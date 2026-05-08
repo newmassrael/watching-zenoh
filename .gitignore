@@ -1,0 +1,24 @@
+# Cargo / Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Mnemosyne — atomic store sidecar is workspace state; commit it (the
+# audit trail lives there). GENERATED.md is derived but typically also
+# committed so reviewers can read it without running the CLI.
+# .atomic/  ← do NOT ignore; it IS the source of truth post Round 251.
+#
+# watching-zenoh hybrid carry: the 13 prose docs in mnemosyne.toml ARE
+# the human-readable surface — GENERATED.md is NOT used here. Atomic
+# store stays as audit-only ledger; the cascade-generated GENERATED.md
+# is a byproduct of every MCP mutate primitive (MCP has no
+# --no-regenerate; only mnemosyne-cli does). We don't track it.
+docs/GENERATED.md
+
+# Local Claude Code settings
+.claude/settings.local.json

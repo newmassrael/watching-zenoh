@@ -1,0 +1,392 @@
+# deploy/mcu_target.yaml — MCU-only canonical skeleton
+#
+# Reference board: STM32H747I-DISCO primary core (Cortex-M7 @ 400 MHz).
+# Phase: A–C (zenoh-pico parity track).
+#
+# This skeleton pins the cooperative-scheduler MCU baseline numbers
+# resolved together with rfc-open-questions-log.md OQ-W6 / OQ-W8 /
+# OQ-W12 / OQ-W13 / OQ-W17 / OQ-W18 / OQ-W19 (the seven-default
+# bundle). Comments cross-reference RFC §5.K fields and the OQ entry
+# each value answers. All numeric defaults below are commented with
+# their derivation; an empirical revision (e.g. measured M7 VLE
+# coefficient) updates this file directly and the corresponding
+# OQ-W* entry moves to `answered`.
+#
+# This file is build-consumable by SCE Phase A landing (RFC §5.J.1
+# C11 emitter for new kinds in §5.A/C/D/E/L/M). Until then it is a
+# schema artifact.
+
+machines:
+  mcu_node:
+    # ---------------------------------------------------------------
+    # platform — RFC §5.K platform block
+    # ---------------------------------------------------------------
+    platform:
+      class: mcu
+      os: bare_metal                   # Phase A onward; lwIP runtime.
+      soc: stm32h747_m7
+      core: cortex_m7
+      has_dcache: true
+      dcache_line_size: 32             # ARM Cortex-M7 = 32 B line.
+      has_speculative_prefetch: true   # M7 has branch predictor +
+                                       # speculative loads → §5.E
+                                       # pre-DMA-RX invalidate emitted.
+      core_count: 1                    # single-core profile; M4
+                                       # companion core handled by a
+                                       # separate deploy entry when
+                                       # used.
+      clock_freq_mhz: 400
+      memcpy_cycles_per_byte: 1.0      # M7 default per §5.K. Drives
+                                       # §5.M stage-copy WCET.
+
+      # OQ-W18 resolution — initial proposal numbers per platform
+      # class. Values below are CMSIS-reference-implementation
+      # estimates; flagged for empirical replacement on a STM32H7
+      # reference board via `sce-bench --measure-vle-coefficients`.
+      # Until the measured pair is committed (with `target=` and
+      # `source-hash=` per §5.A workflow), the build emits the
+      # diagnostic `algorithm/wcet-measurement-class-untrusted-
+      # without-margin` for any codec aggregate that consumes them.
+      vle_decode_cycles_per_byte: 6.0  # M7 estimate
+      tlv_chain_per_entry_overhead_us: 0.5  # M7 estimate
+
+    # ---------------------------------------------------------------
+    # scheduler — RFC §5.K scheduler block
+    # OQ-W13 resolution
+    # ---------------------------------------------------------------
+    scheduler:
+      kind: cooperative
+      tick_period_us: 1000             # 1 ms tick.
+      worker_stack_budget: 4096        # bytes; bounds TLV chain depth
+                                       # × per-level working set
+                                       # (§5.B `codec/tlv-chain-depth-
+                                       # exceeds-stack-budget`).
+      worker_slot_budget_us: 200       # 5× safety margin against the
+                                       # 1 ms tick. KeyExpr matching,
+                                       # CRC, codec aggregate WCET all
+                                       # checked against this bound.
+      keepalive_jitter_budget_us: 5000 # 0.5 × the 10 s zenoh default
+                                       # lease, recomputed when
+                                       # `session.lease_seconds` is
+                                       # overridden below.
+
+    # ---------------------------------------------------------------
+    # memory — RFC §5.K memory block (STM32H747 layout)
+    # ---------------------------------------------------------------
+    memory:
+      sram_regions:
+        dtcm:  { base: 0x20000000, size: 128K, attr: [fast, nocache] }
+        sram1: { base: 0x30000000, size: 128K,
+                 attr: [dma_coherent, cacheable] }
+        sram2: { base: 0x30020000, size: 128K,
+                 attr: [dma_coherent, cacheable] }
+        sram3: { base: 0x30040000, size:  32K,
+                 attr: [dma_coherent, non_cacheable] }
+      dma_channels: [DMAMUX1_CH0, DMAMUX1_CH1, DMAMUX1_CH2, DMAMUX1_CH3]
+
+    # ---------------------------------------------------------------
+    # links — RFC §5.K links block
+    # ---------------------------------------------------------------
+    links:
+      udp_scout:
+        # Multicast scouting link. Trust class `untrusted` — never
+        # spawns Accepting.* (scout/hello-only); §2.6 of session-fsm
+        # therefore requires NO session-arming fields here.
+        bind: "224.0.0.224:7446"
+        driver: lwip_udp
+        mtu_bytes: 1472                # IPv4 UDP over Ethernet.
+        expected_p99_bytes: 256        # Scout/Hello are small.
+        burst_pps: 50                  # multicast scout absorption;
+                                       # observed peak across a small
+                                       # network is < 50 pps.
+        rx_dispatch: isr_to_pool
+        open_timeout_ms: 0             # link is always-on; no open
+                                       # handshake.
+        domain_attrs:
+          trust_class: untrusted
+
+      udp_session:
+        # Unicast session link. Trust class `session_arming` — full
+        # accept-side hardening required.
+        bind: "0.0.0.0:7447"
+        driver: lwip_udp
+        mtu_bytes: 1472
+        expected_p99_bytes: 1024       # PUT/Reply payload p99.
+        burst_pps: 200                 # bounded by AP peer count ×
+                                       # per-peer rate.
+        rx_dispatch: isr_to_pool
+        open_timeout_ms: 5000          # session-fsm.md §2.5 default.
+        domain_attrs:
+          trust_class: session_arming
+          untrusted_source: false      # MCU on private LAN. When set
+                                       # `true` (public-Internet-facing
+                                       # MCU), `stateless_accept` is
+                                       # promoted from optional to
+                                       # required.
+
+        # OQ-W15 — accept-side hardening defaults (MCU profile).
+        # Numbers below match the RFC §5.K example MCU defaults
+        # (8 / 4 / 8 / 30000 / 3600). Empirical validation against
+        # AP-reboot reconnect storm + spoofed flood pending.
+        session_arming_quota: 8
+        accept_rate_per_sec: 4
+        accept_rate_burst: 8
+        accept_rate_table_capacity: 32
+        accepting_inactivity_timeout_ms: 1000
+        # `stateless_accept` block is omitted on this private-LAN
+        # MCU. To enable for public-Internet exposure, uncomment
+        # below (and either declare `untrusted_source: true` to
+        # force-require, or leave optional). HMAC primitive lives in
+        # the target plugin per OQ-W15(a) initial proposal — see
+        # configs/target_extensions_stm32h747.yaml.
+        # stateless_accept:
+        #   mode: cookie_hmac_sha256
+        #   cookie_lifetime_ms: 30000
+        #   key_rotation_s: 3600
+        #   hmac_extern: stm32h7_cryp_hmac_sha256   # target-plugin symbol
+        #   rng_extern: sce_random_fill             # core whitelist symbol
+
+      tcp_session:
+        # Optional unicast TCP session link. MCU lwIP TCP. Phase B+
+        # (RFC §7 Phase B, §5.C link-class table). Skeleton ships a
+        # commented-out block; uncomment when authoring TCP-bearing
+        # SCXML.
+        # bind: "0.0.0.0:7447"
+        # driver: lwip_tcp
+        # mtu_bytes: 1460
+        # expected_p99_bytes: 1024
+        # burst_pps: 200
+        # rx_dispatch: isr_to_pool
+        # open_timeout_ms: 5000
+        # closing_timeout_ms: 100        # OQ-W12 default; per-link
+        #                                # override on Serial below.
+        # domain_attrs:
+        #   trust_class: session_arming
+        #   untrusted_source: false
+        # session_arming_quota: 8
+        # accept_rate_per_sec: 4
+        # accept_rate_burst: 8
+        # accept_rate_table_capacity: 32
+        # accepting_inactivity_timeout_ms: 1000
+        bind: ~                        # placeholder; TCP not wired yet
+        driver: lwip_tcp
+        enabled: false                 # codegen skips when false;
+                                       # field reserved so toggling
+                                       # on does not require a fresh
+                                       # bind/driver/mtu authoring.
+
+      serial_console:
+        # Optional UART console link. Phase C+ (RFC §5.C). Closing
+        # timeout deliberately raised past the 100 ms default —
+        # OQ-W12 calls out the Serial @ 115200 baud edge case where
+        # 100 ms is not enough to flush a Close frame in arbitration
+        # with an in-flight Frame. Serial's `closing_timeout_ms` is
+        # a per-link override.
+        bind: "/dev/serial0"
+        driver: serial_uart
+        mtu_bytes: 256                 # framer-imposed.
+        expected_p99_bytes: 128
+        burst_pps: 20
+        rx_dispatch: worker_tick       # 115200 baud = 11.5 KB/s; ISR
+                                       # path adds no value, worker
+                                       # polling is sufficient.
+        open_timeout_ms: 1000
+        closing_timeout_ms: 250        # OQ-W12 per-link override —
+                                       # 250 ms keeps a 64-byte Close
+                                       # flush comfortable on 115200
+                                       # baud (≈5.6 ms/byte) even
+                                       # under arbitration.
+        enabled: false                 # off by default; toggle on
+                                       # when Serial-bearing SCXML is
+                                       # authored.
+        domain_attrs:
+          trust_class: untrusted       # Serial is treated as
+                                       # physical-access-trusted on
+                                       # private boards; flip to
+                                       # `session_arming` when the
+                                       # console is exposed via a
+                                       # network bridge.
+
+    # ---------------------------------------------------------------
+    # session — session-FSM-level fields
+    # OQ-W12 closing_timeout default
+    # ---------------------------------------------------------------
+    session:
+      handshake_timeout_ms: 2000       # init_ack / open_ack timeout.
+      lease_seconds: 10                # zenoh default; OPEN-negotiated.
+      keepalive_ratio: 3               # keepalive_interval = lease/3.
+      closing_timeout_ms: 100          # OQ-W12 default. Per-link
+                                       # override on `serial_console`
+                                       # above raises this to 250 ms
+                                       # for low-bandwidth links.
+      reassembly_timeout_ms: 500       # session-fsm.md §2.5 default.
+
+    # ---------------------------------------------------------------
+    # qos — TX scheduler / batch / fragment defaults
+    # OQ-W6 batch / fragment defaults (MCU profile)
+    # ---------------------------------------------------------------
+    qos:
+      batch_linger_ms: 5               # MCU profile per session-fsm
+                                       # §2.5 (1 ms AP / 5 ms MCU).
+                                       # Trade-off: larger linger =
+                                       # fewer packets but higher
+                                       # publish latency.
+      batch_size: 4096                 # bytes; MCU-friendly (upstream
+                                       # ~64 KiB is too generous for
+                                       # MCU memory budget). Fits one
+                                       # SRAM2 quarter slot.
+      max_fragment_count: 2            # caps fragments per logical
+                                       # message; revised down from
+                                       # initial 16 per `docs/
+                                       # reassembly-fsm.md` §9.1 to
+                                       # satisfy RFC §5.M invariant
+                                       # `slot_size ≥ max_fragments
+                                       # × mtu_bytes` (4096 ≥ 2 ×
+                                       # 1472 = 2944). MCU IoT use
+                                       # case is small messages; a
+                                       # 4 KB PUT fragments into ≤ 3
+                                       # pieces at MTU 1472, so 2 is
+                                       # restrictive — authors raise
+                                       # both this AND
+                                       # `buffer_pools.reassembly_
+                                       # pool.{slot_size,max_
+                                       # fragments_per_message}` in
+                                       # tandem for higher-throughput
+                                       # deploys.
+
+    # ---------------------------------------------------------------
+    # scouting — Scout/Hello link defaults
+    # ---------------------------------------------------------------
+    scouting:
+      mode: active                     # active | passive | static
+      timeout_ms: 1000                 # session-fsm.md §2.5 default.
+      hello_max_peers: 8               # bounded-collection capacity
+                                       # for the multicast peer table
+                                       # populated by Hello replies.
+
+    # ---------------------------------------------------------------
+    # limits — bounded-collection capacities
+    # OQ-W8 resolution (MCU profile)
+    # ---------------------------------------------------------------
+    # Each value below is referenced by a §5.L bounded-collection
+    # via `<sce:capacity source="deploy"
+    # key="machines.mcu_node.limits.<name>"/>`.
+    # MCU-class numbers are deliberately small — total RAM footprint
+    # of all `bounded-collection` instances combined must fit in the
+    # SRAM region that hosts the statechart instance (§5.J.2 no-alloc
+    # plan). Authors raise these per-deploy with awareness of the
+    # SRAM budget.
+    limits:
+      peer_table: 16                   # max simultaneous unicast
+                                       # session peers. Constrains
+                                       # `session_arming_quota` via
+                                       # the §5.K invariant
+                                       # `quota × max_handshake_time
+                                       # ≤ peer_table.capacity`.
+      multicast_peer_table: 8          # multicast peers learned
+                                       # via Join.
+      local_subscriptions: 16          # `declare_subscriber` table.
+      local_queryables: 8              # `declare_queryable` table.
+      pending_queries: 8               # in-flight `get` table.
+      in_flight_reassembly: 4          # concurrent fragmented-PUT
+                                       # reassemblies (paired with
+                                       # `buffer_pools.reassembly_pool.
+                                       # slot_count`).
+      tx_queue: 16                     # per-link TX worker queue
+                                       # depth (§5.N).
+
+    # ---------------------------------------------------------------
+    # pool_defaults — RFC §5.K pool_defaults block
+    # OQ-W19 resolution (MCU profile = error)
+    # ---------------------------------------------------------------
+    pool_defaults:
+      stage_copy_policy: error         # OQ-W19 MCU = error. Stage-
+                                       # copy is the canonical
+                                       # unanticipated-cost path on
+                                       # cooperative scheduler;
+                                       # surface as build-stop.
+                                       # Per-link `<sce:accept-stage-
+                                       # copy-rate>` allows justified
+                                       # opt-out. Promote to `forbid`
+                                       # for safety-critical
+                                       # downstream deploys.
+
+    # ---------------------------------------------------------------
+    # buffer_pools — RFC §5.K buffer_pools block
+    # ---------------------------------------------------------------
+    buffer_pools:
+      scout_rx_pool:
+        slot_count: 8                  # bounded by burst_pps × tick:
+                                       # 50 pps × 1 ms = 0.05; with
+                                       # 2× safety factor and Scout
+                                       # bursts during initial
+                                       # discovery, 8 is comfortable.
+        slot_size: 256                 # cache-line multiple (32 × 8).
+                                       # ≥ udp_scout.expected_p99_bytes.
+        section: sram1
+        alignment: 32                  # cache-line alignment for
+                                       # `cache_policy: maintain`.
+        dma_channel: DMAMUX1_CH0
+        cache_policy: maintain
+
+      session_rx_pool:
+        slot_count: 16                 # 200 pps × 1 ms × 2.0 safety
+                                       # = 0.4; round up for burst
+                                       # absorption headroom.
+        slot_size: 1536                # cache-line multiple. ≥
+                                       # udp_session.mtu_bytes (1472).
+        section: sram1
+        alignment: 32
+        dma_channel: DMAMUX1_CH1
+        cache_policy: maintain
+
+      session_tx_pool:
+        slot_count: 8                  # tx-queue capacity 16, slots
+                                       # half that for double-buffering.
+        slot_size: 1536
+        section: sram1
+        alignment: 32
+        dma_channel: DMAMUX1_CH2
+        cache_policy: maintain
+
+      reassembly_pool:
+        # §5.M reassembly-variant pool. Sized to limits.in_flight_
+        # reassembly with stage-copy WCET checked against
+        # worker_slot_budget_us per §5.M build-time analysis.
+        variant: reassembly
+        slot_count: 4                  # = limits.in_flight_reassembly.
+        slot_size: 4096                # max reassembled message.
+        section: sram2                 # different SRAM region than
+                                       # rx_pool to avoid line-level
+                                       # cross-contamination per §5.E.
+        alignment: 32
+        dma_channel: DMAMUX1_CH3
+        cache_policy: maintain
+        max_fragments_per_message: 2   # = qos.max_fragment_count.
+                                       # See `qos:` block above for
+                                       # derivation; raise both in
+                                       # tandem with `slot_size` per
+                                       # RFC §5.M invariant.
+        reassembly_timeout_ms: 500     # = session.reassembly_timeout_ms.
+        per_peer_quota: 2              # §5.M DoS hardening; satisfies
+                                       # invariant
+                                       # `peer_table × per_peer_quota
+                                       # ≥ slot_count`
+                                       # (16 × 2 = 32 ≥ 4).
+
+    # ---------------------------------------------------------------
+    # extern_symbols — RFC §5.K + §5.I
+    # OQ-W17 fuzz transport lives in target_plugin (Phase D+)
+    # ---------------------------------------------------------------
+    extern_symbols:
+      lib: sce_intrinsics_runtime_c
+      target_plugin: configs/target_extensions_stm32h747.yaml
+      # The target_plugin file owns:
+      #   - linker_flavor (gnu_ld for STM32CubeIDE / arm-none-eabi-gcc)
+      #   - HMAC primitive symbol (stm32h7_cryp_hmac_sha256 or sw fallback)
+      #   - cross_core_sync (HSEM if core_count > 1)
+      #   - fuzz_coverage_transport (Phase D+; OQ-W17 default
+      #     proposal: `kind: renode_sysbus`). Field is absent at
+      #     Phase A–C — diagnostic
+      #     `fuzz/coverage-transport-on-pre-D-tier` fires if it is
+      #     declared before Phase D entry.

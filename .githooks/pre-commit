@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Mnemosyne SSOT gate — runs on every `git commit`.
+#
+# Blocks the commit if `mnemosyne-cli validate-workspace` finds:
+#   - new T1 cross-ref orphans (not registered in [[orphan_ledger]])
+#   - resolved ledger entries (entry stale, drift catch)
+#   - round-trip mandatory dimension break
+#
+# Install via:
+#   git config core.hooksPath .githooks
+# (one-time per clone; `.githooks/` is tracked, `.git/hooks/` is not)
+set -euo pipefail
+
+if ! command -v mnemosyne-cli >/dev/null 2>&1; then
+    echo "pre-commit: mnemosyne-cli not on PATH — install with" >&2
+    echo "  cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli" >&2
+    exit 1
+fi
+
+# Discover repo root and run from there so `mnemosyne.toml` discovery
+# walks upward correctly regardless of where `git commit` was invoked.
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+exec mnemosyne-cli validate-workspace
