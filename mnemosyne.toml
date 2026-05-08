@@ -1,8 +1,12 @@
 [workspace]
+# README.md and docs/SESSION_KICKOFF.md removed per Round 7 scope correction
+# (2026-05-08). README is a 0-byte stub (Phase E prose authoring deferred).
+# SESSION_KICKOFF.md moved to notes/SESSION_KICKOFF.md as activity-log genre
+# is a fit for ChangelogEntry, not Section. Round 1/5/6 atomic_impact_refs
+# pointing at the two doc roots are absorbed via [[orphan_ledger]] below
+# with kind=atomic_entry_ref (Round 254 mnemosyne extension).
 docs = [
     "ARCHITECTURE.md",
-    "README.md",
-    "docs/SESSION_KICKOFF.md",
     "docs/intrinsics-runtime-symbols.md",
     "docs/oq-w15-ratification-summary.md",
     "docs/reassembly-fsm.md",
@@ -35,3 +39,12 @@ locale = "en"
 # - new orphan added in source → fails validation until ledgered or fixed
 # - entry resolved (ref fixed, target authored) → drift-catch reports it
 # Triage is incremental; remove entries as refs resolve.
+
+# Round 7 scope correction — README.md and docs/SESSION_KICKOFF.md
+# removed from workspace.docs. Their root atomic sections (watching-zenoh
+# and watching-zenoh--다음-세션-시작-스크립트) remain in atomic store as
+# historical record (typed-populated by Round 5 lean/stub). Round 1/5/6
+# impact_refs to those IDs are NOT dangling because the atomic_id_set
+# retains them — atomic store outlives the markdown carrier doc, which
+# is exactly the audit-trail genre's intent. No [[orphan_ledger]] entries
+# are needed; Round 7 changelog entry alone documents the scope shift.
