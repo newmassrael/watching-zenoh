@@ -5,7 +5,9 @@ This file is auto-read by Claude Code at every session start. It defines
 `mnemosyne.toml`.
 
 For prior-session context (decisions, SCE state, OQ-W tracking) read
-`docs/SESSION_KICKOFF.md` after this file.
+`notes/SESSION_KICKOFF.md` after this file. (Moved from `docs/` per
+Round 7 scope correction — activity-log genre is outside Mnemosyne
+governance; the file is a normal markdown read.)
 
 ## SSOT contract
 
@@ -96,7 +98,10 @@ Phased rollout (one phase per session, do not bundle):
   CrossRef edge, Mermaid / state diagram in `examples` field.
 - **Phase D**: residual prose (`intrinsics-runtime-symbols.md`,
   `runtime-crate-{lwip,tokio}.md`, `wire-spec-subset.md`,
-  `ARCHITECTURE.md`, `SESSION_KICKOFF.md`, `README.md`).
+  `ARCHITECTURE.md`). README.md (0-byte stub) and SESSION_KICKOFF.md
+  (activity-log genre) removed from workspace.docs per Round 7 scope
+  correction; latter moved to `notes/`. README prose authoring
+  deferred to Phase E (re-register on completion).
 
 ## Raw `Edit` carve-out — transitional only, per-doc
 

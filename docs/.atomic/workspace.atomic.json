@@ -1,5 +1,251 @@
 {
   "sections": {
+    "1": {
+      "intent": "Synthesize Zenoh-compatible networking stack from SCXML + SCE Forge as single source of truth; two interoperable backends.",
+      "outputs_bullets": [
+        "AP backend: Rust, std, tokio runtime, Linux x86_64 / aarch64",
+        "MCU backend: C11, no_std-equivalent, no heap; SoC TBD until deploy authoring",
+        "Wire-interoperability with upstream zenohd for the sec 2 documented subset"
+      ],
+      "caveats_bullets": [
+        "Not a rewrite of zenoh/zenoh-pico; demonstration that SCE synthesizes industrial wire protocols."
+      ],
+      "impact_scope": [
+        "2",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis"
+      ]
+    },
+    "10": {
+      "intent": "Per-binding QoS configuration sourced from deploy.yaml and emitted as runtime structs (AP) or static const tables (MCU).",
+      "impact_scope": [
+        "10/10.1",
+        "10/10.2"
+      ]
+    },
+    "11": {
+      "intent": "Multi-layer testing strategy: byte-equivalence parity, wire replay, upstream interop, no-alloc guard, drift detection, fuzz.",
+      "impact_scope": [
+        "11/11.1",
+        "11/11.2",
+        "11/11.3",
+        "11/11.4",
+        "11/11.5",
+        "11/11.6"
+      ]
+    },
+    "11/11.4": {
+      "intent": "MCU heap prohibition enforced as five layers — direct trap, linker wrap, libc pin, call-graph reachability, exception ban — not runtime trap alone.",
+      "rationale_bullets": [
+        "Layer 1 direct trap: malloc/calloc/realloc/free stubs emit __builtin_trap on call.",
+        "Layer 2 linker --wrap: -Wl,--wrap on alloc symbols routes libc-internal indirect calls to traps.",
+        "Layer 3 libc pin: newlib-nano or picolibc tiny stdio prevents allocating printf path.",
+        "Layer 4 call-graph: post-link analyzer rejects any reach from out/mcu to deny-listed allocator.",
+        "Layer 5 exception ban: -fno-exceptions/-fno-rtti/-fno-unwind-tables blocks libstdc++ machinery."
+      ],
+      "impact_scope": [
+        "4/4.2",
+        "11/11.6"
+      ]
+    },
+    "11/11.5": {
+      "intent": "Drift gate: every emitted file carries source-hash + template-hash; sce-build verify recomputes and fails on mismatch; manual edits to out/ forbidden.",
+      "rationale_bullets": [
+        "Per-file header carries source-hash + template-hash (sha256 over inputs and sce-build binary).",
+        "sce-build verify recomputes both hashes and fails the gate on mismatch (CI + pre-commit).",
+        "Fixed artifact set: out/{ap,mcu}, Cargo.toml, CMakeLists.txt, linker fragments, sce_sourcemap.json.",
+        "Manual edits to out/ forbidden: path is RFC or sce:extern; exceptions tracked with expiry date.",
+        "sce_sourcemap.json hash mismatch surfaces as traceability/sourcemap-source-hash-mismatch."
+      ],
+      "impact_scope": [
+        "3/3.3",
+        "4/4.2"
+      ]
+    },
+    "12": {
+      "intent": "Generated AP/MCU code dependency surface: SCE crates, runtime crates, intrinsics, and user-provided platform pieces.",
+      "impact_scope": [
+        "12/12.1",
+        "12/12.2",
+        "12/12.3"
+      ]
+    },
+    "13": {
+      "intent": "Pre-SCE prose and tooling work: wire spec, pcap corpus, deploy skeletons, FSM sketches, meta-source generator (RFC 5.G workaround).",
+      "impact_scope": [
+        "5",
+        "11",
+        "11/11.5"
+      ]
+    },
+    "14": {
+      "intent": "Living-doc maintenance notes: when Phase A lands, what sections to revise and how to track architecture-vs-code drift.",
+      "impact_scope": [
+        "8",
+        "13",
+        "15",
+        "16"
+      ]
+    },
+    "15": {
+      "intent": "Placeholder for observability stack (logging, metrics, tracing); decisions deferred per section 14 living-doc notes.",
+      "impact_scope": [
+        "14"
+      ]
+    },
+    "16": {
+      "intent": "Placeholder for performance targets (OPEN handshake latency on MCU, AP TX throughput); awaits first benchmark numbers.",
+      "impact_scope": [
+        "14"
+      ]
+    },
+    "2": {
+      "intent": "Scope partition: MVP (zenoh-pico parity), Deferred (with migration path), Permanent constraints, Extensibility invariants, Protocol pinning.",
+      "impact_scope": [
+        "2/2.0",
+        "2/2.1",
+        "2/2.2",
+        "2/2.3",
+        "2/2.4",
+        "2/2.5"
+      ]
+    },
+    "2/2.4": {
+      "intent": "Six extensibility invariants: static-first, link-extensible, kinds-additive, library-not-monolith, platform gating, out/ SSoT.",
+      "rationale_bullets": [
+        "Static-first, dynamic-opt-in: every MCU-static feature should admit an AP-dynamic variant.",
+        "Link drivers extensible: open set via target plugin, not closed enum.",
+        "Kinds additive: ForgeKind set grows; existing kinds remain stable across versions.",
+        "Generated code exports as library, not monolith: out/ap and out/mcu are library targets.",
+        "Platform gating only when physically necessary; keep pool/link/worker kinds platform-neutral.",
+        "out/ is SSoT-downstream: manual edits forbidden; new features land via SCE extensions."
+      ],
+      "impact_scope": [
+        "2/2.4/2.4.1",
+        "2/2.4/2.4.2",
+        "2/2.4/2.4.3",
+        "2/2.4/2.4.4",
+        "2/2.4/2.4.5",
+        "2/2.4/2.4.6",
+        "2/2.4/2.4.7",
+        "2/2.4/2.4.8"
+      ]
+    },
+    "3": {
+      "intent": "Four design invariants: zero-runtime abstraction, location transparency, strict SSoT, hardware-aware codegen.",
+      "impact_scope": [
+        "3/3.1",
+        "3/3.2",
+        "3/3.3",
+        "3/3.4"
+      ]
+    },
+    "4": {
+      "intent": "Mapping of SCE existing capabilities, RFC-requested extensions, and watching-zenoh authoring scope.",
+      "impact_scope": [
+        "4/4.1",
+        "4/4.2",
+        "4/4.3",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis"
+      ]
+    },
+    "5": {
+      "intent": "Cargo workspace structure: out/ap library, crates/watching_zenoh_{api,bin}, plugin extension path.",
+      "impact_scope": [
+        "5/5.1",
+        "5/5.2",
+        "5/5.3",
+        "5/5.4"
+      ]
+    },
+    "6": {
+      "intent": "Build stages from SCXML+SCE through codegen, out/, cargo, to AP/MCU artifacts; per-target artifact list.",
+      "impact_scope": [
+        "6/6.1",
+        "6/6.2",
+        "6/6.3",
+        "6/6.4"
+      ]
+    },
+    "7": {
+      "intent": "Runtime layout: AP backend (Rust+tokio), MCU backend (C11+lwIP), shared runtime crates/headers.",
+      "impact_scope": [
+        "7/7.1",
+        "7/7.2",
+        "7/7.3",
+        "runtime-crate--sce_link_runtime_tokio",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape"
+      ]
+    },
+    "8": {
+      "intent": "Wire format layering: scouting/transport/network/zenoh/extensions; FSM, codec, link layers.",
+      "impact_scope": [
+        "8/8.1",
+        "8/8.2",
+        "8/8.3",
+        "8/8.4",
+        "wire-spec-subset--watching-zenoh-mvp",
+        "session-fsm--prose-level-sketch"
+      ]
+    },
+    "9": {
+      "intent": "Zero-copy: TX always zero-copy; RX happy path zero-copy; oversized/fragment stage-copy; pool placement; platform-aware link.",
+      "impact_scope": [
+        "9/9.1",
+        "9/9.2",
+        "9/9.3",
+        "9/9.4",
+        "9/9.5",
+        "9/9.6",
+        "9/9.7"
+      ]
+    },
+    "9/9.5": {
+      "intent": "Platform-aware link substrate: 5-row matrix (MCU bare_metal, linux+epoll, linux+io_uring, QNX, etc) sharing pool FSM.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "intrinsics-runtime--symbol-surface"
+      ]
+    },
+    "architecture--watching-zenoh": {
+      "intent": "Pre-implementation design document for watching-zenoh (Zenoh stack synthesized from SCE), blocked on SCE Phase A.",
+      "caveats_bullets": [
+        "Status: Pre-implementation (2026-04-24); blocked on SCE Phase A landing.",
+        "Becomes living reference updated in lockstep with code once SCE Phase A lands."
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface": {
+      "intent": "Defines sce_intrinsics_runtime symbol surface (C11/Rust variants) for atomics/fences/cache/IRQ/RNG/HMAC/HW-sem.",
+      "inputs_bullets": [
+        "RFC sec 5.I sce:extern whitelist — atomics, fences, cache maintenance, IRQ control",
+        "RFC sec 5.J.2 — statechart no_std HAL trait shape (ticks/wake/irq-save)",
+        "RFC sec 5.K target_plugin extension — per-SoC HMAC + HW semaphores out of core whitelist",
+        "session-fsm sec 2.7 G-SFM-5 — HMAC + RNG primitive ownership question (OQ-W15)",
+        "reassembly-fsm sec 6 — cache maintenance pinning (sec 5.E pool FSM call sites)",
+        "ARCHITECTURE sec 9.5 5-row matrix — same symbol set, different bodies per row"
+      ],
+      "outputs_bullets": [
+        "Categorized symbol table marking core whitelist vs target plugin per category",
+        "sec 5.J.2 statechart no_std HAL trait mapped onto these symbols",
+        "Cross-reference into RFC sec 5.I diagnostic list for authoring violation traceability"
+      ],
+      "caveats_bullets": [
+        "OQ-W14 (HW-sem standardization) and OQ-W15 (HMAC+RNG ownership) gate final shape.",
+        "Initial proposal: option 2 for HMAC (target plugin), option 1 for RNG (core whitelist).",
+        "Non-outputs: symbol body implementations, per-SoC HMAC accelerator binding."
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
+        "reassembly-fsm--prose-sketch/6-buffer-pool-interaction",
+        "9/9.5",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+      ]
+    },
     "oq-w15-a--ratification-summary-for-sce-maintainer-sync/1-decision-needed": {
       "intent": "Two binary ratification decisions on sce_intrinsics_runtime_* whitelist membership for RNG and HMAC primitives, individually decidable but coupled by shared consumer.",
       "inputs_bullets": [
@@ -1011,6 +1257,60 @@
         "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w16--generated-source-traceability-state-path-delimiter-and-rust-sce-map-preservation"
       ]
     },
+    "runtime-crate--sce_link_runtime_lwip-c11-header-shape": {
+      "intent": "C11 runtime crate sce_link_runtime_lwip; canonical header for MCU bare_metal lwIP-driver bindings, Phase A blocker.",
+      "inputs_bullets": [
+        "session-fsm sec 6 — six inbound + three outbound events expressed as C functions and event enum",
+        "reassembly-fsm sec 6 — pool ownership FSM with ISR rx_dispatch handing slot ownership token",
+        "scouting-fsm — trust_class:untrusted scouting links: header functions compile-time elided",
+        "RFC sec 5.C/5.J.3/5.J.4/5.E/5.I — link kind + (c11,bare_metal) cell + cache intrinsics",
+        "ARCHITECTURE sec 9.5 row 1 (MCU bare_metal, Phase A-C scope) and sec 3.4 cache coherency",
+        "deploy/mcu_target.yaml extern_symbols.lib + target_plugin (lwIP runtime intrinsics consumer)"
+      ],
+      "outputs_bullets": [
+        "C11 header sce_link_runtime.h: opaque sce_link_t + event enum + RX dispatch + slot handle",
+        "deploy.yaml links.<name>.driver mapping (lwip_udp / lwip_tcp / serial_uart / raw_eth)",
+        "Compile-time elision rules tied to per-link trust_class (function presence/absence)"
+      ],
+      "caveats_bullets": [
+        "Pre-implementation prose; MCU priority track's direct authoring blocker for Phase A entry.",
+        "Non-outputs: header source (codegen target), Rust binding (sibling tokio doc), per-driver lwIP code."
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch/6-link-layer-interaction",
+        "reassembly-fsm--prose-sketch/6-buffer-pool-interaction",
+        "scouting-fsm--prose-sketch/1-3-scouting-link-vs-session-link-distinct",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "9/9.5"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_tokio": {
+      "intent": "Rust runtime crate hosting the Link trait for platform.os=linux; tokio epoll baseline + tokio_uring opt-in.",
+      "inputs_bullets": [
+        "session-fsm sec 6 — 6 inbound link events + 3 outbound invocations defining trait contract",
+        "reassembly-fsm sec 6 — pool ownership FSM edges (free → cpu-mut → dma-armed → cpu-ref → free)",
+        "scouting-fsm — scouting link trust_class:untrusted refuses Accepting and pool binding",
+        "RFC sec 5.C link kind + sec 5.J.3 backend 3-tuple naming + sec 5.J.4 MCU-class matrix",
+        "ARCHITECTURE sec 9.5 row 2 (linux+epoll) and row 3 (linux+io_uring fixed buffers)",
+        "OQ-W20 — keep trait surface small enough for future custom QNX-native runtime"
+      ],
+      "outputs_bullets": [
+        "LinkDriver trait + LinkEvent enum compile-time bindable from session_unicast/multicast SCXML",
+        "deploy.yaml links.<name>.driver enum (tokio_udp / tokio_tcp / optional tokio_uring)",
+        "io_uring fixed-buffer opt-in path reusing sec 5.E pool slot lifecycle FSM unchanged"
+      ],
+      "caveats_bullets": [
+        "Pre-implementation prose, design-only during Phase A-C (MCU-first invariant per RFC sec 7).",
+        "Non-outputs: Rust source, QNX runtime, SCXML authoring (Phase D.1+ blocks on Phase A)."
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch/6-link-layer-interaction",
+        "reassembly-fsm--prose-sketch/6-buffer-pool-interaction",
+        "scouting-fsm--prose-sketch/1-3-scouting-link-vs-session-link-distinct",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "9/9.5"
+      ]
+    },
     "scouting-fsm--prose-sketch/1-1-position-and-triggers": {
       "intent": "Scouting is pre-session — turns abstract \"join Zenoh mesh\" intent into concrete unicast endpoint feeding session FSM Init→LinkOpening.",
       "inputs_bullets": [
@@ -1575,6 +1875,58 @@
         "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w11--multi-link-tx-dispatch-policy",
         "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w12--closing-timeout-default"
       ]
+    },
+    "watching-zenoh": {
+      "intent": "Project landing stub for watching-zenoh; canonical entry pointer to ARCHITECTURE.md design.",
+      "impact_scope": [
+        "1"
+      ]
+    },
+    "watching-zenoh--다음-세션-시작-스크립트": {
+      "intent": "Append-mostly per-session activity log; canonical kickoff prompt source for resuming watching-zenoh work.",
+      "outputs_bullets": [
+        "30+ per-session H2 entries spanning 2026-04-24 to 2026-05-01 (pre-mnemosyne phase)",
+        "11/13 docs atomic-decomposed across Phase A-C (oq-w15, RFC §5, 3 FSM docs)",
+        "Phase D in progress: lean/stub for SESSION_KICKOFF/README, atomic for 5 remaining",
+        "Round 5 scope-removal attempt audited as frozen-ledger lock-in carry"
+      ],
+      "caveats_bullets": [
+        "Per-session H2 entries kept as parser-derived shells; activity-log genre vs atomic Section misfit.",
+        "Round 5 scope-removal attempt failed (mnemosyne lock-in); doc retained per Round 6 lean plan."
+      ],
+      "impact_scope": [
+        "1",
+        "rfc-open-questions-log",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "session-fsm--prose-level-sketch",
+        "scouting-fsm--prose-sketch",
+        "reassembly-fsm--prose-sketch",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync",
+        "intrinsics-runtime--symbol-surface",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "runtime-crate--sce_link_runtime_tokio",
+        "wire-spec-subset--watching-zenoh-mvp"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp": {
+      "intent": "Enumeration of Zenoh 1.x wire-protocol types into MVP/Deferred/Permanent classes mapped to RFC sec 5 SCE kinds.",
+      "inputs_bullets": [
+        "ARCHITECTURE sec 2 — MVP criterion (zenoh-pico parity) and Included/Deferred/Permanent split",
+        "rfc-sce-protocol-synthesis sec 5 — SCE Forge kinds backing each message category",
+        "Upstream zenoh-protocol crate enums and structs (one type = one classification unit)"
+      ],
+      "outputs_bullets": [
+        "Per-message classification (MVP/Deferred/Permanent) with responsible RFC sec 5 SCE kind",
+        "Cross-reference matrix sec 9.2 from message types to RFC sec 5 kinds"
+      ],
+      "caveats_bullets": [
+        "Status: Draft (2026-04-24); field-level shape refined when codec authoring begins (Phase B).",
+        "Unit of classification = one upstream zenoh-protocol type, not feature; preserves crate legibility."
+      ],
+      "impact_scope": [
+        "2",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis"
+      ]
     }
   },
   "changelog_entries": {
@@ -1784,6 +2136,116 @@
         "Phase D mostly index-shaped; lighter than Phase A/B/C",
         "Skipped meta sections (§1/§5/§8/§9/§11/§12 framings + change logs) can be migrated in Phase D as needed",
         "FSM transition-as-CrossRef encoding via impact_scope worked; per-state explicit Sections deferred (state-list-as-bullets pattern adopted)"
+      ]
+    },
+    "Round 5": {
+      "decision_summary": "Scope correction — SESSION_KICKOFF (activity-log genre) and README (empty stub) removed from Mnemosyne workspace as design-doc lifecycle infrastructure genre misfit.",
+      "changes_bullets": [
+        "Remove README.md and docs/SESSION_KICKOFF.md from mnemosyne.toml::workspace.docs (13→11 docs)",
+        "git mv docs/SESSION_KICKOFF.md notes/SESSION_KICKOFF.md; README.md kept as 0-byte stub for Phase E",
+        "Register two [[orphan_ledger]] entries for Round 1 atomic_impact_refs to <watching-zenoh> and to root",
+        "Frozen-ledger spirit preserved: Round 1 body unchanged, Round 5 records scope intent supersede",
+        "CLAUDE.md path + Phase D plan + memory adoption notes updated to reflect 11-doc workspace"
+      ],
+      "verification_bullets": [
+        "validate_workspace post-correction: docs=11/11, T1=0 (ledger-carried), round-trip 11/11, exit=0",
+        "Inbound markdown-link audit: 0 cross-doc refs from remaining 11 docs to either removed doc",
+        "Atomic ledger orphan_refs accounts dangling Round 1 impact_refs via mnemosyne Round 253 mechanism",
+        "git mv preserves SESSION_KICKOFF history; README zero-byte stub remains for Phase E prose authoring"
+      ],
+      "impact_refs": [
+        "watching-zenoh",
+        "watching-zenoh--다음-세션-시작-스크립트"
+      ],
+      "carry_forward_bullets": [
+        "Phase D atomic decompose: tokio/lwip/wire-spec/intrinsics/ARCHITECTURE (~125 sections est)",
+        "Phase E (deferred): README prose authoring + workspace re-registration + atomic decompose",
+        "Mnemosyne PR: scope-removal workflow gap in concepts (frozen-ledger/anti-patterns/schema-guide)",
+        "Mnemosyne PR: scope-change skill + remove_doc/add_orphan_ledger_entry MCP primitives",
+        "Round 5 learning: frozen-ledger blocks past-rewrite, not future-scope-change; orphan_ledger absorbs"
+      ]
+    },
+    "Round 6": {
+      "decision_summary": "Round 5 scope correction blocked by mnemosyne Round 169 atomic-internal orphan reject; reverted to lean/stub plan; SESSION_KICKOFF/README retained in 13-doc workspace as architectural lock-in carry.",
+      "changes_bullets": [
+        "mnemosyne.toml workspace.docs reverted to 13 docs (git checkout); workspace governance unchanged",
+        "Round 5 attempt audited: removal blocked by atomic-internal T1 + frozen-ledger combined lock-in",
+        "Phase D plan reinstated: SESSION_KICKOFF lean (root populate), README stub (1-section minimal)",
+        "atomic store unchanged post-Round-5; Round 5 stays as audit of attempted scope-change (frozen)"
+      ],
+      "verification_bullets": [
+        "validate_workspace post-revert: docs=13/13, T1=0, round-trip 13/13, atomic orphan_refs=0+0, exit=0",
+        "atomic ledger: entries=5 (R1-R5) pre-R6, sections=75; R6 brings entries=6 with no section delta",
+        "Round 5 dangling refs (4) resolved by mnemosyne.toml revert; impact_refs IDs back in atomic_id_set"
+      ],
+      "impact_refs": [
+        "watching-zenoh",
+        "watching-zenoh--다음-세션-시작-스크립트"
+      ],
+      "carry_forward_bullets": [
+        "Phase D atomic decompose: lean/stub + tokio/lwip/wire-spec/intrinsics/ARCHITECTURE",
+        "Mnemosyne PR: scope-management concept + remove_doc/add_orphan_ledger_entry primitives",
+        "Mnemosyne PR: atomic-internal orphan ledger (Round 169 lock-in resolution)",
+        "Mnemosyne PR: schema-guide [[orphan_ledger]] section sync (Round 253 stale)",
+        "Lesson: validate genre fit BEFORE adding doc to workspace.docs (irreversible after Round cite)"
+      ]
+    },
+    "Round 7": {
+      "decision_summary": "Phase D scope correction — README/SESSION_KICKOFF removed from workspace.docs (genre fit); atomic-internal orphan ledger via mnemosyne Round 254 supports textbook path.",
+      "changes_bullets": [
+        "mnemosyne.toml workspace.docs: 13→11 (README.md and docs/SESSION_KICKOFF.md removed)",
+        "git mv docs/SESSION_KICKOFF.md notes/SESSION_KICKOFF.md (outside mnemosyne governance)",
+        "README.md retained as 0-byte stub for Phase E prose authoring (re-register on completion)",
+        "mnemosyne PR Round 254 landed on feat branch: kind-aware [[orphan_ledger]] + scope concept",
+        "CLAUDE.md path + Phase D plan updated to reflect 11-doc workspace"
+      ],
+      "verification_bullets": [
+        "validate_workspace post-correction: docs=11/11, T1=0, round-trip 11/11, orphan_refs=0+0, exit=0",
+        "Atomic store retains watching-zenoh + SESSION_KICKOFF roots as typed-populated historical record",
+        "No [[orphan_ledger]] entries needed — atomic_id_set retains the two roots typed-populated",
+        "git mv preserves SESSION_KICKOFF history; README zero-byte stub unchanged at workspace root"
+      ],
+      "impact_refs": [
+        "watching-zenoh",
+        "watching-zenoh--다음-세션-시작-스크립트"
+      ],
+      "carry_forward_bullets": [
+        "Phase D 잔여: ARCHITECTURE §10-§16 + sub-sections detailed (after MCP restart)",
+        "MCP server restart required: Claude Code reconnect mnemosyne MCP for new build",
+        "mnemosyne PR Round 254 carry: feat/parser-conformance-and-external-ledger branch",
+        "Phase E: README prose authoring + workspace re-registration + atomic decompose"
+      ]
+    },
+    "Round 8": {
+      "decision_summary": "Phase D ARCHITECTURE densify 마감: top-level sec 10-16 + 핵심 sub (2.4, 11.4, 11.5) typed-populate; 4 section-marker docs root-only carry; Phase E README 분리.",
+      "changes_bullets": [
+        "Set sec 2.4 rationale_bullets to 6 extensibility invariants (each <=100 chars, ASCII-only).",
+        "Populated sec 10-16 top-level intent + impact_scope across 7 ARCHITECTURE sections.",
+        "Populated sec 11.4 (no-alloc guard) intent + 5 rationale_bullets + impact_scope detailed.",
+        "Populated sec 11.5 (drift detection) intent + 5 rationale_bullets + impact_scope detailed.",
+        "Atomic sections 93->102 (+9 newly typed-populated; sec 2.4 update did not change count)."
+      ],
+      "verification_bullets": [
+        "validate_workspace x5: T1=0, round-trip 11/11, T3 warn 895 unchanged, orphan_refs 0+0.",
+        "T4 info 472->457 (-15) via typed-primitive mutations only, no prose rewrite.",
+        "GENERATED.md=sync after every batch; cascade verified; entries=7 / sections=102 final."
+      ],
+      "impact_refs": [
+        "2/2.4",
+        "10",
+        "11",
+        "11/11.4",
+        "11/11.5",
+        "12",
+        "13",
+        "14",
+        "15",
+        "16"
+      ],
+      "carry_forward_bullets": [
+        "Sub-heading parser limit on 4 section-marker docs (intrinsics/tokio/lwip/wire-spec): mnemosyne PR.",
+        "Remaining ARCHITECTURE subs (sec 10.1-2, 11.1-3, 11.6, 12.1-3) typed-populate optional.",
+        "Phase E README prose authoring deferred: unstub the file and re-register in workspace.docs."
       ]
     }
   },
