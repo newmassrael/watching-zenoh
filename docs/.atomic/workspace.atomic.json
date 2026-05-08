@@ -22,6 +22,20 @@
         "10/10.2"
       ]
     },
+    "10/10.1": {
+      "intent": "deploy.yaml QoS — per-binding priority/reliability/express/congestion_control declared in machine binding block; typed config consumed by codegen.",
+      "impact_scope": [
+        "10/10.2",
+        "4/4.2"
+      ]
+    },
+    "10/10.2": {
+      "intent": "QoS config codegen — AP emits Rust const QosConfig (data section); MCU emits C const struct in .rodata (Flash, no RAM cost).",
+      "impact_scope": [
+        "10/10.1",
+        "9/9.4"
+      ]
+    },
     "11": {
       "intent": "Multi-layer testing strategy: byte-equivalence parity, wire replay, upstream interop, no-alloc guard, drift detection, fuzz.",
       "impact_scope": [
@@ -31,6 +45,29 @@
         "11/11.4",
         "11/11.5",
         "11/11.6"
+      ]
+    },
+    "11/11.1": {
+      "intent": "Cross-backend parity gate — every algorithm/codec with sce:test-vector runs on both backends and is byte-diffed; gate on merge.",
+      "impact_scope": [
+        "11/11.2",
+        "11/11.3",
+        "8/8.3"
+      ]
+    },
+    "11/11.2": {
+      "intent": "Wire replay tests — pcap captures from upstream zenoh peers replayed into generated stack with declared expected event sequence.",
+      "impact_scope": [
+        "11/11.1",
+        "11/11.3"
+      ]
+    },
+    "11/11.3": {
+      "intent": "Upstream interop CI — dockerized zenohd + AP node + MCU host-mode build (lwIP shim, renode/QEMU later) asserting full handshake + pub/sub roundtrip.",
+      "impact_scope": [
+        "11/11.1",
+        "11/11.2",
+        "8"
       ]
     },
     "11/11.4": {
@@ -61,12 +98,41 @@
         "4/4.2"
       ]
     },
+    "11/11.6": {
+      "intent": "Adversarial input fuzz testing on generated codec/parsers; deferred Phase D+ work; complements §11.1 cross-backend parity.",
+      "impact_scope": [
+        "11/11.1",
+        "8/8.3"
+      ]
+    },
     "12": {
       "intent": "Generated AP/MCU code dependency surface: SCE crates, runtime crates, intrinsics, and user-provided platform pieces.",
       "impact_scope": [
         "12/12.1",
         "12/12.2",
         "12/12.3"
+      ]
+    },
+    "12/12.1": {
+      "intent": "Generated code dependency surface — AP Rust pulls sce_core/forge_runtime/link_runtime_tokio/intrinsics + bytes/tokio/heapless; MCU C pulls forge_runtime_c/link_runtime_lwip/intrinsics + lwIP/HAL.",
+      "impact_scope": [
+        "12/12.2",
+        "12/12.3",
+        "7/7.3"
+      ]
+    },
+    "12/12.2": {
+      "intent": "Runtime crate versioning — SemVer; generated code pins exact minor at build time via Cargo.toml/CMakeLists constraint to avoid SSoT drift between codegen and runtime.",
+      "impact_scope": [
+        "12/12.1",
+        "11/11.5"
+      ]
+    },
+    "12/12.3": {
+      "intent": "External user-provided surface — MCU consumer provides SoC HAL/lwIP config/master linker script; AP binary ships self-contained.",
+      "impact_scope": [
+        "12/12.1",
+        "6/6.2"
       ]
     },
     "13": {
@@ -109,6 +175,39 @@
         "2/2.5"
       ]
     },
+    "2/2.0": {
+      "intent": "Long-term migration vision (every Zenoh feature eventually lands) + MVP criterion (full zenoh-pico parity, peer+client both backends).",
+      "impact_scope": [
+        "2/2.1",
+        "2/2.2",
+        "2/2.3",
+        "2/2.4"
+      ]
+    },
+    "2/2.1": {
+      "intent": "MVP scope table — peer+client modes, full message set, 5 transports, QoS dims, bounded KeyExpr matching, fragmentation, both targets, zero-copy posture.",
+      "impact_scope": [
+        "2/2.0",
+        "2/2.4",
+        "2/2.5",
+        "8"
+      ]
+    },
+    "2/2.2": {
+      "intent": "Phase D+ deferred items (router mode, BLE/Raweth, API shim, shared-mem, admin/scripting) each carries an explicit migration path; not permanently excluded.",
+      "impact_scope": [
+        "2/2.0",
+        "2/2.3"
+      ]
+    },
+    "2/2.3": {
+      "intent": "MCU-class permanent constraints (no router, no aggregation, no heap, no scripting, no unbounded KeyExpr, no dynamic loading); AP unaffected.",
+      "impact_scope": [
+        "2/2.0",
+        "2/2.1",
+        "2/2.2"
+      ]
+    },
     "2/2.4": {
       "intent": "Six extensibility invariants: static-first, link-extensible, kinds-additive, library-not-monolith, platform gating, out/ SSoT.",
       "rationale_bullets": [
@@ -130,6 +229,14 @@
         "2/2.4/2.4.8"
       ]
     },
+    "2/2.5": {
+      "intent": "Zenoh 1.x wire format pinned via deploy.yaml protocol block; additive extensions allowed within 1.x, 2.x is a separate scope decision.",
+      "impact_scope": [
+        "2/2.1",
+        "2/2.4",
+        "8"
+      ]
+    },
     "3": {
       "intent": "Four design invariants: zero-runtime abstraction, location transparency, strict SSoT, hardware-aware codegen.",
       "impact_scope": [
@@ -139,6 +246,35 @@
         "3/3.4"
       ]
     },
+    "3/3.1": {
+      "intent": "Zero-Runtime Abstraction — no vtables, no dynamic dispatch in the hot path; all bindings resolve at build time to direct calls (SCE AOT philosophy carried through).",
+      "impact_scope": [
+        "2/2.4",
+        "8/8.3"
+      ]
+    },
+    "3/3.2": {
+      "intent": "Location Transparency — SCXML uses logical identities; physical transport realization and addressing live in deploy.yaml; same SCXML deploys to AP or MCU.",
+      "impact_scope": [
+        "2/2.1",
+        "8/8.4"
+      ]
+    },
+    "3/3.3": {
+      "intent": "Strict SSoT — wire format / algorithms / FSMs defined once in SCXML+Forge; AP and MCU are descendants; cross-backend drift is a generator bug, not expected.",
+      "impact_scope": [
+        "2/2.4",
+        "11/11.5"
+      ]
+    },
+    "3/3.4": {
+      "intent": "Hardware-Aware Codegen — MCU code integrates with target SoC capabilities (SRAM placement, DMA pairing, alignment) declared via deploy.yaml; AP/MCU share no memory.",
+      "impact_scope": [
+        "2/2.4",
+        "9/9.1",
+        "9/9.4"
+      ]
+    },
     "4": {
       "intent": "Mapping of SCE existing capabilities, RFC-requested extensions, and watching-zenoh authoring scope.",
       "impact_scope": [
@@ -146,6 +282,29 @@
         "4/4.2",
         "4/4.3",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis"
+      ]
+    },
+    "4/4.1": {
+      "intent": "SCE existing surface — SCXML parser/IR/W3C algos, expression transpiler, 11 Forge kinds, multi-language codegen, no_std Rust runtime, diagnostics + composition.",
+      "impact_scope": [
+        "4/4.2",
+        "2/2.4"
+      ]
+    },
+    "4/4.2": {
+      "intent": "SCE extensions requested via RFC — new kinds (algorithm/link/buffer-pool/worker/bounded-collection), codec DSL, fragment pattern, C11 backend, no_std statechart, sce:extern, deploy fields.",
+      "impact_scope": [
+        "4/4.1",
+        "4/4.3",
+        "2/2.1"
+      ]
+    },
+    "4/4.3": {
+      "intent": "Project authoring scope — SCXML statecharts, Forge codec/algorithm/bounded-collection/link/pool/worker sources, deploy.yaml variants, runtime crates, optional API shim.",
+      "impact_scope": [
+        "4/4.2",
+        "5",
+        "8"
       ]
     },
     "5": {
@@ -166,6 +325,21 @@
         "6/6.4"
       ]
     },
+    "6/6.1": {
+      "intent": "Build pipeline stages — sce-codegen single-invocation parse/validate/IR/typecheck/const-fold/emit/sidecar driving Cargo + CMake builds.",
+      "impact_scope": [
+        "5",
+        "6/6.2"
+      ]
+    },
+    "6/6.2": {
+      "intent": "Per-target artifacts — AP gets src/Cargo.toml/build.rs; MCU gets headers/sources/CMake/linker fragment with linker-flavor matrix (GNU LD default, scatter/ICF/os-managed via target plugin).",
+      "impact_scope": [
+        "6/6.1",
+        "5",
+        "9/9.4"
+      ]
+    },
     "7": {
       "intent": "Runtime layout: AP backend (Rust+tokio), MCU backend (C11+lwIP), shared runtime crates/headers.",
       "impact_scope": [
@@ -174,6 +348,30 @@
         "7/7.3",
         "runtime-crate--sce_link_runtime_tokio",
         "runtime-crate--sce_link_runtime_lwip-c11-header-shape"
+      ]
+    },
+    "7/7.1": {
+      "intent": "AP backend stack — generated code on top of sce_core + sce_link_runtime_tokio + Rust std/bytes/tokio; tokio::spawn workers, mpsc channels, BytesMut pools.",
+      "impact_scope": [
+        "7/7.2",
+        "7/7.3",
+        "8/8.4"
+      ]
+    },
+    "7/7.2": {
+      "intent": "MCU stack — generated code over sce_forge_runtime_c + sce_link_runtime_lwip; cooperative tick scheduler with WCET budget; static pools + DMA descriptors.",
+      "impact_scope": [
+        "7/7.1",
+        "7/7.3",
+        "9/9.4",
+        "11/11.4"
+      ]
+    },
+    "7/7.3": {
+      "intent": "Shared runtime crates/headers — sce_core (AP only), sce_forge_runtime (Rust+C variants), sce_link_runtime_{tokio,lwip}, sce_intrinsics_runtime (whitelisted).",
+      "impact_scope": [
+        "7/7.1",
+        "7/7.2"
       ]
     },
     "8": {
@@ -187,6 +385,35 @@
         "session-fsm--prose-level-sketch"
       ]
     },
+    "8/8.1": {
+      "intent": "Wire format stack layer diagram — Application -> Session FSM -> Network FSM -> Codec -> Link -> OS/HAL; bottom-up data flow on RX, top-down on TX.",
+      "impact_scope": [
+        "8/8.2",
+        "8/8.3",
+        "8/8.4"
+      ]
+    },
+    "8/8.2": {
+      "intent": "Session FSM sketch — Init/Scouting/Opening/Established/Closing path authored as session_unicast/multicast.scxml; full model lives in docs/session-fsm.md.",
+      "impact_scope": [
+        "8/8.1"
+      ]
+    },
+    "8/8.3": {
+      "intent": "Codec layer — one SCXML file per message type using RFC §5.B extensions (flags/vle/present-if/len-prefix/TLV); test vectors drive cross-backend parity.",
+      "impact_scope": [
+        "8/8.1",
+        "11/11.1"
+      ]
+    },
+    "8/8.4": {
+      "intent": "Link layer — kind=link SCXML files (UDP unicast/multicast/TCP/Serial/WS) with framer + RX-pool + backpressure declared; driver and address bound via deploy.yaml.",
+      "impact_scope": [
+        "8/8.1",
+        "7/7.1",
+        "7/7.2"
+      ]
+    },
     "9": {
       "intent": "Zero-copy: TX always zero-copy; RX happy path zero-copy; oversized/fragment stage-copy; pool placement; platform-aware link.",
       "impact_scope": [
@@ -197,6 +424,37 @@
         "9/9.5",
         "9/9.6",
         "9/9.7"
+      ]
+    },
+    "9/9.1": {
+      "intent": "TX path zero-copy — Codec encodes directly into pool slot, link send-from-slot, DMA reads via prebuilt descriptor; pool slot in DMA-coherent SRAM.",
+      "impact_scope": [
+        "9/9.2",
+        "9/9.4",
+        "8/8.4"
+      ]
+    },
+    "9/9.2": {
+      "intent": "RX happy path zero-copy — DMA writes pre-programmed RX slot; codec parses in place; event emitted with slot borrow; slot returned to freelist.",
+      "impact_scope": [
+        "9/9.1",
+        "9/9.3",
+        "9/9.4"
+      ]
+    },
+    "9/9.3": {
+      "intent": "Stage-copy RX path for oversized/multi-DMA — one copy DMA-slot to stage; build-time fragmentation analysis; stage_copy_policy warn/error/forbid per machine.",
+      "impact_scope": [
+        "9/9.2",
+        "9/9.5"
+      ]
+    },
+    "9/9.4": {
+      "intent": "Pool placement across .dtcm/.sram1/.flash regions; per-pool placement declared in kind source; memory regions in deploy.yaml; linker fragment ties them.",
+      "impact_scope": [
+        "9/9.1",
+        "9/9.2",
+        "3/3.4"
       ]
     },
     "9/9.5": {
@@ -244,6 +502,125 @@
         "reassembly-fsm--prose-sketch/6-buffer-pool-interaction",
         "9/9.5",
         "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/2-1-atomics": {
+      "intent": "Atomics core whitelist — per-width (u8-u64+usize) load/store/cas/fetch_* with explicit memory ordering encoded in the symbol name; no integer ordering parameter.",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/2-symbol-categories",
+        "intrinsics-runtime--symbol-surface/2-2-fences"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/2-2-fences": {
+      "intent": "Fences core whitelist — atomic_fence_{acquire/release/acq_rel/seq_cst}, compiler_barrier (no runtime cost), dma_fence (DSB on ARMv7-M+, no-op on linux).",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/2-symbol-categories",
+        "intrinsics-runtime--symbol-surface/2-1-atomics"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/2-3-cache-maintenance": {
+      "intent": "Cache maintenance core whitelist on MCU, no-op on AP linux (kernel-coherent); emitted only on §5.E pool lifecycle FSM edges; direct &lt;sce:call&gt; rejected.",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/2-symbol-categories",
+        "9/9.4"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/2-4-irq-control": {
+      "intent": "IRQ control core whitelist (optional) — irq_save/irq_restore; only emitted for workers with sce:critical-section (RFC §5.D, Phase C+); MVP deploys do not use these.",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/2-symbol-categories",
+        "intrinsics-runtime--symbol-surface/5-1-trait-shape"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/2-5-rng": {
+      "intent": "RNG core whitelist (OQ-W15 (a) option 1 initial proposal) — sce_random_fill universal contract; consumed by stateless_accept cookie HMAC key gen only.",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/2-symbol-categories",
+        "intrinsics-runtime--symbol-surface/2-6-hmac"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/2-6-hmac": {
+      "intent": "HMAC target plugin (OQ-W15 (a) option 2) — sce_hmac_sha256 per-SoC accelerator selection (CRYP/SHA/SW-fallback); consumed by listener links with untrusted_source.",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/2-symbol-categories",
+        "intrinsics-runtime--symbol-surface/2-5-rng"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/2-7-hw-semaphores": {
+      "intent": "HW semaphores/mailboxes target plugin (OQ-W14) — sce_hw_sem_*/sce_hw_mbox_*; required at multi-core MCU bring-up (Phase C cross-core); single-core MVP omits.",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/2-symbol-categories",
+        "intrinsics-runtime--symbol-surface/3-whitelist-policy"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/2-symbol-categories": {
+      "intent": "Symbol surface partition into 7 categories (atomics/fences/cache/IRQ/RNG/HMAC/HW-sem) marked core or target-plugin; OQ-W15/W14 gate unresolved cells.",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/2-1-atomics",
+        "intrinsics-runtime--symbol-surface/2-2-fences",
+        "intrinsics-runtime--symbol-surface/3-whitelist-policy"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/3-whitelist-policy": {
+      "intent": "Whitelist policy 2x2 matrix — core if every platform has body AND choice is not deploy-meaningful; target plugin if author/vendor needs to pick between non-interchangeable bodies.",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/2-symbol-categories",
+        "intrinsics-runtime--symbol-surface/4-deploy-extern-symbols"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/4-deploy-extern-symbols": {
+      "intent": "deploy.yaml extern_symbols block (RFC §5.K) names runtime crate variant + target plugin; activates 3-tuple per RFC §5.J.3; three concrete deploy states (mcu_target/ap_standalone/ap_mcu_pair).",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/3-whitelist-policy",
+        "intrinsics-runtime--symbol-surface/2-symbol-categories"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/5-1-trait-shape": {
+      "intent": "StatechartHal trait (Rust pseudocode) — now_us monotonic tick microseconds, wake cooperative-scheduler hint, irq_save/restore (Phase C+ critical section).",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait",
+        "intrinsics-runtime--symbol-surface/5-2-mapping-to-2-symbols"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/5-2-mapping-to-2-symbols": {
+      "intent": "HAL method body mapping per platform — now_us via DWT/SysTick on MCU vs Instant::now on AP linux; wake via worker_wake or tokio reactor; irq_save/restore via §2.4 or empty.",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/5-1-trait-shape",
+        "intrinsics-runtime--symbol-surface/2-symbol-categories"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/5-3-trait-placement-rationale": {
+      "intent": "HAL trait belongs in sce_intrinsics_runtime (statechart concern), not sce_link_runtime_* (I/O concern); both consumers share one symbol surface as single dependency.",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait",
+        "4"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/5-no-std-hal-trait": {
+      "intent": "RFC §5.J.2 statechart no_std HAL trait — provided by sce_intrinsics_runtime, bottoms out on §2 symbols; trait shape MCU-class per RFC §5.J.4.",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/5-1-trait-shape",
+        "intrinsics-runtime--symbol-surface/5-2-mapping-to-2-symbols",
+        "intrinsics-runtime--symbol-surface/5-3-trait-placement-rationale"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/6-self-review": {
+      "intent": "Self-review against ARCHITECTURE §2.4 six invariants — every row PASS; symbol surface identical across platforms with body-elided per platform-class (same shape, different body).",
+      "impact_scope": [
+        "2/2.4"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/7-next-step-scaffolding": {
+      "intent": "Next-step scaffolding when Phase A SCE codegen lands — sce_intrinsics_runtime_c skeleton, _rust skeleton, target_extensions_stm32h747.yaml; OQ-W23 deferral noted.",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/2-symbol-categories",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ]
+    },
+    "intrinsics-runtime--symbol-surface/8-change-log": {
+      "intent": "Change log — 2026-05-01 initial draft (third of three runtime-crate sibling docs; symbol surface partitioned into 7 categories; OQ-W15 (a) initial proposal locked in).",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface/2-symbol-categories"
       ]
     },
     "oq-w15-a--ratification-summary-for-sce-maintainer-sync/1-decision-needed": {
@@ -1284,6 +1661,93 @@
         "9/9.5"
       ]
     },
+    "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-1-opaque-lifecycle-handle": {
+      "intent": "Opaque sce_link_t typedef + sce_link_driver_t enum (lwip_udp/lwip_tcp/serial_uart/raw_eth); one .bss instance per deploy.machines.&lt;m&gt;.links.&lt;name&gt;.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-c11-header-shape",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/3-deploy-driver-mapping"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-2-six-event-enum": {
+      "intent": "Six inbound events (READY/LOST/RX/TX_DRAINED/BACKPRESSURE/FRAMING_ERROR) lift session-fsm §6 1:1 to enum variants; LOST cause discriminator separate.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-3-event-struct",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-c11-header-shape"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-3-event-struct": {
+      "intent": "sce_link_event_t tagged union — kind discriminator + per-variant payload union; size locked &lt;16 bytes via _Static_assert in emitted header.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-2-six-event-enum",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-4-pool-slot-handle"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-4-pool-slot-handle": {
+      "intent": "Opaque sce_pool_slot_handle_t with borrow/release/take ops; §5.E typestate annotations on parameters; Clang -Wconsumed catches use-after-take/double-take.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-3-event-struct",
+        "9/9.4"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-5-three-outbound-functions": {
+      "intent": "Three outbound C functions (sce_link_open/send/close) mirror Rust trait methods; async via cooperative scheduler; resolution arrives through poll_event.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-c11-header-shape",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-6-poll-function"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-6-poll-function": {
+      "intent": "sce_link_poll_event drains one event per cooperative-scheduler tick from bounded queue (event_queue_depth, default 8); WCET bound per worker_slot_budget_us.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-5-three-outbound-functions",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-7-isr-side-entry"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-7-isr-side-entry": {
+      "intent": "sce_link_rx_dispatch ISR entry — cpu-mut→dma-armed-rx edge mover; cache_invalidate emitted by codegen inside this function; author code never calls directly.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-6-poll-function",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-4-pool-slot-handle"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-c11-header-shape": {
+      "intent": "C11 header shape for sce_link_runtime_lwip — opaque sce_link_t, sce_link_event_t enum, RX dispatch entry, sce_pool_slot_handle_t for §5.E ownership edge.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-1-opaque-lifecycle-handle",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-2-six-event-enum",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-3-event-struct"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_lwip-c11-header-shape/3-deploy-driver-mapping": {
+      "intent": "deploy.yaml links.&lt;name&gt;.driver mapping — four values (lwip_udp/lwip_tcp/serial_uart/raw_eth) for bare_metal; raw_eth via target plugin (vendor MAC HAL).",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-1-opaque-lifecycle-handle"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_lwip-c11-header-shape/4-trust-class-header-surface": {
+      "intent": "Trust-class compile-time elision — three classes (untrusted/session_arming/established_session); absent methods not declared (compile fail, not runtime); listener two-instance emission per OQ-W22.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-c11-header-shape"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_lwip-c11-header-shape/5-self-review": {
+      "intent": "Self-review against ARCHITECTURE §2.4 six invariants — every row PASS; static handles, bounded queues, header platform-gated to (c11, bare_metal).",
+      "impact_scope": [
+        "2/2.4"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_lwip-c11-header-shape/6-next-step-scaffolding": {
+      "intent": "Next-step when Phase A C11 emitter lands — sce_link_runtime_lwip crate skeleton, per-deploy .h generation, target_plugin driver impls; direct authoring blocker for Phase A entry.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-c11-header-shape"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_lwip-c11-header-shape/7-change-log": {
+      "intent": "Change log — 2026-05-01 initial draft (KICKOFF #2); header shape locked four outbound + 6 events + poll + ISR; trust-class compile-time elision; typestate via Clang -Wconsumed.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-c11-header-shape"
+      ]
+    },
     "runtime-crate--sce_link_runtime_tokio": {
       "intent": "Rust runtime crate hosting the Link trait for platform.os=linux; tokio epoll baseline + tokio_uring opt-in.",
       "inputs_bullets": [
@@ -1309,6 +1773,94 @@
         "scouting-fsm--prose-sketch/1-3-scouting-link-vs-session-link-distinct",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
         "9/9.5"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_tokio/2-1-two-primitive-link-contract": {
+      "intent": "Four-method LinkDriver trait — open/send/close/poll_event; OQ-W20 satisfied (no epoll/mio types exposed); QNX-native re-impl maps to dispatch_block/MsgSend.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "runtime-crate--sce_link_runtime_tokio/2-2-linkevent-enum"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_tokio/2-2-linkevent-enum": {
+      "intent": "LinkEvent enum — 6 inbound (Ready/Lost/Rx/TxDrained/Backpressure/FramingError) lifting session-fsm §6 1:1; opaque FramingDetail; LostCause variants.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio/2-1-two-primitive-link-contract",
+        "runtime-crate--sce_link_runtime_tokio/2-3-rx-borrows-from-pool-slot"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_tokio/2-3-rx-borrows-from-pool-slot": {
+      "intent": "RxFrame borrows pool slot per RFC §5.E Sample lifetime — no copy default, take() opt-in for owned, Rust borrow checker enforces lifetime across await; (rust,*) only kind.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio/2-2-linkevent-enum",
+        "runtime-crate--sce_link_runtime_tokio/4-1-pool-slot-lifecycle-on-tokio-uring"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_tokio/2-4-trust-class-compile-time-gating": {
+      "intent": "Trust-class propagates to compile-time trait selection — three flavors (untrusted/session_arming/established_session); listener two-instance emission per OQ-W22.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_tokio/2-trait-surface": {
+      "intent": "Rust trait surface for sce_link_runtime_tokio — minimal LinkDriver + LinkEvent contract that session-fsm §6 SCXML binds via &lt;sce:link&gt;.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio/2-1-two-primitive-link-contract",
+        "runtime-crate--sce_link_runtime_tokio/2-2-linkevent-enum"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_tokio/3-deploy-driver-mapping": {
+      "intent": "deploy.yaml links.&lt;name&gt;.driver mapping — three values (tokio_udp/tokio_tcp/tokio_uring) for linux runtime; codegen wires per-driver impl; tokio_uring opt-in (kernel 5.10+).",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "runtime-crate--sce_link_runtime_tokio/4-io-uring-fixed-buffer-opt-in"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_tokio/4-1-pool-slot-lifecycle-on-tokio-uring": {
+      "intent": "Same six-state pool lifecycle FSM applies — per-edge action table maps MCU-bare-metal vs linux+epoll vs linux+io_uring; codegen emits same state-machine code.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio/4-io-uring-fixed-buffer-opt-in",
+        "9/9.5"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_tokio/4-2-registered-buffer-count-check": {
+      "intent": "io_uring fixed buffers must be pre-registered; build invariant Σ pool.slot_count ≤ io_uring.max_registered_buffers; diagnostic on overflow (hard error).",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio/4-io-uring-fixed-buffer-opt-in"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_tokio/4-3-trait-surface-invariance": {
+      "intent": "Neither §4.1 nor §4.2 changes the trait surface of §2 — same SCXML compiles unchanged across epoll and io_uring rows; ARCHITECTURE §9.5 invariant maintained.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "9/9.5"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_tokio/4-io-uring-fixed-buffer-opt-in": {
+      "intent": "io_uring fixed-buffer Phase D.1 opt-in — trait surface §2 unchanged; only edge actions on §5.E pool lifecycle FSM transitions differ; mechanical mapping documented.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio/4-1-pool-slot-lifecycle-on-tokio-uring",
+        "runtime-crate--sce_link_runtime_tokio/4-2-registered-buffer-count-check",
+        "runtime-crate--sce_link_runtime_tokio/4-3-trait-surface-invariance"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_tokio/5-self-review": {
+      "intent": "Self-review against ARCHITECTURE §2.4 six invariants — every row PASS; LinkDriver trait extensible, driver selection deploy-driven, no runtime-driver swap.",
+      "impact_scope": [
+        "2/2.4"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_tokio/6-next-step-scaffolding": {
+      "intent": "Next-step when Phase D.1 opens — sce_link_runtime_tokio crate skeleton, out/ap/Cargo.toml dependency, codegen 3-tuple activation; Phase A-C unaffected (MCU priority).",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "runtime-crate--sce_link_runtime_tokio/3-deploy-driver-mapping"
+      ]
+    },
+    "runtime-crate--sce_link_runtime_tokio/7-change-log": {
+      "intent": "Change log — 2026-05-01 initial draft (KICKOFF #2); trait surface to four methods per OQ-W20; LinkEvent locked to 6 variants; trust-class compile-time gating; io_uring opt-in trait-invariant.",
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
       ]
     },
     "scouting-fsm--prose-sketch/1-1-position-and-triggers": {
@@ -1927,6 +2479,185 @@
         "2",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis"
       ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/0-normative-references": {
+      "intent": "Normative reference table — zenoh-protocol 1.5.0 (struct/enum source), VERSION 0x09, zenoh-pico parity target, upstream test vectors + pcap corpus.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/1-protocol-stack-and-layering"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/1-protocol-stack-and-layering": {
+      "intent": "5-layer stack — Scouting/Transport/Network/Payload/Extensions; every byte belongs to exactly one layer; per-layer SCE kind unambiguous.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer",
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/10-open-questions": {
+      "intent": "Open questions OQ-W1..W8 — zenoh-pico release pin, Auth baseline, Interest no-router, ext::Compression critical bit, OAM drop semantics, batch defaults, PatchType, bounded defaults.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/11-self-review-checklist": {
+      "intent": "Self-review checklist against ARCHITECTURE §2.4 six invariants — every row checkable true; failing during Phase B is design bug, file as RFC OQ or doc revision.",
+      "impact_scope": [
+        "2/2.4"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/12-change-log": {
+      "intent": "Change log — 2026-04-24 initial draft (zenoh-protocol 1.5.0 / VERSION 0x09 grounded); OQ-W1..W8 filed; classification totals to re-verify against zenoh-pico.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/9-scope-classification-summary"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/2-classification-legend": {
+      "intent": "Three-bucket classification legend (Included/Deferred/Permanent) aligned with ARCHITECTURE §2.1/2.2/2.3; Backing-kind column points at RFC §5 source.",
+      "impact_scope": [
+        "2/2.1",
+        "2/2.2",
+        "2/2.3"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer": {
+      "intent": "Scouting layer — Scout/Hello messages (codec RFC §5.B); link kind with framer datagram; UDP multicast 224.0.0.224:7446 by convention.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages": {
+      "intent": "Transport control messages — InitSyn/InitAck/OpenSyn/OpenAck/Close/KeepAlive (4-way handshake + lease); all Included; codec + statechart.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing": {
+      "intent": "Data-carrying framing — Frame (priority/SN), Fragment (RFC §5.M reassembly), Join (multicast), OAM (decode-only); chain key (peer_zid, reliability) 2-tuple.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer",
+        "wire-spec-subset--watching-zenoh-mvp/4-3-low-latency-framing-variant"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/4-3-low-latency-framing-variant": {
+      "intent": "TransportMessageLowLatency variant for UDP unicast/multicast — union of Close/KeepAlive/NetworkMessage; selected statically per-link in deploy.yaml.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions": {
+      "intent": "Transport-layer extensions on Init/Open/Join — QoS/QoSLink/Auth/MultiLink/LowLatency/PatchType Included; Shm/Compression deferred or permanent on MCU.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer": {
+      "intent": "Transport (session) layer — per-peer session state authored as session_unicast/multicast.scxml; split by transport class; peer/client share unicast FSM (Q13).",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "wire-spec-subset--watching-zenoh-mvp/4-3-low-latency-framing-variant",
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants": {
+      "intent": "Declare sub-variants — KeyExpr/Subscriber/Queryable/Token (declare+undeclare) + DeclareFinal; all Included; bounded-collection (RFC §5.L) backed.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/5-2-permanent-on-mcu": {
+      "intent": "Permanent-on-MCU network features — wildcard Interest aggregation across N peers, forwarding-table maintenance, global key-space indexing; deferred on AP.",
+      "impact_scope": [
+        "2/2.3",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer": {
+      "intent": "Network (routing) layer carried inside Frame/Fragment — Push/Request/Response/ResponseFinal/Interest/Declare/OAM; Interest bounded form; aggregation router-only.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "wire-spec-subset--watching-zenoh-mvp/5-2-permanent-on-mcu",
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants": {
+      "intent": "PushBody variants — Put (publish value with timestamp/encoding/sinfo/attachment/payload) and Del (delete key); both Included; codec-backed.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants": {
+      "intent": "RequestBody variant — Query (parameters/consolidation/sinfo/body/attachment); Included; codec + statechart query FSM.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants": {
+      "intent": "ResponseBody variants — Reply (timestamp/encoding/sinfo/payload) and Err (encoding/sinfo/payload, reply-channel error); Included; codec + statechart.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer": {
+      "intent": "Zenoh payload layer — innermost user payload carried inside Push/Request/Response; PushBody/RequestBody/ResponseBody variants enumerated in §6.1-§6.3.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/7-1-common-application-visible-extensions": {
+      "intent": "Common app-visible extensions — Timestamp/Attachment/NodeId/SourceInfo/Consolidation/Encoding/QoS Included; SHM permanent on MCU / deferred on AP.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/7-2-unknown-extensions-policy": {
+      "intent": "Unknown extension policy — ignorable bit set: decode envelope discard body; critical bit unset: framing error → Close{unsupported_extension}.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism",
+        "2/2.5"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism": {
+      "intent": "Extension chain TLV with more-bit per RFC §5.B; per-extension budgets in deploy.yaml; decode-time enforcement with diagnostic on overflow.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/7-1-common-application-visible-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/7-2-unknown-extensions-policy"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix": {
+      "intent": "Transport/link matrix — message-class × link-class table (TCP/UDP-uni/UDP-multi/Serial/WS); per-link framer in deploy.yaml; new classes via target plugin.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer",
+        "2/2.1"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/9-1-message-type-roll-up": {
+      "intent": "Per-layer Included/Deferred/Permanent counts — Scouting 2/0/0, Transport 10/0/0, Network 16/0/3, Payload 5/0/0, Extensions 7/1/0.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/9-scope-classification-summary"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/9-2-cross-reference-to-rfc-5-kinds": {
+      "intent": "RFC §5 kind cross-reference table — §5.A/B/C/D/E/F/I/J/K/L/M/N each used by; every MVP message covered by ≥1 kind; gaps file as RFC OQ.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/9-scope-classification-summary"
+      ]
+    },
+    "wire-spec-subset--watching-zenoh-mvp/9-scope-classification-summary": {
+      "intent": "Scope classification summary — message-type counts per layer + Cross-reference to RFC §5 kinds; every Included row covered by ≥1 kind.",
+      "impact_scope": [
+        "wire-spec-subset--watching-zenoh-mvp/9-1-message-type-roll-up",
+        "wire-spec-subset--watching-zenoh-mvp/9-2-cross-reference-to-rfc-5-kinds"
+      ]
     }
   },
   "changelog_entries": {
@@ -2246,6 +2977,78 @@
         "Sub-heading parser limit on 4 section-marker docs (intrinsics/tokio/lwip/wire-spec): mnemosyne PR.",
         "Remaining ARCHITECTURE subs (sec 10.1-2, 11.1-3, 11.6, 12.1-3) typed-populate optional.",
         "Phase E README prose authoring deferred: unstub the file and re-register in workspace.docs."
+      ]
+    },
+    "Round 9": {
+      "decision_summary": "Phase D 진짜 closure — ARCHITECTURE 잔여 sub 34개 + 4 §-prefix docs sub 69개 typed-populate; \"parser limit\" carry는 misdiagnosis로 판명되어 mnemosyne 변경 불필요.",
+      "changes_bullets": [
+        "ARCHITECTURE.md 34 subs typed-populated: 2/2.0-3+5, 3/3.1-4, 4/4.1-3, 6/6.1-2, 7/7.1-3, 8/8.1-4, 9/9.1-4, 10/10.1-2, 11/11.1-3+11/11.6, 12/12.1-3 (intent + impact_scope each).",
+        "intrinsics-runtime-symbols.md 17 subs typed-populated using slug-form IDs (2-symbol-categories ... 8-change-log).",
+        "runtime-crate-tokio.md 13 subs typed-populated (2-trait-surface ... 7-change-log).",
+        "runtime-crate-lwip.md 13 subs typed-populated (2-c11-header-shape ... 7-change-log).",
+        "wire-spec-subset.md 26 subs typed-populated (0-normative-references ... 12-change-log).",
+        "Atomic sections 102 -> 205 (+103 newly typed-populated; 34 ARCHITECTURE + 17 intrinsics + 13 tokio + 13 lwip + 26 wire-spec)."
+      ],
+      "verification_bullets": [
+        "validate_workspace: T1 orphan total=0, round-trip mandatory=11/11, T3 reject=0, T3 warn 895 -> 843 (-52), T4 info 457 -> 424 (-33), GENERATED.md=sync.",
+        "Round 8 'parser limit' carry diagnosed empirically: mnemosyne-cli validate on each of 4 §-prefix docs returns sections=18/14/14/27, confirming parser recognizes ALL sub-headings; mnemosyne unchanged.",
+        "All impact_scope refs validated via T1 (intra atomic + ARCHITECTURE bare-numeric); no new orphans introduced.",
+        "Sections delta breakdown matches mutation count: 5 docs × varying subs = 103 new section IDs in atomic store."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh",
+        "intrinsics-runtime--symbol-surface",
+        "runtime-crate--sce_link_runtime_tokio",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "wire-spec-subset--watching-zenoh-mvp",
+        "2/2.0",
+        "2/2.1",
+        "2/2.2",
+        "2/2.3",
+        "2/2.5",
+        "3/3.1",
+        "3/3.2",
+        "3/3.3",
+        "3/3.4",
+        "4/4.1",
+        "4/4.2",
+        "4/4.3",
+        "6/6.1",
+        "6/6.2",
+        "7/7.1",
+        "7/7.2",
+        "7/7.3",
+        "8/8.1",
+        "8/8.2",
+        "8/8.3",
+        "8/8.4",
+        "9/9.1",
+        "9/9.2",
+        "9/9.3",
+        "9/9.4",
+        "10/10.1",
+        "10/10.2",
+        "11/11.1",
+        "11/11.2",
+        "11/11.3",
+        "11/11.6",
+        "12/12.1",
+        "12/12.2",
+        "12/12.3",
+        "intrinsics-runtime--symbol-surface/2-symbol-categories",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "runtime-crate--sce_link_runtime_tokio/4-io-uring-fixed-buffer-opt-in",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-c11-header-shape",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/4-trust-class-header-surface",
+        "wire-spec-subset--watching-zenoh-mvp/1-protocol-stack-and-layering",
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer",
+        "wire-spec-subset--watching-zenoh-mvp/9-scope-classification-summary"
+      ],
+      "carry_forward_bullets": [
+        "Phase E only carry remaining: README.md prose authoring (currently 0-byte stub) + workspace.docs re-registration + atomic decompose. All other Phase D items closed.",
+        "Round 8 'parser limit' carry retired — diagnosis showed parser correctly recognizes all sub-headings of 4 §-prefix docs; gap was typed-populate (now closed) not parser."
       ]
     }
   },
