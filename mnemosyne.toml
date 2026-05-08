@@ -1,0 +1,37 @@
+[workspace]
+docs = [
+    "ARCHITECTURE.md",
+    "README.md",
+    "docs/SESSION_KICKOFF.md",
+    "docs/intrinsics-runtime-symbols.md",
+    "docs/oq-w15-ratification-summary.md",
+    "docs/reassembly-fsm.md",
+    "docs/rfc-open-questions-log.md",
+    "docs/rfc-sce-protocol-synthesis.md",
+    "docs/runtime-crate-lwip.md",
+    "docs/runtime-crate-tokio.md",
+    "docs/scouting-fsm.md",
+    "docs/session-fsm.md",
+    "docs/wire-spec-subset.md",
+]
+default_doc = "ARCHITECTURE.md"
+
+[schema]
+# rfc-open-questions-log.md uses `## Change log` (with space) for the
+# session-by-session update log. Adding it lets the parser skip
+# cross_ref extraction inside that section, eliminating the
+# §change-log → §X orphan class.
+changelog_titles = ["Changelog", "Change History", "Change log"]
+# Default `Round ` prefix reserves the `Round N` pattern for future
+# formal changelog entries authored via `append_changelog_entry_v2`.
+# Existing date-based entries (`- **2026-04-24** — ...`) do not match
+# this prefix and remain as prose in the section body.
+entry_id_prefix = "Round "
+
+[style]
+locale = "en"
+# Round 253 EXTERNAL-LEDGER adoption — legacy orphan carry (75 entries).
+# Each row registers a known-stale §X.Y reference. Set-equality semantics:
+# - new orphan added in source → fails validation until ledgered or fixed
+# - entry resolved (ref fixed, target authored) → drift-catch reports it
+# Triage is incremental; remove entries as refs resolve.

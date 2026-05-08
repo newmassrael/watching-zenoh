@@ -1,0 +1,222 @@
+# deploy/ap_mcu_pair.yaml — hybrid AP↔MCU canonical skeleton
+#
+# Two machines under one deploy.yaml: an STM32H747 MCU peer running
+# bare_metal lwIP, and an x86_64 Linux AP peer running tokio.
+# Both consume the same `sources/` SCXML; per-machine values
+# parameterize where the matrix between them differs.
+#
+# Phase: requires both Phase A–C (MCU side, current track) and
+# Phase D.1 (AP linux side). Until Phase D.1 lands, the AP machine
+# stub fails with `deploy/platform-os-not-implemented-in-current-
+# phase` — the MCU machine builds. The skeleton is shipped now so
+# the canonical asymmetric pattern (warn on AP / error on MCU) is
+# already documented and reviewable.
+#
+# Most fields are copied verbatim from `mcu_target.yaml` and
+# `ap_standalone.yaml`; the comments here highlight only the
+# deltas relevant to the asymmetric deploy pattern. Values that
+# match either single-machine skeleton are documented there.
+
+machines:
+  # =================================================================
+  # MCU machine — same as deploy/mcu_target.yaml, abbreviated
+  # =================================================================
+  mcu_node:
+    platform:
+      class: mcu
+      os: bare_metal
+      soc: stm32h747_m7
+      core: cortex_m7
+      has_dcache: true
+      dcache_line_size: 32
+      has_speculative_prefetch: true
+      core_count: 1
+      clock_freq_mhz: 400
+      memcpy_cycles_per_byte: 1.0
+      vle_decode_cycles_per_byte: 6.0
+      tlv_chain_per_entry_overhead_us: 0.5
+    scheduler:
+      kind: cooperative
+      tick_period_us: 1000
+      worker_stack_budget: 4096
+      worker_slot_budget_us: 200
+      keepalive_jitter_budget_us: 5000
+    memory:
+      sram_regions:
+        dtcm:  { base: 0x20000000, size: 128K, attr: [fast, nocache] }
+        sram1: { base: 0x30000000, size: 128K, attr: [dma_coherent, cacheable] }
+        sram2: { base: 0x30020000, size: 128K, attr: [dma_coherent, cacheable] }
+        sram3: { base: 0x30040000, size:  32K, attr: [dma_coherent, non_cacheable] }
+      dma_channels: [DMAMUX1_CH0, DMAMUX1_CH1, DMAMUX1_CH2, DMAMUX1_CH3]
+    links:
+      udp_scout:
+        bind: "224.0.0.224:7446"
+        driver: lwip_udp
+        mtu_bytes: 1472
+        expected_p99_bytes: 256
+        burst_pps: 50
+        rx_dispatch: isr_to_pool
+        open_timeout_ms: 0
+        domain_attrs: { trust_class: untrusted }
+      udp_session:
+        bind: "0.0.0.0:7447"
+        driver: lwip_udp
+        mtu_bytes: 1472
+        expected_p99_bytes: 1024
+        burst_pps: 200
+        rx_dispatch: isr_to_pool
+        open_timeout_ms: 5000
+        domain_attrs:
+          trust_class: session_arming
+          untrusted_source: false
+        session_arming_quota: 8
+        accept_rate_per_sec: 4
+        accept_rate_burst: 8
+        accept_rate_table_capacity: 32
+        accepting_inactivity_timeout_ms: 1000
+    session:
+      handshake_timeout_ms: 2000
+      lease_seconds: 10
+      keepalive_ratio: 3
+      closing_timeout_ms: 100
+      reassembly_timeout_ms: 500
+    qos:
+      batch_linger_ms: 5
+      batch_size: 4096
+      max_fragment_count: 2            # see deploy/mcu_target.yaml comment.
+    scouting:
+      mode: active
+      timeout_ms: 1000
+      hello_max_peers: 8
+    limits:
+      peer_table: 16
+      multicast_peer_table: 8
+      local_subscriptions: 16
+      local_queryables: 8
+      pending_queries: 8
+      in_flight_reassembly: 4
+      tx_queue: 16
+
+    # OQ-W19 asymmetric pattern: MCU half = error.
+    pool_defaults:
+      stage_copy_policy: error
+
+    buffer_pools:
+      scout_rx_pool:    { slot_count: 8,  slot_size:  256, section: sram1, alignment: 32, dma_channel: DMAMUX1_CH0, cache_policy: maintain }
+      session_rx_pool:  { slot_count: 16, slot_size: 1536, section: sram1, alignment: 32, dma_channel: DMAMUX1_CH1, cache_policy: maintain }
+      session_tx_pool:  { slot_count: 8,  slot_size: 1536, section: sram1, alignment: 32, dma_channel: DMAMUX1_CH2, cache_policy: maintain }
+      reassembly_pool:
+        variant: reassembly
+        slot_count: 4
+        slot_size: 4096
+        section: sram2
+        alignment: 32
+        dma_channel: DMAMUX1_CH3
+        cache_policy: maintain
+        max_fragments_per_message: 2
+        reassembly_timeout_ms: 500
+        per_peer_quota: 2
+    extern_symbols:
+      lib: sce_intrinsics_runtime_c
+      target_plugin: configs/target_extensions_stm32h747.yaml
+
+  # =================================================================
+  # AP machine — same as deploy/ap_standalone.yaml, abbreviated
+  # =================================================================
+  ap_node:
+    platform:
+      class: ap
+      os: linux                        # Phase D.1 — until then this
+                                       # block fails with
+                                       # `deploy/platform-os-not-
+                                       # implemented-in-current-phase`.
+      soc: x86_64
+      core: x86_64_generic
+      has_dcache: true
+      dcache_line_size: 64
+      has_speculative_prefetch: true
+      core_count: 1
+      clock_freq_mhz: 3000
+      memcpy_cycles_per_byte: 0.5
+      vle_decode_cycles_per_byte: 3.0
+      tlv_chain_per_entry_overhead_us: 0.2
+    scheduler:
+      kind: tokio
+      tick_period_us: 1000
+      worker_stack_budget: 65536
+    memory:
+      sram_regions: {}
+      dma_channels: []
+    links:
+      udp_scout:
+        bind: "224.0.0.224:7446"
+        driver: tokio_udp
+        mtu_bytes: 1472
+        expected_p99_bytes: 256
+        burst_pps: 500
+        rx_dispatch: worker_tick
+        open_timeout_ms: 0
+        domain_attrs: { trust_class: untrusted }
+      udp_session:
+        bind: "0.0.0.0:7447"
+        driver: tokio_udp
+        mtu_bytes: 1472
+        expected_p99_bytes: 4096
+        burst_pps: 2000
+        rx_dispatch: worker_tick
+        open_timeout_ms: 5000
+        domain_attrs:
+          trust_class: session_arming
+          untrusted_source: false
+        session_arming_quota: 32
+        accept_rate_per_sec: 16
+        accept_rate_burst: 32
+        accept_rate_table_capacity: 128
+        accepting_inactivity_timeout_ms: 1000
+    session:
+      handshake_timeout_ms: 2000
+      lease_seconds: 10
+      keepalive_ratio: 3
+      closing_timeout_ms: 100
+      reassembly_timeout_ms: 500
+    qos:
+      batch_linger_ms: 1
+      batch_size: 65536
+      max_fragment_count: 44           # see deploy/ap_standalone.yaml comment.
+    scouting:
+      mode: active
+      timeout_ms: 1000
+      hello_max_peers: 64
+    limits:
+      peer_table: 256
+      multicast_peer_table: 64
+      local_subscriptions: 256
+      local_queryables: 64
+      pending_queries: 64
+      in_flight_reassembly: 32
+      tx_queue: 256
+
+    # OQ-W19 asymmetric pattern: AP half = warn. The two machines
+    # share the same SCXML sources but different pool policies; this
+    # is the canonical pattern for AP↔MCU pair deploys.
+    pool_defaults:
+      stage_copy_policy: warn
+
+    buffer_pools:
+      scout_rx_pool:    { slot_count: 32, slot_size:  512, section: heap, alignment: 64, dma_channel: ~, cache_policy: none }
+      session_rx_pool:  { slot_count: 64, slot_size: 4096, section: heap, alignment: 64, dma_channel: ~, cache_policy: none }
+      session_tx_pool:  { slot_count: 64, slot_size: 4096, section: heap, alignment: 64, dma_channel: ~, cache_policy: none }
+      reassembly_pool:
+        variant: reassembly
+        slot_count: 32
+        slot_size: 65536
+        section: heap
+        alignment: 64
+        dma_channel: ~
+        cache_policy: none
+        max_fragments_per_message: 44
+        reassembly_timeout_ms: 500
+        per_peer_quota: 8
+    extern_symbols:
+      lib: sce_intrinsics_runtime_rust
+      target_plugin: ~

@@ -1,0 +1,286 @@
+# deploy/ap_standalone.yaml — AP-only canonical skeleton
+#
+# Reference target: x86_64 Linux host with kernel ≥ 5.10 (io_uring
+# opt-in). Tokio reactor (mio epoll). No MCU peer.
+# Phase: D.1 (AP linux baseline; first AP target after MCU
+# zenoh-pico parity in Phase C14).
+#
+# This skeleton is **schema-stable from review #13** but does not
+# emit at Phase A–C — building this deploy currently fails with
+# `deploy/platform-os-not-implemented-in-current-phase` until the
+# `sce_link_runtime_tokio` crate ships at Phase D.1. The skeleton is
+# authored now so that Phase D.1 entry only requires plumbing the
+# runtime crate, not a fresh deploy authoring pass.
+#
+# OQ-W resolution (AP profile): W6 (batch/fragment) / W8 (capacity) /
+# W12 (closing) / W13 (preemptive scheduler — most cooperative-only
+# fields are inapplicable) / W19 (stage_copy_policy = warn for AP).
+
+machines:
+  ap_node:
+    # ---------------------------------------------------------------
+    # platform — RFC §5.K platform block
+    # AP linux (Phase D.1)
+    # ---------------------------------------------------------------
+    platform:
+      class: ap
+      os: linux
+      soc: x86_64                      # generic; specific tuning via
+                                       # target_plugin if desired.
+      core: x86_64_generic
+      has_dcache: true                 # all modern x86 cores; field is
+                                       # required by `deploy/has-
+                                       # dcache-missing` even though
+                                       # cache maintenance is OS-
+                                       # managed on AP.
+      dcache_line_size: 64             # x86_64 baseline (Intel + AMD).
+      has_speculative_prefetch: true   # always true on AP-class cores.
+      core_count: 1                    # logical machine; tokio
+                                       # multiplexes work across OS
+                                       # threads internally. Cross-
+                                       # core sync is OS-managed, not
+                                       # SCE-coordinated, so this
+                                       # stays at 1.
+      clock_freq_mhz: 3000             # nominal; not a build gate on
+                                       # preemptive scheduler.
+      memcpy_cycles_per_byte: 0.5      # x86_64 vectorized memcpy.
+                                       # Used only if the deploy
+                                       # carries a cooperative
+                                       # algorithm (rare on AP).
+
+      # OQ-W18 — VLE/TLV coefficients are required only when
+      # `scheduler.kind: cooperative`. AP runs `tokio` so these are
+      # advisory; declared to keep the schema complete and to
+      # accommodate a hybrid hot-path that drops to cooperative.
+      vle_decode_cycles_per_byte: 3.0  # A-class default per §5.K.
+      tlv_chain_per_entry_overhead_us: 0.2
+
+    # ---------------------------------------------------------------
+    # scheduler — preemptive (tokio)
+    # OQ-W13 — slot_budget / keepalive_jitter are *advisory* on
+    # tokio (preemptive runtime). Declared for documentation; the
+    # build does not gate on `worker_slot_budget_us` when
+    # `scheduler.kind: tokio`.
+    # ---------------------------------------------------------------
+    scheduler:
+      kind: tokio
+      tick_period_us: 1000             # tokio reactor poll cadence;
+                                       # not a hard gate.
+      worker_stack_budget: 65536       # AP-side ~ default async-task
+                                       # stack; bounded only by tokio.
+      # worker_slot_budget_us / keepalive_jitter_budget_us omitted —
+      # preemptive scheduler does not require them.
+
+    # ---------------------------------------------------------------
+    # memory — AP has no SRAM concept; section/region elided.
+    # The schema accepts an empty `memory:` block on `class: ap`.
+    # ---------------------------------------------------------------
+    memory:
+      sram_regions: {}                 # not applicable on AP linux.
+      dma_channels: []                 # not applicable.
+
+    # ---------------------------------------------------------------
+    # links — RFC §5.K links block
+    # ---------------------------------------------------------------
+    links:
+      udp_scout:
+        bind: "224.0.0.224:7446"
+        driver: tokio_udp
+        mtu_bytes: 1472
+        expected_p99_bytes: 256
+        burst_pps: 500                 # AP can handle higher absorption.
+        rx_dispatch: worker_tick       # tokio epoll-driven; isr_to_pool
+                                       # is an MCU concept.
+        open_timeout_ms: 0
+        domain_attrs:
+          trust_class: untrusted
+
+      udp_session:
+        bind: "0.0.0.0:7447"
+        driver: tokio_udp
+        mtu_bytes: 1472
+        expected_p99_bytes: 4096       # AP applications routinely
+                                       # send larger payloads than
+                                       # MCU; fragmentation is the
+                                       # common case.
+        burst_pps: 2000
+        rx_dispatch: worker_tick
+        open_timeout_ms: 5000
+        domain_attrs:
+          trust_class: session_arming
+          untrusted_source: false      # private LAN deploy. Set true
+                                       # for public-Internet AP
+                                       # listeners — `stateless_
+                                       # accept` is then required.
+
+        # OQ-W15 AP-profile defaults (32 / 16 / 32 / 30000 / 3600).
+        session_arming_quota: 32
+        accept_rate_per_sec: 16
+        accept_rate_burst: 32
+        accept_rate_table_capacity: 128
+        accepting_inactivity_timeout_ms: 1000
+        # stateless_accept block omitted (private LAN). Uncomment for
+        # public-Internet exposure:
+        # stateless_accept:
+        #   mode: cookie_hmac_sha256
+        #   cookie_lifetime_ms: 30000
+        #   key_rotation_s: 3600
+        #   hmac_extern: sce_hmac_sha256   # core whitelist symbol
+        #                                  # (AP picks the SW
+        #                                  # implementation; no HW
+        #                                  # accelerator route).
+        #   rng_extern: sce_random_fill
+
+      tcp_session:
+        bind: "0.0.0.0:7447"
+        driver: tokio_tcp
+        mtu_bytes: 1460                # path-MTU default; per-link
+                                       # override per actual NIC.
+        expected_p99_bytes: 4096
+        burst_pps: 2000
+        rx_dispatch: worker_tick
+        open_timeout_ms: 5000
+        closing_timeout_ms: 100        # OQ-W12 default.
+        domain_attrs:
+          trust_class: session_arming
+          untrusted_source: false
+        session_arming_quota: 32
+        accept_rate_per_sec: 16
+        accept_rate_burst: 32
+        accept_rate_table_capacity: 128
+        accepting_inactivity_timeout_ms: 1000
+
+      # Optional: io_uring opt-in driver. Phase D.1 stretch.
+      # udp_session_uring:
+      #   bind: "0.0.0.0:7448"
+      #   driver: tokio_uring          # requires kernel ≥ 5.10
+      #   ...
+
+    # ---------------------------------------------------------------
+    # session
+    # ---------------------------------------------------------------
+    session:
+      handshake_timeout_ms: 2000
+      lease_seconds: 10
+      keepalive_ratio: 3
+      closing_timeout_ms: 100          # OQ-W12 default.
+      reassembly_timeout_ms: 500
+
+    # ---------------------------------------------------------------
+    # qos — AP profile
+    # OQ-W6 — AP profile uses upstream-friendly batch sizing.
+    # ---------------------------------------------------------------
+    qos:
+      batch_linger_ms: 1               # AP profile per session-fsm
+                                       # §2.5.
+      batch_size: 65536                # full upstream default; AP RAM
+                                       # budget allows.
+      max_fragment_count: 44           # AP default. Revised down
+                                       # from initial 256 per
+                                       # `docs/reassembly-fsm.md`
+                                       # §9.1 to satisfy RFC §5.M
+                                       # invariant `slot_size ≥
+                                       # max_fragments × mtu_bytes`
+                                       # (65536 ≥ 44 × 1472 = 64768).
+                                       # AP can afford ~64 KB
+                                       # fragmented messages, which
+                                       # matches `qos.batch_size`.
+                                       # Raise this AND
+                                       # `buffer_pools.reassembly_
+                                       # pool.{slot_size,max_
+                                       # fragments_per_message}` in
+                                       # tandem for >64 KB messages.
+
+    # ---------------------------------------------------------------
+    # scouting
+    # ---------------------------------------------------------------
+    scouting:
+      mode: active
+      timeout_ms: 1000
+      hello_max_peers: 64              # AP scales higher than MCU 8.
+
+    # ---------------------------------------------------------------
+    # limits — AP profile (OQ-W8)
+    # AP capacities are an order of magnitude larger than MCU. Total
+    # heap budget on a Linux host is effectively unbounded for these
+    # tables, but they remain `bounded-collection` instances (not
+    # `Vec<T>`) so the same SCXML compiles unchanged on MCU and AP —
+    # only the deploy capacity differs.
+    # ---------------------------------------------------------------
+    limits:
+      peer_table: 256
+      multicast_peer_table: 64
+      local_subscriptions: 256
+      local_queryables: 64
+      pending_queries: 64
+      in_flight_reassembly: 32
+      tx_queue: 256
+
+    # ---------------------------------------------------------------
+    # pool_defaults — RFC §5.K pool_defaults block
+    # OQ-W19 — AP = warn (ergonomic prototype path; stage-copy
+    # is rare and acceptable on a host with elastic RAM).
+    # ---------------------------------------------------------------
+    pool_defaults:
+      stage_copy_policy: warn
+
+    # ---------------------------------------------------------------
+    # buffer_pools — RFC §5.K buffer_pools block
+    # On AP linux these are `bytes::BytesMut` arenas; section /
+    # alignment / dma_channel / cache_policy fields are accepted but
+    # are no-ops on `class: ap`. Shape kept identical to MCU so the
+    # same SCXML emits unchanged.
+    # ---------------------------------------------------------------
+    buffer_pools:
+      scout_rx_pool:
+        slot_count: 32
+        slot_size: 512
+        section: heap                  # AP-specific; `heap` indicates
+                                       # the section attribute is
+                                       # ignored and a `BytesMut`
+                                       # arena is used instead.
+        alignment: 64
+        dma_channel: ~                 # not applicable on AP.
+        cache_policy: none
+
+      session_rx_pool:
+        slot_count: 64
+        slot_size: 4096
+        section: heap
+        alignment: 64
+        dma_channel: ~
+        cache_policy: none
+
+      session_tx_pool:
+        slot_count: 64
+        slot_size: 4096
+        section: heap
+        alignment: 64
+        dma_channel: ~
+        cache_policy: none
+
+      reassembly_pool:
+        variant: reassembly
+        slot_count: 32                 # = limits.in_flight_reassembly.
+        slot_size: 65536               # ≥ qos.batch_size; AP
+                                       # routinely reassembles
+                                       # multi-fragment messages.
+        section: heap
+        alignment: 64
+        dma_channel: ~
+        cache_policy: none
+        max_fragments_per_message: 44  # = qos.max_fragment_count.
+        reassembly_timeout_ms: 500
+        per_peer_quota: 8              # invariant: peer_table × quota
+                                       # = 256 × 8 = 2048 ≥ 32. OK.
+
+    # ---------------------------------------------------------------
+    # extern_symbols — RFC §5.K
+    # ---------------------------------------------------------------
+    extern_symbols:
+      lib: sce_intrinsics_runtime_rust # AP uses Rust intrinsics.
+      target_plugin: ~                 # AP linux baseline does not
+                                       # require a plugin; declare a
+                                       # plugin file here for
+                                       # io_uring fixed-buffer or
+                                       # netlink integration variants.

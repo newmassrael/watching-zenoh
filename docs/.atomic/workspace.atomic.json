@@ -1,0 +1,1791 @@
+{
+  "sections": {
+    "oq-w15-a--ratification-summary-for-sce-maintainer-sync/1-decision-needed": {
+      "intent": "Two binary ratification decisions on sce_intrinsics_runtime_* whitelist membership for RNG and HMAC primitives, individually decidable but coupled by shared consumer.",
+      "inputs_bullets": [
+        "Shared consumer: stateless_accept: cookie_hmac_sha256 (RFC §5.K hard error if absent)",
+        "Decisions are individually decidable — RNG location does not constrain HMAC location"
+      ],
+      "outputs_bullets": [
+        "Decision 1: sce_random_fill(buf, len) -> int → core whitelist (yes/no)",
+        "Decision 2: sce_hmac_sha256(key, key_len, msg, msg_len, out) → target plugin (yes/no)"
+      ],
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface",
+        "session-fsm--prose-level-sketch",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+      ]
+    },
+    "oq-w15-a--ratification-summary-for-sce-maintainer-sync/2-why-this-decision-is-needed-now": {
+      "intent": "Phase A entry of public-Internet-facing MCU listeners is blocked until both stateless_accept primitives have ratified placement.",
+      "rationale_bullets": [
+        "RFC §5.K stateless_accept required when domain_attrs.untrusted_source: true (build refusal)",
+        "stateless_accept body uses sce_hmac_sha256 (cookie HMAC) and sce_random_fill (key generation)",
+        "Both symbols must be placed (whitelist or plugin) before SCXML can author stateless_accept"
+      ],
+      "inputs_bullets": [
+        "Exposure class: domain_attrs.untrusted_source flag on listener link",
+        "deploy/stateless-accept-required-on-untrusted-source — hard error if missing"
+      ],
+      "outputs_bullets": [
+        "Public-Internet-facing MCU listener Phase A blocked pending placement decision",
+        "Private-LAN MCU listener Phase A not gated (caps alone suffice)"
+      ],
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface",
+        "session-fsm--prose-level-sketch",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+      ]
+    },
+    "oq-w15-a--ratification-summary-for-sce-maintainer-sync/3-initial-proposal-watching-zenoh": {
+      "intent": "Watching-zenoh proposes RNG to core whitelist (universal entropy primitive) and HMAC to target plugin (per-SoC accelerator selection).",
+      "rationale_bullets": [
+        "RNG universal — every platform has some entropy source (HW RNG / ADC noise / OS getrandom)",
+        "RNG no SoC-specific accelerator selection — bundled with HAL, single canonical symbol",
+        "RNG WCET cleanly handled by canonical symbol with measured bound, no per-deploy redeclaration",
+        "HMAC HW-accelerator selection genuinely per-SoC (CRYP/SHA/SW fallback)",
+        "HMAC SW fallback authorable as algorithm kind (option 3 fallback path)",
+        "HMAC bounded blast radius — keeps whitelist small, contains crypto precedent"
+      ],
+      "inputs_bullets": [
+        "Decision questions from §1 of this doc (RNG location / HMAC location)"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "RNG option 2 (target plugin)",
+          "reason": "loses universality, every public-Internet deploy ships plugin"
+        },
+        {
+          "alternative": "RNG option 3 (algorithm kind)",
+          "reason": "not viable, entropy generation is platform-coupled"
+        },
+        {
+          "alternative": "HMAC option 1 (core whitelist)",
+          "reason": "adds 32-byte crypto, sets precedent for more crypto primitives"
+        },
+        {
+          "alternative": "HMAC option 3 (algorithm only)",
+          "reason": "loses HW accelerator, ~10x CPU on STM32H7, tight WCET headroom"
+        }
+      ],
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface",
+        "session-fsm--prose-level-sketch",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+      ]
+    },
+    "oq-w15-a--ratification-summary-for-sce-maintainer-sync/4-counter-options-presented-for-context": {
+      "intent": "Detailed counter-option matrix for the two decisions, expanding the trade-offs that §3 cites in summary form.",
+      "alternatives_rejected": [
+        {
+          "alternative": "RNG option 2 (target plugin)",
+          "reason": "every deploy ships entropy plugin even when platform is canonical"
+        },
+        {
+          "alternative": "RNG option 3 (algorithm kind)",
+          "reason": "not viable; entropy is irreducibly platform-coupled"
+        },
+        {
+          "alternative": "HMAC option 1 (core whitelist)",
+          "reason": "HW dispatch survives but precedent for more crypto additions set"
+        },
+        {
+          "alternative": "HMAC option 3 (algorithm only)",
+          "reason": "zero plugin dep but HW unused, ~10x CPU, tighter burst headroom"
+        }
+      ],
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface",
+        "session-fsm--prose-level-sketch",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+      ]
+    },
+    "oq-w15-a--ratification-summary-for-sce-maintainer-sync/5-blast-radius-forward-compatibility-implications": {
+      "intent": "Forward-compatibility implications across the 2x2 matrix of RNG and HMAC placement decisions.",
+      "rationale_bullets": [
+        "RNG core (proposal): RNG features land free; missing entropy → build-time refusal",
+        "HMAC plugin (proposal): future crypto land by precedent; whitelist stays small",
+        "HMAC plugin (proposal): SoC-vendor crypto IP changes absorbed without RFC churn",
+        "RNG plugin alt: duplicated authoring per canonical deploy; each new RNG re-states it",
+        "HMAC core alt: faster Phase A on listener MCUs; precedent for crypto whitelist adds"
+      ],
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "session-fsm--prose-level-sketch",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+      ]
+    },
+    "oq-w15-a--ratification-summary-for-sce-maintainer-sync/6-action-requested": {
+      "intent": "Ratification ask: yes/no on each of the two proposal decisions, with optional counter-direction and audit artifact in the OQ-W15 entry.",
+      "inputs_bullets": [
+        "Initial proposal (this doc) as ratification subject",
+        "Counter-option matrix as alternatives if proposal rejected"
+      ],
+      "outputs_bullets": [
+        "Ratify or reject proposal (yes/no on each of two decisions)",
+        "If reject: counter-direction from matrix or proposed independently",
+        "Decision artifact: short note in rfc-open-questions-log.md OQ-W15 entry"
+      ],
+      "caveats_bullets": [
+        "OQ-W15 (b) MCU/AP defaults are out of scope here; settle post-Phase-A via HIL measurement"
+      ],
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+      ]
+    },
+    "oq-w15-a--ratification-summary-for-sce-maintainer-sync/7-references-for-the-maintainer": {
+      "intent": "Citation index linking this artifact to its source material in the watching-zenoh internal docs.",
+      "impact_scope": [
+        "intrinsics-runtime--symbol-surface",
+        "session-fsm--prose-level-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/1-framing-overview": {
+      "intent": "Reassembly FSM between codec (Fragment) and network FSMs; chain key=(peer_zid, reliability) — two buffers per peer per upstream wire shape.",
+      "inputs_bullets": [
+        "Chain key (peer_zid 16B, reliability 1bit); no priority, no sn_base in key",
+        "Wire: Fragment {sn:u64 VLE, payload:ZSlice, more bit, reliability bit}",
+        "FRAGMENT_FIRST/DROP exts patch-1+; legacy patch-0 infers first via empty+consecutive SN",
+        "Fragment classification: First / Continue / Final / Drop / unmatched-continue dropped at Router"
+      ],
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "session-fsm--prose-level-sketch/2-3-established-sub-regions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/10-next-step-scaffolding": {
+      "intent": "Reassembly FSM unblocks Phase A SCXML authoring of sources/network/reassembly.scxml; deploy.yaml reassembly_pool block fully named; OQ-W22 closed.",
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "session-fsm--prose-level-sketch/2-3-established-sub-regions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/2-1-hierarchy": {
+      "intent": "ReassemblyDispatcher = Router region + N parallel Slot regions (N=slot_count); one-active-per-key invariant; codegen N is build-time const.",
+      "inputs_bullets": [
+        "Router: chain-key→slot-index map (bounded-collection<SlotEntry, N>), per-peer quota check",
+        "Slot[0..N-1]: parallel sub-region, four-state machine each",
+        "Upstream divergence: shared bounded pool decoupled from peer count (vs upstream inline 2×peers)",
+        "Parity invariant: slot_count ≥ 2 × peer_table.capacity reproduces upstream no-exhaustion",
+        "MCU slot_count=4, AP=32 (OQ-W8); over-commits trade strict parity for memory cost"
+      ],
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/2-2-slot-states": {
+      "intent": "Slot four-state FSM: Empty → Receiving → Complete / TimedOut / Aborted (three terminals funnel back to Empty via slot release).",
+      "inputs_bullets": [
+        "Empty: slot free, awaiting allocation from Router",
+        "Receiving: chain in progress; consecutive Continue allowed",
+        "Complete: Final received with consecutive SN",
+        "TimedOut: reassembly_timeout_ms expired",
+        "Aborted: 7 reasons (OOO/Drop/duplicate-First/oldest-wins/codec-error/unmatched/peer-drop)",
+        "Slot release transitions buffer-pool slot cpu-mut/cpu-ref → free (lifecycle FSM funnel)"
+      ],
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "reassembly-fsm--prose-sketch/2-1-hierarchy",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/2-3-router-states": {
+      "intent": "Router region routes Fragment.* events to Slot regions by chain key; enforces per-peer quota; refuses second First on already-open key (duplicate-first abort).",
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "reassembly-fsm--prose-sketch/2-1-hierarchy",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/2-4-transitions-in-detail": {
+      "intent": "Eight detailed transitions across Slot states: Empty→Receiving (First), Receiving→Receiving (Continue), Final→Complete, plus 5 abort variants and Terminal→Empty release funnel.",
+      "outputs_bullets": [
+        "§2.4.1 Empty→Receiving: Fragment.First admitted by Router (key not-active, quota OK, slot OK)",
+        "§2.4.2 Receiving→Receiving: Fragment.Continue with consecutive SN appends payload",
+        "§2.4.3 Receiving→Complete: Fragment.Final consecutive SN, emit message-complete event",
+        "§2.4.4 Receiving→Aborted: out-of-order Continue (non-consecutive SN, strict in-order)",
+        "§2.4.5 Receiving→TimedOut: reassembly_timeout_ms expired",
+        "§2.4.6 Receiving→Aborted: oldest-wins eviction by Router under pool pressure",
+        "§2.4.7 Receiving→Aborted: codec error on payload decode (§2.4.7a peer-drop via DROP ext)",
+        "§2.4.8 Terminal→Empty: slot release funnel; lifecycle FSM cpu-mut→free"
+      ],
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "reassembly-fsm--prose-sketch/2-2-slot-states",
+        "reassembly-fsm--prose-sketch/2-3-router-states"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/2-5-out-of-order-arrival-policy": {
+      "intent": "Strict in-order policy (OQ-W21 closed): non-consecutive Continue aborts the chain (option 2 ratified); upstream consecutive-SN parity preserved.",
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "reassembly-fsm--prose-sketch/2-4-transitions-in-detail",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w21--out-of-order-continue-policy-under-best_effort"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/2-6-mapping-to-rfc-5m-three-state-sketch": {
+      "intent": "Mapping prose four-state Slot FSM (Empty/Receiving/Complete/TimedOut/Aborted) to RFC §5.M three-state high-level sketch (Idle/Active/Done) with terminal split.",
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/3-tx-fragmentation-sibling-fsm": {
+      "intent": "TX fragmentation sibling FSM — chunks outbound NetworkMessage exceeding link MTU into Fragment.{First, Continue, Final} with consecutive SN.",
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "session-fsm--prose-level-sketch/2-3-established-sub-regions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/4-timer-quota-pool-config": {
+      "intent": "Reassembly timer / per-peer quota / pool config from deploy.yaml — reassembly_timeout_ms, per_peer_quota, slot_count, slot_size live under buffer_pools.reassembly_pool.",
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/5-trust-class-interaction": {
+      "intent": "Trust-class interaction — reassembly forbidden on untrusted/session_arming links; established_session sibling instance receives reassembly bindings (OQ-W22 close).",
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "session-fsm--prose-level-sketch/2-6-trust-class-interaction",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w22--listener-link-trust-class-lifecycle"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/6-buffer-pool-interaction": {
+      "intent": "Buffer-pool lifecycle FSM (§5.E) interaction — reassembly slot acquire = pool slot cpu-mut; terminal release = cpu-mut/cpu-ref → free.",
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/7-1-reassembly-capacity-check-hard-error": {
+      "intent": "Build-time reassembly capacity check — max_fragments × per_peer_quota × peer_table.capacity sufficiency for slot_count; hard error if violated.",
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/7-2-stage-copy-rate-warning": {
+      "intent": "Build-time stage-copy rate warning — expected_p99_bytes / mtu_bytes ratio against pool slot reuse policy; warning if ≥25%.",
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/7-3-reassembly-slot-sizing-recommendation": {
+      "intent": "Build-time reassembly slot_size recommendation (informational) — slot_size ≥ max_fragments × mtu_bytes for full chain absorption.",
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/7-4-stage-copy-wcet-vs-slot-budget-hard-error": {
+      "intent": "Build-time stage-copy WCET hard error — expected_p99_bytes × memcpy_cycles / clock_freq ≤ worker_slot_budget_us; rejects M0+ deploys with oversized stage-copy.",
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/8-1-authoring-contract-gaps": {
+      "intent": "Reassembly authoring-contract gaps (G-RFM-1..N) — most resolved via OQ-W21/W22 closure; residuals tracked for Phase D+ TX fragmentation work.",
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w21--out-of-order-continue-policy-under-best_effort",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w22--listener-link-trust-class-lifecycle"
+      ]
+    },
+    "reassembly-fsm--prose-sketch/8-2-new-open-questions": {
+      "intent": "OQ-W21 (out-of-order continue policy) closed via strict in-order; OQ-W22 (listener-link trust-class lifecycle) closed via codegen sibling split.",
+      "impact_scope": [
+        "reassembly-fsm--prose-sketch",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w21--out-of-order-continue-policy-under-best_effort",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w22--listener-link-trust-class-lifecycle"
+      ]
+    },
+    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm": {
+      "intent": "New ForgeKind::Algorithm — pure synchronous functions with bounded loops, mutable locals, six-backend codegen, MCU-viable WCET.",
+      "rationale_bullets": [
+        "No existing kind expresses pure synchronous functions with bounded loops and mutable locals",
+        "Procedure forces per-byte event dispatch — absurd performance for CRC/VLE",
+        "Transform is single-expression only — cannot host accumulator state",
+        "Bounded loops + no recursion guarantee termination, MCU-viable",
+        "WCET annotation extends termination guarantee to fit cooperative scheduler slot budget"
+      ],
+      "inputs_bullets": [
+        "SCXML body with sce:signature / sce:const / sce:body grammar",
+        "AlgorithmStmt IR: Var/Assign/If/While/Foreach/Return/Call",
+        "<sce:wcet-bound mode=static|measured|opaque> annotation",
+        "scheduler.worker_slot_budget_us from deploy.yaml (deploy model section)"
+      ],
+      "outputs_bullets": [
+        "Six-backend free function: Rust no_std / C11 / Cpp / Kotlin / Go / Python",
+        "WCET estimate_us folded into IR after measurement-class margin (×1 / ×1.2 / ×3)",
+        "Build refusal if estimate_us > worker_slot_budget_us"
+      ],
+      "caveats_bullets": [
+        "Recursion forbidden v1 (algorithm/call-cycle diagnostic)",
+        "Params read-only v1 (algorithm/lvalue-unsupported on param write)",
+        "mode=opaque WCET forbidden under cooperative scheduling",
+        "host: measurement applies ×3.0 safety factor against slot budget"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "Procedure kind",
+          "reason": "forces per-byte event dispatch, absurd performance for CRC/VLE"
+        },
+        {
+          "alternative": "Transform kind",
+          "reason": "single expression cannot host accumulator state"
+        },
+        {
+          "alternative": "Recursion v1",
+          "reason": "would break MCU termination guarantee, deferred"
+        }
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "architecture--watching-zenoh",
+        "rfc-open-questions-log/sce-side-questions-q1q14/q3--algorithm-calling-algorithm",
+        "rfc-open-questions-log/sce-side-questions-q1q14/q4--compute-atbuild-on-transform",
+        "rfc-open-questions-log/sce-side-questions-q1q14/q14--algorithm-calling-bounded-collection-ops"
+      ]
+    },
+    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions": {
+      "intent": "Codec DSL extensions for Zenoh wire format — VLE / variant / TLV-chain / DMA-align / aggregate-WCET — additive, backward compatible.",
+      "rationale_bullets": [
+        "Zenoh wire format requires constructs not expressible in fixed-width Codec kind",
+        "VLE / discriminated union / conditional field / TLV chain are wire-format core",
+        "DMA alignment makes MCU codec output land in DMA-coherent pool slot",
+        "Codec aggregate WCET prevents adversarial frame from blowing slot budget",
+        "Iterative parse only — max-depth lowers to max-iter; no recursion"
+      ],
+      "inputs_bullets": [
+        "12 extensions covering VLE, variant, present-if, flags, len-prefix, repeat, TLV-chain, DMA-align",
+        "Per-platform cycle costs from deploy: vle_decode / memcpy / tlv-chain entry overhead",
+        "scheduler.worker_slot_budget_us drives aggregate WCET gate",
+        "Pool slot alignment from buffer-pool kind for DMA layout invariant"
+      ],
+      "outputs_bullets": [
+        "Six-backend encode/decode pair with NeedMoreBytes typed signal (no exceptions)",
+        "Per-language cursor + uniform NeedMoreBytes signal across all six backends",
+        "Compile-time test-vector round-trip checks (Rust #[test] / C _Static_assert)",
+        "<sce:codec-wcet-bound mode=derived> attribute on codec IR; author may override mode=measured",
+        "Build refusal when codec aggregate WCET > scheduler.worker_slot_budget_us"
+      ],
+      "caveats_bullets": [
+        "MCU-only features (DMA align, aggregate WCET) emit only on (rust,*) and (c11,bare_metal)",
+        "DMA align scope: wire layout only — AP allocator has no alignment obligation",
+        "DMA align legal at build-time-known offsets only; rejected after vle_/len-prefix/repeat/until-eof",
+        "Aggregate WCET requires per-platform cycle constants declared in deploy",
+        "AP targets (preemptive scheduler) exempt from aggregate WCET gate"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "Recursive TLV parse",
+          "reason": "would break MCU termination, iterative max-depth chosen"
+        },
+        {
+          "alternative": "Runtime DMA padding",
+          "reason": "codec/dma-alignment-unsatisfiable rejects variable preceding fields"
+        },
+        {
+          "alternative": "Per-codec WCET as suggestion only",
+          "reason": "adversarial frame attack motivates hard build gate"
+        },
+        {
+          "alternative": "Stage-copy policy default=warn",
+          "reason": "promoted to hard error when stage_copy_policy: error|forbid"
+        }
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "architecture--watching-zenoh",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "wire-spec-subset--watching-zenoh-mvp",
+        "rfc-open-questions-log/sce-side-questions-q1q14/q5--5b-codec-dsl-pr-granularity"
+      ]
+    },
+    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link": {
+      "intent": "Byte-stream link kind — declares endpoint pair, framer/pools/backpressure binding, OS-specific runtime crate. MCU + AP.",
+      "rationale_bullets": [
+        "Protocol synthesis project IS the transport — events originate from raw bytes",
+        "Existing SCE Mesh assumes transport library below; new kind models byte-level endpoint pair",
+        "Per-OS runtime crate naming (sce_link_runtime_<os>) decouples transport from kind shape",
+        "Listener-link sibling emission resolves OQ-W22 trust-class lifecycle",
+        "MCU-class — DMA-aligned slot/ISR-RX/link-time placement no Cpp/Kotlin/Go/Python equivalent"
+      ],
+      "inputs_bullets": [
+        "<sce:link-class> enum: udp / tcp / serial / websocket / raw_eth (additive per phase)",
+        "<sce:framer> bound to a codec; <sce:rx-pool>/<sce:tx-pool> bound to a buffer-pool",
+        "<sce:backpressure>: drop / block / signal-event",
+        "deploy.yaml binding: bind / driver / rx_pool_slot_section / domain_attrs.trust_class"
+      ],
+      "outputs_bullets": [
+        "RX path: driver.poll → framer.decode → event inject",
+        "TX path: event extract → framer.encode → pool slot → driver.send",
+        "Listener with trust_class=session_arming emits arming + established_session sibling",
+        "Per-OS Link trait impl (lwip/tokio/qnx); compile-time elision of trust-incompat methods"
+      ],
+      "caveats_bullets": [
+        "MCU-class — emits only on (rust,*) and (c11,bare_metal); rejects on cpp/kotlin/go/python",
+        "Sibling instance synthesized, not author-declared; inherits transport fields except hardening",
+        "OS-specific link-classes (unix_socket / qnx_msg) added when wired, not pre-declared",
+        "TCP on MCU requires network stack — link/class-unsupported-on-target if absent"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "Pre-declare all OS-specific link-classes",
+          "reason": "schema-accepted-but-codegen-rejects, anti-pattern #9"
+        },
+        {
+          "alternative": "Single listener instance",
+          "reason": "would conflict with OQ-W22 trust-class lifecycle"
+        },
+        {
+          "alternative": "Author-declared sibling",
+          "reason": "error-prone duplication; synthesized inheritance chosen"
+        },
+        {
+          "alternative": "Mesh-style transport library below",
+          "reason": "synthesis project IS the transport, no library to host"
+        }
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "architecture--watching-zenoh",
+        "session-fsm--prose-level-sketch",
+        "reassembly-fsm--prose-sketch",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w22--listener-link-trust-class-lifecycle"
+      ]
+    },
+    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.d-timer-and-worker-primitives": {
+      "intent": "Timer kind reset/cancel ergonomics plus new worker primitive (MCU-class) for concurrent rx/tx execution contexts.",
+      "rationale_bullets": [
+        "<send delay> scalar lacks reset/cancel ergonomics for keepalive/inactivity timers",
+        "Existing Timer kind needs confirmation/extension to cover reset-on / cancel-on shape",
+        "<parallel> shares a macrostep; concurrent rx/tx loops need independent execution contexts",
+        "Worker = one cooperative scheduler tick slot on MCU; tokio::spawn on AP"
+      ],
+      "inputs_bullets": [
+        "Timer: <sce:period> / <sce:reset-on event> / <sce:cancel-on state-exit> / <sce:fire-event>",
+        "Worker: <sce:link-rx ref> / <sce:inbox depth> / <sce:outbox ref> / <sce:body>",
+        "scheduler.kind from deploy (cooperative MCU vs preemptive AP)"
+      ],
+      "outputs_bullets": [
+        "Timer (AP): tokio::time::interval; (MCU): static timer wheel slot",
+        "Worker (AP): tokio::spawn; (MCU): cooperative scheduler tick slot",
+        "Inbox: heapless::spsc (Rust) / fixed ring buffer (C)"
+      ],
+      "caveats_bullets": [
+        "worker primitive MCU-class — rejects on cpp/kotlin/go/python",
+        "Timer kind retains six-backend coverage (separate from worker)",
+        "worker/shared-mutable-state diagnostic — only inbox access permitted across workers"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "<parallel> regions for concurrent loops",
+          "reason": "share macrostep, no independent context"
+        },
+        {
+          "alternative": "Single static timer per type",
+          "reason": "loses reset/cancel ergonomics"
+        },
+        {
+          "alternative": "Heap-allocated inbox",
+          "reason": "breaks no-alloc invariant on MCU"
+        }
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "architecture--watching-zenoh",
+        "session-fsm--prose-level-sketch",
+        "rfc-open-questions-log/sce-side-questions-q1q14/q2--existing-timer-kind-vs-rfc-5d"
+      ]
+    },
+    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement": {
+      "intent": "Buffer pool kind (MCU-class) — slot-count/size/section/alignment/cache-policy + lifecycle FSM + ownership API + linker fragment.",
+      "rationale_bullets": [
+        "MCU zero-copy requires SRAM section + DMA alignment; no existing primitive",
+        "Cache maintenance pinned to lifecycle FSM edges; not author-callable, prevents misplaced flush",
+        "Slot lifecycle FSM (7 states / 11 transitions) tracks ownership across CPU/DMA boundaries",
+        "Phantom-typed Slot<state> + Layer 1-4 analysis stack catch use-after-take and double-take",
+        "Burst absorption analysis prevents pool starvation under wire-rate inbound",
+        "Inter-pool sentinels + ALIGN sections defense-in-depth at 4 layers"
+      ],
+      "inputs_bullets": [
+        "Pool fields: slot-count/slot-size/section/alignment/dma-channel/cache-policy",
+        "deploy memory.sram_regions (base / size / attr) + dma_channels list",
+        "platform.has_dcache + dcache_line_size for cache-policy validation",
+        "rx_dispatch (isr_to_pool / worker_tick) + burst_pps from link"
+      ],
+      "outputs_bullets": [
+        "C: __attribute__((section, aligned)) static + bitmap freelist + DMA descriptor table",
+        "Rust no_std: heapless::pool / #[link_section] static arrays with custom pool API",
+        "Linker fragment sidecar: SECTIONS with ALIGN, inter-pool sentinels, paired desc sections",
+        "Cache maintenance ops emitted on FSM edges (free→armed-tx clean, busy-rx→cpu-ref invalidate)"
+      ],
+      "caveats_bullets": [
+        "MCU-class kind — emits only on (rust,*) and (c11,bare_metal); non-MCU language hard-error",
+        "cache-policy must match platform.has_dcache; mismatch hard-error",
+        "slot_size MUST be cache-line multiple under cache-policy=maintain (no silent padding)",
+        "Inter-pool sentinels address line-level only, NOT set associativity contention"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "Author-called cache_clean / cache_invalidate",
+          "reason": "moved to lifecycle FSM edges to prevent misplacement"
+        },
+        {
+          "alternative": "Silent slot_size pad to cache-line",
+          "reason": "rejected, RAM cost stays explicit per author intent"
+        },
+        {
+          "alternative": "Heap-backed pool on AP-only common abstraction",
+          "reason": "MCU section/DMA constraints break parity"
+        },
+        {
+          "alternative": "Single layer of static analysis",
+          "reason": "Layer 1-4 stack covers Clang/GCC/runtime/release modes"
+        }
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "architecture--watching-zenoh",
+        "reassembly-fsm--prose-sketch",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape"
+      ]
+    },
+    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.f-build-time-evaluation": {
+      "intent": "Build-time evaluation primitives — sce:compute-at='build' const + sce:fold statement; emits static const tables to six backends.",
+      "rationale_bullets": [
+        "CRC tables / KeyExpr tries / derived constants must land as static const, not runtime init",
+        "Single-source host interpreter ensures cross-backend byte-equivalent constants",
+        "Bounded iteration budget keeps build from becoming general-purpose compute platform",
+        "Flat KeyExpr trie buildable today; recursive node trie deferred to Phase 2"
+      ],
+      "inputs_bullets": [
+        "<sce:const sce:compute-at='build'> declaration with type/name",
+        "<sce:fold range/as/elem-type> statement; reuses runtime expression semantics",
+        "sce-build --const-fold-budget=N (default 1M iterations)",
+        "Deploy-declared subscription set drives KeyExpr trie construction"
+      ],
+      "outputs_bullets": [
+        "Rust: pub static [T;N] / C11: static const T[N] / Cpp: inline constexpr std::array",
+        "Kotlin val / Go var [N]T / Python module-level tuple",
+        "Computed arrays placed in .flash on MCU (linker-placed static lookup)",
+        "Cross-backend numeric byte-parity verified by const-fold parity test"
+      ],
+      "caveats_bullets": [
+        "Host interpreter is pure (no I/O, no alloc beyond fold output)",
+        "Total fold iterations capped at budget; exceed → algorithm/const-fold-budget-exceeded",
+        "MVP baseline = runtime bounded-collection for zenoh-pico parity (declare_subscriber)",
+        "Recursive node tries deferred to Phase 2 (use flat representation until then)"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "Runtime initialization for derived constants",
+          "reason": "would defeat zero-RAM static const goal"
+        },
+        {
+          "alternative": "Per-backend interpreter",
+          "reason": "would risk cross-backend numeric drift"
+        },
+        {
+          "alternative": "Unbounded const-fold compute",
+          "reason": "would turn build into general compute platform"
+        }
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "architecture--watching-zenoh",
+        "rfc-open-questions-log/sce-side-questions-q1q14/q4--compute-atbuild-on-transform"
+      ]
+    },
+    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern": {
+      "intent": "Bounded escape hatch — whitelisted extern symbols (atomics / fences / cache / IRQ / HW-sync) plus target_plugin extension shape.",
+      "rationale_bullets": [
+        "Platform-specific intrinsics (atomic CAS, fences, MMIO) resist declarative expression",
+        "Whitelist is bounded — every symbol declared with exact signature, ABI, ordering",
+        "target_plugin extends whitelist for HW sync (HSEM/MU/spinlock); plugin in deploy review scope",
+        "F4 fuzz coverage transport on per-target plugin avoids SCE core polluting on transport choice",
+        "OQ-W14 HW-sync standardization + OQ-W15 (a) crypto primitive ownership consume this field"
+      ],
+      "inputs_bullets": [
+        "<sce:extern name=... sig=... abi=... crate=...> reference",
+        "sce_intrinsics_runtime crate as core whitelist host",
+        "deploy.yaml extern_symbols.target_plugin (path to plugin YAML)",
+        "linker_flavor: gnu_ld / scatter_arm / icf_iar / os_managed"
+      ],
+      "outputs_bullets": [
+        "Per-language ABI-correct extern declaration (Rust extern 'C' / C header / etc.)",
+        "Cache maintenance ops wired to lifecycle FSM edges (cross-ref buffer-pool kind)",
+        "Cross-core inbox uses HW sync primitive when core_count>1 and inbox declares it",
+        "Linker fragment in declared flavor (gnu_ld baseline, scatter_arm/icf_iar via plugin)"
+      ],
+      "caveats_bullets": [
+        "Whitelist rejects symbols not pre-declared; plugin redefining core symbol is hard-error",
+        "CRC/VLE/keyexpr-match MUST be authored as algorithm kinds, NOT extern (anti-extern abuse)",
+        "Linker flavor scatter_arm/icf_iar require Phase C+ generator landing",
+        "Cache maintenance rounds to platform.dcache_line_size; out-of-line trips mem/cache-line-align",
+        "Fuzz coverage transport absent pre-Phase-D; F4 declared without it triggers hard-error"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "Unbounded extern",
+          "reason": "would defeat SSoT claim, every project carries arbitrary symbol soup"
+        },
+        {
+          "alternative": "CRC/VLE as extern",
+          "reason": "algorithm kind already expresses these; extern abuse rejected"
+        },
+        {
+          "alternative": "SCE core hosting per-vendor crypto primitives",
+          "reason": "boundary-pollution risk, kept in plugins"
+        },
+        {
+          "alternative": "Single linker flavor (gnu_ld only)",
+          "reason": "vendor diversity (Keil/IAR) requires plugin extension"
+        }
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.d-timer-and-worker-primitives",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "architecture--watching-zenoh",
+        "intrinsics-runtime--symbol-surface",
+        "rfc-open-questions-log/sce-side-questions-q1q14/q7--sceextern-whitelist-location",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w14--hardware-sync-primitive-standardization-in-target_plugin",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w17--f4-fuzz-coverage-transport-engine-choice-and-per-target-default"
+      ]
+    },
+    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage": {
+      "intent": "Codegen backend = 3-tuple (language, OS, runtime_crate); parity invariant for new kinds across six backends; statechart no_std variant.",
+      "rationale_bullets": [
+        "C11 byte-golden parity already shipped at 758aea3f for eleven existing Forge kinds",
+        "New-kind matrix preserves parity: generic kinds emit on all six backends, MCU-class on (rust|c11)",
+        "Backend = 3-tuple — same Rust on AP linux vs qnx links against different runtime crates",
+        "platform.os drives runtime crate selection; canonical sce_link_runtime_<os> naming",
+        "Statechart runtime no_std feature gate; Forge runtime already no_std + no-alloc"
+      ],
+      "inputs_bullets": [
+        "ForgeKind enum (eleven existing + RFC additions)",
+        "platform.os (bare_metal / linux / qnx / macos / freebsd / windows / rtos)",
+        "sce-codegen -l <lang> --no-std flag for statechart MCU emit",
+        "deploy.yaml runtime_crate override (rare, default = OS-canonical crate)"
+      ],
+      "outputs_bullets": [
+        "Single .h per forge document on C11 (header-only, pinned at 758aea3f)",
+        "no_std Rust statechart emitter using heapless::String / heapless::Vec",
+        "Per-language matrix-conformant emitter for generic kinds; hard-error for MCU-class on non-MCU lang",
+        "Per-OS runtime crate: lwip (bare_metal) / tokio (linux) / qnx / kqueue (macos+bsd) / iocp (windows)"
+      ],
+      "caveats_bullets": [
+        "MCU-class kinds wired only on (rust,*) and (c11,bare_metal); other languages reject",
+        "(rust, qnx, sce_link_runtime_qnx) reserved Phase D.2 namespace; pre-Phase-D author fails build",
+        "Statechart no_std feature gate default off — std consumer compatibility preserved",
+        "SCE Mesh C11 explicitly out of RFC — downstream project doesn't use Mesh codegen"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "Single language axis",
+          "reason": "ignored OS difference between linux tokio and qnx dispatch_create"
+        },
+        {
+          "alternative": "Author-picked runtime crate name in deploy.yaml",
+          "reason": "error-prone, OS-driven default chosen"
+        },
+        {
+          "alternative": "Empty emit on MCU-class for non-MCU lang",
+          "reason": "silently broken, hard-error chosen"
+        },
+        {
+          "alternative": "Mesh codegen extension here",
+          "reason": "out of scope, downstream project not using Mesh"
+        }
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.d-timer-and-worker-primitives",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "architecture--watching-zenoh",
+        "intrinsics-runtime--symbol-surface",
+        "rfc-open-questions-log/sce-side-questions-q1q14/q6--c11-vs-c99-for-the-c-backend",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w20--sce_link_runtime_qnx-reactor-mio-qnx-backend-vs-custom-qnx-native-runtime"
+      ]
+    },
+    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions": {
+      "intent": "Deploy model extensions — scheduler / platform / links / cross_core_sync / stateless_accept descriptor fields driving codegen and gates.",
+      "rationale_bullets": [
+        "Codegen needs deploy-time descriptors for scheduler / DMA / cache / cross-core / hardening",
+        "deploy.yaml is the connecting tissue between hardware truth and SCXML kind authoring",
+        "MTU + expected_p99_bytes drive fragment / reassembly invariants at build time",
+        "stateless_accept block scopes anti-flood hardening fields per listener link",
+        "deploy schema is hardware/networking generic — no zenoh-specific knowledge"
+      ],
+      "inputs_bullets": [
+        "platform: class / soc / has_dcache / dcache_line_size / clock_freq / vle_decode_cycles",
+        "scheduler: kind / tick_period_us / worker_slot_budget_us / keepalive_jitter_budget_us",
+        "links: bind / driver / mtu_bytes / expected_p99_bytes / burst_pps / rx_dispatch / domain_attrs",
+        "cross_core_sync: default / hw_semaphore_unit / inbox_overrides",
+        "stateless_accept: mode / cookie_lifetime_ms / key_rotation_s / hmac_extern / rng_extern"
+      ],
+      "outputs_bullets": [
+        "codegen-time descriptor fed to all kind emitters (algorithm/codec/link/buffer-pool)",
+        "Build refusal on mismatched descriptors (e.g. cache-policy=none on has_dcache=true)",
+        "Per-platform cycle constants drive aggregate WCET gates",
+        "Phase-gated combinations: backend-tuple-not-implemented if pre-Phase-D author"
+      ],
+      "caveats_bullets": [
+        "Schema-genericness policy — no zenoh-specific knowledge in deploy fields",
+        "stateless_accept required when domain_attrs.untrusted_source: true (hard error if absent)",
+        "deploy/multicore-without-target-plugin — cross-core declaration without plugin",
+        "OQ-W18 / OQ-W19 default-value decisions deferred to HIL measurement",
+        "OQ-W15 (a) crypto primitive ownership consumes sce_intrinsics_runtime / target plugin choice"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "Hard-coded constants in codegen",
+          "reason": "would defeat per-target tuning required by MCU diversity"
+        },
+        {
+          "alternative": "Pre-declared phase enums in schema",
+          "reason": "invariant 3 forbids 'built-but-unconsumed' surface"
+        },
+        {
+          "alternative": "domain_plugin field for transport library",
+          "reason": "already in Mesh, double-naming rejected"
+        },
+        {
+          "alternative": "Free-form yaml accepted",
+          "reason": "typed schema chosen for build-time validation"
+        }
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+        "architecture--watching-zenoh",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w13--worker_slot_budget_us-default-and-keyexpr-wcet-source",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w18--vle_decode_cycles_per_byte-and-tlv_chain_per_entry_overhead_us-defaults-per-platform-class"
+      ]
+    },
+    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection": {
+      "intent": "Bounded-collection kind — typed fixed-capacity container with build-time capacity, runtime occupancy; underpins zenoh-pico subscription parity.",
+      "rationale_bullets": [
+        "zenoh-pico parity needs runtime declare/undeclare without heap",
+        "Existing kinds don't express 'capacity at build, occupancy at runtime'",
+        "Per-backend container with handle (slot+generation) detects use-after-remove",
+        "find_by_index/iter callable from algorithm bodies via sce:call (bounded loops)"
+      ],
+      "inputs_bullets": [
+        "<sce:element-type>: codec struct or procedure record",
+        "<sce:capacity source=deploy|const>: build-time-resolved cap",
+        "<sce:index-by field>: optional O(log N) lookup",
+        "<sce:on-overflow>: diagnostic-event / reject / oldest-wins",
+        "<sce:ordering>: insertion / sorted-by(index-by); <sce:concurrency>: single/multi-writer"
+      ],
+      "outputs_bullets": [
+        "Per-language fixed-capacity container with handle (slot index + generation counter)",
+        "insert/remove/get/find_by_index/iter/len/capacity() ops surface uniform across backends",
+        "_Static_assert(N <= UINT16_MAX) on C; capacity() compile-time const on all",
+        "MCU C: struct{slots[N], generation[N], bitmap[N/32], count} + memory_map.h CAPACITY define"
+      ],
+      "caveats_bullets": [
+        "multi-writer mode requires acquire/release atomics on head/tail (extern dependency)",
+        "Element type MUST be a kind reference, not a primitive",
+        "ordering=sorted-by requires index-by declaration",
+        "on-overflow=oldest-wins requires ordering=insertion"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "Heap-backed dynamic vec",
+          "reason": "breaks no-alloc invariant on MCU"
+        },
+        {
+          "alternative": "Static array without bitmap",
+          "reason": "loses sparse occupancy semantics"
+        },
+        {
+          "alternative": "Iterator yielding all N slots",
+          "reason": "leaks unoccupied slot state to caller"
+        },
+        {
+          "alternative": "Single-writer-only",
+          "reason": "would block multi-core scenarios where atomics path exists"
+        }
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "architecture--watching-zenoh",
+        "rfc-open-questions-log/sce-side-questions-q1q14/q11--bounded-collection-capacity-source",
+        "rfc-open-questions-log/sce-side-questions-q1q14/q14--algorithm-calling-bounded-collection-ops",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w8--bounded-collection-default-capacities"
+      ]
+    },
+    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds": {
+      "intent": "Fragment + reassembly variant of buffer-pool — bounded reassembly state, per-peer quota, trust-class hardening, build-time fragmentation analysis.",
+      "rationale_bullets": [
+        "zenoh-pico fragmented messages need pool-slot landing without heap; bounded reassembly state",
+        "Per-peer quota required to defeat malicious-peer pool exhaustion attack",
+        "Trust-class binding (established_session only) defeats UDP source-spoofing of peer identity",
+        "Listener-link sibling emission (OQ-W22) preserves static semantics across handshake transition",
+        "Build-time fragmentation analysis (4 rules) prevents under-sized pools / stage-copy overflow"
+      ],
+      "inputs_bullets": [
+        "<sce:variant>reassembly + slot-count/size / max-fragments / reassembly-timeout-ms / per-peer-quota",
+        "deploy link domain_attrs.trust_class: untrusted | session_arming | established_session",
+        "deploy peer_table.capacity for per-peer quota build invariant",
+        "MTU + expected_p99_bytes from link drive fragmentation rate analysis",
+        "platform.memcpy_cycles_per_byte + clock_freq for stage-copy WCET"
+      ],
+      "outputs_bullets": [
+        "Per-slot fragment-index bitmap + deadline + peer-id (ZID) field",
+        "Listener emits two link-instance siblings; reassembly binds to established_session only",
+        "Build refusal on trust_class=untrusted/session_arming reassembly binding",
+        "4 build invariants: max-fragments / stage-copy rate / slot-size rec / stage-copy WCET"
+      ],
+      "caveats_bullets": [
+        "Reassembly variant inherits MCU-class from buffer-pool — non-MCU language hard error",
+        "Per-peer quota build invariant: peer_table.capacity × quota ≥ slot_count",
+        "trust_class=session_arming listener emits established_session sibling automatically",
+        "Quota rejection takes precedence over on-overflow policy (quota-first)",
+        "Three caps (half-open / per-source / stateless_accept) chain on session_arming side"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "Wire-source-IP as peer identifier",
+          "reason": "trivially spoofed via UDP, not robust"
+        },
+        {
+          "alternative": "Author-declared sibling",
+          "reason": "error-prone, synthesized inheritance chosen"
+        },
+        {
+          "alternative": "Reject listener+reassembly outright",
+          "reason": "would forbid Phase A listener-bearing deploys"
+        },
+        {
+          "alternative": "Honor-system runtime peer-id check",
+          "reason": "defeats static semantics, build-time gate preserved"
+        }
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
+        "architecture--watching-zenoh",
+        "reassembly-fsm--prose-sketch",
+        "session-fsm--prose-level-sketch",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w22--listener-link-trust-class-lifecycle",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults",
+        "rfc-open-questions-log/sce-side-questions-q1q14/q12--fragment--reassembly-author-level-vs-shipped-template"
+      ]
+    },
+    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.n-multi-link-concurrency": {
+      "intent": "Multi-link concurrency clarification — codegen contract for one-tokio-task / cooperative-slot per link, starvation guarantee.",
+      "rationale_bullets": [
+        "zenoh-pico parity needs simultaneous UDP multicast / TCP session / Serial fallback links",
+        "Single-link codegen contract was underspecified; concurrent behavior needed pinning",
+        "Round-robin visit invariant + optional per-link budget prevent starvation"
+      ],
+      "inputs_bullets": [
+        "machines.<name>.links list in deploy.yaml",
+        "scheduler.tick_period_us bounds round-robin period (MCU)",
+        "scheduler.per-link-budget-us optional per-link cap per tick"
+      ],
+      "outputs_bullets": [
+        "AP: tokio::spawn per link + LinkBus mpsc aggregator passed to FSM workers",
+        "MCU: one cooperative scheduler slot per link, round-robin polling",
+        "Per-link heapless::spsc (Rust) / ring buffer (C) link-to-FSM event queue"
+      ],
+      "caveats_bullets": [
+        "MCU concurrent link count bounded by scheduler slot count",
+        "Reader worker aggregates per-link queues into FSM inbox"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "Single multiplexed driver",
+          "reason": "would defeat link-class diversity (UDP/TCP/Serial)"
+        },
+        {
+          "alternative": "Unbounded per-link work per tick",
+          "reason": "would allow one link to starve others"
+        }
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.d-timer-and-worker-primitives",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
+        "architecture--watching-zenoh",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w11--multi-link-tx-dispatch-policy"
+      ]
+    },
+    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.o-generated-source-traceability": {
+      "intent": "Generated-source traceability — 3-layer source mapping (#line / #[doc] / sourcemap JSON), symbol naming convention, addr2sce tool.",
+      "rationale_bullets": [
+        "30k LOC across 15 SCXML files; reverse-engineering by hand is the single largest debug tax",
+        "Source attribution lands in templates from the start; retrofit re-revises every emitter",
+        "IR preserves (file/line/col) provenance through XInclude / template / parametric expansion",
+        "Cross-backend sourcemap JSON byte-identical; per-language markers differ, tooling stays uniform"
+      ],
+      "inputs_bullets": [
+        "Per-symbol IR provenance (file/line/state-path/xpath)",
+        "Symbol naming convention: <machine>__<state_path>__<artifact>",
+        "OQ-W16 state-path delimiter (initial proposal __ with _u_ escape)",
+        "Source hash + template hash from generated-source drift detection header"
+      ],
+      "outputs_bullets": [
+        "Layer (a): #line (C/C11/Cpp) / #[doc] (Rust) / //line (Go) / // SCE-MAP comment (Kotlin/Python)",
+        "Layer (b): canonical symbol name encoding SCXML origin without sourcemap",
+        "Layer (c): out/{ap,mcu}/sce_sourcemap.json byte-identical across backends",
+        "addr2sce tool: PC/symbol/coredump → scxml_file:line:state-path"
+      ],
+      "caveats_bullets": [
+        "Sourcemap source_hash MUST match generated-source header; mismatch = build error",
+        "Within-machine collision diagnostic for state-path duplicates from XInclude/template expansion",
+        "OQ-W16 delimiter mechanism still tracked; codegen emits both #[doc] and // comment until resolved",
+        "Sourcemap is build artifact, never manually edited — 'out/'-equivalent provenance"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "Hand reverse-engineer at debug time",
+          "reason": "scales linearly with codebase, single largest debug tax"
+        },
+        {
+          "alternative": "Retrofit after Phase A",
+          "reason": "would require revising every emitter post-ship"
+        },
+        {
+          "alternative": "Per-language-only markers without unified JSON",
+          "reason": "tooling fragmentation across backends"
+        },
+        {
+          "alternative": "proc_macro_span on Rust",
+          "reason": "unstable, doesn't affect emitted source-line debug info"
+        }
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "architecture--watching-zenoh",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w16--generated-source-traceability-state-path-delimiter-and-rust-sce-map-preservation"
+      ]
+    },
+    "scouting-fsm--prose-sketch/1-1-position-and-triggers": {
+      "intent": "Scouting is pre-session — turns abstract \"join Zenoh mesh\" intent into concrete unicast endpoint feeding session FSM Init→LinkOpening.",
+      "inputs_bullets": [
+        "deploy.scouting.{mode, timeout_ms, hello_max_peers}",
+        "links.udp_scout (trust_class=untrusted)",
+        "connect=/listen= deploy fields (used by static to bypass scouting)",
+        "Local node zid (16B ZenohID) and whatami (peer/client) compile-time consts"
+      ],
+      "outputs_bullets": [
+        "scout.hello.received(zid, whatami, locators[]) — feeds session FSM outbound Init→LinkOpening",
+        "scout.timeout — terminal 'no peers found within scouting.timeout_ms'",
+        "scout.hello.peer_table_full — diagnostic, HelloPeerTable hit hello_max_peers cap"
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "session-fsm--prose-level-sketch",
+        "session-fsm--prose-level-sketch/2-1-unicast-states",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link"
+      ]
+    },
+    "scouting-fsm--prose-sketch/1-2-scout-hello-wire-shape": {
+      "intent": "Scout (version/what/zid) and Hello (version/whatami/zid/locators[]) wire messages on UDP multicast 224.0.0.224:7446.",
+      "inputs_bullets": [
+        "Scout: version u8 (0x09) / what u8 bitmask (router=1, peer=2, client=4, default 3) / zid 16B",
+        "Hello: version u8 / whatami u8 (single value) / zid 16B / locators len-prefixed array",
+        "Default UDP multicast 224.0.0.224:7446; SCOUT_BUFFER_SIZE=32B; default timeout 1000ms",
+        "scout_rx_pool.slot_size 256B (>> Scout encoded ~19B upper bound)"
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "wire-spec-subset--watching-zenoh-mvp"
+      ]
+    },
+    "scouting-fsm--prose-sketch/1-3-scouting-link-vs-session-link-distinct": {
+      "intent": "Scouting link is separate link instance from session links even on shared UDP multicast group/port; trust_class differs (untrusted vs session_arming).",
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "session-fsm--prose-level-sketch/2-6-trust-class-interaction",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link"
+      ]
+    },
+    "scouting-fsm--prose-sketch/1-4-three-modes-and-zenoh-pico-mapping": {
+      "intent": "Three modes — active (zenoh-pico parity Included) / passive (Phase D+ deferred via OQ-W23 close) / static (config bypass parity).",
+      "inputs_bullets": [
+        "active: _z_scout_inner one-shot (exit_on_first true|false) — zenoh-pico parity",
+        "passive: no zenoh-pico equivalent — deferred Phase D+, OQ-W23 closed",
+        "static: scouting bypass via connect=/listen= deploy fields — parity, scouting FSM never instantiated",
+        "MVP mode enum = {active, static}; passive lands at Phase D customer-driven need"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "passive in MVP",
+          "reason": "weakens zenoh-pico parity contract (no upstream daemon)"
+        },
+        {
+          "alternative": "passive as immediate add",
+          "reason": "reversibility asymmetry, removing harder than adding (forward-namespace-0)"
+        },
+        {
+          "alternative": "static as separate non-FSM path",
+          "reason": "schema simpler, but loses uniform mode enum"
+        }
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "architecture--watching-zenoh",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w23--passive-scouting-mode-justification--deploy-schema"
+      ]
+    },
+    "scouting-fsm--prose-sketch/10-next-step-scaffolding": {
+      "intent": "Scouting FSM unblocks Phase A SCXML authoring (active + static modes); declare_fsm authoring contract listed; passive deferred Phase D+.",
+      "outputs_bullets": [
+        "Phase A SCXML authoring of sources/session/scouting.scxml for {active, static}",
+        "declare_fsm.scxml authoring contract documented (Mech1+Mech2 transport-class guard)",
+        "deploy.yaml scouting block stable (mode/timeout_ms/hello_max_peers)",
+        "Passive mode body + 3 deploy fields preserved in OQ-W23 entry for Phase D+ revival"
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "scouting-fsm--prose-sketch/2-4-1-active",
+        "scouting-fsm--prose-sketch/2-4-3-static",
+        "scouting-fsm--prose-sketch/3-2-oq-w3-answer"
+      ]
+    },
+    "scouting-fsm--prose-sketch/2-1-hierarchy": {
+      "intent": "ScoutingDispatcher composes ModeSelector + Active body region (instantiated iff mode∈{active,passive}) + HelloPeerTable; codegen elides regions deploy-mode doesn't require.",
+      "inputs_bullets": [
+        "ModeSelector: deploy.scouting.mode read at codegen time, compile-time const not runtime branch",
+        "Active region: states Idle/Sending/AwaitingHello/Cooldown (only when mode∈{active,passive})",
+        "HelloPeerTable: bounded-collection<HelloEntry, hello_max_peers>, keyed by zid, per-dispatcher",
+        "static mode emits near-empty stub; matches Z_FEATURE_SCOUTING compile-time gate discipline"
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection",
+        "session-fsm--prose-level-sketch/3-1-multicast-session-level-states"
+      ]
+    },
+    "scouting-fsm--prose-sketch/2-2-states-union-of-three-modes": {
+      "intent": "Five states union across modes: Idle / Sending / AwaitingHello / Cooldown (passive) / Bypassed (static); per-mode usage is a subset.",
+      "inputs_bullets": [
+        "Idle: waiting for session-open trigger (active) or next period (passive)",
+        "Sending: encoding + transmitting one Scout frame on scouting link",
+        "AwaitingHello: polling RX path until scouting.timeout_ms; loops if exit_on_first=false",
+        "Cooldown: passive-only inter-period dwell; cooldown_timer = scout_retry_interval - timeout",
+        "Bypassed: static-only marker; emits synthetic scout.hello.received from deploy connect[] at startup"
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "scouting-fsm--prose-sketch/2-1-hierarchy",
+        "scouting-fsm--prose-sketch/1-4-three-modes-and-zenoh-pico-mapping"
+      ]
+    },
+    "scouting-fsm--prose-sketch/2-3-transitions": {
+      "intent": "Active mode transitions Idle→Sending→AwaitingHello with hello.received guards (capacity/dedup); Cooldown for passive; Bypassed terminal for static synthesizes events.",
+      "inputs_bullets": [
+        "Idle→Sending on session_open.requested (active) or passive_period.elapsed (passive)",
+        "Sending: encode+link.send; immediate→AwaitingHello; tx_failed→Idle (diag scout/tx-failed)",
+        "AwaitingHello: scout_timer; hello.received guards (capacity, zid-dedup, exit_on_first)",
+        "Cooldown (passive only): cooldown_timer = scout_retry_interval_ms - timeout_ms",
+        "Bypassed (static): synth scout.hello.received per deploy.connect[] entry at startup; terminal"
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "scouting-fsm--prose-sketch/2-2-states-union-of-three-modes",
+        "session-fsm--prose-level-sketch/2-1-unicast-states"
+      ]
+    },
+    "scouting-fsm--prose-sketch/2-4-1-active": {
+      "intent": "Active body lifts zenoh-pico __z_scout_loop (scout.c:29-140) into states; per-line mapping to Sending entry / AwaitingHello self-loop / hello.received.",
+      "inputs_bullets": [
+        "scout.c:57 link_send_wbuf → Sending entry action",
+        "scout.c:60-62 RX setup + clock → AwaitingHello entry, arm scout_timer",
+        "scout.c:63 elapsed loop → AwaitingHello self-loop until scout_timer.elapsed",
+        "scout.c:73-78 message decode → codec kind on scouting link, decode fail = drop+diag",
+        "scout.c:121-123 exit_on_first → guard on AwaitingHello→Idle transition",
+        "MVP active = implicit-scout (one Hello, take it); scouting.exhaustive=true deferred"
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "scouting-fsm--prose-sketch/2-3-transitions",
+        "scouting-fsm--prose-sketch/1-4-three-modes-and-zenoh-pico-mapping",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ]
+    },
+    "scouting-fsm--prose-sketch/2-4-2-passive-deferred-to-phase-d": {
+      "intent": "Passive deferred Phase D+ (OQ-W23 closed 2026-05-01); MVP enum={active,static}; deploy/scouting-mode-unknown rejects passive value pre-Phase-D.",
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "scouting-fsm--prose-sketch/1-4-three-modes-and-zenoh-pico-mapping",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w23--passive-scouting-mode-justification--deploy-schema"
+      ]
+    },
+    "scouting-fsm--prose-sketch/2-4-3-static": {
+      "intent": "Static = scouting-absent; one synthetic scout.hello.received per deploy.connect[] entry at startup; saves ~1.5KB SRAM via codegen elision on MCU.",
+      "inputs_bullets": [
+        "deploy.connect[] locator list verbatim; matches zenoh-pico _z_locators_by_config",
+        "Codegen elides scouting link, scout codec, scout buffer pool (~1.5KB SRAM saved on MCU)",
+        "udp_session link still authored; only scouting setup omitted under static",
+        "Trust-class clarity: locators trusted-by-construction (deploy file) vs untrusted (wire)",
+        "Distinct mode value gives distinct diagnostics on session-open failure"
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "scouting-fsm--prose-sketch/2-3-transitions",
+        "scouting-fsm--prose-sketch/1-4-three-modes-and-zenoh-pico-mapping"
+      ]
+    },
+    "scouting-fsm--prose-sketch/2-5-timeouts-and-budgets": {
+      "intent": "Two timers — scouting.timeout_ms (1000ms zenoh-pico parity) + link.scouting.open_timeout_ms (0ms always-on); passive timers deferred Phase D+.",
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions"
+      ]
+    },
+    "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants": {
+      "intent": "HelloPeerTable cap = hello_max_peers; two invariants — cap ≤ peer_table+multicast cap (hard error), slot_size ≥ Hello upper bound (informational).",
+      "inputs_bullets": [
+        "Invariant 1 (hard error): hello_max_peers ≤ peer_table.capacity + multicast_peer_table.capacity",
+        "Verification: MCU 8 ≤ 16+8=24 ✓; AP 64 ≤ 256+64=320 ✓",
+        "Invariant 2 (informational): scout_rx_pool.slot_size ≥ HelloUpperBoundBytes(hello_max_peers)",
+        "Diagnostic scouting/hello-max-peers-exceeds-peer-tables (hard error)",
+        "Diagnostic scouting/hello-slot-size-recommendation (informational)"
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement"
+      ]
+    },
+    "scouting-fsm--prose-sketch/3-2-oq-w3-answer": {
+      "intent": "OQ-W3 closed: Interest is not router-only in 1.x — three transport-class mechanisms (unicast acceptor push / multicast Interest pull / client-router push).",
+      "outputs_bullets": [
+        "Mechanism 1 (unicast peer-peer): acceptor pushes ALL local declares + DeclareFinal at handshake",
+        "Mechanism 2 (multicast peer mesh): joining peer Interest{CURRENT,KEYEXPRS} → each remote replies",
+        "Mechanism 1 (client unicast to router): router-side same as peer-peer",
+        "Client unicast no router: not supported (Mech1 absent, Mech2 absent, inbound Interest = no-op)",
+        "MCU multicast peer must implement both directions; unicast-only MCU does only Mech1 acceptor push"
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "wire-spec-subset--watching-zenoh-mvp",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present"
+      ]
+    },
+    "scouting-fsm--prose-sketch/3-3-implication-for-the-scouting-fsm": {
+      "intent": "Scouting FSM doesn't participate in Interest itself, but mode choice determines which Interest mechanism downstream session-establishment fires.",
+      "outputs_bullets": [
+        "mode=active → unicast session-open → Mechanism 1 (acceptor push at handshake)",
+        "mode=passive → multicast peer join → Mechanism 2 (Interest pull + multicast reply)",
+        "mode=static + connect[] → Mechanism 1 (same as active for resulting unicast handshake)",
+        "Scouting is the trigger chain; declare_fsm authors consult here for Interest-trigger boundary"
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "scouting-fsm--prose-sketch/3-2-oq-w3-answer",
+        "scouting-fsm--prose-sketch/1-4-three-modes-and-zenoh-pico-mapping"
+      ]
+    },
+    "scouting-fsm--prose-sketch/6-1-per-link-trust-class-table": {
+      "intent": "Trust-class table extension: untrusted required on scouting links / forbidden elsewhere; three-layer mechanical defense (wire / session-fsm / reassembly).",
+      "inputs_bullets": [
+        "untrusted: required on scouting / forbidden on session+reassembly",
+        "session_arming: forbidden on scouting / required on listener / forbidden on reassembly",
+        "established_session: forbidden on scouting / required on data-plane / required on reassembly",
+        "Layer 1 (wire): trust_class deploy field validated by RFC §5.K",
+        "Layer 2 (session-fsm): no Accepting.* on untrusted (session-fsm §2.6 row 1)",
+        "Layer 3 (reassembly): forbids reassembly pool binding on untrusted (reassembly-fsm §5)"
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "session-fsm--prose-level-sketch/2-6-trust-class-interaction",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
+        "reassembly-fsm--prose-sketch"
+      ]
+    },
+    "scouting-fsm--prose-sketch/6-4-oq-w9-closure": {
+      "intent": "OQ-W9 closed: zenoh-pico clients refuse multicast sessions (UNSUPPORTED) but participate in multicast scouting; codegen rejects whatami=client + multicast session link.",
+      "inputs_bullets": [
+        "whatami=peer + multicast scouting + multicast session: OK (_z_multicast_open_peer)",
+        "whatami=client + multicast scouting: OK (scouting layer is whatami-agnostic)",
+        "whatami=client + multicast session link: REFUSED (_Z_ERR_CONFIG_UNSUPPORTED_CLIENT_MULTICAST)",
+        "Build diag: deploy/client-multicast-session-unsupported (hard error)",
+        "session-fsm §3.4 amend OQ-W9 status open→answered, see scouting-fsm §6.4"
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "session-fsm--prose-level-sketch/3-4-client-mode-and-multicast",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w9--client-mode-and-multicast-session"
+      ]
+    },
+    "scouting-fsm--prose-sketch/8-1-authoring-contract-gaps": {
+      "intent": "Three gaps (G-SCT-1 resolved via OQ-W23 defer; G-SCT-2 unsolicited Hello broadcaster speculative; G-SCT-3 Hello slot-size worst-case sizing).",
+      "inputs_bullets": [
+        "G-SCT-1 resolved: passive mode deferred Phase D+ (OQ-W23 close, MVP={active,static})",
+        "G-SCT-2 speculative: unsolicited Hello broadcaster (no OQ filed; await deploy scenario)",
+        "G-SCT-3 informational: scout_rx_pool slot_size vs Hello worst-case (multi-homed AP, 8 locators)",
+        "Recommendation: scouting/hello-slot-size-recommendation diagnostic (informational, not blocker)"
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w23--passive-scouting-mode-justification--deploy-schema"
+      ]
+    },
+    "scouting-fsm--prose-sketch/8-2-new-open-questions": {
+      "intent": "OQ-W23 / OQ-W3 / OQ-W9 — all three closed in this document; cross-ref pointers added to rfc-open-questions-log entries.",
+      "inputs_bullets": [
+        "OQ-W23 answered/deferred: passive mode Phase D+; (b) defaults preserved in OQ entry",
+        "OQ-W3 closed in §3.2: not router-only, three transport-class mechanisms documented",
+        "OQ-W9 closed in §6.4: client refuses multicast session, participates in scouting"
+      ],
+      "impact_scope": [
+        "scouting-fsm--prose-sketch",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w23--passive-scouting-mode-justification--deploy-schema",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w9--client-mode-and-multicast-session"
+      ]
+    },
+    "session-fsm--prose-level-sketch/10-next-step-scaffolding": {
+      "intent": "Document unblocks deploy.yaml skeletons + runtime crate API stubs + scouting/reassembly FSM sketches; does NOT unblock SCXML authoring (waits for SCE Phase A).",
+      "outputs_bullets": [
+        "deploy/*.yaml skeleton authorable — timer / lease / handshake / closing fully named",
+        "Runtime crate API stubs — link event contract no longer hand-waved",
+        "scouting-fsm.md sibling sketch (active/passive/static)",
+        "reassembly-fsm.md sibling sketch (RxDispatch + Fragment row inputs)"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "scouting-fsm--prose-sketch",
+        "reassembly-fsm--prose-sketch",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "runtime-crate--sce_link_runtime_tokio"
+      ]
+    },
+    "session-fsm--prose-level-sketch/2-1-unicast-states": {
+      "intent": "Unicast session FSM has eight states plus Closed terminal; splits Opening (initiator) and Accepting (acceptor) explicitly.",
+      "inputs_bullets": [
+        "Init: created, link not yet open; entry from outbound or inbound",
+        "LinkOpening: outbound link driver attempting open (TCP connect / WS upgrade)",
+        "Scouting: active scout loop pre-target (mode=active deploys only)",
+        "Opening: initiator driving 4-way Init/Open handshake",
+        "Accepting: acceptor responding to remote-driven handshake",
+        "Established: handshake done, RX/TX regions enabled (sub-region container)",
+        "Closing: graceful close in progress; sends Close with reason",
+        "Closed: terminal, link released, pool slots freed"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
+        "wire-spec-subset--watching-zenoh-mvp"
+      ]
+    },
+    "session-fsm--prose-level-sketch/2-2-unicast-transitions": {
+      "intent": "Unicast transitions — outbound (LinkOpening → Opening.SentInitSyn → GotInitAck → Established) + inbound (Accepting.AwaitingInitSyn → SentInitAck → SentOpenAck → Established).",
+      "outputs_bullets": [
+        "Outbound: Init → LinkOpening → Opening.SentInitSyn → GotInitAck → Established",
+        "Inbound: Init → Accepting.AwaitingInitSyn → SentInitAck → SentOpenAck → Established",
+        "Inbound entry guarded by half_open_cap_available + accept_rate_token (silent drop if denied)",
+        "Cookie validation guard: Accepting.SentInitAck → SentOpenAck rejects invalid/expired cookie",
+        "stateless_accept mode: AwaitingInitSyn→SentInitAck does not allocate FSM instance (cookie-only)",
+        "Timeouts: init_ack/open_ack/init_syn/open_syn → Closing(GENERIC) or Closed(inbound-stall)",
+        "Framing errors → Closing(reason=INVALID); peer Close → Closed(peer-rejected)"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "session-fsm--prose-level-sketch/2-1-unicast-states",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "wire-spec-subset--watching-zenoh-mvp"
+      ]
+    },
+    "session-fsm--prose-level-sketch/2-3-established-sub-regions": {
+      "intent": "Established is parallel SCXML region with 4 concurrent sub-machines: RxDispatch / TxSchedule / Keepalive / LeaseMonitor.",
+      "inputs_bullets": [
+        "RxDispatch: Frame→NetworkMessage / Fragment→reassembly / KeepAlive→reset / Close→parent / OAM→diag",
+        "TxSchedule: Idle / Batching / Flushing per (reliability, priority) band",
+        "Keepalive: Armed / Sending; timer = lease × keepalive_ratio (default 1/3)",
+        "LeaseMonitor: Healthy / Warning / Expired; warning at lease×2/3"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "reassembly-fsm--prose-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.n-multi-link-concurrency"
+      ]
+    },
+    "session-fsm--prose-level-sketch/2-4-close-paths": {
+      "intent": "Close paths from Established by trigger; six trigger types; Closing state has 100ms default timeout for Close-frame flush before link teardown.",
+      "outputs_bullets": [
+        "session.close() → Closing(GENERIC) → Closed",
+        "LeaseMonitor.Expired → Closing(EXPIRED) → Closed",
+        "RxDispatch peer Close → Closed (no reciprocal Close)",
+        "Framing error → Closing(INVALID|UNSUPPORTED) → Closed",
+        "link.lost → Closed (no Close frame)",
+        "TX congestion budget exhaust on RELIABLE batch → Closing(UNRESPONSIVE) → Closed"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "session-fsm--prose-level-sketch/2-3-established-sub-regions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link"
+      ]
+    },
+    "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets": {
+      "intent": "All session-FSM timers named with single deploy.yaml home; 12 timers covering link / handshake / scout / lease / keepalive / closing / batch / reassembly / accept-rate / cookie.",
+      "inputs_bullets": [
+        "link.open_timeout (5s) / init_ack_timeout / open_ack_timeout (2s) / scout_timeout (1s)",
+        "lease (10s, negotiated) / keepalive_interval (lease/3) / closing_timeout (100ms)",
+        "batch_timer (1ms AP / 5ms MCU) / reassembly_timeout (500ms per peer-priority-reliability-sn_base)",
+        "accept_rate_window (1s) / accepting_inactivity_timeout (1s)",
+        "cookie_hmac_lifetime (30s) / cookie_hmac_key_rotation (1h, old key honored one extra lifetime)"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.d-timer-and-worker-primitives"
+      ]
+    },
+    "session-fsm--prose-level-sketch/2-6-trust-class-interaction": {
+      "intent": "Trust-class on each link gates hardening rules; session_arming requires quota + accept_rate; established_session is sibling for post-handshake traffic.",
+      "inputs_bullets": [
+        "untrusted: Scout/Hello-only links, never spawns Accepting",
+        "session_arming: hosts Accepting cluster; quota + accept_rate required (hard error)",
+        "established_session: post-handshake Frame/Fragment, no Accepting attachment",
+        "untrusted_source=true on session_arming → stateless_accept required (not just recommended)",
+        "Listener with session_arming emits sibling established_session instance (OQ-W22 resolution)"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w22--listener-link-trust-class-lifecycle"
+      ]
+    },
+    "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail": {
+      "intent": "Accept-side hardening — three caps in series: half-open capacity / per-source token bucket / optional stateless_accept HMAC cookie.",
+      "inputs_bullets": [
+        "Half-open capacity: session_arming_quota bounds concurrent Accepting.* instances per listener",
+        "Per-source token bucket: accept_rate_per_sec / accept_rate_burst per (link, src_addr)",
+        "Stateless accept (optional): cookie_hmac_sha256 defers FSM allocation until cookie validated",
+        "Three caps chain in series; silent drop on cap denial (no Close frame, anti-amplification)",
+        "deploy.yaml emits all three as bounded-collection checks + token-bucket guard at Init→Accepting"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "session-fsm--prose-level-sketch/2-6-trust-class-interaction",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+      ]
+    },
+    "session-fsm--prose-level-sketch/3-1-multicast-session-level-states": {
+      "intent": "Multicast session-level FSM: Idle → LinkOpening → Running (parallel: JoinEmit / RxDispatch / PeerSweep) → Stopped.",
+      "inputs_bullets": [
+        "JoinEmit: periodic Join (default 2500ms upstream interval); state Idle/Sending",
+        "RxDispatch: classify Join/Frame/Fragment/KeepAlive/Close/OAM on TransportMessageLowLatency",
+        "PeerSweep: timer lease/3, evict PeerTable entries with last_seen > lease",
+        "Idle→LinkOpening on create(multicast_link); LinkOpening→Running on link.ready"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "session-fsm--prose-level-sketch/2-3-established-sub-regions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection"
+      ]
+    },
+    "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states": {
+      "intent": "Per-peer FSM (one per zid in multicast_peer_table bounded-collection): Discovered → Active → Expired.",
+      "inputs_bullets": [
+        "Discovered: first Join validated (version/resolution/batch/qos); init RX seq table",
+        "Active: any msg refresh last_seen; Close{zid} or lease expiry → Expired",
+        "Expired: emit peer-lost event; PeerTable removes at next sweep",
+        "Rejection: version/max_sessions/SN-res/QoS mismatch → ignored + diag (not a transition)"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "session-fsm--prose-level-sketch/3-1-multicast-session-level-states",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection"
+      ]
+    },
+    "session-fsm--prose-level-sketch/3-3-no-close-handshake": {
+      "intent": "Multicast has no Closing state — peers time out via lease monitors; symmetric to upstream which has no multicast/close.rs.",
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "session-fsm--prose-level-sketch/3-1-multicast-session-level-states",
+        "session-fsm--prose-level-sketch/2-4-close-paths"
+      ]
+    },
+    "session-fsm--prose-level-sketch/3-4-client-mode-and-multicast": {
+      "intent": "Client whatami refuses multicast session (zenoh-pico parity); participates in scouting only. OQ-W9 closed via deploy/client-multicast-session-unsupported.",
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "scouting-fsm--prose-sketch",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w9--client-mode-and-multicast-session"
+      ]
+    },
+    "session-fsm--prose-level-sketch/4-scouting-pre-session": {
+      "intent": "Scouting is a sibling SCXML; produces Hello events that drive Init→LinkOpening→Opening. Three modes: active / passive / static.",
+      "inputs_bullets": [
+        "active: Listening → Sending → WaitHello → Connect; clients + peer initial bring-up",
+        "passive: Listening only; peers after mesh stable, receives unsolicited Hello",
+        "static: no scouting; deploy.yaml endpoints, session.create(outbound,endpoint) at boot",
+        "Scouting link distinct from session links even on shared UDP multicast group/port (different framer)",
+        "Hello from already-established peer = no-op (matched by zid; idempotent with session creation)"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "scouting-fsm--prose-sketch",
+        "session-fsm--prose-level-sketch/2-1-unicast-states",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "wire-spec-subset--watching-zenoh-mvp"
+      ]
+    },
+    "session-fsm--prose-level-sketch/5-3-q13-answer": {
+      "intent": "Q13 closed: two SCXML files split by transport class (unicast / multicast), NOT by mode (peer / client) — peer/client wire-identical at session layer.",
+      "outputs_bullets": [
+        "sources/session/session_unicast.scxml — handles both peer and client unicast",
+        "sources/session/session_multicast.scxml — instantiated only on machines with multicast session link",
+        "whatami read from deploy at compile time, embedded in InitSyn, not branched on",
+        "Earlier session_peer.scxml + session_client.scxml framing retracted across ARCH §5 / RFC §7 C8",
+        "Parametric across unicast/multicast rejected — handshake vs no-handshake structurally different"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "architecture--watching-zenoh",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "rfc-open-questions-log/sce-side-questions-q1q14/q13--client-vs-peer-session-fsm-variants"
+      ]
+    },
+    "session-fsm--prose-level-sketch/6-link-layer-interaction": {
+      "intent": "Link layer event contract — 6 inbound link events to FSM, 3 invocations from FSM to link; FSM never touches bytes (codec sibling kinds do).",
+      "inputs_bullets": [
+        "link.ready: TCP/WS open → LinkOpening→Opening.SentInitSyn or attach Accepting",
+        "link.lost(cause): underlying link broken → Closed(diag: link-lost)",
+        "link.rx(bytes): pass to codec, codec emits recv(MsgType) events",
+        "link.tx_drained: TX pool slot freed → wake TxSchedule",
+        "link.backpressure(on|off): TX queue watermark crossed → TxSchedule pause/resume",
+        "link.framing_error: codec decode failed → Closing(INVALID)"
+      ],
+      "outputs_bullets": [
+        "link.open(): initiate connect (outbound only)",
+        "link.send(bytes, reliability): ship encoded TransportMessage",
+        "link.close(): tear down byte channel after Close flushed"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ]
+    },
+    "session-fsm--prose-level-sketch/7-extension-negotiation-summary": {
+      "intent": "Extension negotiation — eight extensions read+written in same handshake transition as carrier message; ext::Auth may span multi-step within Opening.",
+      "inputs_bullets": [
+        "ext::QoS / ext::QoSLink — InitSyn/InitAck; QoS Close(UNSUPPORTED) on incompat",
+        "ext::Auth — multi-step in InitSyn/InitAck/OpenSyn/OpenAck; OQ-W2/W10",
+        "ext::MultiLink — graceful downgrade to single-link on negotiation fail",
+        "ext::LowLatency — session refused on link-class mismatch",
+        "ext::Shm — always advertised absent in MVP; Close(UNSUPPORTED) on peer-critical",
+        "ext::Compression — accept-and-ignore (deploy extensions_ignored); OQ-W4 if peer-critical",
+        "ext::PatchType — Close(UNSUPPORTED) on peer patch > ours; OQ-W7"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "wire-spec-subset--watching-zenoh-mvp",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w2--auth-baseline-methods",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w4--extcompression-critical-bit-safety",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w7--extpatchtype-mismatch-policy",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w10--extauth-multi-step-handshake-shape"
+      ]
+    },
+    "session-fsm--prose-level-sketch/8-1-authoring-contract-gaps": {
+      "intent": "Five authoring contract gaps (G-SFM-1..5) blocked on §5.B codec IR / §5.N policy / §5.I extern primitive ownership.",
+      "inputs_bullets": [
+        "G-SFM-1: cookie continuity datamodel across Accepting.SentInitAck→SentOpenAck (blocked on codec IR)",
+        "G-SFM-2: Established.TxSchedule × multi-link policy (RFC clarification or deploy attribute needed)",
+        "G-SFM-3: session FSM emit / codec write boundary (blocked on codec IR)",
+        "G-SFM-4: LeaseMonitor.Warning normativity (low priority, observability hook alternative)",
+        "G-SFM-5: stateless-accept primitive ownership (HMAC + RNG; OQ-W15 ratification)"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.n-multi-link-concurrency",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+      ]
+    },
+    "session-fsm--prose-level-sketch/8-2-new-open-questions": {
+      "intent": "Four new open questions (OQ-W9..W12) added from this document; OQ-W9 closed via zenoh-pico parity verification.",
+      "inputs_bullets": [
+        "OQ-W9 closed: client multicast session unsupported (zenoh-pico parity, hard-error diag)",
+        "OQ-W10: ext::Auth multi-step shape (USRPWD intra-Opening sub-states); blocks OQ-W2",
+        "OQ-W11: multi-link TX dispatch policy (round-robin vs priority); feeds 5.N, blocks Phase C10",
+        "OQ-W12: closing timeout default for slow links (Serial 115200); deploy.yaml default"
+      ],
+      "impact_scope": [
+        "session-fsm--prose-level-sketch",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w9--client-mode-and-multicast-session",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w10--extauth-multi-step-handshake-shape",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w11--multi-link-tx-dispatch-policy",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w12--closing-timeout-default"
+      ]
+    }
+  },
+  "changelog_entries": {
+    "Round 1": {
+      "decision_summary": "75-orphan ledger triage closed via 6 batches; Mnemosyne SSOT validated end-to-end across 13 design docs.",
+      "changes_bullets": [
+        "Batch 1 (75→70): runtime-crate-lwip / runtime-crate-tokio cross-doc-form for prior plain-§ references",
+        "Batches 2-4 (70→46): cross-doc-form normalization across FSM prose sketches, oq-w15, rfc-open-questions-log",
+        "Batch 5 (46→16): SESSION_KICKOFF strip-§ approach, then user-rejected and rolled back via 18-site link restoration",
+        "Batch 6 (16→0): RFC §6.2.X bold-label-to-heading promotion + ARCHITECTURE §15/§16 placeholder authoring",
+        "Followups: runtime-crate-lwip L302/L315/L361 plain-§ misresolves fixed via cross-doc-form; SESSION_KICKOFF link restoration after strip-§ rejection",
+        "Atomic store sidecar initialized (docs/.atomic/workspace.atomic.json, schema_version=1, empty); MCP mutate primitives verified end-to-end with throwaway demo + revert"
+      ],
+      "verification_bullets": [
+        "validate_workspace post-triage: docs=13/13, T1 orphan total=0 (ledger=0, new=+0, resolved=-0), round-trip mandatory=13/13, exit=0",
+        "Pre-commit hook (.githooks/pre-commit) active and blocking on T1 / T2 / round-trip regressions",
+        "Atomic store mutate primitives (set_section_intent + append_changelog_entry_v2) demo-tested with cascade GENERATED.md auto-update + sidecar revert + generate-docs resync confirmed sync=true",
+        "GENERATED.md added to .gitignore — watching-zenoh hybrid carry: 13 prose docs are the human-readable surface, GENERATED.md is cascade byproduct"
+      ],
+      "impact_refs": [
+        "0",
+        "watching-zenoh",
+        "watching-zenoh--다음-세션-시작-스크립트",
+        "intrinsics-runtime--symbol-surface",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync",
+        "reassembly-fsm--prose-sketch",
+        "rfc-open-questions-log",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "runtime-crate--sce_link_runtime_tokio",
+        "scouting-fsm--prose-sketch",
+        "session-fsm--prose-level-sketch",
+        "wire-spec-subset--watching-zenoh-mvp"
+      ],
+      "carry_forward_bullets": [
+        "Phase A: oq-w15-ratification-summary.md atomic Section migration (first decomposition trial; smallest blast radius)",
+        "Phase B: rfc-sce-protocol-synthesis.md §5 kinds atomic decompose (~11 kinds × ~6 fields)",
+        "Phase C: 3 FSM docs (session/scouting/reassembly) state-Section + transition-CrossRef graph migration",
+        "Phase D: residual prose (intrinsics-runtime-symbols / runtime-crate-{lwip,tokio} / wire-spec-subset / ARCHITECTURE / SESSION_KICKOFF / README)",
+        "Mnemosyne side: anti-patterns concept resource #9 expansion to explicitly cover escape-hatch field additions (NarrativeSection / prose_blocks shape) — separate PR work",
+        "SCE OQ-W15 ratification followups carried from prior session — out of Mnemosyne migration scope"
+      ]
+    },
+    "Round 2": {
+      "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
+      "changes_bullets": [
+        "§1 Decision needed: intent + inputs(2) + outputs(2) + impact_scope(3)",
+        "§2 Why now: intent + rationale(3) + inputs(2) + outputs(2) + impact_scope(3)",
+        "§3 Initial proposal: intent + rationale(6) + alternatives(4) + inputs(1) + impact_scope(3)",
+        "§4 Counter-options: intent + alternatives(4) + impact_scope(3)",
+        "§5 Blast radius: intent + rationale(5) + impact_scope(4)",
+        "§6 Action requested: intent + inputs(2) + outputs(3) + caveat(1) + impact_scope(2)",
+        "§7 References: intent + impact_scope(4)",
+        "Section ID convention established: <doc-root-slug>/<heading-gh-slug> hierarchical form",
+        "Markdown source unchanged; atomic store carries decomposed audit trace alongside prose"
+      ],
+      "verification_bullets": [
+        "validate_workspace at each of 7 section boundaries: T1=0, round-trip=13/13, exit=0",
+        "Atomic ledger drift consistent: entries=1, sections=0→7 (one new section per H2)",
+        "verify_generated post-Phase-A: GENERATED.md cascade sync confirmed",
+        "Format reject caught: alternatives_rejected requires ' — ' separator, not colon (Round 161 §41 line format)",
+        "Style threshold reject caught: rationale bullet 100-char cap (Round 161 §41 MAX_BULLET_CHAR)",
+        "T3 warn baseline 975 unchanged; T4 info 536 unchanged (no new style regressions)"
+      ],
+      "impact_refs": [
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/1-decision-needed",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/2-why-this-decision-is-needed-now",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/3-initial-proposal-watching-zenoh",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/4-counter-options-presented-for-context",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/5-blast-radius-forward-compatibility-implications",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/6-action-requested",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/7-references-for-the-maintainer"
+      ],
+      "carry_forward_bullets": [
+        "Phase B: rfc-sce-protocol-synthesis.md §5 kinds atomic decompose (~11 kinds × ~6 atomic fields)",
+        "Phase C: 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) state-Section + transition-CrossRef graph",
+        "Phase D: residual 6 docs (intrinsics-runtime / runtime-crate-{lwip,tokio} / wire-spec / ARCHITECTURE / SESSION_KICKOFF / README)",
+        "Heading-slug ID convention from Phase A carries forward to Phases B-D"
+      ]
+    },
+    "Round 3": {
+      "decision_summary": "Phase B complete — RFC §5 thirteen kind sub-sections atomic decomposition (5.A-5.F, 5.I-5.O); Phase 2 deferred 5.G/5.H skipped.",
+      "changes_bullets": [
+        "§5.A algorithm: intent + rationale(5) + inputs(4) + outputs(3) + caveats(4) + alternatives(3) + impact_scope(5)",
+        "§5.B codec DSL: intent + rationale(5) + inputs(4) + outputs(5) + caveats(5) + alternatives(4) + impact_scope(5)",
+        "§5.C link: intent + rationale(5) + inputs(4) + outputs(4) + caveats(4) + alternatives(4) + impact_scope(8)",
+        "§5.D timer/worker: intent + rationale(4) + inputs(3) + outputs(3) + caveats(3) + alternatives(3) + impact_scope(5)",
+        "§5.E buffer pool: intent + rationale(6) + inputs(4) + outputs(4) + caveats(4) + alternatives(4) + impact_scope(6)",
+        "§5.F const-fold: intent + rationale(4) + inputs(4) + outputs(4) + caveats(4) + alternatives(3) + impact_scope(5)",
+        "§5.I sce:extern: intent + rationale(5) + inputs(4) + outputs(4) + caveats(5) + alternatives(4) + impact_scope(10)",
+        "§5.J codegen backends: intent + rationale(5) + inputs(4) + outputs(4) + caveats(4) + alternatives(4) + impact_scope(10)",
+        "§5.K deploy model: intent + rationale(5) + inputs(5) + outputs(4) + caveats(5) + alternatives(4) + impact_scope(10)",
+        "§5.L bounded-collection: intent + rationale(4) + inputs(5) + outputs(4) + caveats(4) + alternatives(4) + impact_scope(8)",
+        "§5.M fragment/reassembly: intent + rationale(5) + inputs(5) + outputs(4) + caveats(5) + alternatives(4) + impact_scope(10)",
+        "§5.N multi-link: intent + rationale(3) + inputs(3) + outputs(3) + caveats(2) + alternatives(2) + impact_scope(6)",
+        "§5.O traceability: intent + rationale(4) + inputs(4) + outputs(4) + caveats(4) + alternatives(4) + impact_scope(6)",
+        "Section ID convention: <doc-root-slug>/<heading-gh-slug> form preserved from Phase A",
+        "5.G/5.H Phase 2 deferred kinds skipped from Phase B scope"
+      ],
+      "verification_bullets": [
+        "validate_workspace at each of 13 section boundaries: T1=0, round-trip=13/13, exit=0",
+        "Atomic ledger drift: entries=1→2, sections=7→20 (+13 §5 sub-sections)",
+        "verify_generated post-Phase-B: GENERATED.md cascade sync confirmed",
+        "Bare §N notation avoided in atomic field text — would resolve to wrong default_doc target",
+        "T3 warn baseline 975 unchanged across all 13 sections",
+        "Reject types resolved during Phase A (alternatives separator, bullet 100-char) didn't recur"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.d-timer-and-worker-primitives",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.f-build-time-evaluation",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.n-multi-link-concurrency",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.o-generated-source-traceability"
+      ],
+      "carry_forward_bullets": [
+        "Phase C: 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) state-Section + transition-CrossRef migration",
+        "Phase D: residual 6 docs (intrinsics-runtime / runtime-crate-{lwip,tokio} / wire-spec / ARCHITECTURE / SESSION_KICKOFF / README)",
+        "Phase 2 deferred kinds: §5.G parametric, §5.H recursive/tree (not in current scope, atomic landing deferred)",
+        "Heading-slug ID convention from Phase A/B carries forward to Phases C-D"
+      ]
+    },
+    "Round 4": {
+      "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
+      "changes_bullets": [
+        "session-fsm.md: 18 sections (§2.1-§2.7 unicast / §3.1-§3.4 multicast / §4 scouting / §5.3 Q13 / §6 link / §7 ext / §8.1-§8.2 / §10)",
+        "scouting-fsm.md: 19 sections (§1.1-§1.4 framing / §2.1-§2.6 FSM / §3.2-§3.3 OQ-W3 / §6.1, §6.4 trust+OQ-W9 / §8.1-§8.2 / §10)",
+        "reassembly-fsm.md: 18 sections (§1 framing / §2.1-§2.6 FSM / §3 TX / §4 timer/quota / §5 trust / §6 buffer-pool / §7.1-§7.4 build-time / §8.1-§8.2 / §10)",
+        "Phase C lean pattern: intent + (1-2 dense lists) + impact_scope per section; 3 mutations median",
+        "Cross-FSM CrossRef edges established via impact_scope (e.g. session-fsm/2-3-established ↔ reassembly-fsm/2-1-hierarchy)",
+        "Section ID convention <doc-root>/<heading-gh-slug> preserved across all 3 FSM docs"
+      ],
+      "verification_bullets": [
+        "validate_workspace at section batch boundaries: T1=0, round-trip=13/13, exit=0",
+        "Atomic ledger drift: entries=3→4, sections=20→75 (+55 FSM sections)",
+        "verify_generated post-Phase-C: GENERATED.md cascade sync",
+        "T3 warn baseline 975 unchanged across 55 new sections",
+        "Bullet 100-char rejects caught and trimmed (3 occurrences across Phase C); intent 200-char reject caught (1 occurrence)",
+        "Bare §N notation continued to be avoided; all impact_scope refs verified pre-write"
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/2-1-unicast-states",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-3-established-sub-regions",
+        "session-fsm--prose-level-sketch/2-4-close-paths",
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets",
+        "session-fsm--prose-level-sketch/2-6-trust-class-interaction",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
+        "session-fsm--prose-level-sketch/3-1-multicast-session-level-states",
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states",
+        "session-fsm--prose-level-sketch/3-3-no-close-handshake",
+        "session-fsm--prose-level-sketch/3-4-client-mode-and-multicast",
+        "session-fsm--prose-level-sketch/4-scouting-pre-session",
+        "session-fsm--prose-level-sketch/5-3-q13-answer",
+        "session-fsm--prose-level-sketch/6-link-layer-interaction",
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary",
+        "session-fsm--prose-level-sketch/8-1-authoring-contract-gaps",
+        "session-fsm--prose-level-sketch/8-2-new-open-questions",
+        "session-fsm--prose-level-sketch/10-next-step-scaffolding",
+        "scouting-fsm--prose-sketch/1-1-position-and-triggers",
+        "scouting-fsm--prose-sketch/1-2-scout-hello-wire-shape",
+        "scouting-fsm--prose-sketch/1-3-scouting-link-vs-session-link-distinct",
+        "scouting-fsm--prose-sketch/1-4-three-modes-and-zenoh-pico-mapping",
+        "scouting-fsm--prose-sketch/2-1-hierarchy",
+        "scouting-fsm--prose-sketch/2-2-states-union-of-three-modes",
+        "scouting-fsm--prose-sketch/2-3-transitions",
+        "scouting-fsm--prose-sketch/2-4-1-active",
+        "scouting-fsm--prose-sketch/2-4-2-passive-deferred-to-phase-d",
+        "scouting-fsm--prose-sketch/2-4-3-static",
+        "scouting-fsm--prose-sketch/2-5-timeouts-and-budgets",
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "scouting-fsm--prose-sketch/3-2-oq-w3-answer",
+        "scouting-fsm--prose-sketch/3-3-implication-for-the-scouting-fsm",
+        "scouting-fsm--prose-sketch/6-1-per-link-trust-class-table",
+        "scouting-fsm--prose-sketch/6-4-oq-w9-closure",
+        "scouting-fsm--prose-sketch/8-1-authoring-contract-gaps",
+        "scouting-fsm--prose-sketch/8-2-new-open-questions",
+        "scouting-fsm--prose-sketch/10-next-step-scaffolding",
+        "reassembly-fsm--prose-sketch/1-framing-overview",
+        "reassembly-fsm--prose-sketch/2-1-hierarchy",
+        "reassembly-fsm--prose-sketch/2-2-slot-states",
+        "reassembly-fsm--prose-sketch/2-3-router-states",
+        "reassembly-fsm--prose-sketch/2-4-transitions-in-detail",
+        "reassembly-fsm--prose-sketch/2-5-out-of-order-arrival-policy",
+        "reassembly-fsm--prose-sketch/2-6-mapping-to-rfc-5m-three-state-sketch",
+        "reassembly-fsm--prose-sketch/3-tx-fragmentation-sibling-fsm",
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config",
+        "reassembly-fsm--prose-sketch/5-trust-class-interaction",
+        "reassembly-fsm--prose-sketch/6-buffer-pool-interaction",
+        "reassembly-fsm--prose-sketch/7-1-reassembly-capacity-check-hard-error",
+        "reassembly-fsm--prose-sketch/7-2-stage-copy-rate-warning",
+        "reassembly-fsm--prose-sketch/7-3-reassembly-slot-sizing-recommendation",
+        "reassembly-fsm--prose-sketch/7-4-stage-copy-wcet-vs-slot-budget-hard-error",
+        "reassembly-fsm--prose-sketch/8-1-authoring-contract-gaps",
+        "reassembly-fsm--prose-sketch/8-2-new-open-questions",
+        "reassembly-fsm--prose-sketch/10-next-step-scaffolding"
+      ],
+      "carry_forward_bullets": [
+        "Phase D: residual 6 docs (intrinsics-runtime / runtime-crate-{lwip,tokio} / wire-spec / ARCHITECTURE / SESSION_KICKOFF / README)",
+        "Phase D mostly index-shaped; lighter than Phase A/B/C",
+        "Skipped meta sections (§1/§5/§8/§9/§11/§12 framings + change logs) can be migrated in Phase D as needed",
+        "FSM transition-as-CrossRef encoding via impact_scope worked; per-state explicit Sections deferred (state-list-as-bullets pattern adopted)"
+      ]
+    }
+  },
+  "schema_version": 1
+}
