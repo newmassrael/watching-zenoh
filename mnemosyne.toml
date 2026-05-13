@@ -3,8 +3,12 @@
 # (2026-05-08). README is a 0-byte stub (Phase E prose authoring deferred).
 # SESSION_KICKOFF.md moved to notes/SESSION_KICKOFF.md as activity-log genre
 # is a fit for ChangelogEntry, not Section. Round 1/5/6 atomic_impact_refs
-# pointing at the two doc roots are absorbed via [[orphan_ledger]] below
-# with kind=atomic_entry_ref (Round 254 mnemosyne extension).
+# pointing at the two doc roots are absorbed by the workspace.docs
+# membership change itself — removing the two paths from this list drops
+# their cross-refs out of the orphan-eligible set, so no [[orphan_ledger]]
+# entry is required. (Earlier draft of this comment referenced a Round 254
+# atomic_entry_ref ledger entry "below"; that entry was never authored
+# because the membership-level fix made it unnecessary.)
 docs = [
     "ARCHITECTURE.md",
     "docs/intrinsics-runtime-symbols.md",
