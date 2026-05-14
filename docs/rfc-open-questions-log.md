@@ -1618,12 +1618,17 @@ reading/running upstream), or `either`.
   authoring a new sibling-section requires either a typed `add`
   primitive or the raw-Edit carve-out, the latter blocked by
   this doc's atomic-decompose status).
+- **Status:** in-progress → answered (Round 17, 2026-05-14:
+  RFC §5.I.0 'Tier definitions' subsection landed as atomic
+  section via R287/R289 `add_section` primitive; full spec
+  restructure now spec-authoritative at the atomic-store layer).
 - **SCE-side carry:** unchanged — `BASELINE_SYMBOLS` doc-comment
   header update + tier ratify exchange still pending (original
   OQ-W24 Proposal: "one `BASELINE_SYMBOLS` doc-comment header
   update").
-- **Last update:** Round 16, 2026-05-14 (light closure;
-  full §5.I.0 subsection deferred).
+- **Last update:** Round 17, 2026-05-14 (§5.I.0 'Tier
+  definitions' subsection landed via `add_section`
+  primitive; full closure).
 
 ---
 
