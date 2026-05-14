@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Wire-spec §4 session-layer message-ID validator — RFC §4.1 control
+  messages + §4.2 data-carrying framing v1 allowlist. Pure predicate
+  over the session message header byte (zenoh-pico
+  include/zenoh-pico/protocol/definitions/transport.h:32-39) returning
+  true iff `header.mid` is a v1-recognized session message ID.
+
+  MID extraction: header & 0x1F (zenoh-pico
+  include/zenoh-pico/protocol/definitions/core.h:37 `_Z_MID_MASK`).
+  Upper 3 bits are flag bits (Z|S|D variants), interpreted per-message-
+  kind by the specific decoder; the validator does not touch them.
+
+  v1 session allowlist (zenoh-pico transport.h:32-39):
+    0x00  T_OAM        (§4.2 decode-only)
+    0x01  T_INIT       (§4.1 InitSyn / InitAck, S flag discriminates)
+    0x02  T_OPEN       (§4.1 OpenSyn / OpenAck, S flag discriminates)
+    0x03  T_CLOSE      (§4.1)
+    0x04  T_KEEP_ALIVE (§4.1)
+    0x05  T_FRAME      (§4.2)
+    0x06  T_FRAGMENT   (§4.2 RFC §5.M reassembly)
+    0x07  T_JOIN       (§4.2 multicast)
+
+  Unknown MID at session layer means protocol violation; caller maps
+  `false` to the §4 session-close path. This is distinct from §7.2
+  extension unknown-policy (which has mandatory/non-mandatory skip
+  semantics) — session MIDs have no skip surface.
+
+  Scouting-layer MIDs (SCOUT=0x01, HELLO=0x02 per transport.h:28-29)
+  collide on integer value with T_INIT / T_OPEN but live in a
+  distinct context (pre-session). They are validated by a separate
+  `scouting_mid_v1_valid` predicate (R20+ carry) — single-context
+  single-predicate keeps each call-site honest about the layer it is
+  in.
+
+  No SCE-upstream test fixture exists for session MID validation at
+  vendor pin `1473f99f`; verify-codegen.sh Layer 2 (byte-golden) is
+  N/A. Layer 1 (six-backend emit success) covers the RFC §5.J.4
+  parity gate.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="session_mid_v1_valid"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="header" type="uint8"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="mid" type="uint8" init="0"/>
+    <sce:assign target="mid" expr="header &amp; 0x1F"/>
+    <sce:if cond="mid === 0x00">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x01">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x02">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x03">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x04">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x05">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x06">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x07">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:return expr="false"/>
+  </sce:body>
+</scxml>

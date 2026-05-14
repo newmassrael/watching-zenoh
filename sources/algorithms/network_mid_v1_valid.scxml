@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Wire-spec §5 network-layer message-ID validator — RFC §5 routing
+  layer v1 allowlist. Pure predicate over the network message header
+  byte (zenoh-pico include/zenoh-pico/protocol/definitions/network.h:
+  33-39) returning true iff `header.mid` is a v1-recognized network
+  message ID.
+
+  MID extraction: header & 0x1F (`_Z_MID_MASK` per zenoh-pico
+  core.h:37; identical 5-bit field as session layer). Upper 3 bits
+  carry per-kind flags (Z extension chain marker, plus N/M/R type-
+  specific bits), interpreted by the specific decoder; the validator
+  does not touch them.
+
+  v1 network allowlist (zenoh-pico network.h:33-39):
+    0x19  N_INTEREST        (§5 router-only aggregation; bounded form)
+    0x1A  N_RESPONSE_FINAL  (§5 query-response termination)
+    0x1B  N_RESPONSE        (§5 query-response carrier)
+    0x1C  N_REQUEST         (§5 query carrier; §6.2 RequestBody)
+    0x1D  N_PUSH            (§5 push carrier; §6.1 PushBody Put/Del)
+    0x1E  N_DECLARE         (§5.1 KeyExpr/Sub/Queryable/Token decl)
+    0x1F  N_OAM             (§5 decode-only OAM, parity with §4.2)
+
+  Unknown MID at network layer means routing-protocol violation;
+  caller maps `false` to either session-close (mvp policy) or to the
+  unknown-message log path (mvp+1 policy, currently deferred). v1 has
+  no skip semantics at this layer — §7.2 extension skip applies
+  inside the message body, not at the MID dispatch.
+
+  No SCE-upstream test fixture exists for network MID validation at
+  vendor pin `1473f99f`; verify-codegen.sh Layer 2 (byte-golden) is
+  N/A. Layer 1 (six-backend emit success) covers the RFC §5.J.4
+  parity gate.
+
+  Companion `session_mid_v1_valid` (§4 layer; sibling SCXML in the
+  same round) shares the MID-mask convention but disjoint allowlist
+  ranges (§4: 0x00–0x07, §5: 0x19–0x1F) — combined the two predicates
+  define the entire wire-spec MVP top-level MID surface that is not
+  context-discriminated.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="network_mid_v1_valid"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="header" type="uint8"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="mid" type="uint8" init="0"/>
+    <sce:assign target="mid" expr="header &amp; 0x1F"/>
+    <sce:if cond="mid === 0x19">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x1A">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x1B">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x1C">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x1D">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x1E">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x1F">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:return expr="false"/>
+  </sce:body>
+</scxml>
