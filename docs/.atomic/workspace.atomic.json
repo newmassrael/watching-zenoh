@@ -3033,6 +3033,39 @@
         "vendor/sce pin 갱신 정책 — R14 carry 유지, 갱신 시 audit entry 의무."
       ]
     },
+    "Round 19": {
+      "decision_summary": "§7 extension chain dispatch primitive land — extension_v1_dispatch.scxml (Phase A3, header → action ∈ {handle, skip, reject}) encodes RFC §7.2 unknown-extensions policy + v1 FULL_ID allowlist; tlv_advance pair defers to Phase A4+ (cursor/Result types).",
+      "changes_bullets": [
+        "sources/algorithms/extension_v1_dispatch.scxml land — pure predicate header(uint8) → action(uint8)",
+        "v1 FULL_ID allowlist {0x02 FF, 0x03 FD, 0x27 *_PATCH, 0x51 JOIN_QOS} per zenoh-pico ext.h:46-50",
+        "§7.2 unknown-extensions policy in body: M flag set → 2 reject, M flag clear → 1 skip, else 0 handle",
+        "Z flag (bit 7, more-coming) intentionally out of dispatcher scope — iterator (tlv_advance) concern",
+        "tlv_advance Phase A4+ defer (cursor/Result type deps) — same shape as vle_u64_encode carry"
+      ],
+      "verification_bullets": [
+        "Layer 1 six-backend emit: rust/cpp/kotlin/go/c11/python → 6/6 pass, 1 file each, fail=0",
+        "Layer 2 byte-golden N/A — no SCE-upstream §7 dispatch fixture at vendor pin 1473f99f",
+        "atomic ledger entries 18→19 expected, sections=206 invariant (SCXML asset, no atomic section mutation)",
+        "Round-trip 11/11 + T1 orphan=0 preserved (impact_refs all live, no new cross-ref orphan)"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism",
+        "wire-spec-subset--watching-zenoh-mvp/7-1-common-application-visible-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/7-2-unknown-extensions-policy",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm"
+      ],
+      "carry_forward_bullets": [
+        "tlv_advance.scxml — §7 iterator advance + Z flag extract; lands with §5.F const-fold gate (Phase A4+)",
+        "Phase A 추가 codec algorithms — Push/Request/Response/Declare/OAM encoder/decoder primitives, A4+ cursor 의존",
+        "v1 FULL_ID allowlist {0x02, 0x03, 0x27, 0x51} 변경 시 dispatch SCXML 동시 갱신 + 새 audit entry 의무",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시 (R15-R18 carry 유지)",
+        "SCE BASELINE_SYMBOLS doc-comment header + tier ratify exchange (R16-R18 외부 의존 carry)",
+        "crc16_ccitt ↔ algorithm_crc16 Layer 2 — SCE upstream PR (root name= attribute) + vendor pin 갱신 후 시도",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture 작성 후 (R18 carry)",
+        "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 빌드 + verify 재실행 + audit entry 의무",
+        "Phase E (README 저작) — Mnemosyne migration 마지막, LICENSE/SPDX 안내 포함 carry"
+      ]
+    },
     "Round 2": {
       "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
       "changes_bullets": [
