@@ -12,10 +12,26 @@
 # Two-layer verification (Round 14 design choice — option C):
 #   1. emit-success: each backend runs to exit 0 and writes ≥1 file.
 #   2. byte-golden (only if upstream fixture supplied): the per-backend
-#      emit-tree of the watching-zenoh source is byte-identical to the
-#      emit-tree of the SCE-upstream fixture. Validates that the only
-#      difference between the two SCXML inputs (SPDX header block) does
-#      not leak into generated code.
+#      emit-tree of the watching-zenoh source is byte-equivalent to the
+#      emit-tree of the SCE-upstream fixture after RFC §5.O traceability-
+#      anchor normalization (Round 18 — Layer 2 활성화). Validates that
+#      the only difference between the two SCXML inputs (SPDX header
+#      block + author-side stem) does not leak into generated code
+#      bodies.
+#
+# RFC §5.O traceability anchors (source-hash + SCE-MAP) are *required*
+# to differ between two SCXML inputs that have different file paths or
+# byte contents — that is their job (Round 15 finding). Stripping them
+# before diff yields the body-equivalence check that the byte-golden
+# acceptance gate semantically intends. Stripped patterns:
+#   - `source-hash: <hex64>`
+#   - `SCE-MAP: <path>:<line>` (handles both plain-comment and rust
+#     `#![doc = "..."]` forms)
+#
+# Pair viability still requires file-name alignment via the root
+# `name="…"` attribute on both SCXML inputs (Round 14 carry #1 closed
+# in R15). Pairs whose upstream fixture lacks a matching `name=` will
+# fail Layer 2 with missing-file diagnostics, not body mismatch.
 #
 # Backends: rust, cpp, kotlin, go, c11, python.
 # A backend that the vendored SCE revision does not (yet) support is
@@ -90,6 +106,24 @@ count_emitted() {
     find "$dir" -type f ! -name ".stderr" | wc -l
 }
 
+normalize_tree() {
+    # Strip RFC §5.O traceability anchors (source-hash + SCE-MAP) and
+    # the wall-clock `generated-at` epoch in place. The anchors are
+    # required to differ between two SCXML inputs with different
+    # paths/bytes; `generated-at` differs when paired emit invocations
+    # cross a second boundary. The Layer 2 acceptance gate checks body
+    # equivalence, not these per-invocation lines.
+    local dir="$1"
+    find "$dir" -type f ! -name ".stderr" -print0 \
+        | while IFS= read -r -d '' f; do
+            sed -i \
+                -e 's/source-hash: [0-9a-f]\{64\}/source-hash: <STRIPPED>/' \
+                -e 's/SCE-MAP: [^"[:space:]]\{1,\}:[0-9]\{1,\}/SCE-MAP: <STRIPPED>/' \
+                -e 's/generated-at: [0-9]\{1,\}/generated-at: <STRIPPED>/' \
+                "$f"
+        done
+}
+
 n_pass=0
 n_fail=0
 n_diff_match=0
@@ -129,8 +163,10 @@ for be in "${BACKENDS[@]}"; do
         if [[ "$code_up" -ne 0 || "$files_up" -eq 0 ]]; then
             layer2="up:fail"
         else
-            # Compare emit trees byte-by-byte. Use a sorted file list to
-            # detect missing or extra files on either side.
+            # Normalize RFC §5.O traceability anchors on both sides
+            # before diff, then compare emit trees byte-by-byte.
+            normalize_tree "$WORK/input/$be"
+            normalize_tree "$WORK/upstream/$be"
             if diff -rq \
                     --exclude=".stderr" \
                     "$WORK/input/$be" "$WORK/upstream/$be" \
