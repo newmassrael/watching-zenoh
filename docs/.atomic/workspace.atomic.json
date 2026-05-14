@@ -3172,6 +3172,38 @@
         "Phase E (README 저작) — Mnemosyne migration 마지막, LICENSE/SPDX 안내 포함"
       ]
     },
+    "Round 22": {
+      "decision_summary": "vle_byte_length primitive land — Phase A3 cursor-free TLV chain walker missing piece; vle_u64_decode와 짝으로 §7 extension iterator를 Phase A4 cursor 의존 없이 author-side에서 운영 가능, tlv_advance Phase A4+ 진화의 내부 길이 산출 부분품.",
+      "changes_bullets": [
+        "sources/algorithms/vle_byte_length.scxml — bytes → uint8, 첫 VLE 값 바이트 수 (1..len(data))",
+        "vle_u64_decode와 짝: byte_length가 길이, u64_decode가 값; 둘 다 cursor 없이 A3 운영",
+        "TLV chain walker 의사 코드: enc → vle_byte_length로 body 길이 산출 → has_more 분기",
+        "Boundary: data 끝까지 continuation-bit 미해지 시 len(data) 반환 (vle-width-overflow 동등)",
+        "tlv_advance Phase A4+ 본격 단계에서 vle_byte_length를 내부 호출하는 형태로 진화"
+      ],
+      "verification_bullets": [
+        "Layer 1 six-backend emit: rust/cpp/kotlin/go/c11/python 6/6 pass, 1 file each, fail=0",
+        "Layer 2 N/A — SCE upstream에 vle byte-length fixture 부재 (pin 1473f99f)",
+        "atomic ledger entries 21→22 expected, sections=206 invariant (SCXML asset, no atomic mutation)",
+        "Round-trip 11/11 + T1 orphan=0 preserved (impact_refs §5.A/§5.B/§7 전부 live)"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "tlv_advance.scxml — Phase A4+ cursor/Result; vle_byte_length가 내부 길이 산출",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시 (R15+ carry 유지)",
+        "Phase A 메시지별 codec body — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor 의존",
+        "Z_OAM (0x00) payload-layer Inclusion 결정 — Phase B+ OQ (R21 carry 유지)",
+        "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R20 외부 의존 carry)",
+        "crc16_ccitt ↔ algorithm_crc16 Layer 2 — SCE upstream PR (root name= attribute) + pin 갱신 후",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture (R18 carry)",
+        "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무",
+        "Phase E (README 저작) — Mnemosyne migration 마지막, LICENSE/SPDX 안내 포함"
+      ]
+    },
     "Round 3": {
       "decision_summary": "Phase B complete — RFC §5 thirteen kind sub-sections atomic decomposition (5.A-5.F, 5.I-5.O); Phase 2 deferred 5.G/5.H skipped.",
       "changes_bullets": [

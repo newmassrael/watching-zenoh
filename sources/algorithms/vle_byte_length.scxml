@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  VLE (Variable-Length Encoding) byte-length primitive — Phase A3
+  form, companion to `vle_u64_decode.scxml`. Returns the number of
+  bytes the first VLE-encoded value consumes from `data`, scanning
+  until either the first byte whose continuation bit is clear OR
+  the end of `data`.
+
+  Pairing with vle_u64_decode forms the cursor-free TLV chain
+  walker that the §7 extension iterator needs in Phase A3 (before
+  the §5.F const-fold gate and the cursor/Result types land in
+  Phase A4+):
+
+    1. ext_header  = buf[0]
+    2. action       = extension_v1_dispatch(ext_header)  (R19)
+    3. enc         = ext_header & 0x60
+    4. if enc == ZINT (0x20):
+         body_len = vle_byte_length(buf[1..])             (this SCXML)
+         value    = vle_u64_decode(buf[1 .. 1+body_len])
+       if enc == ZBUF (0x40):
+         len_n    = vle_byte_length(buf[1..])             (this SCXML)
+         len_v    = vle_u64_decode(buf[1 .. 1+len_n])
+         body_len = len_n + len_v
+       if enc == UNIT (0x00):
+         body_len = 0
+    5. advance = 1 + body_len; has_more = (ext_header & 0x80) != 0
+
+  Once Phase A4 lands cursor/Result types, this primitive composes
+  into `tlv_advance` rather than being called directly — but at A3
+  it is the missing piece that makes the walker tractable.
+
+  Boundary behavior:
+    - Valid VLE u64: 1..10 bytes (ceil(64/7) = 10).
+    - Unterminated VLE: returns `len(data)` if no byte with the high
+      bit clear is found. Caller treats a return value of 10 with
+      `(data[9] & 0x80) != 0` as a codec-level decode error
+      (`codec/vle-width-overflow` per RFC §5.B diagnostics; identical
+      framing to `vle_u64_decode`).
+
+  No SCE-upstream test fixture exists for VLE byte-length at vendor
+  pin `1473f99f`; verify-codegen.sh Layer 2 (byte-golden) is N/A.
+  Layer 1 (six-backend emit success) covers the RFC §5.J.4 parity
+  gate.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="vle_byte_length"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="data" type="bytes"/>
+    <sce:return type="uint8"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="count" type="uint8" init="0"/>
+    <sce:foreach item="b" in="data">
+      <sce:assign target="count" expr="count + 1"/>
+      <sce:if cond="(b &amp; 0x80) === 0">
+        <sce:return expr="count"/>
+      </sce:if>
+    </sce:foreach>
+    <sce:return expr="count"/>
+  </sce:body>
+</scxml>
