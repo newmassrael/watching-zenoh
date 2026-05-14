@@ -142,6 +142,40 @@ git config core.hooksPath .githooks
 `cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli`).
 `commit-msg` needs only bash + GNU grep with the `-P` flag.
 
+## License + SPDX header policy
+
+This project is **dual-licensed**: `LGPL-3.0-or-later` (free, with
+LGPL-3 obligations including anti-tivoization) OR
+`LicenseRef-watching-zenoh-Commercial` (paid, 5-way exemption). See
+`LICENSE` for the overview, `LICENSE-LGPL-3.0.md` /
+`LICENSE-GPL-3.0.md` for the verbatim free-tier texts, and
+`LICENSE-COMMERCIAL.md` for the commercial alternative.
+
+When Phase A coding lands (SCXML sources, Rust runtime crates, C/Rust
+runtime adapters, deploy yamls), every author-side source file must
+carry the SPDX header:
+
+```
+SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+```
+
+Applies to: `sources/**.scxml`, `crates/**/*.rs`,
+`runtime/**/*.{rs,c,h}`, `deploy/**.yaml`.
+
+**Generated files** (`out/**`) carry SCE's MIT header per
+`sce-codegen` policy (see `LICENSE-GENERATED.md` in the SCE repo); do
+not overwrite SCE-emitted headers — SCE owns the generation-time
+header policy.
+
+**Third-party vendored code** keeps its original SPDX header. When the
+first vendored snippet lands, add a top-level `THIRD_PARTY.md` ledger
+recording origin, version, and license.
+
+**Doc / config files** that are not source (Markdown, JSON metadata,
+config TOML) inherit the repo-level `LICENSE` and do not require
+in-file SPDX headers.
+
 ## Hard prohibitions
 
 - Do not `Edit` / `Write` `mnemosyne.toml` to bypass validation
