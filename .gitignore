@@ -22,3 +22,8 @@ docs/GENERATED.md
 
 # Local Claude Code settings
 .claude/settings.local.json
+
+# Activity logs (local working notes; outside mnemosyne workspace).
+# Cross-session handoff lives in the atomic changelog (audit-traced);
+# notes/ is a local working cache only.
+notes/
