@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Wire-spec §7 extension chain dispatch — RFC §7.2 "unknown extensions
+  policy" v1 form. Pure predicate over the extension header byte
+  (Z|enc|M|id, zenoh-pico include/zenoh-pico/protocol/ext.h:30-65)
+  returning one of three RX-side dispatch actions.
+
+  Return values:
+    0 = handle_known — header.full_id matches the v1 allowlist;
+        caller routes to the specific decoder by full_id.
+    1 = skip_non_mandatory_unknown — header is unknown to v1 and the
+        M flag is clear; caller advances past the body without
+        side-effects (zenoh-pico `_z_msg_ext_skip_non_mandatories`
+        path).
+    2 = reject_mandatory_unknown — header is unknown to v1 and the M
+        flag is set; caller invokes the §7.2 mandatory-unknown error
+        path (FRAGMENT_DROP / session-close).
+
+  v1 allowlist (zenoh-pico ext.h:46-50, FULL_ID = header & 0x7F):
+    0x02  FRAGMENT_FIRST  (id=0x02, enc=UNIT 0x00, M=0)
+    0x03  FRAGMENT_DROP   (id=0x03, enc=UNIT 0x00, M=0)
+    0x27  INIT_PATCH / JOIN_PATCH  (id=0x07, enc=ZINT 0x20, M=0)
+    0x51  JOIN_QOS        (id=0x01, enc=ZBUF 0x40, M=1)
+
+  Z flag (bit 7, more-coming) is the chain iterator's concern, not
+  the dispatcher's — `tlv_advance` (Phase A4+, depends on cursor /
+  Result types) consumes Z. Dispatcher operates on FULL_ID only,
+  identical to zenoh-pico's `_Z_EXT_FULL_ID(h)` macro.
+
+  No SCE-upstream test fixture exists for §7 dispatch at vendor pin
+  `1473f99f`; verify-codegen.sh Layer 2 (byte-golden) is N/A. Layer 1
+  (six-backend emit success) covers the RFC §5.J.4 parity gate.
+
+  Companion `tlv_advance` (cursor advance + has-next Z-flag extract)
+  lands alongside the §5.F build-time const-fold gate (Phase A4+) —
+  same defer reason as `vle_u64_encode.scxml`. The pair forms the
+  full §7 extension iterator surface once A4 lands.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="extension_v1_dispatch"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="header" type="uint8"/>
+    <sce:return type="uint8"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="full_id" type="uint8" init="0"/>
+    <sce:assign target="full_id" expr="header &amp; 0x7F"/>
+    <sce:if cond="full_id === 0x02">
+      <sce:return expr="0"/>
+    </sce:if>
+    <sce:if cond="full_id === 0x03">
+      <sce:return expr="0"/>
+    </sce:if>
+    <sce:if cond="full_id === 0x27">
+      <sce:return expr="0"/>
+    </sce:if>
+    <sce:if cond="full_id === 0x51">
+      <sce:return expr="0"/>
+    </sce:if>
+    <sce:if cond="(header &amp; 0x10) !== 0">
+      <sce:return expr="2"/>
+    </sce:if>
+    <sce:return expr="1"/>
+  </sce:body>
+</scxml>
