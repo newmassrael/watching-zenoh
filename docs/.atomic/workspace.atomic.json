@@ -2801,6 +2801,37 @@
         "THIRD_PARTY.md ledger to be created when the first vendored snippet (if any) lands during Phase A coding"
       ]
     },
+    "Round 13": {
+      "decision_summary": "sources/ skeleton lands via README (SPDX header double-block + 7-subdir lazy materialize per ARCH §428) + first author-side SCXML sources/algorithms/crc16_ccitt.scxml body-identical to SCE fixture; 6-backend byte-golden verify carried to R14 SCE submodule infrastructure (pin 1473f99f origin/main).",
+      "changes_bullets": [
+        "sources/README.md authored — 7-subdir lazy materialize policy, SPDX header double-block convention (REUSE 3.0 + Linux kernel idiom), snake_case file naming, SCE fixture mechanical-sync rule",
+        "sources/algorithms/crc16_ccitt.scxml authored — first author-side SCXML, body-identical to SCE tests/forge/resources/algorithm_crc16.scxml save SPDX header block",
+        "Commit hygiene: 3 separate commits per R12 land pattern (e8b701b README, ee46bea SCXML, this entry as third)",
+        "No atomic store section mutation — sources/ lives outside workspace.docs; sections=205 preserved",
+        "CLAUDE.md SPDX header policy (R12) first applied to concrete files — concrete shape locked as double comment-block per kernel/REUSE idiom",
+        "ARCHITECTURE.md §428 7-subdir tree treated as design SSoT — no prose duplication in README"
+      ],
+      "verification_bullets": [
+        "XML well-formedness OK: matching tags, valid sce:kind=\"algorithm\", version=\"1.0\"",
+        "SPDX header expression matches R12 ratify (73c509e LICENSE root): `LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial`",
+        "Body diff vs SCE tests/forge/resources/algorithm_crc16.scxml: only SPDX header block prepended; all <sce:*> semantic nodes byte-identical",
+        "Pre-commit hooks (e8b701b, ee46bea) ran mnemosyne-cli validate-workspace clean: T1=0, RT 11/11, atomic ledger entries=12, GENERATED.md=sync",
+        "Commit-msg hook accepted both subjects + 3-bullet bodies under 72-byte/line gate",
+        "sce-codegen 6-backend byte-golden parity NOT verified this round — SCE binary stale (2026-05-04 build predates 6c43163b _macros land), SCE main HEAD WIP non-compiling; verify carried to R14"
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/appendix-a--worked-example-crc16-ccitt"
+      ],
+      "carry_forward_bullets": [
+        "R14 vendor/sce/ git submodule add (pin 1473f99f origin/main) + scripts/build-sce.sh + scripts/verify-codegen.sh — replaces system-installed sce-codegen as the watching-zenoh verification baseline",
+        "R14 retroactive 6-backend byte-golden verify on R13's sources/algorithms/crc16_ccitt.scxml — closes the R13 carry inline in R14 verification_bullets",
+        "Phase A subsequent SCXML files (vle_u64, keyexpr_intersect, keyexpr_includes, etc.) land in sources/algorithms/ with same SPDX double-block convention per R13 README",
+        "SCE remote https://github.com/newmassrael/scxml-core-engine.git serves as submodule source for R14; pin SHA chosen to be on origin/main (pushed) and post-6c43163b (templates have _macros/) and pre-486e136c WIP",
+        "THIRD_PARTY.md ledger creation pending until first vendored snippet lands (CLAUDE.md SPDX policy)"
+      ]
+    },
     "Round 2": {
       "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
       "changes_bullets": [
