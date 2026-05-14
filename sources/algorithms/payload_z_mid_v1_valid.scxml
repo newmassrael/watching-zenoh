@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Wire-spec §6 zenoh-payload-layer message-ID validator — PushBody /
+  RequestBody / ResponseBody v1 allowlist (zenoh-pico
+  include/zenoh-pico/protocol/definitions/message.h:27-32). Pure
+  predicate over the payload-layer header byte returning true iff
+  `header.mid` is a v1-recognized payload Z_MID.
+
+  MID extraction: header & 0x1F. The payload header uses the same
+  5-bit MID field as session/network/declare; upper bits host the Z
+  extension-chain marker (0x80) and per-kind flags (e.g. D dropping
+  bit at 0x20 for §6.1 Put, K resource-key bit at 0x80 — but Z and K
+  alias on bit 7, see message.h:36 vs 38 with comments calling out
+  the per-kind reinterpretation). The validator only inspects MID
+  bits.
+
+  v1 payload allowlist (per RFC §6.1 / §6.2 / §6.3 Inclusion):
+    0x01  Z_PUT    (§6.1 PushBody — publish value)
+    0x02  Z_DEL    (§6.1 PushBody — delete key)
+    0x03  Z_QUERY  (§6.2 RequestBody — query carrier)
+    0x04  Z_REPLY  (§6.3 ResponseBody — reply carrier)
+    0x05  Z_ERR    (§6.3 ResponseBody — reply-channel error)
+
+  Z_OAM (0x00) is intentionally **excluded** from the v1 payload
+  allowlist: RFC §6.1 enumerates only Put/Del, §6.2 only Query,
+  §6.3 only Reply/Err — payload-layer OAM is not in the mvp wire-
+  spec subset. §4.2 T_OAM and §5 N_OAM remain Included for their
+  respective layers (parity carrier) but the payload-layer OAM (Z_OAM
+  at 0x00) lives outside the §6 mvp surface. A future Inclusion
+  decision is a Phase B+ Open Question, not a v1 dispatch concern.
+
+  Unknown payload Z_MID → false; caller maps to payload-decode error
+  + session-close path. Payload runs inside an established session
+  with N_DECLARE / N_PUSH / N_REQUEST / N_RESPONSE envelopes already
+  validated by `network_mid_v1_valid` (R20).
+
+  No SCE-upstream test fixture exists for payload Z_MID validation at
+  vendor pin `1473f99f`; verify-codegen.sh Layer 2 (byte-golden) is
+  N/A. Layer 1 (six-backend emit success) covers the RFC §5.J.4
+  parity gate.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="payload_z_mid_v1_valid"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="header" type="uint8"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="mid" type="uint8" init="0"/>
+    <sce:assign target="mid" expr="header &amp; 0x1F"/>
+    <sce:if cond="mid === 0x01">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x02">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x03">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x04">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x05">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:return expr="false"/>
+  </sce:body>
+</scxml>

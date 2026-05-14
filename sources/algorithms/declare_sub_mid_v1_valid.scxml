@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Wire-spec §5.1 declare sub-message ID validator — DECLARE body
+  inner-MID v1 allowlist (zenoh-pico
+  include/zenoh-pico/protocol/codec/declarations.h:25-36). Pure
+  predicate over the declare body's first byte returning true iff
+  `header.mid` is a v1-recognized declare sub-message ID.
+
+  MID extraction: header & 0x1F. The declare body uses the same
+  5-bit MID field as outer layers; upper bits 5-7 host FLAG_N (0x20)
+  and FLAG_M (0x40) per `_Z_DECL_*_FLAG_*` (declarations.h:26, 29,
+  30) — the validator does not touch them.
+
+  v1 declare sub-allowlist (zenoh-pico declarations.h:25-36):
+    0x00  DECL_KEXPR        (§5.1 keyexpr mapping registration)
+    0x01  UNDECL_KEXPR      (§5.1 keyexpr mapping retirement)
+    0x02  DECL_SUBSCRIBER   (§5.1 subscriber declaration)
+    0x03  UNDECL_SUBSCRIBER (§5.1 subscriber retirement)
+    0x04  DECL_QUERYABLE    (§5.1 queryable declaration)
+    0x05  UNDECL_QUERYABLE  (§5.1 queryable retirement)
+    0x06  DECL_TOKEN        (§5.1 liveliness token declaration)
+    0x07  UNDECL_TOKEN      (§5.1 liveliness token retirement)
+    0x1A  DECL_FINAL        (§5.1 DeclareFinal marker, batch-end)
+
+  The 0x00–0x07 contiguous range covers the 4 declare/undeclare pair
+  surface (KeyExpr / Subscriber / Queryable / Token). DECL_FINAL=0x1A
+  sits separately because its semantic is batch-termination, not a
+  decl/undecl op — kept distinct in the wire spec so future decl
+  kinds (e.g. v2 group_member) can fill 0x08+ without clashing with
+  the final marker.
+
+  Unknown declare sub-MID → false; caller maps to declare-body decode
+  error + session-close path (declare is inside an established
+  session, so the strict policy from §5 network MID applies). v1 has
+  no skip semantics for unknown declare sub-MIDs.
+
+  No SCE-upstream test fixture exists for declare sub-MID validation
+  at vendor pin `1473f99f`; verify-codegen.sh Layer 2 (byte-golden)
+  is N/A. Layer 1 (six-backend emit success) covers the RFC §5.J.4
+  parity gate.
+
+  Companion §5 N_DECLARE outer dispatch lives in
+  `network_mid_v1_valid.scxml` (R20). The two predicates together
+  validate the wire path: outer accepts the N_DECLARE envelope,
+  inner accepts each enveloped declare sub-op.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="declare_sub_mid_v1_valid"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="header" type="uint8"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="mid" type="uint8" init="0"/>
+    <sce:assign target="mid" expr="header &amp; 0x1F"/>
+    <sce:if cond="mid === 0x00">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x01">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x02">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x03">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x04">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x05">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x06">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x07">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x1A">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:return expr="false"/>
+  </sce:body>
+</scxml>
