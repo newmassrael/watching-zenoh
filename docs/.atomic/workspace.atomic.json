@@ -2775,6 +2775,32 @@
         "SCE-side action: BASELINE_SYMBOLS doc-comment update concurrent with OQ-W24 ratify exchange"
       ]
     },
+    "Round 12": {
+      "decision_summary": "Dual-license adoption — LGPL-3.0-or-later (Free, anti-tivo included) OR watching-zenoh Commercial (Qt-style 5-way exemption, $5000 individual cumulative)",
+      "changes_bullets": [
+        "LICENSE root + LICENSE-LGPL-3.0.md + LICENSE-GPL-3.0.md (verbatim from /usr/share/common-licenses)",
+        "LICENSE-COMMERCIAL.md: Qt-style 5-way exemption (proprietary / anti-tivo / private mod / SDK redist / rebrand)",
+        "Pricing: $5000 cumulative individual via GitHub Sponsors; Enterprise contact (SCE pattern)",
+        "CLAUDE.md SPDX header policy added for Phase A author-side sources (sources/crates/runtime/deploy)",
+        "Copyright (c) 2026 newmassrael; SPDX expression `LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial`",
+        "No atomic store section mutation — license lives in root files, impact_refs records future-coupled ARCHITECTURE root"
+      ],
+      "verification_bullets": [
+        "Standard texts md5-verified: LGPL-3.0 e6a600fd... GPL-3.0 d32239bc... (byte-equivalent system canonical)",
+        "Pre-commit + commit-msg hooks both passed during commit 73c509e (line lengths 63/63/71/63 ≤ 72)",
+        "validate_workspace clean: T1=0, round-trip 11/11, entries 11→12 expected post-append, sections=205 unchanged",
+        "Qt-vs-SCE trade-off documented: plain LGPL-3.0 (no linking exception) chosen for higher commercial purchase pressure on embedded use"
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "Phase E (README + workspace.docs re-register) must include a license section cross-referencing LICENSE / LICENSE-COMMERCIAL / SPDX expression",
+        "Phase A first author-side source file (likely sources/algorithms/crc16_ccitt.scxml) lands with the SPDX header per CLAUDE.md policy",
+        "SCE Commercial procurement is independent — needed when watching-zenoh deploys reach proprietary embedded ship even with watching-zenoh Commercial held",
+        "THIRD_PARTY.md ledger to be created when the first vendored snippet (if any) lands during Phase A coding"
+      ]
+    },
     "Round 2": {
       "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
       "changes_bullets": [
