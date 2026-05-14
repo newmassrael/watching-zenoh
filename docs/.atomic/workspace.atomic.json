@@ -2832,6 +2832,39 @@
         "THIRD_PARTY.md ledger creation pending until first vendored snippet lands (CLAUDE.md SPDX policy)"
       ]
     },
+    "Round 14": {
+      "decision_summary": "R14 vendor/sce submodule (pin 1473f99f) + scripts/build-sce + verify-codegen lands; R13 carry verified Layer 1 emit-success 6/6 but R13's \"6-backend byte-golden parity\" claim retracted — sce-codegen derives generated symbol/file names from input-file stem, making byte-golden parity infeasible without stem alignment; R15 carries upstream PR for explicit `<sce:signature name>` attribute (split file-system identity from code-symbol identity).",
+      "changes_bullets": [
+        "vendor/sce git submodule added at pin 1473f99f (origin/main HEAD post-d71a2886 sourcemap/addr2sce, post-6c43163b _macros land)",
+        "scripts/build-sce.sh — cargo build --release --features cli --bin sce-codegen (cli feature gates the bin; emits vendor/sce/target/release/sce-codegen)",
+        "scripts/verify-codegen.sh — option C two-layer verify: (1) emit-success across 6 backends rust/cpp/kotlin/go/c11/python, (2) optional byte-golden diff vs SCE upstream fixture",
+        ".gitignore tightened: vendor/sce/target/ (submodule local build) + .claude/ dir-wide (was leaking scheduled_tasks.lock)",
+        "Four separate commits per R12/R13 hygiene pattern (submodule add, scripts add, gitignore tighten, this audit-trace entry)",
+        "No atomic store section mutation — R14 is infra+verify only; sections=205 preserved",
+        "Replaces stale system /usr/local/bin/sce-codegen (2026-05-04 build pre _macros land) with vendor-pinned binary as watching-zenoh verification baseline"
+      ],
+      "verification_bullets": [
+        "Layer 1 emit-success: bash scripts/verify-codegen.sh sources/algorithms/crc16_ccitt.scxml → 6/6 pass (2 files per backend: crc16_ccitt + crc16_ccitt_test)",
+        "Layer 2 byte-golden vs vendor/sce/tests/forge/resources/algorithm_crc16.scxml: 6/6 mismatch — fundamental, not bug",
+        "Three independent leak vectors documented per backend: source-hash SHA256 differs (SPDX 4-line header in our SCXML), SCE-MAP line offset (procedure at line 14 vs 10), function name (stem-derived crc16_ccitt vs algorithm_crc16)",
+        "SCXML body segments byte-identical between two files (signature + body + test-vector blocks verified via diff)",
+        "vendor/sce/target/release/sce-codegen built (9m30s first build) — 9.9 MB ELF; pin = 1473f99f confirmed via git rev-parse --short",
+        "Pre-commit + commit-msg hooks pass on 4 R14 commits; mnemosyne validate-workspace clean throughout (T1=0, RT 11/11)",
+        "Atomic ledger drift: entries 13 → 14, sections=205 unchanged, GENERATED.md sync after this entry append"
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/appendix-a--worked-example-crc16-ccitt"
+      ],
+      "carry_forward_bullets": [
+        "R15 upstream PR to scxml-core-engine: introduce <sce:signature name=\"...\"> attribute on algorithm kind (and analogous on codec/procedure kinds) so generated symbol is attribute-derived not stem-derived; additive change (fallback to stem when attribute absent) preserves backward compat with existing SCE fixtures",
+        "R15 watching-zenoh consume: add name attribute to sources/algorithms/crc16_ccitt.scxml once SCE PR lands; SCE fixture algorithm_crc16.scxml gets matching name=\"crc16_ccitt\" so byte-golden parity becomes achievable across two stems",
+        "Phase A subsequent SCXML (vle_u64, keyexpr_intersect, keyexpr_includes, ...) follow same emit-success only Layer 1 verify until R15 PR closes the byte-golden gap",
+        "verify-codegen.sh Layer 2 surface kept dormant pending R15 — script already supports 2-arg form for golden diff; that arg path stays unused until name-attribute lands",
+        "THIRD_PARTY.md ledger creation still deferred — vendor/sce is git submodule (gitlink), not vendored snippet copy; ledger trigger remains 'first inline copy of third-party code'"
+      ]
+    },
     "Round 2": {
       "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
       "changes_bullets": [
