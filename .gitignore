@@ -24,8 +24,10 @@ vendor/sce/target/
 # --no-regenerate; only mnemosyne-cli does). We don't track it.
 docs/GENERATED.md
 
-# Local Claude Code settings
-.claude/settings.local.json
+# Local Claude Code state — settings.local.json, scheduled_tasks.lock,
+# transcripts, etc. Team-shared .claude/settings.json (if introduced)
+# would carve out via an explicit `!.claude/settings.json` exception.
+.claude/
 
 # Activity logs (local working notes; outside mnemosyne workspace).
 # Cross-session handoff lives in the atomic changelog (audit-traced);
