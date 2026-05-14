@@ -3,6 +3,10 @@
 **/*.rs.bk
 Cargo.lock
 
+# Vendored submodule build artifacts — submodule manages its own target/.
+# Submodule itself is tracked (gitlink); only its build output is local.
+vendor/sce/target/
+
 # Editor / OS
 .DS_Store
 .vscode/
