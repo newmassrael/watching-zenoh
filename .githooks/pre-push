@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# pre-push hook — run `mnemosyne-cli validate-workspace` before publishing
+# commits to a remote.
+#
+# Push is the natural integrity-gate point: this is where the project's
+# audit-traced state becomes shared. Catches state changes since last commit
+# (e.g. manual atomic.json edits, amends, rebases) that pre-commit may have
+# missed.
+#
+# Checks (mnemosyne-cli validate-workspace):
+#   - T1 cross-ref orphan delta (new orphans not registered in
+#     [[orphan_ledger]])
+#   - T2 frozen-ledger violations (existing ChangelogEntry mutation)
+#   - Round-trip mandatory dimension (parse → emit → re-parse)
+#   - Atomic ledger consistency (entries / sections / GENERATED.md sync)
+#
+# Install via `git config core.hooksPath .githooks` (one-time per clone).
+set -euo pipefail
+
+if ! command -v mnemosyne-cli >/dev/null 2>&1; then
+    echo "pre-push: mnemosyne-cli not on PATH — install with" >&2
+    echo "  cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli" >&2
+    exit 1
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "pre-push: running mnemosyne-cli validate-workspace ..."
+if ! mnemosyne-cli validate-workspace; then
+    echo "pre-push: validate-workspace failed — fix violations before push" >&2
+    exit 1
+fi
+
+exit 0
