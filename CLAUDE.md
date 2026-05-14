@@ -201,3 +201,22 @@ in-file SPDX headers.
   SCE / Zenoh state — verify by direct read.
 - Complex multi-line regex on a registered doc → ask the user to apply
   it manually rather than risk corruption.
+
+## Auto-kickoff trigger
+
+사용자가 첫 메시지로 `/load`, `시작`, `이어가자`, `kickoff` 중 하나만
+입력하면 `notes/NEXT_SESSION.md` 의 "시작 프롬프트 (복사용)" 5단계를
+그대로 수행한다:
+
+1. Mnemosyne concept 6종 적재 (overview → anti-patterns →
+   atomic-store → frozen-ledger → tier-rules → workflow) — 이번 세션에
+   아직 안 읽은 것만
+2. `validate_workspace` 로 베이스라인 (T1 orphan / round-trip /
+   entries / sections / GENERATED.md sync) 캡처
+3. 가장 최근 atomic changelog entry 조회 후 `carry_forward` 복원 —
+   `query_section` 또는 `list_sections` Round-N 패턴 검색
+4. `git status` + `git log --oneline -5` 로 미푸시 commit + 최근 활동 확인
+5. SCE 상태가 작업에 필요하면 `/home/coin/scxml-core-engine/` 직접 read
+
+실행 시 "kickoff 시작" 만 짧게 알리고 중간 단계별 verbose 보고는 생략.
+종료 후 carry 우선순위 + 다음 단계 제안.
