@@ -3003,6 +3003,36 @@
         "vendor/sce pin 갱신 정책 — R14 carry 유지, 갱신 시 audit entry 의무."
       ]
     },
+    "Round 18": {
+      "decision_summary": "scripts/verify-codegen.sh Layer 2 활성화 — RFC §5.O traceability-anchor normalize(source-hash + SCE-MAP + generated-at) 후 body-equivalence 측정; keyexpr_intersect ↔ algorithm_keyexpr_intersect_exact 6/6 match로 R15·R16·R17 공통 carry 자력 closure.",
+      "changes_bullets": [
+        "scripts/verify-codegen.sh: normalize_tree() 추가 — sed in-place로 3개 line pattern을 <STRIPPED>로 치환 후 byte-diff.",
+        "Normalize 대상: source-hash hex64, SCE-MAP <path>:<line> (plain + rust #![doc] 양형), generated-at unix-ts (paired emit이 second-boundary 가로지를 때 정상 normalize).",
+        "Header comment 업데이트 — Round 18 — Layer 2 활성화 + R15 finding (§A6 byte-equivalence semantic intent vs §5.O traceability-anchor 필수 차이) 명시.",
+        "Pair viability 조건 명시 — root name= attribute 양쪽 SCXML 일치해야 emit file-name 정합; 불일치 시 Layer 2는 file-presence diff로 정상 mismatch (body normalize bypass)."
+      ],
+      "verification_bullets": [
+        "Positive: keyexpr_intersect ↔ algorithm_keyexpr_intersect_exact → emit pass=6 fail=0 | golden match=6 mismatch=0, exit 0.",
+        "Layer 1-only path (single-arg) 회귀 없음 — crc16_ccitt.scxml 단독 호출 시 6/6 emit pass + Layer 2 열 미출력 (기존 동작 유지).",
+        "Negative: crc16_ccitt ↔ algorithm_crc16 (upstream에 name= 부재) → 6/6 MISMATCH 유지, file-presence diff 정상 표시 (normalize가 false-pass 유발 안 함).",
+        "validate_workspace clean throughout — T1=0, round-trip 11/11, sections=206 보존 (atomic section mutation 없음, infra-only 라운드).",
+        "RFC §5.O 의미적 부합 확인 — strip되는 3개 line은 §5.O 트레이서빌리티 앵커로 정의된 항목 (source-hash · SCE-MAP · 생성 epoch), §A6 byte-equivalence가 측정하려던 emit body 외 zone."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.o-generated-source-traceability",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm"
+      ],
+      "carry_forward_bullets": [
+        "crc16_ccitt ↔ algorithm_crc16 pair Layer 2 — upstream fixture에 name=crc16_ccitt 부재로 file-name 불일치; SCE upstream PR + vendor pin 갱신 후 시도 가능.",
+        "keyexpr_includes Layer 2 pair 부적합 — upstream algorithm_keyexpr_match_first는 BC iterate algorithm으로 의미가 다름; v1=intersect stub 형 유지, Layer 1만 운영.",
+        "vle_u64_decode Layer 2 pair 부재 — SCE-side에 zenoh-pico _z_zint_decode_u64 parity fixture 작성 후 pairing 가능.",
+        "SCE-side BASELINE_SYMBOLS doc-comment header + tier ratify (R16·R17 carry 유지, 외부 의존).",
+        "Phase A 추가 algorithm SCXML (declare/undeclare/subscribe/publish) — wire-spec §5/§6 mapping 선행 (R15-R17 carry 유지).",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시 (R15-R17 carry 유지).",
+        "vendor/sce pin 갱신 정책 — R14 carry 유지, 갱신 시 audit entry 의무."
+      ]
+    },
     "Round 2": {
       "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
       "changes_bullets": [
