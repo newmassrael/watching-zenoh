@@ -4,10 +4,11 @@ This file is auto-read by Claude Code at every session start. It defines
 **Mnemosyne SSOT operating rules** for the 13 design docs registered in
 `mnemosyne.toml`.
 
-For prior-session context (decisions, SCE state, OQ-W tracking) read
-`notes/SESSION_KICKOFF.md` after this file. (Moved from `docs/` per
-Round 7 scope correction — activity-log genre is outside Mnemosyne
-governance; the file is a normal markdown read.)
+Prior-session context is recovered from the atomic store changelog
+(`query_section(.., include_changelog=true)` or `list_sections` →
+ChangelogEntry traversal). The legacy `notes/SESSION_KICKOFF.md`
+activity log was removed in Round 10 — atomic ledger entries (Round 1+)
+are the audit-traced replacement.
 
 ## SSOT contract
 
