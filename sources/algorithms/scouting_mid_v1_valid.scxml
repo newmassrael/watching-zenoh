@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Wire-spec §3 scouting-layer message-ID validator — pre-session SCOUT
+  / HELLO v1 allowlist (zenoh-pico
+  include/zenoh-pico/protocol/definitions/transport.h:28-29). Pure
+  predicate over the scouting message header byte returning true iff
+  `header.mid` is a v1-recognized scouting message ID.
+
+  MID extraction: header & 0x1F (`_Z_MID_MASK` per zenoh-pico
+  core.h:37; identical 5-bit field as §4 session and §5 network).
+
+  v1 scouting allowlist (zenoh-pico transport.h:28-29):
+    0x01  SCOUT  (§3 active / passive discovery query, UDP multicast)
+    0x02  HELLO  (§3 reply to SCOUT, advertise ZID + locators)
+
+  Context-collision note: MID 0x01 / 0x02 also map to T_INIT / T_OPEN
+  in §4 session layer (zenoh-pico transport.h:33-34). The collision
+  is intentional in the zenoh-pico namespace because the two MIDs
+  appear on disjoint link surfaces — §3 SCOUT/HELLO ride the
+  scouting link (UDP multicast 224.0.0.224:7446 per §3 / §8) while
+  §4 T_INIT/T_OPEN ride the established session link (TCP/UDP unicast
+  or QUIC per §8). The caller is expected to know which layer it is
+  in before invoking either validator; a context-mixed call (e.g.
+  passing a session-link header into this scouting validator) is a
+  caller-side bug, not a wire-format ambiguity.
+
+  Unknown scouting MID → false; caller maps to scout-rejection +
+  scouting-FSM stay-Listening (no escalation to session-close because
+  the scouting link is not yet a session).
+
+  No SCE-upstream test fixture exists for scouting MID validation at
+  vendor pin `1473f99f`; verify-codegen.sh Layer 2 (byte-golden) is
+  N/A. Layer 1 (six-backend emit success) covers the RFC §5.J.4
+  parity gate.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="scouting_mid_v1_valid"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="header" type="uint8"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="mid" type="uint8" init="0"/>
+    <sce:assign target="mid" expr="header &amp; 0x1F"/>
+    <sce:if cond="mid === 0x01">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="mid === 0x02">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:return expr="false"/>
+  </sce:body>
+</scxml>

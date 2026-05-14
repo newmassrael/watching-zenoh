@@ -3137,6 +3137,41 @@
         "Phase E (README 저작) — Mnemosyne migration 마지막, LICENSE/SPDX 안내 포함"
       ]
     },
+    "Round 21": {
+      "decision_summary": "§3 scouting + §5.1 declare sub + §6 payload Z_MID dispatcher 3종 land — scouting_mid_v1_valid (SCOUT/HELLO) + declare_sub_mid_v1_valid (0x00-0x07 + 0x1A) + payload_z_mid_v1_valid (Z_PUT..Z_ERR, Z_OAM 의도적 exclude); R19-R20 dispatcher 패턴 wire-spec MVP top-level MID 표면 완전 종결.",
+      "changes_bullets": [
+        "sources/algorithms/scouting_mid_v1_valid.scxml — SCOUT=0x01 + HELLO=0x02; §3 v1 surface",
+        "sources/algorithms/declare_sub_mid_v1_valid.scxml — §5.1 0x00-0x07 + 0x1A (9 분기)",
+        "sources/algorithms/payload_z_mid_v1_valid.scxml — §6 Z_PUT..Z_ERR (5 분기); Z_OAM 의도적 exclude",
+        "Z_OAM (0x00) 명시 scope-out: §6.1/§6.2/§6.3 어디에도 mvp Inclusion 없음 — Phase B+ OQ",
+        "MID extraction header & 0x1F 통일 (R19-R21 6 SCXML 전부); _Z_MID_MASK convention 유지"
+      ],
+      "verification_bullets": [
+        "Layer 1 six-backend emit: scouting/declare/payload 6/6 × 3 = 18 pass; 0 fail",
+        "Layer 2 N/A — SCE upstream에 §3/§5.1/§6 MID validator fixture 부재 (pin 1473f99f)",
+        "atomic ledger entries 20→21 expected, sections=206 invariant (SCXML asset, no atomic section mutation)",
+        "Round-trip 11/11 + T1 orphan=0 preserved; impact_refs 6 sections 전부 live"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm"
+      ],
+      "carry_forward_bullets": [
+        "tlv_advance.scxml — §7 iterator advance + Z flag extract, Phase A4+ cursor/Result 의존",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시 (R15+ carry 유지)",
+        "Phase A 메시지별 codec body — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor 의존",
+        "Z_OAM (0x00) payload-layer Inclusion 결정 — Phase B+ OQ, R21에서 명시 scope-out",
+        "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R20 외부 의존 carry)",
+        "crc16_ccitt ↔ algorithm_crc16 Layer 2 — SCE upstream PR (root name= attribute) + pin 갱신 후",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture (R18 carry)",
+        "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무",
+        "Phase E (README 저작) — Mnemosyne migration 마지막, LICENSE/SPDX 안내 포함"
+      ]
+    },
     "Round 3": {
       "decision_summary": "Phase B complete — RFC §5 thirteen kind sub-sections atomic decomposition (5.A-5.F, 5.I-5.O); Phase 2 deferred 5.G/5.H skipped.",
       "changes_bullets": [
