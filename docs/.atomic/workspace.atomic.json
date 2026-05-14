@@ -2865,6 +2865,41 @@
         "THIRD_PARTY.md ledger creation still deferred — vendor/sce is git submodule (gitlink), not vendored snippet copy; ledger trigger remains 'first inline copy of third-party code'"
       ]
     },
+    "Round 15": {
+      "decision_summary": "Phase A 후속 SCXML 3종 land (vle_u64_decode + keyexpr_intersect + keyexpr_includes) + crc16_ccitt에 name attribute 부여; R14 carry #1/#6은 misdiagnosis로 판명되어 자력 closure.",
+      "changes_bullets": [
+        "sources/algorithms/crc16_ccitt.scxml에 root name=\"crc16_ccitt\" attribute 추가 (R13 land 시 미부여, 이번 라운드 보충).",
+        "sources/algorithms/keyexpr_intersect.scxml 신규 (38 lines + SPDX) — v1 = exact uint32 ID equality, RFC §5.A line 311 + §5.L line 2642-2647 lock. SCE upstream algorithm_keyexpr_intersect_exact.scxml과 동일 body, watching-zenoh source-of-truth 사본.",
+        "sources/algorithms/keyexpr_includes.scxml 신규 (43 lines + SPDX) — v1 = exact ID equality, includes ≡ intersect under uint32-keyed compile-time fixed KeyExpr set; 호출-사이트는 wildcard 형 land 시 분기.",
+        "sources/algorithms/vle_u64_decode.scxml 신규 (62 lines + SPDX) — zenoh-pico _z_zint_decode_u64 parity, Phase A3 primitives only (bytes → uint64, max-iter=10). 인코드 형 (RFC §B worked example, cursor/Result type 요구)은 Phase A4+ carry.",
+        "verify-codegen.sh Layer 1: 4 SCXML × 6 backend = 24/24 emit-success.",
+        "verify-codegen.sh Layer 2 trial (keyexpr_intersect ↔ vendor/sce/.../algorithm_keyexpr_intersect_exact.scxml): 6/6 file-content mismatch, 그러나 진단상 emit 코드의 *body 자체는 동일*; 차이는 RFC §5.O traceability anchors (source-hash + SCE-MAP line number) 두 줄만. RFC §A6 byte-equivalence acceptance gate의 semantic intent는 충족.",
+        "R14 carry #1 closure: SCE-output file name도 root name attribute에서 derive (`keyexpr_intersect.rs` 양쪽 동일) — R14가 retract한 'stem 의존' 가설은 vendor pin 1473f99f 시점에 이미 fix됨.",
+        "R14 carry #6 closure: SCE upstream PR for `<sce:signature name>` attribute는 vendor/sce/sce-build/src/forge/xsd_validator.rs:64 `<xs:attribute name='name' type='xs:string'/>`로 이미 land, watching-zenoh side에서 자력 사용 가능."
+      ],
+      "verification_bullets": [
+        "validate_workspace: T1 orphan total=0, round-trip mandatory=11/11, T3 reject=0, GENERATED.md=sync (사전 baseline 동일 유지).",
+        "verify-codegen.sh sources/algorithms/{crc16_ccitt,keyexpr_intersect,keyexpr_includes,vle_u64_decode}.scxml: 각각 6/6 backend emit pass=6 fail=0 (rust/cpp/kotlin/go/c11/python).",
+        "Layer 2 mismatch root cause empirical 확인: input/rust/keyexpr_intersect.rs vs upstream/rust/keyexpr_intersect.rs의 diff는 line 2 (source-hash) + line 5-6 (SCE-MAP line number) 두 줄만; body identifier (`pub fn keyexpr_intersect(...)`) + return expression 모두 동일.",
+        "vendor pin xsd_validator.rs root name= attribute 지원 확인 (xsd_validator.rs:64 + algorithm_keyexpr_intersect_exact.scxml fixture가 이미 name=\"keyexpr_intersect\" 보유).",
+        "vle_u64_encode 시도 → fail (`workspace root not detected; template ...`) — cursor/Result type 미 land 확인; decode form 으로 pivot 후 6/6 통과로 진단 검증."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.o-generated-source-traceability",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/appendix-a--worked-example-crc16-ccitt",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/appendix-b--worked-example-vle-zint-u64"
+      ],
+      "carry_forward_bullets": [
+        "vle_u64_encode.scxml — RFC §B worked example 원형 (cursor + Result type 의존); Phase A4 §5.F const-fold gate land 시 함께 land.",
+        "verify-codegen.sh Layer 2 활성화 — SCE-MAP/source-hash anchors strip 옵션 도입 또는 'traceability-only diff' vs 'body diff' 구분 reporter 확장 필요. 별도 라운드.",
+        "Phase A 추가 algorithm SCXML — declare/undeclare/subscribe/publish 등 control-plane 측 algorithm. wire-spec-subset.md §5/§6 mapping 후.",
+        "vendor/sce pin 갱신 정책 — R14 이후 명시 carry 유지. 갱신 시 R16+ audit entry로 기록."
+      ]
+    },
     "Round 2": {
       "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
       "changes_bullets": [

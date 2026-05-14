@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  KeyExpr `includes` predicate — watching-zenoh v1 semantics.
+
+  zenoh-pico defines `_z_keyexpr_includes(left, right)` as "every key
+  matching `right` also matches `left`" (asymmetric — left is the
+  broader expression). The general case requires the same wildcard
+  trie-walk as `keyexpr_intersect` (see
+  `zenoh-pico/include/zenoh-pico/session/keyexpr_match_template.h`).
+
+  Under the watching-zenoh v1 lock (RFC §5.A line 311 + §5.L line
+  2642-2647 + Appendix C line 4001-4003) the runtime KeyExpr set is
+  compile-time fixed and each entry resolves to a single uint32 ID, so
+  `includes` collapses to exact ID equality — identical to
+  `keyexpr_intersect`. The semantic distinction is preserved at the
+  call site (subscription bookkeeping vs declaration-graph filtering)
+  even though the body is the same; Phase A4+ const-fold extensions
+  may diverge the two predicates without breaking call-site contracts.
+
+  Authored as a sibling of `keyexpr_intersect.scxml` so the per-call
+  trace site is named honestly; consumers that need the wildcard form
+  re-author this fixture with a wildcard body when the compile-time
+  KeyExpr set ceases to be uint32-keyed.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_includes"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="broader_id" type="uint32"/>
+    <sce:param name="narrower_id" type="uint32"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:return expr="broader_id === narrower_id"/>
+  </sce:body>
+</scxml>
