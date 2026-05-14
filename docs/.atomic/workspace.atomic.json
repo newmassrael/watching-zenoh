@@ -1330,6 +1330,55 @@
         "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w17--f4-fuzz-coverage-transport-engine-choice-and-per-target-default"
       ]
     },
+    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i.0-tier-definitions": {
+      "title": "§5.I.0 — Tier definitions",
+      "parent_doc": "docs/rfc-sce-protocol-synthesis.md",
+      "parent_section": "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+      "intent": "Spec-authoritative two-tier classification (Architectural / Peripheral) of §5.I primitives so future ratify requests auto-classify rather than relying on implicit SCE maintainer judgment.",
+      "rationale_bullets": [
+        "Inclusion criterion currently lives in SCE source (intrinsic_registry.rs:258), not RFC body.",
+        "Single OQ rejection plus implicit maintainer judgment is O(N) per future ratify request.",
+        "Explicit tiers turn the baseline-drift veto from human judgment into spec-side classification.",
+        "RNG/HMAC/crypto auto-route to Peripheral-tier by definition; baseline never receives them.",
+        "SCE-side cost is zero code — one BASELINE_SYMBOLS doc-comment header update."
+      ],
+      "inputs_bullets": [
+        "Architectural-tier members — atomics, fences, cache maintenance, IRQ control (101 BASELINE_SYMBOLS).",
+        "Peripheral-tier members — RNG, HMAC, HSEM, crypto, vendor time sources (via target_plugin only).",
+        "Inclusion criterion — one valid impl per (arch, ordering, width) triple defines Architectural-tier."
+      ],
+      "outputs_bullets": [
+        "New RFC §5.I.0 subsection preceding the §5.I baseline whitelist table.",
+        "101 current baseline symbols re-labelled Architectural-tier without surface change.",
+        "target_plugin extension shape unchanged; tier label confirms its Peripheral-tier role.",
+        "Future primitive ratify requests auto-classify against published tier definitions."
+      ],
+      "caveats_bullets": [
+        "<sce:extern> resolution against baseline ∪ target_plugin unchanged — no validator surface added.",
+        "Tier labels are spec-side classification metadata, not a new build-time rejection axis.",
+        "SCE-side BASELINE_SYMBOLS doc-comment header update + tier ratify exchange remain carry."
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "Keep tiers implicit (status quo)",
+          "reason": "O(N) ratify debates for N future peripheral primitives."
+        },
+        {
+          "alternative": "Per-primitive carve-out rule",
+          "reason": "only crypto-vetoed; non-crypto peripheral primitives uncovered."
+        },
+        {
+          "alternative": "Document criterion in SCE-side only",
+          "reason": "RFC §5.I silent; downstream consumers cannot audit-trace."
+        }
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+      ],
+      "decision_status": "active"
+    },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage": {
       "intent": "Codegen backend = 3-tuple (language, OS, runtime_crate); parity invariant for new kinds across six backends; statechart no_std variant.",
       "rationale_bullets": [
@@ -2926,6 +2975,34 @@
         "verify-codegen.sh Layer 2 활성화 — R15 carry 유지 (SCE-MAP/source-hash strip option or body-only diff reporter)."
       ]
     },
+    "Round 17": {
+      "decision_summary": "OQ-W24 full closure — RFC §5.I.0 'Tier definitions' subsection landed as atomic-store new section via R287/R289 add_section primitive (first watching-zenoh use of new section creation surface).",
+      "changes_bullets": [
+        "add_section: rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i.0-tier-definitions created.",
+        "§5.I.0 atomic fields: intent + rationale(5) + inputs(3) + outputs(4) + caveats(3) + alternatives(3).",
+        "impact_scope set to §5.I (parent), §OQ-W24, §OQ-W15.",
+        "OQ-W24 raw-Edit: Status open→in-progress→answered (history append), Last update Round 17.",
+        "R16 carry #1 closure: §5.I.0 정식 form land; §5.I caveats remove는 도구 부재로 미시행."
+      ],
+      "verification_bullets": [
+        "validate_workspace mid-mutate: T1=0, round-trip 11/11, sections 205→206 (one new atomic section).",
+        "validate_workspace post-raw-Edit: T3 warn 852→853 (OQ status history append, R138 intentional zone).",
+        "query_section §5.I.0: 6 atomic fields rendered; alternatives em-dash normalized to `--` separator.",
+        "Raw-Edit carve-out: rfc-open-questions-log.md still atomic-decompose unassigned (Phase 미배정)."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i.0-tier-definitions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation"
+      ],
+      "carry_forward_bullets": [
+        "SCE-side BASELINE_SYMBOLS doc-comment header update + tier ratify exchange (외부 의존, R16 carry 유지).",
+        "verify-codegen.sh Layer 2 활성화 — R15·R16 공통 carry, 자력 closure 가능 다음 라운드 후보.",
+        "Phase A 추가 algorithm SCXML (declare/undeclare/subscribe/publish) — wire-spec §5/§6 mapping 선행 필요.",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시 (cursor/Result type 의존).",
+        "vendor/sce pin 갱신 정책 — R14 carry 유지, 갱신 시 audit entry 의무."
+      ]
+    },
     "Round 2": {
       "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
       "changes_bullets": [
@@ -3278,5 +3355,5 @@
     }
   },
   "inventory_entries": {},
-  "schema_version": 2
+  "schema_version": 3
 }
