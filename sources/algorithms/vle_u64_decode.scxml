@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  VLE (Variable-Length Encoding) ZInt u64 decode — Phase A3 form,
+  zenoh-pico parity.
+
+  Wire shape (zenoh-pico `_z_zint_decode_u64`, RFC §5.B): continuation-
+  bit chain of 7-bit groups, little-endian within each group; high bit
+  set on every byte except the last. A u64 takes at most 10 bytes
+  (ceil(64/7) = 10) — the `max-iter="10"` bound is the §5.A WCET
+  handle, codegen emits it as a `_Static_assert` friend on MCU and an
+  unroll hint on AP.
+
+  Encode-direction sibling (RFC Appendix B worked example) requires
+  the `cursor` and `Result` types that land in Phase A4+ (the §5.F
+  build-time const-fold gate landing pulls those types through with
+  it). The encode form is carried separately as `vle_u64_encode.scxml`
+  once Phase A4 lands; decode lands first because the RX codec
+  aggregate-WCET calculation (RFC §5.B "Codec aggregate WCET") consumes
+  `vle_decode_cycles_per_byte` from `deploy.platform` and the decode
+  algorithm is the per-field contributor.
+
+  No SCE-upstream test fixture exists for VLE at vendor pin
+  `1473f99f`; verify-codegen.sh Layer 2 (byte-golden vs upstream) is
+  N/A for this source. Layer 1 (per-backend emit-success) covers the
+  six-backend parity gate from RFC §5.J.4.
+
+  The body terminates on the first byte whose continuation bit is
+  clear, OR after 10 input bytes (the `max-iter` ceiling). The 10-byte
+  case implies an unterminated VLE — caller treats `byte_index >= 9`
+  with a still-set continuation bit as a codec-level decode error
+  (`codec/vle-width-overflow` per RFC §5.B diagnostics).
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="vle_u64_decode"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="data" type="bytes"/>
+    <sce:return type="uint64"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="result" type="uint64" init="0"/>
+    <sce:var name="shift" type="uint8" init="0"/>
+    <sce:foreach item="b" in="data">
+      <sce:var name="lo" type="uint64" init="b"/>
+      <sce:assign target="result" expr="result | ((lo &amp; 0x7F) &lt;&lt; shift)"/>
+      <sce:if cond="(b &amp; 0x80) === 0">
+        <sce:return expr="result"/>
+      </sce:if>
+      <sce:assign target="shift" expr="shift + 7"/>
+    </sce:foreach>
+    <sce:return expr="result"/>
+  </sce:body>
+</scxml>

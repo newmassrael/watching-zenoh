@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  KeyExpr `intersects` predicate — watching-zenoh v1 semantics.
+
+  RFC §5.A line 311 + §5.L line 2642-2647 + Appendix C line 4001-4003
+  lock the v1 semantics: the runtime KeyExpr set is compile-time fixed,
+  matching is reduced to an O(1) table lookup, and the per-entry
+  predicate is exact uint32 ID equality. Full zenoh-pico wildcard
+  semantics (`**`, `*`, `$*`, `@`-verbatim — see
+  `zenoh-pico/include/zenoh-pico/session/keyexpr_match_template.h`) is
+  explicitly out of MVP scope per Appendix C; consumer-side variants
+  with prefix or wildcard semantics land additively in later phases
+  alongside the §5.F const-fold gate (Phase A4+).
+
+  Same body as the SCE upstream test fixture
+  `tests/forge/resources/algorithm_keyexpr_intersect_exact.scxml` (pin
+  `1473f99f`); the watching-zenoh source duplicates the algorithm
+  because the SCE fixture is a codegen-regression scaffold, not a
+  consumable library. RFC §A6 cross-language byte-equivalence acceptance
+  gate applies to this algorithm exactly as it does to crc16_ccitt.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="keyexpr_intersect"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="entry_id" type="uint32"/>
+    <sce:param name="target_id" type="uint32"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:return expr="entry_id === target_id"/>
+  </sce:body>
+</scxml>

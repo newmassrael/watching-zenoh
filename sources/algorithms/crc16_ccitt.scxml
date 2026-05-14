@@ -16,6 +16,7 @@
        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
        xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
        sce:kind="algorithm"
+       name="crc16_ccitt"
        version="1.0">
   <sce:signature>
     <sce:param name="data" type="bytes"/>
