@@ -58,4 +58,19 @@
     </sce:foreach>
     <sce:return expr="result"/>
   </sce:body>
+  <!--
+    Test vectors — VLE u64 decode boundary surface. Zero (single
+    byte, high bit clear), maximum single-byte payload (0x7F = 127),
+    and minimum two-byte payload (0x80 0x01 = 128 = 1 << 7). Anchors
+    the first-byte short-circuit path + the shift+7 accumulator
+    transition. Larger boundaries (8-byte / 10-byte) defer to a
+    bulk JSON oracle alongside the codec conformance harness; the
+    inline anchor pins the entry/transition decisions into the
+    SCXML so the per-backend sidecar (`<fixture>_test.{rs,h}`)
+    round-trips them through the same body the conformance gate
+    exercises.
+  -->
+  <sce:test-vector hex="00" value="0"/>
+  <sce:test-vector hex="7F" value="127"/>
+  <sce:test-vector hex="8001" value="128"/>
 </scxml>

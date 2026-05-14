@@ -3204,6 +3204,40 @@
         "Phase E (README 저작) — Mnemosyne migration 마지막, LICENSE/SPDX 안내 포함"
       ]
     },
+    "Round 23": {
+      "decision_summary": "vle pair test-vector hardening — vle_byte_length + vle_u64_decode 각 3 boundary vectors land; SCE v1 test-vector schema single-`bytes`-param scalar-return 제약 발견, MID validator (uint8 param) 6종 test-vector는 Phase B5 multi-arg/non-bytes 지원 후 deferred carry.",
+      "changes_bullets": [
+        "vle_byte_length.scxml — 3 test-vectors (hex=00→1, 8001→2, FF7F→2); 1-2 byte boundary",
+        "vle_u64_decode.scxml — 3 test-vectors (hex=00→0, 7F→127, 8001→128); zero/max/transition",
+        "SCE v1 test-vector schema: 단일 bytes param + scalar return only (sce-forge-ext.xsd doc-comment)",
+        "MID validator (uint8 param) 6종 test-vector 부적격 → Phase B5 multi-arg/non-bytes 지원 후",
+        "Sidecar test 파일 생성 확인 (per-backend 1 → 2 file, RFC §5.J.4 parity 표면 확장)",
+        "smoke-test 시 scouting_mid 임시 추가 → revert (schema 제약 발견 직후)"
+      ],
+      "verification_bullets": [
+        "Layer 1 six-backend emit: vle_byte_length + vle_u64_decode + scouting(revert) 6/6 × 3 = 18 pass",
+        "Sidecar file count delta vle 양쪽 1 → 2 per backend (algorithm + test sidecar)",
+        "atomic ledger entries 22→23 expected, sections=206 invariant (SCXML asset, no atomic mutation)",
+        "Round-trip 11/11 + T1 orphan=0 preserved (impact_refs §5.A/§5.B/§5.J 전부 live)"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"
+      ],
+      "carry_forward_bullets": [
+        "MID validator test-vector hardening (6 SCXMLs) — Phase B5 multi-arg/non-bytes 지원 후 라운드",
+        "tlv_advance.scxml — Phase A4+ cursor/Result; vle_byte_length 내부 호출",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시",
+        "Phase A 메시지별 codec body — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor",
+        "Z_OAM (0x00) payload-layer Inclusion 결정 — Phase B+ OQ",
+        "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R20 외부 의존)",
+        "crc16_ccitt ↔ algorithm_crc16 Layer 2 — SCE upstream PR + pin 갱신 후",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture (R23에 SCE 측 자료 다수화)",
+        "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무",
+        "Phase E (README 저작) — Mnemosyne migration 마지막"
+      ]
+    },
     "Round 3": {
       "decision_summary": "Phase B complete — RFC §5 thirteen kind sub-sections atomic decomposition (5.A-5.F, 5.I-5.O); Phase 2 deferred 5.G/5.H skipped.",
       "changes_bullets": [
