@@ -117,19 +117,30 @@ Once a doc completes its phase migration its sections live in the
 atomic store; the carve-out no longer applies to that doc — mutation
 must route through the typed primitives.
 
-## Local CI gate
+## Local CI gates
 
-A pre-commit hook at `.githooks/pre-commit` runs `mnemosyne-cli
-validate-workspace` and blocks any commit that introduces a new T1
-orphan, a resolved-but-still-ledgered entry (drift catch), or a
-round-trip mandatory break. One-time install per clone:
+`.githooks/` provides three hooks. One-time install per clone:
 
 ```
 git config core.hooksPath .githooks
 ```
 
-The hook requires `mnemosyne-cli` on `PATH` (install via
+- **pre-commit** — fast `mnemosyne-cli validate-workspace` gate;
+  blocks any commit that introduces a new T1 orphan, a
+  resolved-but-still-ledgered entry (drift catch), or a
+  round-trip mandatory break.
+- **commit-msg** — enforces `COMMIT_FORMAT.md` (subject and body
+  ≤72 bytes per line, no multi-line bullet wraps, no
+  Co-Authored-By / "Generated with Claude Code" / emoji).
+- **pre-push** — re-runs `mnemosyne-cli validate-workspace` at
+  push time so the integrity gate also covers post-commit state
+  changes (manual atomic.json edits, amends, rebases) before
+  remote share.
+
+`pre-commit` and `pre-push` require `mnemosyne-cli` on `PATH`
+(install via
 `cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli`).
+`commit-msg` needs only bash + GNU grep with the `-P` flag.
 
 ## Hard prohibitions
 
