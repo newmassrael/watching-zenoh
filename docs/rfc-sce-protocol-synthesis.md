@@ -3320,7 +3320,7 @@ sourcemap translates back.
   symbols that resolve through the sourcemap.
 - **§6.2.6 (drift detection)** — the sourcemap is one of the
   verified artifacts; its `source_hash` is computed identically to
-  the generated-code header, and `sce-build verify` includes it in
+  the generated-code header, and `sce-codegen verify` includes it in
   the gate.
 
 **Diagnostics.**
@@ -3501,11 +3501,11 @@ carries a header of the form:
 ```
 // SCE-GENERATED — DO NOT EDIT
 // source-hash: <sha256 of sorted input SCXML + deploy.yaml>
-// template-hash: <sha256 of sce-build binary + template tree>
+// template-hash: <sha256 of template tree + Cargo.lock>
 // generated-at: <utc timestamp, informational only>
 ```
 
-`sce-build verify <out-dir>` recomputes both hashes from the
+`sce-codegen verify <out-dir>` recomputes both hashes from the
 current source + template state and compares against the embedded
 values. Mismatch is failure. CI runs this as a gate; pre-commit
 hook runs it locally.

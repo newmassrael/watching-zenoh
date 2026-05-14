@@ -759,7 +759,7 @@ reading/running upstream), or `either`.
 
 ### OQ-W15 — Stateless-accept primitive ownership and defaults
 
-- **Status:** open
+- **Status:** answered (question (a)); (b) carries via post-Phase-A empirical validation
 - **Owner:** SCE maintainer (whitelist decision) + watching-zenoh
   author (defaults).
 - **Question (a) primitive ownership:** The cookie HMAC primitive
@@ -818,9 +818,47 @@ reading/running upstream), or `either`.
   public-Internet-facing deploys cannot proceed without HMAC).
   Private-LAN MCU listeners (no `untrusted_source: true`) are NOT
   blocked.
-- **Last update:** 2026-05-01 후속 #6 (ratification summary
-  artifact prepared at `docs/oq-w15-ratification-summary.md`;
-  status remains `open` pending SCE sync).
+- **Resolution (Round 11, 2026-05-14):** SCE maintainer answer
+  received. Question (a) closed:
+  - **Q1 (RNG → core whitelist):** **No.** SCE `BASELINE_SYMBOLS`
+    boundary is "architecture-fixed primitives" (atomics / fences /
+    cache / IRQ — closed implementation choice per
+    `sce-build/src/forge/intrinsic_registry.rs:258` + drift-guard
+    test `:455-457`). RNG has multiple valid implementations (HW
+    TRNG / ADC+Yarrow / getrandom / arc4random) with quality +
+    seeding policy surface, which is precisely the `target_plugin`
+    category (`sce-build/src/forge/target_plugin.rs:9-16`
+    Q-Call-6 (a) additive composition). Precedent-risk rationale:
+    ratify RNG would invite SHA-256 / AES-GCM / ECDSA under the
+    same "public-Internet requires it" framing — baseline drift
+    toward crypto authority, which SCE is not.
+  - **Q2 (HMAC → target plugin):** **Yes, ratified** — aligns with
+    initial proposal. Per-SoC accelerator selection (STM32H7
+    `CRYP` / ESP32 `SHA` / Cortex-M0+ software fallback) is
+    plugin-meaningful; software fallback also authorable as an
+    `algorithm` kind. Crypto-free baseline precedent preserved.
+  - **Fallback path (Q1 = No):** validated by SCE C13-β anti-flood
+    integration tests (`sce-build/tests/c13_beta_antiflood.rs:173-308`,
+    8 tests over baseline ∪ plugin) — RNG declared as a
+    `target_plugin` row or `<sce:extern>` declaration is accepted
+    by `validate_stateless_accept_externs` (commit `4570a389`,
+    `sce-build/src/lib.rs:1894`). public-Internet-facing MCU
+    deploys unblock by adding a 4-line plugin yaml row, not by SCE
+    spec change.
+  - **Counter-offer (long-term boundary hardening):** SCE
+    maintainer proposed that, should watching-zenoh define RFC §5.I
+    "Architectural-tier" vs "Peripheral-tier" explicit separation,
+    future ratify requests can be auto-classified (RNG / SHA /
+    AES-GCM as Peripheral-tier by construction). Tracked as
+    **OQ-W24** below; spec restructure deferred to a separate
+    round.
+  - Atomic-store cascade: `intrinsics-runtime--symbol-surface/2-5-rng`
+    + `/2-6-hmac` atomic intent ratified to plugin path;
+    `oq-w15-a--ratification-summary-for-sce-maintainer-sync/6-action-requested`
+    carries Decision Outcome citation.
+- **Last update:** Round 11, 2026-05-14 (SCE maintainer answer
+  reflected — (a) closed Q1=No / Q2=Yes; (b) remains open per
+  empirical-validation post-Phase-A path).
 
 ### OQ-W14 — Hardware sync primitive standardization in target_plugin
 
@@ -1492,6 +1530,75 @@ reading/running upstream), or `either`.
   entry as a passive-mode landing patch.
 - **Last update:** 2026-05-01 후속 #5 (OQ-W23 close — defer to
   Phase D+).
+
+### OQ-W24 — RFC §5.I Architectural-tier vs Peripheral-tier explicit separation
+
+- **Status:** open (SCE counter-offer; long-term boundary hardening).
+- **Owner:** watching-zenoh author (RFC §5.I restructure) + SCE
+  maintainer (ratify the structural separation).
+- **Question.** Current RFC §5.I defines a single baseline whitelist
+  (101 symbols, atomics / fences / cache / IRQ) with an implicit
+  inclusion criterion: "architecture-fixed primitives where the
+  implementation choice is closed". The criterion lives in SCE's
+  `sce-build/src/forge/intrinsic_registry.rs:258` constant + drift
+  guard at `:455-457`, not in the RFC body. Should RFC §5.I
+  introduce an explicit two-tier decomposition:
+  - **Architectural-tier** (current baseline): primitives whose
+    implementation is fixed by the CPU / SoC architecture (atomics,
+    fences, cache maintenance, IRQ control). One valid
+    implementation per `(arch, ordering, width)` triple.
+  - **Peripheral-tier** (current `target_plugin`): primitives with
+    multiple valid implementations and a quality / configuration
+    surface (RNG, HMAC, future crypto primitives, hardware
+    semaphores).
+- **Why it matters.** SCE maintainer answer to OQ-W15 (a) Q1
+  cited precedent risk: ratifying RNG into the baseline would
+  invite SHA-256 / AES-GCM / ECDSA under the same "public-Internet
+  requires it" framing — baseline drift toward crypto authority,
+  which SCE is not the spec owner of. Today the defense rests on a
+  single OQ rejection plus implicit SCE maintainer judgment. With
+  explicit tiers, future ratify requests auto-classify (RNG →
+  Peripheral-tier by construction; no per-symbol debate). The
+  tier definition itself becomes the spec authority that holds the
+  boundary.
+- **Proposal (initial).** Adopt the two-tier definition above as a
+  new RFC §5.I.0 subsection ("Tier definitions") preceding the
+  existing baseline whitelist table. The 101 current symbols are
+  re-labelled Architectural-tier without surface change. The
+  `<sce:extern>` resolution flow against baseline ∪ target_plugin
+  (validated by `validate_stateless_accept_externs`, SCE
+  `4570a389`) is unchanged; the tier labels are spec-side
+  classification metadata, not a new validator surface. SCE-side
+  change estimate: zero code, one `BASELINE_SYMBOLS` doc-comment
+  header update.
+- **Counter-options.**
+  1. **Keep tiers implicit (status quo).** Each future ratify
+     request decided ad-hoc with maintainer judgment + OQ entry.
+     Cost: O(N) ratify debates for N future peripheral primitives.
+  2. **Per-primitive carve-out rule.** Codify "no crypto in
+     baseline" as a single inclusion-veto rule. Cheaper than full
+     tier separation but less general (does not cover non-crypto
+     peripheral primitives like hardware RNG accelerators or
+     vendor-specific time sources).
+  3. **Document criterion in SCE-side only.** Place the boundary
+     in `sce-build` README or `intrinsic_registry.rs` module
+     comment, not RFC. Cost: keeps RFC §5.I silent on inclusion
+     criterion; downstream consumers cannot audit-trace the
+     boundary without reading SCE source.
+- **Action.** Draft RFC §5.I.0 subsection in a follow-up round
+  (separate from OQ-W15 (a) closure; the spec restructure has
+  enough surface to warrant its own atomic ChangelogEntry).
+  Coordinate with SCE maintainer to ratify the tier labels in the
+  same exchange as the `BASELINE_SYMBOLS` doc-comment update.
+- **Raised by:** SCE maintainer counter-offer in OQ-W15 (a)
+  resolution (Round 11, 2026-05-14). See OQ-W15 Resolution block
+  above.
+- **Blocks:** nothing. Future crypto / peripheral primitive ratify
+  requests benefit from this being in place but are not blocked
+  by its absence — the implicit boundary works today, just at
+  higher debate cost per future request.
+- **Last update:** Round 11, 2026-05-14 (registered as SCE
+  counter-offer track).
 
 ---
 

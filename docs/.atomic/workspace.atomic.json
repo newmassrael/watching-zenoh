@@ -533,17 +533,32 @@
       ]
     },
     "intrinsics-runtime--symbol-surface/2-5-rng": {
-      "intent": "RNG core whitelist (OQ-W15 (a) option 1 initial proposal) — sce_random_fill universal contract; consumed by stateless_accept cookie HMAC key gen only.",
+      "intent": "RNG target plugin row (OQ-W15 (a) Q1 ratified Round 11: core whitelist rejected; sce_random_fill consumed by stateless_accept cookie HMAC key gen).",
+      "caveats_bullets": [
+        "Q1 = No ratified Round 11: SCE BASELINE_SYMBOLS boundary is architecture-fixed primitives only.",
+        "Impl multiplicity (HW TRNG / ADC+Yarrow / getrandom / arc4random) places RNG in plugin tier.",
+        "Fallback validated by SCE c13_beta_antiflood tests (baseline ∪ plugin lookup, 4570a389).",
+        "Counter-offer tracked as OQ-W24 (RFC §5.I tier-explicit separation, boundary hardening)."
+      ],
       "impact_scope": [
         "intrinsics-runtime--symbol-surface/2-symbol-categories",
-        "intrinsics-runtime--symbol-surface/2-6-hmac"
+        "intrinsics-runtime--symbol-surface/2-6-hmac",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation"
       ]
     },
     "intrinsics-runtime--symbol-surface/2-6-hmac": {
-      "intent": "HMAC target plugin (OQ-W15 (a) option 2) — sce_hmac_sha256 per-SoC accelerator selection (CRYP/SHA/SW-fallback); consumed by listener links with untrusted_source.",
+      "intent": "HMAC target plugin (OQ-W15 (a) Q2 ratified Round 11: per-SoC accelerator selection; sce_hmac_sha256 consumed by listener links with untrusted_source).",
+      "caveats_bullets": [
+        "Q2 = Yes ratified Round 11: proposal target_plugin path confirmed by SCE maintainer.",
+        "Per-SoC accelerator surface (STM32H7 CRYP / ESP32 SHA / Cortex-M0+ SW) keeps baseline crypto-free.",
+        "SW fallback authorable as algorithm kind; wire output identical across backings."
+      ],
       "impact_scope": [
         "intrinsics-runtime--symbol-surface/2-symbol-categories",
-        "intrinsics-runtime--symbol-surface/2-5-rng"
+        "intrinsics-runtime--symbol-surface/2-5-rng",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation"
       ]
     },
     "intrinsics-runtime--symbol-surface/2-7-hw-semaphores": {
@@ -751,11 +766,17 @@
         "Decision artifact: short note in rfc-open-questions-log.md OQ-W15 entry"
       ],
       "caveats_bullets": [
-        "OQ-W15 (b) MCU/AP defaults are out of scope here; settle post-Phase-A via HIL measurement"
+        "OQ-W15 (b) MCU/AP defaults are out of scope here; settle post-Phase-A via HIL measurement",
+        "Decision Outcome (Round 11, 2026-05-14): Q1 = No, Q2 = Yes ratified by SCE maintainer.",
+        "Q1 rationale: BASELINE_SYMBOLS = architecture-fixed primitives only; RNG → plugin tier.",
+        "Q2 rationale: per-SoC accelerator selection genuinely plugin-meaningful (proposal aligned).",
+        "Counter-offer (tier separation) tracked as OQ-W24; spec restructure deferred to next round.",
+        "Fallback path validated (SCE C13-β tests, 4570a389); deploys unblock via 4-line plugin row."
       ],
       "impact_scope": [
         "intrinsics-runtime--symbol-surface",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation"
       ]
     },
     "oq-w15-a--ratification-summary-for-sce-maintainer-sync/7-references-for-the-maintainer": {
@@ -2701,6 +2722,59 @@
         "SCE OQ-W15 ratification followups carried from prior session — out of Mnemosyne migration scope"
       ]
     },
+    "Round 10": {
+      "decision_summary": "RFC §6.2.6 + §5.O cross-ref catch-up: verify CLI rename to sce-codegen + template-hash composition aligned with SCE land",
+      "changes_bullets": [
+        "docs/rfc-sce-protocol-synthesis.md:3504 — template-hash composition `sce-build binary + template tree` → `template tree + Cargo.lock` (SCE 97836fa0 ships Cargo.lock as binary-identity proxy)",
+        "docs/rfc-sce-protocol-synthesis.md:3508 — verify CLI `sce-build verify <out-dir>` → `sce-codegen verify <out-dir>` (SCE 97836fa0 unified the CLI under `sce-codegen`)",
+        "docs/rfc-sce-protocol-synthesis.md:3323 — §5.O cross-ref blurb same rename `sce-build verify` → `sce-codegen verify`",
+        "No atomic-field mutation — §6.2.6 + §5.O cross-ref subsection remain in raw-body form (typed-populate of §6 deferred); changes applied via transitional raw-Edit carve-out per CLAUDE.md (clean baseline + round-trip preserved + T1 orphan delta = 0)"
+      ],
+      "verification_bullets": [
+        "validate_workspace post-edit: T1 orphan total=0 (unchanged), round-trip 11/11 (preserved), T3 warn=843 / T4 info=424 (unchanged), atomic ledger entries=9 (will become 10 after this append) / sections=205 / GENERATED.md=sync",
+        "SCE source-of-truth cited: commit 97836fa0 `feat: land §6.2.6 drift detection — forge::drift + verify CLI + 1 code` — body documents `sce-codegen verify` subcommand and `BTreeMap 2-level sha256 over input SCXML set + template tree + Cargo.lock` composition",
+        "Round-trip mandatory dimension preserved per Edit-carve-out condition (3)"
+      ],
+      "impact_refs": [
+        "6/6.2/6.2.6",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.o-generated-source-traceability"
+      ],
+      "carry_forward_bullets": [
+        "§5.O Atomic 0c (per-function #line redirect) — SCE follow-up, RFC §5.O lines 3094-3103 already cover the scenario; monitor SCE side",
+        "§5.O Python backend marker — SCE 2e0ad3f0 only lands 5-backend (Rust/Cpp/C11/Kotlin/Go); Python emitter SCE-side carry, RFC §5.O line 3158 already specifies `# SCE-MAP:` shape",
+        "OQ-W15 (a) ratification — SCE C13 deferred-2 (4570a389) lands `extern allowlist` infra; cross-check whether the ratified RNG/HMAC target_plugin split is realized SCE-side (separate audit, optional)",
+        "Typed-populate of RFC §6 subsections (intent/rationale/inputs/outputs atomic-field decomposition) — currently §5 kinds only; §6 remains raw-body shape. Not in current scope."
+      ]
+    },
+    "Round 11": {
+      "decision_summary": "OQ-W15 (a) closure (Q1=No RNG → plugin / Q2=Yes HMAC → plugin ratified) + OQ-W24 registration as SCE counter-offer track for §5.I tier-explicit separation",
+      "changes_bullets": [
+        "OQ-W15 status open → answered (Q1=No / Q2=Yes); Resolution block + last-update Round 11",
+        "OQ-W24 registered: RFC §5.I Architectural-tier vs Peripheral-tier explicit separation",
+        "intrinsics §2.5 RNG: intent ratified to plugin path; 4 caveats; impact_scope OQ-W15+W24",
+        "intrinsics §2.6 HMAC: intent ratified to plugin path; 3 caveats; impact_scope OQ-W15+W24",
+        "ratification-summary §6 action-requested: 5 Decision Outcome caveats; impact_scope OQ-W24 added",
+        "Atomic-store cascade GENERATED.md=sync; 12 typed mutations + 2 raw-Edit blocks via carve-out"
+      ],
+      "verification_bullets": [
+        "validate_workspace clean: T1 orphan=0, round-trip 11/11, T3 warn 845→851 (advisory only)",
+        "list_sections: 297→298, OQ-W24 section registered via parser auto-detect",
+        "SCE source cited: BASELINE_SYMBOLS at intrinsic_registry.rs:258, validator at lib.rs:1894",
+        "Fallback path SCE-side closed: c13_beta_antiflood.rs 8 tests over baseline ∪ plugin"
+      ],
+      "impact_refs": [
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation",
+        "intrinsics-runtime--symbol-surface/2-5-rng",
+        "intrinsics-runtime--symbol-surface/2-6-hmac",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/6-action-requested"
+      ],
+      "carry_forward_bullets": [
+        "OQ-W24 spec restructure: RFC §5.I.0 'Tier definitions' subsection drafting in a separate round",
+        "OQ-W15 (b) defaults: empirical HIL validation post-Phase-A (Cortex-M0+/M4/M7 HMAC cycles)",
+        "SCE-side action: BASELINE_SYMBOLS doc-comment update concurrent with OQ-W24 ratify exchange"
+      ]
+    },
     "Round 2": {
       "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
       "changes_bullets": [
@@ -3052,5 +3126,6 @@
       ]
     }
   },
-  "schema_version": 1
+  "inventory_entries": {},
+  "schema_version": 2
 }
