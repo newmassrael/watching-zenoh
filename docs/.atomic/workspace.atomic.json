@@ -1295,7 +1295,9 @@
         "CRC/VLE/keyexpr-match MUST be authored as algorithm kinds, NOT extern (anti-extern abuse)",
         "Linker flavor scatter_arm/icf_iar require Phase C+ generator landing",
         "Cache maintenance rounds to platform.dcache_line_size; out-of-line trips mem/cache-line-align",
-        "Fuzz coverage transport absent pre-Phase-D; F4 declared without it triggers hard-error"
+        "Fuzz coverage transport absent pre-Phase-D; F4 declared without it triggers hard-error",
+        "Architectural-tier: arch-fixed primitives (atomics/fences/cache/IRQ; 101 BASELINE_SYMBOLS)",
+        "Peripheral-tier: multi-impl primitives (RNG/HMAC/HSEM/crypto) via target_plugin only"
       ],
       "alternatives_rejected": [
         {
@@ -2898,6 +2900,30 @@
         "verify-codegen.sh Layer 2 활성화 — SCE-MAP/source-hash anchors strip 옵션 도입 또는 'traceability-only diff' vs 'body diff' 구분 reporter 확장 필요. 별도 라운드.",
         "Phase A 추가 algorithm SCXML — declare/undeclare/subscribe/publish 등 control-plane 측 algorithm. wire-spec-subset.md §5/§6 mapping 후.",
         "vendor/sce pin 갱신 정책 — R14 이후 명시 carry 유지. 갱신 시 R16+ audit entry로 기록."
+      ]
+    },
+    "Round 16": {
+      "decision_summary": "OQ-W24 light closure — RFC §5.I caveats에 Architectural-tier / Peripheral-tier 분리 정의 land; full §5.I.0 subsection heading은 mnemosyne add_section primitive 도입 후 carry.",
+      "changes_bullets": [
+        "add_section_caveat ×2 to rfc-sce-protocol-synthesis §5.i-sce-extern: \"Architectural-tier: arch-fixed primitives (atomics/fences/cache/IRQ; 101 BASELINE_SYMBOLS)\" + \"Peripheral-tier: multi-impl primitives (RNG/HMAC/HSEM/crypto) via target_plugin only\".",
+        "rfc-open-questions-log.md OQ-W24 entry에 Resolution (light form) + Status open → in-progress + SCE-side carry + Last update Round 16 명시 추가 (raw-Edit carve-out: rfc-open-questions-log는 atomic decompose 미완료 도서).",
+        "Caveat는 R161 §41 MAX_BULLET_CHAR=100 제약 하에 압축 form (95-98 chars each); first 시도는 261/297 chars 로 reject되어 재소재안."
+      ],
+      "verification_bullets": [
+        "validate_workspace post-mutate: T1 orphan total=0, round-trip mandatory=11/11, T3 reject=0, GENERATED.md=sync; T3 warn 851 → 852 (+1) / T4 info 426 → 427 (+1) — OQ entry Resolution 단락 추가의 자연스러운 surface, intentional non-zero zone (R138 tier mobility ratify).",
+        "Raw-Edit carve-out 시행 조건 충족: rfc-open-questions-log.md는 Phase 미할당 (atomic decompose 입과 의무 없음); clean baseline before, T1 orphan delta = 0, round-trip preserved.",
+        "Atomic ledger entries 15 → 16, sections 205 unchanged (새 section 몇도 등록 안 됨; 기존 §5.i caveats field 만 즘가).",
+        "OQ-W24 entry body §Proposal이 명시한 'new RFC §5.I.0 subsection' 의도 vs light-form caveat closure 간격 carry로 명시적 감상; carry_forward 항목 1 추가."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+      ],
+      "carry_forward_bullets": [
+        "Full RFC §5.I.0 subsection heading land — mnemosyne add_section primitive 도입 라운드 다음 수행; 이 라운드에 RFC §5.I의 light-form caveats를 heading 구조로 대체 + 기존 caveats는 alternatives_rejected로 재분류.",
+        "SCE-side BASELINE_SYMBOLS doc-comment header update — OQ-W24 원본 Proposal 명시 외부 의존; SCE maintainer sync exchange 시 적용 (OQ-W15 (a) ratify와 동일 익스철인지).",
+        "verify-codegen.sh Layer 2 활성화 — R15 carry 유지 (SCE-MAP/source-hash strip option or body-only diff reporter)."
       ]
     },
     "Round 2": {

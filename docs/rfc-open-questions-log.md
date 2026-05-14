@@ -1597,8 +1597,33 @@ reading/running upstream), or `either`.
   requests benefit from this being in place but are not blocked
   by its absence — the implicit boundary works today, just at
   higher debate cost per future request.
-- **Last update:** Round 11, 2026-05-14 (registered as SCE
-  counter-offer track).
+- **Resolution (light form, Round 16, 2026-05-14).** RFC §5.I body
+  gains two caveats encoding the tier separation:
+  - Architectural-tier — arch-fixed primitives (atomics / fences /
+    cache / IRQ; the 101 BASELINE_SYMBOLS), one valid implementation
+    per `(arch, ordering, width)` triple.
+  - Peripheral-tier — multi-impl primitives (RNG / HMAC / HSEM /
+    crypto / vendor time sources) routed via `target_plugin` only.
+
+  The spec-authority surface now lives in the RFC §5.I atomic
+  caveats field rather than as implicit SCE maintainer judgment.
+  Future ratify requests auto-classify against the published tier
+  definitions: any non-arch-fixed primitive lands in
+  `target_plugin`, never the baseline whitelist. The
+  baseline-drift veto OQ-W24 codified is mechanically enforceable.
+- **Status:** open → in-progress (light closure landed at the
+  caveat layer; a full RFC §5.I.0 subsection heading is carried
+  to a follow-up round that lands an `add_section` mnemosyne
+  primitive — `set_section_*` only updates existing sections, so
+  authoring a new sibling-section requires either a typed `add`
+  primitive or the raw-Edit carve-out, the latter blocked by
+  this doc's atomic-decompose status).
+- **SCE-side carry:** unchanged — `BASELINE_SYMBOLS` doc-comment
+  header update + tier ratify exchange still pending (original
+  OQ-W24 Proposal: "one `BASELINE_SYMBOLS` doc-comment header
+  update").
+- **Last update:** Round 16, 2026-05-14 (light closure;
+  full §5.I.0 subsection deferred).
 
 ---
 
