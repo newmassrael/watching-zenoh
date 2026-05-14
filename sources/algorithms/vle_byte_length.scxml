@@ -67,4 +67,15 @@
     </sce:foreach>
     <sce:return expr="count"/>
   </sce:body>
+  <!--
+    Test vectors — VLE byte-length boundary surface. Single-byte VLE
+    (high bit clear on byte 0), minimum two-byte VLE (continuation
+    on byte 0 + clear on byte 1), and a two-byte form where both
+    bytes carry payload bits (0xFF lo = 0x7F payload + continuation,
+    0x7F hi = 0x7F payload + stop). Anchors the early-return path
+    of the foreach body and the 1-byte / 2-byte transition.
+  -->
+  <sce:test-vector hex="00" value="1"/>
+  <sce:test-vector hex="8001" value="2"/>
+  <sce:test-vector hex="FF7F" value="2"/>
 </scxml>
