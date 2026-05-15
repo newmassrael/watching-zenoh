@@ -35,7 +35,10 @@ Design SSoT entry is ARCHITECTURE.md. The 11 spec docs under
 docs/ are governed by Mnemosyne (atomic-store + GENERATED.md
 lifecycle); the operating rules are in CLAUDE.md.
 
-## Current status (Round 24, 2026-05-15)
+## Current status
+
+Snapshot last refreshed at Round 26 (2026-05-15). The atomic
+changelog under docs/.atomic/ has the latest per-round delta.
 
 - **Phase A3** (author-side SCXML land): 9 algorithms verified
   against six backends — CRC16, VLE u64 decode, VLE byte length,

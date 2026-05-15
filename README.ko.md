@@ -32,7 +32,10 @@ Kotlin / Go / Python 6 언어가 동일 author-side 파일에서 생성된다.
 Mnemosyne 가 관리 (atomic-store + GENERATED.md lifecycle); 운영
 규칙은 CLAUDE.md.
 
-## 현재 상태 (Round 24 기준, 2026-05-15)
+## 현재 상태
+
+스냅샷은 Round 26 (2026-05-15) 시점 갱신. 라운드별 델타는
+docs/.atomic/ 의 atomic changelog 가 최신본.
 
 - **Phase A3** (author-side SCXML 적재): 9 algorithm, 6 backend
   검증 통과 — CRC16, VLE u64 decode, VLE byte length, KeyExpr
