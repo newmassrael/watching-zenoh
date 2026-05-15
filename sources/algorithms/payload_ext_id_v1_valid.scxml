@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Wire-spec §7.1 payload-layer extension FULL_ID allowlist — per-body
+  context. Pure predicate over (z_mid, ext_header) returning true iff
+  the extension's FULL_ID (header & 0x7F) is a v1-recognized extension
+  in the given payload body's local namespace.
+
+  zenoh-pico decodes payload-layer extensions through per-body iterators
+  (src/protocol/codec/message.c): `_z_push_body_decode_extensions` for
+  Put/Del (Z_MID 0x01/0x02), `_z_query_decode_extensions` for Query
+  (Z_MID 0x03), `_z_reply_decode_extension` for Reply (Z_MID 0x04),
+  `_z_err_decode_extension` for Err (Z_MID 0x05). Each iterator has its
+  own switch over `_Z_EXT_FULL_ID(header)` — the same FULL_ID byte can
+  carry different semantics in different bodies (e.g. 0x43 is
+  Attachment in Put/Del but body/Value in Query), so the validator
+  takes the body z_mid as context.
+
+  Per-context v1 allowlist (FULL_ID = ext_header & 0x7F, all entries
+  carry `_Z_MSG_EXT_ENC_ZBUF=0x40` in the high two bits of FULL_ID per
+  include/zenoh-pico/protocol/ext.h:57; source citations point at the
+  encoder line, which matches the decoder switch):
+
+    Z_MID 0x01 PUT   src/protocol/codec/message.c:292,296
+      0x41  source_info  (Z_FLAG_Z_Z chain)
+      0x43  attachment   (Z_FLAG_Z_Z chain)
+
+    Z_MID 0x02 DEL   message.c:292,296 (shared _z_push_body codec)
+      0x41  source_info
+      0x43  attachment
+
+    Z_MID 0x03 QUERY  message.c:431,439,447
+      0x41  source_info
+      0x43  body / Value carrier
+      0x45  attachment
+
+    Z_MID 0x04 REPLY  message.c:520-528 (default branch only)
+      (no v1 extensions; Reply carries Consolidation via header flag and
+       embeds a Push body that has its own ext iterator — but the Reply
+       wrapper itself defines zero v1 ext IDs)
+
+    Z_MID 0x05 ERR   message.c:566
+      0x41  source_info
+
+  RFC §7.1 lists "Timestamp / Encoding / Consolidation" as app-visible
+  but those are inline-body fields gated by header flags
+  (_Z_FLAG_Z_P_T / _Z_FLAG_Z_P_E / _Z_FLAG_Z_Q_C / _Z_FLAG_Z_R_C),
+  not TLV extensions — this validator does not cover them. NodeId and
+  QoS are network-layer (N_PUSH / N_REQUEST / N_RESPONSE) extensions
+  living in src/protocol/codec/network.c and are out of scope here
+  (a `network_ext_id_v1_valid` validator is a separate Phase A piece
+  if needed).
+
+  Unknown z_mid (not 0x01..0x05) → false. Unknown FULL_ID within a
+  recognized context → false; the §7.2 dispatch policy (M-flag-based
+  reject vs skip) is the caller's concern and lives in
+  `extension_v1_dispatch.scxml`. The pair compose as: extract FULL_ID,
+  consult `payload_ext_id_v1_valid(z_mid, header)`; if false, hand off
+  to §7.2 policy (M flag → reject; else skip).
+
+  No SCE-upstream test fixture exists for payload extension validation
+  at vendor pin `1473f99f`; verify-codegen.sh Layer 2 (byte-golden) is
+  N/A. Layer 1 (six-backend emit success) covers the RFC §5.J.4 parity
+  gate.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="payload_ext_id_v1_valid"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="z_mid" type="uint8"/>
+    <sce:param name="ext_header" type="uint8"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="full_id" type="uint8" init="0"/>
+    <sce:assign target="full_id" expr="ext_header &amp; 0x7F"/>
+    <sce:if cond="z_mid === 0x01 &amp;&amp; full_id === 0x41">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="z_mid === 0x01 &amp;&amp; full_id === 0x43">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="z_mid === 0x02 &amp;&amp; full_id === 0x41">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="z_mid === 0x02 &amp;&amp; full_id === 0x43">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="z_mid === 0x03 &amp;&amp; full_id === 0x41">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="z_mid === 0x03 &amp;&amp; full_id === 0x43">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="z_mid === 0x03 &amp;&amp; full_id === 0x45">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="z_mid === 0x05 &amp;&amp; full_id === 0x41">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:return expr="false"/>
+  </sce:body>
+</scxml>
