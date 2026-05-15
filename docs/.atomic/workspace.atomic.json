@@ -3773,6 +3773,70 @@
         "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무"
       ]
     },
+    "Round 25": {
+      "decision_summary": "Phase E register — README.md workspace.docs 재등록 land; R24 한국어 본문을 영문 primary로 재작성 + README.ko.md satellite로 분리 (사용자 정정 'README는 영문 primary, KO 번역은 별도 링크'); 첫 시도 11 parser orphan (URL 링크 + plain §N) → 파서-친화 form 으로 해결 후 12/12 docs clean.",
+      "changes_bullets": [
+        "README.md 영문 primary 재작성 (R24 한국어 본문 → English)",
+        "README.ko.md satellite 신규 (한국어 번역, workspace.docs 외)",
+        "mnemosyne.toml workspace.docs: 11 → 12 (README.md 재등록, R7 scope correction 종결)",
+        "파서-친화 form 정착: markdown URL 링크 제거 (bare URL on list line), plain §N 인라인 미사용",
+        "사용자 정정 적용: README primary 영문, KO 번역 별도 + primary 상단 short link",
+        "Round 25 amendment 주석 mnemosyne.toml 추가 (R7 history 보존 + R25 변경 명시)"
+      ],
+      "verification_bullets": [
+        "validate_workspace: docs 11/11 → 12/12, T1 orphan=0, round-trip 12/12, sections=206 invariant",
+        "T3 warn 853 → 856 (+3) — README 신 내용 추가의 자연 surface, R138 intentional non-zero zone",
+        "Atomic ledger entries 24 → 25 expected, GENERATED.md=sync 유지",
+        "Smoke iteration: 11 parser orphan 발견 → revert → restructure → 0 orphan 재등록 성공"
+      ],
+      "impact_refs": [
+        "watching-zenoh",
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "Phase E final step — README 8 H2 atomic decompose (R5 lean stub → full atomic fields)",
+        "MID validator test-vector hardening (6 SCXMLs) — Phase B5 multi-arg/non-bytes 지원 후",
+        "tlv_advance.scxml — Phase A4+ cursor/Result; vle_byte_length 내부 호출",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시",
+        "Phase A 메시지별 codec body — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor",
+        "Z_OAM (0x00) payload-layer Inclusion 결정 — Phase B+ OQ",
+        "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R20 외부 의존)",
+        "crc16_ccitt ↔ algorithm_crc16 Layer 2 — SCE upstream PR (root name=) + pin 갱신",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture",
+        "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무"
+      ],
+      "publishable_decision_summary": "Phase E register — README.md workspace.docs 재등록 land; R24 한국어 본문을 영문 primary로 재작성 + README.ko.md satellite로 분리 (사용자 정정 'README는 영문 primary, KO 번역은 별도 링크'); 첫 시도 11 parser orphan (URL 링크 + plain §N) → 파서-친화 form 으로 해결 후 12/12 docs clean.",
+      "publishable_changes_bullets": [
+        "README.md 영문 primary 재작성 (R24 한국어 본문 → English)",
+        "README.ko.md satellite 신규 (한국어 번역, workspace.docs 외)",
+        "mnemosyne.toml workspace.docs: 11 → 12 (README.md 재등록, R7 scope correction 종결)",
+        "파서-친화 form 정착: markdown URL 링크 제거 (bare URL on list line), plain §N 인라인 미사용",
+        "사용자 정정 적용: README primary 영문, KO 번역 별도 + primary 상단 short link",
+        "Round 25 amendment 주석 mnemosyne.toml 추가 (R7 history 보존 + R25 변경 명시)"
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: docs 11/11 → 12/12, T1 orphan=0, round-trip 12/12, sections=206 invariant",
+        "T3 warn 853 → 856 (+3) — README 신 내용 추가의 자연 surface, R138 intentional non-zero zone",
+        "Atomic ledger entries 24 → 25 expected, GENERATED.md=sync 유지",
+        "Smoke iteration: 11 parser orphan 발견 → revert → restructure → 0 orphan 재등록 성공"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh",
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase E final step — README 8 H2 atomic decompose (R5 lean stub → full atomic fields)",
+        "MID validator test-vector hardening (6 SCXMLs) — Phase B5 multi-arg/non-bytes 지원 후",
+        "tlv_advance.scxml — Phase A4+ cursor/Result; vle_byte_length 내부 호출",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시",
+        "Phase A 메시지별 codec body — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor",
+        "Z_OAM (0x00) payload-layer Inclusion 결정 — Phase B+ OQ",
+        "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R20 외부 의존)",
+        "crc16_ccitt ↔ algorithm_crc16 Layer 2 — SCE upstream PR (root name=) + pin 갱신",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture",
+        "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무"
+      ]
+    },
     "Round 3": {
       "decision_summary": "Phase B complete — RFC §5 thirteen kind sub-sections atomic decomposition (5.A-5.F, 5.I-5.O); Phase 2 deferred 5.G/5.H skipped.",
       "changes_bullets": [

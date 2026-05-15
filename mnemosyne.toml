@@ -9,8 +9,19 @@
 # entry is required. (Earlier draft of this comment referenced a Round 254
 # atomic_entry_ref ledger entry "below"; that entry was never authored
 # because the membership-level fix made it unnecessary.)
+#
+# Round 25 Phase E amendment (2026-05-15): README.md re-registered after
+# R24 prose authoring + R25 English rewrite (parser-friendly form, no
+# markdown URL links, no plain §N inline refs). Korean translation lives
+# as README.ko.md satellite file outside workspace.docs governance per
+# README language convention. The pre-existing atomic-store section
+# `watching-zenoh` (R5 lean/stub form, Round 1/5/6/7 cited) remains as
+# the doc-root anchor; atomic decompose of README H2 headings into typed
+# Section fields deferred to a later round to keep R25 = register-only
+# per CLAUDE.md "one phase per session, do not bundle".
 docs = [
     "ARCHITECTURE.md",
+    "README.md",
     "docs/intrinsics-runtime-symbols.md",
     "docs/oq-w15-ratification-summary.md",
     "docs/reassembly-fsm.md",
