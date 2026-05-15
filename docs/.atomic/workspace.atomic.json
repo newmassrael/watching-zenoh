@@ -2771,6 +2771,44 @@
         "Phase D: residual prose (intrinsics-runtime-symbols / runtime-crate-{lwip,tokio} / wire-spec-subset / ARCHITECTURE / SESSION_KICKOFF / README)",
         "Mnemosyne side: anti-patterns concept resource #9 expansion to explicitly cover escape-hatch field additions (NarrativeSection / prose_blocks shape) — separate PR work",
         "SCE OQ-W15 ratification followups carried from prior session — out of Mnemosyne migration scope"
+      ],
+      "publishable_decision_summary": "75-orphan ledger triage closed via 6 batches; Mnemosyne SSOT validated end-to-end across 13 design docs.",
+      "publishable_changes_bullets": [
+        "Batch 1 (75→70): runtime-crate-lwip / runtime-crate-tokio cross-doc-form for prior plain-§ references",
+        "Batches 2-4 (70→46): cross-doc-form normalization across FSM prose sketches, oq-w15, rfc-open-questions-log",
+        "Batch 5 (46→16): SESSION_KICKOFF strip-§ approach, then user-rejected and rolled back via 18-site link restoration",
+        "Batch 6 (16→0): RFC §6.2.X bold-label-to-heading promotion + ARCHITECTURE §15/§16 placeholder authoring",
+        "Followups: runtime-crate-lwip L302/L315/L361 plain-§ misresolves fixed via cross-doc-form; SESSION_KICKOFF link restoration after strip-§ rejection",
+        "Atomic store sidecar initialized (docs/.atomic/workspace.atomic.json, schema_version=1, empty); MCP mutate primitives verified end-to-end with throwaway demo + revert"
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace post-triage: docs=13/13, T1 orphan total=0 (ledger=0, new=+0, resolved=-0), round-trip mandatory=13/13, exit=0",
+        "Pre-commit hook (.githooks/pre-commit) active and blocking on T1 / T2 / round-trip regressions",
+        "Atomic store mutate primitives (set_section_intent + append_changelog_entry_v2) demo-tested with cascade GENERATED.md auto-update + sidecar revert + generate-docs resync confirmed sync=true",
+        "GENERATED.md added to .gitignore — watching-zenoh hybrid carry: 13 prose docs are the human-readable surface, GENERATED.md is cascade byproduct"
+      ],
+      "publishable_impact_refs": [
+        "0",
+        "watching-zenoh",
+        "watching-zenoh--다음-세션-시작-스크립트",
+        "intrinsics-runtime--symbol-surface",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync",
+        "reassembly-fsm--prose-sketch",
+        "rfc-open-questions-log",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "runtime-crate--sce_link_runtime_tokio",
+        "scouting-fsm--prose-sketch",
+        "session-fsm--prose-level-sketch",
+        "wire-spec-subset--watching-zenoh-mvp"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase A: oq-w15-ratification-summary.md atomic Section migration (first decomposition trial; smallest blast radius)",
+        "Phase B: rfc-sce-protocol-synthesis.md §5 kinds atomic decompose (~11 kinds × ~6 fields)",
+        "Phase C: 3 FSM docs (session/scouting/reassembly) state-Section + transition-CrossRef graph migration",
+        "Phase D: residual prose (intrinsics-runtime-symbols / runtime-crate-{lwip,tokio} / wire-spec-subset / ARCHITECTURE / SESSION_KICKOFF / README)",
+        "Mnemosyne side: anti-patterns concept resource #9 expansion to explicitly cover escape-hatch field additions (NarrativeSection / prose_blocks shape) — separate PR work",
+        "SCE OQ-W15 ratification followups carried from prior session — out of Mnemosyne migration scope"
       ]
     },
     "Round 10": {
@@ -2791,6 +2829,28 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.o-generated-source-traceability"
       ],
       "carry_forward_bullets": [
+        "§5.O Atomic 0c (per-function #line redirect) — SCE follow-up, RFC §5.O lines 3094-3103 already cover the scenario; monitor SCE side",
+        "§5.O Python backend marker — SCE 2e0ad3f0 only lands 5-backend (Rust/Cpp/C11/Kotlin/Go); Python emitter SCE-side carry, RFC §5.O line 3158 already specifies `# SCE-MAP:` shape",
+        "OQ-W15 (a) ratification — SCE C13 deferred-2 (4570a389) lands `extern allowlist` infra; cross-check whether the ratified RNG/HMAC target_plugin split is realized SCE-side (separate audit, optional)",
+        "Typed-populate of RFC §6 subsections (intent/rationale/inputs/outputs atomic-field decomposition) — currently §5 kinds only; §6 remains raw-body shape. Not in current scope."
+      ],
+      "publishable_decision_summary": "RFC §6.2.6 + §5.O cross-ref catch-up: verify CLI rename to sce-codegen + template-hash composition aligned with SCE land",
+      "publishable_changes_bullets": [
+        "docs/rfc-sce-protocol-synthesis.md:3504 — template-hash composition `sce-build binary + template tree` → `template tree + Cargo.lock` (SCE 97836fa0 ships Cargo.lock as binary-identity proxy)",
+        "docs/rfc-sce-protocol-synthesis.md:3508 — verify CLI `sce-build verify <out-dir>` → `sce-codegen verify <out-dir>` (SCE 97836fa0 unified the CLI under `sce-codegen`)",
+        "docs/rfc-sce-protocol-synthesis.md:3323 — §5.O cross-ref blurb same rename `sce-build verify` → `sce-codegen verify`",
+        "No atomic-field mutation — §6.2.6 + §5.O cross-ref subsection remain in raw-body form (typed-populate of §6 deferred); changes applied via transitional raw-Edit carve-out per CLAUDE.md (clean baseline + round-trip preserved + T1 orphan delta = 0)"
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace post-edit: T1 orphan total=0 (unchanged), round-trip 11/11 (preserved), T3 warn=843 / T4 info=424 (unchanged), atomic ledger entries=9 (will become 10 after this append) / sections=205 / GENERATED.md=sync",
+        "SCE source-of-truth cited: commit 97836fa0 `feat: land §6.2.6 drift detection — forge::drift + verify CLI + 1 code` — body documents `sce-codegen verify` subcommand and `BTreeMap 2-level sha256 over input SCXML set + template tree + Cargo.lock` composition",
+        "Round-trip mandatory dimension preserved per Edit-carve-out condition (3)"
+      ],
+      "publishable_impact_refs": [
+        "6/6.2/6.2.6",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.o-generated-source-traceability"
+      ],
+      "publishable_carry_forward_bullets": [
         "§5.O Atomic 0c (per-function #line redirect) — SCE follow-up, RFC §5.O lines 3094-3103 already cover the scenario; monitor SCE side",
         "§5.O Python backend marker — SCE 2e0ad3f0 only lands 5-backend (Rust/Cpp/C11/Kotlin/Go); Python emitter SCE-side carry, RFC §5.O line 3158 already specifies `# SCE-MAP:` shape",
         "OQ-W15 (a) ratification — SCE C13 deferred-2 (4570a389) lands `extern allowlist` infra; cross-check whether the ratified RNG/HMAC target_plugin split is realized SCE-side (separate audit, optional)",
@@ -2824,6 +2884,33 @@
         "OQ-W24 spec restructure: RFC §5.I.0 'Tier definitions' subsection drafting in a separate round",
         "OQ-W15 (b) defaults: empirical HIL validation post-Phase-A (Cortex-M0+/M4/M7 HMAC cycles)",
         "SCE-side action: BASELINE_SYMBOLS doc-comment update concurrent with OQ-W24 ratify exchange"
+      ],
+      "publishable_decision_summary": "OQ-W15 (a) closure (Q1=No RNG → plugin / Q2=Yes HMAC → plugin ratified) + OQ-W24 registration as SCE counter-offer track for §5.I tier-explicit separation",
+      "publishable_changes_bullets": [
+        "OQ-W15 status open → answered (Q1=No / Q2=Yes); Resolution block + last-update Round 11",
+        "OQ-W24 registered: RFC §5.I Architectural-tier vs Peripheral-tier explicit separation",
+        "intrinsics §2.5 RNG: intent ratified to plugin path; 4 caveats; impact_scope OQ-W15+W24",
+        "intrinsics §2.6 HMAC: intent ratified to plugin path; 3 caveats; impact_scope OQ-W15+W24",
+        "ratification-summary §6 action-requested: 5 Decision Outcome caveats; impact_scope OQ-W24 added",
+        "Atomic-store cascade GENERATED.md=sync; 12 typed mutations + 2 raw-Edit blocks via carve-out"
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace clean: T1 orphan=0, round-trip 11/11, T3 warn 845→851 (advisory only)",
+        "list_sections: 297→298, OQ-W24 section registered via parser auto-detect",
+        "SCE source cited: BASELINE_SYMBOLS at intrinsic_registry.rs:258, validator at lib.rs:1894",
+        "Fallback path SCE-side closed: c13_beta_antiflood.rs 8 tests over baseline ∪ plugin"
+      ],
+      "publishable_impact_refs": [
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation",
+        "intrinsics-runtime--symbol-surface/2-5-rng",
+        "intrinsics-runtime--symbol-surface/2-6-hmac",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/6-action-requested"
+      ],
+      "publishable_carry_forward_bullets": [
+        "OQ-W24 spec restructure: RFC §5.I.0 'Tier definitions' subsection drafting in a separate round",
+        "OQ-W15 (b) defaults: empirical HIL validation post-Phase-A (Cortex-M0+/M4/M7 HMAC cycles)",
+        "SCE-side action: BASELINE_SYMBOLS doc-comment update concurrent with OQ-W24 ratify exchange"
       ]
     },
     "Round 12": {
@@ -2846,6 +2933,30 @@
         "architecture--watching-zenoh"
       ],
       "carry_forward_bullets": [
+        "Phase E (README + workspace.docs re-register) must include a license section cross-referencing LICENSE / LICENSE-COMMERCIAL / SPDX expression",
+        "Phase A first author-side source file (likely sources/algorithms/crc16_ccitt.scxml) lands with the SPDX header per CLAUDE.md policy",
+        "SCE Commercial procurement is independent — needed when watching-zenoh deploys reach proprietary embedded ship even with watching-zenoh Commercial held",
+        "THIRD_PARTY.md ledger to be created when the first vendored snippet (if any) lands during Phase A coding"
+      ],
+      "publishable_decision_summary": "Dual-license adoption — LGPL-3.0-or-later (Free, anti-tivo included) OR watching-zenoh Commercial (Qt-style 5-way exemption, $5000 individual cumulative)",
+      "publishable_changes_bullets": [
+        "LICENSE root + LICENSE-LGPL-3.0.md + LICENSE-GPL-3.0.md (verbatim from /usr/share/common-licenses)",
+        "LICENSE-COMMERCIAL.md: Qt-style 5-way exemption (proprietary / anti-tivo / private mod / SDK redist / rebrand)",
+        "Pricing: $5000 cumulative individual via GitHub Sponsors; Enterprise contact (SCE pattern)",
+        "CLAUDE.md SPDX header policy added for Phase A author-side sources (sources/crates/runtime/deploy)",
+        "Copyright (c) 2026 newmassrael; SPDX expression `LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial`",
+        "No atomic store section mutation — license lives in root files, impact_refs records future-coupled ARCHITECTURE root"
+      ],
+      "publishable_verification_bullets": [
+        "Standard texts md5-verified: LGPL-3.0 e6a600fd... GPL-3.0 d32239bc... (byte-equivalent system canonical)",
+        "Pre-commit + commit-msg hooks both passed during commit 73c509e (line lengths 63/63/71/63 ≤ 72)",
+        "validate_workspace clean: T1=0, round-trip 11/11, entries 11→12 expected post-append, sections=205 unchanged",
+        "Qt-vs-SCE trade-off documented: plain LGPL-3.0 (no linking exception) chosen for higher commercial purchase pressure on embedded use"
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
         "Phase E (README + workspace.docs re-register) must include a license section cross-referencing LICENSE / LICENSE-COMMERCIAL / SPDX expression",
         "Phase A first author-side source file (likely sources/algorithms/crc16_ccitt.scxml) lands with the SPDX header per CLAUDE.md policy",
         "SCE Commercial procurement is independent — needed when watching-zenoh deploys reach proprietary embedded ship even with watching-zenoh Commercial held",
@@ -2881,6 +2992,35 @@
         "Phase A subsequent SCXML files (vle_u64, keyexpr_intersect, keyexpr_includes, etc.) land in sources/algorithms/ with same SPDX double-block convention per R13 README",
         "SCE remote https://github.com/newmassrael/scxml-core-engine.git serves as submodule source for R14; pin SHA chosen to be on origin/main (pushed) and post-6c43163b (templates have _macros/) and pre-486e136c WIP",
         "THIRD_PARTY.md ledger creation pending until first vendored snippet lands (CLAUDE.md SPDX policy)"
+      ],
+      "publishable_decision_summary": "sources/ skeleton lands via README (SPDX header double-block + 7-subdir lazy materialize per ARCH §428) + first author-side SCXML sources/algorithms/crc16_ccitt.scxml body-identical to SCE fixture; 6-backend byte-golden verify carried to R14 SCE submodule infrastructure (pin 1473f99f origin/main).",
+      "publishable_changes_bullets": [
+        "sources/README.md authored — 7-subdir lazy materialize policy, SPDX header double-block convention (REUSE 3.0 + Linux kernel idiom), snake_case file naming, SCE fixture mechanical-sync rule",
+        "sources/algorithms/crc16_ccitt.scxml authored — first author-side SCXML, body-identical to SCE tests/forge/resources/algorithm_crc16.scxml save SPDX header block",
+        "Commit hygiene: 3 separate commits per R12 land pattern (e8b701b README, ee46bea SCXML, this entry as third)",
+        "No atomic store section mutation — sources/ lives outside workspace.docs; sections=205 preserved",
+        "CLAUDE.md SPDX header policy (R12) first applied to concrete files — concrete shape locked as double comment-block per kernel/REUSE idiom",
+        "ARCHITECTURE.md §428 7-subdir tree treated as design SSoT — no prose duplication in README"
+      ],
+      "publishable_verification_bullets": [
+        "XML well-formedness OK: matching tags, valid sce:kind=\"algorithm\", version=\"1.0\"",
+        "SPDX header expression matches R12 ratify (73c509e LICENSE root): `LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial`",
+        "Body diff vs SCE tests/forge/resources/algorithm_crc16.scxml: only SPDX header block prepended; all <sce:*> semantic nodes byte-identical",
+        "Pre-commit hooks (e8b701b, ee46bea) ran mnemosyne-cli validate-workspace clean: T1=0, RT 11/11, atomic ledger entries=12, GENERATED.md=sync",
+        "Commit-msg hook accepted both subjects + 3-bullet bodies under 72-byte/line gate",
+        "sce-codegen 6-backend byte-golden parity NOT verified this round — SCE binary stale (2026-05-04 build predates 6c43163b _macros land), SCE main HEAD WIP non-compiling; verify carried to R14"
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/appendix-a--worked-example-crc16-ccitt"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R14 vendor/sce/ git submodule add (pin 1473f99f origin/main) + scripts/build-sce.sh + scripts/verify-codegen.sh — replaces system-installed sce-codegen as the watching-zenoh verification baseline",
+        "R14 retroactive 6-backend byte-golden verify on R13's sources/algorithms/crc16_ccitt.scxml — closes the R13 carry inline in R14 verification_bullets",
+        "Phase A subsequent SCXML files (vle_u64, keyexpr_intersect, keyexpr_includes, etc.) land in sources/algorithms/ with same SPDX double-block convention per R13 README",
+        "SCE remote https://github.com/newmassrael/scxml-core-engine.git serves as submodule source for R14; pin SHA chosen to be on origin/main (pushed) and post-6c43163b (templates have _macros/) and pre-486e136c WIP",
+        "THIRD_PARTY.md ledger creation pending until first vendored snippet lands (CLAUDE.md SPDX policy)"
       ]
     },
     "Round 14": {
@@ -2909,6 +3049,37 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/appendix-a--worked-example-crc16-ccitt"
       ],
       "carry_forward_bullets": [
+        "R15 upstream PR to scxml-core-engine: introduce <sce:signature name=\"...\"> attribute on algorithm kind (and analogous on codec/procedure kinds) so generated symbol is attribute-derived not stem-derived; additive change (fallback to stem when attribute absent) preserves backward compat with existing SCE fixtures",
+        "R15 watching-zenoh consume: add name attribute to sources/algorithms/crc16_ccitt.scxml once SCE PR lands; SCE fixture algorithm_crc16.scxml gets matching name=\"crc16_ccitt\" so byte-golden parity becomes achievable across two stems",
+        "Phase A subsequent SCXML (vle_u64, keyexpr_intersect, keyexpr_includes, ...) follow same emit-success only Layer 1 verify until R15 PR closes the byte-golden gap",
+        "verify-codegen.sh Layer 2 surface kept dormant pending R15 — script already supports 2-arg form for golden diff; that arg path stays unused until name-attribute lands",
+        "THIRD_PARTY.md ledger creation still deferred — vendor/sce is git submodule (gitlink), not vendored snippet copy; ledger trigger remains 'first inline copy of third-party code'"
+      ],
+      "publishable_decision_summary": "R14 vendor/sce submodule (pin 1473f99f) + scripts/build-sce + verify-codegen lands; R13 carry verified Layer 1 emit-success 6/6 but R13's \"6-backend byte-golden parity\" claim retracted — sce-codegen derives generated symbol/file names from input-file stem, making byte-golden parity infeasible without stem alignment; R15 carries upstream PR for explicit `<sce:signature name>` attribute (split file-system identity from code-symbol identity).",
+      "publishable_changes_bullets": [
+        "vendor/sce git submodule added at pin 1473f99f (origin/main HEAD post-d71a2886 sourcemap/addr2sce, post-6c43163b _macros land)",
+        "scripts/build-sce.sh — cargo build --release --features cli --bin sce-codegen (cli feature gates the bin; emits vendor/sce/target/release/sce-codegen)",
+        "scripts/verify-codegen.sh — option C two-layer verify: (1) emit-success across 6 backends rust/cpp/kotlin/go/c11/python, (2) optional byte-golden diff vs SCE upstream fixture",
+        ".gitignore tightened: vendor/sce/target/ (submodule local build) + .claude/ dir-wide (was leaking scheduled_tasks.lock)",
+        "Four separate commits per R12/R13 hygiene pattern (submodule add, scripts add, gitignore tighten, this audit-trace entry)",
+        "No atomic store section mutation — R14 is infra+verify only; sections=205 preserved",
+        "Replaces stale system /usr/local/bin/sce-codegen (2026-05-04 build pre _macros land) with vendor-pinned binary as watching-zenoh verification baseline"
+      ],
+      "publishable_verification_bullets": [
+        "Layer 1 emit-success: bash scripts/verify-codegen.sh sources/algorithms/crc16_ccitt.scxml → 6/6 pass (2 files per backend: crc16_ccitt + crc16_ccitt_test)",
+        "Layer 2 byte-golden vs vendor/sce/tests/forge/resources/algorithm_crc16.scxml: 6/6 mismatch — fundamental, not bug",
+        "Three independent leak vectors documented per backend: source-hash SHA256 differs (SPDX 4-line header in our SCXML), SCE-MAP line offset (procedure at line 14 vs 10), function name (stem-derived crc16_ccitt vs algorithm_crc16)",
+        "SCXML body segments byte-identical between two files (signature + body + test-vector blocks verified via diff)",
+        "vendor/sce/target/release/sce-codegen built (9m30s first build) — 9.9 MB ELF; pin = 1473f99f confirmed via git rev-parse --short",
+        "Pre-commit + commit-msg hooks pass on 4 R14 commits; mnemosyne validate-workspace clean throughout (T1=0, RT 11/11)",
+        "Atomic ledger drift: entries 13 → 14, sections=205 unchanged, GENERATED.md sync after this entry append"
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/appendix-a--worked-example-crc16-ccitt"
+      ],
+      "publishable_carry_forward_bullets": [
         "R15 upstream PR to scxml-core-engine: introduce <sce:signature name=\"...\"> attribute on algorithm kind (and analogous on codec/procedure kinds) so generated symbol is attribute-derived not stem-derived; additive change (fallback to stem when attribute absent) preserves backward compat with existing SCE fixtures",
         "R15 watching-zenoh consume: add name attribute to sources/algorithms/crc16_ccitt.scxml once SCE PR lands; SCE fixture algorithm_crc16.scxml gets matching name=\"crc16_ccitt\" so byte-golden parity becomes achievable across two stems",
         "Phase A subsequent SCXML (vle_u64, keyexpr_intersect, keyexpr_includes, ...) follow same emit-success only Layer 1 verify until R15 PR closes the byte-golden gap",
@@ -2949,6 +3120,39 @@
         "verify-codegen.sh Layer 2 활성화 — SCE-MAP/source-hash anchors strip 옵션 도입 또는 'traceability-only diff' vs 'body diff' 구분 reporter 확장 필요. 별도 라운드.",
         "Phase A 추가 algorithm SCXML — declare/undeclare/subscribe/publish 등 control-plane 측 algorithm. wire-spec-subset.md §5/§6 mapping 후.",
         "vendor/sce pin 갱신 정책 — R14 이후 명시 carry 유지. 갱신 시 R16+ audit entry로 기록."
+      ],
+      "publishable_decision_summary": "Phase A 후속 SCXML 3종 land (vle_u64_decode + keyexpr_intersect + keyexpr_includes) + crc16_ccitt에 name attribute 부여; R14 carry #1/#6은 misdiagnosis로 판명되어 자력 closure.",
+      "publishable_changes_bullets": [
+        "sources/algorithms/crc16_ccitt.scxml에 root name=\"crc16_ccitt\" attribute 추가 (R13 land 시 미부여, 이번 라운드 보충).",
+        "sources/algorithms/keyexpr_intersect.scxml 신규 (38 lines + SPDX) — v1 = exact uint32 ID equality, RFC §5.A line 311 + §5.L line 2642-2647 lock. SCE upstream algorithm_keyexpr_intersect_exact.scxml과 동일 body, watching-zenoh source-of-truth 사본.",
+        "sources/algorithms/keyexpr_includes.scxml 신규 (43 lines + SPDX) — v1 = exact ID equality, includes ≡ intersect under uint32-keyed compile-time fixed KeyExpr set; 호출-사이트는 wildcard 형 land 시 분기.",
+        "sources/algorithms/vle_u64_decode.scxml 신규 (62 lines + SPDX) — zenoh-pico _z_zint_decode_u64 parity, Phase A3 primitives only (bytes → uint64, max-iter=10). 인코드 형 (RFC §B worked example, cursor/Result type 요구)은 Phase A4+ carry.",
+        "verify-codegen.sh Layer 1: 4 SCXML × 6 backend = 24/24 emit-success.",
+        "verify-codegen.sh Layer 2 trial (keyexpr_intersect ↔ vendor/sce/.../algorithm_keyexpr_intersect_exact.scxml): 6/6 file-content mismatch, 그러나 진단상 emit 코드의 *body 자체는 동일*; 차이는 RFC §5.O traceability anchors (source-hash + SCE-MAP line number) 두 줄만. RFC §A6 byte-equivalence acceptance gate의 semantic intent는 충족.",
+        "R14 carry #1 closure: SCE-output file name도 root name attribute에서 derive (`keyexpr_intersect.rs` 양쪽 동일) — R14가 retract한 'stem 의존' 가설은 vendor pin 1473f99f 시점에 이미 fix됨.",
+        "R14 carry #6 closure: SCE upstream PR for `<sce:signature name>` attribute는 vendor/sce/sce-build/src/forge/xsd_validator.rs:64 `<xs:attribute name='name' type='xs:string'/>`로 이미 land, watching-zenoh side에서 자력 사용 가능."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: T1 orphan total=0, round-trip mandatory=11/11, T3 reject=0, GENERATED.md=sync (사전 baseline 동일 유지).",
+        "verify-codegen.sh sources/algorithms/{crc16_ccitt,keyexpr_intersect,keyexpr_includes,vle_u64_decode}.scxml: 각각 6/6 backend emit pass=6 fail=0 (rust/cpp/kotlin/go/c11/python).",
+        "Layer 2 mismatch root cause empirical 확인: input/rust/keyexpr_intersect.rs vs upstream/rust/keyexpr_intersect.rs의 diff는 line 2 (source-hash) + line 5-6 (SCE-MAP line number) 두 줄만; body identifier (`pub fn keyexpr_intersect(...)`) + return expression 모두 동일.",
+        "vendor pin xsd_validator.rs root name= attribute 지원 확인 (xsd_validator.rs:64 + algorithm_keyexpr_intersect_exact.scxml fixture가 이미 name=\"keyexpr_intersect\" 보유).",
+        "vle_u64_encode 시도 → fail (`workspace root not detected; template ...`) — cursor/Result type 미 land 확인; decode form 으로 pivot 후 6/6 통과로 진단 검증."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.o-generated-source-traceability",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/appendix-a--worked-example-crc16-ccitt",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/appendix-b--worked-example-vle-zint-u64"
+      ],
+      "publishable_carry_forward_bullets": [
+        "vle_u64_encode.scxml — RFC §B worked example 원형 (cursor + Result type 의존); Phase A4 §5.F const-fold gate land 시 함께 land.",
+        "verify-codegen.sh Layer 2 활성화 — SCE-MAP/source-hash anchors strip 옵션 도입 또는 'traceability-only diff' vs 'body diff' 구분 reporter 확장 필요. 별도 라운드.",
+        "Phase A 추가 algorithm SCXML — declare/undeclare/subscribe/publish 등 control-plane 측 algorithm. wire-spec-subset.md §5/§6 mapping 후.",
+        "vendor/sce pin 갱신 정책 — R14 이후 명시 carry 유지. 갱신 시 R16+ audit entry로 기록."
       ]
     },
     "Round 16": {
@@ -2970,6 +3174,28 @@
         "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
       ],
       "carry_forward_bullets": [
+        "Full RFC §5.I.0 subsection heading land — mnemosyne add_section primitive 도입 라운드 다음 수행; 이 라운드에 RFC §5.I의 light-form caveats를 heading 구조로 대체 + 기존 caveats는 alternatives_rejected로 재분류.",
+        "SCE-side BASELINE_SYMBOLS doc-comment header update — OQ-W24 원본 Proposal 명시 외부 의존; SCE maintainer sync exchange 시 적용 (OQ-W15 (a) ratify와 동일 익스철인지).",
+        "verify-codegen.sh Layer 2 활성화 — R15 carry 유지 (SCE-MAP/source-hash strip option or body-only diff reporter)."
+      ],
+      "publishable_decision_summary": "OQ-W24 light closure — RFC §5.I caveats에 Architectural-tier / Peripheral-tier 분리 정의 land; full §5.I.0 subsection heading은 mnemosyne add_section primitive 도입 후 carry.",
+      "publishable_changes_bullets": [
+        "add_section_caveat ×2 to rfc-sce-protocol-synthesis §5.i-sce-extern: \"Architectural-tier: arch-fixed primitives (atomics/fences/cache/IRQ; 101 BASELINE_SYMBOLS)\" + \"Peripheral-tier: multi-impl primitives (RNG/HMAC/HSEM/crypto) via target_plugin only\".",
+        "rfc-open-questions-log.md OQ-W24 entry에 Resolution (light form) + Status open → in-progress + SCE-side carry + Last update Round 16 명시 추가 (raw-Edit carve-out: rfc-open-questions-log는 atomic decompose 미완료 도서).",
+        "Caveat는 R161 §41 MAX_BULLET_CHAR=100 제약 하에 압축 form (95-98 chars each); first 시도는 261/297 chars 로 reject되어 재소재안."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace post-mutate: T1 orphan total=0, round-trip mandatory=11/11, T3 reject=0, GENERATED.md=sync; T3 warn 851 → 852 (+1) / T4 info 426 → 427 (+1) — OQ entry Resolution 단락 추가의 자연스러운 surface, intentional non-zero zone (R138 tier mobility ratify).",
+        "Raw-Edit carve-out 시행 조건 충족: rfc-open-questions-log.md는 Phase 미할당 (atomic decompose 입과 의무 없음); clean baseline before, T1 orphan delta = 0, round-trip preserved.",
+        "Atomic ledger entries 15 → 16, sections 205 unchanged (새 section 몇도 등록 안 됨; 기존 §5.i caveats field 만 즘가).",
+        "OQ-W24 entry body §Proposal이 명시한 'new RFC §5.I.0 subsection' 의도 vs light-form caveat closure 간격 carry로 명시적 감상; carry_forward 항목 1 추가."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+      ],
+      "publishable_carry_forward_bullets": [
         "Full RFC §5.I.0 subsection heading land — mnemosyne add_section primitive 도입 라운드 다음 수행; 이 라운드에 RFC §5.I의 light-form caveats를 heading 구조로 대체 + 기존 caveats는 alternatives_rejected로 재분류.",
         "SCE-side BASELINE_SYMBOLS doc-comment header update — OQ-W24 원본 Proposal 명시 외부 의존; SCE maintainer sync exchange 시 적용 (OQ-W15 (a) ratify와 동일 익스철인지).",
         "verify-codegen.sh Layer 2 활성화 — R15 carry 유지 (SCE-MAP/source-hash strip option or body-only diff reporter)."
@@ -2996,6 +3222,32 @@
         "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation"
       ],
       "carry_forward_bullets": [
+        "SCE-side BASELINE_SYMBOLS doc-comment header update + tier ratify exchange (외부 의존, R16 carry 유지).",
+        "verify-codegen.sh Layer 2 활성화 — R15·R16 공통 carry, 자력 closure 가능 다음 라운드 후보.",
+        "Phase A 추가 algorithm SCXML (declare/undeclare/subscribe/publish) — wire-spec §5/§6 mapping 선행 필요.",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시 (cursor/Result type 의존).",
+        "vendor/sce pin 갱신 정책 — R14 carry 유지, 갱신 시 audit entry 의무."
+      ],
+      "publishable_decision_summary": "OQ-W24 full closure — RFC §5.I.0 'Tier definitions' subsection landed as atomic-store new section via R287/R289 add_section primitive (first watching-zenoh use of new section creation surface).",
+      "publishable_changes_bullets": [
+        "add_section: rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i.0-tier-definitions created.",
+        "§5.I.0 atomic fields: intent + rationale(5) + inputs(3) + outputs(4) + caveats(3) + alternatives(3).",
+        "impact_scope set to §5.I (parent), §OQ-W24, §OQ-W15.",
+        "OQ-W24 raw-Edit: Status open→in-progress→answered (history append), Last update Round 17.",
+        "R16 carry #1 closure: §5.I.0 정식 form land; §5.I caveats remove는 도구 부재로 미시행."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace mid-mutate: T1=0, round-trip 11/11, sections 205→206 (one new atomic section).",
+        "validate_workspace post-raw-Edit: T3 warn 852→853 (OQ status history append, R138 intentional zone).",
+        "query_section §5.I.0: 6 atomic fields rendered; alternatives em-dash normalized to `--` separator.",
+        "Raw-Edit carve-out: rfc-open-questions-log.md still atomic-decompose unassigned (Phase 미배정)."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i.0-tier-definitions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation"
+      ],
+      "publishable_carry_forward_bullets": [
         "SCE-side BASELINE_SYMBOLS doc-comment header update + tier ratify exchange (외부 의존, R16 carry 유지).",
         "verify-codegen.sh Layer 2 활성화 — R15·R16 공통 carry, 자력 closure 가능 다음 라운드 후보.",
         "Phase A 추가 algorithm SCXML (declare/undeclare/subscribe/publish) — wire-spec §5/§6 mapping 선행 필요.",
@@ -3031,6 +3283,34 @@
         "Phase A 추가 algorithm SCXML (declare/undeclare/subscribe/publish) — wire-spec §5/§6 mapping 선행 (R15-R17 carry 유지).",
         "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시 (R15-R17 carry 유지).",
         "vendor/sce pin 갱신 정책 — R14 carry 유지, 갱신 시 audit entry 의무."
+      ],
+      "publishable_decision_summary": "scripts/verify-codegen.sh Layer 2 활성화 — RFC §5.O traceability-anchor normalize(source-hash + SCE-MAP + generated-at) 후 body-equivalence 측정; keyexpr_intersect ↔ algorithm_keyexpr_intersect_exact 6/6 match로 R15·R16·R17 공통 carry 자력 closure.",
+      "publishable_changes_bullets": [
+        "scripts/verify-codegen.sh: normalize_tree() 추가 — sed in-place로 3개 line pattern을 <STRIPPED>로 치환 후 byte-diff.",
+        "Normalize 대상: source-hash hex64, SCE-MAP <path>:<line> (plain + rust #![doc] 양형), generated-at unix-ts (paired emit이 second-boundary 가로지를 때 정상 normalize).",
+        "Header comment 업데이트 — Round 18 — Layer 2 활성화 + R15 finding (§A6 byte-equivalence semantic intent vs §5.O traceability-anchor 필수 차이) 명시.",
+        "Pair viability 조건 명시 — root name= attribute 양쪽 SCXML 일치해야 emit file-name 정합; 불일치 시 Layer 2는 file-presence diff로 정상 mismatch (body normalize bypass)."
+      ],
+      "publishable_verification_bullets": [
+        "Positive: keyexpr_intersect ↔ algorithm_keyexpr_intersect_exact → emit pass=6 fail=0 | golden match=6 mismatch=0, exit 0.",
+        "Layer 1-only path (single-arg) 회귀 없음 — crc16_ccitt.scxml 단독 호출 시 6/6 emit pass + Layer 2 열 미출력 (기존 동작 유지).",
+        "Negative: crc16_ccitt ↔ algorithm_crc16 (upstream에 name= 부재) → 6/6 MISMATCH 유지, file-presence diff 정상 표시 (normalize가 false-pass 유발 안 함).",
+        "validate_workspace clean throughout — T1=0, round-trip 11/11, sections=206 보존 (atomic section mutation 없음, infra-only 라운드).",
+        "RFC §5.O 의미적 부합 확인 — strip되는 3개 line은 §5.O 트레이서빌리티 앵커로 정의된 항목 (source-hash · SCE-MAP · 생성 epoch), §A6 byte-equivalence가 측정하려던 emit body 외 zone."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.o-generated-source-traceability",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm"
+      ],
+      "publishable_carry_forward_bullets": [
+        "crc16_ccitt ↔ algorithm_crc16 pair Layer 2 — upstream fixture에 name=crc16_ccitt 부재로 file-name 불일치; SCE upstream PR + vendor pin 갱신 후 시도 가능.",
+        "keyexpr_includes Layer 2 pair 부적합 — upstream algorithm_keyexpr_match_first는 BC iterate algorithm으로 의미가 다름; v1=intersect stub 형 유지, Layer 1만 운영.",
+        "vle_u64_decode Layer 2 pair 부재 — SCE-side에 zenoh-pico _z_zint_decode_u64 parity fixture 작성 후 pairing 가능.",
+        "SCE-side BASELINE_SYMBOLS doc-comment header + tier ratify (R16·R17 carry 유지, 외부 의존).",
+        "Phase A 추가 algorithm SCXML (declare/undeclare/subscribe/publish) — wire-spec §5/§6 mapping 선행 (R15-R17 carry 유지).",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시 (R15-R17 carry 유지).",
+        "vendor/sce pin 갱신 정책 — R14 carry 유지, 갱신 시 audit entry 의무."
       ]
     },
     "Round 19": {
@@ -3055,6 +3335,37 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm"
       ],
       "carry_forward_bullets": [
+        "tlv_advance.scxml — §7 iterator advance + Z flag extract; lands with §5.F const-fold gate (Phase A4+)",
+        "Phase A 추가 codec algorithms — Push/Request/Response/Declare/OAM encoder/decoder primitives, A4+ cursor 의존",
+        "v1 FULL_ID allowlist {0x02, 0x03, 0x27, 0x51} 변경 시 dispatch SCXML 동시 갱신 + 새 audit entry 의무",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시 (R15-R18 carry 유지)",
+        "SCE BASELINE_SYMBOLS doc-comment header + tier ratify exchange (R16-R18 외부 의존 carry)",
+        "crc16_ccitt ↔ algorithm_crc16 Layer 2 — SCE upstream PR (root name= attribute) + vendor pin 갱신 후 시도",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture 작성 후 (R18 carry)",
+        "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 빌드 + verify 재실행 + audit entry 의무",
+        "Phase E (README 저작) — Mnemosyne migration 마지막, LICENSE/SPDX 안내 포함 carry"
+      ],
+      "publishable_decision_summary": "§7 extension chain dispatch primitive land — extension_v1_dispatch.scxml (Phase A3, header → action ∈ {handle, skip, reject}) encodes RFC §7.2 unknown-extensions policy + v1 FULL_ID allowlist; tlv_advance pair defers to Phase A4+ (cursor/Result types).",
+      "publishable_changes_bullets": [
+        "sources/algorithms/extension_v1_dispatch.scxml land — pure predicate header(uint8) → action(uint8)",
+        "v1 FULL_ID allowlist {0x02 FF, 0x03 FD, 0x27 *_PATCH, 0x51 JOIN_QOS} per zenoh-pico ext.h:46-50",
+        "§7.2 unknown-extensions policy in body: M flag set → 2 reject, M flag clear → 1 skip, else 0 handle",
+        "Z flag (bit 7, more-coming) intentionally out of dispatcher scope — iterator (tlv_advance) concern",
+        "tlv_advance Phase A4+ defer (cursor/Result type deps) — same shape as vle_u64_encode carry"
+      ],
+      "publishable_verification_bullets": [
+        "Layer 1 six-backend emit: rust/cpp/kotlin/go/c11/python → 6/6 pass, 1 file each, fail=0",
+        "Layer 2 byte-golden N/A — no SCE-upstream §7 dispatch fixture at vendor pin 1473f99f",
+        "atomic ledger entries 18→19 expected, sections=206 invariant (SCXML asset, no atomic section mutation)",
+        "Round-trip 11/11 + T1 orphan=0 preserved (impact_refs all live, no new cross-ref orphan)"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism",
+        "wire-spec-subset--watching-zenoh-mvp/7-1-common-application-visible-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/7-2-unknown-extensions-policy",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm"
+      ],
+      "publishable_carry_forward_bullets": [
         "tlv_advance.scxml — §7 iterator advance + Z flag extract; lands with §5.F const-fold gate (Phase A4+)",
         "Phase A 추가 codec algorithms — Push/Request/Response/Declare/OAM encoder/decoder primitives, A4+ cursor 의존",
         "v1 FULL_ID allowlist {0x02, 0x03, 0x27, 0x51} 변경 시 dispatch SCXML 동시 갱신 + 새 audit entry 의무",
@@ -3101,6 +3412,41 @@
         "Phase C: 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) state-Section + transition-CrossRef graph",
         "Phase D: residual 6 docs (intrinsics-runtime / runtime-crate-{lwip,tokio} / wire-spec / ARCHITECTURE / SESSION_KICKOFF / README)",
         "Heading-slug ID convention from Phase A carries forward to Phases B-D"
+      ],
+      "publishable_decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
+      "publishable_changes_bullets": [
+        "§1 Decision needed: intent + inputs(2) + outputs(2) + impact_scope(3)",
+        "§2 Why now: intent + rationale(3) + inputs(2) + outputs(2) + impact_scope(3)",
+        "§3 Initial proposal: intent + rationale(6) + alternatives(4) + inputs(1) + impact_scope(3)",
+        "§4 Counter-options: intent + alternatives(4) + impact_scope(3)",
+        "§5 Blast radius: intent + rationale(5) + impact_scope(4)",
+        "§6 Action requested: intent + inputs(2) + outputs(3) + caveat(1) + impact_scope(2)",
+        "§7 References: intent + impact_scope(4)",
+        "Section ID convention established: <doc-root-slug>/<heading-gh-slug> hierarchical form",
+        "Markdown source unchanged; atomic store carries decomposed audit trace alongside prose"
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace at each of 7 section boundaries: T1=0, round-trip=13/13, exit=0",
+        "Atomic ledger drift consistent: entries=1, sections=0→7 (one new section per H2)",
+        "verify_generated post-Phase-A: GENERATED.md cascade sync confirmed",
+        "Format reject caught: alternatives_rejected requires ' — ' separator, not colon (Round 161 §41 line format)",
+        "Style threshold reject caught: rationale bullet 100-char cap (Round 161 §41 MAX_BULLET_CHAR)",
+        "T3 warn baseline 975 unchanged; T4 info 536 unchanged (no new style regressions)"
+      ],
+      "publishable_impact_refs": [
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/1-decision-needed",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/2-why-this-decision-is-needed-now",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/3-initial-proposal-watching-zenoh",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/4-counter-options-presented-for-context",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/5-blast-radius-forward-compatibility-implications",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/6-action-requested",
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/7-references-for-the-maintainer"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase B: rfc-sce-protocol-synthesis.md §5 kinds atomic decompose (~11 kinds × ~6 atomic fields)",
+        "Phase C: 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) state-Section + transition-CrossRef graph",
+        "Phase D: residual 6 docs (intrinsics-runtime / runtime-crate-{lwip,tokio} / wire-spec / ARCHITECTURE / SESSION_KICKOFF / README)",
+        "Heading-slug ID convention from Phase A carries forward to Phases B-D"
       ]
     },
     "Round 20": {
@@ -3125,6 +3471,38 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm"
       ],
       "carry_forward_bullets": [
+        "scouting_mid_v1_valid.scxml — SCOUT=0x01 + HELLO=0x02, T_INIT/T_OPEN과 context-discriminated",
+        "declare_sub_mid_v1_valid.scxml — §5.1 KEXPR/SUB/QUERYABLE/TOKEN ± UNDECL + FINAL=0x1A",
+        "payload_z_mid_v1_valid.scxml — §6.1 Z_PUT/Z_DEL Included; Z_QUERY/REPLY/ERR partial Included 검토",
+        "tlv_advance.scxml — Phase A4+ cursor/Result 의존 (R19 carry 유지)",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시 (R15-R19 carry 유지)",
+        "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R19 외부 의존 carry)",
+        "crc16_ccitt ↔ algorithm_crc16 Layer 2 — SCE upstream PR (root name= attribute) + pin 갱신 후",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture 작성 후 (R18 carry)",
+        "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무",
+        "Phase E (README 저작) — Mnemosyne migration 마지막, LICENSE/SPDX 안내 포함"
+      ],
+      "publishable_decision_summary": "§4 + §5 top-level MID dispatcher primitives land — session_mid_v1_valid.scxml (T_OAM..T_JOIN, MID 0x00-0x07) + network_mid_v1_valid.scxml (N_INTEREST..N_OAM, MID 0x19-0x1F); R19 dispatcher 패턴 한 계층 위 적용, 2 SCXMLs in one round.",
+      "publishable_changes_bullets": [
+        "sources/algorithms/session_mid_v1_valid.scxml — pure predicate, MID ∈ {0x00..0x07} 명시 분기",
+        "sources/algorithms/network_mid_v1_valid.scxml — pure predicate, MID ∈ {0x19..0x1F} 명시 분기",
+        "MID extraction header & 0x1F (zenoh-pico core.h:37 _Z_MID_MASK) 양쪽 동일 관습",
+        "Unknown MID → false; §4/§5 unknown-policy = protocol violation (skip 분기 없음, §7.2와 구분)",
+        "Scouting MID + Declare sub-MID + Payload Z_MID → R21+ carry (context-discriminated 별도 SCXML)"
+      ],
+      "publishable_verification_bullets": [
+        "Layer 1 six-backend emit: session_mid 6/6 pass + network_mid 6/6 pass; 0 fail",
+        "Layer 2 N/A — SCE upstream에 §4/§5 MID validator fixture 부재 (vendor pin 1473f99f)",
+        "atomic ledger entries 19→20 expected, sections=206 invariant (SCXML asset, no atomic section mutation)",
+        "Round-trip 11/11 + T1 orphan=0 preserved (impact_refs §4-1/§4-2/§5/§5.A 전부 live)"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm"
+      ],
+      "publishable_carry_forward_bullets": [
         "scouting_mid_v1_valid.scxml — SCOUT=0x01 + HELLO=0x02, T_INIT/T_OPEN과 context-discriminated",
         "declare_sub_mid_v1_valid.scxml — §5.1 KEXPR/SUB/QUERYABLE/TOKEN ± UNDECL + FINAL=0x1A",
         "payload_z_mid_v1_valid.scxml — §6.1 Z_PUT/Z_DEL Included; Z_QUERY/REPLY/ERR partial Included 검토",
@@ -3170,6 +3548,39 @@
         "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture (R18 carry)",
         "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무",
         "Phase E (README 저작) — Mnemosyne migration 마지막, LICENSE/SPDX 안내 포함"
+      ],
+      "publishable_decision_summary": "§3 scouting + §5.1 declare sub + §6 payload Z_MID dispatcher 3종 land — scouting_mid_v1_valid (SCOUT/HELLO) + declare_sub_mid_v1_valid (0x00-0x07 + 0x1A) + payload_z_mid_v1_valid (Z_PUT..Z_ERR, Z_OAM 의도적 exclude); R19-R20 dispatcher 패턴 wire-spec MVP top-level MID 표면 완전 종결.",
+      "publishable_changes_bullets": [
+        "sources/algorithms/scouting_mid_v1_valid.scxml — SCOUT=0x01 + HELLO=0x02; §3 v1 surface",
+        "sources/algorithms/declare_sub_mid_v1_valid.scxml — §5.1 0x00-0x07 + 0x1A (9 분기)",
+        "sources/algorithms/payload_z_mid_v1_valid.scxml — §6 Z_PUT..Z_ERR (5 분기); Z_OAM 의도적 exclude",
+        "Z_OAM (0x00) 명시 scope-out: §6.1/§6.2/§6.3 어디에도 mvp Inclusion 없음 — Phase B+ OQ",
+        "MID extraction header & 0x1F 통일 (R19-R21 6 SCXML 전부); _Z_MID_MASK convention 유지"
+      ],
+      "publishable_verification_bullets": [
+        "Layer 1 six-backend emit: scouting/declare/payload 6/6 × 3 = 18 pass; 0 fail",
+        "Layer 2 N/A — SCE upstream에 §3/§5.1/§6 MID validator fixture 부재 (pin 1473f99f)",
+        "atomic ledger entries 20→21 expected, sections=206 invariant (SCXML asset, no atomic section mutation)",
+        "Round-trip 11/11 + T1 orphan=0 preserved; impact_refs 6 sections 전부 live"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm"
+      ],
+      "publishable_carry_forward_bullets": [
+        "tlv_advance.scxml — §7 iterator advance + Z flag extract, Phase A4+ cursor/Result 의존",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시 (R15+ carry 유지)",
+        "Phase A 메시지별 codec body — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor 의존",
+        "Z_OAM (0x00) payload-layer Inclusion 결정 — Phase B+ OQ, R21에서 명시 scope-out",
+        "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R20 외부 의존 carry)",
+        "crc16_ccitt ↔ algorithm_crc16 Layer 2 — SCE upstream PR (root name= attribute) + pin 갱신 후",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture (R18 carry)",
+        "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무",
+        "Phase E (README 저작) — Mnemosyne migration 마지막, LICENSE/SPDX 안내 포함"
       ]
     },
     "Round 22": {
@@ -3193,6 +3604,36 @@
         "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism"
       ],
       "carry_forward_bullets": [
+        "tlv_advance.scxml — Phase A4+ cursor/Result; vle_byte_length가 내부 길이 산출",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시 (R15+ carry 유지)",
+        "Phase A 메시지별 codec body — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor 의존",
+        "Z_OAM (0x00) payload-layer Inclusion 결정 — Phase B+ OQ (R21 carry 유지)",
+        "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R20 외부 의존 carry)",
+        "crc16_ccitt ↔ algorithm_crc16 Layer 2 — SCE upstream PR (root name= attribute) + pin 갱신 후",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture (R18 carry)",
+        "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무",
+        "Phase E (README 저작) — Mnemosyne migration 마지막, LICENSE/SPDX 안내 포함"
+      ],
+      "publishable_decision_summary": "vle_byte_length primitive land — Phase A3 cursor-free TLV chain walker missing piece; vle_u64_decode와 짝으로 §7 extension iterator를 Phase A4 cursor 의존 없이 author-side에서 운영 가능, tlv_advance Phase A4+ 진화의 내부 길이 산출 부분품.",
+      "publishable_changes_bullets": [
+        "sources/algorithms/vle_byte_length.scxml — bytes → uint8, 첫 VLE 값 바이트 수 (1..len(data))",
+        "vle_u64_decode와 짝: byte_length가 길이, u64_decode가 값; 둘 다 cursor 없이 A3 운영",
+        "TLV chain walker 의사 코드: enc → vle_byte_length로 body 길이 산출 → has_more 분기",
+        "Boundary: data 끝까지 continuation-bit 미해지 시 len(data) 반환 (vle-width-overflow 동등)",
+        "tlv_advance Phase A4+ 본격 단계에서 vle_byte_length를 내부 호출하는 형태로 진화"
+      ],
+      "publishable_verification_bullets": [
+        "Layer 1 six-backend emit: rust/cpp/kotlin/go/c11/python 6/6 pass, 1 file each, fail=0",
+        "Layer 2 N/A — SCE upstream에 vle byte-length fixture 부재 (pin 1473f99f)",
+        "atomic ledger entries 21→22 expected, sections=206 invariant (SCXML asset, no atomic mutation)",
+        "Round-trip 11/11 + T1 orphan=0 preserved (impact_refs §5.A/§5.B/§7 전부 live)"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
         "tlv_advance.scxml — Phase A4+ cursor/Result; vle_byte_length가 내부 길이 산출",
         "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시 (R15+ carry 유지)",
         "Phase A 메시지별 codec body — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor 의존",
@@ -3236,6 +3677,100 @@
         "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture (R23에 SCE 측 자료 다수화)",
         "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무",
         "Phase E (README 저작) — Mnemosyne migration 마지막"
+      ],
+      "publishable_decision_summary": "vle pair test-vector hardening — vle_byte_length + vle_u64_decode 각 3 boundary vectors land; SCE v1 test-vector schema single-`bytes`-param scalar-return 제약 발견, MID validator (uint8 param) 6종 test-vector는 Phase B5 multi-arg/non-bytes 지원 후 deferred carry.",
+      "publishable_changes_bullets": [
+        "vle_byte_length.scxml — 3 test-vectors (hex=00→1, 8001→2, FF7F→2); 1-2 byte boundary",
+        "vle_u64_decode.scxml — 3 test-vectors (hex=00→0, 7F→127, 8001→128); zero/max/transition",
+        "SCE v1 test-vector schema: 단일 bytes param + scalar return only (sce-forge-ext.xsd doc-comment)",
+        "MID validator (uint8 param) 6종 test-vector 부적격 → Phase B5 multi-arg/non-bytes 지원 후",
+        "Sidecar test 파일 생성 확인 (per-backend 1 → 2 file, RFC §5.J.4 parity 표면 확장)",
+        "smoke-test 시 scouting_mid 임시 추가 → revert (schema 제약 발견 직후)"
+      ],
+      "publishable_verification_bullets": [
+        "Layer 1 six-backend emit: vle_byte_length + vle_u64_decode + scouting(revert) 6/6 × 3 = 18 pass",
+        "Sidecar file count delta vle 양쪽 1 → 2 per backend (algorithm + test sidecar)",
+        "atomic ledger entries 22→23 expected, sections=206 invariant (SCXML asset, no atomic mutation)",
+        "Round-trip 11/11 + T1 orphan=0 preserved (impact_refs §5.A/§5.B/§5.J 전부 live)"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "MID validator test-vector hardening (6 SCXMLs) — Phase B5 multi-arg/non-bytes 지원 후 라운드",
+        "tlv_advance.scxml — Phase A4+ cursor/Result; vle_byte_length 내부 호출",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시",
+        "Phase A 메시지별 codec body — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor",
+        "Z_OAM (0x00) payload-layer Inclusion 결정 — Phase B+ OQ",
+        "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R20 외부 의존)",
+        "crc16_ccitt ↔ algorithm_crc16 Layer 2 — SCE upstream PR + pin 갱신 후",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture (R23에 SCE 측 자료 다수화)",
+        "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무",
+        "Phase E (README 저작) — Mnemosyne migration 마지막"
+      ]
+    },
+    "Round 24": {
+      "decision_summary": "Phase E start — README.md 본문 저작 (16 byte stub → 150+ line prose); project overview + Phase A/B+ 상태 + 디렉터리 / 빌드 / Local CI gates / 라이센스 / 외부 참조 / 기여 절차. workspace.docs 재등록 + atomic decompose는 R25+ carry (R7 scope correction 직후 단계 분리).",
+      "changes_bullets": [
+        "README.md 16 byte stub → 본문 저작 (project overview + Phase status + dirs table)",
+        "LICENSE / SPDX 안내 + dual-license tier 명시 (LGPL-3.0-or-later OR Commercial)",
+        "Build / verify pipeline (scripts/build-sce.sh + verify-codegen.sh L1/L2) 설명",
+        "Local CI gates (3 githooks) 설치 + mnemosyne-cli install pointer",
+        "외부 참조 (SCE / Mnemosyne / zenoh / zenoh-pico) 명시 link",
+        "workspace.docs 재등록 + atomic decompose는 R25+ carry (R7 scope correction 직후 단계)"
+      ],
+      "verification_bullets": [
+        "Prose only — SCXML 변경 없음, scripts 변경 없음, mnemosyne mutation 없음",
+        "Cross-ref 일관성: docs/wire-spec-subset.md / docs/rfc-* / sources/README.md / CLAUDE.md 실재 확인",
+        "validate_workspace expected clean — README는 workspace.docs 등록 안 됨 (R7 scope correction)",
+        "Round-trip 11/11 + T1 orphan=0 preserved (mnemosyne 무관 산문 저작)"
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "R25 Phase E continuation — workspace.docs 재등록 (mnemosyne.toml) + atomic decompose",
+        "MID validator test-vector hardening (6 SCXMLs) — Phase B5 multi-arg/non-bytes 지원 후",
+        "tlv_advance.scxml — Phase A4+ cursor/Result; vle_byte_length 내부 호출",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시",
+        "Phase A 메시지별 codec body — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor",
+        "Z_OAM (0x00) payload-layer Inclusion 결정 — Phase B+ OQ",
+        "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R20 외부 의존)",
+        "crc16_ccitt ↔ algorithm_crc16 Layer 2 — SCE upstream PR (root name=) + pin 갱신 후",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture",
+        "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무"
+      ],
+      "publishable_decision_summary": "Phase E start — README.md 본문 저작 (16 byte stub → 150+ line prose); project overview + Phase A/B+ 상태 + 디렉터리 / 빌드 / Local CI gates / 라이센스 / 외부 참조 / 기여 절차. workspace.docs 재등록 + atomic decompose는 R25+ carry (R7 scope correction 직후 단계 분리).",
+      "publishable_changes_bullets": [
+        "README.md 16 byte stub → 본문 저작 (project overview + Phase status + dirs table)",
+        "LICENSE / SPDX 안내 + dual-license tier 명시 (LGPL-3.0-or-later OR Commercial)",
+        "Build / verify pipeline (scripts/build-sce.sh + verify-codegen.sh L1/L2) 설명",
+        "Local CI gates (3 githooks) 설치 + mnemosyne-cli install pointer",
+        "외부 참조 (SCE / Mnemosyne / zenoh / zenoh-pico) 명시 link",
+        "workspace.docs 재등록 + atomic decompose는 R25+ carry (R7 scope correction 직후 단계)"
+      ],
+      "publishable_verification_bullets": [
+        "Prose only — SCXML 변경 없음, scripts 변경 없음, mnemosyne mutation 없음",
+        "Cross-ref 일관성: docs/wire-spec-subset.md / docs/rfc-* / sources/README.md / CLAUDE.md 실재 확인",
+        "validate_workspace expected clean — README는 workspace.docs 등록 안 됨 (R7 scope correction)",
+        "Round-trip 11/11 + T1 orphan=0 preserved (mnemosyne 무관 산문 저작)"
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R25 Phase E continuation — workspace.docs 재등록 (mnemosyne.toml) + atomic decompose",
+        "MID validator test-vector hardening (6 SCXMLs) — Phase B5 multi-arg/non-bytes 지원 후",
+        "tlv_advance.scxml — Phase A4+ cursor/Result; vle_byte_length 내부 호출",
+        "vle_u64_encode.scxml — Phase A4 §5.F const-fold gate land 시 동시",
+        "Phase A 메시지별 codec body — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor",
+        "Z_OAM (0x00) payload-layer Inclusion 결정 — Phase B+ OQ",
+        "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R20 외부 의존)",
+        "crc16_ccitt ↔ algorithm_crc16 Layer 2 — SCE upstream PR (root name=) + pin 갱신 후",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture",
+        "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무"
       ]
     },
     "Round 3": {
@@ -3281,6 +3816,53 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.o-generated-source-traceability"
       ],
       "carry_forward_bullets": [
+        "Phase C: 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) state-Section + transition-CrossRef migration",
+        "Phase D: residual 6 docs (intrinsics-runtime / runtime-crate-{lwip,tokio} / wire-spec / ARCHITECTURE / SESSION_KICKOFF / README)",
+        "Phase 2 deferred kinds: §5.G parametric, §5.H recursive/tree (not in current scope, atomic landing deferred)",
+        "Heading-slug ID convention from Phase A/B carries forward to Phases C-D"
+      ],
+      "publishable_decision_summary": "Phase B complete — RFC §5 thirteen kind sub-sections atomic decomposition (5.A-5.F, 5.I-5.O); Phase 2 deferred 5.G/5.H skipped.",
+      "publishable_changes_bullets": [
+        "§5.A algorithm: intent + rationale(5) + inputs(4) + outputs(3) + caveats(4) + alternatives(3) + impact_scope(5)",
+        "§5.B codec DSL: intent + rationale(5) + inputs(4) + outputs(5) + caveats(5) + alternatives(4) + impact_scope(5)",
+        "§5.C link: intent + rationale(5) + inputs(4) + outputs(4) + caveats(4) + alternatives(4) + impact_scope(8)",
+        "§5.D timer/worker: intent + rationale(4) + inputs(3) + outputs(3) + caveats(3) + alternatives(3) + impact_scope(5)",
+        "§5.E buffer pool: intent + rationale(6) + inputs(4) + outputs(4) + caveats(4) + alternatives(4) + impact_scope(6)",
+        "§5.F const-fold: intent + rationale(4) + inputs(4) + outputs(4) + caveats(4) + alternatives(3) + impact_scope(5)",
+        "§5.I sce:extern: intent + rationale(5) + inputs(4) + outputs(4) + caveats(5) + alternatives(4) + impact_scope(10)",
+        "§5.J codegen backends: intent + rationale(5) + inputs(4) + outputs(4) + caveats(4) + alternatives(4) + impact_scope(10)",
+        "§5.K deploy model: intent + rationale(5) + inputs(5) + outputs(4) + caveats(5) + alternatives(4) + impact_scope(10)",
+        "§5.L bounded-collection: intent + rationale(4) + inputs(5) + outputs(4) + caveats(4) + alternatives(4) + impact_scope(8)",
+        "§5.M fragment/reassembly: intent + rationale(5) + inputs(5) + outputs(4) + caveats(5) + alternatives(4) + impact_scope(10)",
+        "§5.N multi-link: intent + rationale(3) + inputs(3) + outputs(3) + caveats(2) + alternatives(2) + impact_scope(6)",
+        "§5.O traceability: intent + rationale(4) + inputs(4) + outputs(4) + caveats(4) + alternatives(4) + impact_scope(6)",
+        "Section ID convention: <doc-root-slug>/<heading-gh-slug> form preserved from Phase A",
+        "5.G/5.H Phase 2 deferred kinds skipped from Phase B scope"
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace at each of 13 section boundaries: T1=0, round-trip=13/13, exit=0",
+        "Atomic ledger drift: entries=1→2, sections=7→20 (+13 §5 sub-sections)",
+        "verify_generated post-Phase-B: GENERATED.md cascade sync confirmed",
+        "Bare §N notation avoided in atomic field text — would resolve to wrong default_doc target",
+        "T3 warn baseline 975 unchanged across all 13 sections",
+        "Reject types resolved during Phase A (alternatives separator, bullet 100-char) didn't recur"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.d-timer-and-worker-primitives",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.f-build-time-evaluation",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.n-multi-link-concurrency",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.o-generated-source-traceability"
+      ],
+      "publishable_carry_forward_bullets": [
         "Phase C: 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) state-Section + transition-CrossRef migration",
         "Phase D: residual 6 docs (intrinsics-runtime / runtime-crate-{lwip,tokio} / wire-spec / ARCHITECTURE / SESSION_KICKOFF / README)",
         "Phase 2 deferred kinds: §5.G parametric, §5.H recursive/tree (not in current scope, atomic landing deferred)",
@@ -3367,6 +3949,86 @@
         "Phase D mostly index-shaped; lighter than Phase A/B/C",
         "Skipped meta sections (§1/§5/§8/§9/§11/§12 framings + change logs) can be migrated in Phase D as needed",
         "FSM transition-as-CrossRef encoding via impact_scope worked; per-state explicit Sections deferred (state-list-as-bullets pattern adopted)"
+      ],
+      "publishable_decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
+      "publishable_changes_bullets": [
+        "session-fsm.md: 18 sections (§2.1-§2.7 unicast / §3.1-§3.4 multicast / §4 scouting / §5.3 Q13 / §6 link / §7 ext / §8.1-§8.2 / §10)",
+        "scouting-fsm.md: 19 sections (§1.1-§1.4 framing / §2.1-§2.6 FSM / §3.2-§3.3 OQ-W3 / §6.1, §6.4 trust+OQ-W9 / §8.1-§8.2 / §10)",
+        "reassembly-fsm.md: 18 sections (§1 framing / §2.1-§2.6 FSM / §3 TX / §4 timer/quota / §5 trust / §6 buffer-pool / §7.1-§7.4 build-time / §8.1-§8.2 / §10)",
+        "Phase C lean pattern: intent + (1-2 dense lists) + impact_scope per section; 3 mutations median",
+        "Cross-FSM CrossRef edges established via impact_scope (e.g. session-fsm/2-3-established ↔ reassembly-fsm/2-1-hierarchy)",
+        "Section ID convention <doc-root>/<heading-gh-slug> preserved across all 3 FSM docs"
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace at section batch boundaries: T1=0, round-trip=13/13, exit=0",
+        "Atomic ledger drift: entries=3→4, sections=20→75 (+55 FSM sections)",
+        "verify_generated post-Phase-C: GENERATED.md cascade sync",
+        "T3 warn baseline 975 unchanged across 55 new sections",
+        "Bullet 100-char rejects caught and trimmed (3 occurrences across Phase C); intent 200-char reject caught (1 occurrence)",
+        "Bare §N notation continued to be avoided; all impact_scope refs verified pre-write"
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/2-1-unicast-states",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-3-established-sub-regions",
+        "session-fsm--prose-level-sketch/2-4-close-paths",
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets",
+        "session-fsm--prose-level-sketch/2-6-trust-class-interaction",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
+        "session-fsm--prose-level-sketch/3-1-multicast-session-level-states",
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states",
+        "session-fsm--prose-level-sketch/3-3-no-close-handshake",
+        "session-fsm--prose-level-sketch/3-4-client-mode-and-multicast",
+        "session-fsm--prose-level-sketch/4-scouting-pre-session",
+        "session-fsm--prose-level-sketch/5-3-q13-answer",
+        "session-fsm--prose-level-sketch/6-link-layer-interaction",
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary",
+        "session-fsm--prose-level-sketch/8-1-authoring-contract-gaps",
+        "session-fsm--prose-level-sketch/8-2-new-open-questions",
+        "session-fsm--prose-level-sketch/10-next-step-scaffolding",
+        "scouting-fsm--prose-sketch/1-1-position-and-triggers",
+        "scouting-fsm--prose-sketch/1-2-scout-hello-wire-shape",
+        "scouting-fsm--prose-sketch/1-3-scouting-link-vs-session-link-distinct",
+        "scouting-fsm--prose-sketch/1-4-three-modes-and-zenoh-pico-mapping",
+        "scouting-fsm--prose-sketch/2-1-hierarchy",
+        "scouting-fsm--prose-sketch/2-2-states-union-of-three-modes",
+        "scouting-fsm--prose-sketch/2-3-transitions",
+        "scouting-fsm--prose-sketch/2-4-1-active",
+        "scouting-fsm--prose-sketch/2-4-2-passive-deferred-to-phase-d",
+        "scouting-fsm--prose-sketch/2-4-3-static",
+        "scouting-fsm--prose-sketch/2-5-timeouts-and-budgets",
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "scouting-fsm--prose-sketch/3-2-oq-w3-answer",
+        "scouting-fsm--prose-sketch/3-3-implication-for-the-scouting-fsm",
+        "scouting-fsm--prose-sketch/6-1-per-link-trust-class-table",
+        "scouting-fsm--prose-sketch/6-4-oq-w9-closure",
+        "scouting-fsm--prose-sketch/8-1-authoring-contract-gaps",
+        "scouting-fsm--prose-sketch/8-2-new-open-questions",
+        "scouting-fsm--prose-sketch/10-next-step-scaffolding",
+        "reassembly-fsm--prose-sketch/1-framing-overview",
+        "reassembly-fsm--prose-sketch/2-1-hierarchy",
+        "reassembly-fsm--prose-sketch/2-2-slot-states",
+        "reassembly-fsm--prose-sketch/2-3-router-states",
+        "reassembly-fsm--prose-sketch/2-4-transitions-in-detail",
+        "reassembly-fsm--prose-sketch/2-5-out-of-order-arrival-policy",
+        "reassembly-fsm--prose-sketch/2-6-mapping-to-rfc-5m-three-state-sketch",
+        "reassembly-fsm--prose-sketch/3-tx-fragmentation-sibling-fsm",
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config",
+        "reassembly-fsm--prose-sketch/5-trust-class-interaction",
+        "reassembly-fsm--prose-sketch/6-buffer-pool-interaction",
+        "reassembly-fsm--prose-sketch/7-1-reassembly-capacity-check-hard-error",
+        "reassembly-fsm--prose-sketch/7-2-stage-copy-rate-warning",
+        "reassembly-fsm--prose-sketch/7-3-reassembly-slot-sizing-recommendation",
+        "reassembly-fsm--prose-sketch/7-4-stage-copy-wcet-vs-slot-budget-hard-error",
+        "reassembly-fsm--prose-sketch/8-1-authoring-contract-gaps",
+        "reassembly-fsm--prose-sketch/8-2-new-open-questions",
+        "reassembly-fsm--prose-sketch/10-next-step-scaffolding"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase D: residual 6 docs (intrinsics-runtime / runtime-crate-{lwip,tokio} / wire-spec / ARCHITECTURE / SESSION_KICKOFF / README)",
+        "Phase D mostly index-shaped; lighter than Phase A/B/C",
+        "Skipped meta sections (§1/§5/§8/§9/§11/§12 framings + change logs) can be migrated in Phase D as needed",
+        "FSM transition-as-CrossRef encoding via impact_scope worked; per-state explicit Sections deferred (state-list-as-bullets pattern adopted)"
       ]
     },
     "Round 5": {
@@ -3389,6 +4051,31 @@
         "watching-zenoh--다음-세션-시작-스크립트"
       ],
       "carry_forward_bullets": [
+        "Phase D atomic decompose: tokio/lwip/wire-spec/intrinsics/ARCHITECTURE (~125 sections est)",
+        "Phase E (deferred): README prose authoring + workspace re-registration + atomic decompose",
+        "Mnemosyne PR: scope-removal workflow gap in concepts (frozen-ledger/anti-patterns/schema-guide)",
+        "Mnemosyne PR: scope-change skill + remove_doc/add_orphan_ledger_entry MCP primitives",
+        "Round 5 learning: frozen-ledger blocks past-rewrite, not future-scope-change; orphan_ledger absorbs"
+      ],
+      "publishable_decision_summary": "Scope correction — SESSION_KICKOFF (activity-log genre) and README (empty stub) removed from Mnemosyne workspace as design-doc lifecycle infrastructure genre misfit.",
+      "publishable_changes_bullets": [
+        "Remove README.md and docs/SESSION_KICKOFF.md from mnemosyne.toml::workspace.docs (13→11 docs)",
+        "git mv docs/SESSION_KICKOFF.md notes/SESSION_KICKOFF.md; README.md kept as 0-byte stub for Phase E",
+        "Register two [[orphan_ledger]] entries for Round 1 atomic_impact_refs to <watching-zenoh> and to root",
+        "Frozen-ledger spirit preserved: Round 1 body unchanged, Round 5 records scope intent supersede",
+        "CLAUDE.md path + Phase D plan + memory adoption notes updated to reflect 11-doc workspace"
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace post-correction: docs=11/11, T1=0 (ledger-carried), round-trip 11/11, exit=0",
+        "Inbound markdown-link audit: 0 cross-doc refs from remaining 11 docs to either removed doc",
+        "Atomic ledger orphan_refs accounts dangling Round 1 impact_refs via mnemosyne Round 253 mechanism",
+        "git mv preserves SESSION_KICKOFF history; README zero-byte stub remains for Phase E prose authoring"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh",
+        "watching-zenoh--다음-세션-시작-스크립트"
+      ],
+      "publishable_carry_forward_bullets": [
         "Phase D atomic decompose: tokio/lwip/wire-spec/intrinsics/ARCHITECTURE (~125 sections est)",
         "Phase E (deferred): README prose authoring + workspace re-registration + atomic decompose",
         "Mnemosyne PR: scope-removal workflow gap in concepts (frozen-ledger/anti-patterns/schema-guide)",
@@ -3419,6 +4106,29 @@
         "Mnemosyne PR: atomic-internal orphan ledger (Round 169 lock-in resolution)",
         "Mnemosyne PR: schema-guide [[orphan_ledger]] section sync (Round 253 stale)",
         "Lesson: validate genre fit BEFORE adding doc to workspace.docs (irreversible after Round cite)"
+      ],
+      "publishable_decision_summary": "Round 5 scope correction blocked by mnemosyne Round 169 atomic-internal orphan reject; reverted to lean/stub plan; SESSION_KICKOFF/README retained in 13-doc workspace as architectural lock-in carry.",
+      "publishable_changes_bullets": [
+        "mnemosyne.toml workspace.docs reverted to 13 docs (git checkout); workspace governance unchanged",
+        "Round 5 attempt audited: removal blocked by atomic-internal T1 + frozen-ledger combined lock-in",
+        "Phase D plan reinstated: SESSION_KICKOFF lean (root populate), README stub (1-section minimal)",
+        "atomic store unchanged post-Round-5; Round 5 stays as audit of attempted scope-change (frozen)"
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace post-revert: docs=13/13, T1=0, round-trip 13/13, atomic orphan_refs=0+0, exit=0",
+        "atomic ledger: entries=5 (R1-R5) pre-R6, sections=75; R6 brings entries=6 with no section delta",
+        "Round 5 dangling refs (4) resolved by mnemosyne.toml revert; impact_refs IDs back in atomic_id_set"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh",
+        "watching-zenoh--다음-세션-시작-스크립트"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase D atomic decompose: lean/stub + tokio/lwip/wire-spec/intrinsics/ARCHITECTURE",
+        "Mnemosyne PR: scope-management concept + remove_doc/add_orphan_ledger_entry primitives",
+        "Mnemosyne PR: atomic-internal orphan ledger (Round 169 lock-in resolution)",
+        "Mnemosyne PR: schema-guide [[orphan_ledger]] section sync (Round 253 stale)",
+        "Lesson: validate genre fit BEFORE adding doc to workspace.docs (irreversible after Round cite)"
       ]
     },
     "Round 7": {
@@ -3441,6 +4151,30 @@
         "watching-zenoh--다음-세션-시작-스크립트"
       ],
       "carry_forward_bullets": [
+        "Phase D 잔여: ARCHITECTURE §10-§16 + sub-sections detailed (after MCP restart)",
+        "MCP server restart required: Claude Code reconnect mnemosyne MCP for new build",
+        "mnemosyne PR Round 254 carry: feat/parser-conformance-and-external-ledger branch",
+        "Phase E: README prose authoring + workspace re-registration + atomic decompose"
+      ],
+      "publishable_decision_summary": "Phase D scope correction — README/SESSION_KICKOFF removed from workspace.docs (genre fit); atomic-internal orphan ledger via mnemosyne Round 254 supports textbook path.",
+      "publishable_changes_bullets": [
+        "mnemosyne.toml workspace.docs: 13→11 (README.md and docs/SESSION_KICKOFF.md removed)",
+        "git mv docs/SESSION_KICKOFF.md notes/SESSION_KICKOFF.md (outside mnemosyne governance)",
+        "README.md retained as 0-byte stub for Phase E prose authoring (re-register on completion)",
+        "mnemosyne PR Round 254 landed on feat branch: kind-aware [[orphan_ledger]] + scope concept",
+        "CLAUDE.md path + Phase D plan updated to reflect 11-doc workspace"
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace post-correction: docs=11/11, T1=0, round-trip 11/11, orphan_refs=0+0, exit=0",
+        "Atomic store retains watching-zenoh + SESSION_KICKOFF roots as typed-populated historical record",
+        "No [[orphan_ledger]] entries needed — atomic_id_set retains the two roots typed-populated",
+        "git mv preserves SESSION_KICKOFF history; README zero-byte stub unchanged at workspace root"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh",
+        "watching-zenoh--다음-세션-시작-스크립트"
+      ],
+      "publishable_carry_forward_bullets": [
         "Phase D 잔여: ARCHITECTURE §10-§16 + sub-sections detailed (after MCP restart)",
         "MCP server restart required: Claude Code reconnect mnemosyne MCP for new build",
         "mnemosyne PR Round 254 carry: feat/parser-conformance-and-external-ledger branch",
@@ -3474,6 +4208,36 @@
         "16"
       ],
       "carry_forward_bullets": [
+        "Sub-heading parser limit on 4 section-marker docs (intrinsics/tokio/lwip/wire-spec): mnemosyne PR.",
+        "Remaining ARCHITECTURE subs (sec 10.1-2, 11.1-3, 11.6, 12.1-3) typed-populate optional.",
+        "Phase E README prose authoring deferred: unstub the file and re-register in workspace.docs."
+      ],
+      "publishable_decision_summary": "Phase D ARCHITECTURE densify 마감: top-level sec 10-16 + 핵심 sub (2.4, 11.4, 11.5) typed-populate; 4 section-marker docs root-only carry; Phase E README 분리.",
+      "publishable_changes_bullets": [
+        "Set sec 2.4 rationale_bullets to 6 extensibility invariants (each <=100 chars, ASCII-only).",
+        "Populated sec 10-16 top-level intent + impact_scope across 7 ARCHITECTURE sections.",
+        "Populated sec 11.4 (no-alloc guard) intent + 5 rationale_bullets + impact_scope detailed.",
+        "Populated sec 11.5 (drift detection) intent + 5 rationale_bullets + impact_scope detailed.",
+        "Atomic sections 93->102 (+9 newly typed-populated; sec 2.4 update did not change count)."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace x5: T1=0, round-trip 11/11, T3 warn 895 unchanged, orphan_refs 0+0.",
+        "T4 info 472->457 (-15) via typed-primitive mutations only, no prose rewrite.",
+        "GENERATED.md=sync after every batch; cascade verified; entries=7 / sections=102 final."
+      ],
+      "publishable_impact_refs": [
+        "2/2.4",
+        "10",
+        "11",
+        "11/11.4",
+        "11/11.5",
+        "12",
+        "13",
+        "14",
+        "15",
+        "16"
+      ],
+      "publishable_carry_forward_bullets": [
         "Sub-heading parser limit on 4 section-marker docs (intrinsics/tokio/lwip/wire-spec): mnemosyne PR.",
         "Remaining ARCHITECTURE subs (sec 10.1-2, 11.1-3, 11.6, 12.1-3) typed-populate optional.",
         "Phase E README prose authoring deferred: unstub the file and re-register in workspace.docs."
@@ -3549,9 +4313,79 @@
       "carry_forward_bullets": [
         "Phase E only carry remaining: README.md prose authoring (currently 0-byte stub) + workspace.docs re-registration + atomic decompose. All other Phase D items closed.",
         "Round 8 'parser limit' carry retired — diagnosis showed parser correctly recognizes all sub-headings of 4 §-prefix docs; gap was typed-populate (now closed) not parser."
+      ],
+      "publishable_decision_summary": "Phase D 진짜 closure — ARCHITECTURE 잔여 sub 34개 + 4 §-prefix docs sub 69개 typed-populate; \"parser limit\" carry는 misdiagnosis로 판명되어 mnemosyne 변경 불필요.",
+      "publishable_changes_bullets": [
+        "ARCHITECTURE.md 34 subs typed-populated: 2/2.0-3+5, 3/3.1-4, 4/4.1-3, 6/6.1-2, 7/7.1-3, 8/8.1-4, 9/9.1-4, 10/10.1-2, 11/11.1-3+11/11.6, 12/12.1-3 (intent + impact_scope each).",
+        "intrinsics-runtime-symbols.md 17 subs typed-populated using slug-form IDs (2-symbol-categories ... 8-change-log).",
+        "runtime-crate-tokio.md 13 subs typed-populated (2-trait-surface ... 7-change-log).",
+        "runtime-crate-lwip.md 13 subs typed-populated (2-c11-header-shape ... 7-change-log).",
+        "wire-spec-subset.md 26 subs typed-populated (0-normative-references ... 12-change-log).",
+        "Atomic sections 102 -> 205 (+103 newly typed-populated; 34 ARCHITECTURE + 17 intrinsics + 13 tokio + 13 lwip + 26 wire-spec)."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: T1 orphan total=0, round-trip mandatory=11/11, T3 reject=0, T3 warn 895 -> 843 (-52), T4 info 457 -> 424 (-33), GENERATED.md=sync.",
+        "Round 8 'parser limit' carry diagnosed empirically: mnemosyne-cli validate on each of 4 §-prefix docs returns sections=18/14/14/27, confirming parser recognizes ALL sub-headings; mnemosyne unchanged.",
+        "All impact_scope refs validated via T1 (intra atomic + ARCHITECTURE bare-numeric); no new orphans introduced.",
+        "Sections delta breakdown matches mutation count: 5 docs × varying subs = 103 new section IDs in atomic store."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh",
+        "intrinsics-runtime--symbol-surface",
+        "runtime-crate--sce_link_runtime_tokio",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "wire-spec-subset--watching-zenoh-mvp",
+        "2/2.0",
+        "2/2.1",
+        "2/2.2",
+        "2/2.3",
+        "2/2.5",
+        "3/3.1",
+        "3/3.2",
+        "3/3.3",
+        "3/3.4",
+        "4/4.1",
+        "4/4.2",
+        "4/4.3",
+        "6/6.1",
+        "6/6.2",
+        "7/7.1",
+        "7/7.2",
+        "7/7.3",
+        "8/8.1",
+        "8/8.2",
+        "8/8.3",
+        "8/8.4",
+        "9/9.1",
+        "9/9.2",
+        "9/9.3",
+        "9/9.4",
+        "10/10.1",
+        "10/10.2",
+        "11/11.1",
+        "11/11.2",
+        "11/11.3",
+        "11/11.6",
+        "12/12.1",
+        "12/12.2",
+        "12/12.3",
+        "intrinsics-runtime--symbol-surface/2-symbol-categories",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "runtime-crate--sce_link_runtime_tokio/4-io-uring-fixed-buffer-opt-in",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-c11-header-shape",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/4-trust-class-header-surface",
+        "wire-spec-subset--watching-zenoh-mvp/1-protocol-stack-and-layering",
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer",
+        "wire-spec-subset--watching-zenoh-mvp/9-scope-classification-summary"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase E only carry remaining: README.md prose authoring (currently 0-byte stub) + workspace.docs re-registration + atomic decompose. All other Phase D items closed.",
+        "Round 8 'parser limit' carry retired — diagnosis showed parser correctly recognizes all sub-headings of 4 §-prefix docs; gap was typed-populate (now closed) not parser."
       ]
     }
   },
   "inventory_entries": {},
-  "schema_version": 3
+  "schema_version": 4
 }
