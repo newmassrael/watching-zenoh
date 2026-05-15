@@ -4110,6 +4110,58 @@
         "vendor/sce pin update policy — R14 carry, audit entry mandatory on each pin bump"
       ]
     },
+    "Round 28": {
+      "decision_summary": "Phase A control-plane SCXML round — 3 new algorithm-kind validators (whatami / payload-ext-id / transport-ext-id) covering §3 Hello body, §7.1 payload-layer per-context extension allowlist, §4.4 transport-layer per-control-message extension allowlist.",
+      "changes_bullets": [
+        "sources/algorithms/whatami_v1_valid.scxml new — §3 Hello + §4.1 Init/Join cbyte whatami 2-bit field validator. Allowlist {0=router, 1=peer, 2=client}; rejects wire value 3 (would decode to API enum 0x08 outside constants.h:50-54 surface).",
+        "sources/algorithms/payload_ext_id_v1_valid.scxml new — §7.1 per-body-kind extension FULL_ID allowlist. 2-param (z_mid, ext_header) → bool. Z_PUT/Z_DEL allow {0x41, 0x43}; Z_QUERY allows {0x41, 0x43, 0x45}; Z_REPLY allows {}; Z_ERR allows {0x41}. Source: zenoh-pico src/protocol/codec/message.c per-body decode_extensions switches.",
+        "sources/algorithms/transport_ext_id_v1_valid.scxml new — §4.4 per-control-message extension FULL_ID allowlist. 2-param (t_mid, ext_header) → bool. T_INIT allows {0x27 INIT_PATCH}; T_OPEN allows {} (skip-all per transport.c:328); T_JOIN allows {0x27 JOIN_PATCH, 0x51 JOIN_QOS}. Fragment (§4.2) extensions out of scope (extension_v1_dispatch R19 covers).",
+        "All three carry SPDX dual-license header per Round 12 convention + root `name=` attribute per Round 15 convention."
+      ],
+      "verification_bullets": [
+        "verify-codegen.sh Layer 1: 6 backends (rust/cpp/kotlin/go/c11/python) × 3 SCXMLs = 18/18 emit pass against vendor pin 1473f99f.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, T3 warn=856 unchanged (atomic ledger entries 27→28).",
+        "zenoh-pico fact verification: whatami codec helpers at src/protocol/codec/transport.c:31-37; Hello cbyte layout at src/protocol/codec/message.c:651-655; payload-ext FULL_IDs at message.c:292,296,431,439,447,566; transport-ext FULL_IDs at transport.c:107,115,226,328."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/7-1-common-application-visible-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/7-2-unknown-extensions-policy"
+      ],
+      "carry_forward_bullets": [
+        "network_ext_id_v1_valid (§7.1 NodeId/QoS on N_PUSH/N_REQUEST/N_RESPONSE envelopes) — splits from payload-layer concern, lives in src/protocol/codec/network.c (not message.c). Sibling to payload_ext_id_v1_valid; ~3-4 FULL_IDs.",
+        "fragment_ext_id_v1_valid (§4.2 FRAGMENT_FIRST/FRAGMENT_DROP on T_MID 0x06) — separates §4.2 data-carrying extension validation from extension_v1_dispatch's universal §7.2 policy.",
+        "NEXT_SESSION.md still at R16 snapshot — overdue for current-state refresh post-R27+R28.",
+        "vle_u64_encode + tlv_advance remain §5.F const-fold gate (A4) blockers, unchanged from R23 carry."
+      ],
+      "publishable_decision_summary": "Phase A control-plane SCXML round — 3 new algorithm-kind validators (whatami / payload-ext-id / transport-ext-id) covering §3 Hello body, §7.1 payload-layer per-context extension allowlist, §4.4 transport-layer per-control-message extension allowlist.",
+      "publishable_changes_bullets": [
+        "sources/algorithms/whatami_v1_valid.scxml new — §3 Hello + §4.1 Init/Join cbyte whatami 2-bit field validator. Allowlist {0=router, 1=peer, 2=client}; rejects wire value 3 (would decode to API enum 0x08 outside constants.h:50-54 surface).",
+        "sources/algorithms/payload_ext_id_v1_valid.scxml new — §7.1 per-body-kind extension FULL_ID allowlist. 2-param (z_mid, ext_header) → bool. Z_PUT/Z_DEL allow {0x41, 0x43}; Z_QUERY allows {0x41, 0x43, 0x45}; Z_REPLY allows {}; Z_ERR allows {0x41}. Source: zenoh-pico src/protocol/codec/message.c per-body decode_extensions switches.",
+        "sources/algorithms/transport_ext_id_v1_valid.scxml new — §4.4 per-control-message extension FULL_ID allowlist. 2-param (t_mid, ext_header) → bool. T_INIT allows {0x27 INIT_PATCH}; T_OPEN allows {} (skip-all per transport.c:328); T_JOIN allows {0x27 JOIN_PATCH, 0x51 JOIN_QOS}. Fragment (§4.2) extensions out of scope (extension_v1_dispatch R19 covers).",
+        "All three carry SPDX dual-license header per Round 12 convention + root `name=` attribute per Round 15 convention."
+      ],
+      "publishable_verification_bullets": [
+        "verify-codegen.sh Layer 1: 6 backends (rust/cpp/kotlin/go/c11/python) × 3 SCXMLs = 18/18 emit pass against vendor pin 1473f99f.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, T3 warn=856 unchanged (atomic ledger entries 27→28).",
+        "zenoh-pico fact verification: whatami codec helpers at src/protocol/codec/transport.c:31-37; Hello cbyte layout at src/protocol/codec/message.c:651-655; payload-ext FULL_IDs at message.c:292,296,431,439,447,566; transport-ext FULL_IDs at transport.c:107,115,226,328."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/7-1-common-application-visible-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/7-2-unknown-extensions-policy"
+      ],
+      "publishable_carry_forward_bullets": [
+        "network_ext_id_v1_valid (§7.1 NodeId/QoS on N_PUSH/N_REQUEST/N_RESPONSE envelopes) — splits from payload-layer concern, lives in src/protocol/codec/network.c (not message.c). Sibling to payload_ext_id_v1_valid; ~3-4 FULL_IDs.",
+        "fragment_ext_id_v1_valid (§4.2 FRAGMENT_FIRST/FRAGMENT_DROP on T_MID 0x06) — separates §4.2 data-carrying extension validation from extension_v1_dispatch's universal §7.2 policy.",
+        "NEXT_SESSION.md still at R16 snapshot — overdue for current-state refresh post-R27+R28.",
+        "vle_u64_encode + tlv_advance remain §5.F const-fold gate (A4) blockers, unchanged from R23 carry."
+      ]
+    },
     "Round 3": {
       "decision_summary": "Phase B complete — RFC §5 thirteen kind sub-sections atomic decomposition (5.A-5.F, 5.I-5.O); Phase 2 deferred 5.G/5.H skipped.",
       "changes_bullets": [

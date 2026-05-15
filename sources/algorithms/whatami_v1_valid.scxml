@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Wire-spec §3 / §4.1 Hello + Init + Join whatami field validator. Pure
+  predicate over the cbyte (whatami + zidlen-1 packed) returning true
+  iff the 2-bit whatami sub-field is a v1-recognized entity kind.
+
+  cbyte layout (zenoh-pico include/zenoh-pico/protocol/codec/transport.c:
+  31-37, src/protocol/codec/message.c:651-655 Hello encoder,
+  src/protocol/codec/transport.c:46-49 Init/Join encoder):
+    bits 0-1  whatami (2-bit wire form)
+    bits 2-3  reserved / zero
+    bits 4-7  zidlen - 1 (zid byte length, 1..16)
+
+  Wire-form whatami enum (after `_z_whatami_to_uint8` = `(api_enum >> 1)
+  & 0x03`, where api_enum from include/zenoh-pico/api/constants.h:50-54):
+    0  router  (api enum 0x01)
+    1  peer    (api enum 0x02)
+    2  client  (api enum 0x04)
+    3  invalid (api `_z_whatami_from_uint8` would yield 0x08, outside
+                the constants.h enum; zenoh-pico does not validate this
+                at decode — watching-zenoh's v1 predicate rejects it)
+
+  The validator inspects only bits 0-1; zidlen sub-field validation
+  belongs to a separate predicate (1..16 range check) since the two
+  fields have independent acceptance semantics. Mid-byte reserved
+  bits 2-3 are not checked here — a future v1 whatami extension would
+  flip those bits, and the present rule pins the wire-level surface to
+  the 3-member enum without forbidding upper-bit reuse.
+
+  Unknown whatami (= 3) → false; caller maps the error to
+  scout/decode-failed (§3 Hello) or session-arming reject (§4.1
+  Init/Join) per the layer's hardening matrix
+  (docs/session-fsm.md §2.6).
+
+  No SCE-upstream test fixture exists for whatami validation at vendor
+  pin `1473f99f`; verify-codegen.sh Layer 2 (byte-golden) is N/A.
+  Layer 1 (six-backend emit success) covers the RFC §5.J.4 parity gate.
+
+  Companion validators: `scouting_mid_v1_valid` (R21) handles the §3
+  outer MID envelope of Hello / Scout; this predicate handles the
+  inner whatami field once the body header is reached.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="whatami_v1_valid"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="cbyte" type="uint8"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="whatami" type="uint8" init="0"/>
+    <sce:assign target="whatami" expr="cbyte &amp; 0x03"/>
+    <sce:if cond="whatami === 0x00">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="whatami === 0x01">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="whatami === 0x02">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:return expr="false"/>
+  </sce:body>
+</scxml>

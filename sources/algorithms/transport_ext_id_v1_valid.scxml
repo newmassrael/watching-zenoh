@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Wire-spec §4.4 transport-layer extension FULL_ID allowlist — per
+  control-message context (Init / Open / Join). Pure predicate over
+  (t_mid, ext_header) returning true iff the extension's FULL_ID
+  (header & 0x7F) is a v1-recognized extension in the given control
+  message's local namespace.
+
+  zenoh-pico decodes transport-layer extensions through per-message
+  iterators (src/protocol/codec/transport.c): `_z_init_decode_ext` for
+  Init (T_MID 0x01) at :226; `_z_open_decode` for Open (T_MID 0x02)
+  uses `_z_msg_ext_skip_non_mandatories` directly at :328 with no
+  known-ID switch (v1 ext allowlist is empty for Open);
+  `_z_join_decode_ext` for Join (T_MID 0x07) at :107,115.
+
+  Per-context v1 allowlist (FULL_ID = ext_header & 0x7F; constants from
+  include/zenoh-pico/protocol/ext.h:46-50):
+
+    T_MID 0x01 INIT   src/protocol/codec/transport.c:226
+      0x27  INIT_PATCH   (id=0x07 | enc=ZINT 0x20; fragmentation patch
+                          level negotiation, §4.4 PatchType)
+
+    T_MID 0x02 OPEN   src/protocol/codec/transport.c:328
+      (no v1 extensions; Open does not negotiate transport-axis fields
+       beyond lease + initial_sn + cookie; ext block exists only to
+       carry forward-compatible unknown-non-mandatory skip per §7.2)
+
+    T_MID 0x07 JOIN   src/protocol/codec/transport.c:107,115
+      0x27  JOIN_PATCH   (id=0x07 | enc=ZINT 0x20; same PatchType as
+                          INIT_PATCH on the Join control path)
+      0x51  JOIN_QOS     (id=0x01 | M=0x10 | enc=ZBUF 0x40; per-priority
+                          QoS sequence-number init carrier, §4.4 QoS)
+
+  Out of scope here:
+  - §4.2 data-carrying extensions FRAGMENT_FIRST (0x02) and
+    FRAGMENT_DROP (0x03) ride on Fragment messages (T_MID 0x06) — the
+    Fragment context is data-carrying per §4.2, not control per §4.4.
+    A separate `fragment_ext_id_v1_valid` validator (or reuse of
+    `extension_v1_dispatch` directly on the Fragment ext header) covers
+    that path.
+  - KeepAlive (T_MID 0x04) and Frame (T_MID 0x05) have empty v1 ext
+    allowlists and use `_z_msg_ext_skip_non_mandatories` directly per
+    transport.c:378,401. Close (T_MID 0x03) has no ext iterator at all
+    per transport.c:345.
+
+  Unknown t_mid (not 0x01 / 0x02 / 0x07) → false. Unknown FULL_ID
+  within a recognized context → false. The §7.2 M-flag-based reject vs
+  skip policy lives in `extension_v1_dispatch.scxml`; this validator
+  answers only the "v1-known FULL_ID in this context" question. The
+  pair compose as: `transport_ext_id_v1_valid(t_mid, header)`; if
+  false, hand off to §7.2 (M flag → reject; else skip).
+
+  No SCE-upstream test fixture exists for transport extension
+  validation at vendor pin `1473f99f`; verify-codegen.sh Layer 2
+  (byte-golden) is N/A. Layer 1 (six-backend emit success) covers the
+  RFC §5.J.4 parity gate.
+
+  Companion `extension_v1_dispatch.scxml` (R19) handles the universal
+  §7.2 dispatch policy; this validator refines its allowlist for the
+  §4.4 transport-control context.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="transport_ext_id_v1_valid"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="t_mid" type="uint8"/>
+    <sce:param name="ext_header" type="uint8"/>
+    <sce:return type="bool"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="full_id" type="uint8" init="0"/>
+    <sce:assign target="full_id" expr="ext_header &amp; 0x7F"/>
+    <sce:if cond="t_mid === 0x01 &amp;&amp; full_id === 0x27">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="t_mid === 0x07 &amp;&amp; full_id === 0x27">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:if cond="t_mid === 0x07 &amp;&amp; full_id === 0x51">
+      <sce:return expr="true"/>
+    </sce:if>
+    <sce:return expr="false"/>
+  </sce:body>
+</scxml>
