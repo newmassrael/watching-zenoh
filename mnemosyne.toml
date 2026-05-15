@@ -56,10 +56,12 @@ locale = "en"
 # Triage is incremental; remove entries as refs resolve.
 
 # Round 7 scope correction — README.md and docs/SESSION_KICKOFF.md
-# removed from workspace.docs. Their root atomic sections (watching-zenoh
-# and watching-zenoh--다음-세션-시작-스크립트) remain in atomic store as
-# historical record (typed-populated by Round 5 lean/stub). Round 1/5/6
-# impact_refs to those IDs are NOT dangling because the atomic_id_set
-# retains them — atomic store outlives the markdown carrier doc, which
-# is exactly the audit-trail genre's intent. No [[orphan_ledger]] entries
-# are needed; Round 7 changelog entry alone documents the scope shift.
+# removed from workspace.docs. Their root atomic sections (the
+# `watching-zenoh` root and the legacy SESSION_KICKOFF root, whose
+# atomic id is a KO slug locked since R5 — no `rename_section`
+# primitive yet) remain in atomic store as historical record (typed-
+# populated by Round 5 lean/stub). Round 1/5/6 impact_refs to those
+# IDs are NOT dangling because the atomic_id_set retains them —
+# atomic store outlives the markdown carrier doc, which is exactly
+# the audit-trail genre's intent. No [[orphan_ledger]] entries are
+# needed; Round 7 changelog entry alone documents the scope shift.

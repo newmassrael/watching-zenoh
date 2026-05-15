@@ -14,7 +14,7 @@
 #   2. byte-golden (only if upstream fixture supplied): the per-backend
 #      emit-tree of the watching-zenoh source is byte-equivalent to the
 #      emit-tree of the SCE-upstream fixture after RFC §5.O traceability-
-#      anchor normalization (Round 18 — Layer 2 활성화). Validates that
+#      anchor normalization (Round 18 — Layer 2 activation). Validates that
 #      the only difference between the two SCXML inputs (SPDX header
 #      block + author-side stem) does not leak into generated code
 #      bodies.
