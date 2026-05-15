@@ -2532,6 +2532,135 @@
         "wire-spec-subset--watching-zenoh-mvp"
       ]
     },
+    "watching-zenoh/build-and-verify": {
+      "title": "Build and verify",
+      "parent_doc": "README.md",
+      "parent_section": "watching-zenoh",
+      "intent": "Build the SCE codegen binary and run six-backend Layer 1 / Layer 2 verification on SCXML sources.",
+      "inputs_bullets": [
+        "scripts/build-sce.sh — builds the SCE binary from the vendored submodule",
+        "scripts/verify-codegen.sh — single-arg Layer 1, two-arg Layer 1 + 2"
+      ],
+      "outputs_bullets": [
+        "Layer 1 emit pass across rust/cpp/kotlin/go/c11/python",
+        "Layer 2 byte-golden diff when paired upstream fixture exists"
+      ],
+      "caveats_bullets": [
+        "Layer 2 normalizes RFC traceability anchors (source-hash + SCE-MAP + generated-at) before body diff",
+        "vendor/sce/ must be initialized via git submodule update before the first build"
+      ],
+      "decision_status": "active"
+    },
+    "watching-zenoh/contributing": {
+      "title": "Contributing",
+      "parent_doc": "README.md",
+      "parent_section": "watching-zenoh",
+      "intent": "Governance rules apply equally to human and AI contributors via CLAUDE.md.",
+      "caveats_bullets": [
+        "Decisions land as atomic changelog Round entries",
+        "Activity notes live in notes/NEXT_SESSION.md",
+        "SSOT contract + atomic-store lifecycle + SPDX header policy are core to the project"
+      ],
+      "decision_status": "active"
+    },
+    "watching-zenoh/current-status": {
+      "title": "Current status",
+      "parent_doc": "README.md",
+      "parent_section": "watching-zenoh",
+      "intent": "Snapshot of Phase A3 / A4 / B+ progress at the latest refresh round, with pointers to the atomic changelog for per-round detail.",
+      "rationale_bullets": [
+        "Phase A3 = 9 algorithm SCXMLs verified across six backends",
+        "Phase A4 blocked on SCE upstream cursor/Result types and the const-fold gate",
+        "Phase B+ covers SCE schema extensions and external ratify dependencies"
+      ],
+      "caveats_bullets": [
+        "Per-round decisions live in docs/.atomic/workspace.atomic.json",
+        "Activity log lives in notes/NEXT_SESSION.md"
+      ],
+      "decision_status": "active"
+    },
+    "watching-zenoh/directory-layout": {
+      "title": "Directory layout",
+      "parent_doc": "README.md",
+      "parent_section": "watching-zenoh",
+      "intent": "Path-to-role map for the repository.",
+      "outputs_bullets": [
+        "ARCHITECTURE.md — design entry point",
+        "docs/ — 11 Mnemosyne-managed spec docs",
+        "docs/.atomic/ — atomic-store sidecar, typed-primitive mutation only",
+        "docs/GENERATED.md — cascade-rendered output, gitignored",
+        "sources/ — SCE Forge input SCXML (sources/README.md for detail)",
+        "scripts/ — build-sce.sh + verify-codegen.sh",
+        "vendor/sce/ — SCE submodule, vendor pin",
+        "notes/ — activity-log genre, outside Mnemosyne",
+        ".githooks/ — pre-commit / commit-msg / pre-push gates",
+        "deploy/ — deploy.yaml skeletons (Phase B+)"
+      ],
+      "decision_status": "active"
+    },
+    "watching-zenoh/external-references": {
+      "title": "External references",
+      "parent_doc": "README.md",
+      "parent_section": "watching-zenoh",
+      "intent": "Pointers to upstream and sister projects.",
+      "outputs_bullets": [
+        "SCE build infrastructure: scxml-core-engine",
+        "Mnemosyne atomic-store + GENERATED.md lifecycle",
+        "zenoh upstream",
+        "zenoh-pico upstream"
+      ],
+      "decision_status": "active"
+    },
+    "watching-zenoh/license": {
+      "title": "License",
+      "parent_doc": "README.md",
+      "parent_section": "watching-zenoh",
+      "intent": "Dual-license tier overview plus SPDX header policy for author-side and generated files.",
+      "rationale_bullets": [
+        "LGPL-3.0-or-later for the free tier with anti-tivoization",
+        "LicenseRef-watching-zenoh-Commercial for the paid tier with five-way exemption"
+      ],
+      "caveats_bullets": [
+        "Author-side source files carry the SPDX header block",
+        "Generated files (out/**) carry the SCE-emitted MIT header",
+        "Vendored third-party code keeps original SPDX header + THIRD_PARTY.md ledger when introduced"
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "Single-license",
+          "reason": "rejected for upstream-stewardship and commercial flexibility"
+        }
+      ],
+      "decision_status": "active"
+    },
+    "watching-zenoh/local-ci-gates": {
+      "title": "Local CI gates",
+      "parent_doc": "README.md",
+      "parent_section": "watching-zenoh",
+      "intent": "Three githooks enforce validate-workspace, commit message format, and push-time re-validate via mnemosyne-cli.",
+      "outputs_bullets": [
+        "pre-commit — mnemosyne-cli validate-workspace (cross-ref orphan + round-trip + ledger drift gates)",
+        "commit-msg — COMMIT_FORMAT.md enforcement (72-byte lines, no emoji, no co-author)",
+        "pre-push — re-validates at push time to catch amends and rebases"
+      ],
+      "caveats_bullets": [
+        "pre-commit and pre-push require mnemosyne-cli on PATH (cargo install ...)",
+        "Install hooks once via git config core.hooksPath .githooks"
+      ],
+      "decision_status": "active"
+    },
+    "watching-zenoh/what-it-does": {
+      "title": "What it does",
+      "parent_doc": "README.md",
+      "parent_section": "watching-zenoh",
+      "intent": "Two builds at once: an MVP wire-compatible subset of zenoh plus a single-source six-backend codegen pipeline.",
+      "rationale_bullets": [
+        "zenoh-pico 1.5.x + zenoh 1.5.x wire interop for MVP subset, optional surfaces deferred to Phase B+",
+        "Same SCXML sources generate six backends via SCE Forge",
+        "Design SSoT is ARCHITECTURE.md; 11 spec docs governed by Mnemosyne"
+      ],
+      "decision_status": "active"
+    },
     "wire-spec-subset--watching-zenoh-mvp": {
       "intent": "Enumeration of Zenoh 1.x wire-protocol types into MVP/Deferred/Permanent classes mapped to RFC sec 5 SCE kinds.",
       "inputs_bullets": [
@@ -3891,6 +4020,88 @@
         "MID validator test-vector hardening (6 SCXMLs) — Phase B5 multi-arg/non-bytes schema support",
         "tlv_advance.scxml — Phase A4+ cursor/Result; calls vle_byte_length internally",
         "vle_u64_encode.scxml — lands with Phase A4 const-fold gate (RFC §5.F)",
+        "Phase A per-message codec bodies — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor",
+        "Z_OAM (0x00) payload-layer inclusion decision — Phase B+ OQ",
+        "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R20 external carry)",
+        "crc16_ccitt vs algorithm_crc16 Layer 2 — SCE upstream PR (root name=) + vendor pin update",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture",
+        "vendor/sce pin update policy — R14 carry, audit entry mandatory on each pin bump"
+      ]
+    },
+    "Round 27": {
+      "decision_summary": "Phase E final — README atomic decompose into 8 H2 sections under watching-zenoh root + heading slug stabilization (current-status heading drops round/date suffix); sections 206 → 214, docs 12/12 clean.",
+      "changes_bullets": [
+        "README.md + README.ko.md current-status heading detached from round/date suffix (slug stability)",
+        "add_section x 8 under watching-zenoh root, parent_doc=README.md (8 H2 slugs)",
+        "set_section_intent x 8, set_section_rationale x 3 (what-it-does, current-status, license)",
+        "set_section_inputs x 1, set_section_outputs x 4, set_section_alternatives x 1",
+        "add_section_caveat x 12 across current-status / build / ci / license / contributing",
+        "Format discovery: alternatives_rejected requires '<alt> -- <reason>' separator (em-dash too)"
+      ],
+      "verification_bullets": [
+        "validate_workspace clean: docs 12/12, T1=0, round-trip 12/12, sections 206 -> 214 (+8 new)",
+        "T3 warn 856 invariant (no new style violations from atomic field expansion)",
+        "Atomic ledger entries 26 -> 27 expected, GENERATED.md=sync via cascade auto-update",
+        "Each new section identified as watching-zenoh/<slug>, parent_section=watching-zenoh"
+      ],
+      "impact_refs": [
+        "watching-zenoh",
+        "watching-zenoh/what-it-does",
+        "watching-zenoh/current-status",
+        "watching-zenoh/directory-layout",
+        "watching-zenoh/build-and-verify",
+        "watching-zenoh/local-ci-gates",
+        "watching-zenoh/license",
+        "watching-zenoh/external-references",
+        "watching-zenoh/contributing",
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "Phase E declared COMPLETE — Mnemosyne migration full closure at R27 (Phase A-E done)",
+        "Mnemosyne PR carry — rename_section primitive to unlock legacy KO atomic id correction",
+        "MID validator test-vector hardening (6 SCXMLs) — Phase B5 multi-arg/non-bytes schema support",
+        "tlv_advance.scxml — Phase A4+ cursor/Result; calls vle_byte_length internally",
+        "vle_u64_encode.scxml — lands with Phase A4 const-fold gate (RFC 5.F)",
+        "Phase A per-message codec bodies — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor",
+        "Z_OAM (0x00) payload-layer inclusion decision — Phase B+ OQ",
+        "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R20 external carry)",
+        "crc16_ccitt vs algorithm_crc16 Layer 2 — SCE upstream PR (root name=) + vendor pin update",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture",
+        "vendor/sce pin update policy — R14 carry, audit entry mandatory on each pin bump"
+      ],
+      "publishable_decision_summary": "Phase E final — README atomic decompose into 8 H2 sections under watching-zenoh root + heading slug stabilization (current-status heading drops round/date suffix); sections 206 → 214, docs 12/12 clean.",
+      "publishable_changes_bullets": [
+        "README.md + README.ko.md current-status heading detached from round/date suffix (slug stability)",
+        "add_section x 8 under watching-zenoh root, parent_doc=README.md (8 H2 slugs)",
+        "set_section_intent x 8, set_section_rationale x 3 (what-it-does, current-status, license)",
+        "set_section_inputs x 1, set_section_outputs x 4, set_section_alternatives x 1",
+        "add_section_caveat x 12 across current-status / build / ci / license / contributing",
+        "Format discovery: alternatives_rejected requires '<alt> -- <reason>' separator (em-dash too)"
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace clean: docs 12/12, T1=0, round-trip 12/12, sections 206 -> 214 (+8 new)",
+        "T3 warn 856 invariant (no new style violations from atomic field expansion)",
+        "Atomic ledger entries 26 -> 27 expected, GENERATED.md=sync via cascade auto-update",
+        "Each new section identified as watching-zenoh/<slug>, parent_section=watching-zenoh"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh",
+        "watching-zenoh/what-it-does",
+        "watching-zenoh/current-status",
+        "watching-zenoh/directory-layout",
+        "watching-zenoh/build-and-verify",
+        "watching-zenoh/local-ci-gates",
+        "watching-zenoh/license",
+        "watching-zenoh/external-references",
+        "watching-zenoh/contributing",
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase E declared COMPLETE — Mnemosyne migration full closure at R27 (Phase A-E done)",
+        "Mnemosyne PR carry — rename_section primitive to unlock legacy KO atomic id correction",
+        "MID validator test-vector hardening (6 SCXMLs) — Phase B5 multi-arg/non-bytes schema support",
+        "tlv_advance.scxml — Phase A4+ cursor/Result; calls vle_byte_length internally",
+        "vle_u64_encode.scxml — lands with Phase A4 const-fold gate (RFC 5.F)",
         "Phase A per-message codec bodies — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor",
         "Z_OAM (0x00) payload-layer inclusion decision — Phase B+ OQ",
         "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R20 external carry)",
