@@ -3837,6 +3837,68 @@
         "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무"
       ]
     },
+    "Round 26": {
+      "decision_summary": "R26 codebase Korean cleanup — fix 2 non-md files (mnemosyne.toml line 60 + scripts/verify-codegen.sh line 17) and establish non-md-English-only convention; historical atomic.json Korean (17 entries) and the legacy KO atomic section id remain locked by T2 frozen-ledger and the missing rename_section primitive respectively.",
+      "changes_bullets": [
+        "mnemosyne.toml line 60 — rephrase KO atomic-section-id literal to English description",
+        "scripts/verify-codegen.sh line 17 — last KO comment token replaced with English equivalent",
+        "Convention: all non-md files (scripts/toml/json/scxml/source/commit) English-only going forward",
+        "Historical atomic.json Korean (17 entries R1, R5-R9, R15-R25) remains locked by T2 frozen-ledger",
+        "Atomic section id with legacy KO slug remains locked by missing rename_section primitive"
+      ],
+      "verification_bullets": [
+        "grep -P Hangul on non-atomic.json non-md files: 0 hits after fix (was 2)",
+        "validate_workspace clean: docs 12/12, T1=0, round-trip 12/12, sections=206 invariant",
+        "Atomic ledger entries 25 → 26 expected, GENERATED.md=sync preserved",
+        "Memory file added: feedback_codebase_english_only.md + MEMORY.md index update"
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "Phase E final step — README 8 H2 atomic decompose (R5 lean stub → full atomic fields)",
+        "Mnemosyne PR carry — rename_section primitive to unlock legacy KO atomic id correction",
+        "MID validator test-vector hardening (6 SCXMLs) — Phase B5 multi-arg/non-bytes schema support",
+        "tlv_advance.scxml — Phase A4+ cursor/Result; calls vle_byte_length internally",
+        "vle_u64_encode.scxml — lands with Phase A4 const-fold gate (RFC §5.F)",
+        "Phase A per-message codec bodies — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor",
+        "Z_OAM (0x00) payload-layer inclusion decision — Phase B+ OQ",
+        "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R20 external carry)",
+        "crc16_ccitt vs algorithm_crc16 Layer 2 — SCE upstream PR (root name=) + vendor pin update",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture",
+        "vendor/sce pin update policy — R14 carry, audit entry mandatory on each pin bump"
+      ],
+      "publishable_decision_summary": "R26 codebase Korean cleanup — fix 2 non-md files (mnemosyne.toml line 60 + scripts/verify-codegen.sh line 17) and establish non-md-English-only convention; historical atomic.json Korean (17 entries) and the legacy KO atomic section id remain locked by T2 frozen-ledger and the missing rename_section primitive respectively.",
+      "publishable_changes_bullets": [
+        "mnemosyne.toml line 60 — rephrase KO atomic-section-id literal to English description",
+        "scripts/verify-codegen.sh line 17 — last KO comment token replaced with English equivalent",
+        "Convention: all non-md files (scripts/toml/json/scxml/source/commit) English-only going forward",
+        "Historical atomic.json Korean (17 entries R1, R5-R9, R15-R25) remains locked by T2 frozen-ledger",
+        "Atomic section id with legacy KO slug remains locked by missing rename_section primitive"
+      ],
+      "publishable_verification_bullets": [
+        "grep -P Hangul on non-atomic.json non-md files: 0 hits after fix (was 2)",
+        "validate_workspace clean: docs 12/12, T1=0, round-trip 12/12, sections=206 invariant",
+        "Atomic ledger entries 25 → 26 expected, GENERATED.md=sync preserved",
+        "Memory file added: feedback_codebase_english_only.md + MEMORY.md index update"
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase E final step — README 8 H2 atomic decompose (R5 lean stub → full atomic fields)",
+        "Mnemosyne PR carry — rename_section primitive to unlock legacy KO atomic id correction",
+        "MID validator test-vector hardening (6 SCXMLs) — Phase B5 multi-arg/non-bytes schema support",
+        "tlv_advance.scxml — Phase A4+ cursor/Result; calls vle_byte_length internally",
+        "vle_u64_encode.scxml — lands with Phase A4 const-fold gate (RFC §5.F)",
+        "Phase A per-message codec bodies — Put/Del/Query/Reply/Err encoder/decoder, A4+ cursor",
+        "Z_OAM (0x00) payload-layer inclusion decision — Phase B+ OQ",
+        "SCE BASELINE_SYMBOLS doc-comment + tier ratify exchange (R16-R20 external carry)",
+        "crc16_ccitt vs algorithm_crc16 Layer 2 — SCE upstream PR (root name=) + vendor pin update",
+        "vle_u64_decode Layer 2 pair — SCE-side _z_zint_decode_u64 parity fixture",
+        "vendor/sce pin update policy — R14 carry, audit entry mandatory on each pin bump"
+      ]
+    },
     "Round 3": {
       "decision_summary": "Phase B complete — RFC §5 thirteen kind sub-sections atomic decomposition (5.A-5.F, 5.I-5.O); Phase 2 deferred 5.G/5.H skipped.",
       "changes_bullets": [
