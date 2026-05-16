@@ -29,6 +29,7 @@ resolver = "2"
 members = [
     "wz-codecs",
     "zenoh-pico-sys",
+    "wz-integration-tests",
 ]
 
 [workspace.package]

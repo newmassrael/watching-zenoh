@@ -44,6 +44,18 @@ pub mod ext_zbuf {
     include!(concat!(env!("OUT_DIR"), "/ext_zbuf.rs"));
 }
 
+pub mod close {
+    include!(concat!(env!("OUT_DIR"), "/close.rs"));
+}
+
+pub mod frame {
+    include!(concat!(env!("OUT_DIR"), "/frame.rs"));
+}
+
+pub mod fragment {
+    include!(concat!(env!("OUT_DIR"), "/fragment.rs"));
+}
+
 pub mod ext_entry {
     include!(concat!(env!("OUT_DIR"), "/ext_entry.rs"));
 }
