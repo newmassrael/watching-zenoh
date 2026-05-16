@@ -5726,6 +5726,48 @@
         "After Phase Z: Phase W (MCU hardening: no_std + alloc cfg-flag + fuzz harness + clippy --all-features) + Phase V (user-facing README + rustdoc + quickstart)."
       ]
     },
+    "Round 52.1": {
+      "decision_summary": "Cargo.lock hotfix — R51/R52 added tokio + wz-runtime-tokio without committing crates/Cargo.lock; restore production reproducibility before R53.",
+      "changes_bullets": [
+        "crates/Cargo.lock: stage 158-line addition (tokio 1.x + mio + bytes + parking_lot + socket2 + 11 transitive + wz-runtime-tokio member entry).",
+        "Last Cargo.lock commit was R42 (a31a39a); R43-R52 (10 rounds) accumulated unlocked deps without pin.",
+        "Hotfix flagged as Round 52.1 (decimal suffix) to keep R53/R54 carry-forward naming stable."
+      ],
+      "verification_bullets": [
+        "cargo build --workspace clean post-stage (Cargo.lock contents match working-tree resolver state).",
+        "cargo test --workspace: 35/35 pass (R52 baseline preserved).",
+        "validate_workspace post-append: T1=0, RT 12/12, GENERATED.md=sync, entries 52 → 53.",
+        "Cargo.lock now matches HEAD's wz-runtime-tokio + tokio dep declarations; clean checkout reproduces same lock."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R53 (Phase Z) = wz-runtime-lwip C11 sibling per docs/runtime-crate-lwip.md (next step).",
+        "R54 (Phase Z closure) = R29 session_fsm script-action placeholder wiring to LinkDriver.",
+        "Lesson: stage Cargo.lock alongside Cargo.toml dep changes; pre-commit hook should grow a cargo metadata gate."
+      ],
+      "publishable_decision_summary": "Cargo.lock hotfix — R51/R52 added tokio + wz-runtime-tokio without committing crates/Cargo.lock; restore production reproducibility before R53.",
+      "publishable_changes_bullets": [
+        "crates/Cargo.lock: stage 158-line addition (tokio 1.x + mio + bytes + parking_lot + socket2 + 11 transitive + wz-runtime-tokio member entry).",
+        "Last Cargo.lock commit was R42 (a31a39a); R43-R52 (10 rounds) accumulated unlocked deps without pin.",
+        "Hotfix flagged as Round 52.1 (decimal suffix) to keep R53/R54 carry-forward naming stable."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build --workspace clean post-stage (Cargo.lock contents match working-tree resolver state).",
+        "cargo test --workspace: 35/35 pass (R52 baseline preserved).",
+        "validate_workspace post-append: T1=0, RT 12/12, GENERATED.md=sync, entries 52 → 53.",
+        "Cargo.lock now matches HEAD's wz-runtime-tokio + tokio dep declarations; clean checkout reproduces same lock."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R53 (Phase Z) = wz-runtime-lwip C11 sibling per docs/runtime-crate-lwip.md (next step).",
+        "R54 (Phase Z closure) = R29 session_fsm script-action placeholder wiring to LinkDriver.",
+        "Lesson: stage Cargo.lock alongside Cargo.toml dep changes; pre-commit hook should grow a cargo metadata gate."
+      ]
+    },
     "Round 6": {
       "decision_summary": "Round 5 scope correction blocked by mnemosyne Round 169 atomic-internal orphan reject; reverted to lean/stub plan; SESSION_KICKOFF/README retained in 13-doc workspace as architectural lock-in carry.",
       "changes_bullets": [
