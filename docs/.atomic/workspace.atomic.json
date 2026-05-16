@@ -6492,6 +6492,48 @@
         "Encapsulation carry (3rd review): wz-runtime-tokio-test-support separate crate split (replaces _test_support feature flag pattern)."
       ]
     },
+    "Round 64.1": {
+      "decision_summary": "CI Layer A hotfix — cargo install --bin mnemosyne-cli failed ambiguous-package; added --package mnemosyne-cli to resolve. First CI run after R63 push surfaced the gap.",
+      "changes_bullets": [
+        "GitHub Actions CI run 25965126663 reported success (5m13s) but `mnemosyne-cli install failed; Layer A skipped` warning; the cargo install step ran `--bin mnemosyne-cli` against a multi-package workspace (audit-broadcast-bench / cascade-measurement / codegen-prototype / mnemosyne-cli / mnemosyne-mcp / schema-bench / ...) and got `error: multiple packages with binaries found`.",
+        ".github/workflows/ci.yml mnemosyne install step amended: `cargo install --git ... --branch main --package mnemosyne-cli --bin mnemosyne-cli`. The --package flag disambiguates the upstream workspace; --bin alone scopes the binary name but not the package selection.",
+        "Doc-comment in the workflow step expanded to record the failure mode + the R64.1 retrospect so a future contributor does not regress to the --bin-only form."
+      ],
+      "verification_bullets": [
+        "Pre-R64.1 CI run (25965126663): conclusion=success, Layer A skipped via the warning + GITHUB_ENV MNEMOSYNE_SKIP=1 fallback. Layer B/C/D ran cleanly.",
+        "Post-R64.1 CI verification pending — push triggers a new run; expect Layer A to install mnemosyne-cli without ambiguity and proceed to `mnemosyne-cli validate-workspace` against the freshly pushed atomic ledger.",
+        "validate_workspace local: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 65 → 66."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "Node.js 20 deprecation warning (actions/checkout@v4) — GitHub Actions runner removes Node 20 on 2026-09-16. Either bump actions/checkout to @v5 (Node 24 native) or set FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true workflow env var. Non-blocking until 2026-09-16.",
+        "R65 spec body authoring still the next round in Path X progression.",
+        "65 local commits unpushed (R63 push + R64 + R64.1); next push triggers Layer A verification."
+      ],
+      "publishable_decision_summary": "CI Layer A hotfix — cargo install --bin mnemosyne-cli failed ambiguous-package; added --package mnemosyne-cli to resolve. First CI run after R63 push surfaced the gap.",
+      "publishable_changes_bullets": [
+        "GitHub Actions CI run 25965126663 reported success (5m13s) but `mnemosyne-cli install failed; Layer A skipped` warning; the cargo install step ran `--bin mnemosyne-cli` against a multi-package workspace (audit-broadcast-bench / cascade-measurement / codegen-prototype / mnemosyne-cli / mnemosyne-mcp / schema-bench / ...) and got `error: multiple packages with binaries found`.",
+        ".github/workflows/ci.yml mnemosyne install step amended: `cargo install --git ... --branch main --package mnemosyne-cli --bin mnemosyne-cli`. The --package flag disambiguates the upstream workspace; --bin alone scopes the binary name but not the package selection.",
+        "Doc-comment in the workflow step expanded to record the failure mode + the R64.1 retrospect so a future contributor does not regress to the --bin-only form."
+      ],
+      "publishable_verification_bullets": [
+        "Pre-R64.1 CI run (25965126663): conclusion=success, Layer A skipped via the warning + GITHUB_ENV MNEMOSYNE_SKIP=1 fallback. Layer B/C/D ran cleanly.",
+        "Post-R64.1 CI verification pending — push triggers a new run; expect Layer A to install mnemosyne-cli without ambiguity and proceed to `mnemosyne-cli validate-workspace` against the freshly pushed atomic ledger.",
+        "validate_workspace local: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 65 → 66."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Node.js 20 deprecation warning (actions/checkout@v4) — GitHub Actions runner removes Node 20 on 2026-09-16. Either bump actions/checkout to @v5 (Node 24 native) or set FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true workflow env var. Non-blocking until 2026-09-16.",
+        "R65 spec body authoring still the next round in Path X progression.",
+        "65 local commits unpushed (R63 push + R64 + R64.1); next push triggers Layer A verification."
+      ]
+    },
     "Round 7": {
       "decision_summary": "Phase D scope correction — README/SESSION_KICKOFF removed from workspace.docs (genre fit); atomic-internal orphan ledger via mnemosyne Round 254 supports textbook path.",
       "changes_bullets": [
