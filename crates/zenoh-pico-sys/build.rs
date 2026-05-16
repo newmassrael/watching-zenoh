@@ -190,6 +190,22 @@ fn main() {
         .allowlist_type("_z_s_msg_hello_t")
         .allowlist_type("_z_locator_array_t")
         .allowlist_function("_z_hello_encode")
+        // R46 — payload codec Layer 3 (msg_put + msg_del). The body
+        // codec writes the header byte (1 byte MID + T/E/Z flags)
+        // computed from msg state, then optional embeds (timestamp +
+        // encoding), optional tlv-chain (ext_entry repeat), then
+        // payload (PUT only — _z_bytes_encode = VLE len + bytes).
+        // _z_bytes_from_buf wraps a Rust slice into a refcounted
+        // arc-slice; _z_bytes_drop releases the refcount after
+        // encoding. _z_bytes_null is the zero-init helper for
+        // attachment / unused slots.
+        .allowlist_type("_z_msg_put_t")
+        .allowlist_type("_z_msg_del_t")
+        .allowlist_type("_z_bytes_t")
+        .allowlist_function("_z_put_encode")
+        .allowlist_function("_z_del_encode")
+        .allowlist_function("_z_bytes_from_buf")
+        .allowlist_function("_z_bytes_drop")
         // bindgen layout-test surface: pin to `Debug` derivation to
         // unblock test-side equality checks against zenoh-pico's
         // typed shape.

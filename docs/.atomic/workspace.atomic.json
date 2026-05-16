@@ -5324,6 +5324,54 @@
         "After codec Layer 3 catalog completes (R47): R48+ runtime crates (wz-runtime-tokio + wz-runtime-lwip)."
       ]
     },
+    "Round 46": {
+      "decision_summary": "Layer 3 payload track entry — msg_put + msg_del simple-case validated against zenoh-pico _z_put_encode / _z_del_encode. Cumulative 10 of 18 codecs wire-validated. Flag-set cases (T/E/Z) deferred to R46b/R47 since each new flag introduces a different primitive class (timestamp/encoding embed, tlv-chain) requiring per-codec setup.",
+      "changes_bullets": [
+        "zenoh-pico-sys allowlist expanded: _z_put_encode + _z_del_encode + _z_msg_put_t + _z_msg_del_t + _z_bytes_t + _z_bytes_from_buf. (_z_bytes_drop is static inline; not bound, payload _z_bytes_t leaks per test invocation — acceptable in test harness scope, R46b carry for production wrap.)",
+        "tests/layer3_msg_put.rs (110 lines, 2 tests): no-flags PUT body byte-equivalence against zenoh-pico. Payload VLE-width corpus (empty / 1-byte / 127-byte / 128-byte / 255-byte) + canonical empty-PUT pin (header=0x01 + VLE(0)).",
+        "tests/layer3_msg_del.rs (45 lines, 1 test): no-flags DEL = single MID 0x02 byte. Smallest Layer 3 codec test in the catalog.",
+        "Cumulative Layer 3 wire-validation surface: 10 of 18 codecs (close + frame + fragment + scout + open_body + init_body + join + hello + msg_put + msg_del)."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace: 31/31 pass / 0 fail. R45 28 + 3 new payload tests (msg_put 2 + msg_del 1) = 31.",
+        "msg_put: 5-payload-size corpus all match zenoh-pico _z_put_encode bytes; empty-PUT canonical [0x01, 0x00] pinned.",
+        "msg_del: no-flags case matches single-byte [0x02] output of zenoh-pico _z_del_encode.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 45→46, T3 warn 856 unchanged."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "carry_forward_bullets": [
+        "R46b = msg_put with T=1 (timestamp embed) + E=1 (encoding embed) + Z=1 (tlv-chain ext_entry with attachment / source_info). Each flag exercises a different primitive class: timestamp (VLE time + VLE zid_len + zid bytes), encoding (VLE-carrier flags + has_schema gate), tlv-chain (variant arm dispatch via ext_entry). Heaviest validation per single codec.",
+        "R46c = _z_bytes_drop wrapper. Static inline helpers in zenoh-pico's bytes.h are not bound by default bindgen; add a non-inline wrapper in wrapper.h so production consumers (and full Layer 3 setup) can release _z_bytes_t resources properly.",
+        "R47 = network envelopes (request + response_final) + remaining 8 codecs (msg_query / msg_reply / msg_err + wireexpr + query + standalone-locator/timestamp/encoding/ext_unit/zint/zbuf where Layer 3 tests can validate each in isolation).",
+        "After codec Layer 3 catalog completes (R47): Phase Y (verify-codegen.sh integration + CI + deploy pipeline) begins at R48."
+      ],
+      "publishable_decision_summary": "Layer 3 payload track entry — msg_put + msg_del simple-case validated against zenoh-pico _z_put_encode / _z_del_encode. Cumulative 10 of 18 codecs wire-validated. Flag-set cases (T/E/Z) deferred to R46b/R47 since each new flag introduces a different primitive class (timestamp/encoding embed, tlv-chain) requiring per-codec setup.",
+      "publishable_changes_bullets": [
+        "zenoh-pico-sys allowlist expanded: _z_put_encode + _z_del_encode + _z_msg_put_t + _z_msg_del_t + _z_bytes_t + _z_bytes_from_buf. (_z_bytes_drop is static inline; not bound, payload _z_bytes_t leaks per test invocation — acceptable in test harness scope, R46b carry for production wrap.)",
+        "tests/layer3_msg_put.rs (110 lines, 2 tests): no-flags PUT body byte-equivalence against zenoh-pico. Payload VLE-width corpus (empty / 1-byte / 127-byte / 128-byte / 255-byte) + canonical empty-PUT pin (header=0x01 + VLE(0)).",
+        "tests/layer3_msg_del.rs (45 lines, 1 test): no-flags DEL = single MID 0x02 byte. Smallest Layer 3 codec test in the catalog.",
+        "Cumulative Layer 3 wire-validation surface: 10 of 18 codecs (close + frame + fragment + scout + open_body + init_body + join + hello + msg_put + msg_del)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace: 31/31 pass / 0 fail. R45 28 + 3 new payload tests (msg_put 2 + msg_del 1) = 31.",
+        "msg_put: 5-payload-size corpus all match zenoh-pico _z_put_encode bytes; empty-PUT canonical [0x01, 0x00] pinned.",
+        "msg_del: no-flags case matches single-byte [0x02] output of zenoh-pico _z_del_encode.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 45→46, T3 warn 856 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R46b = msg_put with T=1 (timestamp embed) + E=1 (encoding embed) + Z=1 (tlv-chain ext_entry with attachment / source_info). Each flag exercises a different primitive class: timestamp (VLE time + VLE zid_len + zid bytes), encoding (VLE-carrier flags + has_schema gate), tlv-chain (variant arm dispatch via ext_entry). Heaviest validation per single codec.",
+        "R46c = _z_bytes_drop wrapper. Static inline helpers in zenoh-pico's bytes.h are not bound by default bindgen; add a non-inline wrapper in wrapper.h so production consumers (and full Layer 3 setup) can release _z_bytes_t resources properly.",
+        "R47 = network envelopes (request + response_final) + remaining 8 codecs (msg_query / msg_reply / msg_err + wireexpr + query + standalone-locator/timestamp/encoding/ext_unit/zint/zbuf where Layer 3 tests can validate each in isolation).",
+        "After codec Layer 3 catalog completes (R47): Phase Y (verify-codegen.sh integration + CI + deploy pipeline) begins at R48."
+      ]
+    },
     "Round 5": {
       "decision_summary": "Scope correction — SESSION_KICKOFF (activity-log genre) and README (empty stub) removed from Mnemosyne workspace as design-doc lifecycle infrastructure genre misfit.",
       "changes_bullets": [
