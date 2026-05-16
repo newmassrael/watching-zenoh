@@ -4354,6 +4354,54 @@
         "vendor/sce pin advancement remains a named carry — bump after SCE side ships a relevant feature, never preemptively. Next bump trigger: codec DSL extensions (RFC §5.B) or any future SCE main advance that closes a watching-zenoh-side gap discovered in verify-codegen.sh."
       ]
     },
+    "Round 31": {
+      "decision_summary": "Phase B5 entry — first codec-kind SCXMLs land. sources/codecs/keep_alive.scxml (empty body, transport-layer KeepAlive frame) + sources/codecs/close.scxml (1-byte reason code, session-close variant arm) authored against vendor pin 11f1032d. Opens the ~30-codec wire-message track.",
+      "changes_bullets": [
+        "sources/codecs/keep_alive.scxml new (24 lines, sce:kind=codec, sce:default-endian=big, empty datamodel). Mirrors SCE fixture codec_zenoh_keep_alive body byte-identical; diff in SPDX header + file stem + root name attribute (wz convention: name=keep_alive matches stem).",
+        "sources/codecs/close.scxml new (28 lines, sce:kind=codec, single <data id='reason' sce:type='uint8' sce:byte='0' sce:bit-size='8'/>). Mirrors SCE fixture codec_variant_session_close body byte-identical; same wz-stem name convention applied.",
+        "sources/codecs/ directory created per sources/README.md §ㄷㅣㅗㄴㅏㅣㅕㅣㄲㅣ ㅗㄷㄲㄷㄷ lazy-init policy (first SCXMLs land the dir).",
+        "wz-vs-SCE stem convention reaffirmed via empirical test: root name=keep_alive (wz) vs name=codec_zenoh_keep_alive (SCE) is the deliberate split — generated symbol + SCE-MAP path reflects the wz-side stem on the consumer end, matching the algorithm-kind precedent set by crc16_ccitt at R13."
+      ],
+      "verification_bullets": [
+        "verify-codegen.sh Layer 1: 6/6 emit pass on each SCXML (rust / cpp / kotlin / go / c11 / python) = 12/12 across the pair. Python statechart-kind unblock from R30 carries forward to codec-kind — 6/6 across both kinds at vendor pin 11f1032d.",
+        "verify-codegen.sh Layer 2 byte-golden with SCE upstream fixture as pair: mismatch reported at FILENAME level (rust: codec_zenoh_keep_alive.rs vs keep_alive.rs etc.), not at body level. Expected per sources/README.md convention; wz stem-rename is by design (symbol naming locality). No body-content divergence.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 30→31 (after this entry), T3 warn 856 unchanged.",
+        "Cross-doc verification: KeepAlive empty-body assertion grounded in zenoh-pico src/protocol/codec/transport.c:_z_keep_alive_encode (no body bytes written). Close reason-byte assertion grounded in zenoh-pico include/zenoh-pico/protocol/definitions/transport.h:_z_close_reason_t."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "carry_forward_bullets": [
+        "~28 codec SCXMLs remaining on the B5 track. Next-smallest targets: scout / hello / init_syn / init_ack / open_syn / open_ack control-message bodies (§4.1). Frame / Fragment data-carrying bodies (§4.2) follow.",
+        "Layer 2 byte-golden expectation refinement — the current 'mismatch on filename, match on body' state is reported as MISMATCH by verify-codegen.sh. Future enhancement: extend the script to separately report 'body-equiv' vs 'filename-equiv' so the per-codec audit trail records the body-equivalence positively. Optional, low priority.",
+        "R29 statechart carry items unchanged (Established sub-regions / stateless_accept variant / multicast / scouting). Codec + statechart tracks proceed in parallel.",
+        "crates/ runtime stub code still empty — link driver + intrinsics binding deferred to a later runtime-track round once enough codec + FSM files exist to pin the actual binding surface."
+      ],
+      "publishable_decision_summary": "Phase B5 entry — first codec-kind SCXMLs land. sources/codecs/keep_alive.scxml (empty body, transport-layer KeepAlive frame) + sources/codecs/close.scxml (1-byte reason code, session-close variant arm) authored against vendor pin 11f1032d. Opens the ~30-codec wire-message track.",
+      "publishable_changes_bullets": [
+        "sources/codecs/keep_alive.scxml new (24 lines, sce:kind=codec, sce:default-endian=big, empty datamodel). Mirrors SCE fixture codec_zenoh_keep_alive body byte-identical; diff in SPDX header + file stem + root name attribute (wz convention: name=keep_alive matches stem).",
+        "sources/codecs/close.scxml new (28 lines, sce:kind=codec, single <data id='reason' sce:type='uint8' sce:byte='0' sce:bit-size='8'/>). Mirrors SCE fixture codec_variant_session_close body byte-identical; same wz-stem name convention applied.",
+        "sources/codecs/ directory created per sources/README.md §ㄷㅣㅗㄴㅏㅣㅕㅣㄲㅣ ㅗㄷㄲㄷㄷ lazy-init policy (first SCXMLs land the dir).",
+        "wz-vs-SCE stem convention reaffirmed via empirical test: root name=keep_alive (wz) vs name=codec_zenoh_keep_alive (SCE) is the deliberate split — generated symbol + SCE-MAP path reflects the wz-side stem on the consumer end, matching the algorithm-kind precedent set by crc16_ccitt at R13."
+      ],
+      "publishable_verification_bullets": [
+        "verify-codegen.sh Layer 1: 6/6 emit pass on each SCXML (rust / cpp / kotlin / go / c11 / python) = 12/12 across the pair. Python statechart-kind unblock from R30 carries forward to codec-kind — 6/6 across both kinds at vendor pin 11f1032d.",
+        "verify-codegen.sh Layer 2 byte-golden with SCE upstream fixture as pair: mismatch reported at FILENAME level (rust: codec_zenoh_keep_alive.rs vs keep_alive.rs etc.), not at body level. Expected per sources/README.md convention; wz stem-rename is by design (symbol naming locality). No body-content divergence.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 30→31 (after this entry), T3 warn 856 unchanged.",
+        "Cross-doc verification: KeepAlive empty-body assertion grounded in zenoh-pico src/protocol/codec/transport.c:_z_keep_alive_encode (no body bytes written). Close reason-byte assertion grounded in zenoh-pico include/zenoh-pico/protocol/definitions/transport.h:_z_close_reason_t."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "~28 codec SCXMLs remaining on the B5 track. Next-smallest targets: scout / hello / init_syn / init_ack / open_syn / open_ack control-message bodies (§4.1). Frame / Fragment data-carrying bodies (§4.2) follow.",
+        "Layer 2 byte-golden expectation refinement — the current 'mismatch on filename, match on body' state is reported as MISMATCH by verify-codegen.sh. Future enhancement: extend the script to separately report 'body-equiv' vs 'filename-equiv' so the per-codec audit trail records the body-equivalence positively. Optional, low priority.",
+        "R29 statechart carry items unchanged (Established sub-regions / stateless_accept variant / multicast / scouting). Codec + statechart tracks proceed in parallel.",
+        "crates/ runtime stub code still empty — link driver + intrinsics binding deferred to a later runtime-track round once enough codec + FSM files exist to pin the actual binding surface."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
