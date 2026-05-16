@@ -1923,7 +1923,7 @@
       ]
     },
     "runtime-crate--sce_link_runtime_tokio/6-next-step-scaffolding": {
-      "intent": "Next-step when Phase D.1 opens — sce_link_runtime_tokio crate skeleton, out/ap/Cargo.toml dependency, codegen 3-tuple activation; Phase A-C unaffected (MCU priority).",
+      "intent": "Phase Z R51-R55b landed: TcpDriver + UdpDriver + session_glue (sce-rust-lua + 17 native fns + Engine-driving). Next: R55c codec wiring + multi-step FSM tick.",
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
         "runtime-crate--sce_link_runtime_tokio/3-deploy-driver-mapping"
@@ -2217,7 +2217,7 @@
       ]
     },
     "session-fsm--prose-level-sketch/10-next-step-scaffolding": {
-      "intent": "Document unblocks deploy.yaml skeletons + runtime crate API stubs + scouting/reassembly FSM sketches; does NOT unblock SCXML authoring (waits for SCE Phase A).",
+      "intent": "R54-R55b: R29 script-action placeholders wired to wz-runtime-tokio LinkDriver via sce-rust-lua + Engine::process_event drives Init→LinkOpening verified.",
       "outputs_bullets": [
         "deploy/*.yaml skeleton authorable — timer / lease / handshake / closing fully named",
         "Runtime crate API stubs — link event contract no longer hand-waved",
@@ -5942,6 +5942,52 @@
         "Engine::tick + Hal time abstraction — the test does not advance time; the link.open_timeout delayed send is queued on the scheduler but never fires. For multi-state coverage in R55c, either mock the Hal (sce_rust_runtime::StdHal allows time injection?) or directly raise link.opened externally to bypass the timeout.",
         "Multi-FSM session-scoped binding (carries forward from R54) — the test confirms single-FSM driving works; multi-peer concurrent FSM instances on one process would still race on the Lua global function name space.",
         "Generated execute_script uses log::error! for failure paths; wz-runtime-tokio now has `log` dep but no logger initialised — a logger-init step in a binary entry point would surface those errors at runtime. Acceptable for the library crate (no main); document as a downstream binary's responsibility."
+      ]
+    },
+    "Round 56": {
+      "decision_summary": "Audit hygiene: §6 next-step intents refreshed for tokio + session-fsm reflecting R54-R55b Phase Z closure; NEXT_SESSION.md state snapshot R16 → R55b.",
+      "changes_bullets": [
+        "set_section_intent on runtime-crate--sce_link_runtime_tokio/6-next-step-scaffolding: 'Phase D.1 open' phrasing retired for 'Phase Z R51-R55b landed; next R55c codec wiring + multi-step FSM tick'.",
+        "set_section_intent on session-fsm--prose-level-sketch/10-next-step-scaffolding: 'Document unblocks deploy.yaml skeletons + runtime crate API stubs + scouting/reassembly FSM sketches' retired for 'R54-R55b: R29 script-action placeholders wired to wz-runtime-tokio LinkDriver via sce-rust-lua + Engine::process_event drives Init→LinkOpening verified'.",
+        "notes/NEXT_SESSION.md current-state + carry-forward sections rewritten from R16 (2026-05-14) snapshot to R55b (2026-05-16): entries 16→56, sections 205→214, tests 0→41, crates 0→5, vendor pin 1473f99f→2ff9d7a9. Activity-log genre, raw Edit per the file's own operating-rules note."
+      ],
+      "verification_bullets": [
+        "validate_workspace post-mutation: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 56 → 57.",
+        "Each intent fits in the 200-char ceiling for the field; T3 warn count unchanged.",
+        "NEXT_SESSION.md change is body-only on a notes/ file (mnemosyne workspace.docs scope-excluded since R7); no validate_workspace impact path."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/6-next-step-scaffolding",
+        "session-fsm--prose-level-sketch/10-next-step-scaffolding"
+      ],
+      "carry_forward_bullets": [
+        "R55c = codec wiring + multi-step FSM (still highest-value self-driveable carry).",
+        "R47b = Layer 3 catalog completion (10 codecs remaining).",
+        "Multi-FSM Lua-engine global namespace race (R55b carry).",
+        "SCE PRs (R44 endian / R50 deploy.yaml batch / R40 reframe `--no-inner-attr` carve-out).",
+        "Activity-log NEXT_SESSION.md is now the durable carry-summary surface; refresh on every round end per the file's operating-rules note."
+      ],
+      "publishable_decision_summary": "Audit hygiene: §6 next-step intents refreshed for tokio + session-fsm reflecting R54-R55b Phase Z closure; NEXT_SESSION.md state snapshot R16 → R55b.",
+      "publishable_changes_bullets": [
+        "set_section_intent on runtime-crate--sce_link_runtime_tokio/6-next-step-scaffolding: 'Phase D.1 open' phrasing retired for 'Phase Z R51-R55b landed; next R55c codec wiring + multi-step FSM tick'.",
+        "set_section_intent on session-fsm--prose-level-sketch/10-next-step-scaffolding: 'Document unblocks deploy.yaml skeletons + runtime crate API stubs + scouting/reassembly FSM sketches' retired for 'R54-R55b: R29 script-action placeholders wired to wz-runtime-tokio LinkDriver via sce-rust-lua + Engine::process_event drives Init→LinkOpening verified'.",
+        "notes/NEXT_SESSION.md current-state + carry-forward sections rewritten from R16 (2026-05-14) snapshot to R55b (2026-05-16): entries 16→56, sections 205→214, tests 0→41, crates 0→5, vendor pin 1473f99f→2ff9d7a9. Activity-log genre, raw Edit per the file's own operating-rules note."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace post-mutation: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 56 → 57.",
+        "Each intent fits in the 200-char ceiling for the field; T3 warn count unchanged.",
+        "NEXT_SESSION.md change is body-only on a notes/ file (mnemosyne workspace.docs scope-excluded since R7); no validate_workspace impact path."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/6-next-step-scaffolding",
+        "session-fsm--prose-level-sketch/10-next-step-scaffolding"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R55c = codec wiring + multi-step FSM (still highest-value self-driveable carry).",
+        "R47b = Layer 3 catalog completion (10 codecs remaining).",
+        "Multi-FSM Lua-engine global namespace race (R55b carry).",
+        "SCE PRs (R44 endian / R50 deploy.yaml batch / R40 reframe `--no-inner-attr` carve-out).",
+        "Activity-log NEXT_SESSION.md is now the durable carry-summary surface; refresh on every round end per the file's operating-rules note."
       ]
     },
     "Round 6": {
