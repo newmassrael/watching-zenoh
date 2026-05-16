@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh encoding sub-codec (RFC §5.B Wire
+     RFC Phase B Y3 atomic 2b-iii-α — full upstream wire fidelity for
+     `_z_encoding_encode` / `_z_encoding_decode`, codec.c:356-381).
+
+     Mirrors zenoh-pico verbatim:
+
+         id = (uint32_t)(en->id) << 1;
+         if (has_schema) id |= _Z_ENCODING_FLAG_S;       // 0x01 LSB
+         _z_zint32_encode(wbf, id);
+         if (has_schema) _z_string_encode(wbf, &schema);
+
+     Wire shape (1+ bytes):
+       VLE bytes  : packed_id    (VLE u32 — bit 0 = has_schema flag,
+                                  bits 1..31 = real id zero-extended)
+       has_schema-gated:
+         VLE bytes: schema_len   (VLE u64 byte-count of schema)
+         bytes    : schema       (UTF-8 string max=128, length-prefixed
+                                  by schema_len above)
+
+     Composition (no new SCE primitives — the VLE+flags carrier
+     composition was first shipped in codec_ext_encoding_info):
+       - B1-γ <sce:flags> on a B1-α <sce:bit-size="vle"> uint32 carrier
+         (textbook composition — flag accessors operate on the decoded
+         host integer regardless of the carrier's wire encoding;
+         is_flags_carrier() is bit-size agnostic per
+         model.rs::CodecField::is_flags_carrier).
+       - B1-δ present-if dotted-path `packed_id.has_schema` gates the
+         schema_len + schema pair.
+       - B5-ζ Surface H + Y0a `<sce:type="string" sce:bit-size="length-ref">`
+         + present-if-on-string (already shipped).
+
+     Host shape (matches existing <sce:flags> precedent — raw integer
+     carrier + per-flag accessors layered on top, NOT host-shifted):
+
+       struct {
+         packed_id: u32,         // raw VLE-decoded value
+         schema_len: Option<u64>,
+         schema: Option<String>,
+       }
+       impl {
+         fn has_schema() -> bool { (packed_id & 1) != 0 }
+         fn set_has_schema(v: bool) { ... }
+       }
+
+     First reachable consumer: codec_zenoh_msg_put / codec_zenoh_msg_err
+     E-gated encoding embed.
+
+     Body byte-identical to SCE upstream codec_zenoh_encoding at
+     vendor pin 11f1032d; diff in SPDX header + file stem + root
+     name (wz convention: name=encoding matches stem). -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="encoding">
+  <datamodel>
+    <sce:flags id="packed_id" sce:type="uint32" sce:byte="0" sce:bit-size="vle">
+      <sce:flag name="has_schema" bit="0"/>
+    </sce:flags>
+    <sce:field id="schema_len" sce:type="uint64" sce:byte="1" sce:bit-size="vle"
+               sce:present-if="packed_id.has_schema"/>
+    <sce:field id="schema" sce:type="string" sce:byte="2" sce:bit-size="length-ref"
+               sce:length-field="schema_len" sce:max-size="128"
+               sce:present-if="packed_id.has_schema"/>
+  </datamodel>
+</scxml>

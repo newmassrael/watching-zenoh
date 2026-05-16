@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh extension ZInt body (RFC §5.B B5-ε,
+     surface G from the watching-zenoh authoring path).
+
+     Mirrors zenoh-pico `_z_msg_ext_encode_zint` / `_z_msg_ext_decode_zint`
+     (src/protocol/codec/ext.c lines 46-60): the ZInt-encoded extension
+     body is a single base-128 VLE u64 value, consuming 1..=10 wire
+     bytes per the RFC §5.B Appendix B continuation chain.
+
+     Used as the `enc=0x01` arm of `codec_zenoh_ext_entry`.
+
+     Body byte-identical to SCE upstream codec_zenoh_ext_zint at
+     vendor pin 11f1032d; diff in SPDX header + file stem + root
+     name (wz convention: name=ext_zint matches stem). -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="ext_zint">
+  <datamodel>
+    <sce:field id="value" sce:type="uint64" sce:byte="0" sce:bit-size="vle"/>
+  </datamodel>
+</scxml>
