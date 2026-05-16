@@ -95,17 +95,21 @@ jobs:
       - name: Install mnemosyne-cli
         # mnemosyne-cli source lives outside this workspace; CI
         # builds it from the upstream main pin used at memory R286
-        # (binary 0.1.0 c2b0d077). R64.1 hotfix: the upstream repo
-        # carries multiple workspace packages
+        # (binary 0.1.0 c2b0d077). R64.2 hotfix: `cargo install`
+        # does NOT accept `--package` (Cargo's `cargo install
+        # --help` lists CRATE as a positional arg). The R64.1
+        # attempt used `--package mnemosyne-cli` and was rejected
+        # with `error: unexpected argument '--package' found`.
+        # Correct shape: pass the crate name positionally + `--bin`
+        # disambiguates the binary if the crate ships multiple.
+        # The upstream multi-package workspace
         # (audit-broadcast-bench / cascade-measurement /
-        # codegen-prototype / mnemosyne-cli / mnemosyne-mcp / etc.),
-        # so `cargo install --git ... --bin mnemosyne-cli` fails
-        # ambiguous-package because `--bin` alone does not pin the
-        # package, only the binary name. Adding `--package` resolves.
+        # codegen-prototype / mnemosyne-cli / mnemosyne-mcp / etc.)
+        # is selected here via the positional crate name.
         run: |
           if ! command -v mnemosyne-cli >/dev/null 2>&1; then
             cargo install --git https://github.com/newmassrael/mnemosyne \
-              --branch main --package mnemosyne-cli --bin mnemosyne-cli || {
+              --branch main --bin mnemosyne-cli mnemosyne-cli || {
               echo "::warning::mnemosyne-cli install failed; Layer A skipped"
               echo "MNEMOSYNE_SKIP=1" >> "$GITHUB_ENV"
             }

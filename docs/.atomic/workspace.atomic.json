@@ -6534,6 +6534,46 @@
         "65 local commits unpushed (R63 push + R64 + R64.1); next push triggers Layer A verification."
       ]
     },
+    "Round 64.2": {
+      "decision_summary": "CI Layer A re-hotfix — R64.1's --package flag was rejected by cargo install; correct shape is positional CRATE name + --bin disambiguator.",
+      "changes_bullets": [
+        "CI run 25965296408 (R64.1 verification): mnemosyne-cli install still failed; stderr surfaced `error: unexpected argument '--package' found` from cargo install (R64.1 retrospect: I added --package without verifying it was a valid `cargo install` flag; cargo install's Usage line documents CRATE as positional, not behind --package).",
+        ".github/workflows/ci.yml mnemosyne install step amended to positional form: `cargo install --git ... --branch main --bin mnemosyne-cli mnemosyne-cli`. The trailing positional `mnemosyne-cli` selects the workspace crate; `--bin mnemosyne-cli` disambiguates the binary (the upstream crate may ship multiple binaries).",
+        "Doc-comment in the workflow step expanded to record both the R64.1 failure mode AND the R64.2 correct shape, so a future contributor cannot regress to either of the two broken variants (--bin-only ambiguous-package OR --package unexpected-argument)."
+      ],
+      "verification_bullets": [
+        "Pre-R64.2 CI run (25965296408): conclusion=success, Layer A skipped via the same warning + GITHUB_ENV MNEMOSYNE_SKIP=1 fallback the R64.1 fix targeted. Stderr in the Install mnemosyne-cli step shows the R64.1 --package rejection.",
+        "Post-R64.2 CI verification pending — push triggers a new run; expect cargo install to accept the positional form and proceed to Layer A `mnemosyne-cli validate-workspace`.",
+        "validate_workspace local: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 66 → 67."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Process retrospect: R64.1 was a guess-and-push pattern (changed CI yaml + pushed + observed CI fail). The honest path is local dry-run with `act` or a personal fork test before pushing CI yaml changes. Track this as a process improvement note for future CI hotfixes.",
+        "Node.js 20 deprecation carry still open (June 2026 forcing).",
+        "R65 spec body authoring still next in Path X."
+      ],
+      "publishable_decision_summary": "CI Layer A re-hotfix — R64.1's --package flag was rejected by cargo install; correct shape is positional CRATE name + --bin disambiguator.",
+      "publishable_changes_bullets": [
+        "CI run 25965296408 (R64.1 verification): mnemosyne-cli install still failed; stderr surfaced `error: unexpected argument '--package' found` from cargo install (R64.1 retrospect: I added --package without verifying it was a valid `cargo install` flag; cargo install's Usage line documents CRATE as positional, not behind --package).",
+        ".github/workflows/ci.yml mnemosyne install step amended to positional form: `cargo install --git ... --branch main --bin mnemosyne-cli mnemosyne-cli`. The trailing positional `mnemosyne-cli` selects the workspace crate; `--bin mnemosyne-cli` disambiguates the binary (the upstream crate may ship multiple binaries).",
+        "Doc-comment in the workflow step expanded to record both the R64.1 failure mode AND the R64.2 correct shape, so a future contributor cannot regress to either of the two broken variants (--bin-only ambiguous-package OR --package unexpected-argument)."
+      ],
+      "publishable_verification_bullets": [
+        "Pre-R64.2 CI run (25965296408): conclusion=success, Layer A skipped via the same warning + GITHUB_ENV MNEMOSYNE_SKIP=1 fallback the R64.1 fix targeted. Stderr in the Install mnemosyne-cli step shows the R64.1 --package rejection.",
+        "Post-R64.2 CI verification pending — push triggers a new run; expect cargo install to accept the positional form and proceed to Layer A `mnemosyne-cli validate-workspace`.",
+        "validate_workspace local: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 66 → 67."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Process retrospect: R64.1 was a guess-and-push pattern (changed CI yaml + pushed + observed CI fail). The honest path is local dry-run with `act` or a personal fork test before pushing CI yaml changes. Track this as a process improvement note for future CI hotfixes.",
+        "Node.js 20 deprecation carry still open (June 2026 forcing).",
+        "R65 spec body authoring still next in Path X."
+      ]
+    },
     "Round 7": {
       "decision_summary": "Phase D scope correction — README/SESSION_KICKOFF removed from workspace.docs (genre fit); atomic-internal orphan ledger via mnemosyne Round 254 supports textbook path.",
       "changes_bullets": [
