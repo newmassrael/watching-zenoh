@@ -1875,7 +1875,7 @@
       ]
     },
     "runtime-crate--sce_link_runtime_tokio/2-trait-surface": {
-      "intent": "Rust trait surface for sce_link_runtime_tokio — minimal LinkDriver + LinkEvent contract that session-fsm §6 SCXML binds via &lt;sce:link&gt;.",
+      "intent": "Rust LinkDriver + LinkEvent contract. R57 INSTALLED OnceLock enforces single-FSM-per-process; multi-peer requires fork or R63 session-scoped Lua binding (deferred).",
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio/2-1-two-primitive-link-contract",
         "runtime-crate--sce_link_runtime_tokio/2-2-linkevent-enum"
@@ -2300,7 +2300,7 @@
       ]
     },
     "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets": {
-      "intent": "All session-FSM timers named with single deploy.yaml home; 12 timers covering link / handshake / scout / lease / keepalive / closing / batch / reassembly / accept-rate / cookie.",
+      "intent": "12 named timers (link / handshake / scout / lease / keepalive / closing / batch / reassembly / accept-rate / cookie). R61b: Hal time-mock for delayed-send coverage carry.",
       "inputs_bullets": [
         "link.open_timeout (5s) / init_ack_timeout / open_ack_timeout (2s) / scout_timeout (1s)",
         "lease (10s, negotiated) / keepalive_interval (lease/3) / closing_timeout (100ms)",
@@ -2331,7 +2331,7 @@
       ]
     },
     "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail": {
-      "intent": "Accept-side hardening — three caps in series: half-open capacity / per-source token bucket / optional stateless_accept HMAC cookie.",
+      "intent": "3-cap hardening (half-open / accept-rate / cookie HMAC) + silent-drop on denial. R62: cookie HMAC-SHA256 helper landed; R63b inbound parser populates Initiator-side cookie from peer InitAck.",
       "inputs_bullets": [
         "Half-open capacity: session_arming_quota bounds concurrent Accepting.* instances per listener",
         "Per-source token bucket: accept_rate_per_sec / accept_rate_burst per (link, src_addr)",
@@ -2447,7 +2447,7 @@
       ]
     },
     "session-fsm--prose-level-sketch/7-extension-negotiation-summary": {
-      "intent": "Extension negotiation — eight extensions read+written in same handshake transition as carrier message; ext::Auth may span multi-step within Opening.",
+      "intent": "5 extension classes (QoS/QoSLink/Auth/MultiLink/LowLatency) negotiated on Init/Open/Join. R63a: wz SCXMLs not yet authored against §7 sce:tlv-chain — multi-session carry.",
       "inputs_bullets": [
         "ext::QoS / ext::QoSLink — InitSyn/InitAck; QoS Close(UNSUPPORTED) on incompat",
         "ext::Auth — multi-step in InitSyn/InitAck/OpenSyn/OpenAck; OQ-W2/W10",
@@ -6426,6 +6426,70 @@
         "R61b carry: Hal time mock for delayed `<send>` timer fire coverage.",
         "R40 long-term: SCE PR for `--no-inner-attr` or wz per-codec sub-crate split — strip workaround still live in wz-codecs + wz-runtime-tokio build.rs.",
         "63 unpushed commits; push remains explicit-consent only. The R52.1-R63 series is the strict-audit pass response to the user's two-round self-review challenge."
+      ]
+    },
+    "Round 64": {
+      "decision_summary": "Path X step 2 — spec freeze intent checkpoint. 4 critical sections' intent fields updated to record R52.1-R63 prototype iteration outcomes + multi-session carries. R65+ split for spec body authoring.",
+      "changes_bullets": [
+        "64 commits pushed to origin/main (Path X step 1 closure). pre-push hook mnemosyne validate passed; GitHub Actions CI first trigger (run 25965126663 in_progress). R52.1-R63 prototype iteration series now visible on remote for the first time.",
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets: intent records R61b Hal time-mock carry as the production-grade-blocking gap for delayed-send timer-fire coverage.",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail: intent records R62 cookie HMAC-SHA256 helper land + R63b Initiator-side inbound parser carry (cookie populate from peer InitAck wire).",
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary: intent records R63a multi-session carry (wz init_body/open_body/join SCXMLs not yet authored against §7 sce:tlv-chain primitive; real zenoh-pico peer interop blocker).",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface: intent records R57 INSTALLED OnceLock single-FSM-per-process limit + R63 session-scoped Lua binding deferral.",
+        "Path X process pivot documented: iterative audit-fix pattern (R52.1-R63 prototype iteration) classified as prototype-grade evidence; spec-freeze first + comprehensive-fixture + spec-drift-only-fix is the production-grade process model going forward."
+      ],
+      "verification_bullets": [
+        "git push origin main succeeded with pre-push hook passing (atomic ledger entries=64, T1=0, RT 12/12, GENERATED.md=sync).",
+        "GitHub Actions CI run 25965126663 status=in_progress (validate + verify + test single-job sequence; multi-lane breakdown surfaces on completion).",
+        "4 set_section_intent calls passed T1+T2 validation; each intent stayed under the 200-char ceiling (one retry on §2-5 / §7 / tokio §2 after initial drafts exceeded MAX_INTENT_CHAR).",
+        "validate_workspace post-mutation: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 64 → 65."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "carry_forward_bullets": [
+        "R65 = spec body authoring round 1. wire-spec-subset.md §4.4 + session-fsm.md §6 outbound table prose update to record actual wire shape (transport-message header byte + parent flags + codec body + extension chain placeholder). Concrete spec freeze takes 3-5 rounds at this granularity.",
+        "R66 = R63a SCXML revision. Authoring extension chain into init_body.scxml / open_body.scxml / join.scxml against sce:tlv-chain primitive; sce-codegen re-run; Layer 3 byte-equiv against zenoh-pico extension chain output verification.",
+        "R67 = R63b Initiator inbound parser. Decode peer InitAck wire bytes -> SessionInitParams.cookie population; symmetric path for OpenSyn.",
+        "R68 = Hal time-mock injection. TestHal struct implementing sce_rust_runtime::Hal with logical-time advance; Engine::tick coverage on all 12 timers in §2-5.",
+        "Phase W = wz-runtime-lwip reintroduction (post spec-freeze).",
+        "GitHub Actions CI result wait. If CI fails on this push, fix lane belongs to R64.1 hotfix.",
+        "Cryptographic safety carries (3rd review): SigningKey newtype + zeroize for cookie_signing_key + RFC 4231 test vectors.",
+        "Encapsulation carry (3rd review): wz-runtime-tokio-test-support separate crate split (replaces _test_support feature flag pattern)."
+      ],
+      "publishable_decision_summary": "Path X step 2 — spec freeze intent checkpoint. 4 critical sections' intent fields updated to record R52.1-R63 prototype iteration outcomes + multi-session carries. R65+ split for spec body authoring.",
+      "publishable_changes_bullets": [
+        "64 commits pushed to origin/main (Path X step 1 closure). pre-push hook mnemosyne validate passed; GitHub Actions CI first trigger (run 25965126663 in_progress). R52.1-R63 prototype iteration series now visible on remote for the first time.",
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets: intent records R61b Hal time-mock carry as the production-grade-blocking gap for delayed-send timer-fire coverage.",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail: intent records R62 cookie HMAC-SHA256 helper land + R63b Initiator-side inbound parser carry (cookie populate from peer InitAck wire).",
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary: intent records R63a multi-session carry (wz init_body/open_body/join SCXMLs not yet authored against §7 sce:tlv-chain primitive; real zenoh-pico peer interop blocker).",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface: intent records R57 INSTALLED OnceLock single-FSM-per-process limit + R63 session-scoped Lua binding deferral.",
+        "Path X process pivot documented: iterative audit-fix pattern (R52.1-R63 prototype iteration) classified as prototype-grade evidence; spec-freeze first + comprehensive-fixture + spec-drift-only-fix is the production-grade process model going forward."
+      ],
+      "publishable_verification_bullets": [
+        "git push origin main succeeded with pre-push hook passing (atomic ledger entries=64, T1=0, RT 12/12, GENERATED.md=sync).",
+        "GitHub Actions CI run 25965126663 status=in_progress (validate + verify + test single-job sequence; multi-lane breakdown surfaces on completion).",
+        "4 set_section_intent calls passed T1+T2 validation; each intent stayed under the 200-char ceiling (one retry on §2-5 / §7 / tokio §2 after initial drafts exceeded MAX_INTENT_CHAR).",
+        "validate_workspace post-mutation: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 64 → 65."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R65 = spec body authoring round 1. wire-spec-subset.md §4.4 + session-fsm.md §6 outbound table prose update to record actual wire shape (transport-message header byte + parent flags + codec body + extension chain placeholder). Concrete spec freeze takes 3-5 rounds at this granularity.",
+        "R66 = R63a SCXML revision. Authoring extension chain into init_body.scxml / open_body.scxml / join.scxml against sce:tlv-chain primitive; sce-codegen re-run; Layer 3 byte-equiv against zenoh-pico extension chain output verification.",
+        "R67 = R63b Initiator inbound parser. Decode peer InitAck wire bytes -> SessionInitParams.cookie population; symmetric path for OpenSyn.",
+        "R68 = Hal time-mock injection. TestHal struct implementing sce_rust_runtime::Hal with logical-time advance; Engine::tick coverage on all 12 timers in §2-5.",
+        "Phase W = wz-runtime-lwip reintroduction (post spec-freeze).",
+        "GitHub Actions CI result wait. If CI fails on this push, fix lane belongs to R64.1 hotfix.",
+        "Cryptographic safety carries (3rd review): SigningKey newtype + zeroize for cookie_signing_key + RFC 4231 test vectors.",
+        "Encapsulation carry (3rd review): wz-runtime-tokio-test-support separate crate split (replaces _test_support feature flag pattern)."
       ]
     },
     "Round 7": {
