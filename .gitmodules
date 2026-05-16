@@ -1,3 +1,6 @@
 [submodule "vendor/sce"]
 	path = vendor/sce
 	url = https://github.com/newmassrael/scxml-core-engine.git
+[submodule "vendor/zenoh-pico"]
+	path = vendor/zenoh-pico
+	url = https://github.com/eclipse-zenoh/zenoh-pico

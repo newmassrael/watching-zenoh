@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# zenoh-pico-sys — FFI bindings to vendored zenoh-pico (1.9.0 +
+# 10 commits, pin 3b3ab65c).
+#
+# Phase 2 walking-skeleton dependency (R41): the foundation for Layer
+# 3 wire-interop tests. Layer 3 proves that wz-codecs' Rust output
+# produces byte-equivalent wire bytes to zenoh-pico's `_z_*_encode`
+# functions for the same logical message. Without an FFI-bridged
+# zenoh-pico reference encoder, Layer 3 would degrade to hand-
+# computed expected bytes — a workaround the project explicitly
+# rejects ("no hack, production level", user directive R39).
+#
+# build.rs invokes the vendored zenoh-pico CMakeLists.txt via the
+# `cmake` build-dep to produce a static library, then runs `bindgen`
+# against the public headers to generate Rust FFI declarations into
+# `$OUT_DIR/bindings.rs` for the allowlisted entry points. The
+# generated bindings are `include!()`-ed from src/lib.rs.
+#
+# Allowlist policy: only enumerate functions/types as Layer 3 tests
+# need them. Auto-binding the full zenoh-pico API would inflate
+# compile time and lock the wz toolchain to unstable internal
+# zenoh-pico symbols. R41 ships `_z_id_len` + `_z_id_t` only (smoke
+# test). Each subsequent codec verified in Layer 3 expands the list
+# by exactly the function it needs.
+
+[package]
+name = "zenoh-pico-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "FFI bindings to vendored zenoh-pico for Layer 3 wire-interop testing."
+build = "build.rs"
+links = "zenohpico"
+
+[lib]
+name = "zenoh_pico_sys"
+path = "src/lib.rs"
+
+[build-dependencies]
+# CMake-driven build of the vendored zenoh-pico C library. The `cmake`
+# crate (0.1.x) invokes the upstream `CMakeLists.txt` with the static-
+# lib + minimal-features flag set and returns the install prefix path
+# for the linker to consume.
+cmake = "0.1"
+# bindgen parses zenoh-pico C headers and emits Rust FFI declarations.
+# The 0.71 series tracks the rustc edition cycle; pin compatible with
+# rust-version 1.75 (workspace package).
+bindgen = "0.71"
+
+[lints]
+workspace = true
