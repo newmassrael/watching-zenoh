@@ -6574,6 +6574,54 @@
         "R65 spec body authoring still next in Path X."
       ]
     },
+    "Round 65": {
+      "decision_summary": "CI-equivalent local gate via scripts/run-ci.sh + pre-push delegation — process fix for R64.1's guess-and-push pattern. Hook now mirrors every CI lane.",
+      "changes_bullets": [
+        "scripts/run-ci.sh (~165 lines) authored as the SSoT for CI lane invocation. Wraps Layer 0 actionlint (optional, skip-graceful) + Layer A mnemosyne validate + Layer B verify-codegen.sh per codec (with R44 LE-divergence allowlist) + Layer C1 cargo test --workspace + Layer C2 cargo clippy --deny warnings + Layer D validate-deploy.sh. Supports --skip-codegen + --layer <NAME> flags for partial runs during development.",
+        ".githooks/pre-push rewritten to delegate to scripts/run-ci.sh. The hook now blocks push when ANY required lane fails locally; CI yaml regressions like R64.1's `--package` rejection would be caught before reaching the GitHub Actions runner.",
+        "Doc-comment in the hook records R64 retrospect: prior gate was mnemosyne-only, the CI yaml change in R64.1 shipped to remote without local syntax verification + observed-then-fixed pattern. Future CI yaml changes must pass run-ci.sh + (when actionlint is installed) Layer 0 before push.",
+        "CI workflow (.github/workflows/ci.yml) NOT yet refactored to call run-ci.sh — the lane bodies remain duplicated. Deduplication is its own follow-up round (R65b carry) because rewriting yaml steps + ensuring identical env / cwd semantics is broader than a hook-install scope.",
+        "Smoke-tested locally: all 6 lanes pass (Layer 0 SKIP because actionlint not installed; A/B/C1/C2/D pass)."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh executed against current HEAD: Layer A mnemosyne OK, Layer B 21 codecs all OK (init_body + join L2 MISMATCH audit-traced + their L1+L3 pass), Layer C1 cargo test 47/47, Layer C2 clippy clean, Layer D 3 deploy yamls schema pass.",
+        "Pre-push hook now refuses push on run-ci.sh non-zero exit; the bypass remains `git push --no-verify` for genuine hotfixes.",
+        "validate_workspace post-mutation: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 67 → 68 (after this Round 65 append)."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "R65b: refactor .github/workflows/ci.yml lane steps to call `bash scripts/run-ci.sh --layer X` instead of inlining the lane bodies. Deduplicates the two paths; right now they could drift (run-ci.sh + CI yaml). Requires env / cwd / cache-step alignment.",
+        "Install actionlint (`go install github.com/rhysd/actionlint/cmd/actionlint@latest`) to activate Layer 0 — currently skip-graceful so R64.1-style flag-syntax bugs are caught only by Layer A/B/C/D downstream. R65 contributors should add actionlint to the local dev setup.",
+        "R65 takes the local-CI-gate carry off the open list. R64.1 guess-and-push pattern is now mechanically preventable.",
+        "R66+ spec body authoring (wire-spec-subset.md §4.4 + session-fsm.md §6) still the next Path X round.",
+        "R67 = R63a SCXML extension chain authoring; R68 = R63b inbound parser; R69 = R61b Hal time-mock; R70 = crypto safety hardening (SigningKey + zeroize + RFC 4231 vectors); R71 = test-support crate split."
+      ],
+      "publishable_decision_summary": "CI-equivalent local gate via scripts/run-ci.sh + pre-push delegation — process fix for R64.1's guess-and-push pattern. Hook now mirrors every CI lane.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh (~165 lines) authored as the SSoT for CI lane invocation. Wraps Layer 0 actionlint (optional, skip-graceful) + Layer A mnemosyne validate + Layer B verify-codegen.sh per codec (with R44 LE-divergence allowlist) + Layer C1 cargo test --workspace + Layer C2 cargo clippy --deny warnings + Layer D validate-deploy.sh. Supports --skip-codegen + --layer <NAME> flags for partial runs during development.",
+        ".githooks/pre-push rewritten to delegate to scripts/run-ci.sh. The hook now blocks push when ANY required lane fails locally; CI yaml regressions like R64.1's `--package` rejection would be caught before reaching the GitHub Actions runner.",
+        "Doc-comment in the hook records R64 retrospect: prior gate was mnemosyne-only, the CI yaml change in R64.1 shipped to remote without local syntax verification + observed-then-fixed pattern. Future CI yaml changes must pass run-ci.sh + (when actionlint is installed) Layer 0 before push.",
+        "CI workflow (.github/workflows/ci.yml) NOT yet refactored to call run-ci.sh — the lane bodies remain duplicated. Deduplication is its own follow-up round (R65b carry) because rewriting yaml steps + ensuring identical env / cwd semantics is broader than a hook-install scope.",
+        "Smoke-tested locally: all 6 lanes pass (Layer 0 SKIP because actionlint not installed; A/B/C1/C2/D pass)."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh executed against current HEAD: Layer A mnemosyne OK, Layer B 21 codecs all OK (init_body + join L2 MISMATCH audit-traced + their L1+L3 pass), Layer C1 cargo test 47/47, Layer C2 clippy clean, Layer D 3 deploy yamls schema pass.",
+        "Pre-push hook now refuses push on run-ci.sh non-zero exit; the bypass remains `git push --no-verify` for genuine hotfixes.",
+        "validate_workspace post-mutation: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 67 → 68 (after this Round 65 append)."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R65b: refactor .github/workflows/ci.yml lane steps to call `bash scripts/run-ci.sh --layer X` instead of inlining the lane bodies. Deduplicates the two paths; right now they could drift (run-ci.sh + CI yaml). Requires env / cwd / cache-step alignment.",
+        "Install actionlint (`go install github.com/rhysd/actionlint/cmd/actionlint@latest`) to activate Layer 0 — currently skip-graceful so R64.1-style flag-syntax bugs are caught only by Layer A/B/C/D downstream. R65 contributors should add actionlint to the local dev setup.",
+        "R65 takes the local-CI-gate carry off the open list. R64.1 guess-and-push pattern is now mechanically preventable.",
+        "R66+ spec body authoring (wire-spec-subset.md §4.4 + session-fsm.md §6) still the next Path X round.",
+        "R67 = R63a SCXML extension chain authoring; R68 = R63b inbound parser; R69 = R61b Hal time-mock; R70 = crypto safety hardening (SigningKey + zeroize + RFC 4231 vectors); R71 = test-support crate split."
+      ]
+    },
     "Round 7": {
       "decision_summary": "Phase D scope correction — README/SESSION_KICKOFF removed from workspace.docs (genre fit); atomic-internal orphan ledger via mnemosyne Round 254 supports textbook path.",
       "changes_bullets": [
