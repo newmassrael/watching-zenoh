@@ -4450,6 +4450,58 @@
         "Layer 2 byte-golden expectation refinement carry from R31 — 'mismatch on filename, match on body' classification still pending verify-codegen.sh enhancement. Low priority."
       ]
     },
+    "Round 33": {
+      "decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
+      "changes_bullets": [
+        "sources/codecs/locator.scxml new — VLE-length-prefixed UTF-8 string codec (B5-ζ). 4 inline test-vectors covering empty / ASCII / IP-locator-form / multi-byte UTF-8 (héllo = 6 bytes for 5 codepoints).",
+        "sources/codecs/scout.scxml new — version + cbyte(3+1+4 multi-bit flag) + zid (B5-α multi-bit flag pack + B5-κ length-ref dotted-path + B5-δ arith +1 + B1-δ present-if local-scope). No inline vectors (B5-θ-optional gate pending per SCE comment).",
+        "sources/codecs/hello.scxml new — adds <sce:import> + <sce:requires-parent-flags> + <sce:repeat> + cross-scope present-if (parent.L) on top of scout's primitive set. First parent-header-flag-gated repeat. Imports locator.scxml as child codec via wz-side stem (src='locator.scxml').",
+        "Body byte-identical to SCE upstream codec_zenoh_locator + codec_zenoh_scout + codec_zenoh_hello at vendor pin 11f1032d. Diff only in SPDX header + file stem + root name + <sce:import src=> retargeted to wz-stem."
+      ],
+      "verification_bullets": [
+        "verify-codegen.sh Layer 1 on each: 6/6 emit pass = 18/18 across the triad. Total Phase B5 codec coverage at end of R33: 7 SCXMLs (keep_alive / close / frame / fragment / locator / scout / hello) × 6 backends = 42/42 emit pass at vendor pin 11f1032d.",
+        "First successful authorship of multi-file codec import — hello.scxml's <sce:import src='locator.scxml'> resolved without diagnostic (sibling-file relative lookup confirmed on the new pin).",
+        "<sce:requires-parent-flags carrier='header'><sce:flag name='L' bit='5'/></sce:requires-parent-flags> emitter parsing confirmed — parent.L cross-scope present-if propagates through to generated wrap shape (Option/optional/etc. per language).",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 32→33, T3 warn 856 unchanged.",
+        "Cross-doc verification: scout cbyte layout bound to zenoh-pico include/zenoh-pico/protocol/definitions/transport.h:49 (_Z_FLAG_T_SCOUT_I=0x08) and src/protocol/codec/message.c:605-623 (_z_scout_encode). hello L-flag bound to transport.h:54 (_Z_FLAG_T_HELLO_L=0x20) and message.c:646-664."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "carry_forward_bullets": [
+        "~23 codec SCXMLs remaining. Next-smallest unfilled: init_syn_body / init_ack_body (open_body / cookie_body chain) — handshake control bodies §4.1. Codec_zenoh_oam (§4.4 transport OAM, ~81 lines — large) probably needs decomposition into a separate round.",
+        "Codec primitive coverage check at end of R33: ε (empty body) + uint8 + VLE + tail + string + length-ref simple + length-ref dotted + arith + present-if local + present-if parent + repeat + import = 12 primitives active. Remaining major primitives to introduce: variant dispatch (codec_variant_*), TLV chain extension iterator, embedded codec composition. Each of those land in a future round as their first realistic consumer arrives.",
+        "Layer 2 byte-golden 'filename-mismatch / body-match' classification carry from R31 still pending verify-codegen.sh enhancement; not blocking.",
+        "R29 statechart carry items unchanged. Codec / statechart tracks remain parallel."
+      ],
+      "publishable_decision_summary": "§3 scouting + locator codec triad lands: sources/codecs/{locator,scout,hello}.scxml. Introduces 7 new B5 primitives across 3 files (string type, multi-bit flag pack, length-ref dotted-path, length-arith +1, present-if local, parent-flag carrier, import cross-codec, repeat-element); all 6 backends emit clean at vendor pin 11f1032d.",
+      "publishable_changes_bullets": [
+        "sources/codecs/locator.scxml new — VLE-length-prefixed UTF-8 string codec (B5-ζ). 4 inline test-vectors covering empty / ASCII / IP-locator-form / multi-byte UTF-8 (héllo = 6 bytes for 5 codepoints).",
+        "sources/codecs/scout.scxml new — version + cbyte(3+1+4 multi-bit flag) + zid (B5-α multi-bit flag pack + B5-κ length-ref dotted-path + B5-δ arith +1 + B1-δ present-if local-scope). No inline vectors (B5-θ-optional gate pending per SCE comment).",
+        "sources/codecs/hello.scxml new — adds <sce:import> + <sce:requires-parent-flags> + <sce:repeat> + cross-scope present-if (parent.L) on top of scout's primitive set. First parent-header-flag-gated repeat. Imports locator.scxml as child codec via wz-side stem (src='locator.scxml').",
+        "Body byte-identical to SCE upstream codec_zenoh_locator + codec_zenoh_scout + codec_zenoh_hello at vendor pin 11f1032d. Diff only in SPDX header + file stem + root name + <sce:import src=> retargeted to wz-stem."
+      ],
+      "publishable_verification_bullets": [
+        "verify-codegen.sh Layer 1 on each: 6/6 emit pass = 18/18 across the triad. Total Phase B5 codec coverage at end of R33: 7 SCXMLs (keep_alive / close / frame / fragment / locator / scout / hello) × 6 backends = 42/42 emit pass at vendor pin 11f1032d.",
+        "First successful authorship of multi-file codec import — hello.scxml's <sce:import src='locator.scxml'> resolved without diagnostic (sibling-file relative lookup confirmed on the new pin).",
+        "<sce:requires-parent-flags carrier='header'><sce:flag name='L' bit='5'/></sce:requires-parent-flags> emitter parsing confirmed — parent.L cross-scope present-if propagates through to generated wrap shape (Option/optional/etc. per language).",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 32→33, T3 warn 856 unchanged.",
+        "Cross-doc verification: scout cbyte layout bound to zenoh-pico include/zenoh-pico/protocol/definitions/transport.h:49 (_Z_FLAG_T_SCOUT_I=0x08) and src/protocol/codec/message.c:605-623 (_z_scout_encode). hello L-flag bound to transport.h:54 (_Z_FLAG_T_HELLO_L=0x20) and message.c:646-664."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "~23 codec SCXMLs remaining. Next-smallest unfilled: init_syn_body / init_ack_body (open_body / cookie_body chain) — handshake control bodies §4.1. Codec_zenoh_oam (§4.4 transport OAM, ~81 lines — large) probably needs decomposition into a separate round.",
+        "Codec primitive coverage check at end of R33: ε (empty body) + uint8 + VLE + tail + string + length-ref simple + length-ref dotted + arith + present-if local + present-if parent + repeat + import = 12 primitives active. Remaining major primitives to introduce: variant dispatch (codec_variant_*), TLV chain extension iterator, embedded codec composition. Each of those land in a future round as their first realistic consumer arrives.",
+        "Layer 2 byte-golden 'filename-mismatch / body-match' classification carry from R31 still pending verify-codegen.sh enhancement; not blocking.",
+        "R29 statechart carry items unchanged. Codec / statechart tracks remain parallel."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
