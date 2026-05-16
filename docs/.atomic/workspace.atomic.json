@@ -6054,6 +6054,58 @@
         "NEXT_SESSION.md still gitignored; consider moving the carry-summary surface into atomic ledger (changelog entries already serve this) or into a tracked docs/ file."
       ]
     },
+    "Round 58": {
+      "decision_summary": "Operational hygiene — NEXT_SESSION.md removed (atomic ledger redundant); pre-commit Cargo.toml↔Cargo.lock sync gate; wz-runtime-lwip reframed as host-build skeleton.",
+      "changes_bullets": [
+        "notes/NEXT_SESSION.md deleted (was gitignored, redundant with atomic ledger's carry_forward field). The activity-log genre this file served is now sourced from `docs/GENERATED.md` rendered Round N blocks or `query_section` on latest impact_refs.",
+        "CLAUDE.md auto-kickoff trigger section updated to drop the `notes/NEXT_SESSION.md` 5-step pointer; the same 5 steps are documented inline in this file as the single source.",
+        ".githooks/pre-commit extended with a Cargo.toml↔Cargo.lock sync gate: any commit staging `crates/**/Cargo.toml` without also staging `crates/Cargo.lock` is blocked with a clear remedy message referencing R52.1 retrospect. Mnemosyne SSOT gate runs after the lock check.",
+        "crates/wz-runtime-lwip/src/lib.rs module doc-comment reframed: top-line 'Phase W deferred — not production' notice plus explicit list of what the R53 skeleton proves vs what is NOT wired (actual lwIP API calls). Cargo.toml description updated to match.",
+        "Multi-FSM single-process limitation acknowledged as the R57 INSTALLED OnceLock guard; production multi-peer deployments fork a process per peer until session-scoped Lua binding lands (bind_native_object path, carry from R57)."
+      ],
+      "verification_bullets": [
+        "cargo build --workspace clean post-rewrite; cargo test --workspace 43/43 unchanged.",
+        "pre-commit hook script syntax-checked manually; the Cargo.lock sync check correctly fires when only Cargo.toml is staged (tested by simulating a manifest-only stage in the integration loop).",
+        "validate_workspace: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 58 → 59 (after this Round 58 append).",
+        "wz-runtime-lwip surface unchanged in terms of compiled output — only the doc-comment and Cargo.toml description shift; the C ABI smoke test continues to pass."
+      ],
+      "impact_refs": [
+        "watching-zenoh",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape"
+      ],
+      "carry_forward_bullets": [
+        "R59 = R40 strip workaround long-term decision. wz build.rs strip of `#![...]` + `//!` is the live patch; either (a) SCE PR for `--no-inner-attr` / `--style include` codegen flag, or (b) wz per-codec sub-crate split to avoid the `include!()` consumption pattern. Pick one before Phase W (codecs reused on MCU side).",
+        "R57c carry still open: Engine multi-step driving (full happy-path coverage past LinkOpening, link.open_timeout via Engine::tick).",
+        "R57b carry still open: cookie generation via HMAC-SHA256 (RFC §5.M intrinsic dep).",
+        "wz-runtime-lwip Phase W = MCU cross-compile toolchain + lwIP API integration. R58 doc reframe makes the skeleton-only status explicit; the implementation gap remains.",
+        "58 + R58 commits unpushed; push remains explicit-consent only."
+      ],
+      "publishable_decision_summary": "Operational hygiene — NEXT_SESSION.md removed (atomic ledger redundant); pre-commit Cargo.toml↔Cargo.lock sync gate; wz-runtime-lwip reframed as host-build skeleton.",
+      "publishable_changes_bullets": [
+        "notes/NEXT_SESSION.md deleted (was gitignored, redundant with atomic ledger's carry_forward field). The activity-log genre this file served is now sourced from `docs/GENERATED.md` rendered Round N blocks or `query_section` on latest impact_refs.",
+        "CLAUDE.md auto-kickoff trigger section updated to drop the `notes/NEXT_SESSION.md` 5-step pointer; the same 5 steps are documented inline in this file as the single source.",
+        ".githooks/pre-commit extended with a Cargo.toml↔Cargo.lock sync gate: any commit staging `crates/**/Cargo.toml` without also staging `crates/Cargo.lock` is blocked with a clear remedy message referencing R52.1 retrospect. Mnemosyne SSOT gate runs after the lock check.",
+        "crates/wz-runtime-lwip/src/lib.rs module doc-comment reframed: top-line 'Phase W deferred — not production' notice plus explicit list of what the R53 skeleton proves vs what is NOT wired (actual lwIP API calls). Cargo.toml description updated to match.",
+        "Multi-FSM single-process limitation acknowledged as the R57 INSTALLED OnceLock guard; production multi-peer deployments fork a process per peer until session-scoped Lua binding lands (bind_native_object path, carry from R57)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build --workspace clean post-rewrite; cargo test --workspace 43/43 unchanged.",
+        "pre-commit hook script syntax-checked manually; the Cargo.lock sync check correctly fires when only Cargo.toml is staged (tested by simulating a manifest-only stage in the integration loop).",
+        "validate_workspace: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 58 → 59 (after this Round 58 append).",
+        "wz-runtime-lwip surface unchanged in terms of compiled output — only the doc-comment and Cargo.toml description shift; the C ABI smoke test continues to pass."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R59 = R40 strip workaround long-term decision. wz build.rs strip of `#![...]` + `//!` is the live patch; either (a) SCE PR for `--no-inner-attr` / `--style include` codegen flag, or (b) wz per-codec sub-crate split to avoid the `include!()` consumption pattern. Pick one before Phase W (codecs reused on MCU side).",
+        "R57c carry still open: Engine multi-step driving (full happy-path coverage past LinkOpening, link.open_timeout via Engine::tick).",
+        "R57b carry still open: cookie generation via HMAC-SHA256 (RFC §5.M intrinsic dep).",
+        "wz-runtime-lwip Phase W = MCU cross-compile toolchain + lwIP API integration. R58 doc reframe makes the skeleton-only status explicit; the implementation gap remains.",
+        "58 + R58 commits unpushed; push remains explicit-consent only."
+      ]
+    },
     "Round 6": {
       "decision_summary": "Round 5 scope correction blocked by mnemosyne Round 169 atomic-internal orphan reject; reverted to lean/stub plan; SESSION_KICKOFF/README retained in 13-doc workspace as architectural lock-in carry.",
       "changes_bullets": [

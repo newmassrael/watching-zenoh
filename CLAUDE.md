@@ -205,8 +205,9 @@ in-file SPDX headers.
 ## Auto-kickoff trigger
 
 사용자가 첫 메시지로 `/load`, `시작`, `이어가자`, `kickoff` 중 하나만
-입력하면 `notes/NEXT_SESSION.md` 의 "시작 프롬프트 (복사용)" 5단계를
-그대로 수행한다:
+입력하면 아래 5단계를 그대로 수행한다 (R58: NEXT_SESSION.md 활동 로그
+genre가 atomic ledger의 carry_forward와 중복이라 제거됨 — 시작 프롬프트는
+이 파일이 단일 소스):
 
 1. Mnemosyne concept 6종 적재 (overview → anti-patterns →
    atomic-store → frozen-ledger → tier-rules → workflow) — 이번 세션에
@@ -214,7 +215,8 @@ in-file SPDX headers.
 2. `validate_workspace` 로 베이스라인 (T1 orphan / round-trip /
    entries / sections / GENERATED.md sync) 캡처
 3. 가장 최근 atomic changelog entry 조회 후 `carry_forward` 복원 —
-   `query_section` 또는 `list_sections` Round-N 패턴 검색
+   `docs/GENERATED.md` 의 마지막 `### Round N` 블록 읽거나
+   `query_section` 으로 latest impact_refs 추적
 4. `git status` + `git log --oneline -5` 로 미푸시 commit + 최근 활동 확인
 5. SCE 상태가 작업에 필요하면 `/home/coin/scxml-core-engine/` 직접 read
 
