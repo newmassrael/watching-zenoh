@@ -1809,7 +1809,7 @@
       ]
     },
     "runtime-crate--sce_link_runtime_lwip-c11-header-shape/6-next-step-scaffolding": {
-      "intent": "Next-step after R53 — SCE B6 link C11 emitter live (vendor 2ff9d7a9); wz-runtime-lwip skeleton landed; tcp/uart/raw_eth siblings + lwIP API + MCU cross-compile follow.",
+      "intent": "R63 reverted R53 NOP-stub skeleton (doc-around-hack). Phase W lands wz-runtime-lwip with real lwIP API + MCU cross-compile; emitter audit kept as link_emitter_b6 Layer 3 test.",
       "impact_scope": [
         "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-c11-header-shape"
       ]
@@ -6372,6 +6372,60 @@
         "R63b carry: inbound parser pass. R62's cookie helper is for the Accepting side's outbound InitAck only; the Initiator-side InitAck decode path that pulls the peer-issued cookie off the wire and stages it into SessionInitParams.cookie for OpenSyn echo is not yet wired. Currently the Initiator's cookie field is caller-supplied at install time — production needs the inbound parser to populate it from the actual peer InitAck.",
         "R63c carry: wz-runtime-lwip resolution still open from R60. R63 cluster bundles all three lwip-related carries (resolution decision + extension chain + inbound parser).",
         "Hal time mock (R61b) and R40 strip workaround long-term decision both still open from prior rounds."
+      ]
+    },
+    "Round 63": {
+      "decision_summary": "Strict audit pass — wz-runtime-lwip reverted (R53 NOP-stub skeleton was document-around-hack); SCE B6 emitter audit preserved as Layer 3 test.",
+      "changes_bullets": [
+        "crates/wz-runtime-lwip/ removed (git rm). The R53 host-build skeleton + R58 doc-only reframe ('Phase W deferred; not production') was an honest classification but did not change the fact that NOP stubs shipped in production crate code. R63 retires the crate; Phase W will reintroduce alongside actual lwIP API + MCU cross-compile.",
+        "crates/Cargo.toml workspace members 5 → 4 (wz-codecs / zenoh-pico-sys / wz-integration-tests / wz-runtime-tokio). Member-list comment documents the R63 revert rationale + the Phase W reintroduction plan.",
+        "crates/wz-integration-tests/tests/link_emitter_b6.rs (~120 lines): preserves the SCE B6 link-kind C11 emitter end-to-end validation that the deleted crate's build.rs codegen step performed. Invokes sce-codegen against sources/links/lwip_udp_scout.scxml, asserts the emit contains 10 load-bearing tokens (sce/forge/link.h include, *_link_t typedef, sce_forge_link_t composition, LINK_CLASS/FRAMER_REF/BACKPRESSURE macros, 4 inline fns). Skip-with-warning when sce-codegen binary is missing on first clone.",
+        "crates/wz-integration-tests/Cargo.toml adds tempfile dev-dependency for per-test emit staging.",
+        "doc §6 intent updated to record the revert + the audit-preservation path."
+      ],
+      "verification_bullets": [
+        "cargo build --workspace clean; cargo test --workspace 48 → 45 (-4 wz-runtime-lwip unit/integration tests removed, +1 link_emitter_b6 added; net -3, no regression).",
+        "cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "link_emitter_b6 verifies the same B6 emitter contract the deleted crate's compile-time codegen exercised, but as a Layer 3 emit-output check rather than a NOP-stub C ABI smoke — closes the audit-value question that R60's review left open.",
+        "validate_workspace: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 63 → 64 (after this Round 63 append)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/6-next-step-scaffolding"
+      ],
+      "carry_forward_bullets": [
+        "Phase W = wz-runtime-lwip reintroduction. MCU cross-compile toolchain (Cortex-M target + lwIP source tree + target-plugin per RFC §5.I) + real `udp_recv` / `udp_sendto` driver code + RX-pool integration + listener-link sibling-pair (§5.C lines 802-833). The deleted crate's `sources/links/lwip_udp_scout.scxml` + the link_emitter_b6 Layer 3 test stay as the codegen-side gate Phase W aims at.",
+        "R63a carry (from R62): transport extension chain emit on Init/Open/Join — SCXML <sce:tlv-chain> primitive available, init_body.scxml / open_body.scxml / join.scxml not yet authored against it. Real zenoh-pico peer interop blocker.",
+        "R63b carry (from R62): inbound parser pass — Initiator-side InitAck decode that pulls peer-issued cookie off the wire into SessionInitParams.cookie for OpenSyn echo.",
+        "R61b carry: Hal time mock for delayed `<send>` timer fire coverage.",
+        "R40 long-term: SCE PR for `--no-inner-attr` or wz per-codec sub-crate split — strip workaround still live in wz-codecs + wz-runtime-tokio build.rs.",
+        "63 unpushed commits; push remains explicit-consent only. The R52.1-R63 series is the strict-audit pass response to the user's two-round self-review challenge."
+      ],
+      "publishable_decision_summary": "Strict audit pass — wz-runtime-lwip reverted (R53 NOP-stub skeleton was document-around-hack); SCE B6 emitter audit preserved as Layer 3 test.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-lwip/ removed (git rm). The R53 host-build skeleton + R58 doc-only reframe ('Phase W deferred; not production') was an honest classification but did not change the fact that NOP stubs shipped in production crate code. R63 retires the crate; Phase W will reintroduce alongside actual lwIP API + MCU cross-compile.",
+        "crates/Cargo.toml workspace members 5 → 4 (wz-codecs / zenoh-pico-sys / wz-integration-tests / wz-runtime-tokio). Member-list comment documents the R63 revert rationale + the Phase W reintroduction plan.",
+        "crates/wz-integration-tests/tests/link_emitter_b6.rs (~120 lines): preserves the SCE B6 link-kind C11 emitter end-to-end validation that the deleted crate's build.rs codegen step performed. Invokes sce-codegen against sources/links/lwip_udp_scout.scxml, asserts the emit contains 10 load-bearing tokens (sce/forge/link.h include, *_link_t typedef, sce_forge_link_t composition, LINK_CLASS/FRAMER_REF/BACKPRESSURE macros, 4 inline fns). Skip-with-warning when sce-codegen binary is missing on first clone.",
+        "crates/wz-integration-tests/Cargo.toml adds tempfile dev-dependency for per-test emit staging.",
+        "doc §6 intent updated to record the revert + the audit-preservation path."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build --workspace clean; cargo test --workspace 48 → 45 (-4 wz-runtime-lwip unit/integration tests removed, +1 link_emitter_b6 added; net -3, no regression).",
+        "cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "link_emitter_b6 verifies the same B6 emitter contract the deleted crate's compile-time codegen exercised, but as a Layer 3 emit-output check rather than a NOP-stub C ABI smoke — closes the audit-value question that R60's review left open.",
+        "validate_workspace: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 63 → 64 (after this Round 63 append)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/6-next-step-scaffolding"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase W = wz-runtime-lwip reintroduction. MCU cross-compile toolchain (Cortex-M target + lwIP source tree + target-plugin per RFC §5.I) + real `udp_recv` / `udp_sendto` driver code + RX-pool integration + listener-link sibling-pair (§5.C lines 802-833). The deleted crate's `sources/links/lwip_udp_scout.scxml` + the link_emitter_b6 Layer 3 test stay as the codegen-side gate Phase W aims at.",
+        "R63a carry (from R62): transport extension chain emit on Init/Open/Join — SCXML <sce:tlv-chain> primitive available, init_body.scxml / open_body.scxml / join.scxml not yet authored against it. Real zenoh-pico peer interop blocker.",
+        "R63b carry (from R62): inbound parser pass — Initiator-side InitAck decode that pulls peer-issued cookie off the wire into SessionInitParams.cookie for OpenSyn echo.",
+        "R61b carry: Hal time mock for delayed `<send>` timer fire coverage.",
+        "R40 long-term: SCE PR for `--no-inner-attr` or wz per-codec sub-crate split — strip workaround still live in wz-codecs + wz-runtime-tokio build.rs.",
+        "63 unpushed commits; push remains explicit-consent only. The R52.1-R63 series is the strict-audit pass response to the user's two-round self-review challenge."
       ]
     },
     "Round 7": {

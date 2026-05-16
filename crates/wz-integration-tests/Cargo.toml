@@ -41,6 +41,10 @@ path = "src/lib.rs"
 wz-codecs = { path = "../wz-codecs" }
 zenoh-pico-sys = { path = "../zenoh-pico-sys" }
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
+# tempfile is used by R63 link_emitter_b6 to stage sce-codegen emit
+# output in a clean directory per test run (no pollution of $OUT_DIR
+# or vendor/sce/target).
+tempfile = "3"
 
 [lints]
 workspace = true
