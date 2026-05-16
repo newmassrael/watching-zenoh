@@ -5896,6 +5896,54 @@
         "53 + R53 + R54 commits unpushed; pre-push hook re-runs validate_workspace at push time. Push remains explicit-consent only."
       ]
     },
+    "Round 55": {
+      "decision_summary": "Engine-driving Phase Z closure — Generated FSM transitions Init→LinkOpening via Engine::process_event, dispatches LinkOpening.onentry script through Lua + reaches RecordingDriver.open().",
+      "changes_bullets": [
+        "wz-runtime-tokio/tests/session_fsm_engine_drive.rs (~90 lines): single integration test. Builds Engine<SessionFsmUnicastPolicy>, installs SessionLinkActions, drives Init -> LinkOpening via process_event(OutboundStart). Verifies (a) state transition, (b) trace.link_driver_open == 1, (c) RecordingDriver.opens == 1.",
+        "Validates the generated `session_fsm_unicast_sm.rs` FSM's execute_script emission reaches `wz-runtime-tokio` LinkDriver via the Lua engine path. Closes the half of R29 carry that R54 left open ('does the FSM actually emit the scripts in the right order' vs. R54's 'are the scripts wired to LinkDriver when dispatched directly').",
+        "Scope ceiling: walks one macrostep only (Init -> LinkOpening). Further FSM progression requires either Engine::tick to fire delayed <send delay='5s'> events (link.open_timeout) or external event injection (link.opened / init_ack.received). Both belong with the codec-encoded wire-bytes round (R55c)."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace 40 → 41 (one new R55b integration test).",
+        "cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "Generated FSM transition mechanic verified: Engine::get_current_state() = SessionFsmUnicastState::LinkOpening post-process_event; trace.link_driver_open == 1; RecordingDriver.opens == 1 — the full FSM -> Lua engine -> register_global_function closure -> BoxedLinkDriver -> RecordingDriver chain.",
+        "validate_workspace post-mutation: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 55 → 56, sections 214 unchanged."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R55c = codec-encoded wire bytes + multi-step FSM driving. Combines (a) R55 (placeholder bytes b'INIT_SYN' → real init_body codec encoding), (b) further FSM progression via Engine::tick to advance the 5s link.open_timeout, and (c) listener-path coverage (Accepting branch reachable via inbound.start external event).",
+        "Engine::tick + Hal time abstraction — the test does not advance time; the link.open_timeout delayed send is queued on the scheduler but never fires. For multi-state coverage in R55c, either mock the Hal (sce_rust_runtime::StdHal allows time injection?) or directly raise link.opened externally to bypass the timeout.",
+        "Multi-FSM session-scoped binding (carries forward from R54) — the test confirms single-FSM driving works; multi-peer concurrent FSM instances on one process would still race on the Lua global function name space.",
+        "Generated execute_script uses log::error! for failure paths; wz-runtime-tokio now has `log` dep but no logger initialised — a logger-init step in a binary entry point would surface those errors at runtime. Acceptable for the library crate (no main); document as a downstream binary's responsibility."
+      ],
+      "publishable_decision_summary": "Engine-driving Phase Z closure — Generated FSM transitions Init→LinkOpening via Engine::process_event, dispatches LinkOpening.onentry script through Lua + reaches RecordingDriver.open().",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/tests/session_fsm_engine_drive.rs (~90 lines): single integration test. Builds Engine<SessionFsmUnicastPolicy>, installs SessionLinkActions, drives Init -> LinkOpening via process_event(OutboundStart). Verifies (a) state transition, (b) trace.link_driver_open == 1, (c) RecordingDriver.opens == 1.",
+        "Validates the generated `session_fsm_unicast_sm.rs` FSM's execute_script emission reaches `wz-runtime-tokio` LinkDriver via the Lua engine path. Closes the half of R29 carry that R54 left open ('does the FSM actually emit the scripts in the right order' vs. R54's 'are the scripts wired to LinkDriver when dispatched directly').",
+        "Scope ceiling: walks one macrostep only (Init -> LinkOpening). Further FSM progression requires either Engine::tick to fire delayed <send delay='5s'> events (link.open_timeout) or external event injection (link.opened / init_ack.received). Both belong with the codec-encoded wire-bytes round (R55c)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace 40 → 41 (one new R55b integration test).",
+        "cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "Generated FSM transition mechanic verified: Engine::get_current_state() = SessionFsmUnicastState::LinkOpening post-process_event; trace.link_driver_open == 1; RecordingDriver.opens == 1 — the full FSM -> Lua engine -> register_global_function closure -> BoxedLinkDriver -> RecordingDriver chain.",
+        "validate_workspace post-mutation: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 55 → 56, sections 214 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R55c = codec-encoded wire bytes + multi-step FSM driving. Combines (a) R55 (placeholder bytes b'INIT_SYN' → real init_body codec encoding), (b) further FSM progression via Engine::tick to advance the 5s link.open_timeout, and (c) listener-path coverage (Accepting branch reachable via inbound.start external event).",
+        "Engine::tick + Hal time abstraction — the test does not advance time; the link.open_timeout delayed send is queued on the scheduler but never fires. For multi-state coverage in R55c, either mock the Hal (sce_rust_runtime::StdHal allows time injection?) or directly raise link.opened externally to bypass the timeout.",
+        "Multi-FSM session-scoped binding (carries forward from R54) — the test confirms single-FSM driving works; multi-peer concurrent FSM instances on one process would still race on the Lua global function name space.",
+        "Generated execute_script uses log::error! for failure paths; wz-runtime-tokio now has `log` dep but no logger initialised — a logger-init step in a binary entry point would surface those errors at runtime. Acceptable for the library crate (no main); document as a downstream binary's responsibility."
+      ]
+    },
     "Round 6": {
       "decision_summary": "Round 5 scope correction blocked by mnemosyne Round 169 atomic-internal orphan reject; reverted to lean/stub plan; SESSION_KICKOFF/README retained in 13-doc workspace as architectural lock-in carry.",
       "changes_bullets": [
