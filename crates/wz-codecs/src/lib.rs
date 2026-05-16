@@ -91,3 +91,19 @@ pub mod msg_put {
 pub mod msg_del {
     include!(concat!(env!("OUT_DIR"), "/msg_del.rs"));
 }
+
+pub mod keep_alive {
+    include!(concat!(env!("OUT_DIR"), "/keep_alive.rs"));
+}
+
+pub mod wireexpr {
+    include!(concat!(env!("OUT_DIR"), "/wireexpr.rs"));
+}
+
+pub mod query {
+    include!(concat!(env!("OUT_DIR"), "/query.rs"));
+}
+
+pub mod request {
+    include!(concat!(env!("OUT_DIR"), "/request.rs"));
+}
