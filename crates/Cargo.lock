@@ -538,6 +538,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "sce-forge-runtime",
+ "wz-codecs",
+ "zenoh-pico-sys",
+]
+
+[[package]]
 name = "zenoh-pico-sys"
 version = "0.1.0"
 dependencies = [

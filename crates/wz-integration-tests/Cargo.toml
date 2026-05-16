@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-integration-tests — Layer 3 wire-interop test harness.
+#
+# Phase 2 walking-skeleton deliverable (R42+). Each `tests/layer3_*.rs`
+# file pairs a wz-emitted encoder (`wz_codecs::<codec>::<Struct>::
+# encode`) with the corresponding zenoh-pico C encoder (`_z_*_encode`
+# via `zenoh_pico_sys`), constructs an equivalent logical message on
+# both sides, encodes via both paths, and BYTE-COMPARES the output.
+#
+# This is the only layer in the verification stack that produces an
+# OBJECTIVE evidence that the watching-zenoh codec SCXML spec
+# correctly models the zenoh-pico 1.9.0 wire format. Layer 1 (cargo
+# emit success) and Layer 2 (sce-codegen-vs-sce-codegen body-golden)
+# are both internal-consistency gates that cannot catch a
+# spec-vs-reality mismatch.
+#
+# Crate type: integration-tests-only (no library). All test logic
+# lives in `tests/layer3_*.rs` files so `cargo test -p
+# wz-integration-tests` is the single command that exercises the
+# Layer 3 lane.
+
+[package]
+name = "wz-integration-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Layer 3 wire-interop tests: wz codec encoders vs zenoh-pico C encoders, byte-compare."
+publish = false
+
+# No library; the crate is purely a host for `tests/*.rs` integration
+# tests. Cargo's default `src/lib.rs` discovery is disabled by setting
+# an explicit (and absent) lib path.
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+wz-codecs = { path = "../wz-codecs" }
+zenoh-pico-sys = { path = "../zenoh-pico-sys" }
+sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
+
+[lints]
+workspace = true

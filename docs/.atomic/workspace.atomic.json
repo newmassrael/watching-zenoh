@@ -5092,6 +5092,66 @@
         "Phase 4 CI (R46+): GitHub Actions running validate_workspace + verify-codegen.sh + cargo test (all crates) + Layer 3 interop. The Layer 3 lane is what makes the CI gate meaningful — prior to R42, CI would only catch codegen regressions, not wire-format divergence."
       ]
     },
+    "Round 42": {
+      "decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
+      "changes_bullets": [
+        "wz-codecs/build.rs CODECS array extended with close + frame + fragment. wz-codecs/src/lib.rs gains matching pub mod declarations. cargo build pass.",
+        "zenoh-pico-sys/wrapper.h new — bindgen umbrella that pulls in zenoh-pico.h PLUS internal protocol/iobuf.h + protocol/codec/transport.h + protocol/codec/message.h. Layer 3 needs the internal _z_*_encode surface which is intentionally not transitively included by the public umbrella.",
+        "zenoh-pico-sys/build.rs allowlist expanded with _z_t_msg_close_t + _z_wbuf_t + _z_zbuf_t + _z_close_encode + _z_wbuf_make + _z_wbuf_len + _z_wbuf_clear + _z_wbuf_to_zbuf + _z_zbuf_clear. Each entry justified by the close Layer 3 test.",
+        "crates/wz-integration-tests/ new crate — Phase 2 Layer 3 wire-interop test host. dev-deps wz-codecs + zenoh-pico-sys + sce-forge-runtime.",
+        "tests/layer3_close.rs (110 lines, 2 tests): byte-compare across 10 reason values + wire-shape pin (1-byte body invariant). FFI byte extraction via wbuf -> zbuf -> _ios._buf[.._w_pos].",
+        "crates/Cargo.toml workspace members extended (wz-integration-tests added)."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace: 8/8 pass / 0 fail. wz-codecs smoke 2/2, zenoh-pico-sys ffi_smoke 4/4, wz-integration-tests layer3_close 2/2.",
+        "Layer 3 close exercises the FULL FFI pipeline: bindgen-emitted _z_t_msg_close_t constructed in Rust; _z_close_encode called across C ABI; bytes extracted from _z_wbuf_t via _z_wbuf_to_zbuf + _z_iosli_t._buf[.._w_pos]; resources cleaned via _z_zbuf_clear + _z_wbuf_clear.",
+        "Byte-equivalence: Close { reason }.encode() (wz) == _z_close_encode(wbf, header, &_z_t_msg_close_t { _reason: reason }) bytes (zenoh-pico) for every reason in {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x42, 0xFF}. 10/10 match.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 41 to 42, T3 warn 856 unchanged.",
+        "Historical significance: 42 rounds (R1-R41) authored a codec spec WITHOUT wire-format validation. R42 supplies the first such validation — the close codec SCXML correctly models zenoh-pico's _z_close_encode output."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "carry_forward_bullets": [
+        "R43 = Layer 3 expansion to frame + fragment codecs. Both are §4.2 data-carrying with VLE sn + tail payload. Adds _z_frame_encode + _z_fragment_encode to zenoh-pico-sys allowlist. First VLE wire-byte agreement validation — VLE u64 is the most pervasive primitive across the codec set.",
+        "R44 = Layer 3 across handshake bodies: init_body + open_body + join + scout + hello. Exercises multi-bit flag, dotted-path length-ref, present-if local + parent.X, repeat, import primitives.",
+        "R45 = Layer 3 across payload bodies: msg_put + msg_del + ext_entry + child codecs (timestamp / encoding / ext_unit/zint/zbuf). Variant + embed + tlv-chain + entry-flag termination validated.",
+        "R46+ = network envelopes (request / response_final), declare bodies, OAM. After this the §3-§7 codec catalog is fully Layer 3-verified against zenoh-pico 1.9.0.",
+        "SCE upstream PR carry (R40) remains: #![doc = SCE-MAP] inner-attr template fix in tools/codegen/templates/forge/rust/<kind>.rs.jinja2. Drop-in fix when SCE ships it; wz-codecs/build.rs strip workaround stays in the meantime.",
+        "After codec Layer 3 catalog completes (R46-R47): R48+ runtime crates (wz-runtime-tokio + wz-runtime-lwip) per docs/runtime-crate-*.md. Session FSM script-placeholder wiring (R29 carry) becomes viable once trait surface lands."
+      ],
+      "publishable_decision_summary": "Layer 3 wire-interop verification lands. First objective evidence in 42 rounds that a watching-zenoh codec SCXML is byte-equivalent to zenoh-pico 1.9.0's wire encoding: close codec emits identical bytes to _z_close_encode across 10 reason-byte test cases. The spec is no longer just an internally-consistent artifact — it is wire-format-validated against the canonical reference implementation for the first codec.",
+      "publishable_changes_bullets": [
+        "wz-codecs/build.rs CODECS array extended with close + frame + fragment. wz-codecs/src/lib.rs gains matching pub mod declarations. cargo build pass.",
+        "zenoh-pico-sys/wrapper.h new — bindgen umbrella that pulls in zenoh-pico.h PLUS internal protocol/iobuf.h + protocol/codec/transport.h + protocol/codec/message.h. Layer 3 needs the internal _z_*_encode surface which is intentionally not transitively included by the public umbrella.",
+        "zenoh-pico-sys/build.rs allowlist expanded with _z_t_msg_close_t + _z_wbuf_t + _z_zbuf_t + _z_close_encode + _z_wbuf_make + _z_wbuf_len + _z_wbuf_clear + _z_wbuf_to_zbuf + _z_zbuf_clear. Each entry justified by the close Layer 3 test.",
+        "crates/wz-integration-tests/ new crate — Phase 2 Layer 3 wire-interop test host. dev-deps wz-codecs + zenoh-pico-sys + sce-forge-runtime.",
+        "tests/layer3_close.rs (110 lines, 2 tests): byte-compare across 10 reason values + wire-shape pin (1-byte body invariant). FFI byte extraction via wbuf -> zbuf -> _ios._buf[.._w_pos].",
+        "crates/Cargo.toml workspace members extended (wz-integration-tests added)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace: 8/8 pass / 0 fail. wz-codecs smoke 2/2, zenoh-pico-sys ffi_smoke 4/4, wz-integration-tests layer3_close 2/2.",
+        "Layer 3 close exercises the FULL FFI pipeline: bindgen-emitted _z_t_msg_close_t constructed in Rust; _z_close_encode called across C ABI; bytes extracted from _z_wbuf_t via _z_wbuf_to_zbuf + _z_iosli_t._buf[.._w_pos]; resources cleaned via _z_zbuf_clear + _z_wbuf_clear.",
+        "Byte-equivalence: Close { reason }.encode() (wz) == _z_close_encode(wbf, header, &_z_t_msg_close_t { _reason: reason }) bytes (zenoh-pico) for every reason in {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x42, 0xFF}. 10/10 match.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 41 to 42, T3 warn 856 unchanged.",
+        "Historical significance: 42 rounds (R1-R41) authored a codec spec WITHOUT wire-format validation. R42 supplies the first such validation — the close codec SCXML correctly models zenoh-pico's _z_close_encode output."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R43 = Layer 3 expansion to frame + fragment codecs. Both are §4.2 data-carrying with VLE sn + tail payload. Adds _z_frame_encode + _z_fragment_encode to zenoh-pico-sys allowlist. First VLE wire-byte agreement validation — VLE u64 is the most pervasive primitive across the codec set.",
+        "R44 = Layer 3 across handshake bodies: init_body + open_body + join + scout + hello. Exercises multi-bit flag, dotted-path length-ref, present-if local + parent.X, repeat, import primitives.",
+        "R45 = Layer 3 across payload bodies: msg_put + msg_del + ext_entry + child codecs (timestamp / encoding / ext_unit/zint/zbuf). Variant + embed + tlv-chain + entry-flag termination validated.",
+        "R46+ = network envelopes (request / response_final), declare bodies, OAM. After this the §3-§7 codec catalog is fully Layer 3-verified against zenoh-pico 1.9.0.",
+        "SCE upstream PR carry (R40) remains: #![doc = SCE-MAP] inner-attr template fix in tools/codegen/templates/forge/rust/<kind>.rs.jinja2. Drop-in fix when SCE ships it; wz-codecs/build.rs strip workaround stays in the meantime.",
+        "After codec Layer 3 catalog completes (R46-R47): R48+ runtime crates (wz-runtime-tokio + wz-runtime-lwip) per docs/runtime-crate-*.md. Session FSM script-placeholder wiring (R29 carry) becomes viable once trait surface lands."
+      ]
+    },
     "Round 5": {
       "decision_summary": "Scope correction — SESSION_KICKOFF (activity-log genre) and README (empty stub) removed from Mnemosyne workspace as design-doc lifecycle infrastructure genre misfit.",
       "changes_bullets": [

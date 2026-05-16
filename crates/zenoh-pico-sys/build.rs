@@ -73,10 +73,17 @@ fn main() {
     // BOTH so the source-tree `#include`s and the generated
     // `config.h` both resolve.
     let installed_include = dst.join("include");
-    let main_header = include_dir
-        .join("zenoh-pico.h")
+    // Use the wz-side wrapper header that pulls in zenoh-pico.h
+    // (public surface) PLUS the internal protocol headers needed for
+    // codec-level Layer 3 byte-compare tests (_z_*_encode + wbuf/
+    // zbuf API). The umbrella public header does not transitively
+    // include the internal codec headers — Layer 3 needs them
+    // explicitly. See wrapper.h.
+    let main_header = manifest_dir
+        .join("wrapper.h")
         .to_string_lossy()
         .into_owned();
+    println!("cargo:rerun-if-changed=wrapper.h");
 
     // zenoh-pico's `system/common/platform.h` errors out with
     // "Unknown platform" unless ONE of the `ZENOH_<PLATFORM>` macros
@@ -121,12 +128,28 @@ fn main() {
         .clang_arg(format!("-D{platform_def}"))
         .clang_arg("-DZENOH_COMPILER_CLANG")
         .clang_arg("-DZENOH_C_STANDARD=11")
-        // R41 allowlist — see Cargo.toml + module docstring for
-        // expansion policy. Adding a function here without a paired
-        // Layer 3 test round is a violation of the "production-level
-        // surface, no auto-bind sprawl" gate.
+        // Allowlist policy — see Cargo.toml + module docstring.
+        // Adding a function here without a paired Layer 3 test round
+        // is a violation of the "production-level surface, no auto-
+        // bind sprawl" gate.
+        //
+        // R41 (smoke): _z_id_t + _z_id_len.
+        // R42 (close codec Layer 3): + wbuf API + close encode.
         .allowlist_type("_z_id_t")
         .allowlist_function("_z_id_len")
+        // R42 — close codec Layer 3 byte-compare. The wbuf is
+        // zenoh-pico's growable byte-output buffer; we construct one,
+        // pass to _z_close_encode, then read raw bytes via the
+        // wbuf→zbuf→rptr path.
+        .allowlist_type("_z_t_msg_close_t")
+        .allowlist_type("_z_wbuf_t")
+        .allowlist_type("_z_zbuf_t")
+        .allowlist_function("_z_close_encode")
+        .allowlist_function("_z_wbuf_make")
+        .allowlist_function("_z_wbuf_len")
+        .allowlist_function("_z_wbuf_clear")
+        .allowlist_function("_z_wbuf_to_zbuf")
+        .allowlist_function("_z_zbuf_clear")
         // bindgen layout-test surface: pin to `Debug` derivation to
         // unblock test-side equality checks against zenoh-pico's
         // typed shape.

@@ -27,12 +27,15 @@ use std::path::Path;
 /// `<sce:import>` directives have already had their target SCXMLs
 /// validated by the importer in this same build.
 const CODECS: &[&str] = &[
-    // Leaf codecs (no imports)
+    // Leaf codecs (no imports) — single-field or empty bodies.
     "timestamp",
     "encoding",
     "ext_unit",
     "ext_zint",
     "ext_zbuf",
+    "close", // §4.1 session-close, 1-byte reason — R42 Layer 3 target
+    "frame", // §4.2 data-carrying VLE sn + tail payload — R42+
+    "fragment", // §4.2 same shape as frame, distinct MID — R42+
     // Composing codecs
     "ext_entry", // imports ext_unit / ext_zint / ext_zbuf
     "msg_put",   // imports timestamp / encoding / ext_entry
