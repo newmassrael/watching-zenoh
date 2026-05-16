@@ -1,34 +1,40 @@
 #!/usr/bin/env bash
-# pre-push hook — run `mnemosyne-cli validate-workspace` before publishing
-# commits to a remote.
+# pre-push hook — CI-equivalent local gate before publishing to remote.
 #
-# Push is the natural integrity-gate point: this is where the project's
-# audit-traced state becomes shared. Catches state changes since last commit
-# (e.g. manual atomic.json edits, amends, rebases) that pre-commit may have
-# missed.
+# R64 retrospect: prior to this hook the only push-time gate was
+# `mnemosyne-cli validate-workspace`. CI yaml regressions (R64.1's
+# `--package` flag that cargo install does not accept) shipped to
+# remote and were observed only after the GitHub Actions runner
+# rejected them. The fix is to mirror CI's full gate-set locally
+# so push-time catches what land-then-CI used to.
 #
-# Checks (mnemosyne-cli validate-workspace):
-#   - T1 cross-ref orphan delta (new orphans not registered in
-#     [[orphan_ledger]])
-#   - T2 frozen-ledger violations (existing ChangelogEntry mutation)
-#   - Round-trip mandatory dimension (parse → emit → re-parse)
-#   - Atomic ledger consistency (entries / sections / GENERATED.md sync)
+# Delegates to `scripts/run-ci.sh` so CI and pre-push share one
+# source of truth for the lane definitions (Layer 0 actionlint /
+# A mnemosyne / B verify-codegen / C1 cargo test / C2 clippy /
+# D deploy yaml).
+#
+# Time cost (warm cache): ~50s typical; up to ~5min on cold
+# compile. The hook can be bypassed via `git push --no-verify`
+# for genuinely urgent hotfixes — that escape hatch is the
+# standard git contract; do not use it to dodge real failures.
 #
 # Install via `git config core.hooksPath .githooks` (one-time per clone).
 set -euo pipefail
 
-if ! command -v mnemosyne-cli >/dev/null 2>&1; then
-    echo "pre-push: mnemosyne-cli not on PATH — install with" >&2
-    echo "  cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli" >&2
-    exit 1
-fi
-
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-echo "pre-push: running mnemosyne-cli validate-workspace ..."
-if ! mnemosyne-cli validate-workspace; then
-    echo "pre-push: validate-workspace failed — fix violations before push" >&2
+if [[ ! -x scripts/run-ci.sh ]]; then
+    echo "pre-push: scripts/run-ci.sh missing or not executable" >&2
+    echo "  chmod +x scripts/run-ci.sh" >&2
+    exit 1
+fi
+
+echo "pre-push: running CI-equivalent gate (scripts/run-ci.sh) ..."
+if ! scripts/run-ci.sh; then
+    echo "" >&2
+    echo "pre-push: CI-equivalent gate failed — fix locally before push." >&2
+    echo "          Bypass with `git push --no-verify` only for genuine hotfixes." >&2
     exit 1
 fi
 
