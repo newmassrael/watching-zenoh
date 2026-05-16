@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Session FSM — unicast, minimal-viable shape.
+
+  Lowering of `docs/session-fsm.md` §2.1 unicast states + §2.2
+  transitions + §2.4 close paths + §2.5 timer names + §2.7 accept-side
+  hardening guards into a single SCE statechart-kind SCXML. First
+  statechart-kind file in watching-zenoh; opens the Phase C8 SCXML
+  authoring track (the existing 14 algorithm-kind SCXMLs are predicate
+  / function primitives, not state machines).
+
+  Scope of this round (R29):
+  - Unicast paths only — multicast variant is a separate file
+    (`session_fsm_multicast.scxml`, deferred).
+  - Scouting state from §2.1 is excluded; active-mode scouting lives in
+    `sources/session/scouting.scxml` (deferred to a later round) and
+    composes into this FSM at the Init level.
+  - Established sub-regions (RX / TX / KeepAlive) from §2.3 are
+    elided to a leaf state; those parallel sub-regions land in a
+    later round to keep this file's complexity bounded.
+  - stateless_accept variant from §2.7 is excluded — same file shape
+    with cookie-only AwaitingInitSyn → SentInitAck transition, deferred.
+
+  Script-action placeholders:
+    Every `<script>...</script>` body is a call-site for an SCE
+    intrinsic that will be bound in a later round when this FSM is
+    composed with `runtime-crate-tokio` / `runtime-crate-lwip` link
+    drivers and `intrinsics-runtime` HMAC / RNG symbols. The names
+    here (`send_init_syn()`, `enable_rx_tx_regions()`, etc.) are
+    semantic placeholders — they correspond 1:1 to surface defined
+    in `docs/runtime-crate-tokio.md` §2 / §6 events and in
+    `docs/intrinsics-runtime-symbols.md` §2-3. The codegen output of
+    this round is the state-transition graph; the binding to actual
+    primitives is deferred (mirrors how `algorithm_v1_dispatch` left
+    `tlv_advance` to a later round).
+
+  Hardening guards (§2.7):
+    The Init → Accepting transition includes the three-cap chain as a
+    `cond=` expression — half-open capacity + per-source token bucket.
+    Cookie validation (the third cap) appears on the
+    Accepting.SentInitAck → SentOpenAck transition. All three return
+    silent-drop on denial (no Close frame, anti-amplification per the
+    §2.7 trust-class hardening matrix).
+
+  Timer events (§2.5):
+    `link.open_timeout` (5s), `init_ack.timeout` (2s),
+    `open_ack.timeout` (2s), `closing.timeout` (100ms). Issued via
+    W3C SCXML 6.2 `<send delay=...>` from the relevant state's
+    onentry. The deploy.yaml-driven actual values will substitute via
+    the §5.K platform.timers block at codegen time; the literal
+    durations here match the prose-doc defaults.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="statechart"
+       name="session_fsm_unicast"
+       version="1.0"
+       initial="Init">
+
+  <state id="Init">
+    <transition event="outbound.start" target="LinkOpening"/>
+    <transition event="inbound.start" target="Accepting"/>
+  </state>
+
+  <state id="LinkOpening">
+    <onentry>
+      <script>link_driver_open()</script>
+      <send event="link.open_timeout" delay="5s"/>
+    </onentry>
+    <transition event="link.opened" target="Opening"/>
+    <transition event="link.open_timeout" target="Closing">
+      <script>set_close_reason_generic()</script>
+    </transition>
+    <transition event="link.lost" target="Closed"/>
+  </state>
+
+  <state id="Opening" initial="SentInitSyn">
+    <state id="SentInitSyn">
+      <onentry>
+        <script>send_init_syn()</script>
+        <send event="init_ack.timeout" delay="2s"/>
+      </onentry>
+      <transition event="init_ack.received" target="GotInitAck"/>
+    </state>
+    <state id="GotInitAck">
+      <onentry>
+        <script>send_open_syn()</script>
+        <send event="open_ack.timeout" delay="2s"/>
+      </onentry>
+      <transition event="open_ack.received" target="Established"/>
+    </state>
+    <transition event="init_ack.timeout" target="Closing">
+      <script>set_close_reason_generic()</script>
+    </transition>
+    <transition event="open_ack.timeout" target="Closing">
+      <script>set_close_reason_generic()</script>
+    </transition>
+    <transition event="framing.error" target="Closing">
+      <script>set_close_reason_invalid()</script>
+    </transition>
+    <transition event="peer.close" target="Closed"/>
+    <transition event="link.lost" target="Closed"/>
+  </state>
+
+  <state id="Accepting" initial="AwaitingInitSyn">
+    <state id="AwaitingInitSyn">
+      <transition event="init_syn.received"
+                  cond="half_open_cap_available() &amp;&amp; accept_rate_token()"
+                  target="SentInitAck"/>
+    </state>
+    <state id="SentInitAck">
+      <onentry>
+        <script>send_init_ack_with_cookie()</script>
+      </onentry>
+      <transition event="open_syn.received"
+                  cond="cookie_valid()"
+                  target="SentOpenAck"/>
+    </state>
+    <state id="SentOpenAck">
+      <onentry>
+        <script>send_open_ack()</script>
+      </onentry>
+      <transition target="Established"/>
+    </state>
+    <transition event="accepting.inactivity_timeout" target="Closed"/>
+    <transition event="framing.error" target="Closing">
+      <script>set_close_reason_invalid()</script>
+    </transition>
+    <transition event="peer.close" target="Closed"/>
+    <transition event="link.lost" target="Closed"/>
+  </state>
+
+  <state id="Established">
+    <onentry>
+      <script>enable_rx_tx_regions()</script>
+      <script>start_lease_monitor()</script>
+      <script>start_keepalive_worker()</script>
+    </onentry>
+    <onexit>
+      <script>stop_keepalive_worker()</script>
+      <script>stop_lease_monitor()</script>
+    </onexit>
+    <transition event="session.close" target="Closing">
+      <script>set_close_reason_generic()</script>
+    </transition>
+    <transition event="lease.expired" target="Closing">
+      <script>set_close_reason_expired()</script>
+    </transition>
+    <transition event="framing.error" target="Closing">
+      <script>set_close_reason_invalid()</script>
+    </transition>
+    <transition event="tx.congestion.exhaust" target="Closing">
+      <script>set_close_reason_unresponsive()</script>
+    </transition>
+    <transition event="peer.close" target="Closed"/>
+    <transition event="link.lost" target="Closed"/>
+  </state>
+
+  <state id="Closing">
+    <onentry>
+      <script>send_close_frame_with_reason()</script>
+      <send event="closing.timeout" delay="100ms"/>
+    </onentry>
+    <transition event="closing.timeout" target="Closed"/>
+    <transition event="link.lost" target="Closed"/>
+  </state>
+
+  <final id="Closed">
+    <onentry>
+      <script>release_link()</script>
+      <script>free_pool_slots()</script>
+    </onentry>
+  </final>
+
+</scxml>
