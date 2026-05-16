@@ -4502,6 +4502,56 @@
         "R29 statechart carry items unchanged. Codec / statechart tracks remain parallel."
       ]
     },
+    "Round 34": {
+      "decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
+      "changes_bullets": [
+        "sources/codecs/init_body.scxml new (70 lines, sce:kind=codec). Wire shape: version + cbyte(whatami:2 + zid_len_m1:4) + zid + [sn_res + batch_size gated on parent.S] + [cookie_len:VLE + cookie:length-ref gated on parent.A]. <sce:requires-parent-flags> declares S(bit 6) and A(bit 5) carriers.",
+        "sources/codecs/open_body.scxml new (60 lines, sce:kind=codec). Wire shape: lease:VLE + initial_sn:VLE + [cookie_len:VLE + cookie:length-ref gated on !parent.A]. First B5-λ negation primitive consumer — cookie present when A flag is CLEAR.",
+        "Body byte-identical to SCE upstream codec_zenoh_init_body + codec_zenoh_open_body at vendor pin 11f1032d. Diff only in SPDX header + file stem + root name (wz convention)."
+      ],
+      "verification_bullets": [
+        "verify-codegen.sh Layer 1 on each: 6/6 emit pass = 12/12. Total Phase B5 codec coverage at end of R34: 9 SCXMLs (keep_alive / close / frame / fragment / locator / scout / hello / init_body / open_body) × 6 backends = 54/54 emit pass at vendor pin 11f1032d.",
+        "B5-λ negation grammar (!parent.A in open_body) emit-confirmed across all 6 backends — SCE-side negation support lands cleanly on the new pin per SCE comment 'landed in the prior atomic commit'.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 33→34, T3 warn 856 unchanged.",
+        "Cross-doc verification: init_body cbyte+S+A bound to zenoh-pico include/zenoh-pico/protocol/definitions/transport.h:67-68 (_Z_FLAG_T_INIT_S=0x40, _Z_FLAG_T_INIT_A=0x20) + src/protocol/codec/transport.c:182-219 (_z_init_encode). open_body A-flag bound to same transport.h plus transport.c:288-305 (_z_open_encode)."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions"
+      ],
+      "carry_forward_bullets": [
+        "~21 codec SCXMLs remaining. Realistic next-smallest set: codec_zenoh_join (multicast Join body, ~63 lines, similar structure to Init body with whatami + extensions; lands the multicast handshake codec).",
+        "After codec_zenoh_join, the bigger payload-side codec landmarks: codec_zenoh_oam (~81 lines, OAM extension wrapper) + payload-body codecs for Put/Del/Query/Reply/Err (§6 track entry). Declare-body codecs (§5.1) are siblings on the §5 network-routing track.",
+        "Handshake codec set is now COMPLETE on unicast track: init_body + open_body + close (R31) + keep_alive (R31) = 4 of 4 unicast control bodies. session_fsm_unicast.scxml (R29) intrinsic placeholder bindings can begin pointing at concrete codec symbols once §5.D worker primitives land in a future round.",
+        "Codec primitive coverage at end of R34: 13 primitives (R33's 12 + B5-λ negation). Remaining major primitives: variant dispatch, TLV chain extension iterator, embedded codec composition. Each lands as its first realistic consumer arrives.",
+        "R29 statechart carry items unchanged. Layer 2 byte-golden 'filename-mismatch / body-match' classification refinement still pending verify-codegen.sh enhancement."
+      ],
+      "publishable_decision_summary": "§4.1 handshake codec set lands — sources/codecs/{init_body,open_body}.scxml. Init body unifies SYN+ACK via parent.S/parent.A independent gates; Open body unifies SYN+ACK via parent.A NEGATION (B5-λ first land). All 6 backends emit clean at vendor pin 11f1032d.",
+      "publishable_changes_bullets": [
+        "sources/codecs/init_body.scxml new (70 lines, sce:kind=codec). Wire shape: version + cbyte(whatami:2 + zid_len_m1:4) + zid + [sn_res + batch_size gated on parent.S] + [cookie_len:VLE + cookie:length-ref gated on parent.A]. <sce:requires-parent-flags> declares S(bit 6) and A(bit 5) carriers.",
+        "sources/codecs/open_body.scxml new (60 lines, sce:kind=codec). Wire shape: lease:VLE + initial_sn:VLE + [cookie_len:VLE + cookie:length-ref gated on !parent.A]. First B5-λ negation primitive consumer — cookie present when A flag is CLEAR.",
+        "Body byte-identical to SCE upstream codec_zenoh_init_body + codec_zenoh_open_body at vendor pin 11f1032d. Diff only in SPDX header + file stem + root name (wz convention)."
+      ],
+      "publishable_verification_bullets": [
+        "verify-codegen.sh Layer 1 on each: 6/6 emit pass = 12/12. Total Phase B5 codec coverage at end of R34: 9 SCXMLs (keep_alive / close / frame / fragment / locator / scout / hello / init_body / open_body) × 6 backends = 54/54 emit pass at vendor pin 11f1032d.",
+        "B5-λ negation grammar (!parent.A in open_body) emit-confirmed across all 6 backends — SCE-side negation support lands cleanly on the new pin per SCE comment 'landed in the prior atomic commit'.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 33→34, T3 warn 856 unchanged.",
+        "Cross-doc verification: init_body cbyte+S+A bound to zenoh-pico include/zenoh-pico/protocol/definitions/transport.h:67-68 (_Z_FLAG_T_INIT_S=0x40, _Z_FLAG_T_INIT_A=0x20) + src/protocol/codec/transport.c:182-219 (_z_init_encode). open_body A-flag bound to same transport.h plus transport.c:288-305 (_z_open_encode)."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "~21 codec SCXMLs remaining. Realistic next-smallest set: codec_zenoh_join (multicast Join body, ~63 lines, similar structure to Init body with whatami + extensions; lands the multicast handshake codec).",
+        "After codec_zenoh_join, the bigger payload-side codec landmarks: codec_zenoh_oam (~81 lines, OAM extension wrapper) + payload-body codecs for Put/Del/Query/Reply/Err (§6 track entry). Declare-body codecs (§5.1) are siblings on the §5 network-routing track.",
+        "Handshake codec set is now COMPLETE on unicast track: init_body + open_body + close (R31) + keep_alive (R31) = 4 of 4 unicast control bodies. session_fsm_unicast.scxml (R29) intrinsic placeholder bindings can begin pointing at concrete codec symbols once §5.D worker primitives land in a future round.",
+        "Codec primitive coverage at end of R34: 13 primitives (R33's 12 + B5-λ negation). Remaining major primitives: variant dispatch, TLV chain extension iterator, embedded codec composition. Each lands as its first realistic consumer arrives.",
+        "R29 statechart carry items unchanged. Layer 2 byte-golden 'filename-mismatch / body-match' classification refinement still pending verify-codegen.sh enhancement."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
