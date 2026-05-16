@@ -4552,6 +4552,50 @@
         "R29 statechart carry items unchanged. Layer 2 byte-golden 'filename-mismatch / body-match' classification refinement still pending verify-codegen.sh enhancement."
       ]
     },
+    "Round 35": {
+      "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
+      "changes_bullets": [
+        "sources/codecs/join.scxml new (66 lines, sce:kind=codec). Wire shape: version + cbyte(whatami:2 + zid_len_m1:4) + zid + [sn_res + batch_size gated on parent.S] + lease:VLE + next_sn_reliable:VLE + next_sn_best_effort:VLE. <sce:requires-parent-flags> declares S(bit 6) only (T-flag is host-level lease scaling, not wire-visible per zenoh-pico transport.c:59-63).",
+        "Body byte-identical to SCE upstream codec_zenoh_join at vendor pin 11f1032d; diff only in SPDX header + file stem + root name (wz convention: name=join matches stem).",
+        "Multicast handshake codec set is now: join.scxml (R35) + close (R31, shared with unicast) + keep_alive (R31, shared). Multicast omits separate Init/Open exchange — a single Join carries the equivalent state per docs/session-fsm.md §3 multicast model."
+      ],
+      "verification_bullets": [
+        "verify-codegen.sh Layer 1: 6/6 emit pass. Total Phase B5 codec coverage at end of R35: 10 SCXMLs × 6 backends = 60/60 emit pass at vendor pin 11f1032d.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 34→35, T3 warn 856 unchanged.",
+        "Cross-doc verification: Join body bound to zenoh-pico include/zenoh-pico/protocol/definitions/transport.h:60-61 (_Z_FLAG_T_JOIN_S=0x40, _Z_FLAG_T_JOIN_T=0x20) + src/protocol/codec/transport.c:40-102 (_z_join_encode). T-flag explicitly excluded from <sce:requires-parent-flags> per its host-only lease/1000 vs lease scaling role (transport.c:59-63)."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "carry_forward_bullets": [
+        "~20 codec SCXMLs remaining. Realistic next-largest jump: payload-side codecs (§6 Put/Del/Query/Reply/Err) — the actual data path. Declare-body codecs (§5.1 8 variants) sit between handshake and payload on the network-routing track.",
+        "Handshake codec set NOW COMPLETE on both unicast + multicast: unicast=init_body/open_body/close/keep_alive, multicast=join/close/keep_alive. 4 of ~10 transport-control bodies still missing: oam (§4.4), frame extensions (FRAGMENT_FIRST/DROP on Fragment body — separate from codec_zenoh_fragment R32 which is base-body-only), Init/Open envelope codecs (the 1-byte header + body wrapping; codec_init_syn_envelope SCE fixture is ~? lines pending check). The 'codec_zenoh_*_envelope' set is the codec layer that ties the body codecs to their transport-MID dispatcher.",
+        "Codec primitive coverage at end of R35: 13 primitives, unchanged. Next primitive frontier: variant dispatch (codec_variant_dispatch.scxml SCE fixture exists) + TLV chain extension iterator + embedded codec composition. Each lands with its first realistic consumer.",
+        "R29 statechart carry items unchanged. Layer 2 byte-golden 'filename-mismatch / body-match' classification refinement still pending."
+      ],
+      "publishable_decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
+      "publishable_changes_bullets": [
+        "sources/codecs/join.scxml new (66 lines, sce:kind=codec). Wire shape: version + cbyte(whatami:2 + zid_len_m1:4) + zid + [sn_res + batch_size gated on parent.S] + lease:VLE + next_sn_reliable:VLE + next_sn_best_effort:VLE. <sce:requires-parent-flags> declares S(bit 6) only (T-flag is host-level lease scaling, not wire-visible per zenoh-pico transport.c:59-63).",
+        "Body byte-identical to SCE upstream codec_zenoh_join at vendor pin 11f1032d; diff only in SPDX header + file stem + root name (wz convention: name=join matches stem).",
+        "Multicast handshake codec set is now: join.scxml (R35) + close (R31, shared with unicast) + keep_alive (R31, shared). Multicast omits separate Init/Open exchange — a single Join carries the equivalent state per docs/session-fsm.md §3 multicast model."
+      ],
+      "publishable_verification_bullets": [
+        "verify-codegen.sh Layer 1: 6/6 emit pass. Total Phase B5 codec coverage at end of R35: 10 SCXMLs × 6 backends = 60/60 emit pass at vendor pin 11f1032d.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 34→35, T3 warn 856 unchanged.",
+        "Cross-doc verification: Join body bound to zenoh-pico include/zenoh-pico/protocol/definitions/transport.h:60-61 (_Z_FLAG_T_JOIN_S=0x40, _Z_FLAG_T_JOIN_T=0x20) + src/protocol/codec/transport.c:40-102 (_z_join_encode). T-flag explicitly excluded from <sce:requires-parent-flags> per its host-only lease/1000 vs lease scaling role (transport.c:59-63)."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "~20 codec SCXMLs remaining. Realistic next-largest jump: payload-side codecs (§6 Put/Del/Query/Reply/Err) — the actual data path. Declare-body codecs (§5.1 8 variants) sit between handshake and payload on the network-routing track.",
+        "Handshake codec set NOW COMPLETE on both unicast + multicast: unicast=init_body/open_body/close/keep_alive, multicast=join/close/keep_alive. 4 of ~10 transport-control bodies still missing: oam (§4.4), frame extensions (FRAGMENT_FIRST/DROP on Fragment body — separate from codec_zenoh_fragment R32 which is base-body-only), Init/Open envelope codecs (the 1-byte header + body wrapping; codec_init_syn_envelope SCE fixture is ~? lines pending check). The 'codec_zenoh_*_envelope' set is the codec layer that ties the body codecs to their transport-MID dispatcher.",
+        "Codec primitive coverage at end of R35: 13 primitives, unchanged. Next primitive frontier: variant dispatch (codec_variant_dispatch.scxml SCE fixture exists) + TLV chain extension iterator + embedded codec composition. Each lands with its first realistic consumer.",
+        "R29 statechart carry items unchanged. Layer 2 byte-golden 'filename-mismatch / body-match' classification refinement still pending."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
