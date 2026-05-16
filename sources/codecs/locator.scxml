@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh locator string body (RFC §5.B B5-ζ,
+     surface H from the watching-zenoh authoring path).
+
+     Mirrors zenoh-pico `_z_string_encode` / `_z_string_decode`
+     (src/protocol/codec.c lines 324-343) which the locator-list
+     encoder calls per element (src/protocol/codec/message.c:155 and
+     :174 — `_z_locators_encode` / `_z_locators_decode_na`). Wire shape
+     is identical to a length-prefixed bytes field (`_z_zsize_encode`
+     for the length VLE, then raw payload bytes), but the host-language
+     type is `String` / `std::string` / `kotlin.String` / `string` /
+     `str` instead of `Vec<u8>` / `std::vector<uint8_t>` / `ByteArray`
+     / `[]byte` / `bytes`. Decode validates UTF-8 and emits typed
+     `CodecError::InvalidUtf8` on malformed input (forge-fail-fast
+     contract — zenoh-pico itself aliases without validating, but
+     SCE-side codecs reject malformed text early).
+
+     Single locator (the locator LIST primitive defers to B5-η/B5-ι
+     repeat-count composition); this fixture pins the foundation
+     surface for `<sce:field sce:type="string">`.
+
+     Wire shape:
+       byte 0+ : locator_len  (VLE u64, 1..=10 bytes, max-size 128)
+       bytes   : locator      (UTF-8 string, length=locator_len, max 128)
+
+     Body byte-identical to SCE upstream codec_zenoh_locator at vendor
+     pin 11f1032d; diff in SPDX header + file stem + root name. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="locator">
+  <datamodel>
+    <sce:field id="locator_len" sce:type="uint64" sce:byte="0" sce:bit-size="vle"/>
+    <sce:field id="locator" sce:type="string" sce:byte="1" sce:bit-size="length-ref"
+               sce:length-field="locator_len" sce:max-size="128"/>
+  </datamodel>
+  <!-- RFC §5.B B5-θ inline test vectors. Pinned single-byte / multi-
+       byte UTF-8 round-trips so the byte-count semantics ("héllo" = 6
+       bytes for 5 codepoints — the é is 0xC3 0xA9) are exercised on
+       both encode and decode paths. The sidecar's UTF-8 validator
+       runs only on the decode side; encode trusts the host invariant. -->
+  <sce:test-vector hex="00">
+    <sce:decoded field="locator_len" value="0"/>
+    <sce:decoded field="locator" string=""/>
+  </sce:test-vector>
+  <sce:test-vector hex="03616263">
+    <sce:decoded field="locator_len" value="3"/>
+    <sce:decoded field="locator" string="abc"/>
+  </sce:test-vector>
+  <sce:test-vector hex="127463702f3132372e302e302e313a37343437">
+    <sce:decoded field="locator_len" value="18"/>
+    <sce:decoded field="locator" string="tcp/127.0.0.1:7447"/>
+  </sce:test-vector>
+  <sce:test-vector hex="0668c3a96c6c6f">
+    <sce:decoded field="locator_len" value="6"/>
+    <sce:decoded field="locator" string="héllo"/>
+  </sce:test-vector>
+</scxml>
