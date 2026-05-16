@@ -83,6 +83,7 @@ fn fixture_params() -> SessionInitParams {
         lease_in_seconds: true,
         initial_sn: 0x42,
         cookie: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x77],
+        cookie_signing_key: vec![0xAB; 32],
     }
 }
 
