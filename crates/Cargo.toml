@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# watching-zenoh — Rust runtime workspace (Phase 2 walking skeleton).
+#
+# Houses the host-side Rust crates that consume sce-codegen output and
+# expose the wire-codec / link-runtime / intrinsics surface to AP
+# (Linux+tokio) and MCU (Cortex-M + lwIP via FFI) deploy targets. This
+# workspace is intentionally separate from `vendor/sce/Cargo.toml` so
+# the watching-zenoh build does not perturb SCE's own self-test
+# workspace; path dependencies into `vendor/sce/*` cross the workspace
+# boundary explicitly.
+#
+# Initial member set (R40 walking skeleton):
+#   - wz-codecs : hosts sce-codegen Rust output for codec-kind SCXMLs
+#                 in sources/codecs/. build.rs runs the codegen
+#                 in-process via sce-build (same pattern SCE's own
+#                 sce-forge-runtime/rust/build.rs uses for the
+#                 numerical conformance harness).
+#
+# Subsequent rounds will add:
+#   - wz-runtime-tokio       (R42+, sce_link_runtime_tokio impl)
+#   - wz-runtime-lwip        (R42+, sce_link_runtime_lwip C11 sibling)
+#   - zenoh-pico-sys         (R41, FFI bindings to vendored zenoh-pico)
+#   - wz-integration-tests   (R41+, Layer 3 wire-interop test harness)
+
+[workspace]
+resolver = "2"
+members = [
+    "wz-codecs",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+authors = ["newmassrael <newmassrael@gmail.com>"]
+
+# Production lint policy: any warning fails the build. Per-crate opt-in
+# via `[lints] workspace = true`. Generated-code crates may add local
+# `#[allow(...)]` annotations but the workspace gate stays strict.
+[workspace.lints.rust]
+warnings = "deny"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3

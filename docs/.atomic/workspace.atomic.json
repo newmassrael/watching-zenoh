@@ -4974,6 +4974,66 @@
         "FSM transition-as-CrossRef encoding via impact_scope worked; per-state explicit Sections deferred (state-list-as-bullets pattern adopted)"
       ]
     },
+    "Round 40": {
+      "decision_summary": "Phase 2 walking skeleton lands — `crates/` Cargo workspace + `wz-codecs` crate that hosts sce-codegen Rust output for the §6 payload trio (msg_put + msg_del + 5 deps). First piece of running code in the project — cargo build passes, smoke test exercises encode/decode round-trip on default instances. 38 rounds of spec authoring now have a Rust binary that compiles.",
+      "changes_bullets": [
+        "crates/Cargo.toml new — wz Rust workspace root. resolver=2; members=[wz-codecs]. Workspace package shares license + edition + rust-version. [workspace.lints.rust] warnings = \"deny\" for production gate parity with SCE workspace.",
+        "crates/wz-codecs/ new (4 files): Cargo.toml + build.rs + src/lib.rs + tests/smoke.rs. Cargo.toml declares deps on sce-forge-runtime (path) and sce-build (build-dep, path) into vendor/sce. lib.rs declares 8 `pub mod <stem> { include!() }` blocks at crate root for codegen-output sibling resolution.",
+        "crates/wz-codecs/build.rs invokes sce-build::compile_forge_with_imports() in-process at compile time, mirroring vendor/sce/sce-forge-runtime/rust/build.rs pattern. 8 SCXMLs compiled in dep-order: timestamp/encoding/ext_unit/ext_zint/ext_zbuf/ext_entry/msg_put/msg_del. cargo:rerun-if-changed wired on sources/codecs/.",
+        "SCE codegen template bug workaround in build.rs post-process: SCE emits `#![doc = \"SCE-MAP: stem:line\"]` as a file-leading inner attribute. When wz includes the file inside `pub mod X { include!(...); }`, rust rejects (E0658 / inner-attribute-not-permitted at item position). SCE's own `cargo test -p sce-forge-runtime --features alloc` hits the same wall — verified R40. Workaround strips the redundant inner-attr line; the SCE-MAP info itself is also emitted on the very next line as a regular `// SCE-MAP: stem:line` comment, so zero info loss. Proper fix is an SCE upstream PR (R41 carry — see below).",
+        "tests/smoke.rs (66 lines, 2 tests): msg_put + msg_del Default→encode→decode→assert-fields-match round-trip. Establishes the encode/decode self-consistency baseline that Layer 3 (wire-interop against zenoh-pico bytes) will graduate from in R41/R42.",
+        ".gitignore extended: `crates/target/` ignored (workspace build output). `crates/Cargo.lock` COMMITTED per Cargo's binary-producing-workspace recommendation for reproducible Layer 3 builds across CI/dev/prod."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-codecs: pass (Compiling wz-codecs v0.1.0, Finished 'dev' profile, 0 errors, 0 warnings).",
+        "cargo test -p wz-codecs: 2 passed / 0 failed / 0 ignored. Both msg_put + msg_del default encode→decode round-trips assert all fields match (header byte, payload_len, payload bytes, present-if Optional gates all None).",
+        "sce-codegen output (in OUT_DIR): 8 .rs files (timestamp.rs, encoding.rs, ext_unit.rs, ext_zint.rs, ext_zbuf.rs, ext_entry.rs, msg_put.rs, msg_del.rs). All `use super::X::Y;` cross-module references resolve through wz_codecs::lib's `pub mod X { include!() }` declarations.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 39→40, T3 warn 856 unchanged.",
+        "First running Rust code in the project. Prior 38 rounds were spec authoring (12 atomic docs, 36 SCXML, vendored SCE, mnemosyne adoption); R40 is the FIRST round whose deliverable executes."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "SCE upstream PR carry — `tools/codegen/templates/forge/rust/<kind>.rs.jinja2` change template to emit SCE-MAP info as `/// SCE-MAP: stem:line` (outer doc, attaches to first struct) or just `// SCE-MAP: stem:line` (regular comment) instead of `#![doc = ...]` (inner attribute). Inner attribute on a file consumed via `include!(...)` inside `pub mod X` is rejected by rust E0658 — broken in SCE's own `--features alloc --tests` build too, just not caught because default build doesn't trigger include!(). Single-line template change; would let wz-codecs/build.rs drop the post-process strip.",
+        "R41 = `crates/zenoh-pico-sys` — vendor zenoh-pico as git submodule (sibling to vendor/sce/), build via cc/cmake, generate FFI bindings via bindgen, expose `_z_put_encode` + `_z_keep_alive_encode` + `_z_init_encode` + sibling `_*_decode` Rust signatures. This is the foundation for Layer 3 wire-interop tests.",
+        "R42 = `crates/wz-integration-tests` — Layer 3 test crate. For each codec in wz-codecs, construct a logical message instance, encode via wz-codecs Rust path AND via zenoh-pico-sys FFI path, byte-compare. First REAL validation that the codec SCXMLs match zenoh-pico wire-format. This is the round that PROVES the 36 SCXML rounds correctly modeled the wire protocol; if it fails, the diagnosis loop is short because each codec is independently testable.",
+        "R43+ = expand wz-codecs to host all 21 codec SCXMLs (currently only 8 of 21 wired). Layer 3 coverage grows in lockstep.",
+        "R45+ (post-Phase 2) = runtime crates wz-runtime-tokio + wz-runtime-lwip per the design docs. Session FSM (R29 statechart) wiring becomes possible once runtime trait surface lands.",
+        "Production gate carry: GitHub Actions CI (validate_workspace + verify-codegen.sh + cargo test + Layer 3 interop) lands in Phase 4 (R46+ after walking skeleton + a few codec/FSM expansion rounds), per the R39 architectural roadmap."
+      ],
+      "publishable_decision_summary": "Phase 2 walking skeleton lands — `crates/` Cargo workspace + `wz-codecs` crate that hosts sce-codegen Rust output for the §6 payload trio (msg_put + msg_del + 5 deps). First piece of running code in the project — cargo build passes, smoke test exercises encode/decode round-trip on default instances. 38 rounds of spec authoring now have a Rust binary that compiles.",
+      "publishable_changes_bullets": [
+        "crates/Cargo.toml new — wz Rust workspace root. resolver=2; members=[wz-codecs]. Workspace package shares license + edition + rust-version. [workspace.lints.rust] warnings = \"deny\" for production gate parity with SCE workspace.",
+        "crates/wz-codecs/ new (4 files): Cargo.toml + build.rs + src/lib.rs + tests/smoke.rs. Cargo.toml declares deps on sce-forge-runtime (path) and sce-build (build-dep, path) into vendor/sce. lib.rs declares 8 `pub mod <stem> { include!() }` blocks at crate root for codegen-output sibling resolution.",
+        "crates/wz-codecs/build.rs invokes sce-build::compile_forge_with_imports() in-process at compile time, mirroring vendor/sce/sce-forge-runtime/rust/build.rs pattern. 8 SCXMLs compiled in dep-order: timestamp/encoding/ext_unit/ext_zint/ext_zbuf/ext_entry/msg_put/msg_del. cargo:rerun-if-changed wired on sources/codecs/.",
+        "SCE codegen template bug workaround in build.rs post-process: SCE emits `#![doc = \"SCE-MAP: stem:line\"]` as a file-leading inner attribute. When wz includes the file inside `pub mod X { include!(...); }`, rust rejects (E0658 / inner-attribute-not-permitted at item position). SCE's own `cargo test -p sce-forge-runtime --features alloc` hits the same wall — verified R40. Workaround strips the redundant inner-attr line; the SCE-MAP info itself is also emitted on the very next line as a regular `// SCE-MAP: stem:line` comment, so zero info loss. Proper fix is an SCE upstream PR (R41 carry — see below).",
+        "tests/smoke.rs (66 lines, 2 tests): msg_put + msg_del Default→encode→decode→assert-fields-match round-trip. Establishes the encode/decode self-consistency baseline that Layer 3 (wire-interop against zenoh-pico bytes) will graduate from in R41/R42.",
+        ".gitignore extended: `crates/target/` ignored (workspace build output). `crates/Cargo.lock` COMMITTED per Cargo's binary-producing-workspace recommendation for reproducible Layer 3 builds across CI/dev/prod."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-codecs: pass (Compiling wz-codecs v0.1.0, Finished 'dev' profile, 0 errors, 0 warnings).",
+        "cargo test -p wz-codecs: 2 passed / 0 failed / 0 ignored. Both msg_put + msg_del default encode→decode round-trips assert all fields match (header byte, payload_len, payload bytes, present-if Optional gates all None).",
+        "sce-codegen output (in OUT_DIR): 8 .rs files (timestamp.rs, encoding.rs, ext_unit.rs, ext_zint.rs, ext_zbuf.rs, ext_entry.rs, msg_put.rs, msg_del.rs). All `use super::X::Y;` cross-module references resolve through wz_codecs::lib's `pub mod X { include!() }` declarations.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 39→40, T3 warn 856 unchanged.",
+        "First running Rust code in the project. Prior 38 rounds were spec authoring (12 atomic docs, 36 SCXML, vendored SCE, mnemosyne adoption); R40 is the FIRST round whose deliverable executes."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "SCE upstream PR carry — `tools/codegen/templates/forge/rust/<kind>.rs.jinja2` change template to emit SCE-MAP info as `/// SCE-MAP: stem:line` (outer doc, attaches to first struct) or just `// SCE-MAP: stem:line` (regular comment) instead of `#![doc = ...]` (inner attribute). Inner attribute on a file consumed via `include!(...)` inside `pub mod X` is rejected by rust E0658 — broken in SCE's own `--features alloc --tests` build too, just not caught because default build doesn't trigger include!(). Single-line template change; would let wz-codecs/build.rs drop the post-process strip.",
+        "R41 = `crates/zenoh-pico-sys` — vendor zenoh-pico as git submodule (sibling to vendor/sce/), build via cc/cmake, generate FFI bindings via bindgen, expose `_z_put_encode` + `_z_keep_alive_encode` + `_z_init_encode` + sibling `_*_decode` Rust signatures. This is the foundation for Layer 3 wire-interop tests.",
+        "R42 = `crates/wz-integration-tests` — Layer 3 test crate. For each codec in wz-codecs, construct a logical message instance, encode via wz-codecs Rust path AND via zenoh-pico-sys FFI path, byte-compare. First REAL validation that the codec SCXMLs match zenoh-pico wire-format. This is the round that PROVES the 36 SCXML rounds correctly modeled the wire protocol; if it fails, the diagnosis loop is short because each codec is independently testable.",
+        "R43+ = expand wz-codecs to host all 21 codec SCXMLs (currently only 8 of 21 wired). Layer 3 coverage grows in lockstep.",
+        "R45+ (post-Phase 2) = runtime crates wz-runtime-tokio + wz-runtime-lwip per the design docs. Session FSM (R29 statechart) wiring becomes possible once runtime trait surface lands.",
+        "Production gate carry: GitHub Actions CI (validate_workspace + verify-codegen.sh + cargo test + Layer 3 interop) lands in Phase 4 (R46+ after walking skeleton + a few codec/FSM expansion rounds), per the R39 architectural roadmap."
+      ]
+    },
     "Round 5": {
       "decision_summary": "Scope correction — SESSION_KICKOFF (activity-log genre) and README (empty stub) removed from Mnemosyne workspace as design-doc lifecycle infrastructure genre misfit.",
       "changes_bullets": [

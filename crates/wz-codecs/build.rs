@@ -1,0 +1,112 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+//
+// wz-codecs build.rs — in-process codegen of selected
+// `sources/codecs/*.scxml` files into `$OUT_DIR/<stem>.rs`.
+//
+// Invokes sce-build's `compile_forge_with_imports` once per SCXML in
+// dependency order (leaves first, composers last); SCE's importer
+// resolves cross-codec references against the supplied `base_dir`
+// (`sources/codecs/`), so `<sce:import src="X.scxml">` directives
+// inside the SCXMLs find their siblings without further wiring.
+//
+// The output files are picked up by `src/lib.rs` via
+// `include!(concat!(env!("OUT_DIR"), "/<stem>.rs"))` inside per-codec
+// `mod <stem> { ... }` blocks. The codegen emits `use super::X::Y;`
+// references that resolve to sibling modules in `lib.rs`.
+
+use sce_build::{
+    compile_forge_with_imports, generator::Language, DocumentLabel, ForgeCompileOptions,
+};
+use std::path::Path;
+
+/// Codec SCXMLs to compile, in dependency order. Each stem `X` is
+/// resolved at `sources/codecs/X.scxml` and emitted as
+/// `$OUT_DIR/X.rs`. The leaf codecs (no imports) come first; the
+/// composing codecs (msg_put, msg_del) come last so their
+/// `<sce:import>` directives have already had their target SCXMLs
+/// validated by the importer in this same build.
+const CODECS: &[&str] = &[
+    // Leaf codecs (no imports)
+    "timestamp",
+    "encoding",
+    "ext_unit",
+    "ext_zint",
+    "ext_zbuf",
+    // Composing codecs
+    "ext_entry", // imports ext_unit / ext_zint / ext_zbuf
+    "msg_put",   // imports timestamp / encoding / ext_entry
+    "msg_del",   // imports timestamp / ext_entry
+];
+
+fn main() {
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set by cargo");
+    let manifest_dir =
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set by cargo");
+
+    // sources/codecs/ relative to crates/wz-codecs/ is ../../sources/codecs.
+    let resource_dir = Path::new(&manifest_dir)
+        .join("../../sources/codecs")
+        .canonicalize()
+        .expect("canonicalize sources/codecs");
+
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed={}", resource_dir.display());
+
+    let options = ForgeCompileOptions::default();
+
+    for stem in CODECS {
+        let scxml_path = resource_dir.join(format!("{stem}.scxml"));
+        let content = std::fs::read_to_string(&scxml_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", scxml_path.display()));
+
+        let output = compile_forge_with_imports(
+            &content,
+            DocumentLabel::symmetric(stem),
+            Language::Rust,
+            &resource_dir,
+            &options,
+        )
+        .unwrap_or_else(|e| panic!("sce-build codegen failed for {stem}: {e}"));
+
+        for (filename, code) in output.files {
+            let target = Path::new(&out_dir).join(&filename);
+            // SCE-upstream transitional workaround (R40 carry): the
+            // codegen template emits `#![doc = "SCE-MAP: stem:line"]`
+            // as an inner attribute at line 1 of each generated file.
+            // When wz consumes the file via
+            // `pub mod X { include!(env!("OUT_DIR")/X.rs); }` the
+            // inner attribute lands at item position inside `mod X`
+            // — rust then rejects it with E0658 "an inner attribute
+            // is not permitted in this context". SCE's own
+            // `sce-forge-runtime --features alloc --tests` build hits
+            // the same wall (verified R40); the SCE conformance
+            // harness's default `cargo build -p sce-forge-runtime`
+            // doesn't trigger include!() so SCE never noticed.
+            //
+            // The SCE-MAP info itself is redundantly emitted on the
+            // very next line as a regular `// SCE-MAP: stem:line`
+            // comment, so removing the inner-attr line loses ZERO
+            // information — only the rustdoc surface that the doc
+            // attribute would expose. That rustdoc surface is also
+            // emitted as part of the per-struct doc-comments below
+            // the strip target, so the net visible-doc-surface change
+            // is zero.
+            //
+            // Proper fix (SCE upstream PR, R41 carry): change
+            // `tools/codegen/templates/forge/rust/<kind>.rs.jinja2`
+            // to emit `// SCE-MAP: stem:line` (regular comment) or
+            // `/// SCE-MAP: stem:line` (outer doc, attached to the
+            // first struct) instead of `#![doc = ...]` inner attr.
+            // Once SCE ships that, this strip becomes a no-op and
+            // can be removed.
+            let stripped = code
+                .lines()
+                .filter(|line| !line.starts_with("#![doc = \"SCE-MAP:"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            std::fs::write(&target, &stripped)
+                .unwrap_or_else(|e| panic!("write {}: {e}", target.display()));
+        }
+    }
+}
