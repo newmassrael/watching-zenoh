@@ -5568,6 +5568,58 @@
         "Round 5 learning: frozen-ledger blocks past-rewrite, not future-scope-change; orphan_ledger absorbs"
       ]
     },
+    "Round 50": {
+      "decision_summary": "Phase Y closure (holding pattern) — deploy/*.yaml schema validator added; CI gains Layer D deploy-validate lane. Full `sce-codegen build deploy/<x>.yaml` end-to-end deferred pending SCE upstream PR (the `build` subcommand does not yet exist — sce-codegen exposes generate / orchestrate / manifest / verify / addr2sce; no `build`). Lightweight YAML parse + schema sanity check provides the production gate that's possible TODAY without waiting on SCE.",
+      "changes_bullets": [
+        "SCE upstream finding: sce-codegen has NO `build` subcommand at vendor pin 11f1032d. Earlier project assumptions (sources/README.md `sce-codegen build deploy/...` example, R39 roadmap referencing deploy pipeline) presumed the subcommand exists. R50 verified the absence empirically (`sce-codegen --help` lists only generate/orchestrate/...). The full deploy build is gated on SCE upstream implementing the subcommand.",
+        "scripts/validate-deploy.sh new (~80 lines). For each deploy/*.yaml: (1) YAML parses; (2) top-level `machines` key present + non-empty; (3) each machine declares `platform.class` + `platform.os`. python3+yaml stdlib used — zero external Rust deps. Holding-pattern gate documented in script header; upgrade path when SCE ships `build`.",
+        ".github/workflows/ci.yml gains Layer D step running validate-deploy.sh + apt-installing python3-yaml on the runner.",
+        "Locally: 3 of 3 deploy/*.yaml (ap_mcu_pair, ap_standalone, mcu_target) pass schema validation."
+      ],
+      "verification_bullets": [
+        "scripts/validate-deploy.sh exit 0 on all 3 deploy/*.yaml; OK status emitted per file.",
+        "Empirical SCE-side finding: `sce-codegen --help` lists generate / orchestrate / generate-w3c / fix-scxml-name / read-metadata / manifest / generate-conformance / expand / list-fixtures / verify / addr2sce / help. No `build` subcommand. Deploy-yaml authoring (deploy/*.yaml at R5+) is schema-stable but emit pipeline is not yet wired upstream.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 49→50, T3 warn 856 unchanged.",
+        "CI workflow now has 5 lanes: Layer A (mnemosyne) + Layer B (verify-codegen.sh per codec = L1+L2+L3) + Layer C1 (cargo test --workspace) + Layer C2 (cargo clippy --deny warnings) + Layer D (deploy YAML schema validate)."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions"
+      ],
+      "carry_forward_bullets": [
+        "**SCE upstream PR** — implement `sce-codegen build <deploy.yaml>` subcommand. Reads the deploy yaml, drives multi-doc codegen (`orchestrate` extended with deploy-attribute resolution), emits `out/<target>/` Cargo crate or C11 source tree per the deploy class. Major SCE work; ETA depends on SCE roadmap. Once landed, replace validate-deploy.sh's lightweight check with `sce-codegen build deploy/ap_standalone.yaml && (cd out/ap && cargo check)`.",
+        "R51 (Phase Z entry) = `crates/wz-runtime-tokio` scaffold. LinkDriver trait per docs/runtime-crate-tokio.md §2 — 4-method (open/send/close/poll_event) + LinkEvent 6-variant enum. Implementations land in R52.",
+        "R52 (Phase Z) = wz-runtime-tokio impl. 2-process Put echo demo: publisher constructs MsgPut + encodes via wz-codecs + sends via tokio TCP; subscriber decodes + asserts equality. FIRST OBSERVABLE COMMUNICATION between two wz processes.",
+        "R53 (Phase Z) = wz-runtime-lwip C11 sibling per docs/runtime-crate-lwip.md.",
+        "R54 (Phase Z) = R29 session_fsm script-action ↔ codec API binding (placeholder staleness closure).",
+        "After Phase Z: Phase W (MCU hardening) + Phase V (user-facing).",
+        "First-run CI trigger: push branch + open PR. Local clippy + tests pass; runner-specific surprises may arise (libclang version drift, mnemosyne-cli install path on GitHub-hosted runner)."
+      ],
+      "publishable_decision_summary": "Phase Y closure (holding pattern) — deploy/*.yaml schema validator added; CI gains Layer D deploy-validate lane. Full `sce-codegen build deploy/<x>.yaml` end-to-end deferred pending SCE upstream PR (the `build` subcommand does not yet exist — sce-codegen exposes generate / orchestrate / manifest / verify / addr2sce; no `build`). Lightweight YAML parse + schema sanity check provides the production gate that's possible TODAY without waiting on SCE.",
+      "publishable_changes_bullets": [
+        "SCE upstream finding: sce-codegen has NO `build` subcommand at vendor pin 11f1032d. Earlier project assumptions (sources/README.md `sce-codegen build deploy/...` example, R39 roadmap referencing deploy pipeline) presumed the subcommand exists. R50 verified the absence empirically (`sce-codegen --help` lists only generate/orchestrate/...). The full deploy build is gated on SCE upstream implementing the subcommand.",
+        "scripts/validate-deploy.sh new (~80 lines). For each deploy/*.yaml: (1) YAML parses; (2) top-level `machines` key present + non-empty; (3) each machine declares `platform.class` + `platform.os`. python3+yaml stdlib used — zero external Rust deps. Holding-pattern gate documented in script header; upgrade path when SCE ships `build`.",
+        ".github/workflows/ci.yml gains Layer D step running validate-deploy.sh + apt-installing python3-yaml on the runner.",
+        "Locally: 3 of 3 deploy/*.yaml (ap_mcu_pair, ap_standalone, mcu_target) pass schema validation."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/validate-deploy.sh exit 0 on all 3 deploy/*.yaml; OK status emitted per file.",
+        "Empirical SCE-side finding: `sce-codegen --help` lists generate / orchestrate / generate-w3c / fix-scxml-name / read-metadata / manifest / generate-conformance / expand / list-fixtures / verify / addr2sce / help. No `build` subcommand. Deploy-yaml authoring (deploy/*.yaml at R5+) is schema-stable but emit pipeline is not yet wired upstream.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 49→50, T3 warn 856 unchanged.",
+        "CI workflow now has 5 lanes: Layer A (mnemosyne) + Layer B (verify-codegen.sh per codec = L1+L2+L3) + Layer C1 (cargo test --workspace) + Layer C2 (cargo clippy --deny warnings) + Layer D (deploy YAML schema validate)."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "**SCE upstream PR** — implement `sce-codegen build <deploy.yaml>` subcommand. Reads the deploy yaml, drives multi-doc codegen (`orchestrate` extended with deploy-attribute resolution), emits `out/<target>/` Cargo crate or C11 source tree per the deploy class. Major SCE work; ETA depends on SCE roadmap. Once landed, replace validate-deploy.sh's lightweight check with `sce-codegen build deploy/ap_standalone.yaml && (cd out/ap && cargo check)`.",
+        "R51 (Phase Z entry) = `crates/wz-runtime-tokio` scaffold. LinkDriver trait per docs/runtime-crate-tokio.md §2 — 4-method (open/send/close/poll_event) + LinkEvent 6-variant enum. Implementations land in R52.",
+        "R52 (Phase Z) = wz-runtime-tokio impl. 2-process Put echo demo: publisher constructs MsgPut + encodes via wz-codecs + sends via tokio TCP; subscriber decodes + asserts equality. FIRST OBSERVABLE COMMUNICATION between two wz processes.",
+        "R53 (Phase Z) = wz-runtime-lwip C11 sibling per docs/runtime-crate-lwip.md.",
+        "R54 (Phase Z) = R29 session_fsm script-action ↔ codec API binding (placeholder staleness closure).",
+        "After Phase Z: Phase W (MCU hardening) + Phase V (user-facing).",
+        "First-run CI trigger: push branch + open PR. Local clippy + tests pass; runner-specific surprises may arise (libclang version drift, mnemosyne-cli install path on GitHub-hosted runner)."
+      ]
+    },
     "Round 6": {
       "decision_summary": "Round 5 scope correction blocked by mnemosyne Round 169 atomic-internal orphan reject; reverted to lean/stub plan; SESSION_KICKOFF/README retained in 13-doc workspace as architectural lock-in carry.",
       "changes_bullets": [
