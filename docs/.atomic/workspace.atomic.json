@@ -6272,6 +6272,56 @@
         "EXPECTED_SCRIPT_NAMES (build.rs) and REGISTERED_SCRIPT_NAMES (session_glue.rs) remain hand-maintained twins; consolidation via include!() or build artifact share is a refactor follow-up."
       ]
     },
+    "Round 61": {
+      "decision_summary": "Strict audit pass — full state-graph coverage. Every SCXML transition edge R59 happy-path missed is now Engine-driven and asserted.",
+      "changes_bullets": [
+        "wz-runtime-tokio/tests/session_fsm_coverage.rs (~250 lines): single mega-test r61_full_coverage_sequential walks 11 scenarios covering every transition edge in session_fsm_unicast.scxml outside the R59 happy path — listener path (Init→AwaitingInitSyn→SentInitAck→SentOpenAck→Established), all 4 close-reason setters (Generic / Invalid / Expired / Unresponsive), all 5 close-from-state edges (LinkOpening / Opening.SentInitSyn / Opening / Established / Accepting), all 3 direct-to-Closed edges (link.lost from LinkOpening, peer.close from Established, link.lost from Accepting).",
+        "fresh_engine() helper isolates each scenario via rebind_session_actions_for_test (R60 feature-gated path); a fresh Driver + Actions triple resets every counter to zero between scenarios while INSTALLED OnceLock stays at its first-install pointer.",
+        "Single mega-test on purpose: cargo's thread-parallel runner races concurrent rebind_session_actions_for_test calls against the process-global Lua-engine global function namespace. Sequential dispatch in one test fn is the only race-safe shape until R60 carry on session-scoped Lua binding lands. Initially split into 11 #[test] fns and observed 9/11 races; consolidated to one fn after diagnosis."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace 45 → 46 (R61 mega-test); cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "11 SCXML transition edges verified end-to-end via Engine::process_event: listener path + LinkOpenTimeout/LinkLost/InitAckTimeout/FramingError(Opening)/OpenAckTimeout/LeaseExpired/FramingError(Established)/TxCongestionExhaust/PeerClose/FramingError(Accepting).",
+        "Each scenario asserts (a) Engine::get_current_state matches the SCXML target state, (b) trace.close_reason discriminator matches the set_close_reason_* action the transition runs, (c) send_close_frame_with_reason counter increments only on Closing-routed paths (not on direct-to-Closed via link.lost / peer.close).",
+        "validate_workspace: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 61 → 62."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-4-close-paths",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail"
+      ],
+      "carry_forward_bullets": [
+        "R61b carry: Hal time mock for delayed `<send>` timer fire (5s link.open_timeout / 2s init_ack.timeout / 2s open_ack.timeout / 100ms closing.timeout / accepting.inactivity_timeout). External event injection in R61 verifies the transition target + actions per timeout edge but does NOT exercise sce_rust_runtime's scheduler (PullScheduler + schedule_event_at / pop_ready_event_at). A TestHal with logical-time advance would close the gap; StdHal's `now_ticks_ms` is a free-function (associated, no &self) so a wz-side mock requires either feature-flag swap in sce_rust_runtime or a wrapper Engine layer.",
+        "R62 carry: cookie HMAC-SHA256 + transport extension chain (§7 ext::QoS / ext::Auth / ext::MultiLink) emit on Init/Open frames — still open from R60.",
+        "R63 carry: wz-runtime-lwip resolution — revert (Phase W defer) or land actual lwIP API; current state is R58 doc-comment reframe which the R57 self-review classified as document-around-the-hack.",
+        "R40 long-term: SCE PR for `--no-inner-attr` or wz per-codec sub-crate split.",
+        "Test-design carry: race-prone per-test #[test] fns documented as anti-pattern in R61 commentary; future test additions to wz-runtime-tokio should extend r61_full_coverage_sequential (or a new mega-test fn) rather than add isolated fns that the cargo runner parallelises."
+      ],
+      "publishable_decision_summary": "Strict audit pass — full state-graph coverage. Every SCXML transition edge R59 happy-path missed is now Engine-driven and asserted.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/tests/session_fsm_coverage.rs (~250 lines): single mega-test r61_full_coverage_sequential walks 11 scenarios covering every transition edge in session_fsm_unicast.scxml outside the R59 happy path — listener path (Init→AwaitingInitSyn→SentInitAck→SentOpenAck→Established), all 4 close-reason setters (Generic / Invalid / Expired / Unresponsive), all 5 close-from-state edges (LinkOpening / Opening.SentInitSyn / Opening / Established / Accepting), all 3 direct-to-Closed edges (link.lost from LinkOpening, peer.close from Established, link.lost from Accepting).",
+        "fresh_engine() helper isolates each scenario via rebind_session_actions_for_test (R60 feature-gated path); a fresh Driver + Actions triple resets every counter to zero between scenarios while INSTALLED OnceLock stays at its first-install pointer.",
+        "Single mega-test on purpose: cargo's thread-parallel runner races concurrent rebind_session_actions_for_test calls against the process-global Lua-engine global function namespace. Sequential dispatch in one test fn is the only race-safe shape until R60 carry on session-scoped Lua binding lands. Initially split into 11 #[test] fns and observed 9/11 races; consolidated to one fn after diagnosis."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace 45 → 46 (R61 mega-test); cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "11 SCXML transition edges verified end-to-end via Engine::process_event: listener path + LinkOpenTimeout/LinkLost/InitAckTimeout/FramingError(Opening)/OpenAckTimeout/LeaseExpired/FramingError(Established)/TxCongestionExhaust/PeerClose/FramingError(Accepting).",
+        "Each scenario asserts (a) Engine::get_current_state matches the SCXML target state, (b) trace.close_reason discriminator matches the set_close_reason_* action the transition runs, (c) send_close_frame_with_reason counter increments only on Closing-routed paths (not on direct-to-Closed via link.lost / peer.close).",
+        "validate_workspace: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 61 → 62."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-4-close-paths",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R61b carry: Hal time mock for delayed `<send>` timer fire (5s link.open_timeout / 2s init_ack.timeout / 2s open_ack.timeout / 100ms closing.timeout / accepting.inactivity_timeout). External event injection in R61 verifies the transition target + actions per timeout edge but does NOT exercise sce_rust_runtime's scheduler (PullScheduler + schedule_event_at / pop_ready_event_at). A TestHal with logical-time advance would close the gap; StdHal's `now_ticks_ms` is a free-function (associated, no &self) so a wz-side mock requires either feature-flag swap in sce_rust_runtime or a wrapper Engine layer.",
+        "R62 carry: cookie HMAC-SHA256 + transport extension chain (§7 ext::QoS / ext::Auth / ext::MultiLink) emit on Init/Open frames — still open from R60.",
+        "R63 carry: wz-runtime-lwip resolution — revert (Phase W defer) or land actual lwIP API; current state is R58 doc-comment reframe which the R57 self-review classified as document-around-the-hack.",
+        "R40 long-term: SCE PR for `--no-inner-attr` or wz per-codec sub-crate split.",
+        "Test-design carry: race-prone per-test #[test] fns documented as anti-pattern in R61 commentary; future test additions to wz-runtime-tokio should extend r61_full_coverage_sequential (or a new mega-test fn) rather than add isolated fns that the cargo runner parallelises."
+      ]
+    },
     "Round 7": {
       "decision_summary": "Phase D scope correction — README/SESSION_KICKOFF removed from workspace.docs (genre fit); atomic-internal orphan ledger via mnemosyne Round 254 supports textbook path.",
       "changes_bullets": [
