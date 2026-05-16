@@ -31,7 +31,14 @@ members = [
     "zenoh-pico-sys",
     "wz-integration-tests",
     "wz-runtime-tokio",
-    "wz-runtime-lwip",
+    # wz-runtime-lwip removed at R63 — the R53 NOP-stub skeleton was
+    # not production-honest and the R58 doc-only reframe ("Phase W
+    # deferred skeleton") was a document-around-the-hack pattern.
+    # Phase W will re-introduce the crate alongside actual lwIP API
+    # integration + MCU cross-compile plumbing. The SCE B6 link
+    # C11 emitter end-to-end validation that the deleted crate
+    # proved is preserved as a Layer-3-style test in
+    # wz-integration-tests/tests/link_emitter_b6.rs.
 ]
 
 [workspace.package]
