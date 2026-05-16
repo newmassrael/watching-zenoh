@@ -4706,6 +4706,60 @@
         "R29 statechart carry items unchanged. Codec / statechart tracks remain parallel; statechart side has had no advance since R29 first land."
       ]
     },
+    "Round 38": {
+      "decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
+      "changes_bullets": [
+        "sources/codecs/wireexpr.scxml new (53 lines, sce:kind=codec). VLE id + N-gated VLE suffix_len + N-gated UTF-8 suffix (max=128). parent.N carrier carries through to declare + 6 network MID consumers. Used by request.scxml's <sce:embed> for the keyexpr slot.",
+        "sources/codecs/query.scxml new (74 lines, sce:kind=codec). Z_QUERY body: header(mid:5 + C@5 + P@6 + Z@7) + C-gated consolidation uint8 + P-gated parameters(VLE+bytes) + Z-gated tlv-chain<ext_entry>. Y3 atomic 2a exhaust-or-depth termination (chain is last field).",
+        "sources/codecs/request.scxml new (97 lines, sce:kind=codec). Network envelope: header(mid:5 + N + M + Z) + rid:VLE + wireexpr embed + Z-gated tlv-chain<ext_entry> + <sce:variant tag='peek.mid'> with <sce:peek-byte> + 3 arms (msg_put 0x01 / msg_del 0x02 / query 0x03) + default. First peek-byte primitive consumer.",
+        "All 3 bodies byte-identical to SCE upstream codec_zenoh_wireexpr + codec_zenoh_query + codec_zenoh_request at vendor pin 11f1032d; diff only in SPDX header + file stem + root name + <sce:import src=> retargeted to wz-stems.",
+        "Codec primitive coverage advance: 17 →18. New primitive: <sce:peek-byte> (Y3 atomic 2b-ii) — dispatches without advancing cursor; arm body re-reads same byte through its own <sce:flags> header."
+      ],
+      "verification_bullets": [
+        "verify-codegen.sh Layer 1 on all 3: 6/6 emit pass each = 18/18. Total Phase B5 codec coverage at end of R38: 21 SCXMLs × 6 backends = 126/126 emit pass at vendor pin 11f1032d.",
+        "<sce:peek-byte id='peek' sce:type='uint8'><sce:flag name='mid' bit='0' width='5'/></sce:peek-byte> + <sce:variant tag='peek.mid'> emit-confirmed across 6 backends. Cross-codec validator passed implicitly — msg_put.header.mid + msg_del.header.mid + query.header.mid all bit=0 width=5 match the peek-byte's mid declaration.",
+        "parent.N pass-through emit-confirmed via wireexpr <sce:requires-parent-flags> declaration. request envelope's header.N carrier propagates to embed.wireexpr's parent.N gate.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 37→38, T3 warn 856 unchanged.",
+        "Cross-doc verification: wireexpr bound to zenoh-pico src/protocol/codec/message.c:115-145; query bound to message.c:394-505; request bound to src/protocol/codec/network.c:113-238."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "carry_forward_bullets": [
+        "Communication-demo gate analysis at end of R38: codec layer for Z_REQUEST{Put,Del,Query} is COMPLETE end-to-end (header byte through innermost payload bytes). Outstanding network MID codecs: Z_RESPONSE (needs msg_reply + msg_err), Z_RESPONSE_FINAL (no deps beyond ext_entry), Z_PUSH (degenerate SCE B5-η demo — needs realistic adaptation if used in wz wire path), Z_DECLARE (§5.1 8 declare sub-bodies needed), Z_INTEREST, Z_OAM. R39 candidate: msg_reply + msg_err + response + response_final — closes the request/response correlation pair.",
+        "Z_PUSH note: the SCE codec_zenoh_push fixture is B5-η Surface I demo (recursive variant body) using *stripped* codec_zenoh_put/del 1-byte leaves. For wz wire path use, push.scxml needs to diverge from SCE fixture and route directly to msg_put/msg_del. Defer to a later round; the Z_REQUEST path already covers Put/Del semantics for the minimum demo (publication via Request rather than Push).",
+        "After R38 the missing pieces for 'see communication' are: (a) runtime crate stub code in crates/ (0 lines), (b) two-process test harness, (c) optional Z_RESPONSE / Z_DECLARE / Z_INTEREST. Path (a)+(b) is now larger than the remaining codec work — the dependency frontier has moved off the codec track for the first time.",
+        "Codec primitive coverage at end of R38: 18 primitives (R37 17 + peek-byte). Remaining major: lookup-table dispatch (codec_variant_dispatch SCE fixture), TLV chain extension iterator advanced modes, embedded codec composition. R29 statechart carry items unchanged."
+      ],
+      "publishable_decision_summary": "Network envelope track entry — sources/codecs/{wireexpr,query,request}.scxml. peek-byte primitive first land (request envelope dispatches to msg_put/msg_del/query bodies via cursor's next byte without advancing). Z_REQUEST network MID now wire-bound to the R37 payload trio.",
+      "publishable_changes_bullets": [
+        "sources/codecs/wireexpr.scxml new (53 lines, sce:kind=codec). VLE id + N-gated VLE suffix_len + N-gated UTF-8 suffix (max=128). parent.N carrier carries through to declare + 6 network MID consumers. Used by request.scxml's <sce:embed> for the keyexpr slot.",
+        "sources/codecs/query.scxml new (74 lines, sce:kind=codec). Z_QUERY body: header(mid:5 + C@5 + P@6 + Z@7) + C-gated consolidation uint8 + P-gated parameters(VLE+bytes) + Z-gated tlv-chain<ext_entry>. Y3 atomic 2a exhaust-or-depth termination (chain is last field).",
+        "sources/codecs/request.scxml new (97 lines, sce:kind=codec). Network envelope: header(mid:5 + N + M + Z) + rid:VLE + wireexpr embed + Z-gated tlv-chain<ext_entry> + <sce:variant tag='peek.mid'> with <sce:peek-byte> + 3 arms (msg_put 0x01 / msg_del 0x02 / query 0x03) + default. First peek-byte primitive consumer.",
+        "All 3 bodies byte-identical to SCE upstream codec_zenoh_wireexpr + codec_zenoh_query + codec_zenoh_request at vendor pin 11f1032d; diff only in SPDX header + file stem + root name + <sce:import src=> retargeted to wz-stems.",
+        "Codec primitive coverage advance: 17 →18. New primitive: <sce:peek-byte> (Y3 atomic 2b-ii) — dispatches without advancing cursor; arm body re-reads same byte through its own <sce:flags> header."
+      ],
+      "publishable_verification_bullets": [
+        "verify-codegen.sh Layer 1 on all 3: 6/6 emit pass each = 18/18. Total Phase B5 codec coverage at end of R38: 21 SCXMLs × 6 backends = 126/126 emit pass at vendor pin 11f1032d.",
+        "<sce:peek-byte id='peek' sce:type='uint8'><sce:flag name='mid' bit='0' width='5'/></sce:peek-byte> + <sce:variant tag='peek.mid'> emit-confirmed across 6 backends. Cross-codec validator passed implicitly — msg_put.header.mid + msg_del.header.mid + query.header.mid all bit=0 width=5 match the peek-byte's mid declaration.",
+        "parent.N pass-through emit-confirmed via wireexpr <sce:requires-parent-flags> declaration. request envelope's header.N carrier propagates to embed.wireexpr's parent.N gate.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 37→38, T3 warn 856 unchanged.",
+        "Cross-doc verification: wireexpr bound to zenoh-pico src/protocol/codec/message.c:115-145; query bound to message.c:394-505; request bound to src/protocol/codec/network.c:113-238."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Communication-demo gate analysis at end of R38: codec layer for Z_REQUEST{Put,Del,Query} is COMPLETE end-to-end (header byte through innermost payload bytes). Outstanding network MID codecs: Z_RESPONSE (needs msg_reply + msg_err), Z_RESPONSE_FINAL (no deps beyond ext_entry), Z_PUSH (degenerate SCE B5-η demo — needs realistic adaptation if used in wz wire path), Z_DECLARE (§5.1 8 declare sub-bodies needed), Z_INTEREST, Z_OAM. R39 candidate: msg_reply + msg_err + response + response_final — closes the request/response correlation pair.",
+        "Z_PUSH note: the SCE codec_zenoh_push fixture is B5-η Surface I demo (recursive variant body) using *stripped* codec_zenoh_put/del 1-byte leaves. For wz wire path use, push.scxml needs to diverge from SCE fixture and route directly to msg_put/msg_del. Defer to a later round; the Z_REQUEST path already covers Put/Del semantics for the minimum demo (publication via Request rather than Push).",
+        "After R38 the missing pieces for 'see communication' are: (a) runtime crate stub code in crates/ (0 lines), (b) two-process test harness, (c) optional Z_RESPONSE / Z_DECLARE / Z_INTEREST. Path (a)+(b) is now larger than the remaining codec work — the dependency frontier has moved off the codec track for the first time.",
+        "Codec primitive coverage at end of R38: 18 primitives (R37 17 + peek-byte). Remaining major: lookup-table dispatch (codec_variant_dispatch SCE fixture), TLV chain extension iterator advanced modes, embedded codec composition. R29 statechart carry items unchanged."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
