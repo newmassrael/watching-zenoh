@@ -5678,6 +5678,54 @@
         "First CI run on GitHub Actions — push branch + open PR to validate workflow on actual runner."
       ]
     },
+    "Round 52": {
+      "decision_summary": "Echo demo expansion — UdpDriver impl added + msg_del/TCP + msg_put/UDP round-trip tests. Phase Z reaches 35 workspace tests. Both push-body codec variants (msg_put + msg_del) now demonstrably survive a real network boundary across BOTH transport classes (TCP + UDP). Reliability::BestEffort hint wired (UDP semantic).",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/lib.rs: UdpDriver impl added. from_socket(socket, peer) constructor + open/send/close/poll_event implementations. Honors Reliability::BestEffort silently (UDP is inherently best-effort); Reliability::Reliable hint is forwarded but UDP can't enforce — the session FSM's responsibility per docs/runtime-crate-tokio.md §6.",
+        "tests/echo_demo_del_and_udp.rs (130 lines, 2 tests). echo_msg_del_tcp_round_trip: MsgDel header=0x02 + no flags + no payload across TCP loopback. echo_msg_put_udp_round_trip: MsgPut header=0x01 + 3-byte payload across UDP datagram — datagram preserves message boundary so no 4-byte length prefix needed.",
+        "Both codec variants of the §6.1 PushBody family validated end-to-end through both link transport classes the project supports for AP linux."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace: 35/35 pass / 0 fail. R51 33 + R52 2 new tests = 35.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 51→52, T3 warn 856 unchanged.",
+        "Phase Z scope at end of R52: LinkDriver trait + TcpDriver + UdpDriver + msg_put/msg_del round-trip tests across both transports. Remaining Phase Z: R53 (wz-runtime-lwip C11 sibling) + R54 (session_fsm R29 placeholder wiring)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants"
+      ],
+      "carry_forward_bullets": [
+        "R53 (Phase Z) = crates/wz-runtime-lwip C11 sibling per docs/runtime-crate-lwip.md. Opaque sce_link_t handle + 6-event sce_link_event_t enum + 3 outbound functions (send_init_syn / send_payload / send_close). FFI-bridged from generated C11 codec code.",
+        "R54 (Phase Z closure) = R29 session_fsm_unicast.scxml script-action placeholder wiring. Bind link_driver_open() / send_init_syn() / etc. to actual wz-runtime-tokio LinkDriver calls. After R54 the FSM drives encoded handshake bytes — zenoh-pico endpoint interop becomes possible.",
+        "R52b (deferred) = 2-PROCESS echo (separate src/bin/publisher.rs + src/bin/subscriber.rs). Validates that the codec stack survives a true process boundary (no shared address space, only the kernel TCP/UDP socket). Lower priority than R53/R54 since the current tokio-task-on-loopback already crosses the kernel socket boundary.",
+        "After Phase Z: Phase W (MCU hardening: no_std + alloc cfg-flag + fuzz harness + clippy --all-features) + Phase V (user-facing README + rustdoc + quickstart)."
+      ],
+      "publishable_decision_summary": "Echo demo expansion — UdpDriver impl added + msg_del/TCP + msg_put/UDP round-trip tests. Phase Z reaches 35 workspace tests. Both push-body codec variants (msg_put + msg_del) now demonstrably survive a real network boundary across BOTH transport classes (TCP + UDP). Reliability::BestEffort hint wired (UDP semantic).",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/lib.rs: UdpDriver impl added. from_socket(socket, peer) constructor + open/send/close/poll_event implementations. Honors Reliability::BestEffort silently (UDP is inherently best-effort); Reliability::Reliable hint is forwarded but UDP can't enforce — the session FSM's responsibility per docs/runtime-crate-tokio.md §6.",
+        "tests/echo_demo_del_and_udp.rs (130 lines, 2 tests). echo_msg_del_tcp_round_trip: MsgDel header=0x02 + no flags + no payload across TCP loopback. echo_msg_put_udp_round_trip: MsgPut header=0x01 + 3-byte payload across UDP datagram — datagram preserves message boundary so no 4-byte length prefix needed.",
+        "Both codec variants of the §6.1 PushBody family validated end-to-end through both link transport classes the project supports for AP linux."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace: 35/35 pass / 0 fail. R51 33 + R52 2 new tests = 35.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 51→52, T3 warn 856 unchanged.",
+        "Phase Z scope at end of R52: LinkDriver trait + TcpDriver + UdpDriver + msg_put/msg_del round-trip tests across both transports. Remaining Phase Z: R53 (wz-runtime-lwip C11 sibling) + R54 (session_fsm R29 placeholder wiring)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R53 (Phase Z) = crates/wz-runtime-lwip C11 sibling per docs/runtime-crate-lwip.md. Opaque sce_link_t handle + 6-event sce_link_event_t enum + 3 outbound functions (send_init_syn / send_payload / send_close). FFI-bridged from generated C11 codec code.",
+        "R54 (Phase Z closure) = R29 session_fsm_unicast.scxml script-action placeholder wiring. Bind link_driver_open() / send_init_syn() / etc. to actual wz-runtime-tokio LinkDriver calls. After R54 the FSM drives encoded handshake bytes — zenoh-pico endpoint interop becomes possible.",
+        "R52b (deferred) = 2-PROCESS echo (separate src/bin/publisher.rs + src/bin/subscriber.rs). Validates that the codec stack survives a true process boundary (no shared address space, only the kernel TCP/UDP socket). Lower priority than R53/R54 since the current tokio-task-on-loopback already crosses the kernel socket boundary.",
+        "After Phase Z: Phase W (MCU hardening: no_std + alloc cfg-flag + fuzz harness + clippy --all-features) + Phase V (user-facing README + rustdoc + quickstart)."
+      ]
+    },
     "Round 6": {
       "decision_summary": "Round 5 scope correction blocked by mnemosyne Round 169 atomic-internal orphan reject; reverted to lean/stub plan; SESSION_KICKOFF/README retained in 13-doc workspace as architectural lock-in carry.",
       "changes_bullets": [
