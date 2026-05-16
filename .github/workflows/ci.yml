@@ -127,6 +127,17 @@ jobs:
       - name: Build sce-codegen (vendor/sce)
         run: bash scripts/build-sce.sh
 
+      - name: Regenerate docs/GENERATED.md (CI fresh-checkout cascade)
+        # R64.4 hotfix: docs/GENERATED.md is .gitignored (byproduct
+        # of atomic mutate cascade). Local mutate auto-regenerates
+        # it so validate-workspace observes GENERATED.md=sync; CI's
+        # fresh checkout has no GENERATED.md (or the wrong one if
+        # previously cached), and validate-workspace fails with
+        # `GENERATED.md=STALE`. Running generate-docs once here
+        # restores the cascade invariant before Layer A.
+        if: env.MNEMOSYNE_SKIP != '1'
+        run: mnemosyne-cli generate-docs
+
       - name: Layer A — Mnemosyne workspace validate
         if: env.MNEMOSYNE_SKIP != '1'
         run: |
