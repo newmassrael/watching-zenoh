@@ -40,10 +40,16 @@ description = "Tokio + mio epoll runtime for watching-zenoh AP linux target (Pha
 name = "wz_runtime_tokio"
 path = "src/lib.rs"
 
+[build-dependencies]
+sce-build = { path = "../../vendor/sce/sce-build" }
+
 [dependencies]
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
 wz-codecs = { path = "../wz-codecs" }
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
+sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
+sce-rust-lua = { path = "../../vendor/sce/sce-rust-lua" }
+log = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

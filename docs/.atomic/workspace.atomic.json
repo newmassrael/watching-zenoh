@@ -5836,6 +5836,66 @@
         "53 + R53 commits unpushed; pre-push hook re-runs validate_workspace + commit-msg formatter at push time. Push remains explicit-consent only."
       ]
     },
+    "Round 54": {
+      "decision_summary": "R29 session_fsm.scxml script-action placeholders wired to wz-runtime-tokio LinkDriver via sce-rust-lua + register_global_function — 23-round stale carry resolved.",
+      "changes_bullets": [
+        "wz-runtime-tokio/Cargo.toml: sce-rust-runtime + sce-rust-lua + log + sce-build (build-dep) added; SCE statechart-kind codegen + Lua script engine pulled into the workspace's dep graph.",
+        "wz-runtime-tokio/build.rs: shells out to `vendor/sce/target/release/sce-codegen generate --language rust` with `--workspace-root` plus a post-emit strip pass that removes both `#![...]` attr-style inner attributes and `//!` inner doc comments (extends the R40 carry strip to statechart emit; lib.rs's wrapping module restores the lint allows as OUTER attributes).",
+        "wz-runtime-tokio/src/lib.rs: `pub mod session_fsm_unicast` exposes the generated emit; `pub mod session_glue` carries the new SessionLinkActions + 17-fn install surface.",
+        "wz-runtime-tokio/src/session_glue.rs (~300 lines): SessionLinkActions struct owns BoxedLinkDriver + ActionTrace; install_session_actions registers 17 native Rust closures with the process-wide Lua engine (sce_rust_lua::lua_engine_singleton + register_global_function) — 7 outbound link calls (link_driver_open/send_init_syn/send_open_syn/send_init_ack_with_cookie/send_open_ack/send_close_frame_with_reason/release_link), 6 state-internal actions (enable_rx_tx_regions, start/stop_lease_monitor, start/stop_keepalive_worker, free_pool_slots), 4 close-reason discriminator setters, and 3 boolean guards (half_open_cap_available/accept_rate_token/cookie_valid).",
+        "TokioLinkDriverAdapter<D: LinkDriver> implements BoxedLinkDriver by holding a tokio::runtime::Handle and `block_on`-ing the async LinkDriver methods inside the sync NativeMethod closure shape (Lua's register_global_function takes a `Fn(&[ScriptValue]) -> ScriptValue + Send + Sync`).",
+        "wz-runtime-tokio/tests/session_glue_dispatch.rs (~140 lines): single integration test walking the full happy-path + listener + close-reason script-action sequence through `dispatch_script`, asserting both the trace counters on SessionLinkActions and the RecordingDriver-side open/close/sends list. Single test on purpose — the Lua engine singleton + register_global_function are process-global, so cargo test's thread-parallel runner races concurrent installs."
+      ],
+      "verification_bullets": [
+        "cargo build --workspace clean; cargo test --workspace 39 → 40 (one new R54 integration test).",
+        "cargo clippy --workspace --all-targets -- -D warnings clean (one doc_lazy_continuation cleanup in lib.rs module-level doc).",
+        "validate_workspace post-mutation: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 54 → 55 (after this Round 54 append), sections 214 unchanged.",
+        "Recording driver verified 1 open + 1 close + 5 outbound sends (INIT_SYN / OPEN_SYN / CLOSE / INIT_ACK_COOKIE / OPEN_ACK), each marked Reliability::Reliable, in source-order matching the SCXML's onentry script ordering across the initiator + listener handshake paths."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-4-close-paths",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R55 = codec-encoded wire bytes for the 7 outbound link calls. Current placeholders (b'INIT_SYN', b'OPEN_SYN', etc.) sit where the proper init_body/open_body/close codec emit + transport-message header + cookie payload bytes will land. Splits cleanly from R54 because the wire-format choices need session-layer transport-header decisions that belong in their own round.",
+        "R55b = wire the Engine-driving path. R54 verified the script-action dispatch in isolation (`dispatch_script(name)` direct call); the next step is to construct `Engine::new(SessionFsmUnicastPolicy::new())`, `raise_external_by_name(\"outbound.start\", \"\")`, `step()` quiescence, and assert the Engine's emitted execute_script sequence matches the action-ordering R54 pinned by hand.",
+        "Lua-engine process-globality is a production concern for multi-peer FSM instances on one process. Two FSM instances would race on `register_global_function` name space (link_driver_open() means whose LinkDriver). Either (a) push per-session bindings via `bind_native_object(session_id, ...)` and use session-scoped function tables, or (b) accept the single-FSM-per-process constraint and document it. Decide before multi-peer integration tests land.",
+        "R29 SCXML script-name single-source-of-truth audit. R54 wired 17 native fns by string name match; if `session_fsm_unicast.scxml` adds a new <script>foo()</script> without a matching install_session_actions registration, the Lua engine silently returns Nil + the SCE FSM continues. Consider a SCE codegen pass that emits the action-name set as a const `&[&str]` and a build-time check that `register_global_function` covers every name in that set.",
+        "R40 carry strip widened to `#![...]` + `//!` lines — the R40 SCE PR option (`--no-inner-attr` carve-out) would now also need to suppress module-level `//!` doc; rethink the SCE PR shape or accept the wz-side strip as the durable answer.",
+        "53 + R53 + R54 commits unpushed; pre-push hook re-runs validate_workspace at push time. Push remains explicit-consent only."
+      ],
+      "publishable_decision_summary": "R29 session_fsm.scxml script-action placeholders wired to wz-runtime-tokio LinkDriver via sce-rust-lua + register_global_function — 23-round stale carry resolved.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/Cargo.toml: sce-rust-runtime + sce-rust-lua + log + sce-build (build-dep) added; SCE statechart-kind codegen + Lua script engine pulled into the workspace's dep graph.",
+        "wz-runtime-tokio/build.rs: shells out to `vendor/sce/target/release/sce-codegen generate --language rust` with `--workspace-root` plus a post-emit strip pass that removes both `#![...]` attr-style inner attributes and `//!` inner doc comments (extends the R40 carry strip to statechart emit; lib.rs's wrapping module restores the lint allows as OUTER attributes).",
+        "wz-runtime-tokio/src/lib.rs: `pub mod session_fsm_unicast` exposes the generated emit; `pub mod session_glue` carries the new SessionLinkActions + 17-fn install surface.",
+        "wz-runtime-tokio/src/session_glue.rs (~300 lines): SessionLinkActions struct owns BoxedLinkDriver + ActionTrace; install_session_actions registers 17 native Rust closures with the process-wide Lua engine (sce_rust_lua::lua_engine_singleton + register_global_function) — 7 outbound link calls (link_driver_open/send_init_syn/send_open_syn/send_init_ack_with_cookie/send_open_ack/send_close_frame_with_reason/release_link), 6 state-internal actions (enable_rx_tx_regions, start/stop_lease_monitor, start/stop_keepalive_worker, free_pool_slots), 4 close-reason discriminator setters, and 3 boolean guards (half_open_cap_available/accept_rate_token/cookie_valid).",
+        "TokioLinkDriverAdapter<D: LinkDriver> implements BoxedLinkDriver by holding a tokio::runtime::Handle and `block_on`-ing the async LinkDriver methods inside the sync NativeMethod closure shape (Lua's register_global_function takes a `Fn(&[ScriptValue]) -> ScriptValue + Send + Sync`).",
+        "wz-runtime-tokio/tests/session_glue_dispatch.rs (~140 lines): single integration test walking the full happy-path + listener + close-reason script-action sequence through `dispatch_script`, asserting both the trace counters on SessionLinkActions and the RecordingDriver-side open/close/sends list. Single test on purpose — the Lua engine singleton + register_global_function are process-global, so cargo test's thread-parallel runner races concurrent installs."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build --workspace clean; cargo test --workspace 39 → 40 (one new R54 integration test).",
+        "cargo clippy --workspace --all-targets -- -D warnings clean (one doc_lazy_continuation cleanup in lib.rs module-level doc).",
+        "validate_workspace post-mutation: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 54 → 55 (after this Round 54 append), sections 214 unchanged.",
+        "Recording driver verified 1 open + 1 close + 5 outbound sends (INIT_SYN / OPEN_SYN / CLOSE / INIT_ACK_COOKIE / OPEN_ACK), each marked Reliability::Reliable, in source-order matching the SCXML's onentry script ordering across the initiator + listener handshake paths."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-4-close-paths",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R55 = codec-encoded wire bytes for the 7 outbound link calls. Current placeholders (b'INIT_SYN', b'OPEN_SYN', etc.) sit where the proper init_body/open_body/close codec emit + transport-message header + cookie payload bytes will land. Splits cleanly from R54 because the wire-format choices need session-layer transport-header decisions that belong in their own round.",
+        "R55b = wire the Engine-driving path. R54 verified the script-action dispatch in isolation (`dispatch_script(name)` direct call); the next step is to construct `Engine::new(SessionFsmUnicastPolicy::new())`, `raise_external_by_name(\"outbound.start\", \"\")`, `step()` quiescence, and assert the Engine's emitted execute_script sequence matches the action-ordering R54 pinned by hand.",
+        "Lua-engine process-globality is a production concern for multi-peer FSM instances on one process. Two FSM instances would race on `register_global_function` name space (link_driver_open() means whose LinkDriver). Either (a) push per-session bindings via `bind_native_object(session_id, ...)` and use session-scoped function tables, or (b) accept the single-FSM-per-process constraint and document it. Decide before multi-peer integration tests land.",
+        "R29 SCXML script-name single-source-of-truth audit. R54 wired 17 native fns by string name match; if `session_fsm_unicast.scxml` adds a new <script>foo()</script> without a matching install_session_actions registration, the Lua engine silently returns Nil + the SCE FSM continues. Consider a SCE codegen pass that emits the action-name set as a const `&[&str]` and a build-time check that `register_global_function` covers every name in that set.",
+        "R40 carry strip widened to `#![...]` + `//!` lines — the R40 SCE PR option (`--no-inner-attr` carve-out) would now also need to suppress module-level `//!` doc; rethink the SCE PR shape or accept the wz-side strip as the durable answer.",
+        "53 + R53 + R54 commits unpushed; pre-push hook re-runs validate_workspace at push time. Push remains explicit-consent only."
+      ]
+    },
     "Round 6": {
       "decision_summary": "Round 5 scope correction blocked by mnemosyne Round 169 atomic-internal orphan reject; reverted to lean/stub plan; SESSION_KICKOFF/README retained in 13-doc workspace as architectural lock-in carry.",
       "changes_bullets": [

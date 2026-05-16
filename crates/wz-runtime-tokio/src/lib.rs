@@ -11,14 +11,45 @@
 //! 4-method baseline + a TCP impl + the R52 echo demo (publisher /
 //! subscriber tokio tasks on loopback).
 //!
-//! No FSM here yet — the session_fsm.scxml R29 placeholder wiring is
-//! a separate round (R54). For R52 the demo manually drives
-//! encode → send → recv → decode without an FSM mediator.
+//! R54 entry. The R29 session_fsm.scxml script-action placeholders
+//! are wired to `LinkDriver` through `session_glue::SessionLinkActions`
+//! plus Lua-engine `register_global_function` registrations. The
+//! generated state machine emit lives at `pub mod session_fsm_unicast`
+//! and is composed via `session_glue::install_session_actions` for
+//! every native dispatch from `<script>...</script>` action bodies.
 
 use std::io;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
+
+pub mod session_glue;
+
+/// Generated SCXML state machine for the unicast session FSM. The
+/// emit comes from `sources/session/session_fsm_unicast.scxml` via
+/// `build.rs`. Public re-export is module-form rather than
+/// `pub use ::*` to keep the generated typenames (`StateXxx`,
+/// `EventXxx`, …) namespaced under `session_fsm_unicast::`.
+///
+/// The build script strips every `#![...]` inner attribute from the
+/// emitted file (R40 carry + R54 statechart extension); the lint
+/// allows the generator originally carried are restored here as
+/// OUTER attributes so the generated code's actual warnings (which
+/// trip `warnings = "deny"` workspace policy) stay suppressed.
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(unused_assignments)]
+#[allow(clippy::style)]
+#[allow(clippy::complexity)]
+pub mod session_fsm_unicast {
+    include!(concat!(env!("OUT_DIR"), "/session_fsm_unicast_sm.rs"));
+}
 
 /// Outbound payload to send over a link. The R51 baseline carries
 /// raw bytes; future rounds extend to typed frames (carrying codec
