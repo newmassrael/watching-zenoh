@@ -16,8 +16,9 @@
 //! encode → send → recv → decode without an FSM mediator.
 
 use std::io;
+use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 
 /// Outbound payload to send over a link. The R51 baseline carries
 /// raw bytes; future rounds extend to typed frames (carrying codec
@@ -162,6 +163,95 @@ impl LinkDriver for TcpDriver {
             Ok(_) => LinkEvent::Rx(RxFrame { bytes: buf }),
             Err(_) => LinkEvent::Lost {
                 cause: LostCause::PeerClosed,
+            },
+        }
+    }
+}
+
+/// UDP datagram driver. R51 baseline assumes one peer; each
+/// `send()` writes one datagram, each `poll_event()` receives one
+/// datagram. No framing prefix — UDP preserves message boundaries.
+/// Honors `Reliability::BestEffort` (the natural UDP semantic) and
+/// silently drops the hint on `Reliability::Reliable` (the session
+/// FSM's responsibility — UDP cannot enforce reliability at the
+/// link layer).
+pub struct UdpDriver {
+    socket: Option<UdpSocket>,
+    peer: Option<SocketAddr>,
+}
+
+impl UdpDriver {
+    /// Wrap a bound UdpSocket + the remote peer the driver
+    /// `send()` targets. R51 baseline: caller establishes the
+    /// (socket, peer) pair externally; future rounds add an
+    /// outbound-discovery + scout-driven peer-selection path.
+    pub fn from_socket(socket: UdpSocket, peer: SocketAddr) -> Self {
+        Self {
+            socket: Some(socket),
+            peer: Some(peer),
+        }
+    }
+}
+
+impl LinkDriver for UdpDriver {
+    async fn open(&mut self) -> io::Result<()> {
+        if self.socket.is_some() && self.peer.is_some() {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "UdpDriver::open requires from_socket constructor",
+            ))
+        }
+    }
+
+    async fn send(
+        &mut self,
+        frame: &TxFrame<'_>,
+        _reliability: Reliability,
+    ) -> io::Result<()> {
+        // UDP link layer is best-effort by definition; Reliability
+        // hint is the session FSM's concern (it may resend on the
+        // RELIABLE channel via a sequence-number window). Here we
+        // just write the datagram.
+        let socket = self
+            .socket
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no socket"))?;
+        let peer = self.peer.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotConnected, "no peer address")
+        })?;
+        socket.send_to(frame.bytes, peer).await?;
+        Ok(())
+    }
+
+    async fn close(&mut self) -> io::Result<()> {
+        // UdpSocket has no kernel-level "close" handshake; dropping
+        // the socket releases the FD. Set our handle to None so
+        // subsequent calls report NotConnected.
+        self.socket = None;
+        self.peer = None;
+        Ok(())
+    }
+
+    async fn poll_event(&mut self) -> LinkEvent {
+        let socket = match self.socket.as_ref() {
+            Some(s) => s,
+            None => return LinkEvent::Lost {
+                cause: LostCause::PeerClosed,
+            },
+        };
+        // Single datagram size cap = 65507 bytes (max UDP payload).
+        // R51 baseline allocates per-recv; production tuning will
+        // use a recycled buffer pool (RFC §5.E lifecycle).
+        let mut buf = vec![0u8; 65507];
+        match socket.recv_from(&mut buf).await {
+            Ok((n, _src)) => {
+                buf.truncate(n);
+                LinkEvent::Rx(RxFrame { bytes: buf })
+            }
+            Err(_) => LinkEvent::Lost {
+                cause: LostCause::OsError,
             },
         }
     }
