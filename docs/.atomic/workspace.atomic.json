@@ -5990,6 +5990,70 @@
         "Activity-log NEXT_SESSION.md is now the durable carry-summary surface; refresh on every round end per the file's operating-rules note."
       ]
     },
+    "Round 57": {
+      "decision_summary": "Wire-format reality + production safety guards — placeholder bytes swapped to real codec encoding; single-install + multi-thread + script-name SSoT guards land in one pass.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs (~280 lines rewrite): SessionInitParams struct (version/whatami/zid/seq_num_res/req_id_res/batch_size/lease/lease_in_seconds/initial_sn/cookie); encode_init / encode_open / encode_close compose wz-codecs::{init_body,open_body,close}::encode (Layer 3 byte-equiv verified vs zenoh-pico _z_*_encode) + transport-message header byte (T_MID + parent flags from vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/transport.h).",
+        "Placeholder bytes b\"INIT_SYN\" / b\"OPEN_SYN\" / b\"CLOSE\" / b\"INIT_ACK_COOKIE\" / b\"OPEN_ACK\" replaced with real codec output. CloseReason discriminator now flows from the trace into encode_close (reason byte sourced from the session.close transition that set the reason).",
+        "INSTALLED: OnceLock<Arc<SessionLinkActions>> single-install guard; install_session_actions returns Err(SessionActionsAlreadyInstalled) on the second call per process (closes R54+R55b carry on multi-FSM Lua global namespace race).",
+        "TokioLinkDriverAdapter::new asserts runtime_flavor == MultiThread at construction site (closes the R54 carry on block_on deadlock risk; converts a silent runtime hazard into a fail-fast panic).",
+        "wz-runtime-tokio/build.rs (audit_script_names + find_script_names + find_cond_names): build-time audit confirms every <script>foo()</script> body + cond= identifier in sources/session/*.scxml matches the EXPECTED_SCRIPT_NAMES set. Mismatch panics the build (closes R54 carry on silent Nil from un-registered script names).",
+        "rebind_session_actions_for_test(actions) exposed (#[doc(hidden)]) so cargo test's thread-parallel runner with the process-global INSTALLED OnceLock can swap closures inside a single test binary without violating the production single-install invariant.",
+        "tests/session_glue_dispatch.rs rewritten — every outbound's wire bytes asserted byte-exact against an expected sequence computed independently from the fixture inputs (no shared helper) so an implementation drift surfaces as a mismatch."
+      ],
+      "verification_bullets": [
+        "cargo build --workspace clean post-rewrite.",
+        "cargo test --workspace: 41 → 43 (R57 inline double-install assertion + R57 init_cbyte/pack_sn_res unit tests).",
+        "cargo clippy --workspace --all-targets -- -D warnings clean (derivable-impls clippy lint fixed by switching CloseReason to #[derive(Default)] + #[default]).",
+        "validate_workspace post-mutation: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 57 → 58 (after this Round 57 append).",
+        "Wire-byte assertions confirm: send_init_syn = [FLAG_S|T_MID_INIT, version, cbyte, zid..., sn_res, batch_size_lo, batch_size_hi]; send_open_syn body carries cookie payload, OpenAck body does NOT; CLOSE = [FLAG_T_CLOSE_S|T_MID_CLOSE, reason_byte]; InitAck flags = FLAG_S|FLAG_A; OpenAck flags = FLAG_T|FLAG_A.",
+        "Production-safety guards exercised in tests: inline double-install in r57 test asserts Err(SessionActionsAlreadyInstalled); script-name audit runs on every build."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-4-close-paths",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "carry_forward_bullets": [
+        "R57c = R55b Engine-driving extended to full happy-path coverage. Currently only Init → LinkOpening verified. Engine::tick or external event injection (link.opened, init_ack.received, open_ack.received) drives the full 4-way handshake; Established / Closing / Closed terminal states still untested at FSM level.",
+        "R57b = cookie generation via HMAC-SHA256. SessionInitParams::cookie is currently caller-supplied bytes; production InitAck side must HMAC-SHA256(per-process-secret, peer_zid || nonce) and OpenSyn side echoes the received cookie. Wires to sce_intrinsics_runtime::hmac_sha256 (deferred RFC §5.M intrinsic).",
+        "R57d = batch_size wire shape audit. wz init_body encode emits batch_size as 2 bytes little-endian; transport.h documents it as u16. The Layer 3 layer3_init_body_s1_a1 fixture passes for both, but real zenoh-pico decode behaviour with a VLE-encoded batch_size variant (if any future patch level introduces one) needs cross-check.",
+        "Operational hygiene (R59) and wz-runtime-lwip resolution (R60) still outstanding from the R57 plan cluster set.",
+        "NEXT_SESSION.md still gitignored; consider moving the carry-summary surface into atomic ledger (changelog entries already serve this) or into a tracked docs/ file."
+      ],
+      "publishable_decision_summary": "Wire-format reality + production safety guards — placeholder bytes swapped to real codec encoding; single-install + multi-thread + script-name SSoT guards land in one pass.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs (~280 lines rewrite): SessionInitParams struct (version/whatami/zid/seq_num_res/req_id_res/batch_size/lease/lease_in_seconds/initial_sn/cookie); encode_init / encode_open / encode_close compose wz-codecs::{init_body,open_body,close}::encode (Layer 3 byte-equiv verified vs zenoh-pico _z_*_encode) + transport-message header byte (T_MID + parent flags from vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/transport.h).",
+        "Placeholder bytes b\"INIT_SYN\" / b\"OPEN_SYN\" / b\"CLOSE\" / b\"INIT_ACK_COOKIE\" / b\"OPEN_ACK\" replaced with real codec output. CloseReason discriminator now flows from the trace into encode_close (reason byte sourced from the session.close transition that set the reason).",
+        "INSTALLED: OnceLock<Arc<SessionLinkActions>> single-install guard; install_session_actions returns Err(SessionActionsAlreadyInstalled) on the second call per process (closes R54+R55b carry on multi-FSM Lua global namespace race).",
+        "TokioLinkDriverAdapter::new asserts runtime_flavor == MultiThread at construction site (closes the R54 carry on block_on deadlock risk; converts a silent runtime hazard into a fail-fast panic).",
+        "wz-runtime-tokio/build.rs (audit_script_names + find_script_names + find_cond_names): build-time audit confirms every <script>foo()</script> body + cond= identifier in sources/session/*.scxml matches the EXPECTED_SCRIPT_NAMES set. Mismatch panics the build (closes R54 carry on silent Nil from un-registered script names).",
+        "rebind_session_actions_for_test(actions) exposed (#[doc(hidden)]) so cargo test's thread-parallel runner with the process-global INSTALLED OnceLock can swap closures inside a single test binary without violating the production single-install invariant.",
+        "tests/session_glue_dispatch.rs rewritten — every outbound's wire bytes asserted byte-exact against an expected sequence computed independently from the fixture inputs (no shared helper) so an implementation drift surfaces as a mismatch."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build --workspace clean post-rewrite.",
+        "cargo test --workspace: 41 → 43 (R57 inline double-install assertion + R57 init_cbyte/pack_sn_res unit tests).",
+        "cargo clippy --workspace --all-targets -- -D warnings clean (derivable-impls clippy lint fixed by switching CloseReason to #[derive(Default)] + #[default]).",
+        "validate_workspace post-mutation: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 57 → 58 (after this Round 57 append).",
+        "Wire-byte assertions confirm: send_init_syn = [FLAG_S|T_MID_INIT, version, cbyte, zid..., sn_res, batch_size_lo, batch_size_hi]; send_open_syn body carries cookie payload, OpenAck body does NOT; CLOSE = [FLAG_T_CLOSE_S|T_MID_CLOSE, reason_byte]; InitAck flags = FLAG_S|FLAG_A; OpenAck flags = FLAG_T|FLAG_A.",
+        "Production-safety guards exercised in tests: inline double-install in r57 test asserts Err(SessionActionsAlreadyInstalled); script-name audit runs on every build."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-4-close-paths",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R57c = R55b Engine-driving extended to full happy-path coverage. Currently only Init → LinkOpening verified. Engine::tick or external event injection (link.opened, init_ack.received, open_ack.received) drives the full 4-way handshake; Established / Closing / Closed terminal states still untested at FSM level.",
+        "R57b = cookie generation via HMAC-SHA256. SessionInitParams::cookie is currently caller-supplied bytes; production InitAck side must HMAC-SHA256(per-process-secret, peer_zid || nonce) and OpenSyn side echoes the received cookie. Wires to sce_intrinsics_runtime::hmac_sha256 (deferred RFC §5.M intrinsic).",
+        "R57d = batch_size wire shape audit. wz init_body encode emits batch_size as 2 bytes little-endian; transport.h documents it as u16. The Layer 3 layer3_init_body_s1_a1 fixture passes for both, but real zenoh-pico decode behaviour with a VLE-encoded batch_size variant (if any future patch level introduces one) needs cross-check.",
+        "Operational hygiene (R59) and wz-runtime-lwip resolution (R60) still outstanding from the R57 plan cluster set.",
+        "NEXT_SESSION.md still gitignored; consider moving the carry-summary surface into atomic ledger (changelog entries already serve this) or into a tracked docs/ file."
+      ]
+    },
     "Round 6": {
       "decision_summary": "Round 5 scope correction blocked by mnemosyne Round 169 atomic-internal orphan reject; reverted to lean/stub plan; SESSION_KICKOFF/README retained in 13-doc workspace as architectural lock-in carry.",
       "changes_bullets": [

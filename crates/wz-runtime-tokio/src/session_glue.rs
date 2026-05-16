@@ -1,60 +1,164 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Session-FSM ↔ LinkDriver glue (R54 — first FSM-driven LinkDriver call).
+//! Session-FSM ↔ LinkDriver glue with real codec-driven wire bytes.
 //!
-//! The generated `session_fsm_unicast_sm` module (from
-//! `sources/session/session_fsm_unicast.scxml`) emits W3C SCXML
-//! `<script>foo()</script>` action bodies as
-//! `ScriptEngineProvider::get().execute_script(sid, "foo()")` calls.
-//! This module supplies the Lua-engine-side implementations: 17
-//! `register_global_function` registrations wire the script names
-//! that appear inside SCXML transitions/onentry/onexit to native
-//! Rust closures that mutate `SessionLinkActions` state.
+//! R57 entry. The R54 baseline used literal placeholder bytes
+//! (`b"INIT_SYN"`, `b"OPEN_SYN"`, …) for the 7 outbound link calls;
+//! the placeholder pattern was an explicit hack flagged in R56's
+//! self-review. R57 swaps every outbound to the real wz-codecs
+//! encode path:
 //!
-//! Scope ceiling. Outbound link calls deliberately invoke
-//! `LinkDriver` with *placeholder bytes* (e.g. b"INIT_SYN") rather
-//! than actual init_body/open_body codec encodings. Closing the
-//! codec-encoded wire-bytes gap is a separate round (R55) — splitting
-//! it lets R54 land the FSM→LinkDriver dispatch as a single audit
-//! step without entangling the wire-format choices for INIT_SYN /
-//! OPEN_SYN / ACK shapes (those need session-layer transport
-//! header + cookie payload decisions that belong in their own
-//! round).
+//! - `send_init_syn` / `send_init_ack_with_cookie` build a
+//!   `wz_codecs::init_body::InitBody` and prepend the
+//!   `_Z_MID_T_INIT` transport-message header byte plus the
+//!   parent.S / parent.A flag pattern from
+//!   `vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/transport.h`.
+//! - `send_open_syn` / `send_open_ack` build a
+//!   `wz_codecs::open_body::OpenBody` with the lease + initial_sn
+//!   carrier and the `_Z_FLAG_T_OPEN_A` / `_Z_FLAG_T_OPEN_T`
+//!   discriminators.
+//! - `send_close_frame_with_reason` builds a
+//!   `wz_codecs::close::Close` (single reason byte) and prepends
+//!   `_Z_MID_T_CLOSE | _Z_FLAG_T_CLOSE_S` for a graceful session
+//!   close (vs. link-only close).
 //!
-//! Lua engine handle. `sce_rust_lua::register()` is one-shot per
-//! process; `install_session_actions` records the registration
-//! result and treats `ScriptEngineAlreadyRegistered` as success
-//! (subsequent installs in the same process — e.g. multiple tests
-//! in one binary — reuse the same engine and only need to register
-//! their own native fns again, which `register_global_function`
-//! safely overwrites by name).
+//! Production-correctness sourcing. The codec output is verified
+//! byte-identical against zenoh-pico's own `_z_init_encode` /
+//! `_z_open_encode` / `_z_close_encode` by the Layer 3 wire-interop
+//! tests (`crates/wz-integration-tests/tests/layer3_{init_body,open_body,close}.rs`).
+//! Re-using those codecs here therefore inherits the same byte-equiv
+//! guarantee — `dispatch_script("send_init_syn")` now produces the
+//! exact bytes a zenoh-pico peer would generate from the equivalent
+//! `_z_t_msg_init_t` input.
+//!
+//! Field values flow through `SessionInitParams`. A production
+//! caller supplies the per-deploy zid / whatami / version /
+//! seq_num_res / req_id_res / batch_size / lease / initial_sn from
+//! `deploy.yaml` (the source of truth per
+//! `docs/wire-spec-subset.md` §4.4 + ARCHITECTURE.md §3.5);
+//! integration tests pass fixed values so the wire bytes are
+//! reproducible.
+//!
+//! Cookie material is supplied by the caller. R57 ships the cookie
+//! handling as a "caller-owned bytes" interface — the
+//! `SessionInitParams::cookie` field carries whatever the
+//! `Accepting` side wants to sign and the `Established`-side
+//! initiator echoes. The HMAC-SHA256 generation per RFC §5.M is
+//! the consumer's responsibility (production callers compose
+//! `sce_intrinsics_runtime::hmac_sha256` with a deploy-supplied
+//! secret); the integration test uses a fixed 8-byte cookie so
+//! the assertion against zenoh-pico's reference is deterministic.
 
 use std::sync::{Arc, Mutex, OnceLock};
 
 use sce_rust_lua::lua_engine_singleton;
 use sce_rust_runtime::scripting::{
-    IScriptEngine, NativeMethod, ScriptError, ScriptResult, ScriptValue,
+    IScriptEngine, NativeMethod, ScriptResult, ScriptValue,
 };
 
 use crate::{LinkDriver, Reliability, TxFrame};
 
+/// Transport-message header constants from
+/// `vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/transport.h`.
+/// Kept local (rather than re-exported from zenoh-pico-sys) so this
+/// module does not pull the zenoh-pico FFI into its hot path on
+/// MCU builds — wz-runtime-tokio is the AP/linux runtime, but the
+/// constants themselves are wire-spec-frozen across both runtimes.
+mod wire_const {
+    pub const T_MID_INIT: u8 = 0x01;
+    pub const T_MID_OPEN: u8 = 0x02;
+    pub const T_MID_CLOSE: u8 = 0x03;
+
+    /// InitAck discriminator (0 = InitSyn, 1 = InitAck).
+    pub const FLAG_T_INIT_A: u8 = 0x20;
+    /// Size parameters carrier (sn_res + batch_size present).
+    pub const FLAG_T_INIT_S: u8 = 0x40;
+
+    /// OpenAck discriminator (0 = OpenSyn, 1 = OpenAck).
+    pub const FLAG_T_OPEN_A: u8 = 0x20;
+    /// Lease in seconds (1) vs milliseconds (0).
+    pub const FLAG_T_OPEN_T: u8 = 0x40;
+
+    /// Session-close vs link-only close.
+    pub const FLAG_T_CLOSE_S: u8 = 0x20;
+}
+
+/// Per-deploy parameters that drive the codec field values for the
+/// 4-way handshake + close. Production callers source these from
+/// `deploy.yaml`; tests pass fixed values for reproducible wire bytes.
+#[derive(Debug, Clone)]
+pub struct SessionInitParams {
+    /// Protocol version (zenoh: 0x05 at the time of writing).
+    pub version: u8,
+    /// API-form whatami: `0x01` Router, `0x02` Peer, `0x04` Client.
+    /// The codec packs the wire-form 2-bit field per
+    /// `_z_whatami_to_uint8` (transport.c:31-37).
+    pub whatami: u8,
+    /// ZenohID — 1..=16 bytes. The codec encodes the length in the
+    /// high 4 bits of `cbyte` as `zid_len - 1`.
+    pub zid: Vec<u8>,
+    /// Sequence-number resolution (0..=3 → 8 / 16 / 32 / 64-bit).
+    pub seq_num_res: u8,
+    /// Request-id resolution (0..=3).
+    pub req_id_res: u8,
+    /// Per-link batch size (bytes). Transport.h documents 1..=65535.
+    pub batch_size: u16,
+    /// Lease duration. The `lease_in_seconds` flag below picks the
+    /// unit; the value itself is VLE-encoded inside the open body.
+    pub lease: u64,
+    /// `_Z_FLAG_T_OPEN_T` semantics: when true the wire encodes the
+    /// `lease` field as seconds (set the flag); when false it
+    /// encodes milliseconds (clear the flag).
+    pub lease_in_seconds: bool,
+    /// Initial sequence number for the reliable channel (VLE-encoded
+    /// inside the open body).
+    pub initial_sn: u64,
+    /// Cookie material exchanged on the InitAck → OpenSyn echo path.
+    /// Production callers generate this via HMAC-SHA256 per RFC §5.M;
+    /// tests use a fixed slice for byte-equiv reproducibility.
+    pub cookie: Vec<u8>,
+}
+
+impl Default for SessionInitParams {
+    /// Test-grade defaults. Production callers MUST override every
+    /// field from `deploy.yaml`.
+    fn default() -> Self {
+        Self {
+            version: 0x05,
+            whatami: 0x02, // Peer
+            zid: vec![0x01; 4],
+            seq_num_res: 0,
+            req_id_res: 0,
+            batch_size: 0,
+            lease: 10_000, // 10s in ms
+            lease_in_seconds: false,
+            initial_sn: 0,
+            cookie: Vec::new(),
+        }
+    }
+}
+
 /// Discrete close-reason discriminator. Mirrors the four close-reason
 /// mutator actions emitted by `session_fsm_unicast.scxml`
 /// (`set_close_reason_generic / invalid / expired / unresponsive`).
+/// Encoded as a single byte in the Close codec body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CloseReason {
+    /// Default close (set via `session.close` transition).
     #[default]
-    Generic,
-    Invalid,
-    Expired,
-    Unresponsive,
+    Generic = 0,
+    /// Framing error close.
+    Invalid = 1,
+    /// Lease expired close.
+    Expired = 2,
+    /// TX congestion / peer unresponsive close.
+    Unresponsive = 3,
 }
 
-/// Counters and discrete state the integration tests inspect to
-/// verify the script-action dispatch reached this side. One field
-/// per native function so a test can pinpoint exactly which
-/// SCXML action the FSM exercised.
+/// Counters + last-wire-bytes snapshot the integration tests inspect
+/// to verify the script-action dispatch reached this side AND the
+/// codec produced the expected wire shape.
 #[derive(Debug, Default)]
 pub struct ActionTrace {
     pub link_driver_open: u32,
@@ -74,40 +178,42 @@ pub struct ActionTrace {
     pub close_reason: CloseReason,
 }
 
-/// Trait-object handle for the link driver shared across the 7
-/// outbound native functions. The Send + Sync bounds are required
-/// by `NativeMethod`'s `Send + Sync` shape on the registered
-/// closures. `Reliable` is the R54 baseline default for every
-/// outbound send; per-message reliability classification is the
-/// session FSM's wire-format concern and lands in R55.
+/// Sync RAII shim around an async `LinkDriver`. Production callers
+/// supply this via `TokioLinkDriverAdapter`; tests supply a
+/// recording implementation.
+///
+/// Send + Sync are required because the trait object captured by
+/// each native-fn closure must outlive the closure's `'static`
+/// bound and travel across worker threads on a Tokio multi-thread
+/// runtime.
 pub trait BoxedLinkDriver: Send + Sync {
-    /// Synchronous send shim — closures registered with
-    /// `register_global_function` are `Fn`, so they cannot
-    /// `.await`. Implementations block on their async driver here
-    /// (Tokio multi-thread runtime context required).
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability);
-
-    /// Synchronous open + close shims, same rationale as send.
     fn open_blocking(&self);
     fn close_blocking(&self);
 }
 
 /// Tokio multi-thread runtime adapter for a `LinkDriver`
-/// implementation. Owns the driver behind a `Mutex` so concurrent
-/// closures serialise their access; the driver's own internal
-/// state is single-owner per the `LinkDriver` trait contract.
+/// implementation.
 pub struct TokioLinkDriverAdapter<D: LinkDriver + Send + 'static> {
     driver: Mutex<D>,
     handle: tokio::runtime::Handle,
 }
 
 impl<D: LinkDriver + Send + 'static> TokioLinkDriverAdapter<D> {
-    /// Wrap a driver + Tokio handle for use inside Lua-registered
-    /// closures. The handle MUST point at a multi-thread runtime —
-    /// `block_on` from inside a current-thread runtime's task
-    /// would deadlock when the closure is invoked on the same
-    /// thread that owns the runtime.
+    /// Wrap a driver + Tokio handle. The handle MUST point at a
+    /// multi-thread runtime; using a current-thread runtime here
+    /// would deadlock on the first script-action dispatch because
+    /// `block_on` from inside the runtime's own worker thread
+    /// requires another worker to make progress. The constructor
+    /// panics fast on a current-thread runtime so the misuse is
+    /// caught at construction site, not at the first dispatch.
     pub fn new(driver: D, handle: tokio::runtime::Handle) -> Self {
+        assert_eq!(
+            handle.runtime_flavor(),
+            tokio::runtime::RuntimeFlavor::MultiThread,
+            "TokioLinkDriverAdapter requires a multi-thread runtime; \
+             block_on on a current-thread runtime worker would deadlock"
+        );
         Self {
             driver: Mutex::new(driver),
             handle,
@@ -133,35 +239,32 @@ impl<D: LinkDriver + Send + 'static> BoxedLinkDriver for TokioLinkDriverAdapter<
     }
 }
 
-/// Bundle of state the 17 native functions read or mutate.
-/// `Arc<SessionLinkActions>` is what the Lua closures capture; the
-/// `Mutex<ActionTrace>` is the only mutable field, so the typical
-/// "lots of small mutexes" overhead does not apply.
+/// Bundle of state shared across the 17 native script functions.
 pub struct SessionLinkActions {
     pub driver: Arc<dyn BoxedLinkDriver>,
+    pub params: SessionInitParams,
     pub trace: Mutex<ActionTrace>,
 }
 
 impl SessionLinkActions {
-    pub fn new(driver: Arc<dyn BoxedLinkDriver>) -> Arc<Self> {
+    /// Construct a session action bundle for one logical FSM instance.
+    /// The `params` are captured by value; production callers
+    /// supplying per-deploy values stage them once at session
+    /// construction.
+    pub fn new(driver: Arc<dyn BoxedLinkDriver>, params: SessionInitParams) -> Arc<Self> {
         Arc::new(Self {
             driver,
+            params,
             trace: Mutex::new(ActionTrace::default()),
         })
     }
 
-    /// Convenience accessor — clones the current trace snapshot
-    /// (counters are u32 / enum, so the clone is cheap).
     pub fn trace_snapshot(&self) -> ActionTrace {
         self.trace.lock().unwrap().clone_via_copy()
     }
 }
 
 impl ActionTrace {
-    /// Manual copy-clone — `#[derive(Clone)]` would clash with the
-    /// Default + Debug derives' compile path here on the older
-    /// rustc versions the workspace supports; field-wise copy
-    /// is explicit and identical in semantics.
     fn clone_via_copy(&self) -> Self {
         Self {
             link_driver_open: self.link_driver_open,
@@ -183,29 +286,58 @@ impl ActionTrace {
     }
 }
 
-/// Process-wide one-shot registration flag for the Lua engine.
-/// `sce_rust_lua::register` returns an error if called twice; we
-/// guard the call with an `OnceLock` so test binaries that install
-/// the engine from multiple tests do not abort.
-static LUA_REGISTERED: OnceLock<()> = OnceLock::new();
+/// Process-wide install guard.
+///
+/// `sce_rust_lua::register_global_function` writes into one process-global
+/// Lua name space; allowing two `install_session_actions` calls would
+/// race on which `SessionLinkActions` the registered closures capture.
+/// R58 makes the guard explicit: the first install succeeds, every
+/// subsequent install returns `Err(SessionActionsAlreadyInstalled)`
+/// so the caller can decide whether to (a) treat reinstall as a
+/// programming bug and abort, or (b) accept the existing install if
+/// the same `SessionLinkActions` already covers their session.
+///
+/// The single-FSM-per-process limit is documented in
+/// `docs/runtime-crate-tokio.md` §6 (carry from R56) — multi-peer
+/// FSM concurrency requires session-scoped binding via
+/// `bind_native_object` and is deferred.
+static INSTALLED: OnceLock<Arc<SessionLinkActions>> = OnceLock::new();
 
-/// SCE-runtime session id the generated state-machine uses by
-/// default. Matches the `_sessionid` system variable initialization
-/// in the emitted code; `create_session` is idempotent so calling
-/// it from `install_session_actions` is safe even when the
-/// generated `initialize` has already done so.
+/// Returned when `install_session_actions` is called twice in the
+/// same process.
+#[derive(Debug)]
+pub struct SessionActionsAlreadyInstalled;
+
+impl std::fmt::Display for SessionActionsAlreadyInstalled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "wz-runtime-tokio session actions already installed; this process supports at most one logical session FSM instance"
+        )
+    }
+}
+
+impl std::error::Error for SessionActionsAlreadyInstalled {}
+
+/// SCE-runtime session id the generated state-machine uses by default.
 pub const SESSION_ID: &str = "session_fsm_unicast";
 
 /// Wire the 17 native script functions referenced by
-/// `session_fsm_unicast.scxml` onto the Lua engine, sharing the
-/// supplied `SessionLinkActions` across every closure.
-pub fn install_session_actions(actions: Arc<SessionLinkActions>) -> Result<(), ScriptError> {
-    // Singleton-init the Lua engine on first use; subsequent calls
-    // (e.g. multi-test binaries) silently reuse the same engine and
-    // only need to register their per-actions closures.
-    let _ = LUA_REGISTERED.get_or_init(|| {
-        let _ = sce_rust_lua::register();
-    });
+/// `session_fsm_unicast.scxml` onto the Lua engine. The first call
+/// per process succeeds and locks the session actions; subsequent
+/// calls return `Err(SessionActionsAlreadyInstalled)`.
+pub fn install_session_actions(
+    actions: Arc<SessionLinkActions>,
+) -> Result<(), SessionActionsAlreadyInstalled> {
+    INSTALLED
+        .set(actions.clone())
+        .map_err(|_| SessionActionsAlreadyInstalled)?;
+
+    // Lua engine register is OnceLock-guarded inside sce_rust_lua so
+    // a re-entrant call here is harmless (the second `register`
+    // returns `Err(ScriptEngineAlreadyRegistered)` which we treat
+    // as success — the engine itself is process-singleton).
+    let _ = sce_rust_lua::register();
 
     let lua = lua_engine_singleton();
     lua.create_session(SESSION_ID);
@@ -217,32 +349,73 @@ pub fn install_session_actions(actions: Arc<SessionLinkActions>) -> Result<(), S
     Ok(())
 }
 
+/// Re-bind the Lua engine's global functions against a fresh
+/// `SessionLinkActions`, bypassing the `INSTALLED` guard.
+///
+/// **Test infrastructure only.** Production code MUST NOT call this
+/// — it deliberately keeps `INSTALLED` pointing at the first
+/// successful `install_session_actions` while overwriting every
+/// `register_global_function` registration with closures captured
+/// against the supplied actions. The resulting state is a hybrid
+/// (first install's actions still observable via the `INSTALLED`
+/// OnceLock, current Lua closures capturing a different
+/// `SessionLinkActions`) that no production caller benefits from.
+///
+/// Tests use this to swap the driver / trace within a single test
+/// binary process, where cargo runs multiple `#[test]` functions
+/// against one shared `INSTALLED`. The function is exposed in all
+/// build profiles (rather than `#[cfg(test)]`-gated) because cargo
+/// builds integration tests as separate crates that cannot see
+/// `#[cfg(test)]` items from the library; the `_for_test` suffix
+/// + this doc comment are the load-bearing "do not use in
+/// production" markers.
+#[doc(hidden)]
+pub fn rebind_session_actions_for_test(actions: Arc<SessionLinkActions>) {
+    let _ = sce_rust_lua::register();
+    let lua = lua_engine_singleton();
+    lua.create_session(SESSION_ID);
+    register_outbound_link_fns(lua, &actions);
+    register_state_internal_fns(lua, &actions);
+    register_guard_fns(lua);
+}
+
 fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLinkActions>) {
     bind_unit(lua, "link_driver_open", actions, |a| {
         a.trace.lock().unwrap().link_driver_open += 1;
         a.driver.open_blocking();
     });
+
     bind_unit(lua, "send_init_syn", actions, |a| {
         a.trace.lock().unwrap().send_init_syn += 1;
-        a.driver.send_blocking(b"INIT_SYN", Reliability::Reliable);
+        let bytes = encode_init(&a.params, /*is_ack=*/ false);
+        a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
+
     bind_unit(lua, "send_open_syn", actions, |a| {
         a.trace.lock().unwrap().send_open_syn += 1;
-        a.driver.send_blocking(b"OPEN_SYN", Reliability::Reliable);
+        let bytes = encode_open(&a.params, /*is_ack=*/ false);
+        a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
+
     bind_unit(lua, "send_init_ack_with_cookie", actions, |a| {
         a.trace.lock().unwrap().send_init_ack_with_cookie += 1;
-        a.driver
-            .send_blocking(b"INIT_ACK_COOKIE", Reliability::Reliable);
+        let bytes = encode_init(&a.params, /*is_ack=*/ true);
+        a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
+
     bind_unit(lua, "send_open_ack", actions, |a| {
         a.trace.lock().unwrap().send_open_ack += 1;
-        a.driver.send_blocking(b"OPEN_ACK", Reliability::Reliable);
+        let bytes = encode_open(&a.params, /*is_ack=*/ true);
+        a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
+
     bind_unit(lua, "send_close_frame_with_reason", actions, |a| {
+        let reason = a.trace.lock().unwrap().close_reason as u8;
         a.trace.lock().unwrap().send_close_frame_with_reason += 1;
-        a.driver.send_blocking(b"CLOSE", Reliability::Reliable);
+        let bytes = encode_close(reason);
+        a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
+
     bind_unit(lua, "release_link", actions, |a| {
         a.trace.lock().unwrap().release_link += 1;
         a.driver.close_blocking();
@@ -280,16 +453,122 @@ fn register_state_internal_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLin
 }
 
 fn register_guard_fns(lua: &dyn IScriptEngine) {
-    // R54 baseline: guard expressions always return true so the
+    // R57 baseline: guard expressions always return true so the
     // accept-side hardening + cookie validation transitions advance
     // for the integration test. Cap quota / token-bucket / cookie
     // HMAC actual checks are RFC §5.M concerns and bind in a later
-    // round (R55+) when the security-relevant state-keeping moves
+    // round (R58+) when the security-relevant state-keeping moves
     // out of placeholder territory.
     bind_bool(lua, "half_open_cap_available", true);
     bind_bool(lua, "accept_rate_token", true);
     bind_bool(lua, "cookie_valid", true);
 }
+
+// ─────────────────────────── codec wiring ───────────────────────────
+
+/// Build the wire bytes for an Init frame (InitSyn if `is_ack==false`,
+/// InitAck if `is_ack==true`). The codec body is the wz `InitBody`,
+/// verified byte-identical to zenoh-pico's `_z_init_encode` by
+/// `crates/wz-integration-tests/tests/layer3_init_body.rs`. The
+/// transport-message header is one byte: `(flags) | T_MID_INIT`.
+fn encode_init(params: &SessionInitParams, is_ack: bool) -> Vec<u8> {
+    use wz_codecs::init_body::InitBody;
+
+    let mut parent_flags = wire_const::FLAG_T_INIT_S;
+    if is_ack {
+        parent_flags |= wire_const::FLAG_T_INIT_A;
+    }
+
+    let cbyte = init_cbyte(params.whatami, params.zid.len());
+    let body = InitBody {
+        version: params.version,
+        cbyte,
+        zid: params.zid.clone(),
+        sn_res: Some(pack_sn_res(params.seq_num_res, params.req_id_res)),
+        batch_size: Some(params.batch_size),
+        cookie_len: if is_ack {
+            Some(params.cookie.len() as u64)
+        } else {
+            None
+        },
+        cookie: if is_ack { Some(params.cookie.clone()) } else { None },
+    };
+
+    let mut wire = Vec::with_capacity(body.zid.len() + params.cookie.len() + 12);
+    wire.push(parent_flags | wire_const::T_MID_INIT);
+    wire.extend_from_slice(&body.encode(parent_flags));
+    wire
+}
+
+/// Build the wire bytes for an Open frame (OpenSyn / OpenAck). Body
+/// is the wz `OpenBody`, verified byte-identical to zenoh-pico's
+/// `_z_open_encode` by `tests/layer3_open_body.rs`.
+fn encode_open(params: &SessionInitParams, is_ack: bool) -> Vec<u8> {
+    use wz_codecs::open_body::OpenBody;
+
+    let mut parent_flags = 0u8;
+    if params.lease_in_seconds {
+        parent_flags |= wire_const::FLAG_T_OPEN_T;
+    }
+    if is_ack {
+        parent_flags |= wire_const::FLAG_T_OPEN_A;
+    }
+
+    // OpenSyn echoes the cookie the InitAck side issued; OpenAck does
+    // not (cookie is consumed by the time the Accepting side sends
+    // OpenAck).
+    let body = OpenBody {
+        lease: params.lease,
+        initial_sn: params.initial_sn,
+        cookie_len: if !is_ack {
+            Some(params.cookie.len() as u64)
+        } else {
+            None
+        },
+        cookie: if !is_ack { Some(params.cookie.clone()) } else { None },
+    };
+
+    let mut wire = Vec::with_capacity(params.cookie.len() + 24);
+    wire.push(parent_flags | wire_const::T_MID_OPEN);
+    wire.extend_from_slice(&body.encode(parent_flags));
+    wire
+}
+
+/// Build the wire bytes for a Close frame. Body is the wz `Close`
+/// (single reason byte), verified byte-identical to zenoh-pico's
+/// `_z_close_encode` by `tests/layer3_close.rs`. The
+/// `_Z_FLAG_T_CLOSE_S` flag selects graceful session close (we
+/// always set it — link-only close is a transport-layer concern
+/// that the link driver handles directly).
+fn encode_close(reason: u8) -> Vec<u8> {
+    use wz_codecs::close::Close;
+
+    let parent_flags = wire_const::FLAG_T_CLOSE_S;
+    let body = Close { reason };
+    let mut wire = Vec::with_capacity(2);
+    wire.push(parent_flags | wire_const::T_MID_CLOSE);
+    wire.extend_from_slice(&body.encode());
+    wire
+}
+
+/// Pack the `cbyte` field per zenoh-pico's `_z_whatami_to_uint8`
+/// (transport.c:31-37) + `(zid_len - 1) << 4` (transport.c:189-192).
+fn init_cbyte(api_whatami: u8, zid_len: usize) -> u8 {
+    debug_assert!(
+        (1..=16).contains(&zid_len),
+        "zid_len must be 1..=16 (wire constraint, transport.h)"
+    );
+    let whatami_wire = (api_whatami >> 1) & 0x03;
+    whatami_wire | (((zid_len as u8 - 1) & 0x0F) << 4)
+}
+
+/// Pack `sn_res` per transport.c:196-197:
+/// `(seq_num_res & 0x03) | ((req_id_res & 0x03) << 2)`.
+fn pack_sn_res(seq_num_res: u8, req_id_res: u8) -> u8 {
+    (seq_num_res & 0x03) | ((req_id_res & 0x03) << 2)
+}
+
+// ─────────────────────────── helpers ───────────────────────────
 
 fn bind_unit<F>(lua: &dyn IScriptEngine, name: &str, actions: &Arc<SessionLinkActions>, body: F)
 where
@@ -330,11 +609,70 @@ fn bind_bool(lua: &dyn IScriptEngine, name: &str, value: bool) {
 }
 
 /// Direct dispatch shim — exercises the script engine path without
-/// driving the generated state machine. Useful as a load-bearing
-/// smoke test: it isolates the "is the Lua engine wired to the
-/// native fns" question from the "does the generated FSM emit the
-/// right execute_script calls" question.
+/// driving the generated state machine. Useful for tests that pin
+/// the script-name → native-fn mapping in isolation from the FSM
+/// transition logic.
 pub fn dispatch_script(name: &str) -> ScriptResult<ScriptValue> {
     let lua = lua_engine_singleton();
     lua.execute_script(SESSION_ID, &format!("{name}()"))
+}
+
+/// R58 carry — the build script (or a dedicated tool) will parse
+/// `sources/session/session_fsm_unicast.scxml` to extract every
+/// `<script>foo()</script>` body and validate that
+/// `register_outbound_link_fns + register_state_internal_fns +
+/// register_guard_fns` cover the same set. The list below is the
+/// hand-maintained truth source until the build-time check lands.
+#[doc(hidden)]
+pub const REGISTERED_SCRIPT_NAMES: &[&str] = &[
+    "link_driver_open",
+    "send_init_syn",
+    "send_open_syn",
+    "send_init_ack_with_cookie",
+    "send_open_ack",
+    "send_close_frame_with_reason",
+    "release_link",
+    "enable_rx_tx_regions",
+    "start_lease_monitor",
+    "stop_lease_monitor",
+    "start_keepalive_worker",
+    "stop_keepalive_worker",
+    "free_pool_slots",
+    "set_close_reason_generic",
+    "set_close_reason_invalid",
+    "set_close_reason_expired",
+    "set_close_reason_unresponsive",
+    "half_open_cap_available",
+    "accept_rate_token",
+    "cookie_valid",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// init_cbyte must match zenoh-pico's transport.c:189-192
+    /// packing exactly — Layer 3 byte-equiv depends on this.
+    #[test]
+    fn init_cbyte_packs_whatami_and_zid_len() {
+        // whatami=Peer(0x02), zid_len=4 → wire whatami = (0x02>>1)&3 = 0x01
+        // zid_len_m1 = 3 → cbyte = 0x01 | (3 << 4) = 0x31
+        assert_eq!(init_cbyte(0x02, 4), 0x31);
+        // whatami=Router(0x01), zid_len=1 → wire whatami = (0x01>>1)&3 = 0
+        // zid_len_m1 = 0 → cbyte = 0
+        assert_eq!(init_cbyte(0x01, 1), 0x00);
+        // whatami=Client(0x04), zid_len=16 → wire whatami = (0x04>>1)&3 = 0x02
+        // zid_len_m1 = 15 → cbyte = 0x02 | (15 << 4) = 0xF2
+        assert_eq!(init_cbyte(0x04, 16), 0xF2);
+    }
+
+    /// pack_sn_res must match transport.c:196-197 packing exactly.
+    #[test]
+    fn pack_sn_res_layout_matches_transport_h() {
+        assert_eq!(pack_sn_res(0, 0), 0x00);
+        assert_eq!(pack_sn_res(3, 0), 0x03);
+        assert_eq!(pack_sn_res(0, 3), 0x0C);
+        assert_eq!(pack_sn_res(3, 3), 0x0F);
+        assert_eq!(pack_sn_res(2, 1), 0x06);
+    }
 }
