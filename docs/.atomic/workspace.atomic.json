@@ -5420,6 +5420,52 @@
         "After Phase Y: Phase Z (runtime crates wz-runtime-tokio + lwip) + Phase W (MCU hardening) + Phase V (user-facing)."
       ]
     },
+    "Round 48": {
+      "decision_summary": "Phase Y entry — Layer 3 wire-interop tests integrated into verify-codegen.sh. The R39-introduced \"Layer 3 NOT YET IMPLEMENTED\" placeholder is closed; each verify-codegen.sh invocation now runs the paired wz-integration-tests/tests/layer3_<stem>.rs file (cargo test) and reports pass/FAIL/skip. R47b carry list of codecs without Layer 3 tests is now visible as `layer3=skip` lines.",
+      "changes_bullets": [
+        "scripts/verify-codegen.sh: header comment Layer 3 section rewritten (no longer NOT-YET-IMPLEMENTED). Implementation block at script tail invokes `cargo test -p wz-integration-tests --test layer3_<stem>` for the input SCXML's stem. Three result modes: pass (test exists + passes), FAIL (test exists + fails — script exits 1), skip (no test file).",
+        "Verification stack now end-to-end automated for any wz codec: one `bash scripts/verify-codegen.sh <wz.scxml> <sce.scxml>` invocation exercises Layer 1 (6-backend emit) + Layer 2 (body-golden vs SCE fixture) + Layer 3 (byte-equiv vs zenoh-pico FFI). Single-command production gate.",
+        "Empirical validation: close.scxml verify reports `Layer 1: 6/6 / Layer 2: golden match=6 / Layer 3: pass (tests=2)`. timestamp.scxml (no Layer 3 test yet) reports `Layer 3: skip (no tests/layer3_timestamp.rs)` — the skip signal makes the R47b carry list mechanically observable."
+      ],
+      "verification_bullets": [
+        "close.scxml end-to-end verify: Layer 1 6/6 + Layer 2 6/6 match + Layer 3 2/2 pass. Single command exercises all three layers.",
+        "keep_alive.scxml: Layer 1 6/6 + Layer 3 1/1 pass (no upstream pair for Layer 2 here — keep_alive has no SCE codec_zenoh_keep_alive counterpart in the R47 set).",
+        "timestamp.scxml: skip path verified — `layer3=skip (no tests/layer3_timestamp.rs)` correctly identifies the missing test. R47b carry visibility achieved.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 47→48, T3 warn 856 unchanged."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"
+      ],
+      "carry_forward_bullets": [
+        "R49 (Phase Y) = GitHub Actions CI workflow. validate_workspace + verify-codegen.sh per-codec sweep + cargo test --workspace + clippy --deny warnings. The verify-codegen.sh integration (R48) makes the per-codec gate mechanically expressible in CI YAML.",
+        "R50 (Phase Y) = sce-codegen build deploy/ap_standalone.yaml end-to-end. Run the deploy-driven build, compile out/ap/ as a Cargo crate, run cargo check against generated code. Validates the deploy pipeline produces a coherent crate.",
+        "R47b parallel-track = expand Layer 3 catalog. Current `skip` reports identify 10 codecs lacking layer3 tests: timestamp + encoding + locator + wireexpr (file-private encoders, need parent-codec setup) + ext_unit/zint/zbuf + ext_entry (variant arms, implicit via msg_put Z=1) + msg_query/reply/err + response_final + request (public encoders, need msg-struct setup). Each round adds 1-3 layer3 tests.",
+        "After R50: Phase Z (runtime crates wz-runtime-tokio + lwip) + Phase W (MCU hardening) + Phase V (user-facing)."
+      ],
+      "publishable_decision_summary": "Phase Y entry — Layer 3 wire-interop tests integrated into verify-codegen.sh. The R39-introduced \"Layer 3 NOT YET IMPLEMENTED\" placeholder is closed; each verify-codegen.sh invocation now runs the paired wz-integration-tests/tests/layer3_<stem>.rs file (cargo test) and reports pass/FAIL/skip. R47b carry list of codecs without Layer 3 tests is now visible as `layer3=skip` lines.",
+      "publishable_changes_bullets": [
+        "scripts/verify-codegen.sh: header comment Layer 3 section rewritten (no longer NOT-YET-IMPLEMENTED). Implementation block at script tail invokes `cargo test -p wz-integration-tests --test layer3_<stem>` for the input SCXML's stem. Three result modes: pass (test exists + passes), FAIL (test exists + fails — script exits 1), skip (no test file).",
+        "Verification stack now end-to-end automated for any wz codec: one `bash scripts/verify-codegen.sh <wz.scxml> <sce.scxml>` invocation exercises Layer 1 (6-backend emit) + Layer 2 (body-golden vs SCE fixture) + Layer 3 (byte-equiv vs zenoh-pico FFI). Single-command production gate.",
+        "Empirical validation: close.scxml verify reports `Layer 1: 6/6 / Layer 2: golden match=6 / Layer 3: pass (tests=2)`. timestamp.scxml (no Layer 3 test yet) reports `Layer 3: skip (no tests/layer3_timestamp.rs)` — the skip signal makes the R47b carry list mechanically observable."
+      ],
+      "publishable_verification_bullets": [
+        "close.scxml end-to-end verify: Layer 1 6/6 + Layer 2 6/6 match + Layer 3 2/2 pass. Single command exercises all three layers.",
+        "keep_alive.scxml: Layer 1 6/6 + Layer 3 1/1 pass (no upstream pair for Layer 2 here — keep_alive has no SCE codec_zenoh_keep_alive counterpart in the R47 set).",
+        "timestamp.scxml: skip path verified — `layer3=skip (no tests/layer3_timestamp.rs)` correctly identifies the missing test. R47b carry visibility achieved.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 47→48, T3 warn 856 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R49 (Phase Y) = GitHub Actions CI workflow. validate_workspace + verify-codegen.sh per-codec sweep + cargo test --workspace + clippy --deny warnings. The verify-codegen.sh integration (R48) makes the per-codec gate mechanically expressible in CI YAML.",
+        "R50 (Phase Y) = sce-codegen build deploy/ap_standalone.yaml end-to-end. Run the deploy-driven build, compile out/ap/ as a Cargo crate, run cargo check against generated code. Validates the deploy pipeline produces a coherent crate.",
+        "R47b parallel-track = expand Layer 3 catalog. Current `skip` reports identify 10 codecs lacking layer3 tests: timestamp + encoding + locator + wireexpr (file-private encoders, need parent-codec setup) + ext_unit/zint/zbuf + ext_entry (variant arms, implicit via msg_put Z=1) + msg_query/reply/err + response_final + request (public encoders, need msg-struct setup). Each round adds 1-3 layer3 tests.",
+        "After R50: Phase Z (runtime crates wz-runtime-tokio + lwip) + Phase W (MCU hardening) + Phase V (user-facing)."
+      ]
+    },
     "Round 5": {
       "decision_summary": "Scope correction — SESSION_KICKOFF (activity-log genre) and README (empty stub) removed from Mnemosyne workspace as design-doc lifecycle infrastructure genre misfit.",
       "changes_bullets": [
