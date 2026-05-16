@@ -42,7 +42,7 @@ fn pack_zid(payload: &[u8]) -> [u8; 16] {
 }
 
 fn compute_join_cbyte(api_whatami: z_whatami_t, zid_len: u8) -> u8 {
-    assert!(zid_len >= 1 && zid_len <= 16);
+    assert!((1..=16).contains(&zid_len));
     whatami_wire_form(api_whatami) | (((zid_len - 1) & 0x0F) << 4)
 }
 

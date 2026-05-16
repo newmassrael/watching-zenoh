@@ -16,8 +16,8 @@
 //! 408-434`): `VLE(sn) + (optional first/drop ext, gated on header.Z)
 //! + payload bytes`. With `header = 0` (no Z flag, no first/drop
 //! extension emission), the body reduces to `VLE(sn) + payload`,
-//! which is the exact same shape `wz_codecs::fragment::Fragment::
-//! encode()` emits from the wz `fragment.scxml` declaration.
+//! which is the exact same shape `wz_codecs::fragment::Fragment::encode()`
+//! emits from the wz `fragment.scxml` declaration.
 //!
 //! Corpus picks VLE width boundaries (1-byte form covers sn 0..=127;
 //! 2-byte form starts at sn=128; 3-byte form starts at sn=16384) plus

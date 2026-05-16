@@ -34,5 +34,9 @@
 #![allow(non_snake_case)]
 #![allow(dead_code)]
 #![allow(improper_ctypes)]
+// Clippy on bindgen output: same rationale as wz-codecs — the
+// entire crate body is auto-generated FFI, style lints belong on
+// bindgen / clang-emit side, not on the consumer.
+#![allow(clippy::all)]
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));

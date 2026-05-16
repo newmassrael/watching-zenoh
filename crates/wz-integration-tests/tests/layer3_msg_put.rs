@@ -83,7 +83,7 @@ fn layer3_msg_put_no_flags_payload_variants() {
         vec![0xAA],
         (0..127u8).collect(),        // VLE 1-byte boundary (len=127)
         (0..128u8).collect(),        // VLE 2-byte boundary (len=128)
-        (0..255u8).map(|i| i).collect(), // 255 bytes (2-byte VLE)
+        (0..255u8).collect(), // 255 bytes (2-byte VLE)
     ];
     for payload in corpus {
         let wz_bytes = MsgPut {
