@@ -5034,6 +5034,64 @@
         "Production gate carry: GitHub Actions CI (validate_workspace + verify-codegen.sh + cargo test + Layer 3 interop) lands in Phase 4 (R46+ after walking skeleton + a few codec/FSM expansion rounds), per the R39 architectural roadmap."
       ]
     },
+    "Round 41": {
+      "decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
+      "changes_bullets": [
+        "vendor/zenoh-pico submodule added (eclipse-zenoh/zenoh-pico) pinned at 3b3ab65c (1.9.0+10 commits). Matches the R5 zenoh-pico reference state used throughout R29+ SCXML authoring evidence chain. .gitmodules updated.",
+        "crates/zenoh-pico-sys/ new crate (Cargo.toml + build.rs + src/lib.rs + tests/ffi_smoke.rs). Build-deps: cmake 0.1 + bindgen 0.71. Crate-level `links = \"zenohpico\"` declares the static library to cargo's link DAG.",
+        "build.rs two-stage: (1) cmake::Config invokes vendor/zenoh-pico/CMakeLists.txt with BUILD_SHARED_LIBS=OFF + minimum-features flag set, produces libzenohpico.a under OUT_DIR/lib/; (2) bindgen parses include/zenoh-pico.h with allowlisted symbols only (`_z_id_t` + `_z_id_len` for R41 smoke). Linux/macOS platform macro (`ZENOH_LINUX` / `ZENOH_MACOS`) derived from cargo TARGET env var — zenoh-pico's platform.h errors out on missing macro at clang parse time.",
+        "src/lib.rs `include!(concat!(env!(\"OUT_DIR\"), \"/bindings.rs\"))` exposes the FFI surface with the bindgen-required `#![allow(non_*case*)]` set. Documented as raw FFI — NOT a safe wrapper. Layer 3 test harness (R42+) is the intended consumer.",
+        "tests/ffi_smoke.rs (4 tests): _z_id_len exercised across all four `_z_id_t.id[16]` topologies (all-zero / partial-trailing-zeros / all-non-zero / mid-buffer-trailing-nonzero). Each asserts the C function's strip-trailing-zeros loop behavior matches expected length, proving the FFI bridge transfers struct-by-value correctly across the C ABI boundary.",
+        "crates/Cargo.toml workspace members extended to include zenoh-pico-sys."
+      ],
+      "verification_bullets": [
+        "cargo build -p zenoh-pico-sys: pass. CMake configures + builds + installs libzenohpico.a (with all upstream platform support layers compiled), bindgen emits bindings.rs into OUT_DIR, rustc links the static lib into the test binary. ~30s cold-build, sub-second warm.",
+        "cargo test -p zenoh-pico-sys: 4/4 passed / 0 failed. All four _z_id_len cases (lengths 0/5/16/10) match the expected output of zenoh-pico's strip-trailing-zeros loop at src/protocol/core.c:35-45.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 40→41, T3 warn 856 unchanged.",
+        "FFI integrity proven empirically: (a) bindgen-emitted `_z_id_t` struct layout matches C's `struct { uint8_t id[16] }` (4 different non-zero patterns transfer correctly); (b) static linker resolves _z_id_len from libzenohpico.a; (c) C function called by Rust returns correct uint8_t values across the FFI boundary."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer"
+      ],
+      "carry_forward_bullets": [
+        "R42 = `crates/wz-integration-tests` Layer 3 wire-interop tests. Expand zenoh-pico-sys allowlist to include `_z_keep_alive_encode` (simplest body, single MID + 0 body bytes — matches the keep_alive.scxml codec wz emit). Then expand to msg_put / msg_del / scout / hello / etc. Each new codec verified = one new allowlist entry + one new test. Per-codec round-trip: (a) construct a known logical message, (b) encode via wz_codecs::X::encode(), (c) encode via zenoh-pico's _z_*_encode FFI, (d) byte-compare. If they differ, the wz codec SCXML's spec mapping has a bug — first REAL spec validation.",
+        "SCE upstream PR carry (R40) still pending: codegen template `#![doc]` inner-attribute fix in `tools/codegen/templates/forge/rust/<kind>.rs.jinja2`. Drop-in fix when SCE ships it; until then wz-codecs/build.rs's strip workaround stays.",
+        "R43+ = expand wz-codecs to wire all 21 codec SCXMLs (currently 8 of 21). Each new codec lands a paired Layer 3 test in wz-integration-tests.",
+        "R44+ = `sce-codegen build deploy/ap_standalone.yaml` end-to-end exercise. Validates the deploy-driven build pipeline produces a coherent `out/ap/` Cargo crate consumable by AP runtimes.",
+        "R45+ = `crates/wz-runtime-tokio` (sce_link_runtime_tokio impl per docs/runtime-crate-tokio.md). Session FSM script-placeholder wiring round (R29 carry) becomes viable once the runtime trait surface lands.",
+        "Phase 4 CI (R46+): GitHub Actions running validate_workspace + verify-codegen.sh + cargo test (all crates) + Layer 3 interop. The Layer 3 lane is what makes the CI gate meaningful — prior to R42, CI would only catch codegen regressions, not wire-format divergence."
+      ],
+      "publishable_decision_summary": "Phase 2 walking-skeleton FFI bridge lands — `vendor/zenoh-pico` submodule + `crates/zenoh-pico-sys` cmake+bindgen crate. First FFI call from wz Rust into zenoh-pico C library succeeds (4/4 smoke tests on `_z_id_len`). Layer 3 wire-interop foundation in place; R42 can now construct byte-equivalence assertions between wz-emit and zenoh-pico-emit for the same logical message.",
+      "publishable_changes_bullets": [
+        "vendor/zenoh-pico submodule added (eclipse-zenoh/zenoh-pico) pinned at 3b3ab65c (1.9.0+10 commits). Matches the R5 zenoh-pico reference state used throughout R29+ SCXML authoring evidence chain. .gitmodules updated.",
+        "crates/zenoh-pico-sys/ new crate (Cargo.toml + build.rs + src/lib.rs + tests/ffi_smoke.rs). Build-deps: cmake 0.1 + bindgen 0.71. Crate-level `links = \"zenohpico\"` declares the static library to cargo's link DAG.",
+        "build.rs two-stage: (1) cmake::Config invokes vendor/zenoh-pico/CMakeLists.txt with BUILD_SHARED_LIBS=OFF + minimum-features flag set, produces libzenohpico.a under OUT_DIR/lib/; (2) bindgen parses include/zenoh-pico.h with allowlisted symbols only (`_z_id_t` + `_z_id_len` for R41 smoke). Linux/macOS platform macro (`ZENOH_LINUX` / `ZENOH_MACOS`) derived from cargo TARGET env var — zenoh-pico's platform.h errors out on missing macro at clang parse time.",
+        "src/lib.rs `include!(concat!(env!(\"OUT_DIR\"), \"/bindings.rs\"))` exposes the FFI surface with the bindgen-required `#![allow(non_*case*)]` set. Documented as raw FFI — NOT a safe wrapper. Layer 3 test harness (R42+) is the intended consumer.",
+        "tests/ffi_smoke.rs (4 tests): _z_id_len exercised across all four `_z_id_t.id[16]` topologies (all-zero / partial-trailing-zeros / all-non-zero / mid-buffer-trailing-nonzero). Each asserts the C function's strip-trailing-zeros loop behavior matches expected length, proving the FFI bridge transfers struct-by-value correctly across the C ABI boundary.",
+        "crates/Cargo.toml workspace members extended to include zenoh-pico-sys."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p zenoh-pico-sys: pass. CMake configures + builds + installs libzenohpico.a (with all upstream platform support layers compiled), bindgen emits bindings.rs into OUT_DIR, rustc links the static lib into the test binary. ~30s cold-build, sub-second warm.",
+        "cargo test -p zenoh-pico-sys: 4/4 passed / 0 failed. All four _z_id_len cases (lengths 0/5/16/10) match the expected output of zenoh-pico's strip-trailing-zeros loop at src/protocol/core.c:35-45.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 40→41, T3 warn 856 unchanged.",
+        "FFI integrity proven empirically: (a) bindgen-emitted `_z_id_t` struct layout matches C's `struct { uint8_t id[16] }` (4 different non-zero patterns transfer correctly); (b) static linker resolves _z_id_len from libzenohpico.a; (c) C function called by Rust returns correct uint8_t values across the FFI boundary."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R42 = `crates/wz-integration-tests` Layer 3 wire-interop tests. Expand zenoh-pico-sys allowlist to include `_z_keep_alive_encode` (simplest body, single MID + 0 body bytes — matches the keep_alive.scxml codec wz emit). Then expand to msg_put / msg_del / scout / hello / etc. Each new codec verified = one new allowlist entry + one new test. Per-codec round-trip: (a) construct a known logical message, (b) encode via wz_codecs::X::encode(), (c) encode via zenoh-pico's _z_*_encode FFI, (d) byte-compare. If they differ, the wz codec SCXML's spec mapping has a bug — first REAL spec validation.",
+        "SCE upstream PR carry (R40) still pending: codegen template `#![doc]` inner-attribute fix in `tools/codegen/templates/forge/rust/<kind>.rs.jinja2`. Drop-in fix when SCE ships it; until then wz-codecs/build.rs's strip workaround stays.",
+        "R43+ = expand wz-codecs to wire all 21 codec SCXMLs (currently 8 of 21). Each new codec lands a paired Layer 3 test in wz-integration-tests.",
+        "R44+ = `sce-codegen build deploy/ap_standalone.yaml` end-to-end exercise. Validates the deploy-driven build pipeline produces a coherent `out/ap/` Cargo crate consumable by AP runtimes.",
+        "R45+ = `crates/wz-runtime-tokio` (sce_link_runtime_tokio impl per docs/runtime-crate-tokio.md). Session FSM script-placeholder wiring round (R29 carry) becomes viable once the runtime trait surface lands.",
+        "Phase 4 CI (R46+): GitHub Actions running validate_workspace + verify-codegen.sh + cargo test (all crates) + Layer 3 interop. The Layer 3 lane is what makes the CI gate meaningful — prior to R42, CI would only catch codegen regressions, not wire-format divergence."
+      ]
+    },
     "Round 5": {
       "decision_summary": "Scope correction — SESSION_KICKOFF (activity-log genre) and README (empty stub) removed from Mnemosyne workspace as design-doc lifecycle infrastructure genre misfit.",
       "changes_bullets": [
