@@ -180,6 +180,16 @@ fn main() {
         .allowlist_function("_z_init_encode")
         .allowlist_function("_z_open_encode")
         .allowlist_function("_z_join_encode")
+        // R45 — hello codec Layer 3. _z_hello_encode is forward-
+        // declared in wrapper.h (file-private in zenoh-pico's
+        // message.c). The locator array is { _len, _val: *_z_locator_t };
+        // empty-array case (_len=0, _val=null) is sufficient for the
+        // R45 minimum Layer 3 scope (parent.L=0 and parent.L=1 with
+        // zero locators). Non-empty locator construction requires
+        // _z_string_t + _z_str_intmap_t setup; deferred to R45b.
+        .allowlist_type("_z_s_msg_hello_t")
+        .allowlist_type("_z_locator_array_t")
+        .allowlist_function("_z_hello_encode")
         // bindgen layout-test surface: pin to `Debug` derivation to
         // unblock test-side equality checks against zenoh-pico's
         // typed shape.

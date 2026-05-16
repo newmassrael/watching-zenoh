@@ -5272,6 +5272,58 @@
         "After codec Layer 3 catalog completes (R47): R48+ runtime crates (wz-runtime-tokio + wz-runtime-lwip)."
       ]
     },
+    "Round 45": {
+      "decision_summary": "Layer 3 hello codec validated. parent.L gate + locator-array zero-boundary verified (L=0 no locators, L=1 with empty locator array writes VLE(0) trailing byte). 8 of 18 codecs now Layer 3 wire-validated. Non-empty locator construction deferred (requires _z_string_t + _z_str_intmap_t FFI plumbing).",
+      "changes_bullets": [
+        "wz-codecs/build.rs CODECS gains locator + hello. lib.rs gains 2 matching pub mod declarations. cargo build pass.",
+        "zenoh-pico-sys allowlist expanded: _z_hello_encode (already forward-declared in wrapper.h from R44) + _z_s_msg_hello_t + _z_locator_array_t. _z_locator_array_t bindgen-emitted as { _len: usize, _val: *mut _z_locator_t }, suitable for empty-array construction without binding _z_locator_t / _z_string_t.",
+        "tests/layer3_hello.rs (140 lines, 3 tests): L0 no locators (3-byte zid) + L1 empty locator array (writes VLE(0) trailing) + L0 with 16-byte max zid (cbyte.zid_len_m1=15 boundary). All three pass byte-equality vs zenoh-pico _z_hello_encode."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace: 28/28 pass / 0 fail. R44 25 + R45 3 new hello tests = 28.",
+        "Cumulative Layer 3 coverage at end of R45: 8 of 18 wz-codecs SCXMLs wire-validated (close + frame + fragment + scout + open_body + init_body + join + hello).",
+        "parent.L=0 branch confirmed: hello body reduces to version + cbyte + zid bytes, identical between wz and zenoh-pico (3 of 3 zid sizes tested).",
+        "parent.L=1 + empty locators branch confirmed: hello body emits VLE(0) trailing for num_locators=0. wz `Hello { num_locators: Some(0), locators: Some(vec![]) }.encode(0x20)` byte-equal to zenoh-pico `_z_hello_encode(wbf, 0x20, &msg)` with `_locators = { _len: 0, _val: null }`.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 44→45, T3 warn 856 unchanged."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "carry_forward_bullets": [
+        "R45b = hello with NON-EMPTY locators. Requires _z_string_t + _z_str_intmap_t + _z_locator_t FFI plumbing + zenoh-pico string builder helpers (_z_string_from_str_n etc.). Adds the per-locator string-encode validation pass; complements R45's zero-locator boundary.",
+        "R46 = Layer 3 payload bodies (msg_put + msg_del + ext_entry + child codecs timestamp/encoding/ext_unit/zint/zbuf). Variant primitive + embed + tlv-chain + entry-flag termination get Layer 3 review. Most complex round yet — 4 new primitive classes simultaneously validated.",
+        "R47 = network envelopes (request + response_final) + remaining codecs (locator standalone + timestamp + encoding + ext_*). After R47 the entire 18-codec wz-codecs catalog has Layer 3 verification.",
+        "SCE upstream PR carry from R44: codec_zenoh_init_body + codec_zenoh_join sce:default-endian \"big\"→\"little\". Still pending.",
+        "SCE upstream PR carry from R40: #![doc = SCE-MAP] inner-attr template fix in tools/codegen/templates/forge/rust/<kind>.rs.jinja2. Still pending.",
+        "After codec Layer 3 catalog completes (R47): R48+ runtime crates (wz-runtime-tokio + wz-runtime-lwip)."
+      ],
+      "publishable_decision_summary": "Layer 3 hello codec validated. parent.L gate + locator-array zero-boundary verified (L=0 no locators, L=1 with empty locator array writes VLE(0) trailing byte). 8 of 18 codecs now Layer 3 wire-validated. Non-empty locator construction deferred (requires _z_string_t + _z_str_intmap_t FFI plumbing).",
+      "publishable_changes_bullets": [
+        "wz-codecs/build.rs CODECS gains locator + hello. lib.rs gains 2 matching pub mod declarations. cargo build pass.",
+        "zenoh-pico-sys allowlist expanded: _z_hello_encode (already forward-declared in wrapper.h from R44) + _z_s_msg_hello_t + _z_locator_array_t. _z_locator_array_t bindgen-emitted as { _len: usize, _val: *mut _z_locator_t }, suitable for empty-array construction without binding _z_locator_t / _z_string_t.",
+        "tests/layer3_hello.rs (140 lines, 3 tests): L0 no locators (3-byte zid) + L1 empty locator array (writes VLE(0) trailing) + L0 with 16-byte max zid (cbyte.zid_len_m1=15 boundary). All three pass byte-equality vs zenoh-pico _z_hello_encode."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace: 28/28 pass / 0 fail. R44 25 + R45 3 new hello tests = 28.",
+        "Cumulative Layer 3 coverage at end of R45: 8 of 18 wz-codecs SCXMLs wire-validated (close + frame + fragment + scout + open_body + init_body + join + hello).",
+        "parent.L=0 branch confirmed: hello body reduces to version + cbyte + zid bytes, identical between wz and zenoh-pico (3 of 3 zid sizes tested).",
+        "parent.L=1 + empty locators branch confirmed: hello body emits VLE(0) trailing for num_locators=0. wz `Hello { num_locators: Some(0), locators: Some(vec![]) }.encode(0x20)` byte-equal to zenoh-pico `_z_hello_encode(wbf, 0x20, &msg)` with `_locators = { _len: 0, _val: null }`.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 44→45, T3 warn 856 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R45b = hello with NON-EMPTY locators. Requires _z_string_t + _z_str_intmap_t + _z_locator_t FFI plumbing + zenoh-pico string builder helpers (_z_string_from_str_n etc.). Adds the per-locator string-encode validation pass; complements R45's zero-locator boundary.",
+        "R46 = Layer 3 payload bodies (msg_put + msg_del + ext_entry + child codecs timestamp/encoding/ext_unit/zint/zbuf). Variant primitive + embed + tlv-chain + entry-flag termination get Layer 3 review. Most complex round yet — 4 new primitive classes simultaneously validated.",
+        "R47 = network envelopes (request + response_final) + remaining codecs (locator standalone + timestamp + encoding + ext_*). After R47 the entire 18-codec wz-codecs catalog has Layer 3 verification.",
+        "SCE upstream PR carry from R44: codec_zenoh_init_body + codec_zenoh_join sce:default-endian \"big\"→\"little\". Still pending.",
+        "SCE upstream PR carry from R40: #![doc = SCE-MAP] inner-attr template fix in tools/codegen/templates/forge/rust/<kind>.rs.jinja2. Still pending.",
+        "After codec Layer 3 catalog completes (R47): R48+ runtime crates (wz-runtime-tokio + wz-runtime-lwip)."
+      ]
+    },
     "Round 5": {
       "decision_summary": "Scope correction — SESSION_KICKOFF (activity-log genre) and README (empty stub) removed from Mnemosyne workspace as design-doc lifecycle infrastructure genre misfit.",
       "changes_bullets": [
