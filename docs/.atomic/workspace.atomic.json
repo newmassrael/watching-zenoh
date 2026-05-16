@@ -4162,6 +4162,62 @@
         "vle_u64_encode + tlv_advance remain §5.F const-fold gate (A4) blockers, unchanged from R23 carry."
       ]
     },
+    "Round 29": {
+      "decision_summary": "Phase C8 entry — first statechart-kind SCXML lands. sources/session/session_fsm_unicast.scxml encodes unicast handshake (Init/LinkOpening/Opening/Accepting/Established/Closing/Closed) per docs/session-fsm.md §2.1-§2.7 minus deferred sub-scopes (multicast, scouting state, Established sub-regions, stateless_accept variant).",
+      "changes_bullets": [
+        "sources/session/session_fsm_unicast.scxml new (208 lines, sce:kind=statechart). 9 leaf states + 2 compound states (Opening / Accepting) + 1 final (Closed); ~20 transitions including 4 timer-driven (link.open_timeout 5s, init_ack.timeout 2s, open_ack.timeout 2s, closing.timeout 100ms via W3C SCXML 6.2 <send delay=...>).",
+        "Accept-side hardening guards inline (§2.7): Init→Accepting cond=half_open_cap_available() && accept_rate_token(); SentInitAck→SentOpenAck cond=cookie_valid(). Stateless_accept variant + Established RX/TX sub-regions deferred (called out in file comment).",
+        "Script-action bodies are SCE-intrinsic placeholders (link_driver_open, send_init_syn, enable_rx_tx_regions, etc.) — binding to runtime-crate-tokio / runtime-crate-lwip / intrinsics-runtime symbols deferred to later round; this round lands the state-transition graph only.",
+        "sources/session/ directory created per sources/README.md §\"ㄷㅣㅗㄴㅏㅣㅕㅣㄲㅣ ㅗㄷㄲㄷㄷ\" lazy-init policy (first SCXML lands the dir; no .keep sentinel).",
+        "MEMORY.md gained feedback_expand_memory_bodies pointer — R28 strategic-Q assessment lesson: expand memory body files when their topic enters conversation (ETA / scope / blocker), do not rely on the index one-liner alone."
+      ],
+      "verification_bullets": [
+        "verify-codegen.sh Layer 1: 5/6 backends pass (rust / cpp / kotlin / go / c11). Python fails with \"Python statechart codegen is not yet supported\" — SCE-side limitation at vendor pin 1473f99f, not a watching-zenoh regression. MCU + AP deploy paths (c11 / rust) both green.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 28→29, T3 warn 856 unchanged.",
+        "Cross-doc verification: states match docs/session-fsm.md §2.1 (8 states listed; Scouting deferred = 7 active); transitions match §2.2 outbound+inbound chains; timers match §2.5 names + defaults; close-paths match §2.4 6-trigger enum (peer.close, framing.error, link.lost, session.close, lease.expired, tx.congestion.exhaust)."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/2-1-unicast-states",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-4-close-paths",
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail"
+      ],
+      "carry_forward_bullets": [
+        "Established sub-regions (RX / TX / KeepAlive parallel regions per docs/session-fsm.md §2.3) — next session-fsm round; introduces SCXML <parallel> element + region-local transitions.",
+        "stateless_accept variant (§2.7 third hardening cap) — separate file session_fsm_unicast_stateless_accept.scxml or inline behind sce:variant=stateless_accept; depends on OQ-W15(a) ratify exchange with SCE maintainer for HMAC / RNG intrinsic ownership.",
+        "session_fsm_multicast.scxml — docs/session-fsm.md §3 multicast variant (no Init/Open handshake, peer table maintenance); separate file per kind-prefix convention.",
+        "scouting.scxml — docs/scouting-fsm.md mapping; composes into session-fsm at Init level. Active + static modes (passive deferred to Phase D+ per R5 OQ-W23 close).",
+        "SCE-side: Python statechart emitter unsupported at vendor pin 1473f99f. Low priority (no deploy uses Python for state machine targets); not a blocker. Optional upstream PR for SCE to close the 6/6 parity gap on statechart kind."
+      ],
+      "publishable_decision_summary": "Phase C8 entry — first statechart-kind SCXML lands. sources/session/session_fsm_unicast.scxml encodes unicast handshake (Init/LinkOpening/Opening/Accepting/Established/Closing/Closed) per docs/session-fsm.md §2.1-§2.7 minus deferred sub-scopes (multicast, scouting state, Established sub-regions, stateless_accept variant).",
+      "publishable_changes_bullets": [
+        "sources/session/session_fsm_unicast.scxml new (208 lines, sce:kind=statechart). 9 leaf states + 2 compound states (Opening / Accepting) + 1 final (Closed); ~20 transitions including 4 timer-driven (link.open_timeout 5s, init_ack.timeout 2s, open_ack.timeout 2s, closing.timeout 100ms via W3C SCXML 6.2 <send delay=...>).",
+        "Accept-side hardening guards inline (§2.7): Init→Accepting cond=half_open_cap_available() && accept_rate_token(); SentInitAck→SentOpenAck cond=cookie_valid(). Stateless_accept variant + Established RX/TX sub-regions deferred (called out in file comment).",
+        "Script-action bodies are SCE-intrinsic placeholders (link_driver_open, send_init_syn, enable_rx_tx_regions, etc.) — binding to runtime-crate-tokio / runtime-crate-lwip / intrinsics-runtime symbols deferred to later round; this round lands the state-transition graph only.",
+        "sources/session/ directory created per sources/README.md §\"ㄷㅣㅗㄴㅏㅣㅕㅣㄲㅣ ㅗㄷㄲㄷㄷ\" lazy-init policy (first SCXML lands the dir; no .keep sentinel).",
+        "MEMORY.md gained feedback_expand_memory_bodies pointer — R28 strategic-Q assessment lesson: expand memory body files when their topic enters conversation (ETA / scope / blocker), do not rely on the index one-liner alone."
+      ],
+      "publishable_verification_bullets": [
+        "verify-codegen.sh Layer 1: 5/6 backends pass (rust / cpp / kotlin / go / c11). Python fails with \"Python statechart codegen is not yet supported\" — SCE-side limitation at vendor pin 1473f99f, not a watching-zenoh regression. MCU + AP deploy paths (c11 / rust) both green.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 28→29, T3 warn 856 unchanged.",
+        "Cross-doc verification: states match docs/session-fsm.md §2.1 (8 states listed; Scouting deferred = 7 active); transitions match §2.2 outbound+inbound chains; timers match §2.5 names + defaults; close-paths match §2.4 6-trigger enum (peer.close, framing.error, link.lost, session.close, lease.expired, tx.congestion.exhaust)."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/2-1-unicast-states",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-4-close-paths",
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Established sub-regions (RX / TX / KeepAlive parallel regions per docs/session-fsm.md §2.3) — next session-fsm round; introduces SCXML <parallel> element + region-local transitions.",
+        "stateless_accept variant (§2.7 third hardening cap) — separate file session_fsm_unicast_stateless_accept.scxml or inline behind sce:variant=stateless_accept; depends on OQ-W15(a) ratify exchange with SCE maintainer for HMAC / RNG intrinsic ownership.",
+        "session_fsm_multicast.scxml — docs/session-fsm.md §3 multicast variant (no Init/Open handshake, peer table maintenance); separate file per kind-prefix convention.",
+        "scouting.scxml — docs/scouting-fsm.md mapping; composes into session-fsm at Init level. Active + static modes (passive deferred to Phase D+ per R5 OQ-W23 close).",
+        "SCE-side: Python statechart emitter unsupported at vendor pin 1473f99f. Low priority (no deploy uses Python for state machine targets); not a blocker. Optional upstream PR for SCE to close the 6/6 parity gap on statechart kind."
+      ]
+    },
     "Round 3": {
       "decision_summary": "Phase B complete — RFC §5 thirteen kind sub-sections atomic decomposition (5.A-5.F, 5.I-5.O); Phase 2 deferred 5.G/5.H skipped.",
       "changes_bullets": [
@@ -4256,6 +4312,46 @@
         "Phase D: residual 6 docs (intrinsics-runtime / runtime-crate-{lwip,tokio} / wire-spec / ARCHITECTURE / SESSION_KICKOFF / README)",
         "Phase 2 deferred kinds: §5.G parametric, §5.H recursive/tree (not in current scope, atomic landing deferred)",
         "Heading-slug ID convention from Phase A/B carries forward to Phases C-D"
+      ]
+    },
+    "Round 30": {
+      "decision_summary": "vendor/sce submodule pin bump 1473f99f → 11f1032d. R29's session_fsm_unicast.scxml goes from 5/6 → 6/6 emit parity; 14 algorithm SCXMLs × 6 backends remain green (84/84, zero regression). Closes the Python statechart codegen gap discovered in R29 — SCE-side fix was already in flight as the α→γ-5 atomic chain plus W3C conformance fixes.",
+      "changes_bullets": [
+        "vendor/sce submodule gitlink: 1473f99f → 11f1032d (60+ SCE commits advanced; principal payload = Python AOT statechart 6-backend parity + W3C SCXML conformance fixes for parallel re-entry / history default / donedata / etc.).",
+        "scripts/build-sce.sh re-run (cargo --release --features cli --bin sce-codegen, 1m25s clean build at new pin). Binary at vendor/sce/target/release/sce-codegen now reflects 11f1032d.",
+        "Memory sce_vendor_pin_state.md rewritten with new pin facts + R29→R30 verification audit; MEMORY.md index line updated.",
+        "No watching-zenoh source/doc/SCXML change in this round — pure dependency advance + audit trail."
+      ],
+      "verification_bullets": [
+        "verify-codegen.sh on sources/session/session_fsm_unicast.scxml: 6/6 emit pass (previously 5/6 at 1473f99f, python branch landed with the chain).",
+        "Regression sweep across sources/algorithms/*.scxml (14 files) × 6 backends = 84/84 emit pass. Zero regressions from the bump.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 29→30, T3 warn 856 unchanged.",
+        "SCE clone vs submodule reconciliation: confirmed local SCE main at /home/coin/scxml-core-engine was 8 commits ahead of GitHub origin before user-side push; after push, origin/main advanced to 11f1032d. Submodule fetched cleanly without re-conflict."
+      ],
+      "carry_forward_bullets": [
+        "R29 deferred sub-scopes still apply: Established sub-regions (<parallel>), stateless_accept variant, session_fsm_multicast, scouting.scxml — all now authorable against the new pin with 6/6 parity expectation.",
+        "Phase B5 wire codec SCXMLs (~30) — codec kind, separate from statechart kind. Pin advance does not change blocker status (was never blocked).",
+        "crates/ runtime stub code still empty — link driver + intrinsics binding deferred to a runtime-track round after the FSM track has more files.",
+        "vendor/sce pin advancement remains a named carry — bump after SCE side ships a relevant feature, never preemptively. Next bump trigger: codec DSL extensions (RFC §5.B) or any future SCE main advance that closes a watching-zenoh-side gap discovered in verify-codegen.sh."
+      ],
+      "publishable_decision_summary": "vendor/sce submodule pin bump 1473f99f → 11f1032d. R29's session_fsm_unicast.scxml goes from 5/6 → 6/6 emit parity; 14 algorithm SCXMLs × 6 backends remain green (84/84, zero regression). Closes the Python statechart codegen gap discovered in R29 — SCE-side fix was already in flight as the α→γ-5 atomic chain plus W3C conformance fixes.",
+      "publishable_changes_bullets": [
+        "vendor/sce submodule gitlink: 1473f99f → 11f1032d (60+ SCE commits advanced; principal payload = Python AOT statechart 6-backend parity + W3C SCXML conformance fixes for parallel re-entry / history default / donedata / etc.).",
+        "scripts/build-sce.sh re-run (cargo --release --features cli --bin sce-codegen, 1m25s clean build at new pin). Binary at vendor/sce/target/release/sce-codegen now reflects 11f1032d.",
+        "Memory sce_vendor_pin_state.md rewritten with new pin facts + R29→R30 verification audit; MEMORY.md index line updated.",
+        "No watching-zenoh source/doc/SCXML change in this round — pure dependency advance + audit trail."
+      ],
+      "publishable_verification_bullets": [
+        "verify-codegen.sh on sources/session/session_fsm_unicast.scxml: 6/6 emit pass (previously 5/6 at 1473f99f, python branch landed with the chain).",
+        "Regression sweep across sources/algorithms/*.scxml (14 files) × 6 backends = 84/84 emit pass. Zero regressions from the bump.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 29→30, T3 warn 856 unchanged.",
+        "SCE clone vs submodule reconciliation: confirmed local SCE main at /home/coin/scxml-core-engine was 8 commits ahead of GitHub origin before user-side push; after push, origin/main advanced to 11f1032d. Submodule fetched cleanly without re-conflict."
+      ],
+      "publishable_carry_forward_bullets": [
+        "R29 deferred sub-scopes still apply: Established sub-regions (<parallel>), stateless_accept variant, session_fsm_multicast, scouting.scxml — all now authorable against the new pin with 6/6 parity expectation.",
+        "Phase B5 wire codec SCXMLs (~30) — codec kind, separate from statechart kind. Pin advance does not change blocker status (was never blocked).",
+        "crates/ runtime stub code still empty — link driver + intrinsics binding deferred to a runtime-track round after the FSM track has more files.",
+        "vendor/sce pin advancement remains a named carry — bump after SCE side ships a relevant feature, never preemptively. Next bump trigger: codec DSL extensions (RFC §5.B) or any future SCE main advance that closes a watching-zenoh-side gap discovered in verify-codegen.sh."
       ]
     },
     "Round 4": {
