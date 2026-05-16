@@ -14,8 +14,8 @@
 //!   - byte 0: version
 //!   - byte 1: cbyte (low 2 bits = whatami wire-form; high 4 bits = zid_len_m1)
 //!   - bytes 2+: zid (length = zid_len_m1 + 1)
-//!   - parent.S: sn_res byte (low 2 bits = seq_num_res, bits 2..3 = req_id_res)
-//!               + batch_size u16 BE
+//!   - parent.S: sn_res byte (low 2 bits = seq_num_res, bits 2..3 =
+//!     req_id_res) + batch_size u16 LE
 //!   - parent.A: VLE(cookie_len) + cookie bytes
 
 use wz_codecs::init_body::InitBody;
@@ -51,7 +51,10 @@ fn pack_zid(payload: &[u8]) -> [u8; 16] {
 /// (transport.c:189-192): low 2 bits = wire-form whatami,
 /// high 4 bits = zid_len - 1.
 fn compute_init_cbyte(api_whatami: z_whatami_t, zid_len: u8) -> u8 {
-    assert!(zid_len >= 1 && zid_len <= 16, "init body requires zid_len in 1..=16");
+    assert!(
+        (1..=16).contains(&zid_len),
+        "init body requires zid_len in 1..=16"
+    );
     whatami_wire_form(api_whatami) | (((zid_len - 1) & 0x0F) << 4)
 }
 

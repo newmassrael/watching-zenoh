@@ -5466,6 +5466,56 @@
         "After R50: Phase Z (runtime crates wz-runtime-tokio + lwip) + Phase W (MCU hardening) + Phase V (user-facing)."
       ]
     },
+    "Round 49": {
+      "decision_summary": "GitHub Actions CI workflow added — Layer A (mnemosyne workspace integrity) + Layer B (per-codec verify-codegen.sh = L1+L2+L3) + Layer C (cargo test + cargo clippy --deny warnings). Clippy gate also adopted locally for wz-codecs + zenoh-pico-sys + wz-integration-tests. Production-grade automated gate ready for PR + main-push runs.",
+      "changes_bullets": [
+        ".github/workflows/ci.yml new (~150 lines). Single ubuntu-22.04 runner job with: checkout (submodules: recursive) + apt cmake/libclang/clang/perl + rust toolchain (stable, with rustfmt+clippy) + cache (Swatinem/rust-cache v2 for crates + vendor/sce) + mnemosyne-cli install (graceful skip on failure) + build-sce.sh + mnemosyne validate-workspace + per-codec verify-codegen.sh sweep with audit-traced LE-divergence allowlist for init_body+join + cargo test --workspace + cargo clippy --workspace --all-targets -- -D warnings.",
+        "wz-codecs/src/lib.rs gains crate-level `#![allow(clippy::all)]` — the entire crate body is sce-codegen include!()'d output, so clippy style lints are SCE template authoring concerns not consumer-tunable. Workspace rustc `warnings = \"deny\"` policy stays in force (rustc warnings ARE consumer-actionable).",
+        "zenoh-pico-sys/src/lib.rs gains `#![allow(clippy::all)]` for the same reason — entire crate is bindgen FFI output.",
+        "wz-integration-tests test files cleaned: `manual_range_contains` (3 places) — `zid_len >= 1 && zid_len <= 16` → `(1..=16).contains(&zid_len)`; `unnecessary identity map` (msg_put: `(0..255u8).map(|i| i).collect()` → `.collect()`); doc list indentation in fragment + init_body. All clippy lints in human-authored code resolved at source, not muted."
+      ],
+      "verification_bullets": [
+        "cargo clippy --workspace --all-targets -- -D warnings: clean (0 warnings, 0 errors).",
+        "cargo test --workspace: 32/32 pass (no regression from clippy fixes).",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 48→49, T3 warn 856 unchanged.",
+        "CI workflow YAML lints clean (no syntax errors per local yamllint check). Workflow will execute on next push to main / PR.",
+        "Layer 2 known-divergence (R44 LE fix for init_body + join) handled in workflow via LAYER2_KNOWN_DIVERGENCE list: codecs in this set may report Layer 2 MISMATCH; the CI re-runs them without `<upstream>` arg to verify L1+L3 alone. Until SCE upstream PR lands, the divergence is audit-traced and doesn't fail CI."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"
+      ],
+      "carry_forward_bullets": [
+        "R50 (Phase Y closure) = `sce-codegen build deploy/ap_standalone.yaml` end-to-end. Run the deploy-driven build, compile out/ap/ as a Cargo crate via cargo check, integrate into the CI workflow as a fourth lane.",
+        "First-run CI trigger: push current branch + open a draft PR to validate the workflow on actual GitHub runner. Local clippy + tests pass; runner-specific failures (apt package versions, libclang quirks, mnemosyne-cli install path) will surface on first run.",
+        "R47b parallel-track = Layer 3 catalog expansion (timestamp + encoding + ext_* + msg_query/reply/err + response_final). The skip reports from verify-codegen.sh now provide a mechanical checklist.",
+        "After R50: Phase Z (runtime crates wz-runtime-tokio + lwip) + Phase W (MCU hardening) + Phase V (user-facing). Mnemosyne-cli install fallback for CI when upstream PAT is not configured — may need a tarball mirror in `vendor/`."
+      ],
+      "publishable_decision_summary": "GitHub Actions CI workflow added — Layer A (mnemosyne workspace integrity) + Layer B (per-codec verify-codegen.sh = L1+L2+L3) + Layer C (cargo test + cargo clippy --deny warnings). Clippy gate also adopted locally for wz-codecs + zenoh-pico-sys + wz-integration-tests. Production-grade automated gate ready for PR + main-push runs.",
+      "publishable_changes_bullets": [
+        ".github/workflows/ci.yml new (~150 lines). Single ubuntu-22.04 runner job with: checkout (submodules: recursive) + apt cmake/libclang/clang/perl + rust toolchain (stable, with rustfmt+clippy) + cache (Swatinem/rust-cache v2 for crates + vendor/sce) + mnemosyne-cli install (graceful skip on failure) + build-sce.sh + mnemosyne validate-workspace + per-codec verify-codegen.sh sweep with audit-traced LE-divergence allowlist for init_body+join + cargo test --workspace + cargo clippy --workspace --all-targets -- -D warnings.",
+        "wz-codecs/src/lib.rs gains crate-level `#![allow(clippy::all)]` — the entire crate body is sce-codegen include!()'d output, so clippy style lints are SCE template authoring concerns not consumer-tunable. Workspace rustc `warnings = \"deny\"` policy stays in force (rustc warnings ARE consumer-actionable).",
+        "zenoh-pico-sys/src/lib.rs gains `#![allow(clippy::all)]` for the same reason — entire crate is bindgen FFI output.",
+        "wz-integration-tests test files cleaned: `manual_range_contains` (3 places) — `zid_len >= 1 && zid_len <= 16` → `(1..=16).contains(&zid_len)`; `unnecessary identity map` (msg_put: `(0..255u8).map(|i| i).collect()` → `.collect()`); doc list indentation in fragment + init_body. All clippy lints in human-authored code resolved at source, not muted."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clippy --workspace --all-targets -- -D warnings: clean (0 warnings, 0 errors).",
+        "cargo test --workspace: 32/32 pass (no regression from clippy fixes).",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 48→49, T3 warn 856 unchanged.",
+        "CI workflow YAML lints clean (no syntax errors per local yamllint check). Workflow will execute on next push to main / PR.",
+        "Layer 2 known-divergence (R44 LE fix for init_body + join) handled in workflow via LAYER2_KNOWN_DIVERGENCE list: codecs in this set may report Layer 2 MISMATCH; the CI re-runs them without `<upstream>` arg to verify L1+L3 alone. Until SCE upstream PR lands, the divergence is audit-traced and doesn't fail CI."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R50 (Phase Y closure) = `sce-codegen build deploy/ap_standalone.yaml` end-to-end. Run the deploy-driven build, compile out/ap/ as a Cargo crate via cargo check, integrate into the CI workflow as a fourth lane.",
+        "First-run CI trigger: push current branch + open a draft PR to validate the workflow on actual GitHub runner. Local clippy + tests pass; runner-specific failures (apt package versions, libclang quirks, mnemosyne-cli install path) will surface on first run.",
+        "R47b parallel-track = Layer 3 catalog expansion (timestamp + encoding + ext_* + msg_query/reply/err + response_final). The skip reports from verify-codegen.sh now provide a mechanical checklist.",
+        "After R50: Phase Z (runtime crates wz-runtime-tokio + lwip) + Phase W (MCU hardening) + Phase V (user-facing). Mnemosyne-cli install fallback for CI when upstream PAT is not configured — may need a tarball mirror in `vendor/`."
+      ]
+    },
     "Round 5": {
       "decision_summary": "Scope correction — SESSION_KICKOFF (activity-log genre) and README (empty stub) removed from Mnemosyne workspace as design-doc lifecycle infrastructure genre misfit.",
       "changes_bullets": [

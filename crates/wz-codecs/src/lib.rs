@@ -23,6 +23,17 @@
 //! `no_std + alloc` variant lands when the lwip runtime crate
 //! arrives; the codegen output already supports both per
 //! `sce-forge-runtime` baseline `no_std` contract.
+//!
+//! Clippy policy: the entire crate body is sce-codegen output —
+//! clippy lints on the generated code's style (unnecessary casts,
+//! redundant binding patterns, etc.) are SCE template authoring
+//! concerns, not consumer-tunable. `#![allow(clippy::all)]` here
+//! silences clippy for the include!()-pasted modules while the
+//! workspace's rustc `warnings = "deny"` policy stays in force
+//! (rustc warnings ARE consumer-actionable; clippy style nits on
+//! generated code are not).
+
+#![allow(clippy::all)]
 
 pub mod timestamp {
     include!(concat!(env!("OUT_DIR"), "/timestamp.rs"));
