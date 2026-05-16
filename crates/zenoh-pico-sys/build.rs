@@ -164,6 +164,22 @@ fn main() {
         .allowlist_function("_z_frame_encode")
         .allowlist_function("_z_fragment_encode")
         .allowlist_function("_z_slice_as_zbuf")
+        // R44 — handshake bodies Layer 3 (scout + init + open + join).
+        // scout exercises cbyte multi-bit packing without parent
+        // flags; init/open/join exercise parent.S / parent.A
+        // (positive + NEGATION) gating. Each codec brings a new
+        // msg-struct shape (zid as fixed [u8;16], cookie as slice,
+        // VLE next_sn chain).
+        .allowlist_type("_z_s_msg_scout_t")
+        .allowlist_type("_z_t_msg_init_t")
+        .allowlist_type("_z_t_msg_open_t")
+        .allowlist_type("_z_t_msg_join_t")
+        .allowlist_type("z_what_t")
+        .allowlist_type("z_whatami_t")
+        .allowlist_function("_z_scout_encode")
+        .allowlist_function("_z_init_encode")
+        .allowlist_function("_z_open_encode")
+        .allowlist_function("_z_join_encode")
         // bindgen layout-test surface: pin to `Debug` derivation to
         // unblock test-side equality checks against zenoh-pico's
         // typed shape.

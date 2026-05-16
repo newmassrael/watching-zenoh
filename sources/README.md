@@ -88,7 +88,7 @@ CLI가 watching-zenoh 측 입력에 대해 호출됐을 때 SCE의 fixture와
 
 본문 SCXML body (`<sce:signature>`, `<sce:body>`, `<sce:test-vector>`
 등 의미 노드)는 SCE fixture와 byte-identical 유지가 원칙. 차이는
-다음 세 가지만 허용:
+다음 네 가지만 허용:
 
 1. **SPDX header block 추가** — watching-zenoh 측 프로젝트 라이선스
    메타데이터; codegen output에는 영향 없음 (XML parser가 comment
@@ -100,10 +100,17 @@ CLI가 watching-zenoh 측 입력에 대해 호출됐을 때 SCE의 fixture와
 3. **`<sce:import src=` 경로** — wz 측 sibling 파일 stem으로 retarget
    (e.g., `src="codec_zenoh_timestamp.scxml"` → `src="timestamp.scxml"`).
    `as=` alias는 SCE 측을 유지 (codegen 출력의 type 참조가 alias 기반).
+4. **Layer 3 wire-interop 검증 결과 SCE fixture가 zenoh-pico와 drift된
+   경우, wz가 zenoh-pico 측 정정** — R44에서 처음 적발 (init_body +
+   join의 `sce:default-endian="big"` ↔ zenoh-pico `_z_uint16_encode`
+   LSB-first LE). 각 codec별 SCXML 헤더 코멘트에 정정 근거 +
+   해당 Layer 3 test 이름 + SCE upstream PR carry 명시. 이 분류의
+   divergence는 verify-codegen.sh Layer 2에서 MISMATCH로 보고되는데,
+   *그것이 올바른 신호*. SCE upstream PR이 land되면 mismatch 해소.
 
 SCE 측 fixture가 갱신될 경우 mechanical sync (본문 변경분을 그대로
-가져오고 SPDX header + stem + import src 만 유지). divergence는
-audit-trace 항목으로 회수 — 무단 divergence 금지.
+가져오고 SPDX header + stem + import src + Layer 3-driven 정정만
+유지). divergence는 audit-trace 항목으로 회수 — 무단 divergence 금지.
 
 ## Symbol naming convention (architectural decision — R39)
 

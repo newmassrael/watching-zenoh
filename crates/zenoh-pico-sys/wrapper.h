@@ -37,4 +37,19 @@
 #include "zenoh-pico/protocol/codec/transport.h"
 #include "zenoh-pico/protocol/codec/message.h"
 
+/* Forward declarations for body-codec functions that have C-side
+ * implementations in src/protocol/codec/message.c but no header
+ * declaration (they are wrapped behind the public
+ * `_z_scouting_message_encode` dispatcher in the upstream API).
+ *
+ * For Layer 3 byte-compare tests we need the body codec's output
+ * directly (without the dispatcher's MID byte prefix), so we declare
+ * the symbols here. The corresponding object code is already in
+ * libzenohpico.a — declaring them here only changes the visibility
+ * to bindgen + the rust linker, not the C-side build.
+ */
+#include "zenoh-pico/protocol/definitions/transport.h"  /* _z_s_msg_scout_t, _z_s_msg_hello_t */
+z_result_t _z_scout_encode(_z_wbuf_t *wbf, uint8_t header, const _z_s_msg_scout_t *msg);
+z_result_t _z_hello_encode(_z_wbuf_t *wbf, uint8_t header, const _z_s_msg_hello_t *msg);
+
 #endif /* WZ_ZENOH_PICO_SYS_WRAPPER_H */
