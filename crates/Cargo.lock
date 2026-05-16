@@ -860,6 +860,7 @@ dependencies = [
  "sce-rust-runtime",
  "tokio",
  "wz-codecs",
+ "wz-runtime-tokio",
 ]
 
 [[package]]

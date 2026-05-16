@@ -65,7 +65,7 @@ impl BoxedLinkDriver for RecordingDriver {
 fn r55b_engine_drives_link_opening_onentry_script() {
     let driver = Arc::new(RecordingDriver::default());
     let actions =
-        SessionLinkActions::new(driver.clone(), SessionInitParams::default());
+        SessionLinkActions::new(driver.clone(), SessionInitParams::for_test());
     if install_session_actions(actions.clone()).is_err() {
         // Sibling test in same binary already installed; rebind to
         // our fresh actions for this test's assertions.

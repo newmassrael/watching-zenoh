@@ -223,7 +223,7 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     let second_driver: Arc<dyn BoxedLinkDriver> =
         Arc::new(RecordingDriver::default());
     let second_actions =
-        SessionLinkActions::new(second_driver, SessionInitParams::default());
+        SessionLinkActions::new(second_driver, SessionInitParams::for_test());
     let second_install = install_session_actions(second_actions);
     assert!(
         second_install.is_err(),
