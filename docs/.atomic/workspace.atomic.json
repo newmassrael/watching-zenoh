@@ -4402,6 +4402,54 @@
         "crates/ runtime stub code still empty — link driver + intrinsics binding deferred to a later runtime-track round once enough codec + FSM files exist to pin the actual binding surface."
       ]
     },
+    "Round 32": {
+      "decision_summary": "B5 codec track continues — sources/codecs/frame.scxml + fragment.scxml authored. First VLE + tail primitive composition (B1-α + tail) plus first inline test-vector land (B5-θ 4-case set). Both share identical body shape per zenoh-pico (sn:VLE + payload:tail, no extensions); differ only in enclosing MID (0x05 Frame / 0x06 Fragment).",
+      "changes_bullets": [
+        "sources/codecs/frame.scxml new (62 lines, sce:kind=codec). Field 0=sn uint64 VLE, field 1=payload bytes tail max-size=65536. 4 inline test-vectors (sn=0/1/127/128 VLE width boundaries + per-row payload composition).",
+        "sources/codecs/fragment.scxml new (52 lines, sce:kind=codec). Same body shape as frame.scxml; distinct only at enclosing MID + R/M host-state flags (not wire-body-visible). Same 4 inline test-vectors.",
+        "Body byte-identical to SCE upstream codec_zenoh_frame + codec_zenoh_fragment at vendor pin 11f1032d; diff is SPDX header + file stem + root name attribute (wz convention: name=frame / name=fragment match stems).",
+        "Codec primitive coverage advance: R31 = empty body + single uint8 (B1-baseline); R32 = VLE + tail composition + 4-vector inline oracle (B1-α + B5-θ). Each codec now adds one or two new primitive surfaces beyond R31."
+      ],
+      "verification_bullets": [
+        "verify-codegen.sh Layer 1 on both files: 6/6 emit pass each = 12/12. Total Phase B5 codec coverage at end of R32: 4 SCXMLs (keep_alive / close / frame / fragment) × 6 backends = 24/24 emit pass at vendor pin 11f1032d.",
+        "Inline test-vector parsing exercised — SCE codegen at 11f1032d accepts <sce:test-vector hex=...><sce:decoded field=... value=.../><sce:decoded field=... hex=.../></sce:test-vector> grammar without diagnostic. Confirms B5-θ trunk land on the new pin.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 31→32, T3 warn 856 unchanged.",
+        "Cross-doc verification: frame body bound to zenoh-pico src/protocol/codec/transport.c:386-395 _z_frame_encode; fragment body bound to lines 409-434 _z_fragment_encode (with no-extension fast path at 429-431). Both confirm sn-VLE + payload-tail composition without extension chain on the body-codec scope."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "carry_forward_bullets": [
+        "~26 codec SCXMLs remaining. Next-smallest targets: scout / hello (§3 scouting bodies, +flag-packing primitive B5-α + length-ref dotted-path B5-κ + present-if B1-δ). Init/Open/Join bodies (§4.1) follow after the scouting pair.",
+        "Codec primitive coverage check: keep_alive/close/frame/fragment exercise empty-body + uint8 + VLE + tail. Next primitives to introduce: multi-bit flag (scout cbyte), length-ref dotted-path (scout zid_len_m1), present-if (scout I gate), arithmetic offset (+1). One pair (scout+hello) likely covers all four.",
+        "R29 statechart carry items unchanged (Established sub-regions / stateless_accept variant / multicast / scouting FSM). Codec + statechart tracks proceed in parallel.",
+        "Layer 2 byte-golden expectation refinement carry from R31 — 'mismatch on filename, match on body' classification still pending verify-codegen.sh enhancement. Low priority."
+      ],
+      "publishable_decision_summary": "B5 codec track continues — sources/codecs/frame.scxml + fragment.scxml authored. First VLE + tail primitive composition (B1-α + tail) plus first inline test-vector land (B5-θ 4-case set). Both share identical body shape per zenoh-pico (sn:VLE + payload:tail, no extensions); differ only in enclosing MID (0x05 Frame / 0x06 Fragment).",
+      "publishable_changes_bullets": [
+        "sources/codecs/frame.scxml new (62 lines, sce:kind=codec). Field 0=sn uint64 VLE, field 1=payload bytes tail max-size=65536. 4 inline test-vectors (sn=0/1/127/128 VLE width boundaries + per-row payload composition).",
+        "sources/codecs/fragment.scxml new (52 lines, sce:kind=codec). Same body shape as frame.scxml; distinct only at enclosing MID + R/M host-state flags (not wire-body-visible). Same 4 inline test-vectors.",
+        "Body byte-identical to SCE upstream codec_zenoh_frame + codec_zenoh_fragment at vendor pin 11f1032d; diff is SPDX header + file stem + root name attribute (wz convention: name=frame / name=fragment match stems).",
+        "Codec primitive coverage advance: R31 = empty body + single uint8 (B1-baseline); R32 = VLE + tail composition + 4-vector inline oracle (B1-α + B5-θ). Each codec now adds one or two new primitive surfaces beyond R31."
+      ],
+      "publishable_verification_bullets": [
+        "verify-codegen.sh Layer 1 on both files: 6/6 emit pass each = 12/12. Total Phase B5 codec coverage at end of R32: 4 SCXMLs (keep_alive / close / frame / fragment) × 6 backends = 24/24 emit pass at vendor pin 11f1032d.",
+        "Inline test-vector parsing exercised — SCE codegen at 11f1032d accepts <sce:test-vector hex=...><sce:decoded field=... value=.../><sce:decoded field=... hex=.../></sce:test-vector> grammar without diagnostic. Confirms B5-θ trunk land on the new pin.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 31→32, T3 warn 856 unchanged.",
+        "Cross-doc verification: frame body bound to zenoh-pico src/protocol/codec/transport.c:386-395 _z_frame_encode; fragment body bound to lines 409-434 _z_fragment_encode (with no-extension fast path at 429-431). Both confirm sn-VLE + payload-tail composition without extension chain on the body-codec scope."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "~26 codec SCXMLs remaining. Next-smallest targets: scout / hello (§3 scouting bodies, +flag-packing primitive B5-α + length-ref dotted-path B5-κ + present-if B1-δ). Init/Open/Join bodies (§4.1) follow after the scouting pair.",
+        "Codec primitive coverage check: keep_alive/close/frame/fragment exercise empty-body + uint8 + VLE + tail. Next primitives to introduce: multi-bit flag (scout cbyte), length-ref dotted-path (scout zid_len_m1), present-if (scout I gate), arithmetic offset (+1). One pair (scout+hello) likely covers all four.",
+        "R29 statechart carry items unchanged (Established sub-regions / stateless_accept variant / multicast / scouting FSM). Codec + statechart tracks proceed in parallel.",
+        "Layer 2 byte-golden expectation refinement carry from R31 — 'mismatch on filename, match on body' classification still pending verify-codegen.sh enhancement. Low priority."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
