@@ -72,6 +72,14 @@ pub mod join {
     include!(concat!(env!("OUT_DIR"), "/join.rs"));
 }
 
+pub mod locator {
+    include!(concat!(env!("OUT_DIR"), "/locator.rs"));
+}
+
+pub mod hello {
+    include!(concat!(env!("OUT_DIR"), "/hello.rs"));
+}
+
 pub mod ext_entry {
     include!(concat!(env!("OUT_DIR"), "/ext_entry.rs"));
 }
