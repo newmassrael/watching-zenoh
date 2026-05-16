@@ -30,6 +30,7 @@ members = [
     "wz-codecs",
     "zenoh-pico-sys",
     "wz-integration-tests",
+    "wz-runtime-tokio",
 ]
 
 [workspace.package]
