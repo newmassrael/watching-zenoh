@@ -41,11 +41,15 @@ const CODECS: &[&str] = &[
     "open_body", // §4.1 Open body — parent.A NEGATION gate — R44 ✓
     "join",      // §4.1 Join body — parent.S + multi-VLE — R44 ✓
     "locator",   // §3 hello locator element — R45 (hello dep)
+    "keep_alive",// §4.1 empty body (transport keepalive) — R47 trivial
     // Composing codecs
     "hello",     // §3 Hello body — parent.L + repeat<locator> — R45
     "ext_entry", // imports ext_unit / ext_zint / ext_zbuf
     "msg_put",   // imports timestamp / encoding / ext_entry
     "msg_del",   // imports timestamp / ext_entry
+    "wireexpr",  // §5 keyexpr fragment — parent.N gated suffix — R47
+    "query",     // §6.2 Query body — header gates + tlv-chain — R47
+    "request",   // §5 Z_REQUEST envelope — peek-byte dispatch — R47
 ];
 
 fn main() {

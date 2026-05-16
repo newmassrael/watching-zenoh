@@ -5372,6 +5372,54 @@
         "After codec Layer 3 catalog completes (R47): Phase Y (verify-codegen.sh integration + CI + deploy pipeline) begins at R48."
       ]
     },
+    "Round 47": {
+      "decision_summary": "wz-codecs full 21-codec catalog wired (keep_alive + wireexpr + query + request added to build.rs CODECS). Layer 3 keep_alive zero-byte body validated. Cumulative 11 of 21 codecs wire-validated. Phase X (codec catalog Layer 3) substantially advanced; remaining 10 codecs (the larger transport bodies + ext_entry implicit path + non-empty Hello locators) deferred to R46b/R47b for variant primitive + tlv-chain isolated coverage.",
+      "changes_bullets": [
+        "wz-codecs CODECS extended with keep_alive + wireexpr + query + request. wz-codecs/src/lib.rs adds 4 matching pub mod declarations. Full 21-codec catalog (the entire sources/codecs/ tree) now compiles via wz-codecs.",
+        "zenoh-pico-sys allowlist gains _z_t_msg_keep_alive_t + _z_keep_alive_encode for the empty-body Layer 3 test.",
+        "tests/layer3_keep_alive.rs (45 lines, 1 test): zero-byte body equivalence between wz KeepAlive::default().encode() and zenoh-pico _z_keep_alive_encode. Smallest Layer 3 test in the catalog — the empty-datamodel codec emit shape is consistent across wz and zenoh-pico.",
+        "Cumulative Layer 3 wire-validation surface: 11 of 21 codecs (close + frame + fragment + scout + open_body + init_body + join + hello + msg_put + msg_del + keep_alive). 10 codecs untested at Layer 3: timestamp + encoding + locator + wireexpr (file-private encoders in zenoh-pico; tested implicitly via parent codec setup), ext_unit/zint/zbuf + ext_entry (variant arms, no standalone encoder), msg_query/reply/err + request + response_final (public encoders, need msg-struct setup carriers — deferred to R47b)."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace: 32/32 pass / 0 fail. R46 31 + R47 1 new keep_alive test = 32.",
+        "wz-codecs catalog now 21/21 SCXMLs wired (matches sources/codecs/*.scxml inventory). Earlier 17-codec subset extended with keep_alive + wireexpr + query + request.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 46→47, T3 warn 856 unchanged."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "carry_forward_bullets": [
+        "R47b (deferred from Phase X) = remaining 10 codecs Layer 3. Most require either (a) parent-codec setup carrier (timestamp/encoding/locator/wireexpr implicit-via-parent), (b) variant arm wrap (ext_*), or (c) public-encoder msg-struct setup (query/reply/err/request/response_final). Plan: cover msg_query + msg_reply + msg_err (3 public payload bodies), then response_final (simplest network envelope), then ext_entry via msg_put Z=1 flag setup. Each round 2-4 codecs.",
+        "R48 (Phase Y entry) = Layer 3 integration into verify-codegen.sh. Add a --layer3 mode (or sibling verify-layer3.sh) that runs the wz-integration-tests Layer 3 lane as part of the per-codec verification cycle.",
+        "R49 (Phase Y) = GitHub Actions CI: validate_workspace + verify-codegen.sh + cargo test --workspace + Layer 3 lane + clippy --deny warnings.",
+        "R50 (Phase Y) = sce-codegen build deploy/ap_standalone.yaml end-to-end + cross-compile validation of out/ap/ Cargo crate.",
+        "After Phase Y: Phase Z (runtime crates wz-runtime-tokio + lwip) + Phase W (MCU hardening) + Phase V (user-facing)."
+      ],
+      "publishable_decision_summary": "wz-codecs full 21-codec catalog wired (keep_alive + wireexpr + query + request added to build.rs CODECS). Layer 3 keep_alive zero-byte body validated. Cumulative 11 of 21 codecs wire-validated. Phase X (codec catalog Layer 3) substantially advanced; remaining 10 codecs (the larger transport bodies + ext_entry implicit path + non-empty Hello locators) deferred to R46b/R47b for variant primitive + tlv-chain isolated coverage.",
+      "publishable_changes_bullets": [
+        "wz-codecs CODECS extended with keep_alive + wireexpr + query + request. wz-codecs/src/lib.rs adds 4 matching pub mod declarations. Full 21-codec catalog (the entire sources/codecs/ tree) now compiles via wz-codecs.",
+        "zenoh-pico-sys allowlist gains _z_t_msg_keep_alive_t + _z_keep_alive_encode for the empty-body Layer 3 test.",
+        "tests/layer3_keep_alive.rs (45 lines, 1 test): zero-byte body equivalence between wz KeepAlive::default().encode() and zenoh-pico _z_keep_alive_encode. Smallest Layer 3 test in the catalog — the empty-datamodel codec emit shape is consistent across wz and zenoh-pico.",
+        "Cumulative Layer 3 wire-validation surface: 11 of 21 codecs (close + frame + fragment + scout + open_body + init_body + join + hello + msg_put + msg_del + keep_alive). 10 codecs untested at Layer 3: timestamp + encoding + locator + wireexpr (file-private encoders in zenoh-pico; tested implicitly via parent codec setup), ext_unit/zint/zbuf + ext_entry (variant arms, no standalone encoder), msg_query/reply/err + request + response_final (public encoders, need msg-struct setup carriers — deferred to R47b)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace: 32/32 pass / 0 fail. R46 31 + R47 1 new keep_alive test = 32.",
+        "wz-codecs catalog now 21/21 SCXMLs wired (matches sources/codecs/*.scxml inventory). Earlier 17-codec subset extended with keep_alive + wireexpr + query + request.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 46→47, T3 warn 856 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R47b (deferred from Phase X) = remaining 10 codecs Layer 3. Most require either (a) parent-codec setup carrier (timestamp/encoding/locator/wireexpr implicit-via-parent), (b) variant arm wrap (ext_*), or (c) public-encoder msg-struct setup (query/reply/err/request/response_final). Plan: cover msg_query + msg_reply + msg_err (3 public payload bodies), then response_final (simplest network envelope), then ext_entry via msg_put Z=1 flag setup. Each round 2-4 codecs.",
+        "R48 (Phase Y entry) = Layer 3 integration into verify-codegen.sh. Add a --layer3 mode (or sibling verify-layer3.sh) that runs the wz-integration-tests Layer 3 lane as part of the per-codec verification cycle.",
+        "R49 (Phase Y) = GitHub Actions CI: validate_workspace + verify-codegen.sh + cargo test --workspace + Layer 3 lane + clippy --deny warnings.",
+        "R50 (Phase Y) = sce-codegen build deploy/ap_standalone.yaml end-to-end + cross-compile validation of out/ap/ Cargo crate.",
+        "After Phase Y: Phase Z (runtime crates wz-runtime-tokio + lwip) + Phase W (MCU hardening) + Phase V (user-facing)."
+      ]
+    },
     "Round 5": {
       "decision_summary": "Scope correction — SESSION_KICKOFF (activity-log genre) and README (empty stub) removed from Mnemosyne workspace as design-doc lifecycle infrastructure genre misfit.",
       "changes_bullets": [

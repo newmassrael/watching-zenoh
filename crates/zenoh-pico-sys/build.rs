@@ -206,6 +206,12 @@ fn main() {
         .allowlist_function("_z_del_encode")
         .allowlist_function("_z_bytes_from_buf")
         .allowlist_function("_z_bytes_drop")
+        // R47 — transport KeepAlive (empty body) for trivial Layer 3
+        // expansion. KeepAlive body is 0 bytes from both sides per
+        // codec_zenoh_keep_alive.scxml empty datamodel and zenoh-
+        // pico's transport.c _z_keep_alive_encode (does nothing).
+        .allowlist_type("_z_t_msg_keep_alive_t")
+        .allowlist_function("_z_keep_alive_encode")
         // bindgen layout-test surface: pin to `Debug` derivation to
         // unblock test-side equality checks against zenoh-pico's
         // typed shape.
