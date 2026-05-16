@@ -4760,6 +4760,58 @@
         "Codec primitive coverage at end of R38: 18 primitives (R37 17 + peek-byte). Remaining major: lookup-table dispatch (codec_variant_dispatch SCE fixture), TLV chain extension iterator advanced modes, embedded codec composition. R29 statechart carry items unchanged."
       ]
     },
+    "Round 39": {
+      "decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
+      "changes_bullets": [
+        "sources/README.md gains \"Symbol naming convention (architectural decision — R39)\" subsection. Confirms wz-stem (e.g., crc16_ccitt) over SCE-stem (algorithm_crc16). Rationale: wire interop is byte-level not symbol-level; wz emit  ↛  SCE test artifact link by design. \"¤ㄷㅣㅗㄴㅏㅣㅕㅣㄲㅣ ㅗㄷㄲㄷㄷ\" section gains a third allowed-difference: <sce:import src=> retargeted to wz-stems.",
+        "scripts/verify-codegen.sh fully reimplemented. Layer 2 (body-golden) now: (1) extracts file stems from input + upstream + 1-level <sce:import src=> resolution, (2) computes 4 case variants per stem (snake/Pascal/camel/SCREAMING) sorted by length descending, (3) applies all variants symmetrically to BOTH trees with __STEM__ placeholder, (4) strips RFC §5.O traceability anchors + line-number embeds (SCXML L<N>:, _l<N>(, __STEM__L<N>(), (5) collapses multi-line wrap continuations, (6) sorts consecutive #include blocks (perl-based, mawk lacks asort).",
+        "Layer 3 (wire-interop against zenoh-pico encoded bytes) added as documented placeholder in script header. Implementation deferred to Phase 2 walking skeleton (R40+ crates/sce_link_runtime_*). Currently marked NOT YET IMPLEMENTED with clear message after Layer 2 output.",
+        "R31 stale carry \"Layer 2 body-match / filename-mismatch false alarm\" — CLOSED. 132/132 pairs (22 SCE-fixture-paired SCXMLs × 6 backends) now report golden=match at vendor pin 11f1032d. No semantic divergence detected anywhere; every prior MISMATCH was either stem-derived (filename/symbol), line-wrap-cosmetic (long-identifier statements), line-number-embed (SPDX header shifts), or import-ordering (alphabetical pre-normalize)."
+      ],
+      "verification_bullets": [
+        "R39-3 regression sweep: 22 wz<>SCE codec/algorithm pairs × 6 backends = 132 comparisons. Pre-R39: 6/132 match (4.5%); post-R39: 132/132 match (100%). No false negatives observed.",
+        "Manual diff inspection of each previously-failing class: (a) crc16_ccitt cpp test = wrap difference (collapsed); (b) keep_alive kotlin = `KeepAlive` template prose hardcode + wz Pascal variant coincidence (symmetric cross-substitution fix); (c) msg_put cpp = #include ordering (perl sort fix); (d) Go/Kotlin test fn name `__STEM__L<N>(` form (regex addition).",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 38→39, T3 warn 856 unchanged.",
+        "Script changes preserve: Layer 1 emit-success semantics unchanged (all 6 backends still required to emit ≥1 file); exit codes unchanged (0=all-pass, 1=any-fail-or-mismatch, 2=usage); --argument signature unchanged."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.o-generated-source-traceability"
+      ],
+      "carry_forward_bullets": [
+        "R40 = Phase 2 walking skeleton entry. crates/ Cargo workspace + sce_link_runtime_tokio skeleton (Rust trait surface stub) + 1 codec SCXML codegen integration (msg_put) + Layer 3 wire-interop test infrastructure (wz-emit encoder bytes ↔ zenoh-pico `_z_put_encode` bytes). This is the round that proves whether 38 rounds of spec are validated against real wire interop.",
+        "R41 = session_fsm_unicast.scxml ↔ codec API binding. R29's script placeholders (link_driver_open / send_init_syn / etc.) are stale since R29; codec API surface (R31-R38) now stable enough to bind. Wire FSM scripts to concrete codec calls; verify FSM-driven encoding produces correct wire bytes.",
+        "Phase 3 (deploy.yaml end-to-end): R42-R44 — `sce-codegen build deploy/ap_standalone.yaml` + `deploy/mcu_target.yaml` + compile generated artifacts. Validates deploy pipeline holistically.",
+        "Phase 4 (CI): R45+ — GitHub Actions workflow running validate_workspace + verify-codegen.sh + Layer 3 + integration tests on every PR. Production gate.",
+        "Layer 3 interop test infrastructure (R40 deliverable): Rust integration test that constructs a logical Put message, encodes via wz-emitted msg_put codec, encodes via zenoh-pico `_z_put_encode` for same logical input, byte-compares results. First REAL validation that codec SCXML spec matches reality."
+      ],
+      "publishable_decision_summary": "Phase 1 architectural debt closure — symbol naming convention ratified (wz-stem confirmed; wire-level interop ≠ symbol-level interop) + verify-codegen.sh Layer 2 reworked to correctly classify body-equivalent pairs (132/132 match after R31-R38 7-round stale misclassification). Layer 3 (wire-interop against zenoh-pico) documented as Phase 2 dependency on `crates/` walking skeleton.",
+      "publishable_changes_bullets": [
+        "sources/README.md gains \"Symbol naming convention (architectural decision — R39)\" subsection. Confirms wz-stem (e.g., crc16_ccitt) over SCE-stem (algorithm_crc16). Rationale: wire interop is byte-level not symbol-level; wz emit  ↛  SCE test artifact link by design. \"¤ㄷㅣㅗㄴㅏㅣㅕㅣㄲㅣ ㅗㄷㄲㄷㄷ\" section gains a third allowed-difference: <sce:import src=> retargeted to wz-stems.",
+        "scripts/verify-codegen.sh fully reimplemented. Layer 2 (body-golden) now: (1) extracts file stems from input + upstream + 1-level <sce:import src=> resolution, (2) computes 4 case variants per stem (snake/Pascal/camel/SCREAMING) sorted by length descending, (3) applies all variants symmetrically to BOTH trees with __STEM__ placeholder, (4) strips RFC §5.O traceability anchors + line-number embeds (SCXML L<N>:, _l<N>(, __STEM__L<N>(), (5) collapses multi-line wrap continuations, (6) sorts consecutive #include blocks (perl-based, mawk lacks asort).",
+        "Layer 3 (wire-interop against zenoh-pico encoded bytes) added as documented placeholder in script header. Implementation deferred to Phase 2 walking skeleton (R40+ crates/sce_link_runtime_*). Currently marked NOT YET IMPLEMENTED with clear message after Layer 2 output.",
+        "R31 stale carry \"Layer 2 body-match / filename-mismatch false alarm\" — CLOSED. 132/132 pairs (22 SCE-fixture-paired SCXMLs × 6 backends) now report golden=match at vendor pin 11f1032d. No semantic divergence detected anywhere; every prior MISMATCH was either stem-derived (filename/symbol), line-wrap-cosmetic (long-identifier statements), line-number-embed (SPDX header shifts), or import-ordering (alphabetical pre-normalize)."
+      ],
+      "publishable_verification_bullets": [
+        "R39-3 regression sweep: 22 wz<>SCE codec/algorithm pairs × 6 backends = 132 comparisons. Pre-R39: 6/132 match (4.5%); post-R39: 132/132 match (100%). No false negatives observed.",
+        "Manual diff inspection of each previously-failing class: (a) crc16_ccitt cpp test = wrap difference (collapsed); (b) keep_alive kotlin = `KeepAlive` template prose hardcode + wz Pascal variant coincidence (symmetric cross-substitution fix); (c) msg_put cpp = #include ordering (perl sort fix); (d) Go/Kotlin test fn name `__STEM__L<N>(` form (regex addition).",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 38→39, T3 warn 856 unchanged.",
+        "Script changes preserve: Layer 1 emit-success semantics unchanged (all 6 backends still required to emit ≥1 file); exit codes unchanged (0=all-pass, 1=any-fail-or-mismatch, 2=usage); --argument signature unchanged."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.o-generated-source-traceability"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R40 = Phase 2 walking skeleton entry. crates/ Cargo workspace + sce_link_runtime_tokio skeleton (Rust trait surface stub) + 1 codec SCXML codegen integration (msg_put) + Layer 3 wire-interop test infrastructure (wz-emit encoder bytes ↔ zenoh-pico `_z_put_encode` bytes). This is the round that proves whether 38 rounds of spec are validated against real wire interop.",
+        "R41 = session_fsm_unicast.scxml ↔ codec API binding. R29's script placeholders (link_driver_open / send_init_syn / etc.) are stale since R29; codec API surface (R31-R38) now stable enough to bind. Wire FSM scripts to concrete codec calls; verify FSM-driven encoding produces correct wire bytes.",
+        "Phase 3 (deploy.yaml end-to-end): R42-R44 — `sce-codegen build deploy/ap_standalone.yaml` + `deploy/mcu_target.yaml` + compile generated artifacts. Validates deploy pipeline holistically.",
+        "Phase 4 (CI): R45+ — GitHub Actions workflow running validate_workspace + verify-codegen.sh + Layer 3 + integration tests on every PR. Production gate.",
+        "Layer 3 interop test infrastructure (R40 deliverable): Rust integration test that constructs a logical Put message, encodes via wz-emitted msg_put codec, encodes via zenoh-pico `_z_put_encode` for same logical input, byte-compares results. First REAL validation that codec SCXML spec matches reality."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [

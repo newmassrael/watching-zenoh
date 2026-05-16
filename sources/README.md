@@ -88,18 +88,64 @@ CLI가 watching-zenoh 측 입력에 대해 호출됐을 때 SCE의 fixture와
 
 본문 SCXML body (`<sce:signature>`, `<sce:body>`, `<sce:test-vector>`
 등 의미 노드)는 SCE fixture와 byte-identical 유지가 원칙. 차이는
-다음 두 가지만 허용:
+다음 세 가지만 허용:
 
 1. **SPDX header block 추가** — watching-zenoh 측 프로젝트 라이선스
    메타데이터; codegen output에는 영향 없음 (XML parser가 comment
    strip)
-2. **파일명 변경** — `algorithm_crc16` (SCE 측 kind-prefix convention)
-   → `crc16_ccitt` (watching-zenoh 측 variant-name convention). 이
-   차이는 generated symbol 이름과 SCE-MAP 경로에 반영됨
+2. **파일명 변경 + root `name=` 일치** — `algorithm_crc16` (SCE 측
+   kind-prefix convention) → `crc16_ccitt` (watching-zenoh 측
+   variant-name convention). 자세한 근거는 아래
+   "Symbol naming convention" 절 참조.
+3. **`<sce:import src=` 경로** — wz 측 sibling 파일 stem으로 retarget
+   (e.g., `src="codec_zenoh_timestamp.scxml"` → `src="timestamp.scxml"`).
+   `as=` alias는 SCE 측을 유지 (codegen 출력의 type 참조가 alias 기반).
 
 SCE 측 fixture가 갱신될 경우 mechanical sync (본문 변경분을 그대로
-가져오고 SPDX header만 유지). divergence는 audit-trace 항목으로
-회수 — 무단 divergence 금지.
+가져오고 SPDX header + stem + import src 만 유지). divergence는
+audit-trace 항목으로 회수 — 무단 divergence 금지.
+
+## Symbol naming convention (architectural decision — R39)
+
+`name=` 속성과 emit symbol은 **wz-stem을 따른다**. 즉
+`crc16_ccitt.scxml`의 root `name="crc16_ccitt"` → emit
+`pub fn crc16_ccitt(...)`. SCE측 `algorithm_crc16.scxml`이 emit하는
+`pub fn algorithm_crc16(...)`과 *symbol이 다르다*. 이는 의도적
+divergence이며 wz 측 architectural decision.
+
+**근거** — Wire protocol interop은 *bytes-on-wire 레벨*에서 일어나지
+*symbol 레벨이 아니다*:
+
+- zenoh-pico 1.9.0이 emit하는 wire bytes ↔ watching-zenoh가 emit하는
+  Rust/C11 binary가 *같은 wire bytes를 생성·소비*하면 interop된다.
+- wz emit `pub fn crc16_ccitt` ↔ SCE test fixture emit
+  `pub fn algorithm_crc16`은 *다른 함수 이름이지만 같은 입력에 같은
+  출력을 낸다*. Symbol-level link 가능성은 *실용적 의미가 없다*:
+  SCE fixture는 SCE codegen self-test의 부속물이지 wz consumer의
+  link target이 아니다.
+
+**암묵적 결정 — wz emit ↛ SCE test artifact link**: wz가 emit한
+코드는 *SCE의 test binary와 symbol-level로 link되지 않는다*. SCE
+fixture는 SCE 측 audit/regression test 용도; wz consumer는 wz가 emit
+한 코드를 *자체 runtime crate*에 link한다 (Phase 2 walking skeleton
+- `crates/sce_link_runtime_*` - 참조).
+
+**검증 implication — Layer 2 byte-golden 의미 정정** (R31-R38 7 라운드
+stale carry 해소): `verify-codegen.sh` Layer 2는 *stem 정규화 후*
+비교한다 — wz-stem과 SCE-stem 각각의 snake_case / PascalCase /
+camelCase / SCREAMING_SNAKE_CASE variant를 모두 `__STEM__`
+placeholder로 치환한 후 diff. 진짜 body 일치는 `golden=match`, 진짜
+semantic divergence는 `golden=mismatch`. 이전에 모든 wz pair가
+`MISMATCH` 보고하던 misclassification (R31 carry부터 7 라운드 stale)은
+R39에서 정정.
+
+**더 강한 검증 (Layer 3 — Phase 2 도입 예정):** SCE-emitted ↔
+SCE-emitted 비교는 *tautological* (동일 SCXML body에 동일 codegen).
+진짜 production validation은 **wz-emitted encoder가 zenoh-pico
+encoded wire bytes와 byte-equivalent**해야 한다. 이 Layer 3 wire-
+interop test는 `crates/sce_link_runtime_*` walking skeleton (R40+)
+land 시 함께 land. 그 시점부터 *codec SCXML이 spec assumption만이
+아니라 실제 wire interop을 통과한다*는 증거가 확보된다.
 
 ## 코드젠 호출
 
