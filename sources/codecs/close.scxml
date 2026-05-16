@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: variant arm body — session-close frame.
+     Imported by codec_variant_dispatch.scxml; carries a single
+     uint8 reason code.
+
+     Reason byte enumeration per zenoh-pico
+     include/zenoh-pico/protocol/definitions/transport.h
+     `_z_close_reason_t` (GENERIC / UNSUPPORTED / INVALID / MAX_SESSIONS
+     / MAX_LINKS / EXPIRED / WRITE_ERROR / READ_ERROR / etc.) — the
+     codec emits the raw uint8 without enum validation; the
+     session-fsm's Close transition is responsible for setting a
+     known-valid reason (session_fsm_unicast.scxml R29
+     set_close_reason_* scripts).
+
+     Body byte-identical to SCE upstream fixture
+     `vendor/sce/tests/forge/resources/codec_variant_session_close.scxml`
+     (vendor pin 11f1032d); diff is the SPDX header block above and
+     the file stem (`close` watching-zenoh side vs
+     `codec_variant_session_close` SCE side per kind-prefix
+     convention). verify-codegen.sh Layer 2 byte-golden pair valid. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="close">
+  <datamodel>
+    <data id="reason" sce:type="uint8" sce:byte="0" sce:bit-size="8"/>
+  </datamodel>
+</scxml>
