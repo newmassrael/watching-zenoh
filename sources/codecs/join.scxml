@@ -42,12 +42,20 @@
          batch_size=0xCAFE lease=120 next_sn_reliable=42
          next_sn_best_effort=99
 
-     Body byte-identical to SCE upstream codec_zenoh_join at vendor
-     pin 11f1032d; diff in SPDX header + file stem + root name
-     attribute (wz convention: name=join matches stem). -->
+     Deliberate divergence from SCE upstream codec_zenoh_join (R44
+     Layer 3 closure): wz uses `sce:default-endian="little"` while
+     SCE fixture uses `="big"`. Same rationale as init_body — zenoh-
+     pico's `_z_uint16_encode` (vendor/zenoh-pico/src/protocol/
+     codec.c:82-85) is LE for batch_size, and the wz BE default
+     inherited from the SCE fixture was a real wire-format drift
+     caught by R44's `layer3_join_s1_with_size_negotiation`. SCE
+     upstream PR carry to fix codec_zenoh_init_body + codec_zenoh_
+     join endian declaration; until then verify-codegen.sh Layer 2
+     reports MISMATCH for this pair (correct signal). -->
+
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:default-endian="big" name="join">
+       sce:kind="codec" sce:default-endian="little" name="join">
   <sce:requires-parent-flags carrier="header">
     <sce:flag name="S" bit="6"/>
   </sce:requires-parent-flags>

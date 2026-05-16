@@ -33,9 +33,13 @@ const CODECS: &[&str] = &[
     "ext_unit",
     "ext_zint",
     "ext_zbuf",
-    "close", // §4.1 session-close, 1-byte reason — R42 Layer 3 target
-    "frame", // §4.2 data-carrying VLE sn + tail payload — R42+
-    "fragment", // §4.2 same shape as frame, distinct MID — R42+
+    "close", // §4.1 session-close, 1-byte reason — R42 Layer 3 ✓
+    "frame", // §4.2 data-carrying VLE sn + tail payload — R43 Layer 3 ✓
+    "fragment", // §4.2 same shape as frame, distinct MID — R43 ✓
+    "scout", // §3 scouting — cbyte multi-bit pack — R44 Layer 3
+    "init_body", // §4.1 Init body — parent.S + parent.A gates — R44
+    "open_body", // §4.1 Open body — parent.A NEGATION gate — R44
+    "join",      // §4.1 Join body — parent.S + multi-VLE — R44
     // Composing codecs
     "ext_entry", // imports ext_unit / ext_zint / ext_zbuf
     "msg_put",   // imports timestamp / encoding / ext_entry

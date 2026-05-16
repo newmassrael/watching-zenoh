@@ -43,12 +43,23 @@
        parent.S=0 parent.A=0: version=0x05 cbyte=0x21 zid=[01 02 03]
          (no sn_res/batch_size/cookie)
 
-     Body byte-identical to SCE upstream codec_zenoh_init_body at
-     vendor pin 11f1032d; diff in SPDX header + file stem + root
-     name attribute (wz convention: name=init_body matches stem). -->
+     Deliberate divergence from SCE upstream codec_zenoh_init_body
+     (R44 Layer 3 closure): wz uses `sce:default-endian="little"`
+     while SCE fixture uses `="big"`. The SCE fixture is incorrect
+     for zenoh-pico wire interop — `_z_uint16_encode` (vendor/zenoh-
+     pico/src/protocol/codec.c:82-85) writes batch_size LSB-first
+     (LE), so wz's previous BE-inherited setting drifted from the
+     reference wire format. R44's `layer3_init_body_s1_*` tests
+     proved the divergence empirically (BE wz vs LE pico). The fix
+     reverses the wz-side endian default so wz emit matches zenoh-
+     pico byte-for-byte; SCE upstream needs a paired PR to correct
+     codec_zenoh_init_body + codec_zenoh_join (R44 carry). Until
+     SCE ships that PR, verify-codegen.sh Layer 2 reports MISMATCH
+     for the init_body/join pairs — this is the correct signal. -->
+
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
-       sce:kind="codec" sce:default-endian="big" name="init_body">
+       sce:kind="codec" sce:default-endian="little" name="init_body">
   <sce:requires-parent-flags carrier="header">
     <sce:flag name="S" bit="6"/>
     <sce:flag name="A" bit="5"/>

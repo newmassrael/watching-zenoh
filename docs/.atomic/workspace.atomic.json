@@ -5206,6 +5206,72 @@
         "After codec Layer 3 catalog completes (R47): R48+ runtime crates (wz-runtime-tokio + wz-runtime-lwip)."
       ]
     },
+    "Round 44": {
+      "decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
+      "changes_bullets": [
+        "wz-codecs/build.rs CODECS array gains scout + init_body + open_body + join. lib.rs gains 4 matching pub mod declarations. cargo build pass.",
+        "zenoh-pico-sys/build.rs allowlist expanded: _z_scout_encode + _z_init_encode + _z_open_encode + _z_join_encode + their msg structs + z_what_t + z_whatami_t.",
+        "zenoh-pico-sys/wrapper.h gains forward declarations for _z_scout_encode + _z_hello_encode (file-private in zenoh-pico's message.c, no header decl upstream). Symbols already in libzenohpico.a; declaration only changes bindgen + linker visibility.",
+        "tests/layer3_scout.rs (110 lines, 3 tests) — cbyte multi-bit pack + local present-if gate (zid emission on cbyte.I). Validated with 0/3/16-byte zid corpus.",
+        "tests/layer3_open_body.rs (110 lines, 3 tests) — parent.A NEGATION gate (B5-λ). Cookie present iff parent.A=0; VLE width boundary corpus for lease + initial_sn.",
+        "tests/layer3_init_body.rs (190 lines, 4 tests) — parent.S + parent.A positive gates. **CAUGHT SPEC DRIFT**: wz BE batch_size diverged from zenoh-pico LE. Fix applied + audit-traced.",
+        "tests/layer3_join.rs (185 lines, 3 tests) — parent.S gate + multi-VLE next_sn chain (3 VLE u64 fields). Same LE batch_size fix as init_body.",
+        "sources/codecs/init_body.scxml + join.scxml: sce:default-endian=\"big\"→\"little\". SCXML comments updated to record the deliberate Layer-3-driven divergence from SCE fixture + the SCE PR carry.",
+        "sources/README.md \"SCE fixture¤와의 관계\" section: divergence policy expanded from 3 to 4 allowed categories; #4 (Layer 3 wire-interop correction over a drifted SCE fixture) explicitly documented."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace: 25/25 pass / 0 fail. Test breakdown: wz-codecs smoke 2/2 (R40), zenoh-pico-sys ffi_smoke 4/4 (R41), layer3_close 2/2 (R42), layer3_fragment 2/2 + layer3_frame 2/2 (R43), layer3_scout 3/3 + layer3_open_body 3/3 + layer3_init_body 4/4 + layer3_join 3/3 (R44 NEW = 13 tests).",
+        "Cumulative Layer 3 coverage at end of R44: 7 of 18 wz-codecs SCXMLs wire-validated against zenoh-pico (close + frame + fragment + scout + open_body + init_body + join).",
+        "Spec-drift caught + fixed empirically: init_body s1_a0 test on first run FAILED with wz BE [0xCA, 0xFE] vs pico LE [0xFE, 0xCA] for batch_size=0xCAFE. Diagnosed via vendor/zenoh-pico/src/protocol/codec.c:82-85 (_z_uint16_encode writes LSB first). Fixed via wz SCXML root sce:default-endian change. Same bug latent in codec_zenoh_join (paired R44 PR).",
+        "Layer 2 verify-codegen.sh impact (deliberate divergence): init_body + join now report 0/6 match — was 6/6 each at R39 closure. This is the CORRECT signal — wz emit no longer matches SCE fixture's incorrect BE emit. Total Layer 2: 120/132 match (down from 132/132 by exactly the 12 init_body+join cells; not a regression, audit-traced divergence).",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 43→44, T3 warn 856 unchanged."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer"
+      ],
+      "carry_forward_bullets": [
+        "**SCE upstream PR** — codec_zenoh_init_body + codec_zenoh_join sce:default-endian \"big\" -> \"little\". Zenoh-pico _z_uint16_encode writes LSB-first (src/protocol/codec.c:82-85), the BE inherited from SCE fixtures was wrong. wz already corrected at R44; SCE fix would re-converge Layer 2 byte-golden to 132/132. Single-line attribute change per fixture, plus an audit entry in SCE's changelog.",
+        "R45 = Layer 3 hello codec. hello.scxml imports locator.scxml so wz-codecs must add both. zenoh-pico-sys allowlist adds _z_hello_encode + _z_s_msg_hello_t + _z_locator_array_t + _z_locator_t (locator vector handling is the new primitive class).",
+        "R46 = Layer 3 payload bodies (msg_put + msg_del + ext_entry + 5 child codecs). Variant primitive + embed + tlv-chain + entry-flag termination all under Layer 3 review.",
+        "R47 = Layer 3 network envelopes (request + response_final) + remaining codecs (locator standalone + timestamp + encoding + ext_unit/zint/zbuf). After R47 the entire 18-codec wz-codecs catalog has Layer 3 verification.",
+        "SCE upstream PR carry (R40) still pending: #![doc = SCE-MAP] inner-attr template fix in tools/codegen/templates/forge/rust/<kind>.rs.jinja2.",
+        "After codec Layer 3 catalog completes (R47): R48+ runtime crates (wz-runtime-tokio + wz-runtime-lwip)."
+      ],
+      "publishable_decision_summary": "Layer 3 handshake codec expansion — scout / open_body / init_body / join validated. **Layer 3 caught the first real spec drift**: SCE codec_zenoh_init_body + codec_zenoh_join wrongly inherited `sce:default-endian=\"big\"` while zenoh-pico's `_z_uint16_encode` is LE (LSB-first). wz init_body + join SCXMLs corrected to `default-endian=\"little\"`; SCE fixture upstream PR carried for matching fix. Production-grade validation now empirically catching incorrect spec assumptions.",
+      "publishable_changes_bullets": [
+        "wz-codecs/build.rs CODECS array gains scout + init_body + open_body + join. lib.rs gains 4 matching pub mod declarations. cargo build pass.",
+        "zenoh-pico-sys/build.rs allowlist expanded: _z_scout_encode + _z_init_encode + _z_open_encode + _z_join_encode + their msg structs + z_what_t + z_whatami_t.",
+        "zenoh-pico-sys/wrapper.h gains forward declarations for _z_scout_encode + _z_hello_encode (file-private in zenoh-pico's message.c, no header decl upstream). Symbols already in libzenohpico.a; declaration only changes bindgen + linker visibility.",
+        "tests/layer3_scout.rs (110 lines, 3 tests) — cbyte multi-bit pack + local present-if gate (zid emission on cbyte.I). Validated with 0/3/16-byte zid corpus.",
+        "tests/layer3_open_body.rs (110 lines, 3 tests) — parent.A NEGATION gate (B5-λ). Cookie present iff parent.A=0; VLE width boundary corpus for lease + initial_sn.",
+        "tests/layer3_init_body.rs (190 lines, 4 tests) — parent.S + parent.A positive gates. **CAUGHT SPEC DRIFT**: wz BE batch_size diverged from zenoh-pico LE. Fix applied + audit-traced.",
+        "tests/layer3_join.rs (185 lines, 3 tests) — parent.S gate + multi-VLE next_sn chain (3 VLE u64 fields). Same LE batch_size fix as init_body.",
+        "sources/codecs/init_body.scxml + join.scxml: sce:default-endian=\"big\"→\"little\". SCXML comments updated to record the deliberate Layer-3-driven divergence from SCE fixture + the SCE PR carry.",
+        "sources/README.md \"SCE fixture¤와의 관계\" section: divergence policy expanded from 3 to 4 allowed categories; #4 (Layer 3 wire-interop correction over a drifted SCE fixture) explicitly documented."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace: 25/25 pass / 0 fail. Test breakdown: wz-codecs smoke 2/2 (R40), zenoh-pico-sys ffi_smoke 4/4 (R41), layer3_close 2/2 (R42), layer3_fragment 2/2 + layer3_frame 2/2 (R43), layer3_scout 3/3 + layer3_open_body 3/3 + layer3_init_body 4/4 + layer3_join 3/3 (R44 NEW = 13 tests).",
+        "Cumulative Layer 3 coverage at end of R44: 7 of 18 wz-codecs SCXMLs wire-validated against zenoh-pico (close + frame + fragment + scout + open_body + init_body + join).",
+        "Spec-drift caught + fixed empirically: init_body s1_a0 test on first run FAILED with wz BE [0xCA, 0xFE] vs pico LE [0xFE, 0xCA] for batch_size=0xCAFE. Diagnosed via vendor/zenoh-pico/src/protocol/codec.c:82-85 (_z_uint16_encode writes LSB first). Fixed via wz SCXML root sce:default-endian change. Same bug latent in codec_zenoh_join (paired R44 PR).",
+        "Layer 2 verify-codegen.sh impact (deliberate divergence): init_body + join now report 0/6 match — was 6/6 each at R39 closure. This is the CORRECT signal — wz emit no longer matches SCE fixture's incorrect BE emit. Total Layer 2: 120/132 match (down from 132/132 by exactly the 12 init_body+join cells; not a regression, audit-traced divergence).",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 43→44, T3 warn 856 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer"
+      ],
+      "publishable_carry_forward_bullets": [
+        "**SCE upstream PR** — codec_zenoh_init_body + codec_zenoh_join sce:default-endian \"big\" -> \"little\". Zenoh-pico _z_uint16_encode writes LSB-first (src/protocol/codec.c:82-85), the BE inherited from SCE fixtures was wrong. wz already corrected at R44; SCE fix would re-converge Layer 2 byte-golden to 132/132. Single-line attribute change per fixture, plus an audit entry in SCE's changelog.",
+        "R45 = Layer 3 hello codec. hello.scxml imports locator.scxml so wz-codecs must add both. zenoh-pico-sys allowlist adds _z_hello_encode + _z_s_msg_hello_t + _z_locator_array_t + _z_locator_t (locator vector handling is the new primitive class).",
+        "R46 = Layer 3 payload bodies (msg_put + msg_del + ext_entry + 5 child codecs). Variant primitive + embed + tlv-chain + entry-flag termination all under Layer 3 review.",
+        "R47 = Layer 3 network envelopes (request + response_final) + remaining codecs (locator standalone + timestamp + encoding + ext_unit/zint/zbuf). After R47 the entire 18-codec wz-codecs catalog has Layer 3 verification.",
+        "SCE upstream PR carry (R40) still pending: #![doc = SCE-MAP] inner-attr template fix in tools/codegen/templates/forge/rust/<kind>.rs.jinja2.",
+        "After codec Layer 3 catalog completes (R47): R48+ runtime crates (wz-runtime-tokio + wz-runtime-lwip)."
+      ]
+    },
     "Round 5": {
       "decision_summary": "Scope correction — SESSION_KICKOFF (activity-log genre) and README (empty stub) removed from Mnemosyne workspace as design-doc lifecycle infrastructure genre misfit.",
       "changes_bullets": [

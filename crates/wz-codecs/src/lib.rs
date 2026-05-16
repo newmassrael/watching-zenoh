@@ -56,6 +56,22 @@ pub mod fragment {
     include!(concat!(env!("OUT_DIR"), "/fragment.rs"));
 }
 
+pub mod scout {
+    include!(concat!(env!("OUT_DIR"), "/scout.rs"));
+}
+
+pub mod init_body {
+    include!(concat!(env!("OUT_DIR"), "/init_body.rs"));
+}
+
+pub mod open_body {
+    include!(concat!(env!("OUT_DIR"), "/open_body.rs"));
+}
+
+pub mod join {
+    include!(concat!(env!("OUT_DIR"), "/join.rs"));
+}
+
 pub mod ext_entry {
     include!(concat!(env!("OUT_DIR"), "/ext_entry.rs"));
 }
