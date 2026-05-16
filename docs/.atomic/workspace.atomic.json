@@ -5152,6 +5152,60 @@
         "After codec Layer 3 catalog completes (R46-R47): R48+ runtime crates (wz-runtime-tokio + wz-runtime-lwip) per docs/runtime-crate-*.md. Session FSM script-placeholder wiring (R29 carry) becomes viable once trait surface lands."
       ]
     },
+    "Round 43": {
+      "decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
+      "changes_bullets": [
+        "zenoh-pico-sys/build.rs allowlist gains: _z_t_msg_frame_t + _z_t_msg_fragment_t + _z_slice_t + _z_delete_context_t + _z_frame_encode + _z_fragment_encode + _z_slice_as_zbuf. All justified by R43 Layer 3 tests.",
+        "tests/layer3_fragment.rs (130 lines, 2 tests): VLE width boundary corpus (sn=0/1/127/128/256/16383/16384/1M/u32::MAX) × payload variants (empty / 1-byte / multi-byte). Non-owning _z_slice_t wrap of Rust &[u8]; empty payload skipped via NULL start pointer + _z_slice_check short-circuit.",
+        "tests/layer3_frame.rs (130 lines, 2 tests): same VLE corpus via the frame path. Construction shape differs from fragment — _z_t_msg_frame_t._payload is *mut _z_zbuf_t (NOT _z_slice_t by value); zbuf built via _z_slice_as_zbuf wrapping a Rust slice, stored in MaybeUninit to avoid unused_assignments lint on the empty-payload null branch. Empty payload: _payload=null short-circuit per upstream code.",
+        "Cross-codec frame↔fragment body-equivalence: when header=0 (no Z flag, no first/drop extensions), frame and fragment produce identical body bytes for the same (sn, payload) input. The transport-layer MID distinction (T_FRAME 0x05 vs T_FRAGMENT 0x06) is written by the envelope encoder, not the body codecs."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace: 12/12 pass / 0 fail. Breakdown by test target: wz-codecs smoke 2/2 (R40), zenoh-pico-sys ffi_smoke 4/4 (R41), wz-integration-tests layer3_close 2/2 (R42), layer3_fragment 2/2 (R43 NEW), layer3_frame 2/2 (R43 NEW).",
+        "VLE u64 primitive validated across width boundaries: 1-byte VLE (sn=0/1/127), 2-byte VLE (sn=128/256/16383), 3-byte VLE (sn=16384/1M), 4+-byte VLE (sn=u32::MAX). Both encoders produce identical byte sequences at every boundary — the most pervasive codec primitive (used by ~20 wire fields across the catalog) has now passed objective Layer 3 verification.",
+        "Cross-codec invariant pinned: wz_codecs::frame::Frame { sn, payload }.encode() == wz_codecs::fragment::Fragment { sn, payload }.encode() when extensions are off (header=0). Caught at test time if the codec SCXMLs ever diverge on the shared §4.2 body shape.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 42→43, T3 warn 856 unchanged.",
+        "Cumulative Layer 3 coverage at end of R43: close + fragment + frame = 3 of 18 wz-codecs SCXMLs wire-validated. Each remaining codec (15 more) lands its own layer3_<codec>.rs in subsequent rounds with the same byte-compare pattern."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "carry_forward_bullets": [
+        "R44 = Layer 3 across handshake bodies (init_body + open_body + join + scout + hello). Exercises multi-bit flag (cbyte), dotted-path length-ref (zid_len_m1), present-if local + parent.X, repeat (Hello locators), import (Hello imports locator). 5 new layer3_*.rs tests + zenoh-pico-sys allowlist expansion for _z_init_encode + _z_open_encode + _z_join_encode + _z_scout_encode + _z_hello_encode + their msg structs.",
+        "R45 = Layer 3 across payload bodies (msg_put + msg_del). Exercises variant (ext_entry inner dispatch), embed (timestamp + encoding), tlv-chain (ext_entry repeat), entry-flag termination. Heaviest primitive load.",
+        "R46 = Layer 3 across network envelopes (request + response_final). Exercises peek-byte primitive.",
+        "R47 = remaining codecs: locator (string), timestamp + encoding (embeddable), ext_unit/zint/zbuf (variant arms). After R47 the entire 18-codec wz-codecs catalog has Layer 3 verification.",
+        "SCE upstream PR carry (R40) remains: #![doc = SCE-MAP] inner-attr template fix.",
+        "After codec Layer 3 catalog completes (R47): R48+ runtime crates (wz-runtime-tokio + wz-runtime-lwip)."
+      ],
+      "publishable_decision_summary": "Layer 3 expansion — fragment + frame codecs validated against zenoh-pico 1.9.0 wire format across VLE width boundaries (1/2/3+ byte forms). VLE u64 primitive byte-correctness now empirically verified; downstream codecs that consume VLE (sn, lease, batch_size, payload_len, ~20 others) inherit confidence transitively. Cross-codec frame↔fragment body-equivalence pinned.",
+      "publishable_changes_bullets": [
+        "zenoh-pico-sys/build.rs allowlist gains: _z_t_msg_frame_t + _z_t_msg_fragment_t + _z_slice_t + _z_delete_context_t + _z_frame_encode + _z_fragment_encode + _z_slice_as_zbuf. All justified by R43 Layer 3 tests.",
+        "tests/layer3_fragment.rs (130 lines, 2 tests): VLE width boundary corpus (sn=0/1/127/128/256/16383/16384/1M/u32::MAX) × payload variants (empty / 1-byte / multi-byte). Non-owning _z_slice_t wrap of Rust &[u8]; empty payload skipped via NULL start pointer + _z_slice_check short-circuit.",
+        "tests/layer3_frame.rs (130 lines, 2 tests): same VLE corpus via the frame path. Construction shape differs from fragment — _z_t_msg_frame_t._payload is *mut _z_zbuf_t (NOT _z_slice_t by value); zbuf built via _z_slice_as_zbuf wrapping a Rust slice, stored in MaybeUninit to avoid unused_assignments lint on the empty-payload null branch. Empty payload: _payload=null short-circuit per upstream code.",
+        "Cross-codec frame↔fragment body-equivalence: when header=0 (no Z flag, no first/drop extensions), frame and fragment produce identical body bytes for the same (sn, payload) input. The transport-layer MID distinction (T_FRAME 0x05 vs T_FRAGMENT 0x06) is written by the envelope encoder, not the body codecs."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace: 12/12 pass / 0 fail. Breakdown by test target: wz-codecs smoke 2/2 (R40), zenoh-pico-sys ffi_smoke 4/4 (R41), wz-integration-tests layer3_close 2/2 (R42), layer3_fragment 2/2 (R43 NEW), layer3_frame 2/2 (R43 NEW).",
+        "VLE u64 primitive validated across width boundaries: 1-byte VLE (sn=0/1/127), 2-byte VLE (sn=128/256/16383), 3-byte VLE (sn=16384/1M), 4+-byte VLE (sn=u32::MAX). Both encoders produce identical byte sequences at every boundary — the most pervasive codec primitive (used by ~20 wire fields across the catalog) has now passed objective Layer 3 verification.",
+        "Cross-codec invariant pinned: wz_codecs::frame::Frame { sn, payload }.encode() == wz_codecs::fragment::Fragment { sn, payload }.encode() when extensions are off (header=0). Caught at test time if the codec SCXMLs ever diverge on the shared §4.2 body shape.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 42→43, T3 warn 856 unchanged.",
+        "Cumulative Layer 3 coverage at end of R43: close + fragment + frame = 3 of 18 wz-codecs SCXMLs wire-validated. Each remaining codec (15 more) lands its own layer3_<codec>.rs in subsequent rounds with the same byte-compare pattern."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R44 = Layer 3 across handshake bodies (init_body + open_body + join + scout + hello). Exercises multi-bit flag (cbyte), dotted-path length-ref (zid_len_m1), present-if local + parent.X, repeat (Hello locators), import (Hello imports locator). 5 new layer3_*.rs tests + zenoh-pico-sys allowlist expansion for _z_init_encode + _z_open_encode + _z_join_encode + _z_scout_encode + _z_hello_encode + their msg structs.",
+        "R45 = Layer 3 across payload bodies (msg_put + msg_del). Exercises variant (ext_entry inner dispatch), embed (timestamp + encoding), tlv-chain (ext_entry repeat), entry-flag termination. Heaviest primitive load.",
+        "R46 = Layer 3 across network envelopes (request + response_final). Exercises peek-byte primitive.",
+        "R47 = remaining codecs: locator (string), timestamp + encoding (embeddable), ext_unit/zint/zbuf (variant arms). After R47 the entire 18-codec wz-codecs catalog has Layer 3 verification.",
+        "SCE upstream PR carry (R40) remains: #![doc = SCE-MAP] inner-attr template fix.",
+        "After codec Layer 3 catalog completes (R47): R48+ runtime crates (wz-runtime-tokio + wz-runtime-lwip)."
+      ]
+    },
     "Round 5": {
       "decision_summary": "Scope correction — SESSION_KICKOFF (activity-log genre) and README (empty stub) removed from Mnemosyne workspace as design-doc lifecycle infrastructure genre misfit.",
       "changes_bullets": [

@@ -150,6 +150,20 @@ fn main() {
         .allowlist_function("_z_wbuf_clear")
         .allowlist_function("_z_wbuf_to_zbuf")
         .allowlist_function("_z_zbuf_clear")
+        // R43 — frame + fragment Layer 3 byte-compare (VLE primitive
+        // validation). Fragment uses _z_slice_t for the payload
+        // (zero-cost wrap of a Rust &[u8]); Frame uses _z_zbuf_t* for
+        // the payload, constructed via _z_slice_as_zbuf from a
+        // _z_slice_t. _z_delete_context_t is the (deleter, context)
+        // pair embedded in _z_slice_t — bindgen needs the type so
+        // Rust can construct a zero-initialized non-owning slice.
+        .allowlist_type("_z_t_msg_frame_t")
+        .allowlist_type("_z_t_msg_fragment_t")
+        .allowlist_type("_z_slice_t")
+        .allowlist_type("_z_delete_context_t")
+        .allowlist_function("_z_frame_encode")
+        .allowlist_function("_z_fragment_encode")
+        .allowlist_function("_z_slice_as_zbuf")
         // bindgen layout-test surface: pin to `Debug` derivation to
         // unblock test-side equality checks against zenoh-pico's
         // typed shape.
