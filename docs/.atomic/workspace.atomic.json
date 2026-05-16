@@ -6322,6 +6322,58 @@
         "Test-design carry: race-prone per-test #[test] fns documented as anti-pattern in R61 commentary; future test additions to wz-runtime-tokio should extend r61_full_coverage_sequential (or a new mega-test fn) rather than add isolated fns that the cargo runner parallelises."
       ]
     },
+    "Round 62": {
+      "decision_summary": "Strict audit pass — cookie HMAC-SHA256 primitive landed per RFC §5.M; extension chain (§7) carry deferred to R63 (SCXML revision scope).",
+      "changes_bullets": [
+        "wz-runtime-tokio depends on `hmac = 0.12` + `sha2 = 0.10` (RustCrypto). MCU sibling Phase W will swap for sce_intrinsics_runtime::hmac_sha256 once that intrinsic lands per RFC §5.I.",
+        "Public `generate_cookie_hmac_sha256(key, peer_zid) -> Vec<u8>` helper in session_glue. Output is HMAC-SHA256 truncated to 16 bytes (cookie wire width per RFC §5.M + zenoh-pico _z_t_msg_init_t._cookie ZSlice convention).",
+        "Short-key panic at construction site (>= 32 bytes per RFC §5.M). Test asserts the loud-reject path so a 16-byte misuse cannot smuggle through to a peer wire-decode-time reject.",
+        "SessionInitParams::cookie_signing_key field added. Caller supplies per-process secret; SessionInitParams::for_test seeds 32 × 0xAB. Cookie field semantics unchanged — still caller-owned wire bytes; the production Accepting side fills it via the new helper before install_session_actions.",
+        "2 unit tests for the HMAC helper: cookie_hmac_sha256_deterministic_16_byte_output + cookie_hmac_short_key_panics."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace 46 → 48 (+2 HMAC unit tests); cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "Cookie helper output deterministic (same key + peer_zid → same 16-byte cookie); divergent peer_zid yields divergent cookie. Short-key panic loud at construction site.",
+        "fixture_params + SessionInitParams::for_test both updated with cookie_signing_key to keep existing wire-byte assertions green; R57 send_init_ack_with_cookie test still passes because the bind closure does not regenerate the cookie inline — caller owns the field, and the test path keeps the literal cookie for byte-equiv reproducibility.",
+        "validate_workspace: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 62 → 63."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
+        "runtime-crate--sce_link_runtime_tokio",
+        "intrinsics-runtime--symbol-surface/2-6-hmac"
+      ],
+      "carry_forward_bullets": [
+        "R63a carry: transport extension chain emit on Init/Open/Join (§7 ext::QoS / ext::Auth / ext::MultiLink / ext::PatchType / ext::LowLatency). The SCE schema's <sce:tlv-chain> primitive supports the shape; wz init_body.scxml + open_body.scxml + join.scxml are not yet authored against it. Multi-session SCXML revision + verify-codegen.sh re-run + Layer 3 byte-equiv extension. Real zenoh peer interop requires this.",
+        "R63b carry: inbound parser pass. R62's cookie helper is for the Accepting side's outbound InitAck only; the Initiator-side InitAck decode path that pulls the peer-issued cookie off the wire and stages it into SessionInitParams.cookie for OpenSyn echo is not yet wired. Currently the Initiator's cookie field is caller-supplied at install time — production needs the inbound parser to populate it from the actual peer InitAck.",
+        "R63c carry: wz-runtime-lwip resolution still open from R60. R63 cluster bundles all three lwip-related carries (resolution decision + extension chain + inbound parser).",
+        "Hal time mock (R61b) and R40 strip workaround long-term decision both still open from prior rounds."
+      ],
+      "publishable_decision_summary": "Strict audit pass — cookie HMAC-SHA256 primitive landed per RFC §5.M; extension chain (§7) carry deferred to R63 (SCXML revision scope).",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio depends on `hmac = 0.12` + `sha2 = 0.10` (RustCrypto). MCU sibling Phase W will swap for sce_intrinsics_runtime::hmac_sha256 once that intrinsic lands per RFC §5.I.",
+        "Public `generate_cookie_hmac_sha256(key, peer_zid) -> Vec<u8>` helper in session_glue. Output is HMAC-SHA256 truncated to 16 bytes (cookie wire width per RFC §5.M + zenoh-pico _z_t_msg_init_t._cookie ZSlice convention).",
+        "Short-key panic at construction site (>= 32 bytes per RFC §5.M). Test asserts the loud-reject path so a 16-byte misuse cannot smuggle through to a peer wire-decode-time reject.",
+        "SessionInitParams::cookie_signing_key field added. Caller supplies per-process secret; SessionInitParams::for_test seeds 32 × 0xAB. Cookie field semantics unchanged — still caller-owned wire bytes; the production Accepting side fills it via the new helper before install_session_actions.",
+        "2 unit tests for the HMAC helper: cookie_hmac_sha256_deterministic_16_byte_output + cookie_hmac_short_key_panics."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace 46 → 48 (+2 HMAC unit tests); cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "Cookie helper output deterministic (same key + peer_zid → same 16-byte cookie); divergent peer_zid yields divergent cookie. Short-key panic loud at construction site.",
+        "fixture_params + SessionInitParams::for_test both updated with cookie_signing_key to keep existing wire-byte assertions green; R57 send_init_ack_with_cookie test still passes because the bind closure does not regenerate the cookie inline — caller owns the field, and the test path keeps the literal cookie for byte-equiv reproducibility.",
+        "validate_workspace: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 62 → 63."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
+        "runtime-crate--sce_link_runtime_tokio",
+        "intrinsics-runtime--symbol-surface/2-6-hmac"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R63a carry: transport extension chain emit on Init/Open/Join (§7 ext::QoS / ext::Auth / ext::MultiLink / ext::PatchType / ext::LowLatency). The SCE schema's <sce:tlv-chain> primitive supports the shape; wz init_body.scxml + open_body.scxml + join.scxml are not yet authored against it. Multi-session SCXML revision + verify-codegen.sh re-run + Layer 3 byte-equiv extension. Real zenoh peer interop requires this.",
+        "R63b carry: inbound parser pass. R62's cookie helper is for the Accepting side's outbound InitAck only; the Initiator-side InitAck decode path that pulls the peer-issued cookie off the wire and stages it into SessionInitParams.cookie for OpenSyn echo is not yet wired. Currently the Initiator's cookie field is caller-supplied at install time — production needs the inbound parser to populate it from the actual peer InitAck.",
+        "R63c carry: wz-runtime-lwip resolution still open from R60. R63 cluster bundles all three lwip-related carries (resolution decision + extension chain + inbound parser).",
+        "Hal time mock (R61b) and R40 strip workaround long-term decision both still open from prior rounds."
+      ]
+    },
     "Round 7": {
       "decision_summary": "Phase D scope correction — README/SESSION_KICKOFF removed from workspace.docs (genre fit); atomic-internal orphan ledger via mnemosyne Round 254 supports textbook path.",
       "changes_bullets": [
