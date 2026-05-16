@@ -4652,6 +4652,60 @@
         "After payload codec set completes: minimum communication demo is unblocked at codec layer — handshake (R31/R34/R35) + Frame (R32) + Put (R37) all wire-bound. Runtime crate / link driver wiring is the remaining gap to 'see communication'."
       ]
     },
+    "Round 37": {
+      "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
+      "changes_bullets": [
+        "sources/codecs/ext_entry.scxml new (75 lines, sce:kind=codec). 1-byte header with 4-tuple bit-range packing (ext_id:4 + M:1 + enc:2 + Z:1) + <sce:variant tag='header.enc'> with 3 arms (Unit/ZInt/ZBuf) + <sce:default>. First variant primitive consumer.",
+        "sources/codecs/msg_put.scxml new (104 lines, sce:kind=codec). PUT envelope: header flags + T-gated timestamp embed + E-gated encoding embed + Z-gated tlv-chain<ext_entry> + payload_len:VLE + payload:length-ref bytes max=256. First <sce:embed> + <sce:tlv-chain> + entry-flag termination consumer.",
+        "sources/codecs/msg_del.scxml new (76 lines, sce:kind=codec). DEL envelope: header flags + T-gated timestamp embed + Z-gated tlv-chain<ext_entry>. Subset of msg_put primitives (no encoding/payload).",
+        "All 3 body byte-identical to SCE upstream codec_zenoh_ext_entry + codec_zenoh_msg_put + codec_zenoh_msg_del at vendor pin 11f1032d; diff only in SPDX header + file stem + root name + <sce:import src=> retargeted to wz-stems (timestamp.scxml / encoding.scxml / ext_entry.scxml / ext_*.scxml).",
+        "Codec primitive coverage advance: 13 →17. New primitives: variant dispatch (B1-β) + embed (Y0c <sce:embed>) + tlv-chain (B5-ε chain element) + entry-flag termination (Y3 atomic 1)."
+      ],
+      "verification_bullets": [
+        "verify-codegen.sh Layer 1 on all 3: 6/6 emit pass each = 18/18. Total Phase B5 codec coverage at end of R37: 18 SCXMLs × 6 backends = 108/108 emit pass at vendor pin 11f1032d.",
+        "<sce:variant tag='header.enc'> with 4-arm dispatch (0x00/0x01/0x02/default) emit-confirmed across 6 backends — sentinel variant primitive proves dotted-path bit-range dispatch (enc is a 2-bit slice of the header byte).",
+        "<sce:tlv-chain ... terminate-on='entry-flag' entry-flag-name='Z' max-depth='4'> emit-confirmed — the iterator+termination grammar that drives multi-extension parsing across PUT/DEL/REPLY/ERR/QUERY bodies all share.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 36→37, T3 warn 856 unchanged.",
+        "Cross-doc verification: ext_entry header bit-layout bound to zenoh-pico include/zenoh-pico/protocol/ext.h:55-65 (FLAG_M=0x10, FLAG_Z=0x80, ENC_*); msg_put header bound to message.c:369-379 _z_put_encode + 257-303 _z_push_body_encode (T@5/E@6/Z@7); msg_del header bound to message.c:381-391 _z_del_encode."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "carry_forward_bullets": [
+        "Communication-demo gate analysis at end of R37: codec layer for handshake (R31+R34+R35) + Frame (R32) + Put/Del payload (R37) is COMPLETE. Remaining gaps to 'see communication': (a) network envelope codec (codec_zenoh_push / codec_zenoh_request / codec_zenoh_response wrapping the payload bodies under network-routing MIDs); (b) crates/ runtime stub code (sce_link_runtime_tokio impl, currently 0 lines); (c) two-process test harness wiring.",
+        "Remaining §6 payload codecs: msg_query (Z_QUERY 0x03) + msg_reply (Z_REPLY 0x04) + msg_err (Z_ERR 0x05) — 3 more SCXMLs to complete the inner-MID-body set. msg_query / msg_reply will likely re-use the existing 17 primitives; msg_err's encoding embed is shared with msg_put.",
+        "Codec primitive coverage at end of R37: 17 primitives. Remaining major primitives: §5.1 declare-body bit-layouts (ext_keyexpr_decl_* with M-flag negation arms? Pending fixture inspection) + lookup-table dispatch for codec_zenoh_request/response inner-MID arms.",
+        "R29 statechart carry items unchanged. Codec / statechart tracks remain parallel; statechart side has had no advance since R29 first land."
+      ],
+      "publishable_decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
+      "publishable_changes_bullets": [
+        "sources/codecs/ext_entry.scxml new (75 lines, sce:kind=codec). 1-byte header with 4-tuple bit-range packing (ext_id:4 + M:1 + enc:2 + Z:1) + <sce:variant tag='header.enc'> with 3 arms (Unit/ZInt/ZBuf) + <sce:default>. First variant primitive consumer.",
+        "sources/codecs/msg_put.scxml new (104 lines, sce:kind=codec). PUT envelope: header flags + T-gated timestamp embed + E-gated encoding embed + Z-gated tlv-chain<ext_entry> + payload_len:VLE + payload:length-ref bytes max=256. First <sce:embed> + <sce:tlv-chain> + entry-flag termination consumer.",
+        "sources/codecs/msg_del.scxml new (76 lines, sce:kind=codec). DEL envelope: header flags + T-gated timestamp embed + Z-gated tlv-chain<ext_entry>. Subset of msg_put primitives (no encoding/payload).",
+        "All 3 body byte-identical to SCE upstream codec_zenoh_ext_entry + codec_zenoh_msg_put + codec_zenoh_msg_del at vendor pin 11f1032d; diff only in SPDX header + file stem + root name + <sce:import src=> retargeted to wz-stems (timestamp.scxml / encoding.scxml / ext_entry.scxml / ext_*.scxml).",
+        "Codec primitive coverage advance: 13 →17. New primitives: variant dispatch (B1-β) + embed (Y0c <sce:embed>) + tlv-chain (B5-ε chain element) + entry-flag termination (Y3 atomic 1)."
+      ],
+      "publishable_verification_bullets": [
+        "verify-codegen.sh Layer 1 on all 3: 6/6 emit pass each = 18/18. Total Phase B5 codec coverage at end of R37: 18 SCXMLs × 6 backends = 108/108 emit pass at vendor pin 11f1032d.",
+        "<sce:variant tag='header.enc'> with 4-arm dispatch (0x00/0x01/0x02/default) emit-confirmed across 6 backends — sentinel variant primitive proves dotted-path bit-range dispatch (enc is a 2-bit slice of the header byte).",
+        "<sce:tlv-chain ... terminate-on='entry-flag' entry-flag-name='Z' max-depth='4'> emit-confirmed — the iterator+termination grammar that drives multi-extension parsing across PUT/DEL/REPLY/ERR/QUERY bodies all share.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 36→37, T3 warn 856 unchanged.",
+        "Cross-doc verification: ext_entry header bit-layout bound to zenoh-pico include/zenoh-pico/protocol/ext.h:55-65 (FLAG_M=0x10, FLAG_Z=0x80, ENC_*); msg_put header bound to message.c:369-379 _z_put_encode + 257-303 _z_push_body_encode (T@5/E@6/Z@7); msg_del header bound to message.c:381-391 _z_del_encode."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Communication-demo gate analysis at end of R37: codec layer for handshake (R31+R34+R35) + Frame (R32) + Put/Del payload (R37) is COMPLETE. Remaining gaps to 'see communication': (a) network envelope codec (codec_zenoh_push / codec_zenoh_request / codec_zenoh_response wrapping the payload bodies under network-routing MIDs); (b) crates/ runtime stub code (sce_link_runtime_tokio impl, currently 0 lines); (c) two-process test harness wiring.",
+        "Remaining §6 payload codecs: msg_query (Z_QUERY 0x03) + msg_reply (Z_REPLY 0x04) + msg_err (Z_ERR 0x05) — 3 more SCXMLs to complete the inner-MID-body set. msg_query / msg_reply will likely re-use the existing 17 primitives; msg_err's encoding embed is shared with msg_put.",
+        "Codec primitive coverage at end of R37: 17 primitives. Remaining major primitives: §5.1 declare-body bit-layouts (ext_keyexpr_decl_* with M-flag negation arms? Pending fixture inspection) + lookup-table dispatch for codec_zenoh_request/response inner-MID arms.",
+        "R29 statechart carry items unchanged. Codec / statechart tracks remain parallel; statechart side has had no advance since R29 first land."
+      ]
+    },
     "Round 4": {
       "decision_summary": "Phase C complete — 3 FSM docs (session-fsm / scouting-fsm / reassembly-fsm) atomic decomposition; 55 new sections at H2/H3 granularity.",
       "changes_bullets": [
