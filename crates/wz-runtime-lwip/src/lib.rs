@@ -1,28 +1,34 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `sce_link_runtime_lwip` — C11 link runtime for the watching-zenoh
-//! MCU bare_metal deploy class.
+//! `sce_link_runtime_lwip` — host-build skeleton of the C11 link
+//! runtime for the watching-zenoh MCU bare_metal deploy class.
 //!
-//! The crate's load-bearing artifact is the C side: per-link wrapper
-//! headers emitted by `sce-codegen --language c11` (built at
-//! `$OUT_DIR/include/<stem>.h`) and the `sce_forge_link_ops_t` vtable
-//! skeleton compiled from `src/sce_link_runtime_lwip.c`.
+//! **Phase W deferred — not production.** The `.c` translation unit
+//! (`src/sce_link_runtime_lwip.c`) ships rx / tx / poll vtable
+//! functions whose bodies count calls and return idle / OK; **no
+//! actual lwIP API** (`udp_recv`, `udp_sendto`, `tcp_*`) is wired.
+//! Consumers MUST NOT take this crate as a production lwIP runtime.
+//! The Phase W round will plumb the cross-compile toolchain
+//! (Cortex-M target, lwIP source tree, target-plugin per RFC §5.I)
+//! and replace the stubs with real driver code.
 //!
-//! The Rust surface here exists for two reasons:
+//! What this crate currently proves (R53 vertical slice):
+//!   1. SCE B6 link-kind C11 emitter operates end-to-end on a wz
+//!      SCXML (`sources/links/lwip_udp_scout.scxml` → emitted
+//!      `lwip_udp_scout.h` via `sce-codegen --language c11`).
+//!   2. The emitted wrapper composes the `sce_forge_link_t` vtable
+//!      shape from `vendor/sce/sce-forge-runtime/c/include/sce/forge/link.h`.
+//!   3. A Rust FFI surface (`LwipUdpDriver` + `LinkHandle`) can hold
+//!      the vtable handle, round-trip ops calls through the C side,
+//!      and read back the counter side effects.
 //!
-//!  1. Smoke-test the C ABI from the host workspace's `cargo test`
-//!     loop. The MCU cross-compile path is not yet wired through the
-//!     host build; until it is, Rust extern declarations and a
-//!     host-compiled stub are the closest reachable proof that the
-//!     emitter output linked cleanly.
-//!  2. Provide a thin safe handle (`LwipUdpDriver`) so future Rust
-//!     consumers — the session FSM glue (R54+) and the cross-language
-//!     parity tests — have a stable Rust type to bind against.
-//!
-//! Trust-class gating, RX-pool integration, and the per-deploy
-//! listener-link sibling pair (RFC §5.C lines 802-833) are all
-//! deferred to later rounds.
+//! Items (1) + (2) are the load-bearing audit of "the C11 link
+//! emitter is consumable from wz"; item (3) is incidental
+//! plumbing whose values are NOT production-grade. Trust-class
+//! gating, RX-pool integration, the listener-link sibling pair
+//! (RFC §5.C lines 802-833), and actual lwIP API wiring all
+//! belong to Phase W.
 
 use std::ffi::c_void;
 use std::os::raw::c_uchar;

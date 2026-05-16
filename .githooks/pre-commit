@@ -1,25 +1,66 @@
 #!/usr/bin/env bash
-# Mnemosyne SSOT gate — runs on every `git commit`.
+# Pre-commit gate — two checks in sequence:
 #
-# Blocks the commit if `mnemosyne-cli validate-workspace` finds:
-#   - new T1 cross-ref orphans (not registered in [[orphan_ledger]])
-#   - resolved ledger entries (entry stale, drift catch)
-#   - round-trip mandatory dimension break
+#   1. Cargo.toml ↔ Cargo.lock synchronisation. R52.1 retrospect:
+#      R51/R52 staged Cargo.toml changes without their Cargo.lock
+#      delta, breaking reproducibility. Any commit that stages a
+#      `crates/**/Cargo.toml` without also staging `crates/Cargo.lock`
+#      is blocked. If the lock file genuinely does not change (e.g.
+#      a metadata-only edit), stage it explicitly anyway so the
+#      check is intentional.
+#
+#   2. Mnemosyne SSOT gate. Blocks the commit if
+#      `mnemosyne-cli validate-workspace` finds:
+#        - new T1 cross-ref orphans (not registered in [[orphan_ledger]])
+#        - resolved ledger entries (entry stale, drift catch)
+#        - round-trip mandatory dimension break
 #
 # Install via:
 #   git config core.hooksPath .githooks
 # (one-time per clone; `.githooks/` is tracked, `.git/hooks/` is not)
 set -euo pipefail
 
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+# ─── Check 1: Cargo.toml ↔ Cargo.lock sync ─────────────────────────
+#
+# `git diff --cached --name-only` lists every path the current commit
+# stages. We grep for `crates/**/Cargo.toml` and separately for
+# `crates/Cargo.lock`; the absence of the lock when a manifest changed
+# is the R52.1 failure mode.
+staged_manifests=$(git diff --cached --name-only \
+    | grep -E '^crates/.+/Cargo\.toml$' || true)
+staged_lockfile=$(git diff --cached --name-only \
+    | grep -E '^crates/Cargo\.lock$' || true)
+
+if [[ -n "$staged_manifests" && -z "$staged_lockfile" ]]; then
+    # Sub-check: does the working-tree Cargo.lock actually differ
+    # from HEAD's? A manifest edit that does not touch the resolved
+    # dep tree (e.g. `description = "..."` change) leaves Cargo.lock
+    # byte-identical with HEAD, in which case staging it would be
+    # a no-op and the R52.1 hazard does not apply.
+    if git diff --quiet HEAD -- crates/Cargo.lock 2>/dev/null \
+        && git diff --quiet -- crates/Cargo.lock 2>/dev/null; then
+        : # lock byte-identical with HEAD; manifest edit is metadata-only.
+    else
+        echo "pre-commit: Cargo.toml change staged WITHOUT crates/Cargo.lock,"  >&2
+        echo "and the working-tree Cargo.lock differs from HEAD:" >&2
+        echo "$staged_manifests" | sed 's/^/    manifest: /' >&2
+        echo "" >&2
+        echo "  R52.1 retrospect: a manifest change without its lock-delta" >&2
+        echo "  breaks reproducibility on fresh checkouts. Stage the lock" >&2
+        echo "  alongside:" >&2
+        echo "    git add crates/Cargo.lock" >&2
+        exit 1
+    fi
+fi
+
+# ─── Check 2: Mnemosyne SSOT gate ──────────────────────────────────
 if ! command -v mnemosyne-cli >/dev/null 2>&1; then
     echo "pre-commit: mnemosyne-cli not on PATH — install with" >&2
     echo "  cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli" >&2
     exit 1
 fi
-
-# Discover repo root and run from there so `mnemosyne.toml` discovery
-# walks upward correctly regardless of where `git commit` was invoked.
-repo_root="$(git rev-parse --show-toplevel)"
-cd "$repo_root"
 
 exec mnemosyne-cli validate-workspace
