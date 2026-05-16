@@ -6106,6 +6106,58 @@
         "58 + R58 commits unpushed; push remains explicit-consent only."
       ]
     },
+    "Round 59": {
+      "decision_summary": "Engine multi-step driving — full outbound-initiator happy path Init→LinkOpening→SentInitSyn→GotInitAck→Established→Closing→Closed verified through real codec encode.",
+      "changes_bullets": [
+        "wz-runtime-tokio/tests/session_fsm_full_path.rs (~180 lines): R59 integration test walks the entire outbound-initiator state path via Engine::process_event(LinkOpened/InitAckReceived/OpenAckReceived/SessionClose/ClosingTimeout) and asserts at every state: (a) `Engine::get_current_state` matches the SCXML target, (b) the onentry/onexit script counters in ActionTrace increment by exactly one each, (c) the RecordingDriver receives the expected open/close/send calls, (d) the Close wire bytes match the codec-produced 2-byte layout [FLAG_T_CLOSE_S|T_MID_CLOSE, reason].",
+        "Closes R57c carry (Engine multi-step driving past LinkOpening) using external-event injection — the 5s link.open_timeout / 100ms closing.timeout delayed sends scheduled inside onentry are not advanced because the happy path drives transitions via real wire events (link.opened / closing.timeout) rather than timeouts. Engine::tick + Hal time mock remains a separate carry for the timeout/failure-path coverage."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace 43 → 44 (R59 new integration test); cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "Engine state assertion at every transition target (Init/LinkOpening/SentInitSyn/GotInitAck/Established/Closing/Closed) confirms the generated SCXML transition graph traverses exactly one macrostep per process_event call.",
+        "Established onentry produces 3 actions (enable_rx_tx_regions, start_lease_monitor, start_keepalive_worker); Established onexit produces 2 (stop_keepalive_worker, stop_lease_monitor); test asserts every counter +1 in the right order.",
+        "Wire bytes for INIT_SYN + OPEN_SYN + CLOSE in the RecordingDriver sends queue confirm the R57 codec path is exercised through the Engine driver, not just the dispatch_script direct call from R57's test.",
+        "validate_workspace: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 59 → 60."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-4-close-paths",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "Failure-path coverage: framing.error / lease.expired / tx.congestion.exhaust / peer.close / link.lost / init_ack.timeout / open_ack.timeout transitions still untested at FSM level. Each fires set_close_reason_* + transitions to Closing; the wire shape is identical to the happy-path Close so the codec assertion stays unchanged.",
+        "Engine::tick + Hal time mock: the 5s link.open_timeout / 2s init_ack.timeout / 100ms closing.timeout / accepting.inactivity_timeout delayed sends are scheduled but never advanced. Production timeout coverage needs `sce_rust_runtime::StdHal` injection or a TestHal that advances logical time.",
+        "Listener-path coverage: R59 walks the initiator path (outbound.start → LinkOpening → Opening). The Accepting branch (inbound.start → AwaitingInitSyn → SentInitAck → SentOpenAck → Established) exercises send_init_ack_with_cookie + send_open_ack which R57 wire tests cover in isolation, but Engine-driven listener-path is its own follow-up test.",
+        "Cookie HMAC-SHA256 (R57b carry) still open: SessionInitParams::cookie is caller-supplied bytes; production listener side must HMAC the cookie before InitAck.",
+        "R40 strip workaround decision still pending (R58 carry): SCE PR for `--no-inner-attr` or wz per-codec sub-crate split."
+      ],
+      "publishable_decision_summary": "Engine multi-step driving — full outbound-initiator happy path Init→LinkOpening→SentInitSyn→GotInitAck→Established→Closing→Closed verified through real codec encode.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/tests/session_fsm_full_path.rs (~180 lines): R59 integration test walks the entire outbound-initiator state path via Engine::process_event(LinkOpened/InitAckReceived/OpenAckReceived/SessionClose/ClosingTimeout) and asserts at every state: (a) `Engine::get_current_state` matches the SCXML target, (b) the onentry/onexit script counters in ActionTrace increment by exactly one each, (c) the RecordingDriver receives the expected open/close/send calls, (d) the Close wire bytes match the codec-produced 2-byte layout [FLAG_T_CLOSE_S|T_MID_CLOSE, reason].",
+        "Closes R57c carry (Engine multi-step driving past LinkOpening) using external-event injection — the 5s link.open_timeout / 100ms closing.timeout delayed sends scheduled inside onentry are not advanced because the happy path drives transitions via real wire events (link.opened / closing.timeout) rather than timeouts. Engine::tick + Hal time mock remains a separate carry for the timeout/failure-path coverage."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace 43 → 44 (R59 new integration test); cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "Engine state assertion at every transition target (Init/LinkOpening/SentInitSyn/GotInitAck/Established/Closing/Closed) confirms the generated SCXML transition graph traverses exactly one macrostep per process_event call.",
+        "Established onentry produces 3 actions (enable_rx_tx_regions, start_lease_monitor, start_keepalive_worker); Established onexit produces 2 (stop_keepalive_worker, stop_lease_monitor); test asserts every counter +1 in the right order.",
+        "Wire bytes for INIT_SYN + OPEN_SYN + CLOSE in the RecordingDriver sends queue confirm the R57 codec path is exercised through the Engine driver, not just the dispatch_script direct call from R57's test.",
+        "validate_workspace: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 59 → 60."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-4-close-paths",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Failure-path coverage: framing.error / lease.expired / tx.congestion.exhaust / peer.close / link.lost / init_ack.timeout / open_ack.timeout transitions still untested at FSM level. Each fires set_close_reason_* + transitions to Closing; the wire shape is identical to the happy-path Close so the codec assertion stays unchanged.",
+        "Engine::tick + Hal time mock: the 5s link.open_timeout / 2s init_ack.timeout / 100ms closing.timeout / accepting.inactivity_timeout delayed sends are scheduled but never advanced. Production timeout coverage needs `sce_rust_runtime::StdHal` injection or a TestHal that advances logical time.",
+        "Listener-path coverage: R59 walks the initiator path (outbound.start → LinkOpening → Opening). The Accepting branch (inbound.start → AwaitingInitSyn → SentInitAck → SentOpenAck → Established) exercises send_init_ack_with_cookie + send_open_ack which R57 wire tests cover in isolation, but Engine-driven listener-path is its own follow-up test.",
+        "Cookie HMAC-SHA256 (R57b carry) still open: SessionInitParams::cookie is caller-supplied bytes; production listener side must HMAC the cookie before InitAck.",
+        "R40 strip workaround decision still pending (R58 carry): SCE PR for `--no-inner-attr` or wz per-codec sub-crate split."
+      ]
+    },
     "Round 6": {
       "decision_summary": "Round 5 scope correction blocked by mnemosyne Round 169 atomic-internal orphan reject; reverted to lean/stub plan; SESSION_KICKOFF/README retained in 13-doc workspace as architectural lock-in carry.",
       "changes_bullets": [
