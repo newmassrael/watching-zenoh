@@ -92,6 +92,15 @@ jobs:
             crates -> target
             vendor/sce -> target
 
+      - name: Install protoc (mnemosyne-server build-script dep)
+        # R64.3 hotfix: cargo install of mnemosyne-cli pulls in the
+        # mnemosyne-server workspace member transitively; that crate's
+        # build script invokes prost-build which requires the
+        # `protoc` binary on PATH. The R64.2 install attempt passed
+        # cargo's argument parser but failed at build-script time
+        # with `Could not find protoc. ... apt-get install protobuf-compiler`.
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+
       - name: Install mnemosyne-cli
         # mnemosyne-cli source lives outside this workspace; CI
         # builds it from the upstream main pin used at memory R286

@@ -6574,6 +6574,46 @@
         "R65 spec body authoring still next in Path X."
       ]
     },
+    "Round 64.3": {
+      "decision_summary": "CI Layer A re-re-hotfix — protoc binary missing on runner; mnemosyne-server (transitive dep) build script needs it. apt-get install protobuf-compiler step prepended.",
+      "changes_bullets": [
+        "CI run 25965629892 (R64.2 verification): cargo install succeeded the argument parser but failed at build-script time with `Could not find protoc ... apt-get install protobuf-compiler`. The mnemosyne workspace's mnemosyne-server crate uses prost-build which needs the protoc binary on PATH; cargo install pulls the whole workspace path-graph through during compilation.",
+        ".github/workflows/ci.yml: new `Install protoc (mnemosyne-server build-script dep)` step added before the `Install mnemosyne-cli` step. Doc-comment records the R64.3 trace so a future contributor does not re-debug the same chain.",
+        "R64 series retrospect: three hotfix attempts (R64.1 --package flag rejection / R64.2 positional CRATE form ok but missing build dep / R64.3 protoc apt install). Each previous attempt would have surfaced earlier with the R65 local-CI-gate hook + actionlint installed locally; R64 series is the historical evidence that motivated the R65 process invariant."
+      ],
+      "verification_bullets": [
+        "Pre-R64.3 CI run (25965629892): mnemosyne-cli install failed at build-script with `Could not find protoc`; Layer A skipped; Layer B/C1/C2/D pass (5m14s).",
+        "Post-R64.3 CI verification pending — push triggers new run; expect protoc step to install + mnemosyne-cli build to complete + Layer A `mnemosyne-cli validate-workspace` to run.",
+        "Local pre-push hook (R65) still gates the push regardless of R64.3 outcome — if the new CI yaml is invalid the hook's eventual Layer 0 (actionlint, when installed) or the GitHub Actions yaml parse step catches it; the cargo install command itself runs only on CI, not in run-ci.sh."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Install actionlint locally to activate the R65 Layer 0 (would have caught R64.1 --package flag immediately).",
+        "R65b dedupe CI yaml lane bodies still open; R64.3 widens the diff so the dedupe carry is increasingly valuable.",
+        "Node.js 20 deprecation carry."
+      ],
+      "publishable_decision_summary": "CI Layer A re-re-hotfix — protoc binary missing on runner; mnemosyne-server (transitive dep) build script needs it. apt-get install protobuf-compiler step prepended.",
+      "publishable_changes_bullets": [
+        "CI run 25965629892 (R64.2 verification): cargo install succeeded the argument parser but failed at build-script time with `Could not find protoc ... apt-get install protobuf-compiler`. The mnemosyne workspace's mnemosyne-server crate uses prost-build which needs the protoc binary on PATH; cargo install pulls the whole workspace path-graph through during compilation.",
+        ".github/workflows/ci.yml: new `Install protoc (mnemosyne-server build-script dep)` step added before the `Install mnemosyne-cli` step. Doc-comment records the R64.3 trace so a future contributor does not re-debug the same chain.",
+        "R64 series retrospect: three hotfix attempts (R64.1 --package flag rejection / R64.2 positional CRATE form ok but missing build dep / R64.3 protoc apt install). Each previous attempt would have surfaced earlier with the R65 local-CI-gate hook + actionlint installed locally; R64 series is the historical evidence that motivated the R65 process invariant."
+      ],
+      "publishable_verification_bullets": [
+        "Pre-R64.3 CI run (25965629892): mnemosyne-cli install failed at build-script with `Could not find protoc`; Layer A skipped; Layer B/C1/C2/D pass (5m14s).",
+        "Post-R64.3 CI verification pending — push triggers new run; expect protoc step to install + mnemosyne-cli build to complete + Layer A `mnemosyne-cli validate-workspace` to run.",
+        "Local pre-push hook (R65) still gates the push regardless of R64.3 outcome — if the new CI yaml is invalid the hook's eventual Layer 0 (actionlint, when installed) or the GitHub Actions yaml parse step catches it; the cargo install command itself runs only on CI, not in run-ci.sh."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Install actionlint locally to activate the R65 Layer 0 (would have caught R64.1 --package flag immediately).",
+        "R65b dedupe CI yaml lane bodies still open; R64.3 widens the diff so the dedupe carry is increasingly valuable.",
+        "Node.js 20 deprecation carry."
+      ]
+    },
     "Round 65": {
       "decision_summary": "CI-equivalent local gate via scripts/run-ci.sh + pre-push delegation — process fix for R64.1's guess-and-push pattern. Hook now mirrors every CI lane.",
       "changes_bullets": [
