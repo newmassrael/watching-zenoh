@@ -696,6 +696,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-runtime-lwip"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "sce-build",
+]
+
+[[package]]
 name = "wz-runtime-tokio"
 version = "0.1.0"
 dependencies = [

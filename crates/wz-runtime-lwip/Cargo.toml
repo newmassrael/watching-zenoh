@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-runtime-lwip — sce_link_runtime_lwip C11 sibling per
+# docs/runtime-crate-lwip.md and RFC §5.J.3.
+#
+# R53 (Phase Z) entry — minimal vertical slice that exercises the
+# SCE B6 link-kind C11 emitter end-to-end:
+#
+#   1. `sources/links/*.scxml` are codegen'd via sce-build to a
+#      `lwip_udp_scout.h` (per-deploy `<snake>_link_t` wrapper)
+#      written into `$OUT_DIR/include/`.
+#   2. `src/sce_link_runtime_lwip.c` provides the
+#      `sce_forge_link_ops_t` vtable skeleton (rx / tx / poll
+#      function pointers) that the generated wrapper composes.
+#      The skeleton uses NOP stubs returning the contract's
+#      idle / OK responses; actual lwIP API calls land in a
+#      later round when the C11 toolchain target (MCU bare_metal
+#      cross-compile) is wired through the host build.
+#   3. `src/lib.rs` declares the FFI extern functions emitted by
+#      the wrapper and exposes a thin safe Rust handle. Smoke
+#      tests verify the contract's load-bearing symbols (vtable
+#      pointer, macro round-trip) survive the codegen + cc roundtrip.
+#
+# Why this shape. docs/runtime-crate-lwip.md §6 predates the SCE B6
+# emitter land (R30 vendor pin 11f1032d), so its "design-only until
+# the C11 emitter exists" wording is stale — B6-α/β/γ closed that
+# gap and the emitter produces a production-grade wrapper header
+# (linker-friendly INTERFACE library at vendor/sce/sce-forge-runtime/
+# c/include/sce/forge/link.h). This crate consumes that emitter
+# output directly instead of hand-authoring the contract; a hand
+# header would diverge from the canonical artifact codegen emits.
+
+[package]
+name = "wz-runtime-lwip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "C11 link runtime for watching-zenoh MCU bare_metal target (lwIP host stubs; R53 vertical slice)."
+
+[lib]
+name = "wz_runtime_lwip"
+path = "src/lib.rs"
+
+[build-dependencies]
+sce-build = { path = "../../vendor/sce/sce-build" }
+cc = "1"
+
+[dependencies]
+
+[lints]
+workspace = true

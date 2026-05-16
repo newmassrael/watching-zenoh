@@ -31,6 +31,7 @@ members = [
     "zenoh-pico-sys",
     "wz-integration-tests",
     "wz-runtime-tokio",
+    "wz-runtime-lwip",
 ]
 
 [workspace.package]

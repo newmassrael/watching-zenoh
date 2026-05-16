@@ -1809,7 +1809,7 @@
       ]
     },
     "runtime-crate--sce_link_runtime_lwip-c11-header-shape/6-next-step-scaffolding": {
-      "intent": "Next-step when Phase A C11 emitter lands — sce_link_runtime_lwip crate skeleton, per-deploy .h generation, target_plugin driver impls; direct authoring blocker for Phase A entry.",
+      "intent": "Next-step after R53 — SCE B6 link C11 emitter live (vendor 2ff9d7a9); wz-runtime-lwip skeleton landed; tcp/uart/raw_eth siblings + lwIP API + MCU cross-compile follow.",
       "impact_scope": [
         "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-c11-header-shape"
       ]
@@ -5766,6 +5766,74 @@
         "R53 (Phase Z) = wz-runtime-lwip C11 sibling per docs/runtime-crate-lwip.md (next step).",
         "R54 (Phase Z closure) = R29 session_fsm script-action placeholder wiring to LinkDriver.",
         "Lesson: stage Cargo.lock alongside Cargo.toml dep changes; pre-commit hook should grow a cargo metadata gate."
+      ]
+    },
+    "Round 53": {
+      "decision_summary": "SCE vendor pin 11f1032d→2ff9d7a9 + wz-runtime-lwip C11 sibling vertical slice — first round consuming B6 link-kind C11 emitter end-to-end.",
+      "changes_bullets": [
+        "vendor/sce submodule bumped 11f1032d → 2ff9d7a9 (13 commits); c56161ea resolves R52.1+ NEW issues (workspace-root flag + 4-layer resolution chain, --version, stale 'C11 emitter lands in M2+' help text strip).",
+        "Verified post-bump: sce-codegen --version returns 0.1.0; CLI emit embeds real template-hash 9faef237... (zero regression closed for CLI path).",
+        "crates/wz-runtime-lwip/ created (Cargo.toml + build.rs + src/sce_link_runtime_lwip.c + src/wz_runtime_lwip.h + src/lib.rs); workspace members 4 → 5.",
+        "sources/links/lwip_udp_scout.scxml authored (sce:kind='link', link-class=udp, framer=frame, backpressure=drop) — first link-kind SCXML in the workspace, mapped to SCE B6-α self-test fixture shape (vendor/sce/sce-build/src/lib.rs:5524).",
+        "build.rs invokes sce-build's compile_forge_with_imports(Language::C11) in-process; emitted lwip_udp_scout.h composed with cc-compiled sce_link_runtime_lwip.c (vtable skeleton — host-build NOP stubs counting rx/tx/poll calls).",
+        "Discarded an earlier hand-authored sce_link_runtime.h drafted against docs/runtime-crate-lwip.md §2 spec when the user flagged that the B6 emitter was already live; reframed R53 to consume the canonical emit instead of hand-locking a divergent contract.",
+        "doc §6 atomic intent updated via set_section_intent to retire the 'design-only until C11 emitter exists' stale claim and record the emitter-live + skeleton-landed state."
+      ],
+      "verification_bullets": [
+        "cargo build --workspace clean; cargo test --workspace 39/39 pass (35 baseline + 4 new wz-runtime-lwip ABI smoke tests).",
+        "Smoke tests (crates/wz-runtime-lwip/src/lib.rs::tests): LinkStatus repr size = 4; LinkOps vtable size = 3 pointers; factory_handle_round_trips_vtable_calls exercises rx/tx/poll through the FFI surface and verifies state counter side effects; tx_default_status round-trips ErrBackpressure variant.",
+        "cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "validate_workspace post-mutations: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 53 → 54, sections 214 unchanged.",
+        "sce-codegen --language c11 against sources/links/lwip_udp_scout.scxml emits include/lwip_udp_scout.h with sce_forge_link_t wrapper struct + 4 inline functions + LINK_CLASS/FRAMER_REF/BACKPRESSURE macros; #include 'sce/forge/link.h' resolves against vendor/sce/sce-forge-runtime/c/include/."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-c11-header-shape",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/6-next-step-scaffolding",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R54 = R29 session_fsm script-action placeholder wiring to wz-runtime-tokio LinkDriver (23-round stale carry; final Phase Z closure).",
+        "R55+ = lwip_tcp + serial_uart + raw_eth sibling SCXMLs in sources/links/; concrete lwIP API wiring inside src/sce_link_runtime_lwip.c (currently NOP stubs); MCU cross-compile target plumbing.",
+        "R53b = docs/runtime-crate-lwip.md §2 spec divergence — hand-authored 6-event enum + 3-outbound function contract differs from B6 emitter's 3-function vtable shape. Decide whether §2 prose is rewritten to match the emitter or retained as a higher-level session-layer contract above the B6 driver vtable.",
+        "R40 carry reframe — SCE-side fix is not the path: sce_map_marker.jinja2 emits BOTH `#![doc=SCE-MAP]` and `// SCE-MAP` per RFC §5.O spec lines 3135-3136 'MUST emit BOTH' obligation. The include!() consumption pattern in wz-codecs is the incompatibility surface; options are (a) keep build.rs strip workaround, (b) switch to per-codec sub-crates, (c) SCE PR adding `--no-inner-attr` carve-out.",
+        "R44 carry still open — vendor/sce/tests/forge/resources/codec_zenoh_init_body.scxml + codec_zenoh_join.scxml retain sce:default-endian='big'; no upstream change between 11f1032d and 2ff9d7a9 touching those files.",
+        "R50 carry still open — sce-codegen lacks a `build <deploy.yaml>` subcommand; the new `orchestrate` subcommand is a weaker multi-doc form that does not consume deploy.yaml.",
+        "In-process API anchor gap — sce-build's compile_forge_with_imports omits the SCE-GENERATED + source-hash + template-hash + generated-at 4-line block that the CLI binary emits, so wz build.rs outputs (wz-codecs, wz-runtime-lwip) lack RFC §5.O traceability anchors entirely. Separate from the CLI workspace-root fix; needs an in-process anchor-emit pass.",
+        "53 + R53 commits unpushed; pre-push hook re-runs validate_workspace + commit-msg formatter at push time. Push remains explicit-consent only."
+      ],
+      "publishable_decision_summary": "SCE vendor pin 11f1032d→2ff9d7a9 + wz-runtime-lwip C11 sibling vertical slice — first round consuming B6 link-kind C11 emitter end-to-end.",
+      "publishable_changes_bullets": [
+        "vendor/sce submodule bumped 11f1032d → 2ff9d7a9 (13 commits); c56161ea resolves R52.1+ NEW issues (workspace-root flag + 4-layer resolution chain, --version, stale 'C11 emitter lands in M2+' help text strip).",
+        "Verified post-bump: sce-codegen --version returns 0.1.0; CLI emit embeds real template-hash 9faef237... (zero regression closed for CLI path).",
+        "crates/wz-runtime-lwip/ created (Cargo.toml + build.rs + src/sce_link_runtime_lwip.c + src/wz_runtime_lwip.h + src/lib.rs); workspace members 4 → 5.",
+        "sources/links/lwip_udp_scout.scxml authored (sce:kind='link', link-class=udp, framer=frame, backpressure=drop) — first link-kind SCXML in the workspace, mapped to SCE B6-α self-test fixture shape (vendor/sce/sce-build/src/lib.rs:5524).",
+        "build.rs invokes sce-build's compile_forge_with_imports(Language::C11) in-process; emitted lwip_udp_scout.h composed with cc-compiled sce_link_runtime_lwip.c (vtable skeleton — host-build NOP stubs counting rx/tx/poll calls).",
+        "Discarded an earlier hand-authored sce_link_runtime.h drafted against docs/runtime-crate-lwip.md §2 spec when the user flagged that the B6 emitter was already live; reframed R53 to consume the canonical emit instead of hand-locking a divergent contract.",
+        "doc §6 atomic intent updated via set_section_intent to retire the 'design-only until C11 emitter exists' stale claim and record the emitter-live + skeleton-landed state."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build --workspace clean; cargo test --workspace 39/39 pass (35 baseline + 4 new wz-runtime-lwip ABI smoke tests).",
+        "Smoke tests (crates/wz-runtime-lwip/src/lib.rs::tests): LinkStatus repr size = 4; LinkOps vtable size = 3 pointers; factory_handle_round_trips_vtable_calls exercises rx/tx/poll through the FFI surface and verifies state counter side effects; tx_default_status round-trips ErrBackpressure variant.",
+        "cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "validate_workspace post-mutations: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 53 → 54, sections 214 unchanged.",
+        "sce-codegen --language c11 against sources/links/lwip_udp_scout.scxml emits include/lwip_udp_scout.h with sce_forge_link_t wrapper struct + 4 inline functions + LINK_CLASS/FRAMER_REF/BACKPRESSURE macros; #include 'sce/forge/link.h' resolves against vendor/sce/sce-forge-runtime/c/include/."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/2-c11-header-shape",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/6-next-step-scaffolding",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R54 = R29 session_fsm script-action placeholder wiring to wz-runtime-tokio LinkDriver (23-round stale carry; final Phase Z closure).",
+        "R55+ = lwip_tcp + serial_uart + raw_eth sibling SCXMLs in sources/links/; concrete lwIP API wiring inside src/sce_link_runtime_lwip.c (currently NOP stubs); MCU cross-compile target plumbing.",
+        "R53b = docs/runtime-crate-lwip.md §2 spec divergence — hand-authored 6-event enum + 3-outbound function contract differs from B6 emitter's 3-function vtable shape. Decide whether §2 prose is rewritten to match the emitter or retained as a higher-level session-layer contract above the B6 driver vtable.",
+        "R40 carry reframe — SCE-side fix is not the path: sce_map_marker.jinja2 emits BOTH `#![doc=SCE-MAP]` and `// SCE-MAP` per RFC §5.O spec lines 3135-3136 'MUST emit BOTH' obligation. The include!() consumption pattern in wz-codecs is the incompatibility surface; options are (a) keep build.rs strip workaround, (b) switch to per-codec sub-crates, (c) SCE PR adding `--no-inner-attr` carve-out.",
+        "R44 carry still open — vendor/sce/tests/forge/resources/codec_zenoh_init_body.scxml + codec_zenoh_join.scxml retain sce:default-endian='big'; no upstream change between 11f1032d and 2ff9d7a9 touching those files.",
+        "R50 carry still open — sce-codegen lacks a `build <deploy.yaml>` subcommand; the new `orchestrate` subcommand is a weaker multi-doc form that does not consume deploy.yaml.",
+        "In-process API anchor gap — sce-build's compile_forge_with_imports omits the SCE-GENERATED + source-hash + template-hash + generated-at 4-line block that the CLI binary emits, so wz build.rs outputs (wz-codecs, wz-runtime-lwip) lack RFC §5.O traceability anchors entirely. Separate from the CLI workspace-root fix; needs an in-process anchor-emit pass.",
+        "53 + R53 commits unpushed; pre-push hook re-runs validate_workspace + commit-msg formatter at push time. Push remains explicit-consent only."
       ]
     },
     "Round 6": {

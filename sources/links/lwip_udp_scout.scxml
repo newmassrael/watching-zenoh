@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- watching-zenoh RFC §5.C link kind — UDP scouting link for the
+     MCU bare_metal deploy class. First R53 vertical slice exercises
+     the SCE B6-α emitter against the C11 backend; emits a per-deploy
+     `<snake_name>_link_t` wrapper that composes the
+     `sce_forge_link_t` driver handle (vtable in flash/rodata).
+
+     Authoring note. The minimal link shape follows SCE B6-α schema
+     happy-path (vendor/sce/sce-build/src/lib.rs::link_rust_happy_path_emits_wrapper_struct,
+     line 5525): link-class + framer ref + backpressure + events.
+     Per-link pool kinds (rx-pool / tx-pool) are RFC §5.E B7 scope
+     and defer; pool ownership lives on the driver impl side until
+     buffer-pool kind lands.
+
+     deploy.yaml binding. `deploy/mcu_target.yaml::machines.mcu.links.scout`
+     declares this link with `driver: lwip_udp`, bind 224.0.0.224:7446,
+     mtu_bytes 1472, expected_p99_bytes 256. The driver value
+     (`lwip_udp`) routes the generated wrapper to the
+     `sce_link_runtime_lwip` impl table; this SCXML supplies the
+     codegen-time contract (link-class, framer, backpressure, event
+     surface). -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="link" name="lwip_udp_scout" version="1.0">
+
+  <sce:link-class>udp</sce:link-class>
+
+  <!-- Framer codec — RFC §5.B `frame` codec writes the transport
+       framing (sequence number + payload) around the application
+       body the scout layer carries. Scout-layer message bodies
+       (`scout` / `hello`) ride inside this framing. -->
+  <sce:framer ref="frame"/>
+
+  <!-- Drop policy on outbound saturation. Scouting is best-effort
+       by RFC §5.C scouting-fsm semantics: a dropped scout query is
+       retried on the next scouting tick, so drop > block (which
+       would stall the cooperative scheduler) > signal-event (which
+       would burden the FSM with per-drop work). -->
+  <sce:backpressure>drop</sce:backpressure>
+
+  <sce:events>
+    <!-- Inbound — scouting FSM receives a hello or scout query frame.
+         The `when` clause routes by the §6.x message id observed
+         post-framer-decode; B6-α schema does not constrain the
+         expression shape, so the codegen-emitted `<snake>_link_rx`
+         passes the decoded view to the FSM and the FSM's transition
+         guards make the actual decision. -->
+    <sce:inbound event="link.scout.rx"/>
+
+    <!-- Outbound — scouting FSM emits a scout query (multicast on
+         the scouting endpoint). The `encode` ref names the codec
+         whose `encode()` produces the wire bytes; codegen threads
+         the framer around it on the link side. -->
+    <sce:outbound event="link.scout.tx" encode="scout"/>
+  </sce:events>
+
+</scxml>
