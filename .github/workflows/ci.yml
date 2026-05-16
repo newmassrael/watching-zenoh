@@ -184,3 +184,12 @@ jobs:
 
       - name: Layer C2 — cargo clippy --deny warnings
         run: (cd crates && cargo clippy --workspace --all-targets -- -D warnings)
+
+      - name: Layer D — deploy/*.yaml schema validate
+        # Holding-pattern gate until SCE upstream ships `sce-codegen
+        # build`; until then this validates YAML parse + machines/
+        # platform schema. Once `build` lands the script invokes it
+        # directly + `cargo check` on the emitted crate.
+        run: |
+          sudo apt-get install -y --no-install-recommends python3-yaml
+          bash scripts/validate-deploy.sh
