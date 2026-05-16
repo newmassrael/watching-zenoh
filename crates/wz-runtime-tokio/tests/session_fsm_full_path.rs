@@ -84,7 +84,7 @@ impl BoxedLinkDriver for RecordingDriver {
 #[test]
 fn r59_engine_drives_full_outbound_initiator_happy_path() {
     let driver = Arc::new(RecordingDriver::default());
-    let actions = SessionLinkActions::new(driver.clone(), SessionInitParams::default());
+    let actions = SessionLinkActions::new(driver.clone(), SessionInitParams::for_test());
     if install_session_actions(actions.clone()).is_err() {
         rebind_session_actions_for_test(actions.clone());
     }

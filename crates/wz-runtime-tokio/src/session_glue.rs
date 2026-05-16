@@ -53,9 +53,9 @@
 use std::sync::{Arc, Mutex, OnceLock};
 
 use sce_rust_lua::lua_engine_singleton;
-use sce_rust_runtime::scripting::{
-    IScriptEngine, NativeMethod, ScriptResult, ScriptValue,
-};
+use sce_rust_runtime::scripting::{IScriptEngine, NativeMethod, ScriptValue};
+#[cfg(any(test, feature = "_test_support"))]
+use sce_rust_runtime::scripting::ScriptResult;
 
 use crate::{LinkDriver, Reliability, TxFrame};
 
@@ -120,10 +120,22 @@ pub struct SessionInitParams {
     pub cookie: Vec<u8>,
 }
 
-impl Default for SessionInitParams {
-    /// Test-grade defaults. Production callers MUST override every
-    /// field from `deploy.yaml`.
-    fn default() -> Self {
+impl SessionInitParams {
+    /// Fixture builder for tests. Returns a SessionInitParams with
+    /// deterministic values that match the Layer 3 wire-interop
+    /// `layer3_init_body` fixture inputs, so wire-byte assertions
+    /// cross-reference cleanly. **No `Default` impl on purpose** —
+    /// production callers MUST source every field from `deploy.yaml`
+    /// (or another configured source). Letting `default()` exist
+    /// would invite silent misuse where a consumer constructs an
+    /// empty/zeroed `SessionInitParams` and the FSM emits wire
+    /// bytes against undefined peer identity.
+    ///
+    /// Gated behind the `_test_support` feature so production builds
+    /// cannot accidentally call it. Tests in this crate enable the
+    /// feature in their `dev-dependencies` block on themselves.
+    #[cfg(any(test, feature = "_test_support"))]
+    pub fn for_test() -> Self {
         Self {
             version: 0x05,
             whatami: 0x02, // Peer
@@ -131,7 +143,7 @@ impl Default for SessionInitParams {
             seq_num_res: 0,
             req_id_res: 0,
             batch_size: 0,
-            lease: 10_000, // 10s in ms
+            lease: 10_000,
             lease_in_seconds: false,
             initial_sn: 0,
             cookie: Vec::new(),
@@ -333,10 +345,11 @@ pub fn install_session_actions(
         .set(actions.clone())
         .map_err(|_| SessionActionsAlreadyInstalled)?;
 
-    // Lua engine register is OnceLock-guarded inside sce_rust_lua so
-    // a re-entrant call here is harmless (the second `register`
-    // returns `Err(ScriptEngineAlreadyRegistered)` which we treat
-    // as success — the engine itself is process-singleton).
+    // sce_rust_lua::register() is process-singleton: first call
+    // installs the engine, subsequent calls return
+    // ScriptEngineAlreadyRegistered. AlreadyRegistered is success
+    // (engine is in place either way); register's Result currently
+    // has exactly one Err variant so silent acceptance is sound.
     let _ = sce_rust_lua::register();
 
     let lua = lua_engine_singleton();
@@ -352,24 +365,20 @@ pub fn install_session_actions(
 /// Re-bind the Lua engine's global functions against a fresh
 /// `SessionLinkActions`, bypassing the `INSTALLED` guard.
 ///
-/// **Test infrastructure only.** Production code MUST NOT call this
-/// — it deliberately keeps `INSTALLED` pointing at the first
-/// successful `install_session_actions` while overwriting every
-/// `register_global_function` registration with closures captured
-/// against the supplied actions. The resulting state is a hybrid
-/// (first install's actions still observable via the `INSTALLED`
-/// OnceLock, current Lua closures capturing a different
-/// `SessionLinkActions`) that no production caller benefits from.
+/// **Test infrastructure only.** Gated behind the `_test_support`
+/// Cargo feature so production builds cannot link against it. Tests
+/// (integration + unit) opt in by listing
+/// `features = ["_test_support"]` on their `wz-runtime-tokio`
+/// dev-dependency entry.
 ///
-/// Tests use this to swap the driver / trace within a single test
-/// binary process, where cargo runs multiple `#[test]` functions
-/// against one shared `INSTALLED`. The function is exposed in all
-/// build profiles (rather than `#[cfg(test)]`-gated) because cargo
-/// builds integration tests as separate crates that cannot see
-/// `#[cfg(test)]` items from the library; the `_for_test` suffix
-/// + this doc comment are the load-bearing "do not use in
-/// production" markers.
-#[doc(hidden)]
+/// Production code does not benefit from this function — it leaves
+/// `INSTALLED` pointing at the original actions while overwriting
+/// every `register_global_function` registration to capture a
+/// different `SessionLinkActions`. The resulting state is a hybrid
+/// that only makes sense for cargo's thread-parallel test runner
+/// reusing one process-global INSTALLED OnceLock across
+/// `#[test]`s.
+#[cfg(any(test, feature = "_test_support"))]
 pub fn rebind_session_actions_for_test(actions: Arc<SessionLinkActions>) {
     let _ = sce_rust_lua::register();
     let lua = lua_engine_singleton();
@@ -580,7 +589,7 @@ where
         ScriptValue::Null
     });
     let ok = lua.register_global_function(name, cb);
-    debug_assert!(ok, "register_global_function failed for {name}");
+    assert!(ok, "register_global_function failed for {name}");
 }
 
 fn bind_close_reason(
@@ -597,7 +606,7 @@ fn bind_close_reason(
         ScriptValue::Null
     });
     let ok = lua.register_global_function(name, cb);
-    debug_assert!(ok, "register_global_function failed for {name}");
+    assert!(ok, "register_global_function failed for {name}");
 }
 
 fn bind_bool(lua: &dyn IScriptEngine, name: &str, value: bool) {
@@ -605,25 +614,40 @@ fn bind_bool(lua: &dyn IScriptEngine, name: &str, value: bool) {
         ScriptValue::Bool(value)
     });
     let ok = lua.register_global_function(name, cb);
-    debug_assert!(ok, "register_global_function failed for {name}");
+    assert!(ok, "register_global_function failed for {name}");
 }
 
 /// Direct dispatch shim — exercises the script engine path without
-/// driving the generated state machine. Useful for tests that pin
-/// the script-name → native-fn mapping in isolation from the FSM
-/// transition logic.
+/// driving the generated state machine. Gated behind `_test_support`
+/// for the same reason as `rebind_session_actions_for_test`:
+/// production callers must drive via `Engine::process_event`, not
+/// by string-name-matching arbitrary scripts (which would be a Lua
+/// injection surface).
+///
+/// The `name` parameter is restricted to identifiers — the
+/// function appends `()` and asserts the identifier matches the
+/// production registration set, so a caller cannot smuggle
+/// arbitrary Lua source through this entry point.
+#[cfg(any(test, feature = "_test_support"))]
 pub fn dispatch_script(name: &str) -> ScriptResult<ScriptValue> {
+    debug_assert!(
+        REGISTERED_SCRIPT_NAMES.contains(&name),
+        "dispatch_script: '{name}' is not a registered script-action name; \
+         production scripts must be drive via Engine::process_event"
+    );
     let lua = lua_engine_singleton();
     lua.execute_script(SESSION_ID, &format!("{name}()"))
 }
 
-/// R58 carry — the build script (or a dedicated tool) will parse
-/// `sources/session/session_fsm_unicast.scxml` to extract every
-/// `<script>foo()</script>` body and validate that
-/// `register_outbound_link_fns + register_state_internal_fns +
-/// register_guard_fns` cover the same set. The list below is the
-/// hand-maintained truth source until the build-time check lands.
-#[doc(hidden)]
+/// Single-source-of-truth list of every script-action name the
+/// `register_*` family installs onto the Lua engine. The build
+/// script (`build.rs::audit_script_names`) reads this constant
+/// directly via `include_str!` parsing and compares it against the
+/// SCXML's `<script>` bodies + `cond=` identifiers, so adding a
+/// name in one place but not the other fails the build instead of
+/// drifting silently. R60 consolidated the build-time and runtime
+/// lists; previously they were hand-maintained twins (drift hazard
+/// flagged in R59's self-review).
 pub const REGISTERED_SCRIPT_NAMES: &[&str] = &[
     "link_driver_open",
     "send_init_syn",

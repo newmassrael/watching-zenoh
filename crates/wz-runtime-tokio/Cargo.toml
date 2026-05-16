@@ -53,6 +53,20 @@ log = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+# Enable the test-only helpers (`for_test`, `dispatch_script`,
+# `rebind_session_actions_for_test`) on the crate's own integration
+# test compilations. Production consumers do NOT see these symbols
+# unless they explicitly opt in to `_test_support`, which the
+# leading underscore + R60 doc-comment surface mark as
+# infrastructure-only.
+wz-runtime-tokio = { path = ".", features = ["_test_support"] }
+
+[features]
+default = []
+# Exposes the test infrastructure shims (for_test / dispatch_script /
+# rebind_session_actions_for_test). Production callers must NOT
+# enable this feature — the encapsulation guard is intentional.
+_test_support = []
 
 [lints]
 workspace = true

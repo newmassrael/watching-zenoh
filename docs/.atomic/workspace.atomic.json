@@ -6206,6 +6206,72 @@
         "Lesson: validate genre fit BEFORE adding doc to workspace.docs (irreversible after Round cite)"
       ]
     },
+    "Round 60": {
+      "decision_summary": "Strict audit pass — encapsulation hardening closes 6 R57/R58/R59 self-review defects: dead code, public test surface, default misuse, silent failures, list duplication, weak invariants.",
+      "changes_bullets": [
+        "SessionInitParams::default removed. New SessionInitParams::for_test() helper gated behind `_test_support` Cargo feature so production builds cannot construct a SessionInitParams via Default (consumer would have silently shipped fixed test bytes on the wire).",
+        "rebind_session_actions_for_test + dispatch_script gated behind `_test_support`. Public surface in production builds excludes both. wz-runtime-tokio/Cargo.toml grew a [features] section with `default = []` and `_test_support = []`; tests opt in via a self-referencing dev-dependency.",
+        "dispatch_script defensive: debug_assert that the requested name is in REGISTERED_SCRIPT_NAMES. Even with `_test_support` enabled, a caller cannot smuggle arbitrary Lua source — only the production registration set is dispatchable.",
+        "bind_unit / bind_close_reason / bind_bool: debug_assert!(ok, ...) replaced with assert!(ok, ...). register_global_function failure now panics in release builds too; the silent-failure window of debug_assert (release-build skip) is gone.",
+        "REGISTERED_SCRIPT_NAMES doc-comment promoted to single-source-of-truth marker. EXPECTED_SCRIPT_NAMES (build.rs) hand-mirror retained but the consolidation rationale is recorded so future divergence is caught at audit.",
+        "tests/session_fsm_real_tcp.rs (~120 lines): tokio multi-thread test wires TcpListener loopback pair, plumbs `TokioLinkDriverAdapter<TcpDriver>` into `SessionLinkActions`, drives Engine through Init→LinkOpening→SentInitSyn, then reads the wire bytes off the peer socket. First end-to-end proof of the production chain (Engine → Lua → SessionLinkActions → adapter → TcpDriver → kernel socket); closes the R57 self-review finding that TokioLinkDriverAdapter was dead code.",
+        "All R55b / R59 callers swapped to SessionInitParams::for_test (sed substitution across 3 test files).",
+        "let _ = sce_rust_lua::register() simplified — clippy::single_match fix; documented why the silent accept is sound (one-variant Result, AlreadyRegistered == engine already in place)."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace 44 → 45 (R60 real-TCP integration); cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "Peer-side read in r60 test confirms `payload[0] == 0x41` (FLAG_T_INIT_S | T_MID_INIT) + `payload[1] == 0x05` (version) actually traverse the full production stack onto a kernel socket. Any drift in Engine ↔ Lua ↔ adapter ↔ TcpDriver chain surfaces as a payload byte mismatch.",
+        "Production build with `--no-default-features` (no `_test_support`) does not expose `for_test`, `dispatch_script`, `rebind_session_actions_for_test`; the encapsulation guard is enforced by the compiler.",
+        "validate_workspace: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 60 → 61."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions"
+      ],
+      "carry_forward_bullets": [
+        "R61 carry: failure-path Engine coverage (framing.error / lease.expired / tx.congestion.exhaust / peer.close / link.lost / *.timeout). Each fires set_close_reason_* + Closing branch; wire shape inherited from R57/R59 happy path.",
+        "R61 carry: listener-path Engine coverage (Accepting branch: inbound.start → AwaitingInitSyn → SentInitAck → SentOpenAck → Established). R57 dispatched send_init_ack_with_cookie + send_open_ack in isolation; Engine-driven listener walk pending.",
+        "R61 carry: Hal time mock for delayed `<send>` timeout coverage. sce_rust_runtime::StdHal injection or a TestHal that advances logical time.",
+        "R62 carry: cookie HMAC-SHA256 — SessionInitParams::cookie currently caller-supplied bytes. Production listener side must HMAC(secret, peer_zid || nonce) per RFC §5.M.",
+        "R62 carry: transport extension chain (§7 ext::QoS / ext::Auth / ext::MultiLink) emit on Init/Open. R57 emits base body only; real zenoh peer interop requires the extension chain.",
+        "R63 carry: wz-runtime-lwip resolution — doc-around-the-hack rejected at R58; either revert (preserve SCE B6 emitter audit via a Layer 3 test) or land actual lwIP API.",
+        "R40 long-term: SCE PR for `--no-inner-attr` flag or wz per-codec sub-crate split. R58 retained the strip workaround; the SCE-side fix is still the lower-cost path.",
+        "EXPECTED_SCRIPT_NAMES (build.rs) and REGISTERED_SCRIPT_NAMES (session_glue.rs) remain hand-maintained twins; consolidation via include!() or build artifact share is a refactor follow-up."
+      ],
+      "publishable_decision_summary": "Strict audit pass — encapsulation hardening closes 6 R57/R58/R59 self-review defects: dead code, public test surface, default misuse, silent failures, list duplication, weak invariants.",
+      "publishable_changes_bullets": [
+        "SessionInitParams::default removed. New SessionInitParams::for_test() helper gated behind `_test_support` Cargo feature so production builds cannot construct a SessionInitParams via Default (consumer would have silently shipped fixed test bytes on the wire).",
+        "rebind_session_actions_for_test + dispatch_script gated behind `_test_support`. Public surface in production builds excludes both. wz-runtime-tokio/Cargo.toml grew a [features] section with `default = []` and `_test_support = []`; tests opt in via a self-referencing dev-dependency.",
+        "dispatch_script defensive: debug_assert that the requested name is in REGISTERED_SCRIPT_NAMES. Even with `_test_support` enabled, a caller cannot smuggle arbitrary Lua source — only the production registration set is dispatchable.",
+        "bind_unit / bind_close_reason / bind_bool: debug_assert!(ok, ...) replaced with assert!(ok, ...). register_global_function failure now panics in release builds too; the silent-failure window of debug_assert (release-build skip) is gone.",
+        "REGISTERED_SCRIPT_NAMES doc-comment promoted to single-source-of-truth marker. EXPECTED_SCRIPT_NAMES (build.rs) hand-mirror retained but the consolidation rationale is recorded so future divergence is caught at audit.",
+        "tests/session_fsm_real_tcp.rs (~120 lines): tokio multi-thread test wires TcpListener loopback pair, plumbs `TokioLinkDriverAdapter<TcpDriver>` into `SessionLinkActions`, drives Engine through Init→LinkOpening→SentInitSyn, then reads the wire bytes off the peer socket. First end-to-end proof of the production chain (Engine → Lua → SessionLinkActions → adapter → TcpDriver → kernel socket); closes the R57 self-review finding that TokioLinkDriverAdapter was dead code.",
+        "All R55b / R59 callers swapped to SessionInitParams::for_test (sed substitution across 3 test files).",
+        "let _ = sce_rust_lua::register() simplified — clippy::single_match fix; documented why the silent accept is sound (one-variant Result, AlreadyRegistered == engine already in place)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace 44 → 45 (R60 real-TCP integration); cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "Peer-side read in r60 test confirms `payload[0] == 0x41` (FLAG_T_INIT_S | T_MID_INIT) + `payload[1] == 0x05` (version) actually traverse the full production stack onto a kernel socket. Any drift in Engine ↔ Lua ↔ adapter ↔ TcpDriver chain surfaces as a payload byte mismatch.",
+        "Production build with `--no-default-features` (no `_test_support`) does not expose `for_test`, `dispatch_script`, `rebind_session_actions_for_test`; the encapsulation guard is enforced by the compiler.",
+        "validate_workspace: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 60 → 61."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R61 carry: failure-path Engine coverage (framing.error / lease.expired / tx.congestion.exhaust / peer.close / link.lost / *.timeout). Each fires set_close_reason_* + Closing branch; wire shape inherited from R57/R59 happy path.",
+        "R61 carry: listener-path Engine coverage (Accepting branch: inbound.start → AwaitingInitSyn → SentInitAck → SentOpenAck → Established). R57 dispatched send_init_ack_with_cookie + send_open_ack in isolation; Engine-driven listener walk pending.",
+        "R61 carry: Hal time mock for delayed `<send>` timeout coverage. sce_rust_runtime::StdHal injection or a TestHal that advances logical time.",
+        "R62 carry: cookie HMAC-SHA256 — SessionInitParams::cookie currently caller-supplied bytes. Production listener side must HMAC(secret, peer_zid || nonce) per RFC §5.M.",
+        "R62 carry: transport extension chain (§7 ext::QoS / ext::Auth / ext::MultiLink) emit on Init/Open. R57 emits base body only; real zenoh peer interop requires the extension chain.",
+        "R63 carry: wz-runtime-lwip resolution — doc-around-the-hack rejected at R58; either revert (preserve SCE B6 emitter audit via a Layer 3 test) or land actual lwIP API.",
+        "R40 long-term: SCE PR for `--no-inner-attr` flag or wz per-codec sub-crate split. R58 retained the strip workaround; the SCE-side fix is still the lower-cost path.",
+        "EXPECTED_SCRIPT_NAMES (build.rs) and REGISTERED_SCRIPT_NAMES (session_glue.rs) remain hand-maintained twins; consolidation via include!() or build artifact share is a refactor follow-up."
+      ]
+    },
     "Round 7": {
       "decision_summary": "Phase D scope correction — README/SESSION_KICKOFF removed from workspace.docs (genre fit); atomic-internal orphan ledger via mnemosyne Round 254 supports textbook path.",
       "changes_bullets": [
