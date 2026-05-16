@@ -1,11 +1,24 @@
-# Cargo / Rust build artifacts
+# Cargo / Rust build artifacts.
+#
+# `/target/` covers any future root-level build output (none today —
+# the wz Rust workspace lives under `crates/`). `crates/target/` is
+# the wz workspace's own build output. `vendor/sce/target/` is the
+# vendored SCE submodule's build output (submodule itself is tracked
+# as a gitlink; only its target/ stays local).
 /target/
-**/*.rs.bk
-Cargo.lock
-
-# Vendored submodule build artifacts — submodule manages its own target/.
-# Submodule itself is tracked (gitlink); only its build output is local.
+crates/target/
 vendor/sce/target/
+**/*.rs.bk
+
+# Cargo.lock policy: COMMITTED for the wz Rust workspace
+# (`crates/Cargo.lock`) per Cargo's recommendation for binary-
+# producing workspaces and for reproducible Layer 3 wire-interop
+# tests across CI / dev / production. SCE submodule's lock file is
+# managed by SCE. The root-level `/Cargo.lock` ignore is defensive —
+# no workspace lives at the repo root today, but the rule prevents
+# accidental commit if one is added later without a paired
+# workspace-policy review.
+/Cargo.lock
 
 # Editor / OS
 .DS_Store

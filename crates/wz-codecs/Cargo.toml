@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-codecs — generated wire-codec library for the watching-zenoh
+# Phase B5 codec SCXMLs.
+#
+# This crate hosts the sce-codegen Rust output for the codec-kind
+# SCXMLs under `sources/codecs/`. build.rs invokes sce-build's
+# `compile_forge_with_imports` in-process at compile time so the
+# generated code lands in `$OUT_DIR/<stem>.rs` and is `include!()`-ed
+# from `src/lib.rs`. No committed Rust codec code exists — the single
+# source of truth is the SCXML set.
+#
+# The Phase 2 walking skeleton (R40) wires only the §6 payload trio
+# (msg_put / msg_del) and their dependency chain (timestamp /
+# encoding / ext_entry / ext_unit / ext_zint / ext_zbuf). The remaining
+# 14 codec SCXMLs (handshake bodies, network envelopes, scouting
+# bodies) land in this crate incrementally as Layer 3 wire-interop
+# coverage expands. The minimum slice is sufficient to prove
+# `sce-codegen → cargo build` compiles end-to-end.
+
+[package]
+name = "wz-codecs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Generated wire codecs from watching-zenoh sources/codecs/ SCXMLs (Phase B5)."
+build = "build.rs"
+
+[lib]
+name = "wz_codecs"
+path = "src/lib.rs"
+
+[dependencies]
+# sce-forge-runtime supplies CodecError + SceCursor + per-language
+# runtime primitives that the generated codec code references
+# (e.g., `use sce_forge_runtime::codec::{CodecError, SceCursor};`).
+sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
+
+[build-dependencies]
+# Build-time codegen via SCE's in-process compile entry point. The
+# same `compile_forge_with_imports` symbol that
+# `vendor/sce/sce-forge-runtime/rust/build.rs` uses for SCE's own
+# numerical conformance harness — no subprocess overhead, no stale-
+# binary issues.
+sce-build = { path = "../../vendor/sce/sce-build" }
+
+[lints]
+workspace = true
