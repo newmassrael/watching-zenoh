@@ -138,85 +138,34 @@ jobs:
         if: env.MNEMOSYNE_SKIP != '1'
         run: mnemosyne-cli generate-docs
 
+      # R65b dedupe: every Layer lane below delegates to
+      # scripts/run-ci.sh --layer X. The lane bodies (codec map,
+      # divergence allowlist, cargo invocations, deploy schema
+      # check) live in a single source of truth that both CI and
+      # the local pre-push hook (.githooks/pre-push) invoke, so
+      # the two paths cannot drift. Previously the CI yaml
+      # duplicated ~50 lines of lane logic that pre-push did not
+      # mirror; R64.1-R64.4 retrospect made that drift the
+      # process-level problem worth solving.
+
       - name: Layer A — Mnemosyne workspace validate
         if: env.MNEMOSYNE_SKIP != '1'
-        run: |
-          mnemosyne-cli validate-workspace
-          echo "Layer A pass"
+        run: bash scripts/run-ci.sh --layer A
 
       - name: Layer B — verify-codegen.sh per codec
-        # Iterates every wz codec SCXML and runs L1+L2+L3. When an
-        # SCE fixture pair exists (codec_zenoh_<stem> or codec_<stem>
-        # variants), pass it as the upstream argument so L2 runs;
-        # otherwise L1+L3 only. R44 init_body+join intentionally
-        # diverge from SCE fixture (LE endian fix); the workflow
-        # tolerates Layer 2 MISMATCH for those two known pairs via
-        # the divergence-allowlist below.
-        run: |
-          set -uo pipefail
-          declare -A SCE_UPSTREAM=(
-            ["crc16_ccitt"]="vendor/sce/tests/forge/resources/algorithm_crc16.scxml"
-            ["keep_alive"]="vendor/sce/tests/forge/resources/codec_zenoh_keep_alive.scxml"
-            ["close"]="vendor/sce/tests/forge/resources/codec_variant_session_close.scxml"
-            ["frame"]="vendor/sce/tests/forge/resources/codec_zenoh_frame.scxml"
-            ["fragment"]="vendor/sce/tests/forge/resources/codec_zenoh_fragment.scxml"
-            ["locator"]="vendor/sce/tests/forge/resources/codec_zenoh_locator.scxml"
-            ["timestamp"]="vendor/sce/tests/forge/resources/codec_zenoh_timestamp.scxml"
-            ["encoding"]="vendor/sce/tests/forge/resources/codec_zenoh_encoding.scxml"
-            ["ext_unit"]="vendor/sce/tests/forge/resources/codec_zenoh_ext_unit.scxml"
-            ["ext_zint"]="vendor/sce/tests/forge/resources/codec_zenoh_ext_zint.scxml"
-            ["ext_zbuf"]="vendor/sce/tests/forge/resources/codec_zenoh_ext_zbuf.scxml"
-            ["ext_entry"]="vendor/sce/tests/forge/resources/codec_zenoh_ext_entry.scxml"
-            ["scout"]="vendor/sce/tests/forge/resources/codec_zenoh_scout.scxml"
-            ["hello"]="vendor/sce/tests/forge/resources/codec_zenoh_hello.scxml"
-            ["msg_put"]="vendor/sce/tests/forge/resources/codec_zenoh_msg_put.scxml"
-            ["msg_del"]="vendor/sce/tests/forge/resources/codec_zenoh_msg_del.scxml"
-            ["wireexpr"]="vendor/sce/tests/forge/resources/codec_zenoh_wireexpr.scxml"
-            ["query"]="vendor/sce/tests/forge/resources/codec_zenoh_query.scxml"
-            ["request"]="vendor/sce/tests/forge/resources/codec_zenoh_request.scxml"
-            ["open_body"]="vendor/sce/tests/forge/resources/codec_zenoh_open_body.scxml"
-          )
-          # Known Layer 2 divergences (audit-traced in atomic ledger):
-          # R44 - init_body + join intentionally use LE (sce:default-endian="little")
-          # while SCE fixture still uses BE. Layer 2 reports MISMATCH;
-          # this is the CORRECT signal. SCE upstream PR pending.
-          LAYER2_KNOWN_DIVERGENCE=(init_body join)
-
-          fail=0
-          for scxml in sources/codecs/*.scxml sources/algorithms/*.scxml; do
-            stem="$(basename "$scxml" .scxml)"
-            upstream="${SCE_UPSTREAM[$stem]:-}"
-            extra=()
-            [[ -n "$upstream" && -f "$upstream" ]] && extra=("$upstream")
-
-            echo "::group::verify $stem"
-            if bash scripts/verify-codegen.sh "$scxml" "${extra[@]}"; then
-              echo "  OK"
-            else
-              # Check if this is a known L2 divergence
-              if [[ " ${LAYER2_KNOWN_DIVERGENCE[*]} " == *" $stem "* ]]; then
-                echo "::warning::$stem Layer 2 MISMATCH is audit-traced (R44 LE divergence)"
-                # Re-run without upstream to verify L1 + L3 alone
-                bash scripts/verify-codegen.sh "$scxml" || fail=1
-              else
-                fail=1
-              fi
-            fi
-            echo "::endgroup::"
-          done
-          exit $fail
+        run: bash scripts/run-ci.sh --layer B
 
       - name: Layer C1 — cargo test --workspace
-        run: (cd crates && cargo test --workspace)
+        run: bash scripts/run-ci.sh --layer C1
 
       - name: Layer C2 — cargo clippy --deny warnings
-        run: (cd crates && cargo clippy --workspace --all-targets -- -D warnings)
+        run: bash scripts/run-ci.sh --layer C2
+
+      - name: Install python3-yaml (Layer D dep)
+        # Layer D's run-ci.sh path no-ops gracefully when python3-yaml
+        # is missing; on CI we install it explicitly so the lane
+        # runs the real check rather than the local-developer skip.
+        run: sudo apt-get install -y --no-install-recommends python3-yaml
 
       - name: Layer D — deploy/*.yaml schema validate
-        # Holding-pattern gate until SCE upstream ships `sce-codegen
-        # build`; until then this validates YAML parse + machines/
-        # platform schema. Once `build` lands the script invokes it
-        # directly + `cargo check` on the emitted crate.
-        run: |
-          sudo apt-get install -y --no-install-recommends python3-yaml
-          bash scripts/validate-deploy.sh
+        run: bash scripts/run-ci.sh --layer D

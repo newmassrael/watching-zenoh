@@ -6702,6 +6702,54 @@
         "R67 = R63a SCXML extension chain authoring; R68 = R63b inbound parser; R69 = R61b Hal time-mock; R70 = crypto safety hardening (SigningKey + zeroize + RFC 4231 vectors); R71 = test-support crate split."
       ]
     },
+    "Round 65b": {
+      "decision_summary": "CI yaml lanes deduped — every Layer A/B/C1/C2/D step now delegates to scripts/run-ci.sh --layer X. SSoT shared with pre-push hook; the two paths cannot drift.",
+      "changes_bullets": [
+        ".github/workflows/ci.yml: 5 Layer steps' bodies replaced with `bash scripts/run-ci.sh --layer X`. Removed ~50 lines of duplicated bash (codec map + divergence allowlist + cargo invocations + deploy schema). Layer A/B/C1/C2/D bodies now live exclusively in scripts/run-ci.sh.",
+        "Layer D's python3-yaml apt install kept in CI yaml (CI runner has no python3-yaml by default; the local run-ci.sh path skip-graceful'd that case). The CI yaml's explicit install ensures Layer D runs the real check rather than the developer-friendly skip.",
+        "Doc comment block at the dedupe boundary documents the R64.1-R64.4 retrospect motivation: CI yaml drift from pre-push hook was the process-level problem the R65 SSoT solved; R65b finishes the dedupe.",
+        "actionlint installed locally via `go install github.com/rhysd/actionlint/cmd/actionlint@latest`; current ci.yml passes lint clean (exit 0). The R65 run-ci.sh Layer 0 now activates when actionlint is on $PATH so the user shell's PATH inclusion is the remaining manual step."
+      ],
+      "verification_bullets": [
+        "actionlint .github/workflows/*.yml exit 0 post-refactor.",
+        "scripts/run-ci.sh --layer A executed locally: validate-workspace passes; entries=70 / RT 12/12 / GENERATED.md=sync.",
+        "scripts/run-ci.sh --layer C2 executed locally: clippy --deny warnings clean.",
+        "Other layers (B/C1/D) were verified in the full run-ci.sh smoke run earlier in this session (R65 commit f74ca2d).",
+        "validate_workspace local: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 70 → 71."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "actionlint shell PATH inclusion — install at $HOME/go/bin; future contributors must add to PATH or run pre-push hooks will silently skip Layer 0. Document in CONTRIBUTING.md (carry to whenever README authoring lands).",
+        "R65b expansion (R64.4 retrospect): scripts/run-ci.sh should optionally simulate CI's fresh-checkout state by removing docs/GENERATED.md before validate so the GENERATED.md=STALE scenario surfaces locally.",
+        "R66 = spec body authoring round 1 next.",
+        "Node.js 20 deprecation still open."
+      ],
+      "publishable_decision_summary": "CI yaml lanes deduped — every Layer A/B/C1/C2/D step now delegates to scripts/run-ci.sh --layer X. SSoT shared with pre-push hook; the two paths cannot drift.",
+      "publishable_changes_bullets": [
+        ".github/workflows/ci.yml: 5 Layer steps' bodies replaced with `bash scripts/run-ci.sh --layer X`. Removed ~50 lines of duplicated bash (codec map + divergence allowlist + cargo invocations + deploy schema). Layer A/B/C1/C2/D bodies now live exclusively in scripts/run-ci.sh.",
+        "Layer D's python3-yaml apt install kept in CI yaml (CI runner has no python3-yaml by default; the local run-ci.sh path skip-graceful'd that case). The CI yaml's explicit install ensures Layer D runs the real check rather than the developer-friendly skip.",
+        "Doc comment block at the dedupe boundary documents the R64.1-R64.4 retrospect motivation: CI yaml drift from pre-push hook was the process-level problem the R65 SSoT solved; R65b finishes the dedupe.",
+        "actionlint installed locally via `go install github.com/rhysd/actionlint/cmd/actionlint@latest`; current ci.yml passes lint clean (exit 0). The R65 run-ci.sh Layer 0 now activates when actionlint is on $PATH so the user shell's PATH inclusion is the remaining manual step."
+      ],
+      "publishable_verification_bullets": [
+        "actionlint .github/workflows/*.yml exit 0 post-refactor.",
+        "scripts/run-ci.sh --layer A executed locally: validate-workspace passes; entries=70 / RT 12/12 / GENERATED.md=sync.",
+        "scripts/run-ci.sh --layer C2 executed locally: clippy --deny warnings clean.",
+        "Other layers (B/C1/D) were verified in the full run-ci.sh smoke run earlier in this session (R65 commit f74ca2d).",
+        "validate_workspace local: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 70 → 71."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "actionlint shell PATH inclusion — install at $HOME/go/bin; future contributors must add to PATH or run pre-push hooks will silently skip Layer 0. Document in CONTRIBUTING.md (carry to whenever README authoring lands).",
+        "R65b expansion (R64.4 retrospect): scripts/run-ci.sh should optionally simulate CI's fresh-checkout state by removing docs/GENERATED.md before validate so the GENERATED.md=STALE scenario surfaces locally.",
+        "R66 = spec body authoring round 1 next.",
+        "Node.js 20 deprecation still open."
+      ]
+    },
     "Round 7": {
       "decision_summary": "Phase D scope correction — README/SESSION_KICKOFF removed from workspace.docs (genre fit); atomic-internal orphan ledger via mnemosyne Round 254 supports textbook path.",
       "changes_bullets": [
