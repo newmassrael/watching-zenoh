@@ -44,16 +44,20 @@
 #             audit-traced rationale. The real interop validation is
 #             Layer 3 (below).
 #
-#   Layer 3 — wire-interop (NOT YET IMPLEMENTED — Phase 2 walking
-#             skeleton dependency, R40+): wz-emitted encoder produces
-#             wire bytes for a logical message; zenoh-pico's own
-#             `_z_*_encode` produces wire bytes for the same logical
-#             message; the two byte sequences MUST be byte-equivalent.
-#             This is the ONLY layer that proves real wire interop.
-#             Layer 3 lands alongside the `crates/sce_link_runtime_*`
-#             walking skeleton; until then, every codec SCXML's "real
-#             world correctness" is a spec assumption, not a tested
-#             property.
+#   Layer 3 — wire-interop (active since R42, integrated R48):
+#             wz-emitted encoder produces wire bytes for a logical
+#             message; zenoh-pico's own `_z_*_encode` (via the
+#             zenoh-pico-sys FFI bridge) produces wire bytes for the
+#             same logical message; the two byte sequences MUST be
+#             byte-equivalent. This is the ONLY layer that proves
+#             real wire interop.
+#
+#             Per-codec Layer 3 tests live in
+#             `crates/wz-integration-tests/tests/layer3_<stem>.rs`.
+#             For each input SCXML this script runs the matching
+#             layer3 test via cargo test if one exists; codecs
+#             without a paired layer3 test report `layer3=skip` and
+#             are listed in the carry-forward (R47b expansion).
 #
 # RFC §5.O traceability anchors (source-hash + SCE-MAP) are *required*
 # to differ between two SCXML inputs with different paths or byte
@@ -404,9 +408,34 @@ if [[ -n "$UPSTREAM" ]]; then
     printf " | golden match=%d mismatch=%d" "$n_diff_match" "$n_diff_mismatch"
 fi
 echo
-if [[ -n "$UPSTREAM" ]]; then
-    printf "verify-codegen: layer 3 (wire-interop against zenoh-pico)"
-    printf " not yet implemented; depends on crates/ walking skeleton.\n"
+
+# Layer 3 — wire-interop against zenoh-pico. For each input SCXML
+# this script invokes the matching `layer3_<stem>.rs` cargo test in
+# wz-integration-tests. The test (if it exists) constructs a logical
+# message, encodes via both wz codegen output and zenoh-pico FFI,
+# and byte-compares. Codecs without a paired layer3 test report
+# `layer3=skip` — see R47b carry in atomic changelog for the
+# expansion plan.
+LAYER3_TEST_DIR="$ROOT/crates/wz-integration-tests/tests"
+INPUT_STEM_FOR_LAYER3="$(extract_stem "$INPUT")"
+LAYER3_TEST_FILE="$LAYER3_TEST_DIR/layer3_${INPUT_STEM_FOR_LAYER3}.rs"
+if [[ -f "$LAYER3_TEST_FILE" ]]; then
+    if (cd "$ROOT/crates" && cargo test -p wz-integration-tests \
+            --test "layer3_${INPUT_STEM_FOR_LAYER3}" \
+            >"$WORK/layer3.log" 2>&1); then
+        n_layer3_pass=$(grep -oE "[0-9]+ passed" "$WORK/layer3.log" \
+            | awk '{print $1}' | head -1)
+        printf "verify-codegen: layer 3 (wire-interop): pass (tests=%s)\n" \
+            "${n_layer3_pass:-?}"
+    else
+        printf "verify-codegen: layer 3 (wire-interop): FAIL (see %s)\n" \
+            "$WORK/layer3.log"
+        cat "$WORK/layer3.log" | tail -10
+        exit 1
+    fi
+else
+    printf "verify-codegen: layer 3 (wire-interop): skip (no %s)\n" \
+        "tests/layer3_${INPUT_STEM_FOR_LAYER3}.rs"
 fi
 
 if [[ "$n_fail" -gt 0 || "$n_diff_mismatch" -gt 0 ]]; then
