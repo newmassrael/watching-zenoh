@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-runtime-tokio — sce_link_runtime_tokio (Rust + tokio + mio epoll
+# baseline) per docs/runtime-crate-tokio.md.
+#
+# Phase Z entry (R51). Initial surface: `LinkDriver` trait + tokio
+# TCP impl + 2-task `tests/echo_demo.rs` proving wire interop end-
+# to-end. This is the FIRST round in the project where two
+# concurrent processes (here: tokio tasks on a single process via
+# loopback) exchange real wire bytes encoded by wz-codecs and decoded
+# back on the other side.
+#
+# Scope reduction vs the full docs/runtime-crate-tokio.md spec:
+#   - 1 process, 2 tasks (publisher + subscriber on loopback TCP)
+#   - LinkDriver trait shape matches §2.1 but only the 4 core methods;
+#     trust-class gating (§2.4) + io_uring opt-in (§4.1) + pool-slot
+#     Rx borrows (§2.3) all deferred to later rounds.
+#   - Codec wiring is fixed to msg_put for the demo; full SCXML-driven
+#     binding lands when session_fsm wiring closes (R54+).
+#
+# The R52 echo demo is the OBSERVABLE COMMUNICATION MILESTONE the
+# project has been working toward since R28 ("when will we see
+# communication?"). It does not yet exercise session FSM handshake
+# or framing; the publisher sends a raw msg_put body, the subscriber
+# decodes the raw msg_put body. This is the smallest end-to-end
+# proof that wz-codecs Layer 3-validated bytes survive a real
+# network round-trip.
+
+[package]
+name = "wz-runtime-tokio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Tokio + mio epoll runtime for watching-zenoh AP linux target (Phase D.1)."
+
+[lib]
+name = "wz_runtime_tokio"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
+wz-codecs = { path = "../wz-codecs" }
+sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+
+[lints]
+workspace = true

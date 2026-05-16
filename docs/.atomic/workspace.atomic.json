@@ -5620,6 +5620,64 @@
         "First-run CI trigger: push branch + open PR. Local clippy + tests pass; runner-specific surprises may arise (libclang version drift, mnemosyne-cli install path on GitHub-hosted runner)."
       ]
     },
+    "Round 51": {
+      "decision_summary": "Phase Z entry — FIRST OBSERVABLE COMMUNICATION milestone reached. wz-runtime-tokio crate lands with LinkDriver trait + TcpDriver impl + echo_demo integration test. Two tokio tasks on a single process exchange a real wz-codecs-encoded MsgPut body over TCP loopback; subscriber decodes back to a structurally-equivalent MsgPut. The R28 user question \"when will we see communication?\" is concretely answered at R51.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/ new crate (3 files): Cargo.toml + src/lib.rs + tests/echo_demo.rs. Workspace member added.",
+        "src/lib.rs: LinkDriver trait (4 methods open/send/close/poll_event matching docs/runtime-crate-tokio.md §2.1 baseline) + TxFrame/RxFrame/LinkEvent/Reliability enums + TcpDriver impl (4-byte BE length-prefixed framing over TcpStream).",
+        "tests/echo_demo.rs: publisher + subscriber tokio tasks on loopback TCP. Publisher: MsgPut header=0x01 + payload=[0xCA,0xFE,0xBA,0xBE,0x42] encoded via wz-codecs, sent via TcpDriver. Subscriber: accept + poll_event Rx + decode via wz-codecs::msg_put::MsgPut::decode + assert equality. PASS.",
+        "crates/Cargo.toml: members extends to include wz-runtime-tokio.",
+        "Workspace: 33/33 tests pass + clippy --deny warnings clean across all 4 crates."
+      ],
+      "verification_bullets": [
+        "R28 question answered: cargo test -p wz-runtime-tokio --test echo_demo passes. MsgPut wire bytes flow through TCP loopback and decode back successfully.",
+        "cargo test --workspace: 33/33 pass / 0 fail. +1 echo_demo vs R47.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "What this proves: encode↔decode self-consistency + Layer 3 zenoh-pico byte-equivalence are not just in-memory properties — they survive a real TCP socket boundary. The bytes Layer 3-validated against zenoh-pico are the SAME bytes flowing on the wire.",
+        "What this does NOT yet prove: zenoh-pico endpoint interop (needs session-FSM handshake — R54); multi-message + reliability + extensions; framing-error paths.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 50→51, T3 warn 856 unchanged."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "session-fsm--prose-level-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link"
+      ],
+      "carry_forward_bullets": [
+        "R52 = 2-process echo (separate publisher.rs + subscriber.rs binaries), msg_del path, multi-frame stream, UdpDriver impl with Reliability::BestEffort wiring.",
+        "R53 = crates/wz-runtime-lwip C11 sibling per docs/runtime-crate-lwip.md.",
+        "R54 = session_fsm_unicast R29 script-action placeholder wiring (link_driver_open / send_init_syn / etc. → wz-runtime-tokio actual calls). After R54 the FSM drives encoded handshake bytes on a real TCP link — zenoh-pico endpoint interop becomes possible.",
+        "After Phase Z: Phase W (MCU hardening) + Phase V (user-facing).",
+        "First CI run on GitHub Actions — push branch + open PR to validate workflow on actual runner."
+      ],
+      "publishable_decision_summary": "Phase Z entry — FIRST OBSERVABLE COMMUNICATION milestone reached. wz-runtime-tokio crate lands with LinkDriver trait + TcpDriver impl + echo_demo integration test. Two tokio tasks on a single process exchange a real wz-codecs-encoded MsgPut body over TCP loopback; subscriber decodes back to a structurally-equivalent MsgPut. The R28 user question \"when will we see communication?\" is concretely answered at R51.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/ new crate (3 files): Cargo.toml + src/lib.rs + tests/echo_demo.rs. Workspace member added.",
+        "src/lib.rs: LinkDriver trait (4 methods open/send/close/poll_event matching docs/runtime-crate-tokio.md §2.1 baseline) + TxFrame/RxFrame/LinkEvent/Reliability enums + TcpDriver impl (4-byte BE length-prefixed framing over TcpStream).",
+        "tests/echo_demo.rs: publisher + subscriber tokio tasks on loopback TCP. Publisher: MsgPut header=0x01 + payload=[0xCA,0xFE,0xBA,0xBE,0x42] encoded via wz-codecs, sent via TcpDriver. Subscriber: accept + poll_event Rx + decode via wz-codecs::msg_put::MsgPut::decode + assert equality. PASS.",
+        "crates/Cargo.toml: members extends to include wz-runtime-tokio.",
+        "Workspace: 33/33 tests pass + clippy --deny warnings clean across all 4 crates."
+      ],
+      "publishable_verification_bullets": [
+        "R28 question answered: cargo test -p wz-runtime-tokio --test echo_demo passes. MsgPut wire bytes flow through TCP loopback and decode back successfully.",
+        "cargo test --workspace: 33/33 pass / 0 fail. +1 echo_demo vs R47.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "What this proves: encode↔decode self-consistency + Layer 3 zenoh-pico byte-equivalence are not just in-memory properties — they survive a real TCP socket boundary. The bytes Layer 3-validated against zenoh-pico are the SAME bytes flowing on the wire.",
+        "What this does NOT yet prove: zenoh-pico endpoint interop (needs session-FSM handshake — R54); multi-message + reliability + extensions; framing-error paths.",
+        "validate_workspace: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, atomic ledger entries 50→51, T3 warn 856 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "session-fsm--prose-level-sketch",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R52 = 2-process echo (separate publisher.rs + subscriber.rs binaries), msg_del path, multi-frame stream, UdpDriver impl with Reliability::BestEffort wiring.",
+        "R53 = crates/wz-runtime-lwip C11 sibling per docs/runtime-crate-lwip.md.",
+        "R54 = session_fsm_unicast R29 script-action placeholder wiring (link_driver_open / send_init_syn / etc. → wz-runtime-tokio actual calls). After R54 the FSM drives encoded handshake bytes on a real TCP link — zenoh-pico endpoint interop becomes possible.",
+        "After Phase Z: Phase W (MCU hardening) + Phase V (user-facing).",
+        "First CI run on GitHub Actions — push branch + open PR to validate workflow on actual runner."
+      ]
+    },
     "Round 6": {
       "decision_summary": "Round 5 scope correction blocked by mnemosyne Round 169 atomic-internal orphan reject; reverted to lean/stub plan; SESSION_KICKOFF/README retained in 13-doc workspace as architectural lock-in carry.",
       "changes_bullets": [
