@@ -8346,6 +8346,62 @@
         "Initiator-side cookie verification — the Initiator (sending InitSyn) receives the Accepting side's InitAck cookie via inbound_cookie capture (R62). The Initiator echoes that cookie verbatim in OpenSyn (R57 caller-owned cookie field). Both sides should ideally re-derive the cookie locally and compare — but the Initiator doesn't know the cookie_signing_key (only the Accepting side does). So echo-only is the correct contract on the Initiator side; R86 only addresses the Accepting-side mint path."
       ]
     },
+    "Round 87": {
+      "decision_summary": "R87 debt repayment — R82's \"first record is Request\" workaround replaced with exact-byte-count round-trip Request construction; assertions strengthened to parsed.len()==1, and the previously-removed Request+Unknown chain test restored.",
+      "changes_bullets": [
+        "Root cause identified for the R82 codec discrepancy: `RequestVariant::default()` returns `CodecZenohMsgPut(MsgPut::default())` per sce-codegen's 'pick first variant' rule, but `MsgPut::default().header = 0` (low-5 MID = 0) causes Request::decode's inner-MID dispatch (line 102 of generated request.rs: `match (peek >> 0) & 0x1F { 1=>MsgPut, 2=>MsgDel, 3=>Query, other=>Default{tag:other, body:Query} }`) to route to the Default arm with Query::decode. Encode wrote MsgPut bytes; decode read Query bytes. The discrepancy is a sce-codegen Default-arm self-inconsistency on the codec output, NOT a real wire-spec bug — production callers construct Request with explicit body, not Default.",
+        "The fix is a test-side construction discipline: build Request with `body: RequestVariant::Default { tag: 0, body: Query::default() }` so encode and decode use the same arm (Default arm) and the same inner codec (Query::default round-trips in 1 byte; Wireexpr::default round-trips in 1 byte). Total round-trip-safe wire: header(1) + rid_vle(1) + wireexpr(1) + query_default(1) = 4 bytes exact.",
+        "crates/wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs: parse_frame_payload_dispatches_request_mid_to_request_decoder rewritten. Asserts `bytes.len() == 4` (encode side) and `parsed.len() == 1` (decode side — strict, no residual). Rustdoc inside the test documents the codegen-Default corner so the construction discipline is preserved when future codecs are added.",
+        "parse_frame_payload_decodes_request_then_unknown_chain restored. This test was REMOVED from the original R82 commit because the default-state mismatch produced unpredictable residual bytes that polluted the chain assertion. With the R87 construction, the chain test asserts `parsed.len() == 2` (Request envelope + Unknown absorbing tail) and validates the Unknown.body byte equality.",
+        "No source-code change in session_glue.rs or wz-codecs/lib.rs — the fix is purely in test construction. The discovered codegen corner (Default impl picks first variant + MsgPut::default.header == 0 ≠ msg_put MID 1) is documented as a separate SCE upstream concern; wz-side tests now bypass it by explicit body construction. No wz-codecs change needed for production correctness.",
+        "Closes R82 carry #1 'wz_codecs::request encode/decode roundtrip discrepancy — default-state Request::default().encode() produces bytes where Request::decode consumes a different (smaller) byte count'. The original carry overstated the scope as a general codec bug; R87 narrows it to 'Default-arm of variant dispatch tag mismatch on initial state', shows that real-construction code is unaffected, and demonstrates the test-side fix."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio green; no source change beyond the test file.",
+        "cargo test -p wz-runtime-tokio --test session_fsm_inbound_dispatch parse_frame_payload: 5 passed (empty / Unknown / Request strict / Request+Unknown chain / truncated). Each assertion is now strict — no `parsed.len() >= 1` or 'first record is X' workarounds remain.",
+        "cargo test --workspace: 115 passed / 0 failed (114 -> 115, +1 = exact R87 new test count: parse_frame_payload_decodes_request_then_unknown_chain restored).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "scripts/run-ci.sh: all 5 layers pass.",
+        "Empirical round-trip evidence: Wireexpr::default with parent_flags=0x1C (N bit clear) encodes/decodes id=0 in exactly 1 byte. Query::default with header=0 encodes header byte only (consolidation/parameters/extensions all None per flag bits clear). The 4-byte wire is byte-exact across encode and decode.",
+        "validate_workspace baseline preserved: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, T3 warn 856 / T4 info 427 unchanged. Atomic ledger entries 99 -> 100 (this Round entry); sections=214 unchanged."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "carry_forward_bullets": [
+        "sce-codegen Default-arm consistency for variant dispatchers — the discovered corner is that sce-codegen's `RequestVariant::default()` picks the first declared variant (`CodecZenohMsgPut`) but the inner body's `Default` impl doesn't set the header byte to match that variant's dispatch MID. Two upstream options: (a) inner body's Default impl sets header to its own MID; (b) outer dispatcher's Default arm picks `Default { tag: 0, body: <fallback-arm> }` consistently. Either is an SCE upstream concern. Document for follow-up SCE work; wz tests no longer trip this corner.",
+        "Variant Default uniformity — the same corner may exist on `CloseVariant`, `MsgPut`'s inner ext discriminators, etc. — any codec with `<sce:variant>` + Default arm. A wz-side audit could enumerate which codecs are affected; defer until a real wz-runtime test trips it again (R87 only confirmed the request.scxml case).",
+        "Round-trip property test infrastructure — R87's construction discipline (build with body=Default{tag:0, body:Query::default()}) is a manual guard. A proptest-style fuzz harness over Request states would catch future codegen regressions. Out of R87 scope; would land alongside SCE upstream codegen audit."
+      ],
+      "publishable_decision_summary": "R87 debt repayment — R82's \"first record is Request\" workaround replaced with exact-byte-count round-trip Request construction; assertions strengthened to parsed.len()==1, and the previously-removed Request+Unknown chain test restored.",
+      "publishable_changes_bullets": [
+        "Root cause identified for the R82 codec discrepancy: `RequestVariant::default()` returns `CodecZenohMsgPut(MsgPut::default())` per sce-codegen's 'pick first variant' rule, but `MsgPut::default().header = 0` (low-5 MID = 0) causes Request::decode's inner-MID dispatch (line 102 of generated request.rs: `match (peek >> 0) & 0x1F { 1=>MsgPut, 2=>MsgDel, 3=>Query, other=>Default{tag:other, body:Query} }`) to route to the Default arm with Query::decode. Encode wrote MsgPut bytes; decode read Query bytes. The discrepancy is a sce-codegen Default-arm self-inconsistency on the codec output, NOT a real wire-spec bug — production callers construct Request with explicit body, not Default.",
+        "The fix is a test-side construction discipline: build Request with `body: RequestVariant::Default { tag: 0, body: Query::default() }` so encode and decode use the same arm (Default arm) and the same inner codec (Query::default round-trips in 1 byte; Wireexpr::default round-trips in 1 byte). Total round-trip-safe wire: header(1) + rid_vle(1) + wireexpr(1) + query_default(1) = 4 bytes exact.",
+        "crates/wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs: parse_frame_payload_dispatches_request_mid_to_request_decoder rewritten. Asserts `bytes.len() == 4` (encode side) and `parsed.len() == 1` (decode side — strict, no residual). Rustdoc inside the test documents the codegen-Default corner so the construction discipline is preserved when future codecs are added.",
+        "parse_frame_payload_decodes_request_then_unknown_chain restored. This test was REMOVED from the original R82 commit because the default-state mismatch produced unpredictable residual bytes that polluted the chain assertion. With the R87 construction, the chain test asserts `parsed.len() == 2` (Request envelope + Unknown absorbing tail) and validates the Unknown.body byte equality.",
+        "No source-code change in session_glue.rs or wz-codecs/lib.rs — the fix is purely in test construction. The discovered codegen corner (Default impl picks first variant + MsgPut::default.header == 0 ≠ msg_put MID 1) is documented as a separate SCE upstream concern; wz-side tests now bypass it by explicit body construction. No wz-codecs change needed for production correctness.",
+        "Closes R82 carry #1 'wz_codecs::request encode/decode roundtrip discrepancy — default-state Request::default().encode() produces bytes where Request::decode consumes a different (smaller) byte count'. The original carry overstated the scope as a general codec bug; R87 narrows it to 'Default-arm of variant dispatch tag mismatch on initial state', shows that real-construction code is unaffected, and demonstrates the test-side fix."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio green; no source change beyond the test file.",
+        "cargo test -p wz-runtime-tokio --test session_fsm_inbound_dispatch parse_frame_payload: 5 passed (empty / Unknown / Request strict / Request+Unknown chain / truncated). Each assertion is now strict — no `parsed.len() >= 1` or 'first record is X' workarounds remain.",
+        "cargo test --workspace: 115 passed / 0 failed (114 -> 115, +1 = exact R87 new test count: parse_frame_payload_decodes_request_then_unknown_chain restored).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "scripts/run-ci.sh: all 5 layers pass.",
+        "Empirical round-trip evidence: Wireexpr::default with parent_flags=0x1C (N bit clear) encodes/decodes id=0 in exactly 1 byte. Query::default with header=0 encodes header byte only (consolidation/parameters/extensions all None per flag bits clear). The 4-byte wire is byte-exact across encode and decode.",
+        "validate_workspace baseline preserved: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, T3 warn 856 / T4 info 427 unchanged. Atomic ledger entries 99 -> 100 (this Round entry); sections=214 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "sce-codegen Default-arm consistency for variant dispatchers — the discovered corner is that sce-codegen's `RequestVariant::default()` picks the first declared variant (`CodecZenohMsgPut`) but the inner body's `Default` impl doesn't set the header byte to match that variant's dispatch MID. Two upstream options: (a) inner body's Default impl sets header to its own MID; (b) outer dispatcher's Default arm picks `Default { tag: 0, body: <fallback-arm> }` consistently. Either is an SCE upstream concern. Document for follow-up SCE work; wz tests no longer trip this corner.",
+        "Variant Default uniformity — the same corner may exist on `CloseVariant`, `MsgPut`'s inner ext discriminators, etc. — any codec with `<sce:variant>` + Default arm. A wz-side audit could enumerate which codecs are affected; defer until a real wz-runtime test trips it again (R87 only confirmed the request.scxml case).",
+        "Round-trip property test infrastructure — R87's construction discipline (build with body=Default{tag:0, body:Query::default()}) is a manual guard. A proptest-style fuzz harness over Request states would catch future codegen regressions. Out of R87 scope; would land alongside SCE upstream codegen audit."
+      ]
+    },
     "Round 9": {
       "decision_summary": "Phase D 진짜 closure — ARCHITECTURE 잔여 sub 34개 + 4 §-prefix docs sub 69개 typed-populate; \"parser limit\" carry는 misdiagnosis로 판명되어 mnemosyne 변경 불필요.",
       "changes_bullets": [

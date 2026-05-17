@@ -381,34 +381,100 @@ fn parse_frame_payload_unknown_mid_absorbs_remainder() {
 
 #[test]
 fn parse_frame_payload_dispatches_request_mid_to_request_decoder() {
-    use wz_codecs::request::Request;
+    use wz_codecs::query::Query;
+    use wz_codecs::request::{Request, RequestVariant};
+    use wz_codecs::wireexpr::Wireexpr;
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
-    // header = N_MID_REQUEST (0x1C); other Request fields default.
-    // Request::default().encode() is the "minimum valid request" wire
-    // we can produce without hand-encoding Wireexpr + inner body.
+    // R87 — exact byte-count round-trip Request envelope. The naive
+    // `Request { header: 0x1C, ..Request::default() }` construction
+    // exercises a self-inconsistent corner of `wz_codecs::request`'s
+    // codegen output: `RequestVariant::default()` returns
+    // `CodecZenohMsgPut(MsgPut::default())` whose `header` is `0`, but
+    // the request decoder's variant dispatch reads the inner header
+    // byte and routes `mid=0` to the `Default` arm with `Query::decode`
+    // — so encode writes MsgPut bytes while decode reads Query bytes.
+    //
+    // The fix is to construct the body with a variant that matches
+    // what `decode` will produce: `RequestVariant::Default { tag: 0,
+    // body: Query::default() }`. Both `Wireexpr::default()` and
+    // `Query::default()` round-trip in exactly one byte each, so the
+    // total wire is `header(1) + rid_vle(1) + wireexpr(1) +
+    // query_default(1) = 4 bytes` and decode consumes exactly that.
     let req = Request {
         header: 0x1C,
-        ..Request::default()
+        rid: 0,
+        keyexpr: Wireexpr::default(),
+        extensions: None,
+        body: RequestVariant::Default {
+            tag: 0,
+            body: Query::default(),
+        },
     };
     let bytes = req.encode();
+    assert_eq!(
+        bytes.len(),
+        4,
+        "round-trip-safe Request constructs to 4 bytes: header + rid + wireexpr + query_default"
+    );
 
     let parsed = parse_frame_payload(&bytes).expect("Request envelope parses");
-    assert!(
-        !parsed.is_empty(),
-        "Request payload yields at least one record"
+    assert_eq!(
+        parsed.len(),
+        1,
+        "round-trip-safe Request yields exactly one record (R87 closure \
+         of the R82 'parsed.len() may exceed 1' carry); got {parsed:?}"
     );
     assert!(
         matches!(parsed[0], NetworkMessage::Request(_)),
-        "Request MID 0x1C dispatches to wz_codecs::request decoder \
-         (first record)"
+        "Request MID 0x1C dispatches to wz_codecs::request decoder"
     );
-    // NOTE: parsed.len() may exceed 1 because wz_codecs::request's
-    // default-state encode/decode pair does not consume the exact same
-    // number of bytes in both directions — the residual is absorbed by
-    // the next iteration of the batch loop. Treating that as a separate
-    // wz-codecs/sce-codegen issue keeps R74 focused on the dispatch
-    // wiring; the dispatch contract here is "first record is Request".
+}
+
+#[test]
+fn parse_frame_payload_decodes_request_then_unknown_chain() {
+    use wz_codecs::query::Query;
+    use wz_codecs::request::{Request, RequestVariant};
+    use wz_codecs::wireexpr::Wireexpr;
+    use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
+
+    // R87 — with the round-trip-safe Request construction, the batch
+    // loop can be tested across a multi-record payload. Prior to R87
+    // this test was removed because the default-state encode/decode
+    // mismatch made the residual unpredictable.
+    let req = Request {
+        header: 0x1C,
+        rid: 0,
+        keyexpr: Wireexpr::default(),
+        extensions: None,
+        body: RequestVariant::Default {
+            tag: 0,
+            body: Query::default(),
+        },
+    };
+    let mut bytes = req.encode();
+    let request_len = bytes.len();
+    // Append an Unknown MID (0x1D = N_MID_PUSH) + 2 trailing bytes.
+    bytes.extend_from_slice(&[0x1D, 0x42, 0x43]);
+
+    let parsed = parse_frame_payload(&bytes).expect("Request + Unknown batch parses");
+    assert_eq!(
+        parsed.len(),
+        2,
+        "two records: Request envelope then Unknown absorbing the tail; got {parsed:?}"
+    );
+    assert!(matches!(parsed[0], NetworkMessage::Request(_)));
+    match &parsed[1] {
+        NetworkMessage::Unknown { mid, body } => {
+            assert_eq!(*mid, 0x1D);
+            assert_eq!(
+                body.as_slice(),
+                &bytes[request_len..],
+                "Unknown.body absorbs from its header byte to end of payload"
+            );
+        }
+        NetworkMessage::Request(_) => panic!("expected Unknown second record"),
+    }
 }
 
 #[test]
