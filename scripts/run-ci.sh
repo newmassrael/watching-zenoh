@@ -124,6 +124,7 @@ layer_b_verify_codegen() {
         ["ext_zint"]="vendor/sce/tests/forge/resources/codec_zenoh_ext_zint.scxml"
         ["ext_zbuf"]="vendor/sce/tests/forge/resources/codec_zenoh_ext_zbuf.scxml"
         ["ext_entry"]="vendor/sce/tests/forge/resources/codec_zenoh_ext_entry.scxml"
+        ["ext_envelope"]="vendor/sce/tests/forge/resources/codec_zenoh_ext_envelope.scxml"
         ["scout"]="vendor/sce/tests/forge/resources/codec_zenoh_scout.scxml"
         ["hello"]="vendor/sce/tests/forge/resources/codec_zenoh_hello.scxml"
         ["msg_put"]="vendor/sce/tests/forge/resources/codec_zenoh_msg_put.scxml"

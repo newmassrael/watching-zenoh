@@ -45,6 +45,7 @@ const CODECS: &[&str] = &[
     // Composing codecs
     "hello",     // §3 Hello body — parent.L + repeat<locator> — R45
     "ext_entry", // imports ext_unit / ext_zint / ext_zbuf
+    "ext_envelope", // imports ext_entry — R67 generic ext chain (RFC §5.B B5-ε)
     "msg_put",   // imports timestamp / encoding / ext_entry
     "msg_del",   // imports timestamp / ext_entry
     "wireexpr",  // §5 keyexpr fragment — parent.N gated suffix — R47

@@ -2509,6 +2509,9 @@
         "ext::Compression — accept-and-ignore (deploy extensions_ignored); OQ-W4 if peer-critical",
         "ext::PatchType — Close(UNSUPPORTED) on peer patch > ours; OQ-W7"
       ],
+      "caveats_bullets": [
+        "R67: ext_envelope.scxml landed (SCE 6-backend body-equiv). init/open/join body 보존. R63a → close."
+      ],
       "impact_scope": [
         "session-fsm--prose-level-sketch",
         "session-fsm--prose-level-sketch/2-2-unicast-transitions",
@@ -2896,6 +2899,9 @@
     },
     "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism": {
       "intent": "Extension chain TLV with more-bit per RFC §5.B; per-extension budgets in deploy.yaml; decode-time enforcement with diagnostic on overflow.",
+      "caveats_bullets": [
+        "R67: wz ext_envelope codec landed (RFC §5.B B5-ε wrapper; SCE upstream body-equiv 6/6)."
+      ],
       "impact_scope": [
         "wire-spec-subset--watching-zenoh-mvp/7-1-common-application-visible-extensions",
         "wire-spec-subset--watching-zenoh-mvp/7-2-unknown-extensions-policy"
@@ -6956,6 +6962,56 @@
       "publishable_carry_forward_bullets": [
         "R67-R71 carry list unchanged (SCXML ext chain / inbound parser / Hal time-mock / crypto polish / test-support crate split).",
         "Push 4 unpushed commits (R66 + R70 + R66d + R66g) when explicit consent given; pre-push hook runs full CI gate locally."
+      ]
+    },
+    "Round 67": {
+      "decision_summary": "Generic ext chain envelope codec (ext_envelope.scxml) landed; SCE codec_zenoh_ext_envelope 6-backend body-equiv. Init/Open/Join wz body 보존 (R44 zenoh-pico 1:1 mirror).",
+      "changes_bullets": [
+        "sources/codecs/ext_envelope.scxml: new SCXML — header_flags uint8 + sce:tlv-chain<ext_entry> max-depth=8 terminate-on entry-flag Z (RFC §5.B B5-ε surface G; Y3 entry-flag termination).",
+        "crates/wz-codecs/build.rs: ext_envelope added to CODECS list after ext_entry (import dependency).",
+        "crates/wz-codecs/src/lib.rs: pub mod ext_envelope { include!(...) } between ext_entry and msg_put.",
+        "session-fsm §7 + wire-spec §7 caveats: R67 close marker appended (Round 161 §41 ≤100 char form)."
+      ],
+      "verification_bullets": [
+        "scripts/verify-codegen.sh sources/codecs/ext_envelope.scxml vs SCE upstream: Layer 1 emit-success 6/6 (rust/cpp/kotlin/go/c11/python), Layer 2 golden=match 6/6 (stem-normalized body-equiv).",
+        "cargo build -p wz-codecs --manifest-path crates/Cargo.toml: clean (sce-build + sce-forge-runtime + wz-codecs compile).",
+        "cargo test -p wz-codecs --lib: 0 tests / ok (no regression on existing modules; ext_envelope codegen output compiles).",
+        "init_body / open_body / join SCXML files unchanged — R44 wz↔zenoh-pico 1:1 wire mirror preserved (R44 BE/LE divergence carry unaffected)."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "carry_forward_bullets": [
+        "Layer 3 wire-interop test layer3_ext_envelope.rs vs zenoh-pico _z_msg_ext_vec_encode (src/protocol/codec/ext.c:148): deferred — zenoh-pico FFI bridge complexity ≈ existing layer3_join. Recommended R68 bundle.",
+        "wz-runtime-tokio session_glue ext chain encode/decode integration: pending — pairs naturally with R68 initiator-side inbound parser (peer InitAck wire → SessionInitParams.cookie populate).",
+        "R68/R69/R71/Phase W carries unchanged. AP getrandom for SigningKey::new entropy (R70b new carry) still open.",
+        "Init/Open/Join wz body BE/LE divergence carry vs SCE fixture (R44 closure): unaffected by R67; SCE upstream PR still pending."
+      ],
+      "publishable_decision_summary": "Generic ext chain envelope codec (ext_envelope.scxml) landed; SCE codec_zenoh_ext_envelope 6-backend body-equiv. Init/Open/Join wz body 보존 (R44 zenoh-pico 1:1 mirror).",
+      "publishable_changes_bullets": [
+        "sources/codecs/ext_envelope.scxml: new SCXML — header_flags uint8 + sce:tlv-chain<ext_entry> max-depth=8 terminate-on entry-flag Z (RFC §5.B B5-ε surface G; Y3 entry-flag termination).",
+        "crates/wz-codecs/build.rs: ext_envelope added to CODECS list after ext_entry (import dependency).",
+        "crates/wz-codecs/src/lib.rs: pub mod ext_envelope { include!(...) } between ext_entry and msg_put.",
+        "session-fsm §7 + wire-spec §7 caveats: R67 close marker appended (Round 161 §41 ≤100 char form)."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/verify-codegen.sh sources/codecs/ext_envelope.scxml vs SCE upstream: Layer 1 emit-success 6/6 (rust/cpp/kotlin/go/c11/python), Layer 2 golden=match 6/6 (stem-normalized body-equiv).",
+        "cargo build -p wz-codecs --manifest-path crates/Cargo.toml: clean (sce-build + sce-forge-runtime + wz-codecs compile).",
+        "cargo test -p wz-codecs --lib: 0 tests / ok (no regression on existing modules; ext_envelope codegen output compiles).",
+        "init_body / open_body / join SCXML files unchanged — R44 wz↔zenoh-pico 1:1 wire mirror preserved (R44 BE/LE divergence carry unaffected)."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Layer 3 wire-interop test layer3_ext_envelope.rs vs zenoh-pico _z_msg_ext_vec_encode (src/protocol/codec/ext.c:148): deferred — zenoh-pico FFI bridge complexity ≈ existing layer3_join. Recommended R68 bundle.",
+        "wz-runtime-tokio session_glue ext chain encode/decode integration: pending — pairs naturally with R68 initiator-side inbound parser (peer InitAck wire → SessionInitParams.cookie populate).",
+        "R68/R69/R71/Phase W carries unchanged. AP getrandom for SigningKey::new entropy (R70b new carry) still open.",
+        "Init/Open/Join wz body BE/LE divergence carry vs SCE fixture (R44 closure): unaffected by R67; SCE upstream PR still pending."
       ]
     },
     "Round 7": {
