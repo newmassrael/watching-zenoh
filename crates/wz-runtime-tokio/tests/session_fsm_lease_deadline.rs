@@ -16,11 +16,10 @@
 //! Production driver loops compose this helper between
 //! `poll_and_dispatch_one` iterations.
 //!
-//! Single mega-test on purpose. The Lua engine + INSTALLED OnceLock
-//! are process-global; splitting scenarios into per-`#[test]` fns
-//! causes cargo's thread-parallel runner to race on
-//! `install_session_actions_for_test` (carry from R71b — fixed in a
-//! later round once the SCE `bind_native_object` upstream lands).
+//! R80 — split into per-branch `#[test]` fns (NoBaseline /
+//! WithinLease / Expired / boundary). The mega-test pattern was
+//! load-bearing only until R79 closed the cross-test race carry via
+//! SCE upstream's per-instance ScriptEngine DI.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -72,113 +71,114 @@ fn drive_to_established(engine: &mut Engine<SessionFsmUnicastPolicy>) {
     assert_eq!(engine.get_current_state(), S::Established);
 }
 
+// ── Scenario 1: stamp slot empty → NoBaseline, state unchanged
 #[test]
-fn r77_check_lease_deadline_covers_no_baseline_within_and_expired() {
-    // ── Scenario 1: stamp slot empty → NoBaseline, state unchanged
-    {
-        let (actions, mut engine) = fresh_setup();
-        drive_to_established(&mut engine);
-        assert!(
-            actions.last_inbound_keepalive_at.lock().unwrap().is_none(),
-            "stamp starts empty (no inbound KeepAlive observed)"
-        );
-        let pre_state = engine.get_current_state();
+fn r77_no_baseline_when_stamp_slot_empty() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_established(&mut engine);
+    assert!(
+        actions.last_inbound_keepalive_at.lock().unwrap().is_none(),
+        "stamp starts empty (no inbound KeepAlive observed)"
+    );
+    let pre_state = engine.get_current_state();
 
-        let outcome = check_lease_deadline(&actions, &mut engine, Instant::now());
-        assert_eq!(
-            outcome,
-            LeaseCheckOutcome::NoBaseline,
-            "absent stamp must surface NoBaseline; got {outcome:?}"
-        );
-        assert_eq!(
-            engine.get_current_state(),
-            pre_state,
-            "NoBaseline branch must NOT mutate FSM state"
-        );
-    }
+    let outcome = check_lease_deadline(&actions, &mut engine, Instant::now());
+    assert_eq!(
+        outcome,
+        LeaseCheckOutcome::NoBaseline,
+        "absent stamp must surface NoBaseline; got {outcome:?}"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        pre_state,
+        "NoBaseline branch must NOT mutate FSM state"
+    );
+}
 
-    // ── Scenario 2: stamp recent, now = stamp + 1ms (lease=10000ms)
-    //                → WithinLease, state unchanged
-    {
-        let (actions, mut engine) = fresh_setup();
-        drive_to_established(&mut engine);
-        // Fixture lease = 10_000 (ms, lease_in_seconds=false) ⇒ 10s window.
-        let stamp = Instant::now();
-        *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
-        let pre_state = engine.get_current_state();
+// ── Scenario 2: stamp recent, now = stamp + 1ms (lease=10000ms)
+//                → WithinLease, state unchanged
+#[test]
+fn r77_within_lease_when_stamp_recent() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_established(&mut engine);
+    // Fixture lease = 10_000 (ms, lease_in_seconds=false) ⇒ 10s window.
+    let stamp = Instant::now();
+    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
+    let pre_state = engine.get_current_state();
 
-        let now = stamp + Duration::from_millis(1);
-        let outcome = check_lease_deadline(&actions, &mut engine, now);
-        assert_eq!(
-            outcome,
-            LeaseCheckOutcome::WithinLease,
-            "1ms < 10s lease must surface WithinLease; got {outcome:?}"
-        );
-        assert_eq!(
-            engine.get_current_state(),
-            pre_state,
-            "WithinLease branch must NOT mutate FSM state"
-        );
-    }
+    let now = stamp + Duration::from_millis(1);
+    let outcome = check_lease_deadline(&actions, &mut engine, now);
+    assert_eq!(
+        outcome,
+        LeaseCheckOutcome::WithinLease,
+        "1ms < 10s lease must surface WithinLease; got {outcome:?}"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        pre_state,
+        "WithinLease branch must NOT mutate FSM state"
+    );
+}
 
-    // ── Scenario 3: stamp old, now = stamp + 20s (lease=10000ms)
-    //                → Expired, FSM Established -> Closing,
-    //                  close_reason = Expired, trace surfaces
-    //                  Established.onexit + Closing.onentry side effects
-    {
-        let (actions, mut engine) = fresh_setup();
-        drive_to_established(&mut engine);
-        let stamp = Instant::now();
-        *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
+// ── Scenario 3: stamp old, now = stamp + 20s (lease=10000ms)
+//                → Expired, FSM Established -> Closing, close_reason
+//                = Expired, trace surfaces Established.onexit +
+//                Closing.onentry side effects
+#[test]
+fn r77_expired_drives_established_to_closing() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_established(&mut engine);
+    let stamp = Instant::now();
+    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
 
-        let now = stamp + Duration::from_secs(20);
-        let outcome = check_lease_deadline(&actions, &mut engine, now);
-        assert_eq!(
-            outcome,
-            LeaseCheckOutcome::Expired,
-            "20s >= 10s lease must surface Expired; got {outcome:?}"
-        );
-        assert_eq!(
-            engine.get_current_state(),
-            S::Closing,
-            "Expired must drive Established -> Closing via lease.expired"
-        );
-        let trace = actions.trace_snapshot();
-        assert_eq!(
-            trace.close_reason,
-            CloseReason::Expired,
-            "Closing.onentry must set close_reason=Expired"
-        );
-        assert_eq!(
-            trace.send_close_frame_with_reason, 1,
-            "Closing.onentry must dispatch send_close_frame_with_reason"
-        );
-        assert_eq!(
-            trace.stop_keepalive_worker, 1,
-            "Established.onexit must stop the keepalive worker"
-        );
-        assert_eq!(
-            trace.stop_lease_monitor, 1,
-            "Established.onexit must stop the lease monitor"
-        );
-    }
+    let now = stamp + Duration::from_secs(20);
+    let outcome = check_lease_deadline(&actions, &mut engine, now);
+    assert_eq!(
+        outcome,
+        LeaseCheckOutcome::Expired,
+        "20s >= 10s lease must surface Expired; got {outcome:?}"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        S::Closing,
+        "Expired must drive Established -> Closing via lease.expired"
+    );
+    let trace = actions.trace_snapshot();
+    assert_eq!(
+        trace.close_reason,
+        CloseReason::Expired,
+        "Closing.onentry must set close_reason=Expired"
+    );
+    assert_eq!(
+        trace.send_close_frame_with_reason, 1,
+        "Closing.onentry must dispatch send_close_frame_with_reason"
+    );
+    assert_eq!(
+        trace.stop_keepalive_worker, 1,
+        "Established.onexit must stop the keepalive worker"
+    );
+    assert_eq!(
+        trace.stop_lease_monitor, 1,
+        "Established.onexit must stop the lease monitor"
+    );
+}
 
-    // ── Scenario 4: boundary — now = stamp + lease (exactly) → Expired
-    //                because the comparator is `>=` (a stamp older than
-    //                or equal to the deadline triggers expiry).
-    {
-        let (actions, mut engine) = fresh_setup();
-        drive_to_established(&mut engine);
-        let stamp = Instant::now();
-        *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
+// ── Scenario 4: boundary — now = stamp + lease (exactly) → Expired
+//                because the comparator is `>=` (a stamp older than
+//                or equal to the deadline triggers expiry).
+#[test]
+fn r77_expired_at_exact_lease_boundary() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_established(&mut engine);
+    let stamp = Instant::now();
+    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
 
-        let now = stamp + Duration::from_millis(10_000);
-        let outcome = check_lease_deadline(&actions, &mut engine, now);
-        assert_eq!(
-            outcome,
-            LeaseCheckOutcome::Expired,
-            "exact lease boundary must surface Expired (>= comparator)"
-        );
-        assert_eq!(engine.get_current_state(), S::Closing);
-    }
+    let now = stamp + Duration::from_millis(10_000);
+    let outcome = check_lease_deadline(&actions, &mut engine, now);
+    assert_eq!(
+        outcome,
+        LeaseCheckOutcome::Expired,
+        "exact lease boundary must surface Expired (>= comparator)"
+    );
+    assert_eq!(engine.get_current_state(), S::Closing);
 }

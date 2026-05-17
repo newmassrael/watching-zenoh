@@ -6,10 +6,14 @@
 //! by the real wz codec encode path with the right
 //! transport-message-id header + flag pattern.
 //!
-//! Single integration test on purpose. The Lua engine + the
-//! `INSTALLED` OnceLock guard are process-global; the
-//! `__test_only_rebind` hook lets the test rebind closures against
-//! a fresh `SessionLinkActions` without resetting the guard.
+//! Single integration test because the walk-through dispatches the
+//! 17 script actions in a fixed sequence and asserts the resulting
+//! wire bytes inline; the sequence is path-dependent (each action
+//! reads the trace counters left by the prior one) so splitting
+//! into per-action `#[test]` fns gains no granularity. R79's
+//! per-instance ScriptEngine DI closed the cross-test race carry —
+//! the multi-engine isolation assertion at the test's tail verifies
+//! the new invariant.
 //!
 //! Wire-byte assertions are exact-bytes (not pattern-matched) so
 //! any drift between session_glue's encode path and zenoh-pico's
