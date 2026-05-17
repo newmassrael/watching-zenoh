@@ -212,6 +212,23 @@ fn main() {
         // pico's transport.c _z_keep_alive_encode (does nothing).
         .allowlist_type("_z_t_msg_keep_alive_t")
         .allowlist_function("_z_keep_alive_encode")
+        // R67c — ext chain Layer 3 byte-compare vs wz ExtEnvelope.
+        // _z_msg_ext_t = union<unit|zint|zbuf> + header byte; the
+        // builder helpers _z_msg_ext_make_* set header bits from
+        // (id|M, enc-constant) per protocol/ext.c. Single-entry
+        // encode via _z_msg_ext_encode(wbf, ext, has_next) — caller
+        // loops with has_next=true on all but the last to emit the
+        // Z (more) bit pattern matching wz tlv-chain entry-flag Z
+        // termination.
+        .allowlist_type("_z_msg_ext_t")
+        .allowlist_type("_z_msg_ext_unit_t")
+        .allowlist_type("_z_msg_ext_zint_t")
+        .allowlist_type("_z_msg_ext_zbuf_t")
+        .allowlist_function("_z_msg_ext_make_unit")
+        .allowlist_function("_z_msg_ext_make_zint")
+        .allowlist_function("_z_msg_ext_make_zbuf")
+        .allowlist_function("_z_msg_ext_encode")
+        .allowlist_function("_z_msg_ext_clear")
         // bindgen layout-test surface: pin to `Debug` derivation to
         // unblock test-side equality checks against zenoh-pico's
         // typed shape.

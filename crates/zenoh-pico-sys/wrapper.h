@@ -36,6 +36,8 @@
 #include "zenoh-pico/protocol/iobuf.h"
 #include "zenoh-pico/protocol/codec/transport.h"
 #include "zenoh-pico/protocol/codec/message.h"
+#include "zenoh-pico/protocol/codec/ext.h"
+#include "zenoh-pico/protocol/ext.h"
 
 /* Forward declarations for body-codec functions that have C-side
  * implementations in src/protocol/codec/message.c but no header
