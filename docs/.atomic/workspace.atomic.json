@@ -753,6 +753,10 @@
         "RNG plugin alt: duplicated authoring per canonical deploy; each new RNG re-states it",
         "HMAC core alt: faster Phase A on listener MCUs; precedent for crypto whitelist adds"
       ],
+      "caveats_bullets": [
+        "R62-R70 AP-side HMAC land (RustCrypto std-coupled) ratifies OQ-W15(a) Q2 plugin path",
+        "SigningKey newtype + zeroize: Phase W MCU swap MUST preserve drop-time wipe semantics"
+      ],
       "impact_scope": [
         "intrinsics-runtime--symbol-surface",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
@@ -6918,6 +6922,38 @@
         "R68 = R63b Initiator inbound parser.",
         "R69 = Hal time-mock injection.",
         "R70b = AP getrandom integration + RFC 4231 TC3-7 coverage."
+      ]
+    },
+    "Round 66g": {
+      "decision_summary": "OQ-W15(a) ratification summary §5 atomic caveats — R62-R70 AP HMAC + SigningKey drop-wipe land confirms the maintainer-sync plugin-path choice.",
+      "changes_bullets": [
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/5-blast-radius-forward-compatibility-implications: 2 caveats added recording the R62 AP-side HMAC + R70 SigningKey newtype + zeroize land. The OQ-W15(a) Q2 plugin path (per-SoC accelerator + SW fallback) is the same shape; the AP RustCrypto path is the concrete reference implementation the MCU sibling will mirror in Phase W."
+      ],
+      "verification_bullets": [
+        "2 add_section_caveat calls; both under 100-char limit.",
+        "validate_workspace clean: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 74 → 75."
+      ],
+      "impact_refs": [
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/5-blast-radius-forward-compatibility-implications"
+      ],
+      "carry_forward_bullets": [
+        "R67-R71 carry list unchanged (SCXML ext chain / inbound parser / Hal time-mock / crypto polish / test-support crate split).",
+        "Push 4 unpushed commits (R66 + R70 + R66d + R66g) when explicit consent given; pre-push hook runs full CI gate locally."
+      ],
+      "publishable_decision_summary": "OQ-W15(a) ratification summary §5 atomic caveats — R62-R70 AP HMAC + SigningKey drop-wipe land confirms the maintainer-sync plugin-path choice.",
+      "publishable_changes_bullets": [
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/5-blast-radius-forward-compatibility-implications: 2 caveats added recording the R62 AP-side HMAC + R70 SigningKey newtype + zeroize land. The OQ-W15(a) Q2 plugin path (per-SoC accelerator + SW fallback) is the same shape; the AP RustCrypto path is the concrete reference implementation the MCU sibling will mirror in Phase W."
+      ],
+      "publishable_verification_bullets": [
+        "2 add_section_caveat calls; both under 100-char limit.",
+        "validate_workspace clean: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 74 → 75."
+      ],
+      "publishable_impact_refs": [
+        "oq-w15-a--ratification-summary-for-sce-maintainer-sync/5-blast-radius-forward-compatibility-implications"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R67-R71 carry list unchanged (SCXML ext chain / inbound parser / Hal time-mock / crypto polish / test-support crate split).",
+        "Push 4 unpushed commits (R66 + R70 + R66d + R66g) when explicit consent given; pre-push hook runs full CI gate locally."
       ]
     },
     "Round 7": {
