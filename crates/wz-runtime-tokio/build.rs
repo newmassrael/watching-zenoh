@@ -48,6 +48,7 @@ const EXPECTED_SCRIPT_NAMES: &[&str] = &[
     "send_close_frame_with_reason",
     "release_link",
     "enable_rx_tx_regions",
+    "record_established_at",
     "start_lease_monitor",
     "stop_lease_monitor",
     "start_keepalive_worker",

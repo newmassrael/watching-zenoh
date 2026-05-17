@@ -351,6 +351,12 @@ pub struct ActionTrace {
     pub free_pool_slots: u32,
     pub set_close_reason_count: u32,
     pub close_reason: CloseReason,
+    /// R84 — incremented on `record_established_at()` script dispatch
+    /// (Established.onentry). Pairs 1:1 with the
+    /// `SessionLinkActions::established_at` timestamp slot so tests
+    /// can assert both the counter side-effect AND the slot
+    /// population in one pass.
+    pub record_established_at: u32,
 }
 
 /// Sync RAII shim around an async `LinkDriver`. Production callers
@@ -453,6 +459,22 @@ pub struct SessionLinkActions {
     /// lease`. No drift correction needed because both `now` and
     /// `stamp` read the same monotonic source.
     pub last_inbound_keepalive_at: Mutex<Option<Instant>>,
+    /// R84 — monotonic `Instant` captured when the session FSM
+    /// enters the `Established` state. Populated by the
+    /// `record_established_at()` Lua action wired to the
+    /// `Established.onentry` block in `session_fsm_unicast.scxml`.
+    /// Consumers (specifically `check_lease_deadline`) fall back to
+    /// this stamp when `last_inbound_keepalive_at` is `None` so a
+    /// peer that never sends a KeepAlive after handshake still
+    /// reaches `lease.expired -> Closing` per session-fsm §2.5
+    /// ("lease counts from Established entry"); the prior R77
+    /// behaviour was `NoBaseline` indefinitely in that case.
+    ///
+    /// Resolution and clock semantics match
+    /// `last_inbound_keepalive_at` — both use `std::time::Instant`
+    /// so the lease comparator subtracts them with a single
+    /// monotonic source.
+    pub established_at: Mutex<Option<Instant>>,
     /// R68b — per-role ext chain slots. Indexed by `ExtChainRole`
     /// via `ext_chain_for`. Each slot lives behind its own `Mutex`
     /// so a setter can swap one chain without blocking the others
@@ -476,6 +498,7 @@ impl SessionLinkActions {
             trace: Mutex::new(ActionTrace::default()),
             inbound_cookie: Mutex::new(None),
             last_inbound_keepalive_at: Mutex::new(None),
+            established_at: Mutex::new(None),
             init_syn_ext: Mutex::new(Vec::new()),
             init_ack_ext: Mutex::new(Vec::new()),
             open_syn_ext: Mutex::new(Vec::new()),
@@ -583,6 +606,7 @@ impl ActionTrace {
             free_pool_slots: self.free_pool_slots,
             set_close_reason_count: self.set_close_reason_count,
             close_reason: self.close_reason,
+            record_established_at: self.record_established_at,
         }
     }
 }
@@ -708,6 +732,10 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
 pub fn register_state_internal_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLinkActions>) {
     bind_unit(lua, "enable_rx_tx_regions", actions, |a| {
         a.trace.lock().unwrap().enable_rx_tx_regions += 1;
+    });
+    bind_unit(lua, "record_established_at", actions, |a| {
+        a.trace.lock().unwrap().record_established_at += 1;
+        *a.established_at.lock().unwrap() = Some(Instant::now());
     });
     bind_unit(lua, "start_lease_monitor", actions, |a| {
         a.trace.lock().unwrap().start_lease_monitor += 1;
@@ -1414,31 +1442,34 @@ pub async fn poll_and_dispatch_one<D: LinkDriver>(
 }
 
 /// R77 — outcome of a single lease-deadline check against
-/// `SessionLinkActions::last_inbound_keepalive_at`.
+/// `SessionLinkActions`' baseline stamps.
 ///
-/// Three branches model the trichotomy the production driver needs
-/// to dispatch on: stamp absent (no inbound KeepAlive observed yet,
-/// lease decision deferred); stamp + lease > now (within the
-/// window); stamp + lease <= now (helper has already injected
-/// `LeaseExpired`).
+/// Baseline selection (R84): the lease counts from
+/// `max(established_at, last_inbound_keepalive_at)` — whichever is
+/// most recent. Both slots being `None` means the FSM has not
+/// reached Established yet AND no peer KeepAlive has been
+/// observed (e.g. pre-handshake), and the helper defers via
+/// `NoBaseline`. The prior R77 baseline was `last_inbound_keepalive_at`
+/// alone, which left `NoBaseline` pinned indefinitely until the
+/// first peer KeepAlive — violating session-fsm §2.5 ("lease
+/// counts from Established entry").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseCheckOutcome {
-    /// `last_inbound_keepalive_at` is `None`. The helper makes no
-    /// decision and does NOT inject `LeaseExpired`. The production
-    /// caller treats this as "still polling" until the first peer
-    /// KeepAlive arrives.
-    ///
-    /// Carry: session-fsm §2.5 specifies that the lease counts
-    /// from Established entry, but the runtime does not yet record
-    /// an `established_at` Instant on `SessionLinkActions`. A
-    /// follow-up round wires that hook; R77 honours R72b's design
-    /// that only inbound KeepAlive populates the slot.
+    /// Both `established_at` and `last_inbound_keepalive_at` are
+    /// `None`. The helper makes no decision and does NOT inject
+    /// `LeaseExpired`. In practice this surfaces only pre-Established
+    /// (since `Established.onentry` populates `established_at` per
+    /// R84). Production callers treat this as "still polling".
     NoBaseline,
-    /// `now.duration_since(stamp) < params.lease`. The helper
-    /// performed no FSM mutation; engine state is unchanged.
+    /// `now.duration_since(baseline) < params.lease` where
+    /// `baseline = max(established_at, last_inbound_keepalive_at)`.
+    /// The helper performed no FSM mutation; engine state is
+    /// unchanged.
     WithinLease,
-    /// `now.duration_since(stamp) >= params.lease`. The helper has
-    /// invoked `engine.process_event(SessionFsmUnicastEvent::LeaseExpired)`
+    /// `now.duration_since(baseline) >= params.lease` where
+    /// `baseline = max(established_at, last_inbound_keepalive_at)`.
+    /// The helper has invoked
+    /// `engine.process_event(SessionFsmUnicastEvent::LeaseExpired)`
     /// so the session-fsm `lease.expired -> Closing(Expired)`
     /// transition fires.
     Expired,
@@ -1477,8 +1508,22 @@ pub fn check_lease_deadline(
     } else {
         Duration::from_millis(actions.params.lease)
     };
-    let stamp = *actions.last_inbound_keepalive_at.lock().unwrap();
-    match stamp {
+    // R84 — baseline is the most recent of established_at and
+    // last_inbound_keepalive_at. The KeepAlive stamp resets the lease
+    // window per peer ping; the established_at stamp covers the
+    // pre-first-KeepAlive window so the lease has a defined
+    // start-of-counting at Established entry per session-fsm §2.5.
+    let baseline = {
+        let keepalive = *actions.last_inbound_keepalive_at.lock().unwrap();
+        let established = *actions.established_at.lock().unwrap();
+        match (established, keepalive) {
+            (None, None) => None,
+            (Some(e), None) => Some(e),
+            (None, Some(k)) => Some(k),
+            (Some(e), Some(k)) => Some(e.max(k)),
+        }
+    };
+    match baseline {
         None => LeaseCheckOutcome::NoBaseline,
         Some(stamp) if now.duration_since(stamp) >= lease => {
             engine.process_event(E::LeaseExpired);
@@ -1760,6 +1805,7 @@ pub const REGISTERED_SCRIPT_NAMES: &[&str] = &[
     "send_close_frame_with_reason",
     "release_link",
     "enable_rx_tx_regions",
+    "record_established_at",
     "start_lease_monitor",
     "stop_lease_monitor",
     "start_keepalive_worker",
