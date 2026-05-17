@@ -139,6 +139,7 @@
   <state id="Established">
     <onentry>
       <script>enable_rx_tx_regions()</script>
+      <script>record_established_at()</script>
       <script>start_lease_monitor()</script>
       <script>start_keepalive_worker()</script>
     </onentry>
