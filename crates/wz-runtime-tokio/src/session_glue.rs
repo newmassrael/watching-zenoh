@@ -66,6 +66,7 @@ use wz_codecs::ext_entry::ExtEntry;
 use wz_codecs::init_body::InitBody;
 use wz_codecs::keep_alive::KeepAlive;
 use wz_codecs::open_body::OpenBody;
+use wz_codecs::request::Request;
 
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
@@ -240,6 +241,16 @@ mod wire_const {
     /// `ExtEntry` records follow the body bytes, terminated by an
     /// entry whose own `Z` bit is clear.
     pub const FLAG_T_Z: u8 = 0x80;
+
+    /// Network-message MID for `Frame.payload` batch entries that
+    /// wrap a query / put / del (network.h:36). First R74-decoded
+    /// network MID since `wz_codecs::request` is the only authored
+    /// envelope codec — additional MIDs (PUSH 0x1D, RESPONSE 0x1B,
+    /// DECLARE 0x1E, OAM 0x1F, RESPONSE_FINAL 0x1A, INTEREST 0x19
+    /// per network.h:33-39) are documented in [`NetworkMessage`] and
+    /// will land alongside their respective envelope codecs in
+    /// follow-up rounds.
+    pub const N_MID_REQUEST: u8 = 0x1C;
 }
 
 /// Per-deploy parameters that drive the codec field values for the
@@ -1104,6 +1115,104 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
     }
 }
 
+/// R74 — one application-layer message inside a `Frame.payload` batch.
+///
+/// `Frame.payload` models `Vec<NetworkMessage>` per
+/// `docs/wire-spec-subset.md` §4 (the Established-session payload
+/// carrier; zenoh-pico maps it to `_z_network_message_t`). Each
+/// record starts with a header byte where bits 0..4 carry the network
+/// MID and bits 5..7 carry per-MID flags + the shared Z bit. The full
+/// network-MID set is 7 wide (PUSH 0x1D, REQUEST 0x1C, RESPONSE 0x1B,
+/// RESPONSE_FINAL 0x1A, DECLARE 0x1E, INTEREST 0x19, OAM 0x1F per
+/// `vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/network.h:33-39`).
+///
+/// R74 ships the first application-layer envelope decoder — `Request`
+/// — because `wz_codecs::request` is the only network-envelope codec
+/// authored so far. Unknown MIDs surface as `Unknown { mid, body }`
+/// absorbing the rest of the payload bytes verbatim; the batch parse
+/// stops at the first Unknown because skipping past an unknown body
+/// without a length-aware decoder would risk misaligning the cursor.
+///
+/// No `Debug` derive on the wrapped `Request` — wz-codecs structs only
+/// derive `Default` (sce-codegen output, see
+/// `crates/wz-codecs/tests/smoke.rs` header). The manual `Debug` impl
+/// below surfaces the variant kind without recursing into codec fields
+/// so `DriverLoopOutcome` can keep its `#[derive(Debug)]`.
+pub enum NetworkMessage {
+    /// Network MID `_Z_MID_N_REQUEST` (0x1C). Carries a query / put /
+    /// del wrapped in a Wireexpr + request-id envelope with response
+    /// correlation. Decoded via `wz_codecs::request::Request`. The
+    /// `Box` keeps the enum variant size small — `Request` carries
+    /// `Wireexpr` + a `RequestVariant` whose arms hold MsgPut / MsgDel
+    /// / Query structs, making the inline form much larger than the
+    /// `Unknown` variant.
+    Request(Box<Request>),
+    /// Header byte's MID falls outside the {REQUEST} subset wz-codecs
+    /// has authored envelope coverage for. `body` carries the rest of
+    /// the payload bytes (header byte included) verbatim so a future
+    /// per-MID decoder can re-parse without losing data; the parse
+    /// stops here to avoid mis-cursor-advancing across an unknown body
+    /// length.
+    Unknown { mid: u8, body: Vec<u8> },
+}
+
+impl std::fmt::Debug for NetworkMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Request(_) => f.write_str("Request(..)"),
+            Self::Unknown { mid, body } => write!(
+                f,
+                "Unknown {{ mid: {mid:#04x}, body_len: {} }}",
+                body.len()
+            ),
+        }
+    }
+}
+
+/// R74 — decode a `Frame.payload` byte slice into the in-order batch
+/// of network messages it carries.
+///
+/// Loop shape: peek the cursor's next byte, mask to `mid = byte & 0x1F`,
+/// dispatch to the matching envelope decoder. On `N_MID_REQUEST` calls
+/// `Request::decode` which re-reads the header byte itself (peek-byte
+/// primitive per RFC §5.B Y3 atomic 2b-ii) so no double-consumption.
+/// On any other MID, absorbs the remaining bytes as `Unknown { mid,
+/// body }` and terminates the batch loop — see
+/// [`NetworkMessage::Unknown`] for the rationale.
+///
+/// An empty `bytes` slice returns `Ok(vec![])` (an empty batch is a
+/// valid Frame.payload — the transport envelope is fine, no
+/// application-layer records).
+///
+/// Codec errors propagate as `CodecError`. The caller is responsible
+/// for deciding whether to surface them as a transport-FSM
+/// `FramingError` (current `poll_and_dispatch_one` behavior, since the
+/// transport envelope already parsed but the application-layer batch
+/// is malformed) or to log and continue with the partially-decoded
+/// batch.
+pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecError> {
+    let mut messages = Vec::new();
+    let mut cursor = SceCursor::new(bytes);
+    while cursor.remaining() > 0 {
+        let header = cursor.peek_slice(1)?[0];
+        let mid = header & 0x1F;
+        match mid {
+            wire_const::N_MID_REQUEST => {
+                let req = Request::decode(&mut cursor)?;
+                messages.push(NetworkMessage::Request(Box::new(req)));
+            }
+            _ => {
+                let rem = cursor.remaining();
+                let body = cursor.peek_slice(rem)?.to_vec();
+                cursor.advance(rem)?;
+                messages.push(NetworkMessage::Unknown { mid, body });
+                break;
+            }
+        }
+    }
+    Ok(messages)
+}
+
 /// R69b — map a parsed inbound transport frame to the matching
 /// session-FSM external event variant.
 ///
@@ -1125,6 +1234,13 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
 /// (e.g. invoke `Hal::now_ticks_ms` and reset the lease deadline)
 /// rather than calling `Engine::process_event` with a spurious
 /// event.
+///
+/// `Frame` returns `None` for the same reason at the FSM layer
+/// (Frame receipt is the carrier for application-layer pub/sub
+/// messages, not a session-state trigger). Callers on the `None`
+/// branch route `Frame.payload` through [`parse_frame_payload`] to
+/// surface the in-batch `NetworkMessage` records — see R74 wiring in
+/// [`poll_and_dispatch_one`].
 pub fn inbound_to_fsm_event(
     frame: &InboundFrame,
 ) -> Option<crate::session_fsm_unicast::SessionFsmUnicastEvent> {
@@ -1142,32 +1258,76 @@ pub fn inbound_to_fsm_event(
 }
 
 /// R76 — outcome of a single iteration of the production driver
-/// loop. Distinguishes the four observable outcomes the caller may
-/// dispatch on: a typed FSM event reached the engine, an inbound
-/// frame produced only a side-effect (KeepAlive lease-stamp update
-/// or Frame application-layer payload that does not advance the
-/// session FSM), the wire bytes failed to parse (the helper raises
-/// `FramingError` to the FSM and returns `ParseError` to the caller
-/// for logging), or the link itself terminated.
-#[derive(Debug)]
+/// loop. Five observable outcomes the caller dispatches on: a typed
+/// FSM event reached the engine; a KeepAlive parsed and updated the
+/// lease stamp but did not advance the FSM (R72b); a Frame envelope
+/// parsed and its payload decoded into a `NetworkMessage` batch the
+/// application layer should dispatch (R74); the wire bytes failed to
+/// parse (the helper raises `FramingError` to the FSM and returns
+/// `ParseError` for logging); or the link itself terminated.
+///
+/// No `derive(Debug)`: the `FramePayload.extensions` field is
+/// `Vec<ExtEntry>` and `ExtEntry` is wz-codecs sce-codegen output that
+/// only derives `Default`. The manual `Debug` impl below summarizes
+/// each variant without recursing into codec fields so existing test
+/// assertions of the form `{outcome:?}` keep working.
 pub enum DriverLoopOutcome {
     /// A typed `SessionFsmUnicastEvent` reached `Engine::process_event`;
     /// any state transition triggered by the event has completed.
     AdvancedFsm,
-    /// The inbound frame parsed but did not project to a typed FSM
-    /// event (`KeepAlive` resets the lease stamp via `handle_inbound`;
-    /// `Frame` payload is application-layer dispatch territory). The
-    /// engine state is unchanged.
+    /// The inbound frame parsed to a `KeepAlive` record. The lease
+    /// stamp was updated inside `handle_inbound` (R72b); the engine
+    /// state is unchanged.
     SideEffectOnly,
-    /// `parse_inbound` rejected the wire bytes. The helper has
-    /// already injected `FramingError` into the engine so the
-    /// session-fsm `framing.error` transition fires; the variant is
-    /// returned so the caller can log the underlying error.
+    /// R74 — the inbound frame parsed to a `Frame` transport envelope
+    /// whose tail payload decoded into a batch of `NetworkMessage`
+    /// records. The session FSM is unchanged (Frame receipt is not a
+    /// session-state trigger); the application layer dispatches
+    /// `messages` against its per-MID handler set.
+    FramePayload {
+        reliable: bool,
+        sn: u64,
+        messages: Vec<NetworkMessage>,
+        has_ext: bool,
+        extensions: Vec<ExtEntry>,
+    },
+    /// `parse_inbound` rejected the wire bytes, OR the Frame envelope
+    /// parsed but `parse_frame_payload` could not decode an authored
+    /// network-MID envelope inside the payload batch (e.g. a truncated
+    /// `Request` body). The helper has already injected `FramingError`
+    /// into the engine so the session-fsm `framing.error` transition
+    /// fires; the variant is returned so the caller can log the
+    /// underlying error.
     ParseError(InboundParseError),
     /// The link reported `LostCause`. The helper has injected
     /// `LinkLost` into the engine so the `link.lost` transition
     /// fires; the cause is returned for logging.
     LinkLost(LostCause),
+}
+
+impl std::fmt::Debug for DriverLoopOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AdvancedFsm => f.write_str("AdvancedFsm"),
+            Self::SideEffectOnly => f.write_str("SideEffectOnly"),
+            Self::FramePayload {
+                reliable,
+                sn,
+                messages,
+                has_ext,
+                extensions,
+            } => f
+                .debug_struct("FramePayload")
+                .field("reliable", reliable)
+                .field("sn", sn)
+                .field("messages", messages)
+                .field("has_ext", has_ext)
+                .field("ext_count", &extensions.len())
+                .finish(),
+            Self::ParseError(e) => write!(f, "ParseError({e:?})"),
+            Self::LinkLost(c) => write!(f, "LinkLost({c:?})"),
+        }
+    }
 }
 
 /// R76 — production driver loop unit. Poll a single `LinkEvent` from
@@ -1211,7 +1371,39 @@ pub async fn poll_and_dispatch_one<D: LinkDriver>(
                     engine.process_event(event);
                     DriverLoopOutcome::AdvancedFsm
                 }
-                None => DriverLoopOutcome::SideEffectOnly,
+                None => match frame {
+                    InboundFrame::Frame {
+                        reliable,
+                        sn,
+                        payload,
+                        has_ext,
+                        extensions,
+                    } => match parse_frame_payload(&payload) {
+                        Ok(messages) => DriverLoopOutcome::FramePayload {
+                            reliable,
+                            sn,
+                            messages,
+                            has_ext,
+                            extensions,
+                        },
+                        Err(codec_err) => {
+                            engine.process_event(E::FramingError);
+                            DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err))
+                        }
+                    },
+                    InboundFrame::KeepAlive { .. } => DriverLoopOutcome::SideEffectOnly,
+                    InboundFrame::Init { .. }
+                    | InboundFrame::Open { .. }
+                    | InboundFrame::Close { .. }
+                    | InboundFrame::Unknown { .. } => {
+                        // inbound_to_fsm_event projects these to Some(event),
+                        // so the outer Some arm handled them — this branch
+                        // is unreachable.
+                        unreachable!(
+                            "inbound_to_fsm_event None branch is Frame/KeepAlive only"
+                        )
+                    }
+                },
             },
             Err(err) => {
                 engine.process_event(E::FramingError);

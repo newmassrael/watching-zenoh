@@ -343,3 +343,80 @@ fn handle_inbound_non_keepalive_does_not_touch_keepalive_slot() {
         "non-KeepAlive frames must NOT mutate the keepalive slot"
     );
 }
+
+// ─────────────── R74 parse_frame_payload application-layer batch ──────────
+
+#[test]
+fn parse_frame_payload_empty_returns_empty_batch() {
+    use wz_runtime_tokio::session_glue::parse_frame_payload;
+
+    let parsed = parse_frame_payload(&[]).expect("empty payload parses");
+    assert!(
+        parsed.is_empty(),
+        "empty payload yields an empty batch (no records)"
+    );
+}
+
+#[test]
+fn parse_frame_payload_unknown_mid_absorbs_remainder() {
+    use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
+
+    // 0x1D = N_MID_PUSH — no codec authored yet, so the parser
+    // absorbs the rest of the payload as Unknown and terminates.
+    let bytes = [0x1D, 0xAB, 0xCD, 0xEF];
+    let parsed = parse_frame_payload(&bytes).expect("unknown MID absorbs as Unknown");
+    assert_eq!(parsed.len(), 1, "single Unknown record");
+    match &parsed[0] {
+        NetworkMessage::Unknown { mid, body } => {
+            assert_eq!(*mid, 0x1D, "header low 5 bits = network MID");
+            assert_eq!(
+                body.as_slice(),
+                &bytes,
+                "Unknown.body absorbs the entire remaining payload including header"
+            );
+        }
+        NetworkMessage::Request(_) => panic!("expected Unknown, got Request"),
+    }
+}
+
+#[test]
+fn parse_frame_payload_dispatches_request_mid_to_request_decoder() {
+    use wz_codecs::request::Request;
+    use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
+
+    // header = N_MID_REQUEST (0x1C); other Request fields default.
+    // Request::default().encode() is the "minimum valid request" wire
+    // we can produce without hand-encoding Wireexpr + inner body.
+    let req = Request {
+        header: 0x1C,
+        ..Request::default()
+    };
+    let bytes = req.encode();
+
+    let parsed = parse_frame_payload(&bytes).expect("Request envelope parses");
+    assert!(
+        !parsed.is_empty(),
+        "Request payload yields at least one record"
+    );
+    assert!(
+        matches!(parsed[0], NetworkMessage::Request(_)),
+        "Request MID 0x1C dispatches to wz_codecs::request decoder \
+         (first record)"
+    );
+    // NOTE: parsed.len() may exceed 1 because wz_codecs::request's
+    // default-state encode/decode pair does not consume the exact same
+    // number of bytes in both directions — the residual is absorbed by
+    // the next iteration of the batch loop. Treating that as a separate
+    // wz-codecs/sce-codegen issue keeps R74 focused on the dispatch
+    // wiring; the dispatch contract here is "first record is Request".
+}
+
+#[test]
+fn parse_frame_payload_truncated_request_returns_codec_error() {
+    use wz_runtime_tokio::session_glue::parse_frame_payload;
+
+    // Header only — Request::decode consumes 1 byte and then tries to
+    // read the rid VLE, hitting NeedMoreBytes.
+    let bytes = [0x1Cu8];
+    parse_frame_payload(&bytes).expect_err("truncated Request body rejects");
+}
