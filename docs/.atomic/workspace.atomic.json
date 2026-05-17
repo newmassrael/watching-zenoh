@@ -7858,6 +7858,58 @@
         "cookie wire field in OpenSyn is empty (cookie_len=0) — RFC §5.M expects the Initiator to echo the cookie it received in InitAck; R78 omits the echo because the test stages only OpenSyn arrival without a prior InitAck-out + cookie-in round-trip. End-to-end cookie echo verification belongs in wz-integration-tests Layer 3 (already covered by layer3_open_body wire-interop tests)."
       ]
     },
+    "Round 79": {
+      "decision_summary": "Vendor pin bump 2ff9d7a9 -> 085268d1 + wz migration to SCE per-instance ScriptEngine DI; INSTALLED OnceLock retired.",
+      "changes_bullets": [
+        "vendor/sce submodule pin bumped: 2ff9d7a9 -> 085268d1 (13 commits, includes 8-commit per-instance ScriptEngine DI chain 09906015 -> 085268d1; provider singleton anti-pattern removed across Rust/Python/Go/Kotlin runtimes, C++ side deferred)",
+        "scripts/build-sce.sh re-run to rebuild vendor/sce/target/release/sce-codegen against the new SCE source so wz build.rs picks up the new codegen shape (Policy::new now accepts mandatory Arc<dyn IScriptEngine> when NEEDS_SCRIPT_ENGINE=true)",
+        "crates/wz-runtime-tokio/src/session_glue.rs: retired INSTALLED OnceLock + SessionActionsAlreadyInstalled struct + Display/Error impls; install_session_actions signature changed to `(actions, script_engine)` and returns () (no global guard); removed `use sce_rust_lua::lua_engine_singleton` (deleted upstream)",
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: install_session_actions_for_test now constructs a fresh Arc<dyn IScriptEngine> (via Arc::new(LuaEngine::new())) per call, wires actions onto it via production install_session_actions, returns the typed handle; dispatch_script gained explicit `&dyn IScriptEngine` first parameter (was implicit via retired singleton)",
+        "9 test files migrated: session_fsm_coverage / engine_drive / full_path / lease_deadline / driver_loop / inbound_dispatch / accepting_path / real_tcp / session_glue_dispatch — install if-else block collapsed to single `let lua = install_session_actions_for_test(actions.clone());` line; every `SessionFsmUnicastPolicy::new()` callsite passes `lua` arg; `dispatch_script` callsites in session_glue_dispatch gained `&*lua` first arg (16 occurrences via replace_all)",
+        "session_glue_dispatch.rs: obsolete double-install assertion (SessionActionsAlreadyInstalled error path) replaced with positive multi-engine isolation assertion — second install on independent engine dispatches to second actions, first engine's trace unaffected — directly verifies the R71b cross-test race carry is closed by design",
+        "R71b / R77b carry CLOSED — race fix landed via SCE upstream's per-instance DI (textbook beats our register_session_function proposal: 5-backend symmetric rather than Rust-only API addition)"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio green",
+        "cargo test --workspace: 76 passed / 0 failed (regression delta = 0 vs R78; same count because mega-test pattern not yet split — that is R80 scope)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean (no unused-import / dead-code warnings after migration)",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass — `run-ci: all required layers pass`",
+        "multi-engine isolation positively asserted: session_glue_dispatch.rs lines 226+ verify two install_session_actions_for_test calls own independent engines + traces (replaces pre-R79 SessionActionsAlreadyInstalled negative test)",
+        "vendor/sce/target/release/sce-codegen rebuilt to 085268d1 source; generated session_fsm_unicast_sm.rs confirmed to emit `let se = self.script_engine.clone();` (was `ScriptEngineProvider::get()`)"
+      ],
+      "carry_forward_bullets": [
+        "R80 mega-test split — 5 test files still bundle multiple scenarios into one `#[test]` fn (carry note in each file's module doc references R71b race). Now that race is closed by R79, each mega-test can split into per-scenario `#[test]` fns; granular cargo test reporting restored. Single-purpose round, no production code change.",
+        "register_session_function proposal RETIRED — SCE upstream solved it 5-backend symmetric via DI. The watching-zenoh-side proposal document drafted earlier in this session is now historical; do NOT file with SCE upstream.",
+        "memory `sce_vendor_pin_state` needs refresh — R30's 11f1032d pin is two bumps stale; current 085268d1 represents both that bump plus the R79 jump. Update memory body in a follow-up.",
+        "C++ side ScriptEngineProvider singleton removal deferred per `489e1922` commit body — wz does not consume the C++ runtime so no wz-side blocker, but future cross-runtime integration (e.g. Phase W lwIP C++ path) would inherit the deferred work.",
+        "wz install_session_actions calls `script_engine.create_session(SESSION_ID)` for `\"session_fsm_unicast\"` but the Policy creates a separate `session_N` id internally via atomic counter — both sessions live on the same engine. The closures auto-inject into Policy's session via `register_global_function`'s engine-scope inject loop, so this works, but the `\"session_fsm_unicast\"` session is leftover (only used by `dispatch_script` direct-invoke path). Future cleanup could unify, but premature."
+      ],
+      "publishable_decision_summary": "Vendor pin bump 2ff9d7a9 -> 085268d1 + wz migration to SCE per-instance ScriptEngine DI; INSTALLED OnceLock retired.",
+      "publishable_changes_bullets": [
+        "vendor/sce submodule pin bumped: 2ff9d7a9 -> 085268d1 (13 commits, includes 8-commit per-instance ScriptEngine DI chain 09906015 -> 085268d1; provider singleton anti-pattern removed across Rust/Python/Go/Kotlin runtimes, C++ side deferred)",
+        "scripts/build-sce.sh re-run to rebuild vendor/sce/target/release/sce-codegen against the new SCE source so wz build.rs picks up the new codegen shape (Policy::new now accepts mandatory Arc<dyn IScriptEngine> when NEEDS_SCRIPT_ENGINE=true)",
+        "crates/wz-runtime-tokio/src/session_glue.rs: retired INSTALLED OnceLock + SessionActionsAlreadyInstalled struct + Display/Error impls; install_session_actions signature changed to `(actions, script_engine)` and returns () (no global guard); removed `use sce_rust_lua::lua_engine_singleton` (deleted upstream)",
+        "crates/wz-runtime-tokio-test-support/src/lib.rs: install_session_actions_for_test now constructs a fresh Arc<dyn IScriptEngine> (via Arc::new(LuaEngine::new())) per call, wires actions onto it via production install_session_actions, returns the typed handle; dispatch_script gained explicit `&dyn IScriptEngine` first parameter (was implicit via retired singleton)",
+        "9 test files migrated: session_fsm_coverage / engine_drive / full_path / lease_deadline / driver_loop / inbound_dispatch / accepting_path / real_tcp / session_glue_dispatch — install if-else block collapsed to single `let lua = install_session_actions_for_test(actions.clone());` line; every `SessionFsmUnicastPolicy::new()` callsite passes `lua` arg; `dispatch_script` callsites in session_glue_dispatch gained `&*lua` first arg (16 occurrences via replace_all)",
+        "session_glue_dispatch.rs: obsolete double-install assertion (SessionActionsAlreadyInstalled error path) replaced with positive multi-engine isolation assertion — second install on independent engine dispatches to second actions, first engine's trace unaffected — directly verifies the R71b cross-test race carry is closed by design",
+        "R71b / R77b carry CLOSED — race fix landed via SCE upstream's per-instance DI (textbook beats our register_session_function proposal: 5-backend symmetric rather than Rust-only API addition)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio green",
+        "cargo test --workspace: 76 passed / 0 failed (regression delta = 0 vs R78; same count because mega-test pattern not yet split — that is R80 scope)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean (no unused-import / dead-code warnings after migration)",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass — `run-ci: all required layers pass`",
+        "multi-engine isolation positively asserted: session_glue_dispatch.rs lines 226+ verify two install_session_actions_for_test calls own independent engines + traces (replaces pre-R79 SessionActionsAlreadyInstalled negative test)",
+        "vendor/sce/target/release/sce-codegen rebuilt to 085268d1 source; generated session_fsm_unicast_sm.rs confirmed to emit `let se = self.script_engine.clone();` (was `ScriptEngineProvider::get()`)"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R80 mega-test split — 5 test files still bundle multiple scenarios into one `#[test]` fn (carry note in each file's module doc references R71b race). Now that race is closed by R79, each mega-test can split into per-scenario `#[test]` fns; granular cargo test reporting restored. Single-purpose round, no production code change.",
+        "register_session_function proposal RETIRED — SCE upstream solved it 5-backend symmetric via DI. The watching-zenoh-side proposal document drafted earlier in this session is now historical; do NOT file with SCE upstream.",
+        "memory `sce_vendor_pin_state` needs refresh — R30's 11f1032d pin is two bumps stale; current 085268d1 represents both that bump plus the R79 jump. Update memory body in a follow-up.",
+        "C++ side ScriptEngineProvider singleton removal deferred per `489e1922` commit body — wz does not consume the C++ runtime so no wz-side blocker, but future cross-runtime integration (e.g. Phase W lwIP C++ path) would inherit the deferred work.",
+        "wz install_session_actions calls `script_engine.create_session(SESSION_ID)` for `\"session_fsm_unicast\"` but the Policy creates a separate `session_N` id internally via atomic counter — both sessions live on the same engine. The closures auto-inject into Policy's session via `register_global_function`'s engine-scope inject loop, so this works, but the `\"session_fsm_unicast\"` session is leftover (only used by `dispatch_script` direct-invoke path). Future cleanup could unify, but premature."
+      ]
+    },
     "Round 8": {
       "decision_summary": "Phase D ARCHITECTURE densify 마감: top-level sec 10-16 + 핵심 sub (2.4, 11.4, 11.5) typed-populate; 4 section-marker docs root-only carry; Phase E README 분리.",
       "changes_bullets": [

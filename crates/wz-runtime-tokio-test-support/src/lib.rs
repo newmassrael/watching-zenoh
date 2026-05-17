@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Test-only fixtures + rebind shims for `wz-runtime-tokio`.
+//! Test-only fixtures + helpers for `wz-runtime-tokio`.
 //!
 //! R71 entry — replaces the `_test_support` Cargo feature that
 //! previously gated these helpers inside the production crate. The
@@ -12,18 +12,24 @@
 //! and `wz-runtime-tokio`'s own production compile units no longer
 //! carry the test-only code paths at all.
 //!
-//! The 3 helpers here intentionally mirror the previous feature-gated
-//! API one-for-one so the migration is a pure import-path rewrite at
-//! every test call site; no logic changes.
+//! R79 entry — SCE upstream commits `09906015` / `489e1922` deleted
+//! `lua_engine_singleton` / `sce_rust_lua::register` and reshaped
+//! every generated `Policy::new` to accept a per-instance
+//! `Arc<dyn IScriptEngine>`. `install_session_actions_for_test`
+//! now constructs a fresh `LuaEngine` per call, wires the 17
+//! closures onto it, and returns the typed engine handle for the
+//! caller to pass into `SessionFsmUnicastPolicy::new`. Each test
+//! owns an independent engine — the cross-test namespace race
+//! the R71b carry pointed at is gone by design.
 
 use std::sync::Arc;
 
-use sce_rust_lua::lua_engine_singleton;
+use sce_rust_lua::LuaEngine;
 use sce_rust_runtime::scripting::{IScriptEngine, ScriptResult, ScriptValue};
 
 use wz_runtime_tokio::session_glue::{
-    register_guard_fns, register_outbound_link_fns, register_state_internal_fns, SessionInitParams,
-    SessionLinkActions, SigningKey, REGISTERED_SCRIPT_NAMES, SESSION_ID,
+    install_session_actions, SessionInitParams, SessionLinkActions, SigningKey,
+    REGISTERED_SCRIPT_NAMES, SESSION_ID,
 };
 
 /// Deterministic `SessionInitParams` matching the Layer 3 wire-interop
@@ -55,49 +61,55 @@ pub fn fixture_session_init_params() -> SessionInitParams {
     }
 }
 
-/// Re-bind the Lua engine's global functions against a fresh
-/// `SessionLinkActions`, bypassing the production `INSTALLED`
-/// OnceLock guard.
+/// Build a fresh `LuaEngine`, wire `actions`'s 17 closures onto it
+/// via the production `install_session_actions` path, and return the
+/// typed engine handle.
 ///
-/// Cargo's test runner reuses one process across N `#[test]` fns in
-/// the same binary, so the process-singleton `INSTALLED` OnceLock
-/// would reject the second-and-onward test's `install_session_actions`
-/// call. This shim overwrites every `register_global_function`
-/// registration to capture a different `SessionLinkActions` so each
-/// `#[test]` fn can drive its own bundle.
+/// The caller passes the returned handle into
+/// `SessionFsmUnicastPolicy::new` so the same engine drives both the
+/// SCE-generated state machine and the script-action dispatch — every
+/// `execute_script` from the Policy resolves the 17 closures from the
+/// engine's `global_functions` map (auto-injected into every session
+/// the engine creates, including the Policy-side `session_N` id).
 ///
-/// The resulting state is a hybrid (the `INSTALLED` slot still points
-/// at the first test's actions while the Lua registrations target
-/// the most-recent bundle); production code MUST use
-/// `install_session_actions` instead, which the type system enforces
-/// by living in `wz-runtime-tokio` proper.
-pub fn install_session_actions_for_test(actions: Arc<SessionLinkActions>) {
-    let _ = sce_rust_lua::register();
-    let lua = lua_engine_singleton();
-    lua.create_session(SESSION_ID);
-    register_outbound_link_fns(lua, &actions);
-    register_state_internal_fns(lua, &actions);
-    register_guard_fns(lua);
+/// Each call yields an independent engine, so two concurrent
+/// `#[test]` fns in the same binary cannot collide on a shared
+/// namespace — the R71b cross-test race carry is resolved by SCE
+/// upstream's per-instance DI rather than a watching-zenoh-side
+/// workaround.
+pub fn install_session_actions_for_test(
+    actions: Arc<SessionLinkActions>,
+) -> Arc<dyn IScriptEngine> {
+    let engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
+    install_session_actions(actions, &engine);
+    engine
 }
 
-/// Direct dispatch shim — invoke a script-action by name without
-/// driving the generated state machine. The `name` argument is
-/// debug-asserted to be a member of `REGISTERED_SCRIPT_NAMES` so a
-/// typo fires loud at test time rather than reaching the Lua engine
-/// as arbitrary source (which would be a Lua injection surface in
-/// production, hence the test-support-only placement).
+/// Direct dispatch shim — invoke a script-action by name on the
+/// supplied engine without driving the generated state machine. The
+/// `name` argument is debug-asserted to be a member of
+/// `REGISTERED_SCRIPT_NAMES` so a typo fires loud at test time rather
+/// than reaching the Lua engine as arbitrary source (which would be a
+/// Lua injection surface in production, hence the test-support-only
+/// placement).
 ///
 /// Production callers MUST drive script-actions via
 /// `Engine::process_event` — that path validates the action against
 /// the generated SCXML's transition guards before invoking the Lua
 /// closure, whereas this shim bypasses all of that for direct
 /// codec-output / trace-counter assertions.
-pub fn dispatch_script(name: &str) -> ScriptResult<ScriptValue> {
+///
+/// R79 — `script_engine` is now an explicit parameter (was implicit
+/// via the retired `lua_engine_singleton`). Callers pass the same
+/// engine they handed to `install_session_actions_for_test`.
+pub fn dispatch_script(
+    script_engine: &dyn IScriptEngine,
+    name: &str,
+) -> ScriptResult<ScriptValue> {
     debug_assert!(
         REGISTERED_SCRIPT_NAMES.contains(&name),
         "dispatch_script: '{name}' is not a registered script-action name; \
          production scripts must be drive via Engine::process_event"
     );
-    let lua = lua_engine_singleton();
-    lua.execute_script(SESSION_ID, &format!("{name}()"))
+    script_engine.execute_script(SESSION_ID, &format!("{name}()"))
 }

@@ -30,7 +30,7 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
 };
 use wz_runtime_tokio::session_glue::{
-    inbound_to_fsm_event, install_session_actions, BoxedLinkDriver, SessionLinkActions,
+    inbound_to_fsm_event, BoxedLinkDriver, SessionLinkActions,
 };
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{
@@ -79,12 +79,10 @@ fn craft_initack_wire(cookie: &[u8]) -> Vec<u8> {
 fn inbound_initack_routes_through_parser_to_fsm_advancing_state() {
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver::default());
     let actions = SessionLinkActions::new(driver, fixture_session_init_params());
-    if install_session_actions(actions.clone()).is_err() {
-        install_session_actions_for_test(actions.clone());
-    }
+    let lua = install_session_actions_for_test(actions.clone());
 
     let mut engine: Engine<SessionFsmUnicastPolicy> =
-        Engine::new(SessionFsmUnicastPolicy::new());
+        Engine::new(SessionFsmUnicastPolicy::new(lua));
     engine.initialize();
     assert_eq!(engine.get_current_state(), SessionFsmUnicastState::Init);
 

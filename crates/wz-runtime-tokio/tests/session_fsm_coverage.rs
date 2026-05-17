@@ -37,7 +37,7 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    install_session_actions, BoxedLinkDriver, CloseReason, SessionLinkActions,
+    BoxedLinkDriver, CloseReason, SessionLinkActions,
 };
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{
@@ -74,10 +74,8 @@ fn fresh_engine() -> (
 ) {
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(RecordingDriver::default());
     let actions = SessionLinkActions::new(driver, fixture_session_init_params());
-    if install_session_actions(actions.clone()).is_err() {
-        install_session_actions_for_test(actions.clone());
-    }
-    let mut engine = Engine::new(SessionFsmUnicastPolicy::new());
+    let lua = install_session_actions_for_test(actions.clone());
+    let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
     engine.initialize();
     (actions, engine)
 }
