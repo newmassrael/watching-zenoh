@@ -7764,6 +7764,54 @@
         "Hal time-mock SCE upstream + R44 BE-to-LE SCE upstream PR pair — unchanged carry."
       ]
     },
+    "Round 77": {
+      "decision_summary": "Lease deadline driver — last_inbound_keepalive_at consumer + auto-LeaseExpired injection.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs — added LeaseCheckOutcome enum (NoBaseline / WithinLease / Expired) and check_lease_deadline(actions, engine, now) helper after poll_and_dispatch_one",
+        "check_lease_deadline reads SessionLinkActions::last_inbound_keepalive_at (R72b slot), compares now.duration_since(stamp) against params.lease via the lease_in_seconds unit selector, and engine.process_event(SessionFsmUnicastEvent::LeaseExpired) on `>= lease` so the session-fsm `lease.expired -> Closing(Expired)` transition fires",
+        "imports: use std::time::Instant → use std::time::{Duration, Instant}",
+        "crates/wz-runtime-tokio/tests/session_fsm_lease_deadline.rs — new test file with single mega-test r77_check_lease_deadline_covers_no_baseline_within_and_expired covering 4 scenarios (NoBaseline / WithinLease / Expired / boundary `==`)",
+        "single mega-test pattern preserved (R71b singleton-race carry) — process-global INSTALLED + Lua engine require sequential dispatch",
+        "consumer wiring for the R72b lease-timestamp slot foreshadowed by inbound_to_fsm_event's `KeepAlive -> None` branch (side effect orthogonal to the state graph, comment at session_glue.rs:1150-1156)"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio green",
+        "cargo test -p wz-runtime-tokio --test session_fsm_lease_deadline: 1 passed (covers 4 scenarios)",
+        "cargo test --workspace: 75 passed / 0 failed (regression delta = 0 vs R76)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass — `run-ci: all required layers pass`",
+        "expired scenario also asserts trace side effects (close_reason=Expired, send_close_frame_with_reason=1, stop_keepalive_worker=1, stop_lease_monitor=1) matching session_fsm_coverage.rs::r61 lease-expired path so the helper inherits the existing FSM-edge verification"
+      ],
+      "carry_forward_bullets": [
+        "established_at slot — session-fsm §2.5 specifies lease counts from Established entry, but SessionLinkActions has no `established_at: Mutex<Option<Instant>>` slot yet; NoBaseline branch defers the decision while the slot stays None. A follow-up round adds the slot + Established-state-entry hook so pre-KeepAlive sessions can still expire on session-start fallback timing",
+        "production driver loop with timeout — check_lease_deadline is one unit; the loop pairing poll_and_dispatch_one (which blocks on peer events) with periodic lease checks needs tokio::select! against a sleep deadline so a silent peer does not pin the poller. R76b drive_session_until_terminal scope.",
+        "R71b/R77b singleton race — the mega-test pattern is still load-bearing (process-global INSTALLED OnceLock + Lua engine); option 4 direct-codec rebind OR SCE bind_native_object upstream still pending.",
+        "Frame inbound also resets the lease? — R72b populates `last_inbound_keepalive_at` only on InboundFrame::KeepAlive. Whether established-session Frame traffic should also count as liveness is a wire-spec discussion (zenoh-pico transport.h:213 wording is `KEEP_ALIVE` specifically); R77 honours R72b's KeepAlive-only design without bundling that question."
+      ],
+      "publishable_decision_summary": "Lease deadline driver — last_inbound_keepalive_at consumer + auto-LeaseExpired injection.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs — added LeaseCheckOutcome enum (NoBaseline / WithinLease / Expired) and check_lease_deadline(actions, engine, now) helper after poll_and_dispatch_one",
+        "check_lease_deadline reads SessionLinkActions::last_inbound_keepalive_at (R72b slot), compares now.duration_since(stamp) against params.lease via the lease_in_seconds unit selector, and engine.process_event(SessionFsmUnicastEvent::LeaseExpired) on `>= lease` so the session-fsm `lease.expired -> Closing(Expired)` transition fires",
+        "imports: use std::time::Instant → use std::time::{Duration, Instant}",
+        "crates/wz-runtime-tokio/tests/session_fsm_lease_deadline.rs — new test file with single mega-test r77_check_lease_deadline_covers_no_baseline_within_and_expired covering 4 scenarios (NoBaseline / WithinLease / Expired / boundary `==`)",
+        "single mega-test pattern preserved (R71b singleton-race carry) — process-global INSTALLED + Lua engine require sequential dispatch",
+        "consumer wiring for the R72b lease-timestamp slot foreshadowed by inbound_to_fsm_event's `KeepAlive -> None` branch (side effect orthogonal to the state graph, comment at session_glue.rs:1150-1156)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio green",
+        "cargo test -p wz-runtime-tokio --test session_fsm_lease_deadline: 1 passed (covers 4 scenarios)",
+        "cargo test --workspace: 75 passed / 0 failed (regression delta = 0 vs R76)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass — `run-ci: all required layers pass`",
+        "expired scenario also asserts trace side effects (close_reason=Expired, send_close_frame_with_reason=1, stop_keepalive_worker=1, stop_lease_monitor=1) matching session_fsm_coverage.rs::r61 lease-expired path so the helper inherits the existing FSM-edge verification"
+      ],
+      "publishable_carry_forward_bullets": [
+        "established_at slot — session-fsm §2.5 specifies lease counts from Established entry, but SessionLinkActions has no `established_at: Mutex<Option<Instant>>` slot yet; NoBaseline branch defers the decision while the slot stays None. A follow-up round adds the slot + Established-state-entry hook so pre-KeepAlive sessions can still expire on session-start fallback timing",
+        "production driver loop with timeout — check_lease_deadline is one unit; the loop pairing poll_and_dispatch_one (which blocks on peer events) with periodic lease checks needs tokio::select! against a sleep deadline so a silent peer does not pin the poller. R76b drive_session_until_terminal scope.",
+        "R71b/R77b singleton race — the mega-test pattern is still load-bearing (process-global INSTALLED OnceLock + Lua engine); option 4 direct-codec rebind OR SCE bind_native_object upstream still pending.",
+        "Frame inbound also resets the lease? — R72b populates `last_inbound_keepalive_at` only on InboundFrame::KeepAlive. Whether established-session Frame traffic should also count as liveness is a wire-spec discussion (zenoh-pico transport.h:213 wording is `KEEP_ALIVE` specifically); R77 honours R72b's KeepAlive-only design without bundling that question."
+      ]
+    },
     "Round 8": {
       "decision_summary": "Phase D ARCHITECTURE densify 마감: top-level sec 10-16 + 핵심 sub (2.4, 11.4, 11.5) typed-populate; 4 section-marker docs root-only carry; Phase E README 분리.",
       "changes_bullets": [

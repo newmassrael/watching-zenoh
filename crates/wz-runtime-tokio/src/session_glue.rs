@@ -51,7 +51,7 @@
 //! the assertion against zenoh-pico's reference is deterministic.
 
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sce_rust_lua::lua_engine_singleton;
 use hmac::{Hmac, Mac};
@@ -1247,6 +1247,81 @@ pub async fn poll_and_dispatch_one<D: LinkDriver>(
                 DriverLoopOutcome::ParseError(err)
             }
         },
+    }
+}
+
+/// R77 — outcome of a single lease-deadline check against
+/// `SessionLinkActions::last_inbound_keepalive_at`.
+///
+/// Three branches model the trichotomy the production driver needs
+/// to dispatch on: stamp absent (no inbound KeepAlive observed yet,
+/// lease decision deferred); stamp + lease > now (within the
+/// window); stamp + lease <= now (helper has already injected
+/// `LeaseExpired`).
+#[derive(Debug, PartialEq, Eq)]
+pub enum LeaseCheckOutcome {
+    /// `last_inbound_keepalive_at` is `None`. The helper makes no
+    /// decision and does NOT inject `LeaseExpired`. The production
+    /// caller treats this as "still polling" until the first peer
+    /// KeepAlive arrives.
+    ///
+    /// Carry: session-fsm §2.5 specifies that the lease counts
+    /// from Established entry, but the runtime does not yet record
+    /// an `established_at` Instant on `SessionLinkActions`. A
+    /// follow-up round wires that hook; R77 honours R72b's design
+    /// that only inbound KeepAlive populates the slot.
+    NoBaseline,
+    /// `now.duration_since(stamp) < params.lease`. The helper
+    /// performed no FSM mutation; engine state is unchanged.
+    WithinLease,
+    /// `now.duration_since(stamp) >= params.lease`. The helper has
+    /// invoked `engine.process_event(SessionFsmUnicastEvent::LeaseExpired)`
+    /// so the session-fsm `lease.expired -> Closing(Expired)`
+    /// transition fires.
+    Expired,
+}
+
+/// R77 — compare `last_inbound_keepalive_at` against `params.lease`
+/// and inject `SessionFsmUnicastEvent::LeaseExpired` when the
+/// window has elapsed.
+///
+/// Production driver loops call this between
+/// `poll_and_dispatch_one` iterations so a peer that stops sending
+/// KeepAlives reaches the `lease.expired -> Closing(Expired)`
+/// transition without the caller hand-wiring the deadline math.
+/// This is the consumer wiring for the R72b `last_inbound_keepalive_at`
+/// slot foreshadowed by `inbound_to_fsm_event`'s `KeepAlive -> None`
+/// branch (lease-timer side effect orthogonal to the state graph).
+///
+/// `now` is parameterised for test determinism. Production callers
+/// pass `Instant::now()`; tests stage a stamp via
+/// `last_inbound_keepalive_at` and pass `stamp + offset` as `now`
+/// so `duration_since` is deterministic without depending on
+/// wall-clock progression during the test.
+///
+/// `params.lease_in_seconds` picks the integer unit per the
+/// `_Z_FLAG_T_OPEN_T` wire semantics; the comparator converts the
+/// integer through the matching `Duration` constructor before the
+/// `>=` check.
+pub fn check_lease_deadline(
+    actions: &Arc<SessionLinkActions>,
+    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy>,
+    now: Instant,
+) -> LeaseCheckOutcome {
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    let lease = if actions.params.lease_in_seconds {
+        Duration::from_secs(actions.params.lease)
+    } else {
+        Duration::from_millis(actions.params.lease)
+    };
+    let stamp = *actions.last_inbound_keepalive_at.lock().unwrap();
+    match stamp {
+        None => LeaseCheckOutcome::NoBaseline,
+        Some(stamp) if now.duration_since(stamp) >= lease => {
+            engine.process_event(E::LeaseExpired);
+            LeaseCheckOutcome::Expired
+        }
+        Some(_) => LeaseCheckOutcome::WithinLease,
     }
 }
 
