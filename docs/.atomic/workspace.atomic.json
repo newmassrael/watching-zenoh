@@ -1876,6 +1876,22 @@
     },
     "runtime-crate--sce_link_runtime_tokio/2-trait-surface": {
       "intent": "Rust LinkDriver + LinkEvent contract. R57 INSTALLED OnceLock enforces single-FSM-per-process; multi-peer requires fork or R63 session-scoped Lua binding (deferred).",
+      "rationale_bullets": [
+        "LinkDriver trait (R51): async open / send / close / poll_event — 4-method baseline",
+        "LinkEvent enum (R51): Ready / Rx(RxFrame) / Lost{cause: LostCause}",
+        "LostCause: PeerClosed / Timeout / OsError",
+        "Reliability hint: Reliable / BestEffort (per-message; UDP enforces BestEffort)",
+        "TcpDriver (R51) + UdpDriver (R52) impls; from_stream / from_socket constructors",
+        "R57 INSTALLED OnceLock guards single-FSM-per-process; 2nd install → SessionActionsAlreadyInstalled",
+        "Multi-peer FSM forks per peer until R63 session-scoped Lua binding lands",
+        "TokioLinkDriverAdapter::new asserts runtime_flavor == MultiThread (block_on deadlock guard)",
+        "R60 real-TCP integration test verifies the chain end-to-end (Engine → Lua → driver → socket)",
+        "Trust-class gating + io_uring opt-in + pool-slot Rx borrows deferred to later rounds"
+      ],
+      "caveats_bullets": [
+        "R60 SessionInitParams::default removed (silent-misuse risk); for_test gated _test_support",
+        "R62 cookie_signing_key Vec u8 plain memory (R70 carry: SigningKey newtype + zeroize)"
+      ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio/2-1-two-primitive-link-contract",
         "runtime-crate--sce_link_runtime_tokio/2-2-linkevent-enum"
@@ -2426,7 +2442,19 @@
       ]
     },
     "session-fsm--prose-level-sketch/6-link-layer-interaction": {
-      "intent": "Link layer event contract — 6 inbound link events to FSM, 3 invocations from FSM to link; FSM never touches bytes (codec sibling kinds do).",
+      "intent": "6 inbound link events + 3 outbound invocations. R52.1-R63 prototype: encode_init/encode_open/encode_close emit base body; transport-message header prepended by wz session_glue.",
+      "rationale_bullets": [
+        "Inbound 6: ready / lost(cause) / rx(bytes) / tx_drained / backpressure(on|off) / framing_error",
+        "Outbound 3: link.open() / link.send(bytes, reliability) / link.close()",
+        "FSM never touches raw bytes — wz-codecs::init_body / open_body / close emit per-message body",
+        "Transport header prepended by session_glue::encode_init/open/close: (flags | T_MID-low-5-bits)",
+        "InitSyn flags=T_INIT_S (0x40); InitAck adds T_INIT_A (0x20); T_MID_INIT (0x01)",
+        "OpenSyn flags=T_OPEN_T per lease unit; OpenAck adds T_OPEN_A (0x20); T_MID_OPEN (0x02)",
+        "Close flags=T_CLOSE_S (graceful session close, 0x20); T_MID_CLOSE (0x03)",
+        "R57 byte-equiv: wz body matches zenoh-pico _z_init_encode / _z_open_encode / _z_close_encode",
+        "R62 cookie HMAC-SHA256(key, peer_zid)[..16] flows through SessionInitParams.cookie field",
+        "Reliability::Reliable in R57 baseline; BestEffort path lives in R52 UdpDriver"
+      ],
       "inputs_bullets": [
         "link.ready: TCP/WS open → LinkOpening→Opening.SentInitSyn or attach Accepting",
         "link.lost(cause): underlying link broken → Closed(diag: link-lost)",
@@ -2439,6 +2467,10 @@
         "link.open(): initiate connect (outbound only)",
         "link.send(bytes, reliability): ship encoded TransportMessage",
         "link.close(): tear down byte channel after Close flushed"
+      ],
+      "caveats_bullets": [
+        "link.rx parser pass (R63b carry): peer InitAck → SessionInitParams.cookie populate",
+        "Reliability::BestEffort path lands when wz UdpDriver session FSM wiring closes (R52)"
       ],
       "impact_scope": [
         "session-fsm--prose-level-sketch",
@@ -2750,7 +2782,23 @@
       ]
     },
     "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions": {
-      "intent": "Transport-layer extensions on Init/Open/Join — QoS/QoSLink/Auth/MultiLink/LowLatency/PatchType Included; Shm/Compression deferred or permanent on MCU.",
+      "intent": "Init/Open/Join extension chain (6 classes). R63a: wz SCXMLs not yet authored against §7 sce:tlv-chain — Phase Z prototype emits base body only.",
+      "rationale_bullets": [
+        "QoS / QoSLink — Included (priority + reliability negotiation per Init/Open/Join)",
+        "Auth — Included-negotiate-only; full method catalog (USRPWD, pubkey) Phase D",
+        "MultiLink — Included; backs RFC §5.N concurrent-link-per-session codegen",
+        "LowLatency — Included; selects §4.3 framing variant on UDP unicast/multicast",
+        "PatchType — Included; wire-format patch level negotiated + honored",
+        "Shm — Permanent on MCU / Deferred on AP (not in zenoh-pico baseline)",
+        "Compression — Deferred; ARCHITECTURE §2.5 pins under extensions_ignored",
+        "R57 wire-format land emits init_body / open_body / close codec body only; no ext chain",
+        "R62 cookie HMAC-SHA256 carried inside InitBody.cookie field, not via ext::Auth",
+        "Real zenoh-pico peer interop requires R63a — SCXMLs against §7 sce:tlv-chain primitive"
+      ],
+      "caveats_bullets": [
+        "R52.1-R63 prototype emits NO ext chain on wire (session_glue base body only)",
+        "Layer 3 byte-equiv references also lack ext::* inputs — passing test ≠ ext chain emit"
+      ],
       "impact_scope": [
         "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism",
         "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
@@ -6748,6 +6796,60 @@
         "R65b expansion (R64.4 retrospect): scripts/run-ci.sh should optionally simulate CI's fresh-checkout state by removing docs/GENERATED.md before validate so the GENERATED.md=STALE scenario surfaces locally.",
         "R66 = spec body authoring round 1 next.",
         "Node.js 20 deprecation still open."
+      ]
+    },
+    "Round 66": {
+      "decision_summary": "Path X step 3 round 1 — spec body authoring across 3 critical sections (wire-spec §4.4 transport ext, session-fsm §6 link interaction, tokio §2 trait surface). R52.1-R63 prototype evidence now lives in atomic body.",
+      "changes_bullets": [
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions: intent + 10 rationale_bullets (6 ext classes inclusion stance + R57 base-body-only emit + R62 cookie-via-body fact + R63a SCXML carry) + 2 caveats (no ext chain on wire; Layer 3 reference also lacks ext::*).",
+        "session-fsm--prose-level-sketch/6-link-layer-interaction: intent + 10 rationale_bullets (6 inbound + 3 outbound + FSM-never-touches-bytes invariant + transport header T_MID encoding for InitSyn/InitAck/OpenSyn/OpenAck/Close + R57 byte-equiv + R62 cookie field + R52 BestEffort path) + 2 caveats (R63b inbound parser; UdpDriver BestEffort).",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface: rationale_bullets (LinkDriver 4-method trait + LinkEvent + LostCause + Reliability + Tcp/UdpDriver impls + R57 single-install OnceLock + R63 multi-peer fork-or-defer + TokioLinkDriverAdapter multi-thread invariant + R60 real-TCP integration evidence) + 2 caveats (R60 SessionInitParams::default removal; R70 carry crypto safety)."
+      ],
+      "verification_bullets": [
+        "3 set_section_intent + 3 set_section_rationale + 6 add_section_caveat across 3 sections; all retried-and-passed under MAX_INTENT_CHAR 200 and MAX_BULLET_CHAR 100 thresholds.",
+        "validate_workspace post each mutation: T1=0, RT 12/12, GENERATED.md=sync.",
+        "atomic ledger entries 71 → 72 (one round entry); sections unchanged (no new sections, only existing-section field updates).",
+        "Each rationale_bullet cross-references the round that landed its underlying code (R51 LinkDriver baseline / R52 UdpDriver / R57 wire encode + INSTALLED guard / R60 real-TCP / R62 cookie HMAC / R63a/b/c carries). The atomic body is now traceable into the codebase + carry tracker simultaneously."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions",
+        "session-fsm--prose-level-sketch/6-link-layer-interaction",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "carry_forward_bullets": [
+        "R67 = R63a SCXML extension chain authoring (init_body/open_body/join against §7 sce:tlv-chain). Real zenoh-pico peer interop blocker.",
+        "R68 = R63b Initiator-side inbound parser (peer InitAck wire → SessionInitParams.cookie populate).",
+        "R69 = R61b Hal time-mock injection (sce_rust_runtime TestHal + Engine::tick coverage on 12 timers).",
+        "R70 = R62 crypto safety hardening (SigningKey newtype + zeroize on cookie_signing_key + RFC 4231 test vectors).",
+        "R71 = wz-runtime-tokio-test-support separate crate split (replaces _test_support feature flag pattern).",
+        "Phase W = wz-runtime-lwip reintroduction with MCU cross-compile + real lwIP API.",
+        "Spec body authoring continues at multi-round pace: R66 covered 3 sections; subsequent rounds will cover R66d (intrinsics-runtime-symbols crypto ownership) / R66e (reassembly-fsm pool ownership) / R66f (scouting-fsm scout link binding) at the same granularity."
+      ],
+      "publishable_decision_summary": "Path X step 3 round 1 — spec body authoring across 3 critical sections (wire-spec §4.4 transport ext, session-fsm §6 link interaction, tokio §2 trait surface). R52.1-R63 prototype evidence now lives in atomic body.",
+      "publishable_changes_bullets": [
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions: intent + 10 rationale_bullets (6 ext classes inclusion stance + R57 base-body-only emit + R62 cookie-via-body fact + R63a SCXML carry) + 2 caveats (no ext chain on wire; Layer 3 reference also lacks ext::*).",
+        "session-fsm--prose-level-sketch/6-link-layer-interaction: intent + 10 rationale_bullets (6 inbound + 3 outbound + FSM-never-touches-bytes invariant + transport header T_MID encoding for InitSyn/InitAck/OpenSyn/OpenAck/Close + R57 byte-equiv + R62 cookie field + R52 BestEffort path) + 2 caveats (R63b inbound parser; UdpDriver BestEffort).",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface: rationale_bullets (LinkDriver 4-method trait + LinkEvent + LostCause + Reliability + Tcp/UdpDriver impls + R57 single-install OnceLock + R63 multi-peer fork-or-defer + TokioLinkDriverAdapter multi-thread invariant + R60 real-TCP integration evidence) + 2 caveats (R60 SessionInitParams::default removal; R70 carry crypto safety)."
+      ],
+      "publishable_verification_bullets": [
+        "3 set_section_intent + 3 set_section_rationale + 6 add_section_caveat across 3 sections; all retried-and-passed under MAX_INTENT_CHAR 200 and MAX_BULLET_CHAR 100 thresholds.",
+        "validate_workspace post each mutation: T1=0, RT 12/12, GENERATED.md=sync.",
+        "atomic ledger entries 71 → 72 (one round entry); sections unchanged (no new sections, only existing-section field updates).",
+        "Each rationale_bullet cross-references the round that landed its underlying code (R51 LinkDriver baseline / R52 UdpDriver / R57 wire encode + INSTALLED guard / R60 real-TCP / R62 cookie HMAC / R63a/b/c carries). The atomic body is now traceable into the codebase + carry tracker simultaneously."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions",
+        "session-fsm--prose-level-sketch/6-link-layer-interaction",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R67 = R63a SCXML extension chain authoring (init_body/open_body/join against §7 sce:tlv-chain). Real zenoh-pico peer interop blocker.",
+        "R68 = R63b Initiator-side inbound parser (peer InitAck wire → SessionInitParams.cookie populate).",
+        "R69 = R61b Hal time-mock injection (sce_rust_runtime TestHal + Engine::tick coverage on 12 timers).",
+        "R70 = R62 crypto safety hardening (SigningKey newtype + zeroize on cookie_signing_key + RFC 4231 test vectors).",
+        "R71 = wz-runtime-tokio-test-support separate crate split (replaces _test_support feature flag pattern).",
+        "Phase W = wz-runtime-lwip reintroduction with MCU cross-compile + real lwIP API.",
+        "Spec body authoring continues at multi-round pace: R66 covered 3 sections; subsequent rounds will cover R66d (intrinsics-runtime-symbols crypto ownership) / R66e (reassembly-fsm pool ownership) / R66f (scouting-fsm scout link binding) at the same granularity."
       ]
     },
     "Round 7": {
