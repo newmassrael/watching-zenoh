@@ -7812,6 +7812,52 @@
         "Frame inbound also resets the lease? — R72b populates `last_inbound_keepalive_at` only on InboundFrame::KeepAlive. Whether established-session Frame traffic should also count as liveness is a wire-spec discussion (zenoh-pico transport.h:213 wording is `KEEP_ALIVE` specifically); R77 honours R72b's KeepAlive-only design without bundling that question."
       ]
     },
+    "Round 78": {
+      "decision_summary": "Accepting-side path integration test — listener handshake via poll_and_dispatch_one terminates at Established.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/tests/session_fsm_accepting_path.rs — new test file walking the listener half of the 4-way handshake: Init -(inbound.start)-> AwaitingInitSyn -(Rx InitSyn via poll_and_dispatch_one)-> SentInitAck -(Rx OpenSyn via poll_and_dispatch_one)-> Established",
+        "hand-craft two inbound wires: craft_initsyn_wire (parent_flags=FLAG_T_INIT_S, no FLAG_T_INIT_A, 10-byte frame with version/cbyte/zid/sn_res/batch_size and no cookie) + craft_opensyn_wire (parent_flags=0x00, 4-byte frame with lease=0/initial_sn=0/cookie_len=0)",
+        "QueueDriver + NoopOutboundDriver test scaffolding mirrors session_fsm_driver_loop.rs from R76 — the helpers are duplicated rather than extracted because mid-flight scaffold extraction would obscure the per-test isolation rules",
+        "Established.onentry side effects asserted (enable_rx_tx_regions=1, start_lease_monitor=1, start_keepalive_worker=1) matching session_fsm_coverage.rs::r61 listener-path expectations — R78 inherits R61's FSM-edge verification but reaches it through the R76 driver helper rather than direct engine.process_event(E::InitSynReceived)",
+        "complements the R76 Initiator-side Rx(InitAck) scenario — confirms poll_and_dispatch_one handles both handshake halves symmetrically (helper does not discriminate Initiator vs Accepting; the FSM does)"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio green",
+        "cargo test -p wz-runtime-tokio --test session_fsm_accepting_path: 1 passed (first try, no wire-crafting iteration)",
+        "cargo test --workspace: 76 passed / 0 failed (regression delta = +1 test vs R77)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass — `run-ci: all required layers pass`",
+        "test-only round; no production code change in session_glue.rs (or anywhere)"
+      ],
+      "carry_forward_bullets": [
+        "Accepting-side InitSyn cookie generation — send_init_ack_with_cookie currently reads params.cookie which the fixture leaves empty. Production deploys MUST populate it via generate_cookie_hmac_sha256(params.cookie_signing_key, peer_zid_from_inbound_InitSyn) before send_init_ack_with_cookie fires; the peer_zid_from_inbound binding is not yet wired into SessionLinkActions (R62 carry, also flagged at session_glue.rs:683-691).",
+        "QueueDriver / NoopOutboundDriver duplication across session_fsm_driver_loop.rs + session_fsm_accepting_path.rs — extraction into wz-runtime-tokio-test-support would consolidate ~80 lines but risks the same singleton-race contagion the mega-test pattern guards against. Defer until R71b/R77b race is closed.",
+        "InboundStart dispatch in production — the test calls engine.process_event(E::InboundStart) directly because the production caller (socket-accept handler) has not been wired yet. Phase W lwIP or AP-side listener bind needs an explicit InboundStart hook on accept().",
+        "cookie wire field in OpenSyn is empty (cookie_len=0) — RFC §5.M expects the Initiator to echo the cookie it received in InitAck; R78 omits the echo because the test stages only OpenSyn arrival without a prior InitAck-out + cookie-in round-trip. End-to-end cookie echo verification belongs in wz-integration-tests Layer 3 (already covered by layer3_open_body wire-interop tests)."
+      ],
+      "publishable_decision_summary": "Accepting-side path integration test — listener handshake via poll_and_dispatch_one terminates at Established.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/tests/session_fsm_accepting_path.rs — new test file walking the listener half of the 4-way handshake: Init -(inbound.start)-> AwaitingInitSyn -(Rx InitSyn via poll_and_dispatch_one)-> SentInitAck -(Rx OpenSyn via poll_and_dispatch_one)-> Established",
+        "hand-craft two inbound wires: craft_initsyn_wire (parent_flags=FLAG_T_INIT_S, no FLAG_T_INIT_A, 10-byte frame with version/cbyte/zid/sn_res/batch_size and no cookie) + craft_opensyn_wire (parent_flags=0x00, 4-byte frame with lease=0/initial_sn=0/cookie_len=0)",
+        "QueueDriver + NoopOutboundDriver test scaffolding mirrors session_fsm_driver_loop.rs from R76 — the helpers are duplicated rather than extracted because mid-flight scaffold extraction would obscure the per-test isolation rules",
+        "Established.onentry side effects asserted (enable_rx_tx_regions=1, start_lease_monitor=1, start_keepalive_worker=1) matching session_fsm_coverage.rs::r61 listener-path expectations — R78 inherits R61's FSM-edge verification but reaches it through the R76 driver helper rather than direct engine.process_event(E::InitSynReceived)",
+        "complements the R76 Initiator-side Rx(InitAck) scenario — confirms poll_and_dispatch_one handles both handshake halves symmetrically (helper does not discriminate Initiator vs Accepting; the FSM does)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio green",
+        "cargo test -p wz-runtime-tokio --test session_fsm_accepting_path: 1 passed (first try, no wire-crafting iteration)",
+        "cargo test --workspace: 76 passed / 0 failed (regression delta = +1 test vs R77)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass — `run-ci: all required layers pass`",
+        "test-only round; no production code change in session_glue.rs (or anywhere)"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Accepting-side InitSyn cookie generation — send_init_ack_with_cookie currently reads params.cookie which the fixture leaves empty. Production deploys MUST populate it via generate_cookie_hmac_sha256(params.cookie_signing_key, peer_zid_from_inbound_InitSyn) before send_init_ack_with_cookie fires; the peer_zid_from_inbound binding is not yet wired into SessionLinkActions (R62 carry, also flagged at session_glue.rs:683-691).",
+        "QueueDriver / NoopOutboundDriver duplication across session_fsm_driver_loop.rs + session_fsm_accepting_path.rs — extraction into wz-runtime-tokio-test-support would consolidate ~80 lines but risks the same singleton-race contagion the mega-test pattern guards against. Defer until R71b/R77b race is closed.",
+        "InboundStart dispatch in production — the test calls engine.process_event(E::InboundStart) directly because the production caller (socket-accept handler) has not been wired yet. Phase W lwIP or AP-side listener bind needs an explicit InboundStart hook on accept().",
+        "cookie wire field in OpenSyn is empty (cookie_len=0) — RFC §5.M expects the Initiator to echo the cookie it received in InitAck; R78 omits the echo because the test stages only OpenSyn arrival without a prior InitAck-out + cookie-in round-trip. End-to-end cookie echo verification belongs in wz-integration-tests Layer 3 (already covered by layer3_open_body wire-interop tests)."
+      ]
+    },
     "Round 8": {
       "decision_summary": "Phase D ARCHITECTURE densify 마감: top-level sec 10-16 + 핵심 sub (2.4, 11.4, 11.5) typed-populate; 4 section-marker docs root-only carry; Phase E README 분리.",
       "changes_bullets": [
