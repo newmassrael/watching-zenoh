@@ -48,10 +48,12 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
 };
 use wz_runtime_tokio::session_glue::{
-    install_session_actions, rebind_session_actions_for_test, BoxedLinkDriver, SessionInitParams,
-    SessionLinkActions,
+    install_session_actions, BoxedLinkDriver, SessionLinkActions,
 };
 use wz_runtime_tokio::Reliability;
+use wz_runtime_tokio_test_support::{
+    fixture_session_init_params, install_session_actions_for_test,
+};
 
 #[derive(Default)]
 struct RecordingDriver {
@@ -84,9 +86,9 @@ impl BoxedLinkDriver for RecordingDriver {
 #[test]
 fn r59_engine_drives_full_outbound_initiator_happy_path() {
     let driver = Arc::new(RecordingDriver::default());
-    let actions = SessionLinkActions::new(driver.clone(), SessionInitParams::for_test());
+    let actions = SessionLinkActions::new(driver.clone(), fixture_session_init_params());
     if install_session_actions(actions.clone()).is_err() {
-        rebind_session_actions_for_test(actions.clone());
+        install_session_actions_for_test(actions.clone());
     }
 
     let mut engine: Engine<SessionFsmUnicastPolicy> =

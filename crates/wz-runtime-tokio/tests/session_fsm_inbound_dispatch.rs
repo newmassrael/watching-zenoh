@@ -30,10 +30,12 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
 };
 use wz_runtime_tokio::session_glue::{
-    inbound_to_fsm_event, install_session_actions, rebind_session_actions_for_test,
-    BoxedLinkDriver, SessionInitParams, SessionLinkActions,
+    inbound_to_fsm_event, install_session_actions, BoxedLinkDriver, SessionLinkActions,
 };
 use wz_runtime_tokio::Reliability;
+use wz_runtime_tokio_test_support::{
+    fixture_session_init_params, install_session_actions_for_test,
+};
 
 #[derive(Default)]
 struct NoopDriver {
@@ -76,9 +78,9 @@ fn craft_initack_wire(cookie: &[u8]) -> Vec<u8> {
 #[test]
 fn inbound_initack_routes_through_parser_to_fsm_advancing_state() {
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver::default());
-    let actions = SessionLinkActions::new(driver, SessionInitParams::for_test());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
     if install_session_actions(actions.clone()).is_err() {
-        rebind_session_actions_for_test(actions.clone());
+        install_session_actions_for_test(actions.clone());
     }
 
     let mut engine: Engine<SessionFsmUnicastPolicy> =
@@ -297,7 +299,7 @@ fn parse_inbound_decodes_keep_alive_frame() {
 #[test]
 fn handle_inbound_keepalive_updates_last_inbound_keepalive_at() {
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver::default());
-    let actions = SessionLinkActions::new(driver, SessionInitParams::for_test());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
 
     assert!(
         actions.last_inbound_keepalive_at.lock().unwrap().is_none(),
@@ -324,7 +326,7 @@ fn handle_inbound_keepalive_updates_last_inbound_keepalive_at() {
 #[test]
 fn handle_inbound_non_keepalive_does_not_touch_keepalive_slot() {
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver::default());
-    let actions = SessionLinkActions::new(driver, SessionInitParams::for_test());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
 
     // Seed the slot to verify a non-KeepAlive frame leaves it
     // untouched (no spurious overwrite).

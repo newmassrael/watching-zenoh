@@ -59,8 +59,6 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use sce_rust_runtime::scripting::{IScriptEngine, NativeMethod, ScriptValue};
-#[cfg(any(test, feature = "_test_support"))]
-use sce_rust_runtime::scripting::ScriptResult;
 
 use sce_forge_runtime::codec::{CodecError, SceCursor};
 use wz_codecs::close::Close;
@@ -296,40 +294,14 @@ pub struct SessionInitParams {
     pub cookie_signing_key: SigningKey,
 }
 
-impl SessionInitParams {
-    /// Fixture builder for tests. Returns a SessionInitParams with
-    /// deterministic values that match the Layer 3 wire-interop
-    /// `layer3_init_body` fixture inputs, so wire-byte assertions
-    /// cross-reference cleanly. **No `Default` impl on purpose** —
-    /// production callers MUST source every field from `deploy.yaml`
-    /// (or another configured source). Letting `default()` exist
-    /// would invite silent misuse where a consumer constructs an
-    /// empty/zeroed `SessionInitParams` and the FSM emits wire
-    /// bytes against undefined peer identity.
-    ///
-    /// Gated behind the `_test_support` feature so production builds
-    /// cannot accidentally call it. Tests in this crate enable the
-    /// feature in their `dev-dependencies` block on themselves.
-    #[cfg(any(test, feature = "_test_support"))]
-    pub fn for_test() -> Self {
-        Self {
-            version: 0x05,
-            whatami: 0x02, // Peer
-            zid: vec![0x01; 4],
-            seq_num_res: 0,
-            req_id_res: 0,
-            batch_size: 0,
-            lease: 10_000,
-            lease_in_seconds: false,
-            initial_sn: 0,
-            cookie: Vec::new(),
-            // Deterministic 32-byte test key. Production callers
-            // MUST supply real per-process entropy here.
-            cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-                .expect("32-byte test key satisfies >= 32 invariant"),
-        }
-    }
-}
+// `SessionInitParams` carries no test-only methods. The deterministic
+// fixture builder (formerly `for_test`) moved out to the
+// `wz-runtime-tokio-test-support` sibling crate at R71 so production
+// builds of this crate no longer carry the test-only code path.
+// `SessionInitParams` intentionally has no `Default` impl — production
+// callers MUST source every field from `deploy.yaml` (or another
+// configured source), and the fixture stays behind the test-support
+// crate boundary.
 
 /// Discrete close-reason discriminator. Mirrors the four close-reason
 /// mutator actions emitted by `session_fsm_unicast.scxml`
@@ -668,33 +640,18 @@ pub fn install_session_actions(
     Ok(())
 }
 
-/// Re-bind the Lua engine's global functions against a fresh
-/// `SessionLinkActions`, bypassing the `INSTALLED` guard.
-///
-/// **Test infrastructure only.** Gated behind the `_test_support`
-/// Cargo feature so production builds cannot link against it. Tests
-/// (integration + unit) opt in by listing
-/// `features = ["_test_support"]` on their `wz-runtime-tokio`
-/// dev-dependency entry.
-///
-/// Production code does not benefit from this function — it leaves
-/// `INSTALLED` pointing at the original actions while overwriting
-/// every `register_global_function` registration to capture a
-/// different `SessionLinkActions`. The resulting state is a hybrid
-/// that only makes sense for cargo's thread-parallel test runner
-/// reusing one process-global INSTALLED OnceLock across
-/// `#[test]`s.
-#[cfg(any(test, feature = "_test_support"))]
-pub fn rebind_session_actions_for_test(actions: Arc<SessionLinkActions>) {
-    let _ = sce_rust_lua::register();
-    let lua = lua_engine_singleton();
-    lua.create_session(SESSION_ID);
-    register_outbound_link_fns(lua, &actions);
-    register_state_internal_fns(lua, &actions);
-    register_guard_fns(lua);
-}
+// R71 — the former `rebind_session_actions_for_test` moved to the
+// `wz-runtime-tokio-test-support` sibling crate as
+// `install_session_actions_for_test`. The three `register_*` helpers
+// below are exposed `pub` so the test-support crate can compose the
+// rebind path; production callers MUST use `install_session_actions`
+// which consults the `INSTALLED` OnceLock guard.
 
-fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLinkActions>) {
+/// Register the 7 outbound link-driver script functions. Public only
+/// to let `wz-runtime-tokio-test-support::install_session_actions_for_test`
+/// compose the rebind path; production code reaches this through
+/// `install_session_actions` instead.
+pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLinkActions>) {
     bind_unit(lua, "link_driver_open", actions, |a| {
         a.trace.lock().unwrap().link_driver_open += 1;
         a.driver.open_blocking();
@@ -762,7 +719,10 @@ fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLink
     });
 }
 
-fn register_state_internal_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLinkActions>) {
+/// Register the 7 lifecycle / lease-monitor script functions. Public
+/// for the same reason as `register_outbound_link_fns` — the
+/// test-support crate composes it during the rebind path.
+pub fn register_state_internal_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLinkActions>) {
     bind_unit(lua, "enable_rx_tx_regions", actions, |a| {
         a.trace.lock().unwrap().enable_rx_tx_regions += 1;
     });
@@ -792,7 +752,10 @@ fn register_state_internal_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLin
     );
 }
 
-fn register_guard_fns(lua: &dyn IScriptEngine) {
+/// Register the 3 guard-condition script functions. Public for the
+/// same reason as `register_outbound_link_fns` — the test-support
+/// crate composes it during the rebind path.
+pub fn register_guard_fns(lua: &dyn IScriptEngine) {
     // R57 baseline: guard expressions always return true so the
     // accept-side hardening + cookie validation transitions advance
     // for the integration test. Cap quota / token-bucket / cookie
@@ -1282,27 +1245,13 @@ fn bind_bool(lua: &dyn IScriptEngine, name: &str, value: bool) {
     assert!(ok, "register_global_function failed for {name}");
 }
 
-/// Direct dispatch shim — exercises the script engine path without
-/// driving the generated state machine. Gated behind `_test_support`
-/// for the same reason as `rebind_session_actions_for_test`:
-/// production callers must drive via `Engine::process_event`, not
-/// by string-name-matching arbitrary scripts (which would be a Lua
-/// injection surface).
-///
-/// The `name` parameter is restricted to identifiers — the
-/// function appends `()` and asserts the identifier matches the
-/// production registration set, so a caller cannot smuggle
-/// arbitrary Lua source through this entry point.
-#[cfg(any(test, feature = "_test_support"))]
-pub fn dispatch_script(name: &str) -> ScriptResult<ScriptValue> {
-    debug_assert!(
-        REGISTERED_SCRIPT_NAMES.contains(&name),
-        "dispatch_script: '{name}' is not a registered script-action name; \
-         production scripts must be drive via Engine::process_event"
-    );
-    let lua = lua_engine_singleton();
-    lua.execute_script(SESSION_ID, &format!("{name}()"))
-}
+// R71 — the former `dispatch_script` test shim moved to the
+// `wz-runtime-tokio-test-support` sibling crate. Production callers
+// drive script actions via `Engine::process_event` (which validates
+// against generated SCXML transition guards before invoking the Lua
+// closure); the direct-by-name dispatch would be a Lua-injection
+// surface in production code paths and therefore lives behind the
+// test-support crate boundary.
 
 /// Single-source-of-truth list of every script-action name the
 /// `register_*` family installs onto the Lua engine. The build

@@ -1110,6 +1110,7 @@ dependencies = [
  "tempfile",
  "wz-codecs",
  "wz-runtime-tokio",
+ "wz-runtime-tokio-test-support",
  "zenoh-pico-sys",
 ]
 
@@ -1127,8 +1128,17 @@ dependencies = [
  "sha2",
  "tokio",
  "wz-codecs",
- "wz-runtime-tokio",
+ "wz-runtime-tokio-test-support",
  "zeroize",
+]
+
+[[package]]
+name = "wz-runtime-tokio-test-support"
+version = "0.1.0"
+dependencies = [
+ "sce-rust-lua",
+ "sce-rust-runtime",
+ "wz-runtime-tokio",
 ]
 
 [[package]]

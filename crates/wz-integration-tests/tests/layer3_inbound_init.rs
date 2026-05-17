@@ -27,10 +27,10 @@
 use std::sync::Arc;
 
 use wz_runtime_tokio::session_glue::{
-    parse_inbound, BoxedLinkDriver, InboundFrame, InboundParseError, SessionInitParams,
-    SessionLinkActions,
+    parse_inbound, BoxedLinkDriver, InboundFrame, InboundParseError, SessionLinkActions,
 };
 use wz_runtime_tokio::Reliability;
+use wz_runtime_tokio_test_support::fixture_session_init_params;
 use zenoh_pico_sys::{
     _z_delete_context_t, _z_id_t, _z_init_encode, _z_slice_t, _z_t_msg_init_t, _z_wbuf_clear,
     _z_wbuf_make, _z_wbuf_to_zbuf, _z_zbuf_clear,
@@ -171,7 +171,7 @@ fn handle_inbound_populates_cookie_slot_from_initack() {
     );
 
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
-    let actions = SessionLinkActions::new(driver, SessionInitParams::for_test());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
 
     let pre = actions.inbound_cookie.lock().unwrap().clone();
     assert!(pre.is_none(), "cookie slot starts empty");

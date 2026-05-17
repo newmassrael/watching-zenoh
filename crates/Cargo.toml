@@ -31,6 +31,7 @@ members = [
     "zenoh-pico-sys",
     "wz-integration-tests",
     "wz-runtime-tokio",
+    "wz-runtime-tokio-test-support",
     # wz-runtime-lwip removed at R63 — the R53 NOP-stub skeleton was
     # not production-honest and the R58 doc-only reframe ("Phase W
     # deferred skeleton") was a document-around-the-hack pattern.

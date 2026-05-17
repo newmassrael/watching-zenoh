@@ -44,10 +44,12 @@ sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
 # R68a — Layer 3 inbound parser test reaches into wz-runtime-tokio's
 # session_glue (`parse_inbound`, `InboundFrame`, `SessionLinkActions::
 # handle_inbound`) to verify the reverse direction: zenoh-pico encode
-# → wz parse → SessionInitParams.cookie populate. `_test_support`
-# enables `for_test` fixture so the test stages a deterministic
-# SessionInitParams without touching production constructors.
-wz-runtime-tokio = { path = "../wz-runtime-tokio", features = ["_test_support"] }
+# → wz parse → SessionInitParams.cookie populate.
+wz-runtime-tokio = { path = "../wz-runtime-tokio" }
+# R71 — `fixture_session_init_params` / `install_session_actions_for_test`
+# / `dispatch_script` live in this sibling crate. Replaces the
+# `_test_support` Cargo feature used through R70.
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
 # tempfile is used by R63 link_emitter_b6 to stage sce-codegen emit
 # output in a clean directory per test run (no pollution of $OUT_DIR
 # or vendor/sce/target).

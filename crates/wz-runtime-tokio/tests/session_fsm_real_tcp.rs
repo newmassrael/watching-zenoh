@@ -27,10 +27,12 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
 };
 use wz_runtime_tokio::session_glue::{
-    install_session_actions, rebind_session_actions_for_test, SessionInitParams, SessionLinkActions,
-    TokioLinkDriverAdapter,
+    install_session_actions, SessionLinkActions, TokioLinkDriverAdapter,
 };
 use wz_runtime_tokio::TcpDriver;
+use wz_runtime_tokio_test_support::{
+    fixture_session_init_params, install_session_actions_for_test,
+};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r60_fsm_drives_real_tcp_loopback() {
@@ -52,9 +54,9 @@ async fn r60_fsm_drives_real_tcp_loopback() {
     let adapter: Arc<TokioLinkDriverAdapter<TcpDriver>> =
         Arc::new(TokioLinkDriverAdapter::new(driver, handle));
 
-    let actions = SessionLinkActions::new(adapter, SessionInitParams::for_test());
+    let actions = SessionLinkActions::new(adapter, fixture_session_init_params());
     if install_session_actions(actions.clone()).is_err() {
-        rebind_session_actions_for_test(actions.clone());
+        install_session_actions_for_test(actions.clone());
     }
 
     // ─── drive Init -> LinkOpening -> SentInitSyn ──────────────
@@ -105,7 +107,7 @@ async fn r60_fsm_drives_real_tcp_loopback() {
         "first wire byte must be FLAG_T_INIT_S | T_MID_INIT"
     );
 
-    // The next byte is the wz `SessionInitParams::for_test` version
+    // The next byte is the `fixture_session_init_params` version
     // (0x05). Catches a regression where the adapter / Lua /
     // SessionLinkActions chain corrupts the payload between
     // encode_init and the socket.

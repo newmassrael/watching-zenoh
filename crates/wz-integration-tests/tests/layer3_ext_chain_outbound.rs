@@ -23,10 +23,9 @@ use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::ext_unit::ExtUnit;
 use wz_codecs::ext_zbuf::ExtZbuf;
 use wz_codecs::ext_zint::ExtZint;
-use wz_runtime_tokio::session_glue::{
-    BoxedLinkDriver, ExtChainRole, SessionInitParams, SessionLinkActions,
-};
+use wz_runtime_tokio::session_glue::{BoxedLinkDriver, ExtChainRole, SessionLinkActions};
 use wz_runtime_tokio::Reliability;
+use wz_runtime_tokio_test_support::fixture_session_init_params;
 use zenoh_pico_sys::{
     _z_delete_context_t, _z_id_t, _z_init_encode, _z_msg_ext_encode, _z_msg_ext_make_unit,
     _z_msg_ext_make_zbuf, _z_msg_ext_make_zint, _z_slice_t, _z_t_msg_init_t, _z_wbuf_clear,
@@ -39,7 +38,7 @@ const FLAG_T_INIT_A: u8 = 0x20;
 const FLAG_T_Z: u8 = 0x80;
 const M_FLAG: u8 = 0x10;
 
-// Fixture inputs — match SessionInitParams::for_test().
+// Fixture inputs — match fixture_session_init_params().
 const FIXTURE_VERSION: u8 = 0x05;
 const FIXTURE_WHATAMI_API: u8 = 0x02; // Peer
 const FIXTURE_ZID: [u8; 4] = [0x01, 0x01, 0x01, 0x01];
@@ -179,7 +178,7 @@ fn encode_init_with_ext_chain_byte_equiv_to_pico() {
     expected.extend_from_slice(&pico_oracle_ext_chain());
 
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
-    let actions = SessionLinkActions::new(driver, SessionInitParams::for_test());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
     actions.set_ext_chain(ExtChainRole::InitAck, wz_oracle_chain());
 
     let actual = actions.encode_init_with_role(/*is_ack=*/ true, ExtChainRole::InitAck);
@@ -197,7 +196,7 @@ fn encode_init_without_ext_chain_omits_z_flag_and_trailing_bytes() {
     expected.extend_from_slice(&pico_init_body(parent_flags));
 
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
-    let actions = SessionLinkActions::new(driver, SessionInitParams::for_test());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
     // No set_ext_chain — slot stays empty.
 
     let actual = actions.encode_init_with_role(/*is_ack=*/ true, ExtChainRole::InitAck);
@@ -212,7 +211,7 @@ fn encode_init_without_ext_chain_omits_z_flag_and_trailing_bytes() {
 fn ext_chain_role_isolation() {
     // Setting InitSyn chain must not bleed into InitAck encode.
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
-    let actions = SessionLinkActions::new(driver, SessionInitParams::for_test());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
     actions.set_ext_chain(ExtChainRole::InitSyn, wz_oracle_chain());
 
     let init_ack_wire =
