@@ -28,7 +28,7 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome,
+    poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome, NetworkMessage,
     SessionLinkActions,
 };
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
@@ -233,6 +233,114 @@ async fn r76_link_lost_peer_closed_drives_toward_terminal() {
     assert!(
         matches!(st, S::Closing | S::Closed),
         "link.lost must drive toward terminal; got {st:?}"
+    );
+}
+
+// ── R74 Scenario A: Rx(Frame) with empty payload → FramePayload
+//                    with messages=[]; FSM unchanged
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r74_rx_frame_with_empty_payload_surfaces_framepayload() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+    let pre_state = engine.get_current_state();
+
+    // T_MID_FRAME (0x05) without R flag, sn=0 VLE single byte, empty
+    // tail payload. R74 dispatch must surface this as FramePayload
+    // (not SideEffectOnly) so the application layer sees the Frame.
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
+        bytes: vec![0x05, 0x00],
+    })]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    match outcome {
+        DriverLoopOutcome::FramePayload {
+            reliable,
+            sn,
+            ref messages,
+            has_ext,
+            ref extensions,
+        } => {
+            assert!(!reliable, "no R flag → best-effort");
+            assert_eq!(sn, 0);
+            assert!(messages.is_empty(), "empty tail → empty batch");
+            assert!(!has_ext);
+            assert!(extensions.is_empty());
+        }
+        _ => panic!("expected FramePayload outcome, got {outcome:?}"),
+    }
+    assert_eq!(
+        engine.get_current_state(),
+        pre_state,
+        "Frame receipt is not a session-state trigger"
+    );
+}
+
+// ── R74 Scenario B: Rx(Frame) with payload carrying a single
+//                    Unknown MID → FramePayload with Unknown record
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    // T_MID_FRAME | R flag = 0x25, sn=1 VLE (0x01), tail payload
+    // = [0x1D, 0xAA, 0xBB] — 0x1D = N_MID_PUSH (no codec authored).
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
+        bytes: vec![0x25, 0x01, 0x1D, 0xAA, 0xBB],
+    })]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    match outcome {
+        DriverLoopOutcome::FramePayload {
+            reliable,
+            sn,
+            messages,
+            ..
+        } => {
+            assert!(reliable, "R flag set → reliable=true");
+            assert_eq!(sn, 1);
+            assert_eq!(messages.len(), 1);
+            match &messages[0] {
+                NetworkMessage::Unknown { mid, body } => {
+                    assert_eq!(*mid, 0x1D);
+                    assert_eq!(body.as_slice(), &[0x1D, 0xAA, 0xBB]);
+                }
+                NetworkMessage::Request(_) => {
+                    panic!("Push MID must NOT dispatch to Request decoder")
+                }
+            }
+        }
+        other => panic!("expected FramePayload, got {other:?}"),
+    }
+}
+
+// ── R74 Scenario C: Rx(Frame) with malformed payload (Request MID
+//                    but truncated body) → ParseError + FramingError
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r74_rx_frame_malformed_request_payload_surfaces_parse_error() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    // Frame envelope OK (header + sn=0), but payload = [0x1C] alone
+    // — Request::decode consumes the header then needs rid VLE bytes
+    // that don't exist. parse_frame_payload returns CodecError;
+    // poll_and_dispatch_one must surface ParseError AND fire
+    // FramingError into the FSM (SentInitSyn -> Closing edge).
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
+        bytes: vec![0x05, 0x00, 0x1C],
+    })]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::ParseError(_)),
+        "malformed application-layer payload must surface ParseError; \
+         got {outcome:?}"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        S::Closing,
+        "framing.error event from R74 path must transition \
+         SentInitSyn -> Closing (consistent with R76 transport-layer \
+         malformed-wire policy)"
     );
 }
 
