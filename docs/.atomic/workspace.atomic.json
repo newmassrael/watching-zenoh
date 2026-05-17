@@ -8244,6 +8244,52 @@
         "Outbound-half observer (R83 carry #4) still open — R83 wires inbound poll + lease observer, R84 closes the established_at gap, but the outbound TX path (record_established_at is technically state-internal not TX, so it's in scope; but send_init_syn / send_open_ack etc. have no symmetric observer) remains unobservable from the application layer. A symmetric outbound observer round would close the full telemetry surface."
       ]
     },
+    "Round 85": {
+      "decision_summary": "R85 max_iters=None production-shape integration test — closes R81 carry #3 (\"max_iters=None production case untested directly\") with a single finite-event-sequence scenario.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/tests/session_fsm_drive_session.rs: r85_unlimited_iters_terminates_on_finite_event_sequence scenario added. Stages a KeepAlive (populates lease stamp without FSM transition) followed by Lost (LinkOpening -> link.lost -> Closed terminal edge). Calls drive_session_until_terminal with max_iters=None and asserts Terminated outcome + engine.is_in_final_state() + lease-stamp populated (proves both arms ran, not just the last one).",
+        "Test is pure addition — no API change, no signature change, no rustdoc rewrite. The unlimited code path was previously exercised only transitively through cargo's workspace runtime; R85 makes it a directly-asserted contract.",
+        "QueueDriver's queue-exhaustion fallback (Lost { PeerClosed }) is NOT load-bearing for the assertion because the test stages the Lost event explicitly — the loop terminates on the staged event, not the fallback.",
+        "Closes R81 carry #3 verbatim: 'max_iters=None production case untested directly — tests cap iterations for determinism; the unlimited code path is exercised only through cargo's overall workspace runtime. A future end-to-end integration (R76c?) with real TCP loopback could verify the unlimited shape under a finite total runtime budget.' R85's QueueDriver staging covers the unlimited-loop contract without needing real TCP."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio green (no source change beyond the test file).",
+        "cargo test -p wz-runtime-tokio --test session_fsm_drive_session: 8 passed (4 R76b + 3 R83 + 1 R85). Each test owns its own LuaEngine via install_session_actions_for_test — per-instance DI from R79 prevents cross-test race on the unlimited-iter test.",
+        "cargo test --workspace: 111 passed / 0 failed (110 -> 111, +1 = exact R85 new test count).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass.",
+        "validate_workspace baseline preserved: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, T3 warn 856 / T4 info 427 unchanged. Atomic ledger entries 97 -> 98 (this Round entry); sections=214 unchanged."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "carry_forward_bullets": [
+        "Real-TCP integration for unlimited path — R85 covers the unlimited-iter contract via QueueDriver staging, which is a synthetic event source. A real-network round (R76c?) would drive drive_session_until_terminal against a tokio::net::TcpListener loopback handshake, proving the unlimited path holds under actual driver poll semantics (non-staged async wakeups). Defer until a Phase W integration use case demands it.",
+        "Iteration count observability — R85's r85 test infers iteration count indirectly (lease stamp population proves >= 2 iterations ran). A future round could expose iter count on the IterationEvent struct (R83 carry #2 cousin) so observers can track 'how many ticks did this session take to terminate' without indirect inference."
+      ],
+      "publishable_decision_summary": "R85 max_iters=None production-shape integration test — closes R81 carry #3 (\"max_iters=None production case untested directly\") with a single finite-event-sequence scenario.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/tests/session_fsm_drive_session.rs: r85_unlimited_iters_terminates_on_finite_event_sequence scenario added. Stages a KeepAlive (populates lease stamp without FSM transition) followed by Lost (LinkOpening -> link.lost -> Closed terminal edge). Calls drive_session_until_terminal with max_iters=None and asserts Terminated outcome + engine.is_in_final_state() + lease-stamp populated (proves both arms ran, not just the last one).",
+        "Test is pure addition — no API change, no signature change, no rustdoc rewrite. The unlimited code path was previously exercised only transitively through cargo's workspace runtime; R85 makes it a directly-asserted contract.",
+        "QueueDriver's queue-exhaustion fallback (Lost { PeerClosed }) is NOT load-bearing for the assertion because the test stages the Lost event explicitly — the loop terminates on the staged event, not the fallback.",
+        "Closes R81 carry #3 verbatim: 'max_iters=None production case untested directly — tests cap iterations for determinism; the unlimited code path is exercised only through cargo's overall workspace runtime. A future end-to-end integration (R76c?) with real TCP loopback could verify the unlimited shape under a finite total runtime budget.' R85's QueueDriver staging covers the unlimited-loop contract without needing real TCP."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio green (no source change beyond the test file).",
+        "cargo test -p wz-runtime-tokio --test session_fsm_drive_session: 8 passed (4 R76b + 3 R83 + 1 R85). Each test owns its own LuaEngine via install_session_actions_for_test — per-instance DI from R79 prevents cross-test race on the unlimited-iter test.",
+        "cargo test --workspace: 111 passed / 0 failed (110 -> 111, +1 = exact R85 new test count).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass.",
+        "validate_workspace baseline preserved: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, T3 warn 856 / T4 info 427 unchanged. Atomic ledger entries 97 -> 98 (this Round entry); sections=214 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Real-TCP integration for unlimited path — R85 covers the unlimited-iter contract via QueueDriver staging, which is a synthetic event source. A real-network round (R76c?) would drive drive_session_until_terminal against a tokio::net::TcpListener loopback handshake, proving the unlimited path holds under actual driver poll semantics (non-staged async wakeups). Defer until a Phase W integration use case demands it.",
+        "Iteration count observability — R85's r85 test infers iteration count indirectly (lease stamp population proves >= 2 iterations ran). A future round could expose iter count on the IterationEvent struct (R83 carry #2 cousin) so observers can track 'how many ticks did this session take to terminate' without indirect inference."
+      ]
+    },
     "Round 9": {
       "decision_summary": "Phase D 진짜 closure — ARCHITECTURE 잔여 sub 34개 + 4 §-prefix docs sub 69개 typed-populate; \"parser limit\" carry는 misdiagnosis로 판명되어 mnemosyne 변경 불필요.",
       "changes_bullets": [

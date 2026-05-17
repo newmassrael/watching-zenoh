@@ -249,6 +249,62 @@ async fn r76b_lease_branch_fires_with_silent_peer() {
     );
 }
 
+// ── R85 Scenario: max_iters=None (unlimited) terminates cleanly on
+//                  a finite event sequence — closes R81 carry #3
+//                  ("max_iters=None production case untested directly").
+//
+// QueueDriver returns Lost { PeerClosed } when its queue is
+// exhausted, so even without an explicit Lost stage the loop
+// terminates. The test stages the Lost event explicitly so the
+// driver's queue-exhaustion fallback isn't load-bearing for the
+// assertion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r85_unlimited_iters_terminates_on_finite_event_sequence() {
+    let (actions, mut engine) = fresh_setup();
+    engine.process_event(E::OutboundStart);
+    assert_eq!(engine.get_current_state(), S::LinkOpening);
+
+    // Finite sequence: KeepAlive (populates lease stamp without
+    // transition) then Lost (LinkOpening -> link.lost -> Closed, a
+    // terminal state). max_iters=None must NOT pin the loop — the
+    // is_in_final_state() check at iteration top must trip after
+    // the Lost arm completes.
+    let mut driver = QueueDriver::with(vec![
+        LinkEvent::Rx(wz_runtime_tokio::RxFrame {
+            bytes: vec![0x04], // T_MID_KEEP_ALIVE
+        }),
+        LinkEvent::Lost {
+            cause: LostCause::PeerClosed,
+        },
+    ]);
+
+    let outcome = drive_session_until_terminal(
+        &mut driver,
+        &actions,
+        &mut engine,
+        None, // unlimited
+        |_| {},
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, DriverOutcome::Terminated),
+        "max_iters=None must surface Terminated when FSM reaches \
+         final state; got {outcome:?}"
+    );
+    assert!(
+        engine.is_in_final_state(),
+        "engine must be in a terminal state after Terminated return"
+    );
+    // KeepAlive arm must have populated the lease stamp before the
+    // Lost arm fired — this proves both events were processed by the
+    // unlimited loop, not just the last one.
+    assert!(
+        actions.last_inbound_keepalive_at.lock().unwrap().is_some(),
+        "KeepAlive iteration ran before the Lost iteration"
+    );
+}
+
 // ── R83 Scenario A: observer captures the per-iteration outcome
 //                    stream — proves R74 FramePayload reaches the
 //                    application-layer consumer via R83 wiring
