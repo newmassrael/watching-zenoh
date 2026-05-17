@@ -13,11 +13,11 @@
 //! inbound work — without it, those 8 commits would land as
 //! production-unreachable helpers.
 //!
-//! Single mega-test on purpose. The Lua engine + INSTALLED OnceLock
-//! are process-global; splitting scenarios into per-`#[test]`
-//! functions causes cargo's thread-parallel runner to race on
-//! `install_session_actions_for_test` (carry from R71b — fixed in a
-//! later round once the SCE `bind_native_object` upstream lands).
+//! R80 — each LinkEvent → outcome mapping is now an independent
+//! `#[tokio::test]` fn (was bundled into a single mega-test before
+//! R79 closed the cross-test race carry by retiring the process-global
+//! `INSTALLED` OnceLock + Lua singleton). Each test owns its own
+//! `LuaEngine` via `install_session_actions_for_test`.
 
 use std::collections::VecDeque;
 use std::io;
@@ -125,132 +125,134 @@ fn drive_to_sent_init_syn(engine: &mut Engine<SessionFsmUnicastPolicy>) {
     assert_eq!(engine.get_current_state(), S::SentInitSyn);
 }
 
+// ── Scenario 1: Rx(InitAck) → AdvancedFsm + state=GotInitAck ─
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn r76_poll_and_dispatch_one_covers_link_event_to_fsm_paths() {
-    // ── Scenario 1: Rx(InitAck) → AdvancedFsm + state=GotInitAck ─
-    {
-        let (actions, mut engine) = fresh_setup();
-        drive_to_sent_init_syn(&mut engine);
+async fn r76_rx_init_ack_advances_to_got_init_ack() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
 
-        let cookie = vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
-        let wire = craft_initack_wire(&cookie);
-        let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-            bytes: wire,
-        })]);
+    let cookie = vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+    let wire = craft_initack_wire(&cookie);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
+        bytes: wire,
+    })]);
 
-        let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
-        assert!(
-            matches!(outcome, DriverLoopOutcome::AdvancedFsm),
-            "InitAck Rx must AdvanceFsm; got {outcome:?}"
-        );
-        assert_eq!(
-            engine.get_current_state(),
-            S::GotInitAck,
-            "Rx(InitAck) must advance SentInitSyn -> GotInitAck"
-        );
-        // R68a cookie capture invariant still applies through the
-        // helper (handle_inbound runs inside poll_and_dispatch_one).
-        let captured = actions.inbound_cookie.lock().unwrap().clone();
-        assert_eq!(captured.as_deref(), Some(cookie.as_slice()));
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::AdvancedFsm),
+        "InitAck Rx must AdvanceFsm; got {outcome:?}"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        S::GotInitAck,
+        "Rx(InitAck) must advance SentInitSyn -> GotInitAck"
+    );
+    // R68a cookie capture invariant still applies through the
+    // helper (handle_inbound runs inside poll_and_dispatch_one).
+    let captured = actions.inbound_cookie.lock().unwrap().clone();
+    assert_eq!(captured.as_deref(), Some(cookie.as_slice()));
+}
+
+// ── Scenario 2: Rx(KeepAlive) → SideEffectOnly, state unchanged
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r76_rx_keepalive_side_effect_only_populates_lease_slot() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+    let pre_state = engine.get_current_state();
+    assert!(
+        actions.last_inbound_keepalive_at.lock().unwrap().is_none(),
+        "keepalive slot empty before Rx"
+    );
+
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
+        bytes: vec![T_MID_KEEP_ALIVE],
+    })]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::SideEffectOnly),
+        "KeepAlive Rx must SideEffectOnly; got {outcome:?}"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        pre_state,
+        "KeepAlive must not advance FSM"
+    );
+    assert!(
+        actions.last_inbound_keepalive_at.lock().unwrap().is_some(),
+        "KeepAlive must populate lease-timestamp slot via handle_inbound"
+    );
+}
+
+// ── Scenario 3: Rx(malformed) → ParseError + FSM moves via
+//                framing.error to Closing
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r76_rx_malformed_surfaces_parse_error_and_framing_close() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    // 2-byte truncated InitAck — header says "InitAck present"
+    // but the body cuts off before the version byte. parse_inbound
+    // returns NeedMoreBytes, the helper raises FramingError.
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
+        bytes: vec![FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT],
+    })]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::ParseError(_)),
+        "truncated wire must surface ParseError; got {outcome:?}"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        S::Closing,
+        "FramingError event must transition SentInitSyn -> Closing"
+    );
+}
+
+// ── Scenario 4: Lost{PeerClosed} → LinkLost outcome + FSM
+//                advances via link.lost transition
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r76_link_lost_peer_closed_drives_toward_terminal() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    let mut driver = QueueDriver::with(vec![LinkEvent::Lost {
+        cause: LostCause::PeerClosed,
+    }]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    match outcome {
+        DriverLoopOutcome::LinkLost(LostCause::PeerClosed) => (),
+        other => panic!("Lost must surface LinkLost(PeerClosed); got {other:?}"),
     }
+    // session-fsm: SentInitSyn + link.lost -> Closing (or Closed
+    // direct depending on the SCXML edge; both are valid
+    // terminations). The assertion accepts either.
+    let st = engine.get_current_state();
+    assert!(
+        matches!(st, S::Closing | S::Closed),
+        "link.lost must drive toward terminal; got {st:?}"
+    );
+}
 
-    // ── Scenario 2: Rx(KeepAlive) → SideEffectOnly, state unchanged
-    {
-        let (actions, mut engine) = fresh_setup();
-        drive_to_sent_init_syn(&mut engine);
-        let pre_state = engine.get_current_state();
-        assert!(
-            actions.last_inbound_keepalive_at.lock().unwrap().is_none(),
-            "keepalive slot empty before Rx"
-        );
+// ── Scenario 5: Ready → LinkOpened mapping; engine advances
+//                LinkOpening -> SentInitSyn via the helper
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r76_ready_maps_to_link_opened_event() {
+    let (actions, mut engine) = fresh_setup();
+    engine.process_event(E::OutboundStart);
+    assert_eq!(engine.get_current_state(), S::LinkOpening);
 
-        let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-            bytes: vec![T_MID_KEEP_ALIVE],
-        })]);
-
-        let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
-        assert!(
-            matches!(outcome, DriverLoopOutcome::SideEffectOnly),
-            "KeepAlive Rx must SideEffectOnly; got {outcome:?}"
-        );
-        assert_eq!(
-            engine.get_current_state(),
-            pre_state,
-            "KeepAlive must not advance FSM"
-        );
-        assert!(
-            actions.last_inbound_keepalive_at.lock().unwrap().is_some(),
-            "KeepAlive must populate lease-timestamp slot via handle_inbound"
-        );
-    }
-
-    // ── Scenario 3: Rx(malformed) → ParseError + FSM moves via
-    //                framing.error to Closing
-    {
-        let (_actions, mut engine) = fresh_setup();
-        drive_to_sent_init_syn(&mut engine);
-
-        // 2-byte truncated InitAck — header says "InitAck present"
-        // but the body cuts off before the version byte. parse_inbound
-        // returns NeedMoreBytes, the helper raises FramingError.
-        let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-            bytes: vec![FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT],
-        })]);
-
-        let outcome = poll_and_dispatch_one(&mut driver, &_actions, &mut engine).await;
-        assert!(
-            matches!(outcome, DriverLoopOutcome::ParseError(_)),
-            "truncated wire must surface ParseError; got {outcome:?}"
-        );
-        assert_eq!(
-            engine.get_current_state(),
-            S::Closing,
-            "FramingError event must transition SentInitSyn -> Closing"
-        );
-    }
-
-    // ── Scenario 4: Lost{PeerClosed} → LinkLost outcome + FSM
-    //                advances via link.lost transition
-    {
-        let (_actions, mut engine) = fresh_setup();
-        drive_to_sent_init_syn(&mut engine);
-
-        let mut driver = QueueDriver::with(vec![LinkEvent::Lost {
-            cause: LostCause::PeerClosed,
-        }]);
-
-        let outcome = poll_and_dispatch_one(&mut driver, &_actions, &mut engine).await;
-        match outcome {
-            DriverLoopOutcome::LinkLost(LostCause::PeerClosed) => (),
-            other => panic!("Lost must surface LinkLost(PeerClosed); got {other:?}"),
-        }
-        // session-fsm: SentInitSyn + link.lost -> Closing (or Closed
-        // direct depending on the SCXML edge; both are valid
-        // terminations). The assertion accepts either.
-        let st = engine.get_current_state();
-        assert!(
-            matches!(st, S::Closing | S::Closed),
-            "link.lost must drive toward terminal; got {st:?}"
-        );
-    }
-
-    // ── Scenario 5: Ready → LinkOpened mapping; engine advances
-    //                LinkOpening -> SentInitSyn via the helper
-    {
-        let (_actions, mut engine) = fresh_setup();
-        engine.process_event(E::OutboundStart);
-        assert_eq!(engine.get_current_state(), S::LinkOpening);
-
-        let mut driver = QueueDriver::with(vec![LinkEvent::Ready]);
-        let outcome = poll_and_dispatch_one(&mut driver, &_actions, &mut engine).await;
-        assert!(
-            matches!(outcome, DriverLoopOutcome::AdvancedFsm),
-            "Ready must AdvanceFsm; got {outcome:?}"
-        );
-        assert_eq!(
-            engine.get_current_state(),
-            S::SentInitSyn,
-            "Ready -> LinkOpened must advance LinkOpening -> SentInitSyn"
-        );
-    }
+    let mut driver = QueueDriver::with(vec![LinkEvent::Ready]);
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::AdvancedFsm),
+        "Ready must AdvanceFsm; got {outcome:?}"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        S::SentInitSyn,
+        "Ready -> LinkOpened must advance LinkOpening -> SentInitSyn"
+    );
 }

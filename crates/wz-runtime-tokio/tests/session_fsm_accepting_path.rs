@@ -20,8 +20,11 @@
 //! handshake symmetrically (it must, since the helper does not
 //! discriminate Initiator vs Accepting — the FSM does).
 //!
-//! Single mega-test on purpose (R71b singleton-race carry — Lua
-//! engine + INSTALLED OnceLock are process-global).
+//! Single `#[test]` fn because the two phases (Rx InitSyn then Rx
+//! OpenSyn) form one continuous handshake walk — phase 2 depends on
+//! phase 1's resulting FSM state. R79 closed the cross-test race
+//! carry that previously forced the mega-test pattern here, but
+//! splitting this particular path-dependent flow gains no granularity.
 
 use std::collections::VecDeque;
 use std::io;

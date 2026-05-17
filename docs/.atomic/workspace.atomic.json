@@ -7972,6 +7972,58 @@
         "Phase E README prose authoring deferred: unstub the file and re-register in workspace.docs."
       ]
     },
+    "Round 80": {
+      "decision_summary": "Mega-test split — 3 files' bundled scenarios fan out to 20 independent `#[test]` fns; R71b doc carry retired across the test tree.",
+      "changes_bullets": [
+        "session_fsm_coverage.rs: 1 mega-test (r61_full_coverage_sequential) -> 11 per-edge #[test] fns (listener path, link_opening timeout/lost, opening init_ack/open_ack/framing, established lease_expired/framing/tx_congestion/peer_close, accepting framing); each test owns an independent LuaEngine via install_session_actions_for_test",
+        "session_fsm_driver_loop.rs: 1 mega-test (r76_poll_and_dispatch_one_covers_link_event_to_fsm_paths) -> 5 #[tokio::test] fns (rx_init_ack, rx_keepalive_side_effect, rx_malformed_parse_error, link_lost_peer_closed, ready_maps_to_link_opened)",
+        "session_fsm_lease_deadline.rs: 1 mega-test (r77_check_lease_deadline_covers_no_baseline_within_and_expired) -> 4 #[test] fns (no_baseline, within_lease, expired_to_closing, expired_at_exact_boundary)",
+        "session_fsm_accepting_path.rs + session_glue_dispatch.rs: kept as single-#[test] integration walks (genuinely path-dependent phase sequencing, splitting gains no granularity); module doc comments updated to explain why each is single-test rather than legacy R71b mega-test",
+        "every split file's module doc updated: R71b cross-test race carry text replaced with R79-closed-by-DI explanation; helper docstring inside fresh_engine / fresh_setup notes per-instance LuaEngine independence",
+        "trace assertions preserved scenario-for-scenario — split is mechanical fan-out, no semantic test coverage change; each new #[test] runs its scenario's identical assertions against an isolated engine"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio green",
+        "cargo test -p wz-runtime-tokio --test session_fsm_coverage: 11 passed (was bundled into 1 mega-test pre-R80)",
+        "cargo test -p wz-runtime-tokio --test session_fsm_driver_loop: 5 passed (was 1)",
+        "cargo test -p wz-runtime-tokio --test session_fsm_lease_deadline: 4 passed (was 1)",
+        "cargo test --workspace: 93 passed / 0 failed (76 -> 93, exact +17 = sum of split deltas)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass",
+        "cargo's thread-parallel runner now executes every scenario concurrently — no race symptoms observed in 3 successive full-test runs (race-free under R79 per-instance DI)"
+      ],
+      "carry_forward_bullets": [
+        "R71b / R77b carry FULLY closed across the test tree — all module doc references to the cross-test race are either replaced (split files) or explain why the file stays single-test (path-dependent walks).",
+        "session_fsm_inbound_dispatch.rs was already multi-#[test] pre-R80 (3+ separate fns per discriminator branch); no R80 work needed there.",
+        "session_fsm_real_tcp.rs / session_fsm_engine_drive.rs / session_fsm_full_path.rs each remain single-#[test] integration walks (TCP loopback / engine-drive happy path / full path coverage — each is one coherent flow, not a bundle of independent scenarios). No split warranted.",
+        "Future tests added in subsequent rounds (R76b drive_session_until_terminal, R77b lease+timeout integration, R74 Frame codec dispatch) can default to per-scenario #[test] fns from the start — R79 + R80 made that the natural pattern."
+      ],
+      "publishable_decision_summary": "Mega-test split — 3 files' bundled scenarios fan out to 20 independent `#[test]` fns; R71b doc carry retired across the test tree.",
+      "publishable_changes_bullets": [
+        "session_fsm_coverage.rs: 1 mega-test (r61_full_coverage_sequential) -> 11 per-edge #[test] fns (listener path, link_opening timeout/lost, opening init_ack/open_ack/framing, established lease_expired/framing/tx_congestion/peer_close, accepting framing); each test owns an independent LuaEngine via install_session_actions_for_test",
+        "session_fsm_driver_loop.rs: 1 mega-test (r76_poll_and_dispatch_one_covers_link_event_to_fsm_paths) -> 5 #[tokio::test] fns (rx_init_ack, rx_keepalive_side_effect, rx_malformed_parse_error, link_lost_peer_closed, ready_maps_to_link_opened)",
+        "session_fsm_lease_deadline.rs: 1 mega-test (r77_check_lease_deadline_covers_no_baseline_within_and_expired) -> 4 #[test] fns (no_baseline, within_lease, expired_to_closing, expired_at_exact_boundary)",
+        "session_fsm_accepting_path.rs + session_glue_dispatch.rs: kept as single-#[test] integration walks (genuinely path-dependent phase sequencing, splitting gains no granularity); module doc comments updated to explain why each is single-test rather than legacy R71b mega-test",
+        "every split file's module doc updated: R71b cross-test race carry text replaced with R79-closed-by-DI explanation; helper docstring inside fresh_engine / fresh_setup notes per-instance LuaEngine independence",
+        "trace assertions preserved scenario-for-scenario — split is mechanical fan-out, no semantic test coverage change; each new #[test] runs its scenario's identical assertions against an isolated engine"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio green",
+        "cargo test -p wz-runtime-tokio --test session_fsm_coverage: 11 passed (was bundled into 1 mega-test pre-R80)",
+        "cargo test -p wz-runtime-tokio --test session_fsm_driver_loop: 5 passed (was 1)",
+        "cargo test -p wz-runtime-tokio --test session_fsm_lease_deadline: 4 passed (was 1)",
+        "cargo test --workspace: 93 passed / 0 failed (76 -> 93, exact +17 = sum of split deltas)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass",
+        "cargo's thread-parallel runner now executes every scenario concurrently — no race symptoms observed in 3 successive full-test runs (race-free under R79 per-instance DI)"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R71b / R77b carry FULLY closed across the test tree — all module doc references to the cross-test race are either replaced (split files) or explain why the file stays single-test (path-dependent walks).",
+        "session_fsm_inbound_dispatch.rs was already multi-#[test] pre-R80 (3+ separate fns per discriminator branch); no R80 work needed there.",
+        "session_fsm_real_tcp.rs / session_fsm_engine_drive.rs / session_fsm_full_path.rs each remain single-#[test] integration walks (TCP loopback / engine-drive happy path / full path coverage — each is one coherent flow, not a bundle of independent scenarios). No split warranted.",
+        "Future tests added in subsequent rounds (R76b drive_session_until_terminal, R77b lease+timeout integration, R74 Frame codec dispatch) can default to per-scenario #[test] fns from the start — R79 + R80 made that the natural pattern."
+      ]
+    },
     "Round 9": {
       "decision_summary": "Phase D 진짜 closure — ARCHITECTURE 잔여 sub 34개 + 4 §-prefix docs sub 69개 typed-populate; \"parser limit\" carry는 misdiagnosis로 판명되어 mnemosyne 변경 불필요.",
       "changes_bullets": [

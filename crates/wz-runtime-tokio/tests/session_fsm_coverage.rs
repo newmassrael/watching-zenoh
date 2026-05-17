@@ -23,11 +23,14 @@
 //        Established -> peer.close -> Closed (direct)
 //        Accepting -> framing.error -> Closing (reason=Invalid)
 //
-// Single mega-test on purpose. The Lua engine + INSTALLED OnceLock
-// are process-global; splitting scenarios into per-`#[test]`
-// functions causes cargo's thread-parallel runner to race on
-// install_session_actions_for_test. Sequential dispatch in one test
-// fn keeps each scenario isolated through the rebind path.
+// R80 — each transition edge is now a separate `#[test]` fn (was a
+// single mega-test fn pre-R80 because of the R71b cross-test race
+// carry on the process-global `INSTALLED` OnceLock + Lua singleton).
+// SCE upstream's per-instance ScriptEngine DI (vendor pin bump
+// 085268d1 in R79) eliminated the shared state, so each `#[test]`
+// now owns an independent `LuaEngine` via
+// `install_session_actions_for_test` and cargo's thread-parallel
+// runner can execute them concurrently without collision.
 
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -62,12 +65,9 @@ impl BoxedLinkDriver for RecordingDriver {
     }
 }
 
-/// Build a driver + actions + Engine triple for one scenario. The
-/// rebind path is the load-bearing isolation: it overwrites every
-/// Lua global with fresh closures so the scenario's trace counters
-/// start at zero. INSTALLED stays pointing at the first install but
-/// the actions captured by every closure are the freshly supplied
-/// ones.
+/// Build a driver + actions + Engine triple for one scenario. Each
+/// call yields an independent `LuaEngine` (R79 per-instance DI), so
+/// concurrent test scenarios cannot contend on shared state.
 fn fresh_engine() -> (
     Arc<SessionLinkActions>,
     Engine<SessionFsmUnicastPolicy>,
@@ -88,155 +88,163 @@ fn drive_to_established(engine: &mut Engine<SessionFsmUnicastPolicy>) {
     assert_eq!(engine.get_current_state(), S::Established);
 }
 
+// ── 1. Listener path: Init → AwaitingInitSyn → SentInitAck
+//                     → SentOpenAck → Established
 #[test]
-fn r61_full_coverage_sequential() {
-    // ── 1. Listener path: Init → AwaitingInitSyn → SentInitAck
-    //                     → SentOpenAck → Established
-    {
-        let (actions, mut engine) = fresh_engine();
-        assert_eq!(engine.get_current_state(), S::Init);
+fn r61_listener_path_inbound_to_established() {
+    let (actions, mut engine) = fresh_engine();
+    assert_eq!(engine.get_current_state(), S::Init);
 
-        engine.process_event(E::InboundStart);
-        assert_eq!(engine.get_current_state(), S::AwaitingInitSyn);
+    engine.process_event(E::InboundStart);
+    assert_eq!(engine.get_current_state(), S::AwaitingInitSyn);
 
-        engine.process_event(E::InitSynReceived);
-        assert_eq!(engine.get_current_state(), S::SentInitAck);
-        let t = actions.trace_snapshot();
-        assert_eq!(t.send_init_ack_with_cookie, 1);
+    engine.process_event(E::InitSynReceived);
+    assert_eq!(engine.get_current_state(), S::SentInitAck);
+    let t = actions.trace_snapshot();
+    assert_eq!(t.send_init_ack_with_cookie, 1);
 
-        engine.process_event(E::OpenSynReceived);
-        // SentOpenAck has an eventless transition to Established —
-        // the macrostep traverses both states in one process_event.
-        assert_eq!(engine.get_current_state(), S::Established);
-        let t = actions.trace_snapshot();
-        assert_eq!(t.send_open_ack, 1);
-        assert_eq!(t.enable_rx_tx_regions, 1);
-        assert_eq!(t.start_lease_monitor, 1);
-        assert_eq!(t.start_keepalive_worker, 1);
-    }
+    engine.process_event(E::OpenSynReceived);
+    // SentOpenAck has an eventless transition to Established —
+    // the macrostep traverses both states in one process_event.
+    assert_eq!(engine.get_current_state(), S::Established);
+    let t = actions.trace_snapshot();
+    assert_eq!(t.send_open_ack, 1);
+    assert_eq!(t.enable_rx_tx_regions, 1);
+    assert_eq!(t.start_lease_monitor, 1);
+    assert_eq!(t.start_keepalive_worker, 1);
+}
 
-    // ── 2. LinkOpening -> link.open_timeout -> Closing (Generic)
-    {
-        let (actions, mut engine) = fresh_engine();
-        engine.process_event(E::OutboundStart);
-        assert_eq!(engine.get_current_state(), S::LinkOpening);
+// ── 2. LinkOpening -> link.open_timeout -> Closing (Generic)
+#[test]
+fn r61_link_opening_open_timeout_to_closing_generic() {
+    let (actions, mut engine) = fresh_engine();
+    engine.process_event(E::OutboundStart);
+    assert_eq!(engine.get_current_state(), S::LinkOpening);
 
-        engine.process_event(E::LinkOpenTimeout);
-        assert_eq!(engine.get_current_state(), S::Closing);
-        let t = actions.trace_snapshot();
-        assert_eq!(t.set_close_reason_count, 1);
-        assert_eq!(t.close_reason, CloseReason::Generic);
-        assert_eq!(t.send_close_frame_with_reason, 1);
-    }
+    engine.process_event(E::LinkOpenTimeout);
+    assert_eq!(engine.get_current_state(), S::Closing);
+    let t = actions.trace_snapshot();
+    assert_eq!(t.set_close_reason_count, 1);
+    assert_eq!(t.close_reason, CloseReason::Generic);
+    assert_eq!(t.send_close_frame_with_reason, 1);
+}
 
-    // ── 3. LinkOpening -> link.lost -> Closed (direct)
-    {
-        let (actions, mut engine) = fresh_engine();
-        engine.process_event(E::OutboundStart);
-        engine.process_event(E::LinkLost);
-        assert_eq!(engine.get_current_state(), S::Closed);
-        assert!(engine.is_in_final_state());
-        let t = actions.trace_snapshot();
-        assert_eq!(t.release_link, 1);
-        assert_eq!(t.free_pool_slots, 1);
-        // link.lost bypasses Closing: no CLOSE frame, no
-        // set_close_reason call.
-        assert_eq!(t.send_close_frame_with_reason, 0);
-        assert_eq!(t.set_close_reason_count, 0);
-    }
+// ── 3. LinkOpening -> link.lost -> Closed (direct)
+#[test]
+fn r61_link_opening_link_lost_to_closed_direct() {
+    let (actions, mut engine) = fresh_engine();
+    engine.process_event(E::OutboundStart);
+    engine.process_event(E::LinkLost);
+    assert_eq!(engine.get_current_state(), S::Closed);
+    assert!(engine.is_in_final_state());
+    let t = actions.trace_snapshot();
+    assert_eq!(t.release_link, 1);
+    assert_eq!(t.free_pool_slots, 1);
+    // link.lost bypasses Closing: no CLOSE frame, no
+    // set_close_reason call.
+    assert_eq!(t.send_close_frame_with_reason, 0);
+    assert_eq!(t.set_close_reason_count, 0);
+}
 
-    // ── 4. Opening (SentInitSyn) -> init_ack.timeout -> Closing
-    {
-        let (actions, mut engine) = fresh_engine();
-        engine.process_event(E::OutboundStart);
-        engine.process_event(E::LinkOpened);
-        assert_eq!(engine.get_current_state(), S::SentInitSyn);
+// ── 4. Opening (SentInitSyn) -> init_ack.timeout -> Closing
+#[test]
+fn r61_opening_init_ack_timeout_to_closing() {
+    let (actions, mut engine) = fresh_engine();
+    engine.process_event(E::OutboundStart);
+    engine.process_event(E::LinkOpened);
+    assert_eq!(engine.get_current_state(), S::SentInitSyn);
 
-        engine.process_event(E::InitAckTimeout);
-        assert_eq!(engine.get_current_state(), S::Closing);
-        let t = actions.trace_snapshot();
-        assert_eq!(t.close_reason, CloseReason::Generic);
-        assert_eq!(t.send_close_frame_with_reason, 1);
-    }
+    engine.process_event(E::InitAckTimeout);
+    assert_eq!(engine.get_current_state(), S::Closing);
+    let t = actions.trace_snapshot();
+    assert_eq!(t.close_reason, CloseReason::Generic);
+    assert_eq!(t.send_close_frame_with_reason, 1);
+}
 
-    // ── 5. Opening -> framing.error -> Closing (Invalid)
-    {
-        let (actions, mut engine) = fresh_engine();
-        engine.process_event(E::OutboundStart);
-        engine.process_event(E::LinkOpened);
-        engine.process_event(E::FramingError);
-        assert_eq!(engine.get_current_state(), S::Closing);
-        let t = actions.trace_snapshot();
-        assert_eq!(t.close_reason, CloseReason::Invalid);
-    }
+// ── 5. Opening -> framing.error -> Closing (Invalid)
+#[test]
+fn r61_opening_framing_error_to_closing_invalid() {
+    let (actions, mut engine) = fresh_engine();
+    engine.process_event(E::OutboundStart);
+    engine.process_event(E::LinkOpened);
+    engine.process_event(E::FramingError);
+    assert_eq!(engine.get_current_state(), S::Closing);
+    let t = actions.trace_snapshot();
+    assert_eq!(t.close_reason, CloseReason::Invalid);
+}
 
-    // ── 6. Opening (GotInitAck) -> open_ack.timeout -> Closing
-    {
-        let (actions, mut engine) = fresh_engine();
-        engine.process_event(E::OutboundStart);
-        engine.process_event(E::LinkOpened);
-        engine.process_event(E::InitAckReceived);
-        assert_eq!(engine.get_current_state(), S::GotInitAck);
+// ── 6. Opening (GotInitAck) -> open_ack.timeout -> Closing
+#[test]
+fn r61_opening_open_ack_timeout_to_closing() {
+    let (actions, mut engine) = fresh_engine();
+    engine.process_event(E::OutboundStart);
+    engine.process_event(E::LinkOpened);
+    engine.process_event(E::InitAckReceived);
+    assert_eq!(engine.get_current_state(), S::GotInitAck);
 
-        engine.process_event(E::OpenAckTimeout);
-        assert_eq!(engine.get_current_state(), S::Closing);
-        let t = actions.trace_snapshot();
-        assert_eq!(t.close_reason, CloseReason::Generic);
-    }
+    engine.process_event(E::OpenAckTimeout);
+    assert_eq!(engine.get_current_state(), S::Closing);
+    let t = actions.trace_snapshot();
+    assert_eq!(t.close_reason, CloseReason::Generic);
+}
 
-    // ── 7. Established -> lease.expired -> Closing (Expired)
-    {
-        let (actions, mut engine) = fresh_engine();
-        drive_to_established(&mut engine);
-        engine.process_event(E::LeaseExpired);
-        assert_eq!(engine.get_current_state(), S::Closing);
-        let t = actions.trace_snapshot();
-        assert_eq!(t.close_reason, CloseReason::Expired);
-        assert_eq!(t.send_close_frame_with_reason, 1);
-        // Established.onexit ran.
-        assert_eq!(t.stop_keepalive_worker, 1);
-        assert_eq!(t.stop_lease_monitor, 1);
-    }
+// ── 7. Established -> lease.expired -> Closing (Expired)
+#[test]
+fn r61_established_lease_expired_to_closing_expired() {
+    let (actions, mut engine) = fresh_engine();
+    drive_to_established(&mut engine);
+    engine.process_event(E::LeaseExpired);
+    assert_eq!(engine.get_current_state(), S::Closing);
+    let t = actions.trace_snapshot();
+    assert_eq!(t.close_reason, CloseReason::Expired);
+    assert_eq!(t.send_close_frame_with_reason, 1);
+    // Established.onexit ran.
+    assert_eq!(t.stop_keepalive_worker, 1);
+    assert_eq!(t.stop_lease_monitor, 1);
+}
 
-    // ── 8. Established -> framing.error -> Closing (Invalid)
-    {
-        let (actions, mut engine) = fresh_engine();
-        drive_to_established(&mut engine);
-        engine.process_event(E::FramingError);
-        assert_eq!(engine.get_current_state(), S::Closing);
-        assert_eq!(actions.trace_snapshot().close_reason, CloseReason::Invalid);
-    }
+// ── 8. Established -> framing.error -> Closing (Invalid)
+#[test]
+fn r61_established_framing_error_to_closing_invalid() {
+    let (actions, mut engine) = fresh_engine();
+    drive_to_established(&mut engine);
+    engine.process_event(E::FramingError);
+    assert_eq!(engine.get_current_state(), S::Closing);
+    assert_eq!(actions.trace_snapshot().close_reason, CloseReason::Invalid);
+}
 
-    // ── 9. Established -> tx.congestion.exhaust -> Closing
-    {
-        let (actions, mut engine) = fresh_engine();
-        drive_to_established(&mut engine);
-        engine.process_event(E::TxCongestionExhaust);
-        assert_eq!(engine.get_current_state(), S::Closing);
-        assert_eq!(
-            actions.trace_snapshot().close_reason,
-            CloseReason::Unresponsive
-        );
-    }
+// ── 9. Established -> tx.congestion.exhaust -> Closing
+#[test]
+fn r61_established_tx_congestion_exhaust_to_closing() {
+    let (actions, mut engine) = fresh_engine();
+    drive_to_established(&mut engine);
+    engine.process_event(E::TxCongestionExhaust);
+    assert_eq!(engine.get_current_state(), S::Closing);
+    assert_eq!(
+        actions.trace_snapshot().close_reason,
+        CloseReason::Unresponsive
+    );
+}
 
-    // ── 10. Established -> peer.close -> Closed (skips Closing)
-    {
-        let (actions, mut engine) = fresh_engine();
-        drive_to_established(&mut engine);
-        engine.process_event(E::PeerClose);
-        assert_eq!(engine.get_current_state(), S::Closed);
-        let t = actions.trace_snapshot();
-        assert_eq!(t.release_link, 1);
-        assert_eq!(t.send_close_frame_with_reason, 0);
-    }
+// ── 10. Established -> peer.close -> Closed (skips Closing)
+#[test]
+fn r61_established_peer_close_to_closed_direct() {
+    let (actions, mut engine) = fresh_engine();
+    drive_to_established(&mut engine);
+    engine.process_event(E::PeerClose);
+    assert_eq!(engine.get_current_state(), S::Closed);
+    let t = actions.trace_snapshot();
+    assert_eq!(t.release_link, 1);
+    assert_eq!(t.send_close_frame_with_reason, 0);
+}
 
-    // ── 11. Accepting -> framing.error -> Closing (Invalid)
-    {
-        let (actions, mut engine) = fresh_engine();
-        engine.process_event(E::InboundStart);
-        engine.process_event(E::InitSynReceived);
-        engine.process_event(E::FramingError);
-        assert_eq!(engine.get_current_state(), S::Closing);
-        assert_eq!(actions.trace_snapshot().close_reason, CloseReason::Invalid);
-    }
+// ── 11. Accepting -> framing.error -> Closing (Invalid)
+#[test]
+fn r61_accepting_framing_error_to_closing_invalid() {
+    let (actions, mut engine) = fresh_engine();
+    engine.process_event(E::InboundStart);
+    engine.process_event(E::InitSynReceived);
+    engine.process_event(E::FramingError);
+    assert_eq!(engine.get_current_state(), S::Closing);
+    assert_eq!(actions.trace_snapshot().close_reason, CloseReason::Invalid);
 }
