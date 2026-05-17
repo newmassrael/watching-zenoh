@@ -2511,7 +2511,8 @@
       ],
       "caveats_bullets": [
         "R67: ext_envelope.scxml landed (SCE 6-backend body-equiv). init/open/join body 보존. R63a → close.",
-        "R67b: ext_envelope round-trip oracle pinned in cargo test (8-byte wire decode + encode byte-equiv)."
+        "R67b: ext_envelope round-trip oracle pinned in cargo test (8-byte wire decode + encode byte-equiv).",
+        "R67c: Layer 3 wire-interop pinned (wz byte-equiv pico chain). R67 full close."
       ],
       "impact_scope": [
         "session-fsm--prose-level-sketch",
@@ -7053,6 +7054,52 @@
         "Layer 3 wire-interop test layer3_ext_envelope.rs vs zenoh-pico _z_msg_ext_vec_encode: still R68 (FFI bridge complexity unchanged).",
         "session_glue ext chain encode/decode integration: still R68 bundle.",
         "R68/R69/R71/Phase W carries + AP getrandom for SigningKey::new: unchanged."
+      ]
+    },
+    "Round 67c": {
+      "decision_summary": "Layer 3 wire-interop test landed — wz ExtEnvelope encode byte-equiv to zenoh-pico _z_msg_ext_encode entry chain. R67 substantive close (spec freeze + codec + Layer 1+2 + round-trip oracle + Layer 3).",
+      "changes_bullets": [
+        "crates/zenoh-pico-sys/wrapper.h: include protocol/codec/ext.h + protocol/ext.h to surface _z_msg_ext_* symbols to bindgen.",
+        "crates/zenoh-pico-sys/build.rs: R67c allowlist block — _z_msg_ext_t/unit/zint/zbuf types + _z_msg_ext_make_unit/zint/zbuf + _z_msg_ext_encode + _z_msg_ext_clear.",
+        "crates/wz-integration-tests/tests/layer3_ext_envelope.rs: Layer 3 wire-interop test — builds 3-entry oracle via _z_msg_ext_make_* + manual M-flag post-set (per protocol/ext.c id-mask semantics), encodes via _z_msg_ext_encode with has_next pattern (true,true,false), prefixes header_flags=0x01, compares to wz ExtEnvelope.encode() + ORACLE_WIRE.",
+        "session-fsm §7 R67c caveat: Layer 3 close marker, R67 full close declared."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_ext_envelope: 1 passed / 0 failed. Both zenoh-pico chain and wz encode byte-equiv ORACLE_WIRE [0x01 0x80 0xB1 0x2A 0x52 0x02 0xAB 0xCD].",
+        "Empirical discovery during test debug: _z_msg_ext_make_* masks id to _Z_EXT_ID_MASK (low 4 bits = ext_id) and OR-s enc-bits only; M flag (0x10) must be post-set on _header. Documented in test source comments + atomic caveat.",
+        "cargo build -p zenoh-pico-sys: clean post-allowlist expansion."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "carry_forward_bullets": [
+        "session_glue ext chain encode/decode integration: still R68 (pairs with inbound parser).",
+        "R68/R69/R71/Phase W carries + AP getrandom: unchanged.",
+        "R67 itself now fully closed — spec frozen, codec landed, Layer 1+2 SCE conformance 6/6, round-trip oracle cargo test, Layer 3 wire-interop vs zenoh-pico byte-equiv."
+      ],
+      "publishable_decision_summary": "Layer 3 wire-interop test landed — wz ExtEnvelope encode byte-equiv to zenoh-pico _z_msg_ext_encode entry chain. R67 substantive close (spec freeze + codec + Layer 1+2 + round-trip oracle + Layer 3).",
+      "publishable_changes_bullets": [
+        "crates/zenoh-pico-sys/wrapper.h: include protocol/codec/ext.h + protocol/ext.h to surface _z_msg_ext_* symbols to bindgen.",
+        "crates/zenoh-pico-sys/build.rs: R67c allowlist block — _z_msg_ext_t/unit/zint/zbuf types + _z_msg_ext_make_unit/zint/zbuf + _z_msg_ext_encode + _z_msg_ext_clear.",
+        "crates/wz-integration-tests/tests/layer3_ext_envelope.rs: Layer 3 wire-interop test — builds 3-entry oracle via _z_msg_ext_make_* + manual M-flag post-set (per protocol/ext.c id-mask semantics), encodes via _z_msg_ext_encode with has_next pattern (true,true,false), prefixes header_flags=0x01, compares to wz ExtEnvelope.encode() + ORACLE_WIRE.",
+        "session-fsm §7 R67c caveat: Layer 3 close marker, R67 full close declared."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_ext_envelope: 1 passed / 0 failed. Both zenoh-pico chain and wz encode byte-equiv ORACLE_WIRE [0x01 0x80 0xB1 0x2A 0x52 0x02 0xAB 0xCD].",
+        "Empirical discovery during test debug: _z_msg_ext_make_* masks id to _Z_EXT_ID_MASK (low 4 bits = ext_id) and OR-s enc-bits only; M flag (0x10) must be post-set on _header. Documented in test source comments + atomic caveat.",
+        "cargo build -p zenoh-pico-sys: clean post-allowlist expansion."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "session_glue ext chain encode/decode integration: still R68 (pairs with inbound parser).",
+        "R68/R69/R71/Phase W carries + AP getrandom: unchanged.",
+        "R67 itself now fully closed — spec frozen, codec landed, Layer 1+2 SCE conformance 6/6, round-trip oracle cargo test, Layer 3 wire-interop vs zenoh-pico byte-equiv."
       ]
     },
     "Round 7": {
