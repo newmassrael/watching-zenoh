@@ -902,11 +902,13 @@ fn encode_close(reason: u8) -> Vec<u8> {
 pub enum InboundFrame {
     /// `_Z_MID_T_INIT` (0x01). `is_ack` mirrors the
     /// `_Z_FLAG_T_INIT_A` discriminator; `has_ext` mirrors the
-    /// transport-header Z flag.
+    /// transport-header Z flag and corresponds to
+    /// `!extensions.is_empty()` when R68c decode succeeds.
     Init {
         is_ack: bool,
         has_ext: bool,
         body: InitBody,
+        extensions: Vec<ExtEntry>,
     },
     /// `_Z_MID_T_OPEN` (0x02). `is_ack` mirrors `_Z_FLAG_T_OPEN_A`;
     /// `lease_in_seconds` mirrors `_Z_FLAG_T_OPEN_T`.
@@ -915,9 +917,14 @@ pub enum InboundFrame {
         lease_in_seconds: bool,
         has_ext: bool,
         body: OpenBody,
+        extensions: Vec<ExtEntry>,
     },
     /// `_Z_MID_T_CLOSE` (0x03). `reason` is the single body byte.
-    Close { reason: u8, has_ext: bool },
+    Close {
+        reason: u8,
+        has_ext: bool,
+        extensions: Vec<ExtEntry>,
+    },
     /// MID outside the handshake/close triad.
     Unknown { mid: u8 },
 }
@@ -934,6 +941,12 @@ pub enum InboundParseError {
     /// The body codec rejected the wire (truncated, VLE overflow,
     /// etc.).
     Codec(CodecError),
+    /// R68c — the transport header set the Z flag but the trailing
+    /// ext chain exceeded `MAX_EXT_CHAIN_DEPTH` without surfacing a
+    /// chain-terminator entry (Z bit clear). Mirrors
+    /// `ext_envelope.scxml::on-overflow="reject"` so a malformed
+    /// peer cannot pin the decoder into an unbounded loop.
+    ExtChainOverflow,
 }
 
 impl std::fmt::Display for InboundParseError {
@@ -941,9 +954,21 @@ impl std::fmt::Display for InboundParseError {
         match self {
             Self::Empty => write!(f, "inbound frame was empty (no transport header)"),
             Self::Codec(e) => write!(f, "inbound body codec rejected wire: {:?}", e),
+            Self::ExtChainOverflow => write!(
+                f,
+                "inbound ext chain exceeded MAX_EXT_CHAIN_DEPTH={} without terminator",
+                MAX_EXT_CHAIN_DEPTH
+            ),
         }
     }
 }
+
+/// R68c — upper bound on ext-chain entries decoded per inbound
+/// frame. Mirrors `ext_envelope.scxml::max-depth="8"` so the wz
+/// inbound decoder fails closed on the same chain length zenoh-pico
+/// would already reject. Production deploys with a higher ceiling
+/// would have to bump this AND `ext_envelope.scxml` together.
+pub const MAX_EXT_CHAIN_DEPTH: usize = 8;
 
 impl std::error::Error for InboundParseError {}
 
@@ -965,35 +990,72 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
     let header = *bytes.first().ok_or(InboundParseError::Empty)?;
     let mid = header & 0x1F;
     let flags = header & 0xE0;
-    let has_ext = (flags & 0x80) != 0;
+    let has_ext = (flags & wire_const::FLAG_T_Z) != 0;
     let mut cursor = SceCursor::new(&bytes[1..]);
     match mid {
         wire_const::T_MID_INIT => {
             let body = InitBody::decode(&mut cursor, flags)?;
+            let extensions = if has_ext {
+                decode_ext_chain(&mut cursor)?
+            } else {
+                Vec::new()
+            };
             Ok(InboundFrame::Init {
                 is_ack: (flags & wire_const::FLAG_T_INIT_A) != 0,
                 has_ext,
                 body,
+                extensions,
             })
         }
         wire_const::T_MID_OPEN => {
             let body = OpenBody::decode(&mut cursor, flags)?;
+            let extensions = if has_ext {
+                decode_ext_chain(&mut cursor)?
+            } else {
+                Vec::new()
+            };
             Ok(InboundFrame::Open {
                 is_ack: (flags & wire_const::FLAG_T_OPEN_A) != 0,
                 lease_in_seconds: (flags & wire_const::FLAG_T_OPEN_T) != 0,
                 has_ext,
                 body,
+                extensions,
             })
         }
         wire_const::T_MID_CLOSE => {
             let body = Close::decode(&mut cursor)?;
+            let extensions = if has_ext {
+                decode_ext_chain(&mut cursor)?
+            } else {
+                Vec::new()
+            };
             Ok(InboundFrame::Close {
                 reason: body.reason,
                 has_ext,
+                extensions,
             })
         }
         other => Ok(InboundFrame::Unknown { mid: other }),
     }
+}
+
+/// Decode a transport-message ext chain in place. Terminates when
+/// an entry's `Z` bit is clear OR when `MAX_EXT_CHAIN_DEPTH` is
+/// reached (the latter returns `ExtChainOverflow` so a malformed
+/// peer cannot pin the decoder into an unbounded loop). The
+/// cursor's `peek_slice` raises `NeedMoreBytes` when the wire
+/// truncates mid-entry, which propagates up as `Codec(NeedMoreBytes)`.
+fn decode_ext_chain(cursor: &mut SceCursor<'_>) -> Result<Vec<ExtEntry>, InboundParseError> {
+    let mut entries = Vec::new();
+    for _ in 0..MAX_EXT_CHAIN_DEPTH {
+        let entry = ExtEntry::decode(cursor).map_err(InboundParseError::Codec)?;
+        let z = entry.z();
+        entries.push(entry);
+        if !z {
+            return Ok(entries);
+        }
+    }
+    Err(InboundParseError::ExtChainOverflow)
 }
 
 /// Pack the `cbyte` field per zenoh-pico's `_z_whatami_to_uint8`
