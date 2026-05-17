@@ -7266,6 +7266,52 @@
         "Inbound→FSM event wiring (parse_inbound 결과를 Engine::process_event로 필터링/forward)는 별도 round — R69+ session_glue_dispatch 의 inbound 파일럿 추가."
       ]
     },
+    "Round 69": {
+      "decision_summary": "AP getrandom for SigningKey::new_random — OS-syscall-backed cryptographic entropy via getrandom crate; MCU sibling defers to intrinsics §2.5 rng per §5.I architectural-tier separation.",
+      "changes_bullets": [
+        "wz-runtime-tokio/Cargo.toml: getrandom = \"0.2\" 의존성 추가 (AP only; Linux getrandom(2) fallback /dev/urandom; macOS getentropy).",
+        "wz-runtime-tokio/src/session_glue.rs: SigningKey::new_random() -> Result<Self, getrandom::Error> 구현. 32-byte Zeroizing<Vec<u8>> 할당 → getrandom::getrandom 채움 → SigningKey rewrap. Length 고정 32로 SigningKeyTooShort 가능성 제거.",
+        "wz-runtime-tokio/src/session_glue.rs: signing_key_new_random_yields_distinct_32_byte_keys unit test — length 검증 + 2-call distinctness (constant-source regression catcher)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib signing_key: 3 passed (debug_redacts + short_returns_err + new_random_distinct).",
+        "cargo test --workspace: 전체 회귀 0건.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "getrandom 0.2.17 설치 성공; Cargo.lock 업데이트 자동 반영."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
+        "intrinsics-runtime--symbol-surface/2-5-rng"
+      ],
+      "carry_forward_bullets": [
+        "R69b — inbound→FSM event wiring: handle_inbound이 parsed InboundFrame을 session FSM event로 매핑해서 Engine::process_event 호출.",
+        "R71 wz-runtime-tokio-test-support crate split + Phase W wz-runtime-lwip: 변경 없음.",
+        "R70-tier Hal time-mock: SCE std build이 Instant::now() 직접 사용 → std lane Hal time-mock은 SCE upstream sched_now Hal routing patch 필요; carry."
+      ],
+      "publishable_decision_summary": "AP getrandom for SigningKey::new_random — OS-syscall-backed cryptographic entropy via getrandom crate; MCU sibling defers to intrinsics §2.5 rng per §5.I architectural-tier separation.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/Cargo.toml: getrandom = \"0.2\" 의존성 추가 (AP only; Linux getrandom(2) fallback /dev/urandom; macOS getentropy).",
+        "wz-runtime-tokio/src/session_glue.rs: SigningKey::new_random() -> Result<Self, getrandom::Error> 구현. 32-byte Zeroizing<Vec<u8>> 할당 → getrandom::getrandom 채움 → SigningKey rewrap. Length 고정 32로 SigningKeyTooShort 가능성 제거.",
+        "wz-runtime-tokio/src/session_glue.rs: signing_key_new_random_yields_distinct_32_byte_keys unit test — length 검증 + 2-call distinctness (constant-source regression catcher)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib signing_key: 3 passed (debug_redacts + short_returns_err + new_random_distinct).",
+        "cargo test --workspace: 전체 회귀 0건.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "getrandom 0.2.17 설치 성공; Cargo.lock 업데이트 자동 반영."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
+        "intrinsics-runtime--symbol-surface/2-5-rng"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R69b — inbound→FSM event wiring: handle_inbound이 parsed InboundFrame을 session FSM event로 매핑해서 Engine::process_event 호출.",
+        "R71 wz-runtime-tokio-test-support crate split + Phase W wz-runtime-lwip: 변경 없음.",
+        "R70-tier Hal time-mock: SCE std build이 Instant::now() 직접 사용 → std lane Hal time-mock은 SCE upstream sched_now Hal routing patch 필요; carry."
+      ]
+    },
     "Round 7": {
       "decision_summary": "Phase D scope correction — README/SESSION_KICKOFF removed from workspace.docs (genre fit); atomic-internal orphan ledger via mnemosyne Round 254 supports textbook path.",
       "changes_bullets": [
