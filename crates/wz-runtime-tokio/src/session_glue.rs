@@ -61,6 +61,11 @@ use sce_rust_runtime::scripting::{IScriptEngine, NativeMethod, ScriptValue};
 #[cfg(any(test, feature = "_test_support"))]
 use sce_rust_runtime::scripting::ScriptResult;
 
+use sce_forge_runtime::codec::{CodecError, SceCursor};
+use wz_codecs::close::Close;
+use wz_codecs::init_body::InitBody;
+use wz_codecs::open_body::OpenBody;
+
 use crate::{LinkDriver, Reliability, TxFrame};
 
 /// Cryptographic key for the anti-amplification cookie MAC.
@@ -380,6 +385,11 @@ pub struct SessionLinkActions {
     pub driver: Arc<dyn BoxedLinkDriver>,
     pub params: SessionInitParams,
     pub trace: Mutex<ActionTrace>,
+    /// Cookie material captured from a peer's InitAck via
+    /// `handle_inbound`. When populated this overrides
+    /// `params.cookie` on the OpenSyn outbound, implementing the
+    /// RFC §5.M echo contract on the Initiator side.
+    pub inbound_cookie: Mutex<Option<Vec<u8>>>,
 }
 
 impl SessionLinkActions {
@@ -392,11 +402,33 @@ impl SessionLinkActions {
             driver,
             params,
             trace: Mutex::new(ActionTrace::default()),
+            inbound_cookie: Mutex::new(None),
         })
     }
 
     pub fn trace_snapshot(&self) -> ActionTrace {
         self.trace.lock().unwrap().clone_via_copy()
+    }
+
+    /// Initiator-side inbound dispatch — parse the wire bytes, and if
+    /// the frame is `Init` with the `_Z_FLAG_T_INIT_A` discriminator
+    /// set (i.e. peer InitAck), capture the cookie payload into
+    /// `inbound_cookie` so the next OpenSyn echoes it verbatim per
+    /// RFC §5.M.
+    ///
+    /// Returns the parsed `InboundFrame` so the caller can drive the
+    /// session FSM (`Engine::process_event`) with the typed event;
+    /// `handle_inbound` itself does not advance the FSM — that wiring
+    /// belongs in a follow-up round when the inbound-event channel
+    /// from `LinkDriver::poll_event` lands.
+    pub fn handle_inbound(&self, bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
+        let frame = parse_inbound(bytes)?;
+        if let InboundFrame::Init { is_ack: true, body, .. } = &frame {
+            if let Some(cookie) = &body.cookie {
+                *self.inbound_cookie.lock().unwrap() = Some(cookie.clone());
+            }
+        }
+        Ok(frame)
     }
 }
 
@@ -526,7 +558,11 @@ fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLink
 
     bind_unit(lua, "send_open_syn", actions, |a| {
         a.trace.lock().unwrap().send_open_syn += 1;
-        let bytes = encode_open(&a.params, /*is_ack=*/ false);
+        // RFC §5.M echo contract: prefer the cookie captured from a
+        // peer InitAck via handle_inbound; fall back to params.cookie
+        // for tests that drive OpenSyn without an inbound parse cycle.
+        let cookie_override = a.inbound_cookie.lock().unwrap().clone();
+        let bytes = encode_open(&a.params, /*is_ack=*/ false, cookie_override.as_deref());
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
@@ -547,7 +583,11 @@ fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLink
 
     bind_unit(lua, "send_open_ack", actions, |a| {
         a.trace.lock().unwrap().send_open_ack += 1;
-        let bytes = encode_open(&a.params, /*is_ack=*/ true);
+        // Accepting side OpenAck: cookie is consumed by the time we
+        // get here (it travelled inbound on OpenSyn and was already
+        // MAC-verified); the OpenAck shape omits it (parent.A=1
+        // suppresses the cookie field per transport.c:300-302).
+        let bytes = encode_open(&a.params, /*is_ack=*/ true, /*cookie_override=*/ None);
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
@@ -614,8 +654,6 @@ fn register_guard_fns(lua: &dyn IScriptEngine) {
 /// `crates/wz-integration-tests/tests/layer3_init_body.rs`. The
 /// transport-message header is one byte: `(flags) | T_MID_INIT`.
 fn encode_init(params: &SessionInitParams, is_ack: bool) -> Vec<u8> {
-    use wz_codecs::init_body::InitBody;
-
     let mut parent_flags = wire_const::FLAG_T_INIT_S;
     if is_ack {
         parent_flags |= wire_const::FLAG_T_INIT_A;
@@ -645,9 +683,19 @@ fn encode_init(params: &SessionInitParams, is_ack: bool) -> Vec<u8> {
 /// Build the wire bytes for an Open frame (OpenSyn / OpenAck). Body
 /// is the wz `OpenBody`, verified byte-identical to zenoh-pico's
 /// `_z_open_encode` by `tests/layer3_open_body.rs`.
-fn encode_open(params: &SessionInitParams, is_ack: bool) -> Vec<u8> {
-    use wz_codecs::open_body::OpenBody;
-
+///
+/// `cookie_override` carries the OpenSyn echo path (RFC §5.M): when
+/// the Initiator receives a peer InitAck via `handle_inbound`, the
+/// captured cookie bytes are passed here so OpenSyn echoes them
+/// verbatim. `None` falls back to `params.cookie` for tests that
+/// drive OpenSyn directly without an inbound parse cycle. The
+/// argument is ignored when `is_ack=true` (OpenAck carries no
+/// cookie field per transport.c:300-302).
+fn encode_open(
+    params: &SessionInitParams,
+    is_ack: bool,
+    cookie_override: Option<&[u8]>,
+) -> Vec<u8> {
     let mut parent_flags = 0u8;
     if params.lease_in_seconds {
         parent_flags |= wire_const::FLAG_T_OPEN_T;
@@ -656,21 +704,23 @@ fn encode_open(params: &SessionInitParams, is_ack: bool) -> Vec<u8> {
         parent_flags |= wire_const::FLAG_T_OPEN_A;
     }
 
-    // OpenSyn echoes the cookie the InitAck side issued; OpenAck does
-    // not (cookie is consumed by the time the Accepting side sends
-    // OpenAck).
+    let cookie_bytes: &[u8] = if !is_ack {
+        cookie_override.unwrap_or(&params.cookie)
+    } else {
+        &[]
+    };
     let body = OpenBody {
         lease: params.lease,
         initial_sn: params.initial_sn,
         cookie_len: if !is_ack {
-            Some(params.cookie.len() as u64)
+            Some(cookie_bytes.len() as u64)
         } else {
             None
         },
-        cookie: if !is_ack { Some(params.cookie.clone()) } else { None },
+        cookie: if !is_ack { Some(cookie_bytes.to_vec()) } else { None },
     };
 
-    let mut wire = Vec::with_capacity(params.cookie.len() + 24);
+    let mut wire = Vec::with_capacity(cookie_bytes.len() + 24);
     wire.push(parent_flags | wire_const::T_MID_OPEN);
     wire.extend_from_slice(&body.encode(parent_flags));
     wire
@@ -683,14 +733,128 @@ fn encode_open(params: &SessionInitParams, is_ack: bool) -> Vec<u8> {
 /// always set it — link-only close is a transport-layer concern
 /// that the link driver handles directly).
 fn encode_close(reason: u8) -> Vec<u8> {
-    use wz_codecs::close::Close;
-
     let parent_flags = wire_const::FLAG_T_CLOSE_S;
     let body = Close { reason };
     let mut wire = Vec::with_capacity(2);
     wire.push(parent_flags | wire_const::T_MID_CLOSE);
     wire.extend_from_slice(&body.encode());
     wire
+}
+
+// ─────────────────────────── inbound parser ───────────────────────────
+
+/// Parsed inbound transport-message frame surfaced by `parse_inbound`.
+///
+/// R68a baseline. The variant set covers the three transport bodies
+/// the Initiator side cares about during handshake + close:
+/// `Init` / `Open` / `Close`. The `has_ext` field on each variant
+/// records whether the parent header's Z flag was set so the caller
+/// can dispatch ext-chain decoding (R68c) without re-parsing the
+/// header byte; the chain itself is decoded by `decode_ext_chain`.
+/// `Unknown { mid }` covers MIDs outside the {INIT, OPEN, CLOSE}
+/// triad — the caller may forward them to a higher-layer dispatch
+/// (e.g. KeepAlive / Frame / Fragment) or drop them.
+///
+/// No `Debug` derive: the wz-codecs structs (`InitBody`/`OpenBody`)
+/// are sce-codegen output and only derive `Default`. Callers
+/// pattern-match the variant and inspect typed fields directly; a
+/// log-style print on the whole frame is rare and can be composed
+/// at the call site if needed.
+pub enum InboundFrame {
+    /// `_Z_MID_T_INIT` (0x01). `is_ack` mirrors the
+    /// `_Z_FLAG_T_INIT_A` discriminator; `has_ext` mirrors the
+    /// transport-header Z flag.
+    Init {
+        is_ack: bool,
+        has_ext: bool,
+        body: InitBody,
+    },
+    /// `_Z_MID_T_OPEN` (0x02). `is_ack` mirrors `_Z_FLAG_T_OPEN_A`;
+    /// `lease_in_seconds` mirrors `_Z_FLAG_T_OPEN_T`.
+    Open {
+        is_ack: bool,
+        lease_in_seconds: bool,
+        has_ext: bool,
+        body: OpenBody,
+    },
+    /// `_Z_MID_T_CLOSE` (0x03). `reason` is the single body byte.
+    Close { reason: u8, has_ext: bool },
+    /// MID outside the handshake/close triad.
+    Unknown { mid: u8 },
+}
+
+/// Error surface for `parse_inbound`. Distinct from `CodecError` so
+/// callers can react to "empty wire" (link delivered a zero-byte
+/// frame, programming error) without conflating it with codec-level
+/// `NeedMoreBytes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InboundParseError {
+    /// The frame was zero bytes — no transport-message header to
+    /// dispatch on.
+    Empty,
+    /// The body codec rejected the wire (truncated, VLE overflow,
+    /// etc.).
+    Codec(CodecError),
+}
+
+impl std::fmt::Display for InboundParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "inbound frame was empty (no transport header)"),
+            Self::Codec(e) => write!(f, "inbound body codec rejected wire: {:?}", e),
+        }
+    }
+}
+
+impl std::error::Error for InboundParseError {}
+
+impl From<CodecError> for InboundParseError {
+    fn from(e: CodecError) -> Self {
+        Self::Codec(e)
+    }
+}
+
+/// Parse a single transport-message frame from `bytes`.
+///
+/// The first byte carries `(flags<<5) | mid` — the low 5 bits are
+/// the message ID, the high 3 bits are the per-MID flag set + the
+/// shared Z flag (`0x80`) for the ext chain. R68a baseline decodes
+/// the body via the wz codec set and reports the Z flag via
+/// `has_ext`; the ext-chain bytes themselves are left in the
+/// trailing portion of `bytes` for R68c to consume.
+pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
+    let header = *bytes.first().ok_or(InboundParseError::Empty)?;
+    let mid = header & 0x1F;
+    let flags = header & 0xE0;
+    let has_ext = (flags & 0x80) != 0;
+    let mut cursor = SceCursor::new(&bytes[1..]);
+    match mid {
+        wire_const::T_MID_INIT => {
+            let body = InitBody::decode(&mut cursor, flags)?;
+            Ok(InboundFrame::Init {
+                is_ack: (flags & wire_const::FLAG_T_INIT_A) != 0,
+                has_ext,
+                body,
+            })
+        }
+        wire_const::T_MID_OPEN => {
+            let body = OpenBody::decode(&mut cursor, flags)?;
+            Ok(InboundFrame::Open {
+                is_ack: (flags & wire_const::FLAG_T_OPEN_A) != 0,
+                lease_in_seconds: (flags & wire_const::FLAG_T_OPEN_T) != 0,
+                has_ext,
+                body,
+            })
+        }
+        wire_const::T_MID_CLOSE => {
+            let body = Close::decode(&mut cursor)?;
+            Ok(InboundFrame::Close {
+                reason: body.reason,
+                has_ext,
+            })
+        }
+        other => Ok(InboundFrame::Unknown { mid: other }),
+    }
 }
 
 /// Pack the `cbyte` field per zenoh-pico's `_z_whatami_to_uint8`

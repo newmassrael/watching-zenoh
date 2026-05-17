@@ -1098,6 +1098,7 @@ dependencies = [
  "sce-forge-runtime",
  "tempfile",
  "wz-codecs",
+ "wz-runtime-tokio",
  "zenoh-pico-sys",
 ]
 
