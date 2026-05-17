@@ -538,7 +538,9 @@
         "Q1 = No ratified Round 11: SCE BASELINE_SYMBOLS boundary is architecture-fixed primitives only.",
         "Impl multiplicity (HW TRNG / ADC+Yarrow / getrandom / arc4random) places RNG in plugin tier.",
         "Fallback validated by SCE c13_beta_antiflood tests (baseline ∪ plugin lookup, 4570a389).",
-        "Counter-offer tracked as OQ-W24 (RFC §5.I tier-explicit separation, boundary hardening)."
+        "Counter-offer tracked as OQ-W24 (RFC §5.I tier-explicit separation, boundary hardening).",
+        "R62 cookie key currently caller-supplied static bytes (no RNG fill yet)",
+        "R70b carry: AP-side getrandom integration for SigningKey::new entropy"
       ],
       "impact_scope": [
         "intrinsics-runtime--symbol-surface/2-symbol-categories",
@@ -552,7 +554,11 @@
       "caveats_bullets": [
         "Q2 = Yes ratified Round 11: proposal target_plugin path confirmed by SCE maintainer.",
         "Per-SoC accelerator surface (STM32H7 CRYP / ESP32 SHA / Cortex-M0+ SW) keeps baseline crypto-free.",
-        "SW fallback authorable as algorithm kind; wire output identical across backings."
+        "SW fallback authorable as algorithm kind; wire output identical across backings.",
+        "R62 AP path uses RustCrypto hmac+sha2 (std-coupled, vendored)",
+        "R70 SigningKey newtype + zeroize-on-drop wraps the secret key bytes",
+        "RFC 4231 TC1+TC2 byte-equiv pinned in wz-runtime-tokio unit tests (R70)",
+        "Phase W (MCU) swaps to sce_intrinsics_runtime::hmac_sha256 per RFC §5.I"
       ],
       "impact_scope": [
         "intrinsics-runtime--symbol-surface/2-symbol-categories",
@@ -912,6 +918,10 @@
     },
     "reassembly-fsm--prose-sketch/6-buffer-pool-interaction": {
       "intent": "Buffer-pool lifecycle FSM (§5.E) interaction — reassembly slot acquire = pool slot cpu-mut; terminal release = cpu-mut/cpu-ref → free.",
+      "caveats_bullets": [
+        "R51-R52 RxFrame { bytes: Vec u8 } owned — pool-slot zero-copy not yet wired",
+        "Pool-slot Rx borrows carry: wz-runtime-tokio §4.1 io_uring fixed-buffer opt-in"
+      ],
       "impact_scope": [
         "reassembly-fsm--prose-sketch",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement"
@@ -1986,6 +1996,10 @@
     },
     "scouting-fsm--prose-sketch/1-3-scouting-link-vs-session-link-distinct": {
       "intent": "Scouting link is separate link instance from session links even on shared UDP multicast group/port; trust_class differs (untrusted vs session_arming).",
+      "caveats_bullets": [
+        "R53 wz authoring: sources/links/lwip_udp_scout.scxml (retained R63 lwip revert)",
+        "SCE B6 link kind C11 emitter validated as link_emitter_b6 Layer 3 test (R63)"
+      ],
       "impact_scope": [
         "scouting-fsm--prose-sketch",
         "session-fsm--prose-level-sketch/2-6-trust-class-interaction",
@@ -6850,6 +6864,60 @@
         "R71 = wz-runtime-tokio-test-support separate crate split (replaces _test_support feature flag pattern).",
         "Phase W = wz-runtime-lwip reintroduction with MCU cross-compile + real lwIP API.",
         "Spec body authoring continues at multi-round pace: R66 covered 3 sections; subsequent rounds will cover R66d (intrinsics-runtime-symbols crypto ownership) / R66e (reassembly-fsm pool ownership) / R66f (scouting-fsm scout link binding) at the same granularity."
+      ]
+    },
+    "Round 66d": {
+      "decision_summary": "Spec body authoring round 2 — intrinsics §2.5/§2.6 (RNG + HMAC) + reassembly §6 (buffer pool) + scouting §1.3 (scout link distinct) get R51-R70 prototype evidence into atomic caveats.",
+      "changes_bullets": [
+        "intrinsics-runtime--symbol-surface/2-6-hmac: 4 caveats (R62 AP path RustCrypto hmac+sha2 / R70 SigningKey newtype + zeroize / RFC 4231 TC1+TC2 pinned / Phase W swap to sce_intrinsics_runtime::hmac_sha256).",
+        "intrinsics-runtime--symbol-surface/2-5-rng: 2 caveats (R62 caller-supplied static key / R70b carry AP getrandom).",
+        "reassembly-fsm--prose-sketch/6-buffer-pool-interaction: 2 caveats (R51-R52 RxFrame Vec<u8> owned not pool-slot zero-copy / pool-slot Rx borrows carry wz-runtime-tokio §4.1).",
+        "scouting-fsm--prose-sketch/1-3-scouting-link-vs-session-link-distinct: 2 caveats (R53 sources/links/lwip_udp_scout.scxml retained R63 lwip revert / SCE B6 link kind C11 emitter validated as link_emitter_b6 Layer 3 test R63)."
+      ],
+      "verification_bullets": [
+        "10 add_section_caveat calls across 4 sections; each <=100 chars (MAX_BULLET_CHAR).",
+        "validate_workspace clean throughout: T1=0, RT 12/12, GENERATED.md=sync.",
+        "atomic ledger entries 73 → 74 (this round). sections unchanged (caveat append, no new sections)."
+      ],
+      "impact_refs": [
+        "intrinsics-runtime--symbol-surface/2-5-rng",
+        "intrinsics-runtime--symbol-surface/2-6-hmac",
+        "reassembly-fsm--prose-sketch/6-buffer-pool-interaction",
+        "scouting-fsm--prose-sketch/1-3-scouting-link-vs-session-link-distinct"
+      ],
+      "carry_forward_bullets": [
+        "R66 spec body authoring covers 7 critical sections now (R66 set + this R66d set). Remaining open: rfc-sce-protocol-synthesis §5.M cookie HMAC sub-section; oq-w15 ratification summary R70 update.",
+        "R71 = wz-runtime-tokio-test-support separate crate split (encapsulation harden).",
+        "R67 = R63a SCXML extension chain authoring.",
+        "R68 = R63b Initiator inbound parser.",
+        "R69 = Hal time-mock injection.",
+        "R70b = AP getrandom integration + RFC 4231 TC3-7 coverage."
+      ],
+      "publishable_decision_summary": "Spec body authoring round 2 — intrinsics §2.5/§2.6 (RNG + HMAC) + reassembly §6 (buffer pool) + scouting §1.3 (scout link distinct) get R51-R70 prototype evidence into atomic caveats.",
+      "publishable_changes_bullets": [
+        "intrinsics-runtime--symbol-surface/2-6-hmac: 4 caveats (R62 AP path RustCrypto hmac+sha2 / R70 SigningKey newtype + zeroize / RFC 4231 TC1+TC2 pinned / Phase W swap to sce_intrinsics_runtime::hmac_sha256).",
+        "intrinsics-runtime--symbol-surface/2-5-rng: 2 caveats (R62 caller-supplied static key / R70b carry AP getrandom).",
+        "reassembly-fsm--prose-sketch/6-buffer-pool-interaction: 2 caveats (R51-R52 RxFrame Vec<u8> owned not pool-slot zero-copy / pool-slot Rx borrows carry wz-runtime-tokio §4.1).",
+        "scouting-fsm--prose-sketch/1-3-scouting-link-vs-session-link-distinct: 2 caveats (R53 sources/links/lwip_udp_scout.scxml retained R63 lwip revert / SCE B6 link kind C11 emitter validated as link_emitter_b6 Layer 3 test R63)."
+      ],
+      "publishable_verification_bullets": [
+        "10 add_section_caveat calls across 4 sections; each <=100 chars (MAX_BULLET_CHAR).",
+        "validate_workspace clean throughout: T1=0, RT 12/12, GENERATED.md=sync.",
+        "atomic ledger entries 73 → 74 (this round). sections unchanged (caveat append, no new sections)."
+      ],
+      "publishable_impact_refs": [
+        "intrinsics-runtime--symbol-surface/2-5-rng",
+        "intrinsics-runtime--symbol-surface/2-6-hmac",
+        "reassembly-fsm--prose-sketch/6-buffer-pool-interaction",
+        "scouting-fsm--prose-sketch/1-3-scouting-link-vs-session-link-distinct"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R66 spec body authoring covers 7 critical sections now (R66 set + this R66d set). Remaining open: rfc-sce-protocol-synthesis §5.M cookie HMAC sub-section; oq-w15 ratification summary R70 update.",
+        "R71 = wz-runtime-tokio-test-support separate crate split (encapsulation harden).",
+        "R67 = R63a SCXML extension chain authoring.",
+        "R68 = R63b Initiator inbound parser.",
+        "R69 = Hal time-mock injection.",
+        "R70b = AP getrandom integration + RFC 4231 TC3-7 coverage."
       ]
     },
     "Round 7": {
