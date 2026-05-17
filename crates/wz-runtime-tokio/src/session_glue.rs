@@ -475,6 +475,18 @@ pub struct SessionLinkActions {
     /// so the lease comparator subtracts them with a single
     /// monotonic source.
     pub established_at: Mutex<Option<Instant>>,
+    /// R86 — `zid` field captured from the most recent inbound
+    /// `InitSyn` frame (`InboundFrame::Init { is_ack: false, .. }`).
+    /// The Accepting side reads this slot inside
+    /// `send_init_ack_with_cookie` to bind the outbound cookie's
+    /// HMAC input to the peer's claimed identity per RFC §5.M
+    /// anti-amplification: `cookie = HMAC-SHA256(cookie_signing_key,
+    /// peer_zid)[..16]`. An absent slot means no InitSyn has
+    /// arrived yet (handshake hasn't started) and the action falls
+    /// back to `params.cookie` verbatim — callers that need strict
+    /// HMAC-only behavior must validate the slot before signalling
+    /// `inbound.start`.
+    pub inbound_peer_zid: Mutex<Option<Vec<u8>>>,
     /// R68b — per-role ext chain slots. Indexed by `ExtChainRole`
     /// via `ext_chain_for`. Each slot lives behind its own `Mutex`
     /// so a setter can swap one chain without blocking the others
@@ -499,6 +511,7 @@ impl SessionLinkActions {
             inbound_cookie: Mutex::new(None),
             last_inbound_keepalive_at: Mutex::new(None),
             established_at: Mutex::new(None),
+            inbound_peer_zid: Mutex::new(None),
             init_syn_ext: Mutex::new(Vec::new()),
             init_ack_ext: Mutex::new(Vec::new()),
             open_syn_ext: Mutex::new(Vec::new()),
@@ -528,9 +541,14 @@ impl SessionLinkActions {
     /// bypassing the `dispatch_script` singleton race that bites
     /// when multiple tests in one binary share the
     /// `INSTALLED`/Lua-engine globals.
-    pub fn encode_init_with_role(&self, is_ack: bool, role: ExtChainRole) -> Vec<u8> {
+    pub fn encode_init_with_role(
+        &self,
+        is_ack: bool,
+        cookie_override: Option<&[u8]>,
+        role: ExtChainRole,
+    ) -> Vec<u8> {
         let chain = self.ext_chain_slot(role).lock().unwrap();
-        encode_init(&self.params, is_ack, &chain)
+        encode_init(&self.params, is_ack, &chain, cookie_override)
     }
 
     pub fn encode_open_with_role(
@@ -574,6 +592,12 @@ impl SessionLinkActions {
                 if let Some(cookie) = &body.cookie {
                     *self.inbound_cookie.lock().unwrap() = Some(cookie.clone());
                 }
+            }
+            InboundFrame::Init { is_ack: false, body, .. } => {
+                // R86 — Accepting-side InitSyn arrival: capture the
+                // peer's claimed zid so the next send_init_ack_with_cookie
+                // can HMAC-bind the outbound cookie to it per RFC §5.M.
+                *self.inbound_peer_zid.lock().unwrap() = Some(body.zid.clone());
             }
             InboundFrame::KeepAlive { .. } => {
                 // R72b — record receive time so the lease deadline
@@ -666,7 +690,11 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
 
     bind_unit(lua, "send_init_syn", actions, |a| {
         a.trace.lock().unwrap().send_init_syn += 1;
-        let bytes = a.encode_init_with_role(/*is_ack=*/ false, ExtChainRole::InitSyn);
+        let bytes = a.encode_init_with_role(
+            /*is_ack=*/ false,
+            /*cookie_override=*/ None,
+            ExtChainRole::InitSyn,
+        );
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
@@ -686,16 +714,30 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
 
     bind_unit(lua, "send_init_ack_with_cookie", actions, |a| {
         a.trace.lock().unwrap().send_init_ack_with_cookie += 1;
-        // Accepting-side cookie material flows through params.cookie.
-        // Production callers MUST populate it via
-        // `generate_cookie_hmac_sha256(params.cookie_signing_key,
-        //  peer_zid_from_inbound_InitSyn)` before install; the
-        // Accepting side's per-handshake nonce / peer_zid binding
-        // is the production caller's responsibility because session
-        // FSM state (incoming peer_zid) is not yet propagated into
-        // SessionLinkActions in R62 — inbound parser pass is a
-        // later round.
-        let bytes = a.encode_init_with_role(/*is_ack=*/ true, ExtChainRole::InitAck);
+        // R86 — Accepting-side cookie binding per RFC §5.M
+        // anti-amplification. If the inbound InitSyn already arrived
+        // (`inbound_peer_zid` slot populated by `handle_inbound`),
+        // mint a fresh cookie via HMAC-SHA256(cookie_signing_key,
+        // peer_zid)[..16] and pass it as the encode override; the
+        // cookie is now bound to the specific peer's claimed
+        // identity, not a deploy-static value. Falls back to
+        // `params.cookie` verbatim if no peer_zid has been observed
+        // (defensive — a well-formed handshake always populates the
+        // slot before this script fires, since `Accepting.onentry`
+        // is gated on `InitSynReceived`).
+        let cookie_hmac: Option<Vec<u8>> = a
+            .inbound_peer_zid
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|peer_zid| {
+                generate_cookie_hmac_sha256(&a.params.cookie_signing_key, peer_zid)
+            });
+        let bytes = a.encode_init_with_role(
+            /*is_ack=*/ true,
+            cookie_hmac.as_deref(),
+            ExtChainRole::InitAck,
+        );
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
@@ -789,6 +831,7 @@ fn encode_init(
     params: &SessionInitParams,
     is_ack: bool,
     extensions: &[ExtEntry],
+    cookie_override: Option<&[u8]>,
 ) -> Vec<u8> {
     let mut parent_flags = wire_const::FLAG_T_INIT_S;
     if is_ack {
@@ -798,19 +841,26 @@ fn encode_init(
         parent_flags |= wire_const::FLAG_T_Z;
     }
 
+    // R86 — cookie carrier rules: InitSyn (is_ack=false) never
+    // carries a cookie regardless of override. InitAck (is_ack=true)
+    // uses cookie_override when supplied (production peer_zid binding
+    // path from send_init_ack_with_cookie) and falls back to
+    // params.cookie otherwise. cookie_override is silently ignored on
+    // InitSyn because the wire-spec forbids the field there.
     let cbyte = init_cbyte(params.whatami, params.zid.len());
+    let cookie_bytes: Option<Vec<u8>> = if is_ack {
+        Some(cookie_override.map(|c| c.to_vec()).unwrap_or_else(|| params.cookie.clone()))
+    } else {
+        None
+    };
     let body = InitBody {
         version: params.version,
         cbyte,
         zid: params.zid.clone(),
         sn_res: Some(pack_sn_res(params.seq_num_res, params.req_id_res)),
         batch_size: Some(params.batch_size),
-        cookie_len: if is_ack {
-            Some(params.cookie.len() as u64)
-        } else {
-            None
-        },
-        cookie: if is_ack { Some(params.cookie.clone()) } else { None },
+        cookie_len: cookie_bytes.as_ref().map(|c| c.len() as u64),
+        cookie: cookie_bytes,
     };
 
     let ext_bytes = encode_ext_chain(extensions);

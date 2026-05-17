@@ -220,3 +220,89 @@ async fn r78_accepting_path_handshake_terminates_at_established() {
         );
     }
 }
+
+// ────── R86 cookie HMAC binding (Accepting-side InitAck wire) ──────
+
+/// Recording outbound driver that captures every send_blocking call
+/// so R86's HMAC-bound cookie can be inspected post-dispatch. The
+/// inert NoopOutboundDriver above discards bytes — fine for the R78
+/// FSM-shape walk, but R86 needs the InitAck wire bytes.
+#[derive(Default)]
+struct RecordingOutboundDriver {
+    sent: Mutex<Vec<Vec<u8>>>,
+}
+
+impl BoxedLinkDriver for RecordingOutboundDriver {
+    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
+        self.sent.lock().unwrap().push(bytes.to_vec());
+    }
+    fn open_blocking(&self) {}
+    fn close_blocking(&self) {}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
+    use wz_runtime_tokio::session_glue::{generate_cookie_hmac_sha256, parse_inbound, InboundFrame};
+
+    // Setup with a RecordingOutboundDriver so the InitAck wire bytes
+    // are captured for cookie inspection.
+    let recording_driver = Arc::new(RecordingOutboundDriver::default());
+    let driver_arc: Arc<dyn BoxedLinkDriver> = recording_driver.clone();
+    let params = fixture_session_init_params();
+    let actions = SessionLinkActions::new(driver_arc, params);
+    let lua = install_session_actions_for_test(actions.clone());
+    let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
+    engine.initialize();
+
+    // Init -> AwaitingInitSyn (listener role activation)
+    engine.process_event(E::InboundStart);
+    assert_eq!(engine.get_current_state(), S::AwaitingInitSyn);
+
+    // Rx InitSyn (zid = [0xB0..0xB3] per craft_initsyn_wire) routes
+    // through poll_and_dispatch_one -> handle_inbound captures
+    // peer_zid -> FSM transitions to SentInitAck -> SentInitAck.onentry
+    // fires send_init_ack_with_cookie which (per R86) HMAC-binds the
+    // cookie against the captured peer_zid.
+    let mut queue_driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
+        bytes: craft_initsyn_wire(),
+    })]);
+    let _ = poll_and_dispatch_one(&mut queue_driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::SentInitAck);
+    assert_eq!(
+        actions.inbound_peer_zid.lock().unwrap().as_deref(),
+        Some(&[0xB0, 0xB1, 0xB2, 0xB3][..]),
+        "InitSyn dispatch must capture peer_zid before SentInitAck.onentry fires"
+    );
+
+    // The InitAck wire was just sent through the recording driver.
+    let sends = recording_driver.sent.lock().unwrap().clone();
+    assert_eq!(sends.len(), 1, "exactly one outbound frame (the InitAck)");
+    let initack_wire = &sends[0];
+
+    // Re-parse the wire and pull out the cookie field. The InitAck
+    // re-encode path is verified byte-identical against zenoh-pico by
+    // layer3_init_body.rs; here we just need the cookie value.
+    let frame = parse_inbound(initack_wire).expect("outbound InitAck wire re-parses");
+    let cookie = match frame {
+        InboundFrame::Init { is_ack: true, body, .. } => {
+            body.cookie.expect("InitAck carries cookie payload")
+        }
+        other => panic!("expected InitAck variant, got {other:?}", other = std::any::type_name_of_val(&other)),
+    };
+
+    // The expected cookie is HMAC-SHA256(cookie_signing_key, peer_zid)
+    // truncated to 16 bytes per RFC §5.M. Recompute it inline using
+    // the same fixture key so the test is independent of the cookie
+    // module's internal constants.
+    let expected_cookie = generate_cookie_hmac_sha256(
+        &fixture_session_init_params().cookie_signing_key,
+        &[0xB0, 0xB1, 0xB2, 0xB3],
+    );
+    assert_eq!(
+        cookie, expected_cookie,
+        "R86: outbound InitAck cookie MUST be HMAC(cookie_signing_key, \
+         inbound_peer_zid)[..16] — pre-R86 this was params.cookie verbatim \
+         which violated RFC §5.M anti-amplification (deploy-static cookie \
+         offers no per-peer replay defense)"
+    );
+}
