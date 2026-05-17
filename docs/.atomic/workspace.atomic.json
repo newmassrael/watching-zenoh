@@ -2510,7 +2510,8 @@
         "ext::PatchType — Close(UNSUPPORTED) on peer patch > ours; OQ-W7"
       ],
       "caveats_bullets": [
-        "R67: ext_envelope.scxml landed (SCE 6-backend body-equiv). init/open/join body 보존. R63a → close."
+        "R67: ext_envelope.scxml landed (SCE 6-backend body-equiv). init/open/join body 보존. R63a → close.",
+        "R67b: ext_envelope round-trip oracle pinned in cargo test (8-byte wire decode + encode byte-equiv)."
       ],
       "impact_scope": [
         "session-fsm--prose-level-sketch",
@@ -7012,6 +7013,46 @@
         "wz-runtime-tokio session_glue ext chain encode/decode integration: pending — pairs naturally with R68 initiator-side inbound parser (peer InitAck wire → SessionInitParams.cookie populate).",
         "R68/R69/R71/Phase W carries unchanged. AP getrandom for SigningKey::new entropy (R70b new carry) still open.",
         "Init/Open/Join wz body BE/LE divergence carry vs SCE fixture (R44 closure): unaffected by R67; SCE upstream PR still pending."
+      ]
+    },
+    "Round 67b": {
+      "decision_summary": "ext_envelope round-trip oracle pinned in cargo test — SCXML-comment 8-byte fixture promoted to executable assertion (textbook spec-frozen-first fixture-first completion of R67).",
+      "changes_bullets": [
+        "crates/wz-codecs/src/lib.rs: #[cfg(test)] mod ext_envelope_oracle with 2 tests — decode_oracle_matches_scxml_comment (header_flags/extensions/variant arm assertions) + round_trip_oracle_byte_equivalent (encode(decode(wire)) == wire).",
+        "Oracle source: sources/codecs/ext_envelope.scxml line 41-52 (RFC §5.B B5-ε Y3 entry-flag termination test vector).",
+        "session-fsm §7 R67b caveat: round-trip oracle pinned.",
+        "Test count: wz-codecs lib 0 → 2 (first runtime tests on the crate)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-codecs --lib ext_envelope_oracle: 2 passed / 0 failed.",
+        "Self-review post-R67 surfaced fixture-first gap (memo [[feedback_spec_frozen_first]]: \"build comprehensive fixture against frozen spec\"). R67b closes the gap for ext_envelope; Layer 3 wire-interop vs zenoh-pico remains R68 carry."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary"
+      ],
+      "carry_forward_bullets": [
+        "Layer 3 wire-interop test layer3_ext_envelope.rs vs zenoh-pico _z_msg_ext_vec_encode: still R68 (FFI bridge complexity unchanged).",
+        "session_glue ext chain encode/decode integration: still R68 bundle.",
+        "R68/R69/R71/Phase W carries + AP getrandom for SigningKey::new: unchanged."
+      ],
+      "publishable_decision_summary": "ext_envelope round-trip oracle pinned in cargo test — SCXML-comment 8-byte fixture promoted to executable assertion (textbook spec-frozen-first fixture-first completion of R67).",
+      "publishable_changes_bullets": [
+        "crates/wz-codecs/src/lib.rs: #[cfg(test)] mod ext_envelope_oracle with 2 tests — decode_oracle_matches_scxml_comment (header_flags/extensions/variant arm assertions) + round_trip_oracle_byte_equivalent (encode(decode(wire)) == wire).",
+        "Oracle source: sources/codecs/ext_envelope.scxml line 41-52 (RFC §5.B B5-ε Y3 entry-flag termination test vector).",
+        "session-fsm §7 R67b caveat: round-trip oracle pinned.",
+        "Test count: wz-codecs lib 0 → 2 (first runtime tests on the crate)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-codecs --lib ext_envelope_oracle: 2 passed / 0 failed.",
+        "Self-review post-R67 surfaced fixture-first gap (memo [[feedback_spec_frozen_first]]: \"build comprehensive fixture against frozen spec\"). R67b closes the gap for ext_envelope; Layer 3 wire-interop vs zenoh-pico remains R68 carry."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Layer 3 wire-interop test layer3_ext_envelope.rs vs zenoh-pico _z_msg_ext_vec_encode: still R68 (FFI bridge complexity unchanged).",
+        "session_glue ext chain encode/decode integration: still R68 bundle.",
+        "R68/R69/R71/Phase W carries + AP getrandom for SigningKey::new: unchanged."
       ]
     },
     "Round 7": {

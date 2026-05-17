@@ -122,3 +122,52 @@ pub mod query {
 pub mod request {
     include!(concat!(env!("OUT_DIR"), "/request.rs"));
 }
+
+#[cfg(test)]
+mod ext_envelope_oracle {
+    //! R67b: SCXML-comment oracle pinned as cargo test.
+    //!
+    //! Oracle wire (8 bytes) from sources/codecs/ext_envelope.scxml
+    //! line 41-52: 0x01 0x80 0xB1 0x2A 0x52 0x02 0xAB 0xCD.
+    //! Layer 3 wire-interop vs zenoh-pico `_z_msg_ext_vec_encode`
+    //! is R68 carry (FFI bridge wiring complexity).
+    use crate::ext_entry::ExtEntryVariant;
+    use crate::ext_envelope::ExtEnvelope;
+    use sce_forge_runtime::codec::SceCursor;
+
+    const ORACLE_WIRE: [u8; 8] = [0x01, 0x80, 0xB1, 0x2A, 0x52, 0x02, 0xAB, 0xCD];
+
+    #[test]
+    fn decode_oracle_matches_scxml_comment() {
+        let mut cursor = SceCursor::new(&ORACLE_WIRE);
+        let env = ExtEnvelope::decode(&mut cursor).expect("decode oracle wire");
+        assert_eq!(env.header_flags, 0x01);
+        assert_eq!(env.extensions.len(), 3);
+        assert_eq!(env.extensions[0].header, 0x80);
+        assert_eq!(env.extensions[1].header, 0xB1);
+        assert_eq!(env.extensions[2].header, 0x52);
+        assert!(matches!(
+            env.extensions[0].body,
+            ExtEntryVariant::CodecZenohExtUnit(_)
+        ));
+        assert!(matches!(
+            env.extensions[1].body,
+            ExtEntryVariant::CodecZenohExtZint(_)
+        ));
+        assert!(matches!(
+            env.extensions[2].body,
+            ExtEntryVariant::CodecZenohExtZbuf(_)
+        ));
+    }
+
+    #[test]
+    fn round_trip_oracle_byte_equivalent() {
+        let mut cursor = SceCursor::new(&ORACLE_WIRE);
+        let env = ExtEnvelope::decode(&mut cursor).expect("decode oracle wire");
+        let wire = env.encode();
+        assert_eq!(
+            wire, ORACLE_WIRE,
+            "encode(decode(oracle)) must round-trip byte-equivalent"
+        );
+    }
+}
