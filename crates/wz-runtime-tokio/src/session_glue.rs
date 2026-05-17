@@ -63,6 +63,7 @@ use sce_rust_runtime::scripting::ScriptResult;
 
 use sce_forge_runtime::codec::{CodecError, SceCursor};
 use wz_codecs::close::Close;
+use wz_codecs::ext_entry::ExtEntry;
 use wz_codecs::init_body::InitBody;
 use wz_codecs::open_body::OpenBody;
 
@@ -191,6 +192,13 @@ mod wire_const {
 
     /// Session-close vs link-only close.
     pub const FLAG_T_CLOSE_S: u8 = 0x20;
+
+    /// Transport-message ext-chain presence bit shared across every
+    /// `_Z_MID_T_*` header (transport.h:44 `_Z_FLAG_T_Z = 0x80`).
+    /// When set the parent header signals that one or more
+    /// `ExtEntry` records follow the body bytes, terminated by an
+    /// entry whose own `Z` bit is clear.
+    pub const FLAG_T_Z: u8 = 0x80;
 }
 
 /// Per-deploy parameters that drive the codec field values for the
@@ -380,6 +388,22 @@ impl<D: LinkDriver + Send + 'static> BoxedLinkDriver for TokioLinkDriverAdapter<
     }
 }
 
+/// Outbound transport-message variant for ext-chain dispatch.
+///
+/// R68b plumbing: 4 negotiation-relevant frame roles each carry
+/// their own ext chain (session-fsm §7 — QoS / QoSLink / Auth /
+/// MultiLink / LowLatency). The encoder reads the appropriate
+/// slot via `SessionLinkActions::ext_chain_for` so per-deploy
+/// negotiation policy can stage distinct chains per role without
+/// growing the `SessionInitParams` struct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtChainRole {
+    InitSyn,
+    InitAck,
+    OpenSyn,
+    OpenAck,
+}
+
 /// Bundle of state shared across the 17 native script functions.
 pub struct SessionLinkActions {
     pub driver: Arc<dyn BoxedLinkDriver>,
@@ -390,6 +414,15 @@ pub struct SessionLinkActions {
     /// `params.cookie` on the OpenSyn outbound, implementing the
     /// RFC §5.M echo contract on the Initiator side.
     pub inbound_cookie: Mutex<Option<Vec<u8>>>,
+    /// R68b — per-role ext chain slots. Indexed by `ExtChainRole`
+    /// via `ext_chain_for`. Each slot lives behind its own `Mutex`
+    /// so a setter can swap one chain without blocking the others
+    /// (e.g. mid-handshake auth-step rotation can rewrite the
+    /// OpenSyn chain without touching the InitSyn record).
+    init_syn_ext: Mutex<Vec<ExtEntry>>,
+    init_ack_ext: Mutex<Vec<ExtEntry>>,
+    open_syn_ext: Mutex<Vec<ExtEntry>>,
+    open_ack_ext: Mutex<Vec<ExtEntry>>,
 }
 
 impl SessionLinkActions {
@@ -403,7 +436,57 @@ impl SessionLinkActions {
             params,
             trace: Mutex::new(ActionTrace::default()),
             inbound_cookie: Mutex::new(None),
+            init_syn_ext: Mutex::new(Vec::new()),
+            init_ack_ext: Mutex::new(Vec::new()),
+            open_syn_ext: Mutex::new(Vec::new()),
+            open_ack_ext: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Replace the ext chain for the given role. Production callers
+    /// stage their negotiation result here; the next outbound frame
+    /// of `role` reads the new chain via the encoder.
+    pub fn set_ext_chain(&self, role: ExtChainRole, entries: Vec<ExtEntry>) {
+        *self.ext_chain_slot(role).lock().unwrap() = entries;
+    }
+
+    /// Lock the ext-chain slot for the given role and encode the
+    /// frame body + chain in one shot, returning the wire bytes.
+    ///
+    /// Lock is held only across the encode call (microseconds);
+    /// the actual `send_blocking` happens after the guard drops so
+    /// a slow driver does not block sibling roles. `ExtEntry` does
+    /// not implement `Clone` (sce-codegen output), so passing the
+    /// slot by reference into the encoder is the cheapest path —
+    /// no snapshot copy required.
+    ///
+    /// `pub` (not `pub(crate)`) so layer-3 integration tests in
+    /// sibling crates can exercise the encode path directly,
+    /// bypassing the `dispatch_script` singleton race that bites
+    /// when multiple tests in one binary share the
+    /// `INSTALLED`/Lua-engine globals.
+    pub fn encode_init_with_role(&self, is_ack: bool, role: ExtChainRole) -> Vec<u8> {
+        let chain = self.ext_chain_slot(role).lock().unwrap();
+        encode_init(&self.params, is_ack, &chain)
+    }
+
+    pub fn encode_open_with_role(
+        &self,
+        is_ack: bool,
+        cookie_override: Option<&[u8]>,
+        role: ExtChainRole,
+    ) -> Vec<u8> {
+        let chain = self.ext_chain_slot(role).lock().unwrap();
+        encode_open(&self.params, is_ack, cookie_override, &chain)
+    }
+
+    fn ext_chain_slot(&self, role: ExtChainRole) -> &Mutex<Vec<ExtEntry>> {
+        match role {
+            ExtChainRole::InitSyn => &self.init_syn_ext,
+            ExtChainRole::InitAck => &self.init_ack_ext,
+            ExtChainRole::OpenSyn => &self.open_syn_ext,
+            ExtChainRole::OpenAck => &self.open_ack_ext,
+        }
     }
 
     pub fn trace_snapshot(&self) -> ActionTrace {
@@ -552,7 +635,7 @@ fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLink
 
     bind_unit(lua, "send_init_syn", actions, |a| {
         a.trace.lock().unwrap().send_init_syn += 1;
-        let bytes = encode_init(&a.params, /*is_ack=*/ false);
+        let bytes = a.encode_init_with_role(/*is_ack=*/ false, ExtChainRole::InitSyn);
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
@@ -562,7 +645,11 @@ fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLink
         // peer InitAck via handle_inbound; fall back to params.cookie
         // for tests that drive OpenSyn without an inbound parse cycle.
         let cookie_override = a.inbound_cookie.lock().unwrap().clone();
-        let bytes = encode_open(&a.params, /*is_ack=*/ false, cookie_override.as_deref());
+        let bytes = a.encode_open_with_role(
+            /*is_ack=*/ false,
+            cookie_override.as_deref(),
+            ExtChainRole::OpenSyn,
+        );
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
@@ -577,7 +664,7 @@ fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLink
         // FSM state (incoming peer_zid) is not yet propagated into
         // SessionLinkActions in R62 — inbound parser pass is a
         // later round.
-        let bytes = encode_init(&a.params, /*is_ack=*/ true);
+        let bytes = a.encode_init_with_role(/*is_ack=*/ true, ExtChainRole::InitAck);
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
@@ -587,7 +674,11 @@ fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLink
         // get here (it travelled inbound on OpenSyn and was already
         // MAC-verified); the OpenAck shape omits it (parent.A=1
         // suppresses the cookie field per transport.c:300-302).
-        let bytes = encode_open(&a.params, /*is_ack=*/ true, /*cookie_override=*/ None);
+        let bytes = a.encode_open_with_role(
+            /*is_ack=*/ true,
+            /*cookie_override=*/ None,
+            ExtChainRole::OpenAck,
+        );
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
@@ -653,10 +744,17 @@ fn register_guard_fns(lua: &dyn IScriptEngine) {
 /// verified byte-identical to zenoh-pico's `_z_init_encode` by
 /// `crates/wz-integration-tests/tests/layer3_init_body.rs`. The
 /// transport-message header is one byte: `(flags) | T_MID_INIT`.
-fn encode_init(params: &SessionInitParams, is_ack: bool) -> Vec<u8> {
+fn encode_init(
+    params: &SessionInitParams,
+    is_ack: bool,
+    extensions: &[ExtEntry],
+) -> Vec<u8> {
     let mut parent_flags = wire_const::FLAG_T_INIT_S;
     if is_ack {
         parent_flags |= wire_const::FLAG_T_INIT_A;
+    }
+    if !extensions.is_empty() {
+        parent_flags |= wire_const::FLAG_T_Z;
     }
 
     let cbyte = init_cbyte(params.whatami, params.zid.len());
@@ -674,9 +772,11 @@ fn encode_init(params: &SessionInitParams, is_ack: bool) -> Vec<u8> {
         cookie: if is_ack { Some(params.cookie.clone()) } else { None },
     };
 
-    let mut wire = Vec::with_capacity(body.zid.len() + params.cookie.len() + 12);
+    let ext_bytes = encode_ext_chain(extensions);
+    let mut wire = Vec::with_capacity(body.zid.len() + params.cookie.len() + 12 + ext_bytes.len());
     wire.push(parent_flags | wire_const::T_MID_INIT);
     wire.extend_from_slice(&body.encode(parent_flags));
+    wire.extend_from_slice(&ext_bytes);
     wire
 }
 
@@ -695,6 +795,7 @@ fn encode_open(
     params: &SessionInitParams,
     is_ack: bool,
     cookie_override: Option<&[u8]>,
+    extensions: &[ExtEntry],
 ) -> Vec<u8> {
     let mut parent_flags = 0u8;
     if params.lease_in_seconds {
@@ -702,6 +803,9 @@ fn encode_open(
     }
     if is_ack {
         parent_flags |= wire_const::FLAG_T_OPEN_A;
+    }
+    if !extensions.is_empty() {
+        parent_flags |= wire_const::FLAG_T_Z;
     }
 
     let cookie_bytes: &[u8] = if !is_ack {
@@ -720,10 +824,45 @@ fn encode_open(
         cookie: if !is_ack { Some(cookie_bytes.to_vec()) } else { None },
     };
 
-    let mut wire = Vec::with_capacity(cookie_bytes.len() + 24);
+    let ext_bytes = encode_ext_chain(extensions);
+    let mut wire = Vec::with_capacity(cookie_bytes.len() + 24 + ext_bytes.len());
     wire.push(parent_flags | wire_const::T_MID_OPEN);
     wire.extend_from_slice(&body.encode(parent_flags));
+    wire.extend_from_slice(&ext_bytes);
     wire
+}
+
+/// Serialize a transport-message ext chain — concatenated
+/// `ExtEntry::encode()` outputs with the per-entry `Z` bit
+/// (`0x80`) flipped to mark chain continuation. Last entry gets
+/// Z=0 (chain terminator); preceding entries get Z=1. Empty input
+/// returns an empty `Vec` so call sites can unconditionally
+/// `extend_from_slice` the result.
+///
+/// The encoder owns Z so authors never have to remember to flip
+/// the bit between "this is a single-entry chain" (Z=0) and
+/// "this is the last entry of an N-entry chain" (also Z=0). The
+/// non-Z bits (`ext_id`, `M`, `enc`) stay author-set; the helper
+/// preserves them via a byte-level patch on the first byte.
+fn encode_ext_chain(entries: &[ExtEntry]) -> Vec<u8> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let mut buf = Vec::with_capacity(entries.len() * 4);
+    let last = entries.len() - 1;
+    for (i, entry) in entries.iter().enumerate() {
+        let mut bytes = entry.encode();
+        // ExtEntry::encode pushes the header byte first (see
+        // ext_entry codegen line 145); flip the Z bit per chain
+        // position before emitting.
+        if i == last {
+            bytes[0] &= !0x80;
+        } else {
+            bytes[0] |= 0x80;
+        }
+        buf.extend_from_slice(&bytes);
+    }
+    buf
 }
 
 /// Build the wire bytes for a Close frame. Body is the wz `Close`

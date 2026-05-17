@@ -7156,6 +7156,60 @@
         "Inbound→FSM event 연결: parse_inbound 결과를 Engine::process_event로 forward하는 wiring은 별도 round; R68a는 parsing/cookie capture까지만."
       ]
     },
+    "Round 68b": {
+      "decision_summary": "Outbound ext-chain encode integration — encode_init/encode_open take ext_chain slice + auto Z flag; SessionLinkActions exposes per-role ext slots via set_ext_chain + encode_*_with_role; Layer 3 byte-equiv vs pico body+chain.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs: encode_init / encode_open에 extensions: &[ExtEntry] 인자 추가. 비어 않으면 transport-header Z flag (0x80) 자동 set + body 뒤 ExtEnvelope-style 체인 append.",
+        "wz-runtime-tokio/src/session_glue.rs: encode_ext_chain(entries) helper — ExtEntry.encode() 출력의 header byte에 Z bit를 chain position기준 자동 조정 (all-but-last set, last clear). Author trust 제거.",
+        "wz-runtime-tokio/src/session_glue.rs: ExtChainRole enum (InitSyn/InitAck/OpenSyn/OpenAck) + SessionLinkActions에 4개 Mutex<Vec<ExtEntry>> 슬롯 + set_ext_chain / ext_chain_slot 접근자.",
+        "wz-runtime-tokio/src/session_glue.rs: pub encode_init_with_role / pub encode_open_with_role — lua-singleton dispatch 우회경로. layer-3 test가 INSTALLED OnceLock race 없이 wire bytes 직접 추출 가능.",
+        "wz-runtime-tokio/src/session_glue.rs: send_init_syn / send_init_ack / send_open_syn / send_open_ack bind closures가 encode_*_with_role 호출로 전환.",
+        "wz-runtime-tokio/src/session_glue.rs: wire_const::FLAG_T_Z = 0x80 상수 추가 (transport.h:44 mirror).",
+        "wz-integration-tests/tests/layer3_ext_chain_outbound.rs: 3 tests — oracle 3-entry chain (Unit/ZInt/ZBuf) byte-equiv vs pico, empty chain은 Z flag/trailing bytes 없음, role isolation (InitSyn 체인이 InitAck에 번지지 않음)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_ext_chain_outbound: 3 passed / 0 failed. parent_flags 0xE0 (Z|S|A) + InitBody + 3-entry chain wire byte-equiv to _z_init_encode+_z_msg_ext_encode 연속 호출.",
+        "cargo test --workspace: 전체 test 회귀 0건 (이전 모든 layer3_*, session_fsm_*, session_glue_dispatch 그대로 통과).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "Layer 3 oracle chain = [0x80, 0xB1, 0x2A, 0x52, 0x02, 0xAB, 0xCD] (7 bytes; ext_envelope.scxml 주석 8-byte oracle에서 header_flags 0x01 제외). encode_ext_chain helper가 Z bit 운용 확인."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "R68c — ext chain decode integration: parse_inbound이 has_ext=true일 때 body cursor 뒤의 trailing bytes를 ext entries로 디코드 + InboundFrame variant에 ext field 노출.",
+        "R69/R71/Phase W + AP getrandom: unchanged.",
+        "Future round: SessionLinkActions::ext_chain_slot가 4-array indexing 대신 [Mutex<Vec<ExtEntry>>; 4] 구조진 추가 고려 (R68b는 named field 4개로 유지 — ExtChainRole match 가독성 우선)."
+      ],
+      "publishable_decision_summary": "Outbound ext-chain encode integration — encode_init/encode_open take ext_chain slice + auto Z flag; SessionLinkActions exposes per-role ext slots via set_ext_chain + encode_*_with_role; Layer 3 byte-equiv vs pico body+chain.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs: encode_init / encode_open에 extensions: &[ExtEntry] 인자 추가. 비어 않으면 transport-header Z flag (0x80) 자동 set + body 뒤 ExtEnvelope-style 체인 append.",
+        "wz-runtime-tokio/src/session_glue.rs: encode_ext_chain(entries) helper — ExtEntry.encode() 출력의 header byte에 Z bit를 chain position기준 자동 조정 (all-but-last set, last clear). Author trust 제거.",
+        "wz-runtime-tokio/src/session_glue.rs: ExtChainRole enum (InitSyn/InitAck/OpenSyn/OpenAck) + SessionLinkActions에 4개 Mutex<Vec<ExtEntry>> 슬롯 + set_ext_chain / ext_chain_slot 접근자.",
+        "wz-runtime-tokio/src/session_glue.rs: pub encode_init_with_role / pub encode_open_with_role — lua-singleton dispatch 우회경로. layer-3 test가 INSTALLED OnceLock race 없이 wire bytes 직접 추출 가능.",
+        "wz-runtime-tokio/src/session_glue.rs: send_init_syn / send_init_ack / send_open_syn / send_open_ack bind closures가 encode_*_with_role 호출로 전환.",
+        "wz-runtime-tokio/src/session_glue.rs: wire_const::FLAG_T_Z = 0x80 상수 추가 (transport.h:44 mirror).",
+        "wz-integration-tests/tests/layer3_ext_chain_outbound.rs: 3 tests — oracle 3-entry chain (Unit/ZInt/ZBuf) byte-equiv vs pico, empty chain은 Z flag/trailing bytes 없음, role isolation (InitSyn 체인이 InitAck에 번지지 않음)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_ext_chain_outbound: 3 passed / 0 failed. parent_flags 0xE0 (Z|S|A) + InitBody + 3-entry chain wire byte-equiv to _z_init_encode+_z_msg_ext_encode 연속 호출.",
+        "cargo test --workspace: 전체 test 회귀 0건 (이전 모든 layer3_*, session_fsm_*, session_glue_dispatch 그대로 통과).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "Layer 3 oracle chain = [0x80, 0xB1, 0x2A, 0x52, 0x02, 0xAB, 0xCD] (7 bytes; ext_envelope.scxml 주석 8-byte oracle에서 header_flags 0x01 제외). encode_ext_chain helper가 Z bit 운용 확인."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R68c — ext chain decode integration: parse_inbound이 has_ext=true일 때 body cursor 뒤의 trailing bytes를 ext entries로 디코드 + InboundFrame variant에 ext field 노출.",
+        "R69/R71/Phase W + AP getrandom: unchanged.",
+        "Future round: SessionLinkActions::ext_chain_slot가 4-array indexing 대신 [Mutex<Vec<ExtEntry>>; 4] 구조진 추가 고려 (R68b는 named field 4개로 유지 — ExtChainRole match 가독성 우선)."
+      ]
+    },
     "Round 7": {
       "decision_summary": "Phase D scope correction — README/SESSION_KICKOFF removed from workspace.docs (genre fit); atomic-internal orphan ledger via mnemosyne Round 254 supports textbook path.",
       "changes_bullets": [
