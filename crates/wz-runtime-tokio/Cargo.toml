@@ -64,6 +64,14 @@ sha2 = "0.10"
 # secret residue in core dumps / heap leaks / panic backtraces
 # (3rd review #4 from R63's strict audit retrospect).
 zeroize = { version = "1", features = ["zeroize_derive"] }
+# R69 — AP-side entropy source for SigningKey::new_random. RustCrypto
+# ecosystem chooses `getrandom` for OS-syscall-backed (Linux: getrandom(2)
+# fallback to /dev/urandom; macOS: getentropy) cryptographic random bytes.
+# MCU sibling (wz-runtime-lwip Phase W) does NOT pull this dep — it
+# routes through `sce_intrinsics_runtime::rng` per §5.I architectural-
+# tier registry (intrinsics §2.5). Keeping the dep AP-only preserves
+# the no_std contract on the MCU build.
+getrandom = "0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

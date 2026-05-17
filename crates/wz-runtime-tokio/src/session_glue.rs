@@ -131,6 +131,36 @@ impl SigningKey {
         })
     }
 
+    /// R69 — construct a SigningKey from OS-backed cryptographic
+    /// entropy. Pulls 32 bytes from `getrandom::getrandom` (Linux
+    /// `getrandom(2)` fallback to `/dev/urandom`; macOS `getentropy`)
+    /// — the RustCrypto-ecosystem standard for AP-side secret-key
+    /// material. Length is fixed at 32 so the result always
+    /// satisfies the `>= 32` invariant; the constructor cannot
+    /// return `SigningKeyTooShort`.
+    ///
+    /// The fallible surface returns `getrandom::Error` so a deploy
+    /// that runs in a sandbox without entropy access (e.g.
+    /// container without `/dev/urandom`) sees a typed error rather
+    /// than a panic.
+    ///
+    /// MCU sibling does NOT use this path — the wz-runtime-lwip
+    /// build will source entropy via `sce_intrinsics_runtime::rng`
+    /// per §5.I architectural-tier registry (intrinsics §2.5).
+    /// Keeping the `getrandom` dep AP-only preserves the no_std
+    /// contract on MCU builds.
+    pub fn new_random() -> Result<Self, getrandom::Error> {
+        let mut buf = Zeroizing::new(vec![0u8; 32]);
+        getrandom::getrandom(buf.as_mut_slice())?;
+        // The buf is already Zeroizing-wrapped, but `new` re-wraps
+        // its input. Move the inner Vec out (preserving the wipe
+        // on the original wrapper's drop should an early-return
+        // occur in future edits).
+        Ok(Self {
+            bytes: Zeroizing::new(std::mem::take(&mut *buf)),
+        })
+    }
+
     /// Crate-internal slice view; not exposed to consumers.
     fn as_slice(&self) -> &[u8] {
         &self.bytes
@@ -1192,6 +1222,26 @@ mod tests {
         assert_ne!(
             cookie_a, cookie_c,
             "different peer_zid must yield different cookie"
+        );
+    }
+
+    /// R69 — SigningKey::new_random yields a 32-byte key (satisfies
+    /// the >= 32 invariant by construction) and two successive
+    /// calls produce distinct material with overwhelming probability
+    /// (collision space = 2^256, never observed in practice).
+    /// The test asserts both surfaces: length AND distinctness, so
+    /// a regression that wires a constant entropy source (zero-fill,
+    /// counter, etc.) fires loud.
+    #[test]
+    fn signing_key_new_random_yields_distinct_32_byte_keys() {
+        let a = SigningKey::new_random().expect("AP entropy available");
+        let b = SigningKey::new_random().expect("AP entropy available");
+        assert_eq!(a.as_slice().len(), 32, "new_random must yield 32 bytes");
+        assert_eq!(b.as_slice().len(), 32);
+        assert_ne!(
+            a.as_slice(),
+            b.as_slice(),
+            "two new_random calls must produce distinct keys (2^256 collision space)"
         );
     }
 
