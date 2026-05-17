@@ -231,3 +231,53 @@ fn parse_inbound_decodes_keep_alive_frame() {
         _ => panic!("expected KeepAlive variant"),
     }
 }
+
+#[test]
+fn handle_inbound_keepalive_updates_last_inbound_keepalive_at() {
+    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver::default());
+    let actions = SessionLinkActions::new(driver, SessionInitParams::for_test());
+
+    assert!(
+        actions.last_inbound_keepalive_at.lock().unwrap().is_none(),
+        "slot starts empty"
+    );
+
+    let pre = std::time::Instant::now();
+    let _ = actions
+        .handle_inbound(&[0x04])
+        .expect("KeepAlive wire parses");
+    let post = std::time::Instant::now();
+
+    let stamp = actions
+        .last_inbound_keepalive_at
+        .lock()
+        .unwrap()
+        .expect("KeepAlive must populate the timestamp slot");
+    assert!(
+        stamp >= pre && stamp <= post,
+        "captured timestamp must lie within the handle_inbound call window"
+    );
+}
+
+#[test]
+fn handle_inbound_non_keepalive_does_not_touch_keepalive_slot() {
+    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver::default());
+    let actions = SessionLinkActions::new(driver, SessionInitParams::for_test());
+
+    // Seed the slot to verify a non-KeepAlive frame leaves it
+    // untouched (no spurious overwrite).
+    let seeded = std::time::Instant::now();
+    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(seeded);
+
+    // Drive an InitAck wire through handle_inbound (R68a path).
+    let cookie = vec![0xAB, 0xCD];
+    let wire = craft_initack_wire(&cookie);
+    let _ = actions.handle_inbound(&wire).expect("InitAck parses");
+
+    let after = *actions.last_inbound_keepalive_at.lock().unwrap();
+    assert_eq!(
+        after,
+        Some(seeded),
+        "non-KeepAlive frames must NOT mutate the keepalive slot"
+    );
+}
