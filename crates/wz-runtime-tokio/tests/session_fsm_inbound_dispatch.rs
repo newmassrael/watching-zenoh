@@ -110,7 +110,8 @@ fn inbound_initack_routes_through_parser_to_fsm_advancing_state() {
     let frame = actions
         .handle_inbound(&wire)
         .expect("handle_inbound on synthetic InitAck");
-    let event = inbound_to_fsm_event(&frame);
+    let event = inbound_to_fsm_event(&frame)
+        .expect("InitAck must project to a typed FSM event (non-KeepAlive)");
     assert_eq!(
         event,
         SessionFsmUnicastEvent::InitAckReceived,
@@ -150,7 +151,7 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
     };
     assert_eq!(
         inbound_to_fsm_event(&init_syn),
-        SessionFsmUnicastEvent::InitSynReceived
+        Some(SessionFsmUnicastEvent::InitSynReceived)
     );
 
     let init_ack = InboundFrame::Init {
@@ -161,7 +162,7 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
     };
     assert_eq!(
         inbound_to_fsm_event(&init_ack),
-        SessionFsmUnicastEvent::InitAckReceived
+        Some(SessionFsmUnicastEvent::InitAckReceived)
     );
 
     let open_syn = InboundFrame::Open {
@@ -173,7 +174,7 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
     };
     assert_eq!(
         inbound_to_fsm_event(&open_syn),
-        SessionFsmUnicastEvent::OpenSynReceived
+        Some(SessionFsmUnicastEvent::OpenSynReceived)
     );
 
     let open_ack = InboundFrame::Open {
@@ -185,7 +186,7 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
     };
     assert_eq!(
         inbound_to_fsm_event(&open_ack),
-        SessionFsmUnicastEvent::OpenAckReceived
+        Some(SessionFsmUnicastEvent::OpenAckReceived)
     );
 
     let close = InboundFrame::Close {
@@ -195,12 +196,38 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
     };
     assert_eq!(
         inbound_to_fsm_event(&close),
-        SessionFsmUnicastEvent::PeerClose
+        Some(SessionFsmUnicastEvent::PeerClose)
+    );
+
+    let keep_alive = InboundFrame::KeepAlive {
+        has_ext: false,
+        extensions: Vec::new(),
+    };
+    assert_eq!(
+        inbound_to_fsm_event(&keep_alive),
+        None,
+        "KeepAlive is a side-effect signal, not an FSM transition"
     );
 
     let unknown = InboundFrame::Unknown { mid: 0x1F };
     assert_eq!(
         inbound_to_fsm_event(&unknown),
-        SessionFsmUnicastEvent::FramingError
+        Some(SessionFsmUnicastEvent::FramingError)
     );
+}
+
+#[test]
+fn parse_inbound_decodes_keep_alive_frame() {
+    use wz_runtime_tokio::session_glue::{parse_inbound, InboundFrame};
+
+    // MID=0x04 (T_MID_KEEP_ALIVE), no flags set, body is zero bytes.
+    let wire = [0x04u8];
+    let frame = parse_inbound(&wire).expect("parse_inbound on KeepAlive wire");
+    match frame {
+        InboundFrame::KeepAlive { has_ext, extensions } => {
+            assert!(!has_ext);
+            assert!(extensions.is_empty());
+        }
+        _ => panic!("expected KeepAlive variant"),
+    }
 }

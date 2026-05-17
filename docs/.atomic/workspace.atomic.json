@@ -7512,6 +7512,54 @@
         "AP getrandom integration for SigningKey::new entropy still open."
       ]
     },
+    "Round 72": {
+      "decision_summary": "parse_inbound KeepAlive variant — InboundFrame::KeepAlive { has_ext, extensions } drained for MID=0x04; inbound_to_fsm_event signature changed to Option<E> so KeepAlive (side-effect-only, no FSM transition) returns None instead of synthesising a spurious event.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs: wire_const::T_MID_KEEP_ALIVE = 0x04 상수 추가 (transport.h:24).",
+        "wz-runtime-tokio/src/session_glue.rs: InboundFrame::KeepAlive { has_ext, extensions } variant 추가. parse_inbound MID dispatch에 KeepAlive::decode (zero-byte body) + Z flag set일 때 decode_ext_chain 동일하게 호출.",
+        "wz-runtime-tokio/src/session_glue.rs: inbound_to_fsm_event 시그니처가 -> Option<E> 로 변경. KeepAlive는 None 반환 (lease timer reset side-effect이 SCXML 전이가 아닌 별도 진랜서). 호출자는 None branch에서 lease deadline reset wiring.",
+        "wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs: 기존 2 tests의 Option<E> 처리 업데이트 + KeepAlive None projection 검증 추가 + parse_inbound_decodes_keep_alive_frame test 추가 (1-byte wire `[0x04]` 디코드 결과 has_ext=false, extensions 빈 Vec 검증)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test session_fsm_inbound_dispatch: 3 passed / 0 failed (기존 2 + KeepAlive 1).",
+        "cargo test --workspace: 전체 회귀 0건. R67/R68/R69 layer3 tests 모두 green.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "Wire MID coverage: parse_inbound이 5 MID (INIT/OPEN/CLOSE/KEEP_ALIVE/Unknown) 처리. Frame/Fragment/OAM/Join은 이후 round carry."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "carry_forward_bullets": [
+        "KeepAlive의 lease-timer-reset side-effect wiring: SessionLinkActions에 last_inbound_keepalive_at: Mutex<Option<Instant>> + handle_inbound이 KeepAlive일 때 update + Established 상태에서 lease.expired 제와 대조. 이후 round.",
+        "parse_inbound MID coverage 확장: Frame(0x05) / Fragment(0x06) / OAM(0x00) / Join(0x07). 각 codec은 wz-codecs에 존재 — InboundFrame variant + dispatch arm 추가.",
+        "R71 wz-runtime-tokio-test-support split / Phase W wz-runtime-lwip / Hal time-mock SCE upstream patch: 이전 그대로 carry."
+      ],
+      "publishable_decision_summary": "parse_inbound KeepAlive variant — InboundFrame::KeepAlive { has_ext, extensions } drained for MID=0x04; inbound_to_fsm_event signature changed to Option<E> so KeepAlive (side-effect-only, no FSM transition) returns None instead of synthesising a spurious event.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs: wire_const::T_MID_KEEP_ALIVE = 0x04 상수 추가 (transport.h:24).",
+        "wz-runtime-tokio/src/session_glue.rs: InboundFrame::KeepAlive { has_ext, extensions } variant 추가. parse_inbound MID dispatch에 KeepAlive::decode (zero-byte body) + Z flag set일 때 decode_ext_chain 동일하게 호출.",
+        "wz-runtime-tokio/src/session_glue.rs: inbound_to_fsm_event 시그니처가 -> Option<E> 로 변경. KeepAlive는 None 반환 (lease timer reset side-effect이 SCXML 전이가 아닌 별도 진랜서). 호출자는 None branch에서 lease deadline reset wiring.",
+        "wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs: 기존 2 tests의 Option<E> 처리 업데이트 + KeepAlive None projection 검증 추가 + parse_inbound_decodes_keep_alive_frame test 추가 (1-byte wire `[0x04]` 디코드 결과 has_ext=false, extensions 빈 Vec 검증)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test session_fsm_inbound_dispatch: 3 passed / 0 failed (기존 2 + KeepAlive 1).",
+        "cargo test --workspace: 전체 회귀 0건. R67/R68/R69 layer3 tests 모두 green.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "Wire MID coverage: parse_inbound이 5 MID (INIT/OPEN/CLOSE/KEEP_ALIVE/Unknown) 처리. Frame/Fragment/OAM/Join은 이후 round carry."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "publishable_carry_forward_bullets": [
+        "KeepAlive의 lease-timer-reset side-effect wiring: SessionLinkActions에 last_inbound_keepalive_at: Mutex<Option<Instant>> + handle_inbound이 KeepAlive일 때 update + Established 상태에서 lease.expired 제와 대조. 이후 round.",
+        "parse_inbound MID coverage 확장: Frame(0x05) / Fragment(0x06) / OAM(0x00) / Join(0x07). 각 codec은 wz-codecs에 존재 — InboundFrame variant + dispatch arm 추가.",
+        "R71 wz-runtime-tokio-test-support split / Phase W wz-runtime-lwip / Hal time-mock SCE upstream patch: 이전 그대로 carry."
+      ]
+    },
     "Round 8": {
       "decision_summary": "Phase D ARCHITECTURE densify 마감: top-level sec 10-16 + 핵심 sub (2.4, 11.4, 11.5) typed-populate; 4 section-marker docs root-only carry; Phase E README 분리.",
       "changes_bullets": [

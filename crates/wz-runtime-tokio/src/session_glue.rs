@@ -65,6 +65,7 @@ use sce_forge_runtime::codec::{CodecError, SceCursor};
 use wz_codecs::close::Close;
 use wz_codecs::ext_entry::ExtEntry;
 use wz_codecs::init_body::InitBody;
+use wz_codecs::keep_alive::KeepAlive;
 use wz_codecs::open_body::OpenBody;
 
 use crate::{LinkDriver, Reliability, TxFrame};
@@ -209,6 +210,9 @@ mod wire_const {
     pub const T_MID_INIT: u8 = 0x01;
     pub const T_MID_OPEN: u8 = 0x02;
     pub const T_MID_CLOSE: u8 = 0x03;
+    /// Per-session liveness ping — zero-byte body; lease-timer
+    /// reset on receive (transport.h:24 commentary, MID 0x04).
+    pub const T_MID_KEEP_ALIVE: u8 = 0x04;
 
     /// InitAck discriminator (0 = InitSyn, 1 = InitAck).
     pub const FLAG_T_INIT_A: u8 = 0x20;
@@ -955,7 +959,15 @@ pub enum InboundFrame {
         has_ext: bool,
         extensions: Vec<ExtEntry>,
     },
-    /// MID outside the handshake/close triad.
+    /// `_Z_MID_T_KEEP_ALIVE` (0x04). Empty-body liveness ping; the
+    /// only payload is the optional ext chain (Z flag-gated). The
+    /// FSM uses receipt to reset the lease timer per
+    /// session-fsm §2.5 keepalive_interval semantics.
+    KeepAlive {
+        has_ext: bool,
+        extensions: Vec<ExtEntry>,
+    },
+    /// MID outside the handshake/close/keepalive set.
     Unknown { mid: u8 },
 }
 
@@ -1065,6 +1077,19 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
                 extensions,
             })
         }
+        wire_const::T_MID_KEEP_ALIVE => {
+            // KeepAlive body is empty (zero-byte payload); the
+            // decode call is a no-op but kept for symmetry with the
+            // other MIDs and to preserve the "every wire-mapped
+            // codec routes through its generated decoder" invariant.
+            let _body = KeepAlive::decode(&mut cursor)?;
+            let extensions = if has_ext {
+                decode_ext_chain(&mut cursor)?
+            } else {
+                Vec::new()
+            };
+            Ok(InboundFrame::KeepAlive { has_ext, extensions })
+        }
         other => Ok(InboundFrame::Unknown { mid: other }),
     }
 }
@@ -1082,17 +1107,26 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
 /// sent a transport-message ID the codec set does not implement,
 /// and the FSM's framing-error transition is the correct response
 /// (Close(generic) on the link).
+///
+/// `KeepAlive` returns `None` because it is NOT a state-transition
+/// trigger in `session_fsm_unicast.scxml` — keepalive receipt only
+/// resets the lease timer (a side effect orthogonal to the state
+/// graph). Callers wire that side-effect on the `None` branch
+/// (e.g. invoke `Hal::now_ticks_ms` and reset the lease deadline)
+/// rather than calling `Engine::process_event` with a spurious
+/// event.
 pub fn inbound_to_fsm_event(
     frame: &InboundFrame,
-) -> crate::session_fsm_unicast::SessionFsmUnicastEvent {
+) -> Option<crate::session_fsm_unicast::SessionFsmUnicastEvent> {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     match frame {
-        InboundFrame::Init { is_ack: false, .. } => E::InitSynReceived,
-        InboundFrame::Init { is_ack: true, .. } => E::InitAckReceived,
-        InboundFrame::Open { is_ack: false, .. } => E::OpenSynReceived,
-        InboundFrame::Open { is_ack: true, .. } => E::OpenAckReceived,
-        InboundFrame::Close { .. } => E::PeerClose,
-        InboundFrame::Unknown { .. } => E::FramingError,
+        InboundFrame::Init { is_ack: false, .. } => Some(E::InitSynReceived),
+        InboundFrame::Init { is_ack: true, .. } => Some(E::InitAckReceived),
+        InboundFrame::Open { is_ack: false, .. } => Some(E::OpenSynReceived),
+        InboundFrame::Open { is_ack: true, .. } => Some(E::OpenAckReceived),
+        InboundFrame::Close { .. } => Some(E::PeerClose),
+        InboundFrame::KeepAlive { .. } => None,
+        InboundFrame::Unknown { .. } => Some(E::FramingError),
     }
 }
 
