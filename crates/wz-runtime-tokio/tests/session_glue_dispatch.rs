@@ -22,10 +22,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use wz_runtime_tokio::session_glue::{
-    dispatch_script, install_session_actions, BoxedLinkDriver, CloseReason, SessionInitParams,
-    SessionLinkActions, SigningKey,
+    install_session_actions, BoxedLinkDriver, CloseReason, SessionInitParams, SessionLinkActions,
+    SigningKey,
 };
 use wz_runtime_tokio::Reliability;
+use wz_runtime_tokio_test_support::{
+    dispatch_script, fixture_session_init_params, install_session_actions_for_test,
+};
 
 #[derive(Default)]
 struct RecordingDriver {
@@ -99,7 +102,7 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     // takes this path, but test infrastructure must tolerate test
     // ordering.
     if install_session_actions(actions.clone()).is_err() {
-        wz_runtime_tokio::session_glue::rebind_session_actions_for_test(actions.clone());
+        install_session_actions_for_test(actions.clone());
     }
 
     // ─── Step 1: initiator handshake path ───────────────────────
@@ -225,7 +228,7 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     let second_driver: Arc<dyn BoxedLinkDriver> =
         Arc::new(RecordingDriver::default());
     let second_actions =
-        SessionLinkActions::new(second_driver, SessionInitParams::for_test());
+        SessionLinkActions::new(second_driver, fixture_session_init_params());
     let second_install = install_session_actions(second_actions);
     assert!(
         second_install.is_err(),

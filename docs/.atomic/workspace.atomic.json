@@ -7512,6 +7512,68 @@
         "AP getrandom integration for SigningKey::new entropy still open."
       ]
     },
+    "Round 71": {
+      "decision_summary": "wz-runtime-tokio-test-support sibling crate split — replaces `_test_support` Cargo feature with a separate crate so production builds carry zero test-only code paths; encapsulation upgrade from feature-flag opt-in to crate-boundary contract.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio-test-support/{Cargo.toml,src/lib.rs} — new sibling crate exposing fixture_session_init_params, install_session_actions_for_test, dispatch_script.",
+        "crates/Cargo.toml — workspace members append wz-runtime-tokio-test-support.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — for_test (was SessionInitParams method), rebind_session_actions_for_test, dispatch_script removed; register_outbound_link_fns / register_state_internal_fns / register_guard_fns promoted to pub with explicit test-support-only safety doc.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — cfg-gated ScriptResult import removed (only the moved fns used it).",
+        "crates/wz-runtime-tokio/Cargo.toml — dropped `_test_support = []` feature stanza and the self-feature dev-dep; dev-deps now pull wz-runtime-tokio-test-support by path.",
+        "crates/wz-integration-tests/Cargo.toml — wz-runtime-tokio dev-dep loses `features = [\"_test_support\"]`; wz-runtime-tokio-test-support added as new path dev-dep.",
+        "8 test files updated import surface: session_fsm_real_tcp.rs, session_fsm_engine_drive.rs, session_fsm_coverage.rs, session_fsm_inbound_dispatch.rs, session_fsm_full_path.rs, session_glue_dispatch.rs, layer3_inbound_init.rs, layer3_ext_chain_outbound.rs.",
+        "Renames at call sites: SessionInitParams::for_test() to fixture_session_init_params(); rebind_session_actions_for_test to install_session_actions_for_test."
+      ],
+      "verification_bullets": [
+        "cargo build --workspace — clean (5 crates compile, wz-runtime-tokio-test-support added).",
+        "cargo test --workspace — every test binary passed; counts unchanged from R73 baseline.",
+        "cargo clippy --workspace --all-targets -- -D warnings — clean.",
+        "scripts/run-ci.sh --skip-codegen — Layer A/C1/C2/D all pass; Layer B skipped per flag (codegen cost gate).",
+        "validate_workspace — T1 orphan total=0, RT 12/12, GENERATED.md=sync, T3 warn=856 / T4 info=427 (baseline preserved, no doc mutation in this round)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "carry_forward_bullets": [
+        "Singleton race fix (Lua engine + INSTALLED OnceLock across cargo's thread-parallel #[test] runner) NOT solved by this crate split; the bare-minimum architectural fix lives in a follow-up round (per-test process isolation OR direct-codec-only test path).",
+        "encode_init_with_role / encode_open_with_role kept pub at R71; their R68b dispatch-bypass rationale outlives the feature-flag retirement.",
+        "R76 Driver loop integration — production consumer for R68/R68a/R68c/R69b/R72/R73 inbound work (invariant #1).",
+        "R77 Lease deadline driver loop — R72b last_inbound_keepalive_at slot consumer.",
+        "R78 Accepting-side path test — InitSynReceived to SentInitAck to SentOpenAck integration.",
+        "Hal time-mock SCE upstream sched_now patch + R44 codec_zenoh_init_body BE to LE fix (SCE upstream PR pair).",
+        "Phase W wz-runtime-lwip MCU cross-compile re-introduction (post-R58 NOP-stub retirement)."
+      ],
+      "publishable_decision_summary": "wz-runtime-tokio-test-support sibling crate split — replaces `_test_support` Cargo feature with a separate crate so production builds carry zero test-only code paths; encapsulation upgrade from feature-flag opt-in to crate-boundary contract.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio-test-support/{Cargo.toml,src/lib.rs} — new sibling crate exposing fixture_session_init_params, install_session_actions_for_test, dispatch_script.",
+        "crates/Cargo.toml — workspace members append wz-runtime-tokio-test-support.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — for_test (was SessionInitParams method), rebind_session_actions_for_test, dispatch_script removed; register_outbound_link_fns / register_state_internal_fns / register_guard_fns promoted to pub with explicit test-support-only safety doc.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — cfg-gated ScriptResult import removed (only the moved fns used it).",
+        "crates/wz-runtime-tokio/Cargo.toml — dropped `_test_support = []` feature stanza and the self-feature dev-dep; dev-deps now pull wz-runtime-tokio-test-support by path.",
+        "crates/wz-integration-tests/Cargo.toml — wz-runtime-tokio dev-dep loses `features = [\"_test_support\"]`; wz-runtime-tokio-test-support added as new path dev-dep.",
+        "8 test files updated import surface: session_fsm_real_tcp.rs, session_fsm_engine_drive.rs, session_fsm_coverage.rs, session_fsm_inbound_dispatch.rs, session_fsm_full_path.rs, session_glue_dispatch.rs, layer3_inbound_init.rs, layer3_ext_chain_outbound.rs.",
+        "Renames at call sites: SessionInitParams::for_test() to fixture_session_init_params(); rebind_session_actions_for_test to install_session_actions_for_test."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build --workspace — clean (5 crates compile, wz-runtime-tokio-test-support added).",
+        "cargo test --workspace — every test binary passed; counts unchanged from R73 baseline.",
+        "cargo clippy --workspace --all-targets -- -D warnings — clean.",
+        "scripts/run-ci.sh --skip-codegen — Layer A/C1/C2/D all pass; Layer B skipped per flag (codegen cost gate).",
+        "validate_workspace — T1 orphan total=0, RT 12/12, GENERATED.md=sync, T3 warn=856 / T4 info=427 (baseline preserved, no doc mutation in this round)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Singleton race fix (Lua engine + INSTALLED OnceLock across cargo's thread-parallel #[test] runner) NOT solved by this crate split; the bare-minimum architectural fix lives in a follow-up round (per-test process isolation OR direct-codec-only test path).",
+        "encode_init_with_role / encode_open_with_role kept pub at R71; their R68b dispatch-bypass rationale outlives the feature-flag retirement.",
+        "R76 Driver loop integration — production consumer for R68/R68a/R68c/R69b/R72/R73 inbound work (invariant #1).",
+        "R77 Lease deadline driver loop — R72b last_inbound_keepalive_at slot consumer.",
+        "R78 Accepting-side path test — InitSynReceived to SentInitAck to SentOpenAck integration.",
+        "Hal time-mock SCE upstream sched_now patch + R44 codec_zenoh_init_body BE to LE fix (SCE upstream PR pair).",
+        "Phase W wz-runtime-lwip MCU cross-compile re-introduction (post-R58 NOP-stub retirement)."
+      ]
+    },
     "Round 72": {
       "decision_summary": "parse_inbound KeepAlive variant — InboundFrame::KeepAlive { has_ext, extensions } drained for MID=0x04; inbound_to_fsm_event signature changed to Option<E> so KeepAlive (side-effect-only, no FSM transition) returns None instead of synthesising a spurious event.",
       "changes_bullets": [

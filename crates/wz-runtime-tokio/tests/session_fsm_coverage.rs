@@ -26,7 +26,7 @@
 // Single mega-test on purpose. The Lua engine + INSTALLED OnceLock
 // are process-global; splitting scenarios into per-`#[test]`
 // functions causes cargo's thread-parallel runner to race on
-// rebind_session_actions_for_test. Sequential dispatch in one test
+// install_session_actions_for_test. Sequential dispatch in one test
 // fn keeps each scenario isolated through the rebind path.
 
 use std::sync::Arc;
@@ -37,10 +37,12 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    install_session_actions, rebind_session_actions_for_test, BoxedLinkDriver, CloseReason,
-    SessionInitParams, SessionLinkActions,
+    install_session_actions, BoxedLinkDriver, CloseReason, SessionLinkActions,
 };
 use wz_runtime_tokio::Reliability;
+use wz_runtime_tokio_test_support::{
+    fixture_session_init_params, install_session_actions_for_test,
+};
 
 #[derive(Default)]
 struct RecordingDriver {
@@ -71,9 +73,9 @@ fn fresh_engine() -> (
     Engine<SessionFsmUnicastPolicy>,
 ) {
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(RecordingDriver::default());
-    let actions = SessionLinkActions::new(driver, SessionInitParams::for_test());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
     if install_session_actions(actions.clone()).is_err() {
-        rebind_session_actions_for_test(actions.clone());
+        install_session_actions_for_test(actions.clone());
     }
     let mut engine = Engine::new(SessionFsmUnicastPolicy::new());
     engine.initialize();

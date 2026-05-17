@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-runtime-tokio-test-support — test-only fixture + rebind crate for
+# wz-runtime-tokio.
+#
+# R71 entry. Replaces the wz-runtime-tokio `_test_support` Cargo
+# feature with an explicit sibling crate. The shape change is
+# encapsulation hardening: under the feature-flag model a downstream
+# consumer could enable `_test_support` on the production crate and
+# import `for_test` / `dispatch_script` from inside it; under the
+# sibling-crate model the same consumer must add an entirely separate
+# path-dep to access the fixtures, and production builds of
+# wz-runtime-tokio carry zero test-only code paths.
+#
+# Scope (R71 baseline):
+#   - fixture_session_init_params() — deterministic SessionInitParams
+#     constructor matching the Layer 3 wire-interop fixture inputs.
+#   - install_session_actions_for_test() — rebind variant of
+#     install_session_actions that bypasses the INSTALLED OnceLock
+#     guard (test runner reuses one process across N #[test] fns).
+#   - dispatch_script() — direct script-engine dispatch shim for the
+#     17 registered script-action names; debug-asserts name validity
+#     so a typo fails the test rather than reaching the Lua engine.
+#
+# The singleton race that R68b worked around (encode_*_with_role pub
+# helpers bypassing dispatch_script) is NOT solved by this crate split
+# on its own; that fix lives in a follow-up round (per-test process
+# isolation OR full direct-codec-only test path). The R71 split
+# eliminates only the feature-flag leak surface.
+
+[package]
+name = "wz-runtime-tokio-test-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Test-only fixtures + rebind shims for wz-runtime-tokio (R71 _test_support feature replacement)."
+publish = false
+
+[lib]
+name = "wz_runtime_tokio_test_support"
+path = "src/lib.rs"
+
+[dependencies]
+wz-runtime-tokio = { path = "../wz-runtime-tokio" }
+sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
+sce-rust-lua = { path = "../../vendor/sce/sce-rust-lua" }
+
+[lints]
+workspace = true
