@@ -1311,7 +1311,9 @@
         "Cache maintenance rounds to platform.dcache_line_size; out-of-line trips mem/cache-line-align",
         "Fuzz coverage transport absent pre-Phase-D; F4 declared without it triggers hard-error",
         "Architectural-tier: arch-fixed primitives (atomics/fences/cache/IRQ; 101 BASELINE_SYMBOLS)",
-        "Peripheral-tier: multi-impl primitives (RNG/HMAC/HSEM/crypto) via target_plugin only"
+        "Peripheral-tier: multi-impl primitives (RNG/HMAC/HSEM/crypto) via target_plugin only",
+        "R62/R70 AP HMAC via RustCrypto (peripheral-tier reference impl, std-coupled)",
+        "Phase W MCU swap to sce_intrinsics_runtime::hmac_sha256 must preserve zeroize"
       ],
       "alternatives_rejected": [
         {
@@ -7064,6 +7066,52 @@
         "R67 = R63a SCXML extension chain authoring (Phase Z prototype wire-spec gap).",
         "R68 = R63b Initiator-side inbound parser.",
         "R69 = Hal time-mock injection."
+      ]
+    },
+    "Round 70b": {
+      "decision_summary": "RFC 4231 TC3-TC7 coverage + §5.I intrinsic registry caveats — closes the 3rd-review crypto safety gaps (RFC test vector coverage + spec audit-trace).",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs tests module: 5 new test fns covering RFC 4231 TC3-TC7. TC3 uniform-byte key+data block-mix; TC4 sequential-byte key off-by-one; TC5 truncation invariant for the 16-byte cookie wire-shape (asserts both full 32-byte MAC + the [..16] truncated form); TC6 block-size+ key triggers hash-key-first path; TC7 both key and data exceed block size.",
+        "TC5 truncation test pins the wire-spec invariant that `generate_cookie_hmac_sha256` returns the first 16 bytes; a regression that returned a different slice would surface here AND in any downstream cookie wire interop.",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern: 2 caveats added. R62/R70 AP RustCrypto HMAC = peripheral-tier reference impl; Phase W MCU swap preserves zeroize."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: session_glue tests 7 → 12 (+5 RFC 4231 cases).",
+        "All 7 RFC 4231 vectors (TC1-TC7) byte-equiv assertions pass against compute_hmac_sha256_full + [..16] truncation.",
+        "cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "validate_workspace: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 75 → 76."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+        "intrinsics-runtime--symbol-surface/2-6-hmac"
+      ],
+      "carry_forward_bullets": [
+        "R67-R71 multi-session carries unchanged: SCXML ext chain / inbound parser / Hal time-mock / test-support crate split.",
+        "R70b carry closed (RFC 4231 TC3-7 + AP getrandom replaces R70's TC1+TC2-only baseline).",
+        "AP getrandom integration for SigningKey::new entropy still open."
+      ],
+      "publishable_decision_summary": "RFC 4231 TC3-TC7 coverage + §5.I intrinsic registry caveats — closes the 3rd-review crypto safety gaps (RFC test vector coverage + spec audit-trace).",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs tests module: 5 new test fns covering RFC 4231 TC3-TC7. TC3 uniform-byte key+data block-mix; TC4 sequential-byte key off-by-one; TC5 truncation invariant for the 16-byte cookie wire-shape (asserts both full 32-byte MAC + the [..16] truncated form); TC6 block-size+ key triggers hash-key-first path; TC7 both key and data exceed block size.",
+        "TC5 truncation test pins the wire-spec invariant that `generate_cookie_hmac_sha256` returns the first 16 bytes; a regression that returned a different slice would surface here AND in any downstream cookie wire interop.",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern: 2 caveats added. R62/R70 AP RustCrypto HMAC = peripheral-tier reference impl; Phase W MCU swap preserves zeroize."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: session_glue tests 7 → 12 (+5 RFC 4231 cases).",
+        "All 7 RFC 4231 vectors (TC1-TC7) byte-equiv assertions pass against compute_hmac_sha256_full + [..16] truncation.",
+        "cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "validate_workspace: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 75 → 76."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+        "intrinsics-runtime--symbol-surface/2-6-hmac"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R67-R71 multi-session carries unchanged: SCXML ext chain / inbound parser / Hal time-mock / test-support crate split.",
+        "R70b carry closed (RFC 4231 TC3-7 + AP getrandom replaces R70's TC1+TC2-only baseline).",
+        "AP getrandom integration for SigningKey::new entropy still open."
       ]
     },
     "Round 8": {

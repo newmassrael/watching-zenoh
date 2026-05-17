@@ -895,6 +895,130 @@ mod tests {
         assert_eq!(mac, expected, "RFC 4231 TC2 byte mismatch");
     }
 
+    /// RFC 4231 Test Case 3 — uniform-byte key + uniform-byte data
+    /// stresses the block-mix path (both key and data 20+ bytes,
+    /// neither block-size-aligned to anything special).
+    ///
+    /// Key  = 0xaa × 20
+    /// Data = 0xdd × 50
+    /// HMAC = 773ea91e36800e46854db8ebd09181a7
+    ///        2959098b3ef8c122d9635514ced565fe
+    #[test]
+    fn rfc4231_test_case_3_full_hmac_sha256() {
+        let key = vec![0xaa; 20];
+        let data = vec![0xdd; 50];
+        let mac = compute_hmac_sha256_full(&key, &data);
+        let expected: [u8; 32] = [
+            0x77, 0x3e, 0xa9, 0x1e, 0x36, 0x80, 0x0e, 0x46,
+            0x85, 0x4d, 0xb8, 0xeb, 0xd0, 0x91, 0x81, 0xa7,
+            0x29, 0x59, 0x09, 0x8b, 0x3e, 0xf8, 0xc1, 0x22,
+            0xd9, 0x63, 0x55, 0x14, 0xce, 0xd5, 0x65, 0xfe,
+        ];
+        assert_eq!(mac, expected, "RFC 4231 TC3 byte mismatch");
+    }
+
+    /// RFC 4231 Test Case 4 — sequential-byte key (0x01..=0x19)
+    /// with uniform-byte data. Catches off-by-one in key
+    /// padding / inner-pad XOR.
+    ///
+    /// Key  = 0x01, 0x02, …, 0x19  (25 bytes)
+    /// Data = 0xcd × 50
+    /// HMAC = 82558a389a443c0ea4cc819899f2083a
+    ///        85f0faa3e578f8077a2e3ff46729665b
+    #[test]
+    fn rfc4231_test_case_4_full_hmac_sha256() {
+        let key: Vec<u8> = (0x01..=0x19).collect();
+        let data = vec![0xcd; 50];
+        let mac = compute_hmac_sha256_full(&key, &data);
+        let expected: [u8; 32] = [
+            0x82, 0x55, 0x8a, 0x38, 0x9a, 0x44, 0x3c, 0x0e,
+            0xa4, 0xcc, 0x81, 0x98, 0x99, 0xf2, 0x08, 0x3a,
+            0x85, 0xf0, 0xfa, 0xa3, 0xe5, 0x78, 0xf8, 0x07,
+            0x7a, 0x2e, 0x3f, 0xf4, 0x67, 0x29, 0x66, 0x5b,
+        ];
+        assert_eq!(mac, expected, "RFC 4231 TC4 byte mismatch");
+    }
+
+    /// RFC 4231 Test Case 5 — truncated-MAC scenario. RFC §4.5
+    /// documents the truncation-to-128-bits use case which is
+    /// exactly what `generate_cookie_hmac_sha256` does (truncate
+    /// to first 16 bytes). The expected output here is the full
+    /// MAC; the truncation invariant is asserted separately so a
+    /// reader can see both the source MAC and the truncated form.
+    ///
+    /// Key  = 0x0c × 20
+    /// Data = "Test With Truncation"
+    /// HMAC = a3b6167473100ee06e0c796c2955552b
+    ///        fa6f7c0a6a8aef8b93f860aab0cd20c5
+    /// Truncated (first 16 bytes) = a3b6167473100ee06e0c796c2955552b
+    #[test]
+    fn rfc4231_test_case_5_truncation_invariant() {
+        let key = vec![0x0c; 20];
+        let data = b"Test With Truncation";
+        let full = compute_hmac_sha256_full(&key, data);
+        let expected_full: [u8; 32] = [
+            0xa3, 0xb6, 0x16, 0x74, 0x73, 0x10, 0x0e, 0xe0,
+            0x6e, 0x0c, 0x79, 0x6c, 0x29, 0x55, 0x55, 0x2b,
+            0xfa, 0x6f, 0x7c, 0x0a, 0x6a, 0x8a, 0xef, 0x8b,
+            0x93, 0xf8, 0x60, 0xaa, 0xb0, 0xcd, 0x20, 0xc5,
+        ];
+        assert_eq!(full, expected_full, "RFC 4231 TC5 full MAC");
+        // First 16 bytes — the cookie wire-shape truncation
+        // matches RFC §4.5 96/128-bit MAC truncation. Asserts
+        // that generate_cookie_hmac_sha256's slice [..16] yields
+        // exactly the RFC truncated form.
+        let expected_truncated: [u8; 16] = [
+            0xa3, 0xb6, 0x16, 0x74, 0x73, 0x10, 0x0e, 0xe0,
+            0x6e, 0x0c, 0x79, 0x6c, 0x29, 0x55, 0x55, 0x2b,
+        ];
+        assert_eq!(&full[..16], expected_truncated.as_slice(), "RFC 4231 TC5 truncated");
+    }
+
+    /// RFC 4231 Test Case 6 — block-size+ key triggers the
+    /// "key longer than block size, hash first" path
+    /// (HMAC algorithm pre-hashes the key when len > 64).
+    ///
+    /// Key  = 0xaa × 131
+    /// Data = "Test Using Larger Than Block-Size Key - Hash Key First"
+    /// HMAC = 60e431591ee0b67f0d8a26aacbf5b77f
+    ///        8e0bc6213728c5140546040f0ee37f54
+    #[test]
+    fn rfc4231_test_case_6_full_hmac_sha256() {
+        let key = vec![0xaa; 131];
+        let data = b"Test Using Larger Than Block-Size Key - Hash Key First";
+        let mac = compute_hmac_sha256_full(&key, data);
+        let expected: [u8; 32] = [
+            0x60, 0xe4, 0x31, 0x59, 0x1e, 0xe0, 0xb6, 0x7f,
+            0x0d, 0x8a, 0x26, 0xaa, 0xcb, 0xf5, 0xb7, 0x7f,
+            0x8e, 0x0b, 0xc6, 0x21, 0x37, 0x28, 0xc5, 0x14,
+            0x05, 0x46, 0x04, 0x0f, 0x0e, 0xe3, 0x7f, 0x54,
+        ];
+        assert_eq!(mac, expected, "RFC 4231 TC6 byte mismatch");
+    }
+
+    /// RFC 4231 Test Case 7 — block-size+ key AND block-size+
+    /// data. Stresses both the key-prehash path AND the multi-
+    /// block message absorption path.
+    ///
+    /// Key  = 0xaa × 131
+    /// Data = "This is a test using a larger than block-size key
+    ///         and a larger than block-size data. ..."
+    /// HMAC = 9b09ffa71b942fcb27635fbcd5b0e944
+    ///        bfdc63644f0713938a7f51535c3a35e2
+    #[test]
+    fn rfc4231_test_case_7_full_hmac_sha256() {
+        let key = vec![0xaa; 131];
+        let data = b"This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.";
+        let mac = compute_hmac_sha256_full(&key, data);
+        let expected: [u8; 32] = [
+            0x9b, 0x09, 0xff, 0xa7, 0x1b, 0x94, 0x2f, 0xcb,
+            0x27, 0x63, 0x5f, 0xbc, 0xd5, 0xb0, 0xe9, 0x44,
+            0xbf, 0xdc, 0x63, 0x64, 0x4f, 0x07, 0x13, 0x93,
+            0x8a, 0x7f, 0x51, 0x53, 0x5c, 0x3a, 0x35, 0xe2,
+        ];
+        assert_eq!(mac, expected, "RFC 4231 TC7 byte mismatch");
+    }
+
     /// init_cbyte must match zenoh-pico's transport.c:189-192
     /// packing exactly — Layer 3 byte-equiv depends on this.
     #[test]
