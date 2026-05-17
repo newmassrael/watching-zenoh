@@ -28,7 +28,7 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
 };
 use wz_runtime_tokio::session_glue::{
-    install_session_actions, BoxedLinkDriver, SessionLinkActions,
+    BoxedLinkDriver, SessionLinkActions,
 };
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{
@@ -68,14 +68,10 @@ fn r55b_engine_drives_link_opening_onentry_script() {
     let driver = Arc::new(RecordingDriver::default());
     let actions =
         SessionLinkActions::new(driver.clone(), fixture_session_init_params());
-    if install_session_actions(actions.clone()).is_err() {
-        // Sibling test in same binary already installed; rebind to
-        // our fresh actions for this test's assertions.
-        install_session_actions_for_test(actions.clone());
-    }
+    let lua = install_session_actions_for_test(actions.clone());
 
     let mut engine: Engine<SessionFsmUnicastPolicy> =
-        Engine::new(SessionFsmUnicastPolicy::new());
+        Engine::new(SessionFsmUnicastPolicy::new(lua));
     engine.initialize();
 
     // SCXML <scxml initial="Init"> places the engine at Init after

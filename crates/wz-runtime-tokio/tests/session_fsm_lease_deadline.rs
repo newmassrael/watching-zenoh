@@ -31,7 +31,7 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    check_lease_deadline, install_session_actions, BoxedLinkDriver, CloseReason,
+    check_lease_deadline, BoxedLinkDriver, CloseReason,
     LeaseCheckOutcome, SessionLinkActions,
 };
 use wz_runtime_tokio::Reliability;
@@ -58,10 +58,8 @@ impl BoxedLinkDriver for NoopOutboundDriver {
 fn fresh_setup() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
     let outbound: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
     let actions = SessionLinkActions::new(outbound, fixture_session_init_params());
-    if install_session_actions(actions.clone()).is_err() {
-        install_session_actions_for_test(actions.clone());
-    }
-    let mut engine = Engine::new(SessionFsmUnicastPolicy::new());
+    let lua = install_session_actions_for_test(actions.clone());
+    let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
     engine.initialize();
     (actions, engine)
 }

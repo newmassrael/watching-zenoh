@@ -50,10 +50,9 @@
 //! secret); the integration test uses a fixed 8-byte cookie so
 //! the assertion against zenoh-pico's reference is deterministic.
 
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use sce_rust_lua::lua_engine_singleton;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use zeroize::Zeroizing;
@@ -577,76 +576,48 @@ impl ActionTrace {
     }
 }
 
-/// Process-wide install guard.
-///
-/// `sce_rust_lua::register_global_function` writes into one process-global
-/// Lua name space; allowing two `install_session_actions` calls would
-/// race on which `SessionLinkActions` the registered closures capture.
-/// R58 makes the guard explicit: the first install succeeds, every
-/// subsequent install returns `Err(SessionActionsAlreadyInstalled)`
-/// so the caller can decide whether to (a) treat reinstall as a
-/// programming bug and abort, or (b) accept the existing install if
-/// the same `SessionLinkActions` already covers their session.
-///
-/// The single-FSM-per-process limit is documented in
-/// `docs/runtime-crate-tokio.md` §6 (carry from R56) — multi-peer
-/// FSM concurrency requires session-scoped binding via
-/// `bind_native_object` and is deferred.
-static INSTALLED: OnceLock<Arc<SessionLinkActions>> = OnceLock::new();
-
-/// Returned when `install_session_actions` is called twice in the
-/// same process.
-#[derive(Debug)]
-pub struct SessionActionsAlreadyInstalled;
-
-impl std::fmt::Display for SessionActionsAlreadyInstalled {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "wz-runtime-tokio session actions already installed; this process supports at most one logical session FSM instance"
-        )
-    }
-}
-
-impl std::error::Error for SessionActionsAlreadyInstalled {}
-
 /// SCE-runtime session id the generated state-machine uses by default.
 pub const SESSION_ID: &str = "session_fsm_unicast";
 
 /// Wire the 17 native script functions referenced by
-/// `session_fsm_unicast.scxml` onto the Lua engine. The first call
-/// per process succeeds and locks the session actions; subsequent
-/// calls return `Err(SessionActionsAlreadyInstalled)`.
+/// `session_fsm_unicast.scxml` onto the supplied script engine, then
+/// create the SCE-runtime session that the generated state machine
+/// dispatches against.
+///
+/// R79 — the process-global `INSTALLED` OnceLock retired after SCE
+/// upstream commit `489e1922` deleted `lua_engine_singleton` /
+/// `sce_rust_lua::register` and SCE commit `09906015` reshaped every
+/// generated `Policy::new` to accept a per-instance
+/// `Arc<dyn IScriptEngine>`. Each call to `install_session_actions`
+/// now binds the 17 closures onto a caller-owned engine, so two
+/// independent session FSMs in the same process bind their closures
+/// onto separate engines — no cross-instance namespace race.
+///
+/// Caller pattern:
+/// ```ignore
+/// let lua: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
+/// install_session_actions(actions.clone(), &lua);
+/// let policy = SessionFsmUnicastPolicy::new(lua.clone());
+/// let mut engine = Engine::new(policy);
+/// ```
 pub fn install_session_actions(
     actions: Arc<SessionLinkActions>,
-) -> Result<(), SessionActionsAlreadyInstalled> {
-    INSTALLED
-        .set(actions.clone())
-        .map_err(|_| SessionActionsAlreadyInstalled)?;
-
-    // sce_rust_lua::register() is process-singleton: first call
-    // installs the engine, subsequent calls return
-    // ScriptEngineAlreadyRegistered. AlreadyRegistered is success
-    // (engine is in place either way); register's Result currently
-    // has exactly one Err variant so silent acceptance is sound.
-    let _ = sce_rust_lua::register();
-
-    let lua = lua_engine_singleton();
-    lua.create_session(SESSION_ID);
-
-    register_outbound_link_fns(lua, &actions);
-    register_state_internal_fns(lua, &actions);
-    register_guard_fns(lua);
-
-    Ok(())
+    script_engine: &Arc<dyn IScriptEngine>,
+) {
+    script_engine.create_session(SESSION_ID);
+    register_outbound_link_fns(script_engine.as_ref(), &actions);
+    register_state_internal_fns(script_engine.as_ref(), &actions);
+    register_guard_fns(script_engine.as_ref());
 }
 
 // R71 — the former `rebind_session_actions_for_test` moved to the
 // `wz-runtime-tokio-test-support` sibling crate as
-// `install_session_actions_for_test`. The three `register_*` helpers
-// below are exposed `pub` so the test-support crate can compose the
-// rebind path; production callers MUST use `install_session_actions`
-// which consults the `INSTALLED` OnceLock guard.
+// `install_session_actions_for_test`. R79 — that rebind helper is
+// also retired upstream of R79's per-instance DI; test-support now
+// simply constructs a fresh `LuaEngine` per test and calls
+// `install_session_actions` with it. The three `register_*` helpers
+// below remain `pub` so the test-support crate can compose them in
+// patterns that vary the registration set (e.g. partial rebinds).
 
 /// Register the 7 outbound link-driver script functions. Public only
 /// to let `wz-runtime-tokio-test-support::install_session_actions_for_test`

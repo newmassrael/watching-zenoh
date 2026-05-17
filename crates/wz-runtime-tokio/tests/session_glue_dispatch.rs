@@ -22,8 +22,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use wz_runtime_tokio::session_glue::{
-    install_session_actions, BoxedLinkDriver, CloseReason, SessionInitParams, SessionLinkActions,
-    SigningKey,
+    BoxedLinkDriver, CloseReason, SessionInitParams, SessionLinkActions, SigningKey,
 };
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{
@@ -95,40 +94,32 @@ fn fixture_params() -> SessionInitParams {
 fn r57_session_script_actions_produce_real_wire_bytes() {
     let driver = Arc::new(RecordingDriver::default());
     let actions = SessionLinkActions::new(driver.clone(), fixture_params());
-    // First install in this binary process. If a sibling test in the
-    // same binary already installed (cargo test runs tests parallel
-    // by default), we treat the `SessionActionsAlreadyInstalled`
-    // error as "rebind onto our own actions" — production code never
-    // takes this path, but test infrastructure must tolerate test
-    // ordering.
-    if install_session_actions(actions.clone()).is_err() {
-        install_session_actions_for_test(actions.clone());
-    }
+    let lua = install_session_actions_for_test(actions.clone());
 
     // ─── Step 1: initiator handshake path ───────────────────────
-    dispatch_script("link_driver_open").expect("LinkOpening onentry");
-    dispatch_script("send_init_syn").expect("Opening/SentInitSyn onentry");
-    dispatch_script("send_open_syn").expect("Opening/GotInitAck onentry");
-    dispatch_script("enable_rx_tx_regions").expect("Established onentry");
-    dispatch_script("start_lease_monitor").expect("Established onentry");
-    dispatch_script("start_keepalive_worker").expect("Established onentry");
+    dispatch_script(&*lua, "link_driver_open").expect("LinkOpening onentry");
+    dispatch_script(&*lua, "send_init_syn").expect("Opening/SentInitSyn onentry");
+    dispatch_script(&*lua, "send_open_syn").expect("Opening/GotInitAck onentry");
+    dispatch_script(&*lua, "enable_rx_tx_regions").expect("Established onentry");
+    dispatch_script(&*lua, "start_lease_monitor").expect("Established onentry");
+    dispatch_script(&*lua, "start_keepalive_worker").expect("Established onentry");
 
     // ─── Step 2: session-close walk ────────────────────────────
-    dispatch_script("set_close_reason_generic").expect("session.close transition action");
-    dispatch_script("stop_keepalive_worker").expect("Established onexit");
-    dispatch_script("stop_lease_monitor").expect("Established onexit");
-    dispatch_script("send_close_frame_with_reason").expect("Closing onentry");
-    dispatch_script("release_link").expect("Closed onentry");
-    dispatch_script("free_pool_slots").expect("Closed onentry");
+    dispatch_script(&*lua, "set_close_reason_generic").expect("session.close transition action");
+    dispatch_script(&*lua, "stop_keepalive_worker").expect("Established onexit");
+    dispatch_script(&*lua, "stop_lease_monitor").expect("Established onexit");
+    dispatch_script(&*lua, "send_close_frame_with_reason").expect("Closing onentry");
+    dispatch_script(&*lua, "release_link").expect("Closed onentry");
+    dispatch_script(&*lua, "free_pool_slots").expect("Closed onentry");
 
     // ─── Step 3: listener-path actions ─────────────────────────
-    dispatch_script("send_init_ack_with_cookie").expect("Accepting/SentInitAck onentry");
-    dispatch_script("send_open_ack").expect("Accepting/SentOpenAck onentry");
+    dispatch_script(&*lua, "send_init_ack_with_cookie").expect("Accepting/SentInitAck onentry");
+    dispatch_script(&*lua, "send_open_ack").expect("Accepting/SentOpenAck onentry");
 
     // ─── Step 4: close-reason discriminator coverage ──────────
-    dispatch_script("set_close_reason_invalid").expect("framing.error path");
-    dispatch_script("set_close_reason_expired").expect("lease.expired path");
-    dispatch_script("set_close_reason_unresponsive").expect("tx.congestion.exhaust path");
+    dispatch_script(&*lua, "set_close_reason_invalid").expect("framing.error path");
+    dispatch_script(&*lua, "set_close_reason_expired").expect("lease.expired path");
+    dispatch_script(&*lua, "set_close_reason_unresponsive").expect("tx.congestion.exhaust path");
 
     let trace = actions.trace_snapshot();
     assert_eq!(trace.link_driver_open, 1);
@@ -224,20 +215,30 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
         "OpenAck body must NOT contain the cookie payload"
     );
 
-    // ── Inline double-install assertion ─────────────────────────
-    let second_driver: Arc<dyn BoxedLinkDriver> =
-        Arc::new(RecordingDriver::default());
-    let second_actions =
-        SessionLinkActions::new(second_driver, fixture_session_init_params());
-    let second_install = install_session_actions(second_actions);
-    assert!(
-        second_install.is_err(),
-        "second install in same process must return SessionActionsAlreadyInstalled"
+    // ── R79 multi-engine isolation assertion ────────────────────
+    // SCE upstream `09906015` + `489e1922` retired the process-global
+    // ScriptEngineProvider singleton; two independent
+    // `install_session_actions_for_test` calls now own separate
+    // `LuaEngine` instances, and a dispatch against the second
+    // engine must hit the SECOND `SessionLinkActions` — not the
+    // first one (which would be the pre-R79 race symptom).
+    let second_driver = Arc::new(RecordingDriver::default());
+    let second_actions = SessionLinkActions::new(
+        second_driver.clone() as Arc<dyn BoxedLinkDriver>,
+        fixture_session_init_params(),
+    );
+    let second_lua = install_session_actions_for_test(second_actions.clone());
+    dispatch_script(&*second_lua, "link_driver_open")
+        .expect("second engine dispatch must succeed independently");
+    let second_trace = second_actions.trace_snapshot();
+    assert_eq!(
+        second_trace.link_driver_open, 1,
+        "second engine's dispatch must increment ITS own actions, not the first"
+    );
+    // First engine's trace remains unchanged by the second install.
+    let first_trace_after = actions.trace_snapshot();
+    assert_eq!(
+        first_trace_after.link_driver_open, 1,
+        "first engine's trace must NOT see the second engine's dispatch"
     );
 }
-
-// double_install behaviour is exercised inline at the end of
-// `r57_session_script_actions_produce_real_wire_bytes` to avoid
-// cargo test's default thread-parallel runner racing two
-// `install_session_actions` calls on the process-global
-// `INSTALLED` OnceLock.

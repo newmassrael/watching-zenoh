@@ -27,7 +27,7 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
 };
 use wz_runtime_tokio::session_glue::{
-    install_session_actions, SessionLinkActions, TokioLinkDriverAdapter,
+    SessionLinkActions, TokioLinkDriverAdapter,
 };
 use wz_runtime_tokio::TcpDriver;
 use wz_runtime_tokio_test_support::{
@@ -55,9 +55,7 @@ async fn r60_fsm_drives_real_tcp_loopback() {
         Arc::new(TokioLinkDriverAdapter::new(driver, handle));
 
     let actions = SessionLinkActions::new(adapter, fixture_session_init_params());
-    if install_session_actions(actions.clone()).is_err() {
-        install_session_actions_for_test(actions.clone());
-    }
+    let lua = install_session_actions_for_test(actions.clone());
 
     // ─── drive Init -> LinkOpening -> SentInitSyn ──────────────
     // The session FSM is sync; run it on a blocking task so the
@@ -65,9 +63,10 @@ async fn r60_fsm_drives_real_tcp_loopback() {
     // available to make progress. Returning the engine + actions
     // back to the test for cross-checks.
     let actions_for_engine = actions.clone();
+    let lua_for_engine = lua.clone();
     let engine_handle = tokio::task::spawn_blocking(move || {
         let mut engine: Engine<SessionFsmUnicastPolicy> =
-            Engine::new(SessionFsmUnicastPolicy::new());
+            Engine::new(SessionFsmUnicastPolicy::new(lua_for_engine));
         engine.initialize();
         engine.process_event(SessionFsmUnicastEvent::OutboundStart);
         engine.process_event(SessionFsmUnicastEvent::LinkOpened);
