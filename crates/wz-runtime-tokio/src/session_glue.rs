@@ -214,6 +214,14 @@ mod wire_const {
     /// Per-session liveness ping — zero-byte body; lease-timer
     /// reset on receive (transport.h:24 commentary, MID 0x04).
     pub const T_MID_KEEP_ALIVE: u8 = 0x04;
+    /// Established-session payload carrier (transport.h:79 MID 0x05).
+    /// Body = VLE sn + tail payload; optional ext chain between sn
+    /// and payload when Z flag set (zenoh-pico skips non-mandatories
+    /// on inbound, transport.c::_z_frame_decode L388).
+    pub const T_MID_FRAME: u8 = 0x05;
+    /// Reliable channel discriminator (1 = reliable, 0 = best-effort)
+    /// for `_Z_MID_T_FRAME` per transport.h:80.
+    pub const FLAG_T_FRAME_R: u8 = 0x20;
 
     /// InitAck discriminator (0 = InitSyn, 1 = InitAck).
     pub const FLAG_T_INIT_A: u8 = 0x20;
@@ -992,6 +1000,21 @@ pub enum InboundFrame {
         has_ext: bool,
         extensions: Vec<ExtEntry>,
     },
+    /// `_Z_MID_T_FRAME` (0x05). Established-session payload carrier:
+    /// `reliable` mirrors `_Z_FLAG_T_FRAME_R`; `sn` is the VLE
+    /// sequence number; `payload` is the tail bytes (the inner
+    /// NetworkMessage batch — higher-layer codec dispatch is the
+    /// caller's responsibility). Z-flagged frames have their ext
+    /// chain decoded into `extensions` between `sn` and `payload`
+    /// to mirror zenoh-pico's `_z_msg_ext_skip_non_mandatories`
+    /// path (transport.c::_z_frame_decode L388).
+    Frame {
+        reliable: bool,
+        sn: u64,
+        payload: Vec<u8>,
+        has_ext: bool,
+        extensions: Vec<ExtEntry>,
+    },
     /// MID outside the handshake/close/keepalive set.
     Unknown { mid: u8 },
 }
@@ -1102,6 +1125,33 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
                 extensions,
             })
         }
+        wire_const::T_MID_FRAME => {
+            // sn first (VLE), then optional ext chain (Z-gated),
+            // then tail payload to end of cursor.
+            let sn = cursor
+                .read_vle_u64()
+                .map_err(InboundParseError::Codec)?;
+            let extensions = if has_ext {
+                decode_ext_chain(&mut cursor)?
+            } else {
+                Vec::new()
+            };
+            let remaining = cursor.remaining();
+            let payload = cursor
+                .peek_slice(remaining)
+                .map_err(InboundParseError::Codec)?
+                .to_vec();
+            cursor
+                .advance(remaining)
+                .map_err(InboundParseError::Codec)?;
+            Ok(InboundFrame::Frame {
+                reliable: (flags & wire_const::FLAG_T_FRAME_R) != 0,
+                sn,
+                payload,
+                has_ext,
+                extensions,
+            })
+        }
         wire_const::T_MID_KEEP_ALIVE => {
             // KeepAlive body is empty (zero-byte payload); the
             // decode call is a no-op but kept for symmetry with the
@@ -1151,6 +1201,7 @@ pub fn inbound_to_fsm_event(
         InboundFrame::Open { is_ack: true, .. } => Some(E::OpenAckReceived),
         InboundFrame::Close { .. } => Some(E::PeerClose),
         InboundFrame::KeepAlive { .. } => None,
+        InboundFrame::Frame { .. } => None,
         InboundFrame::Unknown { .. } => Some(E::FramingError),
     }
 }

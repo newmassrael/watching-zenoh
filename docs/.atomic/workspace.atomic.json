@@ -7600,6 +7600,52 @@
         "parse_inbound MID 확장 (Frame 0x05 / Fragment 0x06 / OAM 0x00 / Join 0x07) carry."
       ]
     },
+    "Round 73": {
+      "decision_summary": "parse_inbound Frame variant — MID 0x05 dispatch via VLE sn + optional ext chain + tail payload; reliable flag from FLAG_T_FRAME_R; mirrors zenoh-pico _z_frame_decode Z-flag skip semantics.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs: wire_const::T_MID_FRAME = 0x05 + FLAG_T_FRAME_R = 0x20 상수 추가 (transport.h:79-80).",
+        "wz-runtime-tokio/src/session_glue.rs: InboundFrame::Frame { reliable, sn, payload, has_ext, extensions } variant 추가. parse_inbound dispatch 이 SceCursor::read_vle_u64 → 조건부 decode_ext_chain → 나머지 cursor bytes를 payload로 수쿽 (zenoh-pico transport.c::_z_frame_decode L388 대조).",
+        "wz-runtime-tokio/src/session_glue.rs: inbound_to_fsm_event의 Frame arm이 None 반환 (Established 상태 payload는 application-layer dispatch이지 FSM transition 아님).",
+        "wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs: 2 tests 추가 — (1) reliable Frame [0x25 0x01 0xCA 0xFE] 디코드 일치 + (2) best-effort sn=128 2-byte VLE boundary [0x05 0x80 0x01]. + covers-every-variant test에 Frame None projection 검증."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test session_fsm_inbound_dispatch: 7 passed / 0 failed.",
+        "cargo test --workspace: 전체 회귀 0건.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "Wire MID coverage: 6 (INIT/OPEN/CLOSE/KEEP_ALIVE/FRAME/Unknown). Fragment(0x06)/OAM(0x00)/Join(0x07)은 후속 round."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "carry_forward_bullets": [
+        "Frame payload 속 application-layer codec dispatch (msg_put/msg_del/request/response 로 디코드): 이후 round. wz-codecs에 이미 존재하는 codec set을 InboundFrame::Frame::payload에 추가로 apply.",
+        "parse_inbound MID 확장 (Fragment 0x06 / OAM 0x00 / Join 0x07) carry.",
+        "R71 wz-runtime-tokio-test-support split / Phase W wz-runtime-lwip / Hal time-mock SCE upstream patch: 이전 그대로 carry."
+      ],
+      "publishable_decision_summary": "parse_inbound Frame variant — MID 0x05 dispatch via VLE sn + optional ext chain + tail payload; reliable flag from FLAG_T_FRAME_R; mirrors zenoh-pico _z_frame_decode Z-flag skip semantics.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs: wire_const::T_MID_FRAME = 0x05 + FLAG_T_FRAME_R = 0x20 상수 추가 (transport.h:79-80).",
+        "wz-runtime-tokio/src/session_glue.rs: InboundFrame::Frame { reliable, sn, payload, has_ext, extensions } variant 추가. parse_inbound dispatch 이 SceCursor::read_vle_u64 → 조건부 decode_ext_chain → 나머지 cursor bytes를 payload로 수쿽 (zenoh-pico transport.c::_z_frame_decode L388 대조).",
+        "wz-runtime-tokio/src/session_glue.rs: inbound_to_fsm_event의 Frame arm이 None 반환 (Established 상태 payload는 application-layer dispatch이지 FSM transition 아님).",
+        "wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs: 2 tests 추가 — (1) reliable Frame [0x25 0x01 0xCA 0xFE] 디코드 일치 + (2) best-effort sn=128 2-byte VLE boundary [0x05 0x80 0x01]. + covers-every-variant test에 Frame None projection 검증."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test session_fsm_inbound_dispatch: 7 passed / 0 failed.",
+        "cargo test --workspace: 전체 회귀 0건.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "Wire MID coverage: 6 (INIT/OPEN/CLOSE/KEEP_ALIVE/FRAME/Unknown). Fragment(0x06)/OAM(0x00)/Join(0x07)은 후속 round."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Frame payload 속 application-layer codec dispatch (msg_put/msg_del/request/response 로 디코드): 이후 round. wz-codecs에 이미 존재하는 codec set을 InboundFrame::Frame::payload에 추가로 apply.",
+        "parse_inbound MID 확장 (Fragment 0x06 / OAM 0x00 / Join 0x07) carry.",
+        "R71 wz-runtime-tokio-test-support split / Phase W wz-runtime-lwip / Hal time-mock SCE upstream patch: 이전 그대로 carry."
+      ]
+    },
     "Round 8": {
       "decision_summary": "Phase D ARCHITECTURE densify 마감: top-level sec 10-16 + 핵심 sub (2.4, 11.4, 11.5) typed-populate; 4 section-marker docs root-only carry; Phase E README 분리.",
       "changes_bullets": [
