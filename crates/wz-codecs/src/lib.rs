@@ -95,6 +95,10 @@ pub mod ext_entry {
     include!(concat!(env!("OUT_DIR"), "/ext_entry.rs"));
 }
 
+pub mod ext_envelope {
+    include!(concat!(env!("OUT_DIR"), "/ext_envelope.rs"));
+}
+
 pub mod msg_put {
     include!(concat!(env!("OUT_DIR"), "/msg_put.rs"));
 }

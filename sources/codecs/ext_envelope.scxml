@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh extension chain envelope — TLV chain
+     of variant-bodied entries (RFC §5.B B5-ε surface G; chain
+     termination via Y3 entry-flag).
+
+     Mirrors zenoh-pico `_z_msg_ext_vec_encode` (src/protocol/codec/
+     ext.c lines 148-159) and the iterative `_z_msg_ext_decode_iter`
+     (lines 226-238): an iterative chain of `_z_msg_ext_t` entries
+     where each entry's body shape is selected at runtime by the
+     `enc` bit-range of its 1-byte header AND the chain terminates
+     when the entry's `Z` bit (bit 7) is clear. B5-ε's surface-G
+     freebie is that an imported codec can itself be a variant (this
+     envelope's `codec_zenoh_ext_entry` body) without IR change. Y3
+     lifts the chain termination strategy from "cursor-exhaust +
+     max-depth" (B5-ε deferral) to "entry-flag" so the wire stream
+     can carry payload after the chain — required by zenoh-pico
+     request/response/declare/oam bodies whose body variant follows
+     the ext chain.
+
+     The `header_flags` byte at position 0 carries the parent
+     transport-message header so the envelope round-trips
+     self-contained (standalone Layer 2/3 conformance shape). For
+     real Zenoh wire integration the envelope is typically invoked
+     AFTER the carrier body (init / open / join / etc.) has already
+     consumed the header — the carrier writes its own header byte
+     and body, then dispatches into this envelope for the ext chain
+     suffix. The standalone form matches zenoh-pico's `*_vec_encode`
+     fanout point and provides the Layer 3 interop oracle without
+     coupling to any carrier-specific message shape.
+
+     Wire round-trip oracle (Rust runtime smoke):
+       header_flags=0x01,
+       entries=[
+         (ext_id=0x00, M=0, enc=0x00, Z=1, body=Unit{}),
+                                            // 1 byte:  0x80
+         (ext_id=0x01, M=1, enc=0x01, Z=1, body=ZInt{value=42}),
+                                            // 2 bytes: 0xB1 0x2A
+         (ext_id=0x02, M=1, enc=0x02, Z=0, body=ZBuf{value=[0xAB,0xCD]})
+                                            // 4 bytes: 0x52 0x02 0xAB 0xCD
+       ]
+       wire = 0x01  0x80  0xB1 0x2A  0x52 0x02 0xAB 0xCD   (8 bytes)
+
+     header byte breakdown (ext_id:4 | M:1 | enc:2 | Z:1):
+       0x80 = ext_id=0,  M=0, enc=0 (Unit), Z=1  →  0x80 = (1 << 7)
+       0xB1 = ext_id=1,  M=1, enc=1 (ZInt), Z=1  →  0xB1 = 0x80 | 0x20 | 0x10 | 0x01
+       0x52 = ext_id=2,  M=1, enc=2 (ZBuf), Z=0  →  0x52 = 0x40 | 0x10 | 0x02
+
+     Body byte-identical to SCE upstream codec_zenoh_ext_envelope at
+     vendor pin 11f1032d; diff in SPDX header + file stem + root
+     name attribute + <sce:import src=> retargeted to wz-side
+     ext_entry stem. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="ext_envelope">
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <datamodel>
+    <sce:field id="header_flags" sce:type="uint8" sce:byte="0" sce:bit-size="8"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="1"
+                   max-depth="8" on-overflow="reject"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+  </datamodel>
+</scxml>
