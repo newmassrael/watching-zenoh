@@ -181,7 +181,7 @@ fn encode_init_with_ext_chain_byte_equiv_to_pico() {
     let actions = SessionLinkActions::new(driver, fixture_session_init_params());
     actions.set_ext_chain(ExtChainRole::InitAck, wz_oracle_chain());
 
-    let actual = actions.encode_init_with_role(/*is_ack=*/ true, ExtChainRole::InitAck);
+    let actual = actions.encode_init_with_role(/*is_ack=*/ true, /*cookie_override=*/ None, ExtChainRole::InitAck);
     assert_eq!(
         actual, expected,
         "wz InitAck encode with ext chain must byte-match pico reference"
@@ -199,7 +199,7 @@ fn encode_init_without_ext_chain_omits_z_flag_and_trailing_bytes() {
     let actions = SessionLinkActions::new(driver, fixture_session_init_params());
     // No set_ext_chain — slot stays empty.
 
-    let actual = actions.encode_init_with_role(/*is_ack=*/ true, ExtChainRole::InitAck);
+    let actual = actions.encode_init_with_role(/*is_ack=*/ true, /*cookie_override=*/ None, ExtChainRole::InitAck);
     assert_eq!(
         actual, expected,
         "empty-chain wire must omit Z flag + trailing bytes"
@@ -215,10 +215,10 @@ fn ext_chain_role_isolation() {
     actions.set_ext_chain(ExtChainRole::InitSyn, wz_oracle_chain());
 
     let init_ack_wire =
-        actions.encode_init_with_role(/*is_ack=*/ true, ExtChainRole::InitAck);
+        actions.encode_init_with_role(/*is_ack=*/ true, /*cookie_override=*/ None, ExtChainRole::InitAck);
     assert_eq!(init_ack_wire[0] & FLAG_T_Z, 0, "InitAck unaffected by InitSyn chain");
 
     let init_syn_wire =
-        actions.encode_init_with_role(/*is_ack=*/ false, ExtChainRole::InitSyn);
+        actions.encode_init_with_role(/*is_ack=*/ false, /*cookie_override=*/ None, ExtChainRole::InitSyn);
     assert_ne!(init_syn_wire[0] & FLAG_T_Z, 0, "InitSyn role chain populates Z");
 }

@@ -420,3 +420,84 @@ fn parse_frame_payload_truncated_request_returns_codec_error() {
     let bytes = [0x1Cu8];
     parse_frame_payload(&bytes).expect_err("truncated Request body rejects");
 }
+
+// ─────────── R86 handle_inbound InitSyn peer_zid capture ───────────
+
+#[test]
+fn r86_handle_inbound_initsyn_captures_peer_zid() {
+    use wz_runtime_tokio::session_glue::InboundFrame;
+
+    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver::default());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
+    assert!(
+        actions.inbound_peer_zid.lock().unwrap().is_none(),
+        "slot starts empty"
+    );
+
+    // Hand-crafted InitSyn wire — FLAG_T_INIT_S (0x40) | T_MID_INIT
+    // (0x01) header, 4-byte peer zid [0xB0..0xB3]. Mirrors
+    // session_fsm_accepting_path::craft_initsyn_wire() shape so the
+    // R78 integration test and this R86 unit test inspect the same
+    // wire across the dispatch layers.
+    let wire = vec![
+        0x40 | 0x01, // FLAG_T_INIT_S | T_MID_INIT
+        0x05, // version
+        0x31, // cbyte: whatami=Peer wire(0x01), zid_len=4 (high nibble = 3)
+        0xB0, 0xB1, 0xB2, 0xB3, // zid (4 bytes)
+        0x00, // sn_res
+        0x00, 0x00, // batch_size LE u16
+    ];
+
+    let frame = actions.handle_inbound(&wire).expect("InitSyn parses");
+    assert!(
+        matches!(frame, InboundFrame::Init { is_ack: false, .. }),
+        "wire decodes to InitSyn (is_ack=false)"
+    );
+
+    let captured = actions.inbound_peer_zid.lock().unwrap().clone();
+    assert_eq!(
+        captured,
+        Some(vec![0xB0, 0xB1, 0xB2, 0xB3]),
+        "InitSyn arrival must capture peer_zid into inbound_peer_zid slot \
+         (R86 wiring for RFC §5.M cookie binding)"
+    );
+}
+
+#[test]
+fn r86_handle_inbound_init_ack_does_not_overwrite_peer_zid() {
+    use wz_runtime_tokio::session_glue::InboundFrame;
+
+    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver::default());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
+
+    // Seed the slot to verify InitAck doesn't overwrite it (InitAck
+    // is the Initiator side observing the listener; the listener's
+    // zid is in body.zid but the SLOT is for inbound peer's zid in
+    // the Accepting-side capture path, so semantic-wise InitAck
+    // should NOT touch this slot to avoid cross-role confusion).
+    let seeded = vec![0xAA, 0xBB, 0xCC, 0xDD];
+    *actions.inbound_peer_zid.lock().unwrap() = Some(seeded.clone());
+
+    // Hand-crafted InitAck wire — has different zid bytes
+    // [0xC0..0xC3] AND a 4-byte cookie at the end, with both
+    // FLAG_T_INIT_S (0x40) and FLAG_T_INIT_A (0x20) parent flags.
+    let wire = vec![
+        0x40 | 0x20 | 0x01, // FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT
+        0x05, 0x31,
+        0xC0, 0xC1, 0xC2, 0xC3, // different zid (would be the responder's)
+        0x00, 0x00, 0x00,
+        0x04, // cookie_len VLE = 4
+        0xDE, 0xAD, 0xBE, 0xEF, // cookie
+    ];
+
+    let frame = actions.handle_inbound(&wire).expect("InitAck parses");
+    assert!(matches!(frame, InboundFrame::Init { is_ack: true, .. }));
+
+    let after = actions.inbound_peer_zid.lock().unwrap().clone();
+    assert_eq!(
+        after,
+        Some(seeded),
+        "InitAck arrival must NOT overwrite inbound_peer_zid \
+         (R86 capture is Accepting-side InitSyn only)"
+    );
+}
