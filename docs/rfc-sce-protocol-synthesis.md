@@ -748,7 +748,7 @@ naming convention formalized in §5.J:
 - Per-driver adapter selects the OS-native I/O primitive. Current
   crate plan:
   - `sce_link_runtime_lwip` (MCU bare_metal — Phase B baseline):
-    `lwip_udp`, `lwip_tcp`, `serial_uart`, `raw_eth`.
+    `lwip_udp`, `lwip_tcp`, `serial_uart`, `websocket_tcp`.
   - `sce_link_runtime_tokio` (AP linux — Phase D.1): `tokio_udp`,
     `tokio_tcp`. Optional `tokio_uring` driver for `io_uring` opt-in
     on kernels ≥ 5.10.
