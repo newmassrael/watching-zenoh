@@ -1296,6 +1296,102 @@ pub fn check_lease_deadline(
     }
 }
 
+/// R76b — outcome of the production driver loop in
+/// `drive_session_until_terminal`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DriverOutcome {
+    /// The engine reached a terminal state
+    /// (`Engine::is_in_final_state() == true`) via FSM transition.
+    /// Production callers exit the session lifecycle here; the
+    /// outbound driver close has already been dispatched by the
+    /// `Closed.onentry` script action chain.
+    Terminated,
+    /// The caller-supplied `max_iters` cap was reached without the
+    /// engine reaching a terminal state. Test callers use this to
+    /// bound runaway loops; production callers pass `None` for
+    /// unlimited iteration.
+    IterationLimit,
+}
+
+/// R76b — production driver loop. Composes `poll_and_dispatch_one`
+/// (one LinkEvent per iteration) with a `tokio::select!` race
+/// against a lease-deadline `tokio::time::sleep` so a peer that
+/// stops sending KeepAlives reaches the `lease.expired -> Closing`
+/// transition without the driver poll blocking indefinitely.
+///
+/// Each iteration:
+///   1. Returns `Terminated` if `engine.is_in_final_state()` already.
+///   2. Returns `IterationLimit` if `max_iters` is exhausted.
+///   3. Reads `last_inbound_keepalive_at`. If `Some(stamp)`, computes
+///      the remaining lease window via `stamp + lease - now`.
+///   4. Selects between `poll_and_dispatch_one` and a sleep of the
+///      remaining window. The first-to-complete branch's outcome is
+///      applied (event dispatch or lease check); the other future
+///      is cancelled.
+///   5. Loop back to (1).
+///
+/// `max_iters = Some(n)` caps the iteration count for test
+/// determinism. Production callers pass `None` for unlimited.
+///
+/// Cancel-safety. `tokio::select!` cancels the losing branch's
+/// future. `poll_and_dispatch_one`'s only `.await` point is
+/// `driver.poll_event()`; cancellation there is well-defined for
+/// the in-tree `TcpDriver` / `UdpDriver` (tokio io futures are
+/// cancel-safe at the read syscall boundary) and for the test
+/// `QueueDriver` (synchronous pop). No bytes are lost across
+/// cancellation.
+///
+/// Carry — the lease branch reads `Instant::now()` (std monotonic
+/// clock) while the sleep uses `tokio::time` (which can be paused
+/// via `tokio::time::pause` for test). Deterministic time-paused
+/// testing of the lease branch requires a unified clock source;
+/// this round trusts the R77 `check_lease_deadline` unit tests for
+/// the leaf logic and uses wall-clock-short-lease integration
+/// testing for the loop wiring.
+pub async fn drive_session_until_terminal<D: LinkDriver>(
+    driver: &mut D,
+    actions: &Arc<SessionLinkActions>,
+    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy>,
+    max_iters: Option<usize>,
+) -> DriverOutcome {
+    let lease = if actions.params.lease_in_seconds {
+        Duration::from_secs(actions.params.lease)
+    } else {
+        Duration::from_millis(actions.params.lease)
+    };
+    let mut iter: usize = 0;
+    loop {
+        if engine.is_in_final_state() {
+            return DriverOutcome::Terminated;
+        }
+        if let Some(limit) = max_iters {
+            if iter >= limit {
+                return DriverOutcome::IterationLimit;
+            }
+            iter += 1;
+        }
+        let lease_deadline = {
+            let stamp = *actions.last_inbound_keepalive_at.lock().unwrap();
+            stamp.map(|s| s + lease)
+        };
+        match lease_deadline {
+            Some(deadline) => {
+                let now = Instant::now();
+                let remaining = deadline.saturating_duration_since(now);
+                tokio::select! {
+                    _ = poll_and_dispatch_one(driver, actions, engine) => {}
+                    _ = tokio::time::sleep(remaining) => {
+                        let _ = check_lease_deadline(actions, engine, Instant::now());
+                    }
+                }
+            }
+            None => {
+                let _ = poll_and_dispatch_one(driver, actions, engine).await;
+            }
+        }
+    }
+}
+
 /// Decode a transport-message ext chain in place. Terminates when
 /// an entry's `Z` bit is clear OR when `MAX_EXT_CHAIN_DEPTH` is
 /// reached (the latter returns `ExtChainOverflow` so a malformed

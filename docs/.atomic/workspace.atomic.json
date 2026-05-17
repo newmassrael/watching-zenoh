@@ -8024,6 +8024,54 @@
         "Future tests added in subsequent rounds (R76b drive_session_until_terminal, R77b lease+timeout integration, R74 Frame codec dispatch) can default to per-scenario #[test] fns from the start — R79 + R80 made that the natural pattern."
       ]
     },
+    "Round 81": {
+      "decision_summary": "R76b drive_session_until_terminal — production session loop composes poll_and_dispatch_one + lease deadline via tokio::select!.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: added DriverOutcome enum (Terminated / IterationLimit) and async drive_session_until_terminal helper after check_lease_deadline; loop body composes poll_and_dispatch_one with a tokio::select! race against tokio::time::sleep(remaining lease window)",
+        "termination at iteration top: engine.is_in_final_state() -> Terminated; max_iters reached -> IterationLimit; production callers pass max_iters=None for unlimited, test callers cap it",
+        "lease branch: reads last_inbound_keepalive_at, computes deadline = stamp + lease (lease_in_seconds-aware), sleeps for saturating_duration_since(now) of the remaining window, then invokes check_lease_deadline(actions, engine, Instant::now()) on the sleep-wins branch; if stamp slot is None (no inbound keepalive yet) falls through to a plain poll_and_dispatch_one await (no lease watchdog)",
+        "crates/wz-runtime-tokio/tests/session_fsm_drive_session.rs: new test file with 4 #[tokio::test] fns covering loop wiring shape — already-terminal engine surfaces Terminated, max_iters=0 surfaces IterationLimit, staged LinkEvent::Lost drives Terminated via poll branch, short-lease + HangingDriver advances FSM past Established via sleep branch",
+        "HangingDriver scaffold (std::future::pending::<LinkEvent>().await) models a silent peer so the lease branch is the only forward path; QueueDriver mirrors R76 driver_loop test scaffolding (intentional duplication, scaffolding-extraction is a separate retrospective)",
+        "closes R76 honest weakness #1 carry (\"poll_and_dispatch_one is a production unit, not a production loop\") — R76b is the loop wrapper that R76 was missing"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio green",
+        "cargo test -p wz-runtime-tokio --test session_fsm_drive_session: 4 passed in 0.03s (wall-clock lease test stable at 20ms lease + 8 max_iters)",
+        "cargo test --workspace: 97 passed / 0 failed (93 -> 97, +4 = exact R76b new test count)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass",
+        "lease branch fires under HangingDriver: scenario 4 asserts FSM advances past Established within wall-clock budget (lease=20ms, 8 max_iters allows ~160ms total)"
+      ],
+      "carry_forward_bullets": [
+        "Time-paused deterministic test for the lease branch — the current scenario 4 relies on wall-clock 20ms; tokio::time::pause + advance would make it deterministic, but the production code mixes tokio::time::sleep (paused-aware) with check_lease_deadline's Instant::now (std clock, NOT paused). Unifying the time source requires either parametrising drive_session_until_terminal with a clock trait or porting check_lease_deadline to tokio::time::Instant. Defer to a separate round.",
+        "Cancel-safety boundary docstring added — in-tree drivers (TcpDriver/UdpDriver/QueueDriver/HangingDriver) are cancel-safe at the poll_event boundary, but extern target-plugin drivers (Phase W) may not be. Phase W integration must audit cancel-safety per driver.",
+        "max_iters=None production case untested directly — tests cap iterations for determinism; the unlimited code path is exercised only through cargo's overall workspace runtime. A future end-to-end integration (R76c?) with real TCP loopback could verify the unlimited shape under a finite total runtime budget.",
+        "drive_session_until_terminal does not surface the inner DriverLoopOutcome (AdvancedFsm / SideEffectOnly / ParseError / LinkLost) per iteration — production telemetry / logging callers would want that. Add a per-iteration observer callback in a follow-up round if needed."
+      ],
+      "publishable_decision_summary": "R76b drive_session_until_terminal — production session loop composes poll_and_dispatch_one + lease deadline via tokio::select!.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: added DriverOutcome enum (Terminated / IterationLimit) and async drive_session_until_terminal helper after check_lease_deadline; loop body composes poll_and_dispatch_one with a tokio::select! race against tokio::time::sleep(remaining lease window)",
+        "termination at iteration top: engine.is_in_final_state() -> Terminated; max_iters reached -> IterationLimit; production callers pass max_iters=None for unlimited, test callers cap it",
+        "lease branch: reads last_inbound_keepalive_at, computes deadline = stamp + lease (lease_in_seconds-aware), sleeps for saturating_duration_since(now) of the remaining window, then invokes check_lease_deadline(actions, engine, Instant::now()) on the sleep-wins branch; if stamp slot is None (no inbound keepalive yet) falls through to a plain poll_and_dispatch_one await (no lease watchdog)",
+        "crates/wz-runtime-tokio/tests/session_fsm_drive_session.rs: new test file with 4 #[tokio::test] fns covering loop wiring shape — already-terminal engine surfaces Terminated, max_iters=0 surfaces IterationLimit, staged LinkEvent::Lost drives Terminated via poll branch, short-lease + HangingDriver advances FSM past Established via sleep branch",
+        "HangingDriver scaffold (std::future::pending::<LinkEvent>().await) models a silent peer so the lease branch is the only forward path; QueueDriver mirrors R76 driver_loop test scaffolding (intentional duplication, scaffolding-extraction is a separate retrospective)",
+        "closes R76 honest weakness #1 carry (\"poll_and_dispatch_one is a production unit, not a production loop\") — R76b is the loop wrapper that R76 was missing"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio green",
+        "cargo test -p wz-runtime-tokio --test session_fsm_drive_session: 4 passed in 0.03s (wall-clock lease test stable at 20ms lease + 8 max_iters)",
+        "cargo test --workspace: 97 passed / 0 failed (93 -> 97, +4 = exact R76b new test count)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass",
+        "lease branch fires under HangingDriver: scenario 4 asserts FSM advances past Established within wall-clock budget (lease=20ms, 8 max_iters allows ~160ms total)"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Time-paused deterministic test for the lease branch — the current scenario 4 relies on wall-clock 20ms; tokio::time::pause + advance would make it deterministic, but the production code mixes tokio::time::sleep (paused-aware) with check_lease_deadline's Instant::now (std clock, NOT paused). Unifying the time source requires either parametrising drive_session_until_terminal with a clock trait or porting check_lease_deadline to tokio::time::Instant. Defer to a separate round.",
+        "Cancel-safety boundary docstring added — in-tree drivers (TcpDriver/UdpDriver/QueueDriver/HangingDriver) are cancel-safe at the poll_event boundary, but extern target-plugin drivers (Phase W) may not be. Phase W integration must audit cancel-safety per driver.",
+        "max_iters=None production case untested directly — tests cap iterations for determinism; the unlimited code path is exercised only through cargo's overall workspace runtime. A future end-to-end integration (R76c?) with real TCP loopback could verify the unlimited shape under a finite total runtime budget.",
+        "drive_session_until_terminal does not surface the inner DriverLoopOutcome (AdvancedFsm / SideEffectOnly / ParseError / LinkLost) per iteration — production telemetry / logging callers would want that. Add a per-iteration observer callback in a follow-up round if needed."
+      ]
+    },
     "Round 9": {
       "decision_summary": "Phase D 진짜 closure — ARCHITECTURE 잔여 sub 34개 + 4 §-prefix docs sub 69개 typed-populate; \"parser limit\" carry는 misdiagnosis로 판명되어 mnemosyne 변경 불필요.",
       "changes_bullets": [
