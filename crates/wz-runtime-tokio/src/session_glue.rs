@@ -1069,6 +1069,33 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
     }
 }
 
+/// R69b — map a parsed inbound transport frame to the matching
+/// session-FSM external event variant.
+///
+/// Drives the receive half of the unicast session lifecycle:
+/// `inbound bytes ─→ parse_inbound ─→ inbound_to_fsm_event ─→
+/// Engine::process_event` so the FSM consumes peer frames without
+/// the caller hand-writing the discriminator match.
+///
+/// `Unknown { mid }` maps to `FramingError` because an unhandled
+/// MID at this dispatch layer is a wire-spec violation — the peer
+/// sent a transport-message ID the codec set does not implement,
+/// and the FSM's framing-error transition is the correct response
+/// (Close(generic) on the link).
+pub fn inbound_to_fsm_event(
+    frame: &InboundFrame,
+) -> crate::session_fsm_unicast::SessionFsmUnicastEvent {
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    match frame {
+        InboundFrame::Init { is_ack: false, .. } => E::InitSynReceived,
+        InboundFrame::Init { is_ack: true, .. } => E::InitAckReceived,
+        InboundFrame::Open { is_ack: false, .. } => E::OpenSynReceived,
+        InboundFrame::Open { is_ack: true, .. } => E::OpenAckReceived,
+        InboundFrame::Close { .. } => E::PeerClose,
+        InboundFrame::Unknown { .. } => E::FramingError,
+    }
+}
+
 /// Decode a transport-message ext chain in place. Terminates when
 /// an entry's `Z` bit is clear OR when `MAX_EXT_CHAIN_DEPTH` is
 /// reached (the latter returns `ExtChainOverflow` so a malformed

@@ -7312,6 +7312,50 @@
         "R70-tier Hal time-mock: SCE std build이 Instant::now() 직접 사용 → std lane Hal time-mock은 SCE upstream sched_now Hal routing patch 필요; carry."
       ]
     },
+    "Round 69b": {
+      "decision_summary": "Inbound→FSM event wiring — inbound_to_fsm_event helper projects InboundFrame to SessionFsmUnicastEvent; integration test routes wire bytes through parse_inbound→handle_inbound→inbound_to_fsm_event→Engine::process_event, advancing FSM from Opening to GotInitAck with cookie capture intact.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs: pub fn inbound_to_fsm_event(&InboundFrame) -> SessionFsmUnicastEvent 상수 매핑 helper 추가. Init(is_ack)/Open(is_ack)/Close/Unknown 6가지 variant을 SessionFsmUnicastEvent의 6개 해당 variant로 projection (Unknown→FramingError).",
+        "wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs: 2 tests — (1) Initiator path Init→LinkOpening→SentInitSyn→GotInitAck 전이가 craft_initack_wire → handle_inbound → inbound_to_fsm_event → engine.process_event 연결링으로 완결 + cookie slot populate 검증, (2) 6 variant projection 완전성."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test session_fsm_inbound_dispatch: 2 passed / 0 failed.",
+        "cargo test --workspace: 전체 회귀 0건; R55b engine_drive, R57 glue_dispatch, R67/R68 layer3 모두 green.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "Wire path 증거: 수제 InitAck wire (parent_flags S|A + body + 8-byte cookie) → parse_inbound 성공 → inbound_cookie slot = peer cookie 건매도 검증 → FSM state == GotInitAck."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/2-1-unicast-states",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions"
+      ],
+      "carry_forward_bullets": [
+        "다음 carry priority: R71 wz-runtime-tokio-test-support crate split (encapsulation hardening) → Phase W wz-runtime-lwip (MCU cross-compile).",
+        "Hal time-mock은 SCE std build sched_now Hal routing patch 필요 — upstream PR 윈도우 열릴 때까지 carry.",
+        "session_fsm_inbound_dispatch 확장: Accepting 경로 (InitSyn→SentInitAck) + Established 종속 전이(세션 close / peer.close) coverage 추가 가능 — 그러나 SCXML accept-side substate 구축이 먼저."
+      ],
+      "publishable_decision_summary": "Inbound→FSM event wiring — inbound_to_fsm_event helper projects InboundFrame to SessionFsmUnicastEvent; integration test routes wire bytes through parse_inbound→handle_inbound→inbound_to_fsm_event→Engine::process_event, advancing FSM from Opening to GotInitAck with cookie capture intact.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs: pub fn inbound_to_fsm_event(&InboundFrame) -> SessionFsmUnicastEvent 상수 매핑 helper 추가. Init(is_ack)/Open(is_ack)/Close/Unknown 6가지 variant을 SessionFsmUnicastEvent의 6개 해당 variant로 projection (Unknown→FramingError).",
+        "wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs: 2 tests — (1) Initiator path Init→LinkOpening→SentInitSyn→GotInitAck 전이가 craft_initack_wire → handle_inbound → inbound_to_fsm_event → engine.process_event 연결링으로 완결 + cookie slot populate 검증, (2) 6 variant projection 완전성."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test session_fsm_inbound_dispatch: 2 passed / 0 failed.",
+        "cargo test --workspace: 전체 회귀 0건; R55b engine_drive, R57 glue_dispatch, R67/R68 layer3 모두 green.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "Wire path 증거: 수제 InitAck wire (parent_flags S|A + body + 8-byte cookie) → parse_inbound 성공 → inbound_cookie slot = peer cookie 건매도 검증 → FSM state == GotInitAck."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/2-1-unicast-states",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "다음 carry priority: R71 wz-runtime-tokio-test-support crate split (encapsulation hardening) → Phase W wz-runtime-lwip (MCU cross-compile).",
+        "Hal time-mock은 SCE std build sched_now Hal routing patch 필요 — upstream PR 윈도우 열릴 때까지 carry.",
+        "session_fsm_inbound_dispatch 확장: Accepting 경로 (InitSyn→SentInitAck) + Established 종속 전이(세션 close / peer.close) coverage 추가 가능 — 그러나 SCXML accept-side substate 구축이 먼저."
+      ]
+    },
     "Round 7": {
       "decision_summary": "Phase D scope correction — README/SESSION_KICKOFF removed from workspace.docs (genre fit); atomic-internal orphan ledger via mnemosyne Round 254 supports textbook path.",
       "changes_bullets": [
