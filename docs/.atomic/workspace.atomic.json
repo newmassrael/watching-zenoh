@@ -7210,6 +7210,62 @@
         "Future round: SessionLinkActions::ext_chain_slot가 4-array indexing 대신 [Mutex<Vec<ExtEntry>>; 4] 구조진 추가 고려 (R68b는 named field 4개로 유지 — ExtChainRole match 가독성 우선)."
       ]
     },
+    "Round 68c": {
+      "decision_summary": "Inbound ext-chain decode integration — parse_inbound honors Z flag, drains trailing ext entries via decode_ext_chain (max-depth=8 reject), InboundFrame surfaces extensions per variant; R68 full close (parser + encode + decode + cookie capture + Layer 3 forward/reverse byte-equiv).",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs: InboundFrame::{Init,Open,Close} variants에 extensions: Vec<ExtEntry> field 추가 + decode_ext_chain helper — has_ext=true일 때 body cursor 뒤 trailing bytes를 ExtEntry::decode loop로 소니파이 (Z bit terminator).",
+        "wz-runtime-tokio/src/session_glue.rs: MAX_EXT_CHAIN_DEPTH = 8 pub const (ext_envelope.scxml max-depth=8 mirror); decode_ext_chain이 limit 초과 시 InboundParseError::ExtChainOverflow 반환. 뎍지적으로 on-overflow=\"reject\" 일치.",
+        "wz-runtime-tokio/src/session_glue.rs: InboundParseError에 ExtChainOverflow variant 추가 + Display 구현 그에 먾춤.",
+        "wz-runtime-tokio/src/session_glue.rs: parse_inbound의 has_ext 상수를 wire_const::FLAG_T_Z로 교체 (magic-number 제거).",
+        "wz-integration-tests/tests/layer3_inbound_init.rs: R68a InboundFrame::Init match arm에 extensions: Vec::new() assertion 추가 (no-Z-flag은 빈 Vec).",
+        "wz-integration-tests/tests/layer3_inbound_ext_chain.rs: 2 tests — pico encode body + ext chain → wz parse_inbound 솼면 entries.len()=3 및 각 엔트리의 ext_id/M/enc/Z/body 디코드 결과 byte-equiv. non-terminating chain MAX_EXT_CHAIN_DEPTH+1 entries는 ExtChainOverflow."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_inbound_ext_chain: 2 passed / 0 failed. 3-entry oracle (Unit/ZInt/ZBuf) header bits + body variant + Z-terminator 자립 검증.",
+        "cargo test -p wz-integration-tests --test layer3_inbound_init: 4 passed / 0 failed (R68a tests InboundFrame schema 확장 대응 후 그대로 통과).",
+        "cargo test --workspace: 회귀 0건. layer3_*, session_fsm_*, session_glue_dispatch, ffi_smoke 모두 green.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean (clippy::no_effect + same_item_push hit 수정 후 ok).",
+        "R68 full close 증거 체인: spec freeze (ext_envelope.scxml R67) + codec land (R67) + Layer 1+2 SCE conformance 6/6 + ext_envelope round-trip oracle (R67b) + Layer 3 outbound byte-equiv (R67c, R68b) + Layer 3 inbound byte-equiv (R68a, R68c)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "R68 itself now fully closed — inbound parser + cookie capture + ext encode + ext decode + Layer 3 양방향 byte-equiv 모두 green.",
+        "R69 Hal time-mock + 12 timers coverage — 다음 출발점.",
+        "R71 wz-runtime-tokio-test-support split + Phase W wz-runtime-lwip + AP getrandom 이전 그대로.",
+        "Inbound→FSM event wiring (parse_inbound 결과를 Engine::process_event로 필터링/forward)는 별도 round — R69+ session_glue_dispatch 의 inbound 파일럿 추가."
+      ],
+      "publishable_decision_summary": "Inbound ext-chain decode integration — parse_inbound honors Z flag, drains trailing ext entries via decode_ext_chain (max-depth=8 reject), InboundFrame surfaces extensions per variant; R68 full close (parser + encode + decode + cookie capture + Layer 3 forward/reverse byte-equiv).",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs: InboundFrame::{Init,Open,Close} variants에 extensions: Vec<ExtEntry> field 추가 + decode_ext_chain helper — has_ext=true일 때 body cursor 뒤 trailing bytes를 ExtEntry::decode loop로 소니파이 (Z bit terminator).",
+        "wz-runtime-tokio/src/session_glue.rs: MAX_EXT_CHAIN_DEPTH = 8 pub const (ext_envelope.scxml max-depth=8 mirror); decode_ext_chain이 limit 초과 시 InboundParseError::ExtChainOverflow 반환. 뎍지적으로 on-overflow=\"reject\" 일치.",
+        "wz-runtime-tokio/src/session_glue.rs: InboundParseError에 ExtChainOverflow variant 추가 + Display 구현 그에 먾춤.",
+        "wz-runtime-tokio/src/session_glue.rs: parse_inbound의 has_ext 상수를 wire_const::FLAG_T_Z로 교체 (magic-number 제거).",
+        "wz-integration-tests/tests/layer3_inbound_init.rs: R68a InboundFrame::Init match arm에 extensions: Vec::new() assertion 추가 (no-Z-flag은 빈 Vec).",
+        "wz-integration-tests/tests/layer3_inbound_ext_chain.rs: 2 tests — pico encode body + ext chain → wz parse_inbound 솼면 entries.len()=3 및 각 엔트리의 ext_id/M/enc/Z/body 디코드 결과 byte-equiv. non-terminating chain MAX_EXT_CHAIN_DEPTH+1 entries는 ExtChainOverflow."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_inbound_ext_chain: 2 passed / 0 failed. 3-entry oracle (Unit/ZInt/ZBuf) header bits + body variant + Z-terminator 자립 검증.",
+        "cargo test -p wz-integration-tests --test layer3_inbound_init: 4 passed / 0 failed (R68a tests InboundFrame schema 확장 대응 후 그대로 통과).",
+        "cargo test --workspace: 회귀 0건. layer3_*, session_fsm_*, session_glue_dispatch, ffi_smoke 모두 green.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean (clippy::no_effect + same_item_push hit 수정 후 ok).",
+        "R68 full close 증거 체인: spec freeze (ext_envelope.scxml R67) + codec land (R67) + Layer 1+2 SCE conformance 6/6 + ext_envelope round-trip oracle (R67b) + Layer 3 outbound byte-equiv (R67c, R68b) + Layer 3 inbound byte-equiv (R68a, R68c)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R68 itself now fully closed — inbound parser + cookie capture + ext encode + ext decode + Layer 3 양방향 byte-equiv 모두 green.",
+        "R69 Hal time-mock + 12 timers coverage — 다음 출발점.",
+        "R71 wz-runtime-tokio-test-support split + Phase W wz-runtime-lwip + AP getrandom 이전 그대로.",
+        "Inbound→FSM event wiring (parse_inbound 결과를 Engine::process_event로 필터링/forward)는 별도 round — R69+ session_glue_dispatch 의 inbound 파일럿 추가."
+      ]
+    },
     "Round 7": {
       "decision_summary": "Phase D scope correction — README/SESSION_KICKOFF removed from workspace.docs (genre fit); atomic-internal orphan ledger via mnemosyne Round 254 supports textbook path.",
       "changes_bullets": [

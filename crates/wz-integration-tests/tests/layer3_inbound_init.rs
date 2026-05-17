@@ -142,9 +142,11 @@ fn parse_inbound_decodes_pico_initack_frame() {
             is_ack,
             has_ext,
             body,
+            extensions,
         } => {
             assert!(is_ack, "InitAck discriminator must be flagged");
             assert!(!has_ext, "no ext chain expected in R68a baseline");
+            assert!(extensions.is_empty(), "no-Z-flag frame must yield empty extensions");
             assert_eq!(body.version, 0x05);
             assert_eq!(body.zid, vec![0x01, 0x02, 0x03, 0x04]);
             assert_eq!(body.sn_res, Some(0x06)); // (seq=2 & 0x03) | ((req=1 & 0x03) << 2)
