@@ -58,6 +58,12 @@ log = "0.4"
 # the §5.I architectural-tier registry (OQ-W15 (a) closure).
 hmac = "0.12"
 sha2 = "0.10"
+# Zeroize cookie signing keys on drop. RustCrypto ecosystem standard;
+# the `Zeroizing<Vec<u8>>` wrapper clears the heap allocation when
+# the SigningKey owning it is dropped, preventing cryptographic
+# secret residue in core dumps / heap leaks / panic backtraces
+# (3rd review #4 from R63's strict audit retrospect).
+zeroize = { version = "1", features = ["zeroize_derive"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

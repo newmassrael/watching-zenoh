@@ -6902,6 +6902,66 @@
         "Phase E: README prose authoring + workspace re-registration + atomic decompose"
       ]
     },
+    "Round 70": {
+      "decision_summary": "Crypto safety hardening — SigningKey newtype + Zeroizing<Vec<u8>> drop-wipe + RFC 4231 HMAC-SHA256 test vectors. Closes the 3rd-review #4 crypto-secret-in-plain-memory defect.",
+      "changes_bullets": [
+        "wz-runtime-tokio/Cargo.toml: zeroize = '1' with zeroize_derive feature added. RustCrypto-ecosystem standard for cryptographic secret lifecycle.",
+        "wz-runtime-tokio/src/session_glue.rs: new SigningKey struct wrapping Zeroizing<Vec<u8>>; SigningKey::new(bytes) validates >= 32 bytes at construct (RFC §5.M) and returns Err(SigningKeyTooShort) instead of panicking at HMAC site. Drop wipes the heap allocation — cookie key bytes no longer linger in core dumps / heap-leak windows / panic backtraces.",
+        "Manual Debug impl on SigningKey: shows length + literal '<redacted>' for bytes. Prevents log / panic stack-trace leakage; a regression to #[derive(Debug)] would surface in `signing_key_debug_redacts_bytes` test.",
+        "SessionInitParams::cookie_signing_key field type Vec<u8> → SigningKey. for_test fixture + integration test fixture_params both construct via SigningKey::new.",
+        "generate_cookie_hmac_sha256 split: pure compute_hmac_sha256_full(key, data) -> [u8; 32] primitive separate from the 16-byte wire truncation. The split lets RFC 4231 test vectors cross-check the underlying HMAC without entangling the cookie-truncation slice.",
+        "2 new RFC 4231 test cases (TC1 + TC2) cross-check against the canonical HMAC-SHA256 vectors. If RustCrypto's hmac/sha2 ever regresses on us the assertion fires loud.",
+        "Removed signing_key_short_panics test; replaced with signing_key_short_returns_err matching the new typed-error path."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace 46 → 48 (R70 added 2 RFC vector tests + signing_key_short_returns_err + signing_key_debug_redacts_bytes; replaces 1 deleted panic test, net +3).",
+        "cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "RFC 4231 TC1 + TC2 assertions pass against compute_hmac_sha256_full: byte-equiv with the spec test vectors.",
+        "SigningKey Debug output verified to redact bytes (test asserts '<redacted>' present + hex absent).",
+        "validate_workspace local: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 72 → 73."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
+        "intrinsics-runtime--symbol-surface/2-6-hmac"
+      ],
+      "carry_forward_bullets": [
+        "R70b carry: RFC 4231 TC3-TC7 coverage. R70 lands TC1+TC2 (smallest + 'Jefe' canonical pair); the remaining test cases (long key / long data / truncated MAC scenarios) extend the regression surface without changing the production code path.",
+        "R71 = wz-runtime-tokio-test-support separate crate split (encapsulation hardening; replaces _test_support feature flag).",
+        "R67 = R63a SCXML extension chain authoring (Phase Z prototype wire-spec gap).",
+        "R68 = R63b Initiator-side inbound parser.",
+        "R69 = Hal time-mock injection."
+      ],
+      "publishable_decision_summary": "Crypto safety hardening — SigningKey newtype + Zeroizing<Vec<u8>> drop-wipe + RFC 4231 HMAC-SHA256 test vectors. Closes the 3rd-review #4 crypto-secret-in-plain-memory defect.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/Cargo.toml: zeroize = '1' with zeroize_derive feature added. RustCrypto-ecosystem standard for cryptographic secret lifecycle.",
+        "wz-runtime-tokio/src/session_glue.rs: new SigningKey struct wrapping Zeroizing<Vec<u8>>; SigningKey::new(bytes) validates >= 32 bytes at construct (RFC §5.M) and returns Err(SigningKeyTooShort) instead of panicking at HMAC site. Drop wipes the heap allocation — cookie key bytes no longer linger in core dumps / heap-leak windows / panic backtraces.",
+        "Manual Debug impl on SigningKey: shows length + literal '<redacted>' for bytes. Prevents log / panic stack-trace leakage; a regression to #[derive(Debug)] would surface in `signing_key_debug_redacts_bytes` test.",
+        "SessionInitParams::cookie_signing_key field type Vec<u8> → SigningKey. for_test fixture + integration test fixture_params both construct via SigningKey::new.",
+        "generate_cookie_hmac_sha256 split: pure compute_hmac_sha256_full(key, data) -> [u8; 32] primitive separate from the 16-byte wire truncation. The split lets RFC 4231 test vectors cross-check the underlying HMAC without entangling the cookie-truncation slice.",
+        "2 new RFC 4231 test cases (TC1 + TC2) cross-check against the canonical HMAC-SHA256 vectors. If RustCrypto's hmac/sha2 ever regresses on us the assertion fires loud.",
+        "Removed signing_key_short_panics test; replaced with signing_key_short_returns_err matching the new typed-error path."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace 46 → 48 (R70 added 2 RFC vector tests + signing_key_short_returns_err + signing_key_debug_redacts_bytes; replaces 1 deleted panic test, net +3).",
+        "cargo clippy --workspace --all-targets -- -D warnings clean.",
+        "RFC 4231 TC1 + TC2 assertions pass against compute_hmac_sha256_full: byte-equiv with the spec test vectors.",
+        "SigningKey Debug output verified to redact bytes (test asserts '<redacted>' present + hex absent).",
+        "validate_workspace local: T1=0, RT 12/12, GENERATED.md=sync, atomic ledger entries 72 → 73."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
+        "intrinsics-runtime--symbol-surface/2-6-hmac"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R70b carry: RFC 4231 TC3-TC7 coverage. R70 lands TC1+TC2 (smallest + 'Jefe' canonical pair); the remaining test cases (long key / long data / truncated MAC scenarios) extend the regression surface without changing the production code path.",
+        "R71 = wz-runtime-tokio-test-support separate crate split (encapsulation hardening; replaces _test_support feature flag).",
+        "R67 = R63a SCXML extension chain authoring (Phase Z prototype wire-spec gap).",
+        "R68 = R63b Initiator-side inbound parser.",
+        "R69 = Hal time-mock injection."
+      ]
+    },
     "Round 8": {
       "decision_summary": "Phase D ARCHITECTURE densify 마감: top-level sec 10-16 + 핵심 sub (2.4, 11.4, 11.5) typed-populate; 4 section-marker docs root-only carry; Phase E README 분리.",
       "changes_bullets": [

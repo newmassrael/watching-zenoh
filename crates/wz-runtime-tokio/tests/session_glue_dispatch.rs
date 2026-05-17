@@ -23,7 +23,7 @@ use std::sync::Mutex;
 
 use wz_runtime_tokio::session_glue::{
     dispatch_script, install_session_actions, BoxedLinkDriver, CloseReason, SessionInitParams,
-    SessionLinkActions,
+    SessionLinkActions, SigningKey,
 };
 use wz_runtime_tokio::Reliability;
 
@@ -83,7 +83,8 @@ fn fixture_params() -> SessionInitParams {
         lease_in_seconds: true,
         initial_sn: 0x42,
         cookie: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x77],
-        cookie_signing_key: vec![0xAB; 32],
+        cookie_signing_key: SigningKey::new(vec![0xAB; 32])
+            .expect("32-byte test key valid"),
     }
 }
 
