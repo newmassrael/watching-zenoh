@@ -7102,6 +7102,60 @@
         "R67 itself now fully closed — spec frozen, codec landed, Layer 1+2 SCE conformance 6/6, round-trip oracle cargo test, Layer 3 wire-interop vs zenoh-pico byte-equiv."
       ]
     },
+    "Round 68": {
+      "decision_summary": "Initiator-side inbound parser baseline — wz parse_inbound + SessionLinkActions.handle_inbound captures peer InitAck cookie into inbound_cookie slot; Layer 3 reverse byte-equiv test vs zenoh-pico _z_init_encode.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs: InboundFrame enum (Init/Open/Close/Unknown) + InboundParseError + parse_inbound(bytes) — first-byte MID dispatch with parent_flags routing into InitBody/OpenBody/Close decode. has_ext field surfaces Z flag (0x80) for R68c.",
+        "wz-runtime-tokio/src/session_glue.rs: SessionLinkActions.inbound_cookie: Mutex<Option<Vec<u8>>> + handle_inbound(bytes) — Init+is_ack 경로에서 cookie 추출 후 slot populate. RFC §5.M echo contract on Initiator side.",
+        "wz-runtime-tokio/src/session_glue.rs: encode_open signature updated to encode_open(params, is_ack, cookie_override: Option<&[u8]>). send_open_syn binding이 inbound_cookie slot 우선 사용 후 params.cookie fallback. send_open_ack는 None pass (cookie 미포함 per transport.c:300-302).",
+        "wz-runtime-tokio/src/session_glue.rs: InitBody/OpenBody/Close/CodecError/SceCursor imports를 file-top으로 hoist (encode_init/encode_open/encode_close 내부 inline use를 제거; inbound parser와 공유).",
+        "wz-integration-tests/Cargo.toml: wz-runtime-tokio dev-dependency added with _test_support feature (for_test fixture access).",
+        "wz-integration-tests/tests/layer3_inbound_init.rs: 4 tests — pico-encoded InitAck → wz parse_inbound 디코드 검증, handle_inbound cookie slot populate 검증, empty wire reject, unknown MID surface."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_inbound_init: 4 passed / 0 failed.",
+        "cargo test --workspace: all pre-existing tests still green (echo_demo, session_fsm_coverage/engine_drive/full_path/real_tcp, session_glue_dispatch, layer3_* full set including R67c ext_envelope). 회귀 0건.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean post-R68a edit.",
+        "InitAck wire = [parent_flags|T_MID_INIT, version, cbyte, zid..., sn_res, batch_size_lo, batch_size_hi, vle(cookie_len), cookie...] — pico _z_init_encode body + 1-byte transport header prefix. wz parse_inbound 디코드 결과 body.cookie와 prepend한 cookie bytes byte-equiv."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/6-link-layer-interaction",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail"
+      ],
+      "carry_forward_bullets": [
+        "R68b — ext chain encode integration: encode_init/encode_open에 옵션 Vec<ExtEntry> 인자 + Z flag(0x80) set + body 뒤 ExtEnvelope.encode() append.",
+        "R68c — ext chain decode integration: parse_inbound이 has_ext=true일 때 body cursor 뒤 ExtEnvelope.decode 호출 + InboundFrame ext field 노출.",
+        "R69/R71/Phase W carries + AP getrandom: unchanged.",
+        "Inbound→FSM event 연결: parse_inbound 결과를 Engine::process_event로 forward하는 wiring은 별도 round; R68a는 parsing/cookie capture까지만."
+      ],
+      "publishable_decision_summary": "Initiator-side inbound parser baseline — wz parse_inbound + SessionLinkActions.handle_inbound captures peer InitAck cookie into inbound_cookie slot; Layer 3 reverse byte-equiv test vs zenoh-pico _z_init_encode.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/session_glue.rs: InboundFrame enum (Init/Open/Close/Unknown) + InboundParseError + parse_inbound(bytes) — first-byte MID dispatch with parent_flags routing into InitBody/OpenBody/Close decode. has_ext field surfaces Z flag (0x80) for R68c.",
+        "wz-runtime-tokio/src/session_glue.rs: SessionLinkActions.inbound_cookie: Mutex<Option<Vec<u8>>> + handle_inbound(bytes) — Init+is_ack 경로에서 cookie 추출 후 slot populate. RFC §5.M echo contract on Initiator side.",
+        "wz-runtime-tokio/src/session_glue.rs: encode_open signature updated to encode_open(params, is_ack, cookie_override: Option<&[u8]>). send_open_syn binding이 inbound_cookie slot 우선 사용 후 params.cookie fallback. send_open_ack는 None pass (cookie 미포함 per transport.c:300-302).",
+        "wz-runtime-tokio/src/session_glue.rs: InitBody/OpenBody/Close/CodecError/SceCursor imports를 file-top으로 hoist (encode_init/encode_open/encode_close 내부 inline use를 제거; inbound parser와 공유).",
+        "wz-integration-tests/Cargo.toml: wz-runtime-tokio dev-dependency added with _test_support feature (for_test fixture access).",
+        "wz-integration-tests/tests/layer3_inbound_init.rs: 4 tests — pico-encoded InitAck → wz parse_inbound 디코드 검증, handle_inbound cookie slot populate 검증, empty wire reject, unknown MID surface."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_inbound_init: 4 passed / 0 failed.",
+        "cargo test --workspace: all pre-existing tests still green (echo_demo, session_fsm_coverage/engine_drive/full_path/real_tcp, session_glue_dispatch, layer3_* full set including R67c ext_envelope). 회귀 0건.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean post-R68a edit.",
+        "InitAck wire = [parent_flags|T_MID_INIT, version, cbyte, zid..., sn_res, batch_size_lo, batch_size_hi, vle(cookie_len), cookie...] — pico _z_init_encode body + 1-byte transport header prefix. wz parse_inbound 디코드 결과 body.cookie와 prepend한 cookie bytes byte-equiv."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/6-link-layer-interaction",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R68b — ext chain encode integration: encode_init/encode_open에 옵션 Vec<ExtEntry> 인자 + Z flag(0x80) set + body 뒤 ExtEnvelope.encode() append.",
+        "R68c — ext chain decode integration: parse_inbound이 has_ext=true일 때 body cursor 뒤 ExtEnvelope.decode 호출 + InboundFrame ext field 노출.",
+        "R69/R71/Phase W carries + AP getrandom: unchanged.",
+        "Inbound→FSM event 연결: parse_inbound 결과를 Engine::process_event로 forward하는 wiring은 별도 round; R68a는 parsing/cookie capture까지만."
+      ]
+    },
     "Round 7": {
       "decision_summary": "Phase D scope correction — README/SESSION_KICKOFF removed from workspace.docs (genre fit); atomic-internal orphan ledger via mnemosyne Round 254 supports textbook path.",
       "changes_bullets": [
