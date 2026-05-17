@@ -51,6 +51,7 @@
 //! the assertion against zenoh-pico's reference is deterministic.
 
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use sce_rust_lua::lua_engine_singleton;
 use hmac::{Hmac, Mac};
@@ -448,6 +449,19 @@ pub struct SessionLinkActions {
     /// `params.cookie` on the OpenSyn outbound, implementing the
     /// RFC §5.M echo contract on the Initiator side.
     pub inbound_cookie: Mutex<Option<Vec<u8>>>,
+    /// R72b — monotonic `Instant` of the most recently observed
+    /// inbound KeepAlive frame. Populated by `handle_inbound` for
+    /// `InboundFrame::KeepAlive`. Consumers compare this against
+    /// `params.lease` to compute the lease deadline; an absent
+    /// timestamp falls back to session-start time (lease counts
+    /// from Established entry per session-fsm §2.5 keepalive
+    /// semantics).
+    ///
+    /// Resolution is `std::time::Instant`'s monotonic-since-process
+    /// clock; the lease comparator is `now.duration_since(stamp) <
+    /// lease`. No drift correction needed because both `now` and
+    /// `stamp` read the same monotonic source.
+    pub last_inbound_keepalive_at: Mutex<Option<Instant>>,
     /// R68b — per-role ext chain slots. Indexed by `ExtChainRole`
     /// via `ext_chain_for`. Each slot lives behind its own `Mutex`
     /// so a setter can swap one chain without blocking the others
@@ -470,6 +484,7 @@ impl SessionLinkActions {
             params,
             trace: Mutex::new(ActionTrace::default()),
             inbound_cookie: Mutex::new(None),
+            last_inbound_keepalive_at: Mutex::new(None),
             init_syn_ext: Mutex::new(Vec::new()),
             init_ack_ext: Mutex::new(Vec::new()),
             open_syn_ext: Mutex::new(Vec::new()),
@@ -540,10 +555,20 @@ impl SessionLinkActions {
     /// from `LinkDriver::poll_event` lands.
     pub fn handle_inbound(&self, bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
         let frame = parse_inbound(bytes)?;
-        if let InboundFrame::Init { is_ack: true, body, .. } = &frame {
-            if let Some(cookie) = &body.cookie {
-                *self.inbound_cookie.lock().unwrap() = Some(cookie.clone());
+        match &frame {
+            InboundFrame::Init { is_ack: true, body, .. } => {
+                if let Some(cookie) = &body.cookie {
+                    *self.inbound_cookie.lock().unwrap() = Some(cookie.clone());
+                }
             }
+            InboundFrame::KeepAlive { .. } => {
+                // R72b — record receive time so the lease deadline
+                // comparator (now - stamp < lease) advances. Reading
+                // Instant::now() inside the lock keeps the captured
+                // stamp synchronous with the wire-arrival moment.
+                *self.last_inbound_keepalive_at.lock().unwrap() = Some(Instant::now());
+            }
+            _ => {}
         }
         Ok(frame)
     }
