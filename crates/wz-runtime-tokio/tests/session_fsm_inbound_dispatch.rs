@@ -209,11 +209,73 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
         "KeepAlive is a side-effect signal, not an FSM transition"
     );
 
+    let frame = InboundFrame::Frame {
+        reliable: true,
+        sn: 0,
+        payload: Vec::new(),
+        has_ext: false,
+        extensions: Vec::new(),
+    };
+    assert_eq!(
+        inbound_to_fsm_event(&frame),
+        None,
+        "Frame payload routes to application dispatch, not FSM transition"
+    );
+
     let unknown = InboundFrame::Unknown { mid: 0x1F };
     assert_eq!(
         inbound_to_fsm_event(&unknown),
         Some(SessionFsmUnicastEvent::FramingError)
     );
+}
+
+#[test]
+fn parse_inbound_decodes_frame_with_sn_and_payload() {
+    use wz_runtime_tokio::session_glue::{parse_inbound, InboundFrame};
+
+    // MID=0x05 (T_MID_FRAME) | R flag (0x20) = 0x25.
+    // sn=1 (VLE single byte: 0x01), payload=[0xCA, 0xFE].
+    let wire = [0x25u8, 0x01, 0xCA, 0xFE];
+    let frame = parse_inbound(&wire).expect("Frame wire parses");
+    match frame {
+        InboundFrame::Frame {
+            reliable,
+            sn,
+            payload,
+            has_ext,
+            extensions,
+        } => {
+            assert!(reliable, "FLAG_T_FRAME_R must surface as reliable=true");
+            assert_eq!(sn, 1);
+            assert_eq!(payload, vec![0xCA, 0xFE]);
+            assert!(!has_ext);
+            assert!(extensions.is_empty());
+        }
+        _ => panic!("expected Frame variant"),
+    }
+}
+
+#[test]
+fn parse_inbound_decodes_best_effort_frame_with_large_sn() {
+    use wz_runtime_tokio::session_glue::{parse_inbound, InboundFrame};
+
+    // MID=0x05, no R flag → best-effort. sn=128 (VLE 2 bytes:
+    // 0x80, 0x01), payload empty.
+    let wire = [0x05u8, 0x80, 0x01];
+    let frame = parse_inbound(&wire).expect("best-effort Frame parses");
+    match frame {
+        InboundFrame::Frame {
+            reliable,
+            sn,
+            payload,
+            ..
+        } => {
+            assert!(!reliable);
+            assert_eq!(sn, 128, "2-byte VLE boundary value");
+            assert!(payload.is_empty());
+        }
+        _ => panic!("expected Frame variant"),
+    }
 }
 
 #[test]
