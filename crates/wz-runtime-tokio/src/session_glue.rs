@@ -1421,7 +1421,7 @@ pub async fn poll_and_dispatch_one<D: LinkDriver>(
 /// lease decision deferred); stamp + lease > now (within the
 /// window); stamp + lease <= now (helper has already injected
 /// `LeaseExpired`).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeaseCheckOutcome {
     /// `last_inbound_keepalive_at` is `None`. The helper makes no
     /// decision and does NOT inject `LeaseExpired`. The production
@@ -1488,6 +1488,59 @@ pub fn check_lease_deadline(
     }
 }
 
+/// R83 — per-iteration event surfaced to the
+/// [`drive_session_until_terminal`] observer callback. Each
+/// iteration of the driver loop runs exactly one branch of the
+/// inner `tokio::select!` (or the no-baseline `await`) and fires
+/// the callback with the matching variant before looping.
+///
+/// Variant choice mirrors the loop body's two work paths:
+///
+/// - [`IterationEvent::Poll`] fires when the
+///   [`poll_and_dispatch_one`] arm completes — i.e. the link
+///   produced a `LinkEvent`. The borrowed [`DriverLoopOutcome`]
+///   reflects whatever the dispatch helper returned: typed FSM
+///   advance, `KeepAlive` side-effect, R74 `FramePayload` with
+///   the decoded `NetworkMessage` batch, `ParseError`, or
+///   `LinkLost`. Application-layer dispatch reads
+///   `FramePayload.messages` here.
+/// - [`IterationEvent::Lease`] fires when the lease-deadline
+///   sleep arm wins the `tokio::select!` race — i.e. the peer
+///   has gone silent. The carried [`LeaseCheckOutcome`] is the
+///   helper's verdict (`NoBaseline` / `WithinLease` / `Expired`);
+///   on `Expired` the FSM has already been advanced to `Closing`
+///   inside the helper, so the next loop top will return
+///   `Terminated`.
+///
+/// The borrow `'a` is the loop iteration's stack frame. Observers
+/// that need to retain outcome data across iterations must clone
+/// the relevant fields (e.g. `FramePayload.messages.clone()`) into
+/// owned storage; the reference does not outlive the callback.
+///
+/// Synchronous contract. The callback runs inside the
+/// `tokio::select!` arm, so heavy work blocks the loop. Callers
+/// with expensive consumers should buffer (`Vec`, `mpsc::Sender`)
+/// inside the closure and drain on a separate task.
+pub enum IterationEvent<'a> {
+    /// `poll_and_dispatch_one` returned. The borrowed outcome
+    /// covers all five `DriverLoopOutcome` variants.
+    Poll(&'a DriverLoopOutcome),
+    /// `tokio::time::sleep` won the select race against the poll
+    /// future; `check_lease_deadline` has already run and its
+    /// verdict is carried here. `Copy` because the enum has only
+    /// unit variants.
+    Lease(LeaseCheckOutcome),
+}
+
+impl std::fmt::Debug for IterationEvent<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Poll(o) => write!(f, "Poll({o:?})"),
+            Self::Lease(o) => write!(f, "Lease({o:?})"),
+        }
+    }
+}
+
 /// R76b — outcome of the production driver loop in
 /// `drive_session_until_terminal`.
 #[derive(Debug, PartialEq, Eq)]
@@ -1540,12 +1593,28 @@ pub enum DriverOutcome {
 /// this round trusts the R77 `check_lease_deadline` unit tests for
 /// the leaf logic and uses wall-clock-short-lease integration
 /// testing for the loop wiring.
-pub async fn drive_session_until_terminal<D: LinkDriver>(
+///
+/// R83 — `on_event` is the per-iteration observer callback. Each
+/// time exactly one of the inner work paths completes (poll arm,
+/// lease arm, or no-baseline await), the callback is invoked once
+/// with the matching [`IterationEvent`] variant before the loop
+/// continues. This is the textbook bridge between the producers
+/// (R74 `FramePayload`, R76 `AdvancedFsm/LinkLost/ParseError`, R77
+/// `LeaseCheckOutcome`) and downstream consumers (pub/sub topic
+/// dispatcher, telemetry, logging) — without it the loop would
+/// discard the outcomes silently. Test callers that do not care
+/// about per-iteration events pass `|_| {}` as a no-op closure.
+pub async fn drive_session_until_terminal<D, F>(
     driver: &mut D,
     actions: &Arc<SessionLinkActions>,
     engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy>,
     max_iters: Option<usize>,
-) -> DriverOutcome {
+    mut on_event: F,
+) -> DriverOutcome
+where
+    D: LinkDriver,
+    F: FnMut(IterationEvent<'_>),
+{
     let lease = if actions.params.lease_in_seconds {
         Duration::from_secs(actions.params.lease)
     } else {
@@ -1571,14 +1640,19 @@ pub async fn drive_session_until_terminal<D: LinkDriver>(
                 let now = Instant::now();
                 let remaining = deadline.saturating_duration_since(now);
                 tokio::select! {
-                    _ = poll_and_dispatch_one(driver, actions, engine) => {}
+                    outcome = poll_and_dispatch_one(driver, actions, engine) => {
+                        on_event(IterationEvent::Poll(&outcome));
+                    }
                     _ = tokio::time::sleep(remaining) => {
-                        let _ = check_lease_deadline(actions, engine, Instant::now());
+                        let lease_outcome =
+                            check_lease_deadline(actions, engine, Instant::now());
+                        on_event(IterationEvent::Lease(lease_outcome));
                     }
                 }
             }
             None => {
-                let _ = poll_and_dispatch_one(driver, actions, engine).await;
+                let outcome = poll_and_dispatch_one(driver, actions, engine).await;
+                on_event(IterationEvent::Poll(&outcome));
             }
         }
     }

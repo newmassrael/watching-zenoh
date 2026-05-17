@@ -30,9 +30,10 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    drive_session_until_terminal, BoxedLinkDriver, DriverOutcome, SessionLinkActions,
+    drive_session_until_terminal, BoxedLinkDriver, DriverLoopOutcome, DriverOutcome,
+    IterationEvent, LeaseCheckOutcome, SessionLinkActions,
 };
-use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
+use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_runtime_tokio_test_support::{
     fixture_session_init_params, install_session_actions_for_test,
 };
@@ -154,7 +155,8 @@ async fn r76b_returns_terminated_when_engine_already_final() {
 
     let mut driver = QueueDriver::with(vec![]);
     let outcome =
-        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(5)).await;
+        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(5), |_| {})
+            .await;
     assert!(
         matches!(outcome, DriverOutcome::Terminated),
         "already-final engine must return Terminated; got {outcome:?}"
@@ -179,7 +181,8 @@ async fn r76b_iteration_limit_when_loop_cannot_terminate() {
     // limit check at iteration top.
     let mut driver = HangingDriver;
     let outcome =
-        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(0)).await;
+        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(0), |_| {})
+            .await;
     assert_eq!(
         outcome,
         DriverOutcome::IterationLimit,
@@ -201,7 +204,8 @@ async fn r76b_link_lost_event_drives_loop_to_terminated() {
         cause: LostCause::PeerClosed,
     }]);
     let outcome =
-        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(5)).await;
+        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(5), |_| {})
+            .await;
     assert!(
         matches!(outcome, DriverOutcome::Terminated),
         "staged Lost must drive loop to Terminated; got {outcome:?}"
@@ -229,7 +233,8 @@ async fn r76b_lease_branch_fires_with_silent_peer() {
 
     let mut driver = HangingDriver;
     let outcome =
-        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(8)).await;
+        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(8), |_| {})
+            .await;
 
     // The outcome is Terminated (FSM reached Closed via Closing) or
     // IterationLimit (if the test host is slow enough that 8 iters
@@ -241,5 +246,153 @@ async fn r76b_lease_branch_fires_with_silent_peer() {
         !matches!(state, S::Established | S::Init),
         "lease branch must have fired and advanced FSM past Established; \
          outcome={outcome:?} state={state:?}"
+    );
+}
+
+// ── R83 Scenario A: observer captures the per-iteration outcome
+//                    stream — proves R74 FramePayload reaches the
+//                    application-layer consumer via R83 wiring
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r83_observer_captures_framepayload_and_linklost_in_order() {
+    let (actions, mut engine) = fresh_setup();
+    engine.process_event(E::OutboundStart);
+    assert_eq!(engine.get_current_state(), S::LinkOpening);
+
+    // Stage two events: Frame (no-FSM-transition, surfaces as
+    // DriverLoopOutcome::FramePayload) then Lost (LinkOpening ->
+    // link.lost -> Closed terminal edge). Observer should see both
+    // Poll events in order; the loop then returns Terminated on the
+    // next iteration top.
+    let mut driver = QueueDriver::with(vec![
+        // T_MID_FRAME (0x05) without R flag, sn=0, empty payload.
+        LinkEvent::Rx(RxFrame {
+            bytes: vec![0x05, 0x00],
+        }),
+        LinkEvent::Lost {
+            cause: LostCause::PeerClosed,
+        },
+    ]);
+
+    let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_observer = captured.clone();
+    let outcome = drive_session_until_terminal(
+        &mut driver,
+        &actions,
+        &mut engine,
+        Some(5),
+        |ev| {
+            captured_for_observer
+                .lock()
+                .unwrap()
+                .push(format!("{ev:?}"));
+        },
+    )
+    .await;
+
+    assert!(
+        matches!(outcome, DriverOutcome::Terminated),
+        "staged Frame + Lost must drive loop to Terminated; got {outcome:?}"
+    );
+
+    let log = captured.lock().unwrap();
+    assert_eq!(
+        log.len(),
+        2,
+        "observer must fire exactly twice (Frame + Lost); got {log:?}"
+    );
+    assert!(
+        log[0].starts_with("Poll(FramePayload"),
+        "first iteration: observer sees FramePayload from R74 wiring; \
+         got {:?}",
+        log[0]
+    );
+    assert!(
+        log[1].starts_with("Poll(LinkLost"),
+        "second iteration: observer sees LinkLost; got {:?}",
+        log[1]
+    );
+}
+
+// ── R83 Scenario B: observer FnMut captures FramePayload.messages
+//                    structurally (not via Debug string) — proves the
+//                    application-layer consumer can read the decoded
+//                    NetworkMessage batch through the &DriverLoopOutcome
+//                    reference
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r83_observer_reads_framepayload_messages_through_reference() {
+    let (actions, mut engine) = fresh_setup();
+    engine.process_event(E::OutboundStart);
+
+    // Frame with a single Unknown-MID record (0x1D = N_MID_PUSH) so
+    // FramePayload.messages.len() == 1 deterministically.
+    let mut driver = QueueDriver::with(vec![
+        LinkEvent::Rx(RxFrame {
+            bytes: vec![0x05, 0x00, 0x1D, 0xAA],
+        }),
+        LinkEvent::Lost {
+            cause: LostCause::PeerClosed,
+        },
+    ]);
+
+    let payload_record_counts: Arc<Mutex<Vec<usize>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let counts_for_observer = payload_record_counts.clone();
+    let _ = drive_session_until_terminal(
+        &mut driver,
+        &actions,
+        &mut engine,
+        Some(5),
+        |ev| {
+            if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+                messages,
+                ..
+            }) = ev
+            {
+                counts_for_observer.lock().unwrap().push(messages.len());
+            }
+        },
+    )
+    .await;
+
+    let counts = payload_record_counts.lock().unwrap();
+    assert_eq!(
+        counts.as_slice(),
+        &[1usize],
+        "observer must read exactly one FramePayload with 1 message; \
+         got {counts:?}"
+    );
+}
+
+// ── R83 Scenario C: observer fires on the Lease branch too — short
+//                    lease + hanging driver + recent stamp ensures
+//                    the sleep arm wins
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r83_observer_fires_on_lease_branch() {
+    let (actions, mut engine) = fresh_setup_with_lease_ms(20);
+    drive_to_established(&mut engine);
+    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(Instant::now());
+
+    let mut driver = HangingDriver;
+    let lease_outcomes: Arc<Mutex<Vec<LeaseCheckOutcome>>> =
+        Arc::new(Mutex::new(Vec::new()));
+    let outcomes_for_observer = lease_outcomes.clone();
+    let _ = drive_session_until_terminal(
+        &mut driver,
+        &actions,
+        &mut engine,
+        Some(8),
+        |ev| {
+            if let IterationEvent::Lease(o) = ev {
+                outcomes_for_observer.lock().unwrap().push(o);
+            }
+        },
+    )
+    .await;
+
+    let captured = lease_outcomes.lock().unwrap();
+    assert!(
+        captured.contains(&LeaseCheckOutcome::Expired),
+        "lease branch must fire at least once with Expired verdict \
+         (short lease + silent peer); captured={captured:?}"
     );
 }
