@@ -59,6 +59,7 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use sce_rust_runtime::scripting::{IScriptEngine, NativeMethod, ScriptValue};
+use sce_rust_runtime::Engine;
 
 use sce_forge_runtime::codec::{CodecError, SceCursor};
 use wz_codecs::close::Close;
@@ -67,7 +68,7 @@ use wz_codecs::init_body::InitBody;
 use wz_codecs::keep_alive::KeepAlive;
 use wz_codecs::open_body::OpenBody;
 
-use crate::{LinkDriver, Reliability, TxFrame};
+use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
 /// Cryptographic key for the anti-amplification cookie MAC.
 ///
@@ -1166,6 +1167,86 @@ pub fn inbound_to_fsm_event(
         InboundFrame::KeepAlive { .. } => None,
         InboundFrame::Frame { .. } => None,
         InboundFrame::Unknown { .. } => Some(E::FramingError),
+    }
+}
+
+/// R76 — outcome of a single iteration of the production driver
+/// loop. Distinguishes the four observable outcomes the caller may
+/// dispatch on: a typed FSM event reached the engine, an inbound
+/// frame produced only a side-effect (KeepAlive lease-stamp update
+/// or Frame application-layer payload that does not advance the
+/// session FSM), the wire bytes failed to parse (the helper raises
+/// `FramingError` to the FSM and returns `ParseError` to the caller
+/// for logging), or the link itself terminated.
+#[derive(Debug)]
+pub enum DriverLoopOutcome {
+    /// A typed `SessionFsmUnicastEvent` reached `Engine::process_event`;
+    /// any state transition triggered by the event has completed.
+    AdvancedFsm,
+    /// The inbound frame parsed but did not project to a typed FSM
+    /// event (`KeepAlive` resets the lease stamp via `handle_inbound`;
+    /// `Frame` payload is application-layer dispatch territory). The
+    /// engine state is unchanged.
+    SideEffectOnly,
+    /// `parse_inbound` rejected the wire bytes. The helper has
+    /// already injected `FramingError` into the engine so the
+    /// session-fsm `framing.error` transition fires; the variant is
+    /// returned so the caller can log the underlying error.
+    ParseError(InboundParseError),
+    /// The link reported `LostCause`. The helper has injected
+    /// `LinkLost` into the engine so the `link.lost` transition
+    /// fires; the cause is returned for logging.
+    LinkLost(LostCause),
+}
+
+/// R76 — production driver loop unit. Poll a single `LinkEvent` from
+/// `driver` and forward it through the inbound chain so the session
+/// FSM advances without the caller hand-wiring
+/// `handle_inbound` + `inbound_to_fsm_event` + `Engine::process_event`.
+///
+/// Mapping:
+///   - `LinkEvent::Ready` → `SessionFsmUnicastEvent::LinkOpened`
+///   - `LinkEvent::Rx(frame)` → parse + project + dispatch chain
+///   - `LinkEvent::Lost { cause }` → `SessionFsmUnicastEvent::LinkLost`
+///
+/// `parse_inbound` errors are mapped to `FramingError` so the FSM's
+/// `framing.error → Closing` transition fires; the caller receives
+/// the typed `ParseError` outcome for logging.
+///
+/// This is the consumer wiring for the R68/R68a/R68c/R69b/R72/R73
+/// inbound work — without an entry point that drives the chain, the
+/// 8 commits would land as production-unreachable helpers (the
+/// invariant the test-support split was supposed to enable). A
+/// production-shaped session driver composes this in a loop until
+/// the FSM reaches `Closed`.
+pub async fn poll_and_dispatch_one<D: LinkDriver>(
+    driver: &mut D,
+    actions: &Arc<SessionLinkActions>,
+    engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy>,
+) -> DriverLoopOutcome {
+    use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    match driver.poll_event().await {
+        LinkEvent::Ready => {
+            engine.process_event(E::LinkOpened);
+            DriverLoopOutcome::AdvancedFsm
+        }
+        LinkEvent::Lost { cause } => {
+            engine.process_event(E::LinkLost);
+            DriverLoopOutcome::LinkLost(cause)
+        }
+        LinkEvent::Rx(rx) => match actions.handle_inbound(&rx.bytes) {
+            Ok(frame) => match inbound_to_fsm_event(&frame) {
+                Some(event) => {
+                    engine.process_event(event);
+                    DriverLoopOutcome::AdvancedFsm
+                }
+                None => DriverLoopOutcome::SideEffectOnly,
+            },
+            Err(err) => {
+                engine.process_event(E::FramingError);
+                DriverLoopOutcome::ParseError(err)
+            }
+        },
     }
 }
 

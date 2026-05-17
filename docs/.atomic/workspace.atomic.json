@@ -7708,6 +7708,62 @@
         "R71 wz-runtime-tokio-test-support split / Phase W wz-runtime-lwip / Hal time-mock SCE upstream patch: 이전 그대로 carry."
       ]
     },
+    "Round 76": {
+      "decision_summary": "Production driver loop entry `poll_and_dispatch_one` lands as the consumer for the R68-R73 inbound chain — invariant #1 textbook closure for the 8 inbound commits that previously had no production caller; carry priority R76 jumped ahead of R74/R75 because R74 (Frame payload app codec) and R75 (Fragment/OAM/Join MID) extend inbound coverage further without solving the dead-end carry from R71.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs — DriverLoopOutcome enum (AdvancedFsm / SideEffectOnly / ParseError / LinkLost) + pub async fn poll_and_dispatch_one(driver, actions, engine).",
+        "session_glue.rs imports — sce_rust_runtime::Engine + crate::{LinkEvent, LostCause} brought into scope; previous import set excluded both.",
+        "Mapping: LinkEvent::Ready to E::LinkOpened; LinkEvent::Rx through handle_inbound + inbound_to_fsm_event + engine.process_event; LinkEvent::Lost to E::LinkLost; parse_inbound Err to E::FramingError (and ParseError outcome returned for logging).",
+        "crates/wz-runtime-tokio/tests/session_fsm_driver_loop.rs — 1 mega-test with 5 scenarios covering Rx(InitAck) / Rx(KeepAlive) / Rx(malformed) / Lost / Ready against a QueueDriver staging.",
+        "Test uses fixture_session_init_params + install_session_actions_for_test fallback (R71 path) to handle the cargo thread-parallel rebind requirement."
+      ],
+      "verification_bullets": [
+        "cargo test --test session_fsm_driver_loop — 1 passed (5 scenarios sequential within one #[test] fn).",
+        "cargo test --workspace — every test binary green; no regression in R67/R68/R72/R73 layer3 + dispatch tests.",
+        "cargo clippy --workspace --all-targets -- -D warnings — clean (Engine import + LinkEvent destructuring lint-free).",
+        "scripts/run-ci.sh --skip-codegen — Layer A/C1/C2/D all pass.",
+        "validate_workspace — T1=0, RT 12/12, GENERATED.md=sync, T3 warn=856 / T4 info=427 baseline preserved (no doc mutation)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets"
+      ],
+      "carry_forward_bullets": [
+        "R77 — last_inbound_keepalive_at consumer + lease deadline auto-LeaseExpired injection (now - stamp > params.lease). Builds on poll_and_dispatch_one as the per-iteration tick.",
+        "R71b — singleton race fix: option 4 (dispatch_script deprecate + direct-codec test path) OR SCE upstream bind_native_object PR pair. encode_*_with_role pub carry: design surface, retire carry tag at R72 (not patch).",
+        "R78 — Accepting-side path integration test (InitSynReceived to SentInitAck to SentOpenAck) now testable via poll_and_dispatch_one with an InitSyn-wire stage.",
+        "Driver loop scaffolding — a long-running pub async fn drive_session_until_terminal that wraps poll_and_dispatch_one in a loop until S::Closed. Deferred until R77 lease-deadline is wired so the loop has a termination condition beyond explicit peer Close.",
+        "Application-layer Frame payload dispatch (R74-tier) — DriverLoopOutcome::SideEffectOnly variant on Frame currently drops the payload; downstream consumer needs the msg_put/del/query/response codec dispatch.",
+        "Hal time-mock SCE upstream + R44 BE-to-LE SCE upstream PR pair — unchanged carry."
+      ],
+      "publishable_decision_summary": "Production driver loop entry `poll_and_dispatch_one` lands as the consumer for the R68-R73 inbound chain — invariant #1 textbook closure for the 8 inbound commits that previously had no production caller; carry priority R76 jumped ahead of R74/R75 because R74 (Frame payload app codec) and R75 (Fragment/OAM/Join MID) extend inbound coverage further without solving the dead-end carry from R71.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs — DriverLoopOutcome enum (AdvancedFsm / SideEffectOnly / ParseError / LinkLost) + pub async fn poll_and_dispatch_one(driver, actions, engine).",
+        "session_glue.rs imports — sce_rust_runtime::Engine + crate::{LinkEvent, LostCause} brought into scope; previous import set excluded both.",
+        "Mapping: LinkEvent::Ready to E::LinkOpened; LinkEvent::Rx through handle_inbound + inbound_to_fsm_event + engine.process_event; LinkEvent::Lost to E::LinkLost; parse_inbound Err to E::FramingError (and ParseError outcome returned for logging).",
+        "crates/wz-runtime-tokio/tests/session_fsm_driver_loop.rs — 1 mega-test with 5 scenarios covering Rx(InitAck) / Rx(KeepAlive) / Rx(malformed) / Lost / Ready against a QueueDriver staging.",
+        "Test uses fixture_session_init_params + install_session_actions_for_test fallback (R71 path) to handle the cargo thread-parallel rebind requirement."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --test session_fsm_driver_loop — 1 passed (5 scenarios sequential within one #[test] fn).",
+        "cargo test --workspace — every test binary green; no regression in R67/R68/R72/R73 layer3 + dispatch tests.",
+        "cargo clippy --workspace --all-targets -- -D warnings — clean (Engine import + LinkEvent destructuring lint-free).",
+        "scripts/run-ci.sh --skip-codegen — Layer A/C1/C2/D all pass.",
+        "validate_workspace — T1=0, RT 12/12, GENERATED.md=sync, T3 warn=856 / T4 info=427 baseline preserved (no doc mutation)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R77 — last_inbound_keepalive_at consumer + lease deadline auto-LeaseExpired injection (now - stamp > params.lease). Builds on poll_and_dispatch_one as the per-iteration tick.",
+        "R71b — singleton race fix: option 4 (dispatch_script deprecate + direct-codec test path) OR SCE upstream bind_native_object PR pair. encode_*_with_role pub carry: design surface, retire carry tag at R72 (not patch).",
+        "R78 — Accepting-side path integration test (InitSynReceived to SentInitAck to SentOpenAck) now testable via poll_and_dispatch_one with an InitSyn-wire stage.",
+        "Driver loop scaffolding — a long-running pub async fn drive_session_until_terminal that wraps poll_and_dispatch_one in a loop until S::Closed. Deferred until R77 lease-deadline is wired so the loop has a termination condition beyond explicit peer Close.",
+        "Application-layer Frame payload dispatch (R74-tier) — DriverLoopOutcome::SideEffectOnly variant on Frame currently drops the payload; downstream consumer needs the msg_put/del/query/response codec dispatch.",
+        "Hal time-mock SCE upstream + R44 BE-to-LE SCE upstream PR pair — unchanged carry."
+      ]
+    },
     "Round 8": {
       "decision_summary": "Phase D ARCHITECTURE densify 마감: top-level sec 10-16 + 핵심 sub (2.4, 11.4, 11.5) typed-populate; 4 section-marker docs root-only carry; Phase E README 분리.",
       "changes_bullets": [
