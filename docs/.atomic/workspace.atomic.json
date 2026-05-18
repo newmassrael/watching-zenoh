@@ -5026,6 +5026,79 @@
         "Defensive carries: R114 freshness gate negative test; other docs/ stale status labels."
       ]
     },
+    "Round 126": {
+      "decision_summary": "R126: SCE vendor pin b719ee3e -> 11287248 (B5-ν consumer-parity gaps closed; unlocks R125c-resume).",
+      "changes_bullets": [
+        "vendor/sce gitlink b719ee3e -> 11287248 (11 commits ahead on origin/main).",
+        "Adopts SCE 11287248 closing the 3 B5-ν gaps R125c signaled to SCE upstream.",
+        "Gap 1 close: FlagLayoutSource Terminal/Forwarding enum - chain-following carrier resolution.",
+        "Gap 2 close: embed_type_pascal cache removed - imp.type_name resolved at emit-time per backend.",
+        "Gap 3 close: native Option handling - Some=>match, None=>0u8 emitted across 6 backends.",
+        "2 new diagnostic codes 283->285: codec/parent-flag-chain-unresolved + chain-bit-drift.",
+        "Verbatim slash-path migration impact zero: wz has no old code references (grep clean).",
+        "SCXML author surface unchanged - sce-forge-ext.xsd same; wz R125b leaves untouched.",
+        "R126 is pin-only; R125c-resume consumes the new substrate in the next round."
+      ],
+      "verification_bullets": [
+        "scripts/build-sce.sh rebuild pass on new pin (1m12s release).",
+        "scripts/run-ci.sh full 7-lane gate pass (Layer 0/A/A2/B/C1/C2/D).",
+        "Layer B per-codec result unchanged: request still LAYER2 MISMATCH (R123b carry); others OK.",
+        "validate_workspace: T1=0; RT 12/12; entries 145 -> 146; sections=214; sync.",
+        "No production-codec golden regen needed (alias==stem fixtures byte-identical pre/post)."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "R125c-resume: wireexpr.scxml dispatcher restructure (variant tag=parent.M; arms imported).",
+        "R125c-resume: drop M=1 from push/request/response/decl_{subscriber,token,queryable}.scxml.",
+        "R125c-resume: scripts/run-ci.sh LAYER2_KNOWN_DIVERGENCE += wireexpr (audit-traced).",
+        "R125c-resume: revert wireexpr_local/wireexpr_nonlocal orphan-status blocks (now live arms).",
+        "R125c-resume: refresh R106 baking comment blocks in decl_*.scxml + request.scxml.",
+        "R125c-resume entry id = Round 125c1 (R125c frozen; corrective via new monotonic id)."
+      ],
+      "publishable_decision_summary": "R126: vendor/sce pin b719ee3e -> 11287248 after SCE closed the three B5-ν consumer-parity gaps R125c reported; pin-only round, R125c-resume next.",
+      "publishable_changes_bullets": [
+        "vendor/sce gitlink b719ee3e -> 11287248 (origin/main is 11 commits ahead).",
+        "11 commit range = 1 functional commit (11287248 B5-ν consumer-parity) + 10 §16.7",
+        "mesh test/error-emission commits with no wz-side impact (Layer 3 unaffected).",
+        "SCE atomic 11287248 closes the three R125c gaps via structurally-fuller fixes:",
+        "Gap 1 (B5-γ chain): FlagLayoutSource Terminal/Forwarding enum at generator.rs:3380;",
+        "validate_cross_codec_parent_flags accepts forwarding sources uniformly.",
+        "Gap 2 (alias-vs-stem): embed_type_pascal cache removed; b5_nu_embed_pascal helper",
+        "at generator.rs:9492 resolves imp.type_name at emit-time per backend.",
+        "Gap 3 (present-if-gated Option): B5NuDerivation.present_if substrate at",
+        "generator.rs:9313; native Some(x)=>match / None=>0 across all 6 backends.",
+        "Two new diagnostic codes 283 -> 285: codec/parent-flag-chain-unresolved +",
+        "codec/parent-flag-chain-bit-drift (Terminal+Forwarding unified bit-drift)."
+      ],
+      "publishable_verification_bullets": [
+        "Wz-side verbatim slash-path grep for codec/parent-flag-mismatch returns zero results;",
+        "no atomic regenerate required (SCE upstream warned about pre-release no-shim migration).",
+        "scripts/build-sce.sh rebuild pass on the new pin (1m12s release profile).",
+        "scripts/run-ci.sh full 7-lane gate pass at pin 11287248 with zero wz-side changes:",
+        "Layer 0 (actionlint) + A (mnemosyne) + A2 (mid value=) + B (codegen 6-backend)",
+        "+ C1 (cargo test --workspace) + C2 (cargo clippy -D warnings) + D (deploy yaml).",
+        "Layer B per-codec unchanged: request stays LAYER2 MISMATCH (R123b carry); all others OK.",
+        "validate_workspace: docs=12/12; T1=0; RT 12/12; entries 145 -> 146; sections=214; sync.",
+        "publishable/audit divergence stable at 7 entries / 7 ledger rows pre-R126 (8/8 post)."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R125c-resume (entry id = Round 125c1): wireexpr.scxml restructure to thin dispatcher.",
+        "R125c-resume RPF: parent.M bit=6 (variant tag) + parent.N bit=5 (arms read via chain).",
+        "R125c-resume arm shape: <sce:arm value='0x00' type='wireexpr_nonlocal'/> +",
+        "<sce:arm value='0x01' type='wireexpr_local' default='true'/> (encoder-side M=1 default).",
+        "R125c-resume drops M=1 baking from 6 consumers (push/request/response/decl_{sub,tk,qy}).",
+        "R125c-resume adds wireexpr to scripts/run-ci.sh LAYER2_KNOWN_DIVERGENCE (audit-traced).",
+        "R125c-resume lifts orphan-status blocks in wireexpr_local + wireexpr_nonlocal headers.",
+        "R125c-resume refreshes R106 baking comment blocks in decl_{sub,tk,qy} + request.scxml.",
+        "R125e (Layer 3 wire-shape interop) unblocked once R125c-resume lands the dispatcher.",
+        "R123b still pending (independent): build.rs compile_forge_with_imports -> _with_deploy."
+      ]
+    },
     "Round 13": {
       "decision_summary": "sources/ skeleton lands via README (SPDX header double-block + 7-subdir lazy materialize per ARCH §428) + first author-side SCXML sources/algorithms/crc16_ccitt.scxml body-identical to SCE fixture; 6-backend byte-golden verify carried to R14 SCE submodule infrastructure (pin 1473f99f origin/main).",
       "changes_bullets": [
