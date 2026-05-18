@@ -3859,6 +3859,62 @@
         "AP MVP demo binary, R67-R71 series, Phase W lwIP — still queued."
       ]
     },
+    "Round 110c": {
+      "decision_summary": "R110c lands the three `_z_decl_commons_encode`-shaped DECLARE sub-types — decl_subscriber (MID 0x02), decl_queryable (MID 0x04), decl_token (MID 0x06) — each carrying header + id VLE + wireexpr with N/M/Z flags. M=1 is baked per R106 to match zenoh-pico's `_z_wireexpr_is_local`-driven semantic; default headers land at 0x42 / 0x44 / 0x46 respectively.",
+      "changes_bullets": [
+        "sources/codecs/decl_subscriber.scxml new — header (mid=0x02 + N@5 + M@6 value=1 + Z@7) + id VLE + wireexpr embed.",
+        "sources/codecs/decl_queryable.scxml new — same shape (mid=0x04). The Z-gated _ext_queryable_info ZINT ext is upstream-encoded only when `_complete || _distance != 0`; zero-init defaults make Z=0 at default state, so the R110c authoring omits the ext encoding and holds it as non-default coverage carry.",
+        "sources/codecs/decl_token.scxml new — same shape (mid=0x06).",
+        "sources/codecs/declare.scxml: variant arms 0x02 / 0x04 / 0x06 appended; sub:import entries for all three sub-codecs added. The declared default arm stays at 0x1A → decl_final.",
+        "crates/wz-codecs/build.rs CODECS: decl_subscriber / decl_queryable / decl_token appended to the composer section (each imports wireexpr); declare entry still last.",
+        "crates/wz-codecs/src/lib.rs: pub mod decl_subscriber / decl_queryable / decl_token added.",
+        "Codegen emit verified at target/debug/build/wz-codecs-*/out/: decl_subscriber.rs Default header=0x42u8 (= 0x02 | 0x40), decl_queryable.rs Default header=0x44u8 (= 0x04 | 0x40), decl_token.rs Default header=0x46u8 (= 0x06 | 0x40). R94-style codegen-inspect verify done."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-codecs: clean compile.",
+        "cargo test --workspace: 149 tests pass (unchanged from R110b; new codecs have no self-test layer this round).",
+        "scripts/run-ci.sh: all 5 lanes (A/B/C1/C2/D) pass.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 125 → 126, sections=214, GENERATED.md=sync.",
+        "DECLARE sub-MID authoring axis: 6/9 covered (decl_final / decl_kexpr / undecl_kexpr / decl_subscriber / decl_queryable / decl_token). Remaining 3 undecl variants (undecl_subscriber / undecl_queryable / undecl_token, all `_z_undecl_encode` shape) carry into R110d."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants"
+      ],
+      "carry_forward_bullets": [
+        "R110d sub-types — undecl_subscriber (MID 0x03) + undecl_queryable (MID 0x05) + undecl_token (MID 0x07). All three share `_z_undecl_encode` shape (header + Z flag + id VLE + optional `_z_decl_ext_keyexpr` ZBuf ext at Z=1). Default state Z=0 — header + id VLE only. 1 round closure with declare envelope variant arm additions for 0x03 / 0x05 / 0x07.",
+        "R110e Layer 3 wire-interop for DECLARE — byte-compare wz `Declare::default()` against zenoh-pico's `_z_declare_encode` with `_ext_qos._val = 5` fixture patch; expected wire `[0x1E, 0x1A]`. allowlist additions: `_z_n_msg_declare_t` + `_z_declare_encode`. Brings codec catalog wire-interop axis to 7/7.",
+        "Non-default Layer 3 coverage carry — enlarged to include decl_subscriber/queryable/token N=1 suffix and Z=1 ext variants. Quality-axis.",
+        "AP MVP demo binary, R67-R71 series, Phase W lwIP — still queued."
+      ],
+      "publishable_decision_summary": "R110c lands the three `_z_decl_commons_encode`-shaped DECLARE sub-types — decl_subscriber (MID 0x02), decl_queryable (MID 0x04), decl_token (MID 0x06) — each carrying header + id VLE + wireexpr with N/M/Z flags. M=1 is baked per R106 to match zenoh-pico's `_z_wireexpr_is_local`-driven semantic; default headers land at 0x42 / 0x44 / 0x46 respectively.",
+      "publishable_changes_bullets": [
+        "sources/codecs/decl_subscriber.scxml new — header (mid=0x02 + N@5 + M@6 value=1 + Z@7) + id VLE + wireexpr embed.",
+        "sources/codecs/decl_queryable.scxml new — same shape (mid=0x04). The Z-gated _ext_queryable_info ZINT ext is upstream-encoded only when `_complete || _distance != 0`; zero-init defaults make Z=0 at default state, so the R110c authoring omits the ext encoding and holds it as non-default coverage carry.",
+        "sources/codecs/decl_token.scxml new — same shape (mid=0x06).",
+        "sources/codecs/declare.scxml: variant arms 0x02 / 0x04 / 0x06 appended; sub:import entries for all three sub-codecs added. The declared default arm stays at 0x1A → decl_final.",
+        "crates/wz-codecs/build.rs CODECS: decl_subscriber / decl_queryable / decl_token appended to the composer section (each imports wireexpr); declare entry still last.",
+        "crates/wz-codecs/src/lib.rs: pub mod decl_subscriber / decl_queryable / decl_token added.",
+        "Codegen emit verified at target/debug/build/wz-codecs-*/out/: decl_subscriber.rs Default header=0x42u8 (= 0x02 | 0x40), decl_queryable.rs Default header=0x44u8 (= 0x04 | 0x40), decl_token.rs Default header=0x46u8 (= 0x06 | 0x40). R94-style codegen-inspect verify done."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-codecs: clean compile.",
+        "cargo test --workspace: 149 tests pass (unchanged from R110b; new codecs have no self-test layer this round).",
+        "scripts/run-ci.sh: all 5 lanes (A/B/C1/C2/D) pass.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 125 → 126, sections=214, GENERATED.md=sync.",
+        "DECLARE sub-MID authoring axis: 6/9 covered (decl_final / decl_kexpr / undecl_kexpr / decl_subscriber / decl_queryable / decl_token). Remaining 3 undecl variants (undecl_subscriber / undecl_queryable / undecl_token, all `_z_undecl_encode` shape) carry into R110d."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R110d sub-types — undecl_subscriber (MID 0x03) + undecl_queryable (MID 0x05) + undecl_token (MID 0x07). All three share `_z_undecl_encode` shape (header + Z flag + id VLE + optional `_z_decl_ext_keyexpr` ZBuf ext at Z=1). Default state Z=0 — header + id VLE only. 1 round closure with declare envelope variant arm additions for 0x03 / 0x05 / 0x07.",
+        "R110e Layer 3 wire-interop for DECLARE — byte-compare wz `Declare::default()` against zenoh-pico's `_z_declare_encode` with `_ext_qos._val = 5` fixture patch; expected wire `[0x1E, 0x1A]`. allowlist additions: `_z_n_msg_declare_t` + `_z_declare_encode`. Brings codec catalog wire-interop axis to 7/7.",
+        "Non-default Layer 3 coverage carry — enlarged to include decl_subscriber/queryable/token N=1 suffix and Z=1 ext variants. Quality-axis.",
+        "AP MVP demo binary, R67-R71 series, Phase W lwIP — still queued."
+      ]
+    },
     "Round 12": {
       "decision_summary": "Dual-license adoption — LGPL-3.0-or-later (Free, anti-tivo included) OR watching-zenoh Commercial (Qt-style 5-way exemption, $5000 individual cumulative)",
       "changes_bullets": [
