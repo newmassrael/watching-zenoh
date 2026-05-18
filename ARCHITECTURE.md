@@ -1,14 +1,16 @@
 # ARCHITECTURE — watching-zenoh
 
-**Status:** Pre-implementation design document (2026-04-24).
+**Status:** Living architecture reference (last refreshed Round 116,
+2026-05-18; original draft 2026-04-24).
 
-The project is blocked on SCE Phase A (see
-`docs/rfc-sce-protocol-synthesis.md`). This document records the
-planned architecture so that decisions made while waiting stay
-consistent, and so the scope contract with SCE maintainers is legible.
-
-When SCE Phase A lands and authoring begins, this file becomes the
-living architecture reference and is updated in lockstep with code.
+SCE Phase A landed at SCE upstream commit `c4cef7e7` (and subsequent
+vendor pin moves through `122f851d`), unblocking authoring on the
+watching-zenoh side. The wire-spec subset codec catalog
+(Phase B) and the unicast session FSM (Phase C, in flight) now have
+code-level realization in `crates/wz-codecs` + `crates/wz-runtime-tokio`;
+the design decisions below are kept in lockstep with that code via
+atomic-changelog rounds. The scope contract with SCE maintainers
+remains legible in `docs/rfc-sce-protocol-synthesis.md`.
 
 ---
 
