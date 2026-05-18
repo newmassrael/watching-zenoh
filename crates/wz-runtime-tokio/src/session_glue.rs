@@ -62,6 +62,7 @@ use sce_rust_runtime::Engine;
 
 use sce_forge_runtime::codec::{CodecError, SceCursor};
 use wz_codecs::close::Close;
+use wz_codecs::declare::Declare;
 use wz_codecs::ext_entry::ExtEntry;
 use wz_codecs::init_body::InitBody;
 use wz_codecs::keep_alive::KeepAlive;
@@ -281,9 +282,21 @@ mod wire_const {
     /// zenoh-pico `_z_response_encode`. Wire-shape sibling to
     /// `N_MID_REQUEST`: header(N@5,M@6,Z@7) + rid VLE + wireexpr
     /// embed + Z-gated ext-chain + peek-byte body variant on the
-    /// inner MID bit-range. Remaining unauthored MID: DECLARE
-    /// (0x1E), per [`NetworkMessage`] doc.
+    /// inner MID bit-range.
     pub const N_MID_RESPONSE: u8 = 0x1B;
+    /// R110/R115 — Declare envelope MID (network.h:34). Declarations
+    /// envelope wrapping one of the nine sub-MID bodies (DECL_KEXPR
+    /// 0x00 / DECL_SUBSCRIBER 0x01 / DECL_QUERYABLE 0x02 /
+    /// DECL_TOKEN 0x03 / UNDECL_KEXPR 0x04 / UNDECL_SUBSCRIBER 0x05 /
+    /// UNDECL_QUERYABLE 0x06 / UNDECL_TOKEN 0x07 / DECL_FINAL 0x08)
+    /// per zenoh-pico `_z_declare_encode`. Wire-shape: header(I@5,
+    /// Z@7) + optional interest_id VLE + Z-gated ext-chain + peek-
+    /// byte inner declaration variant. R110a-e closed the wz-side
+    /// authoring chain (9/9 sub-MIDs + envelope) and the byte-equiv
+    /// Layer 3 wire-interop vs `_z_declare_encode`. R115 wires the
+    /// inbound dispatch on this const so [`parse_frame_payload`]
+    /// surfaces DECLARE records to the application layer.
+    pub const N_MID_DECLARE: u8 = 0x1E;
 }
 
 /// Per-deploy parameters that drive the codec field values for the
@@ -1365,12 +1378,27 @@ pub enum NetworkMessage {
     /// the `Unknown` variant (mirrors the Request sizing
     /// rationale).
     Response(Box<Response>),
-    /// Header byte's MID falls outside the {REQUEST, PUSH, RESPONSE_FINAL, OAM, INTEREST, RESPONSE} subset
-    /// wz-codecs has authored envelope coverage for. `body` carries
-    /// the rest of the payload bytes (header byte included) verbatim
-    /// so a future per-MID decoder can re-parse without losing data;
-    /// the parse stops here to avoid mis-cursor-advancing across an
-    /// unknown body length.
+    /// R110/R115 — Network MID `_Z_MID_N_DECLARE` (0x1E). Declarations
+    /// envelope wrapping one of the nine sub-MID inner bodies
+    /// (DECL_KEXPR / DECL_SUBSCRIBER / DECL_QUERYABLE / DECL_TOKEN /
+    /// UNDECL_KEXPR / UNDECL_SUBSCRIBER / UNDECL_QUERYABLE /
+    /// UNDECL_TOKEN / DECL_FINAL) dispatched via peek-byte on the
+    /// inner header MID. R110a-e closed the wz-side authoring chain
+    /// and the byte-equiv Layer 3 wire-interop vs zenoh-pico
+    /// `_z_declare_encode`; R115 wires the inbound dispatch so a
+    /// peer-emitted DECLARE record surfaces here. The `Box` mirrors
+    /// the `Request`/`Push`/`Response` sizing rationale — `Declare`
+    /// carries an optional interest_id + ext vec + the inner
+    /// `DeclareVariant` whose arms hold the nine sub-body structs,
+    /// making the inline form much larger than `Unknown`.
+    Declare(Box<Declare>),
+    /// Header byte's MID falls outside the
+    /// {REQUEST, PUSH, RESPONSE_FINAL, OAM, INTEREST, RESPONSE, DECLARE}
+    /// subset wz-codecs has authored envelope coverage for. `body`
+    /// carries the rest of the payload bytes (header byte included)
+    /// verbatim so a future per-MID decoder can re-parse without
+    /// losing data; the parse stops here to avoid mis-cursor-advancing
+    /// across an unknown body length.
     Unknown { mid: u8, body: Vec<u8> },
 }
 
@@ -1383,6 +1411,7 @@ impl std::fmt::Debug for NetworkMessage {
             Self::Oam(_) => f.write_str("Oam(..)"),
             Self::Interest(_) => f.write_str("Interest(..)"),
             Self::Response(_) => f.write_str("Response(..)"),
+            Self::Declare(_) => f.write_str("Declare(..)"),
             Self::Unknown { mid, body } => write!(
                 f,
                 "Unknown {{ mid: {mid:#04x}, body_len: {} }}",
@@ -1443,6 +1472,10 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
             wire_const::N_MID_RESPONSE => {
                 let resp = Response::decode(&mut cursor)?;
                 messages.push(NetworkMessage::Response(Box::new(resp)));
+            }
+            wire_const::N_MID_DECLARE => {
+                let decl = Declare::decode(&mut cursor)?;
+                messages.push(NetworkMessage::Declare(Box::new(decl)));
             }
             _ => {
                 let rem = cursor.remaining();

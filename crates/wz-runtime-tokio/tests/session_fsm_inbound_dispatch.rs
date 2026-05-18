@@ -361,16 +361,19 @@ fn parse_frame_payload_empty_returns_empty_batch() {
 fn parse_frame_payload_unknown_mid_absorbs_remainder() {
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
-    // 0x1E = N_MID_DECLARE — the last network MID still without a
-    // wz-side codec post-R97 (RESPONSE 0x1B was uncodec'd pre-R97,
-    // PUSH 0x1D pre-R90; each test pivot follows the latest still-
-    // uncodec'd MID).
-    let bytes = [0x1E, 0xAB, 0xCD, 0xEF];
+    // 0x00 = synthetic network MID outside the {0x19..0x1F} typed set
+    // (post-R115 the authored catalog covers all 7 wz-spec network
+    // MIDs: INTEREST / RESPONSE_FINAL / RESPONSE / REQUEST / PUSH /
+    // DECLARE / OAM). The pre-R115 fixture used 0x1E (DECLARE) because
+    // it was the last un-typed network MID; the R110+R115 catalog
+    // completion forced this refactor to a synthetic out-of-range
+    // value so the Unknown coverage stays meaningful.
+    let bytes = [0x00, 0xAB, 0xCD, 0xEF];
     let parsed = parse_frame_payload(&bytes).expect("unknown MID absorbs as Unknown");
     assert_eq!(parsed.len(), 1, "single Unknown record");
     match &parsed[0] {
         NetworkMessage::Unknown { mid, body } => {
-            assert_eq!(*mid, 0x1E, "header low 5 bits = network MID");
+            assert_eq!(*mid, 0x00, "header low 5 bits = network MID");
             assert_eq!(
                 body.as_slice(),
                 &bytes,
@@ -382,7 +385,8 @@ fn parse_frame_payload_unknown_mid_absorbs_remainder() {
         | NetworkMessage::ResponseFinal(_)
         | NetworkMessage::Oam(_)
         | NetworkMessage::Interest(_)
-        | NetworkMessage::Response(_) => {
+        | NetworkMessage::Response(_)
+        | NetworkMessage::Declare(_) => {
             panic!("expected Unknown, got typed variant")
         }
     }
@@ -443,10 +447,11 @@ fn parse_frame_payload_decodes_request_then_unknown_chain() {
     };
     let mut bytes = req.encode();
     let request_len = bytes.len();
-    // Append an Unknown MID (0x1E = N_MID_DECLARE — still uncodec'd
-    // post-R97; the only network MID left without a typed dispatch
-    // path).
-    bytes.extend_from_slice(&[0x1E, 0x42, 0x43]);
+    // Append an Unknown MID — synthetic 0x00 outside the {0x19..0x1F}
+    // typed catalog. Pre-R115 this slot used 0x1E (DECLARE) as the
+    // last un-typed network MID; the R110+R115 catalog completion
+    // forced the refactor (see parse_frame_payload_unknown_mid_absorbs_remainder).
+    bytes.extend_from_slice(&[0x00, 0x42, 0x43]);
 
     let parsed = parse_frame_payload(&bytes).expect("Request + Unknown batch parses");
     assert_eq!(
@@ -457,7 +462,7 @@ fn parse_frame_payload_decodes_request_then_unknown_chain() {
     assert!(matches!(parsed[0], NetworkMessage::Request(_)));
     match &parsed[1] {
         NetworkMessage::Unknown { mid, body } => {
-            assert_eq!(*mid, 0x1E);
+            assert_eq!(*mid, 0x00);
             assert_eq!(
                 body.as_slice(),
                 &bytes[request_len..],
@@ -469,7 +474,8 @@ fn parse_frame_payload_decodes_request_then_unknown_chain() {
         | NetworkMessage::ResponseFinal(_)
         | NetworkMessage::Oam(_)
         | NetworkMessage::Interest(_)
-        | NetworkMessage::Response(_) => {
+        | NetworkMessage::Response(_)
+        | NetworkMessage::Declare(_) => {
             panic!("expected Unknown second record")
         }
     }

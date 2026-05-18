@@ -283,14 +283,16 @@ async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
     drive_to_sent_init_syn(&mut engine);
 
     // T_MID_FRAME | R flag = 0x25, sn=1 VLE (0x01), tail payload
-    // = [0x1E, 0xAA, 0xBB] — 0x1E = N_MID_DECLARE, the last network
-    // MID still without a wz-side codec post-R97 (RESPONSE 0x1B
-    // moved to a typed dispatch path with R97). When DECLARE lands
-    // this test must switch to a freshly-unused mock or refactor
-    // to a synthetic non-Zenoh MID (the codec catalog will at that
-    // point cover the full 7/7 wz-spec subset).
+    // = [0x00, 0xAA, 0xBB] — 0x00 is a synthetic network MID outside
+    // the {0x19..0x1F} authored set (INTEREST / RESPONSE_FINAL /
+    // RESPONSE / REQUEST / PUSH / DECLARE / OAM are the 7 wz-typed
+    // network MIDs as of R115's DECLARE inbound dispatch land). The
+    // R74 Unknown-MID dispatch path used 0x1E (DECLARE) historically
+    // because that was the last un-typed MID; the R97 + R110 + R115
+    // catalog completion forced a refactor to a synthetic out-of-range
+    // value so the Unknown coverage stays meaningful.
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: vec![0x25, 0x01, 0x1E, 0xAA, 0xBB],
+        bytes: vec![0x25, 0x01, 0x00, 0xAA, 0xBB],
     })]);
 
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
@@ -306,17 +308,18 @@ async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
             assert_eq!(messages.len(), 1);
             match &messages[0] {
                 NetworkMessage::Unknown { mid, body } => {
-                    assert_eq!(*mid, 0x1E);
-                    assert_eq!(body.as_slice(), &[0x1E, 0xAA, 0xBB]);
+                    assert_eq!(*mid, 0x00);
+                    assert_eq!(body.as_slice(), &[0x00, 0xAA, 0xBB]);
                 }
                 NetworkMessage::Request(_)
                 | NetworkMessage::Push(_)
                 | NetworkMessage::ResponseFinal(_)
                 | NetworkMessage::Oam(_)
                 | NetworkMessage::Interest(_)
-                | NetworkMessage::Response(_) => {
+                | NetworkMessage::Response(_)
+                | NetworkMessage::Declare(_) => {
                     panic!(
-                        "DECLARE MID (0x1E) must NOT dispatch to any typed decoder"
+                        "synthetic MID 0x00 must NOT dispatch to any typed decoder"
                     )
                 }
             }
