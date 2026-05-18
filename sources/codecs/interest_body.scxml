@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh INTEREST inner body — the
+     `_z_interest_encode` payload that follows the network-MID
+     `_z_n_interest_encode` envelope when the outer header carries
+     CURRENT or FUTURE (i.e. `_Z_INTEREST_NOT_FINAL_MASK` is set per
+     `include/zenoh-pico/protocol/definitions/interest.h:35`).
+
+     Mirrors zenoh-pico `_z_interest_encode` / `_z_interest_decode`
+     (src/protocol/codec/interest.c L41-91). Sub-codec design: the
+     outer `interest.scxml` envelope embeds THIS codec conditionally
+     on `outer.header.C || outer.header.F`; this codec then owns the
+     body_flags byte layout AND the R-gated wireexpr embed via its
+     own local `header` carrier — which is the textbook way to wire
+     `codec_zenoh_wireexpr`'s `<sce:requires-parent-flags
+     carrier="header"><sce:flag name="N" bit="5"/>` dependency to a
+     non-outer carrier (the wire's body_flags byte rather than the
+     network-message header).
+
+     Wire shape (1+1+VLE bytes, or 1+1+VLE+VLE+sufflen bytes):
+       byte 0   : header     (flags carrier; bit 0 KE @0, SU @1, QU @2,
+                              TO @3, R @4, N @5, M @6, AG @7; see
+                              `interest.h:26-33` for `_Z_INTEREST_FLAG_*`
+                              constant values). KE/SU/QU/TO/AG carry the
+                              interest's appetite signals (which kinds of
+                              declarations interest us); R = RESTRICTED
+                              gates the keyexpr embed (an unrestricted
+                              interest applies to ALL keyexprs); N / M
+                              are the wireexpr CODEC flags set by
+                              `_z_interest_encode` from
+                              `_z_wireexpr_has_suffix` /
+                              `_z_wireexpr_is_local` (interest.c L55-59)
+                              — they occupy `_Z_INTEREST_FLAG_CURRENT` /
+                              `_Z_INTEREST_FLAG_FUTURE` bit positions
+                              because the outer `_z_n_interest_encode`
+                              hoists those CURRENT/FUTURE bits to the
+                              parent header and clears them from the
+                              body flags (interest.c L48-50), freeing
+                              bits 5/6 for the wireexpr codec flags.
+                              The wire-form mask
+                              `_Z_INTEREST_FLAG_COPY_MASK = 0x9F`
+                              (interest.h:37 reordered) reconstructs the
+                              flag set on decode by re-OR'ing into the
+                              host-visible `interest.flags` field.
+       R-gated:
+         bytes  : keyexpr    (codec_zenoh_wireexpr embed — VLE id +
+                              N-gated UTF-8 suffix, parent flags
+                              carrier = this codec's own `header`
+                              (wireexpr's `<sce:requires-parent-flags
+                              carrier="header" name="N" bit="5"/>`
+                              binds to interest_body.header.N at
+                              bit 5 — the same wire bit the upstream
+                              encoder sets via
+                              `_Z_INTEREST_CODEC_FLAG_N 0x20`).
+
+     Composition: B1-γ flags (header) + B1-δ present-if-on-embed
+     (R gate; single-clause grammar) + Y0c <sce:embed>
+     (codec_zenoh_wireexpr inner codec). No new primitives. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="interest_body">
+  <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="KE" bit="0"/>
+      <sce:flag name="SU" bit="1"/>
+      <sce:flag name="QU" bit="2"/>
+      <sce:flag name="TO" bit="3"/>
+      <sce:flag name="R"  bit="4"/>
+      <sce:flag name="N"  bit="5"/>
+      <sce:flag name="M"  bit="6"/>
+      <sce:flag name="AG" bit="7"/>
+    </sce:flags>
+    <sce:embed id="keyexpr" type="codec_zenoh_wireexpr" sce:byte="1"
+               sce:present-if="header.R"/>
+  </datamodel>
+</scxml>

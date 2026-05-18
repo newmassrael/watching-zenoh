@@ -4,65 +4,57 @@
   SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 <!-- SCE Forge conformance: Zenoh INTEREST envelope — declarations
-     discovery / liveliness subscriber registration carrier. Wire-
-     shape-wise sibling to `codec_zenoh_response_final` (R91): header
-     + VLE id + Z-gated ext-chain. No body, no peek-byte variant.
-     Distinguishing additions are two header flags —
-     `_Z_FLAG_N_INTEREST_CURRENT 0x20` (bit 5) and
-     `_Z_FLAG_N_INTEREST_FUTURE 0x40` (bit 6) — that the upstream
-     `_z_n_interest_encode` (src/protocol/codec/network.c L452-465)
-     toggles when the interest declares appetite for the current /
-     future state of matching declarations.
+     discovery / liveliness subscriber registration carrier. Mirrors
+     zenoh-pico `_z_n_interest_encode` / `_z_n_interest_decode`
+     (src/protocol/codec/network.c L452-486) and the inner
+     `_z_interest_encode` / `_z_interest_decode` (interest.c L41-91)
+     delegated via the `body` embed below.
 
-     Mirrors zenoh-pico `_z_n_interest_encode` /
-     `_z_n_interest_decode` (src/protocol/codec/network.c).
+     R93 (envelope-only) and R94 (inner body) land together at this
+     SCXML: the body embed is gated on `header.C || header.F`
+     (`_Z_INTEREST_NOT_FINAL_MASK` per interest.h:35), so the default
+     instance (C=F=0) still round-trips to the 2-byte is_final form
+     that R93's positive test exercises, while peers sending non-
+     final interests now decode the full body + optional wireexpr
+     under the same envelope.
 
-     Wire shape (per upstream is_final path — see scope note below):
+     Wire shape:
        byte 0   : header     (MID Z_INTEREST 0x19 in bits 0..4 + C@5
-                              + F@6 + Z@7). When C or F is set the
-                              upstream encoder follows the id with an
-                              additional inner body (flags byte +
-                              optional wireexpr) per
-                              `_z_interest_encode`
-                              (src/protocol/codec/interest.c L41-69).
-                              This codec authors the *envelope* layer
-                              only — the inner body extension is
-                              deferred (see scope note).
+                              + F@6 + Z@7).
        byte 1+  : interest_id (VLE u64 — upstream uses zint32 zsize,
                               a strict subset of u64-VLE; wire form
                               identical for any value the encoder
                               will produce).
+       (C||F)-  : body        (codec_zenoh_interest_body embed —
+       gated                   body_flags byte + R-gated wireexpr;
+                              see interest_body.scxml for the inner
+                              wire-shape decomposition. The
+                              disjunction `header.C || header.F`
+                              uses the SCE B5-λ Y3 atomic 2b-ii
+                              compound present-if grammar landed
+                              specifically for the
+                              `_Z_INTEREST_NOT_FINAL_MASK` shape per
+                              `PresentIfPredicate::or_with` upstream
+                              docstring).
        Z-gated  : extensions (codec_zenoh_ext_entry tlv-chain, max-
                               depth=4 covers upstream's
                               `_z_msg_ext_skip_non_mandatories` call
                               site (interest.c L88); entry-flag-Z
                               termination per Y3 atomic 1 grammar).
 
-     Scope (R93 envelope-only): authored mechanically as the
-     RESPONSE_FINAL sibling. The is_final form (header.C=0,
-     header.F=0) is wire-equivalent to the response_final layout
-     aside from the MID byte. The non-final form's inner body (flags
-     byte + conditional wireexpr) is intentionally NOT modeled in
-     this round — the body's conditional wireexpr requires
-     `sce:present-if` cascaded across two layers (`header.C or
-     header.F` gates the flags byte; `body_flags.RESTRICTED` gates
-     the wireexpr), and the primitives to express that cascade
-     cleanly belong in a future round dedicated to the INTEREST
-     inner body. Peers sending an INTEREST with C or F set will be
-     parsed up through the id field; the post-id flags byte will
-     currently be mis-routed into the Z-gated ext-chain branch
-     (decode error if !Z, ext-chain framing error if Z). This subset
-     captures the dominant declaration-discovery final-marker use
-     case while keeping the round mechanical.
-
-     Composition: subset of response_final.scxml's primitives. No
-     new primitives. Header MID 0x19 baked via R88 RFC variant-
-     default-uniformity `<sce:flag value=>` so Interest::default()
-     carries the wire MID. -->
+     Composition: B1-γ flags (header) + B1-α VLE (interest_id) +
+     B1-δ Y3 atomic 2b-ii disjunction present-if-on-embed
+     (`header.C || header.F` gates the body sub-codec) + Y0c
+     <sce:embed> (codec_zenoh_interest_body) + Y3 atomic 2a present-
+     if-on-tlv-chain (header.Z gates extensions) + Y3 atomic 1
+     entry-flag termination. No new primitives. Header MID 0x19
+     baked via R88 RFC variant-default-uniformity `<sce:flag
+     value=>` so Interest::default() carries the wire MID. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="interest">
   <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <sce:import src="interest_body.scxml" kind="codec" as="codec_zenoh_interest_body"/>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x19"/>
@@ -71,7 +63,9 @@
       <sce:flag name="Z"   bit="7"/>
     </sce:flags>
     <sce:field id="interest_id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
-    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+    <sce:embed id="body" type="codec_zenoh_interest_body" sce:byte="2"
+               sce:present-if="header.C || header.F"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="3"
                    max-depth="4" on-overflow="reject"
                    sce:present-if="header.Z"
                    terminate-on="entry-flag" entry-flag-name="Z"/>
