@@ -98,3 +98,34 @@ fn reply_default_encode_decode_roundtrip() {
     assert!(decoded.consolidation.is_none(), "C clear => consolidation absent");
     assert!(decoded.extensions.is_none(), "Z clear => extensions absent");
 }
+
+#[test]
+fn err_default_encode_decode_roundtrip() {
+    // R96 — Err is the second inner-body codec consumed by the
+    // RESPONSE envelope (R97). Default header bakes MID 0x05 per RFC
+    // variant-default-uniformity. E=0 keeps the encoding embed
+    // absent; Z=0 keeps the source_info ext-chain absent; the
+    // always-present payload pair (length + bytes) emits as VLE(0) +
+    // empty bytes = 1 byte.
+    use wz_codecs::err::Err;
+
+    let err = Err::default();
+    let encoded = err.encode();
+    assert!(
+        !encoded.is_empty(),
+        "default Err encode produced 0 bytes — header expected"
+    );
+    assert_eq!(
+        encoded[0], 0x05,
+        "default Err header carries MID Z_ERR = 0x05"
+    );
+
+    let mut cursor = SceCursor::new(&encoded);
+    let decoded = Err::decode(&mut cursor).expect("decode default Err bytes");
+
+    assert_eq!(decoded.header, err.header, "header round-trip");
+    assert!(decoded.encoding.is_none(), "E clear => encoding absent");
+    assert!(decoded.extensions.is_none(), "Z clear => extensions absent");
+    assert_eq!(decoded.payload_len, 0, "default payload length zero");
+    assert!(decoded.payload.is_empty(), "default payload bytes empty");
+}

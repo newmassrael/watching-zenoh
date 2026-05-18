@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh ERR inner body — the `_z_err_encode`
+     payload that the network-MID Z_RESPONSE envelope wraps when its
+     variant body's peek-byte dispatch lands on `_Z_MID_Z_ERR = 0x05`
+     (message.h:32). Sibling to `codec_zenoh_reply` (R95) in role —
+     the second arm body of Z_RESPONSE's variant.
+
+     Mirrors zenoh-pico `_z_err_encode` / `_z_err_decode`
+     (src/protocol/codec/message.c L545-599). The encoder emits an
+     E-gated encoding embed, a Z-gated source_info ext-chain, and an
+     always-present length-prefixed payload — structurally a subset
+     of `codec_zenoh_msg_put` minus the T (timestamp) gate. No body
+     variant: err carries opaque error bytes, not nested put / del.
+
+     Wire shape (1+ bytes):
+       byte 0   : header     (MID Z_ERR 0x05 in bits 0..4 + E@6 +
+                              Z@7). E = `_Z_FLAG_Z_E_E = 0x40` gates
+                              the encoding embed; Z = `_Z_FLAG_Z_Z`
+                              gates the source_info extension.
+                              (Bit 5 is unused on err's header —
+                              upstream `_z_err_encode` L549-558 sets
+                              only E and Z.)
+       E-gated:
+         bytes  : encoding   (codec_zenoh_encoding embed — full
+                              upstream wire fidelity: VLE u32
+                              packed_id with LSB has_schema flag +
+                              has_schema-gated VLE u64 schema_len +
+                              UTF-8 schema bytes max=128. Same
+                              codec consumed by msg_put L88).
+       Z-gated:
+         chain  : codec_zenoh_ext_entry tlv-chain (max-depth=4
+                              covers upstream's single
+                              source_info slot — `_Z_MSG_EXT_ENC_
+                              ZBUF | 0x01` per L566 — with safety
+                              margin; entry-flag-Z termination per
+                              Y3 atomic 1 grammar; chain is followed
+                              by the always-present payload pair so
+                              exhaust-or-depth termination wouldn't
+                              detect the payload boundary).
+       always:
+         bytes  : payload_len (VLE u64) + payload (bytes max=256;
+                              upstream is unbounded zbuf — caller-
+                              supplied length-prefix per
+                              `_z_bytes_encode` convention; max-size
+                              matches msg_put.scxml authored ceiling
+                              for the same primitive).
+
+     Composition: B1-γ flags (header) + B1-δ present-if-on-embed (E
+     gate on encoding) + Y3 atomic 2a present-if-on-tlv-chain (Z gate
+     on ext-chain) + Y3 atomic 1 entry-flag termination + Y0c
+     <sce:embed> (codec_zenoh_encoding inner codec) + B1-α length-ref
+     (payload_len / payload pair). No new primitives. Header MID 0x05
+     baked via R88 RFC variant-default-uniformity `<sce:flag value=>`
+     so Err::default()'s header carries the wire MID.
+
+     Body variant arm contract: invoked by codec_zenoh_response when
+     the inner-MID byte after the response header reads 0x05 (Z_ERR).
+     Wire byte 0 here IS the response body's dispatch header from
+     the response envelope's perspective — same indirection as
+     reply / msg_put / msg_del. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="err">
+  <sce:import src="encoding.scxml" kind="codec" as="codec_zenoh_encoding"/>
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x05"/>
+      <sce:flag name="E"   bit="6"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:embed id="encoding" type="codec_zenoh_encoding" sce:byte="1"
+               sce:present-if="header.E"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   max-depth="4" on-overflow="reject"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+    <sce:field id="payload_len" sce:type="uint64" sce:byte="3" sce:bit-size="vle"/>
+    <sce:field id="payload" sce:type="bytes" sce:byte="4" sce:bit-size="length-ref"
+               sce:length-field="payload_len" sce:max-size="256"/>
+  </datamodel>
+</scxml>
