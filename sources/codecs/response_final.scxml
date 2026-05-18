@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh RESPONSE_FINAL marker — closes a
+     Request's reply stream. Wire-shape-wise the simplest network
+     envelope: 1-byte header + request_id VLE + optional ext-chain.
+     No body, no peek-byte variant, no embed.
+
+     Mirrors zenoh-pico `_z_response_final_encode` /
+     `_z_response_final_decode` (src/protocol/codec/network.c).
+
+     Wire shape:
+       byte 0   : header     (MID Z_RESPONSE_FINAL 0x1A in bits 0..4
+                              + Z@7 only — no N, no M flags per
+                              upstream `_z_response_final_encode`
+                              header construction).
+       byte 1+  : request_id (VLE u64 — correlates this final marker
+                              with the original Request's rid).
+       Z-gated  : extensions (codec_zenoh_ext_entry tlv-chain, max-
+                              depth=4 covers upstream's `_z_msg_ext_
+                              skip_non_mandatories` call site;
+                              entry-flag-Z termination).
+
+     No inner body — RESPONSE_FINAL is a pure correlation marker
+     signalling that the Accepting side will send no more replies
+     for this request. The Initiator unblocks the request's reply
+     channel on receipt.
+
+     Composition: subset of push.scxml's primitives — single VLE
+     field replaces the keyexpr embed + body variant. No new
+     primitives. Header MID 0x1A baked via RFC variant-default-
+     uniformity `<sce:flag value=>` per R88. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="response_final">
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x1A"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:field id="request_id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   max-depth="4" on-overflow="reject"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+  </datamodel>
+</scxml>

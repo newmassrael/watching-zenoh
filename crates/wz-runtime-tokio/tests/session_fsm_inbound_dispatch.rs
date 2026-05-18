@@ -376,7 +376,9 @@ fn parse_frame_payload_unknown_mid_absorbs_remainder() {
                 "Unknown.body absorbs the entire remaining payload including header"
             );
         }
-        NetworkMessage::Request(_) | NetworkMessage::Push(_) => {
+        NetworkMessage::Request(_)
+        | NetworkMessage::Push(_)
+        | NetworkMessage::ResponseFinal(_) => {
             panic!("expected Unknown, got typed variant")
         }
     }
@@ -457,7 +459,9 @@ fn parse_frame_payload_decodes_request_then_unknown_chain() {
                 "Unknown.body absorbs from its header byte to end of payload"
             );
         }
-        NetworkMessage::Request(_) | NetworkMessage::Push(_) => {
+        NetworkMessage::Request(_)
+        | NetworkMessage::Push(_)
+        | NetworkMessage::ResponseFinal(_) => {
             panic!("expected Unknown second record")
         }
     }
@@ -516,6 +520,38 @@ fn parse_frame_payload_decodes_push_then_request_chain() {
     assert_eq!(parsed.len(), 2, "two records: Push then Request");
     assert!(matches!(parsed[0], NetworkMessage::Push(_)));
     assert!(matches!(parsed[1], NetworkMessage::Request(_)));
+}
+
+#[test]
+fn parse_frame_payload_dispatches_response_final_mid_to_response_final_decoder() {
+    use wz_codecs::response_final::ResponseFinal;
+    use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
+
+    // R91 — round-trip-safe ResponseFinal using plain
+    // `ResponseFinal::default()`. After R88 variant-default-uniformity
+    // the inner default state is byte-exact (no inner body to worry
+    // about — ResponseFinal is header + request_id VLE only).
+    let rf = ResponseFinal {
+        header: 0x1A,
+        ..ResponseFinal::default()
+    };
+    let bytes = rf.encode();
+    assert_eq!(
+        bytes.len(),
+        2,
+        "round-trip-safe ResponseFinal: header(1) + request_id VLE(1) = 2 bytes"
+    );
+
+    let parsed = parse_frame_payload(&bytes).expect("ResponseFinal envelope parses");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "round-trip-safe ResponseFinal yields exactly one record; got {parsed:?}"
+    );
+    assert!(
+        matches!(parsed[0], NetworkMessage::ResponseFinal(_)),
+        "RESPONSE_FINAL MID 0x1A dispatches to wz_codecs::response_final decoder"
+    );
 }
 
 #[test]
