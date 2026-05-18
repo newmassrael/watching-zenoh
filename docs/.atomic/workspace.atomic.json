@@ -5181,6 +5181,87 @@
         "R123b still pending (independent): build.rs compile_forge_with_imports -> _with_deploy."
       ]
     },
+    "Round 127": {
+      "decision_summary": "R127: SCE vendor pin 11287248 -> b35dbb66 (B5-ν dispatcher-self-gen gaps closed; unlocks R125c2).",
+      "changes_bullets": [
+        "vendor/sce gitlink 11287248 -> b35dbb66 (1 commit ahead on origin/main).",
+        "Adopts SCE b35dbb66 closing R125c1's three dispatcher-side codegen gaps.",
+        "Gap 4/5 close: body_parent_flags_value_expr helper at generator.rs:3383.",
+        "Gap 4/5 fix: FlagLayoutSource::Forwarding emits parent_flags at arm-call sites.",
+        "Gap 6 close: Rust include_stmt brace-list augmentation at lib.rs:2760-2774.",
+        "Gap 6 fix: use super::<dispatcher>::{Struct, StructVariant} auto-emitted.",
+        "Substring assertions (positive + negative) extend the chain-forwarding fixture.",
+        "rustc-compile harness deferred (Q-DSG-3 separate atomic; substring is enough).",
+        "Go backend variant-arm package-qualifier carry noted (wz uses Rust only)."
+      ],
+      "verification_bullets": [
+        "scripts/build-sce.sh rebuild pass on new pin (1m06s release).",
+        "scripts/run-ci.sh full 7-lane gate pass: Layer 0/A/A2/B/C1/C2/D.",
+        "Layer B per-codec unchanged: request stays LAYER2 MISMATCH; all others OK.",
+        "validate_workspace: T1=0; RT 12/12; entries 147 -> 148; sections=214; sync.",
+        "Pin-only round; R125c2 consumes the new substrate in next round."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "R125c2: wireexpr.scxml dispatcher restructure (RPF + variant tag=parent.M).",
+        "R125c2: arm 0x00=wireexpr_nonlocal, 0x01=wireexpr_local default='true'.",
+        "R125c2: drop M=1 baking from push/request/response/decl_{sub,token,qy}.scxml.",
+        "R125c2: scripts/run-ci.sh LAYER2_KNOWN_DIVERGENCE += wireexpr (audit-traced).",
+        "R125c2: lift wireexpr_local + wireexpr_nonlocal orphan-status to live-arm prose.",
+        "R125c2: crates/wz-codecs build.rs CODECS += {wireexpr_local, wireexpr_nonlocal}.",
+        "R125c2: crates/wz-codecs src/lib.rs pub mod {wireexpr_local, wireexpr_nonlocal}.",
+        "R125c2: refresh R106 baking comment blocks in decl_{sub,token,qy} + request.scxml.",
+        "Go backend variant-arm package-qualifier carry from SCE; not on wz Rust-only path."
+      ],
+      "publishable_decision_summary": "R127: vendor/sce pin 11287248 -> b35dbb66 after SCE closed the three R125c1 dispatcher-self-gen gaps via FlagLayoutSource argument substitution + Rust brace-list use; pin-only, R125c2 next.",
+      "publishable_changes_bullets": [
+        "vendor/sce gitlink 11287248 -> b35dbb66 (origin/main 1 commit ahead).",
+        "Single SCE commit closes the three R125c1 gaps in one atomic.",
+        "Gap 4/5 close (dispatcher arm-dispatch): body_parent_flags_value_expr helper",
+        "at sce-build/src/forge/generator.rs:3383 branches on FlagLayoutSource",
+        "(Terminal -> existing per-language substitution; Forwarding -> parent_flags).",
+        "Three call sites collapse to the helper: body_parent_flags_arg (decode,",
+        "comma-prefixed), body_parent_flags_arg_first (encode), body_parent_flags_arg_encode",
+        "(C11-only addendum). Both enumerated-arm + default-arm branches updated.",
+        "Gap 6 close (consumer-site Variant import): validate_and_enrich_imports patches",
+        "Rust include_stmt at lib.rs:2760 to brace-list form when codec_b5_nu_parent_tag_flag",
+        "is set: `use super::wireexpr::{Wireexpr, WireexprVariant};` (rustfmt-preferred).",
+        "Other 5 backends untouched - Cpp #include / Kotlin / Go / Python / C11 already",
+        "bring the variant into scope at consumer sites.",
+        "Existing chain-forwarding fixture extended with positive + negative substring",
+        "assertions (decode/encode both branches) + consumer alias!=stem fixture extended",
+        "to assert brace-list emit literally; SCE test count 2357 unchanged."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/build-sce.sh rebuild pass on the new pin (1m06s release profile).",
+        "scripts/run-ci.sh full 7-lane gate pass at pin b35dbb66 with zero wz-side changes:",
+        "Layer 0 (actionlint) + A (mnemosyne) + A2 (mid value=) + B (codegen 6-backend)",
+        "+ C1 (cargo test --workspace) + C2 (cargo clippy -D warnings) + D (deploy yaml).",
+        "Layer B per-codec unchanged: request stays LAYER2 MISMATCH (R123b carry); others OK.",
+        "validate_workspace: docs=12/12; T1=0; RT 12/12; entries 147 -> 148; sections=214; sync.",
+        "publishable/audit divergence stable at 9/9 pre-R127 -> 10/10 post (R127 row added).",
+        "SCE explicit adoption-path verified: wz R125c1 SCXML compiles clean at b35dbb66."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R125c2 (entry id = Round 125c2): wireexpr.scxml restructure to thin dispatcher.",
+        "R125c2 RPF: parent.M bit=6 (variant tag) + parent.N bit=5 (chain to arms).",
+        "R125c2 arm shape: <sce:arm value='0x00' type='wireexpr_nonlocal'/> +",
+        "<sce:arm value='0x01' type='wireexpr_local' default='true'/> (M=1 default).",
+        "R125c2 drops M=1 baking from 6 consumers (push/request/response/decl_{sub,tk,qy}).",
+        "R125c2 adds wireexpr to scripts/run-ci.sh LAYER2_KNOWN_DIVERGENCE (audit-traced).",
+        "R125c2 lifts orphan-status blocks in wireexpr_local + wireexpr_nonlocal headers.",
+        "R125c2 refreshes R106 baking comment blocks in decl_{sub,tk,qy} + request.scxml.",
+        "R125c2 expands crates/wz-codecs build.rs CODECS list (3 new entries leaf-first).",
+        "R125c2 adds pub mod {wireexpr_local, wireexpr_nonlocal} in src/lib.rs.",
+        "R125e (Layer 3 wire-shape interop) unblocked once R125c2 lands the dispatcher.",
+        "Go backend variant-arm package-qualifier gap noted by SCE; not on wz path now."
+      ]
+    },
     "Round 13": {
       "decision_summary": "sources/ skeleton lands via README (SPDX header double-block + 7-subdir lazy materialize per ARCH §428) + first author-side SCXML sources/algorithms/crc16_ccitt.scxml body-identical to SCE fixture; 6-backend byte-golden verify carried to R14 SCE submodule infrastructure (pin 1473f99f origin/main).",
       "changes_bullets": [
