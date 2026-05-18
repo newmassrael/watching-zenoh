@@ -9151,6 +9151,62 @@
         "Test-MID pivot debt growing — each new typed MID forces 1+ tests to pivot their mock-Unknown MID. The current 0x1E (DECLARE) is the last unused network MID; once R98 closes DECLARE the tests will need to mock a synthetic non-Zenoh MID (e.g. 0x00 or 0x1F if those remain ambiguous, OR a deliberate out-of-spec value with a comment explaining the synthetic source). Plan a follow-up cleanup round that converts these Unknown-MID mocks to a helper that pins them to an explicitly-reserved sentinel MID.",
         "Match-exhaustiveness churn now at 7 NetworkMessage variants (Request/Push/ResponseFinal/Oam/Interest/Response/Unknown) across 3-4 test sites per round. Macro consolidation considered post-DECLARE landing."
       ]
+    },
+    "Round 98": {
+      "decision_summary": "R98 lands the application-layer subscriber registry — closes R90 carry #4, AP MVP critical-path unblock; deliberate pivot away from the next codec round (DECLARE 0x1E) because pub/sub demo value-add exceeds 7/7 MID catalog vanity, and DECLARE's 9-sub-codec chain is a multi-round project on the scale of RESPONSE chain (R95-R97).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/pubsub.rs new — `SubscriberRegistry` with register / unregister / dispatch / len / is_empty / Default. Callbacks are `Box<dyn FnMut(&Push) + Send + 'static>`; subscription handles are opaque `SubscriptionId(u64)` so callers can hold a stable removal key without depending on keyexpr equality (duplicate keyexpr literals are explicitly allowed). Registry is `!Sync` by design — cross-task sharing is the caller's responsibility via `Arc<Mutex<…>>` to keep the hot dispatch path mutex-free in single-owner cases.",
+        "crates/wz-runtime-tokio/src/lib.rs declares `pub mod pubsub` after session_glue.",
+        "Dispatch scope (R98): Push only, literal keyexpr matching on `Push.keyexpr.suffix` when `Push.keyexpr.id == 0`. Non-Push variants and mapping-id pushes (`id != 0`) are filtered out at dispatch time. Module + struct + each method carry doc comments explaining the scope limits and the DECLARE-table dependency that future rounds will close.",
+        "6 inline unit tests cover the dispatch matrix: (1) matching keyexpr fires callback, (2) non-matching keyexpr skips, (3) multiple matching subscribers fire in registration order, (4) non-zero mapping id is filtered out (deferred DECLARE), (5) non-Push variants (ResponseFinal here) are no-ops, (6) unregister is idempotent and returns false on missing id.",
+        "Test helper `push_with_keyexpr` constructs a Push whose Wireexpr embed has id=0 + inline suffix — mirrors the on-wire shape of a router-less pub/sub setup where the publisher has not yet performed a DECLARE handshake (the dominant AP MVP demo configuration)."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio clean.",
+        "cargo test -p wz-runtime-tokio --lib pubsub: 6 passed.",
+        "cargo test --workspace: 127 → 133 (+6 = the six pubsub unit tests; no other test counts changed).",
+        "scripts/run-ci.sh all 5 lanes pass: Layer A (validate-workspace), Layer B (verify-codegen), Layer C1 (cargo test), Layer C2 (cargo clippy -D warnings), Layer D (deploy yaml schema). Layer C2 caught two `field_reassign_with_default` lints in the test fixtures — corrected by inline struct construction with the spread operator before commit (textbook clippy fix mirroring the R82 carry pattern).",
+        "atomic ledger entries: 110 → 111 (this Round 98 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants"
+      ],
+      "carry_forward_bullets": [
+        "Integration shim into `drive_session_until_terminal` — R98 ships the registry as a standalone module; the dispatcher is not yet wired into the session loop's observer callback. The textbook integration is an `&mut SubscriberRegistry` observer adapter that calls `dispatch` on each `IterationEvent::Poll(FramePayload { messages, … })`. Estimate 1 round (small surface, doc + 1 test using QueueDriver).",
+        "DECLARE codec (0x1E) — 9 declaration sub-types (DeclKexpr/UndeclKexpr/DeclSubscriber/UndeclSubscriber/DeclQueryable/UndeclQueryable/DeclToken/UndeclToken/DeclFinal) per zenoh-pico declarations.c. Each sub-type is ~30-50 line SCXML. Multi-round chain on the scale of RESPONSE (3 rounds for reply+err+response). Once DECLARE lands, the pubsub registry can be extended with a mapping-id resolver so non-zero `wireexpr.id` Pushes route to subscribers registered against the resolved base keyexpr + suffix concatenation.",
+        "Keyexpr wildcards — R98 registry is literal-only. Zenoh's keyexpr language supports `*` (single-chunk wildcard), `**` (multi-chunk), and `$*` (substring) per the upstream `_z_keyexpr_intersect_*` API. A wildcard-aware matcher is a follow-up quality round once the basic literal-match demo is validated against zenoh-pico.",
+        "Reply / Err dispatch — dispatch is Push-only. A future round adds the symmetric `Response` arm (`NetworkMessage::Response.body.reply.body` is a Push-shaped wrapper per R95 reply.scxml). The same registry can route both, gated on a per-subscription kind filter (publish-only vs reply-also-accepted).",
+        "Session-loop integration moves `SubscriberRegistry` from a standalone unit-test target to a Linux + tokio echo-demo wire-up. AP MVP demo close: combine the integration shim + a 2-tasks tokio fixture (one publishes, one subscribes via the registry) into an end-to-end smoke test against either a wz peer or a zenoh-pico peer (the latter requires the zenoh-pico-sys FFI bridge from R41/R42)."
+      ],
+      "publishable_decision_summary": "R98 lands the application-layer subscriber registry — closes R90 carry #4, AP MVP critical-path unblock; deliberate pivot away from the next codec round (DECLARE 0x1E) because pub/sub demo value-add exceeds 7/7 MID catalog vanity, and DECLARE's 9-sub-codec chain is a multi-round project on the scale of RESPONSE chain (R95-R97).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/pubsub.rs new — `SubscriberRegistry` with register / unregister / dispatch / len / is_empty / Default. Callbacks are `Box<dyn FnMut(&Push) + Send + 'static>`; subscription handles are opaque `SubscriptionId(u64)` so callers can hold a stable removal key without depending on keyexpr equality (duplicate keyexpr literals are explicitly allowed). Registry is `!Sync` by design — cross-task sharing is the caller's responsibility via `Arc<Mutex<…>>` to keep the hot dispatch path mutex-free in single-owner cases.",
+        "crates/wz-runtime-tokio/src/lib.rs declares `pub mod pubsub` after session_glue.",
+        "Dispatch scope (R98): Push only, literal keyexpr matching on `Push.keyexpr.suffix` when `Push.keyexpr.id == 0`. Non-Push variants and mapping-id pushes (`id != 0`) are filtered out at dispatch time. Module + struct + each method carry doc comments explaining the scope limits and the DECLARE-table dependency that future rounds will close.",
+        "6 inline unit tests cover the dispatch matrix: (1) matching keyexpr fires callback, (2) non-matching keyexpr skips, (3) multiple matching subscribers fire in registration order, (4) non-zero mapping id is filtered out (deferred DECLARE), (5) non-Push variants (ResponseFinal here) are no-ops, (6) unregister is idempotent and returns false on missing id.",
+        "Test helper `push_with_keyexpr` constructs a Push whose Wireexpr embed has id=0 + inline suffix — mirrors the on-wire shape of a router-less pub/sub setup where the publisher has not yet performed a DECLARE handshake (the dominant AP MVP demo configuration)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio clean.",
+        "cargo test -p wz-runtime-tokio --lib pubsub: 6 passed.",
+        "cargo test --workspace: 127 → 133 (+6 = the six pubsub unit tests; no other test counts changed).",
+        "scripts/run-ci.sh all 5 lanes pass: Layer A (validate-workspace), Layer B (verify-codegen), Layer C1 (cargo test), Layer C2 (cargo clippy -D warnings), Layer D (deploy yaml schema). Layer C2 caught two `field_reassign_with_default` lints in the test fixtures — corrected by inline struct construction with the spread operator before commit (textbook clippy fix mirroring the R82 carry pattern).",
+        "atomic ledger entries: 110 → 111 (this Round 98 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Integration shim into `drive_session_until_terminal` — R98 ships the registry as a standalone module; the dispatcher is not yet wired into the session loop's observer callback. The textbook integration is an `&mut SubscriberRegistry` observer adapter that calls `dispatch` on each `IterationEvent::Poll(FramePayload { messages, … })`. Estimate 1 round (small surface, doc + 1 test using QueueDriver).",
+        "DECLARE codec (0x1E) — 9 declaration sub-types (DeclKexpr/UndeclKexpr/DeclSubscriber/UndeclSubscriber/DeclQueryable/UndeclQueryable/DeclToken/UndeclToken/DeclFinal) per zenoh-pico declarations.c. Each sub-type is ~30-50 line SCXML. Multi-round chain on the scale of RESPONSE (3 rounds for reply+err+response). Once DECLARE lands, the pubsub registry can be extended with a mapping-id resolver so non-zero `wireexpr.id` Pushes route to subscribers registered against the resolved base keyexpr + suffix concatenation.",
+        "Keyexpr wildcards — R98 registry is literal-only. Zenoh's keyexpr language supports `*` (single-chunk wildcard), `**` (multi-chunk), and `$*` (substring) per the upstream `_z_keyexpr_intersect_*` API. A wildcard-aware matcher is a follow-up quality round once the basic literal-match demo is validated against zenoh-pico.",
+        "Reply / Err dispatch — dispatch is Push-only. A future round adds the symmetric `Response` arm (`NetworkMessage::Response.body.reply.body` is a Push-shaped wrapper per R95 reply.scxml). The same registry can route both, gated on a per-subscription kind filter (publish-only vs reply-also-accepted).",
+        "Session-loop integration moves `SubscriberRegistry` from a standalone unit-test target to a Linux + tokio echo-demo wire-up. AP MVP demo close: combine the integration shim + a 2-tasks tokio fixture (one publishes, one subscribes via the registry) into an end-to-end smoke test against either a wz peer or a zenoh-pico peer (the latter requires the zenoh-pico-sys FFI bridge from R41/R42)."
+      ]
     }
   },
   "inventory_entries": {},

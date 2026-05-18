@@ -25,6 +25,12 @@ use tokio::net::{TcpStream, UdpSocket};
 
 pub mod session_glue;
 
+/// R98 — application-layer subscriber registry. Routes decoded
+/// `NetworkMessage::Push` records to user-registered callbacks
+/// filtered by literal keyexpr. See `pubsub::SubscriberRegistry`
+/// doc comment for the scope and threading contract.
+pub mod pubsub;
+
 /// Generated SCXML state machine for the unicast session FSM. The
 /// emit comes from `sources/session/session_fsm_unicast.scxml` via
 /// `build.rs`. Public re-export is module-form rather than
