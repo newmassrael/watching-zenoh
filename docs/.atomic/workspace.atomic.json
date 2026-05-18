@@ -4610,6 +4610,73 @@
         "R120 다음 round (R121) entry 조건: 3 design call 모두 사용자 ratify 받은 후 진입; ratify 전까지는 wz 자체 코드 mutation 금지 (textbook recon → ratify → implement 순서 유지)."
       ]
     },
+    "Round 121a": {
+      "decision_summary": "R121a AP MVP demo binary skeleton.",
+      "changes_bullets": [
+        "new crates/wz-ap-demo crate; new scripts/build-zenoh-pico-cli.sh"
+      ],
+      "verification_bullets": [
+        "cargo build/test/clippy pass; binary 3-path smoke pass; 4 CLI binaries built"
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "R121b adds deps + impl"
+      ],
+      "publishable_decision_summary": "R121a AP MVP demo binary skeleton.",
+      "publishable_changes_bullets": [
+        "crates/wz-ap-demo/Cargo.toml new (SPDX header + [[bin]] wz-ap-demo entry).",
+        "crates/wz-ap-demo/src/main.rs new (argv parse with parse_pair helper).",
+        "Behavior: --help -> usage exit 0; both args -> ack exit 0; partial -> error + usage exit 2.",
+        "R121a dependency policy = 0 to avoid workspace.lints.rust=deny breakage (unused-dep warning).",
+        "wz-runtime-tokio / wz-codecs / tokio / log / env_logger deferred to R121b first call site.",
+        "crates/Cargo.toml workspace members += wz-ap-demo.",
+        "Comment block records R121a rationale: first non-library member; Phase D.1; naming convention.",
+        "Naming: ap = deploy class (matches deploy/ap_*.yaml).",
+        "Naming: demo = MVP-stage marker (promoted to crates/wz-deploy-ap/ when production lands).",
+        "scripts/build-zenoh-pico-cli.sh new (mode 0755).",
+        "Follows build-sce.sh pattern (set -euo pipefail + submodule/cmake checks + idempotent CMake).",
+        "CMake source = vendor/zenoh-pico/examples; build dir = target/zenoh-pico-build/.",
+        "Install dir = target/zenoh-pico-cli/ with 4 binaries (z_put / z_sub / z_get / z_queryable).",
+        "Separated from zenoh-pico-sys (sys = FFI binding; this script = CLI binary test-infra).",
+        "Zero duplicate vendor; vendor/ untouched; deterministic pin via existing submodule 3b3ab65c.",
+        "crates/Cargo.lock auto-updated for wz-ap-demo workspace registration.",
+        "target/zenoh-pico-build/ + target/zenoh-pico-cli/ auto-excluded by /target/ gitignore rule."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build --bin wz-ap-demo: pass (0.13s dev profile, 0 warnings).",
+        "cargo test --workspace --quiet: pass; 19 layer3 tests + units; zero regression.",
+        "cargo clippy --workspace --all-targets -- -D warnings: pass (warning count = 0).",
+        "Skeleton smoke --help -> usage exit 0.",
+        "Skeleton smoke --listen 127.0.0.1:7447 --key demo/example/** -> ack exit 0.",
+        "Skeleton smoke --listen only (no --key) -> error + usage exit 2.",
+        "Build script smoke: 4 binaries installed in target/zenoh-pico-cli/.",
+        "Sizes: z_put 16960B, z_sub 17416B, z_get 22144B, z_queryable 21904B.",
+        "Idempotent re-run pass (CMake incremental cache hit; install re-run).",
+        "z_put bare: 'Opening session... Unable to open session!' (router absent; argparse reached).",
+        "validate_workspace post-edit: T1=0; RT 12/12; entries=139; sections=214; sync."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh",
+        "runtime-crate--sce_link_runtime_tokio/6-next-step-scaffolding"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121b: wz-ap-demo Cargo += deps (wz-runtime-tokio, wz-codecs, tokio, log, env_logger).",
+        "R121b: src/main.rs += #[tokio::main] async fn main + session FSM bind on --listen.",
+        "R121b: src/main.rs += DECLARE subscriber on --key + msg_put inbound callback stub.",
+        "R121b: re-run cargo build / test / clippy after deps + impl land.",
+        "R121c: integration test wz-integration-tests/tests/ap_demo_round_trip.rs proposed.",
+        "R121c: std::process::Command launches wz-ap-demo + invokes z_put + asserts callback.",
+        "R121c: scripts/run-ci.sh += Layer E (external-process round-trip).",
+        "R121c: .github/workflows/ci.yml synced (R114 yml-sync invariant).",
+        "R121c precondition: extract z_put/z_sub/z_get/z_queryable argv from .c source.",
+        "R121b precondition: re-scout crates/wz-runtime-tokio/src/session_glue.rs API.",
+        "R121a-origin: initial probe of append_changelog_entry_v2 created placeholder.",
+        "Placeholder removed via user-granted sidecar override per CLAUDE.md anti-pattern #8.",
+        "Re-appended audit-half minimal + publishable-half rich (R295 split applied)."
+      ]
+    },
     "Round 13": {
       "decision_summary": "sources/ skeleton lands via README (SPDX header double-block + 7-subdir lazy materialize per ARCH §428) + first author-side SCXML sources/algorithms/crc16_ccitt.scxml body-identical to SCE fixture; 6-backend byte-golden verify carried to R14 SCE submodule infrastructure (pin 1473f99f origin/main).",
       "changes_bullets": [

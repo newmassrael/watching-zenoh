@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-ap-demo — AP (Application Processor; Linux + tokio runtime) MVP
+# demo binary. The first non-library deploy artifact in the workspace
+# (wz-codecs / wz-runtime-tokio / wz-runtime-tokio-test-support /
+# wz-integration-tests / zenoh-pico-sys are all libraries).
+#
+# Phase D.1 entry (R121+ rollout). Drives wz-runtime-tokio +
+# wz-codecs end-to-end via an external zenoh-pico CLI peer (z_put,
+# z_get) so each round-trip round verifies the wz codec catalog +
+# session FSM + DECLARE registry against a production-realistic
+# foreign implementation — not against another wz process.
+#
+# Naming rationale:
+#   - "ap" = deploy class (matches deploy/ap_*.yaml; mcu-demo + other
+#     deploy-class siblings follow the same crate naming convention).
+#   - "demo" = MVP-stage marker. When the production AP deploy
+#     artifact (driven by deploy/ap_standalone.yaml) lands as a
+#     promotion path, the crate moves to crates/wz-deploy-ap/ (or
+#     similar) and this demo binary either co-exists for regression
+#     coverage or retires.
+#
+# Round rollout:
+#   - R121a (this round): crate skeleton — CLI argv shape locked,
+#     no runtime behavior (deps = none). Establishes the binary
+#     entry point without faking session/codec functionality.
+#   - R121b: session FSM start + DECLARE subscriber + msg_put
+#     inbound dispatch wiring (real wz-runtime-tokio + wz-codecs
+#     dependencies added here).
+#   - R121c: integration test harness driving external zenoh-pico
+#     z_put against this binary + CI Layer E lane.
+
+[package]
+name = "wz-ap-demo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "AP MVP demo binary — exercises wz-runtime-tokio + wz-codecs against an external zenoh-pico CLI peer for round-trip wire interop."
+
+[[bin]]
+name = "wz-ap-demo"
+path = "src/main.rs"
+
+# R121a dependency policy: none. Adding wz-runtime-tokio / wz-codecs /
+# tokio without using them would trip workspace.lints.rust=deny
+# (unused-dep warning). R121b adds them when their first call site
+# lands.
+
+[lints]
+workspace = true
