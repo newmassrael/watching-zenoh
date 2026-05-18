@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh declare-final sub-codec — the
+     terminating declaration in a DECLARE message. Mirrors zenoh-pico
+     `_z_decl_final_encode` / `_z_decl_final_decode`
+     (src/protocol/codec/declarations.c:131-135 + 354-362): emits
+     exactly one header byte with MID `_Z_DECL_FINAL_MID = 0x1A`
+     (declarations.h:36) and no payload. `_z_decl_final_t` itself
+     holds only a `bool _placeholder` reserved for future extension
+     fields; the wire format is currently 1 byte total.
+
+     Used as the declared default arm of `codec_zenoh_declare`'s
+     sub-type variant (R88 RFC variant-default-uniformity). A freshly
+     constructed `DeclFinal::default()` therefore round-trips byte-
+     equivalent to an empty 1-byte wire, and `Declare::default()` —
+     whose declared default arm picks DeclFinal — reaches the same
+     wire as zenoh-pico's `_z_declare_encode` against a zero-init
+     `_z_n_msg_declare_t` (post fixture patches for qos default).
+
+     Body byte-identical to the structural shape demanded by upstream
+     wire RFC. No SCE upstream codec exists for decl_final yet; this
+     authoring is wz-side only and the upstream parity test point is
+     the Layer 3 byte-compare in wz-integration-tests once the
+     declare envelope lands. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="decl_final">
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x1A"/>
+    </sce:flags>
+  </datamodel>
+</scxml>

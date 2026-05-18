@@ -42,6 +42,7 @@ const CODECS: &[&str] = &[
     "join",      // §4.1 Join body — parent.S + multi-VLE — R44 ✓
     "locator",   // §3 hello locator element — R45 (hello dep)
     "keep_alive",// §4.1 empty body (transport keepalive) — R47 trivial
+    "decl_final", // §5 declare-final leaf — 1-byte header MID 0x1A — R110a
     // Composing codecs
     "hello",     // §3 Hello body — parent.L + repeat<locator> — R45
     "ext_entry", // imports ext_unit / ext_zint / ext_zbuf
@@ -59,6 +60,7 @@ const CODECS: &[&str] = &[
     "reply",     // §6.3 Z_REPLY inner body — C-gated consolidation + put/del peek — R95
     "err",       // §6.3 Z_ERR inner body — E-gated encoding + Z ext + payload — R96
     "response",  // §5 Z_RESPONSE envelope — reply/err peek-byte dispatch — R97
+    "declare",   // §5 Z_DECLARE envelope — header + I-gated id + Z ext + sub-MID variant — R110a
 ];
 
 fn main() {
