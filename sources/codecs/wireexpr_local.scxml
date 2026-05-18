@@ -4,30 +4,39 @@
   SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 <!-- SCE Forge conformance: Zenoh wireexpr Local-mapping arm (RFC §5.B
-     B5-ν parent-tag variant dispatch). Leaf body codec consumed as
-     one of two arms by the parent dispatcher `wireexpr` (R125c-
-     pending); selected at decode/encode time when the surrounding
-     network message header's M flag is CLEAR (mask 0x40 per
-     `_Z_FLAG_N_PUSH_M` / `_Z_FLAG_N_REQUEST_M` / `_Z_FLAG_N_RESPONSE_M`
-     in zenoh-pico include/zenoh-pico/protocol/definitions/network.h
-     lines 64, 71, 78).
+     B5-ν parent-tag variant dispatch). Leaf body codec that WILL be
+     consumed as one of two arms by a future parent dispatcher
+     `wireexpr` once the SCE upstream feature gaps documented in
+     R125c are addressed; selected at encode time when the
+     surrounding network message's wireexpr is locally-rooted
+     (sender's `_mapping == LOCAL`), and emitted on the wire with the
+     parent header's M flag SET (mask 0x40 per `_Z_FLAG_N_PUSH_M` /
+     `_Z_FLAG_N_REQUEST_M` / `_Z_FLAG_N_RESPONSE_M` in zenoh-pico
+     include/zenoh-pico/protocol/definitions/network.h lines 64, 71,
+     78).
 
-     Runtime semantic — `_mapping` bound to constant:
-     zenoh-pico `_z_wireexpr_decode` (src/protocol/codec/message.c
-     lines 127-146) sets the decoded keyexpr's mapping field on line
-     133 with the conditional
+     Encoder-side semantic — sender's `_z_wireexpr_is_local(key)` true:
+     zenoh-pico encoders read the sender's wireexpr mapping field and
+     derive the wire M bit from it. For push/request the construction
+     is a single OR per `_z_push_encode` / `_z_request_encode` in
+     src/protocol/codec/network.c lines 42 and 116:
 
-         ke->_mapping = (remote_mapping) ? mapping
-                                         : _Z_KEYEXPR_MAPPING_LOCAL;
+         header = _Z_MID_N_{PUSH,REQUEST}
+                | (_z_wireexpr_is_local(&msg->_key)
+                     ? _Z_FLAG_N_REQUEST_M : 0);
 
-     This file is the FALSE-branch arm: when the upstream message
-     header signals `remote_mapping = false` (header M bit clear),
-     the resulting mapping is the well-known `_Z_KEYEXPR_MAPPING_LOCAL`
-     sentinel (zenoh-pico include/zenoh-pico/protocol/core.h line 151,
-     value 0). The B5-ν dispatcher (R125c codec_zenoh_wireexpr) routes
-     the M=0 arm here so the generated Rust/C++/Kotlin/Go/C11/Python
-     output produces a Local-typed decoded struct distinct from the
-     Nonlocal arm (`wireexpr_nonlocal.scxml`).
+     For response the equivalent construction is the `_Z_SET_FLAG`
+     call at network.c:250-251 guarded by the same `is_local`
+     predicate. `_z_wireexpr_is_local` is defined at
+     include/zenoh-pico/protocol/core.h line 182 as the inline test
+     `expr->_mapping == _Z_KEYEXPR_MAPPING_LOCAL` (where the LOCAL
+     sentinel is `(uintptr_t)0` per core.h:151). The future B5-ν
+     dispatcher MUST route the wire M=1 arm here under `<sce:arm
+     value="0x01" type="wireexpr_local" default="true"/>` (default
+     so `Wireexpr::default()` returns the Local variant and the
+     encoder emits M=1 in the parent header, preserving zenoh-pico's
+     zero-init `_z_wireexpr_t._mapping == LOCAL → is_local=true →
+     M=1` default-state wire shape).
 
      Wire-identical to sibling arm — type-level distinction only:
      this codec's wire byte sequence is BIT-IDENTICAL to
@@ -38,8 +47,8 @@
      mapping context. The arm split is therefore a type-level
      refinement on the decoded struct, not a wire-shape variant; the
      value is statically eliminating the misuse class where caller
-     code accidentally resolves a Local keyexpr through a remote-id
-     mapping table (or vice versa).
+     code accidentally hands a remote-mapped keyexpr to an API
+     expecting locally-rooted ids (or vice versa).
 
      Wire shape (1+VLEbytes  or  1+VLEbytes+VLElen+sufflen bytes):
        byte 0+   : id          (VLE u64, always present; upstream
@@ -54,25 +63,45 @@
                                  max 128 bytes per RFC §5.B Y0a; both
                                  fields gated by the same parent.N)
 
-     Co-gating contract: `suffix_len` and `suffix` BOTH carry
-     `sce:present-if="parent.N"` so the streaming decoder reads
-     neither when N=0 and both when N=1 (mirrors codec_zenoh_init_body
-     cookie_len + cookie + parent.A pattern from B5-ι Batch 1).
-
      Composition: B1-α VLE (id, suffix_len) + B5-γ parent-scope
      present-if (parent.N, no negation) + B2-β present-if + length-ref
      (suffix_len gates suffix's length source) + B5-ζ surface H string
      + Y0a lifted parser ban (`sce:type="string"` + `sce:present-if`).
-     No new primitive surface beyond what the existing `wireexpr.scxml`
-     leaf already exercised at vendor pin 11f1032d.
 
+     Orphan status — R125c integration deferred per SCE upstream
+     gaps:
+       1. SCE B5-γ requires-parent-flags does NOT propagate through a
+          B5-ν variant dispatcher to the arm bodies (cross-doc
+          validator rejects arm body's <sce:requires-parent-flags
+          carrier="header"> with "parent codec has no field named
+          'header'" when the parent is a dispatcher that itself uses
+          requires-parent-flags). This prevents arm bodies from
+          gating the suffix on parent.N — the natural design.
+       2. SCE b5_nu_derivation_block emits the variant enum type name
+          from the consumer's import alias (e.g. CodecZenohWireexpr
+          + "Variant") but the actual variant type is generated from
+          the dispatcher's stem (WireexprVariant), producing an
+          undeclared-type compile error in the consumer.
+       3. SCE b5_nu_derivation_block does not handle present-if-gated
+          embeds — for embeds wrapped in Option<Wireexpr>, the
+          generated match references `self.field.body` directly
+          instead of unwrapping the Option first, producing a
+          no-field-on-Option compile error.
+     Until SCE upstream addresses all three gaps, this codec remains
+     orphan (Layer A/B pass it standalone; no consumer embeds it).
      SCE B5-ν substrate landed at vendor/sce pin b719ee3e (Phase A
-     7e785e92 — parser TagScope::Parent + 4 diagnostics 279-283;
-     Phase B b719ee3e — 6-backend codegen `collect_b5_nu_derivations`
-     + `b5_nu_derivation_block` + `inject_b5_nu_carrier_suffix`).
-     The parent dispatcher `wireexpr.scxml` (R125c) consumes this
-     leaf as the `arm value="0x00"` (M=0, default) per zenoh-pico
-     message.c:133 false-branch semantics. -->
+     7e785e92 + Phase B b719ee3e).
+
+     Editorial trace — R125b's audit half originally bound this arm
+     to wire M=0 (decoder-perspective reading of message.c:133's
+     false-branch). The R125c entry corrects that to wire M=1
+     (encoder-perspective) after direct verification of zenoh-pico
+     network.c:42,116,250 (encoder OR-construction) against
+     core.h:182 (`is_local` predicate) and the SCE Phase B test
+     fixture's `=> 0x40u8` arm assertion. R125b's audit half retains
+     the prior wording per frozen-ledger semantics; R125b's
+     publishable half and the R125c entry both carry the corrected
+     encoder-side reading. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="wireexpr_local">

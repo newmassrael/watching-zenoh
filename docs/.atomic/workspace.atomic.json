@@ -4915,15 +4915,14 @@
         "sources/codecs/wireexpr_local.scxml created — sce:kind='codec', name='wireexpr_local'.",
         "sources/codecs/wireexpr_nonlocal.scxml created — sce:kind='codec', name='wireexpr_nonlocal'.",
         "Both codecs declare requires-parent-flags carrier='header' flag N bit=5 (suffix gating).",
-        "Datamodel byte-identical to existing wireexpr.scxml leaf: id (VLE u64, always) +",
+        "Datamodel byte-identical to existing wireexpr.scxml leaf: id (VLE u64) +",
         "suffix_len (VLE u64, present-if parent.N) + suffix (UTF-8 string, length-ref, max=128).",
-        "Header prose anchors zenoh-pico message.c:115-146 encode/decode pair + line 133 mapping branch.",
-        "Header prose anchors network.h:64,71,78 (_Z_FLAG_N_*_M=0x40 push/request/response carriers).",
-        "wireexpr_local binds decoded _mapping to _Z_KEYEXPR_MAPPING_LOCAL constant (false-branch, M=0).",
-        "wireexpr_nonlocal binds decoded _mapping to caller's mapping argument (true-branch, M=1).",
-        "R125b authors leaves only; the wireexpr.scxml parent dispatcher restructure ships in R125c.",
-        "Empirical correction logged: handoff/SCE-test-fixture arm convention was reversed in zenoh-pico.",
-        "Production-correct arm assignment locked: 0x00=wireexpr_local, 0x01=wireexpr_nonlocal."
+        "Header prose anchors zenoh-pico message.c:115-146 encode/decode + line 133 mapping branch.",
+        "Header prose anchors network.h:64,71,78 (_Z_FLAG_N_*_M=0x40 push/request/response).",
+        "R125c CORRECTION over R125b audit: encoder-side, wireexpr_local binds wire M=1.",
+        "R125c CORRECTION over R125b audit: encoder-side, wireexpr_nonlocal binds wire M=0.",
+        "R125c CORRECTION: production-correct arms are 0x00=wireexpr_nonlocal, 0x01=wireexpr_local.",
+        "R125b authored leaves; wireexpr.scxml dispatcher integration deferred to R125c+SCE-fix."
       ],
       "publishable_verification_bullets": [
         "scripts/run-ci.sh full 7-lane gate pass: Layer 0 (actionlint) + A (mnemosyne validate)",
@@ -4941,18 +4940,90 @@
         "architecture--watching-zenoh"
       ],
       "publishable_carry_forward_bullets": [
-        "R125c: rewrite sources/codecs/wireexpr.scxml into a thin parent-tag variant dispatcher.",
-        "R125c dispatcher shape: empty datamodel except <sce:variant tag='parent.M'> + <sce:import>s.",
-        "R125c dispatcher RPF: parent.M bit=6 (variant tag) AND parent.N bit=5 (forwarded to arms).",
-        "R125c arm assignment: <sce:arm value='0x00' type='wireexpr_local' default='true'/> +",
-        "<sce:arm value='0x01' type='wireexpr_nonlocal'/> (production-correct over SCE fixture).",
-        "R125c correction: M=0 ⇒ LOCAL constant (false-branch on message.c:133), not nonlocal.",
-        "R125c side-effect: wireexpr stem loses body-identity with SCE codec_zenoh_wireexpr fixture.",
-        "R125c follow-on: add 'wireexpr' to scripts/run-ci.sh LAYER2_KNOWN_DIVERGENCE (audit-traced).",
-        "R125d: drop M-flag value='1' from sources/codecs/push|request|response.scxml.",
-        "R125d gate: SCE Q-3 validator rejects derivation+static value=1 coexistence at compile time.",
-        "R125e: author tests/layer3_wireexpr_{local,nonlocal}.rs (wire shape interop pairs).",
-        "R125e covers SCE non-verified surface: zenoh-pico-sys FFI emit/decode vs wz emit round-trip."
+        "R125c finding: SCE B5-γ requires-parent-flags doesn't propagate through B5-ν dispatcher.",
+        "R125c finding: SCE b5_nu_derivation_block uses import alias (should use dispatcher stem).",
+        "R125c finding: SCE b5_nu_derivation_block does not handle present-if-gated Option<embed>.",
+        "R125c: integration deferred until SCE upstream lands fixes; wireexpr.scxml stays flat leaf.",
+        "R125c retracts R125b's M-bit arm assignment (was decoder-side; encoder-side is correct).",
+        "R125c entry signals SCE upstream with the three feature/bug gaps via publishable_changes.",
+        "R125d: drop M-flag value='1' from push/request/response/decl_{sub,token,queryable}.scxml.",
+        "R125d gate: SCE Q-3 forbids derivation+static; gate fires AFTER dispatcher integration.",
+        "R125d blocked on the same SCE upstream fixes that block R125c integration.",
+        "R125e: author tests/layer3_wireexpr_{local,nonlocal}.rs (wire-shape interop pairs).",
+        "R125e covers SCE non-verified surface: zenoh-pico-sys FFI vs wz emit round-trip.",
+        "R125b leaves stay orphan-but-valid at SCE pin b719ee3e; Layer A/B pass them standalone."
+      ]
+    },
+    "Round 125c": {
+      "decision_summary": "R125c: wireexpr B5-ν dispatcher integration deferred — 3 SCE upstream gaps documented; R125b arm assignment retracted to encoder-perspective.",
+      "changes_bullets": [
+        "sources/codecs/wireexpr_local.scxml header rewrite: encoder-side M=1 + orphan status note.",
+        "sources/codecs/wireexpr_nonlocal.scxml header rewrite: encoder-side M=0 + orphan status note.",
+        "R125b publishable half retracted via R295 setters; mnemosyne.toml row hash refreshed.",
+        "wireexpr.scxml + 6 consumers + run-ci.sh: NO change (R125c integration attempt rolled back).",
+        "Recorded 3 SCE upstream gaps (B5-gamma flag thread; b5_nu alias-vs-stem; b5_nu Option<embed>).",
+        "R125b leaves remain orphan-but-valid at SCE pin b719ee3e; Layer A/B pass them standalone.",
+        "Encoder-perspective verify: zenoh-pico network.c:42,116,250 + core.h:182 + SCE Phase B test."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh 7-lane full gate pass (Layer 0/A/A2/B/C1/C2/D).",
+        "Layer B: wireexpr_local OK + wireexpr_nonlocal OK + existing wireexpr OK + 16 other codecs OK.",
+        "validate_workspace: T1=0; RT 12/12; entries 144 -> 145; sections=214; sync.",
+        "R125c integration attempt failed Layer C1 with 19 cargo compile errors (3 distinct gaps).",
+        "Working tree clean after rollback: only wireexpr_local + wireexpr_nonlocal header comments + atomic + toml."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "SCE upstream signal — 3 distinct B5-nu gaps at pin b719ee3e (full detail in publishable_changes).",
+        "Resume R125c dispatcher integration after SCE upstream lands fixes for all 3 gaps.",
+        "R125d (drop static M flag) blocked on same SCE gaps; gate fires only after dispatcher lands.",
+        "R125e (Layer 3 wire-shape verify) independent; can proceed even with current orphan leaves.",
+        "R123b still pending: build.rs compile_forge_with_imports -> compile_forge_with_deploy switch.",
+        "R121b-c still pending: AP MVP demo binary functional completion (4 sub-rounds).",
+        "wireexpr.scxml stays flat leaf at vendor pin 11f1032d body-identical until SCE fix resumes R125c."
+      ],
+      "publishable_decision_summary": "R125c: SCE B5-ν integration attempted for wireexpr; rolled back after CI surfaced 3 distinct SCE upstream gaps. R125b's M-bit arm assignment retracted to encoder-perspective.",
+      "publishable_changes_bullets": [
+        "sources/codecs/wireexpr_local.scxml header rewritten with encoder-side M=1 binding +",
+        "orphan status block documenting the three SCE gaps + editorial trace of R125b retraction.",
+        "sources/codecs/wireexpr_nonlocal.scxml header rewritten with encoder-side M=0 binding +",
+        "parallel orphan status block + editorial trace pointing at wireexpr_local for full gap list.",
+        "wireexpr.scxml body unchanged — stays the flat parent.N-RPF leaf shape (R125b pre-state).",
+        "6 consumer codecs unchanged — push/request/response/decl_{sub,token,queryable} retain",
+        "static <sce:flag name='M' value='1'/> baking (R106). No Q-3 conflict surfaces.",
+        "scripts/run-ci.sh LAYER2_KNOWN_DIVERGENCE unchanged — wireexpr stays body-identical to SCE.",
+        "R125b publishable retracted via R295 setters — changes_bullets + carry_forward updated.",
+        "mnemosyne.toml R125b override_ledger row refreshed: hash 2abdfaa6→6f955f86; reason expanded.",
+        "SCE upstream signal anchored in R125c publishable_changes (3 gaps) for outgoing report drafting."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh full 7-lane gate pass after rollback: Layer 0 + A + A2 + B + C1 + C2 + D.",
+        "Layer B: wireexpr_local OK + wireexpr_nonlocal OK + 19 other codecs OK; no MISMATCH delta.",
+        "validate_workspace: docs=12/12; T1 orphan total=0; round-trip mandatory=12/12.",
+        "validate_workspace atomic ledger: entries 144 -> 145 (this entry); sections=214; sync.",
+        "publishable/audit divergence: 6 entries / 6 ledger rows (R125b retraction + R125c entry).",
+        "R125c integration attempt empirical gap discovery — 3 distinct cargo compile failures captured:",
+        "Gap-1 (B5-gamma): arm body's <requires-parent-flags carrier='header'> rejected because",
+        "dispatcher uses requires-parent-flags itself and has no own 'header' field.",
+        "Gap-2 (b5_nu alias-vs-stem): consumer-site variant type ref `CodecZenohWireexprVariant`",
+        "mismatches dispatcher-side emit `WireexprVariant` (stem-derived).",
+        "Gap-3 (b5_nu Option<embed>): interest_body's `header.R`-gated embed produces Option<Wireexpr>",
+        "but b5_nu_derivation_block emits `self.field.body` without unwrapping the Option."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Draft SCE upstream signal report describing the 3 B5-nu gaps with the cargo error excerpts.",
+        "Send signal report to user for SCE relay (matches R124 / R114 SCE-upstream-debt cluster pattern).",
+        "Resume R125c dispatcher integration after SCE upstream lands fixes for all 3 gaps.",
+        "R125d (drop static M flag) blocked on same SCE fixes; CI Q-3 gate fires only post-dispatcher.",
+        "R125e (Layer 3 wire-shape interop) is INDEPENDENT — can proceed standalone on R125b leaves.",
+        "R123b still pending: crates/wz-codecs/build.rs compile_forge_with_imports -> _with_deploy switch.",
+        "R121b-c still pending: AP MVP demo binary functional 4 sub-rounds (deps/tokio/driver/sub).",
+        "Defensive carries: R114 freshness gate negative test; other docs/ stale status labels."
       ]
     },
     "Round 13": {
