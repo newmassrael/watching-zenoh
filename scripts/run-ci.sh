@@ -19,6 +19,7 @@
 #   Layer C1 — cargo test --workspace
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
 #   Layer D  — deploy/*.yaml schema validate
+#   Layer E  — ap_demo round-trip vs external zenoh-pico z_put (R121c)
 #   Layer 0  — (optional) actionlint .github/workflows/
 #
 # Exit codes:
@@ -262,6 +263,34 @@ layer_d_validate_deploy() {
     bash scripts/validate-deploy.sh
 }
 
+# ─── Layer E — wz-ap-demo round-trip vs external zenoh-pico z_put ───
+# R121c integration test: spawns the wz-ap-demo binary, points an
+# external zenoh-pico z_put CLI at its TCP --listen endpoint, and
+# asserts the AP MVP demo accepted the TCP connection. Subscriber-
+# fired is the optimistic stretch goal checked inside the test;
+# session-FSM-vs-zenoh-pico handshake gaps surface in the test's
+# captured-stderr diagnostic rather than as a hard failure (the
+# conservative 'accepted peer' assertion is the production gate).
+#
+# Pre-requisites:
+#   1. wz-ap-demo binary built (cargo build -p wz-ap-demo).
+#   2. zenoh-pico CLI binaries built (scripts/build-zenoh-pico-cli.sh
+#      produces target/zenoh-pico-cli/z_put + siblings).
+# Both are local-build artifacts. Layer E SKIPs gracefully when
+# either is missing (developer running --layer E without prep) and
+# surfaces the install hint instead of a hard failure.
+layer_e_ap_demo_round_trip() {
+    if [[ ! -x crates/target/debug/wz-ap-demo && ! -x crates/target/release/wz-ap-demo ]]; then
+        echo "Layer E SKIP (wz-ap-demo not built; run: cd crates && cargo build -p wz-ap-demo)"
+        return 0
+    fi
+    if [[ ! -x target/zenoh-pico-cli/z_put ]]; then
+        echo "Layer E SKIP (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
+        return 0
+    fi
+    (cd crates && cargo test -p wz-integration-tests --test ap_demo_round_trip --quiet)
+}
+
 # ─── dispatch ──────────────────────────────────────────────────────
 overall=0
 run_layer 0 layer_0_actionlint || overall=1
@@ -271,6 +300,7 @@ run_layer B layer_b_verify_codegen || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer D layer_d_validate_deploy || overall=1
+run_layer E layer_e_ap_demo_round_trip || overall=1
 
 if [[ $overall -eq 0 ]]; then
     echo ""
