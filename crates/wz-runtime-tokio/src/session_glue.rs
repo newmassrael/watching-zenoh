@@ -66,6 +66,7 @@ use wz_codecs::ext_entry::ExtEntry;
 use wz_codecs::init_body::InitBody;
 use wz_codecs::keep_alive::KeepAlive;
 use wz_codecs::open_body::OpenBody;
+use wz_codecs::interest::Interest;
 use wz_codecs::oam::Oam;
 use wz_codecs::push::Push;
 use wz_codecs::request::Request;
@@ -264,11 +265,20 @@ mod wire_const {
     /// `_z_oam_encode`: header (with mid, enc, Z bits) plus a VLE
     /// id, optional ext-chain, and a body variant dispatched on
     /// `header.enc` (UNIT / ZINT / ZBUF re-using ext_* inner
-    /// codecs). Remaining MIDs (RESPONSE 0x1B, DECLARE 0x1E,
-    /// INTEREST 0x19) documented in [`NetworkMessage`] and will
-    /// land alongside their respective envelope codecs in
-    /// follow-up rounds.
+    /// codecs).
     pub const N_MID_OAM: u8 = 0x1F;
+    /// R93 — Interest envelope MID (network.h:39). Declarations
+    /// discovery / liveliness subscriber registration carrier per
+    /// zenoh-pico `_z_n_interest_encode`. The envelope wireshape
+    /// (is_final form) is structurally identical to RESPONSE_FINAL
+    /// with the addition of two header flags — CURRENT (bit 5) and
+    /// FUTURE (bit 6) — that gate the inner-body extension; this
+    /// crate authors the envelope layer only (see
+    /// `sources/codecs/interest.scxml` scope note). Remaining MIDs
+    /// (RESPONSE 0x1B, DECLARE 0x1E) documented in
+    /// [`NetworkMessage`] and will land alongside their respective
+    /// envelope codecs in follow-up rounds.
+    pub const N_MID_INTEREST: u8 = 0x19;
 }
 
 /// Per-deploy parameters that drive the codec field values for the
@@ -1332,7 +1342,17 @@ pub enum NetworkMessage {
     /// `ExtUnit` / `ExtZint` / `ExtZbuf` — small enough to inline
     /// like `ResponseFinal`.
     Oam(Oam),
-    /// Header byte's MID falls outside the {REQUEST, PUSH, RESPONSE_FINAL, OAM} subset
+    /// R93 — Network MID `_Z_MID_N_INTEREST` (0x1F → 0x19).
+    /// Declarations discovery / liveliness subscriber registration
+    /// envelope; header (mid+C+F+Z) + VLE interest_id + optional
+    /// ext-chain. Envelope-only layer per
+    /// `sources/codecs/interest.scxml` scope note — peers whose
+    /// header sets the C / F bits trigger an inner body (flags +
+    /// optional wireexpr) that this round defers. Inlined (no
+    /// `Box`) because the struct is small — header byte + u64 +
+    /// optional ext vec, same shape as `ResponseFinal`.
+    Interest(Interest),
+    /// Header byte's MID falls outside the {REQUEST, PUSH, RESPONSE_FINAL, OAM, INTEREST} subset
     /// wz-codecs has authored envelope coverage for. `body` carries
     /// the rest of the payload bytes (header byte included) verbatim
     /// so a future per-MID decoder can re-parse without losing data;
@@ -1348,6 +1368,7 @@ impl std::fmt::Debug for NetworkMessage {
             Self::Push(_) => f.write_str("Push(..)"),
             Self::ResponseFinal(_) => f.write_str("ResponseFinal(..)"),
             Self::Oam(_) => f.write_str("Oam(..)"),
+            Self::Interest(_) => f.write_str("Interest(..)"),
             Self::Unknown { mid, body } => write!(
                 f,
                 "Unknown {{ mid: {mid:#04x}, body_len: {} }}",
@@ -1400,6 +1421,10 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
             wire_const::N_MID_OAM => {
                 let oam = Oam::decode(&mut cursor)?;
                 messages.push(NetworkMessage::Oam(oam));
+            }
+            wire_const::N_MID_INTEREST => {
+                let interest = Interest::decode(&mut cursor)?;
+                messages.push(NetworkMessage::Interest(interest));
             }
             _ => {
                 let rem = cursor.remaining();

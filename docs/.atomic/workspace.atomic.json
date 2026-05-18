@@ -8861,6 +8861,66 @@
         "RESPONSE codec (0x1B) — needs reply + err inner body codecs before it can land. Reply carries the queried data payload (similar shape to msg_put), err carries an error envelope (encoding-tagged like ext_entry). 2 inner-body rounds plus the outer envelope = 3-round sequence to close RESPONSE.",
         "DECLARE codec (0x1E) — sequence of declaration variants (DeclSub / DeclToken / DeclQbl / DeclareFinal). Requires a `<sce:repeat>` primitive over a `<sce:variant>` body, which is a more involved primitive combination than the current network-envelope set. ~150 line SCXML; design surface largest of the remaining 3 codecs."
       ]
+    },
+    "Round 93": {
+      "decision_summary": "R93 INTEREST envelope codec lands — 5 of 7 application-layer MIDs covered; envelope-only subset (is_final form) authored mechanically as RESPONSE_FINAL sibling with two extra inert header flags, inner-body extension (flags + conditional wireexpr) deferred.",
+      "changes_bullets": [
+        "sources/codecs/interest.scxml authored — header (mid=0x19, C@5, F@6, Z@7) + interest_id VLE u64 + Z-gated ext_entry tlv-chain (max-depth=4, entry-flag-Z termination). Composition: response_final.scxml subset + two additional inert header flags. Scope note documents the deferred non-final inner body (flags byte + conditional wireexpr).",
+        "crates/wz-codecs/build.rs CODECS list extends with \"interest\" (post-oam).",
+        "crates/wz-codecs/src/lib.rs adds `pub mod interest { include!(...) }`.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: wire_const::N_MID_INTEREST = 0x19; `use wz_codecs::interest::Interest;`; `NetworkMessage::Interest(Interest)` variant + Debug arm; parse_frame_payload arm dispatching MID 0x19 to `Interest::decode`. Updated Unknown-variant doc to mention the {REQUEST, PUSH, RESPONSE_FINAL, OAM, INTEREST} subset.",
+        "crates/wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs + tests/session_fsm_driver_loop.rs: match-exhaustiveness arms include `NetworkMessage::Interest(_)` (3 sites total).",
+        "new positive test `parse_frame_payload_dispatches_interest_mid_to_interest_decoder` mirrors the R92 OAM test pattern: round-trip-safe `Interest { header: 0x19, ..Interest::default() }` encodes to 2 bytes, parses to a single `NetworkMessage::Interest` record."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-codecs (codegen) + cargo build -p wz-runtime-tokio + cargo test --workspace all clean.",
+        "workspace tests: 122 → 123 (+1 = new R93 INTEREST positive test, exact mechanical pattern increment).",
+        "atomic ledger entries: 105 → 106 (this Round 93 entry).",
+        "scripts/run-ci.sh all 5 lanes pass: Layer A (validate-workspace), Layer B (verify-codegen), Layer C1 (cargo test), Layer C2 (cargo clippy -D warnings), Layer D (deploy yaml schema).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved (consistent with the R88+ baseline)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present"
+      ],
+      "carry_forward_bullets": [
+        "INTEREST inner-body extension (deferred from R93) — non-final form's flags byte + conditional wireexpr per `_z_interest_encode` (zenoh-pico src/protocol/codec/interest.c L41-69). Requires `sce:present-if` cascaded across two layers: `header.C or header.F` gates the flags byte; that flag byte's RESTRICTED bit gates the wireexpr. Either a dedicated round once the cascading primitive is exercised cleanly OR a new `interest_body.scxml` companion codec analogous to msg_put/msg_del wrapping the conditional body. ~50-80 line SCXML follow-up.",
+        "RESPONSE codec (0x1B) — still gated on reply.scxml + err.scxml authoring as inner bodies (R91 carry #2 still active). 3-round sequence to close: reply.scxml → err.scxml → response.scxml. Largest remaining work item for full 7/7 MID coverage.",
+        "DECLARE codec (0x1E) — sequence of declaration variants (DeclSub / DeclToken / DeclQbl / DeclareFinal). Requires `<sce:repeat>` over `<sce:variant>` primitive combination. ~150 line SCXML; deferred until RESPONSE chain lands so the codec catalog reaches 6/7 first.",
+        "Match-exhaustiveness churn continues — R93 added 3 more `NetworkMessage::Interest(_)` arms across test files (R91 carry #1 still applies). Per-round overhead ~5-10 minutes; macro consolidation continues to be deferred until 6/7 MID is reached.",
+        "SCE upstream 3c6bf7d7 (\"enforce cross-doc default-arm wire-MID contract at parse time\") sits 1 commit ahead of vendor pin 189bf7f4 — strengthens R88's variant-default-uniformity enforcement at parse time (2 new diagnostic codes, codes 275 → 277). INTEREST has no variant so the new validation is currently inactive on this codec. Consider a vendor pin bump round once another peek-byte variant codec lands (e.g. RESPONSE chain) so the strengthened check is exercised in a meaningful test scenario."
+      ],
+      "publishable_decision_summary": "R93 INTEREST envelope codec lands — 5 of 7 application-layer MIDs covered; envelope-only subset (is_final form) authored mechanically as RESPONSE_FINAL sibling with two extra inert header flags, inner-body extension (flags + conditional wireexpr) deferred.",
+      "publishable_changes_bullets": [
+        "sources/codecs/interest.scxml authored — header (mid=0x19, C@5, F@6, Z@7) + interest_id VLE u64 + Z-gated ext_entry tlv-chain (max-depth=4, entry-flag-Z termination). Composition: response_final.scxml subset + two additional inert header flags. Scope note documents the deferred non-final inner body (flags byte + conditional wireexpr).",
+        "crates/wz-codecs/build.rs CODECS list extends with \"interest\" (post-oam).",
+        "crates/wz-codecs/src/lib.rs adds `pub mod interest { include!(...) }`.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: wire_const::N_MID_INTEREST = 0x19; `use wz_codecs::interest::Interest;`; `NetworkMessage::Interest(Interest)` variant + Debug arm; parse_frame_payload arm dispatching MID 0x19 to `Interest::decode`. Updated Unknown-variant doc to mention the {REQUEST, PUSH, RESPONSE_FINAL, OAM, INTEREST} subset.",
+        "crates/wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs + tests/session_fsm_driver_loop.rs: match-exhaustiveness arms include `NetworkMessage::Interest(_)` (3 sites total).",
+        "new positive test `parse_frame_payload_dispatches_interest_mid_to_interest_decoder` mirrors the R92 OAM test pattern: round-trip-safe `Interest { header: 0x19, ..Interest::default() }` encodes to 2 bytes, parses to a single `NetworkMessage::Interest` record."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-codecs (codegen) + cargo build -p wz-runtime-tokio + cargo test --workspace all clean.",
+        "workspace tests: 122 → 123 (+1 = new R93 INTEREST positive test, exact mechanical pattern increment).",
+        "atomic ledger entries: 105 → 106 (this Round 93 entry).",
+        "scripts/run-ci.sh all 5 lanes pass: Layer A (validate-workspace), Layer B (verify-codegen), Layer C1 (cargo test), Layer C2 (cargo clippy -D warnings), Layer D (deploy yaml schema).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved (consistent with the R88+ baseline)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present"
+      ],
+      "publishable_carry_forward_bullets": [
+        "INTEREST inner-body extension (deferred from R93) — non-final form's flags byte + conditional wireexpr per `_z_interest_encode` (zenoh-pico src/protocol/codec/interest.c L41-69). Requires `sce:present-if` cascaded across two layers: `header.C or header.F` gates the flags byte; that flag byte's RESTRICTED bit gates the wireexpr. Either a dedicated round once the cascading primitive is exercised cleanly OR a new `interest_body.scxml` companion codec analogous to msg_put/msg_del wrapping the conditional body. ~50-80 line SCXML follow-up.",
+        "RESPONSE codec (0x1B) — still gated on reply.scxml + err.scxml authoring as inner bodies (R91 carry #2 still active). 3-round sequence to close: reply.scxml → err.scxml → response.scxml. Largest remaining work item for full 7/7 MID coverage.",
+        "DECLARE codec (0x1E) — sequence of declaration variants (DeclSub / DeclToken / DeclQbl / DeclareFinal). Requires `<sce:repeat>` over `<sce:variant>` primitive combination. ~150 line SCXML; deferred until RESPONSE chain lands so the codec catalog reaches 6/7 first.",
+        "Match-exhaustiveness churn continues — R93 added 3 more `NetworkMessage::Interest(_)` arms across test files (R91 carry #1 still applies). Per-round overhead ~5-10 minutes; macro consolidation continues to be deferred until 6/7 MID is reached.",
+        "SCE upstream 3c6bf7d7 (\"enforce cross-doc default-arm wire-MID contract at parse time\") sits 1 commit ahead of vendor pin 189bf7f4 — strengthens R88's variant-default-uniformity enforcement at parse time (2 new diagnostic codes, codes 275 → 277). INTEREST has no variant so the new validation is currently inactive on this codec. Consider a vendor pin bump round once another peek-byte variant codec lands (e.g. RESPONSE chain) so the strengthened check is exercised in a meaningful test scenario."
+      ]
     }
   },
   "inventory_entries": {},
