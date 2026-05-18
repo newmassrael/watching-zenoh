@@ -239,6 +239,15 @@ fn main() {
         // enum variant) so default-state encode matches wz cleanly.
         .allowlist_type("_z_n_msg_oam_t")
         .allowlist_function("_z_oam_encode")
+        // R104 — INTEREST envelope Layer 3 byte-compare (is_final
+        // form). `_z_n_interest_encode` writes header(0x19) + id
+        // VLE only when interest.flags has neither CURRENT nor
+        // FUTURE (header.C=F=0 means body is absent). The default
+        // state matches wz Interest::default() because R94's body
+        // embed is gated on `header.C || header.F` which evaluates
+        // false at the default state.
+        .allowlist_type("_z_n_msg_interest_t")
+        .allowlist_function("_z_n_interest_encode")
         // R67c — ext chain Layer 3 byte-compare vs wz ExtEnvelope.
         // _z_msg_ext_t = union<unit|zint|zbuf> + header byte; the
         // builder helpers _z_msg_ext_make_* set header bits from
