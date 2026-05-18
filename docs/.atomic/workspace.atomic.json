@@ -5356,6 +5356,95 @@
         "Go backend variant-arm package-qualifier gap noted by SCE; not on wz path now."
       ]
     },
+    "Round 128": {
+      "decision_summary": "R128: SCE pin b35dbb66 -> 7bada841; wireexpr #[allow(unused_variables)] dropped; Gap 7 closed across 6 backends.",
+      "changes_bullets": [
+        "vendor/sce gitlink b35dbb66 -> 7bada841 (2 commits ahead: 2fe638c1 + 7bada841).",
+        "Atomic 7bada841 closes R125c2 cosmetic Gap 7 (dead let raw) across all 6 backends.",
+        "Atomic 7bada841: Jinja2 {% if fields %} guard wraps prefix-decode block.",
+        "Atomic 2fe638c1 closes 2 additional per-backend shape gaps surfaced in audit.",
+        "Atomic 2fe638c1: Python b5_nu_match_term uses kind discriminator (not isinstance).",
+        "Atomic 2fe638c1: Go b5_nu_switch_block uses field-presence check (not type-switch).",
+        "Atomic 2fe638c1: Q-DSG-3 rustc-compile harness landed with warnings=deny mirror.",
+        "crates/wz-codecs/src/lib.rs: #[allow(unused_variables)] on pub mod wireexpr removed.",
+        "wz now compiles wireexpr dispatcher under workspace -D warnings without local carve-out."
+      ],
+      "verification_bullets": [
+        "scripts/build-sce.sh rebuild pass on new pin (1m01s release).",
+        "scripts/run-ci.sh full 7-lane gate pass: Layer 0/A/A2/B/C1/C2/D.",
+        "Layer B per-codec unchanged: request + wireexpr LAYER2 MISMATCH (KNOWN_DIVERGENCE).",
+        "validate_workspace: T1=0; RT 12/12; entries 149 -> 150; sections=214; sync.",
+        "Workspace lint policy fully strict for wireexpr module post-cleanup."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "R125c chain effectively closed: 7 SCE gaps reported and resolved across 4 SCE atomics.",
+        "R125e (Layer 3 wire-shape interop): independent, low value since leaves wire-identical.",
+        "R123b independent: build.rs compile_forge_with_imports -> _with_deploy + arm 0x03.",
+        "R121b-c independent: AP MVP demo binary functional 4 sub-rounds still pending.",
+        "Python/Go backends now correct for B5-ν dispatchers (defensive; not on wz path now)."
+      ],
+      "publishable_decision_summary": "R128: vendor/sce pin b35dbb66 -> 7bada841 after SCE closed Gap 7 across 6 backends + 2 audit Python/Go shape gaps + Q-DSG-3 rustc harness; wz drops workspace #[allow] carve-out.",
+      "publishable_changes_bullets": [
+        "vendor/sce gitlink b35dbb66 -> 7bada841 (2 commits in range: 2fe638c1 + 7bada841).",
+        "Atomic 7bada841 closes Gap 7 cosmetic across all 6 backends via Jinja2",
+        "`{% if fields %}` guard wrapping the prefix-decode block; variant-only",
+        "dispatchers now emit zero prefix-decode lines and the body match starts",
+        "immediately after the parent_flags fallthrough guard.",
+        "Phase B `forge_b5_nu_round_trip_local_nonlocal_rust` fixture extended with the",
+        "negative substring assertions watching-zenoh suggested in the Gap 7 report.",
+        "SCE rustc-compile harness Cargo.toml sets `[lints.rust] warnings = \"deny\"`,",
+        "mirroring wz workspace policy so future dead-binding regressions trip the SCE",
+        "fixture layer before reaching the wz vendor pin bump.",
+        "Atomic 2fe638c1 closes 2 audit-found per-backend shape gaps adjacent to the",
+        "FlagLayoutSource fix:",
+        "Python: b5_nu_match_term emits self.<f>.body.kind == \"<Arm>\" (string",
+        "discriminator) instead of isinstance() against a class hierarchy.",
+        "Go: b5_nu_switch_block emits switch { case s.<F>.Body.<Arm> != nil: ... }",
+        "(field-presence) instead of type-switch against an interface;",
+        "avoids the cross-package qualifier issue entirely.",
+        "Atomic 2fe638c1 also lands Q-DSG-3 rustc-compile harness in",
+        "tests/forge_conformance.rs::rustc_compile_codec_set: temp Cargo project with",
+        "[workspace]-detach + path dependency on sce-forge-runtime + cargo build --quiet.",
+        "6 new per-backend B5-ν fixtures + 2 R125c1 fixtures gain rustc compile assertion.",
+        "crates/wz-codecs src/lib.rs drops the #[allow(unused_variables)] annotation from",
+        "`pub mod wireexpr` (no longer needed; comment block deleted too)."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/build-sce.sh rebuild pass on pin 7bada841 (1m01s release profile).",
+        "scripts/run-ci.sh full 7-lane gate pass: Layer 0 (actionlint) + A (mnemosyne) +",
+        "A2 (mid value=) + B (codegen 6-backend) + C1 (cargo test --workspace) +",
+        "C2 (cargo clippy --workspace --all-targets -D warnings) + D (deploy yaml).",
+        "Layer B per-codec: request + wireexpr remain LAYER2 MISMATCH (KNOWN_DIVERGENCE);",
+        "all other codecs OK; wireexpr_local + wireexpr_nonlocal OK.",
+        "wz-codecs builds clean without the #[allow] carve-out: generated dispatcher",
+        "emits no dead `let raw = cursor.peek_slice(0)?` binding at 7bada841.",
+        "validate_workspace: docs=12/12; T1=0; RT 12/12; entries 149 -> 150; sections=214; sync.",
+        "R125c gap cluster fully resolved across 4 SCE atomics: 11287248, b35dbb66, 2fe638c1, 7bada841."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R125c chain closure complete: 7 distinct SCE gap classes reported and resolved.",
+        "Gap 1 (B5-γ chain), 2 (alias-vs-stem), 3 (Option<embed>), 4/5 (dispatcher",
+        "arm-dispatch), 6 (consumer brace-list use), 7 (variant-only dead binding).",
+        "SCE-side coverage learnings forwarded as fixture-design checklist updates:",
+        "arm-body-with-RPF + variant-only-dispatcher cases; rustc-compile harness with",
+        "warnings=deny mirrors downstream workspace policy.",
+        "R125e (Layer 3 wire-shape interop for arm leaves): low-value carry since leaves",
+        "are wire-identical to the existing wireexpr Layer 3 baselines.",
+        "R123b independent: crates/wz-codecs/build.rs compile_forge_with_imports ->",
+        "_with_deploy switch + sources/codecs/request.scxml arm 0x03 default-true removal.",
+        "R123b clears the `request` stem from LAYER2_KNOWN_DIVERGENCE on completion.",
+        "R121b-c independent: AP MVP demo binary functional 4 sub-rounds (deps + tokio main",
+        "+ TcpDriver wire-up + DECLARE subscriber via SubscriberRegistry).",
+        "R114 cluster carry: SCE upstream needs paired PR for request stem (R88 arm 0x03",
+        "default + R108a mid value=0x1C) to fully clear LAYER2 KNOWN_DIVERGENCE."
+      ]
+    },
     "Round 13": {
       "decision_summary": "sources/ skeleton lands via README (SPDX header double-block + 7-subdir lazy materialize per ARCH §428) + first author-side SCXML sources/algorithms/crc16_ccitt.scxml body-identical to SCE fixture; 6-backend byte-golden verify carried to R14 SCE submodule infrastructure (pin 1473f99f origin/main).",
       "changes_bullets": [
