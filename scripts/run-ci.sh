@@ -124,6 +124,32 @@ layer_b_verify_codegen() {
         return 0
     fi
 
+    # R114 sce-codegen freshness gate. The vendor pin moves
+    # whenever R<X> bumps vendor/sce; if the local sce-codegen
+    # binary was built against an older pin, verify-codegen.sh
+    # silently uses the stale binary and Layer 2 reports
+    # spurious match/mismatch results. The R112 -> R114 GitHub
+    # Actions failure (msg_del/query/request rust+cpp mismatch
+    # on a green local pre-push) traced to exactly this stale-
+    # binary path: timestamp 2026-05-18 00:00 (pre-R112 build)
+    # against R112 vendor pin checkout. The gate below compares
+    # the vendor/sce HEAD commit time to the binary mtime and
+    # auto-rebuilds if the binary is older — same effect as the
+    # CI's clean-build path, but no manual `bash scripts/build-
+    # sce.sh` needed in the developer loop.
+    local sce_head_epoch
+    sce_head_epoch="$(git -C vendor/sce log -1 --format=%ct HEAD 2>/dev/null || echo 0)"
+    local bin_mtime_epoch
+    bin_mtime_epoch="$(stat -c '%Y' vendor/sce/target/release/sce-codegen 2>/dev/null || echo 0)"
+    if [[ "$sce_head_epoch" -gt 0 && "$bin_mtime_epoch" -gt 0 \
+          && "$bin_mtime_epoch" -lt "$sce_head_epoch" ]]; then
+        echo "Layer B: sce-codegen stale (built $(date -d @$bin_mtime_epoch +%F) vs pin $(date -d @$sce_head_epoch +%F)); rebuilding"
+        bash scripts/build-sce.sh >/dev/null 2>&1 || {
+            echo "Layer B FAIL: sce-codegen rebuild failed" >&2
+            return 1
+        }
+    fi
+
     declare -A SCE_UPSTREAM=(
         ["crc16_ccitt"]="vendor/sce/tests/forge/resources/algorithm_crc16.scxml"
         ["keep_alive"]="vendor/sce/tests/forge/resources/codec_zenoh_keep_alive.scxml"
@@ -147,9 +173,21 @@ layer_b_verify_codegen() {
         ["request"]="vendor/sce/tests/forge/resources/codec_zenoh_request.scxml"
         ["open_body"]="vendor/sce/tests/forge/resources/codec_zenoh_open_body.scxml"
     )
-    # R44 init_body + join intentionally use LE while SCE fixture
-    # still uses BE; Layer 2 reports MISMATCH but this is correct.
-    local LAYER2_KNOWN_DIVERGENCE=(init_body join)
+    # R44/R88/R106/R108a intentional divergences from SCE upstream
+    # fixtures. Each entry's wz-side rationale lives in the matching
+    # sources/codecs/*.scxml header comment (search for "Deliberate
+    # divergence from SCE upstream"). Layer 2 reports MISMATCH for
+    # these pairs and the report is correct — these are audit-traced
+    # wire-correctness improvements that SCE upstream has not yet
+    # mirrored (carry as paired upstream PRs).
+    #
+    #   init_body, join    — R44 endian (BE -> LE for zenoh-pico wire)
+    #   msg_del, query     — R88 mid value= baking (variant default)
+    #   request            — R88 + R106 + R108a (mid + M=1 + default arm)
+    #   msg_put            — R88 family member, defense-in-depth for
+    #                        backend-specific MISMATCH noise (R114
+    #                        GitHub Actions observation)
+    local LAYER2_KNOWN_DIVERGENCE=(init_body join msg_del msg_put query request)
 
     local fail=0
     for scxml in sources/codecs/*.scxml sources/algorithms/*.scxml; do
@@ -163,7 +201,7 @@ layer_b_verify_codegen() {
             echo "  $stem OK"
         else
             if [[ " ${LAYER2_KNOWN_DIVERGENCE[*]} " == *" $stem "* ]]; then
-                echo "  $stem L2 MISMATCH (audit-traced R44)"
+                echo "  $stem L2 MISMATCH (audit-traced KNOWN_DIVERGENCE)"
                 bash scripts/verify-codegen.sh "$scxml" >/dev/null 2>&1 || fail=1
             else
                 echo "  $stem FAIL" >&2

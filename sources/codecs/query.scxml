@@ -53,6 +53,21 @@
      unbounded zbuf — caller-supplied length-prefix). All other
      fields match upstream wire 1:1.
 
+     Deliberate divergence from SCE upstream codec_zenoh_query
+     (R88 variant-default-uniformity closure): wz bakes
+     `<sce:flag name="mid" value="0x03"/>` while the SCE fixture
+     leaves the value unset. query is dispatched as the request
+     envelope's `0x03` arm (request.scxml's variant) and is also
+     the declared default arm (R88), so a freshly-built Query must
+     carry MID 0x03 to round-trip byte-equivalent through
+     `Request::default().encode()`. See msg_del.scxml's header
+     comment for the full R88 audit lineage. SCE upstream needs a
+     paired PR to add the `value=` attribute (R114 audit-traced
+     KNOWN_DIVERGENCE). Layer 3 proof lives at
+     crates/wz-integration-tests/tests/layer3_request.rs which
+     exercises the Request -> Query default-arm chain end-to-end.
+
+     Original alignment claim (pre-R88) preserved for history:
      Body byte-identical to SCE upstream codec_zenoh_query at
      vendor pin 11f1032d; diff in SPDX header + file stem + root
      name + <sce:import src=> retargeted to wz-stem. -->
