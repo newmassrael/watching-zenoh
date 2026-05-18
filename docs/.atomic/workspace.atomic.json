@@ -3566,6 +3566,62 @@
         "AP MVP demo binary — Linux + tokio binary, 2-3 rounds."
       ]
     },
+    "Round 108b": {
+      "decision_summary": "R108b lands the REQUEST Layer 3 byte-equivalence test against zenoh-pico's `_z_request_encode`, closing the post-R90 application-layer envelope wire-interop debt at 6/6 MIDs (push / response / response_final / oam / interest / request — DECLARE 0x1E remains as the last unmodeled MID).",
+      "changes_bullets": [
+        "crates/zenoh-pico-sys/build.rs allowlist: `_z_n_msg_request_t` + `_z_request_encode` added with the 2-patch fixture rationale in the allowlist comment (qos default sentinel + query inner consolidation default). R106 baking note retroactively appended to the R105 allowlist comment so the 3-patch fixture count is correctly recorded.",
+        "crates/wz-integration-tests/tests/layer3_request.rs new — 1 byte-equivalence test asserting `wz_codecs::request::Request::default().encode() == _z_request_encode(default _z_n_msg_request_t with 2 field patches)`. Wire bytes: `[0x5C, 0x00, 0x00, 0x03]` (request_hdr MID 0x1C | M flag, rid VLE 0, wireexpr.id VLE 0, query inner hdr MID 0x03 with all C/P/Z flags clear).",
+        "Two-patch fixture: (1) `_ext_qos._val = 5` matches `_Z_N_QOS_DEFAULT._val` so `_z_n_msg_request_needed_exts(msg)` reports `ext_qos=false` and the envelope's Z flag stays clear; (2) `_body._query._consolidation = -1` matches `Z_CONSOLIDATION_MODE_DEFAULT` (= AUTO per api/constants.h L188) so the inner Query's Q_C flag stays clear. The union access `msg._body._query` is sound because the zero-init `_tag = 0 = _Z_REQUEST_QUERY` selects the query arm — matching wz's R88 declared default arm Query.",
+        "Wire-byte derivation: zenoh-pico's `_z_request_encode` (network.c:114-169) builds `header = _Z_MID_N_REQUEST | (_z_wireexpr_is_local ? M : 0) | ext_chain_Z_bit`. After R106 wz bakes M=1 and after the qos patch zeros the ext-chain, both sides reach exactly `0x5C`. R108a's mid `value=` fix is load-bearing here — without it wz would emit `0x40` instead of `0x5C` and the byte-compare would fail."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_request: 1 passed on first try after the 2-patch fixture — R94-style codegen+wire empirical verify confirmed the analysis before relying on the byte literals.",
+        "cargo test --workspace: 149 tests pass (147 → 149: +1 layer3_request integration test + 1 bindgen doc-test auto-emitted for `_z_n_msg_request_t`).",
+        "scripts/run-ci.sh: all 5 lanes (A/B/C1/C2/D) pass.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 121 → 122, sections=214, GENERATED.md=sync.",
+        "Application-layer codec wire-interop progress: post-R90 catalog 5/5 (R101-R105) + R108b = 6/6 byte-equivalent envelope codecs. DECLARE remains 0/1 in the layer-3 axis (also 0/1 in the wz authoring axis — the codec catalog itself is the residual gap)."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "carry_forward_bullets": [
+        "DECLARE codec (MID 0x1E) chain — last unmodeled application-layer MID. 9 declaration sub-types per zenoh-pico declarations.c. Multi-round chain (~3 rounds like RESPONSE). Closure brings codec catalog to 7/7 MIDs in both axes (authoring + wire-interop) and unblocks the mapping-id resolver on the pubsub registry (R98-R99).",
+        "Non-default Layer 3 coverage carry — PUSH N-suffix wireexpr, OAM ZINT/ZBUF arms, INTEREST R=1 non-final form, RESPONSE err arm, REQUEST with PUT/DEL inner tag and ext-chain. Quality-axis round; not gating.",
+        "wire-spec-subset doc round — §6.2 should record the R108a defect closure (`mid value=0x1C` baked) plus the R106 mapping=LOCAL default. Doc-only round. 1-round closure.",
+        "Latent spec-correctness audit (carry from R108a) — wz envelope codec `<sce:flag name=\"mid\">` declarations should all carry explicit `value=`. Audit script: grep `mid.*bit=` SCXML files, flag entries without `value=`. Out of scope for R108b; hardening recommendation only.",
+        "AP MVP demo binary — Linux + tokio binary, 2-3 rounds.",
+        "R67-R71 series — inbound parser / Hal time-mock / test-support split; per project_hybrid_adoption_plan.md still queued."
+      ],
+      "publishable_decision_summary": "R108b lands the REQUEST Layer 3 byte-equivalence test against zenoh-pico's `_z_request_encode`, closing the post-R90 application-layer envelope wire-interop debt at 6/6 MIDs (push / response / response_final / oam / interest / request — DECLARE 0x1E remains as the last unmodeled MID).",
+      "publishable_changes_bullets": [
+        "crates/zenoh-pico-sys/build.rs allowlist: `_z_n_msg_request_t` + `_z_request_encode` added with the 2-patch fixture rationale in the allowlist comment (qos default sentinel + query inner consolidation default). R106 baking note retroactively appended to the R105 allowlist comment so the 3-patch fixture count is correctly recorded.",
+        "crates/wz-integration-tests/tests/layer3_request.rs new — 1 byte-equivalence test asserting `wz_codecs::request::Request::default().encode() == _z_request_encode(default _z_n_msg_request_t with 2 field patches)`. Wire bytes: `[0x5C, 0x00, 0x00, 0x03]` (request_hdr MID 0x1C | M flag, rid VLE 0, wireexpr.id VLE 0, query inner hdr MID 0x03 with all C/P/Z flags clear).",
+        "Two-patch fixture: (1) `_ext_qos._val = 5` matches `_Z_N_QOS_DEFAULT._val` so `_z_n_msg_request_needed_exts(msg)` reports `ext_qos=false` and the envelope's Z flag stays clear; (2) `_body._query._consolidation = -1` matches `Z_CONSOLIDATION_MODE_DEFAULT` (= AUTO per api/constants.h L188) so the inner Query's Q_C flag stays clear. The union access `msg._body._query` is sound because the zero-init `_tag = 0 = _Z_REQUEST_QUERY` selects the query arm — matching wz's R88 declared default arm Query.",
+        "Wire-byte derivation: zenoh-pico's `_z_request_encode` (network.c:114-169) builds `header = _Z_MID_N_REQUEST | (_z_wireexpr_is_local ? M : 0) | ext_chain_Z_bit`. After R106 wz bakes M=1 and after the qos patch zeros the ext-chain, both sides reach exactly `0x5C`. R108a's mid `value=` fix is load-bearing here — without it wz would emit `0x40` instead of `0x5C` and the byte-compare would fail."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_request: 1 passed on first try after the 2-patch fixture — R94-style codegen+wire empirical verify confirmed the analysis before relying on the byte literals.",
+        "cargo test --workspace: 149 tests pass (147 → 149: +1 layer3_request integration test + 1 bindgen doc-test auto-emitted for `_z_n_msg_request_t`).",
+        "scripts/run-ci.sh: all 5 lanes (A/B/C1/C2/D) pass.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 121 → 122, sections=214, GENERATED.md=sync.",
+        "Application-layer codec wire-interop progress: post-R90 catalog 5/5 (R101-R105) + R108b = 6/6 byte-equivalent envelope codecs. DECLARE remains 0/1 in the layer-3 axis (also 0/1 in the wz authoring axis — the codec catalog itself is the residual gap)."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "publishable_carry_forward_bullets": [
+        "DECLARE codec (MID 0x1E) chain — last unmodeled application-layer MID. 9 declaration sub-types per zenoh-pico declarations.c. Multi-round chain (~3 rounds like RESPONSE). Closure brings codec catalog to 7/7 MIDs in both axes (authoring + wire-interop) and unblocks the mapping-id resolver on the pubsub registry (R98-R99).",
+        "Non-default Layer 3 coverage carry — PUSH N-suffix wireexpr, OAM ZINT/ZBUF arms, INTEREST R=1 non-final form, RESPONSE err arm, REQUEST with PUT/DEL inner tag and ext-chain. Quality-axis round; not gating.",
+        "wire-spec-subset doc round — §6.2 should record the R108a defect closure (`mid value=0x1C` baked) plus the R106 mapping=LOCAL default. Doc-only round. 1-round closure.",
+        "Latent spec-correctness audit (carry from R108a) — wz envelope codec `<sce:flag name=\"mid\">` declarations should all carry explicit `value=`. Audit script: grep `mid.*bit=` SCXML files, flag entries without `value=`. Out of scope for R108b; hardening recommendation only.",
+        "AP MVP demo binary — Linux + tokio binary, 2-3 rounds.",
+        "R67-R71 series — inbound parser / Hal time-mock / test-support split; per project_hybrid_adoption_plan.md still queued."
+      ]
+    },
     "Round 11": {
       "decision_summary": "OQ-W15 (a) closure (Q1=No RNG → plugin / Q2=Yes HMAC → plugin ratified) + OQ-W24 registration as SCE counter-offer track for §5.I tier-explicit separation",
       "changes_bullets": [

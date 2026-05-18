@@ -254,9 +254,28 @@ fn main() {
         // err arms). Default state requires 4 fixture patches
         // (qos default + wireexpr mapping non-local + reply
         // consolidation default + reply body _is_put=true) to
-        // reach the same wire as wz Response::default().
+        // reach the same wire as wz Response::default(). R106
+        // baked M=1 default into wz so the wireexpr mapping patch
+        // is gone; R105 fixture now uses 3 patches.
         .allowlist_type("_z_n_msg_response_t")
         .allowlist_function("_z_response_encode")
+        // R108b — REQUEST envelope Layer 3 byte-compare. Closes the
+        // wire-interop debt on the last application-layer envelope
+        // that has zenoh-pico parity. R108a fixed the latent
+        // mid `value=` defect in request.scxml (wz wire first byte
+        // now bakes MID 0x1C | M = 0x5C). Default-state fixture is
+        // 2-patch: (1) `_ext_qos._val = 5` matches the
+        // `_Z_N_QOS_DEFAULT` sentinel so request envelope's
+        // `needed_exts.ext_qos` evaluates false and no qos slot is
+        // emitted; (2) `_body._query._consolidation = -1` matches
+        // `Z_CONSOLIDATION_MODE_DEFAULT` (= AUTO per api/constants.h
+        // L188) so the inner Query's C flag stays clear. Tag stays
+        // at zero-init = `_Z_REQUEST_QUERY` (first enum variant),
+        // which dispatches the encoder to `_z_query_encode` —
+        // matching the R88 declared default arm `Query` in wz's
+        // RequestVariant.
+        .allowlist_type("_z_n_msg_request_t")
+        .allowlist_function("_z_request_encode")
         // R67c — ext chain Layer 3 byte-compare vs wz ExtEnvelope.
         // _z_msg_ext_t = union<unit|zint|zbuf> + header byte; the
         // builder helpers _z_msg_ext_make_* set header bits from
