@@ -37,39 +37,63 @@ lifecycle); the operating rules are in CLAUDE.md.
 
 ## Current status
 
-Snapshot last refreshed at Round 26 (2026-05-15). The atomic
+Snapshot last refreshed at Round 116 (2026-05-18). The atomic
 changelog under docs/.atomic/ has the latest per-round delta.
 
-- **Phase A3** (author-side SCXML land): 9 algorithms verified
-  against six backends — CRC16, VLE u64 decode, VLE byte length,
-  KeyExpr intersect/includes, extension dispatch, and five MID
-  validators (scouting / session / network / declare-sub /
-  payload-Z).
-- **Phase A4** (cursor + Result types + the build-time const-fold
-  gate): blocked on SCE upstream. The watching-zenoh-side carries
-  are tlv_advance, vle_u64_encode, and per-message codec bodies
-  (Put / Del / Query / Reply / Err).
-- **Phase B+**: SCE schema extensions (test-vector multi-arg) and
-  external ratify dependencies.
+- **Phase A** (author-side SCXML primitives — algorithms): CLOSED.
+  9 algorithm-kind SCXML files verified across all six backends
+  (CRC16, VLE u64 decode, VLE byte length, KeyExpr
+  intersect/includes, extension dispatch, MID validators for
+  scouting / session / network / declare-sub / payload-Z).
+- **Phase B** (codec catalog): closed for the wire-spec subset.
+  19 wz-emitted codecs cover the full transport + network +
+  declaration envelope set: 5 transport MIDs (INIT / OPEN / CLOSE /
+  KEEP_ALIVE / FRAME), 7 network MIDs (REQUEST / PUSH /
+  RESPONSE_FINAL / OAM / INTEREST / RESPONSE / DECLARE), 9
+  declaration sub-MIDs (DECL_KEXPR + sub-types and their UNDECL
+  pairs + DECL_FINAL), plus the shared codecs (ext_envelope /
+  ext_entry / ext_unit / ext_zint / ext_zbuf / wireexpr / locator /
+  hello / scout / encoding / timestamp / fragment / msg_put /
+  msg_del / interest_body / reply / err / open_body / init_body /
+  join). Every envelope has byte-equivalent Layer 3 wire-interop
+  vs zenoh-pico `_z_*_encode` (see
+  crates/wz-integration-tests/tests/layer3_*.rs).
+- **Phase C** (session-FSM + integration): unicast track in
+  flight. session_fsm_unicast.scxml carries the 4 timer events
+  (link.open_timeout=5s / init_ack.timeout=2s /
+  open_ack.timeout=2s / closing.timeout=100ms) plus the
+  Init→Established and the close paths; the wz-runtime-tokio
+  crate wires the FSM to a tokio LinkDriver via session_glue.rs.
+  Cookie HMAC-SHA256 (RFC 4231 TC1-TC7) verified at R70.
+  Scouting / multicast / reassembly tracks deferred to later
+  rounds.
+- **Phase W** (lwIP / MCU runtime): not started. R58 NOP-stub
+  reverted at R63 (no document-around-hack); reintroduction
+  blocked on AP MVP demo binary closure.
+- **AP MVP demo binary** (next milestone): Linux + tokio peer
+  doing round-trip query against an external zenoh-pico CLI
+  process. 3-5 rounds expected.
 
 Round-by-round decisions live in the atomic changelog
-(docs/.atomic/workspace.atomic.json) and the activity log
-notes/NEXT_SESSION.md.
+(docs/.atomic/workspace.atomic.json). Currently at 134 entries
+across 214 atomic sections; 159 workspace tests pass; the
+local 6-lane CI (Layer 0 / A / A2 / B / C1 / C2 / D in
+scripts/run-ci.sh) mirrors the GitHub Actions workflow.
 
 ## Directory layout
 
 | Path | Role |
 |---|---|
 | ARCHITECTURE.md | Design entry point |
-| docs/ | 11 Mnemosyne-managed spec docs |
+| docs/ | 12 Mnemosyne-managed spec docs |
 | docs/.atomic/ | Atomic-store sidecar (mutate only via typed primitives) |
 | docs/GENERATED.md | Cascade-rendered output (gitignored, never edit) |
-| sources/ | SCE Forge input SCXML (see sources/README.md) |
-| scripts/ | build-sce.sh + verify-codegen.sh |
+| sources/ | SCE Forge input SCXML (codecs + algorithms + session FSM) |
+| crates/ | wz-codecs / wz-runtime-tokio / wz-integration-tests / -test-support / zenoh-pico-sys |
+| scripts/ | build-sce.sh + verify-codegen.sh + run-ci.sh + audit-mid-values.sh |
 | vendor/sce/ | SCE submodule, vendor pin |
-| notes/ | Activity-log genre (outside Mnemosyne) |
 | .githooks/ | pre-commit / commit-msg / pre-push gates |
-| deploy/ | deploy.yaml skeletons (Phase B+) |
+| deploy/ | deploy.yaml skeletons (ap_standalone / mcu_target / ap_mcu_pair) |
 
 ## Build and verify
 

@@ -34,37 +34,60 @@ Mnemosyne 가 관리 (atomic-store + GENERATED.md lifecycle); 운영
 
 ## 현재 상태
 
-스냅샷은 Round 26 (2026-05-15) 시점 갱신. 라운드별 델타는
+스냅샷은 Round 116 (2026-05-18) 시점 갱신. 라운드별 델타는
 docs/.atomic/ 의 atomic changelog 가 최신본.
 
-- **Phase A3** (author-side SCXML 적재): 9 algorithm, 6 backend
-  검증 통과 — CRC16, VLE u64 decode, VLE byte length, KeyExpr
-  intersect/includes, extension dispatch, MID validator 5종
-  (scouting / session / network / declare-sub / payload-Z).
-- **Phase A4** (cursor + Result type + build-time const-fold
-  gate): SCE upstream 대기. watching-zenoh 측 carry 는
-  tlv_advance, vle_u64_encode, 메시지별 codec body (Put / Del /
-  Query / Reply / Err).
-- **Phase B+**: SCE schema 확장 (test-vector multi-arg) + 외부
-  ratify 의존.
+- **Phase A** (author-side SCXML primitive — algorithm): CLOSED.
+  9 algorithm-kind SCXML 이 6 backend 모두 검증 통과 (CRC16,
+  VLE u64 decode, VLE byte length, KeyExpr intersect/includes,
+  extension dispatch, MID validator 5종 — scouting / session /
+  network / declare-sub / payload-Z).
+- **Phase B** (codec catalog): wire-spec subset 범위 closed.
+  19 wz-emitted codec 이 transport + network + declaration
+  envelope 전체를 커버: transport MID 5종 (INIT / OPEN / CLOSE /
+  KEEP_ALIVE / FRAME), network MID 7종 (REQUEST / PUSH /
+  RESPONSE_FINAL / OAM / INTEREST / RESPONSE / DECLARE),
+  declaration sub-MID 9종 (DECL_KEXPR + sub-type + UNDECL 짝 +
+  DECL_FINAL), 공유 codec (ext_envelope / ext_entry / ext_unit /
+  ext_zint / ext_zbuf / wireexpr / locator / hello / scout /
+  encoding / timestamp / fragment / msg_put / msg_del /
+  interest_body / reply / err / open_body / init_body / join).
+  envelope 전체가 zenoh-pico `_z_*_encode` 와 byte-equivalent
+  Layer 3 wire-interop 보유 (crates/wz-integration-tests/tests/
+  layer3_*.rs).
+- **Phase C** (session-FSM + 통합): unicast 트랙 진행 중.
+  session_fsm_unicast.scxml 가 4 timer event (link.open_timeout=
+  5s / init_ack.timeout=2s / open_ack.timeout=2s /
+  closing.timeout=100ms) + Init→Established + close path 보유.
+  wz-runtime-tokio 가 session_glue.rs 로 tokio LinkDriver 와
+  FSM 연결. Cookie HMAC-SHA256 (RFC 4231 TC1-TC7) R70 검증
+  완료. Scouting / multicast / reassembly 는 후속 라운드.
+- **Phase W** (lwIP / MCU runtime): 미시작. R58 NOP-stub 은
+  R63 에 revert (document-around-hack 금지); 재진입은 AP MVP
+  demo binary closure 후.
+- **AP MVP demo binary** (다음 milestone): Linux + tokio peer
+  가 외부 zenoh-pico CLI process 와 round-trip query. 3-5
+  round 예상.
 
-라운드별 결정은 atomic changelog (docs/.atomic/workspace.atomic.json)
-와 activity log notes/NEXT_SESSION.md.
+라운드별 결정은 atomic changelog (docs/.atomic/workspace.atomic.json).
+현재 134 entry / 214 atomic section; workspace test 159
+passing; 로컬 6-lane CI (scripts/run-ci.sh 의 Layer 0 / A / A2 /
+B / C1 / C2 / D) 가 GitHub Actions workflow 와 동기.
 
 ## 디렉터리
 
 | 경로 | 역할 |
 |---|---|
 | ARCHITECTURE.md | 설계 진입점 |
-| docs/ | Mnemosyne 가 관리하는 11 spec doc |
+| docs/ | Mnemosyne 가 관리하는 12 spec doc |
 | docs/.atomic/ | Atomic-store sidecar (typed primitive 만 mutate) |
 | docs/GENERATED.md | Cascade-render 결과 (gitignored, 직접 편집 금지) |
-| sources/ | SCE Forge 입력 SCXML (sources/README.md 참조) |
-| scripts/ | build-sce.sh + verify-codegen.sh |
+| sources/ | SCE Forge 입력 SCXML (codec + algorithm + session FSM) |
+| crates/ | wz-codecs / wz-runtime-tokio / wz-integration-tests / -test-support / zenoh-pico-sys |
+| scripts/ | build-sce.sh + verify-codegen.sh + run-ci.sh + audit-mid-values.sh |
 | vendor/sce/ | SCE submodule, vendor pin |
-| notes/ | Activity-log 장르 (Mnemosyne 외) |
 | .githooks/ | pre-commit / commit-msg / pre-push 게이트 |
-| deploy/ | deploy.yaml skeleton (Phase B+) |
+| deploy/ | deploy.yaml skeleton (ap_standalone / mcu_target / ap_mcu_pair) |
 
 ## 빌드 + 검증
 

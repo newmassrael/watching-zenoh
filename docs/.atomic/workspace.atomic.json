@@ -4422,6 +4422,52 @@
         "Negative-test for R114 freshness gate — explicitly marked `not gating` in R114's own carry; R117 does not pursue it. Defense-in-depth surface for a later defensive round."
       ]
     },
+    "Round 118": {
+      "decision_summary": "R118 refreshes README.md and README.ko.md Current status sections from the Round 26 snapshot (90 rounds stale) to Round 116 (current). The stale claims included: Phase A4 \"blocked on SCE upstream / carries are tlv_advance, vle_u64_encode, Put / Del / Query / Reply / Err codec bodies\" (all landed since Round 40+), Phase B+ \"test-vector multi-arg + external ratify dependencies\" (vague placeholder), the directory layout's reference to `notes/NEXT_SESSION.md` activity log (removed at R58 with the activity-log genre retirement), and the doc count `11 Mnemosyne-managed spec doc` (now 12 since the OQ-W15 ratification summary lift).",
+      "changes_bullets": [
+        "README.md Current status block replaced — Phase A / B / C / W decomposition with concrete numbers: 9 algorithms, 19 codecs, 5 transport MIDs, 7 network MIDs, 9 declaration sub-MIDs, byte-equivalent Layer 3 wire-interop vs zenoh-pico, session-FSM 4 timer events (5s / 2s / 2s / 100ms), Cookie HMAC-SHA256 RFC 4231 TC1-TC7 cross-check at R70. Phase W explicitly marked `not started` with the R58 NOP-stub revert context (no document-around-hack). AP MVP demo binary surfaced as the next milestone with 3-5 round scoping.",
+        "README.md status footer adds the current atomic ledger metrics inline (134 entries / 214 sections / 159 workspace tests) so a reader can verify the file isn't stale by comparing against `validate_workspace` output directly. Mirrors how SCE's own README cites test counts.",
+        "README.md Directory layout table updated — docs count 11 -> 12, sources / role text expanded to include codecs + algorithms + session FSM (sources/ now hosts all three SCXML kinds; the original `sources/README.md` pointer was decorative). The `crates/` row is added explicitly (the 5 wz crates were not enumerated before). scripts/ row gains the R65 run-ci.sh + R111 audit-mid-values.sh entries. deploy/ row enumerates the three actual yaml files (ap_standalone / mcu_target / ap_mcu_pair) so the reader knows what's there without an ls.",
+        "README.ko.md mirrors the same content in Korean. Both files were updated in the same round per [[feedback_readme_lang_convention]] (primary 영문, KO 별도 + primary 상단 short link 1줄). The 'notes/' row was dropped from both because the directory is empty post-R58.",
+        "Round-by-round decisions text in both files drops the `notes/NEXT_SESSION.md` pointer (removed at R58 per CLAUDE.md's activity-log retirement note) and points readers directly to the atomic changelog."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh full 7-lane passes locally; README is prose-only so Layer A round-trip check confirms no mnemosyne-side regression (T1=0 / RT 12/12 / GENERATED.md=sync).",
+        "validate_workspace: atomic ledger entries 135 -> 136 from this entry; sections unchanged at 214; T3 warn unchanged at 856 (README files are outside Mnemosyne workspace.docs).",
+        "README.md / README.ko.md now reference verifiable metrics that match validate_workspace output (134 entries / 214 sections / 159 tests). A future reader can `validate_workspace` and `cargo test --workspace` to confirm the snapshot is current."
+      ],
+      "impact_refs": [
+        "watching-zenoh/current-status",
+        "watching-zenoh/directory-layout"
+      ],
+      "carry_forward_bullets": [
+        "README staleness pattern — a 90-round-stale public-facing status section is a real production debt because README is the project's first-impression surface; future rounds should refresh status on milestone closures (Phase B close, AP MVP demo close, Phase W entry) rather than waiting for cumulative drift.",
+        "AP MVP demo binary remains the next textbook milestone. R117 + R118 closed CI-hygiene + README-hygiene debts en route.",
+        "When AP MVP demo lands, the README Current status block gains an `AP MVP demo: CLOSED` bullet and the Phase W bullet upgrades from `not started` to whatever the next concrete state is."
+      ],
+      "publishable_decision_summary": "R118 refreshes README.md and README.ko.md Current status sections from the Round 26 snapshot (90 rounds stale) to Round 116 (current). The stale claims included: Phase A4 \"blocked on SCE upstream / carries are tlv_advance, vle_u64_encode, Put / Del / Query / Reply / Err codec bodies\" (all landed since Round 40+), Phase B+ \"test-vector multi-arg + external ratify dependencies\" (vague placeholder), the directory layout's reference to `notes/NEXT_SESSION.md` activity log (removed at R58 with the activity-log genre retirement), and the doc count `11 Mnemosyne-managed spec doc` (now 12 since the OQ-W15 ratification summary lift).",
+      "publishable_changes_bullets": [
+        "README.md Current status block replaced — Phase A / B / C / W decomposition with concrete numbers: 9 algorithms, 19 codecs, 5 transport MIDs, 7 network MIDs, 9 declaration sub-MIDs, byte-equivalent Layer 3 wire-interop vs zenoh-pico, session-FSM 4 timer events (5s / 2s / 2s / 100ms), Cookie HMAC-SHA256 RFC 4231 TC1-TC7 cross-check at R70. Phase W explicitly marked `not started` with the R58 NOP-stub revert context (no document-around-hack). AP MVP demo binary surfaced as the next milestone with 3-5 round scoping.",
+        "README.md status footer adds the current atomic ledger metrics inline (134 entries / 214 sections / 159 workspace tests) so a reader can verify the file isn't stale by comparing against `validate_workspace` output directly. Mirrors how SCE's own README cites test counts.",
+        "README.md Directory layout table updated — docs count 11 -> 12, sources / role text expanded to include codecs + algorithms + session FSM (sources/ now hosts all three SCXML kinds; the original `sources/README.md` pointer was decorative). The `crates/` row is added explicitly (the 5 wz crates were not enumerated before). scripts/ row gains the R65 run-ci.sh + R111 audit-mid-values.sh entries. deploy/ row enumerates the three actual yaml files (ap_standalone / mcu_target / ap_mcu_pair) so the reader knows what's there without an ls.",
+        "README.ko.md mirrors the same content in Korean. Both files were updated in the same round per [[feedback_readme_lang_convention]] (primary 영문, KO 별도 + primary 상단 short link 1줄). The 'notes/' row was dropped from both because the directory is empty post-R58.",
+        "Round-by-round decisions text in both files drops the `notes/NEXT_SESSION.md` pointer (removed at R58 per CLAUDE.md's activity-log retirement note) and points readers directly to the atomic changelog."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh full 7-lane passes locally; README is prose-only so Layer A round-trip check confirms no mnemosyne-side regression (T1=0 / RT 12/12 / GENERATED.md=sync).",
+        "validate_workspace: atomic ledger entries 135 -> 136 from this entry; sections unchanged at 214; T3 warn unchanged at 856 (README files are outside Mnemosyne workspace.docs).",
+        "README.md / README.ko.md now reference verifiable metrics that match validate_workspace output (134 entries / 214 sections / 159 tests). A future reader can `validate_workspace` and `cargo test --workspace` to confirm the snapshot is current."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/current-status",
+        "watching-zenoh/directory-layout"
+      ],
+      "publishable_carry_forward_bullets": [
+        "README staleness pattern — a 90-round-stale public-facing status section is a real production debt because README is the project's first-impression surface; future rounds should refresh status on milestone closures (Phase B close, AP MVP demo close, Phase W entry) rather than waiting for cumulative drift.",
+        "AP MVP demo binary remains the next textbook milestone. R117 + R118 closed CI-hygiene + README-hygiene debts en route.",
+        "When AP MVP demo lands, the README Current status block gains an `AP MVP demo: CLOSED` bullet and the Phase W bullet upgrades from `not started` to whatever the next concrete state is."
+      ]
+    },
     "Round 12": {
       "decision_summary": "Dual-license adoption — LGPL-3.0-or-later (Free, anti-tivo included) OR watching-zenoh Commercial (Qt-style 5-way exemption, $5000 individual cumulative)",
       "changes_bullets": [
