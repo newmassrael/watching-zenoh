@@ -5026,6 +5026,88 @@
         "Defensive carries: R114 freshness gate negative test; other docs/ stale status labels."
       ]
     },
+    "Round 125c1": {
+      "decision_summary": "R125c1: R125c-resume attempt at SCE pin 11287248 surfaced 3 new dispatcher-side codegen gaps; integration deferred again.",
+      "changes_bullets": [
+        "R125c-resume integration attempted at SCE pin 11287248 (R126 substrate).",
+        "Layer A/A2 pass; Layer B FAIL on dispatcher self-gen + 8 consumer compile errors.",
+        "Gap 4: dispatcher decode arm-dispatch uses undeclared `header` (should be parent_flags).",
+        "Gap 5: dispatcher encode arm-dispatch uses self.header (no such field; should be parent_flags).",
+        "Gap 6: consumer references WireexprVariant without `use crate::wireexpr::WireexprVariant`.",
+        "All 12 working-tree changes rolled back; HEAD remains at R126 (a9212bc).",
+        "R125b leaves + R125c orphan-status comment blocks retained verbatim (no churn).",
+        "wireexpr.scxml + 6 consumers unchanged; static M=1 baking retained pending Q-3 fire."
+      ],
+      "verification_bullets": [
+        "Working tree clean post-rollback; HEAD = R126 a9212bc preserved as stable state.",
+        "Pre-rollback observed: 22 cargo compile errors (wz-codecs lib + lib test).",
+        "Errors 11+ traced to Gaps 4/5 in generated wireexpr.rs (out/wireexpr.rs:75-76, 98-101).",
+        "Errors 1-10 traced to Gap 6 across 8 consumers (out/{push,request,response,...}.rs).",
+        "Pre-rollback 7-lane gate exit: Layer B FAIL + Layer C1 FAIL + Layer C2 FAIL.",
+        "Post-rollback 7-lane gate matches R126 commit state (regression-zero)."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "Draft second SCE upstream signal report with the 3 new gaps (4/5/6) for sequential closure.",
+        "Gap 4/5 are the same root cause: B5-ν dispatcher arm-dispatch site uses RPF carrier name literally.",
+        "Gap 6: consumer-site emit references variant type without emitting the corresponding `use`.",
+        "All 3 are in the same b5_nu code path that atomic 11287248 touched - same surface, extended cases.",
+        "Resume R125c-resume after SCE upstream lands a second atomic addressing 4/5/6.",
+        "Phase B test fixture extension proposal: forge_b5_nu_dispatcher_arm_with_rpf_compiles - cover the case.",
+        "R123b independent: build.rs compile_forge_with_imports -> _with_deploy still pending.",
+        "R121b-c independent: AP MVP demo binary functional 4 sub-rounds still pending."
+      ],
+      "publishable_decision_summary": "R125c1: R125c-resume attempt at SCE pin 11287248 surfaced three new dispatcher-side codegen gaps (4/5/6) beyond what atomic 11287248 closed; integration deferred again.",
+      "publishable_changes_bullets": [
+        "R125c-resume integration attempted on SCE vendor pin 11287248 (R126 substrate).",
+        "12 wz-side changes prepared: wireexpr.scxml dispatcher + 6 consumer M=1 drops + leaf",
+        "orphan-status lift + scripts/run-ci.sh KNOWN_DIVERGENCE += wireexpr + build.rs CODECS",
+        "+= {wireexpr_local, wireexpr_nonlocal} + lib.rs pub mod additions + comment refresh.",
+        "Layer A (mnemosyne) and A2 (mid-value) passed; Layer B (codegen) failed wireexpr.rs.",
+        "Gap 4 (dispatcher decode): generated `WireexprNonlocal::decode(cursor, header)?` at",
+        "out/wireexpr.rs:75-76 - `header` is undeclared (dispatcher has no own header field).",
+        "Gap 5 (dispatcher encode): generated `b.encode(self.header)` at out/wireexpr.rs:98,101 -",
+        "no such field on Wireexpr (dispatcher datamodel is variant-only).",
+        "Gap 6 (consumer encode): generated `WireexprVariant::WireexprLocal(_) => 0x40u8` at",
+        "out/push.rs:189 (and 7 other consumers) without `use crate::wireexpr::WireexprVariant`.",
+        "Both Gap 4 and Gap 5 substitute the carrier name (literal `header`) where parent_flags",
+        "is needed - same root cause in two emit code paths.",
+        "All 12 wz-side changes rolled back via git checkout HEAD; HEAD stays at R126 a9212bc.",
+        "wireexpr_local + wireexpr_nonlocal retain R125c orphan-status comment blocks."
+      ],
+      "publishable_verification_bullets": [
+        "Pre-rollback 7-lane gate exit code 1: Layer B FAIL + C1 FAIL + C2 FAIL.",
+        "Pre-rollback cargo build -p wz-codecs surfaces 22 distinct compile errors:",
+        "errors 1-4: out/wireexpr.rs:9-10,75-76 (Gaps 4/5).",
+        "errors 5-20: out/{request,push,response,interest_body,decl_*}.rs:189,196,134 (Gap 6).",
+        "Generated wireexpr.rs body inspection confirms Gap 4 + Gap 5 root cause.",
+        "Help diagnostic from rustc confirms Gap 6 fix direction:",
+        "'help: consider importing this enum / use crate::wireexpr::WireexprVariant'.",
+        "Post-rollback working tree matches HEAD (a9212bc) verbatim - no orphan diff.",
+        "validate_workspace: T1=0; RT 12/12; entries 146 -> 147; sections=214; sync.",
+        "publishable/audit divergence 8 -> 9 entries / 8 -> 9 ledger rows (R125c1 row + entry)."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Draft second SCE upstream signal report (audit-traced cluster atom level matching R125c).",
+        "Gap 4/5 share root cause: B5-ν dispatcher's variant arm-dispatch emit uses RPF carrier",
+        "name (here `header`) literally where the dispatcher has no own header field, only RPF.",
+        "Gap 6 root cause: b5_nu consumer-site emit references variant type without emitting the",
+        "paired `use crate::<dispatcher_stem>::<DispatcherStem>Variant;` import statement.",
+        "All 3 sit in the same code path atomic 11287248 touched (FlagLayoutSource Forwarding",
+        "branch + b5_nu_embed_pascal); they extend the dispatcher-self and consumer-import cases.",
+        "Resume R125c-resume after SCE upstream lands a second atomic addressing Gap 4/5/6.",
+        "Proposed SCE coverage fixture: forge_b5_nu_dispatcher_with_rpf_arm_chain_compiles_rust",
+        "dispatcher has RPF + variant tag=parent.X + arm bodies declare their own RPF chain",
+        "assert dispatcher's arm encode/decode forwards parent_flags, not literal carrier name.",
+        "R125b leaves stay orphan-but-valid at SCE pin 11287248; no Layer A/B drift.",
+        "R123b + R121b-c independent of R125c chain - remain valid next-priority candidates."
+      ]
+    },
     "Round 126": {
       "decision_summary": "R126: SCE vendor pin b719ee3e -> 11287248 (B5-ν consumer-parity gaps closed; unlocks R125c-resume).",
       "changes_bullets": [
