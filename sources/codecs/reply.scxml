@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh REPLY inner body — the
+     `_z_reply_encode` payload that the network-MID Z_RESPONSE
+     envelope wraps when its variant body's peek-byte dispatch lands
+     on `_Z_MID_Z_REPLY = 0x04` (message.h:31). Sibling to
+     `codec_zenoh_msg_put` / `codec_zenoh_msg_del` in role — a
+     network-envelope variant arm body — but distinct in shape:
+     reply carries a consolidation-mode flag plus a nested push_body
+     (put / del) holding the actual replied data.
+
+     Mirrors zenoh-pico `_z_reply_encode` / `_z_reply_decode`
+     (src/protocol/codec/message.c L507-543). The encoder
+     conditionally emits the consolidation byte under `_Z_FLAG_Z_R_C
+     = 0x20` and delegates the trailing payload to
+     `_z_push_body_encode`, which itself is the peek-byte dispatcher
+     across PUT (0x01) / DEL (0x02) — exactly the variant shape
+     `codec_zenoh_push` (R90) and `codec_zenoh_request`'s Z_PUT /
+     Z_DEL arms (R47) already model.
+
+     Wire shape (1+ bytes):
+       byte 0   : header     (MID Z_REPLY 0x04 in bits 0..4 + C@5 +
+                              Z@7). C = `_Z_FLAG_Z_R_C` gates the
+                              consolidation byte; Z =
+                              `_Z_FLAG_Z_Z` gates the ext-chain.
+                              `_z_reply_encode` currently never sets
+                              Z (the upstream encoder writes no
+                              reply-level extensions per L513-518),
+                              so the Z-gated tlv-chain is defensive
+                              wire coverage rather than a routine
+                              encode path. Inbound peers that DO
+                              set Z still decode cleanly via the
+                              gated tlv-chain.
+       C-gated:
+         byte 1 : consolidation (uint8 — `_Z_CONSOLIDATION_MODE_*`
+                                 enum; absent encoded byte implies
+                                 `Z_CONSOLIDATION_MODE_DEFAULT` per
+                                 the decoder's else-branch L533-535).
+       Z-gated:
+         chain  : codec_zenoh_ext_entry tlv-chain (max-depth=4
+                              covers the upstream-reserved extension
+                              slots; entry-flag-Z termination per Y3
+                              atomic 1 grammar; chain is followed by
+                              the always-present push_body so the
+                              exhaust-or-depth termination is not
+                              suitable here).
+       always : push_body   (peek-byte variant — re-reads next byte
+                              as the inner MID and dispatches to
+                              PUT 0x01 (default arm per RFC variant-
+                              default-uniformity since put is the
+                              dominant reply data shape) or DEL
+                              0x02; default fall-through is PUT to
+                              defensively recover from a non-put /
+                              non-del peer MID rather than reject).
+
+     Composition: B1-γ flags (header) + B1-δ present-if-on-field
+     (C gate) + Y3 atomic 2a present-if-on-tlv-chain (Z gate) + Y3
+     atomic 1 entry-flag termination (chain followed by body
+     variant) + Y3 atomic 2b-ii peek-byte variant
+     (codec_zenoh_msg_put / codec_zenoh_msg_del arm bodies). No new
+     primitives. Header MID 0x04 baked via R88 RFC variant-default-
+     uniformity `<sce:flag value=>` so Reply::default()'s header
+     carries the wire MID.
+
+     Body variant arm contract: invoked by codec_zenoh_response when
+     the inner-MID byte after the response header reads 0x04 (Z_REPLY).
+     Wire byte 0 here IS the response body's dispatch header from
+     the response envelope's perspective — same indirection as
+     msg_put / msg_del under request. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="reply">
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <sce:import src="msg_put.scxml" kind="codec" as="codec_zenoh_msg_put"/>
+  <sce:import src="msg_del.scxml" kind="codec" as="codec_zenoh_msg_del"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x04"/>
+      <sce:flag name="C"   bit="5"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:field id="consolidation" sce:type="uint8" sce:byte="1" sce:bit-size="8"
+               sce:present-if="header.C"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   max-depth="4" on-overflow="reject"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+    <sce:variant tag="peek.mid">
+      <sce:peek-byte id="peek" sce:type="uint8">
+        <sce:flag name="mid" bit="0" width="5"/>
+      </sce:peek-byte>
+      <sce:arm value="0x01" type="codec_zenoh_msg_put" default="true"/>
+      <sce:arm value="0x02" type="codec_zenoh_msg_del"/>
+      <sce:default type="codec_zenoh_msg_put"/>
+    </sce:variant>
+  </datamodel>
+</scxml>

@@ -8983,6 +8983,60 @@
         "SCE compound present-if (`PresentIfPredicate::or_with`) is now confirmed working end-to-end (parser, model, generator). Future codec rounds with multi-flag gating (e.g. RESPONSE has rid + response-id correlated to a query-id) can use this grammar without primitive uncertainty.",
         "SCE upstream 3c6bf7d7 (parse-time variant-default-arm-mid contract enforcement) drift unchanged; INTEREST does NOT use a variant primitive, so the new check is still inactive on this codec. Vendor pin bump round still keyed off a future peek-byte variant codec (RESPONSE chain)."
       ]
+    },
+    "Round 95": {
+      "decision_summary": "R95 authors reply.scxml as the first of the RESPONSE chain's two inner-body codecs (R91 carry #2 starts closing) — Z_REPLY=0x04 wire shape: header(C@5,Z@7) + C-gated consolidation byte + Z-gated ext-chain + peek-byte variant dispatching put/del bodies.",
+      "changes_bullets": [
+        "sources/codecs/reply.scxml authored — mirrors zenoh-pico `_z_reply_encode` / `_z_reply_decode` (message.c L507-543). Shape: B1-γ flags header + B1-δ present-if-on-field (C gate on consolidation byte) + Y3 atomic 2a present-if-on-tlv-chain (Z gate, defensive coverage — upstream encoder never sets Z but inbound peers may) + Y3 atomic 1 entry-flag termination + Y3 atomic 2b-ii peek-byte variant (msg_put 0x01 default arm per R88 variant-default-uniformity; msg_del 0x02). Header MID 0x04 baked via `<sce:flag value=>` so Reply::default()'s header carries the wire MID.",
+        "crates/wz-codecs/build.rs CODECS list: `reply` appended (post-interest); depends on msg_put / msg_del / ext_entry which are already built earlier in the list.",
+        "crates/wz-codecs/src/lib.rs: `pub mod reply { include!(...) }` declared after the interest block.",
+        "crates/wz-codecs/tests/smoke.rs: new `reply_default_encode_decode_roundtrip` follows the msg_put / msg_del smoke pattern — default Reply encodes to >=1 byte with header 0x04, decodes idempotent, consolidation/extensions both None at C=Z=0."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-codecs (codegen) clean; reply.rs emitted with peek-byte variant arms (msg_put 0x01, msg_del 0x02) plus a Default arm for unmatched MIDs — mirrors push.rs / request.rs shape.",
+        "cargo test -p wz-codecs --test smoke: 3 passed (msg_put + msg_del + new reply round-trip).",
+        "scripts/run-ci.sh all 5 lanes pass: Layer A (validate-workspace), Layer B (verify-codegen), Layer C1 (cargo test), Layer C2 (cargo clippy -D warnings), Layer D (deploy yaml schema).",
+        "atomic ledger entries: 107 → 108 (this Round 95 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "No network-layer wiring changed — reply is an inner-body codec only; the NetworkMessage variant change lands in R97 alongside response.scxml. Workspace test count unchanged at 124 (R95 adds a wz-codecs smoke test; runtime-tokio test count holds steady)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants"
+      ],
+      "carry_forward_bullets": [
+        "R96 — err.scxml authoring (Z_ERR=0x05). Wire shape: header(E@6,Z@7) + E-gated encoding embed + Z-gated source_info ext-chain + always payload (length-prefixed bytes max=256). Sibling primitive surface to msg_put's payload pair; no peek-byte variant since the body is always opaque payload. ~70 line SCXML. Standalone like reply — no network MID wiring.",
+        "R97 — response.scxml authoring (Z_RESPONSE=0x1B) + NetworkMessage::Response variant + parse_frame_payload arm. Imports reply.scxml + err.scxml as peek-byte arm bodies (0x04 reply default + 0x05 err). Wire-shape sibling to request.scxml: header(N@5,M@6,Z@7) + rid VLE + wireexpr embed + Z-gated ext-chain + peek-byte variant. Bumps MID coverage to 6/7 and unblocks the AP MVP query-response demo path.",
+        "Full RESPONSE chain closure (R95+R96+R97) leaves DECLARE (0x1E) as the last remaining MID. DECLARE requires `<sce:repeat>` over `<sce:variant>` (a primitive combination not exercised in the existing codec catalog) plus 4 sub-declare types (Sub/Token/Qbl/Final). ~150 line SCXML; deferred until R97 lands so the codec catalog reaches 6/7 first.",
+        "Z-gated ext-chain on reply is wire coverage for inbound peers but never emitted by zenoh-pico's encoder. A focused Layer 3 wire-interop round (R90/R91 carry) could verify the inbound-only path against a synthetic zenoh-pico fixture that exercises reply.Z=1; out of R95 scope."
+      ],
+      "publishable_decision_summary": "R95 authors reply.scxml as the first of the RESPONSE chain's two inner-body codecs (R91 carry #2 starts closing) — Z_REPLY=0x04 wire shape: header(C@5,Z@7) + C-gated consolidation byte + Z-gated ext-chain + peek-byte variant dispatching put/del bodies.",
+      "publishable_changes_bullets": [
+        "sources/codecs/reply.scxml authored — mirrors zenoh-pico `_z_reply_encode` / `_z_reply_decode` (message.c L507-543). Shape: B1-γ flags header + B1-δ present-if-on-field (C gate on consolidation byte) + Y3 atomic 2a present-if-on-tlv-chain (Z gate, defensive coverage — upstream encoder never sets Z but inbound peers may) + Y3 atomic 1 entry-flag termination + Y3 atomic 2b-ii peek-byte variant (msg_put 0x01 default arm per R88 variant-default-uniformity; msg_del 0x02). Header MID 0x04 baked via `<sce:flag value=>` so Reply::default()'s header carries the wire MID.",
+        "crates/wz-codecs/build.rs CODECS list: `reply` appended (post-interest); depends on msg_put / msg_del / ext_entry which are already built earlier in the list.",
+        "crates/wz-codecs/src/lib.rs: `pub mod reply { include!(...) }` declared after the interest block.",
+        "crates/wz-codecs/tests/smoke.rs: new `reply_default_encode_decode_roundtrip` follows the msg_put / msg_del smoke pattern — default Reply encodes to >=1 byte with header 0x04, decodes idempotent, consolidation/extensions both None at C=Z=0."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-codecs (codegen) clean; reply.rs emitted with peek-byte variant arms (msg_put 0x01, msg_del 0x02) plus a Default arm for unmatched MIDs — mirrors push.rs / request.rs shape.",
+        "cargo test -p wz-codecs --test smoke: 3 passed (msg_put + msg_del + new reply round-trip).",
+        "scripts/run-ci.sh all 5 lanes pass: Layer A (validate-workspace), Layer B (verify-codegen), Layer C1 (cargo test), Layer C2 (cargo clippy -D warnings), Layer D (deploy yaml schema).",
+        "atomic ledger entries: 107 → 108 (this Round 95 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "No network-layer wiring changed — reply is an inner-body codec only; the NetworkMessage variant change lands in R97 alongside response.scxml. Workspace test count unchanged at 124 (R95 adds a wz-codecs smoke test; runtime-tokio test count holds steady)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R96 — err.scxml authoring (Z_ERR=0x05). Wire shape: header(E@6,Z@7) + E-gated encoding embed + Z-gated source_info ext-chain + always payload (length-prefixed bytes max=256). Sibling primitive surface to msg_put's payload pair; no peek-byte variant since the body is always opaque payload. ~70 line SCXML. Standalone like reply — no network MID wiring.",
+        "R97 — response.scxml authoring (Z_RESPONSE=0x1B) + NetworkMessage::Response variant + parse_frame_payload arm. Imports reply.scxml + err.scxml as peek-byte arm bodies (0x04 reply default + 0x05 err). Wire-shape sibling to request.scxml: header(N@5,M@6,Z@7) + rid VLE + wireexpr embed + Z-gated ext-chain + peek-byte variant. Bumps MID coverage to 6/7 and unblocks the AP MVP query-response demo path.",
+        "Full RESPONSE chain closure (R95+R96+R97) leaves DECLARE (0x1E) as the last remaining MID. DECLARE requires `<sce:repeat>` over `<sce:variant>` (a primitive combination not exercised in the existing codec catalog) plus 4 sub-declare types (Sub/Token/Qbl/Final). ~150 line SCXML; deferred until R97 lands so the codec catalog reaches 6/7 first.",
+        "Z-gated ext-chain on reply is wire coverage for inbound peers but never emitted by zenoh-pico's encoder. A focused Layer 3 wire-interop round (R90/R91 carry) could verify the inbound-only path against a synthetic zenoh-pico fixture that exercises reply.Z=1; out of R95 scope."
+      ]
     }
   },
   "inventory_entries": {},
