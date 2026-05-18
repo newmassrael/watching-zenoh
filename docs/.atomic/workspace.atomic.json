@@ -4468,6 +4468,46 @@
         "When AP MVP demo lands, the README Current status block gains an `AP MVP demo: CLOSED` bullet and the Phase W bullet upgrades from `not started` to whatever the next concrete state is."
       ]
     },
+    "Round 119": {
+      "decision_summary": "R119 refreshes ARCHITECTURE.md's opening status block from \"Pre-implementation design document (2026-04-24); blocked on SCE Phase A\" to \"Living architecture reference (last refreshed Round 116, 2026-05-18)\". SCE Phase A landed at upstream commit c4cef7e7 (and subsequent vendor pin moves through 122f851d), wire-spec subset codec catalog (Phase B) and unicast session FSM (Phase C) are in flight in crates/wz-codecs + crates/wz-runtime-tokio, so the original \"blocked on SCE Phase A\" framing is 116 rounds stale and misleading to a new reader. The change is a raw markdown Edit under the CLAUDE.md transitional carve-out (ARCHITECTURE.md lives in Phase D of the atomic store migration plan and is still in raw markdown form); pre-edit validate_workspace clean, post-edit T1 orphan delta = 0 and round-trip 12/12 preserved, satisfying the three-condition carve-out.",
+      "changes_bullets": [
+        "ARCHITECTURE.md L1-L11 status block rewritten — the original 3-paragraph block claimed `Pre-implementation design document`, `blocked on SCE Phase A`, and `becomes living reference when SCE Phase A lands` (a forward-looking promise that has already been kept). The replacement block records the SCE Phase A landing anchor (commit c4cef7e7 + the 122f851d vendor pin), the Phase B closure + Phase C in-flight state in code, and the lockstep update commitment with reference to the atomic-changelog round mechanism.",
+        "The replacement block keeps the pointer to rfc-sce-protocol-synthesis.md so the SCE maintainer scope contract path stays legible. No section heading structure changed (the opening block is pre-`## 1. Vision` prose, not a section in its own right), so the atomic-section topology for ARCHITECTURE.md is unaffected and round-trip mandatory stays 12/12.",
+        "Raw Edit applied under the CLAUDE.md transitional carve-out: ARCHITECTURE.md is in Phase D of the atomic-store migration roadmap (residual prose, after Phase A oq-w15 / Phase B rfc-sce §5 / Phase C 3 FSM docs); raw Edit / Write on a Phase-not-yet-completed doc is permissible when (1) pre-edit validate_workspace clean (it was: T1=0 / RT 12/12 / GENERATED.md=sync), (2) round-trip preserved post-edit (it is: 12/12), (3) T1 orphan delta = 0 (it is: zero new orphans). The atomic section architecture--watching-zenoh's legacy summary body remains untouched in this round (that section's body field is not exposed by the typed-primitive mutate API; updating it is a Phase D migration concern, not a hygiene-pass concern)."
+      ],
+      "verification_bullets": [
+        "validate_workspace before edit: T1 orphan total=0 / round-trip mandatory=12/12 / GENERATED.md=sync (Round 118 baseline).",
+        "validate_workspace after edit: T1 orphan total=0 (ledger=0, new=+0, resolved=-0) / round-trip mandatory=12/12 / GENERATED.md=sync; atomic ledger entries 136 -> 137 from this entry only.",
+        "Raw markdown Edit carve-out's three preconditions satisfied: pre-clean baseline, round-trip preserved, T1 orphan delta = 0. No new T3/T4 violations introduced (style violation counts unchanged at 856/427)."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "ARCHITECTURE.md remains in Phase D of the atomic-store migration plan (residual prose; CLAUDE.md `Phased rollout` section). When Phase D lands for ARCHITECTURE.md, the typed primitives gain authority over the prose body and raw Edits like R119's become unavailable. R119's status block content should be the seed for the Phase D atomic decomposition's `intent` field.",
+        "The atomic section architecture--watching-zenoh's body field (legacy summary text describing the pre-implementation state) is divergent from the now-current markdown opening block. This divergence does not violate any T1/T2 invariant because the atomic body field is not consulted by the cross-ref orphan check or the frozen-ledger jaccard check; updating it requires the Phase D migration to land first.",
+        "AP MVP demo binary remains the next textbook milestone. R115 + R116 + R117 + R118 + R119 paid down debt en route (DECLARE wire, TestHal substrate, CI yml sync, README hygiene, ARCHITECTURE status hygiene)."
+      ],
+      "publishable_decision_summary": "R119 refreshes ARCHITECTURE.md's opening status block from \"Pre-implementation design document (2026-04-24); blocked on SCE Phase A\" to \"Living architecture reference (last refreshed Round 116, 2026-05-18)\". SCE Phase A landed at upstream commit c4cef7e7 (and subsequent vendor pin moves through 122f851d), wire-spec subset codec catalog (Phase B) and unicast session FSM (Phase C) are in flight in crates/wz-codecs + crates/wz-runtime-tokio, so the original \"blocked on SCE Phase A\" framing is 116 rounds stale and misleading to a new reader. The change is a raw markdown Edit under the CLAUDE.md transitional carve-out (ARCHITECTURE.md lives in Phase D of the atomic store migration plan and is still in raw markdown form); pre-edit validate_workspace clean, post-edit T1 orphan delta = 0 and round-trip 12/12 preserved, satisfying the three-condition carve-out.",
+      "publishable_changes_bullets": [
+        "ARCHITECTURE.md L1-L11 status block rewritten — the original 3-paragraph block claimed `Pre-implementation design document`, `blocked on SCE Phase A`, and `becomes living reference when SCE Phase A lands` (a forward-looking promise that has already been kept). The replacement block records the SCE Phase A landing anchor (commit c4cef7e7 + the 122f851d vendor pin), the Phase B closure + Phase C in-flight state in code, and the lockstep update commitment with reference to the atomic-changelog round mechanism.",
+        "The replacement block keeps the pointer to rfc-sce-protocol-synthesis.md so the SCE maintainer scope contract path stays legible. No section heading structure changed (the opening block is pre-`## 1. Vision` prose, not a section in its own right), so the atomic-section topology for ARCHITECTURE.md is unaffected and round-trip mandatory stays 12/12.",
+        "Raw Edit applied under the CLAUDE.md transitional carve-out: ARCHITECTURE.md is in Phase D of the atomic-store migration roadmap (residual prose, after Phase A oq-w15 / Phase B rfc-sce §5 / Phase C 3 FSM docs); raw Edit / Write on a Phase-not-yet-completed doc is permissible when (1) pre-edit validate_workspace clean (it was: T1=0 / RT 12/12 / GENERATED.md=sync), (2) round-trip preserved post-edit (it is: 12/12), (3) T1 orphan delta = 0 (it is: zero new orphans). The atomic section architecture--watching-zenoh's legacy summary body remains untouched in this round (that section's body field is not exposed by the typed-primitive mutate API; updating it is a Phase D migration concern, not a hygiene-pass concern)."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace before edit: T1 orphan total=0 / round-trip mandatory=12/12 / GENERATED.md=sync (Round 118 baseline).",
+        "validate_workspace after edit: T1 orphan total=0 (ledger=0, new=+0, resolved=-0) / round-trip mandatory=12/12 / GENERATED.md=sync; atomic ledger entries 136 -> 137 from this entry only.",
+        "Raw markdown Edit carve-out's three preconditions satisfied: pre-clean baseline, round-trip preserved, T1 orphan delta = 0. No new T3/T4 violations introduced (style violation counts unchanged at 856/427)."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "ARCHITECTURE.md remains in Phase D of the atomic-store migration plan (residual prose; CLAUDE.md `Phased rollout` section). When Phase D lands for ARCHITECTURE.md, the typed primitives gain authority over the prose body and raw Edits like R119's become unavailable. R119's status block content should be the seed for the Phase D atomic decomposition's `intent` field.",
+        "The atomic section architecture--watching-zenoh's body field (legacy summary text describing the pre-implementation state) is divergent from the now-current markdown opening block. This divergence does not violate any T1/T2 invariant because the atomic body field is not consulted by the cross-ref orphan check or the frozen-ledger jaccard check; updating it requires the Phase D migration to land first.",
+        "AP MVP demo binary remains the next textbook milestone. R115 + R116 + R117 + R118 + R119 paid down debt en route (DECLARE wire, TestHal substrate, CI yml sync, README hygiene, ARCHITECTURE status hygiene)."
+      ]
+    },
     "Round 12": {
       "decision_summary": "Dual-license adoption — LGPL-3.0-or-later (Free, anti-tivo included) OR watching-zenoh Commercial (Qt-style 5-way exemption, $5000 individual cumulative)",
       "changes_bullets": [
