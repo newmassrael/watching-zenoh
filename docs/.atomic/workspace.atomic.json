@@ -3234,6 +3234,58 @@
         "AP MVP demo binary is still the user-visible critical path — R98-R100 internal infrastructure + R101-R102 wire-interop confidence growing. Real Linux + tokio demo binary remains 2-3 rounds out (TCP scaffolding + zenoh-pico peer fixture)."
       ]
     },
+    "Round 103": {
+      "decision_summary": "R103 lands Layer 3 byte-equivalence for OAM (R92) — first self-flag-dispatch variant (header.enc 2-bit field) validated against zenoh-pico; R88 variant-default-uniformity UNIT-default arm proven correct at the wire boundary, partial closure of R88 carry #1 ext_entry self-flag-dispatch audit.",
+      "changes_bullets": [
+        "crates/zenoh-pico-sys/build.rs allowlist: `_z_n_msg_oam_t` + `_z_oam_encode` added; comment notes that the zero-init `_enc = 0` matches zenoh-pico's first enum variant `_Z_OAM_BODY_UNIT` so the wz default arm declaration aligns with no fixture intervention beyond the `_ext_qos._val = 5` qos-default patch.",
+        "crates/wz-integration-tests/tests/layer3_oam.rs new — 1 byte-equivalence test asserting `wz_codecs::oam::Oam::default().encode() == _z_oam_encode(default _z_n_msg_oam_t with qos.val=5)`. Wire bytes: `[0x1F, 0x00]` (header MID 0x1F + enc=0=UNIT + Z=0, id VLE 0). The UNIT body is zero bytes so the encode terminates after the id.",
+        "Helper `zenoh_pico_encode_oam_default()` mirrors R101 / R102 wbuf-extract pattern — single qos patch on the zero-init msg, then encode."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_oam: 1 passed first try (no semantic divergence surfaced for OAM — `_enc=0` self-flag-dispatch happens to be wz/pico symmetric).",
+        "Workspace tests: 144 → 145 (+1 = new layer3_oam test).",
+        "scripts/run-ci.sh all 5 lanes pass: A/B/C1/C2/D.",
+        "atomic ledger entries: 115 → 116 (this Round 103 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "Self-flag-dispatch contract validated at the wire boundary: header.enc bits 5..6 = 0 (UNIT arm) on both sides; the SCE codegen `<sce:variant tag=\"header.enc\">` translates correctly to the upstream's enum-switch dispatch. R88 carry #1 (ext_entry self-flag-dispatch audit) partially closed since OAM and ext_entry share the self-flag dispatch shape."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "carry_forward_bullets": [
+        "Layer 3 rollout to INTEREST envelope + inner body (R93+R94) — `_z_n_interest_encode`. The interest envelope's wireexpr is conditional on the C/F flags (interest_body sub-codec); a default INTEREST has C=F=0 so no inner body, no wireexpr — wire shape [0x19, 0x00] = 2 bytes like response_final. Likely 1 round with possibly the same M-flag divergence pattern but only if C or F is set (in which case interest_body.wireexpr's `_mapping` value matters).",
+        "Layer 3 rollout to RESPONSE (R97) — wireexpr embed + ext-chain + reply/err peek-byte variant. Will likely surface the same wireexpr M-flag divergence as PUSH; the fix is the same fixture patch. 2-round split possible: envelope default + non-trivial inner-body state.",
+        "M-flag default audit still open (R102 carry) — wz request.scxml / response.scxml / push.scxml all declare M without a `value=` default. The Layer 3 fixtures patch the divergence per-test; a codec-side audit would bake M=1 by default OR document the wz semantic divergence explicitly. 1-round audit + decision.",
+        "Three Layer 3 fixtures (response_final, push, oam) now in catalog. Pattern is stable: allowlist add → wbuf_make → patch defaults to match wz state → encode → wbuf_to_zbuf → byte slice → wbuf_clear. Future Layer 3 authors can fast-path through the boilerplate."
+      ],
+      "publishable_decision_summary": "R103 lands Layer 3 byte-equivalence for OAM (R92) — first self-flag-dispatch variant (header.enc 2-bit field) validated against zenoh-pico; R88 variant-default-uniformity UNIT-default arm proven correct at the wire boundary, partial closure of R88 carry #1 ext_entry self-flag-dispatch audit.",
+      "publishable_changes_bullets": [
+        "crates/zenoh-pico-sys/build.rs allowlist: `_z_n_msg_oam_t` + `_z_oam_encode` added; comment notes that the zero-init `_enc = 0` matches zenoh-pico's first enum variant `_Z_OAM_BODY_UNIT` so the wz default arm declaration aligns with no fixture intervention beyond the `_ext_qos._val = 5` qos-default patch.",
+        "crates/wz-integration-tests/tests/layer3_oam.rs new — 1 byte-equivalence test asserting `wz_codecs::oam::Oam::default().encode() == _z_oam_encode(default _z_n_msg_oam_t with qos.val=5)`. Wire bytes: `[0x1F, 0x00]` (header MID 0x1F + enc=0=UNIT + Z=0, id VLE 0). The UNIT body is zero bytes so the encode terminates after the id.",
+        "Helper `zenoh_pico_encode_oam_default()` mirrors R101 / R102 wbuf-extract pattern — single qos patch on the zero-init msg, then encode."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_oam: 1 passed first try (no semantic divergence surfaced for OAM — `_enc=0` self-flag-dispatch happens to be wz/pico symmetric).",
+        "Workspace tests: 144 → 145 (+1 = new layer3_oam test).",
+        "scripts/run-ci.sh all 5 lanes pass: A/B/C1/C2/D.",
+        "atomic ledger entries: 115 → 116 (this Round 103 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "Self-flag-dispatch contract validated at the wire boundary: header.enc bits 5..6 = 0 (UNIT arm) on both sides; the SCE codegen `<sce:variant tag=\"header.enc\">` translates correctly to the upstream's enum-switch dispatch. R88 carry #1 (ext_entry self-flag-dispatch audit) partially closed since OAM and ext_entry share the self-flag dispatch shape."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Layer 3 rollout to INTEREST envelope + inner body (R93+R94) — `_z_n_interest_encode`. The interest envelope's wireexpr is conditional on the C/F flags (interest_body sub-codec); a default INTEREST has C=F=0 so no inner body, no wireexpr — wire shape [0x19, 0x00] = 2 bytes like response_final. Likely 1 round with possibly the same M-flag divergence pattern but only if C or F is set (in which case interest_body.wireexpr's `_mapping` value matters).",
+        "Layer 3 rollout to RESPONSE (R97) — wireexpr embed + ext-chain + reply/err peek-byte variant. Will likely surface the same wireexpr M-flag divergence as PUSH; the fix is the same fixture patch. 2-round split possible: envelope default + non-trivial inner-body state.",
+        "M-flag default audit still open (R102 carry) — wz request.scxml / response.scxml / push.scxml all declare M without a `value=` default. The Layer 3 fixtures patch the divergence per-test; a codec-side audit would bake M=1 by default OR document the wz semantic divergence explicitly. 1-round audit + decision.",
+        "Three Layer 3 fixtures (response_final, push, oam) now in catalog. Pattern is stable: allowlist add → wbuf_make → patch defaults to match wz state → encode → wbuf_to_zbuf → byte slice → wbuf_clear. Future Layer 3 authors can fast-path through the boilerplate."
+      ]
+    },
     "Round 11": {
       "decision_summary": "OQ-W15 (a) closure (Q1=No RNG → plugin / Q2=Yes HMAC → plugin ratified) + OQ-W24 registration as SCE counter-offer track for §5.I tier-explicit separation",
       "changes_bullets": [

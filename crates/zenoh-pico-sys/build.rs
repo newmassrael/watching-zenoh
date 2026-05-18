@@ -231,6 +231,14 @@ fn main() {
         // zero) to match the wz Push::default() shape.
         .allowlist_type("_z_n_msg_push_t")
         .allowlist_function("_z_push_encode")
+        // R103 — OAM Layer 3 byte-compare. Self-flag-dispatch
+        // variant (header.enc 2-bit field selects UNIT/ZINT/ZBUF
+        // inner body); R92 wz authoring + R88 variant-default-
+        // uniformity declared UNIT as the default arm. zenoh-pico's
+        // `_z_oam_encode` defaults the enc field to 0=UNIT (first
+        // enum variant) so default-state encode matches wz cleanly.
+        .allowlist_type("_z_n_msg_oam_t")
+        .allowlist_function("_z_oam_encode")
         // R67c — ext chain Layer 3 byte-compare vs wz ExtEnvelope.
         // _z_msg_ext_t = union<unit|zint|zbuf> + header byte; the
         // builder helpers _z_msg_ext_make_* set header bits from
