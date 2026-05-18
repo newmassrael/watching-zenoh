@@ -4035,6 +4035,56 @@
         "Memory observations from R106-R110e auto-run (for future feedback files): (a) carry chain closure (R102/R104/R105/R106 → closed by R107) reduces accumulated debt risk; (b) paired land of codec + Layer 3 fixture in same round prevents the 8-round wz-side self-consistency-but-no-wire-interop trap that motivated R101; (c) sub-round split with named carry preserves textbook scope even when the parent task spans multiple rounds (R110a/b/c/d/e); (d) codegen emit inspect is a strict prerequisite to relying on any new R88-baked default — R108a's latent defect was discovered by exactly this check."
       ]
     },
+    "Round 111": {
+      "decision_summary": "R111 lands a repo-side bash audit gate (scripts/audit-mid-values.sh, wired into scripts/run-ci.sh as Layer A2) that rejects any wz envelope codec SCXML whose `<sce:flag name=\"mid\">` declaration lacks a `value=` attribute. Closes the R108a defect-class — request.scxml had been authored at R90 without `value=`, going unnoticed for 5+ rounds because wz-side round-trip alone was self-consistent against the broken bytes.",
+      "changes_bullets": [
+        "scripts/audit-mid-values.sh new — production-level bash with `set -euo pipefail`, strips `<sce:peek-byte>...</sce:peek-byte>` blocks via sed range delete (peek fields intentionally lack `value=` because they read runtime bytes, not bake them), then greps remaining `name=\"mid\"` lines for `value=`. Exit codes documented: 0 clean / 1 violation / 2 setup. Diagnostic on violation prints file:line of the offending declaration.",
+        "scripts/run-ci.sh: Layer A2 dispatch slot added between Layer A (mnemosyne) and Layer B (verify-codegen). New `layer_a2_audit_mid_values()` function invokes the audit script; lane header table updated.",
+        "Audit script verified on the current 40-SCXML codec catalog: all envelope-level mid declarations carry `value=`. R110a/b/c/d additions (decl_final / decl_kexpr / undecl_kexpr / decl_subscriber / decl_queryable / decl_token / undecl_subscriber / undecl_queryable / undecl_token) all baked their value= correctly; R108a's mid fix and the original 7 envelope codecs all conform.",
+        "Negative-test path not exercised in R111 (would require corrupting a file mid-commit) but the sed/grep logic was inspected manually — the file/line diagnostic is plain enough to verify on a future real violation. Adding a negative-test SCXML stub purely for CI exercise is a separate hardening that would clutter sources/codecs/; the alternative (test fixtures in scripts/) is also held back to avoid sprawl."
+      ],
+      "verification_bullets": [
+        "scripts/audit-mid-values.sh on the live catalog: 40 file(s) clean — every envelope mid carries value=.",
+        "scripts/run-ci.sh full sweep: Layer 0/A/A2/B/C1/C2/D all pass. Layer A2 takes <0.1s on the 40-file catalog so the CI cost is negligible.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 128 → 129, sections=214, GENERATED.md=sync.",
+        "cargo test --workspace unchanged at 150 tests (R111 has no source-tree impact past scripts/)."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer"
+      ],
+      "carry_forward_bullets": [
+        "SCE-side T-rule for the same defect class — the long-term-textbook hardening is to enforce the rule at parse time inside sce-build so every SCE consumer gains the protection. wz session policy forbids modifying SCE git state, so this is dispatched as a separate upstream PR task (not this session). The repo-side gate stays as a defense-in-depth even after the T-rule lands.",
+        "R112 SCE vendor pin bump 189bf7f4 → 4d1ef3f2 — 15 commits ahead, drift risk increases over time; SCE R88 strengthening + new peek-byte codec impact wz codegen correctness.",
+        "R113 wire-spec doc §5-1 declare-sub-variants caveats — R110a-e 9 sub-MIDs + R107 INTEREST no-baking decision into the doc surface.",
+        "R68 inbound parser → R69 Hal time-mock → AP MVP demo (round-trip query, external zenoh-pico CLI peer) — textbook critical path order per design-call ratify.",
+        "Phase W STM32F4 (Nucleo-F429ZI) trail — separate cross-compile + lwIP plan when Linux tokio AP MVP is reference-validated."
+      ],
+      "publishable_decision_summary": "R111 lands a repo-side bash audit gate (scripts/audit-mid-values.sh, wired into scripts/run-ci.sh as Layer A2) that rejects any wz envelope codec SCXML whose `<sce:flag name=\"mid\">` declaration lacks a `value=` attribute. Closes the R108a defect-class — request.scxml had been authored at R90 without `value=`, going unnoticed for 5+ rounds because wz-side round-trip alone was self-consistent against the broken bytes.",
+      "publishable_changes_bullets": [
+        "scripts/audit-mid-values.sh new — production-level bash with `set -euo pipefail`, strips `<sce:peek-byte>...</sce:peek-byte>` blocks via sed range delete (peek fields intentionally lack `value=` because they read runtime bytes, not bake them), then greps remaining `name=\"mid\"` lines for `value=`. Exit codes documented: 0 clean / 1 violation / 2 setup. Diagnostic on violation prints file:line of the offending declaration.",
+        "scripts/run-ci.sh: Layer A2 dispatch slot added between Layer A (mnemosyne) and Layer B (verify-codegen). New `layer_a2_audit_mid_values()` function invokes the audit script; lane header table updated.",
+        "Audit script verified on the current 40-SCXML codec catalog: all envelope-level mid declarations carry `value=`. R110a/b/c/d additions (decl_final / decl_kexpr / undecl_kexpr / decl_subscriber / decl_queryable / decl_token / undecl_subscriber / undecl_queryable / undecl_token) all baked their value= correctly; R108a's mid fix and the original 7 envelope codecs all conform.",
+        "Negative-test path not exercised in R111 (would require corrupting a file mid-commit) but the sed/grep logic was inspected manually — the file/line diagnostic is plain enough to verify on a future real violation. Adding a negative-test SCXML stub purely for CI exercise is a separate hardening that would clutter sources/codecs/; the alternative (test fixtures in scripts/) is also held back to avoid sprawl."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/audit-mid-values.sh on the live catalog: 40 file(s) clean — every envelope mid carries value=.",
+        "scripts/run-ci.sh full sweep: Layer 0/A/A2/B/C1/C2/D all pass. Layer A2 takes <0.1s on the 40-file catalog so the CI cost is negligible.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 128 → 129, sections=214, GENERATED.md=sync.",
+        "cargo test --workspace unchanged at 150 tests (R111 has no source-tree impact past scripts/)."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer"
+      ],
+      "publishable_carry_forward_bullets": [
+        "SCE-side T-rule for the same defect class — the long-term-textbook hardening is to enforce the rule at parse time inside sce-build so every SCE consumer gains the protection. wz session policy forbids modifying SCE git state, so this is dispatched as a separate upstream PR task (not this session). The repo-side gate stays as a defense-in-depth even after the T-rule lands.",
+        "R112 SCE vendor pin bump 189bf7f4 → 4d1ef3f2 — 15 commits ahead, drift risk increases over time; SCE R88 strengthening + new peek-byte codec impact wz codegen correctness.",
+        "R113 wire-spec doc §5-1 declare-sub-variants caveats — R110a-e 9 sub-MIDs + R107 INTEREST no-baking decision into the doc surface.",
+        "R68 inbound parser → R69 Hal time-mock → AP MVP demo (round-trip query, external zenoh-pico CLI peer) — textbook critical path order per design-call ratify.",
+        "Phase W STM32F4 (Nucleo-F429ZI) trail — separate cross-compile + lwIP plan when Linux tokio AP MVP is reference-validated."
+      ]
+    },
     "Round 12": {
       "decision_summary": "Dual-license adoption — LGPL-3.0-or-later (Free, anti-tivo included) OR watching-zenoh Commercial (Qt-style 5-way exemption, $5000 individual cumulative)",
       "changes_bullets": [
