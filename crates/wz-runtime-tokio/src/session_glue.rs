@@ -70,6 +70,7 @@ use wz_codecs::interest::Interest;
 use wz_codecs::oam::Oam;
 use wz_codecs::push::Push;
 use wz_codecs::request::Request;
+use wz_codecs::response::Response;
 use wz_codecs::response_final::ResponseFinal;
 
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
@@ -267,18 +268,22 @@ mod wire_const {
     /// `header.enc` (UNIT / ZINT / ZBUF re-using ext_* inner
     /// codecs).
     pub const N_MID_OAM: u8 = 0x1F;
-    /// R93 — Interest envelope MID (network.h:39). Declarations
+    /// R93/R94 — Interest envelope MID (network.h:39). Declarations
     /// discovery / liveliness subscriber registration carrier per
-    /// zenoh-pico `_z_n_interest_encode`. The envelope wireshape
-    /// (is_final form) is structurally identical to RESPONSE_FINAL
-    /// with the addition of two header flags — CURRENT (bit 5) and
-    /// FUTURE (bit 6) — that gate the inner-body extension; this
-    /// crate authors the envelope layer only (see
-    /// `sources/codecs/interest.scxml` scope note). Remaining MIDs
-    /// (RESPONSE 0x1B, DECLARE 0x1E) documented in
-    /// [`NetworkMessage`] and will land alongside their respective
-    /// envelope codecs in follow-up rounds.
+    /// zenoh-pico `_z_n_interest_encode`. R93 landed the envelope
+    /// layer (is_final form, RESPONSE_FINAL sibling); R94 closed the
+    /// inner body via the `header.C || header.F` disjunction present-
+    /// if (interest_body sub-codec wraps the body_flags + R-gated
+    /// wireexpr per `_z_interest_encode`).
     pub const N_MID_INTEREST: u8 = 0x19;
+    /// R97 — Response envelope MID (network.h:37). Query reply
+    /// carrier wrapping a reply (0x04) or err (0x05) inner body per
+    /// zenoh-pico `_z_response_encode`. Wire-shape sibling to
+    /// `N_MID_REQUEST`: header(N@5,M@6,Z@7) + rid VLE + wireexpr
+    /// embed + Z-gated ext-chain + peek-byte body variant on the
+    /// inner MID bit-range. Remaining unauthored MID: DECLARE
+    /// (0x1E), per [`NetworkMessage`] doc.
+    pub const N_MID_RESPONSE: u8 = 0x1B;
 }
 
 /// Per-deploy parameters that drive the codec field values for the
@@ -1342,17 +1347,25 @@ pub enum NetworkMessage {
     /// `ExtUnit` / `ExtZint` / `ExtZbuf` — small enough to inline
     /// like `ResponseFinal`.
     Oam(Oam),
-    /// R93 — Network MID `_Z_MID_N_INTEREST` (0x1F → 0x19).
+    /// R93/R94 — Network MID `_Z_MID_N_INTEREST` (0x19).
     /// Declarations discovery / liveliness subscriber registration
-    /// envelope; header (mid+C+F+Z) + VLE interest_id + optional
-    /// ext-chain. Envelope-only layer per
-    /// `sources/codecs/interest.scxml` scope note — peers whose
-    /// header sets the C / F bits trigger an inner body (flags +
-    /// optional wireexpr) that this round defers. Inlined (no
-    /// `Box`) because the struct is small — header byte + u64 +
-    /// optional ext vec, same shape as `ResponseFinal`.
+    /// envelope; header (mid+C+F+Z) + VLE interest_id + (C||F)-gated
+    /// inner body + Z-gated ext-chain. R94 closed the body via the
+    /// interest_body sub-codec (body_flags byte + R-gated wireexpr).
+    /// Inlined (no `Box`) because the struct is small — header byte
+    /// + u64 + optional body + optional ext vec.
     Interest(Interest),
-    /// Header byte's MID falls outside the {REQUEST, PUSH, RESPONSE_FINAL, OAM, INTEREST} subset
+    /// R97 — Network MID `_Z_MID_N_RESPONSE` (0x1B). Query reply
+    /// carrier wrapping a reply (0x04) or err (0x05) inner body
+    /// dispatched via peek-byte on the inner MID bit-range. Same
+    /// envelope shape as `Request` minus the body kind set. The
+    /// `Box` keeps the enum variant size small — `Response`
+    /// carries `Wireexpr` + `ResponseVariant` whose arms hold
+    /// Reply / Err structs, making the inline form larger than
+    /// the `Unknown` variant (mirrors the Request sizing
+    /// rationale).
+    Response(Box<Response>),
+    /// Header byte's MID falls outside the {REQUEST, PUSH, RESPONSE_FINAL, OAM, INTEREST, RESPONSE} subset
     /// wz-codecs has authored envelope coverage for. `body` carries
     /// the rest of the payload bytes (header byte included) verbatim
     /// so a future per-MID decoder can re-parse without losing data;
@@ -1369,6 +1382,7 @@ impl std::fmt::Debug for NetworkMessage {
             Self::ResponseFinal(_) => f.write_str("ResponseFinal(..)"),
             Self::Oam(_) => f.write_str("Oam(..)"),
             Self::Interest(_) => f.write_str("Interest(..)"),
+            Self::Response(_) => f.write_str("Response(..)"),
             Self::Unknown { mid, body } => write!(
                 f,
                 "Unknown {{ mid: {mid:#04x}, body_len: {} }}",
@@ -1425,6 +1439,10 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
             wire_const::N_MID_INTEREST => {
                 let interest = Interest::decode(&mut cursor)?;
                 messages.push(NetworkMessage::Interest(interest));
+            }
+            wire_const::N_MID_RESPONSE => {
+                let resp = Response::decode(&mut cursor)?;
+                messages.push(NetworkMessage::Response(Box::new(resp)));
             }
             _ => {
                 let rem = cursor.remaining();

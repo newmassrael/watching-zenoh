@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh RESPONSE envelope — query reply
+     carrier wrapping a reply (0x04) or err (0x05) inner body.
+     Sibling to `codec_zenoh_request` (R47): same header / rid /
+     wireexpr / Z-gated ext-chain layout, distinct body variant
+     (reply / err instead of put / del / query).
+
+     Mirrors zenoh-pico `_z_response_encode` / `_z_response_decode`
+     (src/protocol/codec/network.c L241-360). The peek-byte primitive
+     surfaces the inner-body MID dispatch as a single SCE construct
+     (Y3 atomic 2b-ii) — the cursor's next byte is read without
+     advancing, the variant dispatches on the named bit-range, and
+     the matched arm body decoder re-reads that same byte as its own
+     first wire byte.
+
+     Wire shape (per upstream network.c response_encode):
+       byte 0   : header     (MID Z_RESPONSE 0x1B in bits 0..4 + N@5 +
+                              M@6 + Z@7) — N = `_Z_FLAG_N_RESPONSE_N`
+                              (has_suffix on the wireexpr); M =
+                              `_Z_FLAG_N_RESPONSE_M` (is_local mapping);
+                              Z = `_Z_FLAG_Z_Z` (has extensions —
+                              upstream's qos / timestamp / responder
+                              ext slots, see network.c L266-292).
+       byte 1+  : request_id (VLE u64 — correlates the response with
+                              the original Request's rid).
+       embed    : keyexpr    (codec_zenoh_wireexpr — VLE id + N-gated
+                              UTF-8 suffix; same parent-flag binding
+                              (`carrier="header" name="N" bit="5"`) as
+                              request / push since the response header
+                              co-locates the N flag at bit 5.
+       Z-gated  : extensions (codec_zenoh_ext_entry tlv-chain, max-
+                              depth=4 covers upstream's 3 ext slots
+                              (qos / timestamp / responder per
+                              network.c L266-292) with safety margin;
+                              entry-flag-Z termination since the body
+                              variant follows the chain — Y3 atomic 1
+                              grammar).
+       inner    : body       — peek-byte primitive dispatches on the
+                              cursor's next byte's MID bit-range; arm
+                              body codec re-reads same byte as own
+                              header.
+
+     Peek-byte arm coverage (per zenoh-pico message.h MIDs):
+       0x04 → codec_zenoh_reply (Z_REPLY arm, declared default per
+                                 RFC variant-default-uniformity since
+                                 reply is the dominant query-response
+                                 data shape and reply.scxml's `<sce:flag
+                                 value="0x04"/>` on its mid field bakes
+                                 the wire-MID into Reply::default()'s
+                                 header so
+                                 `Response::default().encode().decode()
+                                 == Response::default()`).
+       0x05 → codec_zenoh_err   (Z_ERR arm — error envelope).
+       <sce:default> → codec_zenoh_reply (catch-all — non-reply / non-
+                                          err MID under Z_RESPONSE is a
+                                          wire-protocol violation per
+                                          upstream
+                                          `_z_response_decode` line
+                                          355-358; default arm is a
+                                          defensive recovery shape
+                                          rather than a routine path).
+
+     Cross-codec validator (RFC §5.B Y3 atomic 2b-ii peek-byte)
+     confirms: codec_zenoh_reply.header.mid + codec_zenoh_err.header.mid
+     (both bit=0 width=5) match this peek-byte's mid declaration.
+     Each arm body's additional flag declarations (reply.C bit 5 /
+     err.E bit 6 / Z bit 7) sit outside the dispatch bit-range —
+     peek-byte doesn't constrain them.
+
+     Composition: B1-γ flags (header) + B1-α VLE (request_id) + Y0c
+     <sce:embed> (codec_zenoh_wireexpr) + Y3 atomic 2a present-if-on-
+     tlv-chain (header.Z gate) + Y3 atomic 1 entry-flag termination +
+     Y3 atomic 2b-i sub-codec embeds (reply / err arm bodies) +
+     Y3 atomic 2b-ii peek-byte primitive. No new primitives. Header
+     MID 0x1B baked via R88 RFC variant-default-uniformity `<sce:flag
+     value=>` so Response::default() carries the wire MID. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="response">
+  <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr"/>
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <sce:import src="reply.scxml" kind="codec" as="codec_zenoh_reply"/>
+  <sce:import src="err.scxml"   kind="codec" as="codec_zenoh_err"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x1B"/>
+      <sce:flag name="N"   bit="5"/>
+      <sce:flag name="M"   bit="6"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:field id="request_id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+    <sce:embed id="keyexpr" type="codec_zenoh_wireexpr" sce:byte="2"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="3"
+                   max-depth="4" on-overflow="reject"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+    <sce:variant tag="peek.mid">
+      <sce:peek-byte id="peek" sce:type="uint8">
+        <sce:flag name="mid" bit="0" width="5"/>
+      </sce:peek-byte>
+      <sce:arm value="0x04" type="codec_zenoh_reply" default="true"/>
+      <sce:arm value="0x05" type="codec_zenoh_err"/>
+      <sce:default type="codec_zenoh_reply"/>
+    </sce:variant>
+  </datamodel>
+</scxml>
