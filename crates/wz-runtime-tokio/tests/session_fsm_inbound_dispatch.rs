@@ -361,15 +361,16 @@ fn parse_frame_payload_empty_returns_empty_batch() {
 fn parse_frame_payload_unknown_mid_absorbs_remainder() {
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
-    // 0x1B = N_MID_RESPONSE — no codec authored yet (was 0x1D=PUSH
-    // pre-R90; PUSH is now codec'd, so use a still-uncodec'd MID
-    // here to exercise the Unknown absorb path).
-    let bytes = [0x1B, 0xAB, 0xCD, 0xEF];
+    // 0x1E = N_MID_DECLARE — the last network MID still without a
+    // wz-side codec post-R97 (RESPONSE 0x1B was uncodec'd pre-R97,
+    // PUSH 0x1D pre-R90; each test pivot follows the latest still-
+    // uncodec'd MID).
+    let bytes = [0x1E, 0xAB, 0xCD, 0xEF];
     let parsed = parse_frame_payload(&bytes).expect("unknown MID absorbs as Unknown");
     assert_eq!(parsed.len(), 1, "single Unknown record");
     match &parsed[0] {
         NetworkMessage::Unknown { mid, body } => {
-            assert_eq!(*mid, 0x1B, "header low 5 bits = network MID");
+            assert_eq!(*mid, 0x1E, "header low 5 bits = network MID");
             assert_eq!(
                 body.as_slice(),
                 &bytes,
@@ -380,7 +381,8 @@ fn parse_frame_payload_unknown_mid_absorbs_remainder() {
         | NetworkMessage::Push(_)
         | NetworkMessage::ResponseFinal(_)
         | NetworkMessage::Oam(_)
-        | NetworkMessage::Interest(_) => {
+        | NetworkMessage::Interest(_)
+        | NetworkMessage::Response(_) => {
             panic!("expected Unknown, got typed variant")
         }
     }
@@ -441,9 +443,10 @@ fn parse_frame_payload_decodes_request_then_unknown_chain() {
     };
     let mut bytes = req.encode();
     let request_len = bytes.len();
-    // Append an Unknown MID (0x1B = N_MID_RESPONSE — still uncodec'd
-    // post-R90; was 0x1D=PUSH pre-R90).
-    bytes.extend_from_slice(&[0x1B, 0x42, 0x43]);
+    // Append an Unknown MID (0x1E = N_MID_DECLARE — still uncodec'd
+    // post-R97; the only network MID left without a typed dispatch
+    // path).
+    bytes.extend_from_slice(&[0x1E, 0x42, 0x43]);
 
     let parsed = parse_frame_payload(&bytes).expect("Request + Unknown batch parses");
     assert_eq!(
@@ -454,7 +457,7 @@ fn parse_frame_payload_decodes_request_then_unknown_chain() {
     assert!(matches!(parsed[0], NetworkMessage::Request(_)));
     match &parsed[1] {
         NetworkMessage::Unknown { mid, body } => {
-            assert_eq!(*mid, 0x1B);
+            assert_eq!(*mid, 0x1E);
             assert_eq!(
                 body.as_slice(),
                 &bytes[request_len..],
@@ -465,7 +468,8 @@ fn parse_frame_payload_decodes_request_then_unknown_chain() {
         | NetworkMessage::Push(_)
         | NetworkMessage::ResponseFinal(_)
         | NetworkMessage::Oam(_)
-        | NetworkMessage::Interest(_) => {
+        | NetworkMessage::Interest(_)
+        | NetworkMessage::Response(_) => {
             panic!("expected Unknown second record")
         }
     }
@@ -614,6 +618,37 @@ fn parse_frame_payload_dispatches_interest_mid_to_interest_decoder() {
     assert!(
         matches!(parsed[0], NetworkMessage::Interest(_)),
         "INTEREST MID 0x19 dispatches to wz_codecs::interest decoder"
+    );
+}
+
+#[test]
+fn parse_frame_payload_dispatches_response_mid_to_response_decoder() {
+    use wz_codecs::response::Response;
+    use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
+
+    // R97 — round-trip-safe Response envelope with declared-default
+    // arms across the chain: Response.header bakes MID 0x1B; its
+    // peek-byte variant body defaults to Reply (0x04) per the R97
+    // response.scxml `default="true"` arm; Reply's body in turn
+    // defaults to MsgPut (0x01) per R90 push-shaped variant; and
+    // each header along the chain bakes its own wire MID per R88
+    // variant-default-uniformity. Net effect: encode(default) ->
+    // decode(default) is byte-equivalent without explicit field
+    // overrides beyond the outermost header.
+    let resp = Response {
+        header: 0x1B,
+        ..Response::default()
+    };
+    let bytes = resp.encode();
+    let parsed = parse_frame_payload(&bytes).expect("Response envelope parses");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "round-trip-safe Response yields exactly one record; got {parsed:?}"
+    );
+    assert!(
+        matches!(parsed[0], NetworkMessage::Response(_)),
+        "RESPONSE MID 0x1B dispatches to wz_codecs::response decoder"
     );
 }
 

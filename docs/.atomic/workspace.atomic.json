@@ -9091,6 +9091,66 @@
         "AP MVP pub/sub callback registry continues to be the architectural critical path — FramePayload.messages → keyexpr-matched subscriber dispatcher. Estimated 2-3 architectural rounds once 7/7 codec catalog completes (so the message variant set is stable when registry code starts taking dependencies on it). R90 carry #4 still open.",
         "Z_ERR's source_info extension (slot 0x09 with ENC_ZBUF) is currently authored as a generic ext_entry tlv-chain rather than a typed source_info embed. zenoh-pico's decoder uses a slot-discriminator switch (message.c L577-587); wz-side per-slot typed embed is a future quality round when ext-chain audit (R88 carry #1) generalizes."
       ]
+    },
+    "Round 97": {
+      "decision_summary": "R97 lands response.scxml + NetworkMessage::Response wiring, completing the RESPONSE chain started in R95/R96 — application-layer codec coverage now 6/7 MIDs (only DECLARE 0x1E remains uncodec'd); first wz-side codec to consume two R88-uniform inner-body codecs as peek-byte arms.",
+      "changes_bullets": [
+        "sources/codecs/response.scxml authored — mirrors zenoh-pico `_z_response_encode` / `_z_response_decode` (network.c L241-360). Shape: B1-γ flags header (mid 0x1B + N@5 + M@6 + Z@7) + B1-α VLE request_id + Y0c <sce:embed> codec_zenoh_wireexpr (parent.N at bit 5) + Y3 atomic 2a present-if-on-tlv-chain (Z gate) + Y3 atomic 2b-ii peek-byte variant dispatching reply (0x04, declared default per R88 since reply is the dominant query-response shape) / err (0x05). Header MID 0x1B baked via `<sce:flag value=>` per R88 variant-default-uniformity.",
+        "crates/wz-codecs/build.rs CODECS list: `response` appended (post-err); depends on wireexpr / ext_entry / reply / err which are all built earlier in the list.",
+        "crates/wz-codecs/src/lib.rs: `pub mod response { include!(...) }` declared after the err block.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: wire_const::N_MID_RESPONSE = 0x1B; `use wz_codecs::response::Response;`; `NetworkMessage::Response(Box<Response>)` variant + Debug arm; parse_frame_payload arm dispatching MID 0x1B to `Response::decode`. The `Box` mirrors `Request`'s size-balancing rationale (Wireexpr + ResponseVariant arms make the inline form larger than `Unknown`). Updated wire_const::N_MID_INTEREST doc to reflect R94 closure and rewrote the doc comment chain to mark RESPONSE as authored.",
+        "crates/wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs + tests/session_fsm_driver_loop.rs + tests/session_fsm_drive_session.rs: match-exhaustiveness arms include `NetworkMessage::Response(_)` (3 sites total); Unknown-MID mocks pivoted from 0x1B (now typed) to 0x1E (DECLARE, last still-uncodec'd) across all three test files — mirrors the R90 pivot from 0x1D to 0x1B.",
+        "new positive test `parse_frame_payload_dispatches_response_mid_to_response_decoder` mirrors the R97 RESPONSE chain across three layers of R88 variant-default-uniformity: Response.header bakes 0x1B; its variant body defaults to Reply (declared default arm); Reply's body defaults to MsgPut (R90 declared default). Net effect: `Response::default().encode()` round-trips through `parse_frame_payload` to a single `NetworkMessage::Response` record with no explicit field overrides beyond the outermost header."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-codecs (codegen) clean; response.rs emitted with peek-byte variant arms (reply 0x04 default, err 0x05) plus a Default arm — mirrors push.rs / request.rs / oam.rs shape with a 3-deep arm-default chain (response → reply → msg_put).",
+        "cargo test --workspace: 126 → 127 (+1 = new RESPONSE positive test).",
+        "cargo test -p wz-runtime-tokio --test session_fsm_inbound_dispatch: 21 passed.",
+        "scripts/run-ci.sh all 5 lanes pass: Layer A (validate-workspace), Layer B (verify-codegen), Layer C1 (cargo test), Layer C2 (cargo clippy -D warnings), Layer D (deploy yaml schema).",
+        "atomic ledger entries: 109 → 110 (this Round 97 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "Mock-MID pivot caught a latent test — `r83_observer_reads_framepayload_messages_through_reference` (session_fsm_drive_session.rs L387) used 0x1B as the Unknown MID; once RESPONSE became typed the test's bytes parsed as a truncated Response (NeedMoreBytes from the VLE rid read), surfacing as a CodecError instead of an Unknown record. Pivot to 0x1E restores the deterministic 1-Unknown-record assertion and follows the textbook MID-pivot pattern."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants"
+      ],
+      "carry_forward_bullets": [
+        "R98 — declare.scxml (0x1E) authoring closes the 7/7 application-layer MID catalog. Wire shape (per zenoh-pico `_z_declare_encode` network.c L161-238): header(I@5,Z@7) + interest_id VLE (I-gated) + Z-gated ext-chain + body variant on inner declaration MID (DeclSub 0x00 / DeclToken 0x01 / DeclQbl 0x02 / UndeclSub 0x03 / UndeclToken 0x04 / UndeclQbl 0x05 / DeclareFinal 0x1F or 0x06 etc). First wz-side use of `<sce:repeat>` OR `<sce:variant>` composition over a larger arm set than the existing peek-byte codecs (~6-7 arms vs 2-3). Estimate 1-2 rounds depending on whether each declaration sub-type already exists as a leaf sub-codec or needs authoring.",
+        "AP MVP pub/sub callback registry remains the architectural critical path — FramePayload.messages → keyexpr-matched subscriber dispatcher (R90 carry #4 still open). Now that 6/7 codec coverage is in place and Response/Request/Push all reach typed dispatch, the registry can take stable dependencies on `NetworkMessage::{Push,Response,Request}.keyexpr` accessors. Estimate 2-3 rounds.",
+        "Test-MID pivot debt growing — each new typed MID forces 1+ tests to pivot their mock-Unknown MID. The current 0x1E (DECLARE) is the last unused network MID; once R98 closes DECLARE the tests will need to mock a synthetic non-Zenoh MID (e.g. 0x00 or 0x1F if those remain ambiguous, OR a deliberate out-of-spec value with a comment explaining the synthetic source). Plan a follow-up cleanup round that converts these Unknown-MID mocks to a helper that pins them to an explicitly-reserved sentinel MID.",
+        "Match-exhaustiveness churn now at 7 NetworkMessage variants (Request/Push/ResponseFinal/Oam/Interest/Response/Unknown) across 3-4 test sites per round. Macro consolidation considered post-DECLARE landing."
+      ],
+      "publishable_decision_summary": "R97 lands response.scxml + NetworkMessage::Response wiring, completing the RESPONSE chain started in R95/R96 — application-layer codec coverage now 6/7 MIDs (only DECLARE 0x1E remains uncodec'd); first wz-side codec to consume two R88-uniform inner-body codecs as peek-byte arms.",
+      "publishable_changes_bullets": [
+        "sources/codecs/response.scxml authored — mirrors zenoh-pico `_z_response_encode` / `_z_response_decode` (network.c L241-360). Shape: B1-γ flags header (mid 0x1B + N@5 + M@6 + Z@7) + B1-α VLE request_id + Y0c <sce:embed> codec_zenoh_wireexpr (parent.N at bit 5) + Y3 atomic 2a present-if-on-tlv-chain (Z gate) + Y3 atomic 2b-ii peek-byte variant dispatching reply (0x04, declared default per R88 since reply is the dominant query-response shape) / err (0x05). Header MID 0x1B baked via `<sce:flag value=>` per R88 variant-default-uniformity.",
+        "crates/wz-codecs/build.rs CODECS list: `response` appended (post-err); depends on wireexpr / ext_entry / reply / err which are all built earlier in the list.",
+        "crates/wz-codecs/src/lib.rs: `pub mod response { include!(...) }` declared after the err block.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: wire_const::N_MID_RESPONSE = 0x1B; `use wz_codecs::response::Response;`; `NetworkMessage::Response(Box<Response>)` variant + Debug arm; parse_frame_payload arm dispatching MID 0x1B to `Response::decode`. The `Box` mirrors `Request`'s size-balancing rationale (Wireexpr + ResponseVariant arms make the inline form larger than `Unknown`). Updated wire_const::N_MID_INTEREST doc to reflect R94 closure and rewrote the doc comment chain to mark RESPONSE as authored.",
+        "crates/wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs + tests/session_fsm_driver_loop.rs + tests/session_fsm_drive_session.rs: match-exhaustiveness arms include `NetworkMessage::Response(_)` (3 sites total); Unknown-MID mocks pivoted from 0x1B (now typed) to 0x1E (DECLARE, last still-uncodec'd) across all three test files — mirrors the R90 pivot from 0x1D to 0x1B.",
+        "new positive test `parse_frame_payload_dispatches_response_mid_to_response_decoder` mirrors the R97 RESPONSE chain across three layers of R88 variant-default-uniformity: Response.header bakes 0x1B; its variant body defaults to Reply (declared default arm); Reply's body defaults to MsgPut (R90 declared default). Net effect: `Response::default().encode()` round-trips through `parse_frame_payload` to a single `NetworkMessage::Response` record with no explicit field overrides beyond the outermost header."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-codecs (codegen) clean; response.rs emitted with peek-byte variant arms (reply 0x04 default, err 0x05) plus a Default arm — mirrors push.rs / request.rs / oam.rs shape with a 3-deep arm-default chain (response → reply → msg_put).",
+        "cargo test --workspace: 126 → 127 (+1 = new RESPONSE positive test).",
+        "cargo test -p wz-runtime-tokio --test session_fsm_inbound_dispatch: 21 passed.",
+        "scripts/run-ci.sh all 5 lanes pass: Layer A (validate-workspace), Layer B (verify-codegen), Layer C1 (cargo test), Layer C2 (cargo clippy -D warnings), Layer D (deploy yaml schema).",
+        "atomic ledger entries: 109 → 110 (this Round 97 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "Mock-MID pivot caught a latent test — `r83_observer_reads_framepayload_messages_through_reference` (session_fsm_drive_session.rs L387) used 0x1B as the Unknown MID; once RESPONSE became typed the test's bytes parsed as a truncated Response (NeedMoreBytes from the VLE rid read), surfacing as a CodecError instead of an Unknown record. Pivot to 0x1E restores the deterministic 1-Unknown-record assertion and follows the textbook MID-pivot pattern."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R98 — declare.scxml (0x1E) authoring closes the 7/7 application-layer MID catalog. Wire shape (per zenoh-pico `_z_declare_encode` network.c L161-238): header(I@5,Z@7) + interest_id VLE (I-gated) + Z-gated ext-chain + body variant on inner declaration MID (DeclSub 0x00 / DeclToken 0x01 / DeclQbl 0x02 / UndeclSub 0x03 / UndeclToken 0x04 / UndeclQbl 0x05 / DeclareFinal 0x1F or 0x06 etc). First wz-side use of `<sce:repeat>` OR `<sce:variant>` composition over a larger arm set than the existing peek-byte codecs (~6-7 arms vs 2-3). Estimate 1-2 rounds depending on whether each declaration sub-type already exists as a leaf sub-codec or needs authoring.",
+        "AP MVP pub/sub callback registry remains the architectural critical path — FramePayload.messages → keyexpr-matched subscriber dispatcher (R90 carry #4 still open). Now that 6/7 codec coverage is in place and Response/Request/Push all reach typed dispatch, the registry can take stable dependencies on `NetworkMessage::{Push,Response,Request}.keyexpr` accessors. Estimate 2-3 rounds.",
+        "Test-MID pivot debt growing — each new typed MID forces 1+ tests to pivot their mock-Unknown MID. The current 0x1E (DECLARE) is the last unused network MID; once R98 closes DECLARE the tests will need to mock a synthetic non-Zenoh MID (e.g. 0x00 or 0x1F if those remain ambiguous, OR a deliberate out-of-spec value with a comment explaining the synthetic source). Plan a follow-up cleanup round that converts these Unknown-MID mocks to a helper that pins them to an explicitly-reserved sentinel MID.",
+        "Match-exhaustiveness churn now at 7 NetworkMessage variants (Request/Push/ResponseFinal/Oam/Interest/Response/Unknown) across 3-4 test sites per round. Macro consolidation considered post-DECLARE landing."
+      ]
     }
   },
   "inventory_entries": {},

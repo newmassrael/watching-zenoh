@@ -283,11 +283,14 @@ async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
     drive_to_sent_init_syn(&mut engine);
 
     // T_MID_FRAME | R flag = 0x25, sn=1 VLE (0x01), tail payload
-    // = [0x1B, 0xAA, 0xBB] — 0x1B = N_MID_RESPONSE (no codec
-    // authored yet; was 0x1D=PUSH pre-R90 but PUSH now decodes via
-    // r90_* test below).
+    // = [0x1E, 0xAA, 0xBB] — 0x1E = N_MID_DECLARE, the last network
+    // MID still without a wz-side codec post-R97 (RESPONSE 0x1B
+    // moved to a typed dispatch path with R97). When DECLARE lands
+    // this test must switch to a freshly-unused mock or refactor
+    // to a synthetic non-Zenoh MID (the codec catalog will at that
+    // point cover the full 7/7 wz-spec subset).
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: vec![0x25, 0x01, 0x1B, 0xAA, 0xBB],
+        bytes: vec![0x25, 0x01, 0x1E, 0xAA, 0xBB],
     })]);
 
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
@@ -303,16 +306,17 @@ async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
             assert_eq!(messages.len(), 1);
             match &messages[0] {
                 NetworkMessage::Unknown { mid, body } => {
-                    assert_eq!(*mid, 0x1B);
-                    assert_eq!(body.as_slice(), &[0x1B, 0xAA, 0xBB]);
+                    assert_eq!(*mid, 0x1E);
+                    assert_eq!(body.as_slice(), &[0x1E, 0xAA, 0xBB]);
                 }
                 NetworkMessage::Request(_)
                 | NetworkMessage::Push(_)
                 | NetworkMessage::ResponseFinal(_)
                 | NetworkMessage::Oam(_)
-                | NetworkMessage::Interest(_) => {
+                | NetworkMessage::Interest(_)
+                | NetworkMessage::Response(_) => {
                     panic!(
-                        "RESPONSE MID (0x1B) must NOT dispatch to any typed decoder"
+                        "DECLARE MID (0x1E) must NOT dispatch to any typed decoder"
                     )
                 }
             }

@@ -58,6 +58,7 @@ const CODECS: &[&str] = &[
     "interest",  // §5 Z_INTEREST envelope — header + VLE id + ext-chain — R93/R94
     "reply",     // §6.3 Z_REPLY inner body — C-gated consolidation + put/del peek — R95
     "err",       // §6.3 Z_ERR inner body — E-gated encoding + Z ext + payload — R96
+    "response",  // §5 Z_RESPONSE envelope — reply/err peek-byte dispatch — R97
 ];
 
 fn main() {
