@@ -13,12 +13,13 @@
 #
 # Lanes (matches CI workflow):
 #
-#   Layer A — mnemosyne-cli validate-workspace
-#   Layer B — verify-codegen.sh per codec (L1+L2+L3)
+#   Layer A  — mnemosyne-cli validate-workspace
+#   Layer A2 — scripts/audit-mid-values.sh (envelope mid value= gate; R111)
+#   Layer B  — verify-codegen.sh per codec (L1+L2+L3)
 #   Layer C1 — cargo test --workspace
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
-#   Layer D — deploy/*.yaml schema validate
-#   Layer 0 — (optional) actionlint .github/workflows/
+#   Layer D  — deploy/*.yaml schema validate
+#   Layer 0  — (optional) actionlint .github/workflows/
 #
 # Exit codes:
 #   0  every required layer passed
@@ -98,6 +99,18 @@ layer_a_mnemosyne() {
         return 0
     fi
     mnemosyne-cli validate-workspace
+}
+
+# ─── Layer A2 — envelope mid value= audit gate (R111) ───────────────
+# Rejects any sources/codecs/*.scxml whose envelope-level <sce:flag
+# name="mid"> declaration lacks `value=`. Precedent: R108a discovered
+# a latent defect (request.scxml had no mid value= since R90; wire
+# first byte emitted as 0x40 instead of 0x5C) that the wz-side round-
+# trip pass kept invisible until R108b's Layer 3 wire-compare against
+# zenoh-pico's `_z_request_encode`. The audit script is a build-time
+# preventer for that whole class of defect.
+layer_a2_audit_mid_values() {
+    bash scripts/audit-mid-values.sh
 }
 
 # ─── Layer B — verify-codegen.sh per codec ──────────────────────────
@@ -185,6 +198,7 @@ layer_d_validate_deploy() {
 overall=0
 run_layer 0 layer_0_actionlint || overall=1
 run_layer A layer_a_mnemosyne || overall=1
+run_layer A2 layer_a2_audit_mid_values || overall=1
 run_layer B layer_b_verify_codegen || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
