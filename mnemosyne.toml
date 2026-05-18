@@ -140,3 +140,10 @@ target_id = "Round 127"
 reason = "Audit half intentionally minimal per R295/R296 textbook split: pin-only round advancing vendor/sce from 11287248 to b35dbb66 after SCE upstream closed the three R125c1 dispatcher-self-gen gaps (Gap 4/5 dispatcher arm-dispatch parent_flags substitution via body_parent_flags_value_expr helper; Gap 6 Rust include_stmt brace-list augmentation for the variant enum import). Audit half records the pin bump fact + regression-zero verify + per-gap close summaries; publishable half carries the full SCE atomic b35dbb66 anatomy with file+line excerpts (helper at generator.rs:3383; three collapsed call sites; lib.rs:2760 brace-list patch; substring-assertion regression coverage; Q-DSG-3 rustc-compile harness deferral; Go backend package-qualifier cross-cutting carry) and the R125c2 adoption-path checklist."
 applied_in = "R127 in-flight"
 content_hash_after = "9a645e35279bb62d871355d3718efc054eb8d408098e2d35c647f2ef901a5be3"
+
+[[publishable_override_ledger]]
+kind = "redaction"
+target_id = "Round 125c2"
+reason = "Audit half intentionally minimal per R295/R296 textbook split: R125c2 is the production-land third attempt of the R125c integration sequence after SCE upstream's two atomics (11287248 + b35dbb66) closed all six dispatcher-side codegen gaps surfaced in R125c + R125c1. Audit half records the wireexpr.scxml restructure + 6 consumer M=1 drops + comment refresh + lib.rs/build.rs additions + workspace #[allow] for Gap 7 + pubsub.rs pattern-match update; publishable half carries the full per-component anatomy with cross-references to the SCE atomics' specific helper sites (FlagLayoutSource at generator.rs:3380; b5_nu_embed_pascal at 9492; B5NuDerivation.present_if at 9313; body_parent_flags_value_expr at 3383; include_stmt brace-list at lib.rs:2760-2774). Includes the cosmetic Gap 7 carry to SCE upstream (variant-only dispatcher emits dead let raw at decode prefix) suppressed via workspace-policy-permitted #[allow(unused_variables)] on pub mod wireexpr."
+applied_in = "R125c2 in-flight"
+content_hash_after = "18392b7fe3f6e68a330233d36b3fc9cc1d044994beb4e08c3ccacc31ff283335"

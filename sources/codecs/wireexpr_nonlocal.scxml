@@ -71,15 +71,16 @@
      (suffix_len gates suffix's length source) + B5-ζ surface H string
      + Y0a lifted parser ban (`sce:type="string"` + `sce:present-if`).
 
-     Orphan status — R125c integration deferred per SCE upstream
-     gaps (see wireexpr_local.scxml header for the full list of
-     three gaps: B5-γ flag propagation through dispatcher; b5_nu
-     derivation_block alias-vs-stem type name mismatch; b5_nu
-     derivation_block not handling present-if-gated embeds). Until
-     SCE upstream addresses all three gaps, this codec remains
-     orphan (Layer A/B pass it standalone; no consumer embeds it).
-     SCE B5-ν substrate landed at vendor/sce pin b719ee3e (Phase A
-     7e785e92 + Phase B b719ee3e).
+     Live arm status — R125c2 integration landed at SCE vendor pin
+     b35dbb66 (R127 pin bump) after SCE upstream's two atomics
+     (11287248 + b35dbb66) closed all six dispatcher-side codegen
+     gaps surfaced in the R125c → R125c1 sequence; see
+     wireexpr_local.scxml header for the per-gap close-out anatomy.
+     This codec is now consumed as the M=0 non-default arm by the
+     wireexpr.scxml parent-tag variant dispatcher; the 8 consumers
+     embed the dispatcher and the `_derived_header` block leaves
+     header.M at 0x00 when the runtime wireexpr variant is
+     `WireexprNonlocal`.
 
      Editorial trace — R125b's audit half originally bound this arm
      to wire M=1 (decoder-perspective reading of message.c:133's

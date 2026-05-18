@@ -68,29 +68,32 @@
      (suffix_len gates suffix's length source) + B5-ζ surface H string
      + Y0a lifted parser ban (`sce:type="string"` + `sce:present-if`).
 
-     Orphan status — R125c integration deferred per SCE upstream
-     gaps:
-       1. SCE B5-γ requires-parent-flags does NOT propagate through a
-          B5-ν variant dispatcher to the arm bodies (cross-doc
-          validator rejects arm body's <sce:requires-parent-flags
-          carrier="header"> with "parent codec has no field named
-          'header'" when the parent is a dispatcher that itself uses
-          requires-parent-flags). This prevents arm bodies from
-          gating the suffix on parent.N — the natural design.
-       2. SCE b5_nu_derivation_block emits the variant enum type name
-          from the consumer's import alias (e.g. CodecZenohWireexpr
-          + "Variant") but the actual variant type is generated from
-          the dispatcher's stem (WireexprVariant), producing an
-          undeclared-type compile error in the consumer.
-       3. SCE b5_nu_derivation_block does not handle present-if-gated
-          embeds — for embeds wrapped in Option<Wireexpr>, the
-          generated match references `self.field.body` directly
-          instead of unwrapping the Option first, producing a
-          no-field-on-Option compile error.
-     Until SCE upstream addresses all three gaps, this codec remains
-     orphan (Layer A/B pass it standalone; no consumer embeds it).
-     SCE B5-ν substrate landed at vendor/sce pin b719ee3e (Phase A
-     7e785e92 + Phase B b719ee3e).
+     Live arm status — R125c2 integration landed at SCE vendor pin
+     b35dbb66 (R127 pin bump). SCE atomics 11287248 + b35dbb66
+     together close six dispatcher-side codegen gaps surfaced in the
+     R125c → R125c1 sequence: (1) B5-γ chain-following carrier
+     resolution via FlagLayoutSource::{Terminal, Forwarding} at
+     sce-build/src/forge/generator.rs:3380 so the arm body's
+     `<sce:requires-parent-flags carrier="header">` resolves through
+     the wireexpr.scxml dispatcher's own RPF declaration to the
+     grandparent consumer's `header` field; (2) b5_nu_embed_pascal
+     helper at generator.rs:9492 resolves the consumer's import alias
+     to the dispatcher's emitted type name at emit time; (3)
+     B5NuDerivation.present_if substrate at generator.rs:9313 plus
+     per-backend Option-handling for present-if-gated embeds; (4+5)
+     body_parent_flags_value_expr helper at generator.rs:3383
+     branches on FlagLayoutSource to emit `parent_flags` at the
+     dispatcher's own arm-dispatch sites when Forwarding (not the
+     RPF carrier name literal); (6) Rust include_stmt brace-list
+     augmentation at lib.rs:2760-2774 emits
+     `use super::wireexpr::{Wireexpr, WireexprVariant};` at the
+     consumer site so the encoder match resolves the variant type.
+     This codec is now consumed as the M=1 default arm by the
+     wireexpr.scxml parent-tag variant dispatcher; the 8 consumers
+     (push, request, response, interest_body, decl_kexpr,
+     decl_subscriber, decl_queryable, decl_token) embed the
+     dispatcher and the `_derived_header` block sets header.M=0x40
+     when the runtime wireexpr variant is `WireexprLocal`.
 
      Editorial trace — R125b's audit half originally bound this arm
      to wire M=0 (decoder-perspective reading of message.c:133's

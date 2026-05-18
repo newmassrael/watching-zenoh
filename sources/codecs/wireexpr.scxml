@@ -4,62 +4,129 @@
   SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
 <!-- SCE Forge conformance: Zenoh wireexpr (RFC §5.B Y0a — Wire RFC
-     Phase B Y0a foundation). Body codec (parent-scope) consumed by
-     all 8 declare sub-types (decl_keyexpr / decl_subscriber /
-     decl_queryable / decl_token + their undecl_* counterparts via
-     ext_keyexpr) AND by 6 network MID codecs (request / response /
-     response_final / declare / interest / oam) AND by interest
-     payloads. 15+ consumers across Wire RFC Phase B Batches 2/3/4.
+     Phase B Y0a foundation, R125c2 restructure to B5-ν parent-tag
+     variant dispatch at SCE vendor pin b35dbb66). Thin parent-tag
+     variant dispatcher with no own wire fields; the dispatched arm
+     body (`wireexpr_local.scxml` or `wireexpr_nonlocal.scxml`)
+     carries the id + parent.N-gated suffix fields. Body codec
+     consumed by 8 network/declare codecs across Wire RFC Phase B
+     Batches 2/3/4: push, request, response, interest_body,
+     decl_kexpr, decl_subscriber, decl_queryable, decl_token.
 
-     Mirrors zenoh-pico `_z_wireexpr_encode` /
-     `_z_wireexpr_decode` (src/protocol/codec/message.c lines 115-145)
-     verbatim — the wireexpr is a fragment with no header byte of its
-     own; the `has_suffix` external bool (caller's per-MID header N
-     flag) gates the optional UTF-8 suffix. SCE expresses this via
-     `<sce:requires-parent-flags carrier="header"><sce:flag name="N"
-     bit="5"/></sce:requires-parent-flags>` — the bit position 5
-     mirrors `_Z_DECL_KEXPR_FLAG_N = 0x20`,
-     `_Z_DECL_SUBSCRIBER_FLAG_N = 0x20`, and the equivalent N flag in
-     all other declare sub-types (declarations.h:26-30). Network MID
-     consumers (network.c:53, :124) and interest (interest.c:63) call
-     `_z_wireexpr_encode(wbf, has_suffix, ...)` with their own
-     per-message header's N bit at the same position.
+     Pre-R125c2 shape (vendor pin 11f1032d through R125b at pin
+     b719ee3e; R126 advanced pin to 11287248; R127 advanced pin to
+     b35dbb66) — flat leaf with the id + parent.N-gated suffix
+     fields directly in the wireexpr datamodel; body byte-identical
+     to SCE upstream codec_zenoh_wireexpr fixture. zenoh-pico's
+     `_z_wireexpr_encode` / `_z_wireexpr_decode`
+     (src/protocol/codec/message.c lines 115-146) mirror that shape
+     one-for-one.
 
-     Wire shape (1+VLEbytes, or 1+VLEbytes+VLElen+sufflen bytes):
-       byte 0+  : id          (VLE u64, always; zenoh-pico stores u16
-                                but encodes/decodes via _z_zsize/zint16
-                                shared VLE shape; SCE picks u64 for
-                                upper bound — actual values fit u16)
-       parent.N : suffix_len  (VLE u64, present iff parent.N=1)
-                  suffix      (UTF-8 string, length=suffix_len, max 128,
-                               present iff parent.N=1)
+     R125c2 shape — thin parent-tag variant dispatcher. The wire
+     byte sequence is bit-identical between the two arms — the
+     variant is a type-level refinement on the decoded struct
+     (encoder's local vs. remote-mapped keyexpr), driven by the
+     parent header's M flag per zenoh-pico encoder construction at
+     src/protocol/codec/network.c lines 42, 116, 250:
 
-     Co-gating contract: `suffix_len` and `suffix` BOTH carry
-     `sce:present-if="parent.N"` so the streaming decoder reads
-     neither when N=0 and both when N=1. Mirrors codec_zenoh_init_body
-     cookie_len + cookie + parent.A pattern (B5-ι Batch 1).
+         header = ... | (_z_wireexpr_is_local(&msg->_key)
+                            ? _Z_FLAG_N_REQUEST_M : 0);
 
-     Composition: B1-α VLE (id, suffix_len) + B5-γ Parent-scope
-     present-if (parent.N, no negation) + B2-β present-if + length-ref
-     (suffix_len gates suffix's length source) + B5-ζ Surface H string
-     + Y0a lifted parser ban (`sce:type="string"` + `sce:present-if`).
-     No new primitive surface beyond the lift.
+     `_z_wireexpr_is_local` (include/zenoh-pico/protocol/core.h:182)
+     is the inline test `expr->_mapping == _Z_KEYEXPR_MAPPING_LOCAL`
+     where the LOCAL sentinel is `(uintptr_t)0` (core.h:151). The
+     wire M-bit therefore signals encoder-perspective locality:
 
-     Body byte-identical to SCE upstream codec_zenoh_wireexpr at
-     vendor pin 11f1032d; diff in SPDX header + file stem + root
-     name (wz convention: name=wireexpr matches stem). -->
+       M = 1  ⇔  sender's wireexpr was local-rooted at encode time;
+                 dispatcher selects `wireexpr_local` arm
+       M = 0  ⇔  sender's wireexpr was remote-rooted (peer mapping);
+                 dispatcher selects `wireexpr_nonlocal` arm
+
+     Arm assignment (production-correct per zenoh-pico encoder
+     semantics):
+
+       <sce:arm value="0x00" type="wireexpr_nonlocal"/>
+         — wire M=0 (sender's wireexpr was remote-rooted).
+       <sce:arm value="0x01" type="wireexpr_local" default="true"/>
+         — wire M=1 (sender's wireexpr was local-rooted); marked
+         default to preserve the zenoh-pico default-state wire
+         shape — `_z_wireexpr_t` zero-init has `_mapping == 0 ==
+         _Z_KEYEXPR_MAPPING_LOCAL` so `_z_wireexpr_is_local`
+         returns true and zenoh-pico's encoders OR in M=1. Marking
+         Local as the default arm makes `Wireexpr::default()`
+         return the Local variant so `Push::default().encode()`
+         emits M=1 in the parent header byte, matching the wz
+         Layer 3 round-trip baselines (crates/wz-integration-tests/
+         tests/layer3_push.rs etc.) calibrated against zenoh-pico's
+         `_z_push_encode` on a zero-init message.
+
+     Two parent-flag dependencies thread through the dispatcher to
+     the arm bodies via the SCE b35dbb66 chain-following carrier
+     resolution (FlagLayoutSource::Forwarding in
+     sce-build/src/forge/generator.rs:3380; the dispatcher's own
+     decode/encode forward parent_flags to the arm calls per the
+     body_parent_flags_value_expr helper at generator.rs:3383):
+
+       parent.M bit=6  drives the variant dispatch (this codec's
+                       own `<sce:variant tag="parent.M">`); mirrors
+                       `_Z_FLAG_N_PUSH_M = _Z_FLAG_N_REQUEST_M =
+                       _Z_FLAG_N_RESPONSE_M = 0x40` (zenoh-pico
+                       include/zenoh-pico/protocol/definitions/network.h
+                       lines 64, 71, 78).
+       parent.N bit=5  gates the optional suffix inside each arm
+                       body; mirrors `_Z_FLAG_N_PUSH_N =
+                       _Z_FLAG_N_REQUEST_N = _Z_FLAG_N_RESPONSE_N =
+                       0x20` (network.h:63, 70, 77) and the
+                       equivalent declare-family N flag at
+                       definitions/declarations.h:26-30. The arm
+                       bodies declare `<sce:requires-parent-flags
+                       carrier="header"><sce:flag name="N" bit="5"/>
+                       </sce:requires-parent-flags>` and SCE's
+                       chain validator resolves it through this
+                       dispatcher's RPF block to the grandparent
+                       header.
+
+     Type-level refinement value — the generated Rust output is a
+     tagged-union shape (`pub enum WireexprVariant {
+     WireexprLocal(WireexprLocal), WireexprNonlocal(WireexprNonlocal)
+     }` wrapped in `pub struct Wireexpr { body: WireexprVariant }`)
+     that statically prevents the misuse class where caller code
+     accidentally hands a remote-mapped wireexpr to an API expecting
+     locally-rooted ids. Encoder-side M bit derivation happens
+     automatically at the consumer codec via SCE's
+     b5_nu_derivation_block (the `_derived_header` local + 0x40 /
+     0x00 match per arm; the consumer's `use` statement is auto-
+     emitted in brace-list form: `use super::wireexpr::{Wireexpr,
+     WireexprVariant};` per atomic b35dbb66's lib.rs:2760-2774
+     enrichment). The six envelope consumers (push, request,
+     response, decl_subscriber, decl_token, decl_queryable) drop
+     their static `<sce:flag name="M" value="1"/>` baking in this
+     same round (SCE Q-3 cross-doc validator forbids derivation +
+     static-value coexistence; default-state M=1 wire shape is
+     preserved by the wireexpr_local default-arm marker).
+
+     Body-identity break vs SCE upstream — the SCE
+     codec_zenoh_wireexpr.scxml fixture at vendor pin b35dbb66 is
+     still the flat pre-R125c2 shape (id + parent.N-gated suffix as
+     direct fields). wz's R125c2 shift to the B5-ν dispatcher form
+     is the production-correct adoption sequence terminus for SCE's
+     B5-ν substrate; wz enters scripts/run-ci.sh
+     LAYER2_KNOWN_DIVERGENCE for the `wireexpr` stem until SCE
+     upstream lifts its leaf into the same dispatch shape (audit
+     trail: R125c2 entry). -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="wireexpr">
+  <sce:import src="wireexpr_local.scxml" kind="codec" as="wireexpr_local"/>
+  <sce:import src="wireexpr_nonlocal.scxml" kind="codec" as="wireexpr_nonlocal"/>
   <sce:requires-parent-flags carrier="header">
     <sce:flag name="N" bit="5"/>
+    <sce:flag name="M" bit="6"/>
   </sce:requires-parent-flags>
   <datamodel>
-    <sce:field id="id" sce:type="uint64" sce:byte="0" sce:bit-size="vle"/>
-    <sce:field id="suffix_len" sce:type="uint64" sce:byte="1" sce:bit-size="vle"
-               sce:present-if="parent.N"/>
-    <sce:field id="suffix" sce:type="string" sce:byte="2" sce:bit-size="length-ref"
-               sce:length-field="suffix_len" sce:max-size="128"
-               sce:present-if="parent.N"/>
+    <sce:variant tag="parent.M">
+      <sce:arm value="0x00" type="wireexpr_nonlocal"/>
+      <sce:arm value="0x01" type="wireexpr_local" default="true"/>
+    </sce:variant>
   </datamodel>
 </scxml>
