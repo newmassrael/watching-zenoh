@@ -5,21 +5,27 @@
 //! `NetworkMessage::Push` records to user-registered callbacks
 //! filtered by keyexpr literal.
 //!
-//! ## Scope (R98 — AP MVP critical path)
+//! ## Scope (R98 + R99 + R100 — AP MVP critical path)
 //!
 //! - Push messages only. R90 landed Push decoding; R98 wires the
 //!   FramePayload → subscriber → callback path so an application can
-//!   actually observe pub/sub data over a session.
-//! - Literal keyexpr matching only. A registered subscriber's filter
-//!   is matched against `Push.keyexpr.suffix` (the inline
-//!   UTF-8 string) when `Push.keyexpr.id == 0` (sentinel mapping).
-//!   Non-zero mapping ids reference a DECLARE-established table that
-//!   this crate does NOT model yet; such Pushes are filtered out at
-//!   dispatch time and never invoke a callback. Closing that gap
-//!   requires the DECLARE codec chain (deferred).
+//!   actually observe pub/sub data over a session; R99 added the
+//!   `dispatch_iteration_event` adapter so the registry plugs into
+//!   `drive_session_until_terminal` as an observer.
+//! - Keyexpr matching follows zenoh-spec chunk wildcards (R100):
+//!   chunks are split on `/`, `*` matches exactly one chunk, `**`
+//!   matches zero or more chunks (including the empty sequence),
+//!   literal chunks compare byte-for-byte. The `$*` intra-chunk
+//!   substring wildcard from full zenoh is NOT modeled — production
+//!   AP MVP use cases (e.g. `home/**`, `sensors/*/temp`) work
+//!   without it, and adding `$*` requires per-chunk pattern
+//!   compilation that doesn't pay off until a consumer surfaces.
+//!   Pushes whose `keyexpr.id == 0` and `keyexpr.suffix == Some(s)`
+//!   match against the pattern's wildcard expansion; mapping-id
+//!   pushes (`id != 0`) are filtered out (DECLARE codec deferred).
 //! - Reply / Err / Interest / OAM dispatch are NOT routed through
-//!   the registry in R98. They land in a future round once a use
-//!   case surfaces — pub/sub demo is sufficient for the AP MVP.
+//!   the registry. They land in a future round once a use case
+//!   surfaces — pub/sub demo is sufficient for the AP MVP.
 //!
 //! ## Threading
 //!
@@ -70,8 +76,79 @@ impl SubscriptionId {
 
 struct Subscriber {
     id: SubscriptionId,
-    keyexpr_literal: String,
+    /// Pre-split pattern chunks. Empty literal chunks are preserved
+    /// so a pattern like `a//b` (which canonical zenoh treats as a
+    /// chunk-with-empty-string) distinguishes from `a/b`. Wildcards
+    /// `*` and `**` appear as single-char chunk entries; matching is
+    /// performed by [`keyexpr_pattern_matches`].
+    pattern_chunks: Vec<String>,
     callback: SubscriberCallback,
+}
+
+/// Match a `/`-separated zenoh keyexpr `target` (Push's suffix) against
+/// a pattern split into chunks. Pattern chunks are:
+///
+/// * `**` — matches zero or more target chunks.
+/// * `*`  — matches exactly one target chunk (any content).
+/// * any other chunk — must compare byte-for-byte against the
+///   corresponding target chunk.
+///
+/// Returns `true` when the target is covered by the pattern.
+///
+/// The matcher is implemented as a non-recursive two-cursor walk
+/// over pattern + target with a single `**` backtrack frame, mirror-
+/// ing standard glob-match algorithms. Worst-case complexity is
+/// `O(|pattern| * |target|)` when the pattern contains a single
+/// `**`; with multiple `**` the algorithm degrades only on
+/// pathological inputs (the productive zenoh-style patterns
+/// `home/**` / `sensors/*/temp` stay linear).
+pub fn keyexpr_pattern_matches(pattern_chunks: &[&str], target: &str) -> bool {
+    let target_chunks: Vec<&str> = target.split('/').collect();
+    matches_chunks(pattern_chunks, &target_chunks)
+}
+
+fn matches_chunks(pattern: &[&str], target: &[&str]) -> bool {
+    let mut pi = 0;
+    let mut ti = 0;
+    // Backtrack frame for the last `**` encountered. When a
+    // subsequent literal mismatch occurs we rewind pattern to one-
+    // past-`**` and advance target by one, letting `**` consume one
+    // more chunk before re-attempting the suffix.
+    let mut star_star_pi: Option<usize> = None;
+    let mut star_star_ti: usize = 0;
+
+    while ti < target.len() {
+        if pi < pattern.len() {
+            let pat = pattern[pi];
+            if pat == "**" {
+                star_star_pi = Some(pi);
+                star_star_ti = ti;
+                pi += 1;
+                continue;
+            }
+            if pat == "*" || pat == target[ti] {
+                pi += 1;
+                ti += 1;
+                continue;
+            }
+        }
+        // Mismatch (literal differs, or pattern is exhausted while
+        // target still has chunks). If we are inside a `**` frame,
+        // backtrack by absorbing one more target chunk into `**`.
+        if let Some(saved_pi) = star_star_pi {
+            star_star_ti += 1;
+            ti = star_star_ti;
+            pi = saved_pi + 1;
+        } else {
+            return false;
+        }
+    }
+    // Target exhausted. Pattern must be exhausted too, except for a
+    // trailing `**` which matches zero chunks.
+    while pi < pattern.len() && pattern[pi] == "**" {
+        pi += 1;
+    }
+    pi == pattern.len()
 }
 
 /// Subscriber table backing the FramePayload → callback dispatch.
@@ -100,21 +177,26 @@ impl SubscriberRegistry {
         }
     }
 
-    /// Register a subscriber for a literal keyexpr. The returned
-    /// `SubscriptionId` is stable until [`unregister`] is called.
-    /// Duplicate keyexpr literals are allowed and produce distinct
-    /// subscriptions — `dispatch` fires every matching callback in
-    /// registration order.
+    /// Register a subscriber for a keyexpr pattern. Pattern syntax
+    /// matches zenoh chunk wildcards: `/`-separated chunks where
+    /// each chunk is a literal, `*` (single chunk), or `**` (zero
+    /// or more chunks). The returned `SubscriptionId` is stable
+    /// until [`unregister`](Self::unregister) is called. Duplicate
+    /// patterns are allowed and produce distinct subscriptions —
+    /// `dispatch` fires every matching callback in registration
+    /// order.
     pub fn register(
         &mut self,
-        keyexpr: impl Into<String>,
+        keyexpr_pattern: impl Into<String>,
         callback: impl FnMut(&Push) + Send + 'static,
     ) -> SubscriptionId {
         let id = SubscriptionId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
+        let pattern_chunks: Vec<String> =
+            keyexpr_pattern.into().split('/').map(String::from).collect();
         self.subscribers.push(Subscriber {
             id,
-            keyexpr_literal: keyexpr.into(),
+            pattern_chunks,
             callback: Box::new(callback),
         });
         id
@@ -182,7 +264,9 @@ impl SubscriberRegistry {
             None => return,
         };
         for subscriber in &mut self.subscribers {
-            if subscriber.keyexpr_literal == suffix {
+            let chunks: Vec<&str> =
+                subscriber.pattern_chunks.iter().map(String::as_str).collect();
+            if keyexpr_pattern_matches(&chunks, suffix) {
                 (subscriber.callback)(push);
             }
         }
@@ -322,6 +406,116 @@ mod tests {
             counter.load(Ordering::SeqCst),
             0,
             "non-Push variants do not fire subscriber callbacks in R98 scope"
+        );
+    }
+
+    // ── R100 wildcard matcher behaviour ──
+
+    #[test]
+    fn keyexpr_pattern_matches_literal_equality() {
+        assert!(keyexpr_pattern_matches(&["home", "temp"], "home/temp"));
+        assert!(!keyexpr_pattern_matches(&["home", "temp"], "home/humid"));
+        assert!(!keyexpr_pattern_matches(&["home"], "home/temp"));
+        assert!(!keyexpr_pattern_matches(&["home", "temp"], "home"));
+    }
+
+    #[test]
+    fn keyexpr_pattern_matches_single_chunk_wildcard() {
+        // `*` matches exactly one chunk.
+        assert!(keyexpr_pattern_matches(&["home", "*", "temp"], "home/kitchen/temp"));
+        assert!(keyexpr_pattern_matches(&["home", "*", "temp"], "home/bedroom/temp"));
+        // The wildcard does NOT match zero chunks.
+        assert!(!keyexpr_pattern_matches(&["home", "*", "temp"], "home/temp"));
+        // The wildcard does NOT span chunk boundaries.
+        assert!(!keyexpr_pattern_matches(&["home", "*", "temp"], "home/kitchen/sub/temp"));
+    }
+
+    #[test]
+    fn keyexpr_pattern_matches_double_star_zero_or_more() {
+        // `**` matches zero chunks.
+        assert!(keyexpr_pattern_matches(&["home", "**"], "home"));
+        // `**` matches one chunk.
+        assert!(keyexpr_pattern_matches(&["home", "**"], "home/temp"));
+        // `**` matches many chunks.
+        assert!(keyexpr_pattern_matches(&["home", "**"], "home/kitchen/temp/c"));
+        // `**` at the prefix.
+        assert!(keyexpr_pattern_matches(&["**", "temp"], "home/kitchen/temp"));
+        assert!(keyexpr_pattern_matches(&["**", "temp"], "temp"));
+        // `**` in the middle.
+        assert!(keyexpr_pattern_matches(
+            &["home", "**", "temp"],
+            "home/temp"
+        ));
+        assert!(keyexpr_pattern_matches(
+            &["home", "**", "temp"],
+            "home/kitchen/temp"
+        ));
+        assert!(keyexpr_pattern_matches(
+            &["home", "**", "temp"],
+            "home/a/b/c/temp"
+        ));
+        // Negative: literal suffix must still align.
+        assert!(!keyexpr_pattern_matches(
+            &["home", "**", "temp"],
+            "home/kitchen/humid"
+        ));
+    }
+
+    #[test]
+    fn dispatch_fires_callback_on_wildcard_match() {
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("sensors/*/temp", move |_push| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let push = push_with_keyexpr("sensors/room1/temp");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "single-chunk `*` matches the target's middle chunk"
+        );
+    }
+
+    #[test]
+    fn dispatch_fires_callback_on_double_star_prefix() {
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("home/**", move |_push| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let push = push_with_keyexpr("home/kitchen/sensor/c");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "`home/**` matches any descendant of `home`"
+        );
+    }
+
+    #[test]
+    fn dispatch_skips_callback_on_wildcard_mismatch() {
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("sensors/*/temp", move |_push| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        // `sensors/temp` lacks the middle chunk that `*` requires.
+        let push = push_with_keyexpr("sensors/temp");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "`*` does not collapse to zero chunks"
         );
     }
 
