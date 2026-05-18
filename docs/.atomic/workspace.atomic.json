@@ -3454,6 +3454,60 @@
         "M-flag baking is now a wz semantic decision: a freshly-built wireexpr without prior DECLARE is treated as LOCAL (sender-mapping). wire-spec-subset doc could record this explicitly under §6.1/6.2/6.3 to remove the implicit-default ambiguity — deferred to a follow-up doc round to keep R106 focused on the codec layer."
       ]
     },
+    "Round 107": {
+      "decision_summary": "R107 closes the INTEREST M-flag carry from R104/R106 with a decision-only outcome: interest_body keeps M=0 default (no baking), because the M-flag in INTEREST is R-gate (RESTRICTED bit) dependent and wz default (R=0) would produce wire M=1 against zenoh-pico's wire M=0 if the M=1-baking pattern from R106 were applied uniformly.",
+      "changes_bullets": [
+        "No code change. interest_body.scxml:74 (`<sce:flag name=\"M\" bit=\"6\"/>` without `value=`) is the correct shape for INTEREST and is preserved verbatim.",
+        "Audit performed by direct read of zenoh-pico/src/protocol/codec/interest.c:41-69: _z_interest_encode branches on `_Z_INTEREST_FLAG_RESTRICTED` (bit 4). When R=1 it sets `_Z_INTEREST_CODEC_FLAG_M = 0x40` from `_z_wireexpr_is_local(&_keyexpr)`; when R=0 it emits `interest->flags` unchanged (flags byte initialized to 0 by `_z_interest_null()`).",
+        "wz interest_body default is R=0 (the entire wireexpr embed is `sce:present-if=\"header.R\"`-gated). M=1 baking under that default would emit wire M=1 while zenoh-pico's natural default emits wire M=0 — direct wire-byte regression. The R106 baking pattern only fits codecs whose wireexpr is unconditionally present (push/response/request); INTEREST is structurally different.",
+        "R104 layer3_interest fixture asserts the is_final form (`[0x19, 0x00]`) where the outer envelope's `is_final` branch in `_z_n_interest_encode` skips the flags byte entirely. R107 decision therefore does not touch R104's wire assertion. Verified by reading crates/wz-integration-tests/tests/layer3_interest.rs:26-45.",
+        "carry split: R=1 non-final INTEREST Layer 3 coverage is handed off cleanly to the non-default Layer 3 quality round; that round's fixture will hold the wireexpr LOCAL state (mapping=0) so the pico encoder's R=1 branch sets M=1 — matching wz only after that round's authoring decides whether wz interest_body's R=1 path needs `value=` baking or a conditional emit primitive."
+      ],
+      "verification_bullets": [
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 119 → 120, sections=214, GENERATED.md=sync.",
+        "No build/test impact (no source change). Last full CI 5-lane green from R106 commit 8933dff stands.",
+        "Carry chain closure tally: R102 (PUSH M-flag) closed by R106; R104 (INTEREST M-flag) closed by R107 decision; R105 (RESPONSE M-flag fixture patch) closed by R106 fixture cleanup; R106 (interest_body M-flag audit) closed by this entry. Three-round accumulated M-flag carry chain fully terminated.",
+        "Audit primary sources: zenoh-pico/src/protocol/codec/interest.c (R=1 branch lines 52-63, R=0 branch lines 64-67); zenoh-pico/include/zenoh-pico/protocol/definitions/interest.h:26-33 flag bit definitions; wz sources/codecs/interest_body.scxml:67-78 datamodel; crates/wz-integration-tests/tests/layer3_interest.rs:26-45 fixture."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer"
+      ],
+      "carry_forward_bullets": [
+        "R=1 non-final INTEREST Layer 3 coverage — fixture for `_interest.flags = _Z_INTEREST_FLAG_RESTRICTED | _Z_INTEREST_FLAG_CURRENT` (or FUTURE) with wireexpr LOCAL mapping. Decision deferred there: whether wz interest_body's R=1 default needs conditional M=1 baking (a new SCE primitive) or a hand-written test variant that pre-sets `header = 0x50` (R | M). Part of the non-default Layer 3 quality round.",
+        "DECLARE codec (MID 0x1E) chain — still the last unmodeled application-layer MID. 9 declaration sub-types per zenoh-pico declarations.c. Multi-round chain.",
+        "REQUEST Layer 3 wire-interop — R106 baked Request::default()'s header to 0x40 but no Layer 3 fixture validates the wire bytes against zenoh-pico's `_z_request_encode`. Same-shape fixture as R102/R105 (zenoh-pico-sys allowlist for `_z_n_msg_request_t` + `_z_request_encode`, then default-state byte-compare). 1-round closure.",
+        "wire-spec-subset doc update — §6.1/§6.2/§6.3 should record the R106 mapping=LOCAL default semantic (\"a freshly-built wireexpr without prior DECLARE is sender-mapping\"). Doc-only round. 1-round closure.",
+        "AP MVP demo binary — Linux + tokio binary against zenoh-pico peer; 2-3 rounds."
+      ],
+      "publishable_decision_summary": "R107 closes the INTEREST M-flag carry from R104/R106 with a decision-only outcome: interest_body keeps M=0 default (no baking), because the M-flag in INTEREST is R-gate (RESTRICTED bit) dependent and wz default (R=0) would produce wire M=1 against zenoh-pico's wire M=0 if the M=1-baking pattern from R106 were applied uniformly.",
+      "publishable_changes_bullets": [
+        "No code change. interest_body.scxml:74 (`<sce:flag name=\"M\" bit=\"6\"/>` without `value=`) is the correct shape for INTEREST and is preserved verbatim.",
+        "Audit performed by direct read of zenoh-pico/src/protocol/codec/interest.c:41-69: _z_interest_encode branches on `_Z_INTEREST_FLAG_RESTRICTED` (bit 4). When R=1 it sets `_Z_INTEREST_CODEC_FLAG_M = 0x40` from `_z_wireexpr_is_local(&_keyexpr)`; when R=0 it emits `interest->flags` unchanged (flags byte initialized to 0 by `_z_interest_null()`).",
+        "wz interest_body default is R=0 (the entire wireexpr embed is `sce:present-if=\"header.R\"`-gated). M=1 baking under that default would emit wire M=1 while zenoh-pico's natural default emits wire M=0 — direct wire-byte regression. The R106 baking pattern only fits codecs whose wireexpr is unconditionally present (push/response/request); INTEREST is structurally different.",
+        "R104 layer3_interest fixture asserts the is_final form (`[0x19, 0x00]`) where the outer envelope's `is_final` branch in `_z_n_interest_encode` skips the flags byte entirely. R107 decision therefore does not touch R104's wire assertion. Verified by reading crates/wz-integration-tests/tests/layer3_interest.rs:26-45.",
+        "carry split: R=1 non-final INTEREST Layer 3 coverage is handed off cleanly to the non-default Layer 3 quality round; that round's fixture will hold the wireexpr LOCAL state (mapping=0) so the pico encoder's R=1 branch sets M=1 — matching wz only after that round's authoring decides whether wz interest_body's R=1 path needs `value=` baking or a conditional emit primitive."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 119 → 120, sections=214, GENERATED.md=sync.",
+        "No build/test impact (no source change). Last full CI 5-lane green from R106 commit 8933dff stands.",
+        "Carry chain closure tally: R102 (PUSH M-flag) closed by R106; R104 (INTEREST M-flag) closed by R107 decision; R105 (RESPONSE M-flag fixture patch) closed by R106 fixture cleanup; R106 (interest_body M-flag audit) closed by this entry. Three-round accumulated M-flag carry chain fully terminated.",
+        "Audit primary sources: zenoh-pico/src/protocol/codec/interest.c (R=1 branch lines 52-63, R=0 branch lines 64-67); zenoh-pico/include/zenoh-pico/protocol/definitions/interest.h:26-33 flag bit definitions; wz sources/codecs/interest_body.scxml:67-78 datamodel; crates/wz-integration-tests/tests/layer3_interest.rs:26-45 fixture."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R=1 non-final INTEREST Layer 3 coverage — fixture for `_interest.flags = _Z_INTEREST_FLAG_RESTRICTED | _Z_INTEREST_FLAG_CURRENT` (or FUTURE) with wireexpr LOCAL mapping. Decision deferred there: whether wz interest_body's R=1 default needs conditional M=1 baking (a new SCE primitive) or a hand-written test variant that pre-sets `header = 0x50` (R | M). Part of the non-default Layer 3 quality round.",
+        "DECLARE codec (MID 0x1E) chain — still the last unmodeled application-layer MID. 9 declaration sub-types per zenoh-pico declarations.c. Multi-round chain.",
+        "REQUEST Layer 3 wire-interop — R106 baked Request::default()'s header to 0x40 but no Layer 3 fixture validates the wire bytes against zenoh-pico's `_z_request_encode`. Same-shape fixture as R102/R105 (zenoh-pico-sys allowlist for `_z_n_msg_request_t` + `_z_request_encode`, then default-state byte-compare). 1-round closure.",
+        "wire-spec-subset doc update — §6.1/§6.2/§6.3 should record the R106 mapping=LOCAL default semantic (\"a freshly-built wireexpr without prior DECLARE is sender-mapping\"). Doc-only round. 1-round closure.",
+        "AP MVP demo binary — Linux + tokio binary against zenoh-pico peer; 2-3 rounds."
+      ]
+    },
     "Round 11": {
       "decision_summary": "OQ-W15 (a) closure (Q1=No RNG → plugin / Q2=Yes HMAC → plugin ratified) + OQ-W24 registration as SCE counter-offer track for §5.I tier-explicit separation",
       "changes_bullets": [
