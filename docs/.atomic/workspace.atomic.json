@@ -4378,6 +4378,50 @@
         "Carry-misdiagnosis pattern accumulating evidence — R114 carry's 'R68 / R69 / R71' tri-claim was all stale (R68 inbound parser already existed under different round labels, R69 Hal time-mock was infeasible pre-fa3a2fda but the carry didn't note that, R71 split was already merged at 3b398b9). Memory feedback_diagnose_before_carry was extended in this session with the 'roadmap label staleness' variant; future kickoff should grep the codebase for symbols the carry implies are missing before accepting the scope name."
       ]
     },
+    "Round 117": {
+      "decision_summary": "R117 closes the R111/R114/R115 yml-sync carry by adding the Layer A2 step (R111 audit-mid-values.sh envelope mid value= audit gate) to .github/workflows/ci.yml. The carry's parallel \"Layer B freshness gate missing from yml\" claim was a fourth carry-misdiagnosis instance in this carry chain — the R114 freshness gate lives inside `bash scripts/run-ci.sh --layer B` so the CI yml's existing Layer B invocation already covers it (auto-rebuild against a fresh checkout is moot anyway because CI clean-build forces a fresh sce-codegen every workflow run). Only Layer A2 was genuinely missing from the yml.",
+      "changes_bullets": [
+        ".github/workflows/ci.yml adds a `Layer A2 — Envelope mid value= audit` step between Layer A and Layer B, delegating to `bash scripts/run-ci.sh --layer A2` so the yml stays consistent with the local pre-push hook's invocation shape (single source of truth for lane bodies lives in scripts/run-ci.sh per R65b dedupe).",
+        ".github/workflows/ci.yml header comment block gains a Layer A2 paragraph capturing the R108a precedent (request.scxml missing `value=` since R90 emitting first wire byte 0x40 instead of 0x5C, with wz-side round-trip staying green because the bake was internally consistent — only the Layer 3 wire-compare against zenoh-pico's `_z_request_encode` surfaced the defect at R108b). Documents WHY the audit script exists for future readers.",
+        "Carry-misdiagnosis classification — R114/R115/R116 carry-forward bullets all stated `Layer A2 + Layer B freshness gate yml-sync carry`. Investigation in this round revealed the Layer B freshness gate is internal to scripts/run-ci.sh's `layer_b_verify_codegen` function (lines 127-151) so CI's existing `--layer B` invocation already runs it. Only Layer A2 needed a separate yml step. The carry text propagated through 3 rounds without the underlying claim being verified — same pattern as R68/R69/R71 in this session's R114 carry."
+      ],
+      "verification_bullets": [
+        "bash scripts/run-ci.sh --layer A2 passes locally: `audit-mid-values: 40 file(s) clean — every envelope mid carries value=`.",
+        "scripts/run-ci.sh full 7-lane (0 / A / A2 / B / C1 / C2 / D) passes locally end-to-end with no regression.",
+        "validate_workspace: T1=0 / RT 12/12 / GENERATED.md=sync; atomic ledger entries 134 -> 135 from this entry only.",
+        "yml change is structural-only (one new step + one header comment paragraph); no behavior change for the lane logic itself which lives in scripts/run-ci.sh. The next push to main will exercise the new step on GitHub Actions; the script body is the same one local pre-push hooks have been running since R111."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Carry-misdiagnosis surveillance — this round retired the `Layer B freshness gate yml-sync` carry as misdiagnosis. Future kickoff should grep the codebase for the symbols a carry implies are missing before accepting its scope name (per the R115/R116 expansion of feedback_diagnose_before_carry).",
+        "AP MVP demo binary remains the next textbook milestone per R116 carry. R117 paid down a CI hygiene debt en route.",
+        "SCE upstream PR for R88/R106/R108a divergences — unchanged from prior carries.",
+        "Negative-test for R114 freshness gate — explicitly marked `not gating` in R114's own carry; R117 does not pursue it. Defense-in-depth surface for a later defensive round."
+      ],
+      "publishable_decision_summary": "R117 closes the R111/R114/R115 yml-sync carry by adding the Layer A2 step (R111 audit-mid-values.sh envelope mid value= audit gate) to .github/workflows/ci.yml. The carry's parallel \"Layer B freshness gate missing from yml\" claim was a fourth carry-misdiagnosis instance in this carry chain — the R114 freshness gate lives inside `bash scripts/run-ci.sh --layer B` so the CI yml's existing Layer B invocation already covers it (auto-rebuild against a fresh checkout is moot anyway because CI clean-build forces a fresh sce-codegen every workflow run). Only Layer A2 was genuinely missing from the yml.",
+      "publishable_changes_bullets": [
+        ".github/workflows/ci.yml adds a `Layer A2 — Envelope mid value= audit` step between Layer A and Layer B, delegating to `bash scripts/run-ci.sh --layer A2` so the yml stays consistent with the local pre-push hook's invocation shape (single source of truth for lane bodies lives in scripts/run-ci.sh per R65b dedupe).",
+        ".github/workflows/ci.yml header comment block gains a Layer A2 paragraph capturing the R108a precedent (request.scxml missing `value=` since R90 emitting first wire byte 0x40 instead of 0x5C, with wz-side round-trip staying green because the bake was internally consistent — only the Layer 3 wire-compare against zenoh-pico's `_z_request_encode` surfaced the defect at R108b). Documents WHY the audit script exists for future readers.",
+        "Carry-misdiagnosis classification — R114/R115/R116 carry-forward bullets all stated `Layer A2 + Layer B freshness gate yml-sync carry`. Investigation in this round revealed the Layer B freshness gate is internal to scripts/run-ci.sh's `layer_b_verify_codegen` function (lines 127-151) so CI's existing `--layer B` invocation already runs it. Only Layer A2 needed a separate yml step. The carry text propagated through 3 rounds without the underlying claim being verified — same pattern as R68/R69/R71 in this session's R114 carry."
+      ],
+      "publishable_verification_bullets": [
+        "bash scripts/run-ci.sh --layer A2 passes locally: `audit-mid-values: 40 file(s) clean — every envelope mid carries value=`.",
+        "scripts/run-ci.sh full 7-lane (0 / A / A2 / B / C1 / C2 / D) passes locally end-to-end with no regression.",
+        "validate_workspace: T1=0 / RT 12/12 / GENERATED.md=sync; atomic ledger entries 134 -> 135 from this entry only.",
+        "yml change is structural-only (one new step + one header comment paragraph); no behavior change for the lane logic itself which lives in scripts/run-ci.sh. The next push to main will exercise the new step on GitHub Actions; the script body is the same one local pre-push hooks have been running since R111."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carry-misdiagnosis surveillance — this round retired the `Layer B freshness gate yml-sync` carry as misdiagnosis. Future kickoff should grep the codebase for the symbols a carry implies are missing before accepting its scope name (per the R115/R116 expansion of feedback_diagnose_before_carry).",
+        "AP MVP demo binary remains the next textbook milestone per R116 carry. R117 paid down a CI hygiene debt en route.",
+        "SCE upstream PR for R88/R106/R108a divergences — unchanged from prior carries.",
+        "Negative-test for R114 freshness gate — explicitly marked `not gating` in R114's own carry; R117 does not pursue it. Defense-in-depth surface for a later defensive round."
+      ]
+    },
     "Round 12": {
       "decision_summary": "Dual-license adoption — LGPL-3.0-or-later (Free, anti-tivo included) OR watching-zenoh Commercial (Qt-style 5-way exemption, $5000 individual cumulative)",
       "changes_bullets": [

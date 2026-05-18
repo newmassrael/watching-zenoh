@@ -17,6 +17,16 @@
 #   violation). Pre-commit + pre-push hooks already enforce; CI is
 #   the cross-developer safety net.
 #
+# Layer A2 — Envelope mid value= audit (R111 / R117 CI yml sync):
+#   scripts/audit-mid-values.sh rejects any sources/codecs/*.scxml
+#   whose envelope-level <sce:flag name="mid"> declaration lacks
+#   `value=`. R108a precedent: request.scxml had no mid value=
+#   from R90 onward, emitting first wire byte 0x40 instead of 0x5C;
+#   wz-side round-trip stayed green because the bake was internally
+#   consistent, only the Layer 3 wire-compare against zenoh-pico's
+#   `_z_request_encode` surfaced the defect at R108b. The audit
+#   script is a build-time preventer for that whole class.
+#
 # Layer B — codegen + Layer 3 wire-interop per codec:
 #   For each `sources/codecs/*.scxml` paired with the matching SCE
 #   fixture (when one exists), scripts/verify-codegen.sh runs:
@@ -151,6 +161,14 @@ jobs:
       - name: Layer A — Mnemosyne workspace validate
         if: env.MNEMOSYNE_SKIP != '1'
         run: bash scripts/run-ci.sh --layer A
+
+      - name: Layer A2 — Envelope mid value= audit
+        # R117 yml sync — Layer A2 was added to scripts/run-ci.sh in
+        # R111 but never paired into the CI yml; this step closes
+        # that drift. Layer B's freshness gate (R114) lives INSIDE
+        # `--layer B` so CI gets it automatically; only A2 needed a
+        # separate yml step because it is a top-level layer.
+        run: bash scripts/run-ci.sh --layer A2
 
       - name: Layer B — verify-codegen.sh per codec
         run: bash scripts/run-ci.sh --layer B
