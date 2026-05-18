@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh DECLARE network envelope (§5
+     network-routing layer, MID 0x1E). Brings the application-layer
+     codec catalog from 6/7 to 7/7 MIDs (the last unmodeled
+     network-routing envelope after R101-R108b). Mirrors zenoh-pico
+     `_z_declare_encode` / `_z_declare_decode` (src/protocol/codec/
+     network.c:388-417) verbatim wire shape.
+
+     Wire shape (default state):
+       byte 0   : header (MID 0x1E in bits 0..4 + I@5 + Z@7)
+       I-gated:
+         bytes : interest_id (VLE u32)
+       Z-gated:
+         chain : codec_zenoh_ext_entry tlv-chain (qos ext_id=0x01 +
+                 timestamp ext_id=0x02; entry-flag Z termination)
+       always:
+         bytes : 1-byte declaration header (sub-MID dispatch) + body
+                 via the `body` variant peek-byte
+
+     Sub-MID dispatch (peek-byte first byte after envelope ext chain):
+       0x00 = decl_kexpr        (future round; deferred — R110+ chain)
+       0x01 = undecl_kexpr      (future round; deferred)
+       0x02 = decl_subscriber   (future round; deferred)
+       0x03 = undecl_subscriber (future round; deferred)
+       0x04 = decl_queryable    (future round; deferred)
+       0x05 = undecl_queryable  (future round; deferred)
+       0x06 = decl_token        (future round; deferred)
+       0x07 = undecl_token      (future round; deferred)
+       0x1A = decl_final        (R110a: this round, declared default
+                                 arm — smallest blast radius land)
+
+     R110a scope: envelope skeleton + decl_final sub-codec only.
+     decl_final is the declared default arm of the variant per RFC
+     §5.A R88 variant-default-uniformity, so a freshly-constructed
+     `Declare::default()` round-trips byte-exactly through encode ->
+     decode without any sub-type having been authored beyond
+     decl_final. Subsequent rounds add the remaining 8 sub-MIDs
+     incrementally (decl_kexpr / undecl_kexpr / declare-subscriber
+     family / queryable family / token family).
+
+     Body byte-identical to upstream wire RFC. SCE-side does not
+     have a pre-existing codec_zenoh_declare; this authoring is the
+     wz-side proof point and the upstream parity gate will be the
+     Layer 3 byte-compare in wz-integration-tests once the declare
+     envelope's default state is wired. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="declare">
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <sce:import src="decl_final.scxml" kind="codec" as="codec_zenoh_decl_final"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x1E"/>
+      <sce:flag name="I"   bit="5"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:field id="interest_id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"
+               sce:present-if="header.I"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   max-depth="4" on-overflow="reject"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+    <sce:variant tag="peek.mid">
+      <sce:peek-byte id="peek" sce:type="uint8">
+        <sce:flag name="mid" bit="0" width="5"/>
+      </sce:peek-byte>
+      <sce:arm value="0x1A" type="codec_zenoh_decl_final" default="true"/>
+      <sce:default type="codec_zenoh_decl_final"/>
+    </sce:variant>
+  </datamodel>
+</scxml>

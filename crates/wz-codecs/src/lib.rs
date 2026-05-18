@@ -155,6 +155,14 @@ pub mod response {
     include!(concat!(env!("OUT_DIR"), "/response.rs"));
 }
 
+pub mod decl_final {
+    include!(concat!(env!("OUT_DIR"), "/decl_final.rs"));
+}
+
+pub mod declare {
+    include!(concat!(env!("OUT_DIR"), "/declare.rs"));
+}
+
 #[cfg(test)]
 mod ext_envelope_oracle {
     //! R67b: SCXML-comment oracle pinned as cargo test.

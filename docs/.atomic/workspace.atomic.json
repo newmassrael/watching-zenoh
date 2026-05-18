@@ -3741,6 +3741,68 @@
         "SCE-side action: BASELINE_SYMBOLS doc-comment update concurrent with OQ-W24 ratify exchange"
       ]
     },
+    "Round 110a": {
+      "decision_summary": "R110a opens the DECLARE codec chain (MID 0x1E, the last unmodeled application-layer envelope) with a smallest-blast-radius first contact: envelope skeleton + `decl_final` leaf sub-codec only; declared default arm of the envelope's sub-MID variant is decl_final so `Declare::default()` round-trips byte-exact via `[0x1E, 0x1A]` without any other sub-type authored yet. Subsequent rounds add the remaining 8 sub-MIDs incrementally.",
+      "changes_bullets": [
+        "sources/codecs/decl_final.scxml new — 1-byte leaf sub-codec, `mid value=\"0x1A\"` (matches `_Z_DECL_FINAL_MID` from zenoh-pico/include/zenoh-pico/protocol/codec/declarations.h:36). `_z_decl_final_t` holds only a placeholder bool so the wire is one byte total; the SCXML datamodel is correspondingly empty past the header flags.",
+        "sources/codecs/declare.scxml new — envelope, `mid value=\"0x1E\"` (matches `_Z_MID_N_DECLARE` from network.h:34), I flag bit 5, Z flag bit 7. Datamodel: `interest_id` VLE field gated on `header.I`; `extensions` tlv-chain (codec_zenoh_ext_entry) gated on `header.Z`; sub-type peek-byte variant with one arm so far (0x1A → decl_final, declared `default=\"true\"`). Wire shape mirrors zenoh-pico's `_z_declare_encode` (network.c:388-417).",
+        "crates/wz-codecs/build.rs CODECS list: `decl_final` appended to the leaf section (no imports); `declare` appended to the composer section (imports ext_entry + decl_final). Dependency order preserved.",
+        "crates/wz-codecs/src/lib.rs: `pub mod decl_final` + `pub mod declare` declared at the same level as the other codec modules (codegen output references siblings via `super::X` so flat declaration is the textbook layout, per the file docstring).",
+        "Codegen emit verified directly at target/debug/build/wz-codecs-*/out/: `decl_final.rs:64 header: 0x1au8`; `declare.rs:80 header: 0x1eu8` + `DeclareVariant::default() = CodecZenohDeclFinal(DeclFinal::default())` per R88 variant-default-uniformity. R94-style codegen-inspect verify done before relying on the new types.",
+        "DECLARE envelope's default state wire derivation: zenoh-pico's `_z_declare_encode` with zero-init `_z_n_msg_declare_t` emits `[0x1E | Z, 0x01|ENC_ZINT|..., 0x00 (qos val 0), 0x1A]` because `has_qos_ext = (_val != 5)` is true at zero-init; a 1-patch fixture (`_ext_qos._val = 5`) clears that ext and reaches `[0x1E, 0x1A]` which matches wz `Declare::default().encode()`. Layer 3 byte-compare fixture deferred to a paired round when the bulk of sub-types lands (per feedback_layer3_paired_land would be ideal but the carry split here preserves blast-radius isolation in the wz-side authoring axis)."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-codecs: clean compile; codegen emit inspected per R94-style verify path before relying on the new types.",
+        "cargo test --workspace: 149 tests pass (unchanged from R108b; new codecs have no self-test layer this round — first contact authoring round, Layer 3 byte-equivalence is the next deliberate step).",
+        "scripts/run-ci.sh: all 5 lanes (A/B/C1/C2/D) pass.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 123 → 124, sections=214, GENERATED.md=sync.",
+        "Codec catalog axis: 7 §5 envelope MIDs (push 0x1D / oam 0x1F / request 0x1C / response 0x1B / response_final 0x1A / interest 0x19 / declare 0x1E) now have wz authoring. Wire-interop axis: 6/7 (DECLARE remains 0/1 in Layer 3 axis, recorded as R110d carry).",
+        "feedback_partial_apply_carry compliance: R110a's scope is one envelope + one sub-type leaf out of nine sub-types; deferred sub-types are listed in carry_forward with named MID values so the carry chain is auditable."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer"
+      ],
+      "carry_forward_bullets": [
+        "R110b sub-types — decl_kexpr (MID 0x00, header + id VLE + wireexpr embed; N flag bit 5 = wireexpr suffix) and undecl_kexpr (MID 0x01, header + id VLE; Z bit 7 = ext_keyexpr ext). Both are leaf-shape; 1 round closure. Each declare envelope variant arm gets added when its sub-codec lands.",
+        "R110c sub-types — decl_subscriber (MID 0x02) + decl_token (MID 0x06) + decl_queryable (MID 0x04) share `_z_decl_commons_encode` shape (header + N|M|Z flags + id VLE + wireexpr); 1 round if the shape is factored into a shared inner-codec or 3 sub-rounds if authored verbatim per upstream. Decision: verbatim mirrors zenoh-pico exactly (no shared inner codec) since that matches the textbook 1:1 wire-mirror policy used for R44 init_body / open_body / join.",
+        "R110d sub-types — undecl_subscriber (MID 0x03) + undecl_token (MID 0x07) + undecl_queryable (MID 0x05) share `_z_undecl_encode` (header + Z bit + id VLE + optional `_z_decl_ext_keyexpr` ZBuf ext); 1 round.",
+        "R110e Layer 3 wire-interop for DECLARE — byte-compare wz `Declare::default()` against zenoh-pico's `_z_declare_encode` with `_ext_qos._val = 5` fixture patch; expected wire `[0x1E, 0x1A]`. allowlist additions: `_z_n_msg_declare_t` + `_z_declare_encode`. Bringscodec wire-interop axis to 7/7 (full application-layer envelope coverage).",
+        "Non-default Layer 3 coverage carry — PUSH N-suffix wireexpr, OAM ZINT/ZBUF arms, INTEREST R=1 non-final, RESPONSE err arm, REQUEST PUT/DEL inner tag, DECLARE non-final sub-MIDs. Quality-axis, not gating.",
+        "AP MVP demo binary, R67-R71 series, Phase W lwIP — still queued per project_hybrid_adoption_plan.md."
+      ],
+      "publishable_decision_summary": "R110a opens the DECLARE codec chain (MID 0x1E, the last unmodeled application-layer envelope) with a smallest-blast-radius first contact: envelope skeleton + `decl_final` leaf sub-codec only; declared default arm of the envelope's sub-MID variant is decl_final so `Declare::default()` round-trips byte-exact via `[0x1E, 0x1A]` without any other sub-type authored yet. Subsequent rounds add the remaining 8 sub-MIDs incrementally.",
+      "publishable_changes_bullets": [
+        "sources/codecs/decl_final.scxml new — 1-byte leaf sub-codec, `mid value=\"0x1A\"` (matches `_Z_DECL_FINAL_MID` from zenoh-pico/include/zenoh-pico/protocol/codec/declarations.h:36). `_z_decl_final_t` holds only a placeholder bool so the wire is one byte total; the SCXML datamodel is correspondingly empty past the header flags.",
+        "sources/codecs/declare.scxml new — envelope, `mid value=\"0x1E\"` (matches `_Z_MID_N_DECLARE` from network.h:34), I flag bit 5, Z flag bit 7. Datamodel: `interest_id` VLE field gated on `header.I`; `extensions` tlv-chain (codec_zenoh_ext_entry) gated on `header.Z`; sub-type peek-byte variant with one arm so far (0x1A → decl_final, declared `default=\"true\"`). Wire shape mirrors zenoh-pico's `_z_declare_encode` (network.c:388-417).",
+        "crates/wz-codecs/build.rs CODECS list: `decl_final` appended to the leaf section (no imports); `declare` appended to the composer section (imports ext_entry + decl_final). Dependency order preserved.",
+        "crates/wz-codecs/src/lib.rs: `pub mod decl_final` + `pub mod declare` declared at the same level as the other codec modules (codegen output references siblings via `super::X` so flat declaration is the textbook layout, per the file docstring).",
+        "Codegen emit verified directly at target/debug/build/wz-codecs-*/out/: `decl_final.rs:64 header: 0x1au8`; `declare.rs:80 header: 0x1eu8` + `DeclareVariant::default() = CodecZenohDeclFinal(DeclFinal::default())` per R88 variant-default-uniformity. R94-style codegen-inspect verify done before relying on the new types.",
+        "DECLARE envelope's default state wire derivation: zenoh-pico's `_z_declare_encode` with zero-init `_z_n_msg_declare_t` emits `[0x1E | Z, 0x01|ENC_ZINT|..., 0x00 (qos val 0), 0x1A]` because `has_qos_ext = (_val != 5)` is true at zero-init; a 1-patch fixture (`_ext_qos._val = 5`) clears that ext and reaches `[0x1E, 0x1A]` which matches wz `Declare::default().encode()`. Layer 3 byte-compare fixture deferred to a paired round when the bulk of sub-types lands (per feedback_layer3_paired_land would be ideal but the carry split here preserves blast-radius isolation in the wz-side authoring axis)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-codecs: clean compile; codegen emit inspected per R94-style verify path before relying on the new types.",
+        "cargo test --workspace: 149 tests pass (unchanged from R108b; new codecs have no self-test layer this round — first contact authoring round, Layer 3 byte-equivalence is the next deliberate step).",
+        "scripts/run-ci.sh: all 5 lanes (A/B/C1/C2/D) pass.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 123 → 124, sections=214, GENERATED.md=sync.",
+        "Codec catalog axis: 7 §5 envelope MIDs (push 0x1D / oam 0x1F / request 0x1C / response 0x1B / response_final 0x1A / interest 0x19 / declare 0x1E) now have wz authoring. Wire-interop axis: 6/7 (DECLARE remains 0/1 in Layer 3 axis, recorded as R110d carry).",
+        "feedback_partial_apply_carry compliance: R110a's scope is one envelope + one sub-type leaf out of nine sub-types; deferred sub-types are listed in carry_forward with named MID values so the carry chain is auditable."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R110b sub-types — decl_kexpr (MID 0x00, header + id VLE + wireexpr embed; N flag bit 5 = wireexpr suffix) and undecl_kexpr (MID 0x01, header + id VLE; Z bit 7 = ext_keyexpr ext). Both are leaf-shape; 1 round closure. Each declare envelope variant arm gets added when its sub-codec lands.",
+        "R110c sub-types — decl_subscriber (MID 0x02) + decl_token (MID 0x06) + decl_queryable (MID 0x04) share `_z_decl_commons_encode` shape (header + N|M|Z flags + id VLE + wireexpr); 1 round if the shape is factored into a shared inner-codec or 3 sub-rounds if authored verbatim per upstream. Decision: verbatim mirrors zenoh-pico exactly (no shared inner codec) since that matches the textbook 1:1 wire-mirror policy used for R44 init_body / open_body / join.",
+        "R110d sub-types — undecl_subscriber (MID 0x03) + undecl_token (MID 0x07) + undecl_queryable (MID 0x05) share `_z_undecl_encode` (header + Z bit + id VLE + optional `_z_decl_ext_keyexpr` ZBuf ext); 1 round.",
+        "R110e Layer 3 wire-interop for DECLARE — byte-compare wz `Declare::default()` against zenoh-pico's `_z_declare_encode` with `_ext_qos._val = 5` fixture patch; expected wire `[0x1E, 0x1A]`. allowlist additions: `_z_n_msg_declare_t` + `_z_declare_encode`. Bringscodec wire-interop axis to 7/7 (full application-layer envelope coverage).",
+        "Non-default Layer 3 coverage carry — PUSH N-suffix wireexpr, OAM ZINT/ZBUF arms, INTEREST R=1 non-final, RESPONSE err arm, REQUEST PUT/DEL inner tag, DECLARE non-final sub-MIDs. Quality-axis, not gating.",
+        "AP MVP demo binary, R67-R71 series, Phase W lwIP — still queued per project_hybrid_adoption_plan.md."
+      ]
+    },
     "Round 12": {
       "decision_summary": "Dual-license adoption — LGPL-3.0-or-later (Free, anti-tivo included) OR watching-zenoh Commercial (Qt-style 5-way exemption, $5000 individual cumulative)",
       "changes_bullets": [
