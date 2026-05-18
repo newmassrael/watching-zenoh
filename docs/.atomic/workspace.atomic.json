@@ -4085,6 +4085,60 @@
         "Phase W STM32F4 (Nucleo-F429ZI) trail — separate cross-compile + lwIP plan when Linux tokio AP MVP is reference-validated."
       ]
     },
+    "Round 112": {
+      "decision_summary": "R112 bumps the SCE vendor pin 189bf7f4 → 4d1ef3f2 (15 commits ahead), absorbing the variant-default-uniformity codegen + parse-time enforcement series (SCE 022621a3/3c6bf7d7/43812d57/a85cdc6b/19b465f0/f5c6c43f and the 5-backend round-trip test suite). One wz-side break surfaced and was fixed in the same round: ext_entry.scxml's variant lacked the explicit `default=\"true\"` arm marker that SCE 022621a3 now requires at parse time.",
+      "changes_bullets": [
+        "vendor/sce submodule pointer 189bf7f4 → 4d1ef3f2 — absorbs the explicit-default-arm-marker + cross-doc wire-MID-default contract SCE upstream landed during the prior 3 weeks of drift. SCE git tree itself is not modified (feedback_sce_readonly is preserved); only wz's vendor pointer moves.",
+        "sources/codecs/ext_entry.scxml: `<sce:arm value=\"0x00\" type=\"codec_zenoh_ext_unit\"/>` → same arm + `default=\"true\"`. The `<sce:default type=\"codec_zenoh_ext_unit\"/>` catch-all line is kept (separate concept from the declared default arm — catch-all is a runtime fallback for unrecognized values, declared default arm is the compile-time pick for `Default::default()`).",
+        "Defect surface revealed by SCE 022621a3 (\"require explicit default-arm marker on every variant codec\"): the wz catalog had ONE pre-R88 variant (ext_entry, authored earlier than R88 introduced the variant-default-uniformity discipline) without a declared default arm. The other 7+9 envelope + sub-MID variants from the post-R88 era (push / response / request / oam / interest / declare / reply / request) all carried `default=\"true\"` already.",
+        "Update-time defect detection path: SCE pin checkout → cargo build -p wz-codecs failed at sce-build parse with the diagnostic `codec 'ext_entry': <sce:variant> declares no <sce:arm default=\"true\"/>`. R94-style empirical surface — the build is the first authority; the diagnostic was clear enough to land the fix in a single edit."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-codecs after the ext_entry fix: clean compile. sce-forge-runtime rebuilt with the bumped vendor pin.",
+        "cargo test --workspace: 150 tests pass (unchanged from R111). R88-era codecs round-trip byte-equivalent against the new SCE codegen, confirming the variant-default-uniformity contract was already correctly authored on wz side at R88 — only the explicit `default=\"true\"` marker was the new requirement.",
+        "scripts/run-ci.sh: all 6 layers (0/A/A2/B/C1/C2/D) pass.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 129 → 130, sections=214, GENERATED.md=sync.",
+        "R94 feedback_sce_primitive_verify pattern: SCE 022621a3's parse-time enforcement directly caught the ext_entry gap. wz-side build is the first authority; the diagnostic specificity (file + element + missing attribute) made the fix mechanical."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "carry_forward_bullets": [
+        "R113 wire-spec doc §5-1 declare-sub-variants caveats — R110a-e 9 sub-MIDs + R107 INTEREST no-baking decision recorded as atomic caveats. doc-only round.",
+        "R68 inbound parser (peer InitAck cookie populate) — AP MVP demo dependency. Textbook-order next after R113.",
+        "R69 Hal time-mock (12 timer coverage) — AP MVP demo dependency. After R68.",
+        "AP MVP demo binary — round-trip query against external zenoh-pico CLI process (z_get + z_queryable). 3-5 rounds: scaffold → peer fixture → golden-path → timeout-path.",
+        "Phase W STM32F4 trail — separate cross-compile + lwIP plan when Linux tokio AP MVP is reference-validated. Bumped SCE pin already supports cross-backend variant-default-uniformity (43812d57/a85cdc6b/19b465f0/f5c6c43f port the codegen to c11/go/python/kotlin) so Phase W's c11 backend now has parity with the Rust authoritative path.",
+        "Latent SCE primitive audit — R112 surfaced exactly one pre-R88 variant codec gap. A repo-side counterpart to R111 (audit-mid-values) would be `audit-variant-default-arms.sh` scanning for `<sce:variant>` without `default=\"true\"`. SCE's own parse-time enforcement makes this redundant defense-in-depth, but worth noting as a future R114+ hardening if SCE ever loosens the rule."
+      ],
+      "publishable_decision_summary": "R112 bumps the SCE vendor pin 189bf7f4 → 4d1ef3f2 (15 commits ahead), absorbing the variant-default-uniformity codegen + parse-time enforcement series (SCE 022621a3/3c6bf7d7/43812d57/a85cdc6b/19b465f0/f5c6c43f and the 5-backend round-trip test suite). One wz-side break surfaced and was fixed in the same round: ext_entry.scxml's variant lacked the explicit `default=\"true\"` arm marker that SCE 022621a3 now requires at parse time.",
+      "publishable_changes_bullets": [
+        "vendor/sce submodule pointer 189bf7f4 → 4d1ef3f2 — absorbs the explicit-default-arm-marker + cross-doc wire-MID-default contract SCE upstream landed during the prior 3 weeks of drift. SCE git tree itself is not modified (feedback_sce_readonly is preserved); only wz's vendor pointer moves.",
+        "sources/codecs/ext_entry.scxml: `<sce:arm value=\"0x00\" type=\"codec_zenoh_ext_unit\"/>` → same arm + `default=\"true\"`. The `<sce:default type=\"codec_zenoh_ext_unit\"/>` catch-all line is kept (separate concept from the declared default arm — catch-all is a runtime fallback for unrecognized values, declared default arm is the compile-time pick for `Default::default()`).",
+        "Defect surface revealed by SCE 022621a3 (\"require explicit default-arm marker on every variant codec\"): the wz catalog had ONE pre-R88 variant (ext_entry, authored earlier than R88 introduced the variant-default-uniformity discipline) without a declared default arm. The other 7+9 envelope + sub-MID variants from the post-R88 era (push / response / request / oam / interest / declare / reply / request) all carried `default=\"true\"` already.",
+        "Update-time defect detection path: SCE pin checkout → cargo build -p wz-codecs failed at sce-build parse with the diagnostic `codec 'ext_entry': <sce:variant> declares no <sce:arm default=\"true\"/>`. R94-style empirical surface — the build is the first authority; the diagnostic was clear enough to land the fix in a single edit."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-codecs after the ext_entry fix: clean compile. sce-forge-runtime rebuilt with the bumped vendor pin.",
+        "cargo test --workspace: 150 tests pass (unchanged from R111). R88-era codecs round-trip byte-equivalent against the new SCE codegen, confirming the variant-default-uniformity contract was already correctly authored on wz side at R88 — only the explicit `default=\"true\"` marker was the new requirement.",
+        "scripts/run-ci.sh: all 6 layers (0/A/A2/B/C1/C2/D) pass.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 129 → 130, sections=214, GENERATED.md=sync.",
+        "R94 feedback_sce_primitive_verify pattern: SCE 022621a3's parse-time enforcement directly caught the ext_entry gap. wz-side build is the first authority; the diagnostic specificity (file + element + missing attribute) made the fix mechanical."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R113 wire-spec doc §5-1 declare-sub-variants caveats — R110a-e 9 sub-MIDs + R107 INTEREST no-baking decision recorded as atomic caveats. doc-only round.",
+        "R68 inbound parser (peer InitAck cookie populate) — AP MVP demo dependency. Textbook-order next after R113.",
+        "R69 Hal time-mock (12 timer coverage) — AP MVP demo dependency. After R68.",
+        "AP MVP demo binary — round-trip query against external zenoh-pico CLI process (z_get + z_queryable). 3-5 rounds: scaffold → peer fixture → golden-path → timeout-path.",
+        "Phase W STM32F4 trail — separate cross-compile + lwIP plan when Linux tokio AP MVP is reference-validated. Bumped SCE pin already supports cross-backend variant-default-uniformity (43812d57/a85cdc6b/19b465f0/f5c6c43f port the codegen to c11/go/python/kotlin) so Phase W's c11 backend now has parity with the Rust authoritative path.",
+        "Latent SCE primitive audit — R112 surfaced exactly one pre-R88 variant codec gap. A repo-side counterpart to R111 (audit-mid-values) would be `audit-variant-default-arms.sh` scanning for `<sce:variant>` without `default=\"true\"`. SCE's own parse-time enforcement makes this redundant defense-in-depth, but worth noting as a future R114+ hardening if SCE ever loosens the rule."
+      ]
+    },
     "Round 12": {
       "decision_summary": "Dual-license adoption — LGPL-3.0-or-later (Free, anti-tivo included) OR watching-zenoh Commercial (Qt-style 5-way exemption, $5000 individual cumulative)",
       "changes_bullets": [
