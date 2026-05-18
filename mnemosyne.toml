@@ -84,3 +84,10 @@ target_id = "Round 122"
 reason = "Audit half intentionally minimal per the R295/R296 textbook split: SCE upstream debt closures carry long narratives (cross-repo commit refs + before/after metrics + multi-round residual carry), so the audit half stays tight and the publishable half carries the full SCE pin bump + 71357264 wire-byte alignment + 4441431d overlay infra narrative."
 applied_in = "R122 in-flight"
 content_hash_after = "2b9a8b2c89c527f88750049a84e80f6dce0fb3232c304b2bd0b59f37f4b65ff0"
+
+[[publishable_override_ledger]]
+kind = "redaction"
+target_id = "Round 123"
+reason = "Audit half intentionally minimal per R295/R296 textbook split: this round is the deploy-yaml landing half of a 2-phase R123/R123b sequence (R123 = overlay schema in deploy yamls; R123b = wz-codecs build.rs consume + SCXML default removal). The audit half records the landing fact only; the publishable half carries the 3-deploy edit detail + R123b precondition list + R124-R126 Atomic B sequence."
+applied_in = "R123 in-flight"
+content_hash_after = "ebdc450f5626143d8c1ff54dd8c8028888dd09a58cf350325424e046d6264bd9"

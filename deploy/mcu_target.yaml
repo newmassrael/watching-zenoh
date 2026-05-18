@@ -390,3 +390,23 @@ machines:
       #     Phase A–C — diagnostic
       #     `fuzz/coverage-transport-on-pre-D-tier` fires if it is
       #     declared before Phase D entry.
+
+    # ---------------------------------------------------------------
+    # variant_defaults — SCE Atomic A overlay (SCE commit 4441431d)
+    # ---------------------------------------------------------------
+    # Per-consumer default-arm selection for codecs whose variant
+    # default is NOT a wire-spec invariant. Overlay precedes SCXML
+    # `<sce:arm default="true"/>` markers (resolution order in
+    # `compile_forge_with_deploy`: overlay > SCXML marker >
+    # diagnostic `codec/variant-no-default-arm`).
+    #
+    # R88 + R108a watching-zenoh convention: the request envelope's
+    # default arm routes to 0x03 (Query). SCE 71357264 baked the
+    # underlying mid byte 0x1C (zenoh-pico `_Z_MID_N_REQUEST`)
+    # upstream; the arm-default choice between Query / Put / Del /
+    # etc. lives here as deploy-time consumer convention (R123 close
+    # of the R122 `LAYER2_KNOWN_DIVERGENCE = (request)` residual).
+    # Kept identical across all three deploy yamls (single source of
+    # consumer convention across deploy classes).
+    variant_defaults:
+      codec_zenoh_request: 0x03

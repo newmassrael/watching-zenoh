@@ -4728,6 +4728,60 @@
         "SCE fix: validator renamed validate_cross_codec_variant_arm_mids (all arms)."
       ]
     },
+    "Round 123": {
+      "decision_summary": "R123 SCE Atomic A overlay schema landing in 3 deploy yamls.",
+      "changes_bullets": [
+        "deploy/{ap_standalone,mcu_target,ap_mcu_pair}.yaml += variant_defaults block.",
+        "Overlay value codec_zenoh_request: 0x03 identical across 3 deploys."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh full gate pass (Layer 0/A/A2/B/C1/C2/D).",
+        "Layer D validate-deploy: 3/3 deploys schema-OK with new field.",
+        "LAYER2_KNOWN_DIVERGENCE = (request) unchanged (R123b consumes overlay)."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "R123b wz-codecs build.rs compile_forge_with_imports -> compile_forge_with_deploy.",
+        "R123b sources/codecs/request.scxml remove arm 0x03 default true.",
+        "R123b Layer B request OK + KNOWN_DIVERGENCE -> ().",
+        "R124 header.M default=1 signal to SCE."
+      ],
+      "publishable_decision_summary": "R123 SCE Atomic A overlay schema landing in 3 deploy yamls.",
+      "publishable_changes_bullets": [
+        "deploy/ap_standalone.yaml += variant_defaults overlay (ap_node machine).",
+        "deploy/mcu_target.yaml += variant_defaults overlay (mcu_node machine).",
+        "deploy/ap_mcu_pair.yaml += variant_defaults overlay (both mcu_node + ap_node).",
+        "Overlay value codec_zenoh_request: 0x03 identical across all 3 deploys.",
+        "Single source of consumer convention across deploy classes.",
+        "Schema rationale block cites SCE 4441431d + 71357264 + R88 + R108a context.",
+        "Consumes Atomic A overlay infra landed in SCE 4441431d."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh full gate pass (Layer 0/A/A2/B/C1/C2/D).",
+        "Layer D validate-deploy.sh 3/3 deploys schema-OK with new variant_defaults field.",
+        "Layer B unchanged: LAYER2_KNOWN_DIVERGENCE = (request) still 1 stem.",
+        "Reason: wz-codecs build.rs uses compile_forge_with_imports (overlay-agnostic).",
+        "R123b will switch to compile_forge_with_deploy to consume the new overlay.",
+        "validate_workspace: T1=0; RT 12/12; entries=140 -> 141 (this entry); sync."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R123b: crates/wz-codecs/build.rs compile_forge_with_imports -> compile_forge_with_deploy.",
+        "R123b: select which deploy yaml the build feeds (compile-time choice).",
+        "R123b: sources/codecs/request.scxml remove `<sce:arm default=\"true\"/>` from 0x03 arm.",
+        "R123b verify: Layer B request flips MISMATCH -> OK; KNOWN_DIVERGENCE -> ().",
+        "R123b verify: Layer 3 layer3_request.rs wire shape 0x5C/0x00/0x00/0x03 holds.",
+        "R124: header.M default=1 signal to SCE (R106 push/response/request scope).",
+        "R124 payload: ask SCE for flag_defaults overlay extension or new RFC primitive.",
+        "R125 (optional Atomic B trigger): atomic ratify entry + RFC §X boundary section.",
+        "R125 enables SCE 14 SCXML fixture cleanup PR + new diagnostic.",
+        "R126 (post-Atomic B merge): vendor pin bump + clean removal of audit-trace block."
+      ]
+    },
     "Round 13": {
       "decision_summary": "sources/ skeleton lands via README (SPDX header double-block + 7-subdir lazy materialize per ARCH §428) + first author-side SCXML sources/algorithms/crc16_ccitt.scxml body-identical to SCE fixture; 6-backend byte-golden verify carried to R14 SCE submodule infrastructure (pin 1473f99f origin/main).",
       "changes_bullets": [

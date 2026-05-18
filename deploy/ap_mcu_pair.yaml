@@ -120,6 +120,15 @@ machines:
       lib: sce_intrinsics_runtime_c
       target_plugin: configs/target_extensions_stm32h747.yaml
 
+    # ---------------------------------------------------------------
+    # variant_defaults — SCE Atomic A overlay (SCE commit 4441431d)
+    # ---------------------------------------------------------------
+    # See deploy/mcu_target.yaml + deploy/ap_standalone.yaml for the
+    # full rationale; identical block kept across all three deploy
+    # yamls as single source of consumer convention (R123 close).
+    variant_defaults:
+      codec_zenoh_request: 0x03
+
   # =================================================================
   # AP machine — same as deploy/ap_standalone.yaml, abbreviated
   # =================================================================
@@ -220,3 +229,12 @@ machines:
     extern_symbols:
       lib: sce_intrinsics_runtime_rust
       target_plugin: ~
+
+    # ---------------------------------------------------------------
+    # variant_defaults — SCE Atomic A overlay (SCE commit 4441431d)
+    # ---------------------------------------------------------------
+    # See deploy/ap_standalone.yaml + deploy/mcu_target.yaml for the
+    # full rationale; identical block kept across all three deploy
+    # yamls as single source of consumer convention (R123 close).
+    variant_defaults:
+      codec_zenoh_request: 0x03
