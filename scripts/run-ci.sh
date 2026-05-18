@@ -19,7 +19,9 @@
 #   Layer C1 — cargo test --workspace
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
 #   Layer D  — deploy/*.yaml schema validate
-#   Layer E  — ap_demo round-trip vs external zenoh-pico z_put (R121c)
+#   Layer E  — ap_demo bidirectional round-trip vs external zenoh-pico
+#              CLI (R121c z_put → wz subscriber + R121e wz publisher
+#              → z_sub; both directions in one lane)
 #   Layer 0  — (optional) actionlint .github/workflows/
 #
 # Exit codes:
@@ -263,19 +265,35 @@ layer_d_validate_deploy() {
     bash scripts/validate-deploy.sh
 }
 
-# ─── Layer E — wz-ap-demo round-trip vs external zenoh-pico z_put ───
-# R121c integration test: spawns the wz-ap-demo binary, points an
-# external zenoh-pico z_put CLI at its TCP --listen endpoint, and
-# asserts the AP MVP demo accepted the TCP connection. Subscriber-
-# fired is the optimistic stretch goal checked inside the test;
-# session-FSM-vs-zenoh-pico handshake gaps surface in the test's
-# captured-stderr diagnostic rather than as a hard failure (the
-# conservative 'accepted peer' assertion is the production gate).
+# ─── Layer E — wz-ap-demo bidirectional round-trip vs zenoh-pico ────
+# R121c + R121e integration tests. Each test spawns the wz-ap-demo
+# binary, points the matching zenoh-pico CLI at its TCP --listen
+# endpoint, and asserts the round-trip witness line surfaces on the
+# foreign side within a bounded timeout:
+#
+#   R121c (`ap_demo_round_trip.rs`):
+#     z_put initiator → wz-ap-demo subscriber callback fires (hard
+#     gate on the "SUBSCRIBER FIRED" stderr line; R121d closed the
+#     four interop blockers that promoted this from optimistic
+#     stretch goal to hard gate).
+#
+#   R121e (`wz_publisher_to_zsub.rs`):
+#     wz-ap-demo publisher (`--publish demo/test --value
+#     hello-from-wz`) → z_sub client receives the Push and
+#     prints `>> [Subscriber] Received` on stdout. Hard gate on
+#     the foreign-side stdout line plus belt-and-suspenders
+#     assertions on the keyexpr + value substrings so a
+#     wire-shape regression localises the failure.
+#
+# Both tests run in this single lane so the 8-lane CI structure
+# stays intact; each is bounded to ~15s wall-clock so the lane
+# total caps at ~30s on cold start (the gate fires in <500ms on
+# a warm machine).
 #
 # Pre-requisites:
 #   1. wz-ap-demo binary built (cargo build -p wz-ap-demo).
 #   2. zenoh-pico CLI binaries built (scripts/build-zenoh-pico-cli.sh
-#      produces target/zenoh-pico-cli/z_put + siblings).
+#      produces target/zenoh-pico-cli/{z_put,z_sub,...}).
 # Both are local-build artifacts. Layer E SKIPs gracefully when
 # either is missing (developer running --layer E without prep) and
 # surfaces the install hint instead of a hard failure.
@@ -284,11 +302,17 @@ layer_e_ap_demo_round_trip() {
         echo "Layer E SKIP (wz-ap-demo not built; run: cd crates && cargo build -p wz-ap-demo)"
         return 0
     fi
-    if [[ ! -x target/zenoh-pico-cli/z_put ]]; then
+    if [[ ! -x target/zenoh-pico-cli/z_put || ! -x target/zenoh-pico-cli/z_sub ]]; then
         echo "Layer E SKIP (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
         return 0
     fi
-    (cd crates && cargo test -p wz-integration-tests --test ap_demo_round_trip --quiet)
+    # R121e: bundle both tests into a single cargo invocation so
+    # the compilation/link step runs once and the lane timing
+    # stays predictable. `--test` accepts multiple binary names.
+    (cd crates && cargo test -p wz-integration-tests \
+        --test ap_demo_round_trip \
+        --test wz_publisher_to_zsub \
+        --quiet)
 }
 
 # ─── dispatch ──────────────────────────────────────────────────────

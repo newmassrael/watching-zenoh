@@ -50,6 +50,7 @@
 //! secret); the integration test uses a fixed 8-byte cookie so
 //! the assertion against zenoh-pico's reference is deterministic.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -64,15 +65,19 @@ use sce_forge_runtime::codec::{CodecError, SceCursor};
 use wz_codecs::close::Close;
 use wz_codecs::declare::Declare;
 use wz_codecs::ext_entry::ExtEntry;
+use wz_codecs::frame::Frame;
 use wz_codecs::init_body::InitBody;
-use wz_codecs::keep_alive::KeepAlive;
-use wz_codecs::open_body::OpenBody;
 use wz_codecs::interest::Interest;
+use wz_codecs::keep_alive::KeepAlive;
+use wz_codecs::msg_put::MsgPut;
 use wz_codecs::oam::Oam;
-use wz_codecs::push::Push;
+use wz_codecs::open_body::OpenBody;
+use wz_codecs::push::{Push, PushVariant};
 use wz_codecs::request::Request;
 use wz_codecs::response::Response;
 use wz_codecs::response_final::ResponseFinal;
+use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+use wz_codecs::wireexpr_local::WireexprLocal;
 
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
@@ -581,6 +586,26 @@ pub struct SessionLinkActions {
     /// emit InitAck directly without an inbound parse cycle
     /// (R60, layer3_init_body) continue to work.
     pub inbound_peer_init_caps: Mutex<Option<PeerInitCaps>>,
+    /// R121e — outbound Frame sequence-number generator. The
+    /// session-FSM Established-side path emits one `Frame`
+    /// transport-message per outbound application-layer batch
+    /// (PUSH, DECLARE, INTEREST, …); each Frame carries a
+    /// VLE-encoded `sn` per zenoh-pico
+    /// `_z_frame_encode`(transport.c:386-395). The first Frame
+    /// uses `params.initial_sn` (matching the value announced in
+    /// the OpenSyn/OpenAck body so the peer's reliable-channel
+    /// SN-window tracking starts from the agreed origin) and
+    /// each subsequent Frame uses the next integer modulo the
+    /// SN resolution window (`params.seq_num_res` → 8/16/32/
+    /// 64-bit per Zenoh RFC §5.O). For the AP MVP path the
+    /// `AtomicU64` counter does not enforce explicit modulo —
+    /// a session that emits more than `1 << sn_bits` frames
+    /// will rely on the natural u64 wrap, which exceeds every
+    /// configurable SN window. Production code with long-running
+    /// sessions or strict SN-window validation needs the
+    /// explicit modulo at `next_outbound_frame_sn` (R121e
+    /// carry — surface when a measurement justifies it).
+    pub outbound_frame_sn: AtomicU64,
 }
 
 /// R121d — peer-announced sizing caps captured from `InitSyn` for
@@ -628,6 +653,12 @@ impl SessionLinkActions {
     /// supplying per-deploy values stage them once at session
     /// construction.
     pub fn new(driver: Arc<dyn BoxedLinkDriver>, params: SessionInitParams) -> Arc<Self> {
+        // R121e — seed the outbound Frame SN with `params.initial_sn`
+        // so the first emitted Frame matches the value announced in
+        // the OpenSyn/OpenAck body. The peer enforces this start
+        // value via its reliable-channel window tracking
+        // (zenoh-pico unicast/transport.c:182-194).
+        let initial_frame_sn = params.initial_sn;
         Arc::new(Self {
             driver,
             params,
@@ -642,6 +673,7 @@ impl SessionLinkActions {
             open_syn_ext: Mutex::new(Vec::new()),
             open_ack_ext: Mutex::new(Vec::new()),
             inbound_peer_init_caps: Mutex::new(None),
+            outbound_frame_sn: AtomicU64::new(initial_frame_sn),
         })
     }
 
@@ -793,6 +825,88 @@ impl SessionLinkActions {
             _ => {}
         }
         Ok(frame)
+    }
+
+    /// R121e — outbound Frame sequence-number generator. Returns
+    /// the SN to use for the next outbound Frame and advances the
+    /// internal counter by one.
+    ///
+    /// The first call returns `params.initial_sn` (seeded by
+    /// [`SessionLinkActions::new`]); subsequent calls return
+    /// successive integers. The natural u64 wrap exceeds every
+    /// configurable SN resolution window
+    /// (`params.seq_num_res = 0..=3` → 8/16/32/64-bit per Zenoh
+    /// RFC §5.O), so a session that emits fewer than `1 << 32`
+    /// frames never reaches the boundary. Production code with
+    /// long-running sessions OR strict SN-window validation must
+    /// apply the explicit modulo here once a measurement justifies
+    /// the cost (R121e carry — no consumer surfaces it yet).
+    ///
+    /// Atomic `SeqCst` is the textbook default for cross-task
+    /// monotonicity. The hot path is one outbound Frame per
+    /// application-layer batch — the atomic cost is in the noise
+    /// vs. the codec encode + TCP write below it.
+    pub fn next_outbound_frame_sn(&self) -> u64 {
+        self.outbound_frame_sn.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// R121e — encode + dispatch a `Push` (literal keyexpr, `Put`
+    /// payload) on the outbound link, wrapped in a single-message
+    /// `Frame` transport-envelope.
+    ///
+    /// Wire shape composed by this method
+    /// (`encode_frame_with_push` + `build_push_literal` +
+    /// `MsgPut::encode`):
+    ///
+    /// ```text
+    ///   [parent_flags | T_MID_FRAME (0x05)]
+    ///     VLE(sn) | Push.encode_bytes:
+    ///       [push.header | M_derived] [WireexprLocal.encode] [MsgPut.encode]
+    ///         MsgPut: [header 0x01] [VLE(payload_len)] [payload bytes]
+    /// ```
+    ///
+    /// `keyexpr_suffix` carries the literal keyexpr string inline
+    /// (no DECLARE alias indirection). `value` is the
+    /// application-layer payload bytes. `reliable=true` sets
+    /// `FLAG_T_FRAME_R` on the parent Frame header (mirrors
+    /// zenoh-pico transport.c:380); the AP MVP pub/sub path
+    /// passes `true` because the only consumer (z_sub) declares
+    /// its subscription on the reliable channel by default.
+    ///
+    /// Preconditions (caller-enforced):
+    ///   * The session FSM has reached the `Established` state
+    ///     (post `send_open_ack` on Accepting side, post
+    ///     `send_open_syn` echo + InitAck dispatch on Initiator
+    ///     side). Sending a `Frame` before Established violates
+    ///     the session-fsm §2.6 "Frame is established-only"
+    ///     invariant and the peer drops the bytes — zenoh-pico
+    ///     `unicast/transport.c::_z_unicast_recv_frame_t` guards
+    ///     the non-Established state explicitly. Callers
+    ///     typically poll [`trace_snapshot`] for
+    ///     `send_open_ack > 0` (acceptor) or
+    ///     `record_established_at > 0` (both sides) before the
+    ///     first invocation.
+    ///   * The underlying [`BoxedLinkDriver`] is non-blocking
+    ///     OR the channel-decoupling pattern is in place
+    ///     (`OutboundWriteDriver` in wz-ap-demo). Calling this
+    ///     from inside an async future driven by the same Tokio
+    ///     runtime as the driver's writer task — with a driver
+    ///     that synchronously calls `block_on` — would trip the
+    ///     "Cannot start a runtime from within a runtime" check.
+    ///     `TokioLinkDriverAdapter`'s `send_blocking` calls
+    ///     `block_on`; the wz-ap-demo binary substitutes the
+    ///     mpsc-channel `OutboundWriteDriver` precisely to avoid
+    ///     this trap (see wz-ap-demo `OutboundWriteDriver` doc).
+    pub fn send_push_literal(&self, keyexpr_suffix: &str, value: &[u8], reliable: bool) {
+        let push = build_push_literal(keyexpr_suffix, value);
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_push(sn, push, reliable);
+        let reliability = if reliable {
+            Reliability::Reliable
+        } else {
+            Reliability::BestEffort
+        };
+        self.driver.send_blocking(&wire, reliability);
     }
 }
 
@@ -1186,6 +1300,114 @@ fn encode_close(reason: u8) -> Vec<u8> {
     let mut wire = Vec::with_capacity(2);
     wire.push(parent_flags | wire_const::T_MID_CLOSE);
     wire.extend_from_slice(&body.encode());
+    wire
+}
+
+/// R121e — build a `Push` network-message with a literal keyexpr
+/// (id=0 + inline suffix) and a `Put` body carrying `value` as
+/// payload bytes.
+///
+/// Wire-spec sourcing:
+///
+/// * `WireexprLocal { id: 0, suffix: Some(s) }` encodes as "the
+///   keyexpr IS the literal string `s`, no DECLARE alias
+///   indirection". `id = 0` is the Zenoh sentinel for "no
+///   declared mapping" (zenoh-pico
+///   `include/zenoh-pico/api/types.h::_z_keyexpr_set_no_id` path);
+///   zenoh-pico's session-receive resolver
+///   (`_z_session_recv_push`) treats id=0 + suffix=Some as the
+///   literal-keyexpr path with no table lookup. This is the
+///   simplest publisher shape — DECLARE-aliased Push (id != 0,
+///   prior DeclKexpr to assign id → suffix) is a follow-up
+///   optimisation for repeated-keyexpr traffic and is not on the
+///   AP MVP critical path.
+///
+/// * `Push.header` carries:
+///   - bits 0..4: MID = `N_MID_PUSH` (0x1D, network.h:34).
+///   - bit 5:     `N` flag = 1 (suffix carrier present).
+///   - bit 6:     `M` flag — derived from the WireexprLocal arm
+///     at encode time (push.rs:189 `_derived_header`); MUST NOT
+///     be set here.
+///   - bit 7:     `Z` flag = 0 (no Push-level extensions for the
+///     MVP path).
+///
+/// * `MsgPut` body carries:
+///   - `header` = 0x01 (msg_put MID, no timestamp / encoding /
+///     ext flags — payload-only Put per network.c:118).
+///   - `payload_len` = `value.len()` VLE-encoded.
+///   - `payload` = the application bytes.
+///
+/// Pure builder — no I/O, no FSM state coupling. Mirrors the
+/// shape of [`encode_init`] / [`encode_open`] / [`encode_close`].
+pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> Push {
+    let suffix_string = keyexpr_suffix.to_string();
+    let suffix_len = suffix_string.len() as u64;
+    let payload_bytes = value.to_vec();
+    let payload_len = payload_bytes.len() as u64;
+    Push {
+        // `N_MID_PUSH | N_flag(0x20)` — M flag derives from the
+        // WireexprLocal arm at encode time (push.rs:189).
+        header: wire_const::N_MID_PUSH | 0x20,
+        keyexpr: Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len: Some(suffix_len),
+                suffix: Some(suffix_string),
+            }),
+        },
+        extensions: None,
+        body: PushVariant::CodecZenohMsgPut(MsgPut {
+            header: 0x01,
+            timestamp: None,
+            encoding: None,
+            extensions: None,
+            payload_len,
+            payload: payload_bytes,
+        }),
+    }
+}
+
+/// R121e — build the wire bytes for a `Frame` transport-message
+/// (T_MID_FRAME) carrying a single `Push` network-message in its
+/// payload.
+///
+/// Wire shape (composes the transport-envelope header byte that
+/// lives outside the body codec's scope with `Frame.encode()`'s
+/// `VLE(sn) + payload` body):
+///
+/// ```text
+///   [parent_flags | T_MID_FRAME (0x05)]
+///     VLE(sn) | push.encode_bytes
+/// ```
+///
+/// `parent_flags` carries `FLAG_T_FRAME_R` (0x20) when
+/// `reliable`, matching zenoh-pico's `_z_frame_encode` per
+/// `vendor/zenoh-pico/src/protocol/codec/transport.c:380`.
+/// `FLAG_T_Z` (0x80) — Frame-level transport extensions — is not
+/// set: the MVP pub/sub path has no use for transport-level
+/// Frame extensions and the wireless QoS / Auth ext chains live
+/// on the InitSyn / InitAck negotiation paths (see
+/// `ExtChainRole`).
+///
+/// The `Frame { sn, payload }.encode()` body is verified
+/// byte-identical to zenoh-pico's `_z_frame_encode` by
+/// `crates/wz-integration-tests/tests/layer3_frame.rs`. This
+/// helper composes only the one transport header byte that
+/// `Frame::encode` does not emit.
+pub fn encode_frame_with_push(sn: u64, push: Push, reliable: bool) -> Vec<u8> {
+    let parent_flags = if reliable {
+        wire_const::FLAG_T_FRAME_R
+    } else {
+        0u8
+    };
+    let frame = Frame {
+        sn,
+        payload: push.encode(),
+    };
+    let body_bytes = frame.encode();
+    let mut wire = Vec::with_capacity(body_bytes.len() + 1);
+    wire.push(parent_flags | wire_const::T_MID_FRAME);
+    wire.extend_from_slice(&body_bytes);
     wire
 }
 
@@ -2446,5 +2668,175 @@ mod tests {
         assert_eq!(pack_sn_res(0, 3), 0x0C);
         assert_eq!(pack_sn_res(3, 3), 0x0F);
         assert_eq!(pack_sn_res(2, 1), 0x06);
+    }
+
+    // ── R121e — outbound Push/Frame builder coverage ──
+
+    /// `build_push_literal` populates the Push struct with the
+    /// header / wireexpr / msg_put shape the wire-spec calls for:
+    /// `N_MID_PUSH | N_flag` in the header (M derives at encode),
+    /// `WireexprLocal { id=0, suffix=Some(s) }` for the literal
+    /// keyexpr, and `MsgPut` with the supplied payload bytes.
+    #[test]
+    fn build_push_literal_shapes_struct_for_literal_keyexpr() {
+        let push = build_push_literal("demo/test", b"hello");
+        // header bits: N_MID_PUSH (0x1D) | N flag (0x20) = 0x3D.
+        // M flag (0x40) is set at encode time, not on the struct.
+        assert_eq!(
+            push.header, 0x3D,
+            "Push.header must carry N_MID_PUSH (0x1D) | N flag (0x20); M derives at encode"
+        );
+        match &push.keyexpr.body {
+            WireexprVariant::WireexprLocal(arm) => {
+                assert_eq!(arm.id, 0, "literal-keyexpr path uses id=0 sentinel");
+                assert_eq!(
+                    arm.suffix.as_deref(),
+                    Some("demo/test"),
+                    "suffix must carry the literal keyexpr string"
+                );
+                assert_eq!(
+                    arm.suffix_len,
+                    Some(9),
+                    "suffix_len must match suffix.len() so the encoder emits the VLE width"
+                );
+            }
+            WireexprVariant::WireexprNonlocal(_) => {
+                panic!("literal-keyexpr path must select the WireexprLocal arm (M=1)")
+            }
+        }
+        match &push.body {
+            PushVariant::CodecZenohMsgPut(put) => {
+                assert_eq!(put.header, 0x01, "MsgPut header MID = 0x01 with no flags");
+                assert_eq!(
+                    put.payload, b"hello",
+                    "MsgPut.payload carries the application bytes verbatim"
+                );
+                assert_eq!(
+                    put.payload_len, 5,
+                    "MsgPut.payload_len must match payload.len() for the VLE writer"
+                );
+                assert!(put.timestamp.is_none(), "no timestamp flag on the MVP path");
+                assert!(put.encoding.is_none(), "no encoding flag on the MVP path");
+                assert!(put.extensions.is_none(), "no MsgPut-level extensions on the MVP path");
+            }
+            other => panic!("MVP build_push_literal must emit MsgPut body, got {:?}", match other {
+                PushVariant::CodecZenohMsgDel(_) => "MsgDel",
+                PushVariant::Default { .. } => "Default",
+                PushVariant::CodecZenohMsgPut(_) => unreachable!(),
+            }),
+        }
+        assert!(push.extensions.is_none(), "no Push-level extensions on the MVP path");
+    }
+
+    /// `encode_frame_with_push` composes the transport-envelope
+    /// header byte (T_MID_FRAME | parent_flags) with the
+    /// `Frame.encode()` body (VLE(sn) + payload). With reliable=true
+    /// the FLAG_T_FRAME_R bit appears in the header byte.
+    #[test]
+    fn encode_frame_with_push_emits_transport_header_plus_frame_body() {
+        // Empty-payload Push at sn=0 keeps the assertion focused on
+        // the transport-envelope header byte and the Frame body
+        // shape. Push::default()'s wire bytes are independently
+        // pinned by layer3_push.rs's byte-equiv test.
+        let push = Push::default();
+        let push_bytes = push.encode();
+
+        // Reliable Frame at sn=0.
+        let wire_reliable = encode_frame_with_push(0, Push::default(), true);
+        assert_eq!(
+            wire_reliable[0],
+            wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME,
+            "reliable Frame must set FLAG_T_FRAME_R (0x20) on the parent header byte"
+        );
+        // Body shape: VLE(sn=0) = single byte 0x00, followed by
+        // Push.encode() bytes verbatim.
+        assert_eq!(wire_reliable[1], 0x00, "Frame.sn=0 VLE width = 1 byte 0x00");
+        assert_eq!(
+            &wire_reliable[2..],
+            push_bytes.as_slice(),
+            "tail of Frame envelope must be the Push.encode() bytes byte-for-byte"
+        );
+
+        // Best-effort Frame: same shape minus FLAG_T_FRAME_R.
+        let wire_best_effort = encode_frame_with_push(0, Push::default(), false);
+        assert_eq!(
+            wire_best_effort[0],
+            wire_const::T_MID_FRAME,
+            "best-effort Frame must NOT set FLAG_T_FRAME_R; only T_MID_FRAME in the header"
+        );
+    }
+
+    /// `encode_frame_with_push` round-trips the sn VLE width
+    /// boundaries (single-byte 0..=127, two-byte 128..=16383,
+    /// etc.) so a downstream `parse_frame_payload` consumer can
+    /// recover the original sn. The Frame.encode body's VLE writer
+    /// is shared with layer3_frame.rs's byte-equiv coverage; this
+    /// test pins the transport-envelope wrapper around it.
+    #[test]
+    fn encode_frame_with_push_carries_vle_sn_across_widths() {
+        for sn in [0u64, 1, 127, 128, 16383, 16384, 1_000_000] {
+            let wire = encode_frame_with_push(sn, Push::default(), true);
+            // Round-trip through parse_inbound to recover the
+            // sn — it carries us through both the transport-header
+            // byte decode AND the Frame.sn VLE decode.
+            let parsed = parse_inbound(&wire).expect("parse_inbound on round-tripped Frame");
+            match parsed {
+                InboundFrame::Frame { sn: parsed_sn, reliable, .. } => {
+                    assert_eq!(parsed_sn, sn, "sn must round-trip through encode+parse");
+                    assert!(reliable, "reliable=true → FLAG_T_FRAME_R → InboundFrame.reliable=true");
+                }
+                // InboundFrame intentionally omits Debug derive
+                // (sce-codegen wz-codecs structs only derive
+                // Default, so a wrapping `#[derive(Debug)]` here
+                // would not compile). Fall back to a variant-name
+                // string for the panic.
+                other => panic!(
+                    "encode_frame_with_push must produce an InboundFrame::Frame; got {}",
+                    match other {
+                        InboundFrame::Init { .. } => "Init",
+                        InboundFrame::Open { .. } => "Open",
+                        InboundFrame::Close { .. } => "Close",
+                        InboundFrame::KeepAlive { .. } => "KeepAlive",
+                        InboundFrame::Unknown { .. } => "Unknown",
+                        InboundFrame::Frame { .. } => unreachable!(),
+                    }
+                ),
+            }
+        }
+    }
+
+    /// `SessionLinkActions::next_outbound_frame_sn` starts at
+    /// `params.initial_sn` and increments by one per call. This
+    /// pairs the SN seed contract with the increment contract so
+    /// a regression on either side (off-by-one seed, wrong stride)
+    /// fires loud.
+    #[test]
+    fn next_outbound_frame_sn_seeds_at_initial_sn_then_increments() {
+        // Driver harness — discard everything (the SN counter is
+        // independent of driver wire-up).
+        struct NullDriver;
+        impl BoxedLinkDriver for NullDriver {
+            fn send_blocking(&self, _bytes: &[u8], _r: Reliability) {}
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+        }
+        let params = SessionInitParams {
+            version: 0x09,
+            whatami: 0x02,
+            zid: vec![0x01, 0x02, 0x03, 0x04],
+            seq_num_res: 2,
+            req_id_res: 2,
+            batch_size: 65535,
+            lease: 10_000,
+            lease_in_seconds: false,
+            initial_sn: 42,
+            cookie: Vec::new(),
+            cookie_signing_key: SigningKey::new(vec![0xAB; 32])
+                .expect("32-byte demo key satisfies the >=32 invariant"),
+        };
+        let actions = SessionLinkActions::new(Arc::new(NullDriver), params);
+        assert_eq!(actions.next_outbound_frame_sn(), 42, "first SN must equal params.initial_sn");
+        assert_eq!(actions.next_outbound_frame_sn(), 43, "subsequent SNs must increment by 1");
+        assert_eq!(actions.next_outbound_frame_sn(), 44);
     }
 }

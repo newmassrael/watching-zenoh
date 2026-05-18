@@ -7,10 +7,21 @@
 // subscriber + msg_put inbound dispatch end-to-end against an
 // external zenoh-pico peer over real TCP.
 //
-// CLI shape (locked at R121a; consumed here + by R121c integration
-// test fixtures):
+// R121e (this round): bidirectional pubsub. Adds publisher-side
+// emission so the binary can drive zenoh-pico's `z_sub` (in
+// addition to the R121b/c/d subscriber-side reception that
+// already round-trips against `z_put`). The publisher path
+// composes the existing wz-codecs `Push` + `Frame` envelopes via
+// `wz_runtime_tokio::session_glue::{build_push_literal,
+// encode_frame_with_push}` and dispatches through the same
+// `OutboundWriteDriver` mpsc channel that the FSM script-actions
+// use for the handshake outbound — no nested `block_on` (R121d
+// constraint preserved).
 //
-//   wz-ap-demo --listen <tcp_addr> --key <keyexpr>
+// CLI shape (R121b base, R121e extension):
+//
+//   wz-ap-demo --listen <tcp_addr> [--key <keyexpr>]
+//                                   [--publish <keyexpr> --value <text>]
 //
 //   --listen   server-side TCP bind address (e.g. 127.0.0.1:7447).
 //              The binary binds + accepts one peer, then drives
@@ -18,6 +29,23 @@
 //   --key      DECLARE subscriber keyexpr (e.g. demo/example).
 //              Each Push whose keyexpr matches this pattern fires
 //              the demo callback (prints to stderr).
+//              Optional — when omitted, no subscriber callback is
+//              registered and inbound Pushes are silently dropped.
+//   --publish  Publisher keyexpr literal (e.g. demo/test).
+//              When present, the demo spawns a publisher task that
+//              waits for the session FSM to reach Established
+//              (post send_open_ack), then emits N copies of the
+//              Push at a fixed cadence so a z_sub peer can observe
+//              one (z_sub uses `while(1) sleep(1)` so any single
+//              copy is enough; the multi-copy emission absorbs
+//              tail-latency / declare-subscriber timing variance).
+//              Requires --value.
+//   --value    Publisher payload text. Required when --publish is
+//              present; ignored otherwise.
+//
+// At least one of {--key, --publish} must be supplied — running
+// the demo with neither makes the session FSM advance but
+// generates no observable AP-layer behaviour.
 //
 // Bidirectional TCP wiring (the architecturally non-trivial bit):
 //
@@ -90,12 +118,18 @@ fn print_usage() {
     eprintln!("{ABOUT}");
     eprintln!();
     eprintln!("USAGE:");
-    eprintln!("    wz-ap-demo --listen <tcp_addr> --key <keyexpr>");
+    eprintln!("    wz-ap-demo --listen <tcp_addr>");
+    eprintln!("               [--key <keyexpr>]");
+    eprintln!("               [--publish <keyexpr> --value <text>]");
     eprintln!();
     eprintln!("OPTIONS:");
-    eprintln!("    --listen <tcp_addr>   server-side TCP bind address (e.g. 127.0.0.1:7447)");
-    eprintln!("    --key <keyexpr>       DECLARE subscriber keyexpr (e.g. demo/example)");
-    eprintln!("    --help, -h            print this help and exit");
+    eprintln!("    --listen <tcp_addr>      server-side TCP bind address (e.g. 127.0.0.1:7447)");
+    eprintln!("    --key <keyexpr>          DECLARE subscriber keyexpr (e.g. demo/example)");
+    eprintln!("    --publish <keyexpr>      publisher keyexpr literal (e.g. demo/test)");
+    eprintln!("    --value <text>           publisher payload text (required with --publish)");
+    eprintln!("    --help, -h               print this help and exit");
+    eprintln!();
+    eprintln!("At least one of --key / --publish must be supplied.");
 }
 
 fn parse_pair(args: &[String], flag: &str) -> Option<String> {
@@ -347,14 +381,46 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let key = match parse_pair(rest, "--key") {
-        Some(v) => v,
-        None => {
-            eprintln!("wz-ap-demo: --key is required");
-            eprintln!();
-            print_usage();
-            return ExitCode::from(2);
-        }
+
+    // R121e — the demo accepts subscriber-only, publisher-only,
+    // OR both. The argument-validation matrix:
+    //
+    //   --key alone                       → subscriber mode (R121d).
+    //   --publish + --value (no --key)    → publisher mode (R121e).
+    //   --key + --publish + --value       → bidirectional mode
+    //                                       (useful for loopback /
+    //                                       echo scenarios).
+    //   none of the above                 → reject (exit 2) — running
+    //                                       the demo with no AP-layer
+    //                                       behaviour does nothing
+    //                                       observable.
+    //   --publish without --value         → reject (exit 2) — the
+    //                                       payload is mandatory once
+    //                                       a publisher key is set.
+    let key_opt = parse_pair(rest, "--key");
+    let publish_opt = parse_pair(rest, "--publish");
+    let value_opt = parse_pair(rest, "--value");
+    if key_opt.is_none() && publish_opt.is_none() {
+        eprintln!("wz-ap-demo: at least one of --key / --publish must be supplied");
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    if publish_opt.is_some() && value_opt.is_none() {
+        eprintln!("wz-ap-demo: --publish requires --value");
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    if publish_opt.is_none() && value_opt.is_some() {
+        eprintln!("wz-ap-demo: --value is only meaningful with --publish (rejected to surface mis-wired argv)");
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    let publisher_spec: Option<(String, String)> = match (publish_opt, value_opt) {
+        (Some(k), Some(v)) => Some((k, v)),
+        _ => None,
     };
 
     // env_logger reads RUST_LOG (defaults to off). The integration
@@ -364,8 +430,14 @@ fn main() -> ExitCode {
         .init();
 
     eprintln!("{ABOUT}");
-    log::info!("listen = {listen}");
-    log::info!("key    = {key}");
+    log::info!("listen  = {listen}");
+    if let Some(k) = &key_opt {
+        log::info!("key     = {k}");
+    }
+    if let Some((k, v)) = &publisher_spec {
+        log::info!("publish = {k}");
+        log::info!("value   = {v}");
+    }
 
     // Build the multi-thread runtime explicitly — OutboundWriteDriver
     // (mirroring TokioLinkDriverAdapter's contract) requires this
@@ -384,7 +456,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let outcome = runtime.block_on(async move { run_demo(listen, key).await });
+    let outcome = runtime.block_on(async move { run_demo(listen, key_opt, publisher_spec).await });
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -394,7 +466,11 @@ fn main() -> ExitCode {
     }
 }
 
-async fn run_demo(listen: String, key: String) -> io::Result<()> {
+async fn run_demo(
+    listen: String,
+    key: Option<String>,
+    publisher_spec: Option<(String, String)>,
+) -> io::Result<()> {
     // ── Step 1: bind + accept one peer ─────────────────────────
     let listener = TcpListener::bind(&listen).await?;
     log::info!("wz-ap-demo: listening on {}", listener.local_addr()?);
@@ -420,20 +496,25 @@ async fn run_demo(listen: String, key: String) -> io::Result<()> {
     //          through the registered subscriber. The callback prints
     //          payload metadata to stderr; R121c integration test
     //          greps stderr for the expected line shape.
+    //          R121e: --key is now optional (publisher-only mode
+    //          skips the subscriber registration).
     let mut registry = SubscriberRegistry::new();
-    let key_for_callback = key.clone();
-    registry.register(key.clone(), move |push| {
-        // R125c2: keyexpr is a tagged-union; extract id+suffix from
-        // whichever arm the dispatcher selected for stderr logging.
-        let (mid, suffix) = match &push.keyexpr.body {
-            WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.clone()),
-            WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.clone()),
-        };
-        eprintln!(
-            "wz-ap-demo: SUBSCRIBER FIRED key='{}' wireexpr_id={} suffix={:?}",
-            key_for_callback, mid, suffix
-        );
-    });
+    if let Some(ref k) = key {
+        let key_for_callback = k.clone();
+        registry.register(k.clone(), move |push| {
+            // R125c2: keyexpr is a tagged-union; extract id+suffix
+            // from whichever arm the dispatcher selected for
+            // stderr logging.
+            let (mid, suffix) = match &push.keyexpr.body {
+                WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.clone()),
+                WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.clone()),
+            };
+            eprintln!(
+                "wz-ap-demo: SUBSCRIBER FIRED key='{}' wireexpr_id={} suffix={:?}",
+                key_for_callback, mid, suffix
+            );
+        });
+    }
 
     // ── Step 4: session FSM + Lua engine + actions. Production
     //          callers MUST source SessionInitParams from
@@ -447,6 +528,26 @@ async fn run_demo(listen: String, key: String) -> io::Result<()> {
     let mut engine: Engine<SessionFsmUnicastPolicy> =
         Engine::new(SessionFsmUnicastPolicy::new(script_engine));
     engine.initialize();
+
+    // ── Step 4a (R121e): spawn the publisher task BEFORE the
+    //                    drive_session loop so the task can wait on
+    //                    the handshake's send_open_ack trace counter
+    //                    concurrently with the loop's inbound poll.
+    //                    The task receives an Arc<SessionLinkActions>
+    //                    clone so it can call `send_push_literal`
+    //                    independently of the FSM's script-action
+    //                    dispatch. The task exits after emitting the
+    //                    configured number of Pushes; drive_session
+    //                    continues until the peer closes or
+    //                    `max_iters` is reached.
+    let publisher_handle = publisher_spec
+        .as_ref()
+        .map(|(keyexpr, value)| {
+            let actions_for_publisher = actions.clone();
+            let keyexpr = keyexpr.clone();
+            let value = value.clone();
+            tokio::spawn(publisher_task(actions_for_publisher, keyexpr, value))
+        });
 
     // ── Step 4b: activate the listener role on the session FSM.
     //          `session_fsm_unicast.scxml` starts in `Init` and offers
@@ -498,6 +599,22 @@ async fn run_demo(listen: String, key: String) -> io::Result<()> {
     log::info!("wz-ap-demo: session ended: {outcome:?}");
     log::info!("wz-ap-demo: action trace = {:?}", actions.trace_snapshot());
 
+    // R121e — give the publisher task a brief window to finish
+    // its emission loop before tearing down. The drive_session
+    // loop typically returns when the peer closes (z_sub stays
+    // connected forever, so in that case the loop hits the
+    // `max_iters` cap after most Pushes have already been
+    // emitted; in the integration-test flow the test process
+    // SIGKILLs the binary once the gate fires, so the publisher
+    // task does not need to complete on its own). The
+    // 200ms ceiling absorbs the publisher's normal emission
+    // tail (1 Push, 200ms spacing window not yet elapsed); a
+    // wedged publisher is dropped here rather than blocking
+    // shutdown indefinitely.
+    if let Some(handle) = publisher_handle {
+        let _ = tokio::time::timeout(Duration::from_millis(200), handle).await;
+    }
+
     // Drop the FSM-side sender so the writer task observes the
     // channel close and exits cleanly. `actions` holds another
     // clone through the BoxedLinkDriver, so dropping `actions`
@@ -509,4 +626,96 @@ async fn run_demo(listen: String, key: String) -> io::Result<()> {
     // transition) before we return and the runtime shuts down.
     let _ = tokio::time::timeout(Duration::from_millis(50), writer_handle).await;
     Ok(())
+}
+
+/// R121e — publisher task body. Waits for the session FSM to
+/// reach the Established state (signalled by
+/// `trace.send_open_ack > 0` on the acceptor side; this is the
+/// last script-action of the 4-way handshake) and then emits a
+/// fixed number of `Push` frames spaced at a fixed cadence so a
+/// z_sub peer can observe at least one in steady state.
+///
+/// Why multi-copy emission (`PUBLISHER_BURST_COUNT`): zenoh-pico's
+/// `z_sub` declares its subscription AFTER the handshake
+/// completes (the DECLARE[DeclSubscriber] arrives in the first
+/// Frame after the peer's OpenSyn). If wz-ap-demo emits the
+/// Push BEFORE that DECLARE lands, z_sub's local matcher has
+/// nothing to compare against and drops the message. Sending a
+/// short burst spaced at the configured cadence makes the
+/// integration test robust against this 1-frame race window
+/// without needing to peek into the inbound stream for
+/// `DeclSubscriber` arrival.
+///
+/// Why a synchronous trace-counter poll (not a `tokio::sync`
+/// primitive): `SessionLinkActions` does not currently expose an
+/// "Established" event channel, and the trace counter is already
+/// authoritative for the handshake-side script-action dispatch.
+/// A short 50ms poll cadence keeps the cold-start latency
+/// bounded to one polling interval (~50ms) while staying
+/// allocation-free. A future round can swap this for a
+/// `tokio::sync::Notify`-based path once a `SessionLinkActions`
+/// signal slot for Established lands (R121e carry).
+const PUBLISHER_HANDSHAKE_POLL_INTERVAL_MS: u64 = 50;
+const PUBLISHER_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
+const PUBLISHER_BURST_COUNT: usize = 5;
+const PUBLISHER_BURST_INTERVAL_MS: u64 = 200;
+
+async fn publisher_task(
+    actions: Arc<wz_runtime_tokio::session_glue::SessionLinkActions>,
+    keyexpr: String,
+    value: String,
+) {
+    // ── Step 1: wait for Established. The acceptor reaches
+    //           Established on the transition that fires
+    //           `send_open_ack` (the FSM's last script-action
+    //           before entering the Established state per
+    //           session_fsm_unicast.scxml). Poll the trace
+    //           snapshot's counter; once non-zero the FSM has
+    //           dispatched the OpenAck wire bytes, which means
+    //           the peer's view of the session is also
+    //           Established (zenoh-pico transitions to
+    //           Established on receipt of OpenAck per
+    //           transport.c:300-320). Bail with a warn on
+    //           timeout — the publisher had no opportunity to
+    //           emit; the drive_session loop is responsible for
+    //           the failure mode (lease expiry, framing error,
+    //           etc.).
+    let deadline = std::time::Instant::now()
+        + Duration::from_millis(PUBLISHER_HANDSHAKE_TIMEOUT_MS);
+    loop {
+        if actions.trace_snapshot().send_open_ack > 0 {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            log::warn!(
+                "wz-ap-demo: publisher_task gave up waiting for Established \
+                 after {PUBLISHER_HANDSHAKE_TIMEOUT_MS}ms (send_open_ack never fired)"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(PUBLISHER_HANDSHAKE_POLL_INTERVAL_MS)).await;
+    }
+    log::info!(
+        "wz-ap-demo: publisher_task observed Established; emitting {PUBLISHER_BURST_COUNT} Pushes \
+         on keyexpr='{keyexpr}' value='{value}'"
+    );
+
+    // ── Step 2: emit the burst. Each call composes a
+    //           Frame[Push(literal keyexpr, MsgPut(payload))] and
+    //           dispatches via the OutboundWriteDriver mpsc
+    //           channel. `reliable=true` matches z_sub's default
+    //           subscription reliability.
+    for i in 0..PUBLISHER_BURST_COUNT {
+        actions.send_push_literal(&keyexpr, value.as_bytes(), true);
+        eprintln!(
+            "wz-ap-demo: PUBLISHER EMITTED keyexpr='{keyexpr}' value='{value}' idx={i}"
+        );
+        // Cadence pause between emissions (not after the last
+        // one — the run_demo cleanup gives the writer a brief
+        // drain window).
+        if i + 1 < PUBLISHER_BURST_COUNT {
+            tokio::time::sleep(Duration::from_millis(PUBLISHER_BURST_INTERVAL_MS)).await;
+        }
+    }
+    log::info!("wz-ap-demo: publisher_task finished emission burst");
 }
