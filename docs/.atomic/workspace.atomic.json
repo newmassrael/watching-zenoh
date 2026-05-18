@@ -3392,6 +3392,68 @@
         "AP MVP demo binary — internal infrastructure (R98-R100) + wire-interop confidence (R101-R105) are now both in place. Real Linux + tokio runnable demo against a zenoh-pico peer is the next user-visible deliverable; 2-3 rounds for TCP scaffolding + peer fixture + golden-path assertion."
       ]
     },
+    "Round 106": {
+      "decision_summary": "R106 closes the M-flag default audit (cumulative R102/R104/R105 carry) by baking M=1 into push/response/request codec headers — wz default wireexpr is LOCAL mapping, which matches zenoh-pico's `_z_wireexpr_is_local` semantic and removes the Layer 3 fixture's `_key._mapping = 1` divergence patch.",
+      "changes_bullets": [
+        "sources/codecs/push.scxml:80 — `<sce:flag name=\"M\" bit=\"6\"/>` → `value=\"1\"` added. Wire-MID default goes from 0x1D to 0x5D (= 0x1D | 0x40).",
+        "sources/codecs/response.scxml:92 — same: `value=\"1\"` added; Default header 0x1B → 0x5B.",
+        "sources/codecs/request.scxml:93 — same: `value=\"1\"` added. request has no mid baked at this level (variant decides), so Default header is 0x40 (M flag only).",
+        "interest_body.scxml:74 (M flag bit=6, R-gate dependent) and ext_entry.scxml:69 (M flag bit=4, ext-chain More flag — different semantic) were left untouched. interest_body baking deferred to a separate audit because R-gate cleared keyexpr changes the M-flag interpretation; ext_entry M is the ext-chain `More` bit, unrelated to wireexpr-mapping.",
+        "crates/wz-codecs build emit inspected directly in $OUT_DIR/{push,response,request}.rs: `impl Default::default()` bakes header bytes 0x5d / 0x5b / 0x40 — R94-style codegen verify done before relying on the change.",
+        "crates/wz-integration-tests/tests/layer3_push.rs — `msg._key._mapping = 1` patch and its 10-line carry comment removed; wire assertion `[0x1D, ...]` → `[0x5D, ...]`; module doc updated to reflect R106-baked M=1 and the natural mapping=LOCAL fixture default.",
+        "crates/wz-integration-tests/tests/layer3_response.rs — same mapping=1 patch removed (4-patch fixture → 3-patch); wire assertion `[0x1B, ...]` → `[0x5B, ...]`; module doc updated to describe the R106 fixture simplification."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-codecs (workspace at crates/Cargo.toml): clean compile; emitted defaults inspected in target/debug/build/wz-codecs-*/out/ — push.rs:61 header=0x5du8, response.rs:63 header=0x5bu8, request.rs:63 header=0x40u8.",
+        "cargo test --workspace: 147 tests pass; layer3_push + layer3_response now byte-equivalent without the mapping=1 patch.",
+        "scripts/run-ci.sh all 5 lanes (A/B/C1/C2/D) pass.",
+        "atomic ledger entries: 118 → 119 (this Round 106 entry). T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "M-flag audit cumulative carry (R102/R104/R105) closed for the wireexpr-always-present codecs. Remaining carry is interest_body alone, with explicit reason (R-gate variants need separate analysis)."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants"
+      ],
+      "carry_forward_bullets": [
+        "INTEREST M-flag baking (R104 carry residual after R106 closure) — interest_body.scxml:74 declares M at bit=6 with R-gate at bit=4. R=1 path matches push/response/request semantic (wireexpr-mapping); R=0 path treats the bit as unused. zenoh-pico's `_z_interest_encode` (interest.c:52-67) only consults `_z_wireexpr_is_local` when RESTRICTED flag is set, so R=0 emits whatever M was in the flags byte. 1-round audit: decide whether wz interest_body default should bake M=1 (matches R=1 case, makes R=0 fixture set M=1 too — needs pico-side patch) or stay M=0 (matches R=0 case, R=1 fixture would need mapping patch). Layer 3 interest fixture is is_final form (no body emitted) so neither path affects R104's test; the decision affects only future non-final coverage.",
+        "Non-default state Layer 3 coverage carry (post-R90 / R105 carry residual) — PUSH with N-suffix wireexpr, OAM with ZINT/ZBUF arms, INTEREST non-final, RESPONSE with err arm. Quality-axis round, unblocked by R106 but not gating; revisit when a consumer surfaces.",
+        "DECLARE codec (MID 0x1E) chain — last unmodeled application-layer MID. 9 declaration sub-types per zenoh-pico declarations.c (decl_kexpr / undecl_kexpr / decl_subscriber / undecl_subscriber / decl_queryable / undecl_queryable / decl_token / undecl_token / decl_final). Multi-round chain (~3 rounds like the RESPONSE chain). Closure brings the codec catalog to 7/7 MIDs and unblocks the mapping-id resolver on the pubsub registry (R98-R99).",
+        "AP MVP demo binary — internal infrastructure (R98-R100 registry + adapter + wildcard matching) plus wire-interop confidence (R101-R106 byte-equivalent envelopes) are now both in place. Real Linux + tokio runnable demo against a zenoh-pico peer is the next user-visible deliverable; 2-3 rounds for TCP scaffolding + peer fixture + golden-path assertion.",
+        "M-flag baking is now a wz semantic decision: a freshly-built wireexpr without prior DECLARE is treated as LOCAL (sender-mapping). wire-spec-subset doc could record this explicitly under §6.1/6.2/6.3 to remove the implicit-default ambiguity — deferred to a follow-up doc round to keep R106 focused on the codec layer."
+      ],
+      "publishable_decision_summary": "R106 closes the M-flag default audit (cumulative R102/R104/R105 carry) by baking M=1 into push/response/request codec headers — wz default wireexpr is LOCAL mapping, which matches zenoh-pico's `_z_wireexpr_is_local` semantic and removes the Layer 3 fixture's `_key._mapping = 1` divergence patch.",
+      "publishable_changes_bullets": [
+        "sources/codecs/push.scxml:80 — `<sce:flag name=\"M\" bit=\"6\"/>` → `value=\"1\"` added. Wire-MID default goes from 0x1D to 0x5D (= 0x1D | 0x40).",
+        "sources/codecs/response.scxml:92 — same: `value=\"1\"` added; Default header 0x1B → 0x5B.",
+        "sources/codecs/request.scxml:93 — same: `value=\"1\"` added. request has no mid baked at this level (variant decides), so Default header is 0x40 (M flag only).",
+        "interest_body.scxml:74 (M flag bit=6, R-gate dependent) and ext_entry.scxml:69 (M flag bit=4, ext-chain More flag — different semantic) were left untouched. interest_body baking deferred to a separate audit because R-gate cleared keyexpr changes the M-flag interpretation; ext_entry M is the ext-chain `More` bit, unrelated to wireexpr-mapping.",
+        "crates/wz-codecs build emit inspected directly in $OUT_DIR/{push,response,request}.rs: `impl Default::default()` bakes header bytes 0x5d / 0x5b / 0x40 — R94-style codegen verify done before relying on the change.",
+        "crates/wz-integration-tests/tests/layer3_push.rs — `msg._key._mapping = 1` patch and its 10-line carry comment removed; wire assertion `[0x1D, ...]` → `[0x5D, ...]`; module doc updated to reflect R106-baked M=1 and the natural mapping=LOCAL fixture default.",
+        "crates/wz-integration-tests/tests/layer3_response.rs — same mapping=1 patch removed (4-patch fixture → 3-patch); wire assertion `[0x1B, ...]` → `[0x5B, ...]`; module doc updated to describe the R106 fixture simplification."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-codecs (workspace at crates/Cargo.toml): clean compile; emitted defaults inspected in target/debug/build/wz-codecs-*/out/ — push.rs:61 header=0x5du8, response.rs:63 header=0x5bu8, request.rs:63 header=0x40u8.",
+        "cargo test --workspace: 147 tests pass; layer3_push + layer3_response now byte-equivalent without the mapping=1 patch.",
+        "scripts/run-ci.sh all 5 lanes (A/B/C1/C2/D) pass.",
+        "atomic ledger entries: 118 → 119 (this Round 106 entry). T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "M-flag audit cumulative carry (R102/R104/R105) closed for the wireexpr-always-present codecs. Remaining carry is interest_body alone, with explicit reason (R-gate variants need separate analysis)."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "INTEREST M-flag baking (R104 carry residual after R106 closure) — interest_body.scxml:74 declares M at bit=6 with R-gate at bit=4. R=1 path matches push/response/request semantic (wireexpr-mapping); R=0 path treats the bit as unused. zenoh-pico's `_z_interest_encode` (interest.c:52-67) only consults `_z_wireexpr_is_local` when RESTRICTED flag is set, so R=0 emits whatever M was in the flags byte. 1-round audit: decide whether wz interest_body default should bake M=1 (matches R=1 case, makes R=0 fixture set M=1 too — needs pico-side patch) or stay M=0 (matches R=0 case, R=1 fixture would need mapping patch). Layer 3 interest fixture is is_final form (no body emitted) so neither path affects R104's test; the decision affects only future non-final coverage.",
+        "Non-default state Layer 3 coverage carry (post-R90 / R105 carry residual) — PUSH with N-suffix wireexpr, OAM with ZINT/ZBUF arms, INTEREST non-final, RESPONSE with err arm. Quality-axis round, unblocked by R106 but not gating; revisit when a consumer surfaces.",
+        "DECLARE codec (MID 0x1E) chain — last unmodeled application-layer MID. 9 declaration sub-types per zenoh-pico declarations.c (decl_kexpr / undecl_kexpr / decl_subscriber / undecl_subscriber / decl_queryable / undecl_queryable / decl_token / undecl_token / decl_final). Multi-round chain (~3 rounds like the RESPONSE chain). Closure brings the codec catalog to 7/7 MIDs and unblocks the mapping-id resolver on the pubsub registry (R98-R99).",
+        "AP MVP demo binary — internal infrastructure (R98-R100 registry + adapter + wildcard matching) plus wire-interop confidence (R101-R106 byte-equivalent envelopes) are now both in place. Real Linux + tokio runnable demo against a zenoh-pico peer is the next user-visible deliverable; 2-3 rounds for TCP scaffolding + peer fixture + golden-path assertion.",
+        "M-flag baking is now a wz semantic decision: a freshly-built wireexpr without prior DECLARE is treated as LOCAL (sender-mapping). wire-spec-subset doc could record this explicitly under §6.1/6.2/6.3 to remove the implicit-default ambiguity — deferred to a follow-up doc round to keep R106 focused on the codec layer."
+      ]
+    },
     "Round 11": {
       "decision_summary": "OQ-W15 (a) closure (Q1=No RNG → plugin / Q2=Yes HMAC → plugin ratified) + OQ-W24 registration as SCE counter-offer track for §5.I tier-explicit separation",
       "changes_bullets": [
