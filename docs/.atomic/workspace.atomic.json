@@ -4881,6 +4881,80 @@
         "R125e verifies wz emit matches zenoh-pico _z_keyexpr_decode(has_id_mapping)."
       ]
     },
+    "Round 125b": {
+      "decision_summary": "R125b: leaf codecs wireexpr_local + wireexpr_nonlocal authored — wire-identical type-level mapping split.",
+      "changes_bullets": [
+        "sources/codecs/wireexpr_local.scxml authored (id + parent.N-gated suffix; name=wireexpr_local).",
+        "sources/codecs/wireexpr_nonlocal.scxml authored (wire-identical body; name=wireexpr_nonlocal).",
+        "Both arms declare requires-parent-flags carrier=header flag N bit=5 (suffix gating).",
+        "Empirical verify: M=0 binds _mapping=LOCAL constant per zenoh-pico message.c:133 false-branch.",
+        "Empirical verify: M=1 binds _mapping=caller's mapping arg per message.c:133 true-branch.",
+        "Arm assignment locked for R125c: 0x00=wireexpr_local (M=0), 0x01=wireexpr_nonlocal (M=1)."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh 7-lane full gate pass (Layer 0/A/A2/B/C1/C2/D).",
+        "Layer B emit: wireexpr_local OK + wireexpr_nonlocal OK + existing wireexpr OK across 6 backends.",
+        "validate_workspace: T1=0; RT 12/12; entries 143->144 (this entry); sections=214; sync.",
+        "Layer 3 layer3_wireexpr_{local,nonlocal}.rs skip carried to R125e wire-shape verify.",
+        "No new LAYER2_KNOWN_DIVERGENCE (new files have no SCE upstream fixture; L2 is N/A)."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "R125c: wireexpr.scxml restructure into parent-tag variant dispatcher (no own wire fields).",
+        "R125c dispatcher RPF: parent.M bit=6 (variant tag) + parent.N bit=5 (forward to arms).",
+        "R125c arm shape: <sce:variant tag='parent.M'> arm 0x00=wireexpr_local arm 0x01=wireexpr_nonlocal.",
+        "R125c CORRECTION over handoff/SCE-test-fixture: zenoh-pico semantics force M=0->local M=1->nonlocal.",
+        "R125c risk: wireexpr stem loses body-identity with SCE codec_zenoh_wireexpr; KNOWN_DIVERGENCE entry.",
+        "R125d: drop M-flag value=1 from push/request/response.scxml (Q-3 derivation+static coexistence).",
+        "R125e: Layer 3 layer3_wireexpr_{local,nonlocal}.rs wire bit-shape vs zenoh-pico FFI round-trip."
+      ],
+      "publishable_decision_summary": "R125b: wireexpr_local + wireexpr_nonlocal leaves authored — wire-identical bodies with type-level mapping refinement for the R125c parent-tag variant dispatcher (B5-ν, b719ee3e).",
+      "publishable_changes_bullets": [
+        "sources/codecs/wireexpr_local.scxml created — sce:kind='codec', name='wireexpr_local'.",
+        "sources/codecs/wireexpr_nonlocal.scxml created — sce:kind='codec', name='wireexpr_nonlocal'.",
+        "Both codecs declare requires-parent-flags carrier='header' flag N bit=5 (suffix gating).",
+        "Datamodel byte-identical to existing wireexpr.scxml leaf: id (VLE u64, always) +",
+        "suffix_len (VLE u64, present-if parent.N) + suffix (UTF-8 string, length-ref, max=128).",
+        "Header prose anchors zenoh-pico message.c:115-146 encode/decode pair + line 133 mapping branch.",
+        "Header prose anchors network.h:64,71,78 (_Z_FLAG_N_*_M=0x40 push/request/response carriers).",
+        "wireexpr_local binds decoded _mapping to _Z_KEYEXPR_MAPPING_LOCAL constant (false-branch, M=0).",
+        "wireexpr_nonlocal binds decoded _mapping to caller's mapping argument (true-branch, M=1).",
+        "R125b authors leaves only; the wireexpr.scxml parent dispatcher restructure ships in R125c.",
+        "Empirical correction logged: handoff/SCE-test-fixture arm convention was reversed in zenoh-pico.",
+        "Production-correct arm assignment locked: 0x00=wireexpr_local, 0x01=wireexpr_nonlocal."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh full 7-lane gate pass: Layer 0 (actionlint) + A (mnemosyne validate)",
+        "+ A2 (envelope mid value= audit) + B (sce-codegen 6-backend) + C1 (cargo test --workspace)",
+        "+ C2 (cargo clippy -D warnings) + D (deploy yaml schema validate).",
+        "Layer B per-codec result: wireexpr_local OK, wireexpr_nonlocal OK, existing wireexpr OK.",
+        "Layer B 6-backend coverage rust+cpp+kotlin+go+c11+python emit-success for both new codecs.",
+        "Layer 2 byte-golden vs SCE upstream: N/A — no codec_zenoh_wireexpr_local fixture in SCE.",
+        "Layer 3 wire-interop: layer3_wireexpr_{local,nonlocal}.rs absent ⇒ skip; R125e carry.",
+        "validate_workspace: docs=12/12; T1 orphan total=0; round-trip mandatory=12/12.",
+        "validate_workspace atomic ledger: entries 143 → 144 (this entry); sections=214; sync.",
+        "validate_workspace style: T3 warn=856; T4 info=427 (R138 tier-mobility ratify; unchanged)."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R125c: rewrite sources/codecs/wireexpr.scxml into a thin parent-tag variant dispatcher.",
+        "R125c dispatcher shape: empty datamodel except <sce:variant tag='parent.M'> + <sce:import>s.",
+        "R125c dispatcher RPF: parent.M bit=6 (variant tag) AND parent.N bit=5 (forwarded to arms).",
+        "R125c arm assignment: <sce:arm value='0x00' type='wireexpr_local' default='true'/> +",
+        "<sce:arm value='0x01' type='wireexpr_nonlocal'/> (production-correct over SCE fixture).",
+        "R125c correction: M=0 ⇒ LOCAL constant (false-branch on message.c:133), not nonlocal.",
+        "R125c side-effect: wireexpr stem loses body-identity with SCE codec_zenoh_wireexpr fixture.",
+        "R125c follow-on: add 'wireexpr' to scripts/run-ci.sh LAYER2_KNOWN_DIVERGENCE (audit-traced).",
+        "R125d: drop M-flag value='1' from sources/codecs/push|request|response.scxml.",
+        "R125d gate: SCE Q-3 validator rejects derivation+static value=1 coexistence at compile time.",
+        "R125e: author tests/layer3_wireexpr_{local,nonlocal}.rs (wire shape interop pairs).",
+        "R125e covers SCE non-verified surface: zenoh-pico-sys FFI emit/decode vs wz emit round-trip."
+      ]
+    },
     "Round 13": {
       "decision_summary": "sources/ skeleton lands via README (SPDX header double-block + 7-subdir lazy materialize per ARCH §428) + first author-side SCXML sources/algorithms/crc16_ccitt.scxml body-identical to SCE fixture; 6-backend byte-golden verify carried to R14 SCE submodule infrastructure (pin 1473f99f origin/main).",
       "changes_bullets": [
