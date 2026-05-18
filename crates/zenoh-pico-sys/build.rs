@@ -221,6 +221,16 @@ fn main() {
         // — see R101 atomic entry for the per-codec rollout plan.
         .allowlist_type("_z_n_msg_response_final_t")
         .allowlist_function("_z_response_final_encode")
+        // R102 — PUSH Layer 3 byte-compare. PUSH is the first
+        // composite-shape codec the rollout hits: header + wireexpr
+        // embed (parent.N-gated suffix) + Z-gated ext-chain (qos +
+        // timestamp slots) + always-present push_body (put / del
+        // peek-byte dispatch). `_Z_N_QOS_DEFAULT` is an `extern const`
+        // sentinel — the encoder treats `qos._val == 5` as "no qos
+        // ext", so the test fixture must set `_qos._val = 5` (not
+        // zero) to match the wz Push::default() shape.
+        .allowlist_type("_z_n_msg_push_t")
+        .allowlist_function("_z_push_encode")
         // R67c — ext chain Layer 3 byte-compare vs wz ExtEnvelope.
         // _z_msg_ext_t = union<unit|zint|zbuf> + header byte; the
         // builder helpers _z_msg_ext_make_* set header bits from
