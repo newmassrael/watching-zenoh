@@ -105,3 +105,10 @@ target_id = "Round 125a"
 reason = "Audit half intentionally minimal per R295/R296 textbook split: pin-bump-only round (the first sub-round of a 5-sub-round R125a-e adoption sequence for SCE B5-nu parent-tag variant codec dispatch). Audit half records the pin bump + regression-zero fact; publishable half carries the cumulative SCE Phase A + B context, the new diagnostic surface (codes 279-283), and the R125b-e carry plan including the wireexpr body-identical break risk + Layer 3 FFI compatibility verify."
 applied_in = "R125a in-flight"
 content_hash_after = "bd54f94159dfdb8f93e48e4868d29686b73d403f0205c260a27233af9a1260f1"
+
+[[publishable_override_ledger]]
+kind = "redaction"
+target_id = "Round 125b"
+reason = "Audit half intentionally minimal per R295/R296 textbook split: this round authors two new leaf codecs (wireexpr_local + wireexpr_nonlocal) under SCE B5-nu vendor pin b719ee3e. Audit half records the wire-byte-identical leaf authoring fact + the empirical handoff correction (M=0 maps to LOCAL constant per zenoh-pico message.c:133, not nonlocal as the SCE generic B5-nu test fixture and the prior session's carry text both claimed). Publishable half carries the full RFC §5.B B5-nu composition narrative, the zenoh-pico message.c:115-146 encode/decode anchor + network.h:64,71,78 _Z_FLAG_N_*_M=0x40 carrier evidence, the locked production-correct arm assignment for R125c (0x00=wireexpr_local, 0x01=wireexpr_nonlocal), and the R125c-e adoption sequence including the wireexpr stem KNOWN_DIVERGENCE entry follow-on + Layer 3 FFI wire shape interop verify."
+applied_in = "R125b in-flight"
+content_hash_after = "2abdfaa64fc4a493da5742b5525da2bca255cf4bf12100075f32d46192347fa3"
