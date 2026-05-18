@@ -69,3 +69,32 @@ fn msg_del_default_encode_decode_roundtrip() {
     assert!(decoded.timestamp.is_none());
     assert!(decoded.extensions.is_none());
 }
+
+#[test]
+fn reply_default_encode_decode_roundtrip() {
+    // R95 — Reply is an inner body codec for the Z_RESPONSE envelope
+    // landing in R97; default header bakes MID 0x04 per RFC variant-
+    // default-uniformity. C=0 keeps consolidation absent; Z=0 keeps
+    // the ext-chain absent; the always-present push_body variant
+    // defaults to MsgPut (declared default arm) whose header is 0x01
+    // baked-in.
+    use wz_codecs::reply::Reply;
+
+    let reply = Reply::default();
+    let encoded = reply.encode();
+    assert!(
+        !encoded.is_empty(),
+        "default Reply encode produced 0 bytes — header byte expected"
+    );
+    assert_eq!(
+        encoded[0], 0x04,
+        "default Reply header carries MID Z_REPLY = 0x04"
+    );
+
+    let mut cursor = SceCursor::new(&encoded);
+    let decoded = Reply::decode(&mut cursor).expect("decode default Reply bytes");
+
+    assert_eq!(decoded.header, reply.header, "header round-trip");
+    assert!(decoded.consolidation.is_none(), "C clear => consolidation absent");
+    assert!(decoded.extensions.is_none(), "Z clear => extensions absent");
+}

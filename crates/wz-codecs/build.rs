@@ -56,6 +56,7 @@ const CODECS: &[&str] = &[
     "oam",       // §5 Z_OAM envelope — header.enc variant dispatch — R92
     "interest_body", // §5 Z_INTEREST inner body — flags + R-gated wireexpr — R94
     "interest",  // §5 Z_INTEREST envelope — header + VLE id + ext-chain — R93/R94
+    "reply",     // §6.3 Z_REPLY inner body — C-gated consolidation + put/del peek — R95
 ];
 
 fn main() {

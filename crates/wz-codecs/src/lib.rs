@@ -143,6 +143,10 @@ pub mod interest {
     include!(concat!(env!("OUT_DIR"), "/interest.rs"));
 }
 
+pub mod reply {
+    include!(concat!(env!("OUT_DIR"), "/reply.rs"));
+}
+
 #[cfg(test)]
 mod ext_envelope_oracle {
     //! R67b: SCXML-comment oracle pinned as cargo test.
