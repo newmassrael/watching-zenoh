@@ -86,14 +86,16 @@ async fn r60_fsm_drives_real_tcp_loopback() {
 
     // ─── peer-side read confirms wire bytes hit the socket ─────
     //
-    // TcpDriver::send writes a 4-byte BE length prefix then the
-    // frame bytes; we read the length, then read exactly that many
-    // payload bytes, then inspect the payload's leading byte
-    // (transport-message header) to confirm it carries
-    // FLAG_T_INIT_S | T_MID_INIT = 0x41.
-    let mut len_buf = [0u8; 4];
+    // TcpDriver::send writes the Zenoh stream envelope (u16 LE
+    // length prefix + payload, mirroring zenoh-pico's
+    // `_z_link_send_t_msg`) then the frame bytes; we read the
+    // length, then read exactly that many payload bytes, then
+    // inspect the payload's leading byte (transport-message
+    // header) to confirm it carries FLAG_T_INIT_S | T_MID_INIT =
+    // 0x41.
+    let mut len_buf = [0u8; 2];
     peer.read_exact(&mut len_buf).await.expect("read length prefix");
-    let len = u32::from_be_bytes(len_buf) as usize;
+    let len = u16::from_le_bytes(len_buf) as usize;
     assert!(len > 0, "init_syn payload must be non-empty");
     let mut payload = vec![0u8; len];
     peer.read_exact(&mut payload).await.expect("read payload");

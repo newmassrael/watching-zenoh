@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-// R121c — AP MVP demo round-trip integration test.
+// R121c (introduced) / R121d (stretch goal promoted to hard gate) —
+// AP MVP demo round-trip integration test.
 //
 // Drives the wz-ap-demo binary (R121b) against an external zenoh-pico
 // z_put CLI peer over real TCP. This is the first integration test
@@ -23,14 +24,18 @@
 //   5. Wait up to 5s for the wz-ap-demo stderr to contain
 //      "accepted peer" — proves the TCP-accept side of the bidirectional
 //      split works against a real zenoh-pico client.
-//   6. SIGTERM wz-ap-demo + flush captured stderr; assert the
-//      expected log lines are present.
-//
-// Optimistic stretch goal — assert "SUBSCRIBER FIRED" appears too;
-// this only works when the full session FSM handshake completes
-// against zenoh-pico's initiator. If the handshake fails (codec
-// mismatch, frame format drift, etc.) the test surfaces the
-// captured stderr verbatim for diagnosis.
+//   6. Wait up to 5s for the wz-ap-demo stderr to contain
+//      "SUBSCRIBER FIRED" — proves the full session-FSM handshake
+//      completed AND zenoh-pico's z_put successfully echoed its
+//      DECLARE(KeyExpr) → Push(mapping_id) pair THROUGH the wz
+//      pubsub resolver to the registered subscriber callback. This
+//      was a stretch goal in R121c (handshake compat unproven);
+//      R121d closed the four blockers (framing 2-byte LE vs 4-byte
+//      BE; missing InboundStart dispatch; missing peer-caps
+//      InitAck negotiation; missing DECLARE keyexpr-table
+//      resolver) and the line now appears in steady state.
+//   7. SIGTERM wz-ap-demo + flush captured stderr; surface the
+//      full captured text on any failed assertion for diagnosis.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::net::TcpListener;
@@ -165,49 +170,51 @@ fn ap_demo_round_trip_against_zenoh_pico_z_put() {
         .args(["-k", key, "-v", "hello-from-z_put", "-e", &endpoint, "-m", "client"])
         .status();
 
-    // Give the demo a moment to drain inbound + dispatch.
-    thread::sleep(Duration::from_millis(500));
-
-    // Conservative assertion: wz-ap-demo accepted the TCP connection
-    // from zenoh-pico. Proves the bidirectional split + listener wire-
-    // up reaches the FSM entry. Subscriber-fired is the optimistic
-    // stretch goal below.
-    let captured = read_captured(&mut stderr_capture_reader);
-    let accepted = captured.contains("accepted peer");
+    // Two-stage wait: first the conservative `accepted peer` line
+    // (proves the TCP wire-up reached the FSM entry), then the
+    // `SUBSCRIBER FIRED` hard gate (proves the FSM handshake
+    // completed AND the subscriber resolver fired on a mapping-id
+    // Push). Each wait has its own 5s budget so a regression
+    // localizes the failure: missing `accepted peer` means TCP
+    // never connected; missing `SUBSCRIBER FIRED` means the wire
+    // reached the FSM but a handshake / resolver step regressed.
+    let accepted_result =
+        wait_for_substring(&mut stderr_capture_reader, "accepted peer", Duration::from_secs(5));
+    let subscriber_result =
+        wait_for_substring(&mut stderr_capture_reader, "SUBSCRIBER FIRED", Duration::from_secs(5));
 
     // Tear down the demo. SIGTERM via kill(); on Unix this is SIGKILL
     // through std::process::Child — sufficient for test cleanup.
     let _ = child.kill();
     let _ = child.wait();
 
-    // Surface the full captured stderr on failure so any session-FSM
-    // log line (codec error, lease expiry, etc.) is visible in the
-    // cargo test output.
+    // Surface the full captured stderr on any failed assertion so a
+    // session-FSM log line (codec error, lease expiry, etc.) is
+    // visible in the cargo test output without re-running.
     let captured = read_captured(&mut stderr_capture_reader);
-    assert!(
-        accepted,
-        "wz-ap-demo did not log 'accepted peer' after z_put connected to {endpoint}\n\
-         z_put exit: {z_put_status:?}\n--- captured demo stderr ---\n{captured}"
-    );
-
-    // Optimistic check: if the full session handshake completed AND
-    // zenoh-pico's z_put successfully sent the keyexpr DECLARE +
-    // msg_put pair, the subscriber should have fired. If the
-    // handshake didn't complete (codec mismatch is the most likely
-    // cause), this assertion fails but the conservative 'accepted'
-    // check above already passed — the test still proved the wire-up.
-    //
-    // Print the captured stderr for visibility either way; this test
-    // is the first end-to-end check against a foreign implementation
-    // so the stderr is the primary diagnostic surface.
     eprintln!("--- captured wz-ap-demo stderr ---\n{captured}");
-    if !captured.contains("SUBSCRIBER FIRED") {
-        eprintln!(
-            "NOTE: SUBSCRIBER FIRED not observed — full session FSM handshake against \
-             zenoh-pico's z_put initiator did not complete. TCP accept succeeded \
-             (conservative assertion above); the subscriber-fired stretch goal is \
-             carried to the next round once the FSM-vs-zenoh-pico handshake gap is \
-             investigated. z_put exit: {z_put_status:?}"
+
+    let accepted_captured = match accepted_result {
+        Ok(c) => c,
+        Err(c) => panic!(
+            "wz-ap-demo did not log 'accepted peer' within 5s after z_put connected to \
+             {endpoint}\nz_put exit: {z_put_status:?}\n--- captured demo stderr at deadline ---\n{c}"
+        ),
+    };
+    // Conservative gate's witness is the `accepted_captured` snapshot above;
+    // surface it for completeness in test traces even on the success path.
+    let _ = accepted_captured;
+
+    // R121d hard gate — the subscriber must have fired against the
+    // Push that referenced z_put's locally-declared mapping id. If
+    // any of the four R121d blockers regresses (TCP framing, FSM
+    // role start, peer-caps cap, DECLARE resolver) the line is
+    // missing and the assertion below catches it.
+    if let Err(c) = subscriber_result {
+        panic!(
+            "wz-ap-demo did not log 'SUBSCRIBER FIRED' within 5s — handshake or \
+             keyexpr resolver regression against zenoh-pico's z_put initiator.\n\
+             z_put exit: {z_put_status:?}\n--- captured demo stderr at deadline ---\n{c}"
         );
     }
 }

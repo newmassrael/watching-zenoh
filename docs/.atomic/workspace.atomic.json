@@ -4799,6 +4799,82 @@
         "Go backend variant-arm package-qualifier carry from SCE atomic 2fe638c1 (not on wz path)."
       ]
     },
+    "Round 121d": {
+      "decision_summary": "R121d closed four zenoh-pico unicast handshake compat blockers (framing, role start, peer-caps, DECLARE resolver) and promoted AP demo SUBSCRIBER FIRED to hard gate.",
+      "changes_bullets": [
+        "TcpDriver framing 4-byte BE -> 2-byte LE in crates/wz-runtime-tokio/src/lib.rs to match zenoh-pico _Z_MSG_LEN_ENC_SIZE=2",
+        "R60 self-test session_fsm_real_tcp.rs:94-96 updated to 2-byte LE wire shape; framing symmetry preserved",
+        "wz-ap-demo OutboundWriteDriver redesigned as mpsc::UnboundedSender + async writer_task owning OwnedWriteHalf; removes block_on reentrancy",
+        "wz-ap-demo dispatches SessionFsmUnicastEvent::InboundStart after engine.initialize() so FSM enters Accepting.AwaitingInitSyn",
+        "demo_session_init_params aligned to zenoh-pico defaults: version=0x09, seq_num_res=req_id_res=2, batch_size=65535",
+        "Added SessionLinkActions::inbound_peer_init_caps + PeerInitCaps::from_init_syn; handle_inbound captures peer InitSyn sizing",
+        "init_ack_params caps outbound InitAck (seq_num_res/req_id_res/batch_size) to min(own, peer) per wire-spec InitAck<=InitSyn",
+        "encode_init_with_role uses init_ack_params when is_ack=true; InitSyn path unchanged",
+        "SubscriberRegistry adds peer_keyexpr_table populated from Declare(DeclKexpr) + cleared by Declare(UndeclKexpr)",
+        "dispatch_push resolves mapping-id pushes via table[id] + push.suffix per Zenoh composition rule; unresolved composites dropped",
+        "Three new pubsub unit tests cover DECLARE->Push resolution, UndeclKexpr removal, base+suffix composite shape",
+        "ap_demo_round_trip.rs hard-gate: SUBSCRIBER FIRED is 5s wait_for_substring + panic instead of soft eprintln NOTE"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib pubsub: 15 passed (12 prior + 3 new R121d resolver tests)",
+        "cargo test --test session_fsm_real_tcp: 1 passed (R60 wz<->wz self-test with new 2-byte LE framing)",
+        "cargo test --test ap_demo_round_trip: 1 passed in 0.11s with SUBSCRIBER FIRED hard-gate enforced",
+        "scripts/run-ci.sh: all 8 lanes green (Layer 0/A/A2/B/C1/C2/D/E)",
+        "validate_workspace pre/post: docs=12/12, T1 orphan=0, RT=12/12, GENERATED.md=sync; entries +1 sections unchanged",
+        "Manual wz-ap-demo + zenoh-pico z_put -m client repro shows SUBSCRIBER FIRED + z_put exit 0"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "runtime-crate--sce_link_runtime_tokio/2-2-linkevent-enum",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "carry_forward_bullets": [
+        "Phase D production AP deploy: deploy.yaml schema migration (R123b-pre) so wz-ap-demo sources SessionInitParams from a deploy file",
+        "SCXML codec_stream_envelope kind to formalize the 2-byte LE length prefix as generated codec (Phase D follow-up)",
+        "DECLARE resolver covers DeclKexpr/UndeclKexpr only; the other 7 Declare sub-variants stay no-op until a consumer surfaces",
+        "Nested composite Push resolution (DeclKexpr.keyexpr.id!=0) lacks a dedicated test; add when a peer surfaces nested aliases",
+        "version=0x09 is fixed in demo; production AP must source proto version from deploy + re-check version-handshake hardening"
+      ],
+      "publishable_decision_summary": "R121d closed four zenoh-pico unicast handshake compat blockers (framing, role start, peer-caps, DECLARE resolver) and promoted AP demo SUBSCRIBER FIRED to hard gate.",
+      "publishable_changes_bullets": [
+        "TcpDriver framing 4-byte BE -> 2-byte LE in crates/wz-runtime-tokio/src/lib.rs to match zenoh-pico _Z_MSG_LEN_ENC_SIZE=2",
+        "R60 self-test session_fsm_real_tcp.rs:94-96 updated to 2-byte LE wire shape; framing symmetry preserved",
+        "wz-ap-demo OutboundWriteDriver redesigned as mpsc::UnboundedSender + async writer_task owning OwnedWriteHalf; removes block_on reentrancy",
+        "wz-ap-demo dispatches SessionFsmUnicastEvent::InboundStart after engine.initialize() so FSM enters Accepting.AwaitingInitSyn",
+        "demo_session_init_params aligned to zenoh-pico defaults: version=0x09, seq_num_res=req_id_res=2, batch_size=65535",
+        "Added SessionLinkActions::inbound_peer_init_caps + PeerInitCaps::from_init_syn; handle_inbound captures peer InitSyn sizing",
+        "init_ack_params caps outbound InitAck (seq_num_res/req_id_res/batch_size) to min(own, peer) per wire-spec InitAck<=InitSyn",
+        "encode_init_with_role uses init_ack_params when is_ack=true; InitSyn path unchanged",
+        "SubscriberRegistry adds peer_keyexpr_table populated from Declare(DeclKexpr) + cleared by Declare(UndeclKexpr)",
+        "dispatch_push resolves mapping-id pushes via table[id] + push.suffix per Zenoh composition rule; unresolved composites dropped",
+        "Three new pubsub unit tests cover DECLARE->Push resolution, UndeclKexpr removal, base+suffix composite shape",
+        "ap_demo_round_trip.rs hard-gate: SUBSCRIBER FIRED is 5s wait_for_substring + panic instead of soft eprintln NOTE"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib pubsub: 15 passed (12 prior + 3 new R121d resolver tests)",
+        "cargo test --test session_fsm_real_tcp: 1 passed (R60 wz<->wz self-test with new 2-byte LE framing)",
+        "cargo test --test ap_demo_round_trip: 1 passed in 0.11s with SUBSCRIBER FIRED hard-gate enforced",
+        "scripts/run-ci.sh: all 8 lanes green (Layer 0/A/A2/B/C1/C2/D/E)",
+        "validate_workspace pre/post: docs=12/12, T1 orphan=0, RT=12/12, GENERATED.md=sync; entries +1 sections unchanged",
+        "Manual wz-ap-demo + zenoh-pico z_put -m client repro shows SUBSCRIBER FIRED + z_put exit 0"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "runtime-crate--sce_link_runtime_tokio/2-2-linkevent-enum",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer",
+        "wire-spec-subset--watching-zenoh-mvp/8-transport-link-matrix"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase D production AP deploy: deploy.yaml schema migration (R123b-pre) so wz-ap-demo sources SessionInitParams from a deploy file",
+        "SCXML codec_stream_envelope kind to formalize the 2-byte LE length prefix as generated codec (Phase D follow-up)",
+        "DECLARE resolver covers DeclKexpr/UndeclKexpr only; the other 7 Declare sub-variants stay no-op until a consumer surfaces",
+        "Nested composite Push resolution (DeclKexpr.keyexpr.id!=0) lacks a dedicated test; add when a peer surfaces nested aliases",
+        "version=0x09 is fixed in demo; production AP must source proto version from deploy + re-check version-handshake hardening"
+      ]
+    },
     "Round 122": {
       "decision_summary": "R122 vendor/sce pin bump 122f851d to 4441431d; LAYER2_KNOWN_DIVERGENCE 6 to 1.",
       "changes_bullets": [
