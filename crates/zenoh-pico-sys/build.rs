@@ -248,6 +248,15 @@ fn main() {
         // false at the default state.
         .allowlist_type("_z_n_msg_interest_t")
         .allowlist_function("_z_n_interest_encode")
+        // R105 — RESPONSE envelope Layer 3 byte-compare. Largest
+        // post-R90 codec by primitive count: header + wireexpr
+        // embed + Z-gated ext-chain + peek-byte variant (reply /
+        // err arms). Default state requires 4 fixture patches
+        // (qos default + wireexpr mapping non-local + reply
+        // consolidation default + reply body _is_put=true) to
+        // reach the same wire as wz Response::default().
+        .allowlist_type("_z_n_msg_response_t")
+        .allowlist_function("_z_response_encode")
         // R67c — ext chain Layer 3 byte-compare vs wz ExtEnvelope.
         // _z_msg_ext_t = union<unit|zint|zbuf> + header byte; the
         // builder helpers _z_msg_ext_make_* set header bits from
