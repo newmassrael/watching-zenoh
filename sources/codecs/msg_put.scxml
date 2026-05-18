@@ -66,6 +66,22 @@
      caller mirrors zenoh-pico's `_z_push_body_decode_extensions`
      callback.
 
+     R88 variant-default-uniformity status: SCXML element-level
+     identical to SCE upstream codec_zenoh_msg_put at the current
+     vendor pin (R112; both sides carry `value="0x01"` on the mid
+     flag). msg_put is part of the same R88 audit lineage as
+     msg_del / query / request (see msg_del.scxml for the full
+     rationale) — recorded here so future SCE drift on msg_put's
+     mid bake is recognized as a regression, not a fix. wz
+     authoring on msg_put will not unilaterally remove the
+     `value="0x01"` attribute even if a future SCE pin temporarily
+     drops it; the Layer 3 test layer3_push.rs anchors the bake.
+     The CI Layer 2 result for msg_put can occasionally report
+     backend-specific MISMATCH (R114 GitHub Actions observation
+     2026-05-18) without an element-level diff — folded into the
+     R114 KNOWN_DIVERGENCE list as defense-in-depth.
+
+     Original alignment claim (pre-R88) preserved for history:
      Body byte-identical to SCE upstream codec_zenoh_msg_put at
      vendor pin 11f1032d; diff in SPDX header + file stem + root
      name + <sce:import src=> retargeted to wz-side stems. -->

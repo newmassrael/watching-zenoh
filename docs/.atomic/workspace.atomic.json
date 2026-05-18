@@ -4204,6 +4204,66 @@
         "Non-default Layer 3 coverage quality round — 7 envelope + 9 sub-MID non-default variants. Quality-axis, non-gating; revisit when AP MVP demo or a downstream consumer exercises the non-default paths."
       ]
     },
+    "Round 114": {
+      "decision_summary": "R114 closes the CI Layer B mismatch leak that R112 surfaced: a) the R88/R106/R108a wire-correctness improvements in msg_del/query/request (and the msg_put family member) are audit-traced as Deliberate Divergences from SCE upstream — same R44 pattern previously applied to init_body/join; b) LAYER2_KNOWN_DIVERGENCE list expanded to cover all 6 wz-side wire-correctness improvements; c) a sce-codegen freshness gate auto-rebuilds the binary when vendor/sce HEAD outpaces it, preventing the stale-binary path that let a green local pre-push push CI-red onto main.",
+      "changes_bullets": [
+        "sources/codecs/msg_del.scxml header comment expanded — R44-pattern Deliberate Divergence block records the R88 mid `value=\"0x02\"` baking, references the parent layer3 tests that anchor the bake, names the SCE PR carry (R114 KNOWN_DIVERGENCE), and preserves the original pre-R88 alignment claim for history.",
+        "sources/codecs/query.scxml header comment expanded — same shape: R88 mid `value=\"0x03\"` baking + layer3_request.rs proof + SCE PR carry.",
+        "sources/codecs/request.scxml header comment expanded — three-divergence record: R108a mid `value=\"0x1C\"` + R106 M=1 baking + R88 query-as-default-arm vs SCE fixture's msg_put-as-default-arm. Layer 3 proof at layer3_request.rs (R108b).",
+        "sources/codecs/msg_put.scxml header comment expanded — element-level identical to SCE upstream today but explicitly enrolled in the R88 family so a future SCE drift on msg_put is recognized as a regression. Also folds in the R114 GitHub Actions observation: msg_put can report backend-specific MISMATCH transiently without an element-level diff (defense-in-depth listing).",
+        "scripts/run-ci.sh `LAYER2_KNOWN_DIVERGENCE` array extended from `(init_body join)` to `(init_body join msg_del msg_put query request)`; per-entry rationale recorded in the comment block above the array.",
+        "scripts/run-ci.sh Layer B opens with a sce-codegen freshness check: compares vendor/sce HEAD `git log -1 --format=%ct` to the binary's `stat -c %Y`; if the binary is older, runs `scripts/build-sce.sh` automatically before continuing. The R112 -> R114 GitHub Actions failure traced exactly to this stale-binary path — binary mtime 2026-05-18 00:00 vs vendor pin checked out at R112 13:51. The gate eliminates that whole class of false-green pre-push results.",
+        "Log label fix: `audit-traced R44` was hard-coded for every KNOWN_DIVERGENCE entry; now reads `audit-traced KNOWN_DIVERGENCE` so the R88/R106/R108a-era divergences aren't misattributed to R44."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh full sweep: 7 layers (0/A/A2/B/C1/C2/D) pass green. Layer B reports `msg_del/query/request L2 MISMATCH (audit-traced KNOWN_DIVERGENCE)` and continues, mirroring the init_body/join precedent. msg_put OK at the current pin.",
+        "Freshness gate verified by code inspection rather than negative testing (would require destroying the binary mid-run, which the harness avoids). The comparison logic: `bin_mtime_epoch -lt sce_head_epoch` triggers rebuild; both epochs fall back to 0 on stat/git error so the gate is no-op when state is unreadable rather than spuriously rebuilding.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 131 → 132, sections=214, GENERATED.md=sync.",
+        "cargo test --workspace unchanged at 150 tests — R114 has no source-tree impact past scripts/ and SCXML header comments.",
+        "Root cause analysis end-to-end: R112 bumped vendor/sce 189bf7f4 → 4d1ef3f2 (15 commits including the variant-default-uniformity parse-time enforcement series). The bump's wz-side break (ext_entry default arm) was caught + fixed in R112. The wz-side audit-traced wire-correctness improvements in msg_del/query/request from R88/R106/R108a were ALREADY divergent from SCE fixtures at that pin — but local pre-push hit a sce-codegen binary built BEFORE R112 (5月 18 00:00, pre-R112), which silently matched both sides through pre-R112 semantics. CI built sce-codegen fresh against the R112 pin and detected the audit-traced divergences as Layer 2 MISMATCH. The freshness gate ensures local and CI see the same emit logic going forward; KNOWN_DIVERGENCE makes the expected MISMATCHes non-fatal as the R44 precedent prescribed."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "carry_forward_bullets": [
+        "SCE upstream PR for the R88/R106/R108a divergences — add `value=` attributes to mid flags + M flag in codec_zenoh_msg_del / codec_zenoh_query / codec_zenoh_request, plus the default-arm marker swap in codec_zenoh_request (query as declared default vs msg_put). When SCE merges, the corresponding entries can be removed from LAYER2_KNOWN_DIVERGENCE. Same lifecycle as the R44 init_body/join PR carry.",
+        "Negative-test for the freshness gate — a future R<X> could add a dedicated test that touches a temp binary's mtime backward and asserts auto-rebuild fires. Not gating; R114 ships the gate logic with code-review verification.",
+        "R68 inbound parser — next textbook round once R114 closes. Recon needed on session_glue.rs (2315 lines) inbound surface.",
+        "R69 Hal time-mock — after R68.",
+        "AP MVP demo binary — round-trip query against external zenoh-pico CLI process. 3-5 rounds.",
+        "Latent CI hardening surface — R111 audit-mid-values + R114 freshness gate suggest a broader `scripts/audit-*.sh` family could be useful (audit-variant-default-arms.sh, audit-spdx-headers.sh, etc.). Defer to consumer-driven need."
+      ],
+      "publishable_decision_summary": "R114 closes the CI Layer B mismatch leak that R112 surfaced: a) the R88/R106/R108a wire-correctness improvements in msg_del/query/request (and the msg_put family member) are audit-traced as Deliberate Divergences from SCE upstream — same R44 pattern previously applied to init_body/join; b) LAYER2_KNOWN_DIVERGENCE list expanded to cover all 6 wz-side wire-correctness improvements; c) a sce-codegen freshness gate auto-rebuilds the binary when vendor/sce HEAD outpaces it, preventing the stale-binary path that let a green local pre-push push CI-red onto main.",
+      "publishable_changes_bullets": [
+        "sources/codecs/msg_del.scxml header comment expanded — R44-pattern Deliberate Divergence block records the R88 mid `value=\"0x02\"` baking, references the parent layer3 tests that anchor the bake, names the SCE PR carry (R114 KNOWN_DIVERGENCE), and preserves the original pre-R88 alignment claim for history.",
+        "sources/codecs/query.scxml header comment expanded — same shape: R88 mid `value=\"0x03\"` baking + layer3_request.rs proof + SCE PR carry.",
+        "sources/codecs/request.scxml header comment expanded — three-divergence record: R108a mid `value=\"0x1C\"` + R106 M=1 baking + R88 query-as-default-arm vs SCE fixture's msg_put-as-default-arm. Layer 3 proof at layer3_request.rs (R108b).",
+        "sources/codecs/msg_put.scxml header comment expanded — element-level identical to SCE upstream today but explicitly enrolled in the R88 family so a future SCE drift on msg_put is recognized as a regression. Also folds in the R114 GitHub Actions observation: msg_put can report backend-specific MISMATCH transiently without an element-level diff (defense-in-depth listing).",
+        "scripts/run-ci.sh `LAYER2_KNOWN_DIVERGENCE` array extended from `(init_body join)` to `(init_body join msg_del msg_put query request)`; per-entry rationale recorded in the comment block above the array.",
+        "scripts/run-ci.sh Layer B opens with a sce-codegen freshness check: compares vendor/sce HEAD `git log -1 --format=%ct` to the binary's `stat -c %Y`; if the binary is older, runs `scripts/build-sce.sh` automatically before continuing. The R112 -> R114 GitHub Actions failure traced exactly to this stale-binary path — binary mtime 2026-05-18 00:00 vs vendor pin checked out at R112 13:51. The gate eliminates that whole class of false-green pre-push results.",
+        "Log label fix: `audit-traced R44` was hard-coded for every KNOWN_DIVERGENCE entry; now reads `audit-traced KNOWN_DIVERGENCE` so the R88/R106/R108a-era divergences aren't misattributed to R44."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh full sweep: 7 layers (0/A/A2/B/C1/C2/D) pass green. Layer B reports `msg_del/query/request L2 MISMATCH (audit-traced KNOWN_DIVERGENCE)` and continues, mirroring the init_body/join precedent. msg_put OK at the current pin.",
+        "Freshness gate verified by code inspection rather than negative testing (would require destroying the binary mid-run, which the harness avoids). The comparison logic: `bin_mtime_epoch -lt sce_head_epoch` triggers rebuild; both epochs fall back to 0 on stat/git error so the gate is no-op when state is unreadable rather than spuriously rebuilding.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 131 → 132, sections=214, GENERATED.md=sync.",
+        "cargo test --workspace unchanged at 150 tests — R114 has no source-tree impact past scripts/ and SCXML header comments.",
+        "Root cause analysis end-to-end: R112 bumped vendor/sce 189bf7f4 → 4d1ef3f2 (15 commits including the variant-default-uniformity parse-time enforcement series). The bump's wz-side break (ext_entry default arm) was caught + fixed in R112. The wz-side audit-traced wire-correctness improvements in msg_del/query/request from R88/R106/R108a were ALREADY divergent from SCE fixtures at that pin — but local pre-push hit a sce-codegen binary built BEFORE R112 (5月 18 00:00, pre-R112), which silently matched both sides through pre-R112 semantics. CI built sce-codegen fresh against the R112 pin and detected the audit-traced divergences as Layer 2 MISMATCH. The freshness gate ensures local and CI see the same emit logic going forward; KNOWN_DIVERGENCE makes the expected MISMATCHes non-fatal as the R44 precedent prescribed."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "SCE upstream PR for the R88/R106/R108a divergences — add `value=` attributes to mid flags + M flag in codec_zenoh_msg_del / codec_zenoh_query / codec_zenoh_request, plus the default-arm marker swap in codec_zenoh_request (query as declared default vs msg_put). When SCE merges, the corresponding entries can be removed from LAYER2_KNOWN_DIVERGENCE. Same lifecycle as the R44 init_body/join PR carry.",
+        "Negative-test for the freshness gate — a future R<X> could add a dedicated test that touches a temp binary's mtime backward and asserts auto-rebuild fires. Not gating; R114 ships the gate logic with code-review verification.",
+        "R68 inbound parser — next textbook round once R114 closes. Recon needed on session_glue.rs (2315 lines) inbound surface.",
+        "R69 Hal time-mock — after R68.",
+        "AP MVP demo binary — round-trip query against external zenoh-pico CLI process. 3-5 rounds.",
+        "Latent CI hardening surface — R111 audit-mid-values + R114 freshness gate suggest a broader `scripts/audit-*.sh` family could be useful (audit-variant-default-arms.sh, audit-spdx-headers.sh, etc.). Defer to consumer-driven need."
+      ]
+    },
     "Round 12": {
       "decision_summary": "Dual-license adoption — LGPL-3.0-or-later (Free, anti-tivo included) OR watching-zenoh Commercial (Qt-style 5-way exemption, $5000 individual cumulative)",
       "changes_bullets": [

@@ -75,9 +75,28 @@
      arms) + Y3 atomic 2b-ii peek-byte primitive + Y0c <sce:embed>
      (wireexpr inner codec). No new primitives.
 
-     Body byte-identical to SCE upstream codec_zenoh_request at
-     vendor pin 11f1032d; diff in SPDX header + file stem + root
-     name + <sce:import src=> retargeted to wz-stems. -->
+     Deliberate divergence from SCE upstream codec_zenoh_request
+     (three layered R88/R106/R108a closures): (1) wz bakes
+     `<sce:flag name="mid" value="0x1C"/>` per the network MID
+     contract (R108a fix; the SCE fixture leaves it unset and
+     would emit a malformed wire first byte 0x00). (2) wz bakes
+     `<sce:flag name="M" value="1"/>` to match zenoh-pico's
+     `_z_wireexpr_is_local` semantic at default state (R106
+     baking; see wire-spec-subset §6.2 caveat). (3) wz marks the
+     `0x03` (Query) arm as `default="true"` while the SCE fixture
+     marks `0x01` (MsgPut) — wz aligns with zenoh-pico's
+     `_z_n_msg_request_t._tag` zero-init value `_Z_REQUEST_QUERY`
+     so `Request::default()` dispatches Query, not MsgPut, on
+     wire round-trip. Layer 3 proof: crates/wz-integration-tests/
+     tests/layer3_request.rs (R108b). SCE upstream needs a paired
+     PR addressing all three points (R114 audit-traced
+     KNOWN_DIVERGENCE).
+
+     Original alignment claim (pre-R88/R106/R108a) preserved for
+     history: Body byte-identical to SCE upstream
+     codec_zenoh_request at vendor pin 11f1032d; diff in SPDX
+     header + file stem + root name + <sce:import src=>
+     retargeted to wz-stems. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="request">

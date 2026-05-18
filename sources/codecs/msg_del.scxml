@@ -55,6 +55,21 @@
      side interpretation in the caller mirrors zenoh-pico's
      `_z_push_body_decode_extensions` callback pattern.
 
+     Deliberate divergence from SCE upstream codec_zenoh_msg_del
+     (R88 variant-default-uniformity closure): wz bakes
+     `<sce:flag name="mid" value="0x02"/>` while the SCE fixture
+     leaves the value unset. wz's baking is wire-correct — msg_del
+     is dispatched only as the request envelope's `0x02` arm
+     (request.scxml's variant), so a freshly-built MsgDel must
+     carry MID 0x02 to round-trip byte-equivalent through encode
+     -> decode. Without the baking, `MsgDel::default().header =
+     0x00` and the variant peek dispatches the wrong arm. SCE
+     upstream needs a paired PR (R114 audit-traced
+     KNOWN_DIVERGENCE). Layer 3 proof: layer3_push / layer3_request
+     wire-interop tests cover the parent envelopes that select
+     msg_del through their inner-byte peek.
+
+     Original alignment claim (pre-R88) preserved for history:
      Body byte-identical to SCE upstream codec_zenoh_msg_del at
      vendor pin 11f1032d; diff in SPDX header + file stem + root
      name + <sce:import src=> retargeted to wz-side stems. -->
