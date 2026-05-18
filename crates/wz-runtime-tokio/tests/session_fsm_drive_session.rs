@@ -379,11 +379,12 @@ async fn r83_observer_reads_framepayload_messages_through_reference() {
     let (actions, mut engine) = fresh_setup();
     engine.process_event(E::OutboundStart);
 
-    // Frame with a single Unknown-MID record (0x1D = N_MID_PUSH) so
+    // Frame with a single Unknown-MID record (0x1B = N_MID_RESPONSE
+    // — still uncodec'd post-R90; was 0x1D=PUSH pre-R90) so
     // FramePayload.messages.len() == 1 deterministically.
     let mut driver = QueueDriver::with(vec![
         LinkEvent::Rx(RxFrame {
-            bytes: vec![0x05, 0x00, 0x1D, 0xAA],
+            bytes: vec![0x05, 0x00, 0x1B, 0xAA],
         }),
         LinkEvent::Lost {
             cause: LostCause::PeerClosed,

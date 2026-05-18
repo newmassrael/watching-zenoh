@@ -51,6 +51,7 @@ const CODECS: &[&str] = &[
     "wireexpr",  // §5 keyexpr fragment — parent.N gated suffix — R47
     "query",     // §6.2 Query body — header gates + tlv-chain — R47
     "request",   // §5 Z_REQUEST envelope — peek-byte dispatch — R47
+    "push",      // §5 Z_PUSH envelope — peek-byte dispatch — R90
 ];
 
 fn main() {
