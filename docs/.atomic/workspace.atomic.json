@@ -4558,6 +4558,58 @@
         "THIRD_PARTY.md ledger to be created when the first vendored snippet (if any) lands during Phase A coding"
       ]
     },
+    "Round 120": {
+      "decision_summary": "R120 AP MVP demo binary recon — workspace [[bin]] target 0건 확인, zenoh-pico c11 examples 25 CLI binary 가용 (z_get/z_queryable/z_put/z_sub/z_pub/z_scout 포함, 빌드 미실행), wz-codecs 7-MID envelope + 9 DECLARE sub-MID 코덱 catalog 완전 (R110e 종결 상태 유지) — AP MVP demo binary 구현 진입 전 3 design call (crate 위치 / zenoh-pico build path / round-trip MID scope ratchet) 차단됨.",
+      "changes_bullets": [
+        "recon scope = R119 carry \"AP MVP demo binary remains the next textbook milestone\" 의 진입 정찰; 사용자 ratify (이전 세션 design call) 이미 받은 production-realistic external process peer 모델 (z_queryable as wz, z_get from external pico) 의 build 전제 조건 + design 차단 지점을 audit log에 기록",
+        "발견 #1 — crates/ 트리 binary target 0건: wz-codecs/wz-integration-tests/wz-runtime-lwip/wz-runtime-tokio/wz-runtime-tokio-test-support/zenoh-pico-sys 6개 crate 모두 라이브러리; src/bin/ + [[bin]] + examples/ 정의 0건 (find/grep 검증)",
+        "발견 #2 — zenoh-pico Unix CLI examples 25 binary source 가용 (~/zenoh-pico/examples/unix/c11/): z_get.c / z_queryable.c / z_put.c / z_sub.c / z_pub.c / z_scout.c / z_querier.c / z_pull.c / z_advanced_pub.c / z_advanced_sub.c + 변종 15종; 빌드된 binary 없음, CMake build 필요",
+        "발견 #3 — wz-codecs/src/lib.rs 모듈 30+ (timestamp / encoding / ext_unit / ext_zint / ext_zbuf / close / frame / fragment / scout / init_body / open_body / join / locator / hello / ext_entry / ext_envelope / msg_put / msg_del / keep_alive / wireexpr / query / request / push / response_final / oam / interest_body / interest / reply / err / response 등); R110e 시점 인증된 7/7 envelope MID + 9/9 DECLARE sub-MID 모두 구현 (push / oam / interest / response / response_final / request / declare; decl_kexpr / undecl_kexpr / decl_subscriber / undecl_subscriber / decl_queryable / undecl_queryable / decl_token / undecl_token / decl_final)",
+        "발견 #4 — wz-integration-tests/tests/layer3_*.rs 19개 Layer 3 byte-equivalence test: layer3_close / layer3_declare / layer3_ext_chain_outbound / layer3_ext_envelope / layer3_fragment / layer3_frame / layer3_hello / layer3_inbound_declare / layer3_inbound_ext_chain / layer3_inbound_init / layer3_init_body / layer3_interest / layer3_join / layer3_keep_alive / layer3_msg_del / layer3_msg_put / layer3_oam / layer3_open_body / layer3_push 모두 통과 (wire-interop 검증은 코덱 단위로는 종료)",
+        "발견 #5 — SCE upstream HEAD 00513568 (vendor pin 122f851d 기준 1 commit 앞): codec naming alignment (codec_zenoh_*_keyexpr → *_kexpr, msg_err/reply 정규화) — wz 자체 코드 무영향, vendor/sce/ 안에서만 재명명; LAYER2_KNOWN_DIVERGENCE 6개 (init_body / join / msg_del / msg_put / query / request) 는 별개 PR 영역으로 carry 유지"
+      ],
+      "verification_bullets": [
+        "ls / grep / find 정찰 6회 (binary target / wz-codecs module listing / zenoh-pico CLI examples 가용성 / wz-integration-tests 목록 / wz-runtime-tokio dependency 트리 / 7-MID coverage GENERATED.md anchor)",
+        "atomic ledger entry 1건 추가가 유일한 mutation; 코드 변경 없음 (recon round)",
+        "validate_workspace 사전 확인 baseline: T1 orphan=0 / round-trip=12/12 / GENERATED.md=sync / entries=137 / sections=214; post-append 138 / 214 / 12/12 / sync 예상",
+        "직전 세션 carry 4건 중 stale 4건 발견은 R114→R115 carry chain anti-pattern (feedback_diagnose_before_carry roadmap label staleness variant); R120 recon은 carry text 자체를 코드/도구로 grep verify 후 작성하는 textbook 적용"
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh",
+        "runtime-crate--sce_link_runtime_tokio/6-next-step-scaffolding"
+      ],
+      "carry_forward_bullets": [
+        "Design call 1 — demo binary 위치: (a) crates/wz-runtime-tokio/src/bin/ap_demo.rs (crate-internal binary, lib 의존성 자동); (b) crates/wz-demo-ap/ (별도 crate, separation of concerns + production deploy unit 후보); (c) crates/wz-runtime-tokio/examples/ap_demo.rs (cargo example, cargo install 불가). production-grade textbook은 (b); MVP-fast는 (c). 사용자 ratify 필요.",
+        "Design call 2 — zenoh-pico external CLI build path: (a) CI workflow 안에서 ad-hoc CMake build (one-time setup, no vendor commit); (b) cargo xtask 로 zenoh-pico build orchestration (cross-platform but Rust-driven); (c) git submodule add ~/zenoh-pico → vendor/zenoh-pico/ + CMake invocation script (vendored deterministic pin, offline build 보장). production-realistic은 (c) — SCE vendor pin 모델과 일치. 사용자 ratify 필요.",
+        "Design call 3 — round-trip MID scope ratchet: (a) MVP 1 MID 부터 점진 확장 (z_put + msg_put 첫 round, 각 MID 1 sub-round, R121-R127 ratchet); (b) 7 envelope MID coverage matrix 한 round 모두 (단일 거대 round, regression 탐지 어려움); (c) DECLARE 부터 (selector resolution 우선). textbook은 (a) — incremental ratchet pattern (R114 carry chain stale-4건 교훈으로 micro-step 작업이 더 안전). 사용자 ratify 필요.",
+        "R120 다음 round (R121) entry 조건: 3 design call 모두 사용자 ratify 받은 후 진입; ratify 전까지는 wz 자체 코드 mutation 금지 (textbook recon → ratify → implement 순서 유지)."
+      ],
+      "publishable_decision_summary": "R120 AP MVP demo binary recon — workspace [[bin]] target 0건 확인, zenoh-pico c11 examples 25 CLI binary 가용 (z_get/z_queryable/z_put/z_sub/z_pub/z_scout 포함, 빌드 미실행), wz-codecs 7-MID envelope + 9 DECLARE sub-MID 코덱 catalog 완전 (R110e 종결 상태 유지) — AP MVP demo binary 구현 진입 전 3 design call (crate 위치 / zenoh-pico build path / round-trip MID scope ratchet) 차단됨.",
+      "publishable_changes_bullets": [
+        "recon scope = R119 carry \"AP MVP demo binary remains the next textbook milestone\" 의 진입 정찰; 사용자 ratify (이전 세션 design call) 이미 받은 production-realistic external process peer 모델 (z_queryable as wz, z_get from external pico) 의 build 전제 조건 + design 차단 지점을 audit log에 기록",
+        "발견 #1 — crates/ 트리 binary target 0건: wz-codecs/wz-integration-tests/wz-runtime-lwip/wz-runtime-tokio/wz-runtime-tokio-test-support/zenoh-pico-sys 6개 crate 모두 라이브러리; src/bin/ + [[bin]] + examples/ 정의 0건 (find/grep 검증)",
+        "발견 #2 — zenoh-pico Unix CLI examples 25 binary source 가용 (~/zenoh-pico/examples/unix/c11/): z_get.c / z_queryable.c / z_put.c / z_sub.c / z_pub.c / z_scout.c / z_querier.c / z_pull.c / z_advanced_pub.c / z_advanced_sub.c + 변종 15종; 빌드된 binary 없음, CMake build 필요",
+        "발견 #3 — wz-codecs/src/lib.rs 모듈 30+ (timestamp / encoding / ext_unit / ext_zint / ext_zbuf / close / frame / fragment / scout / init_body / open_body / join / locator / hello / ext_entry / ext_envelope / msg_put / msg_del / keep_alive / wireexpr / query / request / push / response_final / oam / interest_body / interest / reply / err / response 등); R110e 시점 인증된 7/7 envelope MID + 9/9 DECLARE sub-MID 모두 구현 (push / oam / interest / response / response_final / request / declare; decl_kexpr / undecl_kexpr / decl_subscriber / undecl_subscriber / decl_queryable / undecl_queryable / decl_token / undecl_token / decl_final)",
+        "발견 #4 — wz-integration-tests/tests/layer3_*.rs 19개 Layer 3 byte-equivalence test: layer3_close / layer3_declare / layer3_ext_chain_outbound / layer3_ext_envelope / layer3_fragment / layer3_frame / layer3_hello / layer3_inbound_declare / layer3_inbound_ext_chain / layer3_inbound_init / layer3_init_body / layer3_interest / layer3_join / layer3_keep_alive / layer3_msg_del / layer3_msg_put / layer3_oam / layer3_open_body / layer3_push 모두 통과 (wire-interop 검증은 코덱 단위로는 종료)",
+        "발견 #5 — SCE upstream HEAD 00513568 (vendor pin 122f851d 기준 1 commit 앞): codec naming alignment (codec_zenoh_*_keyexpr → *_kexpr, msg_err/reply 정규화) — wz 자체 코드 무영향, vendor/sce/ 안에서만 재명명; LAYER2_KNOWN_DIVERGENCE 6개 (init_body / join / msg_del / msg_put / query / request) 는 별개 PR 영역으로 carry 유지"
+      ],
+      "publishable_verification_bullets": [
+        "ls / grep / find 정찰 6회 (binary target / wz-codecs module listing / zenoh-pico CLI examples 가용성 / wz-integration-tests 목록 / wz-runtime-tokio dependency 트리 / 7-MID coverage GENERATED.md anchor)",
+        "atomic ledger entry 1건 추가가 유일한 mutation; 코드 변경 없음 (recon round)",
+        "validate_workspace 사전 확인 baseline: T1 orphan=0 / round-trip=12/12 / GENERATED.md=sync / entries=137 / sections=214; post-append 138 / 214 / 12/12 / sync 예상",
+        "직전 세션 carry 4건 중 stale 4건 발견은 R114→R115 carry chain anti-pattern (feedback_diagnose_before_carry roadmap label staleness variant); R120 recon은 carry text 자체를 코드/도구로 grep verify 후 작성하는 textbook 적용"
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh",
+        "runtime-crate--sce_link_runtime_tokio/6-next-step-scaffolding"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Design call 1 — demo binary 위치: (a) crates/wz-runtime-tokio/src/bin/ap_demo.rs (crate-internal binary, lib 의존성 자동); (b) crates/wz-demo-ap/ (별도 crate, separation of concerns + production deploy unit 후보); (c) crates/wz-runtime-tokio/examples/ap_demo.rs (cargo example, cargo install 불가). production-grade textbook은 (b); MVP-fast는 (c). 사용자 ratify 필요.",
+        "Design call 2 — zenoh-pico external CLI build path: (a) CI workflow 안에서 ad-hoc CMake build (one-time setup, no vendor commit); (b) cargo xtask 로 zenoh-pico build orchestration (cross-platform but Rust-driven); (c) git submodule add ~/zenoh-pico → vendor/zenoh-pico/ + CMake invocation script (vendored deterministic pin, offline build 보장). production-realistic은 (c) — SCE vendor pin 모델과 일치. 사용자 ratify 필요.",
+        "Design call 3 — round-trip MID scope ratchet: (a) MVP 1 MID 부터 점진 확장 (z_put + msg_put 첫 round, 각 MID 1 sub-round, R121-R127 ratchet); (b) 7 envelope MID coverage matrix 한 round 모두 (단일 거대 round, regression 탐지 어려움); (c) DECLARE 부터 (selector resolution 우선). textbook은 (a) — incremental ratchet pattern (R114 carry chain stale-4건 교훈으로 micro-step 작업이 더 안전). 사용자 ratify 필요.",
+        "R120 다음 round (R121) entry 조건: 3 design call 모두 사용자 ratify 받은 후 진입; ratify 전까지는 wz 자체 코드 mutation 금지 (textbook recon → ratify → implement 순서 유지)."
+      ]
+    },
     "Round 13": {
       "decision_summary": "sources/ skeleton lands via README (SPDX header double-block + 7-subdir lazy materialize per ARCH §428) + first author-side SCXML sources/algorithms/crc16_ccitt.scxml body-identical to SCE fixture; 6-backend byte-golden verify carried to R14 SCE submodule infrastructure (pin 1473f99f origin/main).",
       "changes_bullets": [
