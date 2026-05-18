@@ -4264,6 +4264,62 @@
         "Latent CI hardening surface — R111 audit-mid-values + R114 freshness gate suggest a broader `scripts/audit-*.sh` family could be useful (audit-variant-default-arms.sh, audit-spdx-headers.sh, etc.). Defer to consumer-driven need."
       ]
     },
+    "Round 115": {
+      "decision_summary": "R115 wires DECLARE network MID (0x1E) into parse_frame_payload's dispatch table, closing the inbound gap the R110a-e series left when it shipped the wz-codecs::declare authoring chain and the forward-direction Layer 3 wire-interop without pairing them with a NetworkMessage::Declare variant; the carry-side framing (\"R68 inbound parser — recon needed on session_glue.rs (2315 lines)\") was carry-misdiagnosis — the inbound parser surface (parse_inbound 5 transport MIDs, parse_frame_payload 6 of 7 network MIDs, inbound_to_fsm_event, handle_inbound) had been complete since Rounds 68a-97, and the real gap was the missing 7th network MID dispatch arm.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs adds `pub const N_MID_DECLARE: u8 = 0x1E` to the wire_const module, paired with the doc-comment correction on N_MID_RESPONSE that previously claimed DECLARE was the remaining unauthored MID (stale post-R110e).",
+        "session_glue.rs imports wz_codecs::declare::Declare next to the existing 10 wz-codecs envelope codec imports, and adds NetworkMessage::Declare(Box<Declare>) as the 7th typed variant (sizing rationale mirrors Request/Push/Response — interest_id + ext vec + DeclareVariant inline form is larger than the Unknown variant).",
+        "parse_frame_payload gains a wire_const::N_MID_DECLARE => Declare::decode → NetworkMessage::Declare arm directly above the catch-all Unknown branch; the manual Debug impl on NetworkMessage gains a matching Declare(_) → \"Declare(..)\" formatter arm so DriverLoopOutcome's #[derive(Debug)] keeps compiling.",
+        "crates/wz-integration-tests/tests/layer3_inbound_declare.rs (NEW, 3 tests): a) default DECLARE wire bytes from Declare::default().encode() (the same bytes R110e proved pico-equivalent) round-trip through parse_frame_payload → NetworkMessage::Declare with byte-identical re-encode; b) 3-record batch Push :: Declare :: ResponseFinal verifies the Declare dispatch advances the cursor cleanly so the tail records still dispatch correctly; c) truncated 1-byte envelope (envelope header only, no inner declaration body) surfaces the codec NeedMoreBytes error verbatim through parse_frame_payload.",
+        "Two pre-existing Unknown-MID coverage tests in crates/wz-runtime-tokio/tests/ — session_fsm_driver_loop.rs::r74_rx_frame_unknown_network_mid_absorbs_as_unknown and session_fsm_inbound_dispatch.rs::parse_frame_payload_unknown_mid_absorbs_remainder + parse_frame_payload_decodes_request_then_unknown_chain — switched their synthetic Unknown MID fixture from 0x1E (DECLARE — now typed) to 0x00 (outside the {0x19..0x1F} authored set) and added the NetworkMessage::Declare(_) arm to the panic clause so the match stays exhaustive. The first test's authoring comment explicitly flagged this refactor obligation when DECLARE landed; the R115 land discharges it."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace passes 153 / 0 / 1 (+3 from R115's layer3_inbound_declare.rs; baseline was 150 per the R114 carry snapshot).",
+        "cargo test -p wz-integration-tests --test layer3_inbound_declare passes all 3 R115 cases (round-trip / 3-record batch / truncated reject).",
+        "scripts/run-ci.sh full 6-lane (Layer 0 + A + A2 + B + C1 + C2 + D) passes locally; Layer C2 specifically green confirms the test-side match-arm refactors close the non-exhaustive-match clippy reject that the bare NetworkMessage::Declare add would otherwise have produced.",
+        "validate_workspace confirms T1=0 / RT=12/12 / GENERATED.md=sync — the R115 changes are entirely Rust source + integration tests; no doc surface mutated, so the atomic ledger entries / sections delta is exactly +1 / 0 from this entry."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer",
+        "runtime-crate--sce_link_runtime_tokio/7-change-log"
+      ],
+      "carry_forward_bullets": [
+        "The carry-misdiagnosis pattern (a prior session writing `R68 inbound parser, recon needed on session_glue.rs (2315 lines)` as the next round without inspecting the file, when the inbound parser surface was already complete and the actual gap was a one-arm dispatch wire-up) is worth a memory entry next session start; the textbook lesson is `feedback_diagnose_before_carry` in MEMORY.md applied at the round-claim layer, not just the build-verify layer.",
+        "R69 Hal time-mock remains the next textbook round per the R114 carry's R68→R69→AP-MVP sequencing. TestHal struct + logical-time advance + Engine::tick coverage of the 12 timers per session-fsm §2.5 (link.open_timeout / init_ack_timeout / open_ack_timeout / scout_timeout / lease / keepalive_interval / closing_timeout / batch_timer / reassembly_timeout / accept_rate_window / accepting_inactivity_timeout / cookie_hmac_lifetime).",
+        "SCE upstream PR for the R88/R106/R108a divergences — unchanged from R114 carry (init_body / join / msg_del / query / request 5 codecs).",
+        "Negative-test for the R114 freshness gate — unchanged carry.",
+        "AP MVP demo binary — round-trip query against external zenoh-pico CLI process; arrives after R69 lands the time-mock substrate the binary's deterministic-replay test path will lean on.",
+        "Layer A2 + Layer B freshness gate in scripts/run-ci.sh have no matching steps in .github/workflows/ci.yml yet (R111/R114 yml-sync carry). Non-critical because the local pre-push gate catches both classes; CI re-derivation would just be defense-in-depth."
+      ],
+      "publishable_decision_summary": "R115 wires DECLARE network MID (0x1E) into parse_frame_payload's dispatch table, closing the inbound gap the R110a-e series left when it shipped the wz-codecs::declare authoring chain and the forward-direction Layer 3 wire-interop without pairing them with a NetworkMessage::Declare variant; the carry-side framing (\"R68 inbound parser — recon needed on session_glue.rs (2315 lines)\") was carry-misdiagnosis — the inbound parser surface (parse_inbound 5 transport MIDs, parse_frame_payload 6 of 7 network MIDs, inbound_to_fsm_event, handle_inbound) had been complete since Rounds 68a-97, and the real gap was the missing 7th network MID dispatch arm.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs adds `pub const N_MID_DECLARE: u8 = 0x1E` to the wire_const module, paired with the doc-comment correction on N_MID_RESPONSE that previously claimed DECLARE was the remaining unauthored MID (stale post-R110e).",
+        "session_glue.rs imports wz_codecs::declare::Declare next to the existing 10 wz-codecs envelope codec imports, and adds NetworkMessage::Declare(Box<Declare>) as the 7th typed variant (sizing rationale mirrors Request/Push/Response — interest_id + ext vec + DeclareVariant inline form is larger than the Unknown variant).",
+        "parse_frame_payload gains a wire_const::N_MID_DECLARE => Declare::decode → NetworkMessage::Declare arm directly above the catch-all Unknown branch; the manual Debug impl on NetworkMessage gains a matching Declare(_) → \"Declare(..)\" formatter arm so DriverLoopOutcome's #[derive(Debug)] keeps compiling.",
+        "crates/wz-integration-tests/tests/layer3_inbound_declare.rs (NEW, 3 tests): a) default DECLARE wire bytes from Declare::default().encode() (the same bytes R110e proved pico-equivalent) round-trip through parse_frame_payload → NetworkMessage::Declare with byte-identical re-encode; b) 3-record batch Push :: Declare :: ResponseFinal verifies the Declare dispatch advances the cursor cleanly so the tail records still dispatch correctly; c) truncated 1-byte envelope (envelope header only, no inner declaration body) surfaces the codec NeedMoreBytes error verbatim through parse_frame_payload.",
+        "Two pre-existing Unknown-MID coverage tests in crates/wz-runtime-tokio/tests/ — session_fsm_driver_loop.rs::r74_rx_frame_unknown_network_mid_absorbs_as_unknown and session_fsm_inbound_dispatch.rs::parse_frame_payload_unknown_mid_absorbs_remainder + parse_frame_payload_decodes_request_then_unknown_chain — switched their synthetic Unknown MID fixture from 0x1E (DECLARE — now typed) to 0x00 (outside the {0x19..0x1F} authored set) and added the NetworkMessage::Declare(_) arm to the panic clause so the match stays exhaustive. The first test's authoring comment explicitly flagged this refactor obligation when DECLARE landed; the R115 land discharges it."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace passes 153 / 0 / 1 (+3 from R115's layer3_inbound_declare.rs; baseline was 150 per the R114 carry snapshot).",
+        "cargo test -p wz-integration-tests --test layer3_inbound_declare passes all 3 R115 cases (round-trip / 3-record batch / truncated reject).",
+        "scripts/run-ci.sh full 6-lane (Layer 0 + A + A2 + B + C1 + C2 + D) passes locally; Layer C2 specifically green confirms the test-side match-arm refactors close the non-exhaustive-match clippy reject that the bare NetworkMessage::Declare add would otherwise have produced.",
+        "validate_workspace confirms T1=0 / RT=12/12 / GENERATED.md=sync — the R115 changes are entirely Rust source + integration tests; no doc surface mutated, so the atomic ledger entries / sections delta is exactly +1 / 0 from this entry."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer",
+        "runtime-crate--sce_link_runtime_tokio/7-change-log"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The carry-misdiagnosis pattern (a prior session writing `R68 inbound parser, recon needed on session_glue.rs (2315 lines)` as the next round without inspecting the file, when the inbound parser surface was already complete and the actual gap was a one-arm dispatch wire-up) is worth a memory entry next session start; the textbook lesson is `feedback_diagnose_before_carry` in MEMORY.md applied at the round-claim layer, not just the build-verify layer.",
+        "R69 Hal time-mock remains the next textbook round per the R114 carry's R68→R69→AP-MVP sequencing. TestHal struct + logical-time advance + Engine::tick coverage of the 12 timers per session-fsm §2.5 (link.open_timeout / init_ack_timeout / open_ack_timeout / scout_timeout / lease / keepalive_interval / closing_timeout / batch_timer / reassembly_timeout / accept_rate_window / accepting_inactivity_timeout / cookie_hmac_lifetime).",
+        "SCE upstream PR for the R88/R106/R108a divergences — unchanged from R114 carry (init_body / join / msg_del / query / request 5 codecs).",
+        "Negative-test for the R114 freshness gate — unchanged carry.",
+        "AP MVP demo binary — round-trip query against external zenoh-pico CLI process; arrives after R69 lands the time-mock substrate the binary's deterministic-replay test path will lean on.",
+        "Layer A2 + Layer B freshness gate in scripts/run-ci.sh have no matching steps in .github/workflows/ci.yml yet (R111/R114 yml-sync carry). Non-critical because the local pre-push gate catches both classes; CI re-derivation would just be defense-in-depth."
+      ]
+    },
     "Round 12": {
       "decision_summary": "Dual-license adoption — LGPL-3.0-or-later (Free, anti-tivo included) OR watching-zenoh Commercial (Qt-style 5-way exemption, $5000 individual cumulative)",
       "changes_bullets": [
