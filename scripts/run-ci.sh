@@ -191,22 +191,33 @@ layer_b_verify_codegen() {
     # on standalone encode. Validator renamed to
     # validate_cross_codec_variant_arm_mids (all arms iterated).
     #
-    # Residual carry (R123 follow-up):
+    # Residual carry (R123 follow-up; R125c2 update):
     #
-    #   request — R88 arm 0x03 default + R106 M=1 default + R108a
-    #             mid value=0x1C. SCE classifies arm-0x03-default as
-    #             consumer convention (wire-spec invariant only for
-    #             the underlying mid byte 0x1C, already aligned by
-    #             71357264); fix is the new SCE 4441431d Atomic A
-    #             overlay: deploy/*.yaml variant_defaults: { codec_-
-    #             zenoh_request: 0x03 }. R123 round adds that
-    #             overlay to the three deploy yamls.
-    #             header.M default=1 (R106 push/response/request)
-    #             remains outside overlay schema scope (flag-default
-    #             vs arm-default); R124 signals SCE for either
-    #             flag_defaults overlay extension or RFC new
-    #             flag-default-bake primitive.
-    local LAYER2_KNOWN_DIVERGENCE=(request)
+    #   request — R88 arm 0x03 default + R108a mid value=0x1C are
+    #             still divergences (R114 → R123b follow-up). The
+    #             R106 M=1 baking is RETRACTED in R125c2 because
+    #             wireexpr.scxml is now a B5-ν parent-tag variant
+    #             dispatcher (SCE vendor pin b35dbb66) and the M
+    #             bit is derived from the selected arm rather than
+    #             statically baked. SCE Q-3 cross-doc validator
+    #             forbids derivation + static-value coexistence so
+    #             the R106 baking had to go once the dispatcher
+    #             landed.
+    #
+    #   wireexpr — R125c2 restructure into a parent-tag variant
+    #             dispatcher (B5-ν Phase B substrate; SCE atomic
+    #             b35dbb66 closed all six gaps surfaced in the
+    #             R125c → R125c1 → R125c2 sequence). SCE upstream
+    #             codec_zenoh_wireexpr fixture is still the pre-
+    #             B5-ν flat leaf shape, so wz's wireexpr stem no
+    #             longer body-matches SCE. Production-correct
+    #             adoption sequence terminus for SCE's B5-ν; SCE
+    #             upstream needs to lift its leaf into the same
+    #             dispatch shape to clear this entry. Layer 3
+    #             (crates/wz-integration-tests/tests/
+    #             layer3_wireexpr_{local,nonlocal}.rs) is the real
+    #             wire-interop check carried to R125e.
+    local LAYER2_KNOWN_DIVERGENCE=(request wireexpr)
 
     local fail=0
     for scxml in sources/codecs/*.scxml sources/algorithms/*.scxml; do

@@ -5108,6 +5108,100 @@
         "R123b + R121b-c independent of R125c chain - remain valid next-priority candidates."
       ]
     },
+    "Round 125c2": {
+      "decision_summary": "R125c2: wireexpr B5-ν parent-tag variant dispatcher integration landed; 6 SCE-side gaps closed (11287248 + b35dbb66 atomics).",
+      "changes_bullets": [
+        "sources/codecs/wireexpr.scxml restructured as thin B5-ν parent-tag dispatcher.",
+        "Dispatcher RPF: parent.M bit=6 (variant) + parent.N bit=5 (chain to arms).",
+        "Arms: 0x00=wireexpr_nonlocal, 0x01=wireexpr_local default='true' (M=1 default).",
+        "6 consumer codecs dropped static `<sce:flag name=M value=1/>` (R106 retracted).",
+        "R106 baking comment blocks refreshed in decl_subscriber/queryable/token + request.",
+        "wireexpr_local + wireexpr_nonlocal orphan-status blocks lifted to live-arm prose.",
+        "scripts/run-ci.sh: LAYER2_KNOWN_DIVERGENCE += wireexpr (audit-traced).",
+        "crates/wz-codecs build.rs CODECS += {wireexpr_local, wireexpr_nonlocal} leaf-first.",
+        "crates/wz-codecs src/lib.rs += pub mod wireexpr_local + wireexpr_nonlocal.",
+        "#[allow(unused_variables)] on pub mod wireexpr (workspace policy carve-out).",
+        "Gap 7 captured: SCE emits dead `let raw = cursor.peek_slice(0)?` for variant-only.",
+        "wz-runtime-tokio src/pubsub.rs: pattern-match on WireexprVariant for id/suffix.",
+        "wz-runtime-tokio tests/session_fsm_drive_session.rs: test fixture uses Local arm."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh full 7-lane gate pass (Layer 0/A/A2/B/C1/C2/D) at SCE pin b35dbb66.",
+        "Layer B per-codec: wireexpr L2 MISMATCH+KNOWN; wireexpr_local/nonlocal OK; rest unchanged.",
+        "wz-codecs cargo build + clippy -D warnings clean; wz-runtime-tokio lib tests pass.",
+        "validate_workspace: T1=0; RT 12/12; entries 148 -> 149; sections=214; sync.",
+        "All 6 prior SCE gap classes (1-6) confirmed closed; only cosmetic Gap 7 remains."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "Gap 7 cosmetic SCE upstream signal: skip dead let raw when datamodel has no own fields.",
+        "Gap 7 is workspace-policy-suppressed (#[allow]) per generated-code crate carve-out.",
+        "R125e: author crates/wz-integration-tests/tests/layer3_wireexpr_{local,nonlocal}.rs.",
+        "R125e covers SCE non-verified surface: zenoh-pico-sys FFI emit/decode round-trip.",
+        "R125b-c milestone effectively achieved: B5-ν dispatch live; type-safety established.",
+        "Go backend variant-arm package-qualifier carry from SCE (not on wz Rust-only path).",
+        "R123b independent: crates/wz-codecs/build.rs compile_forge_with_imports -> _with_deploy.",
+        "R121b-c independent: AP MVP demo binary functional 4 sub-rounds still pending."
+      ],
+      "publishable_decision_summary": "R125c2: wireexpr B5-ν dispatcher integration landed at SCE pin b35dbb66; six dispatcher-side gaps closed across SCE atomics 11287248 + b35dbb66; type-safety established.",
+      "publishable_changes_bullets": [
+        "sources/codecs/wireexpr.scxml restructured into a thin parent-tag variant dispatcher.",
+        "Dispatcher RPF declares parent.N bit=5 (suffix gating, chain-forwarded to arms via",
+        "SCE FlagLayoutSource::Forwarding) and parent.M bit=6 (variant dispatch tag).",
+        "Variant arms: 0x00=wireexpr_nonlocal (non-default) + 0x01=wireexpr_local default.",
+        "Local-as-default rationale: preserves zenoh-pico zero-init mapping=LOCAL default",
+        "state where the encoder OR's M=1 into the parent header byte.",
+        "Six envelope consumers (push/request/response/decl_subscriber/decl_token/decl_queryable)",
+        "drop their static `<sce:flag name=M value=1/>` baking — SCE Q-3 forbids derivation",
+        "+ static coexistence; the dispatcher's b5_nu_derivation_block drives M now.",
+        "R106 baking comment blocks refreshed: decl_subscriber/queryable/token + request all",
+        "document the R125c2 derivation closure with cross-ref to the dispatcher header.",
+        "wireexpr_local + wireexpr_nonlocal orphan-status comment blocks lifted; per-arm",
+        "prose now describes live-arm dispatcher consumption with the six-gap close anatomy.",
+        "scripts/run-ci.sh LAYER2_KNOWN_DIVERGENCE += wireexpr (SCE upstream still flat leaf).",
+        "crates/wz-codecs build.rs CODECS list extended with the two arm leaves before the",
+        "dispatcher entry, preserving the existing leaves-first dependency-order convention.",
+        "crates/wz-codecs src/lib.rs adds pub mod wireexpr_local + pub mod wireexpr_nonlocal",
+        "alongside pub mod wireexpr (the latter now annotated #[allow(unused_variables)]).",
+        "wz-runtime-tokio src/pubsub.rs dispatch path pattern-matches on WireexprVariant to",
+        "extract id + suffix from either arm body; both test fixtures rebuilt accordingly."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh full 7-lane gate pass at SCE pin b35dbb66: Layer 0 (actionlint)",
+        "+ A (mnemosyne) + A2 (mid value=) + B (codegen 6-backend per codec) + C1 (cargo",
+        "test --workspace) + C2 (cargo clippy --workspace -D warnings) + D (deploy yaml).",
+        "Layer B per-codec: wireexpr stem reports L2 MISMATCH+KNOWN_DIVERGENCE (audit-traced",
+        "against SCE upstream flat-leaf fixture); wireexpr_local + wireexpr_nonlocal OK.",
+        "All other 30+ codecs unchanged; request still LAYER2 MISMATCH for R123b carry.",
+        "wz-codecs lib + wz-runtime-tokio lib + lib test all compile clean under -D warnings.",
+        "validate_workspace: T1=0; RT 12/12; entries 148 -> 149; sections=214; sync; T3/T4 stable.",
+        "All six pre-R125c2 SCE gap classes confirmed closed by direct generated-code inspection:",
+        "Gap 1 (B5-γ chain), 2 (alias-vs-stem), 3 (Option<embed>), 4/5 (dispatcher arm-dispatch",
+        "parent_flags forwarding), 6 (consumer brace-list use import). Only cosmetic Gap 7",
+        "remains (variant-only dispatcher's unused `let raw` binding; workspace #[allow] applied)."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Gap 7 cosmetic carry to SCE upstream: variant-only dispatcher emits dead",
+        "`let raw = cursor.peek_slice(0)?; cursor.advance(0)?;` at the decode prefix site.",
+        "Suppressed locally via #[allow(unused_variables)] on pub mod wireexpr per workspace",
+        "generated-code-crate carve-out; proper SCE-side fix is to skip the dead emit when",
+        "the dispatcher has no own fields (datamodel = variant only).",
+        "R125e: author crates/wz-integration-tests/tests/layer3_wireexpr_{local,nonlocal}.rs",
+        "for zenoh-pico-sys FFI emit/decode round-trip (the only SCE non-verified surface).",
+        "R125b-c milestone effectively closed: B5-ν dispatch live; type-safe Local/Nonlocal",
+        "refinement at the wireexpr layer; consumer code statically pattern-matches.",
+        "Go backend variant-arm package-qualifier carry from SCE (not on wz path now).",
+        "R123b still pending (independent): build.rs compile_forge_with_imports -> _with_deploy",
+        "+ drop request.scxml arm 0x03 default; clears request stem from KNOWN_DIVERGENCE.",
+        "R121b-c still pending (independent): AP MVP demo binary functional in 4 sub-rounds.",
+        "R114 freshness gate negative test still pending (defensive carry)."
+      ]
+    },
     "Round 126": {
       "decision_summary": "R126: SCE vendor pin b719ee3e -> 11287248 (B5-ν consumer-parity gaps closed; unlocks R125c-resume).",
       "changes_bullets": [

@@ -111,6 +111,25 @@ pub mod keep_alive {
     include!(concat!(env!("OUT_DIR"), "/keep_alive.rs"));
 }
 
+pub mod wireexpr_local {
+    include!(concat!(env!("OUT_DIR"), "/wireexpr_local.rs"));
+}
+
+pub mod wireexpr_nonlocal {
+    include!(concat!(env!("OUT_DIR"), "/wireexpr_nonlocal.rs"));
+}
+
+// R125c2 carry: SCE codegen at vendor pin b35dbb66 emits a
+// `let raw = cursor.peek_slice(0)?;` binding in the dispatcher's
+// decode() for variant-only codecs (no own fixed fields before the
+// variant) — `raw` is dead because there's no prefix to copy out.
+// Workspace `warnings = "deny"` upgrades the unused-variable lint
+// to a compile error; per workspace policy ("Generated-code crates
+// may add local `#[allow(...)]` annotations") we suppress it at the
+// module boundary. Proper fix is SCE-side (skip the dead binding
+// when datamodel has no own fields); tracked as the cosmetic carry
+// in R125c2 entry for SCE upstream follow-on.
+#[allow(unused_variables)]
 pub mod wireexpr {
     include!(concat!(env!("OUT_DIR"), "/wireexpr.rs"));
 }

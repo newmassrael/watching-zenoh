@@ -9,17 +9,26 @@
      (src/protocol/codec/declarations.c:65-84) for the encode side;
      decode at declarations.c:212-235.
 
-     Wire shape (default state, M=1 baked per R106 pattern):
+     Wire shape (default state, M=1 derived from wireexpr_local
+     dispatcher default arm per R125c2 — pre-R125c2 shape was static
+     `<sce:flag name="M" value="1"/>` baking per R106; SCE Q-3 cross-
+     doc validator forbids derivation + static coexistence once
+     wireexpr.scxml became a B5-ν parent-tag variant dispatcher at
+     SCE vendor pin b35dbb66):
        byte 0   : header (MID 0x02 + N@5 + M@6 + Z@7)
        byte 1+  : id (VLE u32; zenoh-pico stores u32 here)
-       byte 2+  : wireexpr fragment (suffix gated on header.N)
+       byte 2+  : wireexpr fragment (suffix gated on header.N; arm
+                  body selected by parent.M dispatch)
 
-     M=1 baking rationale: zenoh-pico's `_z_decl_commons_encode` sets
-     M from `_z_wireexpr_is_local(keyexpr)`. Zero-init wireexpr has
-     `_mapping = 0 = _Z_KEYEXPR_MAPPING_LOCAL` so M=1 at default
-     state. Mirrors the R106 baking decision for push/response/
-     request envelopes — a freshly-built wireexpr without prior
-     DECLARE is sender-mapping.
+     M=1 derivation rationale: zenoh-pico's `_z_decl_commons_encode`
+     sets M from `_z_wireexpr_is_local(keyexpr)`. Zero-init wireexpr
+     has `_mapping = 0 = _Z_KEYEXPR_MAPPING_LOCAL` so M=1 at default
+     state. wz's R125c2 wireexpr.scxml dispatcher marks wireexpr_local
+     as `default="true"` so `Wireexpr::default()` returns the Local
+     arm and the SCE B5-ν Phase B encoder ORs 0x40 into the parent
+     header.M bit at emit time — same wire effect as the R106-era
+     static baking, but driven by derivation per SCE Q-3 and unifying
+     the M-bit emit path across push / response / request / decl_*.
 
      R110c first contact: default state only (N=Z=0, M=1, id=0,
      wireexpr id=0 no suffix). Wire is `[0x42, 0x00, 0x00]` (3
@@ -35,7 +44,7 @@
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x02"/>
       <sce:flag name="N"   bit="5"/>
-      <sce:flag name="M"   bit="6" value="1"/>
+      <sce:flag name="M"   bit="6"/>
       <sce:flag name="Z"   bit="7"/>
     </sce:flags>
     <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>

@@ -48,6 +48,7 @@
 //! variant) without taking ownership.
 
 use wz_codecs::push::Push;
+use wz_codecs::wireexpr::WireexprVariant;
 
 use crate::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
 
@@ -256,10 +257,19 @@ impl SubscriberRegistry {
         // registered literal, so we silently filter — a future
         // round attaches the mapping resolver to the registry and
         // promotes the filter to an equality check.
-        if push.keyexpr.id != 0 {
+        // R125c2: keyexpr is now a tagged-union (B5-ν parent-tag
+        // variant dispatch on parent.M); extract id + suffix from
+        // whichever arm the dispatcher selected. Both arms carry the
+        // same id + Option<suffix> fields — the variant is a type-
+        // level mapping-context refinement, not a wire-shape split.
+        let (id, suffix_opt) = match &push.keyexpr.body {
+            WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
+            WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
+        };
+        if id != 0 {
             return;
         }
-        let suffix = match push.keyexpr.suffix.as_deref() {
+        let suffix = match suffix_opt {
             Some(s) => s,
             None => return,
         };
@@ -279,13 +289,23 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use wz_codecs::wireexpr::Wireexpr;
+    use wz_codecs::wireexpr_local::WireexprLocal;
+    use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
     fn push_with_keyexpr(suffix: &str) -> Push {
+        // R125c2: wireexpr is now a tagged-union (Local default arm at
+        // M=1; mirrors zenoh-pico's `_z_wireexpr_t` zero-init mapping=
+        // LOCAL → is_local=true → encoder OR's M=1). Construct the
+        // Local arm so the test wire shape matches zenoh-pico's
+        // default-state push (header M=1 ORed in by the encoder via
+        // the b5_nu_derivation_block).
         Push {
             keyexpr: Wireexpr {
-                id: 0,
-                suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix.into()),
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(suffix.len() as u64),
+                    suffix: Some(suffix.into()),
+                }),
             },
             ..Push::default()
         }
@@ -370,11 +390,16 @@ mod tests {
         // Push referencing a DECLARE-established mapping id (no
         // inline suffix). The registry has no resolver for the id so
         // the dispatch path is a no-op — documented R98 scope limit.
+        // R125c2: keyexpr is now a tagged-union; Nonlocal arm chosen
+        // because a peer-declared mapping id is by definition not the
+        // sender's local key (M=0 on wire ⇔ Nonlocal arm).
         let push = Push {
             keyexpr: Wireexpr {
-                id: 7,
-                suffix_len: None,
-                suffix: None,
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                    id: 7,
+                    suffix_len: None,
+                    suffix: None,
+                }),
             },
             ..Push::default()
         };

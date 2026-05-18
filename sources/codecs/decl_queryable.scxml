@@ -11,10 +11,15 @@
      info ZINT ext (ext_id 0x01) packing `_complete` (bit 0) and
      `_distance` (upper 56 bits).
 
-     Wire shape (default state, M=1 baked per R106 pattern):
+     Wire shape (default state, M=1 derived from wireexpr_local
+     dispatcher default arm per R125c2 — pre-R125c2 shape was static
+     `<sce:flag name="M" value="1"/>` baking per R106; SCE Q-3
+     forbids derivation + static coexistence once wireexpr.scxml
+     became a B5-ν dispatcher at SCE pin b35dbb66):
        byte 0   : header (MID 0x04 + N@5 + M@6 + Z@7)
        byte 1+  : id (VLE u32)
-       byte 2+  : wireexpr fragment (suffix gated on header.N)
+       byte 2+  : wireexpr fragment (suffix gated on header.N; arm
+                  body selected by parent.M dispatch)
        Z-gated  : queryable_info ZINT ext (_complete=false +
                   _distance=0 evaluates `has_info_ext=false` at
                   zero-init, so Z=0 at default state)
@@ -33,7 +38,7 @@
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x04"/>
       <sce:flag name="N"   bit="5"/>
-      <sce:flag name="M"   bit="6" value="1"/>
+      <sce:flag name="M"   bit="6"/>
       <sce:flag name="Z"   bit="7"/>
     </sce:flags>
     <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>

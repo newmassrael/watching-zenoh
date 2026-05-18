@@ -433,7 +433,8 @@ async fn r83_observer_reads_framepayload_messages_through_reference() {
 async fn r99_subscriber_registry_routes_framepayload_push_to_callback() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wz_codecs::push::Push;
-    use wz_codecs::wireexpr::Wireexpr;
+    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+    use wz_codecs::wireexpr_local::WireexprLocal;
     use wz_runtime_tokio::pubsub::SubscriberRegistry;
 
     let (actions, mut engine) = fresh_setup();
@@ -446,13 +447,20 @@ async fn r99_subscriber_registry_routes_framepayload_push_to_callback() {
     // is header(1) + wireexpr.id VLE(1) + suffix_len VLE(1) +
     // suffix("demo/topic", 10 bytes) + msg_put header(1) +
     // msg_put.payload_len VLE(1) = 15 bytes.
+    // R125c2: wireexpr is now a tagged-union dispatched on parent.M;
+    // build the Local arm so the derived header.M bit ends up set
+    // (matches zenoh-pico's `_z_wireexpr_is_local(&_key) → M=1`
+    // construction at network.c:42 for the zero-init mapping=LOCAL
+    // sender state).
     let keyexpr_literal = "demo/topic";
     let push = Push {
         header: 0x1D | 0x20,
         keyexpr: Wireexpr {
-            id: 0,
-            suffix_len: Some(keyexpr_literal.len() as u64),
-            suffix: Some(keyexpr_literal.into()),
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len: Some(keyexpr_literal.len() as u64),
+                suffix: Some(keyexpr_literal.into()),
+            }),
         },
         ..Push::default()
     };

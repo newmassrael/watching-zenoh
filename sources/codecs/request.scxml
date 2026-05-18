@@ -76,21 +76,31 @@
      (wireexpr inner codec). No new primitives.
 
      Deliberate divergence from SCE upstream codec_zenoh_request
-     (three layered R88/R106/R108a closures): (1) wz bakes
-     `<sce:flag name="mid" value="0x1C"/>` per the network MID
-     contract (R108a fix; the SCE fixture leaves it unset and
-     would emit a malformed wire first byte 0x00). (2) wz bakes
-     `<sce:flag name="M" value="1"/>` to match zenoh-pico's
-     `_z_wireexpr_is_local` semantic at default state (R106
-     baking; see wire-spec-subset §6.2 caveat). (3) wz marks the
-     `0x03` (Query) arm as `default="true"` while the SCE fixture
-     marks `0x01` (MsgPut) — wz aligns with zenoh-pico's
+     (two remaining points after R125c2's point-2 closure): (1) wz
+     bakes `<sce:flag name="mid" value="0x1C"/>` per the network
+     MID contract (R108a fix; the SCE fixture leaves it unset and
+     would emit a malformed wire first byte 0x00). (2) [closed
+     R125c2] wz previously baked `<sce:flag name="M" value="1"/>`
+     (R106) to match zenoh-pico's `_z_wireexpr_is_local` semantic
+     at default state. R125c2 closes that point — the new
+     wireexpr.scxml parent-tag variant dispatcher (at SCE pin
+     b35dbb66) derives M at encode time from the wireexpr arm
+     choice, and SCE Q-3 cross-doc validator forbids derivation +
+     static-value coexistence so the static baking had to go. The
+     default-state wire byte is preserved (M=1 still set) by
+     marking wireexpr_local as the dispatcher's default="true" arm
+     so `Wireexpr::default()` returns the Local variant and the
+     encoder ORs 0x40 into the parent header.M bit. (3) wz marks
+     the `0x03` (Query) arm as `default="true"` while the SCE
+     fixture marks `0x01` (MsgPut) — wz aligns with zenoh-pico's
      `_z_n_msg_request_t._tag` zero-init value `_Z_REQUEST_QUERY`
      so `Request::default()` dispatches Query, not MsgPut, on
      wire round-trip. Layer 3 proof: crates/wz-integration-tests/
      tests/layer3_request.rs (R108b). SCE upstream needs a paired
-     PR addressing all three points (R114 audit-traced
-     KNOWN_DIVERGENCE).
+     PR addressing the remaining points (1) and (3) (R114
+     audit-traced KNOWN_DIVERGENCE; point (2) is closed — wz
+     drives M via the dispatcher and the static-value baking is
+     gone).
 
      Original alignment claim (pre-R88/R106/R108a) preserved for
      history: Body byte-identical to SCE upstream
@@ -109,7 +119,7 @@
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x1C"/>
       <sce:flag name="N"   bit="5"/>
-      <sce:flag name="M"   bit="6" value="1"/>
+      <sce:flag name="M"   bit="6"/>
       <sce:flag name="Z"   bit="7"/>
     </sce:flags>
     <sce:field id="rid" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>

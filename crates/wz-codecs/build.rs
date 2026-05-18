@@ -53,7 +53,9 @@ const CODECS: &[&str] = &[
     "ext_envelope", // imports ext_entry — R67 generic ext chain (RFC §5.B B5-ε)
     "msg_put",   // imports timestamp / encoding / ext_entry
     "msg_del",   // imports timestamp / ext_entry
-    "wireexpr",  // §5 keyexpr fragment — parent.N gated suffix — R47
+    "wireexpr_local",    // §5 wireexpr Local arm — R125b leaf; R125c2 dispatched
+    "wireexpr_nonlocal", // §5 wireexpr Nonlocal arm — R125b leaf; R125c2 dispatched
+    "wireexpr",  // §5 keyexpr fragment — R125c2 B5-ν dispatcher (pin b35dbb66)
     "query",     // §6.2 Query body — header gates + tlv-chain — R47
     "request",   // §5 Z_REQUEST envelope — peek-byte dispatch — R47
     "push",      // §5 Z_PUSH envelope — peek-byte dispatch — R90
