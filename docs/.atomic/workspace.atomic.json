@@ -5047,6 +5047,68 @@
         "InboundReadDriver hex-dump diagnostic log is at debug level. Useful for future foreign-interop diagnosis (R121f initiator-side debugging cost was reduced to one RUST_LOG=debug run); keep until a production-observability decision reframes the debug-log set."
       ]
     },
+    "Round 121f1": {
+      "decision_summary": "R121f1 closes the wz initiator to zenoh-pico peer-listen interop carry by seeding SessionLinkActions::new with the wire-spec-mandatory patch extension on both Init ext chains, restoring symmetric size negotiation with zenoh-pico's Z_FEATURE_FRAGMENTATION=1 accept-side cap.",
+      "changes_bullets": [
+        "session_glue.rs: introduce default_init_patch_ext_entry() returning the _Z_MSG_EXT_ID_INIT_PATCH (0x27) + VLE(_Z_CURRENT_PATCH=1) entry; SessionLinkActions::new now seeds both init_syn_ext and init_ack_ext slots with this entry.",
+        "session_glue.rs: extend imports to bring in ExtEntryVariant and ExtZint from wz-codecs so the helper can construct the typed body arm.",
+        "wz-integration-tests: new wz_initiator_to_zsub.rs covers the previously open foreign-interop cell (wz initiator + publisher to zenoh-pico z_sub peer-listen) and asserts the Subscriber Received witness within 10s.",
+        "scripts/run-ci.sh: Layer E lane now invokes the new integration test alongside the existing three (ap_demo_round_trip + wz_publisher_to_zsub + wz_initiator_to_wz_acceptor); the lane header documents the closed 2x2 role x direction matrix and removes the stale zenoh-pico peer-listen does not respond carry note.",
+        "tests/session_glue_dispatch.rs: update expected_init_syn to include FLAG_T_Z + trailing patch-ext bytes and add a corresponding tail assertion to expected_init_ack.",
+        "tests/session_fsm_real_tcp.rs: update the first-byte assertion from 0x41 to 0xC1 (FLAG_T_Z added) with a rationale comment citing R121f1.",
+        "tests/layer3_ext_chain_outbound.rs: rename the empty-chain test to encode_init_with_explicit_empty_chain_omits_z_flag_and_trailing_bytes and explicitly clear the slot before encoding; pre-clear both Init chains in the role-isolation test; add default_session_actions_seed_init_chains_with_patch_extension test asserting the new default behavior."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace: all suites green; updated session_glue_dispatch + session_fsm_real_tcp + layer3_ext_chain_outbound tests reflect the new default; default_session_actions_seed_init_chains_with_patch_extension covers the seed contract.",
+        "Layer E manual reproduction: z_sub -m peer -l tcp/127.0.0.1:PORT paired with wz-ap-demo --connect ADDR --publish demo/test --value hello-r121f1 yields five Subscriber Received lines on the foreign side; pre-fix produced Codec(NeedMoreBytes) leading to SentInitSyn then Closing.",
+        "Root-cause line-pinpoint via strace -e trace=sendto,recvfrom -xx on z_sub: pre-fix zenoh-pico emitted exactly 25 bytes (LE length prefix 0x17 0x00 + 23-byte payload) with FLAG_T_Z=1 in the InitAck header but no trailing ext bytes; the size negotiation in vendor/zenoh-pico/src/transport/unicast/transport.c:237-241 capped iam._patch to _Z_NO_PATCH (0) after _z_t_msg_make_init_ack had already set the Z bit (transport.c:165-193). The wz parser correctly read Z=1 and reported NeedMoreBytes.",
+        "bash scripts/run-ci.sh: all 8 lanes pass (Layer 0/A/A2/B/C1/C2/D/E)."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism",
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121g: DECLARE(KeyExpr) outbound emit + DECLARE-aliased Push: SessionLinkActions::declare_keyexpr(id, suffix) + build_push_aliased(id, optional_suffix, value); integration test against z_sub confirming the keyexpr-table population path.",
+        "R121h: SCXML codec_stream_envelope kind: replace the four inline u16-LE length-prefix sites (TcpDriver send/poll + InboundReadDriver + OutboundWriteDriver + writer_task) with a generated codec call once sce-codegen supports a length-prefix-only stream framer.",
+        "R123b-pre: deploy yaml flat to nested topology schema migration; resumes R123b once that lands (build.rs compile_forge_with_imports to compile_scxml_with_imports, removes the request stem from LAYER2_KNOWN_DIVERGENCE).",
+        "R121i: 7 DECLARE sub-variants (DeclSub / DeclToken / DeclQbl + Undecl* + DeclFinal). Defer until consumer surface exists.",
+        "R121j: Query/Reply chain (wz-side encoder + dispatch). AP MVP's last large area; 4-6 rounds estimated.",
+        "R114: freshness gate negative test for scripts/run-ci.sh layer_b (sce-codegen mtime backward to auto-rebuild verification). Low-priority defensive carry."
+      ],
+      "publishable_decision_summary": "R121f1 closes the wz initiator to zenoh-pico peer-listen interop carry by seeding SessionLinkActions::new with the wire-spec-mandatory patch extension on both Init ext chains, restoring symmetric size negotiation with zenoh-pico's Z_FEATURE_FRAGMENTATION=1 accept-side cap.",
+      "publishable_changes_bullets": [
+        "session_glue.rs: introduce default_init_patch_ext_entry() returning the _Z_MSG_EXT_ID_INIT_PATCH (0x27) + VLE(_Z_CURRENT_PATCH=1) entry; SessionLinkActions::new now seeds both init_syn_ext and init_ack_ext slots with this entry.",
+        "session_glue.rs: extend imports to bring in ExtEntryVariant and ExtZint from wz-codecs so the helper can construct the typed body arm.",
+        "wz-integration-tests: new wz_initiator_to_zsub.rs covers the previously open foreign-interop cell (wz initiator + publisher to zenoh-pico z_sub peer-listen) and asserts the Subscriber Received witness within 10s.",
+        "scripts/run-ci.sh: Layer E lane now invokes the new integration test alongside the existing three (ap_demo_round_trip + wz_publisher_to_zsub + wz_initiator_to_wz_acceptor); the lane header documents the closed 2x2 role x direction matrix and removes the stale zenoh-pico peer-listen does not respond carry note.",
+        "tests/session_glue_dispatch.rs: update expected_init_syn to include FLAG_T_Z + trailing patch-ext bytes and add a corresponding tail assertion to expected_init_ack.",
+        "tests/session_fsm_real_tcp.rs: update the first-byte assertion from 0x41 to 0xC1 (FLAG_T_Z added) with a rationale comment citing R121f1.",
+        "tests/layer3_ext_chain_outbound.rs: rename the empty-chain test to encode_init_with_explicit_empty_chain_omits_z_flag_and_trailing_bytes and explicitly clear the slot before encoding; pre-clear both Init chains in the role-isolation test; add default_session_actions_seed_init_chains_with_patch_extension test asserting the new default behavior."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace: all suites green; updated session_glue_dispatch + session_fsm_real_tcp + layer3_ext_chain_outbound tests reflect the new default; default_session_actions_seed_init_chains_with_patch_extension covers the seed contract.",
+        "Layer E manual reproduction: z_sub -m peer -l tcp/127.0.0.1:PORT paired with wz-ap-demo --connect ADDR --publish demo/test --value hello-r121f1 yields five Subscriber Received lines on the foreign side; pre-fix produced Codec(NeedMoreBytes) leading to SentInitSyn then Closing.",
+        "Root-cause line-pinpoint via strace -e trace=sendto,recvfrom -xx on z_sub: pre-fix zenoh-pico emitted exactly 25 bytes (LE length prefix 0x17 0x00 + 23-byte payload) with FLAG_T_Z=1 in the InitAck header but no trailing ext bytes; the size negotiation in vendor/zenoh-pico/src/transport/unicast/transport.c:237-241 capped iam._patch to _Z_NO_PATCH (0) after _z_t_msg_make_init_ack had already set the Z bit (transport.c:165-193). The wz parser correctly read Z=1 and reported NeedMoreBytes.",
+        "bash scripts/run-ci.sh: all 8 lanes pass (Layer 0/A/A2/B/C1/C2/D/E)."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-4-transport-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism",
+        "session-fsm--prose-level-sketch/7-extension-negotiation-summary",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121g: DECLARE(KeyExpr) outbound emit + DECLARE-aliased Push: SessionLinkActions::declare_keyexpr(id, suffix) + build_push_aliased(id, optional_suffix, value); integration test against z_sub confirming the keyexpr-table population path.",
+        "R121h: SCXML codec_stream_envelope kind: replace the four inline u16-LE length-prefix sites (TcpDriver send/poll + InboundReadDriver + OutboundWriteDriver + writer_task) with a generated codec call once sce-codegen supports a length-prefix-only stream framer.",
+        "R123b-pre: deploy yaml flat to nested topology schema migration; resumes R123b once that lands (build.rs compile_forge_with_imports to compile_scxml_with_imports, removes the request stem from LAYER2_KNOWN_DIVERGENCE).",
+        "R121i: 7 DECLARE sub-variants (DeclSub / DeclToken / DeclQbl + Undecl* + DeclFinal). Defer until consumer surface exists.",
+        "R121j: Query/Reply chain (wz-side encoder + dispatch). AP MVP's last large area; 4-6 rounds estimated.",
+        "R114: freshness gate negative test for scripts/run-ci.sh layer_b (sce-codegen mtime backward to auto-rebuild verification). Low-priority defensive carry."
+      ]
+    },
     "Round 122": {
       "decision_summary": "R122 vendor/sce pin bump 122f851d to 4441431d; LAYER2_KNOWN_DIVERGENCE 6 to 1.",
       "changes_bullets": [

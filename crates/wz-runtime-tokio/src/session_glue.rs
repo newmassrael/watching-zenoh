@@ -64,7 +64,8 @@ use sce_rust_runtime::Engine;
 use sce_forge_runtime::codec::{CodecError, SceCursor};
 use wz_codecs::close::Close;
 use wz_codecs::declare::Declare;
-use wz_codecs::ext_entry::ExtEntry;
+use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
+use wz_codecs::ext_zint::ExtZint;
 use wz_codecs::frame::Frame;
 use wz_codecs::init_body::InitBody;
 use wz_codecs::interest::Interest;
@@ -647,6 +648,57 @@ impl PeerInitCaps {
     }
 }
 
+/// R121f1 — wire-spec-mandatory Patch extension entry for the Init
+/// transport-message ext chain. Zenoh's Init handshake includes a
+/// `_Z_MSG_EXT_ID_INIT_PATCH` extension (header byte `0x07 |
+/// _Z_MSG_EXT_ENC_ZINT = 0x27`, body = `zint64(_Z_CURRENT_PATCH = 1)`)
+/// that announces the protocol patch level. Without it, zenoh-pico's
+/// accepting side caps `iam._body._init._patch` to the peer's
+/// announced value via the size-negotiation rule at
+/// `vendor/zenoh-pico/src/transport/unicast/transport.c:237-241`:
+///
+/// ```c
+/// #if Z_FEATURE_FRAGMENTATION == 1
+///     if (iam._body._init._patch > tmsg._body._init._patch) {
+///         iam._body._init._patch = tmsg._body._init._patch;
+///     }
+/// #endif
+/// ```
+///
+/// But `_z_t_msg_make_init_ack`
+/// (`vendor/zenoh-pico/src/protocol/definitions/transport.c:187-191`)
+/// has already set `_Z_FLAG_T_Z` on the InitAck header before the cap
+/// runs. The cap reduces `iam._patch` to `_Z_NO_PATCH = 0`, which
+/// makes `_z_init_encode`
+/// (`vendor/zenoh-pico/src/protocol/codec/transport.c:206-216`) skip
+/// the patch-ext emit — but the header `Z=1` is now frozen onto the
+/// wire. The peer (i.e. wz) reads `Z=1` and expects ext bytes, but
+/// the payload terminates at the body — `NeedMoreBytes`, the wz
+/// session FSM closes, and zenoh-pico logs `Connection accept
+/// handshake failed with error -117`.
+///
+/// Mirroring zenoh-pico's `_z_t_msg_make_init_syn` / `make_init_ack`
+/// invariant (`_patch = _Z_CURRENT_PATCH`) on the wz outbound side
+/// keeps the negotiation symmetric — peer's `tmsg._patch = 1`,
+/// `iam._patch` stays `1`, and the patch-ext bytes accompany the
+/// `Z=1` header on the wire. This is the foreign-interop fix for the
+/// R121f1 carry surfaced when wz initiator dialed zenoh-pico
+/// peer-listen; the wz↔wz path (R121f) was symptom-free because
+/// both ends previously emitted Init bodies with `Z=0`.
+pub fn default_init_patch_ext_entry() -> ExtEntry {
+    // header byte layout per `vendor/zenoh-pico/include/zenoh-pico/
+    // protocol/ext.h:47-65`:
+    //   bits 0..3 = ext_id 0x07 (INIT_PATCH)
+    //   bit 4     = M (mandatory) = 0
+    //   bits 5..6 = enc = 0x01 (ZINT)
+    //   bit 7     = Z (chain continuation) — encoder owns this bit
+    //               via `encode_ext_chain`, so leave it cleared here.
+    ExtEntry {
+        header: 0x07 | 0x20, // _Z_MSG_EXT_ID_INIT_PATCH literal
+        body: ExtEntryVariant::CodecZenohExtZint(ExtZint { value: 1 }),
+    }
+}
+
 impl SessionLinkActions {
     /// Construct a session action bundle for one logical FSM instance.
     /// The `params` are captured by value; production callers
@@ -668,8 +720,14 @@ impl SessionLinkActions {
             established_at: Mutex::new(None),
             inbound_peer_zid: Mutex::new(None),
             inbound_opensyn_cookie: Mutex::new(None),
-            init_syn_ext: Mutex::new(Vec::new()),
-            init_ack_ext: Mutex::new(Vec::new()),
+            // R121f1 — default ext chains seed both Init roles with the
+            // patch-extension entry that zenoh-pico's accept-side
+            // size-negotiation requires. See
+            // [`default_init_patch_ext_entry`] for the wire-spec
+            // citation and the foreign-interop failure mode this
+            // closes.
+            init_syn_ext: Mutex::new(vec![default_init_patch_ext_entry()]),
+            init_ack_ext: Mutex::new(vec![default_init_patch_ext_entry()]),
             open_syn_ext: Mutex::new(Vec::new()),
             open_ack_ext: Mutex::new(Vec::new()),
             inbound_peer_init_caps: Mutex::new(None),
