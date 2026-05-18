@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh undecl_queryable sub-codec —
+     releases a queryable declaration. Mirrors zenoh-pico
+     `_z_undecl_queryable_encode` / `_z_undecl_encode`
+     (src/protocol/codec/declarations.c:120-122 + 90-100).
+
+     Wire shape (default state):
+       byte 0   : header (MID 0x05 + Z@7)
+       byte 1+  : id (VLE u32)
+       Z-gated  : ext_keyexpr ZBuf ext (non-default coverage carry)
+
+     R110d first contact: default state only (Z=0, id=0). Wire is
+     `[0x05, 0x00]` (2 bytes).
+
+     Body byte-identical to upstream wire RFC. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="undecl_queryable">
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x05"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+  </datamodel>
+</scxml>

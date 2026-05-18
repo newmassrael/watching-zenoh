@@ -3915,6 +3915,68 @@
         "AP MVP demo binary, R67-R71 series, Phase W lwIP — still queued."
       ]
     },
+    "Round 110d": {
+      "decision_summary": "R110d completes the DECLARE sub-MID authoring with the three `_z_undecl_encode`-shaped sub-types — undecl_subscriber (MID 0x03), undecl_queryable (MID 0x05), undecl_token (MID 0x07). Each is a leaf (header + id VLE + Z-gated ext_keyexpr held back). DECLARE sub-MID authoring axis now 9/9; only the Layer 3 wire-interop closure (R110e) remains.",
+      "changes_bullets": [
+        "sources/codecs/undecl_subscriber.scxml new — header (mid=0x03 + Z@7) + id VLE.",
+        "sources/codecs/undecl_queryable.scxml new — header (mid=0x05 + Z@7) + id VLE.",
+        "sources/codecs/undecl_token.scxml new — header (mid=0x07 + Z@7) + id VLE.",
+        "All three sub-codecs share zenoh-pico's `_z_undecl_encode` wire shape (declarations.c:90-100). M flag is NOT baked here: unlike the decl_commons family, `_z_undecl_encode` does NOT consult `_z_wireexpr_is_local` on the body — the wireexpr (if any) is carried in the Z-gated `_z_decl_ext_keyexpr` ZBuf ext, which has its own internal `_z_wireexpr_is_local` check in the ext header byte. wz default state has Z=0 (no ext), so no M consideration at envelope header level.",
+        "sources/codecs/declare.scxml: variant arms 0x03 / 0x05 / 0x07 appended; sub:import entries for all three sub-codecs added. The declared default arm stays at 0x1A → decl_final.",
+        "crates/wz-codecs/build.rs CODECS: undecl_subscriber / undecl_queryable / undecl_token appended to the leaf section (no imports). declare entry still last.",
+        "crates/wz-codecs/src/lib.rs: pub mod undecl_subscriber / undecl_queryable / undecl_token added.",
+        "Codegen emit verified at target/debug/build/wz-codecs-*/out/: undecl_subscriber.rs header=0x03u8, undecl_queryable.rs header=0x05u8, undecl_token.rs header=0x07u8. R94-style codegen-inspect verify done."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-codecs: clean compile.",
+        "cargo test --workspace: 149 tests pass (unchanged from R110c).",
+        "scripts/run-ci.sh: all 5 lanes (A/B/C1/C2/D) pass.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 126 → 127, sections=214, GENERATED.md=sync.",
+        "DECLARE sub-MID authoring axis: 9/9 covered (all sub-MIDs listed in zenoh-pico declarations.h:25-36 now have wz-side codecs). Codec catalog authoring closure: 7/7 envelope MIDs + 9/9 DECLARE sub-MIDs.",
+        "Remaining gap: Layer 3 wire-interop for the DECLARE envelope (R110e — single test, allowlist additions for `_z_n_msg_declare_t` + `_z_declare_encode`, fixture pattern from R102/R105/R108b)."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants"
+      ],
+      "carry_forward_bullets": [
+        "R110e Layer 3 wire-interop for DECLARE — byte-compare wz `Declare::default()` against zenoh-pico's `_z_declare_encode` with `_ext_qos._val = 5` fixture patch. Expected wire `[0x1E, 0x1A]` (envelope header + decl_final sub-MID). allowlist additions in crates/zenoh-pico-sys/build.rs: `_z_n_msg_declare_t` + `_z_declare_encode`. Brings codec catalog wire-interop axis from 6/7 to 7/7.",
+        "Non-default Layer 3 coverage carry — now spans all 7 envelope MIDs and all 9 DECLARE sub-MIDs. Each codec's non-default states (suffix / ext-chain / variant arms) await a Layer 3 round when a consumer surfaces; quality-axis, not gating.",
+        "AP MVP demo binary — Linux + tokio binary against zenoh-pico peer; 2-3 rounds. Internal infrastructure (R98-R100 pubsub registry + wildcard matching) + wire-interop confidence (R101-R110) now both in place.",
+        "R67-R71 series — inbound parser / Hal time-mock / wz-runtime-tokio-test-support split. Still queued per project_hybrid_adoption_plan.md.",
+        "Phase W wz-runtime-lwip — still queued; MCU cross-compile + real lwIP API + RX-pool + listener-link + target-plugin. Largest remaining work item."
+      ],
+      "publishable_decision_summary": "R110d completes the DECLARE sub-MID authoring with the three `_z_undecl_encode`-shaped sub-types — undecl_subscriber (MID 0x03), undecl_queryable (MID 0x05), undecl_token (MID 0x07). Each is a leaf (header + id VLE + Z-gated ext_keyexpr held back). DECLARE sub-MID authoring axis now 9/9; only the Layer 3 wire-interop closure (R110e) remains.",
+      "publishable_changes_bullets": [
+        "sources/codecs/undecl_subscriber.scxml new — header (mid=0x03 + Z@7) + id VLE.",
+        "sources/codecs/undecl_queryable.scxml new — header (mid=0x05 + Z@7) + id VLE.",
+        "sources/codecs/undecl_token.scxml new — header (mid=0x07 + Z@7) + id VLE.",
+        "All three sub-codecs share zenoh-pico's `_z_undecl_encode` wire shape (declarations.c:90-100). M flag is NOT baked here: unlike the decl_commons family, `_z_undecl_encode` does NOT consult `_z_wireexpr_is_local` on the body — the wireexpr (if any) is carried in the Z-gated `_z_decl_ext_keyexpr` ZBuf ext, which has its own internal `_z_wireexpr_is_local` check in the ext header byte. wz default state has Z=0 (no ext), so no M consideration at envelope header level.",
+        "sources/codecs/declare.scxml: variant arms 0x03 / 0x05 / 0x07 appended; sub:import entries for all three sub-codecs added. The declared default arm stays at 0x1A → decl_final.",
+        "crates/wz-codecs/build.rs CODECS: undecl_subscriber / undecl_queryable / undecl_token appended to the leaf section (no imports). declare entry still last.",
+        "crates/wz-codecs/src/lib.rs: pub mod undecl_subscriber / undecl_queryable / undecl_token added.",
+        "Codegen emit verified at target/debug/build/wz-codecs-*/out/: undecl_subscriber.rs header=0x03u8, undecl_queryable.rs header=0x05u8, undecl_token.rs header=0x07u8. R94-style codegen-inspect verify done."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-codecs: clean compile.",
+        "cargo test --workspace: 149 tests pass (unchanged from R110c).",
+        "scripts/run-ci.sh: all 5 lanes (A/B/C1/C2/D) pass.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 126 → 127, sections=214, GENERATED.md=sync.",
+        "DECLARE sub-MID authoring axis: 9/9 covered (all sub-MIDs listed in zenoh-pico declarations.h:25-36 now have wz-side codecs). Codec catalog authoring closure: 7/7 envelope MIDs + 9/9 DECLARE sub-MIDs.",
+        "Remaining gap: Layer 3 wire-interop for the DECLARE envelope (R110e — single test, allowlist additions for `_z_n_msg_declare_t` + `_z_declare_encode`, fixture pattern from R102/R105/R108b)."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R110e Layer 3 wire-interop for DECLARE — byte-compare wz `Declare::default()` against zenoh-pico's `_z_declare_encode` with `_ext_qos._val = 5` fixture patch. Expected wire `[0x1E, 0x1A]` (envelope header + decl_final sub-MID). allowlist additions in crates/zenoh-pico-sys/build.rs: `_z_n_msg_declare_t` + `_z_declare_encode`. Brings codec catalog wire-interop axis from 6/7 to 7/7.",
+        "Non-default Layer 3 coverage carry — now spans all 7 envelope MIDs and all 9 DECLARE sub-MIDs. Each codec's non-default states (suffix / ext-chain / variant arms) await a Layer 3 round when a consumer surfaces; quality-axis, not gating.",
+        "AP MVP demo binary — Linux + tokio binary against zenoh-pico peer; 2-3 rounds. Internal infrastructure (R98-R100 pubsub registry + wildcard matching) + wire-interop confidence (R101-R110) now both in place.",
+        "R67-R71 series — inbound parser / Hal time-mock / wz-runtime-tokio-test-support split. Still queued per project_hybrid_adoption_plan.md.",
+        "Phase W wz-runtime-lwip — still queued; MCU cross-compile + real lwIP API + RX-pool + listener-link + target-plugin. Largest remaining work item."
+      ]
+    },
     "Round 12": {
       "decision_summary": "Dual-license adoption — LGPL-3.0-or-later (Free, anti-tivo included) OR watching-zenoh Commercial (Qt-style 5-way exemption, $5000 individual cumulative)",
       "changes_bullets": [

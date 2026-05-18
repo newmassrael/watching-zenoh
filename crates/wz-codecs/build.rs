@@ -44,6 +44,9 @@ const CODECS: &[&str] = &[
     "keep_alive",// §4.1 empty body (transport keepalive) — R47 trivial
     "decl_final", // §5 declare-final leaf — 1-byte header MID 0x1A — R110a
     "undecl_kexpr", // §5 undecl kexpr leaf — header + id VLE, MID 0x01 — R110b
+    "undecl_subscriber", // §5 undecl subscriber leaf — header + id VLE, MID 0x03 — R110d
+    "undecl_queryable",  // §5 undecl queryable leaf — header + id VLE, MID 0x05 — R110d
+    "undecl_token",      // §5 undecl token leaf — header + id VLE, MID 0x07 — R110d
     // Composing codecs
     "hello",     // §3 Hello body — parent.L + repeat<locator> — R45
     "ext_entry", // imports ext_unit / ext_zint / ext_zbuf
