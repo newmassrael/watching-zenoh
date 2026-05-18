@@ -306,9 +306,11 @@ async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
                     assert_eq!(*mid, 0x1B);
                     assert_eq!(body.as_slice(), &[0x1B, 0xAA, 0xBB]);
                 }
-                NetworkMessage::Request(_) | NetworkMessage::Push(_) => {
+                NetworkMessage::Request(_)
+                | NetworkMessage::Push(_)
+                | NetworkMessage::ResponseFinal(_) => {
                     panic!(
-                        "RESPONSE MID (0x1B) must NOT dispatch to Request/Push decoders"
+                        "RESPONSE MID (0x1B) must NOT dispatch to Request/Push/ResponseFinal decoders"
                     )
                 }
             }

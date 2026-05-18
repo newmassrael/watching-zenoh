@@ -52,6 +52,7 @@ const CODECS: &[&str] = &[
     "query",     // §6.2 Query body — header gates + tlv-chain — R47
     "request",   // §5 Z_REQUEST envelope — peek-byte dispatch — R47
     "push",      // §5 Z_PUSH envelope — peek-byte dispatch — R90
+    "response_final", // §5 Z_RESPONSE_FINAL marker — header + rid — R91
 ];
 
 fn main() {

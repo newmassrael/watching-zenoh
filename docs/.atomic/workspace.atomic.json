@@ -8735,6 +8735,68 @@
         "Wire-interop test against zenoh-pico _z_push_encode — R43 pattern (layer3_frame.rs) cross-checks codec output against zenoh-pico's C encoder. layer3_push.rs would mirror that for the new Push codec. Defer until a focused layer3 round; the codec is internally self-consistent (round-trip safe via R88 uniformity), so wire-interop is a separate quality gate.",
         "pub/sub callback registry consumer for FramePayload.messages — R74/R83/R90 surface the decoded messages at the API boundary but no real consumer reads them yet. The application-layer subscriber dispatcher / Lua bridge that takes NetworkMessage::Push(Box<Push>) and routes by Wireexpr keyexpr is the next textbook step. Out of R90 scope; would close the AP MVP pub/sub demo gap."
       ]
+    },
+    "Round 91": {
+      "decision_summary": "R91 RESPONSE_FINAL marker codec lands — application-layer 3/7 MID coverage; simplest envelope shape so far (no body, no embed, no variant — just header + request_id VLE + optional ext-chain).",
+      "changes_bullets": [
+        "sources/codecs/response_final.scxml authored (~50 lines). Mirrors zenoh-pico `_z_response_final_encode` (src/protocol/codec/network.c): byte 0 = header with mid (bits 0..4, value=0x1A) + Z (bit 7) only — no N, no M flags per upstream header construction. byte 1+ = request_id VLE (correlates marker with original Request rid). Z-gated tlv-chain extensions (codec_zenoh_ext_entry, max-depth=4). No body, no peek-byte variant, no embed — simplest of the network envelopes.",
+        "wz-codecs build.rs: \"response_final\" appended to CODECS. lib.rs: pub mod response_final { include!(...) } sibling to push module.",
+        "wz-runtime-tokio session_glue.rs: wire_const::N_MID_RESPONSE_FINAL (0x1A) added. NetworkMessage enum gains ResponseFinal(ResponseFinal) variant — NOT Box-wrapped because the struct is small (three integer-ish fields + optional ext vec); rustdoc explains the inline choice vs Request/Push's Box.",
+        "Manual Debug impl extended with `Self::ResponseFinal(_) => f.write_str(\"ResponseFinal(..)\")` arm. parse_frame_payload gains N_MID_RESPONSE_FINAL match arm dispatching to ResponseFinal::decode + NetworkMessage::ResponseFinal wrap.",
+        "All NetworkMessage match arms across the test suite extended with `| NetworkMessage::ResponseFinal(_)` for exhaustiveness (driver_loop + inbound_dispatch). This is the second time a new MID has required updating every match site in tests; documented as carry below for a possible non-exhaustive-helper round.",
+        "1 new R91 unit test: parse_frame_payload_dispatches_response_final_mid_to_response_final_decoder. Asserts `bytes.len() == 2` (encode produces header + 1-byte VLE), `parsed.len() == 1`, and `matches!(parsed[0], NetworkMessage::ResponseFinal(_))`."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-codecs green; sce-build's codegen pipeline accepts response_final.scxml on first try.",
+        "cargo build -p wz-runtime-tokio green after R91 ResponseFinal wiring; match-exhaustiveness errors caught + fixed inside the round across 3 test files (textbook compile-time guard working).",
+        "cargo test --workspace: 121 passed / 0 failed (120 -> 121, +1 = exact R91 new test count). All prior 120 tests still pass with the new variant added — no regression in R74/R76/R77/R78/R83/R84/R85/R86/R88/R89/R90 paths.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass.",
+        "validate_workspace baseline preserved: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, T3 warn 856 / T4 info 427 unchanged. Atomic ledger entries 103 -> 104 (this Round entry); sections=214 unchanged.",
+        "Application-layer codec coverage now: 3 of 7 network MIDs (REQUEST 0x1C via R74, PUSH 0x1D via R90, RESPONSE_FINAL 0x1A via R91). Remaining 4 MIDs (RESPONSE 0x1B, DECLARE 0x1E, INTEREST 0x19, OAM 0x1F)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "carry_forward_bullets": [
+        "Match-exhaustiveness churn across tests — R90 + R91 both required updating every NetworkMessage match arm across 3 test files. Each new MID will keep this overhead. Options: (a) helper macro / function that converts NetworkMessage to a String for assertions (consolidates the variants); (b) `_ =>` wildcard arm in tests that don't need exhaustive coverage; (c) leave-as-is per textbook 'all match sites must explicit-handle every variant'. Option (c) is the safest textbook choice; documenting here so future MID-add rounds budget time for the churn.",
+        "RESPONSE codec (0x1B) requires reply + err inner body codecs — RESPONSE follows the same shape as REQUEST (header + rid + keyexpr + ext-chain + variant body) but the variant body is reply / err which wz-codecs hasn't authored yet. A pre-R92 round (or R92 itself if scope allows) authors reply.scxml + err.scxml as msg_put / msg_del siblings (single body each — reply carries the queried data, err carries an error envelope). After that, response.scxml follows the request.scxml template directly.",
+        "DECLARE (0x1E) codec — keyexpr declaration envelope. Different shape: a sequence of declarations (DeclSub / DeclToken / DeclQbl / etc.) rather than a single body. Likely needs a `<sce:repeat>` primitive over a variant body. ~100-150 line SCXML; more design surface than RESPONSE_FINAL.",
+        "INTEREST (0x19) + OAM (0x1F) codecs — INTEREST is the subscriber pull request (similar to Request shape but with interest-id and topic-filter fields); OAM is operations & maintenance (versioned ext-only payload). 1 round each, sequential.",
+        "layer3_response_final.rs wire-interop test against zenoh-pico — R43 pattern. layer3_push.rs (R90 carry #3) + layer3_response_final.rs together would land in a focused layer3 round once 2-3 new codecs accumulate — economy of scale on the FFI bridge setup."
+      ],
+      "publishable_decision_summary": "R91 RESPONSE_FINAL marker codec lands — application-layer 3/7 MID coverage; simplest envelope shape so far (no body, no embed, no variant — just header + request_id VLE + optional ext-chain).",
+      "publishable_changes_bullets": [
+        "sources/codecs/response_final.scxml authored (~50 lines). Mirrors zenoh-pico `_z_response_final_encode` (src/protocol/codec/network.c): byte 0 = header with mid (bits 0..4, value=0x1A) + Z (bit 7) only — no N, no M flags per upstream header construction. byte 1+ = request_id VLE (correlates marker with original Request rid). Z-gated tlv-chain extensions (codec_zenoh_ext_entry, max-depth=4). No body, no peek-byte variant, no embed — simplest of the network envelopes.",
+        "wz-codecs build.rs: \"response_final\" appended to CODECS. lib.rs: pub mod response_final { include!(...) } sibling to push module.",
+        "wz-runtime-tokio session_glue.rs: wire_const::N_MID_RESPONSE_FINAL (0x1A) added. NetworkMessage enum gains ResponseFinal(ResponseFinal) variant — NOT Box-wrapped because the struct is small (three integer-ish fields + optional ext vec); rustdoc explains the inline choice vs Request/Push's Box.",
+        "Manual Debug impl extended with `Self::ResponseFinal(_) => f.write_str(\"ResponseFinal(..)\")` arm. parse_frame_payload gains N_MID_RESPONSE_FINAL match arm dispatching to ResponseFinal::decode + NetworkMessage::ResponseFinal wrap.",
+        "All NetworkMessage match arms across the test suite extended with `| NetworkMessage::ResponseFinal(_)` for exhaustiveness (driver_loop + inbound_dispatch). This is the second time a new MID has required updating every match site in tests; documented as carry below for a possible non-exhaustive-helper round.",
+        "1 new R91 unit test: parse_frame_payload_dispatches_response_final_mid_to_response_final_decoder. Asserts `bytes.len() == 2` (encode produces header + 1-byte VLE), `parsed.len() == 1`, and `matches!(parsed[0], NetworkMessage::ResponseFinal(_))`."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-codecs green; sce-build's codegen pipeline accepts response_final.scxml on first try.",
+        "cargo build -p wz-runtime-tokio green after R91 ResponseFinal wiring; match-exhaustiveness errors caught + fixed inside the round across 3 test files (textbook compile-time guard working).",
+        "cargo test --workspace: 121 passed / 0 failed (120 -> 121, +1 = exact R91 new test count). All prior 120 tests still pass with the new variant added — no regression in R74/R76/R77/R78/R83/R84/R85/R86/R88/R89/R90 paths.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass.",
+        "validate_workspace baseline preserved: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, T3 warn 856 / T4 info 427 unchanged. Atomic ledger entries 103 -> 104 (this Round entry); sections=214 unchanged.",
+        "Application-layer codec coverage now: 3 of 7 network MIDs (REQUEST 0x1C via R74, PUSH 0x1D via R90, RESPONSE_FINAL 0x1A via R91). Remaining 4 MIDs (RESPONSE 0x1B, DECLARE 0x1E, INTEREST 0x19, OAM 0x1F)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Match-exhaustiveness churn across tests — R90 + R91 both required updating every NetworkMessage match arm across 3 test files. Each new MID will keep this overhead. Options: (a) helper macro / function that converts NetworkMessage to a String for assertions (consolidates the variants); (b) `_ =>` wildcard arm in tests that don't need exhaustive coverage; (c) leave-as-is per textbook 'all match sites must explicit-handle every variant'. Option (c) is the safest textbook choice; documenting here so future MID-add rounds budget time for the churn.",
+        "RESPONSE codec (0x1B) requires reply + err inner body codecs — RESPONSE follows the same shape as REQUEST (header + rid + keyexpr + ext-chain + variant body) but the variant body is reply / err which wz-codecs hasn't authored yet. A pre-R92 round (or R92 itself if scope allows) authors reply.scxml + err.scxml as msg_put / msg_del siblings (single body each — reply carries the queried data, err carries an error envelope). After that, response.scxml follows the request.scxml template directly.",
+        "DECLARE (0x1E) codec — keyexpr declaration envelope. Different shape: a sequence of declarations (DeclSub / DeclToken / DeclQbl / etc.) rather than a single body. Likely needs a `<sce:repeat>` primitive over a variant body. ~100-150 line SCXML; more design surface than RESPONSE_FINAL.",
+        "INTEREST (0x19) + OAM (0x1F) codecs — INTEREST is the subscriber pull request (similar to Request shape but with interest-id and topic-filter fields); OAM is operations & maintenance (versioned ext-only payload). 1 round each, sequential.",
+        "layer3_response_final.rs wire-interop test against zenoh-pico — R43 pattern. layer3_push.rs (R90 carry #3) + layer3_response_final.rs together would land in a focused layer3 round once 2-3 new codecs accumulate — economy of scale on the FFI bridge setup."
+      ]
     }
   },
   "inventory_entries": {},
