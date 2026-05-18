@@ -4677,6 +4677,57 @@
         "Re-appended audit-half minimal + publishable-half rich (R295 split applied)."
       ]
     },
+    "Round 122": {
+      "decision_summary": "R122 vendor/sce pin bump 122f851d to 4441431d; LAYER2_KNOWN_DIVERGENCE 6 to 1.",
+      "changes_bullets": [
+        "vendor/sce gitlink bump 122f851d to 4441431d.",
+        "scripts/run-ci.sh LAYER2_KNOWN_DIVERGENCE array shrunk from 6 to 1 (request only)."
+      ],
+      "verification_bullets": [
+        "scripts/build-sce.sh rebuild pass on new pin.",
+        "scripts/run-ci.sh full gate pass (Layer 0/A/A2/B/C1/C2/D)."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "R123 deploy yaml variant_defaults overlay for request residual.",
+        "R124 header.M default=1 signal to SCE."
+      ],
+      "publishable_decision_summary": "R122 vendor/sce pin bump 122f851d to 4441431d; LAYER2_KNOWN_DIVERGENCE 6 to 1.",
+      "publishable_changes_bullets": [
+        "vendor/sce gitlink bump 122f851d -> 4441431d (4 commits ahead).",
+        "Adopts SCE commit 71357264 (align Zenoh codec wire bytes to zenoh-pico HEAD).",
+        "Adopts SCE commit 4441431d (deploy.yaml variant_defaults overlay; consumed in R123).",
+        "Side-load SCE 75c80a03 (compile_scxml rerun-if-changed) + eddff1db (mesh fixture).",
+        "scripts/run-ci.sh LAYER2_KNOWN_DIVERGENCE array shrunk from 6 to 1 (only request).",
+        "5 stems flip MISMATCH -> OK: init_body, join, msg_del, msg_put, query.",
+        "Audit comment rewritten to record R122 closure narrative + R123/R124 residual carry."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/build-sce.sh on new pin: 1m00s release rebuild pass.",
+        "scripts/run-ci.sh full gate: Layer 0/A/A2/B/C1/C2/D all pass.",
+        "Layer B before: 6 MISMATCH (init_body/join/msg_del/msg_put/query/request).",
+        "Layer B after: 1 MISMATCH (request only; carried per R123 overlay path).",
+        "validate_workspace: T1=0; RT 12/12; entries=139->140 (this entry); sync.",
+        "Workspace tests 159 + skeleton binary unchanged; zero regression."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R123: deploy/{ap_standalone,mcu_target,ap_mcu_pair}.yaml += variant_defaults block.",
+        "R123 overlay value: codec_zenoh_request: 0x03 (R88 arm-0x03 consumer convention).",
+        "R123 verification: Layer 3 layer3_request.rs re-run; LAYER2_KNOWN_DIVERGENCE -> ().",
+        "R124: signal SCE for header.M default=1 needed (R106 push/response/request).",
+        "R124 signal payload: extend overlay schema (flag_defaults) or new RFC primitive.",
+        "R125 (optional, joint ratification): atomic ratify entry + RFC boundary section.",
+        "R125 enables SCE Atomic B (14 SCXML fixture cleanup + new diagnostic).",
+        "R126 (post-Atomic B merge): vendor pin bump + KNOWN_DIVERGENCE () + comment cleanup.",
+        "SCE root-cause: validator checked default arm only; non-default standalone wrong.",
+        "SCE fix: validator renamed validate_cross_codec_variant_arm_mids (all arms)."
+      ]
+    },
     "Round 13": {
       "decision_summary": "sources/ skeleton lands via README (SPDX header double-block + 7-subdir lazy materialize per ARCH §428) + first author-side SCXML sources/algorithms/crc16_ccitt.scxml body-identical to SCE fixture; 6-backend byte-golden verify carried to R14 SCE submodule infrastructure (pin 1473f99f origin/main).",
       "changes_bullets": [
