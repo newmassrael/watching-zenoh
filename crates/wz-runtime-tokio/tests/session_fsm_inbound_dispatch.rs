@@ -381,49 +381,38 @@ fn parse_frame_payload_unknown_mid_absorbs_remainder() {
 
 #[test]
 fn parse_frame_payload_dispatches_request_mid_to_request_decoder() {
-    use wz_codecs::query::Query;
-    use wz_codecs::request::{Request, RequestVariant};
-    use wz_codecs::wireexpr::Wireexpr;
+    use wz_codecs::request::Request;
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
-    // R87 — exact byte-count round-trip Request envelope. The naive
-    // `Request { header: 0x1C, ..Request::default() }` construction
-    // exercises a self-inconsistent corner of `wz_codecs::request`'s
-    // codegen output: `RequestVariant::default()` returns
-    // `CodecZenohMsgPut(MsgPut::default())` whose `header` is `0`, but
-    // the request decoder's variant dispatch reads the inner header
-    // byte and routes `mid=0` to the `Default` arm with `Query::decode`
-    // — so encode writes MsgPut bytes while decode reads Query bytes.
-    //
-    // The fix is to construct the body with a variant that matches
-    // what `decode` will produce: `RequestVariant::Default { tag: 0,
-    // body: Query::default() }`. Both `Wireexpr::default()` and
-    // `Query::default()` round-trip in exactly one byte each, so the
-    // total wire is `header(1) + rid_vle(1) + wireexpr(1) +
-    // query_default(1) = 4 bytes` and decode consumes exactly that.
+    // R88 — exact byte-count round-trip Request envelope using plain
+    // `Request::default()`. Pre-R88 this test required explicit
+    // construction with `RequestVariant::Default { tag: 0, body:
+    // Query::default() }` to work around a codegen Default-arm
+    // self-inconsistency (R82 carry / R87 documentation). The SCE
+    // vendor pin bump to 189bf7f4 landed RFC variant-default-uniformity:
+    //   - `<sce:arm value="0x03" type="codec_zenoh_query" default="true"/>`
+    //     in request.scxml marks Query as the declared default arm
+    //   - `<sce:flag name="mid" bit="0" width="5" value="0x03"/>` in
+    //     query.scxml bakes the wire-MID into Query::default()'s header
+    //   - Codegen now emits `RequestVariant::default() -> CodecZenohQuery(Query::default())`
+    //     with Query.header = 0x03 → encode writes Query bytes →
+    //     decode peeks 0x03 → CodecZenohQuery arm → byte-exact roundtrip.
     let req = Request {
         header: 0x1C,
-        rid: 0,
-        keyexpr: Wireexpr::default(),
-        extensions: None,
-        body: RequestVariant::Default {
-            tag: 0,
-            body: Query::default(),
-        },
+        ..Request::default()
     };
     let bytes = req.encode();
     assert_eq!(
         bytes.len(),
         4,
-        "round-trip-safe Request constructs to 4 bytes: header + rid + wireexpr + query_default"
+        "round-trip-safe Request: header + rid + wireexpr + query_default = 4 bytes"
     );
 
     let parsed = parse_frame_payload(&bytes).expect("Request envelope parses");
     assert_eq!(
         parsed.len(),
         1,
-        "round-trip-safe Request yields exactly one record (R87 closure \
-         of the R82 'parsed.len() may exceed 1' carry); got {parsed:?}"
+        "round-trip-safe Request yields exactly one record; got {parsed:?}"
     );
     assert!(
         matches!(parsed[0], NetworkMessage::Request(_)),
@@ -433,24 +422,15 @@ fn parse_frame_payload_dispatches_request_mid_to_request_decoder() {
 
 #[test]
 fn parse_frame_payload_decodes_request_then_unknown_chain() {
-    use wz_codecs::query::Query;
-    use wz_codecs::request::{Request, RequestVariant};
-    use wz_codecs::wireexpr::Wireexpr;
+    use wz_codecs::request::Request;
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
-    // R87 — with the round-trip-safe Request construction, the batch
-    // loop can be tested across a multi-record payload. Prior to R87
-    // this test was removed because the default-state encode/decode
-    // mismatch made the residual unpredictable.
+    // R88 — chain test simplified alongside the Request roundtrip.
+    // The default-state mismatch that previously polluted this test's
+    // residual is gone after the SCE variant-default-uniformity fix.
     let req = Request {
         header: 0x1C,
-        rid: 0,
-        keyexpr: Wireexpr::default(),
-        extensions: None,
-        body: RequestVariant::Default {
-            tag: 0,
-            body: Query::default(),
-        },
+        ..Request::default()
     };
     let mut bytes = req.encode();
     let request_len = bytes.len();
