@@ -113,10 +113,21 @@ pub trait LinkDriver {
 }
 
 /// Minimal TCP driver. Reads/writes length-prefixed frames on a
-/// single TcpStream: 4-byte BE length + bytes. The framing is
-/// not yet wz-codec-driven (a real SCXML framer kind lands in a
-/// later round); for R52 echo demo this manual framing is
-/// sufficient.
+/// single TcpStream using the Zenoh streamed-link wire envelope:
+/// **2-byte little-endian length** + payload bytes. This matches
+/// zenoh-pico's `_z_link_send_t_msg` /
+/// `_z_link_recv_t_msg_cap_flow_stream` (`Z_LINK_CAP_FLOW_STREAM`
+/// branch) at zenoh-pico/src/transport/common/{tx,rx}.c with
+/// `_Z_MSG_LEN_ENC_SIZE = 2` (zenoh-pico/include/zenoh-pico/
+/// protocol/definitions/core.h:32), and bounds the per-frame
+/// payload to 65535 bytes which is also the upstream
+/// `Z_BATCH_UNICAST_SIZE` ceiling.
+///
+/// The framing remains hand-rolled here; a SCXML
+/// `codec_stream_envelope` kind generating the same emit will land
+/// in a later round (Phase D follow-up to R121d) so this driver
+/// can call into the generated codec rather than open-coding the
+/// length-prefix bytes.
 pub struct TcpDriver {
     stream: Option<TcpStream>,
 }
@@ -155,12 +166,16 @@ impl LinkDriver for TcpDriver {
             .stream
             .as_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no stream"))?;
-        let len: u32 = frame
+        // Zenoh streamed-link envelope: u16 LE length prefix. See
+        // zenoh-pico/src/transport/common/tx.c:415-447 for the
+        // reference encoder. The 65535 byte ceiling matches the
+        // upstream `Z_BATCH_UNICAST_SIZE` maximum.
+        let len: u16 = frame
             .bytes
             .len()
             .try_into()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame > 4 GiB"))?;
-        stream.write_all(&len.to_be_bytes()).await?;
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame > 65535 bytes"))?;
+        stream.write_all(&len.to_le_bytes()).await?;
         stream.write_all(frame.bytes).await?;
         stream.flush().await?;
         Ok(())
@@ -180,7 +195,11 @@ impl LinkDriver for TcpDriver {
                 cause: LostCause::PeerClosed,
             },
         };
-        let mut len_buf = [0u8; 4];
+        // Zenoh streamed-link envelope: u16 LE length prefix. See
+        // zenoh-pico/src/transport/common/rx.c:35-62
+        // (`_z_link_recv_t_msg_cap_flow_stream`) for the reference
+        // decoder.
+        let mut len_buf = [0u8; 2];
         match stream.read_exact(&mut len_buf).await {
             Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
@@ -194,7 +213,7 @@ impl LinkDriver for TcpDriver {
                 };
             }
         }
-        let len = u32::from_be_bytes(len_buf) as usize;
+        let len = u16::from_le_bytes(len_buf) as usize;
         let mut buf = vec![0u8; len];
         match stream.read_exact(&mut buf).await {
             Ok(_) => LinkEvent::Rx(RxFrame { bytes: buf }),

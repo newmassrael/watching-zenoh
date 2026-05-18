@@ -566,6 +566,60 @@ pub struct SessionLinkActions {
     init_ack_ext: Mutex<Vec<ExtEntry>>,
     open_syn_ext: Mutex<Vec<ExtEntry>>,
     open_ack_ext: Mutex<Vec<ExtEntry>>,
+    /// R121d — sizing parameters parsed from the peer's inbound
+    /// `InitSyn`. The Accepting side caps its outbound InitAck
+    /// `seq_num_res / req_id_res / batch_size` to `min(own,
+    /// peer)` per the wire-spec invariant
+    /// `InitAck.size <= InitSyn.size`. The reference enforcement
+    /// is in zenoh-pico/src/transport/unicast/transport.c:123-140
+    /// (`_z_unicast_handshake_open`) where the initiator rejects
+    /// an InitAck that announces values larger than its own
+    /// InitSyn with `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION`. Empty
+    /// slot means no InitSyn has been parsed yet (handshake
+    /// hasn't started) and `encode_init_with_role(is_ack=true)`
+    /// falls back to `self.params` verbatim — test paths that
+    /// emit InitAck directly without an inbound parse cycle
+    /// (R60, layer3_init_body) continue to work.
+    pub inbound_peer_init_caps: Mutex<Option<PeerInitCaps>>,
+}
+
+/// R121d — peer-announced sizing caps captured from `InitSyn` for
+/// the Accepting-side negotiation rule
+/// `InitAck.size <= InitSyn.size`. Defaults match
+/// zenoh-pico's behaviour when the `_Z_FLAG_T_INIT_S` bit is
+/// clear on InitSyn (zenoh-pico/src/protocol/codec/transport.c:267-269
+/// — falls back to `_Z_DEFAULT_RESOLUTION_SIZE = 2` and
+/// `_Z_DEFAULT_UNICAST_BATCH_SIZE = 65535`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerInitCaps {
+    pub seq_num_res: u8,
+    pub req_id_res: u8,
+    pub batch_size: u16,
+}
+
+impl PeerInitCaps {
+    /// Decode the InitSyn `sn_res` byte + optional `batch_size`
+    /// field per the init_body codec (parent.S=1 carries both,
+    /// parent.S=0 falls back to defaults). The `sn_res` byte is
+    /// packed `(seq_num_res & 0x03) | ((req_id_res & 0x03) << 2)`
+    /// per zenoh-pico transport.c:196-197.
+    pub fn from_init_syn(sn_res_byte: Option<u8>, batch_size: Option<u16>) -> Self {
+        match sn_res_byte {
+            Some(b) => Self {
+                seq_num_res: b & 0x03,
+                req_id_res: (b >> 2) & 0x03,
+                batch_size: batch_size.unwrap_or(65535),
+            },
+            None => Self {
+                // S bit clear → both peer defaults to
+                // `_Z_DEFAULT_RESOLUTION_SIZE = 2` and
+                // `_Z_DEFAULT_UNICAST_BATCH_SIZE = 65535`.
+                seq_num_res: 2,
+                req_id_res: 2,
+                batch_size: 65535,
+            },
+        }
+    }
 }
 
 impl SessionLinkActions {
@@ -587,7 +641,37 @@ impl SessionLinkActions {
             init_ack_ext: Mutex::new(Vec::new()),
             open_syn_ext: Mutex::new(Vec::new()),
             open_ack_ext: Mutex::new(Vec::new()),
+            inbound_peer_init_caps: Mutex::new(None),
         })
+    }
+
+    /// R121d — derive the SessionInitParams the Accepting side
+    /// will emit on the outbound InitAck. Caps `seq_num_res`,
+    /// `req_id_res`, and `batch_size` to `min(self.params.x,
+    /// peer.x)` when an InitSyn has been parsed (slot populated
+    /// by [`handle_inbound`]); falls back to `self.params`
+    /// unmodified when no peer caps are known yet. The result is
+    /// a fresh `SessionInitParams` so the caller can pass it to
+    /// the codec without consuming the canonical params slot.
+    ///
+    /// This is the textbook enforcement of the wire-spec
+    /// invariant `InitAck.size <= InitSyn.size` documented in
+    /// zenoh-pico/src/transport/unicast/transport.c:120-140
+    /// ("Any of the size parameters in the InitAck must be less
+    /// or equal than the one in the InitSyn"). Skipping it makes
+    /// an external initiator reject the InitAck with
+    /// `_Z_ERR_TRANSPORT_OPEN_SN_RESOLUTION` and abort the
+    /// session, which is the R121d immediate symptom this
+    /// negotiation closes.
+    pub fn init_ack_params(&self) -> SessionInitParams {
+        let peer = *self.inbound_peer_init_caps.lock().unwrap();
+        let mut params = self.params.clone();
+        if let Some(p) = peer {
+            params.seq_num_res = params.seq_num_res.min(p.seq_num_res);
+            params.req_id_res = params.req_id_res.min(p.req_id_res);
+            params.batch_size = params.batch_size.min(p.batch_size);
+        }
+        params
     }
 
     /// Replace the ext chain for the given role. Production callers
@@ -619,7 +703,18 @@ impl SessionLinkActions {
         role: ExtChainRole,
     ) -> Vec<u8> {
         let chain = self.ext_chain_slot(role).lock().unwrap();
-        encode_init(&self.params, is_ack, &chain, cookie_override)
+        if is_ack {
+            // R121d — capped-to-peer params so the outbound InitAck
+            // satisfies the wire-spec `InitAck.size <= InitSyn.size`
+            // invariant. The owned clone is cheap (the heavy field
+            // is `cookie_signing_key`, which is a 32-byte
+            // `Zeroizing<Vec<u8>>` clone) and stays local to this
+            // call frame.
+            let params = self.init_ack_params();
+            encode_init(&params, is_ack, &chain, cookie_override)
+        } else {
+            encode_init(&self.params, is_ack, &chain, cookie_override)
+        }
     }
 
     pub fn encode_open_with_role(
@@ -669,6 +764,13 @@ impl SessionLinkActions {
                 // peer's claimed zid so the next send_init_ack_with_cookie
                 // can HMAC-bind the outbound cookie to it per RFC §5.M.
                 *self.inbound_peer_zid.lock().unwrap() = Some(body.zid.clone());
+                // R121d — capture the peer's announced sizing caps
+                // so `init_ack_params` can enforce the wire-spec
+                // `InitAck.size <= InitSyn.size` rule on the
+                // outbound InitAck (zenoh-pico
+                // unicast/transport.c:123-140 rejection condition).
+                *self.inbound_peer_init_caps.lock().unwrap() =
+                    Some(PeerInitCaps::from_init_syn(body.sn_res, body.batch_size));
             }
             InboundFrame::Open { is_ack: false, body, .. } => {
                 // R89 — Accepting-side OpenSyn arrival: capture the

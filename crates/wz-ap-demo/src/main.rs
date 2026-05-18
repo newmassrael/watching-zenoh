@@ -30,21 +30,34 @@
 //   drivers:
 //
 //     InboundReadDriver { reader: OwnedReadHalf }
-//       impls `LinkDriver` — `poll_event` reads one 4-byte BE
-//       length-prefixed frame, `send`/`open`/`close` are no-ops
-//       (the inbound side never emits outbound bytes).
+//       impls `LinkDriver` — `poll_event` reads one Zenoh stream
+//       envelope (u16 LE length prefix + payload), `send`/`open`/
+//       `close` are no-ops (the inbound side never emits outbound
+//       bytes).
 //
-//     OutboundWriteDriver { writer: Arc<TokioMutex<OwnedWriteHalf>> }
-//       impls `BoxedLinkDriver` — `send_blocking` block_on-locks
-//       the writer mutex and writes a 4-byte BE length prefix +
-//       payload, mirroring `TcpDriver::send` framing verbatim so
-//       the wire shape is identical to the bundled `TcpDriver`.
+//     OutboundWriteDriver { tx: mpsc::UnboundedSender<Vec<u8>> }
+//       impls `BoxedLinkDriver` — `send_blocking` enqueues the
+//       transport-message bytes onto an unbounded mpsc channel.
+//       A dedicated async **writer task** (spawned in
+//       `run_demo`) owns the `OwnedWriteHalf` and drains the
+//       channel, writing the Zenoh stream envelope (u16 LE length
+//       prefix + payload) for each enqueued frame. This avoids
+//       the `Handle::block_on` reentrancy panic that would fire if
+//       `send_blocking` blocked on async TCP writes from a future
+//       being driven by the same runtime — `drive_session_until_
+//       terminal` polls inbound asynchronously, then the FSM's
+//       script-action handlers (e.g. `send_init_ack_with_cookie`)
+//       fire synchronously on the same task; nested `block_on` is
+//       not permitted. The channel is the textbook decoupling.
+//       Channel-send is sync + non-blocking; the writer task
+//       handles flush + ordering. Frame ordering is preserved
+//       because there is exactly one writer task per outbound
+//       channel.
 //
 //   Both halves wrap the same TcpStream so peer reads see what we
 //   send and peer writes reach our poll_event. The split lets each
 //   side own its half exclusively, satisfying both the `&mut
-//   LinkDriver` and `Arc<dyn BoxedLinkDriver>` shape constraints
-//   without any custom Mutex around the full driver.
+//   LinkDriver` and `Arc<dyn BoxedLinkDriver>` shape constraints.
 
 use std::env;
 use std::io;
@@ -57,7 +70,7 @@ use sce_rust_runtime::{Engine, IScriptEngine};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::mpsc;
 use wz_codecs::wireexpr::WireexprVariant;
 use wz_runtime_tokio::pubsub::SubscriberRegistry;
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastPolicy;
@@ -95,19 +108,43 @@ fn parse_pair(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
-// R121b session params: MVP-fixed values mirroring the test-support
-// fixture's zenoh-default shape (whatami=Peer, version=0x05,
-// lease=10s, deterministic ZID). Production AP deployment will
-// source these from deploy.yaml once the topology-schema migration
-// (R123b-pre carry) lands.
+// R121d interop-tuned session params. Values aligned to
+// zenoh-pico 1.5.0 defaults so the AP demo can complete a real
+// session handshake against `z_put -m client`:
+//
+//   - `version = 0x09` matches `Z_PROTO_VERSION` in
+//     zenoh-pico/include/zenoh-pico/config.h.in:190. The earlier
+//     0x05 value (carried from the R121b MVP) was tolerated by
+//     unicast but is one revision behind; matching the upstream
+//     constant is the textbook interop default.
+//   - `seq_num_res = 2` / `req_id_res = 2` match
+//     `Z_SN_RESOLUTION` / `Z_REQ_RESOLUTION` (both 0x02) in the
+//     same config header. The earlier `0` value resolved to an
+//     8-bit SN window (`_z_sn_max(0) = 127`,
+//     zenoh-pico/src/transport/utils.c:24-29), which would have
+//     wrapped sequence numbers within a few frames.
+//   - `batch_size = 65535` lets zenoh-pico cap to its own
+//     `Z_BATCH_UNICAST_SIZE` (2048 in the bundled CLI build per
+//     target/zenoh-pico-build/CMakeCache.txt). The earlier `0`
+//     value crashed zenoh-pico inside `__unsafe_z_prepare_wbuf`
+//     because the negotiation in
+//     zenoh-pico/src/transport/unicast/transport.c:135-136
+//     takes `min(own, peer)` and a zero-sized wbuf segfaults on
+//     the first `_z_wbuf_put` (this was the R121d immediate
+//     crash root cause).
+//
+// `whatami = 0x02 (Peer)`, `lease = 10s`, `zid = 4-byte demo
+// constant` carry from R121b unchanged. Production AP deployment
+// will source these from deploy.yaml once the topology-schema
+// migration (R123b-pre carry) lands.
 fn demo_session_init_params() -> SessionInitParams {
     SessionInitParams {
-        version: 0x05,
+        version: 0x09,
         whatami: 0x02, // Peer
         zid: vec![0x01, 0x02, 0x03, 0x04],
-        seq_num_res: 0,
-        req_id_res: 0,
-        batch_size: 0,
+        seq_num_res: 2,
+        req_id_res: 2,
+        batch_size: 65535,
         lease: 10_000,
         lease_in_seconds: false,
         initial_sn: 0,
@@ -123,7 +160,9 @@ fn demo_session_init_params() -> SessionInitParams {
 
 /// Inbound half of the bidirectional split — owns the read half of
 /// the accepted TcpStream and implements [`LinkDriver`] with
-/// poll_event reading one 4-byte BE length-prefixed frame.
+/// poll_event reading one Zenoh stream envelope (u16 LE length
+/// prefix + payload, mirroring zenoh-pico's
+/// `_z_link_recv_t_msg_cap_flow_stream`).
 ///
 /// The send/open/close methods are no-ops because the inbound side
 /// never emits outbound bytes — the FSM's outbound path is wired
@@ -165,7 +204,7 @@ impl LinkDriver for InboundReadDriver {
     }
 
     async fn poll_event(&mut self) -> LinkEvent {
-        let mut len_buf = [0u8; 4];
+        let mut len_buf = [0u8; 2];
         match self.reader.read_exact(&mut len_buf).await {
             Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
@@ -179,7 +218,7 @@ impl LinkDriver for InboundReadDriver {
                 };
             }
         }
-        let len = u32::from_be_bytes(len_buf) as usize;
+        let len = u16::from_le_bytes(len_buf) as usize;
         let mut buf = vec![0u8; len];
         match self.reader.read_exact(&mut buf).await {
             Ok(_) => LinkEvent::Rx(RxFrame { bytes: buf }),
@@ -190,41 +229,46 @@ impl LinkDriver for InboundReadDriver {
     }
 }
 
-/// Outbound half of the bidirectional split — holds an Arc-shared
-/// Tokio Mutex over the accepted TcpStream's write half and
-/// implements [`BoxedLinkDriver`] so [`SessionLinkActions::new`]'s
-/// `Arc<dyn BoxedLinkDriver>` slot is satisfied without consuming
-/// the read half.
+/// Outbound half of the bidirectional split — holds an
+/// `mpsc::UnboundedSender<Vec<u8>>` whose receiver is owned by a
+/// dedicated writer task spawned in [`run_demo`]. Implements
+/// [`BoxedLinkDriver`] so [`SessionLinkActions::new`]'s
+/// `Arc<dyn BoxedLinkDriver>` slot is satisfied.
 ///
-/// `send_blocking` uses the captured tokio runtime handle's
-/// `block_on` to bridge from the sync `BoxedLinkDriver` contract
-/// (the Lua closures inside `SessionLinkActions` are sync) to the
-/// async TCP write. The handle MUST point at a multi-thread
-/// runtime so block_on doesn't deadlock — TokioLinkDriverAdapter
-/// makes the same assertion at construction; this driver follows
-/// the same contract.
+/// `send_blocking` enqueues the transport-message bytes
+/// synchronously (channel send is non-blocking and has no
+/// `block_on`), which is the architecturally required shape: the
+/// FSM script-action handlers (e.g. `send_init_ack_with_cookie`)
+/// fire from the synchronous portion of [`drive_session_until_terminal`],
+/// and that loop is itself a future driven by the same Tokio
+/// runtime. A `Handle::block_on` from inside such a future would
+/// fail the "Cannot start a runtime from within a runtime"
+/// reentrancy check; the channel decoupling keeps the
+/// sync-from-async boundary clean.
+///
+/// Frame ordering is preserved because the channel is single-
+/// producer-single-consumer in the demo (one Lua engine drives
+/// one writer task) and `mpsc` preserves enqueue order.
 struct OutboundWriteDriver {
-    writer: Arc<TokioMutex<OwnedWriteHalf>>,
-    handle: tokio::runtime::Handle,
+    tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 impl BoxedLinkDriver for OutboundWriteDriver {
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) {
-        let writer = self.writer.clone();
-        let owned_bytes = bytes.to_vec();
-        let result: io::Result<()> = self.handle.block_on(async move {
-            let mut w = writer.lock().await;
-            let len: u32 = owned_bytes
-                .len()
-                .try_into()
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame > 4 GiB"))?;
-            w.write_all(&len.to_be_bytes()).await?;
-            w.write_all(&owned_bytes).await?;
-            w.flush().await?;
-            Ok(())
-        });
-        if let Err(e) = result {
-            log::warn!("wz-ap-demo: outbound send failed: {e}");
+        if bytes.len() > u16::MAX as usize {
+            // Frame oversize: drop with a warn rather than overflow
+            // the u16 length prefix. zenoh-pico's
+            // `Z_BATCH_UNICAST_SIZE` ceiling is 65535, so a frame
+            // larger than this is a wz-side encoder bug — surface
+            // loudly.
+            log::warn!(
+                "wz-ap-demo: outbound frame {} bytes > 65535; dropping",
+                bytes.len()
+            );
+            return;
+        }
+        if let Err(e) = self.tx.send(bytes.to_vec()) {
+            log::warn!("wz-ap-demo: outbound channel closed; dropping frame ({e})");
         }
     }
 
@@ -234,12 +278,55 @@ impl BoxedLinkDriver for OutboundWriteDriver {
     }
 
     fn close_blocking(&self) {
-        let writer = self.writer.clone();
-        let _ = self.handle.block_on(async move {
-            let mut w = writer.lock().await;
-            w.shutdown().await
-        });
+        // The writer task is owned by `run_demo`'s scope and exits
+        // when every Sender clone is dropped (after run_demo
+        // returns). Explicit per-frame shutdown from the FSM's
+        // `release_link` would race against in-flight enqueues;
+        // letting the receiver-drop signal terminate the task is
+        // the textbook channel idiom.
     }
+}
+
+/// Async writer task. Owns the [`OwnedWriteHalf`] and drains the
+/// outbound channel one frame at a time, writing each frame's
+/// Zenoh stream envelope (u16 LE length prefix + payload) and
+/// flushing. Exits when every [`OutboundWriteDriver`] clone has
+/// dropped (i.e. the receiver returns `None`) or when a write
+/// fails (logged + bail).
+async fn writer_task(
+    mut writer: OwnedWriteHalf,
+    mut rx: mpsc::UnboundedReceiver<Vec<u8>>,
+) {
+    while let Some(payload) = rx.recv().await {
+        // Defensive: send_blocking already rejects oversize frames,
+        // but assert here in case a future caller bypasses that
+        // check.
+        let len = match u16::try_from(payload.len()) {
+            Ok(n) => n,
+            Err(_) => {
+                log::warn!(
+                    "wz-ap-demo: writer_task received oversize frame ({} bytes); dropping",
+                    payload.len()
+                );
+                continue;
+            }
+        };
+        if let Err(e) = writer.write_all(&len.to_le_bytes()).await {
+            log::warn!("wz-ap-demo: write length prefix failed: {e}; closing");
+            return;
+        }
+        if let Err(e) = writer.write_all(&payload).await {
+            log::warn!("wz-ap-demo: write payload failed: {e}; closing");
+            return;
+        }
+        if let Err(e) = writer.flush().await {
+            log::warn!("wz-ap-demo: flush failed: {e}; closing");
+            return;
+        }
+    }
+    // Channel closed → shut down the write half cleanly so the peer
+    // observes EOF rather than RST.
+    let _ = writer.shutdown().await;
 }
 
 fn main() -> ExitCode {
@@ -315,17 +402,17 @@ async fn run_demo(listen: String, key: String) -> io::Result<()> {
     log::info!("wz-ap-demo: accepted peer {peer}");
 
     // ── Step 2: split the TcpStream into owned read + write halves
-    //          so inbound (drive_session) and outbound (FSM script-
-    //          actions) can own their half exclusively without any
-    //          Mutex around the full driver. The write half goes
-    //          behind an Arc<TokioMutex> so multiple script-action
-    //          dispatches serialize their `send_blocking` calls.
+    //          + spawn a dedicated writer task so the FSM's sync
+    //          script-action handlers can enqueue outbound frames
+    //          without nesting `block_on` inside the runtime that
+    //          is driving the inbound poll loop. The writer task
+    //          owns the `OwnedWriteHalf`; the FSM-facing
+    //          `OutboundWriteDriver` holds only the sender.
     let (reader, writer) = stream.into_split();
     let inbound = InboundReadDriver { reader };
-    let outbound = Arc::new(OutboundWriteDriver {
-        writer: Arc::new(TokioMutex::new(writer)),
-        handle: tokio::runtime::Handle::current(),
-    });
+    let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let writer_handle = tokio::spawn(writer_task(writer, outbound_rx));
+    let outbound = Arc::new(OutboundWriteDriver { tx: outbound_tx });
 
     // ── Step 3: subscriber registry — register the --key callback
     //          BEFORE drive_session starts so any Push that arrives
@@ -361,6 +448,27 @@ async fn run_demo(listen: String, key: String) -> io::Result<()> {
         Engine::new(SessionFsmUnicastPolicy::new(script_engine));
     engine.initialize();
 
+    // ── Step 4b: activate the listener role on the session FSM.
+    //          `session_fsm_unicast.scxml` starts in `Init` and offers
+    //          two role-selection transitions (`outbound.start` →
+    //          LinkOpening, `inbound.start` → Accepting); the driver
+    //          loop does NOT synthesize either side — the production
+    //          caller dispatches the relevant role event after the
+    //          socket is established. The wz-ap-demo binary is purely
+    //          the acceptor (it called `listener.accept().await`
+    //          above), so InboundStart fires here to land the FSM in
+    //          `Accepting.AwaitingInitSyn` before the first inbound
+    //          frame arrives. Without this, the FSM stays in `Init`
+    //          and silently drops `init_syn.received`, which is the
+    //          textbook root cause for an external initiator's
+    //          "Unable to open session" report (the `init_syn.received`
+    //          transition only exists inside `Accepting`).
+    //          Matches the pattern asserted by
+    //          `session_fsm_accepting_path.rs::r78_*`.
+    engine.process_event(
+        wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent::InboundStart,
+    );
+
     // ── Step 5: drive the session FSM until terminal. The observer
     //          callback routes IterationEvent::Poll(FramePayload {
     //          messages, .. }) through the subscriber registry so
@@ -374,13 +482,31 @@ async fn run_demo(listen: String, key: String) -> io::Result<()> {
         &actions,
         &mut engine,
         Some(10_000),
-        |event| registry.dispatch_iteration_event(event),
+        |event| {
+            // Per-iteration trace stays at `debug` so an
+            // `RUST_LOG=info` production run does not flood the
+            // log on every Push frame. The integration test sets
+            // `RUST_LOG=info` and asserts only on the SUBSCRIBER
+            // FIRED line emitted by the registered callback, so
+            // hiding this trace behind `debug` does not regress
+            // the test surface.
+            log::debug!("wz-ap-demo: iteration event = {event:?}");
+            registry.dispatch_iteration_event(event)
+        },
     )
     .await;
     log::info!("wz-ap-demo: session ended: {outcome:?}");
+    log::info!("wz-ap-demo: action trace = {:?}", actions.trace_snapshot());
 
-    // Give the runtime a moment to drain any tail outbound write
-    // before shutdown collapses the writer mutex.
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    // Drop the FSM-side sender so the writer task observes the
+    // channel close and exits cleanly. `actions` holds another
+    // clone through the BoxedLinkDriver, so dropping `actions`
+    // explicitly is the textbook signal — every Sender clone must
+    // drop for `rx.recv()` in the writer task to return `None`.
+    drop(actions);
+    // Give the writer task a brief window to drain any tail frame
+    // (e.g. a Close frame the FSM enqueued during the final
+    // transition) before we return and the runtime shuts down.
+    let _ = tokio::time::timeout(Duration::from_millis(50), writer_handle).await;
     Ok(())
 }

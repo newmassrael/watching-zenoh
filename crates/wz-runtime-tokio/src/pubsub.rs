@@ -21,8 +21,13 @@
 //!   without it, and adding `$*` requires per-chunk pattern
 //!   compilation that doesn't pay off until a consumer surfaces.
 //!   Pushes whose `keyexpr.id == 0` and `keyexpr.suffix == Some(s)`
-//!   match against the pattern's wildcard expansion; mapping-id
-//!   pushes (`id != 0`) are filtered out (DECLARE codec deferred).
+//!   match against the pattern's wildcard expansion. R121d
+//!   landed the DECLARE-table resolver, so pushes whose
+//!   `keyexpr.id != 0` are resolved against the peer's locally-
+//!   declared mapping table (populated by inbound
+//!   `Declare(DeclKexpr)` records, removed by `Declare(UndeclKexpr)`).
+//!   The resolved keyexpr is `table[id] + push.suffix.unwrap_or("")`
+//!   per Zenoh's mapping-id + optional inline suffix composition.
 //! - Reply / Err / Interest / OAM dispatch are NOT routed through
 //!   the registry. They land in a future round once a use case
 //!   surfaces — pub/sub demo is sufficient for the AP MVP.
@@ -47,6 +52,9 @@
 //! application can inspect `Push.body` (msg_put / msg_del peek-byte
 //! variant) without taking ownership.
 
+use std::collections::HashMap;
+
+use wz_codecs::declare::DeclareVariant;
 use wz_codecs::push::Push;
 use wz_codecs::wireexpr::WireexprVariant;
 
@@ -154,11 +162,27 @@ fn matches_chunks(pattern: &[&str], target: &[&str]) -> bool {
 
 /// Subscriber table backing the FramePayload → callback dispatch.
 ///
-/// See module-level docs for scope (Push-only, literal-matching,
-/// `!Sync`).
+/// See module-level docs for scope (Push + DECLARE resolver, R121d).
+/// `!Sync` by construction (no shared mutable state); callers that
+/// need cross-task sharing wrap in `Arc<Mutex<…>>`.
 pub struct SubscriberRegistry {
     subscribers: Vec<Subscriber>,
     next_id: u64,
+    /// R121d — peer-side keyexpr alias table. Populated from
+    /// inbound `Declare(DeclKexpr)` records; cleared per-id by
+    /// `Declare(UndeclKexpr)`. Each entry maps a peer-declared
+    /// mapping id (the `DeclKexpr.id` u64) to the literal keyexpr
+    /// string the peer aliased it to.
+    ///
+    /// For now only the simple "DeclKexpr.keyexpr is a literal
+    /// (id=0, suffix=Some)" case is recorded. Composite
+    /// declarations (`DeclKexpr.keyexpr.id != 0`) — where one
+    /// alias references another — are recorded as their resolved
+    /// form when the table already contains the inner reference;
+    /// unresolved composites stay out of the table so a
+    /// downstream Push referencing them is filtered as "no
+    /// resolution" rather than firing on a partial keyexpr.
+    peer_keyexpr_table: HashMap<u64, String>,
 }
 
 impl Default for SubscriberRegistry {
@@ -175,6 +199,7 @@ impl SubscriberRegistry {
         Self {
             subscribers: Vec::new(),
             next_id: 1,
+            peer_keyexpr_table: HashMap::new(),
         }
     }
 
@@ -243,20 +268,22 @@ impl SubscriberRegistry {
     }
 
     /// Route a decoded `NetworkMessage` to matching subscriber
-    /// callbacks. Non-Push variants and mapping-id Pushes (where
-    /// `keyexpr.id != 0`) are no-ops in R98 scope; see module-level
-    /// docs for the rationale.
+    /// callbacks. R98 routes Push; R121d also processes
+    /// `Declare(DeclKexpr / UndeclKexpr)` to maintain the peer
+    /// mapping table so a downstream mapping-id Push can be
+    /// resolved against it. Other `Declare` sub-variants
+    /// (DeclSubscriber, DeclQueryable, DeclToken, etc.) and other
+    /// `NetworkMessage` variants are no-ops in this registry's
+    /// scope — the AP MVP path only needs Push round-trip.
     pub fn dispatch(&mut self, message: &NetworkMessage) {
-        let push = match message {
-            NetworkMessage::Push(push) => push,
-            _ => return,
-        };
-        // Mapping-id pushes need the DECLARE-established table to
-        // resolve `id` to a base keyexpr. Without that table the
-        // registry cannot tell whether a non-zero id matches any
-        // registered literal, so we silently filter — a future
-        // round attaches the mapping resolver to the registry and
-        // promotes the filter to an equality check.
+        match message {
+            NetworkMessage::Push(push) => self.dispatch_push(push),
+            NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body),
+            _ => {}
+        }
+    }
+
+    fn dispatch_push(&mut self, push: &Push) {
         // R125c2: keyexpr is now a tagged-union (B5-ν parent-tag
         // variant dispatch on parent.M); extract id + suffix from
         // whichever arm the dispatcher selected. Both arms carry the
@@ -266,19 +293,95 @@ impl SubscriberRegistry {
             WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
             WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
         };
-        if id != 0 {
-            return;
-        }
-        let suffix = match suffix_opt {
-            Some(s) => s,
-            None => return,
+        // R121d — resolve the Push's keyexpr against the peer
+        // mapping table. The composition rule is:
+        //
+        //   id == 0                       → keyexpr = suffix.unwrap_or("")
+        //   id != 0, suffix is None       → keyexpr = table[id]
+        //   id != 0, suffix is Some(s)    → keyexpr = table[id] + s
+        //
+        // If `id != 0` and the table has no entry, the push is
+        // un-resolvable (the peer never declared this id, OR the
+        // declaration arrived through a path the registry has not
+        // yet absorbed). Drop silently rather than firing on a
+        // partial keyexpr.
+        let resolved: String = if id == 0 {
+            match suffix_opt {
+                Some(s) => s.to_string(),
+                None => return,
+            }
+        } else {
+            let base = match self.peer_keyexpr_table.get(&id) {
+                Some(s) => s.clone(),
+                None => return,
+            };
+            match suffix_opt {
+                Some(s) => {
+                    let mut out = base;
+                    out.push_str(s);
+                    out
+                }
+                None => base,
+            }
         };
+
         for subscriber in &mut self.subscribers {
             let chunks: Vec<&str> =
                 subscriber.pattern_chunks.iter().map(String::as_str).collect();
-            if keyexpr_pattern_matches(&chunks, suffix) {
+            if keyexpr_pattern_matches(&chunks, &resolved) {
                 (subscriber.callback)(push);
             }
+        }
+    }
+
+    /// R121d — absorb a `Declare` envelope's inner body so the
+    /// peer mapping table tracks the peer's locally-declared
+    /// keyexpr aliases. Only `DeclKexpr` and `UndeclKexpr` are
+    /// processed; the other 7 Declare sub-variants do not affect
+    /// the keyexpr table.
+    fn absorb_declare(&mut self, body: &DeclareVariant) {
+        match body {
+            DeclareVariant::CodecZenohDeclKexpr(d) => {
+                // Resolve the declared keyexpr to a literal string,
+                // following the same composition rule as Push
+                // resolution (id==0 → suffix verbatim; id!=0 →
+                // table[id] + suffix). If the inner reference is
+                // unresolvable we skip — recording a partial entry
+                // would later mis-fire subscriber matches.
+                if let Some(literal) = self.resolve_wireexpr(&d.keyexpr.body) {
+                    self.peer_keyexpr_table.insert(d.id, literal);
+                }
+            }
+            DeclareVariant::CodecZenohUndeclKexpr(u) => {
+                self.peer_keyexpr_table.remove(&u.id);
+            }
+            // Other sub-variants do not affect the keyexpr table.
+            _ => {}
+        }
+    }
+
+    /// Resolve a `Wireexpr` to its literal keyexpr string using the
+    /// current peer mapping table. Returns `None` when the
+    /// expression references a mapping id that has not been
+    /// declared yet (or when it is the empty `(id=0, suffix=None)`
+    /// form, which carries no resolution).
+    fn resolve_wireexpr(&self, body: &WireexprVariant) -> Option<String> {
+        let (id, suffix_opt) = match body {
+            WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
+            WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
+        };
+        if id == 0 {
+            suffix_opt.map(str::to_string)
+        } else {
+            let base = self.peer_keyexpr_table.get(&id)?.clone();
+            Some(match suffix_opt {
+                Some(s) => {
+                    let mut out = base;
+                    out.push_str(s);
+                    out
+                }
+                None => base,
+            })
         }
     }
 }
@@ -554,5 +657,141 @@ mod tests {
         // Second call to unregister returns false (idempotent) and
         // does not panic.
         assert!(!registry.unregister(id));
+    }
+
+    // ── R121d DECLARE-resolver behaviour ──
+
+    /// Build a Declare envelope carrying a DeclKexpr that maps
+    /// `id` to the literal keyexpr suffix `s`. Models the wire
+    /// shape zenoh-pico emits on `z_declare_keyexpr` when the
+    /// argument is a string (no prefix mapping).
+    fn declare_kexpr_literal(mapping_id: u64, s: &str) -> wz_codecs::declare::Declare {
+        wz_codecs::declare::Declare {
+            body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
+                wz_codecs::decl_kexpr::DeclKexpr {
+                    id: mapping_id,
+                    keyexpr: wz_codecs::wireexpr::Wireexpr {
+                        body: WireexprVariant::WireexprLocal(
+                            wz_codecs::wireexpr_local::WireexprLocal {
+                                id: 0,
+                                suffix_len: Some(s.len() as u64),
+                                suffix: Some(s.into()),
+                            },
+                        ),
+                    },
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        }
+    }
+
+    fn undeclare_kexpr(mapping_id: u64) -> wz_codecs::declare::Declare {
+        wz_codecs::declare::Declare {
+            body: wz_codecs::declare::DeclareVariant::CodecZenohUndeclKexpr(
+                wz_codecs::undecl_kexpr::UndeclKexpr {
+                    id: mapping_id,
+                    ..Default::default()
+                },
+            ),
+            ..Default::default()
+        }
+    }
+
+    fn push_with_mapping_id(mapping_id: u64, inline_suffix: Option<&str>) -> Push {
+        Push {
+            keyexpr: wz_codecs::wireexpr::Wireexpr {
+                body: WireexprVariant::WireexprLocal(
+                    wz_codecs::wireexpr_local::WireexprLocal {
+                        id: mapping_id,
+                        suffix_len: inline_suffix.map(|s| s.len() as u64),
+                        suffix: inline_suffix.map(str::to_string),
+                    },
+                ),
+            },
+            ..Push::default()
+        }
+    }
+
+    #[test]
+    fn declare_then_push_with_mapping_id_resolves_via_table() {
+        // Models the zenoh-pico z_put flow: peer first declares
+        // a literal keyexpr under mapping id 1, then publishes
+        // referencing that id. The registry's resolver must
+        // resolve id=1 to "demo/test" and fire the matching
+        // subscriber.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("demo/test", move |_push| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        registry.dispatch(&NetworkMessage::Declare(Box::new(
+            declare_kexpr_literal(1, "demo/test"),
+        )));
+        registry.dispatch(&NetworkMessage::Push(Box::new(
+            push_with_mapping_id(1, None),
+        )));
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "Push referencing a declared mapping id must resolve via the table \
+             and fire the matching subscriber"
+        );
+    }
+
+    #[test]
+    fn undeclare_removes_mapping_so_later_push_no_longer_resolves() {
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("demo/test", move |_push| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        registry.dispatch(&NetworkMessage::Declare(Box::new(
+            declare_kexpr_literal(1, "demo/test"),
+        )));
+        registry.dispatch(&NetworkMessage::Push(Box::new(
+            push_with_mapping_id(1, None),
+        )));
+        registry.dispatch(&NetworkMessage::Declare(Box::new(undeclare_kexpr(1))));
+        registry.dispatch(&NetworkMessage::Push(Box::new(
+            push_with_mapping_id(1, None),
+        )));
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "post-undeclare Push referencing the same id must not resolve / fire"
+        );
+    }
+
+    #[test]
+    fn push_with_mapping_id_and_inline_suffix_appends_to_base() {
+        // The Zenoh mapping-id + optional inline suffix composition:
+        // resolved keyexpr = table[id] + suffix.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("home/sensor/temp", move |_push| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        registry.dispatch(&NetworkMessage::Declare(Box::new(
+            declare_kexpr_literal(5, "home/sensor/"),
+        )));
+        registry.dispatch(&NetworkMessage::Push(Box::new(
+            push_with_mapping_id(5, Some("temp")),
+        )));
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "Push id=5 + suffix=temp must resolve to 'home/sensor/temp' \
+             via the base+suffix composition rule"
+        );
     }
 }
