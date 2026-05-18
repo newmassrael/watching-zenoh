@@ -379,7 +379,8 @@ fn parse_frame_payload_unknown_mid_absorbs_remainder() {
         NetworkMessage::Request(_)
         | NetworkMessage::Push(_)
         | NetworkMessage::ResponseFinal(_)
-        | NetworkMessage::Oam(_) => {
+        | NetworkMessage::Oam(_)
+        | NetworkMessage::Interest(_) => {
             panic!("expected Unknown, got typed variant")
         }
     }
@@ -463,7 +464,8 @@ fn parse_frame_payload_decodes_request_then_unknown_chain() {
         NetworkMessage::Request(_)
         | NetworkMessage::Push(_)
         | NetworkMessage::ResponseFinal(_)
-        | NetworkMessage::Oam(_) => {
+        | NetworkMessage::Oam(_)
+        | NetworkMessage::Interest(_) => {
             panic!("expected Unknown second record")
         }
     }
@@ -578,6 +580,40 @@ fn parse_frame_payload_dispatches_oam_mid_to_oam_decoder() {
     assert!(
         matches!(parsed[0], NetworkMessage::Oam(_)),
         "OAM MID 0x1F dispatches to wz_codecs::oam decoder"
+    );
+}
+
+#[test]
+fn parse_frame_payload_dispatches_interest_mid_to_interest_decoder() {
+    use wz_codecs::interest::Interest;
+    use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
+
+    // R93 — round-trip-safe Interest envelope with default header
+    // (mid=0x19, C/F/Z bits clear): wire form is header byte + VLE id (1
+    // byte for id=0) = 2 bytes, structurally identical to a default
+    // ResponseFinal aside from the MID. The envelope-only scope of
+    // interest.scxml maps to upstream's is_final path; flipping C or F
+    // would invite the inner-body extension deferred to a future round.
+    let interest = Interest {
+        header: 0x19,
+        ..Interest::default()
+    };
+    let bytes = interest.encode();
+    assert_eq!(
+        bytes.len(),
+        2,
+        "round-trip-safe Interest: header(1) + interest_id VLE(1) = 2 bytes"
+    );
+
+    let parsed = parse_frame_payload(&bytes).expect("Interest envelope parses");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "round-trip-safe Interest yields exactly one record; got {parsed:?}"
+    );
+    assert!(
+        matches!(parsed[0], NetworkMessage::Interest(_)),
+        "INTEREST MID 0x19 dispatches to wz_codecs::interest decoder"
     );
 }
 

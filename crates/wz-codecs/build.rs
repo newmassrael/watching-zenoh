@@ -54,6 +54,7 @@ const CODECS: &[&str] = &[
     "push",      // §5 Z_PUSH envelope — peek-byte dispatch — R90
     "response_final", // §5 Z_RESPONSE_FINAL marker — header + rid — R91
     "oam",       // §5 Z_OAM envelope — header.enc variant dispatch — R92
+    "interest",  // §5 Z_INTEREST envelope — header + VLE id + ext-chain — R93
 ];
 
 fn main() {

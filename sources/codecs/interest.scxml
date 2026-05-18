@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh INTEREST envelope — declarations
+     discovery / liveliness subscriber registration carrier. Wire-
+     shape-wise sibling to `codec_zenoh_response_final` (R91): header
+     + VLE id + Z-gated ext-chain. No body, no peek-byte variant.
+     Distinguishing additions are two header flags —
+     `_Z_FLAG_N_INTEREST_CURRENT 0x20` (bit 5) and
+     `_Z_FLAG_N_INTEREST_FUTURE 0x40` (bit 6) — that the upstream
+     `_z_n_interest_encode` (src/protocol/codec/network.c L452-465)
+     toggles when the interest declares appetite for the current /
+     future state of matching declarations.
+
+     Mirrors zenoh-pico `_z_n_interest_encode` /
+     `_z_n_interest_decode` (src/protocol/codec/network.c).
+
+     Wire shape (per upstream is_final path — see scope note below):
+       byte 0   : header     (MID Z_INTEREST 0x19 in bits 0..4 + C@5
+                              + F@6 + Z@7). When C or F is set the
+                              upstream encoder follows the id with an
+                              additional inner body (flags byte +
+                              optional wireexpr) per
+                              `_z_interest_encode`
+                              (src/protocol/codec/interest.c L41-69).
+                              This codec authors the *envelope* layer
+                              only — the inner body extension is
+                              deferred (see scope note).
+       byte 1+  : interest_id (VLE u64 — upstream uses zint32 zsize,
+                              a strict subset of u64-VLE; wire form
+                              identical for any value the encoder
+                              will produce).
+       Z-gated  : extensions (codec_zenoh_ext_entry tlv-chain, max-
+                              depth=4 covers upstream's
+                              `_z_msg_ext_skip_non_mandatories` call
+                              site (interest.c L88); entry-flag-Z
+                              termination per Y3 atomic 1 grammar).
+
+     Scope (R93 envelope-only): authored mechanically as the
+     RESPONSE_FINAL sibling. The is_final form (header.C=0,
+     header.F=0) is wire-equivalent to the response_final layout
+     aside from the MID byte. The non-final form's inner body (flags
+     byte + conditional wireexpr) is intentionally NOT modeled in
+     this round — the body's conditional wireexpr requires
+     `sce:present-if` cascaded across two layers (`header.C or
+     header.F` gates the flags byte; `body_flags.RESTRICTED` gates
+     the wireexpr), and the primitives to express that cascade
+     cleanly belong in a future round dedicated to the INTEREST
+     inner body. Peers sending an INTEREST with C or F set will be
+     parsed up through the id field; the post-id flags byte will
+     currently be mis-routed into the Z-gated ext-chain branch
+     (decode error if !Z, ext-chain framing error if Z). This subset
+     captures the dominant declaration-discovery final-marker use
+     case while keeping the round mechanical.
+
+     Composition: subset of response_final.scxml's primitives. No
+     new primitives. Header MID 0x19 baked via R88 RFC variant-
+     default-uniformity `<sce:flag value=>` so Interest::default()
+     carries the wire MID. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="interest">
+  <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x19"/>
+      <sce:flag name="C"   bit="5"/>
+      <sce:flag name="F"   bit="6"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:field id="interest_id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+    <sce:tlv-chain id="extensions" type="codec_zenoh_ext_entry" sce:byte="2"
+                   max-depth="4" on-overflow="reject"
+                   sce:present-if="header.Z"
+                   terminate-on="entry-flag" entry-flag-name="Z"/>
+  </datamodel>
+</scxml>
