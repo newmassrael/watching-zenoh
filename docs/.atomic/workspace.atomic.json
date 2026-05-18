@@ -3286,6 +3286,58 @@
         "Three Layer 3 fixtures (response_final, push, oam) now in catalog. Pattern is stable: allowlist add → wbuf_make → patch defaults to match wz state → encode → wbuf_to_zbuf → byte slice → wbuf_clear. Future Layer 3 authors can fast-path through the boilerplate."
       ]
     },
+    "Round 104": {
+      "decision_summary": "R104 lands Layer 3 byte-equivalence for INTEREST envelope (R93/R94) — is_final default form proven against zenoh-pico's `_z_n_interest_encode`; cleanest fixture so far (no qos / mapping patches needed since header.C=F=0 elides both the body sub-codec and the wireexpr embed).",
+      "changes_bullets": [
+        "crates/zenoh-pico-sys/build.rs allowlist: `_z_n_msg_interest_t` + `_z_n_interest_encode` added; comment notes that is_final form (C=F=0) writes only [header, id VLE] without the body branch.",
+        "crates/wz-integration-tests/tests/layer3_interest.rs new — 1 byte-equivalence test asserting `wz_codecs::interest::Interest::default().encode() == _z_n_interest_encode(default _z_n_msg_interest_t)`. Wire bytes: `[0x19, 0x00]` (header MID 0x19 + no flags, id VLE 0). The interest_body sub-codec from R94 is gated on `header.C || header.F` and skipped at the default state, so neither side's wireexpr embed runs.",
+        "Zero patching on the zenoh-pico fixture (no qos slot on `_z_n_msg_interest_t` per protocol shape; no inner-body wireexpr touched because is_final=true) — first Layer 3 test where the C-side default zero-init reaches the wz default state unmodified."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_interest: 1 passed first try.",
+        "Workspace tests: 145 → 146 (+1 = new layer3_interest test).",
+        "scripts/run-ci.sh all 5 lanes pass: A/B/C1/C2/D.",
+        "atomic ledger entries: 116 → 117 (this Round 104 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "R94 disjunction present-if (`header.C || header.F`) compiles to the right wire shape — zenoh-pico's encoder reaches the same byte sequence when its own non-final branch is also skipped (flags=0). The disjunction primitive is now wire-validated."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present"
+      ],
+      "carry_forward_bullets": [
+        "Non-final INTEREST Layer 3 — a follow-up fixture sets `interest.flags |= _Z_INTEREST_FLAG_CURRENT` on both sides and asserts the body byte + (R-gated) wireexpr round-trip. Will surface the same wireexpr `_mapping` divergence as PUSH (R102 carry) since interest_body.scxml's wireexpr embed uses `parent.N` against interest_body's own header, but the upstream encoder runs the same `_z_wireexpr_is_local` check. ~1 round.",
+        "RESPONSE (R97) Layer 3 — last remaining post-R90 codec without wire-interop coverage. Expected to surface the M-flag divergence (response.scxml mirrors request/push flag layout); fixture pattern reuses the PUSH M-flag patch. The peek-byte reply/err arm dispatch will exercise a chain of R88 default arms (response → reply → msg_put). 1-2 rounds.",
+        "M-flag default audit (R102 carry) still open — wz request/response/push declare M without a `value=` default. The Layer 3 fixtures patch the divergence per-test; a codec-side audit would bake M=1 by default OR document the wz semantic divergence explicitly.",
+        "Layer 3 rollout pattern is now stable across 4 codecs (response_final, push, oam, interest). Per-codec cost shrunk to ~50 lines of test + ~6 lines of allowlist after the first three."
+      ],
+      "publishable_decision_summary": "R104 lands Layer 3 byte-equivalence for INTEREST envelope (R93/R94) — is_final default form proven against zenoh-pico's `_z_n_interest_encode`; cleanest fixture so far (no qos / mapping patches needed since header.C=F=0 elides both the body sub-codec and the wireexpr embed).",
+      "publishable_changes_bullets": [
+        "crates/zenoh-pico-sys/build.rs allowlist: `_z_n_msg_interest_t` + `_z_n_interest_encode` added; comment notes that is_final form (C=F=0) writes only [header, id VLE] without the body branch.",
+        "crates/wz-integration-tests/tests/layer3_interest.rs new — 1 byte-equivalence test asserting `wz_codecs::interest::Interest::default().encode() == _z_n_interest_encode(default _z_n_msg_interest_t)`. Wire bytes: `[0x19, 0x00]` (header MID 0x19 + no flags, id VLE 0). The interest_body sub-codec from R94 is gated on `header.C || header.F` and skipped at the default state, so neither side's wireexpr embed runs.",
+        "Zero patching on the zenoh-pico fixture (no qos slot on `_z_n_msg_interest_t` per protocol shape; no inner-body wireexpr touched because is_final=true) — first Layer 3 test where the C-side default zero-init reaches the wz default state unmodified."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_interest: 1 passed first try.",
+        "Workspace tests: 145 → 146 (+1 = new layer3_interest test).",
+        "scripts/run-ci.sh all 5 lanes pass: A/B/C1/C2/D.",
+        "atomic ledger entries: 116 → 117 (this Round 104 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "R94 disjunction present-if (`header.C || header.F`) compiles to the right wire shape — zenoh-pico's encoder reaches the same byte sequence when its own non-final branch is also skipped (flags=0). The disjunction primitive is now wire-validated."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Non-final INTEREST Layer 3 — a follow-up fixture sets `interest.flags |= _Z_INTEREST_FLAG_CURRENT` on both sides and asserts the body byte + (R-gated) wireexpr round-trip. Will surface the same wireexpr `_mapping` divergence as PUSH (R102 carry) since interest_body.scxml's wireexpr embed uses `parent.N` against interest_body's own header, but the upstream encoder runs the same `_z_wireexpr_is_local` check. ~1 round.",
+        "RESPONSE (R97) Layer 3 — last remaining post-R90 codec without wire-interop coverage. Expected to surface the M-flag divergence (response.scxml mirrors request/push flag layout); fixture pattern reuses the PUSH M-flag patch. The peek-byte reply/err arm dispatch will exercise a chain of R88 default arms (response → reply → msg_put). 1-2 rounds.",
+        "M-flag default audit (R102 carry) still open — wz request/response/push declare M without a `value=` default. The Layer 3 fixtures patch the divergence per-test; a codec-side audit would bake M=1 by default OR document the wz semantic divergence explicitly.",
+        "Layer 3 rollout pattern is now stable across 4 codecs (response_final, push, oam, interest). Per-codec cost shrunk to ~50 lines of test + ~6 lines of allowlist after the first three."
+      ]
+    },
     "Round 11": {
       "decision_summary": "OQ-W15 (a) closure (Q1=No RNG → plugin / Q2=Yes HMAC → plugin ratified) + OQ-W24 registration as SCE counter-offer track for §5.I tier-explicit separation",
       "changes_bullets": [
