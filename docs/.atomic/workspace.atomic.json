@@ -4677,6 +4677,68 @@
         "Re-appended audit-half minimal + publishable-half rich (R295 split applied)."
       ]
     },
+    "Round 121b": {
+      "decision_summary": "R121b: wz-ap-demo functional — bidirectional Tcp split + session FSM + SubscriberRegistry observer wired.",
+      "changes_bullets": [
+        "crates/wz-ap-demo/Cargo.toml: deps wired (wz-runtime-tokio, wz-codecs,",
+        "sce-rust-runtime, sce-rust-lua, tokio, log, env_logger).",
+        "crates/wz-ap-demo/src/main.rs rewritten with full async pipeline.",
+        "Custom InboundReadDriver (LinkDriver) + OutboundWriteDriver (BoxedLinkDriver).",
+        "TcpStream::into_split() pattern: reader to drive_session, writer Arc<TokioMutex>.",
+        "demo_session_init_params(): MVP fixed values (version=0x05, whatami=Peer, lease=10s).",
+        "SubscriberRegistry::register(--key, callback) wired before drive_session.",
+        "drive_session_until_terminal observer routes IterationEvent through registry."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh full 7-lane gate pass (Layer 0/A/A2/B/C1/C2/D).",
+        "cargo build -p wz-ap-demo clean under -D warnings.",
+        "Smoke: wz-ap-demo --help renders usage block without panic.",
+        "validate_workspace: T1=0; RT 12/12; entries 151 -> 152; sections=214; sync.",
+        "9 commits ahead of origin/main; functional demo binary ready for R121c test."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "R121c: ap_demo_round_trip.rs integration test in crates/wz-integration-tests/tests/.",
+        "R121c: std::process::Command launches wz-ap-demo + zenoh-pico-cli z_put against --listen.",
+        "R121c: assert subscriber callback stderr line on chosen --key.",
+        "R121c: scripts/run-ci.sh += Layer E (integration tests) + .github/workflows/ci.yml sync.",
+        "R121b architectural note: InboundReadDriver + OutboundWriteDriver split pattern",
+        "documented in main.rs header; may upstream as wz-runtime-tokio convenience helper.",
+        "Demo callback observability is eprintln (synchronous) — integration test greps stderr."
+      ],
+      "publishable_decision_summary": "R121b: wz-ap-demo functional — bidirectional Tcp split + session FSM + SubscriberRegistry observer wired.",
+      "publishable_changes_bullets": [
+        "crates/wz-ap-demo/Cargo.toml: deps wired (wz-runtime-tokio, wz-codecs,",
+        "sce-rust-runtime, sce-rust-lua, tokio, log, env_logger).",
+        "crates/wz-ap-demo/src/main.rs rewritten with full async pipeline.",
+        "Custom InboundReadDriver (LinkDriver) + OutboundWriteDriver (BoxedLinkDriver).",
+        "TcpStream::into_split() pattern: reader to drive_session, writer Arc<TokioMutex>.",
+        "demo_session_init_params(): MVP fixed values (version=0x05, whatami=Peer, lease=10s).",
+        "SubscriberRegistry::register(--key, callback) wired before drive_session.",
+        "drive_session_until_terminal observer routes IterationEvent through registry."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh full 7-lane gate pass (Layer 0/A/A2/B/C1/C2/D).",
+        "cargo build -p wz-ap-demo clean under -D warnings.",
+        "Smoke: wz-ap-demo --help renders usage block without panic.",
+        "validate_workspace: T1=0; RT 12/12; entries 151 -> 152; sections=214; sync.",
+        "9 commits ahead of origin/main; functional demo binary ready for R121c test."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121c: ap_demo_round_trip.rs integration test in crates/wz-integration-tests/tests/.",
+        "R121c: std::process::Command launches wz-ap-demo + zenoh-pico-cli z_put against --listen.",
+        "R121c: assert subscriber callback stderr line on chosen --key.",
+        "R121c: scripts/run-ci.sh += Layer E (integration tests) + .github/workflows/ci.yml sync.",
+        "R121b architectural note: InboundReadDriver + OutboundWriteDriver split pattern",
+        "documented in main.rs header; may upstream as wz-runtime-tokio convenience helper.",
+        "Demo callback observability is eprintln (synchronous) — integration test greps stderr."
+      ]
+    },
     "Round 122": {
       "decision_summary": "R122 vendor/sce pin bump 122f851d to 4441431d; LAYER2_KNOWN_DIVERGENCE 6 to 1.",
       "changes_bullets": [
