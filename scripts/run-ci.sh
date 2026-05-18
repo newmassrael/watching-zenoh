@@ -19,9 +19,9 @@
 #   Layer C1 — cargo test --workspace
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
 #   Layer D  — deploy/*.yaml schema validate
-#   Layer E  — ap_demo bidirectional round-trip vs external zenoh-pico
-#              CLI (R121c z_put → wz subscriber + R121e wz publisher
-#              → z_sub; both directions in one lane)
+#   Layer E  — ap_demo + initiator round-trip suite (R121c z_put →
+#              wz subscriber + R121e wz publisher → z_sub + R121f
+#              wz initiator → wz acceptor; three tests in one lane)
 #   Layer 0  — (optional) actionlint .github/workflows/
 #
 # Exit codes:
@@ -306,12 +306,22 @@ layer_e_ap_demo_round_trip() {
         echo "Layer E SKIP (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
         return 0
     fi
-    # R121e: bundle both tests into a single cargo invocation so
-    # the compilation/link step runs once and the lane timing
-    # stays predictable. `--test` accepts multiple binary names.
+    # R121e + R121f: bundle the integration tests into a single
+    # cargo invocation so the compilation/link step runs once and
+    # the lane timing stays predictable. `--test` accepts multiple
+    # binary names. Three tests cover the role-direction matrix:
+    #   ap_demo_round_trip       — wz acceptor + zenoh-pico initiator
+    #   wz_publisher_to_zsub     — wz acceptor + publisher → zenoh-pico
+    #   wz_initiator_to_wz_acceptor — wz initiator + publisher → wz
+    # The fourth cell (wz initiator → zenoh-pico peer-mode listener)
+    # is a known-incompatible carry — zenoh-pico 1.5.0 peer-mode
+    # listen accepts TCP but does not respond to Client-whatami
+    # InitSyn; needs a Zenoh router binary or zenoh-pico patch
+    # to validate the foreign-interop side (R121f1 / R121g carry).
     (cd crates && cargo test -p wz-integration-tests \
         --test ap_demo_round_trip \
         --test wz_publisher_to_zsub \
+        --test wz_initiator_to_wz_acceptor \
         --quiet)
 }
 

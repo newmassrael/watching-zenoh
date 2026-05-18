@@ -18,14 +18,24 @@
 // use for the handshake outbound — no nested `block_on` (R121d
 // constraint preserved).
 //
-// CLI shape (R121b base, R121e extension):
+// CLI shape (R121b base, R121e --publish/--value, R121f --connect):
 //
-//   wz-ap-demo --listen <tcp_addr> [--key <keyexpr>]
-//                                   [--publish <keyexpr> --value <text>]
+//   wz-ap-demo (--listen <addr> | --connect <addr>)
+//              [--key <keyexpr>]
+//              [--publish <keyexpr> --value <text>]
 //
-//   --listen   server-side TCP bind address (e.g. 127.0.0.1:7447).
-//              The binary binds + accepts one peer, then drives
-//              the session FSM until terminal state.
+//   --listen   server-side TCP bind address (acceptor mode;
+//              e.g. 127.0.0.1:7447). Binds + accepts one peer,
+//              then drives the session FSM with `InboundStart`.
+//   --connect  remote TCP peer address (initiator mode;
+//              e.g. 127.0.0.1:7447). Dials the peer, then drives
+//              the session FSM with `OutboundStart` + `LinkOpened`
+//              so wz emits the first `InitSyn` and walks the
+//              4-way handshake from the dialing side.
+//              Exactly one of --listen / --connect is required;
+//              the two modes are mutually exclusive (a single
+//              demo invocation acts as either acceptor OR
+//              initiator, never both).
 //   --key      DECLARE subscriber keyexpr (e.g. demo/example).
 //              Each Push whose keyexpr matches this pattern fires
 //              the demo callback (prints to stderr).
@@ -34,11 +44,13 @@
 //   --publish  Publisher keyexpr literal (e.g. demo/test).
 //              When present, the demo spawns a publisher task that
 //              waits for the session FSM to reach Established
-//              (post send_open_ack), then emits N copies of the
-//              Push at a fixed cadence so a z_sub peer can observe
-//              one (z_sub uses `while(1) sleep(1)` so any single
-//              copy is enough; the multi-copy emission absorbs
-//              tail-latency / declare-subscriber timing variance).
+//              (role-agnostic `record_established_at` counter,
+//              fires on both acceptor and initiator sides), then
+//              emits N copies of the Push at a fixed cadence so a
+//              z_sub peer can observe one (z_sub uses
+//              `while(1) sleep(1)` so any single copy is enough;
+//              the multi-copy emission absorbs tail-latency /
+//              declare-subscriber timing variance).
 //              Requires --value.
 //   --value    Publisher payload text. Required when --publish is
 //              present; ignored otherwise.
@@ -97,7 +109,7 @@ use sce_rust_lua::LuaEngine;
 use sce_rust_runtime::{Engine, IScriptEngine};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use wz_codecs::wireexpr::WireexprVariant;
 use wz_runtime_tokio::pubsub::SubscriberRegistry;
@@ -114,21 +126,34 @@ const ABOUT: &str = concat!(
     " — AP MVP demo binary",
 );
 
+/// R121f — session role select. `--listen` lands here as
+/// `Acceptor`; `--connect` lands as `Initiator`. The two roles
+/// drive different role-start FSM events (`InboundStart` vs
+/// `OutboundStart` + `LinkOpened`) and different TCP setup
+/// paths (bind+accept vs dial), but share the rest of the
+/// session-FSM + outbound-publisher + inbound-subscriber wiring.
+enum Role {
+    Acceptor { listen: String },
+    Initiator { connect: String },
+}
+
 fn print_usage() {
     eprintln!("{ABOUT}");
     eprintln!();
     eprintln!("USAGE:");
-    eprintln!("    wz-ap-demo --listen <tcp_addr>");
+    eprintln!("    wz-ap-demo (--listen <addr> | --connect <addr>)");
     eprintln!("               [--key <keyexpr>]");
     eprintln!("               [--publish <keyexpr> --value <text>]");
     eprintln!();
     eprintln!("OPTIONS:");
-    eprintln!("    --listen <tcp_addr>      server-side TCP bind address (e.g. 127.0.0.1:7447)");
+    eprintln!("    --listen <addr>          acceptor mode (e.g. 127.0.0.1:7447)");
+    eprintln!("    --connect <addr>         initiator mode (e.g. 127.0.0.1:7447)");
     eprintln!("    --key <keyexpr>          DECLARE subscriber keyexpr (e.g. demo/example)");
     eprintln!("    --publish <keyexpr>      publisher keyexpr literal (e.g. demo/test)");
     eprintln!("    --value <text>           publisher payload text (required with --publish)");
     eprintln!("    --help, -h               print this help and exit");
     eprintln!();
+    eprintln!("Exactly one of --listen / --connect is required.");
     eprintln!("At least one of --key / --publish must be supplied.");
 }
 
@@ -167,14 +192,34 @@ fn parse_pair(args: &[String], flag: &str) -> Option<String> {
 //     the first `_z_wbuf_put` (this was the R121d immediate
 //     crash root cause).
 //
-// `whatami = 0x02 (Peer)`, `lease = 10s`, `zid = 4-byte demo
-// constant` carry from R121b unchanged. Production AP deployment
-// will source these from deploy.yaml once the topology-schema
-// migration (R123b-pre carry) lands.
-fn demo_session_init_params() -> SessionInitParams {
+// R121f — `whatami` is now role-conditional. zenoh-pico's
+// production-tested handshake pattern is `Client → Peer/Router`
+// (e.g. `z_put -m client` → wz-ap-demo --listen), AND `Peer →
+// Peer-with-listen-locator` is fragile in zenoh-pico 1.5.0
+// without prior multicast scouting (peer-peer over unicast TCP
+// only is not the well-trodden path upstream). The R121f
+// initiator path therefore announces `Client` (wire whatami =
+// `(0x04 >> 1) & 0x03 = 0x02`) so a zenoh-pico
+// `-m peer -l <locator>` listener accepts it via the same
+// well-tested code path that R121c/d exercised in reverse
+// (`z_put -m client` → wz acceptor).
+//
+// The acceptor side keeps `whatami = Peer (0x02)` from R121b/c/d
+// — the existing R121c/e tests rely on this. Splitting the
+// constant on role honours both directions.
+//
+// `lease = 10s`, `zid = 4-byte demo constant` carry from R121b
+// unchanged. Production AP deployment will source these from
+// deploy.yaml once the topology-schema migration (R123b-pre
+// carry) lands.
+fn demo_session_init_params(role: &Role) -> SessionInitParams {
+    let whatami_api = match role {
+        Role::Acceptor { .. } => 0x02, // Peer — R121b/c/d/e baseline
+        Role::Initiator { .. } => 0x04, // Client — R121f initiator path
+    };
     SessionInitParams {
         version: 0x09,
-        whatami: 0x02, // Peer
+        whatami: whatami_api,
         zid: vec![0x01, 0x02, 0x03, 0x04],
         seq_num_res: 2,
         req_id_res: 2,
@@ -255,7 +300,13 @@ impl LinkDriver for InboundReadDriver {
         let len = u16::from_le_bytes(len_buf) as usize;
         let mut buf = vec![0u8; len];
         match self.reader.read_exact(&mut buf).await {
-            Ok(_) => LinkEvent::Rx(RxFrame { bytes: buf }),
+            Ok(_) => {
+                log::debug!(
+                    "wz-ap-demo: inbound frame len={} bytes={:02x?}",
+                    len, buf
+                );
+                LinkEvent::Rx(RxFrame { bytes: buf })
+            }
             Err(_) => LinkEvent::Lost {
                 cause: LostCause::PeerClosed,
             },
@@ -372,10 +423,24 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let listen = match parse_pair(rest, "--listen") {
-        Some(v) => v,
-        None => {
-            eprintln!("wz-ap-demo: --listen is required");
+    // R121f — exactly one of --listen / --connect must be supplied.
+    // The demo's session FSM role-start is hard-coded to one or
+    // the other (Acceptor calls InboundStart on listen; Initiator
+    // calls OutboundStart + LinkOpened on connect) — there is no
+    // self-loopback configuration that would justify both.
+    let listen_opt = parse_pair(rest, "--listen");
+    let connect_opt = parse_pair(rest, "--connect");
+    let role: Role = match (listen_opt, connect_opt) {
+        (Some(addr), None) => Role::Acceptor { listen: addr },
+        (None, Some(addr)) => Role::Initiator { connect: addr },
+        (Some(_), Some(_)) => {
+            eprintln!("wz-ap-demo: --listen and --connect are mutually exclusive");
+            eprintln!();
+            print_usage();
+            return ExitCode::from(2);
+        }
+        (None, None) => {
+            eprintln!("wz-ap-demo: exactly one of --listen / --connect is required");
             eprintln!();
             print_usage();
             return ExitCode::from(2);
@@ -430,7 +495,10 @@ fn main() -> ExitCode {
         .init();
 
     eprintln!("{ABOUT}");
-    log::info!("listen  = {listen}");
+    match &role {
+        Role::Acceptor { listen } => log::info!("listen  = {listen}"),
+        Role::Initiator { connect } => log::info!("connect = {connect}"),
+    }
     if let Some(k) = &key_opt {
         log::info!("key     = {k}");
     }
@@ -456,7 +524,8 @@ fn main() -> ExitCode {
         }
     };
 
-    let outcome = runtime.block_on(async move { run_demo(listen, key_opt, publisher_spec).await });
+    let outcome =
+        runtime.block_on(async move { run_demo(role, key_opt, publisher_spec).await });
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -467,15 +536,36 @@ fn main() -> ExitCode {
 }
 
 async fn run_demo(
-    listen: String,
+    role: Role,
     key: Option<String>,
     publisher_spec: Option<(String, String)>,
 ) -> io::Result<()> {
-    // ── Step 1: bind + accept one peer ─────────────────────────
-    let listener = TcpListener::bind(&listen).await?;
-    log::info!("wz-ap-demo: listening on {}", listener.local_addr()?);
-    let (stream, peer) = listener.accept().await?;
-    log::info!("wz-ap-demo: accepted peer {peer}");
+    // ── Step 1: TCP setup. Acceptor binds + accepts; Initiator
+    //           dials. Both paths land at the same `TcpStream`
+    //           value below, after which the FSM-driving code is
+    //           role-agnostic except for the initial event
+    //           dispatch (Step 4b).
+    let stream = match &role {
+        Role::Acceptor { listen } => {
+            let listener = TcpListener::bind(listen).await?;
+            log::info!("wz-ap-demo: listening on {}", listener.local_addr()?);
+            let (s, peer) = listener.accept().await?;
+            log::info!("wz-ap-demo: accepted peer {peer}");
+            s
+        }
+        Role::Initiator { connect } => {
+            // R121f — dial the configured peer. Note: this binary
+            // does NOT implement TCP retry / connect timeout
+            // tuning beyond the kernel default; production callers
+            // that need either compose around a `tokio::time::timeout`.
+            // The address must resolve (DNS or numeric) — we surface
+            // any TcpStream::connect error up through the io::Result
+            // return so the binary's exit code reflects the cause.
+            let s = TcpStream::connect(connect).await?;
+            log::info!("wz-ap-demo: connected to {}", s.peer_addr()?);
+            s
+        }
+    };
 
     // ── Step 2: split the TcpStream into owned read + write halves
     //          + spawn a dedicated writer task so the FSM's sync
@@ -520,7 +610,7 @@ async fn run_demo(
     //          callers MUST source SessionInitParams from
     //          deploy.yaml; the demo uses fixed MVP values per the
     //          `demo_session_init_params()` constant block.
-    let params = demo_session_init_params();
+    let params = demo_session_init_params(&role);
     let actions = SessionLinkActions::new(outbound, params);
     let script_engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
     install_session_actions(actions.clone(), &script_engine);
@@ -549,26 +639,41 @@ async fn run_demo(
             tokio::spawn(publisher_task(actions_for_publisher, keyexpr, value))
         });
 
-    // ── Step 4b: activate the listener role on the session FSM.
-    //          `session_fsm_unicast.scxml` starts in `Init` and offers
-    //          two role-selection transitions (`outbound.start` →
-    //          LinkOpening, `inbound.start` → Accepting); the driver
-    //          loop does NOT synthesize either side — the production
-    //          caller dispatches the relevant role event after the
-    //          socket is established. The wz-ap-demo binary is purely
-    //          the acceptor (it called `listener.accept().await`
-    //          above), so InboundStart fires here to land the FSM in
-    //          `Accepting.AwaitingInitSyn` before the first inbound
-    //          frame arrives. Without this, the FSM stays in `Init`
-    //          and silently drops `init_syn.received`, which is the
-    //          textbook root cause for an external initiator's
-    //          "Unable to open session" report (the `init_syn.received`
-    //          transition only exists inside `Accepting`).
-    //          Matches the pattern asserted by
-    //          `session_fsm_accepting_path.rs::r78_*`.
-    engine.process_event(
-        wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent::InboundStart,
-    );
+    // ── Step 4b: activate the session FSM role. The
+    //          `session_fsm_unicast.scxml` starts in `Init` and
+    //          offers two role-selection transitions
+    //          (`outbound.start` → LinkOpening,
+    //          `inbound.start` → Accepting); the driver loop does
+    //          NOT synthesize either side — the production caller
+    //          dispatches the relevant role event after the socket
+    //          is established. Without this dispatch the FSM stays
+    //          in `Init` and silently drops the first inbound
+    //          frame.
+    //
+    //          R121d acceptor path: `InboundStart` lands the FSM
+    //          in `Accepting.AwaitingInitSyn` before the first
+    //          inbound `InitSyn` frame arrives. Mirrors the pattern
+    //          asserted by `session_fsm_accepting_path.rs::r78_*`.
+    //
+    //          R121f initiator path: `OutboundStart` lands the
+    //          FSM in `LinkOpening` (fires `link_driver_open`
+    //          which is a no-op on the OutboundWriteDriver since
+    //          TCP is already connected); then `LinkOpened` lands
+    //          it in `SentInitSyn` which fires `send_init_syn` —
+    //          our first wire byte goes out here. Mirrors the
+    //          pattern asserted by
+    //          `session_fsm_real_tcp.rs::r60_fsm_drives_real_tcp_loopback`
+    //          (`OutboundStart` + `LinkOpened` in sequence).
+    use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastEvent as E;
+    match &role {
+        Role::Acceptor { .. } => {
+            engine.process_event(E::InboundStart);
+        }
+        Role::Initiator { .. } => {
+            engine.process_event(E::OutboundStart);
+            engine.process_event(E::LinkOpened);
+        }
+    }
 
     // ── Step 5: drive the session FSM until terminal. The observer
     //          callback routes IterationEvent::Poll(FramePayload {
@@ -630,10 +735,14 @@ async fn run_demo(
 
 /// R121e — publisher task body. Waits for the session FSM to
 /// reach the Established state (signalled by
-/// `trace.send_open_ack > 0` on the acceptor side; this is the
-/// last script-action of the 4-way handshake) and then emits a
-/// fixed number of `Push` frames spaced at a fixed cadence so a
-/// z_sub peer can observe at least one in steady state.
+/// `trace.record_established_at > 0`, the role-agnostic
+/// `Established.onentry` script-action counter; this fires on
+/// both the acceptor side after `send_open_ack` AND on the
+/// initiator side after the peer's `OpenAck` arrives — R121f
+/// refactor unified the gate so the publisher works in both
+/// modes without role-aware branching). Then emits a fixed
+/// number of `Push` frames spaced at a fixed cadence so a z_sub
+/// peer can observe at least one in steady state.
 ///
 /// Why multi-copy emission (`PUBLISHER_BURST_COUNT`): zenoh-pico's
 /// `z_sub` declares its subscription AFTER the handshake
@@ -665,31 +774,37 @@ async fn publisher_task(
     keyexpr: String,
     value: String,
 ) {
-    // ── Step 1: wait for Established. The acceptor reaches
-    //           Established on the transition that fires
-    //           `send_open_ack` (the FSM's last script-action
-    //           before entering the Established state per
-    //           session_fsm_unicast.scxml). Poll the trace
-    //           snapshot's counter; once non-zero the FSM has
-    //           dispatched the OpenAck wire bytes, which means
-    //           the peer's view of the session is also
-    //           Established (zenoh-pico transitions to
-    //           Established on receipt of OpenAck per
-    //           transport.c:300-320). Bail with a warn on
-    //           timeout — the publisher had no opportunity to
-    //           emit; the drive_session loop is responsible for
-    //           the failure mode (lease expiry, framing error,
-    //           etc.).
+    // ── Step 1: wait for Established. Both acceptor and initiator
+    //           reach Established on the same `record_established_at`
+    //           script-action that fires on `Established.onentry`
+    //           in `session_fsm_unicast.scxml`. R121e used the
+    //           acceptor-specific `send_open_ack` counter; R121f
+    //           refactor unified the gate so the publisher works
+    //           in both roles. The counter signals:
+    //             - acceptor side: after sending OpenAck (the
+    //               last handshake script-action AND the
+    //               transition into Established);
+    //             - initiator side: after the peer's OpenAck
+    //               arrives (`OpenAckReceived` event drives the
+    //               SentOpenSyn → Established transition).
+    //           Polling `record_established_at` is therefore
+    //           role-agnostic; the publisher does not need to
+    //           know whether wz dialed out or accepted in.
+    //           Bail with a warn on timeout — the publisher had
+    //           no opportunity to emit; the drive_session loop
+    //           is responsible for the failure mode (lease
+    //           expiry, framing error, etc.).
     let deadline = std::time::Instant::now()
         + Duration::from_millis(PUBLISHER_HANDSHAKE_TIMEOUT_MS);
     loop {
-        if actions.trace_snapshot().send_open_ack > 0 {
+        if actions.trace_snapshot().record_established_at > 0 {
             break;
         }
         if std::time::Instant::now() >= deadline {
             log::warn!(
                 "wz-ap-demo: publisher_task gave up waiting for Established \
-                 after {PUBLISHER_HANDSHAKE_TIMEOUT_MS}ms (send_open_ack never fired)"
+                 after {PUBLISHER_HANDSHAKE_TIMEOUT_MS}ms (record_established_at \
+                 never fired)"
             );
             return;
         }
