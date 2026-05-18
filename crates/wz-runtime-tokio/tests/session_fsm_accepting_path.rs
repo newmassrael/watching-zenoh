@@ -35,7 +35,7 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome,
+    poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome, PeerInitCaps,
     SessionLinkActions,
 };
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
@@ -417,4 +417,92 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
          which violated RFC §5.M anti-amplification (deploy-static cookie \
          offers no per-peer replay defense)"
     );
+}
+
+// ───────────── R121d peer-caps negotiation unit tests ──────────────
+
+#[test]
+fn r121d_peer_init_caps_from_init_syn_uses_defaults_when_s_bit_clear() {
+    // When the peer's InitSyn carries `_Z_FLAG_T_INIT_S=0`, the
+    // `sn_res` byte and `batch_size` are absent on the wire; the
+    // decoder must substitute the Zenoh defaults
+    // (`_Z_DEFAULT_RESOLUTION_SIZE=2`, `_Z_DEFAULT_UNICAST_BATCH_SIZE
+    // =65535`) so the downstream `min(own, peer)` cap in
+    // `init_ack_params` keeps the own params verbatim (peer's stated
+    // ceiling is the maximum).
+    let caps = PeerInitCaps::from_init_syn(None, None);
+    assert_eq!(caps.seq_num_res, 2);
+    assert_eq!(caps.req_id_res, 2);
+    assert_eq!(caps.batch_size, 65535);
+}
+
+#[test]
+fn r121d_peer_init_caps_decodes_packed_sn_res_byte() {
+    // The InitSyn `sn_res` byte is packed
+    // `(seq & 0x03) | ((req & 0x03) << 2)` per zenoh-pico
+    // transport.c:196-197. Encoder shape: seq=1, req=2 →
+    // 0x01 | (0x02 << 2) = 0x09. Decoder must invert that
+    // composition exactly.
+    let caps = PeerInitCaps::from_init_syn(Some(0x09), Some(1024));
+    assert_eq!(caps.seq_num_res, 1, "low 2 bits are seq_num_res");
+    assert_eq!(caps.req_id_res, 2, "next 2 bits are req_id_res");
+    assert_eq!(caps.batch_size, 1024);
+}
+
+#[test]
+fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
+    // The wire-spec invariant `InitAck.size <= InitSyn.size`
+    // (zenoh-pico unicast/transport.c:123-140) requires the
+    // Accepting side to cap each sizing field to `min(own, peer)`.
+    // Construct an actions instance whose own params announce
+    // permissive ceilings, capture a peer with stricter caps via
+    // the inbound slot, and verify `init_ack_params` flattens the
+    // three fields to the peer's stricter values.
+    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
+    let mut params = fixture_session_init_params();
+    params.seq_num_res = 3;
+    params.req_id_res = 3;
+    params.batch_size = 65535;
+    let actions = SessionLinkActions::new(driver, params);
+
+    // No peer InitSyn parsed yet → init_ack_params returns own
+    // params verbatim (the slot is `None`).
+    let p = actions.init_ack_params();
+    assert_eq!(p.seq_num_res, 3);
+    assert_eq!(p.req_id_res, 3);
+    assert_eq!(p.batch_size, 65535);
+
+    // Capture peer caps with stricter values across the board.
+    *actions.inbound_peer_init_caps.lock().unwrap() = Some(PeerInitCaps {
+        seq_num_res: 2,
+        req_id_res: 1,
+        batch_size: 2048,
+    });
+    let p = actions.init_ack_params();
+    assert_eq!(p.seq_num_res, 2, "seq_num_res capped to peer");
+    assert_eq!(p.req_id_res, 1, "req_id_res capped to peer");
+    assert_eq!(p.batch_size, 2048, "batch_size capped to peer");
+}
+
+#[test]
+fn r121d_init_ack_params_keeps_own_when_own_lower() {
+    // Symmetric case — when our own announced caps are stricter
+    // than the peer's, `min(own, peer) = own`. Verifies the cap
+    // never accidentally promotes a value upward.
+    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
+    let mut params = fixture_session_init_params();
+    params.seq_num_res = 1;
+    params.req_id_res = 1;
+    params.batch_size = 512;
+    let actions = SessionLinkActions::new(driver, params);
+
+    *actions.inbound_peer_init_caps.lock().unwrap() = Some(PeerInitCaps {
+        seq_num_res: 3,
+        req_id_res: 3,
+        batch_size: 65535,
+    });
+    let p = actions.init_ack_params();
+    assert_eq!(p.seq_num_res, 1, "own seq_num_res preserved (1 < 3)");
+    assert_eq!(p.req_id_res, 1, "own req_id_res preserved (1 < 3)");
+    assert_eq!(p.batch_size, 512, "own batch_size preserved (512 < 65535)");
 }
