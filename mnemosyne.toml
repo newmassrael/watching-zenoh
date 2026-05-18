@@ -98,3 +98,10 @@ target_id = "Round 124"
 reason = "Audit half intentionally minimal per R295/R296 textbook split: signal-only round (no wz code mutation), SCE-bound report body delivered to user for upstream relay. The audit half records the signal-drafted fact; the publishable half carries the zenoh-pico spec evidence trail (network.h flag definitions + network.c runtime is_local semantics) and the 3-option decision matrix (flag_defaults overlay vs runtime primitive vs status quo) that shapes the SCE response."
 applied_in = "R124 in-flight"
 content_hash_after = "66d577a7b6b96d3a4e99f6010f1d47c0809a28483ea373871e5f9f2a370637fc"
+
+[[publishable_override_ledger]]
+kind = "redaction"
+target_id = "Round 125a"
+reason = "Audit half intentionally minimal per R295/R296 textbook split: pin-bump-only round (the first sub-round of a 5-sub-round R125a-e adoption sequence for SCE B5-nu parent-tag variant codec dispatch). Audit half records the pin bump + regression-zero fact; publishable half carries the cumulative SCE Phase A + B context, the new diagnostic surface (codes 279-283), and the R125b-e carry plan including the wireexpr body-identical break risk + Layer 3 FFI compatibility verify."
+applied_in = "R125a in-flight"
+content_hash_after = "bd54f94159dfdb8f93e48e4868d29686b73d403f0205c260a27233af9a1260f1"

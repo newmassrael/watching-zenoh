@@ -4828,6 +4828,59 @@
         "MVP-stage assumption: wz always uses local-form wireexpr (id only) per Layer 3 fixtures."
       ]
     },
+    "Round 125a": {
+      "decision_summary": "R125a vendor/sce pin bump 4441431d to b719ee3e (SCE B5-nu Phase A + B land).",
+      "changes_bullets": [
+        "vendor/sce gitlink bump 4441431d to b719ee3e (2 commits ahead).",
+        "Adopts SCE 7e785e92 (B5-nu Phase A) + b719ee3e (Phase B 6-backend codegen)."
+      ],
+      "verification_bullets": [
+        "scripts/build-sce.sh rebuild pass on new pin (1m05s).",
+        "scripts/run-ci.sh full gate pass (Layer 0/A/A2/B/C1/C2/D).",
+        "Layer B KNOWN_DIVERGENCE unchanged: (request) still 1 stem.",
+        "R125a is pin-only; new B5-nu mechanism unused until R125b-e land."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "R125b: sources/codecs/wireexpr_{local,nonlocal}.scxml new leaf codecs.",
+        "R125c: sources/codecs/wireexpr.scxml variant tag=parent.M dispatch.",
+        "R125d: push/request/response.scxml drop M-flag value=1 bake.",
+        "R125e: Layer 3 zenoh-pico FFI bit-shape compatibility verify."
+      ],
+      "publishable_decision_summary": "R125a vendor/sce pin bump 4441431d to b719ee3e (SCE B5-nu Phase A + B land).",
+      "publishable_changes_bullets": [
+        "vendor/sce gitlink bump 4441431d -> b719ee3e (2 commits ahead).",
+        "Adopts SCE 7e785e92 (B5-nu Phase A) syntax + TagScope::Parent model.",
+        "Adopts SCE b719ee3e (Phase B) 6-backend codegen for parent-tag dispatch.",
+        "New diagnostic codes 279-283 (rpf / undeclared flag / Q-3 / Q-6) now available.",
+        "R125a is pin-only; new B5-nu mechanism unused until R125b-e adopt it."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/build-sce.sh rebuild pass on new pin (1m05s release).",
+        "scripts/run-ci.sh full gate pass (Layer 0/A/A2/B/C1/C2/D).",
+        "Layer B KNOWN_DIVERGENCE unchanged: only (request) still 1 stem.",
+        "All 4 leaf codecs we will introduce in R125b-c are deferred.",
+        "validate_workspace: T1=0; RT 12/12; entries 142 -> 143 (this entry); sync."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R125b: sources/codecs/wireexpr_local.scxml new (id-only wire shape).",
+        "R125b: sources/codecs/wireexpr_nonlocal.scxml new (id + suffix wire shape).",
+        "R125b precondition: scout zenoh-pico _z_keyexpr_encode + decode source.",
+        "R125c: sources/codecs/wireexpr.scxml += <sce:variant tag=\"parent.M\">.",
+        "R125c: keep existing parent.N suffix gating; only add parent.M dispatch.",
+        "R125c risk: wz wireexpr body-identical to SCE codec_zenoh_wireexpr breaks.",
+        "R125c effect: wireexpr likely lands in LAYER2_KNOWN_DIVERGENCE temporarily.",
+        "R125d: drop M-flag value=1 from push/request/response.scxml.",
+        "R125d gate: Q-3 cross-doc validator forbids derivation + static value coexistence.",
+        "R125e: Layer 3 layer3_{push,request,response}.rs wire bit-shape compatibility.",
+        "R125e verifies wz emit matches zenoh-pico _z_keyexpr_decode(has_id_mapping)."
+      ]
+    },
     "Round 13": {
       "decision_summary": "sources/ skeleton lands via README (SPDX header double-block + 7-subdir lazy materialize per ARCH §428) + first author-side SCXML sources/algorithms/crc16_ccitt.scxml body-identical to SCE fixture; 6-backend byte-golden verify carried to R14 SCE submodule infrastructure (pin 1473f99f origin/main).",
       "changes_bullets": [
