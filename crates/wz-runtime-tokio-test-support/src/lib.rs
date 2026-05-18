@@ -22,10 +22,12 @@
 //! owns an independent engine — the cross-test namespace race
 //! the R71b carry pointed at is gone by design.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use sce_rust_lua::LuaEngine;
 use sce_rust_runtime::scripting::{IScriptEngine, ScriptResult, ScriptValue};
+use sce_rust_runtime::Hal;
 
 use wz_runtime_tokio::session_glue::{
     install_session_actions, SessionInitParams, SessionLinkActions, SigningKey,
@@ -112,4 +114,96 @@ pub fn dispatch_script(
          production scripts must be drive via Engine::process_event"
     );
     script_engine.execute_script(SESSION_ID, &format!("{name}()"))
+}
+
+/// Process-global synthetic tick state backing [`TestHal`].
+///
+/// The atomic is `static` because `Hal` methods are associated (no
+/// `&self`), so the impl can only reach this state via process-global
+/// storage. Test code that needs isolated tick streams across
+/// concurrently-running test binaries must put each test in its own
+/// binary (`#[test]` fns in the same test binary share this state
+/// and should run sequentially — `cargo test` defaults to multi-thread
+/// per binary, so use `--test-threads=1` if a test asserts on the
+/// initial tick value).
+static TEST_HAL_TICK_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Zero-sized [`Hal`] impl whose `now_ticks_ms` reads from a
+/// process-global `AtomicU64` the test advances by hand.
+///
+/// R116 entry — became viable when SCE upstream commit `fa3a2fda`
+/// ("fix: route scheduler clock through Hal trait under std builds")
+/// unified `SchedTimePoint` to `u64` ms and routed `sched_now()` /
+/// `sched_now_plus()` through `<P::Hal as Hal>::now_ticks_ms()` on
+/// both std and no_std profiles. Before that fix, a `TestHal` on the
+/// std build was decorative: the SCE Engine's std path read
+/// `Instant::now()` directly and the consumer's `Hal` impl had no
+/// causal effect on scheduler resolution.
+///
+/// Usage pattern matches SCE's own regression test
+/// (`sce-rust-runtime/tests/hal_clock_routing.rs`):
+///
+/// 1. Anchor the synthetic clock to a known epoch via [`test_hal_set_ticks`]
+///    at test entry so the assertion baseline is independent of any
+///    prior mutation in the same test binary.
+/// 2. Construct an `Engine<P, TestHal>` (the policy's `type Hal`
+///    associated type must resolve to `TestHal` — see
+///    [`hal_timer_routing.rs`](../tests/hal_timer_routing.rs) for the
+///    test-policy shape needed to opt in; the production session-FSM
+///    policy emits `type Hal = StdHal` from the codegen template and
+///    is not Hal-swappable today).
+/// 3. Call `engine.schedule_event(Ev, Duration::from_secs(N), …)`
+///    and assert `!engine.has_ready_events()` immediately (clock
+///    hasn't advanced).
+/// 4. Call [`test_hal_set_ticks`] / [`test_hal_advance_ticks`] to push
+///    the synthetic clock past `ready_at`, then assert
+///    `engine.has_ready_events()` — the scheduler's `pop_ready_event_at`
+///    now sees the synthetic clock via `sched_now()`.
+///
+/// `wake()` is a no-op (matches `StdHal`'s single-threaded contract);
+/// `irq_save` direct-passes the closure (matches `StdHal`'s `!Sync`
+/// engine model — no critical section needed under std).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TestHal;
+
+impl Hal for TestHal {
+    fn now_ticks_ms() -> u64 {
+        TEST_HAL_TICK_MS.load(Ordering::SeqCst)
+    }
+    fn wake() {}
+    fn irq_save<F, R>(f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        f()
+    }
+}
+
+/// Set the synthetic tick value backing [`TestHal::now_ticks_ms`].
+///
+/// Mirrors the `mock_set_ticks` helper in SCE's
+/// `hal_clock_routing.rs`. Anchoring tests to a non-zero epoch at
+/// entry (e.g. `test_hal_set_ticks(1_000_000)`) makes the assertion
+/// baseline independent of any prior `test_hal_advance_ticks` call
+/// in the same test binary — important because `cargo test` runs
+/// `#[test]` fns multi-threaded by default and they share the
+/// process-global atomic.
+pub fn test_hal_set_ticks(ms: u64) {
+    TEST_HAL_TICK_MS.store(ms, Ordering::SeqCst);
+}
+
+/// Advance the synthetic tick by `delta_ms` (relative to the current
+/// value). Returns the new tick value.
+///
+/// Convenience over [`test_hal_set_ticks`] for the common "schedule
+/// a 5s delay, advance 5_001 ms, assert ready" pattern.
+pub fn test_hal_advance_ticks(delta_ms: u64) -> u64 {
+    TEST_HAL_TICK_MS.fetch_add(delta_ms, Ordering::SeqCst) + delta_ms
+}
+
+/// Read the current synthetic tick. Mainly useful in assertions that
+/// surface "advance_ticks went the wrong way" via the returned value
+/// rather than via the indirect `has_ready_events` boolean.
+pub fn test_hal_now_ticks() -> u64 {
+    TEST_HAL_TICK_MS.load(Ordering::SeqCst)
 }

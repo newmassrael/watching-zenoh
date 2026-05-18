@@ -41,6 +41,12 @@ path = "src/lib.rs"
 wz-codecs = { path = "../wz-codecs" }
 zenoh-pico-sys = { path = "../zenoh-pico-sys" }
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
+# R116b — `hal_timer_routing.rs` declares an in-test TimerProbePolicy
+# that uses sce_rust_runtime::{Engine, Hal, StatePolicy} directly to
+# exercise the Hal-routed scheduler clock post-SCE fa3a2fda. The
+# production wz crates reach SCE only via sce_forge_runtime + the
+# generated Policy code; this dep is test-surface only.
+sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
 # R68a — Layer 3 inbound parser test reaches into wz-runtime-tokio's
 # session_glue (`parse_inbound`, `InboundFrame`, `SessionLinkActions::
 # handle_inbound`) to verify the reverse direction: zenoh-pico encode

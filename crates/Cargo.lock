@@ -1107,6 +1107,7 @@ name = "wz-integration-tests"
 version = "0.1.0"
 dependencies = [
  "sce-forge-runtime",
+ "sce-rust-runtime",
  "tempfile",
  "wz-codecs",
  "wz-runtime-tokio",
