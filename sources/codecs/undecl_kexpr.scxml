@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh undecl_kexpr sub-codec — releases
+     the wireexpr-id-to-suffix binding established by an earlier
+     decl_kexpr. Mirrors zenoh-pico `_z_undecl_kexpr_encode` /
+     `_z_undecl_kexpr_decode` (src/protocol/codec/declarations.c:86-88
+     + 192-200).
+
+     Wire shape:
+       byte 0   : header  (MID 0x01 in bits 0..4 + Z@7)
+       byte 1+  : id      (VLE u64)
+       Z-gated  : ext_keyexpr ZBuf ext entry — `_z_msg_ext_make`
+                  shape with `_Z_MSG_EXT_ENC_ZBUF | _Z_MSG_EXT_FLAG_M
+                  | 0x0f`. Z=1 non-default form is the upstream way
+                  to carry an optional keyexpr alongside an undecl.
+
+     Asymmetric encode/decode: zenoh-pico's `_z_undecl_kexpr_encode`
+     only emits `[header, id_VLE]` (no Z gate decision in the encoder;
+     header Z bit comes from upstream caller setting it before
+     `_z_decl_commons_encode`). The decoder handles the Z-gated ext
+     skip path. R110b authors the encode side faithfully (Z=0 default
+     emit; Z=1 ext-keyexpr emit is non-default coverage carry).
+
+     R110b first contact: default state only (Z=0, id=0). Wire is
+     `[0x01, 0x00]` (2 bytes). Z=1 form deferred to non-default Layer
+     3 coverage carry (same quality-axis bucket as the other
+     non-default Layer 3 states).
+
+     Body byte-identical to upstream wire RFC. No SCE-side upstream
+     codec exists yet. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="undecl_kexpr">
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x01"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+  </datamodel>
+</scxml>

@@ -159,6 +159,14 @@ pub mod decl_final {
     include!(concat!(env!("OUT_DIR"), "/decl_final.rs"));
 }
 
+pub mod decl_kexpr {
+    include!(concat!(env!("OUT_DIR"), "/decl_kexpr.rs"));
+}
+
+pub mod undecl_kexpr {
+    include!(concat!(env!("OUT_DIR"), "/undecl_kexpr.rs"));
+}
+
 pub mod declare {
     include!(concat!(env!("OUT_DIR"), "/declare.rs"));
 }
