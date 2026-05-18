@@ -77,7 +77,7 @@
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x1D"/>
       <sce:flag name="N"   bit="5"/>
-      <sce:flag name="M"   bit="6"/>
+      <sce:flag name="M"   bit="6" value="1"/>
       <sce:flag name="Z"   bit="7"/>
     </sce:flags>
     <sce:embed id="keyexpr" type="codec_zenoh_wireexpr" sce:byte="1"/>

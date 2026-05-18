@@ -11,18 +11,21 @@
 //! put / del peek-byte body). R88 RFC variant-default-uniformity
 //! applies a three-level chain (response → reply → msg_put) of
 //! declared default arms, so wz `Response::default().encode()`
-//! reaches the same wire bytes as zenoh-pico after a four-patch
+//! reaches the same wire bytes as zenoh-pico after a three-patch
 //! fixture matches the upstream defaults: (1) `_ext_qos._val = 5`
-//! is the Z_N_QOS_DEFAULT sentinel; (2) `_key._mapping = 1` keeps
-//! the wireexpr non-LOCAL so the M flag stays clear; (3)
+//! is the Z_N_QOS_DEFAULT sentinel; (2)
 //! `_body._reply._consolidation = -1` is Z_CONSOLIDATION_MODE_DEFAULT
-//! which clears the reply.C bit; (4) `_body._reply._body._is_put =
+//! which clears the reply.C bit; (3) `_body._reply._body._is_put =
 //! true` selects the PUT branch inside the reply body union,
-//! mirroring R88's msg_put default-arm declaration.
+//! mirroring R88's msg_put default-arm declaration. R106 dropped
+//! the `_key._mapping = 1` patch: M=1 is now baked into wz
+//! Response::default()'s header, and the pico encoder's
+//! `_z_wireexpr_is_local` check sets the same bit when `_mapping`
+//! stays at its zero-init value of 0 (LOCAL).
 //!
-//! Wire shape: `[0x1B, 0x00, 0x00, 0x04, 0x01, 0x00]` = 6 bytes =
-//! response_header + rid VLE + wireexpr.id VLE + reply_header +
-//! msg_put_header + payload_len VLE.
+//! Wire shape: `[0x5B, 0x00, 0x00, 0x04, 0x01, 0x00]` = 6 bytes =
+//! response_header (MID 0x1B | M flag) + rid VLE + wireexpr.id VLE +
+//! reply_header + msg_put_header + payload_len VLE.
 
 use wz_codecs::response::Response;
 use zenoh_pico_sys::{
@@ -42,21 +45,21 @@ fn zenoh_pico_encode_response_default() -> Vec<u8> {
         let mut msg = _z_n_msg_response_t::default();
         // (1) qos default — see layer3_push.rs comment.
         msg._ext_qos._val = 5;
-        // (2) wireexpr non-local mapping — see layer3_push.rs M-flag
-        //     divergence comment.
-        msg._key._mapping = 1;
-        // (3) consolidation default = -1 (Z_CONSOLIDATION_MODE_DEFAULT
+        // (2) consolidation default = -1 (Z_CONSOLIDATION_MODE_DEFAULT
         //     per api/constants.h:188 == Z_CONSOLIDATION_MODE_AUTO).
         //     The encoder treats any other value as "has_consolidation"
         //     and emits the C flag + byte. wz Reply::default().header
         //     keeps C=0, so we set the mode to the upstream default
         //     to keep both sides quiet.
         msg._body._reply._consolidation = -1;
-        // (4) PUT branch inside reply._body. Zero-init `_is_put=false`
+        // (3) PUT branch inside reply._body. Zero-init `_is_put=false`
         //     would select the DEL branch (header MID 0x02) but wz
         //     reply's body variant defaults to MsgPut (declared default
         //     arm per R88).
         msg._body._reply._body._is_put = true;
+        // R106: `_key._mapping` left at zero-init = 0 (LOCAL). The
+        //       encoder's `_z_wireexpr_is_local` check sets M=1 to
+        //       match the R106-baked wz default header.
         let ret = _z_response_encode(&mut wbf, &msg);
         assert_eq!(ret, 0, "_z_response_encode failed");
         let mut zbf = _z_wbuf_to_zbuf(&wbf);
@@ -78,7 +81,7 @@ fn layer3_response_default_byte_equivalent() {
     );
     assert_eq!(
         wz,
-        &[0x1B, 0x00, 0x00, 0x04, 0x01, 0x00],
-        "default wire form: response_hdr + rid + ke.id + reply_hdr + put_hdr + payload_len"
+        &[0x5B, 0x00, 0x00, 0x04, 0x01, 0x00],
+        "default wire form: response_hdr (MID 0x1B | M flag) + rid + ke.id + reply_hdr + put_hdr + payload_len"
     );
 }
