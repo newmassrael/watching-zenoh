@@ -173,21 +173,40 @@ layer_b_verify_codegen() {
         ["request"]="vendor/sce/tests/forge/resources/codec_zenoh_request.scxml"
         ["open_body"]="vendor/sce/tests/forge/resources/codec_zenoh_open_body.scxml"
     )
-    # R44/R88/R106/R108a intentional divergences from SCE upstream
-    # fixtures. Each entry's wz-side rationale lives in the matching
-    # sources/codecs/*.scxml header comment (search for "Deliberate
-    # divergence from SCE upstream"). Layer 2 reports MISMATCH for
-    # these pairs and the report is correct — these are audit-traced
-    # wire-correctness improvements that SCE upstream has not yet
-    # mirrored (carry as paired upstream PRs).
+    # Intentional divergences from SCE upstream fixtures. Each entry's
+    # wz-side rationale lives in the matching sources/codecs/*.scxml
+    # header comment (search for "Deliberate divergence from SCE
+    # upstream"). Layer 2 reports MISMATCH for these pairs and the
+    # report is correct — these are audit-traced wire-correctness
+    # improvements that SCE upstream has not yet mirrored.
     #
-    #   init_body, join    — R44 endian (BE -> LE for zenoh-pico wire)
-    #   msg_del, query     — R88 mid value= baking (variant default)
-    #   request            — R88 + R106 + R108a (mid + M=1 + default arm)
-    #   msg_put            — R88 family member, defense-in-depth for
-    #                        backend-specific MISMATCH noise (R114
-    #                        GitHub Actions observation)
-    local LAYER2_KNOWN_DIVERGENCE=(init_body join msg_del msg_put query request)
+    # R122 closure (vendor pin 122f851d → 4441431d): SCE commit
+    # 71357264 "align Zenoh codec wire bytes to zenoh-pico HEAD"
+    # reverse-merged five wire-shape patches upstream — init_body /
+    # join (R44 endian) + msg_del / query (R88 mid value= baking) +
+    # msg_put (R88 family / R114 defense-in-depth) all flipped from
+    # MISMATCH to OK on the new pin. SCE root-cause: validator
+    # validate_cross_codec_variant_default_arm only checked the
+    # default arm; non-default arms produced silent wire-wrong bytes
+    # on standalone encode. Validator renamed to
+    # validate_cross_codec_variant_arm_mids (all arms iterated).
+    #
+    # Residual carry (R123 follow-up):
+    #
+    #   request — R88 arm 0x03 default + R106 M=1 default + R108a
+    #             mid value=0x1C. SCE classifies arm-0x03-default as
+    #             consumer convention (wire-spec invariant only for
+    #             the underlying mid byte 0x1C, already aligned by
+    #             71357264); fix is the new SCE 4441431d Atomic A
+    #             overlay: deploy/*.yaml variant_defaults: { codec_-
+    #             zenoh_request: 0x03 }. R123 round adds that
+    #             overlay to the three deploy yamls.
+    #             header.M default=1 (R106 push/response/request)
+    #             remains outside overlay schema scope (flag-default
+    #             vs arm-default); R124 signals SCE for either
+    #             flag_defaults overlay extension or RFC new
+    #             flag-default-bake primitive.
+    local LAYER2_KNOWN_DIVERGENCE=(request)
 
     local fail=0
     for scxml in sources/codecs/*.scxml sources/algorithms/*.scxml; do

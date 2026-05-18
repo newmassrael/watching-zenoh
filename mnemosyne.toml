@@ -77,3 +77,10 @@ target_id = "Round 121a"
 reason = "Audit half kept minimal because the MCP append_changelog_entry_v2 call failed to deserialize the original rich payload (suspected arg-length / multi-byte handling at the publish boundary); publishable half populated via R295 set_changelog_publishable_* primitives to preserve the full R121a record."
 applied_in = "R121a in-flight (sidecar override + re-append per CLAUDE.md anti-pattern #8 carve-out)"
 content_hash_after = "dd94c34f95fb869d7cf41a32a96fe0a13e84eeeb0bbdbff20a42747f8f44e79b"
+
+[[publishable_override_ledger]]
+kind = "redaction"
+target_id = "Round 122"
+reason = "Audit half intentionally minimal per the R295/R296 textbook split: SCE upstream debt closures carry long narratives (cross-repo commit refs + before/after metrics + multi-round residual carry), so the audit half stays tight and the publishable half carries the full SCE pin bump + 71357264 wire-byte alignment + 4441431d overlay infra narrative."
+applied_in = "R122 in-flight"
+content_hash_after = "2b9a8b2c89c527f88750049a84e80f6dce0fb3232c304b2bd0b59f37f4b65ff0"
