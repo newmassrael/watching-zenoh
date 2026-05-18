@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh decl_kexpr sub-codec — binds a
+     wireexpr-id to its (optional) keyexpr suffix. Mirrors zenoh-pico
+     `_z_decl_kexpr_encode` / `_z_decl_kexpr_decode`
+     (src/protocol/codec/declarations.c:52-63 + 181-191).
+
+     Wire shape:
+       byte 0   : header  (MID 0x00 in bits 0..4 + N@5)
+       byte 1+  : id      (VLE u64; zenoh-pico stores u16 but the
+                            shared VLE shape lets wz use u64 upper
+                            bound — same convention as wireexpr.scxml's
+                            id field per its docstring)
+       byte 2+  : wireexpr fragment via codec_zenoh_wireexpr embed
+                  (suffix gated on header.N = wireexpr.parent.N)
+
+     R110b first contact: default state only (N=0, wireexpr id=0,
+     no suffix) so the wire is `[0x00, 0x00, 0x00]` (3 bytes). N=1
+     suffix-carrying form is non-default Layer 3 coverage carry —
+     same quality-axis as PUSH N-suffix.
+
+     Body byte-identical to upstream wire RFC. No SCE-side upstream
+     codec exists yet; the upstream parity gate is the Layer 3
+     byte-compare against `_z_decl_kexpr_encode` (R110e). -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="decl_kexpr">
+  <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x00"/>
+      <sce:flag name="N"   bit="5"/>
+    </sce:flags>
+    <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+    <sce:embed id="keyexpr" type="codec_zenoh_wireexpr" sce:byte="2"/>
+  </datamodel>
+</scxml>

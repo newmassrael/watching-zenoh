@@ -52,6 +52,8 @@
        sce:kind="codec" sce:default-endian="big" name="declare">
   <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
   <sce:import src="decl_final.scxml" kind="codec" as="codec_zenoh_decl_final"/>
+  <sce:import src="decl_kexpr.scxml" kind="codec" as="codec_zenoh_decl_kexpr"/>
+  <sce:import src="undecl_kexpr.scxml" kind="codec" as="codec_zenoh_undecl_kexpr"/>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x1E"/>
@@ -68,6 +70,8 @@
       <sce:peek-byte id="peek" sce:type="uint8">
         <sce:flag name="mid" bit="0" width="5"/>
       </sce:peek-byte>
+      <sce:arm value="0x00" type="codec_zenoh_decl_kexpr"/>
+      <sce:arm value="0x01" type="codec_zenoh_undecl_kexpr"/>
       <sce:arm value="0x1A" type="codec_zenoh_decl_final" default="true"/>
       <sce:default type="codec_zenoh_decl_final"/>
     </sce:variant>
