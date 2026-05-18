@@ -53,6 +53,7 @@ const CODECS: &[&str] = &[
     "request",   // §5 Z_REQUEST envelope — peek-byte dispatch — R47
     "push",      // §5 Z_PUSH envelope — peek-byte dispatch — R90
     "response_final", // §5 Z_RESPONSE_FINAL marker — header + rid — R91
+    "oam",       // §5 Z_OAM envelope — header.enc variant dispatch — R92
 ];
 
 fn main() {

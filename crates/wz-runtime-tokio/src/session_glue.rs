@@ -66,6 +66,7 @@ use wz_codecs::ext_entry::ExtEntry;
 use wz_codecs::init_body::InitBody;
 use wz_codecs::keep_alive::KeepAlive;
 use wz_codecs::open_body::OpenBody;
+use wz_codecs::oam::Oam;
 use wz_codecs::push::Push;
 use wz_codecs::request::Request;
 use wz_codecs::response_final::ResponseFinal;
@@ -256,12 +257,18 @@ mod wire_const {
     /// R91 — Response-final marker MID (network.h:38). Pure
     /// correlation marker closing a Request's reply stream per
     /// zenoh-pico `_z_response_final_encode`: 1-byte header +
-    /// request_id VLE + optional ext-chain, no body. Additional
-    /// MIDs (RESPONSE 0x1B, DECLARE 0x1E, OAM 0x1F, INTEREST 0x19
-    /// per network.h:33-39) are documented in [`NetworkMessage`]
-    /// and will land alongside their respective envelope codecs
-    /// in follow-up rounds.
+    /// request_id VLE + optional ext-chain, no body.
     pub const N_MID_RESPONSE_FINAL: u8 = 0x1A;
+    /// R92 — OAM (Operations & Maintenance) MID (network.h:33).
+    /// Diagnostic / control-plane envelope per zenoh-pico
+    /// `_z_oam_encode`: header (with mid, enc, Z bits) plus a VLE
+    /// id, optional ext-chain, and a body variant dispatched on
+    /// `header.enc` (UNIT / ZINT / ZBUF re-using ext_* inner
+    /// codecs). Remaining MIDs (RESPONSE 0x1B, DECLARE 0x1E,
+    /// INTEREST 0x19) documented in [`NetworkMessage`] and will
+    /// land alongside their respective envelope codecs in
+    /// follow-up rounds.
+    pub const N_MID_OAM: u8 = 0x1F;
 }
 
 /// Per-deploy parameters that drive the codec field values for the
@@ -1318,7 +1325,14 @@ pub enum NetworkMessage {
     /// small — just three integer fields plus an optional ext
     /// vec.
     ResponseFinal(ResponseFinal),
-    /// Header byte's MID falls outside the {REQUEST, PUSH, RESPONSE_FINAL} subset
+    /// R92 — Network MID `_Z_MID_N_OAM` (0x1F). Diagnostic /
+    /// control-plane envelope; header (mid+enc+Z) + VLE id +
+    /// optional ext-chain + body variant on `header.enc` (UNIT
+    /// / ZINT / ZBUF inner codec). The body variant arms hold
+    /// `ExtUnit` / `ExtZint` / `ExtZbuf` — small enough to inline
+    /// like `ResponseFinal`.
+    Oam(Oam),
+    /// Header byte's MID falls outside the {REQUEST, PUSH, RESPONSE_FINAL, OAM} subset
     /// wz-codecs has authored envelope coverage for. `body` carries
     /// the rest of the payload bytes (header byte included) verbatim
     /// so a future per-MID decoder can re-parse without losing data;
@@ -1333,6 +1347,7 @@ impl std::fmt::Debug for NetworkMessage {
             Self::Request(_) => f.write_str("Request(..)"),
             Self::Push(_) => f.write_str("Push(..)"),
             Self::ResponseFinal(_) => f.write_str("ResponseFinal(..)"),
+            Self::Oam(_) => f.write_str("Oam(..)"),
             Self::Unknown { mid, body } => write!(
                 f,
                 "Unknown {{ mid: {mid:#04x}, body_len: {} }}",
@@ -1381,6 +1396,10 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
             wire_const::N_MID_RESPONSE_FINAL => {
                 let rf = ResponseFinal::decode(&mut cursor)?;
                 messages.push(NetworkMessage::ResponseFinal(rf));
+            }
+            wire_const::N_MID_OAM => {
+                let oam = Oam::decode(&mut cursor)?;
+                messages.push(NetworkMessage::Oam(oam));
             }
             _ => {
                 let rem = cursor.remaining();

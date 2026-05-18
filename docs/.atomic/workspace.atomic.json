@@ -8797,6 +8797,70 @@
         "INTEREST (0x19) + OAM (0x1F) codecs — INTEREST is the subscriber pull request (similar to Request shape but with interest-id and topic-filter fields); OAM is operations & maintenance (versioned ext-only payload). 1 round each, sequential.",
         "layer3_response_final.rs wire-interop test against zenoh-pico — R43 pattern. layer3_push.rs (R90 carry #3) + layer3_response_final.rs together would land in a focused layer3 round once 2-3 new codecs accumulate — economy of scale on the FFI bridge setup."
       ]
+    },
+    "Round 92": {
+      "decision_summary": "R92 OAM envelope codec lands — 4 of 7 application-layer MIDs covered; first wz-side codec using self-flag-dispatch variant (header.enc) reusing the ext_unit/zint/zbuf body codecs at the network-MID layer.",
+      "changes_bullets": [
+        "sources/codecs/oam.scxml authored (~70 lines). Mirrors zenoh-pico `_z_oam_encode` (src/protocol/codec/network.c): byte 0 = header with mid (bits 0..4, value=0x1F) + enc (bits 5..6, 2-bit body selector) + Z (bit 7). byte 1+ = id VLE u64. Z-gated tlv-chain extensions. Variant dispatch on `header.enc` (self-flag pattern, mirrors ext_entry) with arms: 0x00 UNIT (declared `default=\"true\"` per R88), 0x01 ZINT, 0x02 ZBUF, <sce:default> UNIT. Body arm codecs re-use existing ext_unit / ext_zint / ext_zbuf imports.",
+        "First wz-side codec using SELF-FLAG-DISPATCH variant primitive (`tag=\"header.enc\"`) instead of peek-byte dispatch like push/request. The dispatch byte comes from the outer codec's own header, not the inner body's first byte — so inner codecs (ext_unit/zint/zbuf, all leaf shapes without their own header) do NOT need `<sce:flag value=>` baked-MID; the outer arm `default=\"true\"` alone closes the R88 variant-default-uniformity invariant for self-flag dispatch.",
+        "wz-codecs build.rs: \"oam\" appended to CODECS. lib.rs: pub mod oam { include!(...) } sibling to response_final module.",
+        "wz-runtime-tokio session_glue.rs: wire_const::N_MID_OAM (0x1F) added. NetworkMessage gains Oam(Oam) variant (inlined, no Box — OamVariant arms hold ext_unit/zint/zbuf which are small leaf structs). Manual Debug impl arm: `Self::Oam(_) => f.write_str(\"Oam(..)\")`. parse_frame_payload N_MID_OAM arm dispatches to Oam::decode + NetworkMessage::Oam wrap.",
+        "All NetworkMessage match arms across 2 test files extended with `| NetworkMessage::Oam(_)` for exhaustiveness (driver_loop + inbound_dispatch). Same churn pattern documented in R91 carry; cumulative count of test-side match-arm updates across R90+R91+R92 = ~5 sites.",
+        "Clippy `doc-lazy-continuation` lint trip on N_MID_OAM rustdoc fixed inside the round (the rustdoc continuation line started with `+` which clippy parsed as a new bulleted item; reflowed to plain prose).",
+        "1 new R92 unit test in session_fsm_inbound_dispatch.rs: parse_frame_payload_dispatches_oam_mid_to_oam_decoder. Asserts `parsed.len() == 1` and `matches!(parsed[0], NetworkMessage::Oam(_))` for `Oam { header: 0x1F, ..Default::default() }`."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-codecs green; sce-build's codegen pipeline accepts oam.scxml on first try — the self-flag-dispatch variant with `default=\"true\"` arm marker emits the new RFC variant-default-uniformity codegen for OamVariant::default() automatically.",
+        "cargo build -p wz-runtime-tokio green after R92 Oam wiring; match-exhaustiveness errors caught + fixed across both test files inside the round.",
+        "Inspected generated oam.rs Default impl (codegen output): `impl Default for OamVariant { fn default() -> Self { Self::CodecZenohExtUnit(ExtUnit::default()) } }` with RFC variant-default-uniformity rustdoc — matches R88's textbook contract. The R88 fix extends seamlessly from peek-byte (request/push) to self-flag (oam) variant dispatch.",
+        "cargo test --workspace: 122 passed / 0 failed (121 -> 122, +1 = exact R92 new test count). All prior 121 tests still pass.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean (after the doc-lazy-continuation fix).",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass.",
+        "validate_workspace baseline preserved: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, T3 warn 856 / T4 info 427 unchanged. Atomic ledger entries 104 -> 105 (this Round entry); sections=214 unchanged.",
+        "Application-layer codec coverage now: 4 of 7 network MIDs (REQUEST 0x1C via R74, PUSH 0x1D via R90, RESPONSE_FINAL 0x1A via R91, OAM 0x1F via R92). Remaining 3 MIDs (RESPONSE 0x1B, DECLARE 0x1E, INTEREST 0x19)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "carry_forward_bullets": [
+        "R88 carry #1 'ext_entry self-flag-dispatch audit' partially closed by R92 — OAM uses the same self-flag-dispatch shape as ext_entry and verifies that R88 variant-default-uniformity extends cleanly to it (outer arm `default=\"true\"` alone is sufficient when inner codecs are leaf-shapes). The original ext_entry could theoretically benefit from the same `default=\"true\"` marker for parity, but the existing legacy 'first declared arm' Default impl happens to be byte-equivalent (first arm value 0x00 matches default header.enc=0). Not a defect, just a coincidence — documenting for future audit.",
+        "INTEREST codec (0x19) — wraps an `_z_interest_t` body with interest_id (VLE), flags (CURRENT/FUTURE/AGGREGATE flag bits in the body header), and optional keyexpr. ~80-100 line SCXML; depends on a new `interest_body.scxml` (sibling to msg_put/msg_del shape) OR can be inlined since the interest body is just 2-3 fields.",
+        "RESPONSE codec (0x1B) — needs reply + err inner body codecs before it can land. Reply carries the queried data payload (similar shape to msg_put), err carries an error envelope (encoding-tagged like ext_entry). 2 inner-body rounds plus the outer envelope = 3-round sequence to close RESPONSE.",
+        "DECLARE codec (0x1E) — sequence of declaration variants (DeclSub / DeclToken / DeclQbl / DeclareFinal). Requires a `<sce:repeat>` primitive over a `<sce:variant>` body, which is a more involved primitive combination than the current network-envelope set. ~150 line SCXML; design surface largest of the remaining 3 codecs."
+      ],
+      "publishable_decision_summary": "R92 OAM envelope codec lands — 4 of 7 application-layer MIDs covered; first wz-side codec using self-flag-dispatch variant (header.enc) reusing the ext_unit/zint/zbuf body codecs at the network-MID layer.",
+      "publishable_changes_bullets": [
+        "sources/codecs/oam.scxml authored (~70 lines). Mirrors zenoh-pico `_z_oam_encode` (src/protocol/codec/network.c): byte 0 = header with mid (bits 0..4, value=0x1F) + enc (bits 5..6, 2-bit body selector) + Z (bit 7). byte 1+ = id VLE u64. Z-gated tlv-chain extensions. Variant dispatch on `header.enc` (self-flag pattern, mirrors ext_entry) with arms: 0x00 UNIT (declared `default=\"true\"` per R88), 0x01 ZINT, 0x02 ZBUF, <sce:default> UNIT. Body arm codecs re-use existing ext_unit / ext_zint / ext_zbuf imports.",
+        "First wz-side codec using SELF-FLAG-DISPATCH variant primitive (`tag=\"header.enc\"`) instead of peek-byte dispatch like push/request. The dispatch byte comes from the outer codec's own header, not the inner body's first byte — so inner codecs (ext_unit/zint/zbuf, all leaf shapes without their own header) do NOT need `<sce:flag value=>` baked-MID; the outer arm `default=\"true\"` alone closes the R88 variant-default-uniformity invariant for self-flag dispatch.",
+        "wz-codecs build.rs: \"oam\" appended to CODECS. lib.rs: pub mod oam { include!(...) } sibling to response_final module.",
+        "wz-runtime-tokio session_glue.rs: wire_const::N_MID_OAM (0x1F) added. NetworkMessage gains Oam(Oam) variant (inlined, no Box — OamVariant arms hold ext_unit/zint/zbuf which are small leaf structs). Manual Debug impl arm: `Self::Oam(_) => f.write_str(\"Oam(..)\")`. parse_frame_payload N_MID_OAM arm dispatches to Oam::decode + NetworkMessage::Oam wrap.",
+        "All NetworkMessage match arms across 2 test files extended with `| NetworkMessage::Oam(_)` for exhaustiveness (driver_loop + inbound_dispatch). Same churn pattern documented in R91 carry; cumulative count of test-side match-arm updates across R90+R91+R92 = ~5 sites.",
+        "Clippy `doc-lazy-continuation` lint trip on N_MID_OAM rustdoc fixed inside the round (the rustdoc continuation line started with `+` which clippy parsed as a new bulleted item; reflowed to plain prose).",
+        "1 new R92 unit test in session_fsm_inbound_dispatch.rs: parse_frame_payload_dispatches_oam_mid_to_oam_decoder. Asserts `parsed.len() == 1` and `matches!(parsed[0], NetworkMessage::Oam(_))` for `Oam { header: 0x1F, ..Default::default() }`."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-codecs green; sce-build's codegen pipeline accepts oam.scxml on first try — the self-flag-dispatch variant with `default=\"true\"` arm marker emits the new RFC variant-default-uniformity codegen for OamVariant::default() automatically.",
+        "cargo build -p wz-runtime-tokio green after R92 Oam wiring; match-exhaustiveness errors caught + fixed across both test files inside the round.",
+        "Inspected generated oam.rs Default impl (codegen output): `impl Default for OamVariant { fn default() -> Self { Self::CodecZenohExtUnit(ExtUnit::default()) } }` with RFC variant-default-uniformity rustdoc — matches R88's textbook contract. The R88 fix extends seamlessly from peek-byte (request/push) to self-flag (oam) variant dispatch.",
+        "cargo test --workspace: 122 passed / 0 failed (121 -> 122, +1 = exact R92 new test count). All prior 121 tests still pass.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean (after the doc-lazy-continuation fix).",
+        "scripts/run-ci.sh: Layer A (validate-workspace) + Layer B (verify-codegen) + Layer C1 (test) + Layer C2 (clippy) + Layer D (deploy schema) all pass.",
+        "validate_workspace baseline preserved: T1 orphan=0, round-trip 12/12, GENERATED.md=sync, T3 warn 856 / T4 info 427 unchanged. Atomic ledger entries 104 -> 105 (this Round entry); sections=214 unchanged.",
+        "Application-layer codec coverage now: 4 of 7 network MIDs (REQUEST 0x1C via R74, PUSH 0x1D via R90, RESPONSE_FINAL 0x1A via R91, OAM 0x1F via R92). Remaining 3 MIDs (RESPONSE 0x1B, DECLARE 0x1E, INTEREST 0x19)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R88 carry #1 'ext_entry self-flag-dispatch audit' partially closed by R92 — OAM uses the same self-flag-dispatch shape as ext_entry and verifies that R88 variant-default-uniformity extends cleanly to it (outer arm `default=\"true\"` alone is sufficient when inner codecs are leaf-shapes). The original ext_entry could theoretically benefit from the same `default=\"true\"` marker for parity, but the existing legacy 'first declared arm' Default impl happens to be byte-equivalent (first arm value 0x00 matches default header.enc=0). Not a defect, just a coincidence — documenting for future audit.",
+        "INTEREST codec (0x19) — wraps an `_z_interest_t` body with interest_id (VLE), flags (CURRENT/FUTURE/AGGREGATE flag bits in the body header), and optional keyexpr. ~80-100 line SCXML; depends on a new `interest_body.scxml` (sibling to msg_put/msg_del shape) OR can be inlined since the interest body is just 2-3 fields.",
+        "RESPONSE codec (0x1B) — needs reply + err inner body codecs before it can land. Reply carries the queried data payload (similar shape to msg_put), err carries an error envelope (encoding-tagged like ext_entry). 2 inner-body rounds plus the outer envelope = 3-round sequence to close RESPONSE.",
+        "DECLARE codec (0x1E) — sequence of declaration variants (DeclSub / DeclToken / DeclQbl / DeclareFinal). Requires a `<sce:repeat>` primitive over a `<sce:variant>` body, which is a more involved primitive combination than the current network-envelope set. ~150 line SCXML; design surface largest of the remaining 3 codecs."
+      ]
     }
   },
   "inventory_entries": {},

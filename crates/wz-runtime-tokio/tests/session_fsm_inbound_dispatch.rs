@@ -378,7 +378,8 @@ fn parse_frame_payload_unknown_mid_absorbs_remainder() {
         }
         NetworkMessage::Request(_)
         | NetworkMessage::Push(_)
-        | NetworkMessage::ResponseFinal(_) => {
+        | NetworkMessage::ResponseFinal(_)
+        | NetworkMessage::Oam(_) => {
             panic!("expected Unknown, got typed variant")
         }
     }
@@ -461,7 +462,8 @@ fn parse_frame_payload_decodes_request_then_unknown_chain() {
         }
         NetworkMessage::Request(_)
         | NetworkMessage::Push(_)
-        | NetworkMessage::ResponseFinal(_) => {
+        | NetworkMessage::ResponseFinal(_)
+        | NetworkMessage::Oam(_) => {
             panic!("expected Unknown second record")
         }
     }
@@ -551,6 +553,31 @@ fn parse_frame_payload_dispatches_response_final_mid_to_response_final_decoder()
     assert!(
         matches!(parsed[0], NetworkMessage::ResponseFinal(_)),
         "RESPONSE_FINAL MID 0x1A dispatches to wz_codecs::response_final decoder"
+    );
+}
+
+#[test]
+fn parse_frame_payload_dispatches_oam_mid_to_oam_decoder() {
+    use wz_codecs::oam::Oam;
+    use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
+
+    // R92 — round-trip-safe OAM with default header.enc=00 (UNIT)
+    // selecting the empty ext_unit body via the declared default arm.
+    let oam = Oam {
+        header: 0x1F,
+        ..Oam::default()
+    };
+    let bytes = oam.encode();
+
+    let parsed = parse_frame_payload(&bytes).expect("OAM envelope parses");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "round-trip-safe OAM yields exactly one record; got {parsed:?}"
+    );
+    assert!(
+        matches!(parsed[0], NetworkMessage::Oam(_)),
+        "OAM MID 0x1F dispatches to wz_codecs::oam decoder"
     );
 }
 

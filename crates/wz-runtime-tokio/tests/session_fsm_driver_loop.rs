@@ -308,9 +308,10 @@ async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
                 }
                 NetworkMessage::Request(_)
                 | NetworkMessage::Push(_)
-                | NetworkMessage::ResponseFinal(_) => {
+                | NetworkMessage::ResponseFinal(_)
+                | NetworkMessage::Oam(_) => {
                     panic!(
-                        "RESPONSE MID (0x1B) must NOT dispatch to Request/Push/ResponseFinal decoders"
+                        "RESPONSE MID (0x1B) must NOT dispatch to any typed decoder"
                     )
                 }
             }
