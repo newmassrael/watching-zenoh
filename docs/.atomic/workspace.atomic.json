@@ -3118,6 +3118,64 @@
         "Layer 3 wire-interop tests — R90 / R91 carry. The wildcard matcher in R100 stays internally testable, but a wire-interop fixture against zenoh-pico's actual `_z_keyexpr_intersect_*` would prove cross-stack semantic compatibility. Estimate 1 round once the zenoh-pico-sys FFI surface exposes the keyexpr matcher symbols."
       ]
     },
+    "Round 101": {
+      "decision_summary": "R101 lands the first Layer 3 wire-interop test for the post-R90 codec catalog — ResponseFinal::default().encode() now proven byte-equivalent to zenoh-pico's `_z_response_final_encode`; closes the smallest carry of the R90/R91/R92/R93-R94/R95-R97 wire-interop debt accumulation and seeds the rollout pattern for the rest of the catalog.",
+      "changes_bullets": [
+        "crates/zenoh-pico-sys/wrapper.h: `#include \"zenoh-pico/protocol/codec/network.h\"` added alongside the existing transport/message/ext includes so bindgen can see the N-level (network-MID) encoders — same expansion pattern as previous Layer 3 rounds (the umbrella public header does not transitively pull in the internal codec headers; Layer 3 needs them explicitly).",
+        "crates/zenoh-pico-sys/build.rs allowlist: `_z_response_final_encode` + `_z_n_msg_response_final_t` added with an inline comment explaining why ResponseFinal was chosen as the first contact (smallest envelope post-R90: header + zsize request_id only).",
+        "crates/wz-integration-tests/tests/layer3_response_final.rs new — 3 byte-equivalence tests: (1) default ResponseFinal (request_id=0) emits the canonical [0x1A, 0x00] 2-byte wire, (2) single-byte VLE rid 0x42 emits [0x1A, 0x42], (3) multi-byte VLE rid 200 crosses the 7-bit boundary and emits [0x1A, 0xC8, 0x01]. Each test asserts wz_codecs::response_final::ResponseFinal encode() bytes match zenoh-pico's `_z_response_final_encode` output. Test layout mirrors the existing layer3_keep_alive.rs pattern (wbuf alloc → encode → wbuf_to_zbuf → raw slice copy → wbuf_clear).",
+        "Helper `zenoh_pico_encode_response_final(request_id: u64) -> Vec<u8>` widens the test's u64 input to the bindgen-surfaced `usize` zint_t via `as _` so the call site keeps the natural numeric type — zenoh-pico's `_z_zint_t` resolves to `size_t` on x86_64-linux which bindgen produces as `usize`. Comment explains the widen for future Layer 3 authors hitting the same surface."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_response_final: 3 passed (default + single-byte VLE + multi-byte VLE).",
+        "Byte-by-byte equality confirmed against the live `_z_response_final_encode` call — wz codec output is not merely self-consistent but actually matches zenoh-pico's encoder for the modeled state space.",
+        "scripts/run-ci.sh all 5 lanes pass: Layer A (validate-workspace), Layer B (verify-codegen), Layer C1 (cargo test), Layer C2 (cargo clippy -D warnings), Layer D (deploy yaml schema). Clippy clean first try.",
+        "Workspace tests: 140 → 143 (+3 = new layer3 byte-compare tests).",
+        "atomic ledger entries: 113 → 114 (this Round 101 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "First contact pattern documented inline so the rollout to PUSH (R90), OAM (R92), INTEREST (R93-R94), RESPONSE (R97) is mechanical — each subsequent codec adds its `_z_*_encode` + msg_t to the allowlist, writes the wbuf-extract helper, and asserts byte-equivalence."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "carry_forward_bullets": [
+        "Layer 3 wire-interop rollout to remaining post-R90 codecs — PUSH (R90), OAM (R92), INTEREST envelope + inner body (R93-R94), RESPONSE (R97). Each is a ~80-100 line layer3_*.rs following the R101 pattern (wbuf-extract helper + 2-3 byte-equivalence tests covering default + edge cases). Estimate 1 round per codec; 4 rounds total to close the post-R90 catalog Layer 3 debt completely.",
+        "Wire-interop for the inner-body sub-codecs (interest_body R94, reply R95, err R96) is gated on whether zenoh-pico exposes the inner encoder as a separately callable function. interest_body is invoked via `_z_interest_encode` (the outer envelope), reply/err via `_z_response_encode`. Direct sub-codec byte-equivalence may require synthetic fixtures that target the wire-form sub-range; defer until the outer envelope Layer 3 tests reveal whether per-sub-codec coverage adds confidence beyond the envelope test alone.",
+        "PUSH (R90) Layer 3 will exercise the wireexpr embed + ext-chain + peek-byte variant body — first Layer 3 test to span an embedded codec AND a tlv-chain AND a variant primitive in a single fixture. Expect minor allowlist additions (`_z_push_encode`, `_z_n_msg_push_t`, `_z_wireexpr_t`, `_z_msg_put_t` ext slot helpers).",
+        "OAM (R92) Layer 3 will exercise the self-flag-dispatch variant (header.enc) with three default-state arms (UNIT / ZINT / ZBUF). Should resolve the ext_entry self-flag-dispatch audit (R88 carry #1) cleanly because UNIT is the declared default arm and `_z_oam_encode` defaults the enc field to 00 = UNIT, matching the wz codec's variant-default-uniformity behavior.",
+        "RESPONSE (R97) Layer 3 is the most involved post-R90 codec (envelope + wireexpr embed + ext-chain + peek-byte variant with reply/err arm bodies). Likely a 2-round split: layer3_response.rs (envelope default state with empty reply body) + layer3_response_with_inner_body.rs (R88 default arm chain: response → reply → msg_put each carrying their baked MID)."
+      ],
+      "publishable_decision_summary": "R101 lands the first Layer 3 wire-interop test for the post-R90 codec catalog — ResponseFinal::default().encode() now proven byte-equivalent to zenoh-pico's `_z_response_final_encode`; closes the smallest carry of the R90/R91/R92/R93-R94/R95-R97 wire-interop debt accumulation and seeds the rollout pattern for the rest of the catalog.",
+      "publishable_changes_bullets": [
+        "crates/zenoh-pico-sys/wrapper.h: `#include \"zenoh-pico/protocol/codec/network.h\"` added alongside the existing transport/message/ext includes so bindgen can see the N-level (network-MID) encoders — same expansion pattern as previous Layer 3 rounds (the umbrella public header does not transitively pull in the internal codec headers; Layer 3 needs them explicitly).",
+        "crates/zenoh-pico-sys/build.rs allowlist: `_z_response_final_encode` + `_z_n_msg_response_final_t` added with an inline comment explaining why ResponseFinal was chosen as the first contact (smallest envelope post-R90: header + zsize request_id only).",
+        "crates/wz-integration-tests/tests/layer3_response_final.rs new — 3 byte-equivalence tests: (1) default ResponseFinal (request_id=0) emits the canonical [0x1A, 0x00] 2-byte wire, (2) single-byte VLE rid 0x42 emits [0x1A, 0x42], (3) multi-byte VLE rid 200 crosses the 7-bit boundary and emits [0x1A, 0xC8, 0x01]. Each test asserts wz_codecs::response_final::ResponseFinal encode() bytes match zenoh-pico's `_z_response_final_encode` output. Test layout mirrors the existing layer3_keep_alive.rs pattern (wbuf alloc → encode → wbuf_to_zbuf → raw slice copy → wbuf_clear).",
+        "Helper `zenoh_pico_encode_response_final(request_id: u64) -> Vec<u8>` widens the test's u64 input to the bindgen-surfaced `usize` zint_t via `as _` so the call site keeps the natural numeric type — zenoh-pico's `_z_zint_t` resolves to `size_t` on x86_64-linux which bindgen produces as `usize`. Comment explains the widen for future Layer 3 authors hitting the same surface."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_response_final: 3 passed (default + single-byte VLE + multi-byte VLE).",
+        "Byte-by-byte equality confirmed against the live `_z_response_final_encode` call — wz codec output is not merely self-consistent but actually matches zenoh-pico's encoder for the modeled state space.",
+        "scripts/run-ci.sh all 5 lanes pass: Layer A (validate-workspace), Layer B (verify-codegen), Layer C1 (cargo test), Layer C2 (cargo clippy -D warnings), Layer D (deploy yaml schema). Clippy clean first try.",
+        "Workspace tests: 140 → 143 (+3 = new layer3 byte-compare tests).",
+        "atomic ledger entries: 113 → 114 (this Round 101 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "First contact pattern documented inline so the rollout to PUSH (R90), OAM (R92), INTEREST (R93-R94), RESPONSE (R97) is mechanical — each subsequent codec adds its `_z_*_encode` + msg_t to the allowlist, writes the wbuf-extract helper, and asserts byte-equivalence."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Layer 3 wire-interop rollout to remaining post-R90 codecs — PUSH (R90), OAM (R92), INTEREST envelope + inner body (R93-R94), RESPONSE (R97). Each is a ~80-100 line layer3_*.rs following the R101 pattern (wbuf-extract helper + 2-3 byte-equivalence tests covering default + edge cases). Estimate 1 round per codec; 4 rounds total to close the post-R90 catalog Layer 3 debt completely.",
+        "Wire-interop for the inner-body sub-codecs (interest_body R94, reply R95, err R96) is gated on whether zenoh-pico exposes the inner encoder as a separately callable function. interest_body is invoked via `_z_interest_encode` (the outer envelope), reply/err via `_z_response_encode`. Direct sub-codec byte-equivalence may require synthetic fixtures that target the wire-form sub-range; defer until the outer envelope Layer 3 tests reveal whether per-sub-codec coverage adds confidence beyond the envelope test alone.",
+        "PUSH (R90) Layer 3 will exercise the wireexpr embed + ext-chain + peek-byte variant body — first Layer 3 test to span an embedded codec AND a tlv-chain AND a variant primitive in a single fixture. Expect minor allowlist additions (`_z_push_encode`, `_z_n_msg_push_t`, `_z_wireexpr_t`, `_z_msg_put_t` ext slot helpers).",
+        "OAM (R92) Layer 3 will exercise the self-flag-dispatch variant (header.enc) with three default-state arms (UNIT / ZINT / ZBUF). Should resolve the ext_entry self-flag-dispatch audit (R88 carry #1) cleanly because UNIT is the declared default arm and `_z_oam_encode` defaults the enc field to 00 = UNIT, matching the wz codec's variant-default-uniformity behavior.",
+        "RESPONSE (R97) Layer 3 is the most involved post-R90 codec (envelope + wireexpr embed + ext-chain + peek-byte variant with reply/err arm bodies). Likely a 2-round split: layer3_response.rs (envelope default state with empty reply body) + layer3_response_with_inner_body.rs (R88 default arm chain: response → reply → msg_put each carrying their baked MID)."
+      ]
+    },
     "Round 11": {
       "decision_summary": "OQ-W15 (a) closure (Q1=No RNG → plugin / Q2=Yes HMAC → plugin ratified) + OQ-W24 registration as SCE counter-offer track for §5.I tier-explicit separation",
       "changes_bullets": [

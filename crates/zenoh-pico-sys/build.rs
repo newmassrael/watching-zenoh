@@ -212,6 +212,15 @@ fn main() {
         // pico's transport.c _z_keep_alive_encode (does nothing).
         .allowlist_type("_z_t_msg_keep_alive_t")
         .allowlist_function("_z_keep_alive_encode")
+        // R101 — first Layer 3 byte-compare for the post-R90 codec
+        // catalog. ResponseFinal is the smallest envelope authored
+        // post-R90 (header + zsize request_id, no body, no
+        // extensions in the upstream encode path) so it's the
+        // textbook first contact for the wire-interop debt
+        // accumulating from R90 / R91 / R92 / R93+R94 / R95+R96+R97
+        // — see R101 atomic entry for the per-codec rollout plan.
+        .allowlist_type("_z_n_msg_response_final_t")
+        .allowlist_function("_z_response_final_encode")
         // R67c — ext chain Layer 3 byte-compare vs wz ExtEnvelope.
         // _z_msg_ext_t = union<unit|zint|zbuf> + header byte; the
         // builder helpers _z_msg_ext_make_* set header bits from
