@@ -9207,6 +9207,58 @@
         "Reply / Err dispatch — dispatch is Push-only. A future round adds the symmetric `Response` arm (`NetworkMessage::Response.body.reply.body` is a Push-shaped wrapper per R95 reply.scxml). The same registry can route both, gated on a per-subscription kind filter (publish-only vs reply-also-accepted).",
         "Session-loop integration moves `SubscriberRegistry` from a standalone unit-test target to a Linux + tokio echo-demo wire-up. AP MVP demo close: combine the integration shim + a 2-tasks tokio fixture (one publishes, one subscribes via the registry) into an end-to-end smoke test against either a wz peer or a zenoh-pico peer (the latter requires the zenoh-pico-sys FFI bridge from R41/R42)."
       ]
+    },
+    "Round 99": {
+      "decision_summary": "R99 wires the R98 SubscriberRegistry into drive_session_until_terminal — closes R98 carry #1 with an in-place dispatch_iteration_event adapter and an end-to-end integration test exercising the full AP MVP path: link bytes → Frame → parse_frame_payload → NetworkMessage::Push → registry → callback.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/pubsub.rs: new method `SubscriberRegistry::dispatch_iteration_event(&mut self, IterationEvent<'_>)` extracts `FramePayload.messages` from `IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. })` and routes each record through `dispatch`. Non-FramePayload poll outcomes and Lease branch events are no-ops. The method keeps the integration site free of the `if let Poll(FramePayload { … })` matcher boilerplate.",
+        "Doc comment cross-references `drive_session_until_terminal` and explains the observer-shaped consumption pattern so future callers can pick it up without reading the test.",
+        "crates/wz-runtime-tokio/tests/session_fsm_drive_session.rs: new test `r99_subscriber_registry_routes_framepayload_push_to_callback` constructs a Push wire (header N=1, inline `keyexpr.suffix = \"demo/topic\"`, default msg_put body), wraps in a Frame envelope (T_MID_FRAME|R, sn=1 VLE), drives `drive_session_until_terminal` with an observer closure that calls `registry.dispatch_iteration_event(ev)` through an `Arc<Mutex<SubscriberRegistry>>`, then asserts the registered callback fired exactly once.",
+        "Test uses `Arc<Mutex<SubscriberRegistry>>` to model the realistic production sharing pattern — the registry is owned across the drive task AND the application-side handle that wants to register / unregister concurrently."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test session_fsm_drive_session r99_subscriber: 1 passed (round-trip Push wire → callback fired exactly once).",
+        "scripts/run-ci.sh all 5 lanes pass: Layer A (validate-workspace), Layer B (verify-codegen), Layer C1 (cargo test), Layer C2 (cargo clippy -D warnings), Layer D (deploy yaml schema). Clippy clean first try.",
+        "Workspace tests: 133 → 134 (+1 = R99 integration test).",
+        "atomic ledger entries: 111 → 112 (this Round 99 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "Existing R83 / R98 tests stay green — the new `dispatch_iteration_event` adapter is additive; no existing observer signatures or registry methods were modified."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants"
+      ],
+      "carry_forward_bullets": [
+        "AP MVP demo wire-up — R98 + R99 together cover the publisher → subscriber callback path in isolation (unit + integration tests). The next step is a runnable Linux + tokio binary that opens a real TCP session against a zenoh-pico peer, registers a subscriber for a known keyexpr, and asserts the callback fires when the peer publishes. Estimate 2-3 rounds (binary scaffolding + zenoh-pico peer fixture + golden-path assertion).",
+        "Wildcard keyexpr matching — R98/R99 registry is literal-only. Zenoh's keyexpr language supports `*` (single-chunk) / `**` (multi-chunk) / `$*` (substring) per upstream `_z_keyexpr_intersect_*`. A wildcard-aware matcher is a follow-up quality round once the basic literal-match demo is validated against zenoh-pico.",
+        "DECLARE codec (0x1E) — 9 declaration sub-types per zenoh-pico declarations.c, multi-round chain on the scale of RESPONSE (3 rounds). Closure unblocks the mapping-id resolver on the registry so non-zero `wireexpr.id` Pushes route through resolved-base + suffix concatenation.",
+        "Symmetric dispatch for Reply / Err — R99 routes Push only. A future round adds the symmetric `Response` arm (`NetworkMessage::Response.body` peek-byte dispatches to reply / err; reply itself wraps a push_body so the keyexpr matching could pass through). Kind-filtered subscriptions (publish-only vs reply-also-accepted) are the textbook way to surface the new dispatch path."
+      ],
+      "publishable_decision_summary": "R99 wires the R98 SubscriberRegistry into drive_session_until_terminal — closes R98 carry #1 with an in-place dispatch_iteration_event adapter and an end-to-end integration test exercising the full AP MVP path: link bytes → Frame → parse_frame_payload → NetworkMessage::Push → registry → callback.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/pubsub.rs: new method `SubscriberRegistry::dispatch_iteration_event(&mut self, IterationEvent<'_>)` extracts `FramePayload.messages` from `IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. })` and routes each record through `dispatch`. Non-FramePayload poll outcomes and Lease branch events are no-ops. The method keeps the integration site free of the `if let Poll(FramePayload { … })` matcher boilerplate.",
+        "Doc comment cross-references `drive_session_until_terminal` and explains the observer-shaped consumption pattern so future callers can pick it up without reading the test.",
+        "crates/wz-runtime-tokio/tests/session_fsm_drive_session.rs: new test `r99_subscriber_registry_routes_framepayload_push_to_callback` constructs a Push wire (header N=1, inline `keyexpr.suffix = \"demo/topic\"`, default msg_put body), wraps in a Frame envelope (T_MID_FRAME|R, sn=1 VLE), drives `drive_session_until_terminal` with an observer closure that calls `registry.dispatch_iteration_event(ev)` through an `Arc<Mutex<SubscriberRegistry>>`, then asserts the registered callback fired exactly once.",
+        "Test uses `Arc<Mutex<SubscriberRegistry>>` to model the realistic production sharing pattern — the registry is owned across the drive task AND the application-side handle that wants to register / unregister concurrently."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test session_fsm_drive_session r99_subscriber: 1 passed (round-trip Push wire → callback fired exactly once).",
+        "scripts/run-ci.sh all 5 lanes pass: Layer A (validate-workspace), Layer B (verify-codegen), Layer C1 (cargo test), Layer C2 (cargo clippy -D warnings), Layer D (deploy yaml schema). Clippy clean first try.",
+        "Workspace tests: 133 → 134 (+1 = R99 integration test).",
+        "atomic ledger entries: 111 → 112 (this Round 99 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "Existing R83 / R98 tests stay green — the new `dispatch_iteration_event` adapter is additive; no existing observer signatures or registry methods were modified."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "AP MVP demo wire-up — R98 + R99 together cover the publisher → subscriber callback path in isolation (unit + integration tests). The next step is a runnable Linux + tokio binary that opens a real TCP session against a zenoh-pico peer, registers a subscriber for a known keyexpr, and asserts the callback fires when the peer publishes. Estimate 2-3 rounds (binary scaffolding + zenoh-pico peer fixture + golden-path assertion).",
+        "Wildcard keyexpr matching — R98/R99 registry is literal-only. Zenoh's keyexpr language supports `*` (single-chunk) / `**` (multi-chunk) / `$*` (substring) per upstream `_z_keyexpr_intersect_*`. A wildcard-aware matcher is a follow-up quality round once the basic literal-match demo is validated against zenoh-pico.",
+        "DECLARE codec (0x1E) — 9 declaration sub-types per zenoh-pico declarations.c, multi-round chain on the scale of RESPONSE (3 rounds). Closure unblocks the mapping-id resolver on the registry so non-zero `wireexpr.id` Pushes route through resolved-base + suffix concatenation.",
+        "Symmetric dispatch for Reply / Err — R99 routes Push only. A future round adds the symmetric `Response` arm (`NetworkMessage::Response.body` peek-byte dispatches to reply / err; reply itself wraps a push_body so the keyexpr matching could pass through). Kind-filtered subscriptions (publish-only vs reply-also-accepted) are the textbook way to surface the new dispatch path."
+      ]
     }
   },
   "inventory_entries": {},

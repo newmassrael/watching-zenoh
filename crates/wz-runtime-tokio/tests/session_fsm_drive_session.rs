@@ -421,6 +421,89 @@ async fn r83_observer_reads_framepayload_messages_through_reference() {
     );
 }
 
+// ── R99: pub/sub registry integration — Push wire arrives over the
+//        link, drive_session_until_terminal observer adapter routes
+//        the FramePayload.messages batch through
+//        SubscriberRegistry::dispatch_iteration_event, the registered
+//        callback fires with the inline keyexpr suffix that matches
+//        its filter. End-to-end coverage of the AP MVP path:
+//          link bytes → parse_inbound → Frame → parse_frame_payload
+//          → NetworkMessage::Push → SubscriberRegistry → callback.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r99_subscriber_registry_routes_framepayload_push_to_callback() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wz_codecs::push::Push;
+    use wz_codecs::wireexpr::Wireexpr;
+    use wz_runtime_tokio::pubsub::SubscriberRegistry;
+
+    let (actions, mut engine) = fresh_setup();
+    engine.process_event(E::OutboundStart);
+
+    // Build a Push with an inline keyexpr suffix "demo/topic". The
+    // N flag (bit 5 = 0x20) signals the wireexpr's `parent.N`-gated
+    // suffix is present; the inner body variant defaults to MsgPut
+    // per R88 variant-default-uniformity so the encoded wire shape
+    // is header(1) + wireexpr.id VLE(1) + suffix_len VLE(1) +
+    // suffix("demo/topic", 10 bytes) + msg_put header(1) +
+    // msg_put.payload_len VLE(1) = 15 bytes.
+    let keyexpr_literal = "demo/topic";
+    let push = Push {
+        header: 0x1D | 0x20,
+        keyexpr: Wireexpr {
+            id: 0,
+            suffix_len: Some(keyexpr_literal.len() as u64),
+            suffix: Some(keyexpr_literal.into()),
+        },
+        ..Push::default()
+    };
+    let push_bytes = push.encode();
+    // Frame envelope: T_MID_FRAME | R = 0x25, sn=1 VLE (0x01), tail = push_bytes.
+    let mut frame_wire = vec![0x25, 0x01];
+    frame_wire.extend_from_slice(&push_bytes);
+
+    let mut driver = QueueDriver::with(vec![
+        LinkEvent::Rx(RxFrame { bytes: frame_wire }),
+        LinkEvent::Lost {
+            cause: LostCause::PeerClosed,
+        },
+    ]);
+
+    // SubscriberRegistry shared with the observer closure. Arc<Mutex>
+    // mirrors a production callsite where the registry is held by
+    // both the drive_session task and an application-side handle
+    // that wants to register / unregister concurrently.
+    let registry = Arc::new(Mutex::new(SubscriberRegistry::new()));
+    let hit_count = Arc::new(AtomicUsize::new(0));
+    let hit_count_for_callback = hit_count.clone();
+    registry
+        .lock()
+        .unwrap()
+        .register(keyexpr_literal, move |_push| {
+            hit_count_for_callback.fetch_add(1, Ordering::SeqCst);
+        });
+
+    let registry_for_observer = registry.clone();
+    let _ = drive_session_until_terminal(
+        &mut driver,
+        &actions,
+        &mut engine,
+        Some(5),
+        |ev| {
+            registry_for_observer
+                .lock()
+                .unwrap()
+                .dispatch_iteration_event(ev);
+        },
+    )
+    .await;
+
+    assert_eq!(
+        hit_count.load(Ordering::SeqCst),
+        1,
+        "subscriber callback fires exactly once for the matching keyexpr"
+    );
+}
+
 // ── R83 Scenario C: observer fires on the Lease branch too — short
 //                    lease + hanging driver + recent stamp ensures
 //                    the sleep arm wins

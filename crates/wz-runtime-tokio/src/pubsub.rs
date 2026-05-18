@@ -43,7 +43,7 @@
 
 use wz_codecs::push::Push;
 
-use crate::session_glue::NetworkMessage;
+use crate::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
 
 /// Boxed callback invoked when a Push message's keyexpr matches a
 /// registered subscriber. See module-level docs for the lifetime and
@@ -139,6 +139,24 @@ impl SubscriberRegistry {
     /// Whether the registry holds any subscriber.
     pub fn is_empty(&self) -> bool {
         self.subscribers.is_empty()
+    }
+
+    /// Route an `IterationEvent` produced by
+    /// [`drive_session_until_terminal`](crate::session_glue::drive_session_until_terminal)
+    /// to matching subscriber callbacks. The adapter pulls
+    /// `FramePayload.messages` out of `IterationEvent::Poll` and
+    /// dispatches each record via [`dispatch`](Self::dispatch);
+    /// `Lease` events and non-FramePayload poll outcomes are
+    /// no-ops. Callers use this as the registry's observer
+    /// callback so they need not hand-write the
+    /// `if let Poll(FramePayload { messages, .. })` matcher at the
+    /// integration site.
+    pub fn dispatch_iteration_event(&mut self, event: IterationEvent<'_>) {
+        if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
+            for message in messages {
+                self.dispatch(message);
+            }
+        }
     }
 
     /// Route a decoded `NetworkMessage` to matching subscriber
