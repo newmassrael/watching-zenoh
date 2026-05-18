@@ -3977,6 +3977,64 @@
         "Phase W wz-runtime-lwip — still queued; MCU cross-compile + real lwIP API + RX-pool + listener-link + target-plugin. Largest remaining work item."
       ]
     },
+    "Round 110e": {
+      "decision_summary": "R110e closes the DECLARE chain and the application-layer codec catalog at 7/7 envelope MIDs with a Layer 3 byte-equivalence test against zenoh-pico's `_z_declare_encode`. The post-R90 wire-interop debt that started at 0/5 envelopes (when R101 opened the rollout) is now fully retired across all application-layer routing envelopes.",
+      "changes_bullets": [
+        "crates/zenoh-pico-sys/build.rs allowlist: `_z_n_msg_declare_t` + `_z_declare_encode` appended with the 2-patch fixture rationale in the allowlist comment.",
+        "crates/wz-integration-tests/tests/layer3_declare.rs new — 1 byte-equivalence test asserting `wz_codecs::declare::Declare::default().encode() == _z_declare_encode(default _z_n_msg_declare_t with 2 field patches)`. Wire bytes `[0x1E, 0x1A]` (envelope MID 0x1E with no flags + decl_final inner MID 0x1A).",
+        "Two-patch fixture: (1) `_ext_qos._val = 5` matches `_Z_N_QOS_DEFAULT._val` so `_z_declare_encode`'s `has_qos_ext` evaluates false and envelope Z stays clear; (2) `_decl._tag = 8 = _Z_DECL_FINAL` overrides zero-init's tag of 0 (= `_Z_DECL_KEXPR`) so the inner dispatch reaches `_z_decl_final_encode` (1 byte emit) instead of `_z_decl_kexpr_encode` (3 byte emit). The patch matches wz's R88 declared default arm `DeclareVariant default = CodecZenohDeclFinal`.",
+        "Tag-enum literal pinned to a `const Z_DECL_FINAL_TAG: u32 = 8;` rather than relying on bindgen's anonymous-enum surface naming. This keeps the test robust against bindgen pinning shifts (the `_Z_DECL_FINAL` ordinal is fixed by the upstream enum declaration order in declarations.h:97).",
+        "Codec catalog status at R110e close: authoring axis 7/7 envelope MIDs + 9/9 DECLARE sub-MIDs; wire-interop axis 7/7 envelope MIDs (push R102 / oam R103 / interest R104 / response R105 / response_final R101 / request R108b / declare R110e). The post-R90 wire-interop debt opened by R101 is fully retired."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_declare: 1 passed on first try after the 2-patch fixture — R94-style codegen+wire empirical verify confirmed the analysis before relying on the byte literals.",
+        "cargo test --workspace: 150 tests pass (149 → 150: +1 layer3_declare integration test). Bindgen doc-test count unchanged because both new symbols' rustdoc lines fall outside the auto-generated example carve-out.",
+        "scripts/run-ci.sh: all 5 lanes (A/B/C1/C2/D) pass.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 127 → 128, sections=214, GENERATED.md=sync.",
+        "R110 chain closure tally: R110a envelope + decl_final, R110b decl_kexpr + undecl_kexpr, R110c decl_subscriber/queryable/token, R110d undecl_subscriber/queryable/token, R110e Layer 3. Five sub-rounds, one chain, no carry leak between sub-rounds (each one landed with its own atomic entry + commit + CI green)."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "carry_forward_bullets": [
+        "Latent spec-correctness audit script — grep every wz envelope codec's `<sce:flag name=\"mid\">` for missing `value=` (R108a defect surfaced this gap). Now that the codec catalog is at full 7/7 authoring + 9/9 sub-MIDs, the audit script has a complete target set and can be a 1-round hardening that turns the rule into a build-time check (sce-build T-rule or repo-side bash gate).",
+        "Non-default Layer 3 coverage — PUSH N-suffix wireexpr, OAM ZINT/ZBUF arms, INTEREST R=1 non-final, RESPONSE err arm, REQUEST PUT/DEL inner tag, DECLARE non-final sub-MID dispatch + N=1 suffix + Z=1 ext-keyexpr forms. Quality-axis bucket; revisit when a consumer surfaces, not blocking.",
+        "AP MVP demo binary — Linux + tokio binary against zenoh-pico peer. Now the user-visible critical path with no codec-side or wire-interop preconditions left; 2-3 rounds (TCP scaffolding + peer fixture + golden-path assertion).",
+        "R67-R71 series — inbound parser (R68) / Hal time-mock (R69) / wz-runtime-tokio-test-support split (R71). Still queued per project_hybrid_adoption_plan.md; sequencing decision pending against the AP MVP demo carry.",
+        "Phase W wz-runtime-lwip reintroduction — MCU cross-compile + real lwIP API + RX-pool + listener-link sibling-pair + target-plugin. Largest remaining work item, 10+ rounds.",
+        "Memory observations from R106-R110e auto-run (for future feedback files): (a) carry chain closure (R102/R104/R105/R106 → closed by R107) reduces accumulated debt risk; (b) paired land of codec + Layer 3 fixture in same round prevents the 8-round wz-side self-consistency-but-no-wire-interop trap that motivated R101; (c) sub-round split with named carry preserves textbook scope even when the parent task spans multiple rounds (R110a/b/c/d/e); (d) codegen emit inspect is a strict prerequisite to relying on any new R88-baked default — R108a's latent defect was discovered by exactly this check."
+      ],
+      "publishable_decision_summary": "R110e closes the DECLARE chain and the application-layer codec catalog at 7/7 envelope MIDs with a Layer 3 byte-equivalence test against zenoh-pico's `_z_declare_encode`. The post-R90 wire-interop debt that started at 0/5 envelopes (when R101 opened the rollout) is now fully retired across all application-layer routing envelopes.",
+      "publishable_changes_bullets": [
+        "crates/zenoh-pico-sys/build.rs allowlist: `_z_n_msg_declare_t` + `_z_declare_encode` appended with the 2-patch fixture rationale in the allowlist comment.",
+        "crates/wz-integration-tests/tests/layer3_declare.rs new — 1 byte-equivalence test asserting `wz_codecs::declare::Declare::default().encode() == _z_declare_encode(default _z_n_msg_declare_t with 2 field patches)`. Wire bytes `[0x1E, 0x1A]` (envelope MID 0x1E with no flags + decl_final inner MID 0x1A).",
+        "Two-patch fixture: (1) `_ext_qos._val = 5` matches `_Z_N_QOS_DEFAULT._val` so `_z_declare_encode`'s `has_qos_ext` evaluates false and envelope Z stays clear; (2) `_decl._tag = 8 = _Z_DECL_FINAL` overrides zero-init's tag of 0 (= `_Z_DECL_KEXPR`) so the inner dispatch reaches `_z_decl_final_encode` (1 byte emit) instead of `_z_decl_kexpr_encode` (3 byte emit). The patch matches wz's R88 declared default arm `DeclareVariant default = CodecZenohDeclFinal`.",
+        "Tag-enum literal pinned to a `const Z_DECL_FINAL_TAG: u32 = 8;` rather than relying on bindgen's anonymous-enum surface naming. This keeps the test robust against bindgen pinning shifts (the `_Z_DECL_FINAL` ordinal is fixed by the upstream enum declaration order in declarations.h:97).",
+        "Codec catalog status at R110e close: authoring axis 7/7 envelope MIDs + 9/9 DECLARE sub-MIDs; wire-interop axis 7/7 envelope MIDs (push R102 / oam R103 / interest R104 / response R105 / response_final R101 / request R108b / declare R110e). The post-R90 wire-interop debt opened by R101 is fully retired."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_declare: 1 passed on first try after the 2-patch fixture — R94-style codegen+wire empirical verify confirmed the analysis before relying on the byte literals.",
+        "cargo test --workspace: 150 tests pass (149 → 150: +1 layer3_declare integration test). Bindgen doc-test count unchanged because both new symbols' rustdoc lines fall outside the auto-generated example carve-out.",
+        "scripts/run-ci.sh: all 5 lanes (A/B/C1/C2/D) pass.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 127 → 128, sections=214, GENERATED.md=sync.",
+        "R110 chain closure tally: R110a envelope + decl_final, R110b decl_kexpr + undecl_kexpr, R110c decl_subscriber/queryable/token, R110d undecl_subscriber/queryable/token, R110e Layer 3. Five sub-rounds, one chain, no carry leak between sub-rounds (each one landed with its own atomic entry + commit + CI green)."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Latent spec-correctness audit script — grep every wz envelope codec's `<sce:flag name=\"mid\">` for missing `value=` (R108a defect surfaced this gap). Now that the codec catalog is at full 7/7 authoring + 9/9 sub-MIDs, the audit script has a complete target set and can be a 1-round hardening that turns the rule into a build-time check (sce-build T-rule or repo-side bash gate).",
+        "Non-default Layer 3 coverage — PUSH N-suffix wireexpr, OAM ZINT/ZBUF arms, INTEREST R=1 non-final, RESPONSE err arm, REQUEST PUT/DEL inner tag, DECLARE non-final sub-MID dispatch + N=1 suffix + Z=1 ext-keyexpr forms. Quality-axis bucket; revisit when a consumer surfaces, not blocking.",
+        "AP MVP demo binary — Linux + tokio binary against zenoh-pico peer. Now the user-visible critical path with no codec-side or wire-interop preconditions left; 2-3 rounds (TCP scaffolding + peer fixture + golden-path assertion).",
+        "R67-R71 series — inbound parser (R68) / Hal time-mock (R69) / wz-runtime-tokio-test-support split (R71). Still queued per project_hybrid_adoption_plan.md; sequencing decision pending against the AP MVP demo carry.",
+        "Phase W wz-runtime-lwip reintroduction — MCU cross-compile + real lwIP API + RX-pool + listener-link sibling-pair + target-plugin. Largest remaining work item, 10+ rounds.",
+        "Memory observations from R106-R110e auto-run (for future feedback files): (a) carry chain closure (R102/R104/R105/R106 → closed by R107) reduces accumulated debt risk; (b) paired land of codec + Layer 3 fixture in same round prevents the 8-round wz-side self-consistency-but-no-wire-interop trap that motivated R101; (c) sub-round split with named carry preserves textbook scope even when the parent task spans multiple rounds (R110a/b/c/d/e); (d) codegen emit inspect is a strict prerequisite to relying on any new R88-baked default — R108a's latent defect was discovered by exactly this check."
+      ]
+    },
     "Round 12": {
       "decision_summary": "Dual-license adoption — LGPL-3.0-or-later (Free, anti-tivo included) OR watching-zenoh Commercial (Qt-style 5-way exemption, $5000 individual cumulative)",
       "changes_bullets": [

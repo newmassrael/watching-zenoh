@@ -259,6 +259,19 @@ fn main() {
         // is gone; R105 fixture now uses 3 patches.
         .allowlist_type("_z_n_msg_response_t")
         .allowlist_function("_z_response_encode")
+        // R110e — DECLARE envelope Layer 3 byte-compare. Closes the
+        // application-layer codec catalog wire-interop axis at 7/7
+        // MIDs (DECLARE was the last unmodeled envelope). Default-
+        // state fixture is 2-patch: (1) `_ext_qos._val = 5` matches
+        // `_Z_N_QOS_DEFAULT` so `_z_declare_encode`'s qos-needed
+        // check evaluates false and Z stays clear; (2)
+        // `_decl._tag = 8 = _Z_DECL_FINAL` overrides the zero-init
+        // tag of 0 (= _Z_DECL_KEXPR) so the inner declaration is
+        // dispatched to `_z_decl_final_encode` — matching wz
+        // Declare's R88 declared default arm `DeclFinal`. Wire:
+        // `[0x1E, 0x1A]`.
+        .allowlist_type("_z_n_msg_declare_t")
+        .allowlist_function("_z_declare_encode")
         // R108b — REQUEST envelope Layer 3 byte-compare. Closes the
         // wire-interop debt on the last application-layer envelope
         // that has zenoh-pico parity. R108a fixed the latent
