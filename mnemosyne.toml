@@ -65,3 +65,15 @@ locale = "en"
 # atomic store outlives the markdown carrier doc, which is exactly
 # the audit-trail genre's intent. No [[orphan_ledger]] entries are
 # needed; Round 7 changelog entry alone documents the scope shift.
+
+# Round 296 publishable_override_ledger — registers post-hoc
+# publishable-half mutations so the audit/publishable divergence
+# check accepts them. Each row pins a single changelog_entry's
+# current publishable_hash with an audit-traceable reason.
+
+[[publishable_override_ledger]]
+kind = "redaction"
+target_id = "Round 121a"
+reason = "Audit half kept minimal because the MCP append_changelog_entry_v2 call failed to deserialize the original rich payload (suspected arg-length / multi-byte handling at the publish boundary); publishable half populated via R295 set_changelog_publishable_* primitives to preserve the full R121a record."
+applied_in = "R121a in-flight (sidecar override + re-append per CLAUDE.md anti-pattern #8 carve-out)"
+content_hash_after = "dd94c34f95fb869d7cf41a32a96fe0a13e84eeeb0bbdbff20a42747f8f44e79b"

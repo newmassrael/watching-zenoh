@@ -32,6 +32,7 @@ members = [
     "wz-integration-tests",
     "wz-runtime-tokio",
     "wz-runtime-tokio-test-support",
+    "wz-ap-demo",
     # wz-runtime-lwip removed at R63 — the R53 NOP-stub skeleton was
     # not production-honest and the R58 doc-only reframe ("Phase W
     # deferred skeleton") was a document-around-the-hack pattern.
@@ -40,6 +41,12 @@ members = [
     # C11 emitter end-to-end validation that the deleted crate
     # proved is preserved as a Layer-3-style test in
     # wz-integration-tests/tests/link_emitter_b6.rs.
+    #
+    # wz-ap-demo added at R121a — first non-library deploy artifact
+    # (AP MVP demo binary; Phase D.1). The rest of the workspace
+    # remains library crates. See crates/wz-ap-demo/Cargo.toml for
+    # the round rollout (R121a skeleton → R121b functional → R121c
+    # integration test + CI Layer E).
 ]
 
 [workspace.package]
