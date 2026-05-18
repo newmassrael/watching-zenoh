@@ -179,6 +179,18 @@ pub mod decl_token {
     include!(concat!(env!("OUT_DIR"), "/decl_token.rs"));
 }
 
+pub mod undecl_subscriber {
+    include!(concat!(env!("OUT_DIR"), "/undecl_subscriber.rs"));
+}
+
+pub mod undecl_queryable {
+    include!(concat!(env!("OUT_DIR"), "/undecl_queryable.rs"));
+}
+
+pub mod undecl_token {
+    include!(concat!(env!("OUT_DIR"), "/undecl_token.rs"));
+}
+
 pub mod declare {
     include!(concat!(env!("OUT_DIR"), "/declare.rs"));
 }
