@@ -91,3 +91,10 @@ target_id = "Round 123"
 reason = "Audit half intentionally minimal per R295/R296 textbook split: this round is the deploy-yaml landing half of a 2-phase R123/R123b sequence (R123 = overlay schema in deploy yamls; R123b = wz-codecs build.rs consume + SCXML default removal). The audit half records the landing fact only; the publishable half carries the 3-deploy edit detail + R123b precondition list + R124-R126 Atomic B sequence."
 applied_in = "R123 in-flight"
 content_hash_after = "ebdc450f5626143d8c1ff54dd8c8028888dd09a58cf350325424e046d6264bd9"
+
+[[publishable_override_ledger]]
+kind = "redaction"
+target_id = "Round 124"
+reason = "Audit half intentionally minimal per R295/R296 textbook split: signal-only round (no wz code mutation), SCE-bound report body delivered to user for upstream relay. The audit half records the signal-drafted fact; the publishable half carries the zenoh-pico spec evidence trail (network.h flag definitions + network.c runtime is_local semantics) and the 3-option decision matrix (flag_defaults overlay vs runtime primitive vs status quo) that shapes the SCE response."
+applied_in = "R124 in-flight"
+content_hash_after = "66d577a7b6b96d3a4e99f6010f1d47c0809a28483ea373871e5f9f2a370637fc"

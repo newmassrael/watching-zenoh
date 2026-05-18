@@ -4782,6 +4782,52 @@
         "R126 (post-Atomic B merge): vendor pin bump + clean removal of audit-trace block."
       ]
     },
+    "Round 124": {
+      "decision_summary": "R124 header.M default=1 signal report drafted for SCE upstream.",
+      "changes_bullets": [
+        "atomic ledger only; report body delivered to user for SCE relay.",
+        "No code mutation in wz this round."
+      ],
+      "verification_bullets": [
+        "zenoh-pico spec confirmed: _Z_FLAG_N_{PUSH,REQUEST,RESPONSE}_M = 0x40 bit 6.",
+        "zenoh-pico network.c: M flag is runtime wireexpr_is_local check.",
+        "wz R106 bake = MVP simplification assuming always-local wireexpr."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "Awaiting SCE ack on flag_defaults overlay extension vs runtime check primitive.",
+        "R125 Atomic B preflight: depends on R124 SCE decision shape.",
+        "R123b independent of R124 — can land in parallel."
+      ],
+      "publishable_decision_summary": "R124 header.M default=1 signal report drafted for SCE upstream.",
+      "publishable_changes_bullets": [
+        "atomic ledger entry only; SCE-bound report body delivered to user.",
+        "User relays the report to SCE upstream issue tracker.",
+        "No code mutation in wz this round (signal-only).",
+        "Response from SCE shapes R125 Atomic B preflight + R123b independence."
+      ],
+      "publishable_verification_bullets": [
+        "zenoh-pico network.h L64/71/78: _Z_FLAG_N_{PUSH,REQUEST,RESPONSE}_M = 0x40 bit 6.",
+        "zenoh-pico network.c L42 (push) + L116 (request): runtime is_local check.",
+        "zenoh-pico network.c L243+: response M flag set in current branch context.",
+        "wz request.scxml header confirms R106 bake = MVP simplification.",
+        "wz Layer 3 fixtures use local-form wireexpr (id only, no suffix)."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Awaiting SCE ack: option A (flag_defaults overlay) vs B (runtime primitive) vs C (status quo).",
+        "R125 Atomic B preflight depends on R124 SCE decision shape.",
+        "R123b independent of R124 — can land in parallel without SCE response.",
+        "If SCE picks A (flag_defaults overlay) — wz adds new overlay block to 3 deploys.",
+        "If SCE picks B (runtime primitive) — wz drops R106 SCXML bakes + relies on codegen.",
+        "If SCE picks C (status quo) — wz keeps R106 SCXML bakes as audit-traced consumer convention.",
+        "MVP-stage assumption: wz always uses local-form wireexpr (id only) per Layer 3 fixtures."
+      ]
+    },
     "Round 13": {
       "decision_summary": "sources/ skeleton lands via README (SPDX header double-block + 7-subdir lazy materialize per ARCH §428) + first author-side SCXML sources/algorithms/crc16_ccitt.scxml body-identical to SCE fixture; 6-backend byte-golden verify carried to R14 SCE submodule infrastructure (pin 1473f99f origin/main).",
       "changes_bullets": [
