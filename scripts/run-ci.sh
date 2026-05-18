@@ -306,22 +306,31 @@ layer_e_ap_demo_round_trip() {
         echo "Layer E SKIP (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
         return 0
     fi
-    # R121e + R121f: bundle the integration tests into a single
-    # cargo invocation so the compilation/link step runs once and
-    # the lane timing stays predictable. `--test` accepts multiple
-    # binary names. Three tests cover the role-direction matrix:
-    #   ap_demo_round_trip       — wz acceptor + zenoh-pico initiator
-    #   wz_publisher_to_zsub     — wz acceptor + publisher → zenoh-pico
-    #   wz_initiator_to_wz_acceptor — wz initiator + publisher → wz
-    # The fourth cell (wz initiator → zenoh-pico peer-mode listener)
-    # is a known-incompatible carry — zenoh-pico 1.5.0 peer-mode
-    # listen accepts TCP but does not respond to Client-whatami
-    # InitSyn; needs a Zenoh router binary or zenoh-pico patch
-    # to validate the foreign-interop side (R121f1 / R121g carry).
+    # R121e + R121f + R121f1: bundle the integration tests into a
+    # single cargo invocation so the compilation/link step runs once
+    # and the lane timing stays predictable. `--test` accepts multiple
+    # binary names. Four tests cover the full 2×2 role × direction
+    # foreign-interop matrix that defines AP MVP pubsub completeness:
+    #   ap_demo_round_trip          — wz acceptor + sub vs z_put
+    #   wz_publisher_to_zsub        — wz acceptor + pub vs z_sub
+    #   wz_initiator_to_wz_acceptor — wz initiator + pub vs wz
+    #   wz_initiator_to_zsub        — wz initiator + pub vs z_sub
+    #                                 (peer-listen) — closed by R121f1
+    #                                 after fixing the patch-extension
+    #                                 default in `SessionLinkActions`.
+    # The R121f authoring snapshot's "zenoh-pico peer-listen does not
+    # respond" carry was mis-diagnosis; R121f1 walked the actual wire
+    # bytes via strace + ZENOH_DEBUG=3 and traced the close to a
+    # stale-Z-flag inconsistency in zenoh-pico's
+    # `_z_t_msg_make_init_ack` + size-negotiation cap interaction
+    # (transport.c:165-193 + transport.c:237-241). Sending the
+    # wire-spec-mandatory patch extension from the wz side restores
+    # symmetry — see `default_init_patch_ext_entry`.
     (cd crates && cargo test -p wz-integration-tests \
         --test ap_demo_round_trip \
         --test wz_publisher_to_zsub \
         --test wz_initiator_to_wz_acceptor \
+        --test wz_initiator_to_zsub \
         --quiet)
 }
 

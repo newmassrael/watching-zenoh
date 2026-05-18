@@ -160,9 +160,13 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     let init_cbyte = expected_init_cbyte(params.whatami, params.zid.len());
     let init_sn_res = expected_sn_res(params.seq_num_res, params.req_id_res);
 
-    // InitSyn — flags=S only, no cookie. Wire =
-    //   [header_byte] || version || cbyte || zid || sn_res || batch_size(le)
-    let init_syn_flags = 0x40u8; // FLAG_T_INIT_S
+    // InitSyn — flags=S|Z (R121f1 default ext chain seeds the patch
+    // extension entry per zenoh-pico's `Z_FEATURE_FRAGMENTATION=1`
+    // size-negotiation invariant; see `default_init_patch_ext_entry`
+    // for the wire-spec citation). Wire =
+    //   [header_byte] || version || cbyte || zid || sn_res ||
+    //   batch_size(le) || patch_ext_header || patch_ext_value(VLE)
+    let init_syn_flags = 0x40u8 | 0x80u8; // FLAG_T_INIT_S | FLAG_T_Z
     let mut expected_init_syn = Vec::new();
     expected_init_syn.push(init_syn_flags | 0x01 /* T_MID_INIT */);
     expected_init_syn.push(params.version);
@@ -173,6 +177,13 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     // (init_body.rs emits low byte then `(_v >> 8) as u8`).
     expected_init_syn.push((params.batch_size & 0xFF) as u8);
     expected_init_syn.push((params.batch_size >> 8) as u8);
+    // R121f1 — patch extension entry. Header byte
+    // `_Z_MSG_EXT_ID_INIT_PATCH = 0x07 | _Z_MSG_EXT_ENC_ZINT = 0x27`;
+    // body = VLE(`_Z_CURRENT_PATCH = 1`) = single byte 0x01. Last
+    // entry of a single-entry chain, so the Z bit on the ext header
+    // is cleared by `encode_ext_chain` (chain terminator).
+    expected_init_syn.push(0x07 | 0x20 /* INIT_PATCH | ENC_ZINT */);
+    expected_init_syn.push(0x01 /* VLE(_Z_CURRENT_PATCH) */);
     assert_eq!(
         snap.sends[0].0, expected_init_syn,
         "send_init_syn wire bytes drift",
@@ -198,14 +209,25 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     let expected_close = vec![close_flags | 0x03 /* T_MID_CLOSE */, 0x00 /* reason */];
     assert_eq!(snap.sends[2].0, expected_close, "Close wire bytes drift");
 
-    // InitAck — flags=S|A, includes cookie.
-    let init_ack_flags = 0x40u8 | 0x20u8; // S | A
+    // InitAck — flags=S|A|Z, includes cookie (R121f1 default ext
+    // chain seeds the patch-extension entry mirroring zenoh-pico's
+    // size-negotiation invariant; see `default_init_patch_ext_entry`).
+    let init_ack_flags = 0x40u8 | 0x20u8 | 0x80u8; // S | A | Z
     let init_ack = &snap.sends[3].0;
     assert_eq!(init_ack[0], init_ack_flags | 0x01 /* T_MID_INIT */);
     assert!(
         init_ack.windows(params.cookie.len())
             .any(|w| w == params.cookie.as_slice()),
         "InitAck body must contain the cookie payload"
+    );
+    // R121f1 — patch-ext entry trails the cookie field. Last two
+    // bytes of the InitAck wire = [0x27 (INIT_PATCH | ENC_ZINT),
+    //                              0x01 (VLE _Z_CURRENT_PATCH)].
+    let init_ack_tail = &init_ack[init_ack.len() - 2..];
+    assert_eq!(
+        init_ack_tail,
+        &[0x27u8, 0x01u8],
+        "InitAck must terminate with the default patch-ext entry"
     );
 
     // OpenAck — flags=T|A, no cookie.

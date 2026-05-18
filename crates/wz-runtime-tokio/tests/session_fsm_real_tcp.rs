@@ -101,11 +101,15 @@ async fn r60_fsm_drives_real_tcp_loopback() {
     peer.read_exact(&mut payload).await.expect("read payload");
 
     // The first byte is the transport-message header: high flag
-    // bits (S | A | Z) | low 5 bits (T_MID). InitSyn uses
-    // FLAG_T_INIT_S only (0x40) plus T_MID_INIT (0x01) = 0x41.
+    // bits (S | A | Z) | low 5 bits (T_MID). R121f1 — the
+    // `SessionLinkActions::new` default ext chain seeds the
+    // wire-spec-mandatory patch extension for foreign-interop with
+    // zenoh-pico's `Z_FEATURE_FRAGMENTATION=1` size negotiation, so
+    // the InitSyn header now carries `FLAG_T_Z (0x80)` in addition
+    // to `FLAG_T_INIT_S (0x40)` and `T_MID_INIT (0x01)` = 0xC1.
     assert_eq!(
-        payload[0], 0x41,
-        "first wire byte must be FLAG_T_INIT_S | T_MID_INIT"
+        payload[0], 0xC1,
+        "first wire byte must be FLAG_T_Z | FLAG_T_INIT_S | T_MID_INIT"
     );
 
     // The next byte is the `fixture_session_init_params` version

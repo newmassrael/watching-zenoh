@@ -189,7 +189,7 @@ fn encode_init_with_ext_chain_byte_equiv_to_pico() {
 }
 
 #[test]
-fn encode_init_without_ext_chain_omits_z_flag_and_trailing_bytes() {
+fn encode_init_with_explicit_empty_chain_omits_z_flag_and_trailing_bytes() {
     let parent_flags = FLAG_T_INIT_S | FLAG_T_INIT_A;
     let mut expected = Vec::new();
     expected.push(parent_flags | T_MID_INIT);
@@ -197,12 +197,16 @@ fn encode_init_without_ext_chain_omits_z_flag_and_trailing_bytes() {
 
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
     let actions = SessionLinkActions::new(driver, fixture_session_init_params());
-    // No set_ext_chain — slot stays empty.
+    // R121f1 — `SessionLinkActions::new` now seeds the Init ext chains
+    // with the wire-spec-mandatory patch entry; this test re-asserts
+    // the encoder's "empty chain → no Z flag + no trailing bytes"
+    // contract by explicitly clearing the slot first.
+    actions.set_ext_chain(ExtChainRole::InitAck, Vec::new());
 
     let actual = actions.encode_init_with_role(/*is_ack=*/ true, /*cookie_override=*/ None, ExtChainRole::InitAck);
     assert_eq!(
         actual, expected,
-        "empty-chain wire must omit Z flag + trailing bytes"
+        "explicitly-empty chain wire must omit Z flag + trailing bytes"
     );
     assert_eq!(actual[0] & FLAG_T_Z, 0, "Z flag must be clear");
 }
@@ -210,8 +214,12 @@ fn encode_init_without_ext_chain_omits_z_flag_and_trailing_bytes() {
 #[test]
 fn ext_chain_role_isolation() {
     // Setting InitSyn chain must not bleed into InitAck encode.
+    // R121f1 — clear both default Init ext chains first so the
+    // post-set state isolates exactly one role's override.
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
     let actions = SessionLinkActions::new(driver, fixture_session_init_params());
+    actions.set_ext_chain(ExtChainRole::InitSyn, Vec::new());
+    actions.set_ext_chain(ExtChainRole::InitAck, Vec::new());
     actions.set_ext_chain(ExtChainRole::InitSyn, wz_oracle_chain());
 
     let init_ack_wire =
@@ -221,4 +229,45 @@ fn ext_chain_role_isolation() {
     let init_syn_wire =
         actions.encode_init_with_role(/*is_ack=*/ false, /*cookie_override=*/ None, ExtChainRole::InitSyn);
     assert_ne!(init_syn_wire[0] & FLAG_T_Z, 0, "InitSyn role chain populates Z");
+}
+
+/// R121f1 — `SessionLinkActions::new()` seeds the Init ext chains
+/// with the wire-spec-mandatory patch extension entry
+/// (`_Z_MSG_EXT_ID_INIT_PATCH = 0x07 | _Z_MSG_EXT_ENC_ZINT = 0x27`,
+/// `body = VLE(_Z_CURRENT_PATCH = 1) = 0x01`). Without this seed,
+/// zenoh-pico's accept-side size negotiation caps `iam._patch` to
+/// `_Z_NO_PATCH = 0`, the InitAck header carries a stale `Z=1`
+/// flag with no trailing ext bytes, and the wz initiator's parser
+/// reports `NeedMoreBytes` (closure of the R121f foreign-interop
+/// carry; see `default_init_patch_ext_entry` in session_glue for
+/// the wire-spec citation).
+#[test]
+fn default_session_actions_seed_init_chains_with_patch_extension() {
+    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
+
+    let init_syn = actions.encode_init_with_role(
+        /*is_ack=*/ false, /*cookie_override=*/ None, ExtChainRole::InitSyn,
+    );
+    let init_ack = actions.encode_init_with_role(
+        /*is_ack=*/ true, /*cookie_override=*/ None, ExtChainRole::InitAck,
+    );
+
+    assert_ne!(init_syn[0] & FLAG_T_Z, 0, "default InitSyn wire must set Z");
+    assert_ne!(init_ack[0] & FLAG_T_Z, 0, "default InitAck wire must set Z");
+
+    // Last two bytes of each Init frame = [patch_ext_header,
+    // VLE(_Z_CURRENT_PATCH)] = [0x27, 0x01]. `encode_ext_chain`
+    // clears the Z bit on the single-entry chain's last entry, so
+    // the header byte is 0x27 unmodified.
+    assert_eq!(
+        &init_syn[init_syn.len() - 2..],
+        &[0x27u8, 0x01u8],
+        "default InitSyn must terminate with the patch-ext entry",
+    );
+    assert_eq!(
+        &init_ack[init_ack.len() - 2..],
+        &[0x27u8, 0x01u8],
+        "default InitAck must terminate with the patch-ext entry",
+    );
 }
