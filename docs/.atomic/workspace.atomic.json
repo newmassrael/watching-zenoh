@@ -3508,6 +3508,64 @@
         "AP MVP demo binary — Linux + tokio binary against zenoh-pico peer; 2-3 rounds."
       ]
     },
+    "Round 108a": {
+      "decision_summary": "R108a fixes a latent wire-correctness defect in request.scxml: the `mid` flag was declared without `value=` so wz Request::default()'s wire header byte was emitted as 0x40 (M flag only, no MID nibble) instead of the spec-required 0x5C (= 0x1C MID | M flag); discovered during R108 REQUEST Layer 3 wire-interop planning before the Layer 3 fixture was authored, so no published test ever consumed the broken bytes.",
+      "changes_bullets": [
+        "sources/codecs/request.scxml:91 — `<sce:flag name=\"mid\" bit=\"0\" width=\"5\"/>` → `value=\"0x1C\"` added, matching zenoh-pico's `_Z_MID_N_REQUEST = 0x1c` (definitions/network.h:36).",
+        "Defect provenance: R90 wz-side request authoring imported the SCXML structure from push.scxml / response.scxml but missed copying the mid `value=` annotation. push (0x1D) and response (0x1B) had it; request did not. No upstream test caught this because no Layer 3 wire-interop fixture for REQUEST existed yet — a wire-spec self-consistency gap the R102/R104/R105 paired-land pattern only retroactively flagged through R108 planning.",
+        "Defect detection path: planning the REQUEST Layer 3 fixture surfaced the question \"what is the expected wire first byte?\" — cross-checking codegen emit ($OUT_DIR/wz-codecs-*/out/request.rs:63 `header: 0x40u8`) against zenoh-pico's `_z_request_encode` (network.c:116 `header = _Z_MID_N_REQUEST | ...`) made the divergence immediate. Documented as the proper R94-style empirical verify path before relying on the bake.",
+        "Build emit re-inspected after the SCXML change: request.rs `impl Default::default()` now bakes `header: 0x5cu8` (= 0x1C | 0x40). R88 RFC variant-default-uniformity for the inner RequestVariant (declared default arm = Query) still picks `CodecZenohQuery(Query::default())` unchanged.",
+        "No fixture / test code touched in R108a — the Layer 3 wire-compare itself (zenoh-pico-sys allowlist expansion, fixture for the 5 ext fields, inner Query body fixture) is carry-split into R108b under feedback_partial_apply_carry."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-codecs: clean rebuild; emit inspected directly at target/debug/build/wz-codecs-*/out/request.rs:63 — header literal `0x5cu8`.",
+        "cargo test --workspace: 147 tests pass (same count as post-R106; no test currently asserts wire bytes for REQUEST so no test status changes — the silent-bug-fix profile of R108a is documented honestly in this entry rather than performing a fake test-count delta).",
+        "scripts/run-ci.sh: all 5 lanes (A/B/C1/C2/D) pass.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 120 → 121, sections=214, GENERATED.md=sync.",
+        "Round-trip integrity for Request encode → decode → re-encode within wz preserved (no test gap introduced) because the decode path matches the encode path on the same wire byte; wire-byte change is symmetric. Cross-implementation wire-compare against zenoh-pico moves to R108b."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer"
+      ],
+      "carry_forward_bullets": [
+        "R108b REQUEST Layer 3 wire-interop — zenoh-pico-sys allowlist expansion (`_z_n_msg_request_t` + `_z_request_encode`); fixture for the 5 default-state-emitted ext fields (`_z_n_msg_request_needed_exts` evaluates `ext_qos = (val != 5)` true by default — the same `_ext_qos._val = 5` patch as PUSH/RESPONSE handles it); inner-body fixture for `_Z_REQUEST_QUERY` tag (= 0, first enum variant) so the encoder reaches `_z_query_encode(wbf, &msg->_body._query)`; Query inner-body byte-equivalence against wz Query::default() (separate Query codec, additional analysis surface). 1-round closure with the layered fixture pattern from R102/R105.",
+        "Latent spec-correctness audit — R108a's defect (mid `value=` missing on REQUEST despite it being present on PUSH / RESPONSE) suggests a textbook gate: every wz envelope codec's `<sce:flag name=\"mid\">` declaration should carry an explicit `value=` matching the upstream MID, and a unit-level check (or SCE-side T-rule) should reject mid-without-value at parse time. Out of scope for R108a / R108b; recorded here for future hardening.",
+        "DECLARE codec (MID 0x1E) chain — still unmodeled. 9 sub-types, ~3 rounds.",
+        "Non-default Layer 3 coverage carry — PUSH N-suffix wireexpr, OAM ZINT/ZBUF arms, INTEREST R=1 non-final form, RESPONSE err arm. Quality-axis.",
+        "wire-spec-subset doc round — §6.2 should now record both the M=1 wz default semantic (R106 carry) AND the MID=0x1C explicit value (R108a defect closure), to prevent future authoring sessions from rediscovering the gap.",
+        "AP MVP demo binary — Linux + tokio binary, 2-3 rounds."
+      ],
+      "publishable_decision_summary": "R108a fixes a latent wire-correctness defect in request.scxml: the `mid` flag was declared without `value=` so wz Request::default()'s wire header byte was emitted as 0x40 (M flag only, no MID nibble) instead of the spec-required 0x5C (= 0x1C MID | M flag); discovered during R108 REQUEST Layer 3 wire-interop planning before the Layer 3 fixture was authored, so no published test ever consumed the broken bytes.",
+      "publishable_changes_bullets": [
+        "sources/codecs/request.scxml:91 — `<sce:flag name=\"mid\" bit=\"0\" width=\"5\"/>` → `value=\"0x1C\"` added, matching zenoh-pico's `_Z_MID_N_REQUEST = 0x1c` (definitions/network.h:36).",
+        "Defect provenance: R90 wz-side request authoring imported the SCXML structure from push.scxml / response.scxml but missed copying the mid `value=` annotation. push (0x1D) and response (0x1B) had it; request did not. No upstream test caught this because no Layer 3 wire-interop fixture for REQUEST existed yet — a wire-spec self-consistency gap the R102/R104/R105 paired-land pattern only retroactively flagged through R108 planning.",
+        "Defect detection path: planning the REQUEST Layer 3 fixture surfaced the question \"what is the expected wire first byte?\" — cross-checking codegen emit ($OUT_DIR/wz-codecs-*/out/request.rs:63 `header: 0x40u8`) against zenoh-pico's `_z_request_encode` (network.c:116 `header = _Z_MID_N_REQUEST | ...`) made the divergence immediate. Documented as the proper R94-style empirical verify path before relying on the bake.",
+        "Build emit re-inspected after the SCXML change: request.rs `impl Default::default()` now bakes `header: 0x5cu8` (= 0x1C | 0x40). R88 RFC variant-default-uniformity for the inner RequestVariant (declared default arm = Query) still picks `CodecZenohQuery(Query::default())` unchanged.",
+        "No fixture / test code touched in R108a — the Layer 3 wire-compare itself (zenoh-pico-sys allowlist expansion, fixture for the 5 ext fields, inner Query body fixture) is carry-split into R108b under feedback_partial_apply_carry."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-codecs: clean rebuild; emit inspected directly at target/debug/build/wz-codecs-*/out/request.rs:63 — header literal `0x5cu8`.",
+        "cargo test --workspace: 147 tests pass (same count as post-R106; no test currently asserts wire bytes for REQUEST so no test status changes — the silent-bug-fix profile of R108a is documented honestly in this entry rather than performing a fake test-count delta).",
+        "scripts/run-ci.sh: all 5 lanes (A/B/C1/C2/D) pass.",
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 120 → 121, sections=214, GENERATED.md=sync.",
+        "Round-trip integrity for Request encode → decode → re-encode within wz preserved (no test gap introduced) because the decode path matches the encode path on the same wire byte; wire-byte change is symmetric. Cross-implementation wire-compare against zenoh-pico moves to R108b."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R108b REQUEST Layer 3 wire-interop — zenoh-pico-sys allowlist expansion (`_z_n_msg_request_t` + `_z_request_encode`); fixture for the 5 default-state-emitted ext fields (`_z_n_msg_request_needed_exts` evaluates `ext_qos = (val != 5)` true by default — the same `_ext_qos._val = 5` patch as PUSH/RESPONSE handles it); inner-body fixture for `_Z_REQUEST_QUERY` tag (= 0, first enum variant) so the encoder reaches `_z_query_encode(wbf, &msg->_body._query)`; Query inner-body byte-equivalence against wz Query::default() (separate Query codec, additional analysis surface). 1-round closure with the layered fixture pattern from R102/R105.",
+        "Latent spec-correctness audit — R108a's defect (mid `value=` missing on REQUEST despite it being present on PUSH / RESPONSE) suggests a textbook gate: every wz envelope codec's `<sce:flag name=\"mid\">` declaration should carry an explicit `value=` matching the upstream MID, and a unit-level check (or SCE-side T-rule) should reject mid-without-value at parse time. Out of scope for R108a / R108b; recorded here for future hardening.",
+        "DECLARE codec (MID 0x1E) chain — still unmodeled. 9 sub-types, ~3 rounds.",
+        "Non-default Layer 3 coverage carry — PUSH N-suffix wireexpr, OAM ZINT/ZBUF arms, INTEREST R=1 non-final form, RESPONSE err arm. Quality-axis.",
+        "wire-spec-subset doc round — §6.2 should now record both the M=1 wz default semantic (R106 carry) AND the MID=0x1C explicit value (R108a defect closure), to prevent future authoring sessions from rediscovering the gap.",
+        "AP MVP demo binary — Linux + tokio binary, 2-3 rounds."
+      ]
+    },
     "Round 11": {
       "decision_summary": "OQ-W15 (a) closure (Q1=No RNG → plugin / Q2=Yes HMAC → plugin ratified) + OQ-W24 registration as SCE counter-offer track for §5.I tier-explicit separation",
       "changes_bullets": [
