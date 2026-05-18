@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh decl_subscriber sub-codec — declares
+     a subscriber for a wireexpr keyexpr. Mirrors zenoh-pico
+     `_z_decl_subscriber_encode` / `_z_decl_commons_encode`
+     (src/protocol/codec/declarations.c:65-84) for the encode side;
+     decode at declarations.c:212-235.
+
+     Wire shape (default state, M=1 baked per R106 pattern):
+       byte 0   : header (MID 0x02 + N@5 + M@6 + Z@7)
+       byte 1+  : id (VLE u32; zenoh-pico stores u32 here)
+       byte 2+  : wireexpr fragment (suffix gated on header.N)
+
+     M=1 baking rationale: zenoh-pico's `_z_decl_commons_encode` sets
+     M from `_z_wireexpr_is_local(keyexpr)`. Zero-init wireexpr has
+     `_mapping = 0 = _Z_KEYEXPR_MAPPING_LOCAL` so M=1 at default
+     state. Mirrors the R106 baking decision for push/response/
+     request envelopes — a freshly-built wireexpr without prior
+     DECLARE is sender-mapping.
+
+     R110c first contact: default state only (N=Z=0, M=1, id=0,
+     wireexpr id=0 no suffix). Wire is `[0x42, 0x00, 0x00]` (3
+     bytes; 0x42 = 0x02 MID | 0x40 M flag). N=1 suffix and ext
+     variants are non-default Layer 3 coverage carry.
+
+     Body byte-identical to upstream wire RFC. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="big" name="decl_subscriber">
+  <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr"/>
+  <datamodel>
+    <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
+      <sce:flag name="mid" bit="0" width="5" value="0x02"/>
+      <sce:flag name="N"   bit="5"/>
+      <sce:flag name="M"   bit="6" value="1"/>
+      <sce:flag name="Z"   bit="7"/>
+    </sce:flags>
+    <sce:field id="id" sce:type="uint64" sce:byte="1" sce:bit-size="vle"/>
+    <sce:embed id="keyexpr" type="codec_zenoh_wireexpr" sce:byte="2"/>
+  </datamodel>
+</scxml>

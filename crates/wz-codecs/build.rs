@@ -62,6 +62,9 @@ const CODECS: &[&str] = &[
     "err",       // §6.3 Z_ERR inner body — E-gated encoding + Z ext + payload — R96
     "response",  // §5 Z_RESPONSE envelope — reply/err peek-byte dispatch — R97
     "decl_kexpr", // §5 decl kexpr — header + id VLE + wireexpr embed, MID 0x00 — R110b
+    "decl_subscriber", // §5 decl subscriber — _z_decl_commons shape, MID 0x02 — R110c
+    "decl_queryable",  // §5 decl queryable — _z_decl_commons shape, MID 0x04 — R110c
+    "decl_token",      // §5 decl token — _z_decl_commons shape, MID 0x06 — R110c
     "declare",   // §5 Z_DECLARE envelope — header + I-gated id + Z ext + sub-MID variant — R110a
 ];
 
