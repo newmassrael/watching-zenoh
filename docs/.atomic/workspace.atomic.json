@@ -8921,6 +8921,68 @@
         "Match-exhaustiveness churn continues — R93 added 3 more `NetworkMessage::Interest(_)` arms across test files (R91 carry #1 still applies). Per-round overhead ~5-10 minutes; macro consolidation continues to be deferred until 6/7 MID is reached.",
         "SCE upstream 3c6bf7d7 (\"enforce cross-doc default-arm wire-MID contract at parse time\") sits 1 commit ahead of vendor pin 189bf7f4 — strengthens R88's variant-default-uniformity enforcement at parse time (2 new diagnostic codes, codes 275 → 277). INTEREST has no variant so the new validation is currently inactive on this codec. Consider a vendor pin bump round once another peek-byte variant codec lands (e.g. RESPONSE chain) so the strengthened check is exercised in a meaningful test scenario."
       ]
+    },
+    "Round 94": {
+      "decision_summary": "R94 closes the R93 INTEREST inner-body carry by authoring interest_body.scxml sub-codec and extending interest.scxml with a `header.C || header.F` disjunction present-if embed; first wz-side use of SCE's `PresentIfPredicate::or_with` compound grammar (Y3 atomic 2b-ii) — _Z_INTEREST_NOT_FINAL_MASK shape now fully modeled.",
+      "changes_bullets": [
+        "sources/codecs/interest_body.scxml new — 8-flag header carrier (KE/SU/QU/TO/R/N/M/AG matching interest.h:26-33 + interest.c L48-50 mask reshuffle) + R-gated wireexpr embed. The header carrier is named `header` so wireexpr's `<sce:requires-parent-flags carrier=\"header\" name=\"N\" bit=\"5\"/>` resolves to interest_body's flag byte (not the outer envelope header); textbook re-use of an existing sub-codec's parent-flag binding by naming the carrier consistently.",
+        "sources/codecs/interest.scxml extended — imports interest_body, adds `<sce:embed id=\"body\" type=\"codec_zenoh_interest_body\" sce:byte=\"2\" sce:present-if=\"header.C || header.F\"/>` immediately after the interest_id field, and bumps the tlv-chain `sce:byte` from 2 to 3 to preserve ordering (body precedes extensions on the wire). Header MID 0x19 bake-in preserved. Comment rewritten to drop the R93 scope-limitation note now that the inner body is in scope.",
+        "crates/wz-codecs/build.rs CODECS list: `interest_body` inserted before `interest` to honor dependency order (interest embeds interest_body).",
+        "crates/wz-codecs/src/lib.rs: `pub mod interest_body { include!(...) }` declared above `pub mod interest`.",
+        "crates/wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs: new test `parse_frame_payload_dispatches_non_final_interest_with_body_byte` exercises the disjunction code path — Interest with header=0x39 (mid|C) + InterestBody::default() encodes to 3 bytes (header + id + body_flags), round-trips through parse_frame_payload, decodes back with C set, body Some, keyexpr None. The pre-existing R93 is_final test stays green because the default (C=F=0) case still skips the body embed.",
+        "Source comments cite SCE parser.rs L2398 disjunction grammar and the `PresentIfPredicate::or_with` upstream docstring so future audit can trace the primitive lineage."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-codecs (codegen) emits `let body = if (header & 0x20u8) != 0 || (header & 0x40u8) != 0 { Some(InterestBody::decode(cursor)?) } else { None };` at line 75 of the generated interest.rs — byte-exact mapping of the disjunction predicate to a Rust `||` short-circuit branch confirms SCE codegen support is real, not just parser/model land.",
+        "cargo test -p wz-runtime-tokio --test session_fsm_inbound_dispatch: 20 passed (R93 19 + R94 1 = exact delta).",
+        "scripts/run-ci.sh all 5 lanes pass: Layer A (validate-workspace), Layer B (verify-codegen), Layer C1 (cargo test), Layer C2 (cargo clippy -D warnings), Layer D (deploy yaml schema).",
+        "atomic ledger entries: 106 → 107 (this Round 94 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "R93 envelope-only positive test stays green — default Interest (C=F=0) round-trips to 2 bytes because the disjunction evaluates false at the default state, so the body embed is skipped on both encode and decode."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present"
+      ],
+      "carry_forward_bullets": [
+        "INTEREST inner body now full wire-form parity with `_z_interest_encode` / `_z_interest_decode` at the is_final and the non-final-without-RESTRICTED paths. The non-final-with-RESTRICTED path (R=1 in body_flags → wireexpr follows) is also wire-modeled via the R-gated wireexpr embed, but a dedicated positive test exercising R=1 with a non-empty keyexpr suffix is deferred to a future quality round; R94 covers the disjunction landing and the empty-body baseline. ~10-line test addition when prioritized.",
+        "RESPONSE codec (0x1B) chain remains the largest outstanding work — reply.scxml + err.scxml inner-body authoring still pending (R91 carry #2). Estimate 3 rounds (reply → err → response).",
+        "DECLARE codec (0x1E) — `<sce:repeat>` over `<sce:variant>` primitive combination, ~150 line SCXML. Deferred until RESPONSE chain reaches 6/7 MID.",
+        "SCE compound present-if (`PresentIfPredicate::or_with`) is now confirmed working end-to-end (parser, model, generator). Future codec rounds with multi-flag gating (e.g. RESPONSE has rid + response-id correlated to a query-id) can use this grammar without primitive uncertainty.",
+        "SCE upstream 3c6bf7d7 (parse-time variant-default-arm-mid contract enforcement) drift unchanged; INTEREST does NOT use a variant primitive, so the new check is still inactive on this codec. Vendor pin bump round still keyed off a future peek-byte variant codec (RESPONSE chain)."
+      ],
+      "publishable_decision_summary": "R94 closes the R93 INTEREST inner-body carry by authoring interest_body.scxml sub-codec and extending interest.scxml with a `header.C || header.F` disjunction present-if embed; first wz-side use of SCE's `PresentIfPredicate::or_with` compound grammar (Y3 atomic 2b-ii) — _Z_INTEREST_NOT_FINAL_MASK shape now fully modeled.",
+      "publishable_changes_bullets": [
+        "sources/codecs/interest_body.scxml new — 8-flag header carrier (KE/SU/QU/TO/R/N/M/AG matching interest.h:26-33 + interest.c L48-50 mask reshuffle) + R-gated wireexpr embed. The header carrier is named `header` so wireexpr's `<sce:requires-parent-flags carrier=\"header\" name=\"N\" bit=\"5\"/>` resolves to interest_body's flag byte (not the outer envelope header); textbook re-use of an existing sub-codec's parent-flag binding by naming the carrier consistently.",
+        "sources/codecs/interest.scxml extended — imports interest_body, adds `<sce:embed id=\"body\" type=\"codec_zenoh_interest_body\" sce:byte=\"2\" sce:present-if=\"header.C || header.F\"/>` immediately after the interest_id field, and bumps the tlv-chain `sce:byte` from 2 to 3 to preserve ordering (body precedes extensions on the wire). Header MID 0x19 bake-in preserved. Comment rewritten to drop the R93 scope-limitation note now that the inner body is in scope.",
+        "crates/wz-codecs/build.rs CODECS list: `interest_body` inserted before `interest` to honor dependency order (interest embeds interest_body).",
+        "crates/wz-codecs/src/lib.rs: `pub mod interest_body { include!(...) }` declared above `pub mod interest`.",
+        "crates/wz-runtime-tokio/tests/session_fsm_inbound_dispatch.rs: new test `parse_frame_payload_dispatches_non_final_interest_with_body_byte` exercises the disjunction code path — Interest with header=0x39 (mid|C) + InterestBody::default() encodes to 3 bytes (header + id + body_flags), round-trips through parse_frame_payload, decodes back with C set, body Some, keyexpr None. The pre-existing R93 is_final test stays green because the default (C=F=0) case still skips the body embed.",
+        "Source comments cite SCE parser.rs L2398 disjunction grammar and the `PresentIfPredicate::or_with` upstream docstring so future audit can trace the primitive lineage."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-codecs (codegen) emits `let body = if (header & 0x20u8) != 0 || (header & 0x40u8) != 0 { Some(InterestBody::decode(cursor)?) } else { None };` at line 75 of the generated interest.rs — byte-exact mapping of the disjunction predicate to a Rust `||` short-circuit branch confirms SCE codegen support is real, not just parser/model land.",
+        "cargo test -p wz-runtime-tokio --test session_fsm_inbound_dispatch: 20 passed (R93 19 + R94 1 = exact delta).",
+        "scripts/run-ci.sh all 5 lanes pass: Layer A (validate-workspace), Layer B (verify-codegen), Layer C1 (cargo test), Layer C2 (cargo clippy -D warnings), Layer D (deploy yaml schema).",
+        "atomic ledger entries: 106 → 107 (this Round 94 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "R93 envelope-only positive test stays green — default Interest (C=F=0) round-trips to 2 bytes because the disjunction evaluates false at the default state, so the body embed is skipped on both encode and decode."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present"
+      ],
+      "publishable_carry_forward_bullets": [
+        "INTEREST inner body now full wire-form parity with `_z_interest_encode` / `_z_interest_decode` at the is_final and the non-final-without-RESTRICTED paths. The non-final-with-RESTRICTED path (R=1 in body_flags → wireexpr follows) is also wire-modeled via the R-gated wireexpr embed, but a dedicated positive test exercising R=1 with a non-empty keyexpr suffix is deferred to a future quality round; R94 covers the disjunction landing and the empty-body baseline. ~10-line test addition when prioritized.",
+        "RESPONSE codec (0x1B) chain remains the largest outstanding work — reply.scxml + err.scxml inner-body authoring still pending (R91 carry #2). Estimate 3 rounds (reply → err → response).",
+        "DECLARE codec (0x1E) — `<sce:repeat>` over `<sce:variant>` primitive combination, ~150 line SCXML. Deferred until RESPONSE chain reaches 6/7 MID.",
+        "SCE compound present-if (`PresentIfPredicate::or_with`) is now confirmed working end-to-end (parser, model, generator). Future codec rounds with multi-flag gating (e.g. RESPONSE has rid + response-id correlated to a query-id) can use this grammar without primitive uncertainty.",
+        "SCE upstream 3c6bf7d7 (parse-time variant-default-arm-mid contract enforcement) drift unchanged; INTEREST does NOT use a variant primitive, so the new check is still inactive on this codec. Vendor pin bump round still keyed off a future peek-byte variant codec (RESPONSE chain)."
+      ]
     }
   },
   "inventory_entries": {},

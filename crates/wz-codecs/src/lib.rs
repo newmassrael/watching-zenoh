@@ -135,6 +135,10 @@ pub mod oam {
     include!(concat!(env!("OUT_DIR"), "/oam.rs"));
 }
 
+pub mod interest_body {
+    include!(concat!(env!("OUT_DIR"), "/interest_body.rs"));
+}
+
 pub mod interest {
     include!(concat!(env!("OUT_DIR"), "/interest.rs"));
 }

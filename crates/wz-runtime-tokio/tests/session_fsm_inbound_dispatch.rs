@@ -591,9 +591,9 @@ fn parse_frame_payload_dispatches_interest_mid_to_interest_decoder() {
     // R93 — round-trip-safe Interest envelope with default header
     // (mid=0x19, C/F/Z bits clear): wire form is header byte + VLE id (1
     // byte for id=0) = 2 bytes, structurally identical to a default
-    // ResponseFinal aside from the MID. The envelope-only scope of
-    // interest.scxml maps to upstream's is_final path; flipping C or F
-    // would invite the inner-body extension deferred to a future round.
+    // ResponseFinal aside from the MID. Default form leaves the inner
+    // body absent because R94's `header.C || header.F` present-if on
+    // the body embed evaluates false at C=F=0.
     let interest = Interest {
         header: 0x19,
         ..Interest::default()
@@ -602,7 +602,7 @@ fn parse_frame_payload_dispatches_interest_mid_to_interest_decoder() {
     assert_eq!(
         bytes.len(),
         2,
-        "round-trip-safe Interest: header(1) + interest_id VLE(1) = 2 bytes"
+        "round-trip-safe Interest is_final form: header(1) + interest_id VLE(1) = 2 bytes"
     );
 
     let parsed = parse_frame_payload(&bytes).expect("Interest envelope parses");
@@ -615,6 +615,59 @@ fn parse_frame_payload_dispatches_interest_mid_to_interest_decoder() {
         matches!(parsed[0], NetworkMessage::Interest(_)),
         "INTEREST MID 0x19 dispatches to wz_codecs::interest decoder"
     );
+}
+
+#[test]
+fn parse_frame_payload_dispatches_non_final_interest_with_body_byte() {
+    use wz_codecs::interest::Interest;
+    use wz_codecs::interest_body::InterestBody;
+    use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
+
+    // R94 — non-final Interest exercises the
+    // `header.C || header.F` disjunction present-if landing the inner
+    // body embed (`PresentIfPredicate::or_with` per SCE parser.rs L2398
+    // grammar). header = 0x19 | 0x20 sets the CURRENT bit so the
+    // codegen `if (header & 0x20) != 0 || (header & 0x40) != 0` branch
+    // fires; body = InterestBody::default() emits a single 0x00 flags
+    // byte (R=0 keeps keyexpr absent). No CodecError from
+    // truncation = the body is present on the wire AND the cursor
+    // advances past it before the (absent) ext-chain check.
+    let interest = Interest {
+        header: 0x19 | 0x20,
+        body: Some(InterestBody::default()),
+        ..Interest::default()
+    };
+    let bytes = interest.encode();
+    assert_eq!(
+        bytes.len(),
+        3,
+        "non-final Interest: header(1) + interest_id VLE(1) + body_flags(1) = 3 bytes; got {bytes:?}"
+    );
+    assert_eq!(
+        bytes[0], 0x39,
+        "header carries MID 0x19 | C bit 0x20"
+    );
+    assert_eq!(
+        bytes[2], 0x00,
+        "body header byte default = 0 (no R, no keyexpr)"
+    );
+
+    let parsed = parse_frame_payload(&bytes).expect("non-final Interest parses");
+    assert_eq!(parsed.len(), 1, "exactly one Interest record; got {parsed:?}");
+    match &parsed[0] {
+        NetworkMessage::Interest(interest) => {
+            assert!(interest.c(), "C flag survived round-trip");
+            assert!(
+                interest.body.is_some(),
+                "C set => body decoded; got {:?}",
+                interest.body.is_some()
+            );
+            let body = interest.body.as_ref().unwrap();
+            assert_eq!(body.header, 0x00);
+            assert!(body.keyexpr.is_none(), "R clear => keyexpr absent");
+        }
+        other => panic!("expected NetworkMessage::Interest, got {other:?}"),
+    }
 }
 
 #[test]
