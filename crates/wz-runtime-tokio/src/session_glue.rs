@@ -66,6 +66,7 @@ use wz_codecs::ext_entry::ExtEntry;
 use wz_codecs::init_body::InitBody;
 use wz_codecs::keep_alive::KeepAlive;
 use wz_codecs::open_body::OpenBody;
+use wz_codecs::push::Push;
 use wz_codecs::request::Request;
 
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
@@ -244,13 +245,17 @@ mod wire_const {
 
     /// Network-message MID for `Frame.payload` batch entries that
     /// wrap a query / put / del (network.h:36). First R74-decoded
-    /// network MID since `wz_codecs::request` is the only authored
-    /// envelope codec — additional MIDs (PUSH 0x1D, RESPONSE 0x1B,
-    /// DECLARE 0x1E, OAM 0x1F, RESPONSE_FINAL 0x1A, INTEREST 0x19
-    /// per network.h:33-39) are documented in [`NetworkMessage`] and
+    /// network MID.
+    pub const N_MID_REQUEST: u8 = 0x1C;
+    /// R90 — Push envelope MID (network.h:35). Pub/sub data
+    /// carrier wrapping a put / del inner body; sibling to
+    /// `N_MID_REQUEST` minus the rid field per zenoh-pico
+    /// `_z_push_encode`. Additional MIDs (RESPONSE 0x1B, DECLARE
+    /// 0x1E, OAM 0x1F, RESPONSE_FINAL 0x1A, INTEREST 0x19 per
+    /// network.h:33-39) are documented in [`NetworkMessage`] and
     /// will land alongside their respective envelope codecs in
     /// follow-up rounds.
-    pub const N_MID_REQUEST: u8 = 0x1C;
+    pub const N_MID_PUSH: u8 = 0x1D;
 }
 
 /// Per-deploy parameters that drive the codec field values for the
@@ -1295,12 +1300,17 @@ pub enum NetworkMessage {
     /// / Query structs, making the inline form much larger than the
     /// `Unknown` variant.
     Request(Box<Request>),
-    /// Header byte's MID falls outside the {REQUEST} subset wz-codecs
-    /// has authored envelope coverage for. `body` carries the rest of
-    /// the payload bytes (header byte included) verbatim so a future
-    /// per-MID decoder can re-parse without losing data; the parse
-    /// stops here to avoid mis-cursor-advancing across an unknown body
-    /// length.
+    /// R90 — Network MID `_Z_MID_N_PUSH` (0x1D). Pub/sub data
+    /// carrier wrapping a put / del inner body — same envelope
+    /// shape as `Request` minus the rid field. The `Box` mirrors
+    /// the `Request` variant's size-balancing rationale.
+    Push(Box<Push>),
+    /// Header byte's MID falls outside the {REQUEST, PUSH} subset
+    /// wz-codecs has authored envelope coverage for. `body` carries
+    /// the rest of the payload bytes (header byte included) verbatim
+    /// so a future per-MID decoder can re-parse without losing data;
+    /// the parse stops here to avoid mis-cursor-advancing across an
+    /// unknown body length.
     Unknown { mid: u8, body: Vec<u8> },
 }
 
@@ -1308,6 +1318,7 @@ impl std::fmt::Debug for NetworkMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Request(_) => f.write_str("Request(..)"),
+            Self::Push(_) => f.write_str("Push(..)"),
             Self::Unknown { mid, body } => write!(
                 f,
                 "Unknown {{ mid: {mid:#04x}, body_len: {} }}",
@@ -1348,6 +1359,10 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
             wire_const::N_MID_REQUEST => {
                 let req = Request::decode(&mut cursor)?;
                 messages.push(NetworkMessage::Request(Box::new(req)));
+            }
+            wire_const::N_MID_PUSH => {
+                let push = Push::decode(&mut cursor)?;
+                messages.push(NetworkMessage::Push(Box::new(push)));
             }
             _ => {
                 let rem = cursor.remaining();

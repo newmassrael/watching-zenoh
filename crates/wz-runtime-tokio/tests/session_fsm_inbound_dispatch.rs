@@ -361,21 +361,24 @@ fn parse_frame_payload_empty_returns_empty_batch() {
 fn parse_frame_payload_unknown_mid_absorbs_remainder() {
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
-    // 0x1D = N_MID_PUSH — no codec authored yet, so the parser
-    // absorbs the rest of the payload as Unknown and terminates.
-    let bytes = [0x1D, 0xAB, 0xCD, 0xEF];
+    // 0x1B = N_MID_RESPONSE — no codec authored yet (was 0x1D=PUSH
+    // pre-R90; PUSH is now codec'd, so use a still-uncodec'd MID
+    // here to exercise the Unknown absorb path).
+    let bytes = [0x1B, 0xAB, 0xCD, 0xEF];
     let parsed = parse_frame_payload(&bytes).expect("unknown MID absorbs as Unknown");
     assert_eq!(parsed.len(), 1, "single Unknown record");
     match &parsed[0] {
         NetworkMessage::Unknown { mid, body } => {
-            assert_eq!(*mid, 0x1D, "header low 5 bits = network MID");
+            assert_eq!(*mid, 0x1B, "header low 5 bits = network MID");
             assert_eq!(
                 body.as_slice(),
                 &bytes,
                 "Unknown.body absorbs the entire remaining payload including header"
             );
         }
-        NetworkMessage::Request(_) => panic!("expected Unknown, got Request"),
+        NetworkMessage::Request(_) | NetworkMessage::Push(_) => {
+            panic!("expected Unknown, got typed variant")
+        }
     }
 }
 
@@ -434,8 +437,9 @@ fn parse_frame_payload_decodes_request_then_unknown_chain() {
     };
     let mut bytes = req.encode();
     let request_len = bytes.len();
-    // Append an Unknown MID (0x1D = N_MID_PUSH) + 2 trailing bytes.
-    bytes.extend_from_slice(&[0x1D, 0x42, 0x43]);
+    // Append an Unknown MID (0x1B = N_MID_RESPONSE — still uncodec'd
+    // post-R90; was 0x1D=PUSH pre-R90).
+    bytes.extend_from_slice(&[0x1B, 0x42, 0x43]);
 
     let parsed = parse_frame_payload(&bytes).expect("Request + Unknown batch parses");
     assert_eq!(
@@ -446,15 +450,72 @@ fn parse_frame_payload_decodes_request_then_unknown_chain() {
     assert!(matches!(parsed[0], NetworkMessage::Request(_)));
     match &parsed[1] {
         NetworkMessage::Unknown { mid, body } => {
-            assert_eq!(*mid, 0x1D);
+            assert_eq!(*mid, 0x1B);
             assert_eq!(
                 body.as_slice(),
                 &bytes[request_len..],
                 "Unknown.body absorbs from its header byte to end of payload"
             );
         }
-        NetworkMessage::Request(_) => panic!("expected Unknown second record"),
+        NetworkMessage::Request(_) | NetworkMessage::Push(_) => {
+            panic!("expected Unknown second record")
+        }
     }
+}
+
+#[test]
+fn parse_frame_payload_dispatches_push_mid_to_push_decoder() {
+    use wz_codecs::push::Push;
+    use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
+
+    // R90 — round-trip-safe Push using plain `Push::default()`.
+    // After R88 variant-default-uniformity + R90 push.scxml's
+    // `<sce:arm value="0x01" default="true"/>` on msg_put:
+    //   - Push::default().body = CodecZenohMsgPut(MsgPut::default())
+    //   - MsgPut::default().header = 0x01 (R88 baked MID)
+    //   - encode writes msg_put bytes; decode peeks 0x01 → msg_put arm
+    //   - byte-exact roundtrip.
+    let push = Push {
+        header: 0x1D,
+        ..Push::default()
+    };
+    let bytes = push.encode();
+
+    let parsed = parse_frame_payload(&bytes).expect("Push envelope parses");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "round-trip-safe Push yields exactly one record; got {parsed:?}"
+    );
+    assert!(
+        matches!(parsed[0], NetworkMessage::Push(_)),
+        "PUSH MID 0x1D dispatches to wz_codecs::push decoder"
+    );
+}
+
+#[test]
+fn parse_frame_payload_decodes_push_then_request_chain() {
+    use wz_codecs::push::Push;
+    use wz_codecs::request::Request;
+    use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
+
+    // R90 — multi-codec batch: PUSH + REQUEST in one Frame.payload.
+    // Both round-trip-safe constructions via R88's Default-uniformity.
+    let push = Push {
+        header: 0x1D,
+        ..Push::default()
+    };
+    let req = Request {
+        header: 0x1C,
+        ..Request::default()
+    };
+    let mut bytes = push.encode();
+    bytes.extend_from_slice(&req.encode());
+
+    let parsed = parse_frame_payload(&bytes).expect("Push+Request batch parses");
+    assert_eq!(parsed.len(), 2, "two records: Push then Request");
+    assert!(matches!(parsed[0], NetworkMessage::Push(_)));
+    assert!(matches!(parsed[1], NetworkMessage::Request(_)));
 }
 
 #[test]

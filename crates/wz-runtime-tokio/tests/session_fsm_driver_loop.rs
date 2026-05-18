@@ -283,9 +283,11 @@ async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
     drive_to_sent_init_syn(&mut engine);
 
     // T_MID_FRAME | R flag = 0x25, sn=1 VLE (0x01), tail payload
-    // = [0x1D, 0xAA, 0xBB] — 0x1D = N_MID_PUSH (no codec authored).
+    // = [0x1B, 0xAA, 0xBB] — 0x1B = N_MID_RESPONSE (no codec
+    // authored yet; was 0x1D=PUSH pre-R90 but PUSH now decodes via
+    // r90_* test below).
     let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: vec![0x25, 0x01, 0x1D, 0xAA, 0xBB],
+        bytes: vec![0x25, 0x01, 0x1B, 0xAA, 0xBB],
     })]);
 
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
@@ -301,13 +303,62 @@ async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
             assert_eq!(messages.len(), 1);
             match &messages[0] {
                 NetworkMessage::Unknown { mid, body } => {
-                    assert_eq!(*mid, 0x1D);
-                    assert_eq!(body.as_slice(), &[0x1D, 0xAA, 0xBB]);
+                    assert_eq!(*mid, 0x1B);
+                    assert_eq!(body.as_slice(), &[0x1B, 0xAA, 0xBB]);
                 }
-                NetworkMessage::Request(_) => {
-                    panic!("Push MID must NOT dispatch to Request decoder")
+                NetworkMessage::Request(_) | NetworkMessage::Push(_) => {
+                    panic!(
+                        "RESPONSE MID (0x1B) must NOT dispatch to Request/Push decoders"
+                    )
                 }
             }
+        }
+        other => panic!("expected FramePayload, got {other:?}"),
+    }
+}
+
+// ── R90 Scenario: Rx(Frame) with PUSH payload → FramePayload
+//                  containing Push variant decoded via wz_codecs::push
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r90_rx_frame_push_payload_decodes_via_push_codec() {
+    use wz_codecs::push::Push;
+
+    let (actions, mut engine) = fresh_setup();
+    drive_to_sent_init_syn(&mut engine);
+
+    // Build a round-trip-safe Push (header = N_MID_PUSH = 0x1D,
+    // other fields default). After R88 variant-default-uniformity:
+    // Push::default().body = CodecZenohMsgPut(MsgPut::default())
+    // with MsgPut.header = 0x01 baked in → byte-exact roundtrip.
+    let push = Push {
+        header: 0x1D,
+        ..Push::default()
+    };
+    let push_bytes = push.encode();
+
+    // Frame envelope: T_MID_FRAME | R flag = 0x25, sn=2 VLE = 0x02,
+    // tail = push_bytes.
+    let mut frame_wire = vec![0x25, 0x02];
+    frame_wire.extend_from_slice(&push_bytes);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
+        bytes: frame_wire,
+    })]);
+
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    match outcome {
+        DriverLoopOutcome::FramePayload {
+            reliable,
+            sn,
+            messages,
+            ..
+        } => {
+            assert!(reliable);
+            assert_eq!(sn, 2);
+            assert_eq!(messages.len(), 1, "exactly one Push record; got {messages:?}");
+            assert!(
+                matches!(messages[0], NetworkMessage::Push(_)),
+                "PUSH MID 0x1D dispatches to wz_codecs::push decoder"
+            );
         }
         other => panic!("expected FramePayload, got {other:?}"),
     }
