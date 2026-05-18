@@ -4739,6 +4739,66 @@
         "Demo callback observability is eprintln (synchronous) — integration test greps stderr."
       ]
     },
+    "Round 121c": {
+      "decision_summary": "R121c: ap_demo_round_trip integration test + Layer E CI lane; AP MVP demo accepts zenoh-pico z_put TCP connection.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/ap_demo_round_trip.rs authored.",
+        "Test spawns wz-ap-demo --listen 127.0.0.1:<port> --key demo/test.",
+        "Test spawns zenoh-pico z_put -k demo/test -v hello -e tcp/...:<port> -m client.",
+        "Conservative gate: assert 'accepted peer' in wz-ap-demo stderr (TCP layer).",
+        "Stretch goal: 'SUBSCRIBER FIRED' check (not yet asserted; session FSM gap).",
+        "scripts/run-ci.sh += layer_e_ap_demo_round_trip with binary-presence skips.",
+        ".github/workflows/ci.yml += Layer E + zenoh-pico CLI build + wz-ap-demo build steps.",
+        "Pre-rebuild Layer D commentary preserved; new Layer E slots after Layer D in dispatch."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh full 8-lane gate pass (Layer 0/A/A2/B/C1/C2/D/E).",
+        "Layer E test runs 10.66s; ap_demo_round_trip 1 passed / 0 failed.",
+        "zenoh-pico z_put logs 'Unable to open session!' to its own stdout/stderr.",
+        "wz-ap-demo logs 'accepted peer' — conservative TCP-accept gate satisfied.",
+        "validate_workspace: T1=0; RT 12/12; entries 152 -> 153; sections=214; sync."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "R121d: session FSM handshake compatibility with zenoh-pico initiator gap analysis.",
+        "R121d: assert 'SUBSCRIBER FIRED' as hard gate once handshake completes end-to-end.",
+        "R121b/c milestone closed at the 'wire-up + TCP accept' bar; deeper FSM-compat next.",
+        "R114 freshness gate negative test still pending (defensive carry).",
+        "R123b-pre deploy yaml schema migration still pending (R123b dispatcher blocker).",
+        "Go backend variant-arm package-qualifier carry from SCE atomic 2fe638c1 (not on wz path)."
+      ],
+      "publishable_decision_summary": "R121c: ap_demo_round_trip integration test + Layer E CI lane; AP MVP demo accepts zenoh-pico z_put TCP connection.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/ap_demo_round_trip.rs authored.",
+        "Test spawns wz-ap-demo --listen 127.0.0.1:<port> --key demo/test.",
+        "Test spawns zenoh-pico z_put -k demo/test -v hello -e tcp/...:<port> -m client.",
+        "Conservative gate: assert 'accepted peer' in wz-ap-demo stderr (TCP layer).",
+        "Stretch goal: 'SUBSCRIBER FIRED' check (not yet asserted; session FSM gap).",
+        "scripts/run-ci.sh += layer_e_ap_demo_round_trip with binary-presence skips.",
+        ".github/workflows/ci.yml += Layer E + zenoh-pico CLI build + wz-ap-demo build steps.",
+        "Pre-rebuild Layer D commentary preserved; new Layer E slots after Layer D in dispatch."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh full 8-lane gate pass (Layer 0/A/A2/B/C1/C2/D/E).",
+        "Layer E test runs 10.66s; ap_demo_round_trip 1 passed / 0 failed.",
+        "zenoh-pico z_put logs 'Unable to open session!' to its own stdout/stderr.",
+        "wz-ap-demo logs 'accepted peer' — conservative TCP-accept gate satisfied.",
+        "validate_workspace: T1=0; RT 12/12; entries 152 -> 153; sections=214; sync."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121d: session FSM handshake compatibility with zenoh-pico initiator gap analysis.",
+        "R121d: assert 'SUBSCRIBER FIRED' as hard gate once handshake completes end-to-end.",
+        "R121b/c milestone closed at the 'wire-up + TCP accept' bar; deeper FSM-compat next.",
+        "R114 freshness gate negative test still pending (defensive carry).",
+        "R123b-pre deploy yaml schema migration still pending (R123b dispatcher blocker).",
+        "Go backend variant-arm package-qualifier carry from SCE atomic 2fe638c1 (not on wz path)."
+      ]
+    },
     "Round 122": {
       "decision_summary": "R122 vendor/sce pin bump 122f851d to 4441431d; LAYER2_KNOWN_DIVERGENCE 6 to 1.",
       "changes_bullets": [

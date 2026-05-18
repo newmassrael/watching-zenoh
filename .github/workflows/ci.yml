@@ -187,3 +187,19 @@ jobs:
 
       - name: Layer D — deploy/*.yaml schema validate
         run: bash scripts/run-ci.sh --layer D
+
+      - name: Build zenoh-pico CLI binaries (Layer E dep)
+        # R121c yml sync — Layer E spawns target/zenoh-pico-cli/z_put
+        # against the wz-ap-demo binary's TCP --listen endpoint. The
+        # CLI binaries are built from the vendored zenoh-pico
+        # submodule via scripts/build-zenoh-pico-cli.sh; local
+        # developers run this on demand, CI builds them every run
+        # since the Swatinem cache covers `crates -> target` +
+        # `vendor/sce -> target` only.
+        run: bash scripts/build-zenoh-pico-cli.sh
+
+      - name: Build wz-ap-demo binary (Layer E dep)
+        run: (cd crates && cargo build -p wz-ap-demo)
+
+      - name: Layer E — wz-ap-demo round-trip vs zenoh-pico z_put
+        run: bash scripts/run-ci.sh --layer E
