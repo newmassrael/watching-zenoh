@@ -4875,6 +4875,50 @@
         "version=0x09 is fixed in demo; production AP must source proto version from deploy + re-check version-handshake hardening"
       ]
     },
+    "Round 121d1": {
+      "decision_summary": "R121d1 backfilled unit-test coverage for the R121d peer-caps negotiation primitives (PeerInitCaps decoder + SessionLinkActions::init_ack_params capping).",
+      "changes_bullets": [
+        "session_fsm_accepting_path.rs imports PeerInitCaps from session_glue",
+        "Added r121d_peer_init_caps_from_init_syn_uses_defaults_when_s_bit_clear test",
+        "Added r121d_peer_init_caps_decodes_packed_sn_res_byte test (sn_res = (seq | req<<2))",
+        "Added r121d_init_ack_params_caps_to_peer_when_peer_lower test",
+        "Added r121d_init_ack_params_keeps_own_when_own_lower test (no upward promotion)"
+      ],
+      "verification_bullets": [
+        "cargo test --test session_fsm_accepting_path: 8 passed (4 prior + 4 new R121d1 unit tests)",
+        "validate_workspace pre/post: docs=12/12, T1 orphan=0, RT=12/12, sync; entries +1 sections unchanged",
+        "Workspace cargo test sweep: no regression across all crates"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail"
+      ],
+      "carry_forward_bullets": [
+        "Nested wireexpr resolution (DeclKexpr.keyexpr.id!=0) still lacks dedicated unit-test coverage; awaits a peer that emits nested aliases",
+        "R121d freshness-gate carry from R114 still open (defensive, low priority)"
+      ],
+      "publishable_decision_summary": "R121d1 backfilled unit-test coverage for the R121d peer-caps negotiation primitives (PeerInitCaps decoder + SessionLinkActions::init_ack_params capping).",
+      "publishable_changes_bullets": [
+        "session_fsm_accepting_path.rs imports PeerInitCaps from session_glue",
+        "Added r121d_peer_init_caps_from_init_syn_uses_defaults_when_s_bit_clear test",
+        "Added r121d_peer_init_caps_decodes_packed_sn_res_byte test (sn_res = (seq | req<<2))",
+        "Added r121d_init_ack_params_caps_to_peer_when_peer_lower test",
+        "Added r121d_init_ack_params_keeps_own_when_own_lower test (no upward promotion)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --test session_fsm_accepting_path: 8 passed (4 prior + 4 new R121d1 unit tests)",
+        "validate_workspace pre/post: docs=12/12, T1 orphan=0, RT=12/12, sync; entries +1 sections unchanged",
+        "Workspace cargo test sweep: no regression across all crates"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Nested wireexpr resolution (DeclKexpr.keyexpr.id!=0) still lacks dedicated unit-test coverage; awaits a peer that emits nested aliases",
+        "R121d freshness-gate carry from R114 still open (defensive, low priority)"
+      ]
+    },
     "Round 122": {
       "decision_summary": "R122 vendor/sce pin bump 122f851d to 4441431d; LAYER2_KNOWN_DIVERGENCE 6 to 1.",
       "changes_bullets": [
