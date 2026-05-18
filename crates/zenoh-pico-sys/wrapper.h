@@ -36,6 +36,7 @@
 #include "zenoh-pico/protocol/iobuf.h"
 #include "zenoh-pico/protocol/codec/transport.h"
 #include "zenoh-pico/protocol/codec/message.h"
+#include "zenoh-pico/protocol/codec/network.h"
 #include "zenoh-pico/protocol/codec/ext.h"
 #include "zenoh-pico/protocol/ext.h"
 
