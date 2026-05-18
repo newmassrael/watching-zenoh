@@ -3338,6 +3338,60 @@
         "Layer 3 rollout pattern is now stable across 4 codecs (response_final, push, oam, interest). Per-codec cost shrunk to ~50 lines of test + ~6 lines of allowlist after the first three."
       ]
     },
+    "Round 105": {
+      "decision_summary": "R105 lands Layer 3 byte-equivalence for RESPONSE (R97) — closes the post-R90 codec catalog's wire-interop debt completely; 5/5 application-layer envelopes (response_final/push/oam/interest/response) now proven byte-for-byte against zenoh-pico, validating the R88 three-level default-arm chain (response → reply → msg_put) at the wire boundary.",
+      "changes_bullets": [
+        "crates/zenoh-pico-sys/build.rs allowlist: `_z_n_msg_response_t` + `_z_response_encode` added; comment notes the 4-patch fixture needed to match the wz default state.",
+        "crates/wz-integration-tests/tests/layer3_response.rs new — 1 byte-equivalence test asserting `wz_codecs::response::Response::default().encode() == _z_response_encode(default _z_n_msg_response_t with 4 field patches)`. Wire bytes: `[0x1B, 0x00, 0x00, 0x04, 0x01, 0x00]` (response_hdr + rid + ke.id + reply_hdr + put_hdr + payload_len).",
+        "Four-patch fixture: (1) `_ext_qos._val = 5` matches `_Z_N_QOS_DEFAULT._val`; (2) `_key._mapping = 1` (non-LOCAL) keeps M flag clear — same divergence as PUSH (R102 carry); (3) `_body._reply._consolidation = -1` matches `Z_CONSOLIDATION_MODE_DEFAULT` (= AUTO per api/constants.h:188) so the reply.C bit stays clear; (4) `_body._reply._body._is_put = true` selects the PUT branch inside the reply body union, mirroring R88's msg_put declared default arm.",
+        "Doc-block flattened from list-of-numbered-bullets to inline prose after clippy `doc_overindented_list_items` flagged the heavily-indented multi-line entries; the field-mapping content is preserved verbatim in prose form."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_response: 1 passed first try after the 4-patch fixture.",
+        "Workspace tests: 146 → 147 (+1 = new layer3_response test).",
+        "scripts/run-ci.sh all 5 lanes pass: A/B/C1/C2/D. Layer C2 caught the doc-overindent clippy violation on the first run; fixed by flattening the bullet list to prose and re-running clean.",
+        "atomic ledger entries: 117 → 118 (this Round 105 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "Three-level R88 default-arm chain (response default arm = reply, reply default arm = msg_put, msg_put header = 0x01) validated at the wire boundary — wz codegen's variant-default-uniformity contract holds end-to-end for the most-complex post-R90 codec."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants"
+      ],
+      "carry_forward_bullets": [
+        "Post-R90 Layer 3 debt closed — all 5 envelope codecs (response_final R101, push R102, oam R103, interest R104, response R105) now have byte-equivalence tests against zenoh-pico's encoders. The next quality-axis carry is non-default state coverage (PUSH with N-suffix wireexpr, OAM with ZINT/ZBUF arms, INTEREST non-final, RESPONSE with err arm). Per-codec state-space expansion is a quality round once a consumer surfaces.",
+        "M-flag default audit (R102 carry, R104 carry, R105 carry) still open — wz push.scxml / response.scxml declare M without a `value=` default but zenoh-pico's encoder auto-sets M when the wireexpr is local (mapping=0). The Layer 3 fixtures patch the divergence; a codec-side audit decides whether to bake M=1 by default OR document the wz semantic explicitly. 1-round audit + decision.",
+        "DECLARE codec (0x1E) chain — still the last unmodeled MID (7/7 codec catalog not yet reached). 9 declaration sub-types per zenoh-pico declarations.c, multi-round chain (~3 rounds like RESPONSE). Closure unblocks the mapping-id resolver on the pubsub registry.",
+        "AP MVP demo binary — internal infrastructure (R98-R100) + wire-interop confidence (R101-R105) are now both in place. Real Linux + tokio runnable demo against a zenoh-pico peer is the next user-visible deliverable; 2-3 rounds for TCP scaffolding + peer fixture + golden-path assertion."
+      ],
+      "publishable_decision_summary": "R105 lands Layer 3 byte-equivalence for RESPONSE (R97) — closes the post-R90 codec catalog's wire-interop debt completely; 5/5 application-layer envelopes (response_final/push/oam/interest/response) now proven byte-for-byte against zenoh-pico, validating the R88 three-level default-arm chain (response → reply → msg_put) at the wire boundary.",
+      "publishable_changes_bullets": [
+        "crates/zenoh-pico-sys/build.rs allowlist: `_z_n_msg_response_t` + `_z_response_encode` added; comment notes the 4-patch fixture needed to match the wz default state.",
+        "crates/wz-integration-tests/tests/layer3_response.rs new — 1 byte-equivalence test asserting `wz_codecs::response::Response::default().encode() == _z_response_encode(default _z_n_msg_response_t with 4 field patches)`. Wire bytes: `[0x1B, 0x00, 0x00, 0x04, 0x01, 0x00]` (response_hdr + rid + ke.id + reply_hdr + put_hdr + payload_len).",
+        "Four-patch fixture: (1) `_ext_qos._val = 5` matches `_Z_N_QOS_DEFAULT._val`; (2) `_key._mapping = 1` (non-LOCAL) keeps M flag clear — same divergence as PUSH (R102 carry); (3) `_body._reply._consolidation = -1` matches `Z_CONSOLIDATION_MODE_DEFAULT` (= AUTO per api/constants.h:188) so the reply.C bit stays clear; (4) `_body._reply._body._is_put = true` selects the PUT branch inside the reply body union, mirroring R88's msg_put declared default arm.",
+        "Doc-block flattened from list-of-numbered-bullets to inline prose after clippy `doc_overindented_list_items` flagged the heavily-indented multi-line entries; the field-mapping content is preserved verbatim in prose form."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_response: 1 passed first try after the 4-patch fixture.",
+        "Workspace tests: 146 → 147 (+1 = new layer3_response test).",
+        "scripts/run-ci.sh all 5 lanes pass: A/B/C1/C2/D. Layer C2 caught the doc-overindent clippy violation on the first run; fixed by flattening the bullet list to prose and re-running clean.",
+        "atomic ledger entries: 117 → 118 (this Round 105 entry).",
+        "T1=0 / RT 12/12 / GENERATED.md=sync preserved.",
+        "Three-level R88 default-arm chain (response default arm = reply, reply default arm = msg_put, msg_put header = 0x01) validated at the wire boundary — wz codegen's variant-default-uniformity contract holds end-to-end for the most-complex post-R90 codec."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Post-R90 Layer 3 debt closed — all 5 envelope codecs (response_final R101, push R102, oam R103, interest R104, response R105) now have byte-equivalence tests against zenoh-pico's encoders. The next quality-axis carry is non-default state coverage (PUSH with N-suffix wireexpr, OAM with ZINT/ZBUF arms, INTEREST non-final, RESPONSE with err arm). Per-codec state-space expansion is a quality round once a consumer surfaces.",
+        "M-flag default audit (R102 carry, R104 carry, R105 carry) still open — wz push.scxml / response.scxml declare M without a `value=` default but zenoh-pico's encoder auto-sets M when the wireexpr is local (mapping=0). The Layer 3 fixtures patch the divergence; a codec-side audit decides whether to bake M=1 by default OR document the wz semantic explicitly. 1-round audit + decision.",
+        "DECLARE codec (0x1E) chain — still the last unmodeled MID (7/7 codec catalog not yet reached). 9 declaration sub-types per zenoh-pico declarations.c, multi-round chain (~3 rounds like RESPONSE). Closure unblocks the mapping-id resolver on the pubsub registry.",
+        "AP MVP demo binary — internal infrastructure (R98-R100) + wire-interop confidence (R101-R105) are now both in place. Real Linux + tokio runnable demo against a zenoh-pico peer is the next user-visible deliverable; 2-3 rounds for TCP scaffolding + peer fixture + golden-path assertion."
+      ]
+    },
     "Round 11": {
       "decision_summary": "OQ-W15 (a) closure (Q1=No RNG → plugin / Q2=Yes HMAC → plugin ratified) + OQ-W24 registration as SCE counter-offer track for §5.I tier-explicit separation",
       "changes_bullets": [
