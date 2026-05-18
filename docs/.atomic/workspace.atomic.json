@@ -2840,6 +2840,9 @@
     },
     "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants": {
       "intent": "Declare sub-variants — KeyExpr/Subscriber/Queryable/Token (declare+undeclare) + DeclareFinal; all Included; bounded-collection (RFC §5.L) backed.",
+      "caveats_bullets": [
+        "R110 added wz codecs for all 9 DECLARE sub-MIDs (kexpr/sub/queryable/token + undecl + final)."
+      ],
       "impact_scope": [
         "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer"
       ]
@@ -2853,6 +2856,9 @@
     },
     "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer": {
       "intent": "Network (routing) layer carried inside Frame/Fragment — Push/Request/Response/ResponseFinal/Interest/Declare/OAM; Interest bounded form; aggregation router-only.",
+      "caveats_bullets": [
+        "R107 INTEREST M-flag M=0 default kept (R-gate semantic differs from push/response/request)."
+      ],
       "impact_scope": [
         "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
         "wire-spec-subset--watching-zenoh-mvp/5-2-permanent-on-mcu",
@@ -2897,6 +2903,9 @@
     },
     "wire-spec-subset--watching-zenoh-mvp/7-1-common-application-visible-extensions": {
       "intent": "Common app-visible extensions — Timestamp/Attachment/NodeId/SourceInfo/Consolidation/Encoding/QoS Included; SHM permanent on MCU / deferred on AP.",
+      "caveats_bullets": [
+        "ext_entry variant requires explicit default=\"true\" arm per SCE 022621a3 (R112 vendor bump)."
+      ],
       "impact_scope": [
         "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism"
       ]
@@ -4137,6 +4146,62 @@
         "AP MVP demo binary — round-trip query against external zenoh-pico CLI process (z_get + z_queryable). 3-5 rounds: scaffold → peer fixture → golden-path → timeout-path.",
         "Phase W STM32F4 trail — separate cross-compile + lwIP plan when Linux tokio AP MVP is reference-validated. Bumped SCE pin already supports cross-backend variant-default-uniformity (43812d57/a85cdc6b/19b465f0/f5c6c43f port the codegen to c11/go/python/kotlin) so Phase W's c11 backend now has parity with the Rust authoritative path.",
         "Latent SCE primitive audit — R112 surfaced exactly one pre-R88 variant codec gap. A repo-side counterpart to R111 (audit-mid-values) would be `audit-variant-default-arms.sh` scanning for `<sce:variant>` without `default=\"true\"`. SCE's own parse-time enforcement makes this redundant defense-in-depth, but worth noting as a future R114+ hardening if SCE ever loosens the rule."
+      ]
+    },
+    "Round 113": {
+      "decision_summary": "R113 records the R107/R110/R112 decisions and additions into the wire-spec-subset doc surface as atomic caveats: §5-1 declare-sub-variants logs the R110 9-sub-MID codec addition; §5-network-routing-layer logs the R107 INTEREST M-flag no-baking decision; §7-1 common-extensions logs the R112-driven ext_entry explicit default arm requirement. Closes the doc-round half of the cumulative R107/R110/R112 carry.",
+      "changes_bullets": [
+        "wire-spec-subset/5-1-declare-sub-variants caveat append: \"R110 added wz codecs for all 9 DECLARE sub-MIDs (kexpr/sub/queryable/token + undecl + final).\" via add_section_caveat. Records that the DECLARE codec catalog is now codec-side complete (was 0/9 pre-R110a, now 9/9 after R110d).",
+        "wire-spec-subset/5-network-routing-layer caveat append: \"R107 INTEREST M-flag M=0 default kept (R-gate semantic differs from push/response/request).\" via add_section_caveat. Records that the R106 M=1 baking pattern explicitly does NOT extend to INTEREST because INTEREST's M flag is R-gated (RESTRICTED bit) and the wz default state (R=0) would diverge from zenoh-pico's wire on M baking.",
+        "wire-spec-subset/7-1-common-application-visible-extensions caveat append: \"ext_entry variant requires explicit default=\\\"true\\\" arm per SCE 022621a3 (R112 vendor bump).\" via add_section_caveat. Records the rationale chain for R112's ext_entry fix — future authoring will not rediscover \"why the catch-all <sce:default> isn't enough\" without context.",
+        "No source / code change in R113. All three mutations are typed atomic primitives on existing Section.caveats_bullets fields; GENERATED.md cascade renders the new caveats automatically per the atomic mutate contract.",
+        "Caveat character lengths verified ahead of mutation (≤100 chars per R161 §41 threshold): §5-1 = 92, §5-network-routing-layer = 90, §7-1 = 89."
+      ],
+      "verification_bullets": [
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 130 → 131, sections=214, GENERATED.md=sync.",
+        "No build / test impact (doc-only round). Last full CI green from R112 commit de20bcf stands.",
+        "Doc-round carry closure tally: R107 INTEREST decision (recorded in R113 §5-network-routing-layer caveat), R110 9-sub-MID addition (R113 §5-1 caveat), R112 ext_entry default arm requirement (R113 §7-1 caveat). Three distinct doc-round carries terminated by this single round.",
+        "Caveat genre fit per atomic-store anti-patterns concept: each caveat is a single-line technical constraint rather than a narrative; the rationale chain (`why` behind the decision) lives in the changelog entries' decision_summary / changes_bullets, not duplicated into the section body. Frozen-ledger preserves the R107/R110/R112 entries; caveats render the consequences readable for future authoring."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer",
+        "wire-spec-subset--watching-zenoh-mvp/7-1-common-application-visible-extensions"
+      ],
+      "carry_forward_bullets": [
+        "R68 inbound parser (peer InitAck cookie populate) — AP MVP demo dependency. session_glue.rs side; init/open_body decode already in wz-codecs since R44 but integration is missing. Textbook next round.",
+        "R69 Hal time-mock (12 timer coverage per session-fsm §2.5) — AP MVP demo dependency. TestHal struct + logical-time advance + `Engine::tick` coverage.",
+        "AP MVP demo binary — round-trip query against external zenoh-pico CLI process (z_get + z_queryable). 3-5 rounds: scaffold → peer fixture → happy-path → timeout-path → error-path.",
+        "R71 wz-runtime-tokio-test-support crate split — internal encapsulation, post-AP-MVP per the long-term-correctness ratify (need demo's actual API surface to decide what to expose).",
+        "Phase W STM32F4 trail — separate cross-compile + lwIP plan when Linux tokio AP MVP is reference-validated.",
+        "Non-default Layer 3 coverage quality round — 7 envelope + 9 sub-MID non-default variants. Quality-axis, non-gating; revisit when AP MVP demo or a downstream consumer exercises the non-default paths."
+      ],
+      "publishable_decision_summary": "R113 records the R107/R110/R112 decisions and additions into the wire-spec-subset doc surface as atomic caveats: §5-1 declare-sub-variants logs the R110 9-sub-MID codec addition; §5-network-routing-layer logs the R107 INTEREST M-flag no-baking decision; §7-1 common-extensions logs the R112-driven ext_entry explicit default arm requirement. Closes the doc-round half of the cumulative R107/R110/R112 carry.",
+      "publishable_changes_bullets": [
+        "wire-spec-subset/5-1-declare-sub-variants caveat append: \"R110 added wz codecs for all 9 DECLARE sub-MIDs (kexpr/sub/queryable/token + undecl + final).\" via add_section_caveat. Records that the DECLARE codec catalog is now codec-side complete (was 0/9 pre-R110a, now 9/9 after R110d).",
+        "wire-spec-subset/5-network-routing-layer caveat append: \"R107 INTEREST M-flag M=0 default kept (R-gate semantic differs from push/response/request).\" via add_section_caveat. Records that the R106 M=1 baking pattern explicitly does NOT extend to INTEREST because INTEREST's M flag is R-gated (RESTRICTED bit) and the wz default state (R=0) would diverge from zenoh-pico's wire on M baking.",
+        "wire-spec-subset/7-1-common-application-visible-extensions caveat append: \"ext_entry variant requires explicit default=\\\"true\\\" arm per SCE 022621a3 (R112 vendor bump).\" via add_section_caveat. Records the rationale chain for R112's ext_entry fix — future authoring will not rediscover \"why the catch-all <sce:default> isn't enough\" without context.",
+        "No source / code change in R113. All three mutations are typed atomic primitives on existing Section.caveats_bullets fields; GENERATED.md cascade renders the new caveats automatically per the atomic mutate contract.",
+        "Caveat character lengths verified ahead of mutation (≤100 chars per R161 §41 threshold): §5-1 = 92, §5-network-routing-layer = 90, §7-1 = 89."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 130 → 131, sections=214, GENERATED.md=sync.",
+        "No build / test impact (doc-only round). Last full CI green from R112 commit de20bcf stands.",
+        "Doc-round carry closure tally: R107 INTEREST decision (recorded in R113 §5-network-routing-layer caveat), R110 9-sub-MID addition (R113 §5-1 caveat), R112 ext_entry default arm requirement (R113 §7-1 caveat). Three distinct doc-round carries terminated by this single round.",
+        "Caveat genre fit per atomic-store anti-patterns concept: each caveat is a single-line technical constraint rather than a narrative; the rationale chain (`why` behind the decision) lives in the changelog entries' decision_summary / changes_bullets, not duplicated into the section body. Frozen-ledger preserves the R107/R110/R112 entries; caveats render the consequences readable for future authoring."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "wire-spec-subset--watching-zenoh-mvp/5-network-routing-layer",
+        "wire-spec-subset--watching-zenoh-mvp/7-1-common-application-visible-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R68 inbound parser (peer InitAck cookie populate) — AP MVP demo dependency. session_glue.rs side; init/open_body decode already in wz-codecs since R44 but integration is missing. Textbook next round.",
+        "R69 Hal time-mock (12 timer coverage per session-fsm §2.5) — AP MVP demo dependency. TestHal struct + logical-time advance + `Engine::tick` coverage.",
+        "AP MVP demo binary — round-trip query against external zenoh-pico CLI process (z_get + z_queryable). 3-5 rounds: scaffold → peer fixture → happy-path → timeout-path → error-path.",
+        "R71 wz-runtime-tokio-test-support crate split — internal encapsulation, post-AP-MVP per the long-term-correctness ratify (need demo's actual API surface to decide what to expose).",
+        "Phase W STM32F4 trail — separate cross-compile + lwIP plan when Linux tokio AP MVP is reference-validated.",
+        "Non-default Layer 3 coverage quality round — 7 envelope + 9 sub-MID non-default variants. Quality-axis, non-gating; revisit when AP MVP demo or a downstream consumer exercises the non-default paths."
       ]
     },
     "Round 12": {
