@@ -2861,12 +2861,18 @@
     },
     "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants": {
       "intent": "PushBody variants — Put (publish value with timestamp/encoding/sinfo/attachment/payload) and Del (delete key); both Included; codec-backed.",
+      "caveats_bullets": [
+        "wz Push::default() bakes 0x5D (MID 0x1D|M); M=1 = LOCAL wireexpr (R106/R102 Layer 3)."
+      ],
       "impact_scope": [
         "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
       ]
     },
     "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants": {
       "intent": "RequestBody variant — Query (parameters/consolidation/sinfo/body/attachment); Included; codec + statechart query FSM.",
+      "caveats_bullets": [
+        "wz Request::default() bakes 0x5C (MID 0x1C|M); R108a fixed missing mid value=, R108b Layer 3."
+      ],
       "impact_scope": [
         "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer",
         "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants"
@@ -2874,6 +2880,9 @@
     },
     "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants": {
       "intent": "ResponseBody variants — Reply (timestamp/encoding/sinfo/payload) and Err (encoding/sinfo/payload, reply-channel error); Included; codec + statechart.",
+      "caveats_bullets": [
+        "wz Response::default() bakes 0x5B (MID 0x1B|M); LOCAL wireexpr default (R106/R105 Layer 3)."
+      ],
       "impact_scope": [
         "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants"
       ]
@@ -3620,6 +3629,60 @@
         "Latent spec-correctness audit (carry from R108a) — wz envelope codec `<sce:flag name=\"mid\">` declarations should all carry explicit `value=`. Audit script: grep `mid.*bit=` SCXML files, flag entries without `value=`. Out of scope for R108b; hardening recommendation only.",
         "AP MVP demo binary — Linux + tokio binary, 2-3 rounds.",
         "R67-R71 series — inbound parser / Hal time-mock / test-support split; per project_hybrid_adoption_plan.md still queued."
+      ]
+    },
+    "Round 109": {
+      "decision_summary": "R109 records the R106 + R108a default-header semantics into wire-spec-subset §6.1/§6.2/§6.3 as atomic caveats so the implicit-default ambiguity (M-flag baking, mid `value=` requirement) is captured in the doc surface, not just in codec source files; closes the R106/R108b doc-round carry and gives future authoring sessions a single read-once reference for the per-envelope wire-header default state.",
+      "changes_bullets": [
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants caveat append: \"wz Push::default() bakes 0x5D (MID 0x1D|M); M=1 = LOCAL wireexpr (R106/R102 Layer 3).\" via add_section_caveat.",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants caveat append: \"wz Request::default() bakes 0x5C (MID 0x1C|M); R108a fixed missing mid value=, R108b Layer 3.\" via add_section_caveat.",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants caveat append: \"wz Response::default() bakes 0x5B (MID 0x1B|M); LOCAL wireexpr default (R106/R105 Layer 3).\" via add_section_caveat.",
+        "No source / code change. All three mutations are typed atomic primitives operating on the existing Section.caveats_bullets fields; GENERATED.md cascade renders the new caveats automatically and is kept in sync per the atomic mutate contract.",
+        "INTEREST §5 wasn't updated because R107's decision was \"no M-baking\" (interest_body header keeps M=0 default) — the caveat would carry no defaulted-header bytes to record; the audit lives in the R107 changelog entry instead, which is the appropriate genre fit per anti-patterns concept."
+      ],
+      "verification_bullets": [
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 122 → 123, sections=214, GENERATED.md=sync.",
+        "Caveat character lengths verified ahead of mutation (≤100 chars per R161 §41 threshold): §6.1=82, §6.2=92, §6.3=85.",
+        "No build / test impact (doc-only round). Last full CI green from R108b commit 10477c4 stands.",
+        "Carry closure tally: R106 doc-round carry + R108b doc-round carry both terminated by this entry. Remaining R108b carries are codec-layer (DECLARE chain) and quality-axis (non-default Layer 3) — separate genre."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants"
+      ],
+      "carry_forward_bullets": [
+        "DECLARE codec (MID 0x1E) chain — last unmodeled application-layer MID. 9 declaration sub-types per zenoh-pico declarations.c. Multi-round chain (~3 rounds). Closure brings codec catalog to 7/7 MIDs and unblocks pubsub registry mapping-id resolver.",
+        "Latent spec-correctness audit script — grep every wz envelope codec's `<sce:flag name=\"mid\">` for missing `value=` (R108a was a textbook example of this gap going unnoticed). 1-round hardening when DECLARE chain lands and gives the audit script a known target set.",
+        "Non-default Layer 3 coverage — PUSH N-suffix wireexpr, OAM ZINT/ZBUF arms, INTEREST R=1 non-final, RESPONSE err arm, REQUEST PUT/DEL inner tag + ext-chain. Quality-axis round; not gating.",
+        "AP MVP demo binary — Linux + tokio binary against zenoh-pico peer, 2-3 rounds (TCP scaffolding + peer fixture + golden-path).",
+        "R67-R71 series — inbound parser / Hal time-mock / wz-runtime-tokio-test-support split per project_hybrid_adoption_plan.md; still queued, sequencing decision needed (Phase W lwIP reintroduction also pending)."
+      ],
+      "publishable_decision_summary": "R109 records the R106 + R108a default-header semantics into wire-spec-subset §6.1/§6.2/§6.3 as atomic caveats so the implicit-default ambiguity (M-flag baking, mid `value=` requirement) is captured in the doc surface, not just in codec source files; closes the R106/R108b doc-round carry and gives future authoring sessions a single read-once reference for the per-envelope wire-header default state.",
+      "publishable_changes_bullets": [
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants caveat append: \"wz Push::default() bakes 0x5D (MID 0x1D|M); M=1 = LOCAL wireexpr (R106/R102 Layer 3).\" via add_section_caveat.",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants caveat append: \"wz Request::default() bakes 0x5C (MID 0x1C|M); R108a fixed missing mid value=, R108b Layer 3.\" via add_section_caveat.",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants caveat append: \"wz Response::default() bakes 0x5B (MID 0x1B|M); LOCAL wireexpr default (R106/R105 Layer 3).\" via add_section_caveat.",
+        "No source / code change. All three mutations are typed atomic primitives operating on the existing Section.caveats_bullets fields; GENERATED.md cascade renders the new caveats automatically and is kept in sync per the atomic mutate contract.",
+        "INTEREST §5 wasn't updated because R107's decision was \"no M-baking\" (interest_body header keeps M=0 default) — the caveat would carry no defaulted-header bytes to record; the audit lives in the R107 changelog entry instead, which is the appropriate genre fit per anti-patterns concept."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: docs=12/12, T1=0, RT 12/12, ledger entries 122 → 123, sections=214, GENERATED.md=sync.",
+        "Caveat character lengths verified ahead of mutation (≤100 chars per R161 §41 threshold): §6.1=82, §6.2=92, §6.3=85.",
+        "No build / test impact (doc-only round). Last full CI green from R108b commit 10477c4 stands.",
+        "Carry closure tally: R106 doc-round carry + R108b doc-round carry both terminated by this entry. Remaining R108b carries are codec-layer (DECLARE chain) and quality-axis (non-default Layer 3) — separate genre."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "DECLARE codec (MID 0x1E) chain — last unmodeled application-layer MID. 9 declaration sub-types per zenoh-pico declarations.c. Multi-round chain (~3 rounds). Closure brings codec catalog to 7/7 MIDs and unblocks pubsub registry mapping-id resolver.",
+        "Latent spec-correctness audit script — grep every wz envelope codec's `<sce:flag name=\"mid\">` for missing `value=` (R108a was a textbook example of this gap going unnoticed). 1-round hardening when DECLARE chain lands and gives the audit script a known target set.",
+        "Non-default Layer 3 coverage — PUSH N-suffix wireexpr, OAM ZINT/ZBUF arms, INTEREST R=1 non-final, RESPONSE err arm, REQUEST PUT/DEL inner tag + ext-chain. Quality-axis round; not gating.",
+        "AP MVP demo binary — Linux + tokio binary against zenoh-pico peer, 2-3 rounds (TCP scaffolding + peer fixture + golden-path).",
+        "R67-R71 series — inbound parser / Hal time-mock / wz-runtime-tokio-test-support split per project_hybrid_adoption_plan.md; still queued, sequencing decision needed (Phase W lwIP reintroduction also pending)."
       ]
     },
     "Round 11": {
