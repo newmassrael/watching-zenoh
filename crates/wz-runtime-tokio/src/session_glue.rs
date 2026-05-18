@@ -357,6 +357,14 @@ pub struct ActionTrace {
     /// can assert both the counter side-effect AND the slot
     /// population in one pass.
     pub record_established_at: u32,
+    /// R89 — incremented on every `cookie_valid()` guard invocation
+    /// (SentInitAck -> SentOpenAck transition condition). Tests
+    /// assert this counter to confirm the dynamic guard fired
+    /// instead of a constant-true fallback. The verdict itself is
+    /// observed indirectly via FSM state after the transition: if
+    /// guard returned true the FSM advances to SentOpenAck, if
+    /// false it stays at SentInitAck.
+    pub cookie_valid_check: u32,
 }
 
 /// Sync RAII shim around an async `LinkDriver`. Production callers
@@ -487,6 +495,22 @@ pub struct SessionLinkActions {
     /// HMAC-only behavior must validate the slot before signalling
     /// `inbound.start`.
     pub inbound_peer_zid: Mutex<Option<Vec<u8>>>,
+    /// R89 — `cookie` field captured from the most recent inbound
+    /// `OpenSyn` frame (`InboundFrame::Open { is_ack: false, .. }`).
+    /// Set by `handle_inbound` for the Accepting side; consumed by
+    /// the `cookie_valid()` guard which re-computes the expected
+    /// HMAC-SHA256(cookie_signing_key, inbound_peer_zid)[..16] and
+    /// compares it against this slot. RFC §5.M anti-amplification
+    /// closes the loop opened by R86: R86 mints the cookie on the
+    /// outbound InitAck; R89 verifies the same cookie on the
+    /// inbound OpenSyn echo.
+    ///
+    /// Distinct from `inbound_cookie` (R62) which captures the
+    /// Initiator-side InitAck.body.cookie for OpenSyn echo. Those
+    /// two slots model the same wire field on opposite sides of
+    /// the handshake — one slot per role keeps the dispatch
+    /// unambiguous.
+    pub inbound_opensyn_cookie: Mutex<Option<Vec<u8>>>,
     /// R68b — per-role ext chain slots. Indexed by `ExtChainRole`
     /// via `ext_chain_for`. Each slot lives behind its own `Mutex`
     /// so a setter can swap one chain without blocking the others
@@ -512,6 +536,7 @@ impl SessionLinkActions {
             last_inbound_keepalive_at: Mutex::new(None),
             established_at: Mutex::new(None),
             inbound_peer_zid: Mutex::new(None),
+            inbound_opensyn_cookie: Mutex::new(None),
             init_syn_ext: Mutex::new(Vec::new()),
             init_ack_ext: Mutex::new(Vec::new()),
             open_syn_ext: Mutex::new(Vec::new()),
@@ -599,6 +624,17 @@ impl SessionLinkActions {
                 // can HMAC-bind the outbound cookie to it per RFC §5.M.
                 *self.inbound_peer_zid.lock().unwrap() = Some(body.zid.clone());
             }
+            InboundFrame::Open { is_ack: false, body, .. } => {
+                // R89 — Accepting-side OpenSyn arrival: capture the
+                // echoed cookie so the `cookie_valid()` guard can
+                // re-HMAC peer_zid and compare against this slot.
+                // Closes the loop opened by R86 (outbound cookie
+                // mint) — RFC §5.M anti-amplification on both
+                // sides of the handshake.
+                if let Some(cookie) = &body.cookie {
+                    *self.inbound_opensyn_cookie.lock().unwrap() = Some(cookie.clone());
+                }
+            }
             InboundFrame::KeepAlive { .. } => {
                 // R72b — record receive time so the lease deadline
                 // comparator (now - stamp < lease) advances. Reading
@@ -631,6 +667,7 @@ impl ActionTrace {
             set_close_reason_count: self.set_close_reason_count,
             close_reason: self.close_reason,
             record_established_at: self.record_established_at,
+            cookie_valid_check: self.cookie_valid_check,
         }
     }
 }
@@ -666,7 +703,7 @@ pub fn install_session_actions(
     script_engine.create_session(SESSION_ID);
     register_outbound_link_fns(script_engine.as_ref(), &actions);
     register_state_internal_fns(script_engine.as_ref(), &actions);
-    register_guard_fns(script_engine.as_ref());
+    register_guard_fns(script_engine.as_ref(), &actions);
 }
 
 // R71 — the former `rebind_session_actions_for_test` moved to the
@@ -808,16 +845,49 @@ pub fn register_state_internal_fns(lua: &dyn IScriptEngine, actions: &Arc<Sessio
 /// Register the 3 guard-condition script functions. Public for the
 /// same reason as `register_outbound_link_fns` — the test-support
 /// crate composes it during the rebind path.
-pub fn register_guard_fns(lua: &dyn IScriptEngine) {
-    // R57 baseline: guard expressions always return true so the
-    // accept-side hardening + cookie validation transitions advance
-    // for the integration test. Cap quota / token-bucket / cookie
-    // HMAC actual checks are RFC §5.M concerns and bind in a later
-    // round (R58+) when the security-relevant state-keeping moves
-    // out of placeholder territory.
+///
+/// R89 — signature gains `actions` parameter so `cookie_valid` can
+/// dispatch dynamically against the inbound OpenSyn cookie + the
+/// stored peer_zid + cookie_signing_key. `half_open_cap_available`
+/// and `accept_rate_token` remain R57 placeholder constants pending
+/// cap-quota / token-bucket implementation rounds.
+pub fn register_guard_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLinkActions>) {
     bind_bool(lua, "half_open_cap_available", true);
     bind_bool(lua, "accept_rate_token", true);
-    bind_bool(lua, "cookie_valid", true);
+    bind_guard(lua, "cookie_valid", actions, |a| {
+        // R89 — cookie_valid is the inbound half of R86's outbound
+        // cookie binding. The Accepting side stored peer_zid on
+        // InitSyn arrival (R86 inbound_peer_zid slot) and minted a
+        // cookie via HMAC-SHA256(cookie_signing_key, peer_zid)[..16]
+        // on InitAck send (R86 send_init_ack_with_cookie). The
+        // Initiator echoes that cookie verbatim on OpenSyn; here we
+        // re-compute the expected HMAC and compare against the
+        // captured inbound OpenSyn cookie (R89 inbound_opensyn_cookie
+        // slot). Mismatch -> guard returns false -> FSM stays at
+        // SentInitAck instead of advancing to SentOpenAck.
+        //
+        // The counter increments on every invocation so tests can
+        // assert the guard actually fired (vs. R57's bind_bool
+        // placeholder which never executed any dynamic check).
+        a.trace.lock().unwrap().cookie_valid_check += 1;
+
+        // Defensive: any missing material rejects. A well-formed
+        // handshake populates both slots before this guard runs.
+        let peer_zid = match a.inbound_peer_zid.lock().unwrap().clone() {
+            Some(z) => z,
+            None => return false,
+        };
+        let echoed = match a.inbound_opensyn_cookie.lock().unwrap().clone() {
+            Some(c) => c,
+            None => return false,
+        };
+        let expected = generate_cookie_hmac_sha256(&a.params.cookie_signing_key, &peer_zid);
+        // Byte-equality compare. Constant-time compare is overkill
+        // for a single-peer test fixture path; if the HMAC verdict
+        // ever drives a security-critical timing oracle on prod
+        // hardware, swap to `subtle::ConstantTimeEq` here.
+        echoed == expected
+    });
 }
 
 // ─────────────────────────── codec wiring ───────────────────────────
@@ -1824,6 +1894,24 @@ fn bind_close_reason(
 fn bind_bool(lua: &dyn IScriptEngine, name: &str, value: bool) {
     let cb: NativeMethod = Box::new(move |_args: &[ScriptValue]| -> ScriptValue {
         ScriptValue::Bool(value)
+    });
+    let ok = lua.register_global_function(name, cb);
+    assert!(ok, "register_global_function failed for {name}");
+}
+
+/// R89 — dynamic boolean guard binding. The closure receives the
+/// captured `Arc<SessionLinkActions>` and returns a `bool` verdict
+/// per invocation; sibling to `bind_unit` (which returns Null) and
+/// `bind_bool` (which returns a constant). Used by `cookie_valid()`
+/// to re-HMAC peer_zid against the inbound OpenSyn cookie at guard
+/// evaluation time rather than at registration time.
+fn bind_guard<F>(lua: &dyn IScriptEngine, name: &str, actions: &Arc<SessionLinkActions>, body: F)
+where
+    F: Fn(&Arc<SessionLinkActions>) -> bool + Send + Sync + 'static,
+{
+    let captured = actions.clone();
+    let cb: NativeMethod = Box::new(move |_args: &[ScriptValue]| -> ScriptValue {
+        ScriptValue::Bool(body(&captured))
     });
     let ok = lua.register_global_function(name, cb);
     assert!(ok, "register_global_function failed for {name}");

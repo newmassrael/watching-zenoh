@@ -92,11 +92,27 @@ fn drive_to_established(engine: &mut Engine<SessionFsmUnicastPolicy>) {
 //                     → SentOpenAck → Established
 #[test]
 fn r61_listener_path_inbound_to_established() {
+    use wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256;
+
     let (actions, mut engine) = fresh_engine();
     assert_eq!(engine.get_current_state(), S::Init);
 
     engine.process_event(E::InboundStart);
     assert_eq!(engine.get_current_state(), S::AwaitingInitSyn);
+
+    // R89 — raw-event-injection bypasses handle_inbound, so the
+    // R86 peer_zid + R89 OpenSyn cookie slots must be seeded
+    // manually to satisfy the dynamic cookie_valid() guard. r61
+    // verifies FSM transition shape, not wire-bytes; the seed
+    // mirrors what handle_inbound would populate on a real
+    // InitSyn + OpenSyn arrival.
+    let fixture_peer_zid = vec![0xB0, 0xB1, 0xB2, 0xB3];
+    *actions.inbound_peer_zid.lock().unwrap() = Some(fixture_peer_zid.clone());
+    let expected_cookie = generate_cookie_hmac_sha256(
+        &actions.params.cookie_signing_key,
+        &fixture_peer_zid,
+    );
+    *actions.inbound_opensyn_cookie.lock().unwrap() = Some(expected_cookie);
 
     engine.process_event(E::InitSynReceived);
     assert_eq!(engine.get_current_state(), S::SentInitAck);
@@ -112,6 +128,12 @@ fn r61_listener_path_inbound_to_established() {
     assert_eq!(t.enable_rx_tx_regions, 1);
     assert_eq!(t.start_lease_monitor, 1);
     assert_eq!(t.start_keepalive_worker, 1);
+    assert!(
+        t.cookie_valid_check >= 1,
+        "R89 dynamic guard must have fired at least once on the \
+         SentInitAck -> SentOpenAck transition; got count={}",
+        t.cookie_valid_check
+    );
 }
 
 // ── 2. LinkOpening -> link.open_timeout -> Closing (Generic)

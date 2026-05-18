@@ -122,20 +122,29 @@ fn craft_initsyn_wire() -> Vec<u8> {
     ]
 }
 
-/// Hand-craft a minimal OpenSyn wire frame. `parent_flags = 0x00`
-/// (no FLAG_T_OPEN_A, no FLAG_T_OPEN_T) so the cookie carrier is
-/// present (gated by `(parent_flags & 0x20) == 0` per OpenBody
-/// decode) and the lease is interpreted in milliseconds:
+/// Hand-craft an OpenSyn wire frame echoing a cookie. `parent_flags
+/// = 0x00` (no FLAG_T_OPEN_A, no FLAG_T_OPEN_T) so the cookie
+/// carrier is present (gated by `(parent_flags & 0x20) == 0` per
+/// OpenBody decode) and the lease is interpreted in milliseconds:
 ///   - lease VLE = 0     (single byte 0x00)
 ///   - initial_sn VLE = 0 (single byte 0x00)
-///   - cookie_len VLE = 0 (single byte 0x00) — empty cookie carrier
-fn craft_opensyn_wire() -> Vec<u8> {
-    vec![
+///   - cookie_len VLE = `cookie.len()` (assumed < 0x80 for single-byte VLE)
+///   - cookie bytes
+///
+/// R89 — cookie payload is now required by the `cookie_valid()`
+/// guard's HMAC verification (closes the R86 outbound mint loop).
+/// Pre-R89 this function ignored `cookie` and emitted a zero-length
+/// carrier; the guard was an unconditional `true` placeholder.
+fn craft_opensyn_wire(cookie: &[u8]) -> Vec<u8> {
+    assert!(cookie.len() < 0x80, "fixture: single-byte VLE only");
+    let mut wire = vec![
         T_MID_OPEN,
         0x00, // lease VLE = 0
         0x00, // initial_sn VLE = 0
-        0x00, // cookie_len VLE = 0
-    ]
+        cookie.len() as u8, // cookie_len VLE
+    ];
+    wire.extend_from_slice(cookie);
+    wire
 }
 
 fn fresh_setup() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
@@ -182,8 +191,16 @@ async fn r78_accepting_path_handshake_terminates_at_established() {
 
     // ── Rx OpenSyn via poll_and_dispatch_one ───────────────────────
     {
+        // R89 — the OpenSyn must echo the HMAC-bound cookie the
+        // Accepting side minted on InitAck (R86) for the
+        // `cookie_valid()` guard to pass. peer_zid was captured by
+        // R86 on InitSyn arrival (= [0xB0..0xB3] from craft_initsyn_wire).
+        let expected_cookie = wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
+            &fixture_session_init_params().cookie_signing_key,
+            &[0xB0, 0xB1, 0xB2, 0xB3],
+        );
         let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-            bytes: craft_opensyn_wire(),
+            bytes: craft_opensyn_wire(&expected_cookie),
         })]);
         let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
         assert!(
@@ -218,7 +235,102 @@ async fn r78_accepting_path_handshake_terminates_at_established() {
             trace.start_keepalive_worker, 1,
             "Established.onentry must start the keepalive worker"
         );
+        // R89 — the cookie_valid() guard MUST have fired exactly
+        // once on the SentInitAck -> SentOpenAck transition. The
+        // happy-path OpenSyn arrival was the only candidate.
+        assert_eq!(
+            trace.cookie_valid_check, 1,
+            "R89 dynamic guard must fire exactly once on the valid \
+             OpenSyn cookie echo path; got count={}",
+            trace.cookie_valid_check
+        );
     }
+}
+
+// ───────────── R89 cookie verification negative paths ──────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r89_invalid_cookie_blocks_transition_to_sentopen_ack() {
+    // Setup mirrors r78 happy path up through SentInitAck, then
+    // stages an OpenSyn whose cookie is byte-mismatched against the
+    // R86-minted HMAC. The cookie_valid() guard must reject the
+    // transition and the FSM must stay at SentInitAck.
+    let recording_driver = Arc::new(NoopOutboundDriver::default());
+    let driver_arc: Arc<dyn BoxedLinkDriver> = recording_driver;
+    let actions = SessionLinkActions::new(driver_arc, fixture_session_init_params());
+    let lua = install_session_actions_for_test(actions.clone());
+    let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
+    engine.initialize();
+
+    engine.process_event(E::InboundStart);
+    assert_eq!(engine.get_current_state(), S::AwaitingInitSyn);
+
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
+        bytes: craft_initsyn_wire(),
+    })]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::SentInitAck);
+
+    // Forged cookie: 16 bytes of 0xFF — guaranteed to mismatch any
+    // valid HMAC(cookie_signing_key, peer_zid) output.
+    let forged = vec![0xFFu8; 16];
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
+        bytes: craft_opensyn_wire(&forged),
+    })]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+
+    assert_eq!(
+        engine.get_current_state(),
+        S::SentInitAck,
+        "forged cookie must NOT advance the FSM past SentInitAck \
+         (cookie_valid guard rejects); state={:?}",
+        engine.get_current_state()
+    );
+    let trace = actions.trace_snapshot();
+    assert!(
+        trace.cookie_valid_check >= 1,
+        "cookie_valid guard must have fired (and rejected); got count={}",
+        trace.cookie_valid_check
+    );
+    assert_eq!(
+        trace.send_open_ack, 0,
+        "send_open_ack must NOT fire when cookie verification fails"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r89_missing_cookie_blocks_transition_to_sentopen_ack() {
+    let recording_driver = Arc::new(NoopOutboundDriver::default());
+    let driver_arc: Arc<dyn BoxedLinkDriver> = recording_driver;
+    let actions = SessionLinkActions::new(driver_arc, fixture_session_init_params());
+    let lua = install_session_actions_for_test(actions.clone());
+    let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
+    engine.initialize();
+
+    engine.process_event(E::InboundStart);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
+        bytes: craft_initsyn_wire(),
+    })]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::SentInitAck);
+
+    // Zero-length cookie carrier: cookie_len VLE = 0, no cookie
+    // bytes. OpenBody.cookie decodes as Some(Vec::new()) per the
+    // present-if gating; the R89 guard sees an empty Vec which
+    // never matches a non-empty HMAC output.
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
+        bytes: craft_opensyn_wire(&[]),
+    })]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+
+    assert_eq!(
+        engine.get_current_state(),
+        S::SentInitAck,
+        "missing/empty cookie must NOT advance past SentInitAck"
+    );
+    let trace = actions.trace_snapshot();
+    assert!(trace.cookie_valid_check >= 1);
+    assert_eq!(trace.send_open_ack, 0);
 }
 
 // ────── R86 cookie HMAC binding (Accepting-side InitAck wire) ──────
