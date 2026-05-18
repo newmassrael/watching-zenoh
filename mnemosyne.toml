@@ -154,3 +154,10 @@ target_id = "Round 128"
 reason = "Audit half intentionally minimal per R295/R296 textbook split: pin-bump-plus-allow-drop round consuming the third SCE B5-ν follow-on cluster (atomics 2fe638c1 + 7bada841). Audit half records the pin bump + #[allow] removal + Gap 7 closure summary; publishable half carries the full per-atomic anatomy (Jinja2 {% if fields %} guard at all 6 backend templates; Python isinstance->kind discriminator fix at b5_nu_match_term; Go type-switch->field-presence fix at b5_nu_switch_block_go; Q-DSG-3 rustc-compile harness at tests/forge_conformance.rs::rustc_compile_codec_set with warnings=deny mirror; 6 new per-backend B5-nu fixtures), plus the R125c chain closure summary (7 gap classes resolved across 4 SCE atomics 11287248 -> b35dbb66 -> 2fe638c1 -> 7bada841) and the residual independent-priority carry list for R125e / R123b / R121b-c / R114 cluster."
 applied_in = "R128 in-flight"
 content_hash_after = "50a86f1d2cb769b385885b33a802b98604ec48dcabc67ad404111ffb14064c0e"
+
+[[publishable_override_ledger]]
+kind = "redaction"
+target_id = "Round 123b"
+reason = "Audit half intentionally minimal per R295/R296 textbook split: R123b integration attempt deferred — SCE compile_scxml_with_imports (the only deploy-aware path covering both imports and the variant_defaults overlay) calls parse_deploy(deploy/ap_standalone.yaml) which rejects wz's pre-topology yaml schema (top-level `machines:` vs SCE-expected `topology.<device>.machines.<machine>` nesting at SCE pin 7bada841). All 3 working-tree changes (build.rs orchestrator switch + sources/codecs/request.scxml arm 0x03 default drop + scripts/run-ci.sh KNOWN_DIVERGENCE -= request) rolled back; HEAD stays at R128 dad20aa. Audit half records the deferral + the empirical schema mismatch; publishable half carries the full SCE-API survey (3 compile_* entry points considered), the rollback rationale, and the R123b-pre carry plan (yaml schema migration + validate-deploy.sh upgrade as workspace-wide refactor preconditions before R123b can resume)."
+applied_in = "R123b in-flight"
+content_hash_after = "763d7dc937411626613ff1a508e80d2c41da08feb71ab413d9c34f10327c52a5"

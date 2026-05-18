@@ -4782,6 +4782,91 @@
         "R126 (post-Atomic B merge): vendor pin bump + clean removal of audit-trace block."
       ]
     },
+    "Round 123b": {
+      "decision_summary": "R123b: deferred — wz deploy/*.yaml uses pre-topology schema; SCE parse_deploy requires topology.machines nesting.",
+      "changes_bullets": [
+        "R123b integration attempted: build.rs switch to compile_scxml_with_imports + deploy.",
+        "Attempt failed at parse_deploy: deploy/ap_standalone.yaml top-level machines: rejected.",
+        "Error: unknown field `machines`, expected one of version/topology/discovery/partitions etc.",
+        "Schema migration to topology.<device>.machines.<name> is the wz-side precondition.",
+        "All 3 R123b working-tree changes rolled back (build.rs + request.scxml + run-ci.sh).",
+        "request stem retains arm 0x03 default; LAYER2_KNOWN_DIVERGENCE = (request wireexpr) stays.",
+        "compile_forge_with_imports has no deploy parameter; compile_scxml_with_imports is the deploy-aware path."
+      ],
+      "verification_bullets": [
+        "Pre-rollback observed: build-script-build panic at build.rs:102 (parse_deploy YAML error).",
+        "Working tree clean post-rollback; HEAD = R128 dad20aa preserved as stable state.",
+        "validate_workspace: T1=0; RT 12/12; entries 150 -> 151; sections=214; sync.",
+        "scripts/validate-deploy.sh (Phase Y R50 holding-pattern check) still accepts old schema.",
+        "SCE compile_forge_with_imports (single-doc, no deploy) keeps current codecs OK."
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "carry_forward_bullets": [
+        "R123b-pre: migrate deploy/{ap_standalone,mcu_target,ap_mcu_pair}.yaml from machines: top-level",
+        "to topology.<device>.machines.<machine> nested shape per SCE current schema.",
+        "R123b-pre: migrate scripts/validate-deploy.sh schema check to the new yaml structure.",
+        "R123b-pre is a workspace-wide refactor; scope estimation pending separate planning round.",
+        "After R123b-pre lands, R123b resumes: switch build.rs + drop request arm 0x03 default.",
+        "R121b-c independent (recommended next): AP MVP demo binary functional 4 sub-rounds.",
+        "R114 cluster carry on request stem stays: SCE upstream PR for mid value=0x1C + R88 arm-default."
+      ],
+      "publishable_decision_summary": "R123b: integration attempt deferred — wz deploy yamls use the pre-topology schema and SCE parse_deploy at pin 7bada841 requires the topology.<device>.machines.<machine> nested shape; rolled back.",
+      "publishable_changes_bullets": [
+        "R123b plan from prior handoff: switch crates/wz-codecs/build.rs from",
+        "compile_forge_with_imports to a deploy-aware path so SCE applies the",
+        "variant_defaults overlay from deploy/ap_standalone.yaml at codegen time;",
+        "drop `default=\"true\"` from sources/codecs/request.scxml arm 0x03;",
+        "remove `request` from scripts/run-ci.sh LAYER2_KNOWN_DIVERGENCE.",
+        "SCE API survey: compile_forge_with_deploy is single-doc + no imports;",
+        "compile_forge_with_imports is single-doc + imports + no deploy;",
+        "compile_scxml_with_imports is multi-doc + imports + deploy.",
+        "Chose compile_scxml_with_imports as the only path covering both imports",
+        "and deploy overlay; build.rs restructured for one-shot orchestrator.",
+        "parse_deploy(deploy/ap_standalone.yaml) panics: unknown field `machines:`",
+        "at top level. SCE schema expects topology.<device>.machines.<m> nesting.",
+        "wz deploy yamls (ap_standalone / mcu_target / ap_mcu_pair) all use the",
+        "older flat schema with `machines:` at top level; wz validate-deploy.sh",
+        "Phase Y R50 holding-pattern check (python yaml well-formedness only)",
+        "accepts the flat shape and didn't surface the SCE divergence.",
+        "All 3 working-tree changes rolled back; HEAD stays at R128 dad20aa.",
+        "Layer 2 KNOWN_DIVERGENCE remains (wireexpr) (request); R114 cluster carry preserved."
+      ],
+      "publishable_verification_bullets": [
+        "Pre-rollback: cargo build -p wz-codecs panic at wz-codecs/build.rs:102 via",
+        "parse_deploy with `Yaml('unknown field machines, expected one of version,",
+        "topology, discovery, partitions, distributability, extern_symbols, variant_defaults",
+        "at line 19 column 1')`.",
+        "Layer C1+C2 FAIL pre-rollback; Layer D PASS (validate-deploy.sh schema check",
+        "is a python yaml well-formedness gate, not SCE schema conformance).",
+        "Post-rollback git status clean; HEAD verbatim at R128 dad20aa.",
+        "validate_workspace: docs=12/12; T1=0; RT 12/12; entries 150 -> 151; sync.",
+        "scripts/run-ci.sh full 7-lane gate would pass at the rollback state",
+        "(no wz-side code change since R128; SCE pin 7bada841 stable)."
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R123b-pre (workspace-wide refactor; scope TBD): migrate the 3 deploy yamls from",
+        "top-level `machines:` to `topology.<device>.machines.<machine>` nested shape",
+        "matching SCE's current DeployConfig schema at pin 7bada841.",
+        "R123b-pre also migrates scripts/validate-deploy.sh schema check to the new",
+        "yaml structure (currently a R50 holding-pattern python yaml well-formedness",
+        "check; upgrade to invoke sce-codegen subcommand once available).",
+        "R123b-pre scope estimation: 3 yaml files + 1 shell script + audit-trace via",
+        "separate planning round before commit.",
+        "R123b resumes after R123b-pre lands: build.rs switch to",
+        "compile_scxml_with_imports + drop sources/codecs/request.scxml arm 0x03",
+        "default + clear request stem from LAYER2_KNOWN_DIVERGENCE.",
+        "R121b-c is the recommended next priority (independent of R123b chain):",
+        "AP MVP demo binary functional in 4 sub-rounds (deps + tokio main +",
+        "TcpDriver wire-up + DECLARE subscriber via SubscriberRegistry).",
+        "R114 cluster carry on request stem unaffected by R123b-pre: SCE upstream",
+        "still needs paired PR for mid value=0x1C baking + R88 arm-default convention."
+      ]
+    },
     "Round 124": {
       "decision_summary": "R124 header.M default=1 signal report drafted for SCE upstream.",
       "changes_bullets": [
