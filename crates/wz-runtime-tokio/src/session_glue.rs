@@ -63,7 +63,8 @@ use sce_rust_runtime::Engine;
 
 use sce_forge_runtime::codec::{CodecError, SceCursor};
 use wz_codecs::close::Close;
-use wz_codecs::declare::Declare;
+use wz_codecs::decl_kexpr::DeclKexpr;
+use wz_codecs::declare::{Declare, DeclareVariant};
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::ext_zint::ExtZint;
 use wz_codecs::frame::Frame;
@@ -79,6 +80,7 @@ use wz_codecs::response::Response;
 use wz_codecs::response_final::ResponseFinal;
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
+use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
@@ -966,6 +968,64 @@ impl SessionLinkActions {
         };
         self.driver.send_blocking(&wire, reliability);
     }
+
+    /// R121g — encode + dispatch a `Declare(DeclKexpr)` on the
+    /// outbound link, registering `mapping_id -> suffix` in the
+    /// peer's keyexpr table. After the peer has parsed this frame
+    /// (zenoh-pico's `_z_session_recv_declaration` populates the
+    /// table), the publisher may emit aliased Pushes carrying only
+    /// `mapping_id` (and optionally a per-Push suffix) via
+    /// [`send_push_aliased`].
+    ///
+    /// DECLARE outbound is hard-coded to the reliable channel — the
+    /// session-FSM SN window enforces ordering between this frame
+    /// and any subsequent aliased Push on the same channel, so the
+    /// peer's table is guaranteed populated before a referencing
+    /// Push arrives. A best-effort DECLARE would race against the
+    /// aliased Push and the peer's resolver would reject the id;
+    /// best-effort DECLARE has no production semantics in zenoh-pico.
+    ///
+    /// Preconditions match [`send_push_literal`] (the session FSM
+    /// must have reached `Established`; the driver must be
+    /// non-blocking or the channel-decoupling pattern must be in
+    /// place to avoid `block_on`-in-runtime panic).
+    pub fn send_declare_keyexpr(&self, mapping_id: u64, suffix: &str) {
+        let declare = build_declare_kexpr(mapping_id, suffix);
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+        self.driver.send_blocking(&wire, Reliability::Reliable);
+    }
+
+    /// R121g — encode + dispatch a DECLARE-aliased `Push` (id != 0).
+    /// Mirror of [`send_push_literal`] for the
+    /// after-DECLARE-registration path. The caller MUST have
+    /// invoked [`send_declare_keyexpr`] earlier on the same session
+    /// (or relied on a prior in-band DECLARE) so the peer's keyexpr
+    /// table contains a `mapping_id` entry; otherwise the peer
+    /// drops the Push with an "unknown wireexpr id" error.
+    ///
+    /// `suffix=None` emits a pure-aliased Push (the declared
+    /// literal is the full keyexpr). `suffix=Some(s)` emits a
+    /// composite Push (the declared prefix + `s`) — useful when
+    /// one DECLARE registers a common prefix and many Pushes carry
+    /// the per-instance tail.
+    pub fn send_push_aliased(
+        &self,
+        mapping_id: u64,
+        suffix: Option<&str>,
+        value: &[u8],
+        reliable: bool,
+    ) {
+        let push = build_push_aliased(mapping_id, suffix, value);
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_push(sn, push, reliable);
+        let reliability = if reliable {
+            Reliability::Reliable
+        } else {
+            Reliability::BestEffort
+        };
+        self.driver.send_blocking(&wire, reliability);
+    }
 }
 
 impl ActionTrace {
@@ -1423,6 +1483,184 @@ pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> Push {
             payload: payload_bytes,
         }),
     }
+}
+
+/// R121g — build a `Push` network-message that references a peer-
+/// declared keyexpr mapping. Mirror of [`build_push_literal`] for
+/// the DECLARE-aliased path: instead of carrying the full literal
+/// suffix on every Push, the publisher first sends a
+/// `Declare(DeclKexpr)` (via [`build_declare_kexpr`] / the
+/// `send_declare_keyexpr` action) that registers `id` → "demo/test",
+/// then emits subsequent Pushes carrying only that `id` (and
+/// optionally a per-Push suffix appended to the declared prefix).
+///
+/// Wire-spec sourcing:
+///
+/// * `WireexprLocal { id: N, suffix: None }` — pure aliased Push.
+///   The peer (z_sub) consults its keyexpr table built from prior
+///   inbound `DeclKexpr` records (zenoh-pico's
+///   `_z_session_recv_declaration` path) and resolves `id=N` to the
+///   declared keyexpr. This is the bandwidth-efficient shape for
+///   repeated-keyexpr publishers.
+///
+/// * `WireexprLocal { id: N, suffix: Some(s) }` — composite. The
+///   peer concatenates its declared prefix with `s` to form the
+///   effective keyexpr. Used when one DECLARE establishes a prefix
+///   (e.g. `myhouse/sensors/`) and many publishers add per-sensor
+///   suffixes (`temp`, `humidity`) without redeclaring.
+///
+/// Panics if `mapping_id == 0` — id zero is the literal-keyexpr
+/// sentinel (`build_push_literal`'s arm). The split keeps the two
+/// shapes apart at the API surface so a caller cannot silently
+/// invert them.
+pub fn build_push_aliased(mapping_id: u64, suffix: Option<&str>, value: &[u8]) -> Push {
+    assert!(
+        mapping_id != 0,
+        "build_push_aliased requires a non-zero mapping id; use build_push_literal for id=0",
+    );
+    let suffix_string = suffix.map(str::to_string);
+    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let payload_bytes = value.to_vec();
+    let payload_len = payload_bytes.len() as u64;
+    // Push.header.N (bit 5, 0x20) is the "suffix carrier present"
+    // flag: set when the WireexprLocal carries a non-None suffix,
+    // clear for a pure-aliased Push (`suffix=None`). The peer's
+    // wireexpr decoder reads this bit to decide whether to expect
+    // `VLE(suffix_len) + suffix bytes` after the id; an out-of-sync
+    // N flag drops the codec into an offset-shifted read of the
+    // following MsgPut header, which the peer surfaces as
+    // `Unknown message type received` (zenoh-pico
+    // `_z_network_message_decode` MID switch on a stale byte).
+    let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
+    Push {
+        header: wire_const::N_MID_PUSH | n_flag,
+        keyexpr: Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: mapping_id,
+                suffix_len,
+                suffix: suffix_string,
+            }),
+        },
+        extensions: None,
+        body: PushVariant::CodecZenohMsgPut(MsgPut {
+            header: 0x01,
+            timestamp: None,
+            encoding: None,
+            extensions: None,
+            payload_len,
+            payload: payload_bytes,
+        }),
+    }
+}
+
+/// R121g — build a `Declare` network-message that registers a
+/// literal-keyexpr mapping. The peer's inbound dispatch
+/// (zenoh-pico's `_z_session_recv_declaration` →
+/// `_z_register_resource`) inserts `mapping_id → suffix` into its
+/// local keyexpr table, after which any inbound Push with
+/// `WireexprLocal { id: mapping_id, suffix: None }` resolves to the
+/// declared literal.
+///
+/// Wire shape (per
+/// `vendor/zenoh-pico/src/protocol/codec/declarations.c:52-63`):
+///
+/// ```text
+///   [DeclKexpr.header = _Z_DECL_KEXPR_MID(0x00)
+///                       | (suffix.is_some() ? _Z_DECL_KEXPR_FLAG_N(0x20) : 0)
+///                       | (WireexprLocal ? B5-ν derived 0x40 : 0)]
+///   VLE(mapping_id)
+///   WireexprLocal.encode (id VLE + optional suffix_len VLE + suffix bytes)
+/// ```
+///
+/// Wrapped in a `Declare` envelope with the network MID header
+/// `N_MID_DECLARE (0x1E)`, no `interest_id`, no extensions.
+///
+/// Panics if `mapping_id == 0` — id zero is reserved as the
+/// literal-keyexpr sentinel and a DECLARE with id=0 has no
+/// table-population semantics in zenoh-pico.
+pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> Declare {
+    assert!(
+        mapping_id != 0,
+        "build_declare_kexpr requires a non-zero mapping id; id=0 is the literal-keyexpr sentinel",
+    );
+    let suffix_string = suffix.to_string();
+    let suffix_len = Some(suffix_string.len() as u64);
+    Declare {
+        // `N_MID_DECLARE (0x1E)` — no I (interest_id), no Z
+        // (extensions); the MVP wires only the unsolicited
+        // mapping-population shape that zenoh-pico emits on
+        // `z_declare_keyexpr` without an Interest reply context.
+        header: wire_const::N_MID_DECLARE,
+        interest_id: None,
+        extensions: None,
+        body: DeclareVariant::CodecZenohDeclKexpr(DeclKexpr {
+            // Inner DeclKexpr header MUST carry `_Z_DECL_KEXPR_FLAG_N
+            // (0x20)` when the keyexpr has a suffix string, per
+            // `vendor/zenoh-pico/src/protocol/codec/declarations.c:52-58`.
+            // The peer (zenoh-pico) gates the wireexpr suffix decode
+            // on this bit (declarations.c:185); a missing N flag
+            // drops the codec into an offset-shifted read of the
+            // next message, surfaced as `Unknown message type
+            // received` by `_z_network_message_decode`.
+            //
+            // We deliberately use the `WireexprNonlocal` arm below
+            // even though the keyexpr is semantically local. Reason:
+            // the wz codegen's B5-ν derived bit OR's `0x40` into the
+            // parent header for the `WireexprLocal` arm. zenoh-pico's
+            // DeclKexpr header layout does NOT define a flag at bit 6
+            // (only N at bit 5); the spurious `0x40` would corrupt
+            // the wire shape just like the missing `0x20` does. The
+            // two variants emit byte-identical body bytes
+            // (`VLE(id) + optional VLE(len) + suffix`), so using
+            // Nonlocal here is purely a derive-bit-suppression
+            // mechanism — the receiver never sees the `Local /
+            // Nonlocal` distinction. The wz Push codec, by contrast,
+            // wants the `0x40` derive because zenoh-pico's Push
+            // header DOES use bit 6 as `_Z_FLAG_N_PUSH_M` (local
+            // mapping indicator).
+            header: 0x20, // _Z_DECL_KEXPR_FLAG_N
+            id: mapping_id,
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                    id: 0,
+                    suffix_len,
+                    suffix: Some(suffix_string),
+                }),
+            },
+        }),
+    }
+}
+
+/// R121g — build the wire bytes for a `Frame` transport-message
+/// carrying a single `Declare` network-message in its payload.
+/// Mirror of [`encode_frame_with_push`] for the DECLARE outbound
+/// path.
+///
+/// `parent_flags` carries `FLAG_T_FRAME_R (0x20)` when `reliable`,
+/// matching zenoh-pico's `_z_frame_encode` at
+/// `vendor/zenoh-pico/src/protocol/codec/transport.c:380`.
+/// DECLARE outbound is always reliable in the AP MVP path — the
+/// session-FSM reliable-channel SN window orders DECLARE before
+/// any dependent aliased Push, so the peer's keyexpr table is
+/// populated before the first resolving Push arrives. Callers
+/// passing `reliable=false` accept that the DECLARE may arrive
+/// after a referencing Push and the peer's resolver will reject
+/// the unknown id — useful only for fuzz / negative tests.
+pub fn encode_frame_with_declare(sn: u64, declare: Declare, reliable: bool) -> Vec<u8> {
+    let parent_flags = if reliable {
+        wire_const::FLAG_T_FRAME_R
+    } else {
+        0u8
+    };
+    let frame = Frame {
+        sn,
+        payload: declare.encode(),
+    };
+    let body_bytes = frame.encode();
+    let mut wire = Vec::with_capacity(body_bytes.len() + 1);
+    wire.push(parent_flags | wire_const::T_MID_FRAME);
+    wire.extend_from_slice(&body_bytes);
+    wire
 }
 
 /// R121e — build the wire bytes for a `Frame` transport-message
@@ -2861,6 +3099,169 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// R121g — `build_push_aliased` produces a `WireexprLocal`
+    /// with the non-zero mapping id, while `build_push_literal`
+    /// produces id=0 + inline suffix. The aliased Push is the
+    /// efficient repeated-keyexpr shape that follows a peer-side
+    /// `DeclKexpr` registration.
+    #[test]
+    fn build_push_aliased_carries_non_zero_id_with_optional_suffix() {
+        let pure = build_push_aliased(7, None, b"hello");
+        match &pure.keyexpr.body {
+            WireexprVariant::WireexprLocal(w) => {
+                assert_eq!(w.id, 7, "pure aliased Push id must equal mapping_id");
+                assert_eq!(w.suffix, None, "pure aliased Push must omit suffix");
+                assert_eq!(w.suffix_len, None, "pure aliased Push must omit suffix_len");
+            }
+            _ => panic!("build_push_aliased must produce a WireexprLocal arm"),
+        }
+        match &pure.body {
+            PushVariant::CodecZenohMsgPut(p) => {
+                assert_eq!(p.payload, b"hello".to_vec());
+                assert_eq!(p.payload_len, 5);
+            }
+            _ => panic!("build_push_aliased must wrap a MsgPut body"),
+        }
+
+        let composite = build_push_aliased(7, Some("tail"), b"hi");
+        match &composite.keyexpr.body {
+            WireexprVariant::WireexprLocal(w) => {
+                assert_eq!(w.id, 7);
+                assert_eq!(w.suffix.as_deref(), Some("tail"));
+                assert_eq!(w.suffix_len, Some(4));
+            }
+            _ => panic!("composite aliased Push must produce a WireexprLocal arm"),
+        }
+    }
+
+    /// R121g — `build_push_aliased` rejects `mapping_id == 0` so a
+    /// caller cannot silently produce a literal-keyexpr Push via
+    /// the aliased entry point.
+    #[test]
+    #[should_panic(expected = "build_push_aliased requires a non-zero mapping id")]
+    fn build_push_aliased_rejects_zero_mapping_id() {
+        let _ = build_push_aliased(0, Some("demo"), b"");
+    }
+
+    /// R121g — `build_declare_kexpr` wraps a `DeclKexpr` registering
+    /// `mapping_id -> suffix` in a `Declare` envelope with the
+    /// network MID header and no interest_id / no extensions. The
+    /// inner DeclKexpr carries the literal suffix via the
+    /// `WireexprNonlocal` arm — see [`build_declare_kexpr`] doc for
+    /// why this seemingly counterintuitive arm wins on the wire
+    /// (B5-ν derive-bit suppression matches zenoh-pico's
+    /// DeclKexpr header layout, which has no bit-6 flag).
+    #[test]
+    fn build_declare_kexpr_wraps_decl_kexpr_with_literal_suffix() {
+        let declare = build_declare_kexpr(7, "demo/test");
+        assert_eq!(
+            declare.header,
+            wire_const::N_MID_DECLARE,
+            "Declare header must carry N_MID_DECLARE with no flag bits set",
+        );
+        assert!(declare.interest_id.is_none(), "MVP DECLARE has no interest_id");
+        assert!(declare.extensions.is_none(), "MVP DECLARE has no extensions");
+        match &declare.body {
+            DeclareVariant::CodecZenohDeclKexpr(dk) => {
+                assert_eq!(dk.id, 7, "DeclKexpr.id must equal mapping_id argument");
+                assert_eq!(
+                    dk.header, 0x20,
+                    "DeclKexpr.header must carry _Z_DECL_KEXPR_FLAG_N (0x20)"
+                );
+                match &dk.keyexpr.body {
+                    WireexprVariant::WireexprNonlocal(w) => {
+                        assert_eq!(w.id, 0, "inner Wireexpr.id is the literal-keyexpr sentinel 0");
+                        assert_eq!(w.suffix.as_deref(), Some("demo/test"));
+                        assert_eq!(w.suffix_len, Some(9));
+                    }
+                    _ => panic!(
+                        "DeclKexpr.keyexpr must use the WireexprNonlocal arm to suppress \
+                         the codegen's 0x40 derive bit (the wz Push codec wants that bit \
+                         for zenoh-pico's Push header M flag, but DeclKexpr does not \
+                         define a flag at bit 6)"
+                    ),
+                }
+            }
+            _ => panic!("build_declare_kexpr must produce a CodecZenohDeclKexpr variant"),
+        }
+    }
+
+    /// R121g — Wire-byte regression gate: the bytes emitted by
+    /// `build_declare_kexpr(7, "demo/test").encode()` must equal
+    /// zenoh-pico's `_z_decl_kexpr_encode` output for the same
+    /// arguments. Authored as a byte-literal compare so a future
+    /// codegen drift on either DeclKexpr.header derivation or
+    /// WireexprNonlocal encoding shape surfaces immediately.
+    ///
+    /// Expected wire bytes from zenoh-pico
+    /// (`vendor/zenoh-pico/src/protocol/codec/declarations.c:52-63`):
+    ///   - DeclKexpr.header = `_Z_DECL_KEXPR_MID(0) | _Z_DECL_KEXPR_FLAG_N(0x20)` = `0x20`
+    ///   - VLE(id=7) = `0x07`
+    ///   - wireexpr.id VLE(0) = `0x00`
+    ///   - wireexpr.suffix string = VLE(9) + 9 bytes of "demo/test"
+    #[test]
+    fn build_declare_kexpr_emits_zenoh_pico_compatible_wire_bytes() {
+        let declare = build_declare_kexpr(7, "demo/test");
+        let outer = declare.encode();
+        // Skip the outer Declare envelope header (0x1E) — that
+        // single byte is the wz Declare codec's own emit; the rest
+        // is the DeclKexpr inner body. The byte-compare gate sits
+        // on the inner body so a regression in either the inner
+        // header derivation OR the wireexpr body emit fires.
+        let mut expected = vec![
+            wire_const::N_MID_DECLARE, // outer Declare 0x1E
+            0x20,                      // DeclKexpr.header = _Z_DECL_KEXPR_FLAG_N
+            0x07,                      // VLE(mapping_id=7)
+            0x00,                      // wireexpr.id VLE(0)
+            0x09,                      // suffix_len VLE(9)
+        ];
+        expected.extend_from_slice(b"demo/test");
+        assert_eq!(
+            outer, expected,
+            "build_declare_kexpr wire bytes must match zenoh-pico's \
+             _z_decl_kexpr_encode output byte-for-byte"
+        );
+    }
+
+    /// R121g — `build_declare_kexpr` rejects `mapping_id == 0` to
+    /// keep the literal-keyexpr sentinel out of the DECLARE table.
+    #[test]
+    #[should_panic(expected = "build_declare_kexpr requires a non-zero mapping id")]
+    fn build_declare_kexpr_rejects_zero_mapping_id() {
+        let _ = build_declare_kexpr(0, "demo/test");
+    }
+
+    /// R121g — `encode_frame_with_declare` produces the same
+    /// `[parent_flags | T_MID_FRAME]` + `Frame.encode()` wrapping
+    /// as `encode_frame_with_push`, with `Declare.encode()` as the
+    /// inner payload bytes. Reliable / best-effort header flag
+    /// behaviour mirrors the Push variant.
+    #[test]
+    fn encode_frame_with_declare_wraps_declare_in_frame_envelope() {
+        let declare = build_declare_kexpr(7, "demo/test");
+        let declare_bytes = declare.encode();
+
+        let wire_reliable = encode_frame_with_declare(0, build_declare_kexpr(7, "demo/test"), true);
+        assert_eq!(
+            wire_reliable[0],
+            wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME,
+            "reliable Frame must set FLAG_T_FRAME_R on the parent header",
+        );
+        assert_eq!(wire_reliable[1], 0x00, "sn=0 VLE = single byte 0x00");
+        assert_eq!(
+            &wire_reliable[2..],
+            declare_bytes.as_slice(),
+            "Frame body tail must be Declare.encode() bytes verbatim",
+        );
+
+        let wire_best_effort = encode_frame_with_declare(0, build_declare_kexpr(7, "demo/test"), false);
+        assert_eq!(
+            wire_best_effort[0],
+            wire_const::T_MID_FRAME,
+            "best-effort Frame must omit FLAG_T_FRAME_R",
+        );
     }
 
     /// `SessionLinkActions::next_outbound_frame_sn` starts at
