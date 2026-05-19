@@ -465,6 +465,12 @@ fn main() -> ExitCode {
     let key_opt = parse_pair(rest, "--key");
     let publish_opt = parse_pair(rest, "--publish");
     let value_opt = parse_pair(rest, "--value");
+    // R121g — `--declare-id <N>` opts the publisher into the
+    // DECLARE-aliased path: send one `Declare(DeclKexpr(N, suffix))`
+    // before the burst, then emit aliased Pushes carrying only
+    // `id=N`. Defaults to None (literal-keyexpr path, R121e shape).
+    // Only meaningful when --publish is set.
+    let declare_id_opt = parse_pair(rest, "--declare-id");
     if key_opt.is_none() && publish_opt.is_none() {
         eprintln!("wz-ap-demo: at least one of --key / --publish must be supplied");
         eprintln!();
@@ -483,8 +489,28 @@ fn main() -> ExitCode {
         print_usage();
         return ExitCode::from(2);
     }
-    let publisher_spec: Option<(String, String)> = match (publish_opt, value_opt) {
-        (Some(k), Some(v)) => Some((k, v)),
+    if declare_id_opt.is_some() && publish_opt.is_none() {
+        eprintln!("wz-ap-demo: --declare-id is only meaningful with --publish");
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    let declare_id_parsed: Option<u64> = match declare_id_opt {
+        Some(s) => match s.parse::<u64>() {
+            Ok(0) => {
+                eprintln!("wz-ap-demo: --declare-id must be non-zero (0 is the literal-keyexpr sentinel)");
+                return ExitCode::from(2);
+            }
+            Ok(n) => Some(n),
+            Err(e) => {
+                eprintln!("wz-ap-demo: --declare-id must be a positive integer ({e})");
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    let publisher_spec: Option<(String, String, Option<u64>)> = match (publish_opt, value_opt) {
+        (Some(k), Some(v)) => Some((k, v, declare_id_parsed)),
         _ => None,
     };
 
@@ -502,9 +528,12 @@ fn main() -> ExitCode {
     if let Some(k) = &key_opt {
         log::info!("key     = {k}");
     }
-    if let Some((k, v)) = &publisher_spec {
+    if let Some((k, v, id)) = &publisher_spec {
         log::info!("publish = {k}");
         log::info!("value   = {v}");
+        if let Some(n) = id {
+            log::info!("declare-id = {n} (R121g DECLARE-aliased mode)");
+        }
     }
 
     // Build the multi-thread runtime explicitly — OutboundWriteDriver
@@ -538,7 +567,7 @@ fn main() -> ExitCode {
 async fn run_demo(
     role: Role,
     key: Option<String>,
-    publisher_spec: Option<(String, String)>,
+    publisher_spec: Option<(String, String, Option<u64>)>,
 ) -> io::Result<()> {
     // ── Step 1: TCP setup. Acceptor binds + accepts; Initiator
     //           dials. Both paths land at the same `TcpStream`
@@ -632,11 +661,12 @@ async fn run_demo(
     //                    `max_iters` is reached.
     let publisher_handle = publisher_spec
         .as_ref()
-        .map(|(keyexpr, value)| {
+        .map(|(keyexpr, value, declare_id)| {
             let actions_for_publisher = actions.clone();
             let keyexpr = keyexpr.clone();
             let value = value.clone();
-            tokio::spawn(publisher_task(actions_for_publisher, keyexpr, value))
+            let declare_id = *declare_id;
+            tokio::spawn(publisher_task(actions_for_publisher, keyexpr, value, declare_id))
         });
 
     // ── Step 4b: activate the session FSM role. The
@@ -773,6 +803,7 @@ async fn publisher_task(
     actions: Arc<wz_runtime_tokio::session_glue::SessionLinkActions>,
     keyexpr: String,
     value: String,
+    declare_id: Option<u64>,
 ) {
     // ── Step 1: wait for Established. Both acceptor and initiator
     //           reach Established on the same `record_established_at`
@@ -815,16 +846,55 @@ async fn publisher_task(
          on keyexpr='{keyexpr}' value='{value}'"
     );
 
-    // ── Step 2: emit the burst. Each call composes a
-    //           Frame[Push(literal keyexpr, MsgPut(payload))] and
-    //           dispatches via the OutboundWriteDriver mpsc
-    //           channel. `reliable=true` matches z_sub's default
-    //           subscription reliability.
-    for i in 0..PUBLISHER_BURST_COUNT {
-        actions.send_push_literal(&keyexpr, value.as_bytes(), true);
+    // ── Step 2 (R121g): if --declare-id was supplied, send a
+    //           Frame[Declare(DeclKexpr(id, suffix=keyexpr))] once
+    //           so the peer's keyexpr table maps `id -> keyexpr`.
+    //           Subsequent Pushes carry only `id` (and an empty
+    //           suffix), which the peer resolves via the populated
+    //           table. The DECLARE is reliable to guarantee
+    //           ordering on the reliable channel — the SN window
+    //           preserves "DECLARE before any dependent Push" on
+    //           the peer side.
+    if let Some(mapping_id) = declare_id {
+        actions.send_declare_keyexpr(mapping_id, &keyexpr);
         eprintln!(
-            "wz-ap-demo: PUBLISHER EMITTED keyexpr='{keyexpr}' value='{value}' idx={i}"
+            "wz-ap-demo: PUBLISHER DECLARED keyexpr='{keyexpr}' mapping_id={mapping_id}"
         );
+        // Small drain pause so the DECLARE bytes reach the peer's
+        // session-FSM dispatch (and populate the keyexpr table)
+        // before the first aliased Push fires on the same channel.
+        // The mpsc-channel + writer-task topology preserves
+        // application-order on the wire, but the peer's receive
+        // task is independent of our writer — a brief pause makes
+        // the test less reliant on scheduling fairness.
+        tokio::time::sleep(Duration::from_millis(PUBLISHER_BURST_INTERVAL_MS)).await;
+    }
+
+    // ── Step 3: emit the burst. Each call composes a
+    //           Frame[Push(literal | aliased keyexpr, MsgPut(payload))]
+    //           and dispatches via the OutboundWriteDriver mpsc
+    //           channel. `reliable=true` matches z_sub's default
+    //           subscription reliability. When `declare_id` is
+    //           supplied, the aliased Pushes carry only the
+    //           mapping id (suffix=None), which is the
+    //           bandwidth-efficient shape (one declared keyexpr
+    //           amortised across N Pushes).
+    for i in 0..PUBLISHER_BURST_COUNT {
+        match declare_id {
+            Some(mapping_id) => {
+                actions.send_push_aliased(mapping_id, None, value.as_bytes(), true);
+                eprintln!(
+                    "wz-ap-demo: PUBLISHER EMITTED ALIASED mapping_id={mapping_id} \
+                     value='{value}' idx={i}"
+                );
+            }
+            None => {
+                actions.send_push_literal(&keyexpr, value.as_bytes(), true);
+                eprintln!(
+                    "wz-ap-demo: PUBLISHER EMITTED keyexpr='{keyexpr}' value='{value}' idx={i}"
+                );
+            }
+        }
         // Cadence pause between emissions (not after the last
         // one — the run_demo cleanup gives the writer a brief
         // drain window).

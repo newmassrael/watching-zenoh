@@ -5109,6 +5109,70 @@
         "R114: freshness gate negative test for scripts/run-ci.sh layer_b (sce-codegen mtime backward to auto-rebuild verification). Low-priority defensive carry."
       ]
     },
+    "Round 121g": {
+      "decision_summary": "R121g lands wz outbound DECLARE(KeyExpr) emit + DECLARE-aliased Push, closing the bandwidth-efficient repeated-keyexpr publisher path against zenoh-pico and surfacing two wz-codec interop hazards pinned by unit + integration tests.",
+      "changes_bullets": [
+        "session_glue.rs: add build_push_aliased(mapping_id, optional_suffix, value) — pure-aliased or composite Push with non-zero WireexprLocal id; panics on id=0.",
+        "session_glue.rs: add build_declare_kexpr(mapping_id, suffix) — Declare envelope carrying a DeclKexpr that registers id to literal keyexpr; header explicitly sets _Z_DECL_KEXPR_FLAG_N (0x20), uses WireexprNonlocal arm to suppress the codec's spurious 0x40 derive bit (zenoh-pico's DeclKexpr has no flag at bit 6).",
+        "session_glue.rs: add encode_frame_with_declare(sn, declare, reliable) mirroring encode_frame_with_push for the Frame[Declare] wrap.",
+        "session_glue.rs: SessionLinkActions::send_declare_keyexpr(mapping_id, suffix) and send_push_aliased(mapping_id, suffix, value, reliable) action methods compose the encode helpers + next_outbound_frame_sn + driver send_blocking.",
+        "wz-ap-demo: --declare-id <N> CLI opt-in routes publisher_task through DECLARE + aliased Push; without the flag the literal-keyexpr R121e path is retained.",
+        "wz-integration-tests: new wz_publisher_aliased_to_zsub.rs drives the full DECLARE + aliased Push round-trip and gates on z_sub's Subscriber Received line plus the demo's PUBLISHER DECLARED and PUBLISHER EMITTED ALIASED logs.",
+        "wz-runtime-tokio unit tests: 5 new tests cover the build helpers' struct shapes, id=0 panics, encode_frame_with_declare envelope wrap, and a wire-byte regression gate (build_declare_kexpr_emits_zenoh_pico_compatible_wire_bytes) anchoring the bytes against zenoh-pico's _z_decl_kexpr_encode reference.",
+        "scripts/run-ci.sh: Layer E lane now invokes the new integration test; the lane header documents the codec interop hazards encountered during R121g authoring."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace: 38 lib tests + 5 new R121g unit tests + 5 Layer E integration tests pass; build_push_aliased rejects id=0, build_declare_kexpr emits the byte-exact zenoh-pico-compatible wire (0x1E outer + 0x20 0x07 0x00 0x09 'demo/test').",
+        "Layer E manual reproduction: wz-ap-demo --listen ADDR --publish demo/test --value hi-r121g --declare-id 7 paired with z_sub -e tcp/ADDR -m client -k 'demo/**' produces five Subscriber Received ('demo/test': 'hi-r121g') lines on z_sub's stdout; pre-fix produced Unknown message type received: 9 + Connection compromised due to message processing error: -119 (offset-shifted decode from the missing N flag).",
+        "Codec hazard line-pinpoints via strace recvfrom -xx capture: (1) WireexprLocal arm's B5-ν derived 0x40 bit corrupted DeclKexpr.header (zenoh-pico's _z_decl_kexpr_encode at vendor/zenoh-pico/src/protocol/codec/declarations.c:52-58 does not define a flag at bit 6); (2) wz codec does not auto-derive _Z_DECL_KEXPR_FLAG_N from suffix presence — author must set it. Both pinned in build_declare_kexpr doc + tests.",
+        "bash scripts/run-ci.sh: all 8 lanes pass (Layer 0/A/A2/B/C1/C2/D/E); Layer C2 clippy initially flagged a calls-to-push-immediately-after-creation lint on the new wire-byte fixture, refactored to a vec! initializer."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121h: SCXML codec_stream_envelope kind — replace the four inline u16-LE length-prefix sites (TcpDriver send/poll + InboundReadDriver + OutboundWriteDriver + writer_task) with a generated codec call once sce-codegen supports a length-prefix-only stream framer.",
+        "R121i: 6 remaining DECLARE sub-variants (DeclSub / DeclToken / DeclQbl + Undecl* + DeclFinal). The DeclKexpr codec hazard surfaced here (B5-ν derive bit collision + author-set N flag) likely repeats for DeclSubscriber / DeclQueryable headers — pin via byte-compare unit tests on each.",
+        "R121j: Query/Reply chain (wz-side encoder + dispatch). AP MVP's last large area; 4-6 rounds estimated.",
+        "R123b-pre: deploy yaml flat to nested topology schema migration; resumes R123b once that lands.",
+        "R114: freshness gate negative test for scripts/run-ci.sh layer_b (sce-codegen mtime backward to auto-rebuild verification). Low-priority defensive carry.",
+        "wz-codecs B5-ν derive-bit propagation: file a follow-up note in the wz-codecs / sce-codegen workflow that the B5-ν derived 0x40 bit for WireexprLocal is only correct when the parent codec uses bit 6 as a flag carrier (Push, Request, Response). For parents that do not (DeclKexpr, possibly Interest), the codec author must either use WireexprNonlocal as a derive-suppression workaround OR the codegen needs a per-parent opt-out for the derive."
+      ],
+      "publishable_decision_summary": "R121g lands wz outbound DECLARE(KeyExpr) emit + DECLARE-aliased Push, closing the bandwidth-efficient repeated-keyexpr publisher path against zenoh-pico and surfacing two wz-codec interop hazards pinned by unit + integration tests.",
+      "publishable_changes_bullets": [
+        "session_glue.rs: add build_push_aliased(mapping_id, optional_suffix, value) — pure-aliased or composite Push with non-zero WireexprLocal id; panics on id=0.",
+        "session_glue.rs: add build_declare_kexpr(mapping_id, suffix) — Declare envelope carrying a DeclKexpr that registers id to literal keyexpr; header explicitly sets _Z_DECL_KEXPR_FLAG_N (0x20), uses WireexprNonlocal arm to suppress the codec's spurious 0x40 derive bit (zenoh-pico's DeclKexpr has no flag at bit 6).",
+        "session_glue.rs: add encode_frame_with_declare(sn, declare, reliable) mirroring encode_frame_with_push for the Frame[Declare] wrap.",
+        "session_glue.rs: SessionLinkActions::send_declare_keyexpr(mapping_id, suffix) and send_push_aliased(mapping_id, suffix, value, reliable) action methods compose the encode helpers + next_outbound_frame_sn + driver send_blocking.",
+        "wz-ap-demo: --declare-id <N> CLI opt-in routes publisher_task through DECLARE + aliased Push; without the flag the literal-keyexpr R121e path is retained.",
+        "wz-integration-tests: new wz_publisher_aliased_to_zsub.rs drives the full DECLARE + aliased Push round-trip and gates on z_sub's Subscriber Received line plus the demo's PUBLISHER DECLARED and PUBLISHER EMITTED ALIASED logs.",
+        "wz-runtime-tokio unit tests: 5 new tests cover the build helpers' struct shapes, id=0 panics, encode_frame_with_declare envelope wrap, and a wire-byte regression gate (build_declare_kexpr_emits_zenoh_pico_compatible_wire_bytes) anchoring the bytes against zenoh-pico's _z_decl_kexpr_encode reference.",
+        "scripts/run-ci.sh: Layer E lane now invokes the new integration test; the lane header documents the codec interop hazards encountered during R121g authoring."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace: 38 lib tests + 5 new R121g unit tests + 5 Layer E integration tests pass; build_push_aliased rejects id=0, build_declare_kexpr emits the byte-exact zenoh-pico-compatible wire (0x1E outer + 0x20 0x07 0x00 0x09 'demo/test').",
+        "Layer E manual reproduction: wz-ap-demo --listen ADDR --publish demo/test --value hi-r121g --declare-id 7 paired with z_sub -e tcp/ADDR -m client -k 'demo/**' produces five Subscriber Received ('demo/test': 'hi-r121g') lines on z_sub's stdout; pre-fix produced Unknown message type received: 9 + Connection compromised due to message processing error: -119 (offset-shifted decode from the missing N flag).",
+        "Codec hazard line-pinpoints via strace recvfrom -xx capture: (1) WireexprLocal arm's B5-ν derived 0x40 bit corrupted DeclKexpr.header (zenoh-pico's _z_decl_kexpr_encode at vendor/zenoh-pico/src/protocol/codec/declarations.c:52-58 does not define a flag at bit 6); (2) wz codec does not auto-derive _Z_DECL_KEXPR_FLAG_N from suffix presence — author must set it. Both pinned in build_declare_kexpr doc + tests.",
+        "bash scripts/run-ci.sh: all 8 lanes pass (Layer 0/A/A2/B/C1/C2/D/E); Layer C2 clippy initially flagged a calls-to-push-immediately-after-creation lint on the new wire-byte fixture, refactored to a vec! initializer."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121h: SCXML codec_stream_envelope kind — replace the four inline u16-LE length-prefix sites (TcpDriver send/poll + InboundReadDriver + OutboundWriteDriver + writer_task) with a generated codec call once sce-codegen supports a length-prefix-only stream framer.",
+        "R121i: 6 remaining DECLARE sub-variants (DeclSub / DeclToken / DeclQbl + Undecl* + DeclFinal). The DeclKexpr codec hazard surfaced here (B5-ν derive bit collision + author-set N flag) likely repeats for DeclSubscriber / DeclQueryable headers — pin via byte-compare unit tests on each.",
+        "R121j: Query/Reply chain (wz-side encoder + dispatch). AP MVP's last large area; 4-6 rounds estimated.",
+        "R123b-pre: deploy yaml flat to nested topology schema migration; resumes R123b once that lands.",
+        "R114: freshness gate negative test for scripts/run-ci.sh layer_b (sce-codegen mtime backward to auto-rebuild verification). Low-priority defensive carry.",
+        "wz-codecs B5-ν derive-bit propagation: file a follow-up note in the wz-codecs / sce-codegen workflow that the B5-ν derived 0x40 bit for WireexprLocal is only correct when the parent codec uses bit 6 as a flag carrier (Push, Request, Response). For parents that do not (DeclKexpr, possibly Interest), the codec author must either use WireexprNonlocal as a derive-suppression workaround OR the codegen needs a per-parent opt-out for the derive."
+      ]
+    },
     "Round 122": {
       "decision_summary": "R122 vendor/sce pin bump 122f851d to 4441431d; LAYER2_KNOWN_DIVERGENCE 6 to 1.",
       "changes_bullets": [
