@@ -5173,6 +5173,66 @@
         "wz-codecs B5-ν derive-bit propagation: file a follow-up note in the wz-codecs / sce-codegen workflow that the B5-ν derived 0x40 bit for WireexprLocal is only correct when the parent codec uses bit 6 as a flag carrier (Push, Request, Response). For parents that do not (DeclKexpr, possibly Interest), the codec author must either use WireexprNonlocal as a derive-suppression workaround OR the codegen needs a per-parent opt-out for the derive."
       ]
     },
+    "Round 121h-pre": {
+      "decision_summary": "R121h-pre bumps the SCE vendor pin from 7bada841 to e10619d3 to land the B5-ν variant-dispatch ownership invert (leaf-owned `tag=\"parent.X\"` → parent-owned `<sce:variant-dispatch flag=\"X.Y\"/>` at `<sce:import>`), updates wireexpr.scxml + 8 importer codecs accordingly, and retires the R121g `WireexprNonlocal` derive-suppression workaround in `build_declare_kexpr`.",
+      "changes_bullets": [
+        "vendor/sce submodule pin 7bada841 → e10619d3 (SCE: feat: Invert B5-ν variant dispatch ownership from leaf to parent).",
+        "sources/codecs/wireexpr.scxml: drop `tag=\"parent.M\"` from `<sce:variant>` (β leaf shape); RPF block retires the M flag (B5-ν purpose ended) and keeps N for B5-γ chain forwarding to the arm bodies.",
+        "sources/codecs/{push,request,response,decl_subscriber,decl_queryable,decl_token}.scxml (6 codecs): add `<sce:variant-dispatch flag=\"header.M\"/>` as a child of the wireexpr `<sce:import>` to opt into parent-derived M-flag emission. Each rationale cites the corresponding zenoh-pico `_Z_FLAG_*_M = 0x40` definition.",
+        "sources/codecs/{decl_kexpr,interest_body}.scxml: deliberately omit `<sce:variant-dispatch>` — DeclKexpr.header has no bit-6 flag (declarations.h:25-26), interest_body's bit 6 = `_Z_FLAG_N_INTEREST_FUTURE` semantic-mismatch with wireexpr.M. Doc comment cites both spec sources.",
+        "wz-runtime-tokio/src/session_glue.rs::build_declare_kexpr: restore inner keyexpr arm from `WireexprNonlocal` → `WireexprLocal` (semantically correct under the invert). Drop the `WireexprNonlocal` import. Comment retired as R121h-pre history note.",
+        "wz-runtime-tokio/src/session_glue.rs tests: update build_declare_kexpr_wraps_decl_kexpr_with_literal_suffix assertion arm to `WireexprLocal`; byte-compare test (build_declare_kexpr_emits_zenoh_pico_compatible_wire_bytes) wire bytes unchanged."
+      ],
+      "verification_bullets": [
+        "cargo test --workspace: all suites green; 38 wz-runtime-tokio lib tests pass including the byte-compare gate that anchors `build_declare_kexpr` output to zenoh-pico's `_z_decl_kexpr_encode` reference (wire bytes identical pre- and post-invert).",
+        "bash scripts/run-ci.sh: all 8 lanes pass (Layer 0/A/A2/B/C1/C2/D/E); Layer E foreign-interop tests (5 total — ap_demo_round_trip / wz_publisher_to_zsub / wz_initiator_to_wz_acceptor / wz_initiator_to_zsub / wz_publisher_aliased_to_zsub) all green confirming the invert + workaround removal preserves wire compatibility against zenoh-pico 1.5.0.",
+        "Wire-byte regression-resistance: `build_declare_kexpr_emits_zenoh_pico_compatible_wire_bytes` validates the bytes [0x1E, 0x20, 0x07, 0x00, 0x09, \"demo/test\"] byte-for-byte against zenoh-pico's reference at vendor/zenoh-pico/src/protocol/codec/declarations.c:52-63. The invert changes derive plumbing but not the emitted bytes — DeclKexpr's parent declines `<sce:variant-dispatch>` so no parent derive is emitted at bit 6.",
+        "SCE-side validator surface: parser.rs comment confirms `tag=\"parent.X\"` form is removed and dispatch on parent flag is now declared at import; cross-doc validator (Q-D-3a per generator.rs comment) requires either a `<sce:variant-dispatch>` or a default arm on every variant import — wz's wireexpr_local arm carries `default=\"true\"` so the no-dispatch parents (decl_kexpr / interest_body) construct cleanly."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121i: 6 remaining DECLARE sub-variants (DeclSub / DeclToken / DeclQbl + Undecl* + DeclFinal). With B5-ν ownership inverted, each variant's parent codec can independently opt in/out of M-flag derive at the import site — no codec-level workaround needed. Pin each new outbound with a byte-compare unit test mirroring `build_declare_kexpr_emits_zenoh_pico_compatible_wire_bytes`.",
+        "R121h: SCXML codec_stream_envelope kind — replace the four inline u16-LE length-prefix sites with a generated codec call.",
+        "R121j: Query/Reply chain (wz-side encoder + dispatch). AP MVP's last large area; 4-6 rounds estimated.",
+        "R123b-pre: deploy yaml flat to nested topology schema migration; resumes R123b once that lands.",
+        "R114: freshness gate negative test for scripts/run-ci.sh layer_b (sce-codegen mtime backward → auto-rebuild verification). Low-priority defensive carry.",
+        "Update feedback_wz_codec_b5nu_propagation_hazard memory: RESOLVED at SCE pin e10619d3 (this round). Keep the file as a learning artifact — historical reference for AI agents reading prior rounds."
+      ],
+      "publishable_decision_summary": "R121h-pre bumps the SCE vendor pin from 7bada841 to e10619d3 to land the B5-ν variant-dispatch ownership invert (leaf-owned `tag=\"parent.X\"` → parent-owned `<sce:variant-dispatch flag=\"X.Y\"/>` at `<sce:import>`), updates wireexpr.scxml + 8 importer codecs accordingly, and retires the R121g `WireexprNonlocal` derive-suppression workaround in `build_declare_kexpr`.",
+      "publishable_changes_bullets": [
+        "vendor/sce submodule pin 7bada841 → e10619d3 (SCE: feat: Invert B5-ν variant dispatch ownership from leaf to parent).",
+        "sources/codecs/wireexpr.scxml: drop `tag=\"parent.M\"` from `<sce:variant>` (β leaf shape); RPF block retires the M flag (B5-ν purpose ended) and keeps N for B5-γ chain forwarding to the arm bodies.",
+        "sources/codecs/{push,request,response,decl_subscriber,decl_queryable,decl_token}.scxml (6 codecs): add `<sce:variant-dispatch flag=\"header.M\"/>` as a child of the wireexpr `<sce:import>` to opt into parent-derived M-flag emission. Each rationale cites the corresponding zenoh-pico `_Z_FLAG_*_M = 0x40` definition.",
+        "sources/codecs/{decl_kexpr,interest_body}.scxml: deliberately omit `<sce:variant-dispatch>` — DeclKexpr.header has no bit-6 flag (declarations.h:25-26), interest_body's bit 6 = `_Z_FLAG_N_INTEREST_FUTURE` semantic-mismatch with wireexpr.M. Doc comment cites both spec sources.",
+        "wz-runtime-tokio/src/session_glue.rs::build_declare_kexpr: restore inner keyexpr arm from `WireexprNonlocal` → `WireexprLocal` (semantically correct under the invert). Drop the `WireexprNonlocal` import. Comment retired as R121h-pre history note.",
+        "wz-runtime-tokio/src/session_glue.rs tests: update build_declare_kexpr_wraps_decl_kexpr_with_literal_suffix assertion arm to `WireexprLocal`; byte-compare test (build_declare_kexpr_emits_zenoh_pico_compatible_wire_bytes) wire bytes unchanged."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace: all suites green; 38 wz-runtime-tokio lib tests pass including the byte-compare gate that anchors `build_declare_kexpr` output to zenoh-pico's `_z_decl_kexpr_encode` reference (wire bytes identical pre- and post-invert).",
+        "bash scripts/run-ci.sh: all 8 lanes pass (Layer 0/A/A2/B/C1/C2/D/E); Layer E foreign-interop tests (5 total — ap_demo_round_trip / wz_publisher_to_zsub / wz_initiator_to_wz_acceptor / wz_initiator_to_zsub / wz_publisher_aliased_to_zsub) all green confirming the invert + workaround removal preserves wire compatibility against zenoh-pico 1.5.0.",
+        "Wire-byte regression-resistance: `build_declare_kexpr_emits_zenoh_pico_compatible_wire_bytes` validates the bytes [0x1E, 0x20, 0x07, 0x00, 0x09, \"demo/test\"] byte-for-byte against zenoh-pico's reference at vendor/zenoh-pico/src/protocol/codec/declarations.c:52-63. The invert changes derive plumbing but not the emitted bytes — DeclKexpr's parent declines `<sce:variant-dispatch>` so no parent derive is emitted at bit 6.",
+        "SCE-side validator surface: parser.rs comment confirms `tag=\"parent.X\"` form is removed and dispatch on parent flag is now declared at import; cross-doc validator (Q-D-3a per generator.rs comment) requires either a `<sce:variant-dispatch>` or a default arm on every variant import — wz's wireexpr_local arm carries `default=\"true\"` so the no-dispatch parents (decl_kexpr / interest_body) construct cleanly."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "wire-spec-subset--watching-zenoh-mvp/7-extension-chain-mechanism",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121i: 6 remaining DECLARE sub-variants (DeclSub / DeclToken / DeclQbl + Undecl* + DeclFinal). With B5-ν ownership inverted, each variant's parent codec can independently opt in/out of M-flag derive at the import site — no codec-level workaround needed. Pin each new outbound with a byte-compare unit test mirroring `build_declare_kexpr_emits_zenoh_pico_compatible_wire_bytes`.",
+        "R121h: SCXML codec_stream_envelope kind — replace the four inline u16-LE length-prefix sites with a generated codec call.",
+        "R121j: Query/Reply chain (wz-side encoder + dispatch). AP MVP's last large area; 4-6 rounds estimated.",
+        "R123b-pre: deploy yaml flat to nested topology schema migration; resumes R123b once that lands.",
+        "R114: freshness gate negative test for scripts/run-ci.sh layer_b (sce-codegen mtime backward → auto-rebuild verification). Low-priority defensive carry.",
+        "Update feedback_wz_codec_b5nu_propagation_hazard memory: RESOLVED at SCE pin e10619d3 (this round). Keep the file as a learning artifact — historical reference for AI agents reading prior rounds."
+      ]
+    },
     "Round 122": {
       "decision_summary": "R122 vendor/sce pin bump 122f851d to 4441431d; LAYER2_KNOWN_DIVERGENCE 6 to 1.",
       "changes_bullets": [

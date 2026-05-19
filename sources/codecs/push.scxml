@@ -69,7 +69,12 @@
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="push">
-  <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr"/>
+  <!-- R121h-pre: B5-ν ownership invert (SCE pin e10619d3). Push.header
+       bit 6 = `_Z_FLAG_N_PUSH_M = 0x40` (zenoh-pico network.h:64);
+       parent declares the wireexpr arm dispatch on its own M flag. -->
+  <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr">
+    <sce:variant-dispatch flag="header.M"/>
+  </sce:import>
   <sce:import src="ext_entry.scxml" kind="codec" as="codec_zenoh_ext_entry"/>
   <sce:import src="msg_put.scxml" kind="codec" as="codec_zenoh_msg_put"/>
   <sce:import src="msg_del.scxml" kind="codec" as="codec_zenoh_msg_del"/>

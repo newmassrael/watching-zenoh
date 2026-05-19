@@ -67,12 +67,6 @@
      decode/encode forward parent_flags to the arm calls per the
      body_parent_flags_value_expr helper at generator.rs:3383):
 
-       parent.M bit=6  drives the variant dispatch (this codec's
-                       own `<sce:variant tag="parent.M">`); mirrors
-                       `_Z_FLAG_N_PUSH_M = _Z_FLAG_N_REQUEST_M =
-                       _Z_FLAG_N_RESPONSE_M = 0x40` (zenoh-pico
-                       include/zenoh-pico/protocol/definitions/network.h
-                       lines 64, 71, 78).
        parent.N bit=5  gates the optional suffix inside each arm
                        body; mirrors `_Z_FLAG_N_PUSH_N =
                        _Z_FLAG_N_REQUEST_N = _Z_FLAG_N_RESPONSE_N =
@@ -85,6 +79,22 @@
                        chain validator resolves it through this
                        dispatcher's RPF block to the grandparent
                        header.
+
+       R121h-pre (SCE pin e10619d3): B5-ν ownership inverted from
+       leaf to parent. This dispatcher dropped `tag="parent.M"` on
+       its `<sce:variant>`; each importing parent now declares
+       `<sce:variant-dispatch flag="header.<flag>"/>` as a child of
+       its `<sce:import>` to wire the arm-to-bit derivation. This
+       lets parents that have NO bit-6 flag in their wire-spec
+       (DeclKexpr, UndeclKexpr, Interest, InterestBody) import
+       wireexpr cleanly — they omit the `<sce:variant-dispatch>`
+       child and the codegen emits no derive at the parent carrier,
+       so the wire byte is what the parent author set verbatim.
+       Parents with a real bit-6 M flag (push, request, response,
+       decl_subscriber, decl_queryable, decl_token) add the
+       dispatch child to opt in. The M flag is therefore retired
+       from this dispatcher's RPF block (RPF stays alive for B5-γ
+       chain forwarding of N to the arm bodies).
 
      Type-level refinement value — the generated Rust output is a
      tagged-union shape (`pub enum WireexprVariant {
@@ -121,10 +131,9 @@
   <sce:import src="wireexpr_nonlocal.scxml" kind="codec" as="wireexpr_nonlocal"/>
   <sce:requires-parent-flags carrier="header">
     <sce:flag name="N" bit="5"/>
-    <sce:flag name="M" bit="6"/>
   </sce:requires-parent-flags>
   <datamodel>
-    <sce:variant tag="parent.M">
+    <sce:variant>
       <sce:arm value="0x00" type="wireexpr_nonlocal"/>
       <sce:arm value="0x01" type="wireexpr_local" default="true"/>
     </sce:variant>
