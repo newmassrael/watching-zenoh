@@ -62,6 +62,14 @@
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="interest_body">
+  <!-- R121h-pre: B5-ν ownership invert. Deliberately NO
+       `<sce:variant-dispatch>` child — interest_body's flag layout
+       (KE/SU/QU/TO/RES/CUR/FUT/AGG per interest.c L55-71) maps bit 5
+       to `_Z_FLAG_N_INTEREST_CURRENT` and bit 6 to
+       `_Z_FLAG_N_INTEREST_FUTURE` (network.h:56-57). Neither is the
+       wireexpr local-mapping discriminator, so emitting a derive bit
+       there would corrupt the CURRENT/FUTURE semantics. The wireexpr
+       inner arm choice is a type-level refinement only. -->
   <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr"/>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">

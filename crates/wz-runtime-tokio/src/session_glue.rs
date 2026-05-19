@@ -80,7 +80,6 @@ use wz_codecs::response::Response;
 use wz_codecs::response_final::ResponseFinal;
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
-use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
@@ -1601,27 +1600,27 @@ pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> Declare {
             // on this bit (declarations.c:185); a missing N flag
             // drops the codec into an offset-shifted read of the
             // next message, surfaced as `Unknown message type
-            // received` by `_z_network_message_decode`.
+            // received` by `_z_network_message_decode`. The wz codec
+            // does not auto-derive this flag from suffix presence —
+            // author must set it explicitly.
             //
-            // We deliberately use the `WireexprNonlocal` arm below
-            // even though the keyexpr is semantically local. Reason:
-            // the wz codegen's B5-ν derived bit OR's `0x40` into the
-            // parent header for the `WireexprLocal` arm. zenoh-pico's
-            // DeclKexpr header layout does NOT define a flag at bit 6
-            // (only N at bit 5); the spurious `0x40` would corrupt
-            // the wire shape just like the missing `0x20` does. The
-            // two variants emit byte-identical body bytes
-            // (`VLE(id) + optional VLE(len) + suffix`), so using
-            // Nonlocal here is purely a derive-bit-suppression
-            // mechanism — the receiver never sees the `Local /
-            // Nonlocal` distinction. The wz Push codec, by contrast,
-            // wants the `0x40` derive because zenoh-pico's Push
-            // header DOES use bit 6 as `_Z_FLAG_N_PUSH_M` (local
-            // mapping indicator).
+            // Inner arm = `WireexprLocal` (semantically correct: the
+            // declared keyexpr lives in the local mapping table).
+            // R121h-pre — SCE vendor pin e10619d3's B5-ν ownership
+            // invert moved the wireexpr arm dispatch decision to the
+            // parent's `<sce:import>` site
+            // (sources/codecs/decl_kexpr.scxml). DeclKexpr deliberately
+            // omits the `<sce:variant-dispatch>` child because its
+            // header has no flag at bit 6 — the wireexpr arm choice
+            // is a type-level refinement only and no parent derive
+            // bit is emitted. The pre-R121h-pre WireexprNonlocal
+            // workaround (used to suppress the codegen's spurious
+            // 0x40 OR under the leaf-owned `tag="parent.M"` regime)
+            // has retired with this pin bump.
             header: 0x20, // _Z_DECL_KEXPR_FLAG_N
             id: mapping_id,
             keyexpr: Wireexpr {
-                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
                     id: 0,
                     suffix_len,
                     suffix: Some(suffix_string),
@@ -3147,12 +3146,13 @@ mod tests {
 
     /// R121g — `build_declare_kexpr` wraps a `DeclKexpr` registering
     /// `mapping_id -> suffix` in a `Declare` envelope with the
-    /// network MID header and no interest_id / no extensions. The
+    /// network MID header and no interest_id / no extensions.
+    /// R121h-pre — under the SCE e10619d3 B5-ν ownership invert, the
     /// inner DeclKexpr carries the literal suffix via the
-    /// `WireexprNonlocal` arm — see [`build_declare_kexpr`] doc for
-    /// why this seemingly counterintuitive arm wins on the wire
-    /// (B5-ν derive-bit suppression matches zenoh-pico's
-    /// DeclKexpr header layout, which has no bit-6 flag).
+    /// `WireexprLocal` arm (semantically correct: the declared
+    /// keyexpr lives in the local mapping table); DeclKexpr's
+    /// `<sce:import>` site omits `<sce:variant-dispatch>` so no
+    /// parent derive bit is emitted at bit 6.
     #[test]
     fn build_declare_kexpr_wraps_decl_kexpr_with_literal_suffix() {
         let declare = build_declare_kexpr(7, "demo/test");
@@ -3171,16 +3171,16 @@ mod tests {
                     "DeclKexpr.header must carry _Z_DECL_KEXPR_FLAG_N (0x20)"
                 );
                 match &dk.keyexpr.body {
-                    WireexprVariant::WireexprNonlocal(w) => {
+                    WireexprVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 0, "inner Wireexpr.id is the literal-keyexpr sentinel 0");
                         assert_eq!(w.suffix.as_deref(), Some("demo/test"));
                         assert_eq!(w.suffix_len, Some(9));
                     }
                     _ => panic!(
-                        "DeclKexpr.keyexpr must use the WireexprNonlocal arm to suppress \
-                         the codegen's 0x40 derive bit (the wz Push codec wants that bit \
-                         for zenoh-pico's Push header M flag, but DeclKexpr does not \
-                         define a flag at bit 6)"
+                        "DeclKexpr.keyexpr must use the WireexprLocal arm under \
+                         the SCE e10619d3 B5-ν invert (the parent's <sce:import> \
+                         site omits <sce:variant-dispatch>, so no parent derive \
+                         bit is emitted regardless of which arm is selected)"
                     ),
                 }
             }

@@ -28,6 +28,18 @@
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="decl_kexpr">
+  <!-- R121h-pre: B5-ν ownership invert (SCE pin e10619d3).
+       Deliberately NO `<sce:variant-dispatch>` child — DeclKexpr.header
+       has only `_Z_DECL_KEXPR_FLAG_N (0x20)` at bit 5 (zenoh-pico
+       declarations.h:25-26). Bit 6 is unused on the wire; emitting a
+       derive bit there would corrupt the frame and surface as
+       `Unknown message type received` on the peer
+       (`_z_network_message_decode` offset-shift). The wireexpr inner
+       arm choice is therefore a type-level refinement only, not a
+       wire-level signal. Pre-R121h-pre the wz codec authored
+       `WireexprNonlocal` as a derive-suppression workaround under the
+       leaf-owned `tag="parent.M"` regime; with parent-owned dispatch
+       the workaround retires and the author may use either arm. -->
   <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr"/>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">

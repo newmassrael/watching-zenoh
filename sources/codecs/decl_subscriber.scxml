@@ -39,7 +39,12 @@
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="decl_subscriber">
-  <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr"/>
+  <!-- R121h-pre: B5-ν ownership invert. DeclSubscriber.header bit 6 =
+       `_Z_DECL_SUBSCRIBER_FLAG_M = 0x40` (zenoh-pico
+       declarations.h:30). -->
+  <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr">
+    <sce:variant-dispatch flag="header.M"/>
+  </sce:import>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x02"/>
