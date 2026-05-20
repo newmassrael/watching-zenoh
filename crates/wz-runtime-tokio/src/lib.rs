@@ -20,8 +20,10 @@
 
 use std::io;
 use std::net::SocketAddr;
+use sce_forge_runtime::codec::SceCursor;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
+use wz_codecs::stream_envelope::StreamEnvelope;
 
 pub mod session_glue;
 
@@ -123,11 +125,18 @@ pub trait LinkDriver {
 /// payload to 65535 bytes which is also the upstream
 /// `Z_BATCH_UNICAST_SIZE` ceiling.
 ///
-/// The framing remains hand-rolled here; a SCXML
-/// `codec_stream_envelope` kind generating the same emit will land
-/// in a later round (Phase D follow-up to R121d) so this driver
-/// can call into the generated codec rather than open-coding the
-/// length-prefix bytes.
+/// R121h: the wire envelope is now expressed by
+/// `sources/codecs/stream_envelope.scxml` (SCE codec_kind) and
+/// rendered into `wz_codecs::stream_envelope::StreamEnvelope`. The
+/// driver invokes the generated encoder on `send` and the generated
+/// decoder on `poll_event` so the codec catalog is the single
+/// source of truth for the on-wire shape. The 2-byte prefix read
+/// at the start of `poll_event` is unavoidable until SCE exposes a
+/// codec-level `MIN_FRAME_BYTES` associated constant (the wire
+/// shape needs a length to size the second `read_exact`, and the
+/// codec's `decode` requires the full frame in the cursor before
+/// it can run). The duplication is bounded to a 2-byte `[u8; 2]`
+/// length sniff; the structural decode runs through the codec.
 pub struct TcpDriver {
     stream: Option<TcpStream>,
 }
@@ -166,17 +175,17 @@ impl LinkDriver for TcpDriver {
             .stream
             .as_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no stream"))?;
-        // Zenoh streamed-link envelope: u16 LE length prefix. See
-        // zenoh-pico/src/transport/common/tx.c:415-447 for the
-        // reference encoder. The 65535 byte ceiling matches the
-        // upstream `Z_BATCH_UNICAST_SIZE` maximum.
-        let len: u16 = frame
+        let payload_len: u16 = frame
             .bytes
             .len()
             .try_into()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame > 65535 bytes"))?;
-        stream.write_all(&len.to_le_bytes()).await?;
-        stream.write_all(frame.bytes).await?;
+        let envelope = StreamEnvelope {
+            payload_len,
+            payload: frame.bytes.to_vec(),
+        };
+        let wire = envelope.encode();
+        stream.write_all(&wire).await?;
         stream.flush().await?;
         Ok(())
     }
@@ -195,12 +204,17 @@ impl LinkDriver for TcpDriver {
                 cause: LostCause::PeerClosed,
             },
         };
-        // Zenoh streamed-link envelope: u16 LE length prefix. See
-        // zenoh-pico/src/transport/common/rx.c:35-62
-        // (`_z_link_recv_t_msg_cap_flow_stream`) for the reference
-        // decoder.
-        let mut len_buf = [0u8; 2];
-        match stream.read_exact(&mut len_buf).await {
+        // Two-step read: the codec_stream_envelope wire shape is
+        // `uint16 payload_len LE + bytes payload[payload_len]` and the
+        // payload size is needed before the second read can be sized.
+        // Sniff the 2-byte prefix raw, then read the payload into the
+        // tail of a single frame buffer, then decode the full frame
+        // through `StreamEnvelope::decode` for byte-stable SSOT (the
+        // 2-byte sniff mirrors stream_envelope.scxml's min frame
+        // bytes; future SCE round may expose `MIN_FRAME_BYTES` as an
+        // associated const so this hardcoded `2` can also be removed).
+        let mut prefix = [0u8; 2];
+        match stream.read_exact(&mut prefix).await {
             Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
                 return LinkEvent::Lost {
@@ -213,14 +227,26 @@ impl LinkDriver for TcpDriver {
                 };
             }
         }
-        let len = u16::from_le_bytes(len_buf) as usize;
-        let mut buf = vec![0u8; len];
-        match stream.read_exact(&mut buf).await {
-            Ok(_) => LinkEvent::Rx(RxFrame { bytes: buf }),
-            Err(_) => LinkEvent::Lost {
+        let payload_len = u16::from_le_bytes(prefix) as usize;
+        let mut frame = vec![0u8; 2 + payload_len];
+        frame[..2].copy_from_slice(&prefix);
+        if stream.read_exact(&mut frame[2..]).await.is_err() {
+            return LinkEvent::Lost {
                 cause: LostCause::PeerClosed,
-            },
+            };
         }
+        let mut cursor = SceCursor::new(&frame);
+        let envelope = match StreamEnvelope::decode(&mut cursor) {
+            Ok(e) => e,
+            Err(_) => {
+                return LinkEvent::Lost {
+                    cause: LostCause::PeerClosed,
+                };
+            }
+        };
+        LinkEvent::Rx(RxFrame {
+            bytes: envelope.payload,
+        })
     }
 }
 
