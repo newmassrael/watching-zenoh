@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- SCE Forge conformance: Zenoh streamed-link wire envelope — the
+     length-prefixed framing that wraps every transport message on a
+     byte-stream link (TCP, UNIX domain socket, TLS, etc.). The wire
+     shape is a 2-byte little-endian `payload_len` followed by exactly
+     that many payload bytes — the same framing that the inner
+     transport-message codec (frame / fragment / init / open / join /
+     close / keep_alive / etc.) emits as its `bytes` body.
+
+     Mirrors zenoh-pico's stream-link send/recv pair on the
+     `Z_LINK_CAP_FLOW_STREAM` branch:
+       - encode: vendor/zenoh-pico/src/transport/common/tx.c
+                 `_z_link_send_t_msg` writes a u16 LE length prefix via
+                 `_z_wbuf_set_uint16` ahead of the encoded transport
+                 message bytes.
+       - decode: vendor/zenoh-pico/src/transport/common/rx.c
+                 `_z_link_recv_t_msg_cap_flow_stream` reads two bytes
+                 into `_z_zint_t r_msg_len` and then reads exactly that
+                 many bytes into the message buffer.
+     The 2-byte prefix size is fixed by
+     `_Z_MSG_LEN_ENC_SIZE = 2`
+     (vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/core.h:32),
+     and the payload ceiling is bounded by `Z_BATCH_UNICAST_SIZE` whose
+     wire representation cannot exceed u16 max (65535) because the
+     prefix field is two bytes. zenoh-pico's CMake default for
+     `BATCH_UNICAST_SIZE` is 2048
+     (vendor/zenoh-pico/CMakeLists.txt:307); the absolute wire ceiling
+     is 65535, hence `sce:max-size="65535"` here.
+
+     Composition: B1-α fixed uint16 (LE via codec-level
+     `default-endian`) + B5-δ Surface F length-ref
+     (`length-field="payload_len"`). No new primitive surface — the
+     codec is purely a length-prefix + tail-by-length pair, the same
+     shape used by `ext_zbuf` for its inner VLE-prefixed bytes payload
+     but with a fixed 2-byte little-endian length instead of VLE.
+
+     Before R121h the framing was hand-rolled in two sites of
+     `crates/wz-runtime-tokio/src/lib.rs` (TcpDriver::send →
+     `len.to_le_bytes()` + `write_all`; TcpDriver::poll_event →
+     `read_exact(len_buf)` + `u16::from_le_bytes`). R121h migrates
+     both call sites to call into the generated
+     `wz_codecs::stream_envelope::StreamEnvelope` encoder/decoder so
+     the wire shape is owned by a single SSOT (this SCXML) instead of
+     two hand-rolled mirrors.
+
+     Wire round-trip oracles:
+       payload = [0xAB, 0xCD, 0xEF]       (3 bytes)
+       wire    = 0x03 0x00 0xAB 0xCD 0xEF (5 bytes)
+
+       payload = []                       (empty body — illegal at the
+                                           transport-message layer but
+                                           the codec round-trips it
+                                           lossless; the keep_alive
+                                           message has its own 1-byte
+                                           body, so the empty case is
+                                           only exercised by the
+                                           codec's unit test.)
+       wire    = 0x00 0x00                (2 bytes)
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec" sce:default-endian="little" name="stream_envelope">
+  <datamodel>
+    <sce:field id="payload_len" sce:type="uint16" sce:byte="0" sce:bit-size="16"/>
+    <sce:field id="payload" sce:type="bytes" sce:byte="2" sce:bit-size="length-ref"
+               sce:length-field="payload_len" sce:max-size="65535"/>
+  </datamodel>
+</scxml>

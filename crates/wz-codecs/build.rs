@@ -33,6 +33,7 @@ const CODECS: &[&str] = &[
     "ext_unit",
     "ext_zint",
     "ext_zbuf",
+    "stream_envelope", // §4.0 streamed-link wire envelope (u16 LE len + payload) — R121h
     "close", // §4.1 session-close, 1-byte reason — R42 Layer 3 ✓
     "frame", // §4.2 data-carrying VLE sn + tail payload — R43 Layer 3 ✓
     "fragment", // §4.2 same shape as frame, distinct MID — R43 ✓
