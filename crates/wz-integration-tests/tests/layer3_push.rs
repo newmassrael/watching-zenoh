@@ -75,7 +75,7 @@ fn zenoh_pico_encode_push_default() -> Vec<u8> {
 
 #[test]
 fn layer3_push_default_byte_equivalent() {
-    let wz = Push::default().encode();
+    let wz = Push::default().encode_to_vec();
     let pico = zenoh_pico_encode_push_default();
     assert_eq!(
         wz, pico,

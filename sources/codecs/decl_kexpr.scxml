@@ -40,7 +40,9 @@
        `WireexprNonlocal` as a derive-suppression workaround under the
        leaf-owned `tag="parent.M"` regime; with parent-owned dispatch
        the workaround retires and the author may use either arm. -->
-  <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr"/>
+  <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr">
+    <sce:flag-bind input="N" source="header.N"/>
+  </sce:import>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="mid" bit="0" width="5" value="0x00"/>

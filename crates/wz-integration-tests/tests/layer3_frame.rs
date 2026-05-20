@@ -100,7 +100,7 @@ fn layer3_frame_vle_width_boundaries() {
             sn,
             payload: payload.clone(),
         }
-        .encode();
+        .encode_to_vec();
         let pico_bytes = zenoh_pico_encode_frame(sn, &payload);
         assert_eq!(
             wz_bytes, pico_bytes,
@@ -124,12 +124,12 @@ fn layer3_frame_matches_fragment_when_no_extension() {
         sn,
         payload: payload.clone(),
     }
-    .encode();
+    .encode_to_vec();
     let fragment_bytes = wz_codecs::fragment::Fragment {
         sn,
         payload: payload.clone(),
     }
-    .encode();
+    .encode_to_vec();
     assert_eq!(
         frame_bytes, fragment_bytes,
         "wz Frame and Fragment must emit identical body bytes \

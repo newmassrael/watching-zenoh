@@ -184,7 +184,7 @@ impl LinkDriver for TcpDriver {
             payload_len,
             payload: frame.bytes.to_vec(),
         };
-        let wire = envelope.encode();
+        let wire = envelope.encode_to_vec();
         stream.write_all(&wire).await?;
         stream.flush().await?;
         Ok(())

@@ -33,11 +33,15 @@ build = "build.rs"
 name = "wz_codecs"
 path = "src/lib.rs"
 
+[features]
+default = ["alloc"]
+alloc = ["sce-forge-runtime/alloc"]
+
 [dependencies]
 # sce-forge-runtime supplies CodecError + SceCursor + per-language
 # runtime primitives that the generated codec code references
 # (e.g., `use sce_forge_runtime::codec::{CodecError, SceCursor};`).
-sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
+sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-features = false }
 
 [build-dependencies]
 # Build-time codegen via SCE's in-process compile entry point. The

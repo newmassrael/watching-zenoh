@@ -89,7 +89,7 @@ fn layer3_scout_no_zid() {
         cbyte,
         zid: None,
     }
-    .encode();
+    .encode_to_vec();
 
     let pico_bytes = zenoh_pico_encode_scout(version, what, zid_bytes);
     assert_eq!(wz_bytes, pico_bytes);
@@ -108,7 +108,7 @@ fn layer3_scout_with_zid() {
         cbyte,
         zid: Some(zid_bytes.clone()),
     }
-    .encode();
+    .encode_to_vec();
 
     let pico_bytes = zenoh_pico_encode_scout(version, what, &zid_bytes);
     assert_eq!(wz_bytes, pico_bytes);
@@ -127,7 +127,7 @@ fn layer3_scout_max_zid_16_bytes() {
         cbyte,
         zid: Some(zid_bytes.clone()),
     }
-    .encode();
+    .encode_to_vec();
 
     let pico_bytes = zenoh_pico_encode_scout(version, what, &zid_bytes);
     assert_eq!(wz_bytes, pico_bytes);

@@ -5,7 +5,7 @@
 //! network envelope; R91 wz-side authoring, R101 first-contact Layer 3
 //! byte-compare).
 //!
-//! Pins the textbook contract: wz `ResponseFinal::default().encode()`
+//! Pins the textbook contract: wz `ResponseFinal::default().encode_to_vec()`
 //! produces byte-for-byte identical output to zenoh-pico's
 //! `_z_response_final_encode` invoked against
 //! `_z_n_msg_response_final_t { _request_id = 0 }`. Default state is
@@ -59,7 +59,7 @@ fn zenoh_pico_encode_response_final(request_id: u64) -> Vec<u8> {
 
 #[test]
 fn layer3_response_final_default_byte_equivalent() {
-    let wz = ResponseFinal::default().encode();
+    let wz = ResponseFinal::default().encode_to_vec();
     let pico = zenoh_pico_encode_response_final(0);
     assert_eq!(
         wz, pico,
@@ -79,7 +79,7 @@ fn layer3_response_final_nonzero_rid_byte_equivalent() {
         request_id: rid,
         ..ResponseFinal::default()
     }
-    .encode();
+    .encode_to_vec();
     let pico = zenoh_pico_encode_response_final(rid);
     assert_eq!(
         wz, pico,
@@ -99,7 +99,7 @@ fn layer3_response_final_multibyte_vle_rid_byte_equivalent() {
         request_id: rid,
         ..ResponseFinal::default()
     }
-    .encode();
+    .encode_to_vec();
     let pico = zenoh_pico_encode_response_final(rid);
     assert_eq!(
         wz, pico,

@@ -63,7 +63,7 @@ async fn echo_msg_del_tcp_round_trip() {
             timestamp: None,
             extensions: None,
         };
-        let bytes = original.encode();
+        let bytes = original.encode_to_vec();
         driver
             .send(&TxFrame { bytes: &bytes }, Reliability::Reliable)
             .await
@@ -118,7 +118,7 @@ async fn echo_msg_put_udp_round_trip() {
             payload_len: 3,
             payload: vec![0x11, 0x22, 0x33],
         };
-        let bytes = original.encode();
+        let bytes = original.encode_to_vec();
         // Tiny grace so the subscriber's recv_from is ready; UDP
         // is connectionless, so a too-early send would be silently
         // dropped (no kernel buffer set up yet on the listener).

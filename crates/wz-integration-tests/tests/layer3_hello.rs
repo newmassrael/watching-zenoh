@@ -95,7 +95,7 @@ fn layer3_hello_l0_no_locators() {
         num_locators: None,
         locators: None,
     }
-    .encode(0u8);
+    .encode_to_vec(0);
 
     let pico = zenoh_pico_encode_hello(0u8, version, whatami, &zid);
     assert_eq!(wz, pico);
@@ -117,7 +117,7 @@ fn layer3_hello_l1_empty_locator_array() {
         num_locators: Some(0),
         locators: Some(vec![]),
     }
-    .encode(FLAG_HELLO_L);
+    .encode_to_vec(((FLAG_HELLO_L) >> 5) & 1);
 
     let pico = zenoh_pico_encode_hello(FLAG_HELLO_L, version, whatami, &zid);
     assert_eq!(wz, pico);
@@ -142,7 +142,7 @@ fn layer3_hello_l0_max_zid() {
         num_locators: None,
         locators: None,
     }
-    .encode(0u8);
+    .encode_to_vec(0);
 
     let pico = zenoh_pico_encode_hello(0u8, version, whatami, &zid);
     assert_eq!(wz, pico);

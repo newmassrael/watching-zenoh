@@ -63,6 +63,8 @@
        version="1.0"
        initial="Init">
 
+  <sce:session-role kind="accept-side"/>
+
   <state id="Init">
     <transition event="outbound.start" target="LinkOpening"/>
     <transition event="inbound.start" target="Accepting"/>

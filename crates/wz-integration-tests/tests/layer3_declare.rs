@@ -78,7 +78,7 @@ fn zenoh_pico_encode_declare_default() -> Vec<u8> {
 
 #[test]
 fn layer3_declare_default_byte_equivalent() {
-    let wz = Declare::default().encode();
+    let wz = Declare::default().encode_to_vec();
     let pico = zenoh_pico_encode_declare_default();
     assert_eq!(
         wz, pico,

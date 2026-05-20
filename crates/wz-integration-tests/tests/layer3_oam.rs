@@ -45,7 +45,7 @@ fn zenoh_pico_encode_oam_default() -> Vec<u8> {
 
 #[test]
 fn layer3_oam_default_byte_equivalent() {
-    let wz = Oam::default().encode();
+    let wz = Oam::default().encode_to_vec();
     let pico = zenoh_pico_encode_oam_default();
     assert_eq!(
         wz, pico,

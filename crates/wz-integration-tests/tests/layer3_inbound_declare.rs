@@ -4,7 +4,7 @@
 //! Layer 3 wire-interop — reverse direction (DECLARE inbound batch dispatch).
 //!
 //! `layer3_declare.rs` closed the forward direction in R110e (wz
-//! `Declare::default().encode()` byte-equals zenoh-pico
+//! `Declare::default().encode_to_vec()` byte-equals zenoh-pico
 //! `_z_declare_encode`). R115 closes the loop: the same bytes routed
 //! through `parse_frame_payload` produce a `NetworkMessage::Declare`
 //! variant whose inner body field-matches the canonical
@@ -30,7 +30,7 @@ use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
 
 #[test]
 fn declare_default_round_trips_through_parse_frame_payload() {
-    let wire = Declare::default().encode();
+    let wire = Declare::default().encode_to_vec();
     assert_eq!(
         wire,
         &[0x1E, 0x1A],
@@ -44,10 +44,10 @@ fn declare_default_round_trips_through_parse_frame_payload() {
         NetworkMessage::Declare(decl) => {
             let mut cursor = SceCursor::new(&wire);
             let canonical = Declare::decode(&mut cursor).expect("canonical decode");
-            let re_encoded = decl.encode();
+            let re_encoded = decl.encode_to_vec();
             assert_eq!(
                 re_encoded,
-                canonical.encode(),
+                canonical.encode_to_vec(),
                 "parse_frame_payload-produced Declare must field-match the canonical decode"
             );
             assert_eq!(re_encoded, wire, "round-trip byte-equivalence preserved");
@@ -65,9 +65,9 @@ fn declare_dispatch_does_not_swallow_subsequent_records() {
     // against the "unknown body length" failure mode that
     // `NetworkMessage::Unknown` is documented to avoid.
     let mut wire = Vec::new();
-    wire.extend_from_slice(&Push::default().encode());
-    wire.extend_from_slice(&Declare::default().encode());
-    wire.extend_from_slice(&ResponseFinal::default().encode());
+    wire.extend_from_slice(&Push::default().encode_to_vec());
+    wire.extend_from_slice(&Declare::default().encode_to_vec());
+    wire.extend_from_slice(&ResponseFinal::default().encode_to_vec());
 
     let messages = parse_frame_payload(&wire).expect("parse 3-record batch");
     assert_eq!(messages.len(), 3, "all three records must be dispatched");

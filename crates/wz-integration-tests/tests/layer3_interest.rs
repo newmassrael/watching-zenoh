@@ -46,7 +46,7 @@ fn zenoh_pico_encode_interest_default() -> Vec<u8> {
 
 #[test]
 fn layer3_interest_default_byte_equivalent() {
-    let wz = Interest::default().encode();
+    let wz = Interest::default().encode_to_vec();
     let pico = zenoh_pico_encode_interest_default();
     assert_eq!(
         wz, pico,

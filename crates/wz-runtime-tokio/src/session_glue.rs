@@ -1538,7 +1538,9 @@ fn encode_init(
     let ext_bytes = encode_ext_chain(extensions);
     let mut wire = Vec::with_capacity(body.zid.len() + params.cookie.len() + 12 + ext_bytes.len());
     wire.push(parent_flags | wire_const::T_MID_INIT);
-    wire.extend_from_slice(&body.encode(parent_flags));
+    let s = (parent_flags >> 6) & 1;
+    let a = (parent_flags >> 5) & 1;
+    wire.extend_from_slice(&body.encode_to_vec(s, a));
     wire.extend_from_slice(&ext_bytes);
     wire
 }
@@ -1590,7 +1592,8 @@ fn encode_open(
     let ext_bytes = encode_ext_chain(extensions);
     let mut wire = Vec::with_capacity(cookie_bytes.len() + 24 + ext_bytes.len());
     wire.push(parent_flags | wire_const::T_MID_OPEN);
-    wire.extend_from_slice(&body.encode(parent_flags));
+    let a = (parent_flags >> 5) & 1;
+    wire.extend_from_slice(&body.encode_to_vec(a));
     wire.extend_from_slice(&ext_bytes);
     wire
 }
@@ -1614,7 +1617,7 @@ fn encode_ext_chain(entries: &[ExtEntry]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(entries.len() * 4);
     let last = entries.len() - 1;
     for (i, entry) in entries.iter().enumerate() {
-        let mut bytes = entry.encode();
+        let mut bytes = entry.encode_to_vec();
         // ExtEntry::encode pushes the header byte first (see
         // ext_entry codegen line 145); flip the Z bit per chain
         // position before emitting.
@@ -1639,7 +1642,7 @@ fn encode_close(reason: u8) -> Vec<u8> {
     let body = Close { reason };
     let mut wire = Vec::with_capacity(2);
     wire.push(parent_flags | wire_const::T_MID_CLOSE);
-    wire.extend_from_slice(&body.encode());
+    wire.extend_from_slice(&body.encode_to_vec());
     wire
 }
 
@@ -3056,7 +3059,7 @@ pub fn build_request_query_with_target(
 /// helper with an exts-present variant.
 ///
 /// ResponseFinal is a network-message envelope at the same layer as
-/// `Declare` and `Request` — its `.encode()` output is emitted
+/// `Declare` and `Request` — its `.encode_to_vec()` output is emitted
 /// directly into the Frame payload without an additional wrapper
 /// header. The 0x1A MID lives in the `_Z_MID_N_*` network-message
 /// namespace (distinct from the inner DECLARE-body 0x1A
@@ -3339,9 +3342,9 @@ pub fn encode_frame_with_response(sn: u64, response: Response, reliable: bool) -
     };
     let frame = Frame {
         sn,
-        payload: response.encode(),
+        payload: response.encode_to_vec(),
     };
-    let body_bytes = frame.encode();
+    let body_bytes = frame.encode_to_vec();
     let mut wire = Vec::with_capacity(body_bytes.len() + 1);
     wire.push(parent_flags | wire_const::T_MID_FRAME);
     wire.extend_from_slice(&body_bytes);
@@ -3371,9 +3374,9 @@ pub fn encode_frame_with_response_final(
     };
     let frame = Frame {
         sn,
-        payload: response_final.encode(),
+        payload: response_final.encode_to_vec(),
     };
-    let body_bytes = frame.encode();
+    let body_bytes = frame.encode_to_vec();
     let mut wire = Vec::with_capacity(body_bytes.len() + 1);
     wire.push(parent_flags | wire_const::T_MID_FRAME);
     wire.extend_from_slice(&body_bytes);
@@ -3399,9 +3402,9 @@ pub fn encode_frame_with_request(sn: u64, request: Request, reliable: bool) -> V
     };
     let frame = Frame {
         sn,
-        payload: request.encode(),
+        payload: request.encode_to_vec(),
     };
-    let body_bytes = frame.encode();
+    let body_bytes = frame.encode_to_vec();
     let mut wire = Vec::with_capacity(body_bytes.len() + 1);
     wire.push(parent_flags | wire_const::T_MID_FRAME);
     wire.extend_from_slice(&body_bytes);
@@ -3431,9 +3434,9 @@ pub fn encode_frame_with_declare(sn: u64, declare: Declare, reliable: bool) -> V
     };
     let frame = Frame {
         sn,
-        payload: declare.encode(),
+        payload: declare.encode_to_vec(),
     };
-    let body_bytes = frame.encode();
+    let body_bytes = frame.encode_to_vec();
     let mut wire = Vec::with_capacity(body_bytes.len() + 1);
     wire.push(parent_flags | wire_const::T_MID_FRAME);
     wire.extend_from_slice(&body_bytes);
@@ -3445,7 +3448,7 @@ pub fn encode_frame_with_declare(sn: u64, declare: Declare, reliable: bool) -> V
 /// payload.
 ///
 /// Wire shape (composes the transport-envelope header byte that
-/// lives outside the body codec's scope with `Frame.encode()`'s
+/// lives outside the body codec's scope with `Frame.encode_to_vec()`'s
 /// `VLE(sn) + payload` body):
 ///
 /// ```text
@@ -3462,7 +3465,7 @@ pub fn encode_frame_with_declare(sn: u64, declare: Declare, reliable: bool) -> V
 /// on the InitSyn / InitAck negotiation paths (see
 /// `ExtChainRole`).
 ///
-/// The `Frame { sn, payload }.encode()` body is verified
+/// The `Frame { sn, payload }.encode_to_vec()` body is verified
 /// byte-identical to zenoh-pico's `_z_frame_encode` by
 /// `crates/wz-integration-tests/tests/layer3_frame.rs`. This
 /// helper composes only the one transport header byte that
@@ -3475,9 +3478,9 @@ pub fn encode_frame_with_push(sn: u64, push: Push, reliable: bool) -> Vec<u8> {
     };
     let frame = Frame {
         sn,
-        payload: push.encode(),
+        payload: push.encode_to_vec(),
     };
-    let body_bytes = frame.encode();
+    let body_bytes = frame.encode_to_vec();
     let mut wire = Vec::with_capacity(body_bytes.len() + 1);
     wire.push(parent_flags | wire_const::T_MID_FRAME);
     wire.extend_from_slice(&body_bytes);
@@ -3621,7 +3624,7 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
     let mut cursor = SceCursor::new(&bytes[1..]);
     match mid {
         wire_const::T_MID_INIT => {
-            let body = InitBody::decode(&mut cursor, flags)?;
+            let body = InitBody::decode(&mut cursor, (flags >> 6) & 1, (flags >> 5) & 1)?;
             let extensions = if has_ext {
                 decode_ext_chain(&mut cursor)?
             } else {
@@ -3635,7 +3638,7 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
             })
         }
         wire_const::T_MID_OPEN => {
-            let body = OpenBody::decode(&mut cursor, flags)?;
+            let body = OpenBody::decode(&mut cursor, (flags >> 5) & 1)?;
             let extensions = if has_ext {
                 decode_ext_chain(&mut cursor)?
             } else {
@@ -4803,7 +4806,7 @@ mod tests {
 
     /// `encode_frame_with_push` composes the transport-envelope
     /// header byte (T_MID_FRAME | parent_flags) with the
-    /// `Frame.encode()` body (VLE(sn) + payload). With reliable=true
+    /// `Frame.encode_to_vec()` body (VLE(sn) + payload). With reliable=true
     /// the FLAG_T_FRAME_R bit appears in the header byte.
     #[test]
     fn encode_frame_with_push_emits_transport_header_plus_frame_body() {
@@ -4812,7 +4815,7 @@ mod tests {
         // shape. Push::default()'s wire bytes are independently
         // pinned by layer3_push.rs's byte-equiv test.
         let push = Push::default();
-        let push_bytes = push.encode();
+        let push_bytes = push.encode_to_vec();
 
         // Reliable Frame at sn=0.
         let wire_reliable = encode_frame_with_push(0, Push::default(), true);
@@ -4822,12 +4825,12 @@ mod tests {
             "reliable Frame must set FLAG_T_FRAME_R (0x20) on the parent header byte"
         );
         // Body shape: VLE(sn=0) = single byte 0x00, followed by
-        // Push.encode() bytes verbatim.
+        // Push.encode_to_vec() bytes verbatim.
         assert_eq!(wire_reliable[1], 0x00, "Frame.sn=0 VLE width = 1 byte 0x00");
         assert_eq!(
             &wire_reliable[2..],
             push_bytes.as_slice(),
-            "tail of Frame envelope must be the Push.encode() bytes byte-for-byte"
+            "tail of Frame envelope must be the Push.encode_to_vec() bytes byte-for-byte"
         );
 
         // Best-effort Frame: same shape minus FLAG_T_FRAME_R.
@@ -4967,7 +4970,7 @@ mod tests {
     }
 
     /// R121g — Wire-byte regression gate: the bytes emitted by
-    /// `build_declare_kexpr(7, "demo/test").encode()` must equal
+    /// `build_declare_kexpr(7, "demo/test").encode_to_vec()` must equal
     /// zenoh-pico's `_z_decl_kexpr_encode` output for the same
     /// arguments. Authored as a byte-literal compare so a future
     /// codegen drift on either DeclKexpr.header derivation or
@@ -4982,7 +4985,7 @@ mod tests {
     #[test]
     fn build_declare_kexpr_emits_zenoh_pico_compatible_wire_bytes() {
         let declare = build_declare_kexpr(7, "demo/test");
-        let outer = declare.encode();
+        let outer = declare.encode_to_vec();
         // Skip the outer Declare envelope header (0x1E) — that
         // single byte is the wz Declare codec's own emit; the rest
         // is the DeclKexpr inner body. The byte-compare gate sits
@@ -5012,14 +5015,14 @@ mod tests {
     }
 
     /// R121g — `encode_frame_with_declare` produces the same
-    /// `[parent_flags | T_MID_FRAME]` + `Frame.encode()` wrapping
-    /// as `encode_frame_with_push`, with `Declare.encode()` as the
+    /// `[parent_flags | T_MID_FRAME]` + `Frame.encode_to_vec()` wrapping
+    /// as `encode_frame_with_push`, with `Declare.encode_to_vec()` as the
     /// inner payload bytes. Reliable / best-effort header flag
     /// behaviour mirrors the Push variant.
     #[test]
     fn encode_frame_with_declare_wraps_declare_in_frame_envelope() {
         let declare = build_declare_kexpr(7, "demo/test");
-        let declare_bytes = declare.encode();
+        let declare_bytes = declare.encode_to_vec();
 
         let wire_reliable = encode_frame_with_declare(0, build_declare_kexpr(7, "demo/test"), true);
         assert_eq!(
@@ -5031,7 +5034,7 @@ mod tests {
         assert_eq!(
             &wire_reliable[2..],
             declare_bytes.as_slice(),
-            "Frame body tail must be Declare.encode() bytes verbatim",
+            "Frame body tail must be Declare.encode_to_vec() bytes verbatim",
         );
 
         let wire_best_effort = encode_frame_with_declare(0, build_declare_kexpr(7, "demo/test"), false);
@@ -5111,7 +5114,7 @@ mod tests {
     }
 
     /// R121i — Wire-byte regression gate: the bytes emitted by
-    /// `build_declare_subscriber(5, 7, None).encode()` must equal
+    /// `build_declare_subscriber(5, 7, None).encode_to_vec()` must equal
     /// zenoh-pico's `_z_decl_subscriber_encode` /
     /// `_z_decl_commons_encode` output for the same arguments
     /// (vendor/zenoh-pico/src/protocol/codec/declarations.c:65-84
@@ -5136,7 +5139,7 @@ mod tests {
         //   VLE(subscriber_id=5)     = 0x05
         //   wireexpr Local id=7 only = 0x07
         let alias = build_declare_subscriber(5, 7, None);
-        let alias_wire = alias.encode();
+        let alias_wire = alias.encode_to_vec();
         let alias_expected = vec![
             wire_const::N_MID_DECLARE, // 0x1E
             0x42,                       // MID(0x02) | M(0x40)
@@ -5155,7 +5158,7 @@ mod tests {
         //   suffix_len VLE(3) = 0x03
         //   suffix bytes = "abc"
         let composite = build_declare_subscriber(5, 7, Some("abc"));
-        let composite_wire = composite.encode();
+        let composite_wire = composite.encode_to_vec();
         let mut composite_expected = vec![
             wire_const::N_MID_DECLARE,
             0x62, // MID | N | M
@@ -5176,7 +5179,7 @@ mod tests {
         //   suffix_len VLE(9) = 0x09
         //   suffix bytes = "demo/test"
         let literal = build_declare_subscriber(5, 0, Some("demo/test"));
-        let literal_wire = literal.encode();
+        let literal_wire = literal.encode_to_vec();
         let mut literal_expected = vec![
             wire_const::N_MID_DECLARE,
             0x62,
@@ -5259,7 +5262,7 @@ mod tests {
     }
 
     /// R121i-b — Wire-byte regression gate: the bytes emitted by
-    /// `build_declare_queryable(...).encode()` must equal zenoh-pico's
+    /// `build_declare_queryable(...).encode_to_vec()` must equal zenoh-pico's
     /// `_z_decl_queryable_encode` output for the no-info-ext shape
     /// (vendor/zenoh-pico/src/protocol/codec/declarations.c:105-118
     ///   with `has_info_ext = false` short-circuit at line 109).
@@ -5278,7 +5281,7 @@ mod tests {
         //   VLE(queryable_id=9)  = 0x09
         //   wireexpr Local id=7  = 0x07
         let alias = build_declare_queryable(9, 7, None);
-        let alias_wire = alias.encode();
+        let alias_wire = alias.encode_to_vec();
         let alias_expected = vec![
             wire_const::N_MID_DECLARE, // 0x1E
             0x44,                       // MID(0x04) | M(0x40)
@@ -5297,7 +5300,7 @@ mod tests {
         //   suffix_len VLE(3) = 0x03
         //   suffix bytes = "abc"
         let composite = build_declare_queryable(9, 7, Some("abc"));
-        let composite_wire = composite.encode();
+        let composite_wire = composite.encode_to_vec();
         let mut composite_expected = vec![
             wire_const::N_MID_DECLARE,
             0x64, // MID | N | M
@@ -5318,7 +5321,7 @@ mod tests {
         //   suffix_len VLE(9) = 0x09
         //   suffix bytes = "demo/test"
         let literal = build_declare_queryable(9, 0, Some("demo/test"));
-        let literal_wire = literal.encode();
+        let literal_wire = literal.encode_to_vec();
         let mut literal_expected = vec![
             wire_const::N_MID_DECLARE,
             0x64,
@@ -5392,7 +5395,7 @@ mod tests {
     }
 
     /// R121i-b — Wire-byte regression gate: the bytes emitted by
-    /// `build_declare_token(...).encode()` must equal zenoh-pico's
+    /// `build_declare_token(...).encode_to_vec()` must equal zenoh-pico's
     /// `_z_decl_token_encode` output
     /// (vendor/zenoh-pico/src/protocol/codec/declarations.c:123-126).
     ///
@@ -5404,7 +5407,7 @@ mod tests {
     fn build_declare_token_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — pure alias (token_id=11, mapping_id=7, no suffix).
         let alias = build_declare_token(11, 7, None);
-        let alias_wire = alias.encode();
+        let alias_wire = alias.encode_to_vec();
         let alias_expected = vec![
             wire_const::N_MID_DECLARE, // 0x1E
             0x46,                       // MID(0x06) | M(0x40)
@@ -5418,7 +5421,7 @@ mod tests {
 
         // Case 2 — composite (id=7 + tail "abc").
         let composite = build_declare_token(11, 7, Some("abc"));
-        let composite_wire = composite.encode();
+        let composite_wire = composite.encode_to_vec();
         let mut composite_expected = vec![
             wire_const::N_MID_DECLARE,
             0x66, // MID(0x06) | N | M
@@ -5434,7 +5437,7 @@ mod tests {
 
         // Case 3 — literal (id=0 + suffix "demo/test").
         let literal = build_declare_token(11, 0, Some("demo/test"));
-        let literal_wire = literal.encode();
+        let literal_wire = literal.encode_to_vec();
         let mut literal_expected = vec![
             wire_const::N_MID_DECLARE,
             0x66,
@@ -5466,7 +5469,7 @@ mod tests {
         //   DeclSubscriber.header = MID(0x02) | M(0x00) = 0x02
         let alias = build_declare_subscriber_nonlocal(5, 7, None);
         assert_eq!(
-            alias.encode(),
+            alias.encode_to_vec(),
             vec![
                 wire_const::N_MID_DECLARE, // 0x1E outer
                 0x02,                       // MID only, no N, no M
@@ -5489,7 +5492,7 @@ mod tests {
         ];
         composite_expected.extend_from_slice(b"abc");
         assert_eq!(
-            composite.encode(),
+            composite.encode_to_vec(),
             composite_expected,
             "DeclSubscriber Nonlocal composite-case wire bytes must \
              match zenoh-pico reference",
@@ -5501,7 +5504,7 @@ mod tests {
         // regression surface on the Nonlocal arm.
         let large = build_declare_subscriber_nonlocal(5, 200, None);
         assert_eq!(
-            large.encode(),
+            large.encode_to_vec(),
             vec![
                 wire_const::N_MID_DECLARE,
                 0x02,
@@ -5549,7 +5552,7 @@ mod tests {
         // Case 1 — pure alias.
         let alias = build_declare_queryable_nonlocal(9, 7, None);
         assert_eq!(
-            alias.encode(),
+            alias.encode_to_vec(),
             vec![
                 wire_const::N_MID_DECLARE,
                 0x04, // MID only, no N, no M
@@ -5571,7 +5574,7 @@ mod tests {
         ];
         composite_expected.extend_from_slice(b"abc");
         assert_eq!(
-            composite.encode(),
+            composite.encode_to_vec(),
             composite_expected,
             "DeclQueryable Nonlocal composite-case wire bytes must match \
              zenoh-pico reference",
@@ -5580,7 +5583,7 @@ mod tests {
         // Case 3 — multi-byte VLE boundary on the peer's mapping id.
         let large = build_declare_queryable_nonlocal(9, 200, None);
         assert_eq!(
-            large.encode(),
+            large.encode_to_vec(),
             vec![
                 wire_const::N_MID_DECLARE,
                 0x04,
@@ -5624,7 +5627,7 @@ mod tests {
     fn build_declare_token_nonlocal_emits_zenoh_pico_compatible_wire_bytes() {
         let alias = build_declare_token_nonlocal(11, 7, None);
         assert_eq!(
-            alias.encode(),
+            alias.encode_to_vec(),
             vec![
                 wire_const::N_MID_DECLARE,
                 0x06, // MID only, no N, no M
@@ -5645,7 +5648,7 @@ mod tests {
         ];
         composite_expected.extend_from_slice(b"abc");
         assert_eq!(
-            composite.encode(),
+            composite.encode_to_vec(),
             composite_expected,
             "DeclToken Nonlocal composite-case wire bytes must match \
              zenoh-pico reference",
@@ -5653,7 +5656,7 @@ mod tests {
 
         let large = build_declare_token_nonlocal(11, 200, None);
         assert_eq!(
-            large.encode(),
+            large.encode_to_vec(),
             vec![
                 wire_const::N_MID_DECLARE,
                 0x06,
@@ -5700,7 +5703,7 @@ mod tests {
     fn build_undeclare_kexpr_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — single-byte VLE id (id=42 fits in 7 bits).
         let small = build_undeclare_kexpr(42);
-        let small_wire = small.encode();
+        let small_wire = small.encode_to_vec();
         let small_expected = vec![
             wire_const::N_MID_DECLARE, // 0x1E outer
             0x01,                       // _Z_UNDECL_KEXPR_MID
@@ -5715,7 +5718,7 @@ mod tests {
         // boundary; first byte = 0xC8 (low 7 bits 0x48 + cont 0x80),
         // second byte = 0x01).
         let large = build_undeclare_kexpr(200);
-        let large_wire = large.encode();
+        let large_wire = large.encode_to_vec();
         let large_expected = vec![
             wire_const::N_MID_DECLARE,
             0x01,
@@ -5747,7 +5750,7 @@ mod tests {
     #[test]
     fn build_undeclare_subscriber_emits_zenoh_pico_compatible_wire_bytes() {
         let small = build_undeclare_subscriber(42);
-        let small_wire = small.encode();
+        let small_wire = small.encode_to_vec();
         assert_eq!(
             small_wire,
             vec![
@@ -5759,7 +5762,7 @@ mod tests {
         );
 
         let large = build_undeclare_subscriber(200);
-        let large_wire = large.encode();
+        let large_wire = large.encode_to_vec();
         assert_eq!(
             large_wire,
             vec![
@@ -5788,7 +5791,7 @@ mod tests {
     fn build_undeclare_queryable_emits_zenoh_pico_compatible_wire_bytes() {
         let small = build_undeclare_queryable(42);
         assert_eq!(
-            small.encode(),
+            small.encode_to_vec(),
             vec![
                 wire_const::N_MID_DECLARE,
                 0x05, // _Z_UNDECL_QUERYABLE_MID
@@ -5799,7 +5802,7 @@ mod tests {
 
         let large = build_undeclare_queryable(200);
         assert_eq!(
-            large.encode(),
+            large.encode_to_vec(),
             vec![
                 wire_const::N_MID_DECLARE,
                 0x05,
@@ -5826,7 +5829,7 @@ mod tests {
     fn build_undeclare_token_emits_zenoh_pico_compatible_wire_bytes() {
         let small = build_undeclare_token(42);
         assert_eq!(
-            small.encode(),
+            small.encode_to_vec(),
             vec![
                 wire_const::N_MID_DECLARE,
                 0x07, // _Z_UNDECL_TOKEN_MID
@@ -5837,7 +5840,7 @@ mod tests {
 
         let large = build_undeclare_token(200);
         assert_eq!(
-            large.encode(),
+            large.encode_to_vec(),
             vec![
                 wire_const::N_MID_DECLARE,
                 0x07,
@@ -5865,7 +5868,7 @@ mod tests {
     #[test]
     fn build_declare_final_emits_two_byte_marker() {
         let declare = build_declare_final();
-        let wire = declare.encode();
+        let wire = declare.encode_to_vec();
         assert_eq!(
             wire,
             vec![
@@ -5951,7 +5954,7 @@ mod tests {
     }
 
     /// R121j-1 — Wire-byte regression gate: the bytes emitted by
-    /// `build_request_query(...).encode()` must equal zenoh-pico's
+    /// `build_request_query(...).encode_to_vec()` must equal zenoh-pico's
     /// `_z_request_encode` + `_z_query_encode` output for the
     /// minimal-shape inputs (no consolidation, no params, no exts at
     /// either level). Three vectors lock the alias / composite /
@@ -5974,7 +5977,7 @@ mod tests {
         //   wireexpr.id VLE(7) = 0x07
         //   Query.header   = MID(0x03)
         let alias = build_request_query(42, 7, None);
-        let alias_wire = alias.encode();
+        let alias_wire = alias.encode_to_vec();
         let alias_expected = vec![
             0x5C, // Request: MID 0x1C | M 0x40
             0x2A, // VLE(rid=42)
@@ -5994,7 +5997,7 @@ mod tests {
         //   wireexpr.suffix bytes = "abc"
         //   Query.header = 0x03
         let composite = build_request_query(42, 7, Some("abc"));
-        let composite_wire = composite.encode();
+        let composite_wire = composite.encode_to_vec();
         let mut composite_expected = vec![
             0x7C, // MID | N | M
             0x2A,
@@ -6016,7 +6019,7 @@ mod tests {
         //   wireexpr.suffix bytes = "demo/test"
         //   Query.header = 0x03
         let literal = build_request_query(42, 0, Some("demo/test"));
-        let literal_wire = literal.encode();
+        let literal_wire = literal.encode_to_vec();
         let mut literal_expected = vec![
             0x7C,
             0x2A,
@@ -6052,7 +6055,7 @@ mod tests {
         ];
         for (mode, expected_byte) in cases {
             let request = build_request_query_with_consolidation(42, 7, None, mode);
-            let wire = request.encode();
+            let wire = request.encode_to_vec();
             let expected = vec![
                 0x5C,          // Request: MID 0x1C | M 0x40
                 0x2A,          // VLE(rid=42)
@@ -6124,7 +6127,7 @@ mod tests {
         //   Query:   [0x43, 0x03, b'k', b'=', b'v']
         //              (MID(0x03) | Q_P(0x40), VLE(len=3), 3 bytes)
         let small = build_request_query_with_parameters(42, 7, None, b"k=v");
-        let small_wire = small.encode();
+        let small_wire = small.encode_to_vec();
         let mut small_expected = vec![
             0x5C, // Request: MID 0x1C | M 0x40
             0x2A, // VLE(rid=42)
@@ -6145,7 +6148,7 @@ mod tests {
         // on the parameters_len field specifically.
         let mid_params: Vec<u8> = (0u8..128).collect();
         let mid = build_request_query_with_parameters(42, 7, None, &mid_params);
-        let mid_wire = mid.encode();
+        let mid_wire = mid.encode_to_vec();
         let mut mid_expected = vec![
             0x5C,
             0x2A,
@@ -6164,7 +6167,7 @@ mod tests {
         // Case 3 — at max-size (256 bytes). VLE(256) = 0x80 0x02.
         let max_params: Vec<u8> = (0..256).map(|i| (i % 251) as u8).collect();
         let max = build_request_query_with_parameters(42, 7, None, &max_params);
-        let max_wire = max.encode();
+        let max_wire = max.encode_to_vec();
         let mut max_expected = vec![
             0x5C, 0x2A, 0x07, 0x43, 0x80, 0x02,
         ];
@@ -6223,7 +6226,7 @@ mod tests {
         //   ExtEntry header: [0x45]          (ENC_ZBUF(0x40) | id(0x05))
         //   ExtZbuf: [0x02, b'h', b'i']      (VLE(2), bytes)
         let small = build_request_query_with_attachment(42, 7, None, b"hi");
-        let small_wire = small.encode();
+        let small_wire = small.encode_to_vec();
         let mut small_expected = vec![
             0x5C, // Request: MID 0x1C | M 0x40
             0x2A, // VLE(rid=42)
@@ -6243,7 +6246,7 @@ mod tests {
         // 0..32). VLE(32) = 0x20 (single byte, fits in 7 bits).
         let max_attach: Vec<u8> = (0u8..32).collect();
         let max = build_request_query_with_attachment(42, 7, None, &max_attach);
-        let max_wire = max.encode();
+        let max_wire = max.encode_to_vec();
         let mut max_expected = vec![
             0x5C, 0x2A, 0x07,
             0x83, // Query header with Q_Z
@@ -6321,7 +6324,7 @@ mod tests {
         //   ExtZint.value VLE(50) = 0x32
         //   Query.header = 0x03
         let small = build_request_query_with_timeout_ms(42, 7, None, 50);
-        let small_wire = small.encode();
+        let small_wire = small.encode_to_vec();
         assert_eq!(
             small_wire,
             vec![
@@ -6338,7 +6341,7 @@ mod tests {
 
         // Case 2 — multi-byte VLE boundary (1000ms = 0xE8 0x07).
         let mid = build_request_query_with_timeout_ms(42, 7, None, 1000);
-        let mid_wire = mid.encode();
+        let mid_wire = mid.encode_to_vec();
         assert_eq!(
             mid_wire,
             vec![
@@ -6357,7 +6360,7 @@ mod tests {
         // Case 3 — large VLE (2^32 = 0x1_0000_0000 = 5-byte VLE in
         // base-128: 0x80 0x80 0x80 0x80 0x10).
         let large = build_request_query_with_timeout_ms(42, 7, None, 1u64 << 32);
-        let large_wire = large.encode();
+        let large_wire = large.encode_to_vec();
         assert_eq!(
             large_wire,
             vec![
@@ -6429,7 +6432,7 @@ mod tests {
         ];
         for (target, target_byte) in cases {
             let request = build_request_query_with_target(42, 7, None, target);
-            let wire = request.encode();
+            let wire = request.encode_to_vec();
             assert_eq!(
                 wire,
                 vec![
@@ -6499,7 +6502,7 @@ mod tests {
             .consolidation(ConsolidationMode::Monotonic)
             .parameters(b"k=v")
             .build();
-        let wire = request.encode();
+        let wire = request.encode_to_vec();
         let mut expected = vec![
             0x5C, // Request: MID | M
             0x2A, // VLE(rid=42)
@@ -6551,7 +6554,7 @@ mod tests {
             .request_target(QueryTarget::All)
             .request_timeout_ms(1000)
             .build();
-        let wire = request.encode();
+        let wire = request.encode_to_vec();
         let mut expected = vec![
             0xDC, // Request: MID | M | N_Z
             0x2A, // VLE(rid=42)
@@ -6618,9 +6621,9 @@ mod tests {
     }
 
     /// R121j-1 — `encode_frame_with_request` produces the same
-    /// `[parent_flags | T_MID_FRAME]` + `Frame.encode()` wrapping as
+    /// `[parent_flags | T_MID_FRAME]` + `Frame.encode_to_vec()` wrapping as
     /// the existing `encode_frame_with_push` / `encode_frame_with_declare`
-    /// helpers, with `Request.encode()` as the inner payload bytes.
+    /// helpers, with `Request.encode_to_vec()` as the inner payload bytes.
     /// Reliable / best-effort header-flag behaviour mirrors the other
     /// two helpers so the SN-window ordering contract stays uniform
     /// across PUSH / DECLARE / REQUEST outbound paths.
@@ -6634,7 +6637,7 @@ mod tests {
     fn build_response_final_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — single-byte VLE rid (rid=42).
         let small = build_response_final(42);
-        let small_wire = small.encode();
+        let small_wire = small.encode_to_vec();
         assert_eq!(
             small_wire,
             vec![
@@ -6646,7 +6649,7 @@ mod tests {
 
         // Case 2 — multi-byte VLE rid (rid=200, encodes as 0xC8 0x01).
         let large = build_response_final(200);
-        let large_wire = large.encode();
+        let large_wire = large.encode_to_vec();
         assert_eq!(
             large_wire,
             vec![
@@ -6670,7 +6673,7 @@ mod tests {
 
     /// R121j-2 — `encode_frame_with_response_final` produces the
     /// same Frame envelope wrap as the other `encode_frame_with_*`
-    /// helpers, with `ResponseFinal.encode()` as the payload bytes.
+    /// helpers, with `ResponseFinal.encode_to_vec()` as the payload bytes.
     /// Reliable / best-effort header-flag behaviour mirrors the
     /// other three helpers; the production action layer hard-codes
     /// reliable=true but the helper accepts the flag for fuzz /
@@ -6678,7 +6681,7 @@ mod tests {
     #[test]
     fn encode_frame_with_response_final_wraps_in_frame_envelope() {
         let rf = build_response_final(42);
-        let rf_bytes = rf.encode();
+        let rf_bytes = rf.encode_to_vec();
 
         let wire_reliable = encode_frame_with_response_final(0, build_response_final(42), true);
         assert_eq!(
@@ -6690,7 +6693,7 @@ mod tests {
         assert_eq!(
             &wire_reliable[2..],
             rf_bytes.as_slice(),
-            "Frame body tail must be ResponseFinal.encode() bytes verbatim",
+            "Frame body tail must be ResponseFinal.encode_to_vec() bytes verbatim",
         );
 
         let wire_best_effort = encode_frame_with_response_final(0, build_response_final(42), false);
@@ -6719,7 +6722,7 @@ mod tests {
         //   MsgPut.payload_len(11) → 0x0B
         //   payload "hello-reply"
         let small = build_response_reply_literal(42, "demo/test", b"hello-reply");
-        let small_wire = small.encode();
+        let small_wire = small.encode_to_vec();
         let mut small_expected = vec![
             0x7B, // Response: MID | N | M
             0x2A, // VLE(rid=42)
@@ -6740,7 +6743,7 @@ mod tests {
 
         // Case 2 — multi-byte VLE boundary on rid (200 = 0xC8 0x01).
         let large = build_response_reply_literal(200, "k", b"v");
-        let large_wire = large.encode();
+        let large_wire = large.encode_to_vec();
         let large_expected = vec![
             0x7B,
             0xC8, // VLE(200) low + cont
@@ -6799,7 +6802,7 @@ mod tests {
         //   payload_len(1) → 0x01
         //   payload "v"
         let alias = build_response_reply_aliased(42, 7, None, b"v");
-        let alias_wire = alias.encode();
+        let alias_wire = alias.encode_to_vec();
         assert_eq!(
             alias_wire,
             vec![
@@ -6820,7 +6823,7 @@ mod tests {
         //   Response.header = MID | N | M = 0x7B
         //   wireexpr Local: id=7 + suffix_len(4) + "tail"
         let composite = build_response_reply_aliased(42, 7, Some("tail"), b"data");
-        let composite_wire = composite.encode();
+        let composite_wire = composite.encode_to_vec();
         let mut composite_expected = vec![
             0x7B,
             0x2A,
@@ -6840,7 +6843,7 @@ mod tests {
 
         // Case 3 — multi-byte VLE alias (mapping_id=200).
         let large = build_response_reply_aliased(42, 200, None, b"x");
-        let large_wire = large.encode();
+        let large_wire = large.encode_to_vec();
         assert_eq!(
             large_wire,
             vec![
@@ -6876,7 +6879,7 @@ mod tests {
         //   payload_len(4) = 0x04
         //   "fail"
         let small = build_response_err_literal(42, "k", b"fail");
-        let small_wire = small.encode();
+        let small_wire = small.encode_to_vec();
         let mut small_expected = vec![
             0x7B,
             0x2A,
@@ -6895,7 +6898,7 @@ mod tests {
 
         // Case 2 — multi-byte VLE rid (200).
         let large = build_response_err_literal(200, "x", b"e");
-        let large_wire = large.encode();
+        let large_wire = large.encode_to_vec();
         assert_eq!(
             large_wire,
             vec![
@@ -6938,7 +6941,7 @@ mod tests {
     fn build_response_err_aliased_emits_zenoh_pico_compatible_wire_bytes() {
         // Pure alias: rid=42, mapping_id=7, no suffix, payload "e".
         let alias = build_response_err_aliased(42, 7, None, b"e");
-        let alias_wire = alias.encode();
+        let alias_wire = alias.encode_to_vec();
         assert_eq!(
             alias_wire,
             vec![
@@ -6955,7 +6958,7 @@ mod tests {
 
         // Composite: rid=42, mapping_id=7, suffix "tail", payload "data".
         let composite = build_response_err_aliased(42, 7, Some("tail"), b"data");
-        let composite_wire = composite.encode();
+        let composite_wire = composite.encode_to_vec();
         let mut composite_expected = vec![
             0x7B, // Response: MID | N | M
             0x2A,
@@ -6980,13 +6983,13 @@ mod tests {
     }
 
     /// R121j-3 — `encode_frame_with_response` produces the same
-    /// `[parent_flags | T_MID_FRAME]` + `Frame.encode()` wrapping as
-    /// the other helpers, with `Response.encode()` as the inner
+    /// `[parent_flags | T_MID_FRAME]` + `Frame.encode_to_vec()` wrapping as
+    /// the other helpers, with `Response.encode_to_vec()` as the inner
     /// payload bytes. Reply data delivery defaults to reliable.
     #[test]
     fn encode_frame_with_response_wraps_response_in_frame_envelope() {
         let response = build_response_reply_literal(42, "k", b"v");
-        let response_bytes = response.encode();
+        let response_bytes = response.encode_to_vec();
 
         let wire_reliable = encode_frame_with_response(
             0,
@@ -7002,7 +7005,7 @@ mod tests {
         assert_eq!(
             &wire_reliable[2..],
             response_bytes.as_slice(),
-            "Frame body tail must be Response.encode() bytes verbatim",
+            "Frame body tail must be Response.encode_to_vec() bytes verbatim",
         );
 
         let wire_best_effort = encode_frame_with_response(
@@ -7020,7 +7023,7 @@ mod tests {
     #[test]
     fn encode_frame_with_request_wraps_request_in_frame_envelope() {
         let request = build_request_query(42, 7, None);
-        let request_bytes = request.encode();
+        let request_bytes = request.encode_to_vec();
 
         let wire_reliable = encode_frame_with_request(0, build_request_query(42, 7, None), true);
         assert_eq!(
@@ -7032,7 +7035,7 @@ mod tests {
         assert_eq!(
             &wire_reliable[2..],
             request_bytes.as_slice(),
-            "Frame body tail must be Request.encode() bytes verbatim",
+            "Frame body tail must be Request.encode_to_vec() bytes verbatim",
         );
 
         let wire_best_effort = encode_frame_with_request(0, build_request_query(42, 7, None), false);
