@@ -64,7 +64,9 @@ use sce_rust_runtime::Engine;
 use sce_forge_runtime::codec::{CodecError, SceCursor};
 use wz_codecs::close::Close;
 use wz_codecs::decl_kexpr::DeclKexpr;
+use wz_codecs::decl_queryable::DeclQueryable;
 use wz_codecs::decl_subscriber::DeclSubscriber;
+use wz_codecs::decl_token::DeclToken;
 use wz_codecs::declare::{Declare, DeclareVariant};
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::ext_zint::ExtZint;
@@ -1059,6 +1061,64 @@ impl SessionLinkActions {
         let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
         self.driver.send_blocking(&wire, Reliability::Reliable);
     }
+
+    /// R121i-b — encode + dispatch a `Declare(DeclQueryable)` on the
+    /// outbound link, registering a queryable on the peer for the
+    /// keyexpr resolved by `(keyexpr_mapping_id, keyexpr_suffix)`.
+    /// The peer's inbound dispatch (zenoh-pico's
+    /// `_z_session_recv_declaration` ->
+    /// `_z_register_questionable_queryable`) inserts
+    /// `queryable_id -> keyexpr` into its local queryable table; any
+    /// `Request(Query)` arriving from this peer that matches the
+    /// declared keyexpr will then trigger the wz-side `on_query`
+    /// callback path (R121j+).
+    ///
+    /// AP MVP emits the `has_info_ext = false` shape — see
+    /// [`build_declare_queryable`] doc for the rationale and the
+    /// future split path for `complete = true` / non-zero `distance`.
+    ///
+    /// Same reliable-channel preconditions as
+    /// [`send_declare_keyexpr`]: the SN-window ordering guarantees
+    /// the peer's queryable table is populated before any matching
+    /// `Request(Query)` arrives.
+    pub fn send_declare_queryable(
+        &self,
+        queryable_id: u64,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) {
+        let declare = build_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix);
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+        self.driver.send_blocking(&wire, Reliability::Reliable);
+    }
+
+    /// R121i-b — encode + dispatch a `Declare(DeclToken)` on the
+    /// outbound link, registering a liveliness token on the peer for
+    /// the keyexpr resolved by `(keyexpr_mapping_id,
+    /// keyexpr_suffix)`. The peer's inbound dispatch inserts
+    /// `token_id -> keyexpr` into its liveliness-token table; the
+    /// declared token then participates in zenoh-pico's liveliness
+    /// notification fan-out (Z_FEATURE_LIVELINESS path).
+    ///
+    /// No extension surface — zenoh-pico's `_z_decl_token_encode`
+    /// always emits the bare `_z_decl_commons_encode(has_ext=false)`
+    /// shape, so this builder's wire bytes are byte-stable across
+    /// every `(id, mapping, suffix)` triple.
+    ///
+    /// Same reliable-channel preconditions as
+    /// [`send_declare_keyexpr`] / [`send_declare_subscriber`].
+    pub fn send_declare_token(
+        &self,
+        token_id: u64,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) {
+        let declare = build_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix);
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+        self.driver.send_blocking(&wire, Reliability::Reliable);
+    }
 }
 
 impl ActionTrace {
@@ -1729,6 +1789,149 @@ pub fn build_declare_subscriber(
             // derived (see fn-level doc comment).
             header: 0x02 | n_flag,
             id: subscriber_id,
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: keyexpr_mapping_id,
+                    suffix_len,
+                    suffix: suffix_string,
+                }),
+            },
+        }),
+    }
+}
+
+/// R121i-b — build a `Declare` network-message that registers a
+/// queryable on the peer for `(keyexpr_mapping_id, keyexpr_suffix)`.
+/// Mirrors zenoh-pico `_z_decl_queryable_encode` at
+/// `vendor/zenoh-pico/src/protocol/codec/declarations.c:105-118`,
+/// with `_z_decl_commons_encode` (declarations.c:65-80) providing the
+/// shared `[header | id | wireexpr]` body.
+///
+/// AP MVP scope: the wz codec emits the `has_info_ext = false` shape
+/// (no `_Z_MSG_EXT_ENC_ZINT | 0x01` `ExtQueryableInfo` tail). zenoh-
+/// pico produces the same byte sequence when both `complete = false`
+/// and `distance = 0`, which is the default `_z_queryable_infos_t`
+/// shipped by `z_query_consolidation_default`. A future round (R121j)
+/// that needs `complete = true` or non-zero `distance` will add a
+/// separate `build_declare_queryable_with_info` helper carrying the
+/// extra `Z` ext bytes; this helper's wire-byte contract for the
+/// no-ext shape is pinned by the byte-compare test below.
+///
+/// Wire shape (after the `N_MID_DECLARE` envelope header):
+///
+/// ```text
+///   [DeclQueryable.header = _Z_DECL_QUERYABLE_MID (0x04)
+///                            | (suffix.is_some() ? 0x20 : 0)
+///                            | (codegen-derived: 0x40 from parent.M
+///                              dispatch on the wireexpr import,
+///                              always set under the wz convention of
+///                              Local-arm wireexpr)]
+///   VLE(queryable_id)
+///   wireexpr.encode  (id VLE + optional suffix_len VLE + suffix bytes)
+/// ```
+///
+/// The codegen-derived M bit follows the same convention as
+/// [`build_declare_subscriber`]: `<sce:variant-dispatch
+/// flag="header.M"/>` on the wireexpr `<sce:import>` in
+/// `sources/codecs/decl_queryable.scxml` (post-R121h-pre B5-ν
+/// ownership invert) ORs 0x40 in for the `WireexprLocal` arm. The
+/// author-supplied header carries the MID + optional N (suffix gate);
+/// M is derived at encode time.
+///
+/// `keyexpr_mapping_id` / `keyexpr_suffix` convention mirrors
+/// [`build_declare_subscriber`]:
+///   - `(0, Some(s))`: literal — the queried keyexpr is `s` itself
+///     (id=0 is the wz literal-sentinel).
+///   - `(N, None)`: alias — the queried keyexpr is the peer's
+///     mapping for `N`.
+///   - `(N, Some(s))`: compound — alias `N`'s prefix + `s`.
+pub fn build_declare_queryable(
+    queryable_id: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+) -> Declare {
+    let suffix_string = keyexpr_suffix.map(str::to_string);
+    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let n_flag = if keyexpr_suffix.is_some() {
+        0x20u8
+    } else {
+        0x00u8
+    };
+    Declare {
+        header: wire_const::N_MID_DECLARE,
+        interest_id: None,
+        extensions: None,
+        body: DeclareVariant::CodecZenohDeclQueryable(DeclQueryable {
+            // MID 0x04 (_Z_DECL_QUERYABLE_MID per
+            // vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/declarations.h:32)
+            // + N gate; M is codegen-derived.
+            header: 0x04 | n_flag,
+            id: queryable_id,
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: keyexpr_mapping_id,
+                    suffix_len,
+                    suffix: suffix_string,
+                }),
+            },
+        }),
+    }
+}
+
+/// R121i-b — build a `Declare` network-message that registers a
+/// liveliness token on the peer for `(keyexpr_mapping_id,
+/// keyexpr_suffix)`. Mirrors zenoh-pico `_z_decl_token_encode` at
+/// `vendor/zenoh-pico/src/protocol/codec/declarations.c:123-126`
+/// (a thin `_z_decl_commons_encode` wrapper with `has_extensions =
+/// false`).
+///
+/// Liveliness tokens are unconditionally zero-tail: the zenoh-pico
+/// encoder has no extension surface at all (compare to DeclQueryable's
+/// `ExtQueryableInfo`), so this builder's emit shape is byte-stable
+/// for every `(id, mapping, suffix)` input.
+///
+/// Wire shape (after the `N_MID_DECLARE` envelope header):
+///
+/// ```text
+///   [DeclToken.header = _Z_DECL_TOKEN_MID (0x06)
+///                        | (suffix.is_some() ? 0x20 : 0)
+///                        | (codegen-derived: 0x40 from parent.M
+///                          dispatch on the wireexpr import)]
+///   VLE(token_id)
+///   wireexpr.encode
+/// ```
+///
+/// Same M-bit derivation contract as [`build_declare_subscriber`] /
+/// [`build_declare_queryable`]: `<sce:variant-dispatch
+/// flag="header.M"/>` on the wireexpr import in
+/// `sources/codecs/decl_token.scxml`. The wireexpr arm is always
+/// `WireexprLocal` here; `WireexprNonlocal` is reserved for future
+/// Interest / Reply paths (R121j+).
+///
+/// `keyexpr_mapping_id` / `keyexpr_suffix` convention matches the
+/// other DECLARE builders (literal / alias / compound).
+pub fn build_declare_token(
+    token_id: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+) -> Declare {
+    let suffix_string = keyexpr_suffix.map(str::to_string);
+    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let n_flag = if keyexpr_suffix.is_some() {
+        0x20u8
+    } else {
+        0x00u8
+    };
+    Declare {
+        header: wire_const::N_MID_DECLARE,
+        interest_id: None,
+        extensions: None,
+        body: DeclareVariant::CodecZenohDeclToken(DeclToken {
+            // MID 0x06 (_Z_DECL_TOKEN_MID per
+            // vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/declarations.h:34)
+            // + N gate; M is codegen-derived.
+            header: 0x06 | n_flag,
+            id: token_id,
             keyexpr: Wireexpr {
                 body: WireexprVariant::WireexprLocal(WireexprLocal {
                     id: keyexpr_mapping_id,
@@ -3520,6 +3723,264 @@ mod tests {
         assert_eq!(
             literal_wire, literal_expected,
             "literal-case wire bytes must match zenoh-pico reference"
+        );
+    }
+
+    /// R121i-b — `build_declare_queryable` produces a Declare envelope
+    /// carrying a `DeclQueryable` inner body. Mirror of the
+    /// DeclSubscriber structural test, with MID swap 0x02 → 0x04 and
+    /// the `WireexprLocal` arm preserved (M-bit codegen-derivation
+    /// path identical).
+    #[test]
+    fn build_declare_queryable_wraps_decl_queryable_in_declare_envelope() {
+        // Case 1 — pure alias to a peer-declared mapping (suffix=None).
+        let alias = build_declare_queryable(9, 7, None);
+        assert_eq!(
+            alias.header,
+            wire_const::N_MID_DECLARE,
+            "Declare envelope header must carry N_MID_DECLARE",
+        );
+        match &alias.body {
+            DeclareVariant::CodecZenohDeclQueryable(d) => {
+                assert_eq!(d.id, 9, "DeclQueryable.id must equal queryable_id");
+                assert_eq!(
+                    d.header, 0x04,
+                    "header carries MID 0x04 only; N clear (no suffix), M codegen-derived"
+                );
+                match &d.keyexpr.body {
+                    WireexprVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 7, "Wireexpr.id must equal keyexpr_mapping_id");
+                        assert!(w.suffix.is_none(), "alias case has no suffix");
+                        assert!(w.suffix_len.is_none());
+                    }
+                    _ => panic!("DeclQueryable.keyexpr must use WireexprLocal arm"),
+                }
+            }
+            _ => panic!("build_declare_queryable must produce CodecZenohDeclQueryable"),
+        }
+
+        // Case 2 — composite: alias N + tail suffix.
+        let composite = build_declare_queryable(9, 7, Some("tail"));
+        match &composite.body {
+            DeclareVariant::CodecZenohDeclQueryable(d) => {
+                assert_eq!(d.header, 0x24, "header MID 0x04 | N(0x20) when suffix present");
+                match &d.keyexpr.body {
+                    WireexprVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 7);
+                        assert_eq!(w.suffix.as_deref(), Some("tail"));
+                        assert_eq!(w.suffix_len, Some(4));
+                    }
+                    _ => panic!("composite must use WireexprLocal arm"),
+                }
+            }
+            _ => panic!(),
+        }
+
+        // Case 3 — literal: id=0 sentinel + suffix carries the keyexpr.
+        let literal = build_declare_queryable(9, 0, Some("demo/test"));
+        match &literal.body {
+            DeclareVariant::CodecZenohDeclQueryable(d) => {
+                assert_eq!(d.header, 0x24, "literal case still sets N (suffix present)");
+                match &d.keyexpr.body {
+                    WireexprVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 0, "literal sentinel id=0");
+                        assert_eq!(w.suffix.as_deref(), Some("demo/test"));
+                    }
+                    _ => panic!("literal must use WireexprLocal arm"),
+                }
+            }
+            _ => panic!(),
+        }
+    }
+
+    /// R121i-b — Wire-byte regression gate: the bytes emitted by
+    /// `build_declare_queryable(...).encode()` must equal zenoh-pico's
+    /// `_z_decl_queryable_encode` output for the no-info-ext shape
+    /// (vendor/zenoh-pico/src/protocol/codec/declarations.c:105-118
+    ///   with `has_info_ext = false` short-circuit at line 109).
+    ///
+    /// MID differs from DeclSubscriber (0x02 → 0x04) but the rest of
+    /// the wire (id VLE + wireexpr body + M-bit OR convention) is
+    /// identical — these three vectors lock the same alias /
+    /// composite / literal trio. The `has_info_ext = true` variant
+    /// (future ExtQueryableInfo tail) is out of scope for this round.
+    #[test]
+    fn build_declare_queryable_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — pure alias (queryable_id=9, mapping_id=7, no
+        // suffix). Wire shape:
+        //   outer Declare header 0x1E (N_MID_DECLARE)
+        //   DeclQueryable.header = MID(0x04) | M(0x40) = 0x44
+        //   VLE(queryable_id=9)  = 0x09
+        //   wireexpr Local id=7  = 0x07
+        let alias = build_declare_queryable(9, 7, None);
+        let alias_wire = alias.encode();
+        let alias_expected = vec![
+            wire_const::N_MID_DECLARE, // 0x1E
+            0x44,                       // MID(0x04) | M(0x40)
+            0x09,                       // VLE(queryable_id=9)
+            0x07,                       // wireexpr.id VLE(7)
+        ];
+        assert_eq!(
+            alias_wire, alias_expected,
+            "DeclQueryable alias-case wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 2 — composite (id=7 + tail "abc"):
+        //   DeclQueryable.header = MID | N | M = 0x64
+        //   VLE(9) = 0x09
+        //   wireexpr.id VLE(7) = 0x07
+        //   suffix_len VLE(3) = 0x03
+        //   suffix bytes = "abc"
+        let composite = build_declare_queryable(9, 7, Some("abc"));
+        let composite_wire = composite.encode();
+        let mut composite_expected = vec![
+            wire_const::N_MID_DECLARE,
+            0x64, // MID | N | M
+            0x09,
+            0x07,
+            0x03,
+        ];
+        composite_expected.extend_from_slice(b"abc");
+        assert_eq!(
+            composite_wire, composite_expected,
+            "DeclQueryable composite-case wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 3 — literal (id=0 + suffix "demo/test"):
+        //   DeclQueryable.header = MID | N | M = 0x64
+        //   VLE(9) = 0x09
+        //   wireexpr.id VLE(0) = 0x00
+        //   suffix_len VLE(9) = 0x09
+        //   suffix bytes = "demo/test"
+        let literal = build_declare_queryable(9, 0, Some("demo/test"));
+        let literal_wire = literal.encode();
+        let mut literal_expected = vec![
+            wire_const::N_MID_DECLARE,
+            0x64,
+            0x09,
+            0x00,
+            0x09,
+        ];
+        literal_expected.extend_from_slice(b"demo/test");
+        assert_eq!(
+            literal_wire, literal_expected,
+            "DeclQueryable literal-case wire bytes must match zenoh-pico reference"
+        );
+    }
+
+    /// R121i-b — `build_declare_token` produces a Declare envelope
+    /// carrying a `DeclToken` inner body. Mirror of the DeclSubscriber
+    /// / DeclQueryable structural test, with MID swap to 0x06.
+    #[test]
+    fn build_declare_token_wraps_decl_token_in_declare_envelope() {
+        // Case 1 — pure alias.
+        let alias = build_declare_token(11, 7, None);
+        match &alias.body {
+            DeclareVariant::CodecZenohDeclToken(d) => {
+                assert_eq!(d.id, 11, "DeclToken.id must equal token_id");
+                assert_eq!(
+                    d.header, 0x06,
+                    "header carries MID 0x06 only; N clear, M codegen-derived"
+                );
+                match &d.keyexpr.body {
+                    WireexprVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 7);
+                        assert!(w.suffix.is_none());
+                    }
+                    _ => panic!("DeclToken.keyexpr must use WireexprLocal arm"),
+                }
+            }
+            _ => panic!("build_declare_token must produce CodecZenohDeclToken"),
+        }
+
+        // Case 2 — composite.
+        let composite = build_declare_token(11, 7, Some("tail"));
+        match &composite.body {
+            DeclareVariant::CodecZenohDeclToken(d) => {
+                assert_eq!(d.header, 0x26, "header MID 0x06 | N(0x20)");
+                match &d.keyexpr.body {
+                    WireexprVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 7);
+                        assert_eq!(w.suffix.as_deref(), Some("tail"));
+                    }
+                    _ => panic!(),
+                }
+            }
+            _ => panic!(),
+        }
+
+        // Case 3 — literal.
+        let literal = build_declare_token(11, 0, Some("demo/test"));
+        match &literal.body {
+            DeclareVariant::CodecZenohDeclToken(d) => {
+                assert_eq!(d.header, 0x26);
+                match &d.keyexpr.body {
+                    WireexprVariant::WireexprLocal(w) => {
+                        assert_eq!(w.id, 0);
+                        assert_eq!(w.suffix.as_deref(), Some("demo/test"));
+                    }
+                    _ => panic!(),
+                }
+            }
+            _ => panic!(),
+        }
+    }
+
+    /// R121i-b — Wire-byte regression gate: the bytes emitted by
+    /// `build_declare_token(...).encode()` must equal zenoh-pico's
+    /// `_z_decl_token_encode` output
+    /// (vendor/zenoh-pico/src/protocol/codec/declarations.c:123-126).
+    ///
+    /// DeclToken's encode is a pure `_z_decl_commons_encode(has_ext =
+    /// false)` wrapper — no extension surface at all. The three
+    /// vectors lock the alias / composite / literal trio with MID
+    /// 0x06.
+    #[test]
+    fn build_declare_token_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — pure alias (token_id=11, mapping_id=7, no suffix).
+        let alias = build_declare_token(11, 7, None);
+        let alias_wire = alias.encode();
+        let alias_expected = vec![
+            wire_const::N_MID_DECLARE, // 0x1E
+            0x46,                       // MID(0x06) | M(0x40)
+            0x0B,                       // VLE(token_id=11)
+            0x07,                       // wireexpr.id VLE(7)
+        ];
+        assert_eq!(
+            alias_wire, alias_expected,
+            "DeclToken alias-case wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 2 — composite (id=7 + tail "abc").
+        let composite = build_declare_token(11, 7, Some("abc"));
+        let composite_wire = composite.encode();
+        let mut composite_expected = vec![
+            wire_const::N_MID_DECLARE,
+            0x66, // MID(0x06) | N | M
+            0x0B,
+            0x07,
+            0x03,
+        ];
+        composite_expected.extend_from_slice(b"abc");
+        assert_eq!(
+            composite_wire, composite_expected,
+            "DeclToken composite-case wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 3 — literal (id=0 + suffix "demo/test").
+        let literal = build_declare_token(11, 0, Some("demo/test"));
+        let literal_wire = literal.encode();
+        let mut literal_expected = vec![
+            wire_const::N_MID_DECLARE,
+            0x66,
+            0x0B,
+            0x00,
+            0x09,
+        ];
+        literal_expected.extend_from_slice(b"demo/test");
+        assert_eq!(
+            literal_wire, literal_expected,
+            "DeclToken literal-case wire bytes must match zenoh-pico reference"
         );
     }
 
