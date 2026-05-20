@@ -2573,6 +2573,83 @@ pub fn build_request_query_with_consolidation(
     request
 }
 
+/// R121j-1b — `parameters` slice max-size enforced by the wz Query
+/// codec (sources/codecs/query.scxml's `sce:max-size="256"` on the
+/// `parameters` field). Zenoh-pico's `_z_slice_t` is variable-length
+/// upstream; wz's stripped-down scope bounds it at 256 to keep the
+/// codec deterministic. The builder rejects `params.len() > 256` so
+/// the caller surfaces the size violation at the call site rather
+/// than as a runtime decoder error on the peer.
+pub const REQUEST_QUERY_PARAMETERS_MAX_LEN: usize = 256;
+
+/// R121j-1b — build a `Request(Query)` with an explicit parameters
+/// slice (selector + key=value tail string in zenoh-pico, e.g.
+/// `"category=temperature"`). Layered on top of [`build_request_query`]:
+///
+/// ```text
+///   [Request.header | M_derived]      // same as build_request_query
+///   VLE(rid)
+///   wireexpr.encode
+///   [Query.header = _Z_MID_Z_QUERY (0x03) | _Z_FLAG_Z_Q_P (0x40)]
+///   VLE(params.len())                  // <-- the layered addition
+///   params bytes
+/// ```
+///
+/// The Q_P flag at bit 6 (`_Z_FLAG_Z_Q_P` per
+/// vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/message.h:103)
+/// is set unconditionally here — zenoh-pico's encoder sets it on any
+/// non-empty `_parameters` slice (message.c:398-401), and the wz codec
+/// gates the `parameters_len` / `parameters` field pair on `header.P`
+/// (query.scxml's `sce:present-if="header.P"` on both).
+///
+/// Empty `params` is rejected (zenoh-pico's `has_params` predicate is
+/// `_z_slice_check(&params) && params.len > 0`, so an empty slice
+/// would clear Q_P and emit no params — the caller for an empty
+/// case should call [`build_request_query`] directly). Slice length
+/// above [`REQUEST_QUERY_PARAMETERS_MAX_LEN`] is also rejected to
+/// match the wz codec's `sce:max-size="256"` bound.
+///
+/// `_implicit_anyke` (zenoh-pico's `**` / `?` selector convention
+/// that prepends `_Z_QUERY_PARAMS_KEY_ANYKE` to the params at encode
+/// time, message.c:414-425) is NOT modelled here — AP MVP simple
+/// `z_get` does not set it. A future helper
+/// (`build_request_query_with_parameters_and_anyke`) can layer the
+/// anyke-prepend on top.
+pub fn build_request_query_with_parameters(
+    rid: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+    params: &[u8],
+) -> Request {
+    assert!(
+        !params.is_empty(),
+        "build_request_query_with_parameters requires a non-empty params slice; \
+         use build_request_query for the no-params case (zenoh-pico's encoder \
+         predicate has_params is `len > 0`)",
+    );
+    assert!(
+        params.len() <= REQUEST_QUERY_PARAMETERS_MAX_LEN,
+        "params slice length {} exceeds wz Query codec's max-size ({})",
+        params.len(),
+        REQUEST_QUERY_PARAMETERS_MAX_LEN,
+    );
+    let mut request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix);
+    if let RequestVariant::CodecZenohQuery(ref mut query) = request.body {
+        // Set the Q_P flag (0x40 = `_Z_FLAG_Z_Q_P`). The wz codec
+        // gates both `parameters_len` and `parameters` on `header.P`
+        // (query.scxml), so the flag and both fields stay paired.
+        query.header |= 0x40;
+        query.parameters_len = Some(params.len() as u64);
+        query.parameters = Some(params.to_vec());
+    } else {
+        unreachable!(
+            "build_request_query must produce a CodecZenohQuery body — \
+             the layered helper relies on this invariant"
+        );
+    }
+    request
+}
+
 /// R121j-2 — build a `ResponseFinal` network-message that terminates
 /// the multi-Reply sequence for `request_id`. Mirrors zenoh-pico
 /// `_z_response_final_encode` at
@@ -5367,6 +5444,102 @@ mod tests {
         assert_eq!(ConsolidationMode::None.wire_byte(), 0u8);
         assert_eq!(ConsolidationMode::Monotonic.wire_byte(), 1u8);
         assert_eq!(ConsolidationMode::Latest.wire_byte(), 2u8);
+    }
+
+    /// R121j-1b — Wire-byte regression gate for
+    /// `build_request_query_with_parameters`. The layered helper
+    /// flips Q_P(0x40) on the Query header and appends VLE(len) +
+    /// bytes after the header byte. Three vectors lock the small-
+    /// params, multi-byte VLE boundary, and max-size (256) cases.
+    /// The Q_C bit (0x20) stays clear because this helper does not
+    /// layer consolidation (separate concern).
+    #[test]
+    fn build_request_query_with_parameters_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — small params (alias case, rid=42, mapping_id=7,
+        // no suffix; params="k=v"). Wire:
+        //   Request: [0x5C, 0x2A, 0x07]      (MID|M, VLE(42), VLE(7))
+        //   Query:   [0x43, 0x03, b'k', b'=', b'v']
+        //              (MID(0x03) | Q_P(0x40), VLE(len=3), 3 bytes)
+        let small = build_request_query_with_parameters(42, 7, None, b"k=v");
+        let small_wire = small.encode();
+        let mut small_expected = vec![
+            0x5C, // Request: MID 0x1C | M 0x40
+            0x2A, // VLE(rid=42)
+            0x07, // wireexpr.id VLE(7)
+            0x43, // Query: MID(0x03) | Q_P(0x40)
+            0x03, // VLE(params_len=3)
+        ];
+        small_expected.extend_from_slice(b"k=v");
+        assert_eq!(
+            small_wire, small_expected,
+            "Request(Query+params) small-params wire bytes must match \
+             zenoh-pico reference (msg.c:398-401, 426-428)",
+        );
+
+        // Case 2 — multi-byte VLE boundary on params_len (params
+        // length=128 crosses the 7-bit VLE boundary; first byte =
+        // 0x80, second byte = 0x01). Lock the VLE writer regression
+        // on the parameters_len field specifically.
+        let mid_params: Vec<u8> = (0u8..128).collect();
+        let mid = build_request_query_with_parameters(42, 7, None, &mid_params);
+        let mid_wire = mid.encode();
+        let mut mid_expected = vec![
+            0x5C,
+            0x2A,
+            0x07,
+            0x43,
+            0x80, // VLE(128) low 7 + cont bit
+            0x01, // VLE(128) high byte
+        ];
+        mid_expected.extend_from_slice(&mid_params);
+        assert_eq!(
+            mid_wire, mid_expected,
+            "Request(Query+params) multi-byte VLE params_len wire bytes \
+             must match zenoh-pico reference",
+        );
+
+        // Case 3 — at max-size (256 bytes). VLE(256) = 0x80 0x02.
+        let max_params: Vec<u8> = (0..256).map(|i| (i % 251) as u8).collect();
+        let max = build_request_query_with_parameters(42, 7, None, &max_params);
+        let max_wire = max.encode();
+        let mut max_expected = vec![
+            0x5C, 0x2A, 0x07, 0x43, 0x80, 0x02,
+        ];
+        max_expected.extend_from_slice(&max_params);
+        assert_eq!(
+            max_wire, max_expected,
+            "Request(Query+params) max-size params wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        // Inner-arm sanity check.
+        match &small.body {
+            RequestVariant::CodecZenohQuery(q) => {
+                assert_eq!(q.header, 0x43, "Query.header MID | Q_P");
+                assert_eq!(q.parameters_len, Some(3));
+                assert_eq!(q.parameters.as_deref(), Some(b"k=v".as_slice()));
+                assert!(
+                    q.consolidation.is_none() && q.extensions.is_none(),
+                    "parameters-only helper must not set consolidation or exts",
+                );
+            }
+            _ => panic!("expected CodecZenohQuery"),
+        }
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "build_request_query_with_parameters requires a non-empty params slice"
+    )]
+    fn build_request_query_with_parameters_rejects_empty_slice() {
+        let _ = build_request_query_with_parameters(42, 7, None, b"");
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds wz Query codec's max-size (256)")]
+    fn build_request_query_with_parameters_rejects_over_max_size() {
+        let over: Vec<u8> = vec![0u8; REQUEST_QUERY_PARAMETERS_MAX_LEN + 1];
+        let _ = build_request_query_with_parameters(42, 7, None, &over);
     }
 
     /// R121j-1 — `encode_frame_with_request` produces the same

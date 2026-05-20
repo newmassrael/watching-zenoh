@@ -5729,6 +5729,42 @@
         "R121h-perf-bump carry intact from R121h-perf-bump-1-study — next round needs explicit user consent before the atomic 2-phase migration begins (12 SCXML + vendor pin bump in one commit, then TcpDriver hot path sink-based migration)."
       ]
     },
+    "Round 121j-1b": {
+      "decision_summary": "R121j-1b adds the parameters layered helper, paying down the second quarter of the Q-helpers carry (R121j-1a closed consolidation; this closes parameters).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `pub const REQUEST_QUERY_PARAMETERS_MAX_LEN: usize = 256` mirroring sources/codecs/query.scxml's `sce:max-size=\"256\"` on the parameters field.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `build_request_query_with_parameters(rid, mapping_id, suffix, params)`. Built on top of `build_request_query` (same one-shot composition pattern as R121j-1a): ORs Q_P(0x40) into `Query.header`, sets `parameters_len = Some(params.len() as u64)` and `parameters = Some(params.to_vec())`. The codec gates both `parameters_len` and `parameters` fields on `header.P` (query.scxml line 79 / 81), so the flag + paired Optional fields stay byte-coherent.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added two assertion gates. `assert!(!params.is_empty(), ...)` rejects the empty-slice case (zenoh-pico's `has_params` predicate at message.c:398 is `_z_slice_check && len > 0`, so an empty slice would silently clear Q_P and emit no params — the caller's intent is then `build_request_query` no-params). `assert!(params.len() <= REQUEST_QUERY_PARAMETERS_MAX_LEN, ...)` rejects oversize at the call site rather than at the peer's decoder.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added three unit tests in the `tests` mod. Byte-compare locks small-params (k=v) + multi-byte VLE boundary (params_len=128 → 0x80 0x01) + max-size (256-byte payload → VLE 0x80 0x02). Two `#[should_panic]` tests guard the empty-slice and over-max rejections.",
+        "Out of scope (audit-traced carry): `_implicit_anyke` selector convention (zenoh-pico message.c:414-425 prepends `_Z_QUERY_PARAMS_KEY_ANYKE` for `**` / `?` selectors). AP MVP simple `z_get` does not set it; a future helper `build_request_query_with_parameters_and_anyke` layers the anyke-prepend when needed."
+      ],
+      "verification_bullets": [
+        "Targeted: `cargo test -p wz-runtime-tokio --lib build_request_query_with_parameters` — 3 passed, 0 failed (1 byte-compare + 2 panic-rejection).",
+        "Regression: `cargo test -p wz-runtime-tokio --lib` — 65 passed, 0 failed (up from 62 at R121j-1a closure; +3 R121j-1b tests).",
+        "Layer C2 equivalent: `cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings` — clean after a single doc-comment rewrite (line 2609 had `> [REQUEST_QUERY_PARAMETERS_MAX_LEN]` which clippy `doc_lazy_continuation` interpreted as a missing-marker quote; reworded to `above` prose form)."
+      ],
+      "carry_forward_bullets": [
+        "R121j-1c/d carry intact — layered helpers for Q-level exts (Q_Z + ext_entry chain for source_info ext_id=0x01 / value ext_id=0x03 / attachment ext_id=0x05; needs Value codec wiring investigation for the value ext) and Request-level exts (outer N_Z + qos / tstamp / target / budget / timeout_ms ext_ids).",
+        "Open compositional gap: R121j-1a (consolidation) + R121j-1b (parameters) are one-shot helpers that do not compose. A caller wanting both layered must mutate the Request body manually. If 1c or 1d also need composition with the existing layers, the textbook fix is to introduce a `RequestQueryExt` trait with `with_consolidation` / `with_parameters` / `with_*` fluent chain methods and refactor the existing one-shot helpers into thin wrappers over the trait. Defer the trait extraction until composition is genuinely needed (YAGNI — R121j-1c may reveal that exts can be set independently without inter-layer composition concerns)."
+      ],
+      "publishable_decision_summary": "R121j-1b adds the parameters layered helper, paying down the second quarter of the Q-helpers carry (R121j-1a closed consolidation; this closes parameters).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `pub const REQUEST_QUERY_PARAMETERS_MAX_LEN: usize = 256` mirroring sources/codecs/query.scxml's `sce:max-size=\"256\"` on the parameters field.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `build_request_query_with_parameters(rid, mapping_id, suffix, params)`. Built on top of `build_request_query` (same one-shot composition pattern as R121j-1a): ORs Q_P(0x40) into `Query.header`, sets `parameters_len = Some(params.len() as u64)` and `parameters = Some(params.to_vec())`. The codec gates both `parameters_len` and `parameters` fields on `header.P` (query.scxml line 79 / 81), so the flag + paired Optional fields stay byte-coherent.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added two assertion gates. `assert!(!params.is_empty(), ...)` rejects the empty-slice case (zenoh-pico's `has_params` predicate at message.c:398 is `_z_slice_check && len > 0`, so an empty slice would silently clear Q_P and emit no params — the caller's intent is then `build_request_query` no-params). `assert!(params.len() <= REQUEST_QUERY_PARAMETERS_MAX_LEN, ...)` rejects oversize at the call site rather than at the peer's decoder.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added three unit tests in the `tests` mod. Byte-compare locks small-params (k=v) + multi-byte VLE boundary (params_len=128 → 0x80 0x01) + max-size (256-byte payload → VLE 0x80 0x02). Two `#[should_panic]` tests guard the empty-slice and over-max rejections.",
+        "Out of scope (audit-traced carry): `_implicit_anyke` selector convention (zenoh-pico message.c:414-425 prepends `_Z_QUERY_PARAMS_KEY_ANYKE` for `**` / `?` selectors). AP MVP simple `z_get` does not set it; a future helper `build_request_query_with_parameters_and_anyke` layers the anyke-prepend when needed."
+      ],
+      "publishable_verification_bullets": [
+        "Targeted: `cargo test -p wz-runtime-tokio --lib build_request_query_with_parameters` — 3 passed, 0 failed (1 byte-compare + 2 panic-rejection).",
+        "Regression: `cargo test -p wz-runtime-tokio --lib` — 65 passed, 0 failed (up from 62 at R121j-1a closure; +3 R121j-1b tests).",
+        "Layer C2 equivalent: `cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings` — clean after a single doc-comment rewrite (line 2609 had `> [REQUEST_QUERY_PARAMETERS_MAX_LEN]` which clippy `doc_lazy_continuation` interpreted as a missing-marker quote; reworded to `above` prose form)."
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121j-1c/d carry intact — layered helpers for Q-level exts (Q_Z + ext_entry chain for source_info ext_id=0x01 / value ext_id=0x03 / attachment ext_id=0x05; needs Value codec wiring investigation for the value ext) and Request-level exts (outer N_Z + qos / tstamp / target / budget / timeout_ms ext_ids).",
+        "Open compositional gap: R121j-1a (consolidation) + R121j-1b (parameters) are one-shot helpers that do not compose. A caller wanting both layered must mutate the Request body manually. If 1c or 1d also need composition with the existing layers, the textbook fix is to introduce a `RequestQueryExt` trait with `with_consolidation` / `with_parameters` / `with_*` fluent chain methods and refactor the existing one-shot helpers into thin wrappers over the trait. Defer the trait extraction until composition is genuinely needed (YAGNI — R121j-1c may reveal that exts can be set independently without inter-layer composition concerns)."
+      ]
+    },
     "Round 121j-2": {
       "decision_summary": "R121j-2 adds ResponseFinal outbound to close the Query/Reply sequence — build_response_final + encode_frame_with_response_final + SessionLinkActions::send_response_final — with 2-vector wire-byte byte-compare tests against zenoh-pico _z_response_final_encode (network.c:368-376) covering both single-byte and multi-byte VLE rid cases.",
       "changes_bullets": [
