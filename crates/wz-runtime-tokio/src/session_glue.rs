@@ -63,11 +63,16 @@ use sce_rust_runtime::Engine;
 
 use sce_forge_runtime::codec::{CodecError, SceCursor};
 use wz_codecs::close::Close;
+use wz_codecs::decl_final::DeclFinal;
 use wz_codecs::decl_kexpr::DeclKexpr;
 use wz_codecs::decl_queryable::DeclQueryable;
 use wz_codecs::decl_subscriber::DeclSubscriber;
 use wz_codecs::decl_token::DeclToken;
 use wz_codecs::declare::{Declare, DeclareVariant};
+use wz_codecs::undecl_kexpr::UndeclKexpr;
+use wz_codecs::undecl_queryable::UndeclQueryable;
+use wz_codecs::undecl_subscriber::UndeclSubscriber;
+use wz_codecs::undecl_token::UndeclToken;
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::ext_zint::ExtZint;
 use wz_codecs::frame::Frame;
@@ -1119,6 +1124,73 @@ impl SessionLinkActions {
         let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
         self.driver.send_blocking(&wire, Reliability::Reliable);
     }
+
+    /// R121i-c — encode + dispatch a `Declare(UndeclKexpr)` on the
+    /// outbound link, retracting a previously declared keyexpr
+    /// mapping (id) on the peer. The peer's inbound dispatch
+    /// (zenoh-pico's `_z_session_recv_declaration` ->
+    /// `_z_unregister_resource`) removes the `(id -> keyexpr)` entry;
+    /// any subsequent Push from this peer that aliases the retracted
+    /// id will be rejected by the peer's resolver.
+    ///
+    /// Reliable channel — same SN-window ordering reason as the
+    /// DECLARE path: the peer must observe the retraction before any
+    /// later Push that still aliases the id, otherwise the peer would
+    /// dispatch the Push to the now-stale keyexpr.
+    pub fn send_undeclare_kexpr(&self, mapping_id: u64) {
+        let declare = build_undeclare_kexpr(mapping_id);
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+        self.driver.send_blocking(&wire, Reliability::Reliable);
+    }
+
+    /// R121i-c — encode + dispatch a `Declare(UndeclSubscriber)` on
+    /// the outbound link, retracting a previously declared
+    /// subscription (id) on the peer. The peer drops the
+    /// `subscriber_id -> keyexpr` entry from its subscriber table;
+    /// subsequent matching Pushes will no longer route to this
+    /// subscriber (the peer's other subscribers on the same keyexpr
+    /// continue to receive).
+    pub fn send_undeclare_subscriber(&self, subscriber_id: u64) {
+        let declare = build_undeclare_subscriber(subscriber_id);
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+        self.driver.send_blocking(&wire, Reliability::Reliable);
+    }
+
+    /// R121i-c — encode + dispatch a `Declare(UndeclQueryable)` on
+    /// the outbound link, retracting a previously declared queryable
+    /// (id) on the peer.
+    pub fn send_undeclare_queryable(&self, queryable_id: u64) {
+        let declare = build_undeclare_queryable(queryable_id);
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+        self.driver.send_blocking(&wire, Reliability::Reliable);
+    }
+
+    /// R121i-c — encode + dispatch a `Declare(UndeclToken)` on the
+    /// outbound link, retracting a previously declared liveliness
+    /// token (id) on the peer.
+    pub fn send_undeclare_token(&self, token_id: u64) {
+        let declare = build_undeclare_token(token_id);
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+        self.driver.send_blocking(&wire, Reliability::Reliable);
+    }
+
+    /// R121i-c — encode + dispatch a `Declare(DeclFinal)` marker on
+    /// the outbound link, terminating a declaration sequence.
+    /// Reserved for the future Interest/Reply path (R121j+); the
+    /// unsolicited DECLARE outbound path that the AP MVP uses today
+    /// does not emit DeclFinal, but the action is provided so the
+    /// state machine has the dispatch shape ready when Interest
+    /// replies need to close a multi-DECLARE reply batch.
+    pub fn send_declare_final(&self) {
+        let declare = build_declare_final();
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+        self.driver.send_blocking(&wire, Reliability::Reliable);
+    }
 }
 
 impl ActionTrace {
@@ -1939,6 +2011,146 @@ pub fn build_declare_token(
                     suffix: suffix_string,
                 }),
             },
+        }),
+    }
+}
+
+/// R121i-c — build a `Declare(UndeclKexpr)` network-message that
+/// retracts a previously declared keyexpr-mapping (id) on the peer.
+/// Mirrors zenoh-pico `_z_undecl_kexpr_encode` at
+/// `vendor/zenoh-pico/src/protocol/codec/declarations.c:86-89`.
+///
+/// Wire shape (after the `N_MID_DECLARE` envelope header):
+///
+/// ```text
+///   [UndeclKexpr.header = _Z_UNDECL_KEXPR_MID (0x01)]
+///   VLE(mapping_id)
+/// ```
+///
+/// UndeclKexpr has no wireexpr body and no Z-ext surface (unlike the
+/// other three Undecl_* variants below): the retraction is purely
+/// id-based because the peer already has the (id -> keyexpr) entry
+/// from a prior `Declare(DeclKexpr)`. The Z bit is bit-7 of the
+/// header and is left clear by every conformant zenoh-pico
+/// emit — wz mirrors that contract.
+pub fn build_undeclare_kexpr(mapping_id: u64) -> Declare {
+    Declare {
+        header: wire_const::N_MID_DECLARE,
+        interest_id: None,
+        extensions: None,
+        body: DeclareVariant::CodecZenohUndeclKexpr(UndeclKexpr {
+            header: 0x01, // _Z_UNDECL_KEXPR_MID
+            id: mapping_id,
+        }),
+    }
+}
+
+/// R121i-c — build a `Declare(UndeclSubscriber)` network-message that
+/// retracts a previously declared subscription (id) on the peer.
+/// Mirrors zenoh-pico `_z_undecl_subscriber_encode` /
+/// `_z_undecl_encode(has_keyexpr_ext = false)` at
+/// `vendor/zenoh-pico/src/protocol/codec/declarations.c:90-103`.
+///
+/// AP MVP scope: the wz UndeclSubscriber codec emits the no-ext
+/// shape only. The wz codegen for UndeclSubscriber does not model
+/// the optional `_z_decl_ext_keyexpr_encode` tail (declarations.c:38-50)
+/// — the SCXML stops at `id`. Peers route undeclare by id alone, so
+/// the ext is purely informational at this layer (used by routers for
+/// cross-validation). Future rounds that need the ext_keyexpr surface
+/// extend `sources/codecs/undecl_subscriber.scxml` with the optional
+/// ext field + add a separate `build_undeclare_subscriber_with_keyexpr`
+/// helper; the no-ext contract here stays byte-stable.
+///
+/// Wire shape:
+///
+/// ```text
+///   [UndeclSubscriber.header = _Z_UNDECL_SUBSCRIBER_MID (0x03)]
+///   VLE(subscriber_id)
+/// ```
+pub fn build_undeclare_subscriber(subscriber_id: u64) -> Declare {
+    Declare {
+        header: wire_const::N_MID_DECLARE,
+        interest_id: None,
+        extensions: None,
+        body: DeclareVariant::CodecZenohUndeclSubscriber(UndeclSubscriber {
+            header: 0x03, // _Z_UNDECL_SUBSCRIBER_MID
+            id: subscriber_id,
+        }),
+    }
+}
+
+/// R121i-c — build a `Declare(UndeclQueryable)` network-message that
+/// retracts a previously declared queryable (id) on the peer. Same
+/// no-ext shape contract as [`build_undeclare_subscriber`]; mirrors
+/// zenoh-pico `_z_undecl_queryable_encode` /
+/// `_z_undecl_encode(has_keyexpr_ext = false)` at
+/// `vendor/zenoh-pico/src/protocol/codec/declarations.c:120-122`.
+///
+/// Wire shape:
+///
+/// ```text
+///   [UndeclQueryable.header = _Z_UNDECL_QUERYABLE_MID (0x05)]
+///   VLE(queryable_id)
+/// ```
+pub fn build_undeclare_queryable(queryable_id: u64) -> Declare {
+    Declare {
+        header: wire_const::N_MID_DECLARE,
+        interest_id: None,
+        extensions: None,
+        body: DeclareVariant::CodecZenohUndeclQueryable(UndeclQueryable {
+            header: 0x05, // _Z_UNDECL_QUERYABLE_MID
+            id: queryable_id,
+        }),
+    }
+}
+
+/// R121i-c — build a `Declare(UndeclToken)` network-message that
+/// retracts a previously declared liveliness token (id) on the peer.
+/// Same no-ext shape contract as [`build_undeclare_subscriber`];
+/// mirrors zenoh-pico `_z_undecl_token_encode` /
+/// `_z_undecl_encode(has_keyexpr_ext = false)` at
+/// `vendor/zenoh-pico/src/protocol/codec/declarations.c:128-130`.
+///
+/// Wire shape:
+///
+/// ```text
+///   [UndeclToken.header = _Z_UNDECL_TOKEN_MID (0x07)]
+///   VLE(token_id)
+/// ```
+pub fn build_undeclare_token(token_id: u64) -> Declare {
+    Declare {
+        header: wire_const::N_MID_DECLARE,
+        interest_id: None,
+        extensions: None,
+        body: DeclareVariant::CodecZenohUndeclToken(UndeclToken {
+            header: 0x07, // _Z_UNDECL_TOKEN_MID
+            id: token_id,
+        }),
+    }
+}
+
+/// R121i-c — build a `Declare(DeclFinal)` marker that terminates a
+/// declaration sequence on the wire. Mirrors zenoh-pico
+/// `_z_decl_final_encode` at
+/// `vendor/zenoh-pico/src/protocol/codec/declarations.c:131-135`:
+/// a single-byte `0x1A` marker with no body, no id, no ext.
+///
+/// DeclFinal is used by zenoh-pico as the sentinel that signals the
+/// end of an Interest-driven declaration batch (router → peer
+/// replay). For the unsolicited DECLARE outbound path the wz AP MVP
+/// uses (R121g+), DeclFinal is not strictly required, but the helper
+/// is provided so the future Interest/Reply path (R121j+) has the
+/// terminator builder ready when it needs to close a multi-DECLARE
+/// reply sequence.
+///
+/// Wire shape: `[N_MID_DECLARE, 0x1A]` — exactly two bytes.
+pub fn build_declare_final() -> Declare {
+    Declare {
+        header: wire_const::N_MID_DECLARE,
+        interest_id: None,
+        extensions: None,
+        body: DeclareVariant::CodecZenohDeclFinal(DeclFinal {
+            header: 0x1A, // _Z_DECL_FINAL_MID
         }),
     }
 }
@@ -3982,6 +4194,201 @@ mod tests {
             literal_wire, literal_expected,
             "DeclToken literal-case wire bytes must match zenoh-pico reference"
         );
+    }
+
+    /// R121i-c — `build_undeclare_kexpr` produces a `Declare`
+    /// envelope carrying an `UndeclKexpr` body. Two vectors lock both
+    /// the single-byte VLE id case and the multi-byte VLE boundary
+    /// (id >= 128) so a future codegen drift on the VLE writer
+    /// surfaces immediately. Reference: zenoh-pico
+    /// `_z_undecl_kexpr_encode` at declarations.c:86-89 —
+    /// `[header(_Z_UNDECL_KEXPR_MID=0x01), VLE(id)]`, no Z ext, no
+    /// wireexpr body.
+    #[test]
+    fn build_undeclare_kexpr_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — single-byte VLE id (id=42 fits in 7 bits).
+        let small = build_undeclare_kexpr(42);
+        let small_wire = small.encode();
+        let small_expected = vec![
+            wire_const::N_MID_DECLARE, // 0x1E outer
+            0x01,                       // _Z_UNDECL_KEXPR_MID
+            0x2A,                       // VLE(42) single byte
+        ];
+        assert_eq!(
+            small_wire, small_expected,
+            "UndeclKexpr small-id wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 2 — multi-byte VLE id (id=200 crosses the 7-bit
+        // boundary; first byte = 0xC8 (low 7 bits 0x48 + cont 0x80),
+        // second byte = 0x01).
+        let large = build_undeclare_kexpr(200);
+        let large_wire = large.encode();
+        let large_expected = vec![
+            wire_const::N_MID_DECLARE,
+            0x01,
+            0xC8, // (200 & 0x7F) | 0x80
+            0x01, // 200 >> 7
+        ];
+        assert_eq!(
+            large_wire, large_expected,
+            "UndeclKexpr multi-byte VLE id wire bytes must match zenoh-pico reference"
+        );
+
+        // Inner-arm sanity check on the small-id case.
+        match &small.body {
+            DeclareVariant::CodecZenohUndeclKexpr(d) => {
+                assert_eq!(d.header, 0x01, "header carries MID only; Z (bit-7) clear");
+                assert_eq!(d.id, 42);
+            }
+            _ => panic!("build_undeclare_kexpr must produce CodecZenohUndeclKexpr"),
+        }
+    }
+
+    /// R121i-c — `build_undeclare_subscriber` produces a `Declare`
+    /// envelope carrying an `UndeclSubscriber` body in the no-ext
+    /// shape (Z bit clear). Reference: zenoh-pico
+    /// `_z_undecl_subscriber_encode` -> `_z_undecl_encode(.., has_keyexpr_ext=false)`
+    /// at declarations.c:90-103. The wz UndeclSubscriber codec does
+    /// not model the optional ext_keyexpr tail; this contract is
+    /// locked by the two vectors below.
+    #[test]
+    fn build_undeclare_subscriber_emits_zenoh_pico_compatible_wire_bytes() {
+        let small = build_undeclare_subscriber(42);
+        let small_wire = small.encode();
+        assert_eq!(
+            small_wire,
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x03, // _Z_UNDECL_SUBSCRIBER_MID
+                0x2A, // VLE(42)
+            ],
+            "UndeclSubscriber small-id wire bytes must match zenoh-pico reference",
+        );
+
+        let large = build_undeclare_subscriber(200);
+        let large_wire = large.encode();
+        assert_eq!(
+            large_wire,
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x03,
+                0xC8,
+                0x01,
+            ],
+            "UndeclSubscriber multi-byte VLE id wire bytes must match zenoh-pico reference",
+        );
+
+        match &small.body {
+            DeclareVariant::CodecZenohUndeclSubscriber(d) => {
+                assert_eq!(d.header, 0x03);
+                assert_eq!(d.id, 42);
+            }
+            _ => panic!("build_undeclare_subscriber must produce CodecZenohUndeclSubscriber"),
+        }
+    }
+
+    /// R121i-c — `build_undeclare_queryable` produces a `Declare`
+    /// envelope carrying an `UndeclQueryable` body in the no-ext
+    /// shape. MID = 0x05 (_Z_UNDECL_QUERYABLE_MID); rest matches
+    /// `_z_undecl_encode` shape from declarations.c:120-122.
+    #[test]
+    fn build_undeclare_queryable_emits_zenoh_pico_compatible_wire_bytes() {
+        let small = build_undeclare_queryable(42);
+        assert_eq!(
+            small.encode(),
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x05, // _Z_UNDECL_QUERYABLE_MID
+                0x2A,
+            ],
+            "UndeclQueryable small-id wire bytes must match zenoh-pico reference",
+        );
+
+        let large = build_undeclare_queryable(200);
+        assert_eq!(
+            large.encode(),
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x05,
+                0xC8,
+                0x01,
+            ],
+            "UndeclQueryable multi-byte VLE id wire bytes must match zenoh-pico reference",
+        );
+
+        match &small.body {
+            DeclareVariant::CodecZenohUndeclQueryable(d) => {
+                assert_eq!(d.header, 0x05);
+                assert_eq!(d.id, 42);
+            }
+            _ => panic!("build_undeclare_queryable must produce CodecZenohUndeclQueryable"),
+        }
+    }
+
+    /// R121i-c — `build_undeclare_token` produces a `Declare`
+    /// envelope carrying an `UndeclToken` body in the no-ext shape.
+    /// MID = 0x07 (_Z_UNDECL_TOKEN_MID); rest matches the
+    /// `_z_undecl_encode` shape from declarations.c:128-130.
+    #[test]
+    fn build_undeclare_token_emits_zenoh_pico_compatible_wire_bytes() {
+        let small = build_undeclare_token(42);
+        assert_eq!(
+            small.encode(),
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x07, // _Z_UNDECL_TOKEN_MID
+                0x2A,
+            ],
+            "UndeclToken small-id wire bytes must match zenoh-pico reference",
+        );
+
+        let large = build_undeclare_token(200);
+        assert_eq!(
+            large.encode(),
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x07,
+                0xC8,
+                0x01,
+            ],
+            "UndeclToken multi-byte VLE id wire bytes must match zenoh-pico reference",
+        );
+
+        match &small.body {
+            DeclareVariant::CodecZenohUndeclToken(d) => {
+                assert_eq!(d.header, 0x07);
+                assert_eq!(d.id, 42);
+            }
+            _ => panic!("build_undeclare_token must produce CodecZenohUndeclToken"),
+        }
+    }
+
+    /// R121i-c — `build_declare_final` produces a `Declare` envelope
+    /// carrying a single-byte `DeclFinal` marker. Reference: zenoh-
+    /// pico `_z_decl_final_encode` at declarations.c:131-135 —
+    /// `[header(_Z_DECL_FINAL_MID=0x1A)]`, no body, no id, no ext.
+    /// The full wire is exactly 2 bytes (`N_MID_DECLARE` outer +
+    /// `DeclFinal.header` inner); the byte-compare locks both.
+    #[test]
+    fn build_declare_final_emits_two_byte_marker() {
+        let declare = build_declare_final();
+        let wire = declare.encode();
+        assert_eq!(
+            wire,
+            vec![
+                wire_const::N_MID_DECLARE, // 0x1E outer
+                0x1A,                       // _Z_DECL_FINAL_MID inner
+            ],
+            "DeclFinal wire must equal [N_MID_DECLARE, _Z_DECL_FINAL_MID]",
+        );
+
+        match &declare.body {
+            DeclareVariant::CodecZenohDeclFinal(d) => {
+                assert_eq!(d.header, 0x1A, "DeclFinal.header must equal _Z_DECL_FINAL_MID");
+            }
+            _ => panic!("build_declare_final must produce CodecZenohDeclFinal"),
+        }
     }
 
     /// `SessionLinkActions::next_outbound_frame_sn` starts at
