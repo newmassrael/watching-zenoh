@@ -85,8 +85,9 @@ use wz_codecs::oam::Oam;
 use wz_codecs::open_body::OpenBody;
 use wz_codecs::push::{Push, PushVariant};
 use wz_codecs::query::Query;
+use wz_codecs::reply::{Reply, ReplyVariant};
 use wz_codecs::request::{Request, RequestVariant};
-use wz_codecs::response::Response;
+use wz_codecs::response::{Response, ResponseVariant};
 use wz_codecs::response_final::ResponseFinal;
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
@@ -2960,6 +2961,173 @@ pub fn build_response_final(request_id: u64) -> ResponseFinal {
         request_id,
         extensions: None,
     }
+}
+
+/// R121j-3 — build a `Response(Reply(MsgPut))` network-message in
+/// the minimal AP MVP shape (no Response-level exts, no Reply-level
+/// consolidation, no Reply-level exts, no MsgPut timestamp /
+/// encoding / exts). The wire is the queryable's data response to
+/// an earlier `Request(Query)` keyed by `request_id`.
+///
+/// Mirrors the zenoh-pico encoder chain
+/// `_z_response_encode -> _z_reply_encode -> _z_push_body_encode ->
+/// _z_msg_put_encode`
+/// (vendor/zenoh-pico/src/protocol/codec/network.c:241-304 +
+/// vendor/zenoh-pico/src/protocol/codec/message.c:507-543 +
+/// the put-encode at message.c:259-310).
+///
+/// Wire shape (literal-keyexpr case — `id=0 + suffix`):
+///
+/// ```text
+///   [Response.header = _Z_MID_N_RESPONSE(0x1B)
+///                       | _Z_FLAG_N_RESPONSE_N(0x20)         // suffix present
+///                       | _Z_FLAG_N_RESPONSE_M(0x40)         // wireexpr Local arm (codegen-derived)
+///                       | Z(0x00)]                           // no Response exts
+///   VLE(request_id)
+///   wireexpr Local: VLE(id=0), VLE(suffix.len()), suffix bytes
+///   [Reply.header = _Z_MID_Z_REPLY(0x04)]                    // no C, no Z
+///   [MsgPut.header = _Z_MID_Z_PUT(0x01)]                     // no T, no E, no Z
+///   VLE(payload.len())
+///   payload bytes
+/// ```
+///
+/// `keyexpr_suffix` is required (no `Option<&str>`): the literal
+/// shape's whole point is to carry the keyexpr inline, so an
+/// empty / None literal would be a bug. For aliased-keyexpr replies
+/// (publisher sent the matching Query through a mapped id), use
+/// [`build_response_reply_aliased`].
+///
+/// Future R121j-3 sub-helpers (audit-traced carry):
+/// `_with_consolidation(mode)` sets Reply.header.C(0x20) + 1-byte
+/// consolidation; `_with_responder(zid, eid)` sets Response.header.Z
+/// and emits the Responder ext (ext_id=0x03 ZBUF, zid+eid encoding
+/// per network.c:281-291); `_with_reply_del(...)` swaps the MsgPut
+/// arm for a MsgDel arm (delete instead of put as the reply payload).
+pub fn build_response_reply_literal(
+    request_id: u64,
+    keyexpr_suffix: &str,
+    payload: &[u8],
+) -> Response {
+    assert!(
+        !keyexpr_suffix.is_empty(),
+        "build_response_reply_literal requires a non-empty keyexpr suffix; \
+         the literal shape's purpose is to carry the keyexpr inline",
+    );
+    let suffix_string = keyexpr_suffix.to_string();
+    let suffix_len = Some(suffix_string.len() as u64);
+    Response {
+        // MID 0x1B | N 0x20 (suffix present) | M codegen-derived
+        // (Local arm sets 0x40). Z stays clear (no Response exts).
+        header: 0x1B | 0x20,
+        request_id,
+        keyexpr: Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len,
+                suffix: Some(suffix_string),
+            }),
+        },
+        extensions: None,
+        body: ResponseVariant::CodecZenohReply(Reply {
+            // MID 0x04 only; no C (consolidation), no Z (Reply exts).
+            header: 0x04,
+            consolidation: None,
+            extensions: None,
+            body: ReplyVariant::CodecZenohMsgPut(MsgPut {
+                // MID 0x01 only; no T/E/Z gates.
+                header: 0x01,
+                timestamp: None,
+                encoding: None,
+                extensions: None,
+                payload_len: payload.len() as u64,
+                payload: payload.to_vec(),
+            }),
+        }),
+    }
+}
+
+/// R121j-3 — build a `Response(Reply(MsgPut))` for a peer-declared
+/// keyexpr mapping (aliased path). Mirror of
+/// [`build_response_reply_literal`] for the case where the original
+/// `Request(Query)` keyexpr resolved via a `Declare(DeclKexpr)`
+/// previously sent in this session. The queryable replies referencing
+/// the same mapping_id so the requester's wireexpr table resolves
+/// the response to the original query keyexpr.
+///
+/// Convention matches the DECLARE / Request builders:
+///   - `(N, None)`: pure alias — Reply targets peer's mapping for `N`.
+///   - `(N, Some(s))`: compound — alias `N`'s prefix + suffix `s`.
+///
+/// Panics on `mapping_id == 0` — id=0 is the literal-keyexpr sentinel;
+/// for literal replies use [`build_response_reply_literal`].
+pub fn build_response_reply_aliased(
+    request_id: u64,
+    mapping_id: u64,
+    suffix: Option<&str>,
+    payload: &[u8],
+) -> Response {
+    assert!(
+        mapping_id != 0,
+        "build_response_reply_aliased requires a non-zero mapping id; \
+         use build_response_reply_literal for the literal keyexpr case",
+    );
+    let suffix_string = suffix.map(str::to_string);
+    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
+    Response {
+        header: 0x1B | n_flag,
+        request_id,
+        keyexpr: Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: mapping_id,
+                suffix_len,
+                suffix: suffix_string,
+            }),
+        },
+        extensions: None,
+        body: ResponseVariant::CodecZenohReply(Reply {
+            header: 0x04,
+            consolidation: None,
+            extensions: None,
+            body: ReplyVariant::CodecZenohMsgPut(MsgPut {
+                header: 0x01,
+                timestamp: None,
+                encoding: None,
+                extensions: None,
+                payload_len: payload.len() as u64,
+                payload: payload.to_vec(),
+            }),
+        }),
+    }
+}
+
+/// R121j-3 — build the wire bytes for a `Frame` transport-message
+/// carrying a single `Response` network-message in its payload.
+/// Mirror of the other `encode_frame_with_*` helpers (PUSH /
+/// DECLARE / REQUEST / RESPONSE_FINAL).
+///
+/// Reply data delivery is on the reliable channel by default — a
+/// dropped Reply leaves the requester's `z_get` waiting for a
+/// reply that never arrives, then for the matching
+/// `ResponseFinal` that the queryable never re-emits (because from
+/// its perspective the reply was sent). The default `reliable=true`
+/// is the production-safe choice; callers passing `false` accept
+/// the consequence.
+pub fn encode_frame_with_response(sn: u64, response: Response, reliable: bool) -> Vec<u8> {
+    let parent_flags = if reliable {
+        wire_const::FLAG_T_FRAME_R
+    } else {
+        0u8
+    };
+    let frame = Frame {
+        sn,
+        payload: response.encode(),
+    };
+    let body_bytes = frame.encode();
+    let mut wire = Vec::with_capacity(body_bytes.len() + 1);
+    wire.push(parent_flags | wire_const::T_MID_FRAME);
+    wire.extend_from_slice(&body_bytes);
+    wire
 }
 
 /// R121j-2 — build the wire bytes for a `Frame` transport-message
@@ -6170,6 +6338,202 @@ mod tests {
         );
 
         let wire_best_effort = encode_frame_with_response_final(0, build_response_final(42), false);
+        assert_eq!(
+            wire_best_effort[0],
+            wire_const::T_MID_FRAME,
+            "best-effort Frame must omit FLAG_T_FRAME_R",
+        );
+    }
+
+    /// R121j-3 — Wire-byte regression gate for
+    /// `build_response_reply_literal`. The minimal Response(Reply(MsgPut))
+    /// chain wire shape after the inner `_z_msg_put_encode` arm — no
+    /// Response-level exts, no Reply-level consolidation/exts, no
+    /// MsgPut timestamp/encoding/exts. Two vectors lock the alias
+    /// rid + small payload and the multi-byte VLE boundary (rid=200).
+    #[test]
+    fn build_response_reply_literal_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — small request_id (42), literal keyexpr "demo/test",
+        // payload "hello-reply".
+        //   Response.header = MID(0x1B) | N(0x20) | M(0x40 codegen) = 0x7B
+        //   VLE(rid=42) = 0x2A
+        //   wireexpr Local: id=0 → 0x00, suffix_len(9) → 0x09, "demo/test"
+        //   Reply.header = 0x04
+        //   MsgPut.header = 0x01
+        //   MsgPut.payload_len(11) → 0x0B
+        //   payload "hello-reply"
+        let small = build_response_reply_literal(42, "demo/test", b"hello-reply");
+        let small_wire = small.encode();
+        let mut small_expected = vec![
+            0x7B, // Response: MID | N | M
+            0x2A, // VLE(rid=42)
+            0x00, // wireexpr.id VLE(0) literal sentinel
+            0x09, // wireexpr.suffix_len VLE(9)
+        ];
+        small_expected.extend_from_slice(b"demo/test");
+        small_expected.push(0x04); // Reply.header MID only
+        small_expected.push(0x01); // MsgPut.header MID only
+        small_expected.push(0x0B); // payload_len VLE(11)
+        small_expected.extend_from_slice(b"hello-reply");
+        assert_eq!(
+            small_wire, small_expected,
+            "Response(Reply(MsgPut)) literal wire bytes must match \
+             zenoh-pico reference chain (network.c:241-304 + \
+             message.c:507-543 + message.c:259-310)",
+        );
+
+        // Case 2 — multi-byte VLE boundary on rid (200 = 0xC8 0x01).
+        let large = build_response_reply_literal(200, "k", b"v");
+        let large_wire = large.encode();
+        let large_expected = vec![
+            0x7B,
+            0xC8, // VLE(200) low + cont
+            0x01, // VLE(200) high
+            0x00, // wireexpr id=0 literal
+            0x01, // suffix_len(1)
+            b'k',
+            0x04, // Reply.header
+            0x01, // MsgPut.header
+            0x01, // payload_len(1)
+            b'v',
+        ];
+        assert_eq!(
+            large_wire, large_expected,
+            "Response(Reply) multi-byte VLE rid wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        // Inner-arm sanity.
+        match &small.body {
+            ResponseVariant::CodecZenohReply(reply) => {
+                assert_eq!(reply.header, 0x04, "Reply.header MID only");
+                assert!(reply.consolidation.is_none());
+                assert!(reply.extensions.is_none());
+                match &reply.body {
+                    ReplyVariant::CodecZenohMsgPut(put) => {
+                        assert_eq!(put.header, 0x01);
+                        assert_eq!(put.payload_len, 11);
+                        assert_eq!(put.payload.as_slice(), b"hello-reply");
+                    }
+                    _ => panic!("Reply.body must be CodecZenohMsgPut"),
+                }
+            }
+            _ => panic!("Response.body must be CodecZenohReply"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "build_response_reply_literal requires a non-empty keyexpr suffix")]
+    fn build_response_reply_literal_rejects_empty_suffix() {
+        let _ = build_response_reply_literal(42, "", b"v");
+    }
+
+    /// R121j-3 — Wire-byte regression gate for
+    /// `build_response_reply_aliased`. Three vectors lock the
+    /// aliased / composite / aliased-large-VLE shapes.
+    #[test]
+    fn build_response_reply_aliased_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — pure alias (rid=42, mapping_id=7, no suffix,
+        // payload "v"). Wire:
+        //   Response.header = MID(0x1B) | M(0x40, no N) = 0x5B
+        //   VLE(rid=42) = 0x2A
+        //   wireexpr Local: id=7 → 0x07 (no suffix; N flag clear)
+        //   Reply.header = 0x04
+        //   MsgPut.header = 0x01
+        //   payload_len(1) → 0x01
+        //   payload "v"
+        let alias = build_response_reply_aliased(42, 7, None, b"v");
+        let alias_wire = alias.encode();
+        assert_eq!(
+            alias_wire,
+            vec![
+                0x5B, // Response: MID | M (no N)
+                0x2A,
+                0x07, // wireexpr.id VLE(7)
+                0x04, // Reply.header
+                0x01, // MsgPut.header
+                0x01, // payload_len(1)
+                b'v',
+            ],
+            "Response(Reply) aliased no-suffix wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        // Case 2 — composite (rid=42, mapping_id=7, suffix "tail",
+        // payload "data"). Wire:
+        //   Response.header = MID | N | M = 0x7B
+        //   wireexpr Local: id=7 + suffix_len(4) + "tail"
+        let composite = build_response_reply_aliased(42, 7, Some("tail"), b"data");
+        let composite_wire = composite.encode();
+        let mut composite_expected = vec![
+            0x7B,
+            0x2A,
+            0x07, // wireexpr.id
+            0x04, // suffix_len(4)
+        ];
+        composite_expected.extend_from_slice(b"tail");
+        composite_expected.push(0x04); // Reply.header
+        composite_expected.push(0x01); // MsgPut.header
+        composite_expected.push(0x04); // payload_len(4)
+        composite_expected.extend_from_slice(b"data");
+        assert_eq!(
+            composite_wire, composite_expected,
+            "Response(Reply) composite alias wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        // Case 3 — multi-byte VLE alias (mapping_id=200).
+        let large = build_response_reply_aliased(42, 200, None, b"x");
+        let large_wire = large.encode();
+        assert_eq!(
+            large_wire,
+            vec![
+                0x5B, 0x2A,
+                0xC8, 0x01, // wireexpr.id VLE(200)
+                0x04, 0x01, 0x01, b'x',
+            ],
+            "Response(Reply) multi-byte VLE alias wire bytes must match \
+             zenoh-pico reference",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "build_response_reply_aliased requires a non-zero mapping id")]
+    fn build_response_reply_aliased_rejects_zero_mapping_id() {
+        let _ = build_response_reply_aliased(42, 0, Some("any"), b"v");
+    }
+
+    /// R121j-3 — `encode_frame_with_response` produces the same
+    /// `[parent_flags | T_MID_FRAME]` + `Frame.encode()` wrapping as
+    /// the other helpers, with `Response.encode()` as the inner
+    /// payload bytes. Reply data delivery defaults to reliable.
+    #[test]
+    fn encode_frame_with_response_wraps_response_in_frame_envelope() {
+        let response = build_response_reply_literal(42, "k", b"v");
+        let response_bytes = response.encode();
+
+        let wire_reliable = encode_frame_with_response(
+            0,
+            build_response_reply_literal(42, "k", b"v"),
+            true,
+        );
+        assert_eq!(
+            wire_reliable[0],
+            wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME,
+            "reliable Frame must set FLAG_T_FRAME_R",
+        );
+        assert_eq!(wire_reliable[1], 0x00, "sn=0 VLE = 0x00");
+        assert_eq!(
+            &wire_reliable[2..],
+            response_bytes.as_slice(),
+            "Frame body tail must be Response.encode() bytes verbatim",
+        );
+
+        let wire_best_effort = encode_frame_with_response(
+            0,
+            build_response_reply_literal(42, "k", b"v"),
+            false,
+        );
         assert_eq!(
             wire_best_effort[0],
             wire_const::T_MID_FRAME,
