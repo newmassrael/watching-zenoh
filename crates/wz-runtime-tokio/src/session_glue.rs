@@ -83,7 +83,8 @@ use wz_codecs::msg_put::MsgPut;
 use wz_codecs::oam::Oam;
 use wz_codecs::open_body::OpenBody;
 use wz_codecs::push::{Push, PushVariant};
-use wz_codecs::request::Request;
+use wz_codecs::query::Query;
+use wz_codecs::request::{Request, RequestVariant};
 use wz_codecs::response::Response;
 use wz_codecs::response_final::ResponseFinal;
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
@@ -1191,6 +1192,38 @@ impl SessionLinkActions {
         let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
         self.driver.send_blocking(&wire, Reliability::Reliable);
     }
+
+    /// R121j-1 — encode + dispatch a `Request(Query)` on the outbound
+    /// link, sending a query to the peer for the keyexpr resolved by
+    /// `(keyexpr_mapping_id, keyexpr_suffix)`. The peer's inbound
+    /// dispatch (zenoh-pico's `_z_session_recv_request` ->
+    /// `_z_trigger_queryables`) routes the query into every queryable
+    /// callback registered for a matching keyexpr; each callback's
+    /// reply is delivered back to this peer as a `Response(Reply)`
+    /// carrying the same `rid`. Termination is signaled by the peer
+    /// emitting `ResponseFinal` with this `rid`.
+    ///
+    /// AP MVP minimal shape: no consolidation, no parameters, no
+    /// Query-level extensions, no Request-level extensions. The
+    /// builder doc describes the layered helpers that lift those
+    /// constraints when needed.
+    ///
+    /// Reliable channel — the peer must observe the Query and any
+    /// out-of-order Reply / ResponseFinal must not race ahead of the
+    /// Request itself. SN-window ordering on the reliable channel
+    /// gives this guarantee; an unreliable Query could silently drop
+    /// and leave the local z_get future hung indefinitely.
+    pub fn send_request_query(
+        &self,
+        rid: u64,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) {
+        let request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix);
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_request(sn, request, /*reliable=*/ true);
+        self.driver.send_blocking(&wire, Reliability::Reliable);
+    }
 }
 
 impl ActionTrace {
@@ -2153,6 +2186,124 @@ pub fn build_declare_final() -> Declare {
             header: 0x1A, // _Z_DECL_FINAL_MID
         }),
     }
+}
+
+/// R121j-1 — build a `Request` network-message that carries a
+/// `Query` body, addressed to the keyexpr resolved by
+/// `(keyexpr_mapping_id, keyexpr_suffix)`. Mirrors zenoh-pico
+/// `_z_request_encode` at
+/// `vendor/zenoh-pico/src/protocol/codec/network.c:114-169` with the
+/// `_Z_REQUEST_QUERY` tag-arm + `_z_query_encode` body at
+/// `vendor/zenoh-pico/src/protocol/codec/message.c:394-451`.
+///
+/// AP MVP scope: emits the minimal Query shape with no consolidation
+/// (`Z_CONSOLIDATION_MODE_DEFAULT`), no parameters, no Query-level
+/// extensions (body / info / attachment), and no Request-level
+/// extensions (qos / tstamp / target / budget / timeout_ms). Under
+/// these defaults zenoh-pico's `_z_msg_query_required_extensions`
+/// returns zero, `_z_n_msg_request_needed_exts` returns zero, and
+/// the outer Z flag stays clear — the wire reduces to:
+///
+/// ```text
+///   [Request.header = _Z_MID_N_REQUEST (0x1C)
+///                      | (suffix.is_some() ? 0x20 : 0)   // N
+///                      | codegen-derived 0x40             // M from Local
+///                      | (Z extensions = 0 here)]
+///   VLE(rid)
+///   wireexpr.encode  (id VLE + optional suffix_len VLE + suffix bytes)
+///   [Query.header = _Z_MID_Z_QUERY (0x03)]   // no C / P / Z flags
+/// ```
+///
+/// Future rounds add layered helpers:
+///   - `build_request_query_with_consolidation(consolidation_mode)`
+///     sets bit 5 (`_Z_FLAG_Z_Q_C`) + emits the 1-byte consolidation
+///     value (message.c:411-413).
+///   - `build_request_query_with_parameters(params)` sets bit 6
+///     (`_Z_FLAG_Z_Q_P`) + emits the params slice (message.c:426-428).
+///   - `build_request_query_with_exts(...)` adds the body / info /
+///     attachment Query-level extensions or the qos / tstamp /
+///     target / budget / timeout_ms Request-level extensions.
+///
+/// Each layered helper extends this byte-compare contract with its
+/// own vectors; the minimal shape pinned here is the foundation.
+///
+/// `rid` is the request id the peer echoes back in its Response /
+/// ResponseFinal; reuse by the caller is allowed but the AP MVP path
+/// allocates a fresh `rid` per `z_get` to keep the in-flight Query
+/// table simple.
+///
+/// `keyexpr_mapping_id` / `keyexpr_suffix` convention matches the
+/// DECLARE builders:
+///   - `(0, Some(s))`: literal — the queried keyexpr is `s` itself
+///     (id=0 is the wz literal-sentinel).
+///   - `(N, None)`: alias — the queried keyexpr is the peer's
+///     mapping for `N`.
+///   - `(N, Some(s))`: compound — alias `N`'s prefix + `s`.
+pub fn build_request_query(
+    rid: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+) -> Request {
+    let suffix_string = keyexpr_suffix.map(str::to_string);
+    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let n_flag = if keyexpr_suffix.is_some() {
+        0x20u8
+    } else {
+        0x00u8
+    };
+    Request {
+        // MID 0x1C (_Z_MID_N_REQUEST) + N gate; M is codegen-derived
+        // from the wireexpr Local arm. Z (outer ext) stays clear:
+        // this minimal builder emits no Request-level extensions.
+        header: 0x1C | n_flag,
+        rid,
+        keyexpr: Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: keyexpr_mapping_id,
+                suffix_len,
+                suffix: suffix_string,
+            }),
+        },
+        extensions: None,
+        body: RequestVariant::CodecZenohQuery(Query {
+            // MID 0x03 (_Z_MID_Z_QUERY) only. No C (consolidation),
+            // no P (params), no Z (Query-level exts). The byte-
+            // compare test below pins this minimal shape.
+            header: 0x03,
+            consolidation: None,
+            parameters_len: None,
+            parameters: None,
+            extensions: None,
+        }),
+    }
+}
+
+/// R121j-1 — build the wire bytes for a `Frame` transport-message
+/// carrying a single `Request` network-message in its payload. Mirror
+/// of [`encode_frame_with_push`] / [`encode_frame_with_declare`] for
+/// the REQUEST outbound path.
+///
+/// Like the DECLARE outbound path, Request(Query) goes on the
+/// reliable channel by default — the peer's responder side needs to
+/// see the Query to dispatch into its queryable callback; an
+/// unreliable Query could silently drop and leave the local
+/// `z_get` future hung without a Response or ResponseFinal. Callers
+/// that pass `reliable=false` accept that risk explicitly.
+pub fn encode_frame_with_request(sn: u64, request: Request, reliable: bool) -> Vec<u8> {
+    let parent_flags = if reliable {
+        wire_const::FLAG_T_FRAME_R
+    } else {
+        0u8
+    };
+    let frame = Frame {
+        sn,
+        payload: request.encode(),
+    };
+    let body_bytes = frame.encode();
+    let mut wire = Vec::with_capacity(body_bytes.len() + 1);
+    wire.push(parent_flags | wire_const::T_MID_FRAME);
+    wire.extend_from_slice(&body_bytes);
+    wire
 }
 
 /// R121g — build the wire bytes for a `Frame` transport-message
@@ -4389,6 +4540,187 @@ mod tests {
             }
             _ => panic!("build_declare_final must produce CodecZenohDeclFinal"),
         }
+    }
+
+    /// R121j-1 — `build_request_query` produces a Request envelope
+    /// carrying a `Query` inner body in the minimal AP MVP shape (no
+    /// consolidation, no params, no exts at either level). Three
+    /// vectors lock the alias / composite / literal trio mirroring
+    /// the DECLARE builders, but using `_Z_MID_N_REQUEST (0x1C)` for
+    /// the outer header and `_Z_MID_Z_QUERY (0x03)` for the inner
+    /// Query header.
+    #[test]
+    fn build_request_query_wraps_query_in_request_envelope() {
+        // Case 1 — pure alias.
+        let alias = build_request_query(42, 7, None);
+        assert_eq!(
+            alias.header,
+            0x1C,
+            "Request header carries MID 0x1C only (no N since no suffix); \
+             M is codegen-derived from the Local wireexpr arm at encode",
+        );
+        assert_eq!(alias.rid, 42, "Request.rid must equal the requested rid");
+        match &alias.keyexpr.body {
+            WireexprVariant::WireexprLocal(w) => {
+                assert_eq!(w.id, 7);
+                assert!(w.suffix.is_none());
+            }
+            _ => panic!("Request.keyexpr must use WireexprLocal arm"),
+        }
+        assert!(alias.extensions.is_none(), "minimal shape: no Request-level exts");
+        match &alias.body {
+            RequestVariant::CodecZenohQuery(q) => {
+                assert_eq!(
+                    q.header, 0x03,
+                    "Query.header is MID 0x03 only — no C / P / Z flags in minimal shape"
+                );
+                assert!(q.consolidation.is_none());
+                assert!(q.parameters_len.is_none());
+                assert!(q.parameters.is_none());
+                assert!(q.extensions.is_none());
+            }
+            _ => panic!("Request.body must use CodecZenohQuery arm"),
+        }
+
+        // Case 2 — composite (id=7 + tail "tail").
+        let composite = build_request_query(42, 7, Some("tail"));
+        assert_eq!(
+            composite.header, 0x3C,
+            "Request header carries MID 0x1C | N(0x20) = 0x3C when suffix present",
+        );
+        match &composite.keyexpr.body {
+            WireexprVariant::WireexprLocal(w) => {
+                assert_eq!(w.id, 7);
+                assert_eq!(w.suffix.as_deref(), Some("tail"));
+                assert_eq!(w.suffix_len, Some(4));
+            }
+            _ => panic!(),
+        }
+
+        // Case 3 — literal (id=0 sentinel + suffix carries the keyexpr).
+        let literal = build_request_query(42, 0, Some("demo/test"));
+        assert_eq!(literal.header, 0x3C, "literal case still sets N (suffix present)");
+        match &literal.keyexpr.body {
+            WireexprVariant::WireexprLocal(w) => {
+                assert_eq!(w.id, 0, "literal sentinel id=0");
+                assert_eq!(w.suffix.as_deref(), Some("demo/test"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    /// R121j-1 — Wire-byte regression gate: the bytes emitted by
+    /// `build_request_query(...).encode()` must equal zenoh-pico's
+    /// `_z_request_encode` + `_z_query_encode` output for the
+    /// minimal-shape inputs (no consolidation, no params, no exts at
+    /// either level). Three vectors lock the alias / composite /
+    /// literal trio:
+    ///
+    /// References:
+    ///   - `_z_request_encode` (vendor/zenoh-pico/src/protocol/codec/network.c:114-169)
+    ///     — emits `[header | N | M | Z=0]`, `VLE(rid)`, `wireexpr.encode`,
+    ///       and switches into `_z_query_encode` for `_Z_REQUEST_QUERY`.
+    ///   - `_z_query_encode` (vendor/zenoh-pico/src/protocol/codec/message.c:394-451)
+    ///     — emits `[header | C | P | Z]` then optional consolidation /
+    ///       params / exts. In the minimal shape only the header byte
+    ///       (0x03) is emitted.
+    #[test]
+    fn build_request_query_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — pure alias (rid=42, mapping_id=7, no suffix).
+        // Wire shape:
+        //   Request.header = MID(0x1C) | M(0x40) = 0x5C
+        //   VLE(rid=42)     = 0x2A
+        //   wireexpr.id VLE(7) = 0x07
+        //   Query.header   = MID(0x03)
+        let alias = build_request_query(42, 7, None);
+        let alias_wire = alias.encode();
+        let alias_expected = vec![
+            0x5C, // Request: MID 0x1C | M 0x40
+            0x2A, // VLE(rid=42)
+            0x07, // wireexpr.id VLE(7)
+            0x03, // Query: MID _Z_MID_Z_QUERY only
+        ];
+        assert_eq!(
+            alias_wire, alias_expected,
+            "Request(Query) alias-case wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 2 — composite (rid=42, id=7 + suffix "abc"):
+        //   Request.header = MID | N | M = 0x7C
+        //   VLE(42) = 0x2A
+        //   wireexpr.id VLE(7) = 0x07
+        //   wireexpr.suffix_len VLE(3) = 0x03
+        //   wireexpr.suffix bytes = "abc"
+        //   Query.header = 0x03
+        let composite = build_request_query(42, 7, Some("abc"));
+        let composite_wire = composite.encode();
+        let mut composite_expected = vec![
+            0x7C, // MID | N | M
+            0x2A,
+            0x07,
+            0x03,
+        ];
+        composite_expected.extend_from_slice(b"abc");
+        composite_expected.push(0x03); // Query MID
+        assert_eq!(
+            composite_wire, composite_expected,
+            "Request(Query) composite-case wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 3 — literal (rid=42, id=0 + suffix "demo/test"):
+        //   Request.header = MID | N | M = 0x7C
+        //   VLE(42) = 0x2A
+        //   wireexpr.id VLE(0) = 0x00
+        //   wireexpr.suffix_len VLE(9) = 0x09
+        //   wireexpr.suffix bytes = "demo/test"
+        //   Query.header = 0x03
+        let literal = build_request_query(42, 0, Some("demo/test"));
+        let literal_wire = literal.encode();
+        let mut literal_expected = vec![
+            0x7C,
+            0x2A,
+            0x00,
+            0x09,
+        ];
+        literal_expected.extend_from_slice(b"demo/test");
+        literal_expected.push(0x03); // Query MID
+        assert_eq!(
+            literal_wire, literal_expected,
+            "Request(Query) literal-case wire bytes must match zenoh-pico reference"
+        );
+    }
+
+    /// R121j-1 — `encode_frame_with_request` produces the same
+    /// `[parent_flags | T_MID_FRAME]` + `Frame.encode()` wrapping as
+    /// the existing `encode_frame_with_push` / `encode_frame_with_declare`
+    /// helpers, with `Request.encode()` as the inner payload bytes.
+    /// Reliable / best-effort header-flag behaviour mirrors the other
+    /// two helpers so the SN-window ordering contract stays uniform
+    /// across PUSH / DECLARE / REQUEST outbound paths.
+    #[test]
+    fn encode_frame_with_request_wraps_request_in_frame_envelope() {
+        let request = build_request_query(42, 7, None);
+        let request_bytes = request.encode();
+
+        let wire_reliable = encode_frame_with_request(0, build_request_query(42, 7, None), true);
+        assert_eq!(
+            wire_reliable[0],
+            wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME,
+            "reliable Frame must set FLAG_T_FRAME_R on the parent header",
+        );
+        assert_eq!(wire_reliable[1], 0x00, "sn=0 VLE = single byte 0x00");
+        assert_eq!(
+            &wire_reliable[2..],
+            request_bytes.as_slice(),
+            "Frame body tail must be Request.encode() bytes verbatim",
+        );
+
+        let wire_best_effort = encode_frame_with_request(0, build_request_query(42, 7, None), false);
+        assert_eq!(
+            wire_best_effort[0],
+            wire_const::T_MID_FRAME,
+            "best-effort Frame must omit FLAG_T_FRAME_R",
+        );
     }
 
     /// `SessionLinkActions::next_outbound_frame_sn` starts at
