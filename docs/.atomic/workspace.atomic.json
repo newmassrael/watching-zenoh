@@ -5695,6 +5695,40 @@
         "Query exts (body/info/attachment) require the ExtEntry / Value codec wiring — verify these codec modules are already published by wz-codecs (lib.rs:98-103 lists ext_entry + ext_envelope; check Value too) before R121j-3 enters."
       ]
     },
+    "Round 121j-1a": {
+      "decision_summary": "R121j-1a adds the consolidation layered helper on top of R121j-1's minimal Request(Query) builder, paying down the first quarter of the Q-helpers carry without touching the inbound path.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `pub enum ConsolidationMode { None, Monotonic, Latest }` mirroring zenoh-pico's `z_consolidation_mode_t` (constants.h:185-187) for the three transmitted values. `Z_CONSOLIDATION_MODE_AUTO = -1` is intentionally NOT representable since zenoh-pico's encoder treats AUTO as the `do not transmit` sentinel — callers wanting that case use plain `build_request_query`.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `ConsolidationMode::wire_byte(self) -> u8` const fn returning 0/1/2 per the zenoh-pico enum integer values. Const-fn so the mapping is verifiable at compile time.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `build_request_query_with_consolidation(rid, mapping_id, suffix, consolidation)`. Built on top of `build_request_query` (calls it then mutates the inner `Query` body via the `RequestVariant::CodecZenohQuery` arm match): ORs Q_C(0x20) into `Query.header` and sets `Query.consolidation = Some(consolidation.wire_byte())`. The 1-byte consolidation field then emits at offset 4 of the Request wire shape (after the existing 4-byte minimal-shape prefix). No params, no exts — those are separate layered helpers (R121j-1b/c/d carry).",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added two unit tests. `build_request_query_with_consolidation_emits_zenoh_pico_compatible_wire_bytes` byte-compare-locks the three modes (alias case, mapping_id=7, no suffix): NONE → 0x5C 0x2A 0x07 0x23 0x00; MONOTONIC → ...0x23 0x01; LATEST → ...0x23 0x02. The 0x23 = MID(0x03) | Q_C(0x20) replaces the minimal-shape 0x03. `consolidation_mode_wire_byte_matches_zenoh_pico_enum_values` independently locks the enum-to-byte mapping so a refactor of the const fn without an encoder change still catches the regression."
+      ],
+      "verification_bullets": [
+        "Targeted: `cargo test -p wz-runtime-tokio --lib build_request_query_with_consolidation consolidation_mode` — 2 passed, 0 failed.",
+        "Regression: `cargo test -p wz-runtime-tokio --lib` — 62 passed, 0 failed (up from 60 at R121i-d closure; +2 R121j-1a tests).",
+        "Layer C2 equivalent: `cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings` — clean."
+      ],
+      "carry_forward_bullets": [
+        "R121j-1b/c/d carry intact — layered helpers for parameters (Q_P + slice payload), Query-level exts (Q_Z + ext_entry chain for source_info / value / attachment ext_ids), Request-level exts (outer N_Z + qos / tstamp / target / budget / timeout_ms ext_ids). Each follows the same pattern: extend `build_request_query`'s baseline by setting the relevant flag + populating the codegen-produced Optional field.",
+        "R121h-perf-bump carry intact from R121h-perf-bump-1-study — next round needs explicit user consent before the atomic 2-phase migration begins (12 SCXML + vendor pin bump in one commit, then TcpDriver hot path sink-based migration)."
+      ],
+      "publishable_decision_summary": "R121j-1a adds the consolidation layered helper on top of R121j-1's minimal Request(Query) builder, paying down the first quarter of the Q-helpers carry without touching the inbound path.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `pub enum ConsolidationMode { None, Monotonic, Latest }` mirroring zenoh-pico's `z_consolidation_mode_t` (constants.h:185-187) for the three transmitted values. `Z_CONSOLIDATION_MODE_AUTO = -1` is intentionally NOT representable since zenoh-pico's encoder treats AUTO as the `do not transmit` sentinel — callers wanting that case use plain `build_request_query`.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `ConsolidationMode::wire_byte(self) -> u8` const fn returning 0/1/2 per the zenoh-pico enum integer values. Const-fn so the mapping is verifiable at compile time.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `build_request_query_with_consolidation(rid, mapping_id, suffix, consolidation)`. Built on top of `build_request_query` (calls it then mutates the inner `Query` body via the `RequestVariant::CodecZenohQuery` arm match): ORs Q_C(0x20) into `Query.header` and sets `Query.consolidation = Some(consolidation.wire_byte())`. The 1-byte consolidation field then emits at offset 4 of the Request wire shape (after the existing 4-byte minimal-shape prefix). No params, no exts — those are separate layered helpers (R121j-1b/c/d carry).",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added two unit tests. `build_request_query_with_consolidation_emits_zenoh_pico_compatible_wire_bytes` byte-compare-locks the three modes (alias case, mapping_id=7, no suffix): NONE → 0x5C 0x2A 0x07 0x23 0x00; MONOTONIC → ...0x23 0x01; LATEST → ...0x23 0x02. The 0x23 = MID(0x03) | Q_C(0x20) replaces the minimal-shape 0x03. `consolidation_mode_wire_byte_matches_zenoh_pico_enum_values` independently locks the enum-to-byte mapping so a refactor of the const fn without an encoder change still catches the regression."
+      ],
+      "publishable_verification_bullets": [
+        "Targeted: `cargo test -p wz-runtime-tokio --lib build_request_query_with_consolidation consolidation_mode` — 2 passed, 0 failed.",
+        "Regression: `cargo test -p wz-runtime-tokio --lib` — 62 passed, 0 failed (up from 60 at R121i-d closure; +2 R121j-1a tests).",
+        "Layer C2 equivalent: `cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings` — clean."
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121j-1b/c/d carry intact — layered helpers for parameters (Q_P + slice payload), Query-level exts (Q_Z + ext_entry chain for source_info / value / attachment ext_ids), Request-level exts (outer N_Z + qos / tstamp / target / budget / timeout_ms ext_ids). Each follows the same pattern: extend `build_request_query`'s baseline by setting the relevant flag + populating the codegen-produced Optional field.",
+        "R121h-perf-bump carry intact from R121h-perf-bump-1-study — next round needs explicit user consent before the atomic 2-phase migration begins (12 SCXML + vendor pin bump in one commit, then TcpDriver hot path sink-based migration)."
+      ]
+    },
     "Round 121j-2": {
       "decision_summary": "R121j-2 adds ResponseFinal outbound to close the Query/Reply sequence — build_response_final + encode_frame_with_response_final + SessionLinkActions::send_response_final — with 2-vector wire-byte byte-compare tests against zenoh-pico _z_response_final_encode (network.c:368-376) covering both single-byte and multi-byte VLE rid cases.",
       "changes_bullets": [
