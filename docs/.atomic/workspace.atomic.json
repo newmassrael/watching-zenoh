@@ -5229,6 +5229,60 @@
         "SCE feature proposal (optional): expose codec model's min_frame_bytes (and possibly max_frame_bytes) as a generated associated const on each codec struct, e.g. `pub const MIN_FRAME_BYTES: usize = 2;`. Removes the last hard-coded wire-shape number from runtime consumers like wz-runtime-tokio TcpDriver::poll_event's 2-byte prefix sniff. Per user directive (this session) any SCE non-textbook surface or improvement proposal is reported back rather than worked around in wz; this carry is the report. Not a blocker for R121i/j — just a future polish item if SCE accepts the proposal."
       ]
     },
+    "Round 121h-perf-bump-attempt": {
+      "decision_summary": "R121h-perf-bump-attempt investigated SCE drift +15 commits (vendor pin 54d513af -> SCE main de5d5e9a) and discovered the SCE B1-α series (sink-based encode + encode_to_vec wrapper) already lands the exact zero-alloc fix our R121i-c carry parked as an SCE upstream proposal; deferred the actual vendor bump to a multi-round R121h-perf-bump phase because the Axis-1 inversion that ships in the same drift window strengthens the present-if predicate grammar and 11 wz codec SCXMLs need migration before the bump can land cleanly.",
+      "changes_bullets": [
+        "vendor/sce submodule fetched SCE main; observed +15 commits since wz vendor pin 54d513af: 6 B1-α (sink-based encode chain) + 8 Axis-1 / Axis-2 / Axis-3 / Axis-5 inversion + refactor + fmt commits. The B1-α series alone is exactly the perf-debt repayment proposed in R121i-c carry; no SCE upstream PR needed.",
+        "Read sce-forge-runtime/rust/src/codec.rs:180-330 in the bumped tree. SCE B1-α API surface confirmed: SceSink trait (object-safe, write_bytes / position / per-width helpers as default methods); SliceSink<'a> over &mut [u8] (raises BufferOverflow at capacity, no_std + no_alloc compatible — the natural MCU sink); VecSink<'a> over &mut Vec<u8> (alloc-feature-gated, infallible grow — the std hot path); encode_to_vec() preserved as a feature-gated wrapper for source-compat. Wire format byte-identical — wz's 14 byte-compare invariants would be preserved across the bump.",
+        "Attempted cargo check at the bumped pin -> wz-codecs build.rs panicked: 'codec init_body: field sn_res has sce:present-if=\"parent.…\" but parent is not declared earlier in this codec — present-if predicates must reference a flags-bearing carrier that the streaming decoder has already consumed; reorder the fields, or correct the predicate'. The Axis-1 inversion chain (36c0750e foundation + 63daab97 codegen wire-up + bf41498c 19-fixture migrate + 19b0fcf0 delete legacy RPF) tightened this grammar.",
+        "Surveyed `grep -l 'parent\\.' sources/codecs/`: 11 wz codec SCXMLs in the migration surface — init_body, open_body, hello, join, decl_kexpr, decl_subscriber, decl_queryable, decl_token, wireexpr, wireexpr_local, wireexpr_nonlocal. All AP MVP-critical codec series. Migration cost is one round per ~3-4 codecs (~3 sub-rounds), exceeds this session's remaining context budget.",
+        "Reverted vendor pin: vendor/sce checkout 54d513af. cargo check -p wz-codecs -p wz-runtime-tokio clean. No wz-side production code touched in this round — investigation-only audit-traced ledger entry."
+      ],
+      "verification_bullets": [
+        "vendor/sce/.git HEAD == 54d513af verified post-revert.",
+        "cargo check -p wz-codecs -p wz-runtime-tokio: builds cleanly at the restored pin; status quo intact.",
+        "git status -s on wz root: no tracked file changed by this round (the submodule pointer never committed forward).",
+        "validate_workspace baseline: docs=12/12, T1 orphan=0 (no new), round-trip mandatory 12/12, GENERATED.md=sync; atomic ledger entries advance 167 -> 168, sections=214 unchanged."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121h-perf-bump-1 (next session): adopt Axis-1 inversion's new present-if grammar. Study SCE's 19-codec fixture-migration commit (bf41498c) as the canonical reference for the new flags-bearing carrier shape, then migrate wz's init_body.scxml as the first wz example (handshake path, byte-compare invariants for InitBody/InitAck must survive end-to-end).",
+        "R121h-perf-bump-2: migrate the other 10 codec SCXMLs (open_body, hello, join, wireexpr trio, decl_* quadruple). Pin each migration to its existing byte-compare test. Two-to-three round bundle depending on grammar pattern uniformity.",
+        "R121h-perf-bump-3: actual vendor pin bump 54d513af -> de5d5e9a after all 11 SCXMLs migrate cleanly. wz codec consumers (TcpDriver hot path) then migrate from `*.encode()` to sink-based `*.encode<S: SceSink>(&mut sink)` for zero-alloc throughput. Hot path final shape: stack-allocated SliceSink over fixed-size scratch buffer for fits-in-u16 frames; VecSink fallback for variable-size paths.",
+        "SCE upstream PR DEFERRED / RETRACTED: B1-α series already landed cb1b40b7..de5d5e9a. The R121i-c carry's 'SCE upstream encode_into(&mut Vec<u8>) feature proposal' is obsolete — actual SCE implementation chose the strictly more textbook generic `<S: SceSink>` trait dispatch (covers MCU + std in one API).",
+        "R121i-d (DECLARE Nonlocal arm extension) still pending; orthogonal to the vendor-bump axis. Can interleave with R121h-perf-bump-1/-2/-3 phases (does not touch codec SCXML grammar).",
+        "Selection-bias warning: 11 codec SCXMLs in the migration surface might shrink — some `parent.…` references may already conform to the new grammar (the init_body failure was the first the build hit). R121h-perf-bump-1's first task is a per-codec grammar-compliance audit before bulk migration."
+      ],
+      "publishable_decision_summary": "R121h-perf-bump-attempt investigated SCE drift +15 commits (vendor pin 54d513af -> SCE main de5d5e9a) and discovered the SCE B1-α series (sink-based encode + encode_to_vec wrapper) already lands the exact zero-alloc fix our R121i-c carry parked as an SCE upstream proposal; deferred the actual vendor bump to a multi-round R121h-perf-bump phase because the Axis-1 inversion that ships in the same drift window strengthens the present-if predicate grammar and 11 wz codec SCXMLs need migration before the bump can land cleanly.",
+      "publishable_changes_bullets": [
+        "vendor/sce submodule fetched SCE main; observed +15 commits since wz vendor pin 54d513af: 6 B1-α (sink-based encode chain) + 8 Axis-1 / Axis-2 / Axis-3 / Axis-5 inversion + refactor + fmt commits. The B1-α series alone is exactly the perf-debt repayment proposed in R121i-c carry; no SCE upstream PR needed.",
+        "Read sce-forge-runtime/rust/src/codec.rs:180-330 in the bumped tree. SCE B1-α API surface confirmed: SceSink trait (object-safe, write_bytes / position / per-width helpers as default methods); SliceSink<'a> over &mut [u8] (raises BufferOverflow at capacity, no_std + no_alloc compatible — the natural MCU sink); VecSink<'a> over &mut Vec<u8> (alloc-feature-gated, infallible grow — the std hot path); encode_to_vec() preserved as a feature-gated wrapper for source-compat. Wire format byte-identical — wz's 14 byte-compare invariants would be preserved across the bump.",
+        "Attempted cargo check at the bumped pin -> wz-codecs build.rs panicked: 'codec init_body: field sn_res has sce:present-if=\"parent.…\" but parent is not declared earlier in this codec — present-if predicates must reference a flags-bearing carrier that the streaming decoder has already consumed; reorder the fields, or correct the predicate'. The Axis-1 inversion chain (36c0750e foundation + 63daab97 codegen wire-up + bf41498c 19-fixture migrate + 19b0fcf0 delete legacy RPF) tightened this grammar.",
+        "Surveyed `grep -l 'parent\\.' sources/codecs/`: 11 wz codec SCXMLs in the migration surface — init_body, open_body, hello, join, decl_kexpr, decl_subscriber, decl_queryable, decl_token, wireexpr, wireexpr_local, wireexpr_nonlocal. All AP MVP-critical codec series. Migration cost is one round per ~3-4 codecs (~3 sub-rounds), exceeds this session's remaining context budget.",
+        "Reverted vendor pin: vendor/sce checkout 54d513af. cargo check -p wz-codecs -p wz-runtime-tokio clean. No wz-side production code touched in this round — investigation-only audit-traced ledger entry."
+      ],
+      "publishable_verification_bullets": [
+        "vendor/sce/.git HEAD == 54d513af verified post-revert.",
+        "cargo check -p wz-codecs -p wz-runtime-tokio: builds cleanly at the restored pin; status quo intact.",
+        "git status -s on wz root: no tracked file changed by this round (the submodule pointer never committed forward).",
+        "validate_workspace baseline: docs=12/12, T1 orphan=0 (no new), round-trip mandatory 12/12, GENERATED.md=sync; atomic ledger entries advance 167 -> 168, sections=214 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121h-perf-bump-1 (next session): adopt Axis-1 inversion's new present-if grammar. Study SCE's 19-codec fixture-migration commit (bf41498c) as the canonical reference for the new flags-bearing carrier shape, then migrate wz's init_body.scxml as the first wz example (handshake path, byte-compare invariants for InitBody/InitAck must survive end-to-end).",
+        "R121h-perf-bump-2: migrate the other 10 codec SCXMLs (open_body, hello, join, wireexpr trio, decl_* quadruple). Pin each migration to its existing byte-compare test. Two-to-three round bundle depending on grammar pattern uniformity.",
+        "R121h-perf-bump-3: actual vendor pin bump 54d513af -> de5d5e9a after all 11 SCXMLs migrate cleanly. wz codec consumers (TcpDriver hot path) then migrate from `*.encode()` to sink-based `*.encode<S: SceSink>(&mut sink)` for zero-alloc throughput. Hot path final shape: stack-allocated SliceSink over fixed-size scratch buffer for fits-in-u16 frames; VecSink fallback for variable-size paths.",
+        "SCE upstream PR DEFERRED / RETRACTED: B1-α series already landed cb1b40b7..de5d5e9a. The R121i-c carry's 'SCE upstream encode_into(&mut Vec<u8>) feature proposal' is obsolete — actual SCE implementation chose the strictly more textbook generic `<S: SceSink>` trait dispatch (covers MCU + std in one API).",
+        "R121i-d (DECLARE Nonlocal arm extension) still pending; orthogonal to the vendor-bump axis. Can interleave with R121h-perf-bump-1/-2/-3 phases (does not touch codec SCXML grammar).",
+        "Selection-bias warning: 11 codec SCXMLs in the migration surface might shrink — some `parent.…` references may already conform to the new grammar (the init_body failure was the first the build hit). R121h-perf-bump-1's first task is a per-codec grammar-compliance audit before bulk migration."
+      ]
+    },
     "Round 121h-pre": {
       "decision_summary": "R121h-pre bumps the SCE vendor pin from 7bada841 to e10619d3 to land the B5-ν variant-dispatch ownership invert (leaf-owned `tag=\"parent.X\"` → parent-owned `<sce:variant-dispatch flag=\"X.Y\"/>` at `<sce:import>`), updates wireexpr.scxml + 8 importer codecs accordingly, and retires the R121g `WireexprNonlocal` derive-suppression workaround in `build_declare_kexpr`.",
       "changes_bullets": [
