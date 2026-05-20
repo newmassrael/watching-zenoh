@@ -2489,6 +2489,90 @@ pub fn build_request_query(
     }
 }
 
+/// R121j-1a — explicit consolidation mode for the Query body. Mirrors
+/// zenoh-pico's `z_consolidation_mode_t` enum
+/// (vendor/zenoh-pico/include/zenoh-pico/api/constants.h:184-188) for
+/// the three emitted modes; `AUTO` / `DEFAULT` (the encoder's "do not
+/// transmit" sentinel `Z_CONSOLIDATION_MODE_DEFAULT =
+/// Z_CONSOLIDATION_MODE_AUTO = -1`) is intentionally NOT representable
+/// here — callers wanting that case call [`build_request_query`]
+/// directly so the Q_C flag stays clear and the wire-byte count is
+/// the minimal-shape baseline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConsolidationMode {
+    /// `Z_CONSOLIDATION_MODE_NONE = 0` — no consolidation; the
+    /// peer forwards every reply in arrival order.
+    None,
+    /// `Z_CONSOLIDATION_MODE_MONOTONIC = 1` — the peer guarantees
+    /// each reply for a given keyexpr is monotonic in some local
+    /// ordering (typically timestamp).
+    Monotonic,
+    /// `Z_CONSOLIDATION_MODE_LATEST = 2` — the peer keeps only
+    /// the latest reply per keyexpr; duplicates earlier in the
+    /// stream are dropped.
+    Latest,
+}
+
+impl ConsolidationMode {
+    /// Wire byte value as written by zenoh-pico's `_z_uint8_encode`
+    /// invocation in `_z_query_encode` (message.c:412). The mapping
+    /// follows the enum literal values verbatim.
+    pub const fn wire_byte(self) -> u8 {
+        match self {
+            Self::None => 0u8,
+            Self::Monotonic => 1u8,
+            Self::Latest => 2u8,
+        }
+    }
+}
+
+/// R121j-1a — build a `Request(Query)` with an explicit
+/// consolidation mode (one of the three "transmitted" zenoh-pico
+/// modes). Wire shape extends [`build_request_query`]'s minimal
+/// baseline by one byte:
+///
+/// ```text
+///   [Request.header | M_derived]      // same as build_request_query
+///   VLE(rid)
+///   wireexpr.encode
+///   [Query.header = _Z_MID_Z_QUERY (0x03) | _Z_FLAG_Z_Q_C (0x20)]
+///   uint8(consolidation.wire_byte())   // <-- the layered addition
+/// ```
+///
+/// The Q_C flag at bit 5 (`_Z_FLAG_Z_Q_C`) is set unconditionally
+/// here — by construction the caller chose a non-AUTO mode, so
+/// zenoh-pico's `has_consolidation` predicate
+/// (`msg->_consolidation != Z_CONSOLIDATION_MODE_DEFAULT`,
+/// message.c:402) is true and the encoder emits the flag + the byte.
+///
+/// `keyexpr_mapping_id` / `keyexpr_suffix` follow the same convention
+/// as [`build_request_query`] (literal id=0 / alias / compound). No
+/// params, no exts — those are separate layered helpers.
+pub fn build_request_query_with_consolidation(
+    rid: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+    consolidation: ConsolidationMode,
+) -> Request {
+    let mut request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix);
+    if let RequestVariant::CodecZenohQuery(ref mut query) = request.body {
+        // Set the Q_C flag (0x20 = `_Z_FLAG_Z_Q_C` per
+        // vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/message.h
+        // line for `_Z_FLAG_Z_Q_C`). The wz codec gates the
+        // consolidation field on `header.C` (query.scxml line for
+        // `sce:present-if="header.C"`), so setting the flag here is
+        // what wires the field into the wire bytes.
+        query.header |= 0x20;
+        query.consolidation = Some(consolidation.wire_byte());
+    } else {
+        unreachable!(
+            "build_request_query must produce a CodecZenohQuery body — \
+             the layered helper relies on this invariant"
+        );
+    }
+    request
+}
+
 /// R121j-2 — build a `ResponseFinal` network-message that terminates
 /// the multi-Reply sequence for `request_id`. Mirrors zenoh-pico
 /// `_z_response_final_encode` at
@@ -5205,6 +5289,84 @@ mod tests {
             literal_wire, literal_expected,
             "Request(Query) literal-case wire bytes must match zenoh-pico reference"
         );
+    }
+
+    /// R121j-1a — Wire-byte regression gate for
+    /// `build_request_query_with_consolidation`. The layered helper
+    /// flips Q_C(0x20) on the Query header and appends a 1-byte
+    /// consolidation value after the header byte. Three vectors lock
+    /// the three transmitted modes (NONE / MONOTONIC / LATEST); the
+    /// AUTO/DEFAULT case stays the responsibility of plain
+    /// [`build_request_query`] (no Q_C, no extra byte).
+    #[test]
+    fn build_request_query_with_consolidation_emits_zenoh_pico_compatible_wire_bytes() {
+        // Baseline shape derived from build_request_query alias case
+        // (rid=42, mapping_id=7, no suffix): Request prefix bytes are
+        // [0x5C, 0x2A, 0x07] (MID|M, VLE(42), VLE(7)). The Query
+        // header changes from 0x03 to 0x23 (Q_C set) and the
+        // consolidation byte follows.
+        let cases: [(ConsolidationMode, u8); 3] = [
+            (ConsolidationMode::None, 0x00),
+            (ConsolidationMode::Monotonic, 0x01),
+            (ConsolidationMode::Latest, 0x02),
+        ];
+        for (mode, expected_byte) in cases {
+            let request = build_request_query_with_consolidation(42, 7, None, mode);
+            let wire = request.encode();
+            let expected = vec![
+                0x5C,          // Request: MID 0x1C | M 0x40
+                0x2A,          // VLE(rid=42)
+                0x07,          // wireexpr.id VLE(7)
+                0x23,          // Query: MID 0x03 | Q_C 0x20
+                expected_byte, // consolidation byte
+            ];
+            assert_eq!(
+                wire, expected,
+                "Request(Query+consolidation) wire bytes for mode {mode:?} \
+                 must match zenoh-pico reference (msg.c:402-413)",
+            );
+        }
+
+        // Inner-arm sanity: Query.header carries Q_C set + consolidation
+        // is Some(wire_byte) — matches the Optional-field shape that
+        // the codegen produces from query.scxml's `sce:present-if`.
+        let r = build_request_query_with_consolidation(
+            42,
+            7,
+            None,
+            ConsolidationMode::Monotonic,
+        );
+        match &r.body {
+            RequestVariant::CodecZenohQuery(q) => {
+                assert_eq!(
+                    q.header, 0x23,
+                    "Query.header must carry MID(0x03) | Q_C(0x20)"
+                );
+                assert_eq!(q.consolidation, Some(0x01));
+                assert!(
+                    q.parameters_len.is_none()
+                        && q.parameters.is_none()
+                        && q.extensions.is_none(),
+                    "consolidation-only layered helper must not set \
+                     params or exts (those are separate helpers)",
+                );
+            }
+            _ => panic!("expected CodecZenohQuery"),
+        }
+    }
+
+    /// R121j-1a — wire byte mapping invariant for `ConsolidationMode`.
+    /// The mapping mirrors zenoh-pico's `z_consolidation_mode_t` enum
+    /// integer values (constants.h:185-187). A regression here would
+    /// silently miswire the consolidation policy at the peer — the
+    /// dedicated test guards the mapping independently of the encode
+    /// path so a refactor that touches the `wire_byte` method without
+    /// touching the encoder gets caught.
+    #[test]
+    fn consolidation_mode_wire_byte_matches_zenoh_pico_enum_values() {
+        assert_eq!(ConsolidationMode::None.wire_byte(), 0u8);
+        assert_eq!(ConsolidationMode::Monotonic.wire_byte(), 1u8);
+        assert_eq!(ConsolidationMode::Latest.wire_byte(), 2u8);
     }
 
     /// R121j-1 — `encode_frame_with_request` produces the same
