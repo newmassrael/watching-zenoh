@@ -1224,6 +1224,26 @@ impl SessionLinkActions {
         let wire = encode_frame_with_request(sn, request, /*reliable=*/ true);
         self.driver.send_blocking(&wire, Reliability::Reliable);
     }
+
+    /// R121j-2 — encode + dispatch a `ResponseFinal(request_id)` on
+    /// the outbound link, signaling that no more `Response(Reply)`
+    /// messages will follow for `request_id`. The peer that issued
+    /// the matching `Request(Query)` resolves its `z_get` future on
+    /// receipt of this message (zenoh-pico's
+    /// `_z_session_recv_response_final` -> `_z_pending_query_pop`).
+    ///
+    /// Always reliable — losing a ResponseFinal would leave the
+    /// requesting peer's z_get future hung waiting for sequence
+    /// termination. This is enforced by hard-coding `reliable=true`
+    /// at the action layer; the helper builder accepts a flag for
+    /// the fuzz / negative-test path but the production action does
+    /// not expose it.
+    pub fn send_response_final(&self, request_id: u64) {
+        let response_final = build_response_final(request_id);
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_response_final(sn, response_final, /*reliable=*/ true);
+        self.driver.send_blocking(&wire, Reliability::Reliable);
+    }
 }
 
 impl ActionTrace {
@@ -2276,6 +2296,73 @@ pub fn build_request_query(
             extensions: None,
         }),
     }
+}
+
+/// R121j-2 — build a `ResponseFinal` network-message that terminates
+/// the multi-Reply sequence for `request_id`. Mirrors zenoh-pico
+/// `_z_response_final_encode` at
+/// `vendor/zenoh-pico/src/protocol/codec/network.c:368-376`:
+///
+/// ```text
+///   [ResponseFinal.header = _Z_MID_N_RESPONSE_FINAL (0x1A)]
+///   VLE(request_id)
+/// ```
+///
+/// AP MVP scope: minimal shape only — no Z(extensions) flag, no
+/// trailing ExtEntry list. Future rounds that need RF-level
+/// extensions (none defined in zenoh-pico today, but the wire format
+/// reserves bit 7 for it via the `_Z_FLAG_Z_Z` carrier) extend this
+/// helper with an exts-present variant.
+///
+/// ResponseFinal is a network-message envelope at the same layer as
+/// `Declare` and `Request` — its `.encode()` output is emitted
+/// directly into the Frame payload without an additional wrapper
+/// header. The 0x1A MID lives in the `_Z_MID_N_*` network-message
+/// namespace (distinct from the inner DECLARE-body 0x1A
+/// `_Z_DECL_FINAL_MID`, which is at a different layer).
+///
+/// `request_id` MUST equal the `rid` from the matching
+/// [`build_request_query`] that opened the Query/Reply session.
+pub fn build_response_final(request_id: u64) -> ResponseFinal {
+    ResponseFinal {
+        // MID 0x1A (_Z_MID_N_RESPONSE_FINAL). Z bit-7 stays clear:
+        // minimal shape has no RF-level extensions.
+        header: 0x1A,
+        request_id,
+        extensions: None,
+    }
+}
+
+/// R121j-2 — build the wire bytes for a `Frame` transport-message
+/// carrying a single `ResponseFinal` network-message in its payload.
+/// Mirror of the other `encode_frame_with_*` helpers (PUSH /
+/// DECLARE / REQUEST).
+///
+/// ResponseFinal is unconditionally reliable in zenoh-pico's model:
+/// dropping a ResponseFinal would leave the requesting peer's
+/// `z_get` future hung waiting for sequence termination. The default
+/// `reliable=true` is the production-safe choice; callers passing
+/// `false` accept the consequence (typically only fuzz / negative
+/// tests).
+pub fn encode_frame_with_response_final(
+    sn: u64,
+    response_final: ResponseFinal,
+    reliable: bool,
+) -> Vec<u8> {
+    let parent_flags = if reliable {
+        wire_const::FLAG_T_FRAME_R
+    } else {
+        0u8
+    };
+    let frame = Frame {
+        sn,
+        payload: response_final.encode(),
+    };
+    let body_bytes = frame.encode();
+    let mut wire = Vec::with_capacity(body_bytes.len() + 1);
+    wire.push(parent_flags | wire_const::T_MID_FRAME);
+    wire.extend_from_slice(&body_bytes);
+    wire
 }
 
 /// R121j-1 — build the wire bytes for a `Frame` transport-message
@@ -4697,6 +4784,83 @@ mod tests {
     /// Reliable / best-effort header-flag behaviour mirrors the other
     /// two helpers so the SN-window ordering contract stays uniform
     /// across PUSH / DECLARE / REQUEST outbound paths.
+    /// R121j-2 — Wire-byte regression gate: `build_response_final`
+    /// emits the zenoh-pico `_z_response_final_encode` shape
+    /// (network.c:368-376). Two vectors lock both the single-byte
+    /// VLE rid and the multi-byte VLE boundary (rid=200) — the same
+    /// boundary R121i-c uses to protect against codegen drift on
+    /// the VLE writer's continuation-bit logic.
+    #[test]
+    fn build_response_final_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — single-byte VLE rid (rid=42).
+        let small = build_response_final(42);
+        let small_wire = small.encode();
+        assert_eq!(
+            small_wire,
+            vec![
+                0x1A, // _Z_MID_N_RESPONSE_FINAL (no Z flag)
+                0x2A, // VLE(rid=42)
+            ],
+            "ResponseFinal small-rid wire bytes must match zenoh-pico reference",
+        );
+
+        // Case 2 — multi-byte VLE rid (rid=200, encodes as 0xC8 0x01).
+        let large = build_response_final(200);
+        let large_wire = large.encode();
+        assert_eq!(
+            large_wire,
+            vec![
+                0x1A,
+                0xC8, // (200 & 0x7F) | 0x80
+                0x01, // 200 >> 7
+            ],
+            "ResponseFinal multi-byte VLE rid wire bytes must match zenoh-pico reference",
+        );
+
+        assert_eq!(
+            small.header, 0x1A,
+            "header carries MID only; Z (bit-7) clear in minimal shape"
+        );
+        assert_eq!(small.request_id, 42);
+        assert!(
+            small.extensions.is_none(),
+            "minimal shape: no RF-level extensions"
+        );
+    }
+
+    /// R121j-2 — `encode_frame_with_response_final` produces the
+    /// same Frame envelope wrap as the other `encode_frame_with_*`
+    /// helpers, with `ResponseFinal.encode()` as the payload bytes.
+    /// Reliable / best-effort header-flag behaviour mirrors the
+    /// other three helpers; the production action layer hard-codes
+    /// reliable=true but the helper accepts the flag for fuzz /
+    /// negative-test paths.
+    #[test]
+    fn encode_frame_with_response_final_wraps_in_frame_envelope() {
+        let rf = build_response_final(42);
+        let rf_bytes = rf.encode();
+
+        let wire_reliable = encode_frame_with_response_final(0, build_response_final(42), true);
+        assert_eq!(
+            wire_reliable[0],
+            wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME,
+            "reliable Frame must set FLAG_T_FRAME_R on the parent header",
+        );
+        assert_eq!(wire_reliable[1], 0x00, "sn=0 VLE = single byte 0x00");
+        assert_eq!(
+            &wire_reliable[2..],
+            rf_bytes.as_slice(),
+            "Frame body tail must be ResponseFinal.encode() bytes verbatim",
+        );
+
+        let wire_best_effort = encode_frame_with_response_final(0, build_response_final(42), false);
+        assert_eq!(
+            wire_best_effort[0],
+            wire_const::T_MID_FRAME,
+            "best-effort Frame must omit FLAG_T_FRAME_R",
+        );
+    }
+
     #[test]
     fn encode_frame_with_request_wraps_request_in_frame_envelope() {
         let request = build_request_query(42, 7, None);
