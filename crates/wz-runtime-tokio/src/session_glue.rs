@@ -2834,6 +2834,99 @@ pub fn build_request_query_with_timeout_ms(
     request
 }
 
+/// R121j-1e — explicit query-target enum for cross-router Query
+/// dispatch. Mirrors zenoh-pico's `z_query_target_t`
+/// (vendor/zenoh-pico/include/zenoh-pico/api/constants.h:262-266) for
+/// the two transmitted values. `BEST_MATCHING (0)` is intentionally
+/// NOT representable here — zenoh-pico's encoder predicate
+/// `ext_target = _ext_target != Z_QUERY_TARGET_BEST_MATCHING`
+/// (vendor/zenoh-pico/src/protocol/definitions/network.c:27) clears
+/// the ext when the value is BEST_MATCHING, so callers wanting that
+/// case use plain [`build_request_query`] and the wire bytes carry
+/// no target ext (peer infers BEST_MATCHING from absence).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueryTarget {
+    /// `Z_QUERY_TARGET_ALL = 1` — every matching queryable
+    /// receives the query and may reply.
+    All,
+    /// `Z_QUERY_TARGET_ALL_COMPLETE = 2` — only the queryables
+    /// declared `complete = true` receive the query; useful when
+    /// the client wants authoritative answers from peers that
+    /// claim full coverage of the keyexpr.
+    AllComplete,
+}
+
+impl QueryTarget {
+    /// Wire byte value as written by zenoh-pico's `_z_zsize_encode`
+    /// invocation in the `_z_request_encode` target-ext branch
+    /// (network.c:142 `_z_zsize_encode(wbf, msg->_ext_target)`).
+    /// `BEST_MATCHING (0)` is not present in this enum, so the
+    /// wire byte is always `1` or `2`.
+    pub const fn wire_byte(self) -> u8 {
+        match self {
+            Self::All => 1u8,
+            Self::AllComplete => 2u8,
+        }
+    }
+}
+
+/// R121j-1e — build a `Request(Query)` carrying a Request-level
+/// query-target extension. Mirrors zenoh-pico's `_z_request_encode`
+/// target-ext path (network.c:138-143): `_z_uint8_encode(extheader =
+/// _Z_MSG_EXT_ENC_ZINT | 0x04 | _Z_MSG_EXT_FLAG_M)` followed by
+/// `_z_zsize_encode(target_enum_value)`.
+///
+/// Wire shape (single Request-level ext, target-only):
+///
+/// ```text
+///   [Request.header | _Z_FLAG_Z_Z(0x80) | M_derived | N if suffix]
+///   VLE(rid)
+///   wireexpr.encode
+///   [ExtEntry.header = _Z_MSG_EXT_ENC_ZINT(0x20)
+///                       | _Z_MSG_EXT_FLAG_M(0x10)
+///                       | ext_id_target(0x04)
+///                       | Z(0x00, last entry)]               = 0x34
+///   VLE(target.wire_byte())                              // ExtZint body
+///   [Query.header = _Z_MID_Z_QUERY(0x03)]
+/// ```
+///
+/// `M = 1` on this ext header — target is **mandatory** for
+/// cross-router dispatch (zenoh-pico network.c:140 ORs in
+/// `_Z_MSG_EXT_FLAG_M` unconditionally for target, distinct from
+/// timeout/qos/budget which leave M clear). A peer that does not
+/// understand the target ext MUST reject the frame via
+/// `_z_msg_ext_unknown_error` (per the ext_entry codec's M-flag
+/// contract); routers without target awareness drop the query.
+///
+/// `ext_id = 0x04` matches `_z_request_decode_extensions` case at
+/// network.c:186-191 (`case 0x04 | _Z_MSG_EXT_ENC_ZINT |
+/// _Z_MSG_EXT_FLAG_M`).
+///
+/// `Z_QUERY_TARGET_BEST_MATCHING` (the default) is not part of
+/// [`QueryTarget`] because zenoh-pico's encoder predicate clears
+/// the ext on that value; the peer infers BEST_MATCHING from
+/// ext-absence. Callers wanting BEST_MATCHING use plain
+/// [`build_request_query`] and let the peer fall back to default.
+pub fn build_request_query_with_target(
+    rid: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+    target: QueryTarget,
+) -> Request {
+    let mut request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix);
+    // Request-level Z flag (0x80) gates the Request.extensions chain.
+    request.header |= 0x80;
+    request.extensions = Some(vec![ExtEntry {
+        // ENC_ZINT(0x20) | M(0x10) | ext_id_target(0x04) = 0x34.
+        // M=1 mandatory; entry-Z=0 (single-ext).
+        header: 0x20 | 0x10 | 0x04,
+        body: ExtEntryVariant::CodecZenohExtZint(ExtZint {
+            value: target.wire_byte() as u64,
+        }),
+    }]);
+    request
+}
+
 /// R121j-2 — build a `ResponseFinal` network-message that terminates
 /// the multi-Reply sequence for `request_id`. Mirrors zenoh-pico
 /// `_z_response_final_encode` at
@@ -5927,6 +6020,77 @@ mod tests {
     )]
     fn build_request_query_with_timeout_ms_rejects_zero() {
         let _ = build_request_query_with_timeout_ms(42, 7, None, 0);
+    }
+
+    /// R121j-1e — Wire-byte regression gate for
+    /// `build_request_query_with_target`. The target ext sets M=1
+    /// (mandatory marker) on the ExtEntry.header, distinct from
+    /// timeout / qos / budget which leave M clear. Two vectors lock
+    /// the two transmitted target values (All=1 / AllComplete=2);
+    /// BEST_MATCHING (0) is not representable in [`QueryTarget`] —
+    /// the encoder predicate clears the ext on default, so absence
+    /// of this helper's wire bytes is the BEST_MATCHING signal.
+    #[test]
+    fn build_request_query_with_target_emits_zenoh_pico_compatible_wire_bytes() {
+        // Alias case rid=42, mapping_id=7, no suffix. For both target
+        // values the wire shape differs only in the ExtZint body
+        // (1 byte) since target ∈ {1, 2} both fit in single-byte VLE.
+        //   Request.header = MID(0x1C) | M(0x40) | N_Z(0x80) = 0xDC
+        //   ExtEntry.header = ENC_ZINT(0x20) | M(0x10) | id_target(0x04) = 0x34
+        let cases: [(QueryTarget, u8); 2] = [
+            (QueryTarget::All, 0x01),
+            (QueryTarget::AllComplete, 0x02),
+        ];
+        for (target, target_byte) in cases {
+            let request = build_request_query_with_target(42, 7, None, target);
+            let wire = request.encode();
+            assert_eq!(
+                wire,
+                vec![
+                    0xDC, // Request: MID | M | N_Z
+                    0x2A, // VLE(rid=42)
+                    0x07, // wireexpr.id VLE(7)
+                    0x34, // ExtEntry: ENC_ZINT | M | id_target
+                    target_byte, // VLE(target_enum_value)
+                    0x03, // Query.header (minimal)
+                ],
+                "Request(target={target:?},Query) wire bytes must match \
+                 zenoh-pico reference (network.c:138-143)",
+            );
+        }
+
+        // Inner-arm sanity check on the All case.
+        let r = build_request_query_with_target(42, 7, None, QueryTarget::All);
+        let req_exts = r
+            .extensions
+            .as_ref()
+            .expect("N_Z set → Request.extensions must be Some");
+        assert_eq!(req_exts.len(), 1);
+        assert_eq!(
+            req_exts[0].header, 0x34,
+            "Request ExtEntry.header = ENC_ZINT(0x20) | M(0x10) | id_target(0x04)"
+        );
+        assert!(
+            (req_exts[0].header & 0x10) != 0,
+            "target ext MUST set the mandatory marker bit (M=1, 0x10) — peers \
+             without target awareness reject the frame on unknown M-bit exts"
+        );
+        match &req_exts[0].body {
+            ExtEntryVariant::CodecZenohExtZint(zi) => {
+                assert_eq!(zi.value, 1);
+            }
+            _ => panic!("target ext body must be CodecZenohExtZint"),
+        }
+    }
+
+    /// R121j-1e — wire byte mapping invariant for `QueryTarget`. The
+    /// mapping mirrors zenoh-pico's `z_query_target_t` enum integer
+    /// values (constants.h:263-264). BEST_MATCHING (0) is absent by
+    /// design (the encoder predicate clears the ext on default).
+    #[test]
+    fn query_target_wire_byte_matches_zenoh_pico_enum_values() {
+        assert_eq!(QueryTarget::All.wire_byte(), 1u8);
+        assert_eq!(QueryTarget::AllComplete.wire_byte(), 2u8);
     }
 
     /// R121j-1 — `encode_frame_with_request` produces the same
