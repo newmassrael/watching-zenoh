@@ -2492,6 +2492,212 @@ pub fn build_request_query(
     }
 }
 
+/// R121j-2a — fluent builder for `Request(Query)` that composes the
+/// layered options exposed individually by R121j-1a/1b/1c/1d/1e
+/// (consolidation / parameters / Query-attachment / Request-timeout
+/// / Request-target). The five one-shot helpers below stay as thin
+/// wrappers around this builder so existing callers see no surface
+/// change; the builder unlocks the multi-layer composition that the
+/// one-shot helpers cannot express (each one-shot resets the
+/// extensions vec, so chaining two of them via `.body` mutation
+/// silently drops the first).
+///
+/// Setter validation (panic conditions) is preserved per layer:
+/// `parameters` rejects empty / oversize, `query_attachment` rejects
+/// empty / oversize, `request_timeout_ms` rejects zero. The default
+/// values that zenoh-pico's encoder omits from the wire
+/// (`ConsolidationMode::AUTO`, `QueryTarget::BEST_MATCHING`, empty
+/// params / attachment, zero timeout) remain non-representable —
+/// callers wanting any of those simply do not call the corresponding
+/// setter, leaving the field as `None` in the builder so `build()`
+/// emits the minimal-shape wire bytes that match zenoh-pico's
+/// encode-on-non-default predicate at network.c / message.c.
+///
+/// Request-level extension ordering at `build()` time follows
+/// zenoh-pico's `_z_request_encode` chain
+/// (vendor/zenoh-pico/src/protocol/codec/network.c:122-167):
+/// qos → tstamp → target → budget → timeout. The intermediate Z
+/// chain-continuation bits are set on every entry except the last.
+/// (Only target + timeout are implemented as setters today; qos /
+/// tstamp / budget sub-setters layer in once their codec wiring lands
+/// — see the audit-traced carry in the Round 121j-1d /1e entries.)
+pub struct RequestQueryBuilder {
+    rid: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<String>,
+    // Query-layer settings.
+    consolidation: Option<ConsolidationMode>,
+    parameters: Option<Vec<u8>>,
+    query_attachment: Option<Vec<u8>>,
+    // Request-layer ext settings.
+    request_target: Option<QueryTarget>,
+    request_timeout_ms: Option<u64>,
+}
+
+impl RequestQueryBuilder {
+    /// Begin a builder rooted in the same baseline contract as
+    /// [`build_request_query`]: minimal Request(Query) envelope with
+    /// the keyexpr arm (literal id=0 + Some, alias id=N + None,
+    /// compound id=N + Some). Same id/suffix semantics.
+    pub fn new(rid: u64, keyexpr_mapping_id: u64, keyexpr_suffix: Option<&str>) -> Self {
+        Self {
+            rid,
+            keyexpr_mapping_id,
+            keyexpr_suffix: keyexpr_suffix.map(str::to_string),
+            consolidation: None,
+            parameters: None,
+            query_attachment: None,
+            request_target: None,
+            request_timeout_ms: None,
+        }
+    }
+
+    /// Set the Query-body consolidation mode. Subsequent calls
+    /// overwrite (last-wins; standard builder idiom). See
+    /// [`ConsolidationMode`] for the wire-byte contract.
+    pub fn consolidation(mut self, mode: ConsolidationMode) -> Self {
+        self.consolidation = Some(mode);
+        self
+    }
+
+    /// Set the Query-body parameters slice. Panics on empty
+    /// (zenoh-pico's encoder clears Q_P on empty) and on
+    /// `len > REQUEST_QUERY_PARAMETERS_MAX_LEN` (wz codec bound).
+    pub fn parameters(mut self, params: &[u8]) -> Self {
+        assert!(
+            !params.is_empty(),
+            "RequestQueryBuilder::parameters requires a non-empty params slice",
+        );
+        assert!(
+            params.len() <= REQUEST_QUERY_PARAMETERS_MAX_LEN,
+            "params slice length {} exceeds wz Query codec's max-size ({})",
+            params.len(),
+            REQUEST_QUERY_PARAMETERS_MAX_LEN,
+        );
+        self.parameters = Some(params.to_vec());
+        self
+    }
+
+    /// Set the Query-level attachment extension payload. Panics on
+    /// empty and on `len > QUERY_EXT_ZBUF_MAX_LEN`.
+    pub fn query_attachment(mut self, attachment: &[u8]) -> Self {
+        assert!(
+            !attachment.is_empty(),
+            "RequestQueryBuilder::query_attachment requires a non-empty attachment slice",
+        );
+        assert!(
+            attachment.len() <= QUERY_EXT_ZBUF_MAX_LEN,
+            "attachment slice length {} exceeds wz ExtZbuf codec's max-size ({})",
+            attachment.len(),
+            QUERY_EXT_ZBUF_MAX_LEN,
+        );
+        self.query_attachment = Some(attachment.to_vec());
+        self
+    }
+
+    /// Set the Request-level target extension. Wire mapping per
+    /// [`QueryTarget::wire_byte`]; the M=1 mandatory marker is set on
+    /// the emitted ExtEntry header per zenoh-pico convention
+    /// (network.c:140).
+    pub fn request_target(mut self, target: QueryTarget) -> Self {
+        self.request_target = Some(target);
+        self
+    }
+
+    /// Set the Request-level timeout extension. Panics on zero (the
+    /// zenoh-pico encoder predicate clears the ext on zero).
+    pub fn request_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        assert!(
+            timeout_ms != 0,
+            "RequestQueryBuilder::request_timeout_ms requires a non-zero timeout",
+        );
+        self.request_timeout_ms = Some(timeout_ms);
+        self
+    }
+
+    /// Materialise the Request. Constructs the baseline envelope via
+    /// [`build_request_query`], applies all Query-layer settings to
+    /// the inner Query body, then assembles Request-level extensions
+    /// in zenoh-pico's emit order with proper Z chain-continuation
+    /// bits on intermediate entries.
+    pub fn build(self) -> Request {
+        let mut request = build_request_query(
+            self.rid,
+            self.keyexpr_mapping_id,
+            self.keyexpr_suffix.as_deref(),
+        );
+
+        // Query-layer settings (consolidation / parameters /
+        // Q-attachment). The codec gates these on Query.header
+        // flags Q_C(0x20) / Q_P(0x40) / Q_Z(0x80).
+        if let RequestVariant::CodecZenohQuery(ref mut query) = request.body {
+            if let Some(mode) = self.consolidation {
+                query.header |= 0x20;
+                query.consolidation = Some(mode.wire_byte());
+            }
+            if let Some(params) = self.parameters {
+                query.header |= 0x40;
+                query.parameters_len = Some(params.len() as u64);
+                query.parameters = Some(params);
+            }
+            if let Some(attachment) = self.query_attachment {
+                query.header |= 0x80;
+                query.extensions = Some(vec![ExtEntry {
+                    header: 0x40 | 0x05, // ENC_ZBUF | id_attachment
+                    body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+                        value_len: attachment.len() as u64,
+                        value: attachment,
+                    }),
+                }]);
+            }
+        } else {
+            unreachable!(
+                "build_request_query must produce a CodecZenohQuery body — \
+                 the layered builder relies on this invariant"
+            );
+        }
+
+        // Request-level extensions in zenoh-pico encode order: qos →
+        // tstamp → target → budget → timeout (network.c:122-167).
+        // Today only target + timeout are exposed; qos / tstamp /
+        // budget setters layer in once their codec wiring lands.
+        let mut request_exts: Vec<ExtEntry> = Vec::new();
+        if let Some(target) = self.request_target {
+            request_exts.push(ExtEntry {
+                // ENC_ZINT(0x20) | M(0x10) | id_target(0x04). Z bit
+                // set below as a chain step if a later ext follows.
+                header: 0x20 | 0x10 | 0x04,
+                body: ExtEntryVariant::CodecZenohExtZint(ExtZint {
+                    value: target.wire_byte() as u64,
+                }),
+            });
+        }
+        if let Some(timeout_ms) = self.request_timeout_ms {
+            request_exts.push(ExtEntry {
+                // ENC_ZINT(0x20) | id_timeout(0x06). M stays clear
+                // (timeout is informational).
+                header: 0x20 | 0x06,
+                body: ExtEntryVariant::CodecZenohExtZint(ExtZint { value: timeout_ms }),
+            });
+        }
+
+        if !request_exts.is_empty() {
+            request.header |= 0x80; // N_Z (Request-level exts present)
+            // Z chain-continuation: set 0x80 on every entry except
+            // the last so the decoder loop consumes the whole chain.
+            let last_idx = request_exts.len() - 1;
+            for (i, ext) in request_exts.iter_mut().enumerate() {
+                if i < last_idx {
+                    ext.header |= 0x80;
+                }
+            }
+            request.extensions = Some(request_exts);
+        }
+
+        request
+    }
+}
+
 /// R121j-1a — explicit consolidation mode for the Query body. Mirrors
 /// zenoh-pico's `z_consolidation_mode_t` enum
 /// (vendor/zenoh-pico/include/zenoh-pico/api/constants.h:184-188) for
@@ -2557,23 +2763,9 @@ pub fn build_request_query_with_consolidation(
     keyexpr_suffix: Option<&str>,
     consolidation: ConsolidationMode,
 ) -> Request {
-    let mut request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix);
-    if let RequestVariant::CodecZenohQuery(ref mut query) = request.body {
-        // Set the Q_C flag (0x20 = `_Z_FLAG_Z_Q_C` per
-        // vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/message.h
-        // line for `_Z_FLAG_Z_Q_C`). The wz codec gates the
-        // consolidation field on `header.C` (query.scxml line for
-        // `sce:present-if="header.C"`), so setting the flag here is
-        // what wires the field into the wire bytes.
-        query.header |= 0x20;
-        query.consolidation = Some(consolidation.wire_byte());
-    } else {
-        unreachable!(
-            "build_request_query must produce a CodecZenohQuery body — \
-             the layered helper relies on this invariant"
-        );
-    }
-    request
+    RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
+        .consolidation(consolidation)
+        .build()
 }
 
 /// R121j-1b — `parameters` slice max-size enforced by the wz Query
@@ -2624,33 +2816,9 @@ pub fn build_request_query_with_parameters(
     keyexpr_suffix: Option<&str>,
     params: &[u8],
 ) -> Request {
-    assert!(
-        !params.is_empty(),
-        "build_request_query_with_parameters requires a non-empty params slice; \
-         use build_request_query for the no-params case (zenoh-pico's encoder \
-         predicate has_params is `len > 0`)",
-    );
-    assert!(
-        params.len() <= REQUEST_QUERY_PARAMETERS_MAX_LEN,
-        "params slice length {} exceeds wz Query codec's max-size ({})",
-        params.len(),
-        REQUEST_QUERY_PARAMETERS_MAX_LEN,
-    );
-    let mut request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix);
-    if let RequestVariant::CodecZenohQuery(ref mut query) = request.body {
-        // Set the Q_P flag (0x40 = `_Z_FLAG_Z_Q_P`). The wz codec
-        // gates both `parameters_len` and `parameters` on `header.P`
-        // (query.scxml), so the flag and both fields stay paired.
-        query.header |= 0x40;
-        query.parameters_len = Some(params.len() as u64);
-        query.parameters = Some(params.to_vec());
-    } else {
-        unreachable!(
-            "build_request_query must produce a CodecZenohQuery body — \
-             the layered helper relies on this invariant"
-        );
-    }
-    request
+    RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
+        .parameters(params)
+        .build()
 }
 
 /// R121j-1c — `attachment` slice max-size enforced by the wz ExtZbuf
@@ -2725,42 +2893,9 @@ pub fn build_request_query_with_attachment(
     keyexpr_suffix: Option<&str>,
     attachment: &[u8],
 ) -> Request {
-    assert!(
-        !attachment.is_empty(),
-        "build_request_query_with_attachment requires a non-empty attachment \
-         slice; use build_request_query for the no-attachment case (zenoh-pico's \
-         encoder predicate gates the ext on non-empty bytes)",
-    );
-    assert!(
-        attachment.len() <= QUERY_EXT_ZBUF_MAX_LEN,
-        "attachment slice length {} exceeds wz ExtZbuf codec's max-size ({})",
-        attachment.len(),
-        QUERY_EXT_ZBUF_MAX_LEN,
-    );
-    let mut request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix);
-    if let RequestVariant::CodecZenohQuery(ref mut query) = request.body {
-        // Q_Z flag at bit 7 (`_Z_FLAG_Z_Z`); the wz codec gates the
-        // `extensions` tlv-chain on `header.Z` (query.scxml:84
-        // `sce:present-if="header.Z"`).
-        query.header |= 0x80;
-        // Single attachment ext entry. Header = ENC_ZBUF(enc=0x02 at
-        // bits 5..6 → 0x40) | ext_id_attachment(0x05); M=0, Z=0 (last).
-        // Body arm = ExtZbuf carrying the attachment payload.
-        let ext = ExtEntry {
-            header: 0x40 | 0x05,
-            body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
-                value_len: attachment.len() as u64,
-                value: attachment.to_vec(),
-            }),
-        };
-        query.extensions = Some(vec![ext]);
-    } else {
-        unreachable!(
-            "build_request_query must produce a CodecZenohQuery body — \
-             the layered helper relies on this invariant"
-        );
-    }
-    request
+    RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
+        .query_attachment(attachment)
+        .build()
 }
 
 /// R121j-1d — build a `Request(Query)` carrying a Request-level
@@ -2815,25 +2950,9 @@ pub fn build_request_query_with_timeout_ms(
     keyexpr_suffix: Option<&str>,
     timeout_ms: u64,
 ) -> Request {
-    assert!(
-        timeout_ms != 0,
-        "build_request_query_with_timeout_ms requires a non-zero timeout; \
-         zenoh-pico's encoder predicate `_ext_timeout_ms != 0` would clear \
-         the ext on zero — use build_request_query for the no-timeout case",
-    );
-    let mut request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix);
-    // Request-level Z flag (0x80) gates the Request.extensions chain
-    // emit (request.scxml line 131 `sce:present-if="header.Z"` on the
-    // tlv-chain). Distinct from the inner Query.header.Z (0x80) which
-    // gates the QUERY-level extensions chain (R121j-1c).
-    request.header |= 0x80;
-    request.extensions = Some(vec![ExtEntry {
-        // ENC_ZINT(enc=0x01 at bits 5..6 → 0x20) | ext_id_timeout(0x06).
-        // M=0 (informational), entry-Z=0 (single-ext, no successor).
-        header: 0x20 | 0x06,
-        body: ExtEntryVariant::CodecZenohExtZint(ExtZint { value: timeout_ms }),
-    }]);
-    request
+    RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
+        .request_timeout_ms(timeout_ms)
+        .build()
 }
 
 /// R121j-1e — explicit query-target enum for cross-router Query
@@ -2915,18 +3034,9 @@ pub fn build_request_query_with_target(
     keyexpr_suffix: Option<&str>,
     target: QueryTarget,
 ) -> Request {
-    let mut request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix);
-    // Request-level Z flag (0x80) gates the Request.extensions chain.
-    request.header |= 0x80;
-    request.extensions = Some(vec![ExtEntry {
-        // ENC_ZINT(0x20) | M(0x10) | ext_id_target(0x04) = 0x34.
-        // M=1 mandatory; entry-Z=0 (single-ext).
-        header: 0x20 | 0x10 | 0x04,
-        body: ExtEntryVariant::CodecZenohExtZint(ExtZint {
-            value: target.wire_byte() as u64,
-        }),
-    }]);
-    request
+    RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
+        .request_target(target)
+        .build()
 }
 
 /// R121j-2 — build a `ResponseFinal` network-message that terminates
@@ -6082,7 +6192,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "build_request_query_with_parameters requires a non-empty params slice"
+        expected = "RequestQueryBuilder::parameters requires a non-empty params slice"
     )]
     fn build_request_query_with_parameters_rejects_empty_slice() {
         let _ = build_request_query_with_parameters(42, 7, None, b"");
@@ -6176,7 +6286,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "build_request_query_with_attachment requires a non-empty attachment slice"
+        expected = "RequestQueryBuilder::query_attachment requires a non-empty attachment slice"
     )]
     fn build_request_query_with_attachment_rejects_empty_slice() {
         let _ = build_request_query_with_attachment(42, 7, None, b"");
@@ -6292,7 +6402,7 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "build_request_query_with_timeout_ms requires a non-zero timeout"
+        expected = "RequestQueryBuilder::request_timeout_ms requires a non-zero timeout"
     )]
     fn build_request_query_with_timeout_ms_rejects_zero() {
         let _ = build_request_query_with_timeout_ms(42, 7, None, 0);
@@ -6367,6 +6477,144 @@ mod tests {
     fn query_target_wire_byte_matches_zenoh_pico_enum_values() {
         assert_eq!(QueryTarget::All.wire_byte(), 1u8);
         assert_eq!(QueryTarget::AllComplete.wire_byte(), 2u8);
+    }
+
+    /// R121j-2a — Composition smoke test: two Query-layer settings
+    /// (consolidation + parameters) applied via the builder produce
+    /// wire bytes consistent with both layers. The two-layer shape
+    /// is what the old one-shot helpers CANNOT produce because each
+    /// resets the Query body's optional fields.
+    #[test]
+    fn request_query_builder_composes_consolidation_and_parameters() {
+        // rid=42, mapping_id=7, no suffix.
+        // Layers: consolidation=Monotonic, params=b"k=v".
+        //   Request.header = MID(0x1C) | M(0x40) = 0x5C  (no N, no N_Z)
+        //   VLE(rid=42) = 0x2A
+        //   wireexpr Local: id=7 → 0x07
+        //   Query.header = MID(0x03) | Q_C(0x20) | Q_P(0x40) = 0x63
+        //   consolidation byte = 0x01 (Monotonic)
+        //   parameters_len VLE = 0x03
+        //   "k=v" 3 bytes
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .consolidation(ConsolidationMode::Monotonic)
+            .parameters(b"k=v")
+            .build();
+        let wire = request.encode();
+        let mut expected = vec![
+            0x5C, // Request: MID | M
+            0x2A, // VLE(rid=42)
+            0x07, // wireexpr.id VLE(7)
+            0x63, // Query: MID | Q_C | Q_P
+            0x01, // consolidation = Monotonic
+            0x03, // parameters_len VLE(3)
+        ];
+        expected.extend_from_slice(b"k=v");
+        assert_eq!(
+            wire, expected,
+            "Composed (consolidation + parameters) wire must carry both \
+             layers — the regression that pre-R121j-2a one-shot \
+             helpers couldn't express",
+        );
+    }
+
+    /// R121j-2a — Composition full-stack: all 5 currently-exposed
+    /// builder layers applied together. Verifies (1) Request-level
+    /// ext ordering (target first, then timeout per zenoh-pico
+    /// network.c:122-167), (2) Z chain-continuation bit on the
+    /// intermediate target ext, (3) all three Query-layer flag bits
+    /// (Q_C / Q_P / Q_Z) set together, (4) the attachment ext sits at
+    /// the Query level (after Query.consolidation + parameters), not
+    /// at the Request level.
+    #[test]
+    fn request_query_builder_composes_all_five_layers() {
+        // rid=42, mapping_id=7, no suffix.
+        // Layers: consolidation=Latest, params=b"k=v", q_attachment=b"at",
+        //         req_target=All, req_timeout_ms=1000.
+        //   Request.header = MID(0x1C) | M(0x40) | N_Z(0x80) = 0xDC
+        //   VLE(rid=42) = 0x2A
+        //   wireexpr Local: id=7 → 0x07
+        //   Request ext 1: target (ENC_ZINT|M|id_target=0x34) | Z(0x80) = 0xB4
+        //   ExtZint VLE(All=1) = 0x01
+        //   Request ext 2: timeout (ENC_ZINT|id_timeout=0x26), no Z = 0x26
+        //   ExtZint VLE(1000) = 0xE8 0x07
+        //   Query.header = MID(0x03) | Q_C(0x20) | Q_P(0x40) | Q_Z(0x80) = 0xE3
+        //   consolidation = Latest = 0x02
+        //   parameters_len VLE(3) = 0x03
+        //   "k=v"
+        //   Q-attachment ext: header (ENC_ZBUF|id_attachment=0x45), no Z = 0x45
+        //   ExtZbuf VLE(2) = 0x02
+        //   "at"
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .consolidation(ConsolidationMode::Latest)
+            .parameters(b"k=v")
+            .query_attachment(b"at")
+            .request_target(QueryTarget::All)
+            .request_timeout_ms(1000)
+            .build();
+        let wire = request.encode();
+        let mut expected = vec![
+            0xDC, // Request: MID | M | N_Z
+            0x2A, // VLE(rid=42)
+            0x07, // wireexpr.id VLE(7)
+            // Request-level ext chain: target(Z=1) → timeout(last)
+            0xB4, // ENC_ZINT | M | id_target | Z(chain)
+            0x01, // VLE(target=All=1)
+            0x26, // ENC_ZINT | id_timeout, Z=0 (last)
+            0xE8, 0x07, // VLE(timeout_ms=1000)
+            // Query body
+            0xE3, // Query: MID | Q_C | Q_P | Q_Z
+            0x02, // consolidation = Latest
+            0x03, // parameters_len VLE(3)
+        ];
+        expected.extend_from_slice(b"k=v");
+        expected.extend_from_slice(&[
+            0x45, // Q-attachment ext: ENC_ZBUF | id_attachment, Z=0
+            0x02, // VLE(attachment_len=2)
+        ]);
+        expected.extend_from_slice(b"at");
+        assert_eq!(
+            wire, expected,
+            "Five-layer composed wire must carry all settings — \
+             verifies Request-level ext ordering + Z chain bit on \
+             intermediate entry + all three Q-flag bits + Q-attachment \
+             positioning",
+        );
+
+        // Inner-arm sanity.
+        let req_exts = request
+            .extensions
+            .as_ref()
+            .expect("N_Z set → Request.extensions must be Some");
+        assert_eq!(req_exts.len(), 2, "target + timeout exts");
+        assert_eq!(
+            req_exts[0].header & 0x80,
+            0x80,
+            "target ext must carry Z chain-continuation bit (more follows)",
+        );
+        assert_eq!(
+            req_exts[1].header & 0x80,
+            0x00,
+            "timeout ext must NOT carry Z (it is the last entry)",
+        );
+    }
+
+    /// R121j-2a — Per-setter validation flows through to the builder.
+    /// Mirrors the one-shot helper rejection tests; the builder is
+    /// where the panic actually fires now.
+    #[test]
+    #[should_panic(expected = "RequestQueryBuilder::parameters")]
+    fn request_query_builder_parameters_rejects_empty() {
+        let _ = RequestQueryBuilder::new(42, 7, None)
+            .parameters(b"")
+            .build();
+    }
+
+    #[test]
+    #[should_panic(expected = "RequestQueryBuilder::request_timeout_ms")]
+    fn request_query_builder_timeout_rejects_zero() {
+        let _ = RequestQueryBuilder::new(42, 7, None)
+            .request_timeout_ms(0)
+            .build();
     }
 
     /// R121j-1 — `encode_frame_with_request` produces the same
