@@ -89,6 +89,7 @@ use wz_codecs::response::Response;
 use wz_codecs::response_final::ResponseFinal;
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
+use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
@@ -2059,6 +2060,196 @@ pub fn build_declare_token(
             id: token_id,
             keyexpr: Wireexpr {
                 body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: keyexpr_mapping_id,
+                    suffix_len,
+                    suffix: suffix_string,
+                }),
+            },
+        }),
+    }
+}
+
+// ─── R121i-d: WireexprNonlocal-arm DECLARE builders ──────────────────
+//
+// Companions to `build_declare_subscriber` / `build_declare_queryable`
+// / `build_declare_token` for the M=0 case (the wire byte that
+// `vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/network.h:63`
+// dubs `_Z_FLAG_N_..._M`, derived at the wireexpr `<sce:import>` from
+// the variant arm — Local → 0x40 OR, Nonlocal → no OR).
+//
+// Encoder-perspective locality (sources/codecs/wireexpr.scxml docblock
+// + zenoh-pico `_z_wireexpr_is_local` at core.h:182):
+//
+//   M = 1 (Local arm)    sender's wireexpr was rooted in the sender's
+//                        own mapping table — i.e. wz declared the
+//                        keyexpr's mapping_id itself.
+//   M = 0 (Nonlocal arm) sender's wireexpr was rooted in the *peer's*
+//                        mapping table — i.e. wz is referring to a
+//                        mapping_id that was DeclKexpr'd by the peer
+//                        and registered into wz's peer-keyexpr table.
+//
+// Use case (the gap these builders close — without them wz could not
+// emit DECLARE traffic that references peer-declared mappings, which
+// is the cross-validation surface that AP MVP inbound parsing
+// (R121j-5+) will trigger). Pre-R121i-d, the four DECLARE builders
+// hard-coded the WireexprLocal arm, so a wz acceptor that received a
+// peer's DeclKexpr could not in turn DeclSubscriber against that
+// peer's id without the codegen-derived M bit silently emitting M=1
+// (wrong direction — would tell the peer "I own this mapping" when
+// in fact the peer owns it).
+//
+// `build_declare_kexpr` (the mapping-population variant) deliberately
+// has *no* `_nonlocal` companion: DeclKexpr's purpose is the sender
+// installing a (id, literal) pair *into its own* mapping table; the
+// inner wireexpr is the literal itself (id=0 + suffix sentinel), and
+// encoder-perspective locality is by definition Local. A
+// `build_declare_kexpr_nonlocal` would mean "I am declaring a mapping
+// owned by you" — semantically void; zenoh-pico has no such encoder
+// path and the peer would reject it (declarations.c:52 sets M=1 via
+// the unconditional `_z_wireexpr_is_local(LOCAL)=true` of the
+// freshly-built `_z_wireexpr_t`).
+//
+// `id == 0` rejection: in the Nonlocal arm, mapping_id 0 is also
+// nonsense — zenoh-pico's `_Z_KEYEXPR_MAPPING_LOCAL` sentinel is
+// `(uintptr_t)0` (core.h:151), so a remote-mapped id=0 would refer
+// to "the peer's literal-sentinel slot" which has no table entry.
+// Each `_nonlocal` builder panics on id=0 with the same shape as
+// `build_declare_kexpr_rejects_zero_mapping_id`.
+
+/// R121i-d — build a `Declare(DeclSubscriber)` that registers a
+/// subscriber on the peer for a keyexpr rooted in the *peer's*
+/// mapping table (M=0 wire arm). Mirror of [`build_declare_subscriber`]
+/// for the Nonlocal case; see the module-level docblock above for the
+/// encoder-perspective locality semantics.
+///
+/// `keyexpr_mapping_id` is the peer-declared mapping id; `keyexpr_suffix`
+/// is the optional tail concatenated to that mapping's literal at the
+/// peer (`None` = pure alias, `Some(s)` = composite). Panics on
+/// `keyexpr_mapping_id == 0` (literal-sentinel inversion is not
+/// representable in the Nonlocal arm — use [`build_declare_subscriber`]
+/// with `(0, Some(s))` for literal subscriptions).
+///
+/// Wire shape after the `N_MID_DECLARE` envelope (mirror of the Local
+/// builder's wire shape with the M-bit derivation flipped):
+///
+/// ```text
+///   [DeclSubscriber.header = _Z_DECL_SUBSCRIBER_MID (0x02)
+///                            | (suffix.is_some() ? 0x20 : 0)
+///                            | (codegen-derived: 0x00 from Nonlocal
+///                              arm dispatch on the wireexpr import)]
+///   VLE(subscriber_id)
+///   wireexpr.encode  (id VLE + optional suffix_len VLE + suffix bytes)
+/// ```
+pub fn build_declare_subscriber_nonlocal(
+    subscriber_id: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+) -> Declare {
+    assert!(
+        keyexpr_mapping_id != 0,
+        "build_declare_subscriber_nonlocal requires a non-zero mapping id; \
+         id=0 is the literal-keyexpr sentinel, which is only representable \
+         in the Local arm — call build_declare_subscriber instead",
+    );
+    let suffix_string = keyexpr_suffix.map(str::to_string);
+    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let n_flag = if keyexpr_suffix.is_some() {
+        0x20u8
+    } else {
+        0x00u8
+    };
+    Declare {
+        header: wire_const::N_MID_DECLARE,
+        interest_id: None,
+        extensions: None,
+        body: DeclareVariant::CodecZenohDeclSubscriber(DeclSubscriber {
+            header: 0x02 | n_flag,
+            id: subscriber_id,
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                    id: keyexpr_mapping_id,
+                    suffix_len,
+                    suffix: suffix_string,
+                }),
+            },
+        }),
+    }
+}
+
+/// R121i-d — build a `Declare(DeclQueryable)` for a keyexpr rooted in
+/// the peer's mapping table (M=0 wire arm). Mirror of
+/// [`build_declare_queryable`] for the Nonlocal case. The id=0
+/// rejection rule from [`build_declare_subscriber_nonlocal`] applies
+/// identically. Emit follows the `has_info_ext = false` shape
+/// (default-state `_z_queryable_infos_t`); a future round adding
+/// `complete` / `distance` will introduce a separate
+/// `build_declare_queryable_nonlocal_with_info` helper.
+pub fn build_declare_queryable_nonlocal(
+    queryable_id: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+) -> Declare {
+    assert!(
+        keyexpr_mapping_id != 0,
+        "build_declare_queryable_nonlocal requires a non-zero mapping id; \
+         id=0 is the literal-keyexpr sentinel — call build_declare_queryable instead",
+    );
+    let suffix_string = keyexpr_suffix.map(str::to_string);
+    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let n_flag = if keyexpr_suffix.is_some() {
+        0x20u8
+    } else {
+        0x00u8
+    };
+    Declare {
+        header: wire_const::N_MID_DECLARE,
+        interest_id: None,
+        extensions: None,
+        body: DeclareVariant::CodecZenohDeclQueryable(DeclQueryable {
+            header: 0x04 | n_flag,
+            id: queryable_id,
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                    id: keyexpr_mapping_id,
+                    suffix_len,
+                    suffix: suffix_string,
+                }),
+            },
+        }),
+    }
+}
+
+/// R121i-d — build a `Declare(DeclToken)` for a keyexpr rooted in the
+/// peer's mapping table (M=0 wire arm). Mirror of
+/// [`build_declare_token`] for the Nonlocal case. Same id=0 rejection
+/// rule as the other `_nonlocal` builders. DeclToken has no extension
+/// surface at all, so the no-ext byte-stability contract is preserved.
+pub fn build_declare_token_nonlocal(
+    token_id: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+) -> Declare {
+    assert!(
+        keyexpr_mapping_id != 0,
+        "build_declare_token_nonlocal requires a non-zero mapping id; \
+         id=0 is the literal-keyexpr sentinel — call build_declare_token instead",
+    );
+    let suffix_string = keyexpr_suffix.map(str::to_string);
+    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let n_flag = if keyexpr_suffix.is_some() {
+        0x20u8
+    } else {
+        0x00u8
+    };
+    Declare {
+        header: wire_const::N_MID_DECLARE,
+        interest_id: None,
+        extensions: None,
+        body: DeclareVariant::CodecZenohDeclToken(DeclToken {
+            header: 0x06 | n_flag,
+            id: token_id,
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                     id: keyexpr_mapping_id,
                     suffix_len,
                     suffix: suffix_string,
@@ -4434,6 +4625,245 @@ mod tests {
         );
     }
 
+    /// R121i-d — Wire-byte regression gate for
+    /// `build_declare_subscriber_nonlocal`. Mirror of the Local-arm
+    /// byte-compare with the M-bit OR convention flipped: the
+    /// codegen-derived `_derived_header` at the wireexpr import site
+    /// is 0x00 for the Nonlocal arm (decl_subscriber.scxml +
+    /// wireexpr.scxml `<sce:arm value="0x00" type="wireexpr_nonlocal"/>`),
+    /// so the emitted DeclSubscriber.header carries MID + N only, no
+    /// M bit. Three vectors lock the alias / composite / multi-byte
+    /// VLE boundary cases (literal id=0 is rejected by the builder so
+    /// is exercised in the `_rejects_zero_mapping_id` panic test
+    /// below, not here).
+    #[test]
+    fn build_declare_subscriber_nonlocal_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — pure alias to peer's mapping 7 (no suffix).
+        //   DeclSubscriber.header = MID(0x02) | M(0x00) = 0x02
+        let alias = build_declare_subscriber_nonlocal(5, 7, None);
+        assert_eq!(
+            alias.encode(),
+            vec![
+                wire_const::N_MID_DECLARE, // 0x1E outer
+                0x02,                       // MID only, no N, no M
+                0x05,                       // VLE(subscriber_id=5)
+                0x07,                       // wireexpr.id VLE(7)
+            ],
+            "DeclSubscriber Nonlocal alias-case wire bytes must match \
+             zenoh-pico reference (M bit clear)",
+        );
+
+        // Case 2 — composite: peer's mapping 7 + tail "abc".
+        //   DeclSubscriber.header = MID | N | M(=0) = 0x22
+        let composite = build_declare_subscriber_nonlocal(5, 7, Some("abc"));
+        let mut composite_expected = vec![
+            wire_const::N_MID_DECLARE,
+            0x22, // MID | N, no M
+            0x05,
+            0x07,
+            0x03,
+        ];
+        composite_expected.extend_from_slice(b"abc");
+        assert_eq!(
+            composite.encode(),
+            composite_expected,
+            "DeclSubscriber Nonlocal composite-case wire bytes must \
+             match zenoh-pico reference",
+        );
+
+        // Case 3 — multi-byte VLE boundary on the peer's mapping id
+        // (id=200 crosses the 7-bit VLE boundary; first byte = 0xC8,
+        // second byte = 0x01). Pure alias to lock the VLE writer
+        // regression surface on the Nonlocal arm.
+        let large = build_declare_subscriber_nonlocal(5, 200, None);
+        assert_eq!(
+            large.encode(),
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x02,
+                0x05,
+                0xC8, // VLE(200) low 7 + cont bit
+                0x01, // VLE(200) high byte
+            ],
+            "DeclSubscriber Nonlocal multi-byte VLE id wire bytes \
+             must match zenoh-pico reference",
+        );
+
+        // Inner-arm sanity check — must be Nonlocal, not Local.
+        match &alias.body {
+            DeclareVariant::CodecZenohDeclSubscriber(d) => {
+                match &d.keyexpr.body {
+                    WireexprVariant::WireexprNonlocal(w) => {
+                        assert_eq!(w.id, 7);
+                        assert!(w.suffix.is_none());
+                    }
+                    _ => panic!(
+                        "build_declare_subscriber_nonlocal must produce a \
+                         WireexprNonlocal arm"
+                    ),
+                }
+            }
+            _ => panic!("expected CodecZenohDeclSubscriber"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "build_declare_subscriber_nonlocal requires a non-zero mapping id")]
+    fn build_declare_subscriber_nonlocal_rejects_zero_mapping_id() {
+        let _ = build_declare_subscriber_nonlocal(5, 0, Some("demo/test"));
+    }
+
+    /// R121i-d — Wire-byte regression gate for
+    /// `build_declare_queryable_nonlocal`. Mirror of the Local-arm
+    /// byte-compare with MID swap 0x02 → 0x04 and the M-bit OR
+    /// convention flipped to 0x00. No-info-ext shape (default-state
+    /// `_z_queryable_infos_t`); a future round adding `complete` /
+    /// `distance` will introduce a separate
+    /// `build_declare_queryable_nonlocal_with_info` byte-compare.
+    #[test]
+    fn build_declare_queryable_nonlocal_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — pure alias.
+        let alias = build_declare_queryable_nonlocal(9, 7, None);
+        assert_eq!(
+            alias.encode(),
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x04, // MID only, no N, no M
+                0x09,
+                0x07,
+            ],
+            "DeclQueryable Nonlocal alias-case wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        // Case 2 — composite.
+        let composite = build_declare_queryable_nonlocal(9, 7, Some("abc"));
+        let mut composite_expected = vec![
+            wire_const::N_MID_DECLARE,
+            0x24, // MID | N, no M
+            0x09,
+            0x07,
+            0x03,
+        ];
+        composite_expected.extend_from_slice(b"abc");
+        assert_eq!(
+            composite.encode(),
+            composite_expected,
+            "DeclQueryable Nonlocal composite-case wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        // Case 3 — multi-byte VLE boundary on the peer's mapping id.
+        let large = build_declare_queryable_nonlocal(9, 200, None);
+        assert_eq!(
+            large.encode(),
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x04,
+                0x09,
+                0xC8,
+                0x01,
+            ],
+            "DeclQueryable Nonlocal multi-byte VLE id wire bytes must \
+             match zenoh-pico reference",
+        );
+
+        match &alias.body {
+            DeclareVariant::CodecZenohDeclQueryable(d) => {
+                match &d.keyexpr.body {
+                    WireexprVariant::WireexprNonlocal(w) => {
+                        assert_eq!(w.id, 7);
+                        assert!(w.suffix.is_none());
+                    }
+                    _ => panic!(
+                        "build_declare_queryable_nonlocal must produce a \
+                         WireexprNonlocal arm"
+                    ),
+                }
+            }
+            _ => panic!("expected CodecZenohDeclQueryable"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "build_declare_queryable_nonlocal requires a non-zero mapping id")]
+    fn build_declare_queryable_nonlocal_rejects_zero_mapping_id() {
+        let _ = build_declare_queryable_nonlocal(9, 0, Some("demo/test"));
+    }
+
+    /// R121i-d — Wire-byte regression gate for
+    /// `build_declare_token_nonlocal`. Mirror of the Local-arm byte-
+    /// compare with MID swap to 0x06 and the M-bit OR flipped to 0x00.
+    /// DeclToken has no extension surface — emit is byte-stable for
+    /// every `(id, mapping, suffix)` input in either arm.
+    #[test]
+    fn build_declare_token_nonlocal_emits_zenoh_pico_compatible_wire_bytes() {
+        let alias = build_declare_token_nonlocal(11, 7, None);
+        assert_eq!(
+            alias.encode(),
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x06, // MID only, no N, no M
+                0x0B, // VLE(token_id=11)
+                0x07,
+            ],
+            "DeclToken Nonlocal alias-case wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        let composite = build_declare_token_nonlocal(11, 7, Some("abc"));
+        let mut composite_expected = vec![
+            wire_const::N_MID_DECLARE,
+            0x26, // MID | N, no M
+            0x0B,
+            0x07,
+            0x03,
+        ];
+        composite_expected.extend_from_slice(b"abc");
+        assert_eq!(
+            composite.encode(),
+            composite_expected,
+            "DeclToken Nonlocal composite-case wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        let large = build_declare_token_nonlocal(11, 200, None);
+        assert_eq!(
+            large.encode(),
+            vec![
+                wire_const::N_MID_DECLARE,
+                0x06,
+                0x0B,
+                0xC8,
+                0x01,
+            ],
+            "DeclToken Nonlocal multi-byte VLE id wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        match &alias.body {
+            DeclareVariant::CodecZenohDeclToken(d) => {
+                match &d.keyexpr.body {
+                    WireexprVariant::WireexprNonlocal(w) => {
+                        assert_eq!(w.id, 7);
+                        assert!(w.suffix.is_none());
+                    }
+                    _ => panic!(
+                        "build_declare_token_nonlocal must produce a \
+                         WireexprNonlocal arm"
+                    ),
+                }
+            }
+            _ => panic!("expected CodecZenohDeclToken"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "build_declare_token_nonlocal requires a non-zero mapping id")]
+    fn build_declare_token_nonlocal_rejects_zero_mapping_id() {
+        let _ = build_declare_token_nonlocal(11, 0, Some("demo/test"));
+    }
+
     /// R121i-c — `build_undeclare_kexpr` produces a `Declare`
     /// envelope carrying an `UndeclKexpr` body. Two vectors lock both
     /// the single-byte VLE id case and the multi-byte VLE boundary
@@ -4706,11 +5136,11 @@ mod tests {
     /// References:
     ///   - `_z_request_encode` (vendor/zenoh-pico/src/protocol/codec/network.c:114-169)
     ///     — emits `[header | N | M | Z=0]`, `VLE(rid)`, `wireexpr.encode`,
-    ///       and switches into `_z_query_encode` for `_Z_REQUEST_QUERY`.
+    ///     and switches into `_z_query_encode` for `_Z_REQUEST_QUERY`.
     ///   - `_z_query_encode` (vendor/zenoh-pico/src/protocol/codec/message.c:394-451)
     ///     — emits `[header | C | P | Z]` then optional consolidation /
-    ///       params / exts. In the minimal shape only the header byte
-    ///       (0x03) is emitted.
+    ///     params / exts. In the minimal shape only the header byte
+    ///     (0x03) is emitted.
     #[test]
     fn build_request_query_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — pure alias (rid=42, mapping_id=7, no suffix).
