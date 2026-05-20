@@ -55,6 +55,10 @@ pub mod ext_zbuf {
     include!(concat!(env!("OUT_DIR"), "/ext_zbuf.rs"));
 }
 
+pub mod stream_envelope {
+    include!(concat!(env!("OUT_DIR"), "/stream_envelope.rs"));
+}
+
 pub mod close {
     include!(concat!(env!("OUT_DIR"), "/close.rs"));
 }
