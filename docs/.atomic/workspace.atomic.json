@@ -5551,6 +5551,54 @@
         "Query exts (body/info/attachment) require the ExtEntry / Value codec wiring — verify these codec modules are already published by wz-codecs (lib.rs:98-103 lists ext_entry + ext_envelope; check Value too) before R121j-3 enters."
       ]
     },
+    "Round 121j-2": {
+      "decision_summary": "R121j-2 adds ResponseFinal outbound to close the Query/Reply sequence — build_response_final + encode_frame_with_response_final + SessionLinkActions::send_response_final — with 2-vector wire-byte byte-compare tests against zenoh-pico _z_response_final_encode (network.c:368-376) covering both single-byte and multi-byte VLE rid cases.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs build_response_final(request_id) builder added next to build_request_query. Emits the minimal AP MVP shape: ResponseFinal.header = _Z_MID_N_RESPONSE_FINAL(0x1A), Z bit-7 clear (no RF-level exts), extensions = None. zenoh-pico defines no ResponseFinal-level extensions today but the wire format reserves bit 7 for them via _Z_FLAG_Z_Z; future rounds extend with an exts-present variant if a use case emerges.",
+        "crates/wz-runtime-tokio/src/session_glue.rs encode_frame_with_response_final(sn, response_final, reliable) helper added: Frame envelope wrap mirror of encode_frame_with_push / encode_frame_with_declare / encode_frame_with_request. ResponseFinal is unconditionally reliable in zenoh-pico's model (losing it would leave the requesting peer's z_get future hung), so the production action layer below hard-codes reliable=true; the helper still accepts the flag for fuzz / negative-test paths.",
+        "crates/wz-runtime-tokio/src/session_glue.rs SessionLinkActions::send_response_final(request_id) action added: build_response_final -> next_outbound_frame_sn -> encode_frame_with_response_final -> driver.send_blocking(Reliable). request_id MUST equal the rid from the matching Request(Query); callers are trusted to thread the rid through.",
+        "crates/wz-runtime-tokio/src/session_glue.rs tests: two new unit tests. build_response_final_emits_zenoh_pico_compatible_wire_bytes locks 2 vectors (rid=42 single-byte VLE + rid=200 multi-byte VLE boundary that protects against VLE writer continuation-bit regression). encode_frame_with_response_final_wraps_in_frame_envelope validates the Frame envelope wrap behaves identically to the other three encode_frame_with_* helpers for both reliable and best-effort parent-flag paths."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib -- response_final: both new tests pass. The byte-compare gate confirms the 2 emit shapes match zenoh-pico's _z_response_final_encode byte-for-byte; any future codegen drift on header derivation, VLE writer, or the Z-flag dispatch surfaces immediately.",
+        "cargo test -p wz-runtime-tokio --lib: all 54 lib tests green (52 prior + 2 new R121j-2); no regression on the R121g/R121i-a/b/c/R121j-1 byte-compare gates.",
+        "bash scripts/run-ci.sh: all 8 lanes pass (Layer 0/A/A2/B/C1/C2/D/E). No new clippy warnings; warnings=deny workspace policy preserved.",
+        "validate_workspace baseline: docs=12/12, T1 orphan=0 (no new), round-trip mandatory 12/12, GENERATED.md=sync; atomic ledger entries advance 166 -> 167, sections=214 unchanged."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121j-3 next: Response(Reply) outbound. zenoh-pico _z_response_encode (network.c:241-321) + _z_reply_encode (message.c:507+) reference. Response envelope mirrors Request structurally (header / rid / keyexpr / exts) but uses _Z_MID_N_RESPONSE(0x1B) and carries the inner Reply body (MID 0x04). Reply body in turn carries a value payload similar to MsgPut — needs the Value codec wiring (verify Value module is published by wz-codecs).",
+        "Response Exts surface non-trivial: zenoh-pico encodes ext_qos / ext_timestamp / ext_responder for Response (network.c:266-292). AP MVP Reply outbound likely needs ext_responder at minimum because zenoh-pico clients dispatch reply callbacks per-responder; minimal shape may be too sparse for real interop. Verify against zenoh-pico's z_query / on_reply behaviour during R121j-3 entry.",
+        "R121j-4: inbound Query parser + dispatch (on_query callback + QueryableTable). Bigger engineering change — introduces the queryable registration surface. Best entered after R121j-3 lands the Reply outbound so the queryable callback has a place to emit replies.",
+        "R121h-perf zero-alloc encode debt still on the carry list — production-perf gating, parked as SCE-upstream feature proposal (textbook path per SCE-is-priority directive). Not a wz-session deliverable."
+      ],
+      "publishable_decision_summary": "R121j-2 adds ResponseFinal outbound to close the Query/Reply sequence — build_response_final + encode_frame_with_response_final + SessionLinkActions::send_response_final — with 2-vector wire-byte byte-compare tests against zenoh-pico _z_response_final_encode (network.c:368-376) covering both single-byte and multi-byte VLE rid cases.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs build_response_final(request_id) builder added next to build_request_query. Emits the minimal AP MVP shape: ResponseFinal.header = _Z_MID_N_RESPONSE_FINAL(0x1A), Z bit-7 clear (no RF-level exts), extensions = None. zenoh-pico defines no ResponseFinal-level extensions today but the wire format reserves bit 7 for them via _Z_FLAG_Z_Z; future rounds extend with an exts-present variant if a use case emerges.",
+        "crates/wz-runtime-tokio/src/session_glue.rs encode_frame_with_response_final(sn, response_final, reliable) helper added: Frame envelope wrap mirror of encode_frame_with_push / encode_frame_with_declare / encode_frame_with_request. ResponseFinal is unconditionally reliable in zenoh-pico's model (losing it would leave the requesting peer's z_get future hung), so the production action layer below hard-codes reliable=true; the helper still accepts the flag for fuzz / negative-test paths.",
+        "crates/wz-runtime-tokio/src/session_glue.rs SessionLinkActions::send_response_final(request_id) action added: build_response_final -> next_outbound_frame_sn -> encode_frame_with_response_final -> driver.send_blocking(Reliable). request_id MUST equal the rid from the matching Request(Query); callers are trusted to thread the rid through.",
+        "crates/wz-runtime-tokio/src/session_glue.rs tests: two new unit tests. build_response_final_emits_zenoh_pico_compatible_wire_bytes locks 2 vectors (rid=42 single-byte VLE + rid=200 multi-byte VLE boundary that protects against VLE writer continuation-bit regression). encode_frame_with_response_final_wraps_in_frame_envelope validates the Frame envelope wrap behaves identically to the other three encode_frame_with_* helpers for both reliable and best-effort parent-flag paths."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib -- response_final: both new tests pass. The byte-compare gate confirms the 2 emit shapes match zenoh-pico's _z_response_final_encode byte-for-byte; any future codegen drift on header derivation, VLE writer, or the Z-flag dispatch surfaces immediately.",
+        "cargo test -p wz-runtime-tokio --lib: all 54 lib tests green (52 prior + 2 new R121j-2); no regression on the R121g/R121i-a/b/c/R121j-1 byte-compare gates.",
+        "bash scripts/run-ci.sh: all 8 lanes pass (Layer 0/A/A2/B/C1/C2/D/E). No new clippy warnings; warnings=deny workspace policy preserved.",
+        "validate_workspace baseline: docs=12/12, T1 orphan=0 (no new), round-trip mandatory 12/12, GENERATED.md=sync; atomic ledger entries advance 166 -> 167, sections=214 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121j-3 next: Response(Reply) outbound. zenoh-pico _z_response_encode (network.c:241-321) + _z_reply_encode (message.c:507+) reference. Response envelope mirrors Request structurally (header / rid / keyexpr / exts) but uses _Z_MID_N_RESPONSE(0x1B) and carries the inner Reply body (MID 0x04). Reply body in turn carries a value payload similar to MsgPut — needs the Value codec wiring (verify Value module is published by wz-codecs).",
+        "Response Exts surface non-trivial: zenoh-pico encodes ext_qos / ext_timestamp / ext_responder for Response (network.c:266-292). AP MVP Reply outbound likely needs ext_responder at minimum because zenoh-pico clients dispatch reply callbacks per-responder; minimal shape may be too sparse for real interop. Verify against zenoh-pico's z_query / on_reply behaviour during R121j-3 entry.",
+        "R121j-4: inbound Query parser + dispatch (on_query callback + QueryableTable). Bigger engineering change — introduces the queryable registration surface. Best entered after R121j-3 lands the Reply outbound so the queryable callback has a place to emit replies.",
+        "R121h-perf zero-alloc encode debt still on the carry list — production-perf gating, parked as SCE-upstream feature proposal (textbook path per SCE-is-priority directive). Not a wz-session deliverable."
+      ]
+    },
     "Round 122": {
       "decision_summary": "R122 vendor/sce pin bump 122f851d to 4441431d; LAYER2_KNOWN_DIVERGENCE 6 to 1.",
       "changes_bullets": [
