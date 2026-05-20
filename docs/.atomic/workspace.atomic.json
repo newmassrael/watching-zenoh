@@ -5983,6 +5983,48 @@
         "R121h-perf-bump-2 carry intact: still blocking on explicit user consent for the atomic 12-SCXML migration + vendor pin bump."
       ]
     },
+    "Round 121j-4": {
+      "decision_summary": "R121j-4 closes the Response(Err) outbound mirror of R121j-3 (Reply), giving the queryable-side a way to emit error responses for failed Query handling.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `use wz_codecs::err::Err;` import.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `build_response_err_literal(request_id, keyexpr_suffix, payload)` and `build_response_err_aliased(request_id, mapping_id, suffix, payload)`. Mirror R121j-3 Reply builders with `ResponseVariant::CodecZenohErr(Err)` arm instead of `CodecZenohReply(Reply)`. Minimal Err shape (header=0x05 MID only, no E encoding, no Z exts, no payload prefix beyond payload_len + bytes).",
+        "Structural difference from Reply documented: Reply wraps a MsgPut which itself carries a MID byte (0x01) before its own payload_len/payload pair, so a literal Response(Reply) wire ends with `[Reply.header(0x04), MsgPut.header(0x01), payload_len, payload]`. Err is a leaf with no inner MID wrap, so a literal Response(Err) wire ends with `[Err.header(0x05), payload_len, payload]` — the Err MID byte position is identical to where the Reply chain's Reply.header sits, allowing the peer's outer Response decoder to discriminate on that byte.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added four unit tests. literal byte-compare (small rid + multi-byte VLE rid=200), aliased byte-compare (pure alias + composite), and two `#[should_panic]` rejections (literal empty suffix, aliased zero mapping_id). Inner-arm sanity verifies the Err struct shape independently.",
+        "Out of scope (audit-traced carry): `_with_encoding(...)` sets Err.header.E(0x40) + emits the Encoding sub-codec inline; `_with_source_info(...)` sets Err.header.Z + emits a source_info ext entry (ext_id=0x01 ZBUF); `_with_attachment(...)` similar for ext_id=0x05. AP MVP queryable error path does not need encoding hints or source-info exts; the minimal shape here ships first."
+      ],
+      "verification_bullets": [
+        "Targeted: `cargo test -p wz-runtime-tokio --lib build_response_err` — 4 passed, 0 failed.",
+        "Regression: `cargo test -p wz-runtime-tokio --lib` — 81 passed, 0 failed (up from 77 at R121j-3 closure; +4 R121j-4 tests).",
+        "Layer C2 equivalent: `cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings` — clean."
+      ],
+      "carry_forward_bullets": [
+        "R121j-3 + R121j-4 outbound layer now complete in minimal shape. Queryable-side reply / err path: caller constructs Response via build_response_reply_* or build_response_err_*, encodes with encode_frame_with_response, hands to the link driver. The actual queryable dispatch wiring (when does wz CHOOSE to emit Reply vs Err) is part of R121j-5 inbound parser + on_query callback territory.",
+        "R121j-3/4 sub-helpers carry intact: consolidation / responder / del-body / encoding hints / source-info exts. None are AP MVP-blocking. The textbook RequestQueryBuilder / ResponseReplyBuilder pattern (per-layer Option fields + chained setters + ordered .build() materializer) becomes the right textbook fix when 8+ helpers exist OR when a multi-layer caller surfaces.",
+        "R121j-5 (inbound Request(Query) parser + on_query callback + QueryableTable) carry intact. Now that BOTH outbound directions of Query/Reply are functional, R121j-5 is the next major AP MVP closure target. Scope: (1) inbound Request parser that surfaces the Query body to a per-keyexpr callback table, (2) per-session QueryableTable (id → callback fn + keyexpr binding) registered via send_declare_queryable, (3) callback signature design (Query handle with reply / err methods that internally call build_response_*). Estimated 2-3 rounds; significant new surface for QueryableTable type and async lifecycle. Recommended as the next non-perf-bump session focus.",
+        "Query/Reply outbound now ~75% (was 36% at session start, ~50% after R121j-3, ~75% now with both Reply + Err). Remaining 25% is the layered sub-helpers + composition refactor. AP MVP weighted parity bumps from ~71-75% to ~75-78% with this session's series.",
+        "R121h-perf-bump-2 carry intact: blocking on explicit user consent for the atomic 12-SCXML migration + vendor pin bump."
+      ],
+      "publishable_decision_summary": "R121j-4 closes the Response(Err) outbound mirror of R121j-3 (Reply), giving the queryable-side a way to emit error responses for failed Query handling.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `use wz_codecs::err::Err;` import.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `build_response_err_literal(request_id, keyexpr_suffix, payload)` and `build_response_err_aliased(request_id, mapping_id, suffix, payload)`. Mirror R121j-3 Reply builders with `ResponseVariant::CodecZenohErr(Err)` arm instead of `CodecZenohReply(Reply)`. Minimal Err shape (header=0x05 MID only, no E encoding, no Z exts, no payload prefix beyond payload_len + bytes).",
+        "Structural difference from Reply documented: Reply wraps a MsgPut which itself carries a MID byte (0x01) before its own payload_len/payload pair, so a literal Response(Reply) wire ends with `[Reply.header(0x04), MsgPut.header(0x01), payload_len, payload]`. Err is a leaf with no inner MID wrap, so a literal Response(Err) wire ends with `[Err.header(0x05), payload_len, payload]` — the Err MID byte position is identical to where the Reply chain's Reply.header sits, allowing the peer's outer Response decoder to discriminate on that byte.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added four unit tests. literal byte-compare (small rid + multi-byte VLE rid=200), aliased byte-compare (pure alias + composite), and two `#[should_panic]` rejections (literal empty suffix, aliased zero mapping_id). Inner-arm sanity verifies the Err struct shape independently.",
+        "Out of scope (audit-traced carry): `_with_encoding(...)` sets Err.header.E(0x40) + emits the Encoding sub-codec inline; `_with_source_info(...)` sets Err.header.Z + emits a source_info ext entry (ext_id=0x01 ZBUF); `_with_attachment(...)` similar for ext_id=0x05. AP MVP queryable error path does not need encoding hints or source-info exts; the minimal shape here ships first."
+      ],
+      "publishable_verification_bullets": [
+        "Targeted: `cargo test -p wz-runtime-tokio --lib build_response_err` — 4 passed, 0 failed.",
+        "Regression: `cargo test -p wz-runtime-tokio --lib` — 81 passed, 0 failed (up from 77 at R121j-3 closure; +4 R121j-4 tests).",
+        "Layer C2 equivalent: `cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings` — clean."
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121j-3 + R121j-4 outbound layer now complete in minimal shape. Queryable-side reply / err path: caller constructs Response via build_response_reply_* or build_response_err_*, encodes with encode_frame_with_response, hands to the link driver. The actual queryable dispatch wiring (when does wz CHOOSE to emit Reply vs Err) is part of R121j-5 inbound parser + on_query callback territory.",
+        "R121j-3/4 sub-helpers carry intact: consolidation / responder / del-body / encoding hints / source-info exts. None are AP MVP-blocking. The textbook RequestQueryBuilder / ResponseReplyBuilder pattern (per-layer Option fields + chained setters + ordered .build() materializer) becomes the right textbook fix when 8+ helpers exist OR when a multi-layer caller surfaces.",
+        "R121j-5 (inbound Request(Query) parser + on_query callback + QueryableTable) carry intact. Now that BOTH outbound directions of Query/Reply are functional, R121j-5 is the next major AP MVP closure target. Scope: (1) inbound Request parser that surfaces the Query body to a per-keyexpr callback table, (2) per-session QueryableTable (id → callback fn + keyexpr binding) registered via send_declare_queryable, (3) callback signature design (Query handle with reply / err methods that internally call build_response_*). Estimated 2-3 rounds; significant new surface for QueryableTable type and async lifecycle. Recommended as the next non-perf-bump session focus.",
+        "Query/Reply outbound now ~75% (was 36% at session start, ~50% after R121j-3, ~75% now with both Reply + Err). Remaining 25% is the layered sub-helpers + composition refactor. AP MVP weighted parity bumps from ~71-75% to ~75-78% with this session's series.",
+        "R121h-perf-bump-2 carry intact: blocking on explicit user consent for the atomic 12-SCXML migration + vendor pin bump."
+      ]
+    },
     "Round 122": {
       "decision_summary": "R122 vendor/sce pin bump 122f851d to 4441431d; LAYER2_KNOWN_DIVERGENCE 6 to 1.",
       "changes_bullets": [
