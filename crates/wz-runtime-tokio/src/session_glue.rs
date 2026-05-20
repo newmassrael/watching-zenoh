@@ -2761,6 +2761,79 @@ pub fn build_request_query_with_attachment(
     request
 }
 
+/// R121j-1d — build a `Request(Query)` carrying a Request-level
+/// timeout extension. Mirrors zenoh-pico's `_z_request_encode`
+/// timeout-ext path (vendor/zenoh-pico/src/protocol/codec/network.c:150-155):
+/// `_z_uint8_encode(extheader = _Z_MSG_EXT_ENC_ZINT | 0x06)` followed
+/// by `_z_zint64_encode(timeout_ms)`.
+///
+/// Wire shape (single Request-level ext, timeout-only — no qos /
+/// tstamp / target / budget):
+///
+/// ```text
+///   [Request.header | _Z_FLAG_Z_Z(0x80) | M_derived | N if suffix]
+///   VLE(rid)
+///   wireexpr.encode
+///   [ExtEntry.header = _Z_MSG_EXT_ENC_ZINT(0x20) | ext_id_timeout(0x06)
+///                       | Z(0x00, last entry)]                = 0x26
+///   VLE(timeout_ms)                                       // ExtZint body
+///   [Query.header = _Z_MID_Z_QUERY(0x03)]                 // inner body
+/// ```
+///
+/// Two distinct Z bits at two layers — clarification:
+/// 1. Request.header Z (0x80, `_Z_FLAG_Z_Z` at the network message
+///    layer) gates the Request-level tlv-chain (Request.extensions).
+///    This is set here.
+/// 2. ExtEntry.header Z (0x80, chain-continuation marker on each
+///    entry) signals "more entries follow"; for a single timeout ext
+///    it stays clear (no successor).
+///
+/// `ext_id = 0x06` matches `_z_request_decode_extensions` case at
+/// network.c:199-202 (`case 0x06 | _Z_MSG_EXT_ENC_ZINT`). M flag
+/// (mandatory, 0x10) stays clear — timeout is informational; if the
+/// peer ignores it the query simply doesn't time out at the peer's
+/// table (matches zenoh-pico's encode at network.c:152 emitting no
+/// M bit, unlike the target ext at line 140 which DOES set M).
+///
+/// `timeout_ms == 0` is rejected to match zenoh-pico's encoder
+/// predicate `exts.ext_timeout_ms = msg->_ext_timeout_ms != 0`
+/// (network.c at the `_z_n_msg_request_needed_exts` site at
+/// vendor/zenoh-pico/src/protocol/definitions/network.c:29). A zero
+/// timeout would silently clear the ext from the wire — the caller's
+/// intent for "no timeout" is plain [`build_request_query`].
+///
+/// QoS / target / budget / tstamp Request-level exts are NOT covered
+/// by this helper; sub-helpers for each follow the same pattern with
+/// the appropriate ext_id and enc shape (qos/budget/timeout use
+/// ZINT; tstamp uses ZBUF; target uses ZINT + M=1 since target is
+/// mandatory for cross-router queries per network.c:140).
+pub fn build_request_query_with_timeout_ms(
+    rid: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+    timeout_ms: u64,
+) -> Request {
+    assert!(
+        timeout_ms != 0,
+        "build_request_query_with_timeout_ms requires a non-zero timeout; \
+         zenoh-pico's encoder predicate `_ext_timeout_ms != 0` would clear \
+         the ext on zero — use build_request_query for the no-timeout case",
+    );
+    let mut request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix);
+    // Request-level Z flag (0x80) gates the Request.extensions chain
+    // emit (request.scxml line 131 `sce:present-if="header.Z"` on the
+    // tlv-chain). Distinct from the inner Query.header.Z (0x80) which
+    // gates the QUERY-level extensions chain (R121j-1c).
+    request.header |= 0x80;
+    request.extensions = Some(vec![ExtEntry {
+        // ENC_ZINT(enc=0x01 at bits 5..6 → 0x20) | ext_id_timeout(0x06).
+        // M=0 (informational), entry-Z=0 (single-ext, no successor).
+        header: 0x20 | 0x06,
+        body: ExtEntryVariant::CodecZenohExtZint(ExtZint { value: timeout_ms }),
+    }]);
+    request
+}
+
 /// R121j-2 — build a `ResponseFinal` network-message that terminates
 /// the multi-Reply sequence for `request_id`. Mirrors zenoh-pico
 /// `_z_response_final_encode` at
@@ -5745,6 +5818,115 @@ mod tests {
     fn build_request_query_with_attachment_rejects_over_max_size() {
         let over: Vec<u8> = vec![0u8; QUERY_EXT_ZBUF_MAX_LEN + 1];
         let _ = build_request_query_with_attachment(42, 7, None, &over);
+    }
+
+    /// R121j-1d — Wire-byte regression gate for
+    /// `build_request_query_with_timeout_ms`. The Request-level Z bit
+    /// (0x80) on the outer header signals the Request.extensions
+    /// chain follows the wireexpr; the ExtEntry header (0x26 =
+    /// ENC_ZINT | id_timeout) precedes the Query body. Three vectors
+    /// lock single-byte VLE timeout (50ms), multi-byte VLE boundary
+    /// (1000ms = 0xE8 0x07), and large VLE (2^32 ms = 5-byte VLE).
+    /// The Query body's MID byte (0x03) stays at the tail, after the
+    /// Request-level exts — mirrors the zenoh-pico encoder order
+    /// (network.c:122-167: header / rid / wireexpr / exts loop /
+    /// body switch).
+    #[test]
+    fn build_request_query_with_timeout_ms_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — single-byte VLE timeout (50ms fits in 7 bits).
+        // Alias case rid=42, mapping_id=7, no suffix.
+        //   Request.header = MID(0x1C) | M(0x40) | N_Z(0x80) = 0xDC
+        //   VLE(rid=42) = 0x2A
+        //   wireexpr.id VLE(7) = 0x07
+        //   ExtEntry.header = ENC_ZINT(0x20) | id_timeout(0x06) = 0x26
+        //   ExtZint.value VLE(50) = 0x32
+        //   Query.header = 0x03
+        let small = build_request_query_with_timeout_ms(42, 7, None, 50);
+        let small_wire = small.encode();
+        assert_eq!(
+            small_wire,
+            vec![
+                0xDC, // Request: MID | M | N_Z
+                0x2A, // VLE(rid=42)
+                0x07, // wireexpr.id VLE(7)
+                0x26, // ExtEntry: ENC_ZINT | id_timeout
+                0x32, // ExtZint VLE(50)
+                0x03, // Query.header (minimal)
+            ],
+            "Request(timeout=50ms,Query) wire bytes must match \
+             zenoh-pico reference (network.c:122-167)",
+        );
+
+        // Case 2 — multi-byte VLE boundary (1000ms = 0xE8 0x07).
+        let mid = build_request_query_with_timeout_ms(42, 7, None, 1000);
+        let mid_wire = mid.encode();
+        assert_eq!(
+            mid_wire,
+            vec![
+                0xDC,
+                0x2A,
+                0x07,
+                0x26,
+                0xE8, // VLE(1000) low 7 + cont
+                0x07, // VLE(1000) high
+                0x03,
+            ],
+            "Request(timeout=1000ms,Query) wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        // Case 3 — large VLE (2^32 = 0x1_0000_0000 = 5-byte VLE in
+        // base-128: 0x80 0x80 0x80 0x80 0x10).
+        let large = build_request_query_with_timeout_ms(42, 7, None, 1u64 << 32);
+        let large_wire = large.encode();
+        assert_eq!(
+            large_wire,
+            vec![
+                0xDC,
+                0x2A,
+                0x07,
+                0x26,
+                0x80, 0x80, 0x80, 0x80, 0x10, // VLE(2^32)
+                0x03,
+            ],
+            "Request(timeout=2^32 ms,Query) wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        // Inner-arm sanity: Request.extensions has 1 entry with ZInt
+        // body; Query body is minimal-shape (no Q_C / Q_P / Q_Z).
+        match &small.body {
+            RequestVariant::CodecZenohQuery(q) => {
+                assert_eq!(q.header, 0x03, "Query.header minimal (no Q flags)");
+                assert!(q.consolidation.is_none());
+                assert!(q.parameters.is_none());
+                assert!(q.extensions.is_none(), "no Q-level exts");
+            }
+            _ => panic!("expected CodecZenohQuery"),
+        }
+        let req_exts = small
+            .extensions
+            .as_ref()
+            .expect("N_Z set → Request.extensions must be Some");
+        assert_eq!(req_exts.len(), 1, "single Request-level ext");
+        assert_eq!(
+            req_exts[0].header, 0x26,
+            "Request ExtEntry.header = ENC_ZINT(0x20) | id_timeout(0x06)"
+        );
+        match &req_exts[0].body {
+            ExtEntryVariant::CodecZenohExtZint(zi) => {
+                assert_eq!(zi.value, 50);
+            }
+            _ => panic!("timeout ext body must be CodecZenohExtZint"),
+        }
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "build_request_query_with_timeout_ms requires a non-zero timeout"
+    )]
+    fn build_request_query_with_timeout_ms_rejects_zero() {
+        let _ = build_request_query_with_timeout_ms(42, 7, None, 0);
     }
 
     /// R121j-1 — `encode_frame_with_request` produces the same
