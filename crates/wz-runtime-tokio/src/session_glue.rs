@@ -74,6 +74,7 @@ use wz_codecs::undecl_queryable::UndeclQueryable;
 use wz_codecs::undecl_subscriber::UndeclSubscriber;
 use wz_codecs::undecl_token::UndeclToken;
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
+use wz_codecs::ext_zbuf::ExtZbuf;
 use wz_codecs::ext_zint::ExtZint;
 use wz_codecs::frame::Frame;
 use wz_codecs::init_body::InitBody;
@@ -2641,6 +2642,116 @@ pub fn build_request_query_with_parameters(
         query.header |= 0x40;
         query.parameters_len = Some(params.len() as u64);
         query.parameters = Some(params.to_vec());
+    } else {
+        unreachable!(
+            "build_request_query must produce a CodecZenohQuery body — \
+             the layered helper relies on this invariant"
+        );
+    }
+    request
+}
+
+/// R121j-1c — `attachment` slice max-size enforced by the wz ExtZbuf
+/// codec (sources/codecs/ext_zbuf.scxml's `sce:max-size="32"` on
+/// the `value` field). zenoh-pico's `_z_msg_ext_t.body._zbuf._val`
+/// is variable-length upstream (no codec-level bound); wz's
+/// stripped-down scope caps the ZBuf body at 32 bytes across all
+/// ExtZbuf-encoded extensions (attachment, value-as-payload,
+/// source_info-as-payload). A future round that needs larger
+/// attachments either lifts the wz codec bound or adds a separate
+/// `ExtZbufLarge` arm; until then the helper rejects oversize at
+/// the call site so wz-to-wz interop does not silently fail at the
+/// peer decoder. zenoh-pico peers accept arbitrarily large ZBuf
+/// payloads, so wz-emit -> zenoh-pico-receive is unaffected.
+pub const QUERY_EXT_ZBUF_MAX_LEN: usize = 32;
+
+/// R121j-1c — build a `Request(Query)` with a single attachment
+/// extension. Mirrors zenoh-pico's `_z_query_encode` attachment-ext
+/// path (message.c:446-448): `_z_uint8_encode(extheader =
+/// _Z_MSG_EXT_ENC_ZBUF | 0x05)` then `_z_bytes_encode(&attachment)`.
+///
+/// Wire shape (single-ext, attachment-only — no source_info, no
+/// body/value ext):
+///
+/// ```text
+///   [Request.header | M_derived]      // same as build_request_query
+///   VLE(rid)
+///   wireexpr.encode
+///   [Query.header = _Z_MID_Z_QUERY(0x03) | _Z_FLAG_Z_Z(0x80)]
+///   [ExtEntry.header = _Z_MSG_EXT_ENC_ZBUF(0x40) | ext_id(0x05)
+///                       | Z(0x00, last entry)]               // = 0x45
+///   VLE(attachment.len())
+///   attachment bytes
+/// ```
+///
+/// The Q_Z flag (Query-level, 0x80 = `_Z_FLAG_Z_Z` at the network
+/// message layer per
+/// vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/message.h:35)
+/// signals "extension chain follows"; it is distinct from the
+/// ext_entry.Z bit (chain-continuation marker, 0x80 on each entry
+/// header except the last). With a single attachment ext, Q_Z is
+/// set on Query.header and ext_entry.Z stays clear (no successor).
+///
+/// `ext_id = 0x05` is the attachment slot per zenoh-pico's
+/// `_z_query_decode_extensions` switch (message.c:467: `case
+/// _Z_MSG_EXT_ENC_ZBUF | 0x05: // Attachment`). The M flag
+/// (mandatory, 0x10) stays clear — attachment is informational, the
+/// peer may safely ignore it without breaking the query semantics
+/// (matches zenoh-pico's encode shape at message.c:447 which emits
+/// no M bit).
+///
+/// `attachment.is_empty()` is rejected: zenoh-pico's
+/// `_z_msg_query_required_extensions` (message.c at the
+/// `required_exts.attachment = _z_bytes_check(...) ? true : false`
+/// site) only sets the attachment requirement when the bytes slice
+/// is non-empty, so an empty attachment would silently clear the
+/// ext from the wire and emit only the bare Query header (the
+/// caller's intent is then plain `build_request_query`).
+///
+/// `attachment.len() > QUERY_EXT_ZBUF_MAX_LEN` is rejected to match
+/// the wz codec's ExtZbuf bound; see the constant's doc-comment.
+///
+/// Source-info and body(Value) extensions are NOT covered by this
+/// helper — separate concerns with their own sub-codec wiring
+/// (source_info ext needs zid+eid+sn struct; body Value ext needs
+/// the Value codec encoding+payload pair). Future
+/// `build_request_query_with_source_info` /
+/// `_with_body_value` / `_with_full_exts` helpers layer those.
+pub fn build_request_query_with_attachment(
+    rid: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+    attachment: &[u8],
+) -> Request {
+    assert!(
+        !attachment.is_empty(),
+        "build_request_query_with_attachment requires a non-empty attachment \
+         slice; use build_request_query for the no-attachment case (zenoh-pico's \
+         encoder predicate gates the ext on non-empty bytes)",
+    );
+    assert!(
+        attachment.len() <= QUERY_EXT_ZBUF_MAX_LEN,
+        "attachment slice length {} exceeds wz ExtZbuf codec's max-size ({})",
+        attachment.len(),
+        QUERY_EXT_ZBUF_MAX_LEN,
+    );
+    let mut request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix);
+    if let RequestVariant::CodecZenohQuery(ref mut query) = request.body {
+        // Q_Z flag at bit 7 (`_Z_FLAG_Z_Z`); the wz codec gates the
+        // `extensions` tlv-chain on `header.Z` (query.scxml:84
+        // `sce:present-if="header.Z"`).
+        query.header |= 0x80;
+        // Single attachment ext entry. Header = ENC_ZBUF(enc=0x02 at
+        // bits 5..6 → 0x40) | ext_id_attachment(0x05); M=0, Z=0 (last).
+        // Body arm = ExtZbuf carrying the attachment payload.
+        let ext = ExtEntry {
+            header: 0x40 | 0x05,
+            body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+                value_len: attachment.len() as u64,
+                value: attachment.to_vec(),
+            }),
+        };
+        query.extensions = Some(vec![ext]);
     } else {
         unreachable!(
             "build_request_query must produce a CodecZenohQuery body — \
@@ -5540,6 +5651,100 @@ mod tests {
     fn build_request_query_with_parameters_rejects_over_max_size() {
         let over: Vec<u8> = vec![0u8; REQUEST_QUERY_PARAMETERS_MAX_LEN + 1];
         let _ = build_request_query_with_parameters(42, 7, None, &over);
+    }
+
+    /// R121j-1c — Wire-byte regression gate for
+    /// `build_request_query_with_attachment`. The layered helper
+    /// flips Q_Z(0x80) on the Query header and appends a single
+    /// ext_entry with header 0x45 (ENC_ZBUF | ext_id=0x05) and an
+    /// ExtZbuf body carrying VLE(len) + bytes. Three vectors lock
+    /// the small-attachment, multi-byte VLE boundary (won't hit at
+    /// max-size 32, but small-vs-byte-256 differs in single-byte
+    /// VLE only here), and at-max (32-byte) cases. The Q_C / Q_P
+    /// bits stay clear because this helper is attachment-only.
+    #[test]
+    fn build_request_query_with_attachment_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — small attachment (alias case, rid=42, mapping_id=7,
+        // no suffix; attachment = b"hi").
+        //   Request: [0x5C, 0x2A, 0x07]      (MID|M, VLE(42), VLE(7))
+        //   Query:   [0x83]                  (MID(0x03) | Q_Z(0x80))
+        //   ExtEntry header: [0x45]          (ENC_ZBUF(0x40) | id(0x05))
+        //   ExtZbuf: [0x02, b'h', b'i']      (VLE(2), bytes)
+        let small = build_request_query_with_attachment(42, 7, None, b"hi");
+        let small_wire = small.encode();
+        let mut small_expected = vec![
+            0x5C, // Request: MID 0x1C | M 0x40
+            0x2A, // VLE(rid=42)
+            0x07, // wireexpr.id VLE(7)
+            0x83, // Query: MID(0x03) | Q_Z(0x80)
+            0x45, // ExtEntry: ENC_ZBUF | id_attachment
+            0x02, // ExtZbuf.value_len VLE(2)
+        ];
+        small_expected.extend_from_slice(b"hi");
+        assert_eq!(
+            small_wire, small_expected,
+            "Request(Query+attachment) small-attachment wire bytes must \
+             match zenoh-pico reference (msg.c:446-448)",
+        );
+
+        // Case 2 — at-max attachment (32 bytes, all-distinct sequence
+        // 0..32). VLE(32) = 0x20 (single byte, fits in 7 bits).
+        let max_attach: Vec<u8> = (0u8..32).collect();
+        let max = build_request_query_with_attachment(42, 7, None, &max_attach);
+        let max_wire = max.encode();
+        let mut max_expected = vec![
+            0x5C, 0x2A, 0x07,
+            0x83, // Query header with Q_Z
+            0x45, // ExtEntry header
+            0x20, // VLE(32) single byte
+        ];
+        max_expected.extend_from_slice(&max_attach);
+        assert_eq!(
+            max_wire, max_expected,
+            "Request(Query+attachment) max-size (32-byte) attachment wire \
+             bytes must match zenoh-pico reference",
+        );
+
+        // Inner-arm sanity: Query.header carries Q_Z; extensions vec
+        // has exactly one entry with the expected ext_id + ZBuf body.
+        match &small.body {
+            RequestVariant::CodecZenohQuery(q) => {
+                assert_eq!(q.header, 0x83, "Query.header MID(0x03) | Q_Z(0x80)");
+                let exts = q.extensions.as_ref().expect("Q_Z set → extensions vec must be Some");
+                assert_eq!(exts.len(), 1, "single attachment ext only");
+                assert_eq!(
+                    exts[0].header, 0x45,
+                    "ExtEntry.header = ENC_ZBUF(0x40) | id_attachment(0x05)"
+                );
+                match &exts[0].body {
+                    ExtEntryVariant::CodecZenohExtZbuf(zb) => {
+                        assert_eq!(zb.value_len, 2);
+                        assert_eq!(zb.value.as_slice(), b"hi".as_slice());
+                    }
+                    _ => panic!("attachment ext body must be CodecZenohExtZbuf"),
+                }
+                assert!(
+                    q.consolidation.is_none() && q.parameters.is_none(),
+                    "attachment-only helper must not set consolidation or params",
+                );
+            }
+            _ => panic!("expected CodecZenohQuery"),
+        }
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "build_request_query_with_attachment requires a non-empty attachment slice"
+    )]
+    fn build_request_query_with_attachment_rejects_empty_slice() {
+        let _ = build_request_query_with_attachment(42, 7, None, b"");
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds wz ExtZbuf codec's max-size (32)")]
+    fn build_request_query_with_attachment_rejects_over_max_size() {
+        let over: Vec<u8> = vec![0u8; QUERY_EXT_ZBUF_MAX_LEN + 1];
+        let _ = build_request_query_with_attachment(42, 7, None, &over);
     }
 
     /// R121j-1 — `encode_frame_with_request` produces the same
