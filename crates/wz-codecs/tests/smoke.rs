@@ -100,6 +100,114 @@ fn reply_default_encode_decode_roundtrip() {
 }
 
 #[test]
+fn stream_envelope_wire_bytes_match_zenoh_pico_reference() {
+    // R121h — byte-compare gate for codec_stream_envelope against
+    // zenoh-pico's `_z_link_send_t_msg` reference encoder on the
+    // `Z_LINK_CAP_FLOW_STREAM` branch (vendor/zenoh-pico/src/
+    // transport/common/tx.c:415-447). The reference writes
+    // `_Z_MSG_LEN_ENC_SIZE = 2` zero bytes, encodes the transport
+    // message body, then backfills the prefix with the little-endian
+    // u16 length of everything after the prefix. Our codec emit
+    // produces the same wire bytes for the prefix + payload pair.
+    //
+    // Five vectors cover the critical equivalence classes:
+    //   - empty payload (the minimal frame, two zero bytes)
+    //   - tiny payload (single-byte length fits in low byte)
+    //   - 255 boundary (largest length encoded entirely in low byte)
+    //   - 256 boundary (smallest length needing the high byte —
+    //     this is the multi-byte case that the pre-R121h-pre2 SCE
+    //     simple-path decode emitted as `raw[0] as usize`, silently
+    //     truncating to `raw[0] = 0x00`; locked here as the
+    //     post-refactor regression-resistance vector)
+    //   - 300 byte payload (asymmetric high byte ≠ 0, low byte ≠ 0)
+    use wz_codecs::stream_envelope::StreamEnvelope;
+
+    let cases: [(&[u8], &[u8]); 5] = [
+        (&[], &[0x00, 0x00]),
+        (
+            &[0xAB, 0xCD, 0xEF],
+            &[0x03, 0x00, 0xAB, 0xCD, 0xEF],
+        ),
+        (
+            &[0x42; 255],
+            // First two bytes [0xFF, 0x00] then 255 × 0x42; assemble
+            // the expected wire bytes inline since the slice literal
+            // syntax cannot embed a repeat-count macro.
+            &expected_wire_255()[..],
+        ),
+        (
+            &[0x42; 256],
+            &expected_wire_256()[..],
+        ),
+        (
+            &[0x42; 300],
+            &expected_wire_300()[..],
+        ),
+    ];
+
+    for (i, (payload, expected_wire)) in cases.iter().enumerate() {
+        let env = StreamEnvelope {
+            payload_len: payload.len() as u16,
+            payload: payload.to_vec(),
+        };
+        let wire = env.encode();
+        assert_eq!(
+            wire.len(),
+            expected_wire.len(),
+            "case {i}: wire length mismatch"
+        );
+        assert_eq!(
+            &wire[..],
+            *expected_wire,
+            "case {i}: wire bytes mismatch vs zenoh-pico reference"
+        );
+
+        let mut cursor = SceCursor::new(&wire);
+        let decoded = StreamEnvelope::decode(&mut cursor)
+            .unwrap_or_else(|_| panic!("case {i}: decode failed"));
+        assert_eq!(
+            decoded.payload_len as usize,
+            payload.len(),
+            "case {i}: decoded payload_len mismatch (multi-byte regression)"
+        );
+        assert_eq!(
+            decoded.payload.len(),
+            payload.len(),
+            "case {i}: decoded payload byte count mismatch"
+        );
+        assert_eq!(
+            &decoded.payload[..],
+            *payload,
+            "case {i}: decoded payload bytes mismatch"
+        );
+    }
+}
+
+fn expected_wire_255() -> Vec<u8> {
+    let mut v = Vec::with_capacity(257);
+    v.push(0xFF);
+    v.push(0x00);
+    v.extend(std::iter::repeat(0x42).take(255));
+    v
+}
+
+fn expected_wire_256() -> Vec<u8> {
+    let mut v = Vec::with_capacity(258);
+    v.push(0x00);
+    v.push(0x01);
+    v.extend(std::iter::repeat(0x42).take(256));
+    v
+}
+
+fn expected_wire_300() -> Vec<u8> {
+    let mut v = Vec::with_capacity(302);
+    v.push(0x2C);
+    v.push(0x01);
+    v.extend(std::iter::repeat(0x42).take(300));
+    v
+}
+
+#[test]
 fn err_default_encode_decode_roundtrip() {
     // R96 — Err is the second inner-body codec consumed by the
     // RESPONSE envelope (R97). Default header bakes MID 0x05 per RFC

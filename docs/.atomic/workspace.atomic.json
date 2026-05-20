@@ -5173,6 +5173,62 @@
         "wz-codecs B5-ν derive-bit propagation: file a follow-up note in the wz-codecs / sce-codegen workflow that the B5-ν derived 0x40 bit for WireexprLocal is only correct when the parent codec uses bit 6 as a flag carrier (Push, Request, Response). For parents that do not (DeclKexpr, possibly Interest), the codec author must either use WireexprNonlocal as a derive-suppression workaround OR the codegen needs a per-parent opt-out for the derive."
       ]
     },
+    "Round 121h": {
+      "decision_summary": "R121h replaces the hand-rolled u16 LE length-prefix framing in TcpDriver::send and TcpDriver::poll_event with calls into the generated wz_codecs::stream_envelope::StreamEnvelope encoder/decoder, lands a 5-vector byte-compare regression test against the zenoh-pico _z_link_send_t_msg reference (including the 256-byte multi-byte-length critical case), and removes the last hand-rolled wire-framing site from the AP tokio runtime.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs imports: add `sce_forge_runtime::codec::SceCursor` and `wz_codecs::stream_envelope::StreamEnvelope`.",
+        "crates/wz-runtime-tokio/src/lib.rs TcpDriver doc comment rewritten: removes the R121d-era `framing remains hand-rolled` deferral note and replaces it with the R121h SSOT statement plus a rationale paragraph for the 2-byte prefix sniff at the start of poll_event (until SCE exposes a codec MIN_FRAME_BYTES associated const, the wire-shape requires this read before the structural decode can run).",
+        "crates/wz-runtime-tokio/src/lib.rs TcpDriver::send (lines 160-181): replaces the `len.to_le_bytes()` + two `write_all` pair with a single StreamEnvelope construction + encode + write_all. Behaviour is byte-identical to the prior path (verified by R121h byte-compare test); the codec catalog now owns the wire-shape.",
+        "crates/wz-runtime-tokio/src/lib.rs TcpDriver::poll_event (lines 191-224): two-step read pattern. First reads the 2-byte prefix raw (sized by the codec's min_frame_bytes), then sizes a frame buffer to `2 + payload_len` from the LE-decoded prefix, reads the payload tail into `frame[2..]`, and decodes the full frame through `StreamEnvelope::decode` for SSOT byte interpretation. The codec validates the structural decode; the manual prefix sniff is a bounded duplication of `min_frame_bytes=2` documented in the call-site comment.",
+        "crates/wz-codecs/tests/smoke.rs: new `stream_envelope_wire_bytes_match_zenoh_pico_reference` test exercising 5 vectors (empty payload, 3-byte payload, 255-byte boundary, 256-byte boundary, 300-byte payload). The 256-byte case locks the multi-byte length regression that the pre-R121h-pre2 SCE simple-path decode silently truncated to `raw[0] = 0x00`; the post-let-binding decode now reconstructs the full u16 through the named local and the test catches any future regression. Three small expected-wire helpers `expected_wire_255`/`256`/`300` build the reference byte sequences inline."
+      ],
+      "verification_bullets": [
+        "cargo build --workspace: clean rebuild including wz-runtime-tokio with the codec wire-up; no rustc warnings introduced.",
+        "cargo test -p wz-codecs --test smoke stream_envelope: the new byte-compare test passes with all 5 vectors green; the 256-byte case explicitly verifies that StreamEnvelope::decode reconstructs payload_len from both prefix bytes (not the low byte alone), defending against any future SCE simple-path regression.",
+        "cargo test --workspace: all suites green. wz-runtime-tokio lib tests + Layer E 5 integration tests (ap_demo_round_trip / wz_publisher_to_zsub / wz_initiator_to_wz_acceptor / wz_initiator_to_zsub / wz_publisher_aliased_to_zsub) all pass — confirms the codec-routed send/poll_event remains wire-compatible with both wz↔wz and wz↔zenoh-pico 1.5.0 interop scenarios.",
+        "bash scripts/run-ci.sh: all 8 lanes pass (Layer 0/A/A2/B/C1/C2/D/E). Layer E foreign interop validated end-to-end including the AP demo z_put → wz subscriber path that crosses both encode (wz publisher) and decode (wz subscriber) on the codec.",
+        "validate_workspace baseline: docs=12/12, T1 orphan=0 (no new), round-trip mandatory 12/12, GENERATED.md=sync; atomic ledger entries advance 161 -> 162 with this entry, sections=214 unchanged."
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121i: 6 DECLARE sub-variants (DeclSub / DeclToken / DeclQbl + Undecl x3 + DeclFinal). Each variant's parent codec opts in/out of M-flag derive at the import site per the R121h-pre B5-nu invert; each new outbound gets a per-variant byte-compare unit test mirroring the stream_envelope_wire_bytes test pattern. Estimate 2-3 rounds.",
+        "R121j: Query/Reply chain (wz-side encoder + dispatch). AP MVP's last large area. Estimate 4-6 rounds.",
+        "R123b-pre: deploy yaml flat to nested topology schema migration; resumes R123b once that lands.",
+        "R114: freshness gate negative test for scripts/run-ci.sh layer_b (sce-codegen mtime backward auto-rebuild verification). Low-priority defensive carry.",
+        "SCE feature proposal (optional): expose codec model's min_frame_bytes (and possibly max_frame_bytes) as a generated associated const on each codec struct, e.g. `pub const MIN_FRAME_BYTES: usize = 2;`. Removes the last hard-coded wire-shape number from runtime consumers like wz-runtime-tokio TcpDriver::poll_event's 2-byte prefix sniff. Per user directive (this session) any SCE non-textbook surface or improvement proposal is reported back rather than worked around in wz; this carry is the report. Not a blocker for R121i/j — just a future polish item if SCE accepts the proposal."
+      ],
+      "publishable_decision_summary": "R121h replaces the hand-rolled u16 LE length-prefix framing in TcpDriver::send and TcpDriver::poll_event with calls into the generated wz_codecs::stream_envelope::StreamEnvelope encoder/decoder, lands a 5-vector byte-compare regression test against the zenoh-pico _z_link_send_t_msg reference (including the 256-byte multi-byte-length critical case), and removes the last hand-rolled wire-framing site from the AP tokio runtime.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs imports: add `sce_forge_runtime::codec::SceCursor` and `wz_codecs::stream_envelope::StreamEnvelope`.",
+        "crates/wz-runtime-tokio/src/lib.rs TcpDriver doc comment rewritten: removes the R121d-era `framing remains hand-rolled` deferral note and replaces it with the R121h SSOT statement plus a rationale paragraph for the 2-byte prefix sniff at the start of poll_event (until SCE exposes a codec MIN_FRAME_BYTES associated const, the wire-shape requires this read before the structural decode can run).",
+        "crates/wz-runtime-tokio/src/lib.rs TcpDriver::send (lines 160-181): replaces the `len.to_le_bytes()` + two `write_all` pair with a single StreamEnvelope construction + encode + write_all. Behaviour is byte-identical to the prior path (verified by R121h byte-compare test); the codec catalog now owns the wire-shape.",
+        "crates/wz-runtime-tokio/src/lib.rs TcpDriver::poll_event (lines 191-224): two-step read pattern. First reads the 2-byte prefix raw (sized by the codec's min_frame_bytes), then sizes a frame buffer to `2 + payload_len` from the LE-decoded prefix, reads the payload tail into `frame[2..]`, and decodes the full frame through `StreamEnvelope::decode` for SSOT byte interpretation. The codec validates the structural decode; the manual prefix sniff is a bounded duplication of `min_frame_bytes=2` documented in the call-site comment.",
+        "crates/wz-codecs/tests/smoke.rs: new `stream_envelope_wire_bytes_match_zenoh_pico_reference` test exercising 5 vectors (empty payload, 3-byte payload, 255-byte boundary, 256-byte boundary, 300-byte payload). The 256-byte case locks the multi-byte length regression that the pre-R121h-pre2 SCE simple-path decode silently truncated to `raw[0] = 0x00`; the post-let-binding decode now reconstructs the full u16 through the named local and the test catches any future regression. Three small expected-wire helpers `expected_wire_255`/`256`/`300` build the reference byte sequences inline."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build --workspace: clean rebuild including wz-runtime-tokio with the codec wire-up; no rustc warnings introduced.",
+        "cargo test -p wz-codecs --test smoke stream_envelope: the new byte-compare test passes with all 5 vectors green; the 256-byte case explicitly verifies that StreamEnvelope::decode reconstructs payload_len from both prefix bytes (not the low byte alone), defending against any future SCE simple-path regression.",
+        "cargo test --workspace: all suites green. wz-runtime-tokio lib tests + Layer E 5 integration tests (ap_demo_round_trip / wz_publisher_to_zsub / wz_initiator_to_wz_acceptor / wz_initiator_to_zsub / wz_publisher_aliased_to_zsub) all pass — confirms the codec-routed send/poll_event remains wire-compatible with both wz↔wz and wz↔zenoh-pico 1.5.0 interop scenarios.",
+        "bash scripts/run-ci.sh: all 8 lanes pass (Layer 0/A/A2/B/C1/C2/D/E). Layer E foreign interop validated end-to-end including the AP demo z_put → wz subscriber path that crosses both encode (wz publisher) and decode (wz subscriber) on the codec.",
+        "validate_workspace baseline: docs=12/12, T1 orphan=0 (no new), round-trip mandatory 12/12, GENERATED.md=sync; atomic ledger entries advance 161 -> 162 with this entry, sections=214 unchanged."
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "wire-spec-subset--watching-zenoh-mvp/4-transport-session-layer",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121i: 6 DECLARE sub-variants (DeclSub / DeclToken / DeclQbl + Undecl x3 + DeclFinal). Each variant's parent codec opts in/out of M-flag derive at the import site per the R121h-pre B5-nu invert; each new outbound gets a per-variant byte-compare unit test mirroring the stream_envelope_wire_bytes test pattern. Estimate 2-3 rounds.",
+        "R121j: Query/Reply chain (wz-side encoder + dispatch). AP MVP's last large area. Estimate 4-6 rounds.",
+        "R123b-pre: deploy yaml flat to nested topology schema migration; resumes R123b once that lands.",
+        "R114: freshness gate negative test for scripts/run-ci.sh layer_b (sce-codegen mtime backward auto-rebuild verification). Low-priority defensive carry.",
+        "SCE feature proposal (optional): expose codec model's min_frame_bytes (and possibly max_frame_bytes) as a generated associated const on each codec struct, e.g. `pub const MIN_FRAME_BYTES: usize = 2;`. Removes the last hard-coded wire-shape number from runtime consumers like wz-runtime-tokio TcpDriver::poll_event's 2-byte prefix sniff. Per user directive (this session) any SCE non-textbook surface or improvement proposal is reported back rather than worked around in wz; this carry is the report. Not a blocker for R121i/j — just a future polish item if SCE accepts the proposal."
+      ]
+    },
     "Round 121h-pre": {
       "decision_summary": "R121h-pre bumps the SCE vendor pin from 7bada841 to e10619d3 to land the B5-ν variant-dispatch ownership invert (leaf-owned `tag=\"parent.X\"` → parent-owned `<sce:variant-dispatch flag=\"X.Y\"/>` at `<sce:import>`), updates wireexpr.scxml + 8 importer codecs accordingly, and retires the R121g `WireexprNonlocal` derive-suppression workaround in `build_declare_kexpr`.",
       "changes_bullets": [
