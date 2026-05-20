@@ -145,7 +145,7 @@ fn layer3_init_body_s0_a0() {
         cookie_len: None,
         cookie: None,
     }
-    .encode(input.parent_flags);
+    .encode_to_vec(((input.parent_flags) >> 6) & 1, ((input.parent_flags) >> 5) & 1);
     let pico = zenoh_pico_encode_init(&input);
     assert_eq!(wz, pico);
 }
@@ -174,7 +174,7 @@ fn layer3_init_body_s1_a0() {
         cookie_len: None,
         cookie: None,
     }
-    .encode(input.parent_flags);
+    .encode_to_vec(((input.parent_flags) >> 6) & 1, ((input.parent_flags) >> 5) & 1);
     let pico = zenoh_pico_encode_init(&input);
     assert_eq!(wz, pico);
 }
@@ -203,7 +203,7 @@ fn layer3_init_body_s0_a1() {
         cookie_len: Some(cookie.len() as u64),
         cookie: Some(cookie.clone()),
     }
-    .encode(input.parent_flags);
+    .encode_to_vec(((input.parent_flags) >> 6) & 1, ((input.parent_flags) >> 5) & 1);
     let pico = zenoh_pico_encode_init(&input);
     assert_eq!(wz, pico);
 }
@@ -233,7 +233,7 @@ fn layer3_init_body_s1_a1() {
         cookie_len: Some(cookie.len() as u64),
         cookie: Some(cookie.clone()),
     }
-    .encode(input.parent_flags);
+    .encode_to_vec(((input.parent_flags) >> 6) & 1, ((input.parent_flags) >> 5) & 1);
     let pico = zenoh_pico_encode_init(&input);
     assert_eq!(wz, pico);
 }

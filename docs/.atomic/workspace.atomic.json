@@ -5273,6 +5273,80 @@
         "Inventory hazard for R121h-perf-bump-2: per-leaf input narrowing per SCE Phase C convention (`declared inputs narrowed to actually-used flags`). E.g. decl_subscriber's RPF declared N/M/Z but only N is actually consumed by the leaf body; M became codegen-derived (B5-ν variant dispatch), Z is unused. Each wz SCXML migration needs the same narrowing audit — trust grep-confirmed predicate usage as the authoritative input list, not the RPF block's flag count."
       ]
     },
+    "Round 121h-perf-bump-2": {
+      "decision_summary": "SCE vendor pin 54d513af to 27accb35 atomic bump + Axis-1 inversion grammar migration on 11 SCXML files + Axis-3 session-role declaration + alloc feature wiring + .encode() to .encode_to_vec() rename across wz codebase, gated by SCE-side fix 07afcc45 for the embed-dispatcher arg-order bug surfaced in this round.",
+      "changes_bullets": [
+        "vendor/sce 54d513af to 27accb35 (33 commits incl Axis-1 Phase A-D2 RPF deletion + Axis-3 Phase A-D listener role + B1-alpha sink-based encode + 07afcc45 embed-dispatcher arg-order fix + 9a8a869e cross-backend substring guard + 27accb35 callee-side validator)",
+        "7 RPF leaves migrated to Axis-1 grammar (hello, init_body, join, open_body, wireexpr, wireexpr_local, wireexpr_nonlocal): requires-parent-flags to flag-inputs + parent.X to X predicate",
+        "8 wireexpr importers extended with flag-bind input=N source=header.N child on the wireexpr import (push, request, response, decl_subscriber, decl_queryable, decl_token, decl_kexpr, interest_body)",
+        "wireexpr.scxml dispatcher: chain-forwarder flag-bind input=N source=N added at the wireexpr_local + wireexpr_nonlocal arm imports",
+        "sources/session/session_fsm_unicast.scxml: session-role kind=accept-side declaration added (Axis-3 Phase A reserved-substate gate)",
+        "crates/wz-codecs/Cargo.toml: alloc feature wired (default=alloc, alloc=sce-forge-runtime/alloc) so encode_to_vec + VecSink emits stay available",
+        "wz authoring code .encode() to .encode_to_vec() mass rename across 23 .rs files (94 sites in wz-runtime-tokio/src + 17 layer3 tests + 5 runtime-tokio tests + wz-codecs lib/test)",
+        "InitBody/OpenBody encode + decode call sites at session_glue.rs unpacked from parent_flags u8 to individual flag-input args ((parent_flags>>6)&1 for S, (parent_flags>>5)&1 for A) at lines 1541/1593 encode + 3624/3638 decode",
+        "layer3_init_body/join/hello/open_body integration tests .encode(parent_flags) sites unpacked codec-by-codec; 3 literal-0 sites simplified per clippy::erasing_op"
+      ],
+      "verification_bullets": [
+        "cargo build --workspace clean across 7 member crates",
+        "cargo test --workspace --no-fail-fast 100% pass no failed suites; wz-runtime-tokio lib tests 85/85 baseline preserved; layer3 wire-byte-compare tests green; session_fsm inbound dispatch tests recovered from NeedMoreBytes regression",
+        "scripts/run-ci.sh 8 lanes pass (Layer 0 actionlint + A validate-workspace + A2 audit-mid + B verify-codegen + C1 cargo test + C2 cargo clippy --all-targets -D warnings + D deploy yaml + E ap_demo round-trip suite) exit=0",
+        "ap_demo_round_trip_against_zenoh_pico_z_put pass: interop with zenoh-pico restored after SCE 07afcc45 fix; pre-fix wz hit the bug on the (variant-dispatch + flag-bind on same import + beta-shape dispatcher leaf with flag-inputs) tuple which Phase D1 arm-side-only fixture had not covered; report drafted upstream fix landed same day",
+        "vendor/sce HEAD = 27accb35 confirmed",
+        "SCE 07afcc45 regression gate axis1_inversion_embed_dispatcher_arg_order (inline 4-codec fixture + 6-backend compile-smoke + Rust emit substring assertion + rustc round-trip across (M N) truth table) seals the coverage gap"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "session-fsm--prose-level-sketch/2-1-unicast-states",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "carry_forward_bullets": [
+        "R121h-perf-bump-3: TcpDriver hot path Vec::with_capacity(65537) + to_vec() perf reclaim (sink-based encode path now available via SCE B1-alpha)",
+        "R121j-5: inbound Request(Query) parser + on_query callback + QueryableTable (next major AP MVP gap; Query/Reply inbound 0% to 100%)",
+        "R121j-2b: ResponseReplyBuilder + ResponseErrBuilder (Response side mirror of R121j-2a)",
+        "R121j-1f/1g/1h: Request-level qos + budget + timestamp setters in RequestQueryBuilder",
+        "R121j-3a/b/c + R121j-4a/b/c: Reply/Err sub-helpers (consolidation/responder/del-body + encoding/source_info/attachment)",
+        "R121k+: inbound DECLARE parser (8 declare types; 4-6 rounds)",
+        "Layer 2 wireexpr KNOWN_DIVERGENCE: wz uses R125c2 dispatcher form SCE upstream codec_zenoh_wireexpr.scxml still flat leaf -- passive carry pending SCE upstream PR lifting its fixture to the same dispatch shape"
+      ],
+      "publishable_decision_summary": "SCE vendor pin 54d513af to 27accb35 atomic bump + Axis-1 inversion grammar migration on 11 SCXML files + Axis-3 session-role declaration + alloc feature wiring + .encode() to .encode_to_vec() rename across wz codebase, gated by SCE-side fix 07afcc45 for the embed-dispatcher arg-order bug surfaced in this round.",
+      "publishable_changes_bullets": [
+        "vendor/sce 54d513af to 27accb35 (33 commits incl Axis-1 Phase A-D2 RPF deletion + Axis-3 Phase A-D listener role + B1-alpha sink-based encode + 07afcc45 embed-dispatcher arg-order fix + 9a8a869e cross-backend substring guard + 27accb35 callee-side validator)",
+        "7 RPF leaves migrated to Axis-1 grammar (hello, init_body, join, open_body, wireexpr, wireexpr_local, wireexpr_nonlocal): requires-parent-flags to flag-inputs + parent.X to X predicate",
+        "8 wireexpr importers extended with flag-bind input=N source=header.N child on the wireexpr import (push, request, response, decl_subscriber, decl_queryable, decl_token, decl_kexpr, interest_body)",
+        "wireexpr.scxml dispatcher: chain-forwarder flag-bind input=N source=N added at the wireexpr_local + wireexpr_nonlocal arm imports",
+        "sources/session/session_fsm_unicast.scxml: session-role kind=accept-side declaration added (Axis-3 Phase A reserved-substate gate)",
+        "crates/wz-codecs/Cargo.toml: alloc feature wired (default=alloc, alloc=sce-forge-runtime/alloc) so encode_to_vec + VecSink emits stay available",
+        "wz authoring code .encode() to .encode_to_vec() mass rename across 23 .rs files (94 sites in wz-runtime-tokio/src + 17 layer3 tests + 5 runtime-tokio tests + wz-codecs lib/test)",
+        "InitBody/OpenBody encode + decode call sites at session_glue.rs unpacked from parent_flags u8 to individual flag-input args ((parent_flags>>6)&1 for S, (parent_flags>>5)&1 for A) at lines 1541/1593 encode + 3624/3638 decode",
+        "layer3_init_body/join/hello/open_body integration tests .encode(parent_flags) sites unpacked codec-by-codec; 3 literal-0 sites simplified per clippy::erasing_op"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build --workspace clean across 7 member crates",
+        "cargo test --workspace --no-fail-fast 100% pass no failed suites; wz-runtime-tokio lib tests 85/85 baseline preserved; layer3 wire-byte-compare tests green; session_fsm inbound dispatch tests recovered from NeedMoreBytes regression",
+        "scripts/run-ci.sh 8 lanes pass (Layer 0 actionlint + A validate-workspace + A2 audit-mid + B verify-codegen + C1 cargo test + C2 cargo clippy --all-targets -D warnings + D deploy yaml + E ap_demo round-trip suite) exit=0",
+        "ap_demo_round_trip_against_zenoh_pico_z_put pass: interop with zenoh-pico restored after SCE 07afcc45 fix; pre-fix wz hit the bug on the (variant-dispatch + flag-bind on same import + beta-shape dispatcher leaf with flag-inputs) tuple which Phase D1 arm-side-only fixture had not covered; report drafted upstream fix landed same day",
+        "vendor/sce HEAD = 27accb35 confirmed",
+        "SCE 07afcc45 regression gate axis1_inversion_embed_dispatcher_arg_order (inline 4-codec fixture + 6-backend compile-smoke + Rust emit substring assertion + rustc round-trip across (M N) truth table) seals the coverage gap"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "session-fsm--prose-level-sketch/2-1-unicast-states",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121h-perf-bump-3: TcpDriver hot path Vec::with_capacity(65537) + to_vec() perf reclaim (sink-based encode path now available via SCE B1-alpha)",
+        "R121j-5: inbound Request(Query) parser + on_query callback + QueryableTable (next major AP MVP gap; Query/Reply inbound 0% to 100%)",
+        "R121j-2b: ResponseReplyBuilder + ResponseErrBuilder (Response side mirror of R121j-2a)",
+        "R121j-1f/1g/1h: Request-level qos + budget + timestamp setters in RequestQueryBuilder",
+        "R121j-3a/b/c + R121j-4a/b/c: Reply/Err sub-helpers (consolidation/responder/del-body + encoding/source_info/attachment)",
+        "R121k+: inbound DECLARE parser (8 declare types; 4-6 rounds)",
+        "Layer 2 wireexpr KNOWN_DIVERGENCE: wz uses R125c2 dispatcher form SCE upstream codec_zenoh_wireexpr.scxml still flat leaf -- passive carry pending SCE upstream PR lifting its fixture to the same dispatch shape"
+      ]
+    },
     "Round 121h-perf-bump-attempt": {
       "decision_summary": "R121h-perf-bump-attempt investigated SCE drift +15 commits (vendor pin 54d513af -> SCE main de5d5e9a) and discovered the SCE B1-α series (sink-based encode + encode_to_vec wrapper) already lands the exact zero-alloc fix our R121i-c carry parked as an SCE upstream proposal; deferred the actual vendor bump to a multi-round R121h-perf-bump phase because the Axis-1 inversion that ships in the same drift window strengthens the present-if predicate grammar and 11 wz codec SCXMLs need migration before the bump can land cleanly.",
       "changes_bullets": [

@@ -78,7 +78,7 @@ fn layer3_open_body_syn_cookie_present() {
         cookie_len: Some(cookie.len() as u64),
         cookie: Some(cookie.clone()),
     }
-    .encode(parent_flags);
+    .encode_to_vec(((parent_flags) >> 5) & 1);
 
     let pico_bytes = zenoh_pico_encode_open(parent_flags, lease, initial_sn, &cookie);
     assert_eq!(wz_bytes, pico_bytes);
@@ -97,7 +97,7 @@ fn layer3_open_body_ack_no_cookie() {
         cookie_len: None,
         cookie: None,
     }
-    .encode(parent_flags);
+    .encode_to_vec(((parent_flags) >> 5) & 1);
 
     let pico_bytes = zenoh_pico_encode_open(parent_flags, lease, initial_sn, &[]);
     assert_eq!(wz_bytes, pico_bytes);
@@ -122,7 +122,7 @@ fn layer3_open_body_vle_boundaries() {
             cookie_len: None,
             cookie: None,
         }
-        .encode(FLAG_OPEN_A);
+        .encode_to_vec(((FLAG_OPEN_A) >> 5) & 1);
         let pico_a1 = zenoh_pico_encode_open(FLAG_OPEN_A, lease, initial_sn, &[]);
         assert_eq!(wz_a1, pico_a1, "A=1 lease={lease} sn={initial_sn}");
 
@@ -134,7 +134,7 @@ fn layer3_open_body_vle_boundaries() {
             cookie_len: Some(cookie.len() as u64),
             cookie: Some(cookie.clone()),
         }
-        .encode(0);
+        .encode_to_vec(0);
         let pico_a0 = zenoh_pico_encode_open(0, lease, initial_sn, &cookie);
         assert_eq!(wz_a0, pico_a0, "A=0 lease={lease} sn={initial_sn}");
     }

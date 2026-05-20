@@ -94,7 +94,7 @@ fn layer3_msg_put_no_flags_payload_variants() {
             payload_len: payload.len() as u64,
             payload: payload.clone(),
         }
-        .encode();
+        .encode_to_vec();
         let pico_bytes = zenoh_pico_encode_put_no_flags(&payload);
         assert_eq!(
             wz_bytes, pico_bytes,
@@ -115,7 +115,7 @@ fn layer3_msg_put_empty_payload_yields_header_and_zero_vle() {
         payload_len: 0,
         payload: vec![],
     }
-    .encode();
+    .encode_to_vec();
     let pico = zenoh_pico_encode_put_no_flags(&[]);
     assert_eq!(wz, pico);
     assert_eq!(wz, vec![MID_Z_PUT, 0x00], "empty-PUT canonical form");

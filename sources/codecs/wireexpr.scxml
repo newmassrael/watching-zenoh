@@ -127,11 +127,15 @@
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec" sce:default-endian="big" name="wireexpr">
-  <sce:import src="wireexpr_local.scxml" kind="codec" as="wireexpr_local"/>
-  <sce:import src="wireexpr_nonlocal.scxml" kind="codec" as="wireexpr_nonlocal"/>
-  <sce:requires-parent-flags carrier="header">
-    <sce:flag name="N" bit="5"/>
-  </sce:requires-parent-flags>
+  <sce:flag-inputs>
+    <sce:flag-input name="N" width="1"/>
+  </sce:flag-inputs>
+  <sce:import src="wireexpr_local.scxml" kind="codec" as="wireexpr_local">
+    <sce:flag-bind input="N" source="N"/>
+  </sce:import>
+  <sce:import src="wireexpr_nonlocal.scxml" kind="codec" as="wireexpr_nonlocal">
+    <sce:flag-bind input="N" source="N"/>
+  </sce:import>
   <datamodel>
     <sce:variant>
       <sce:arm value="0x00" type="wireexpr_nonlocal"/>

@@ -122,7 +122,7 @@ fn layer3_fragment_vle_width_boundaries() {
             sn,
             payload: payload.clone(),
         }
-        .encode();
+        .encode_to_vec();
         let pico_bytes = zenoh_pico_encode_fragment(sn, &payload);
         assert_eq!(
             wz_bytes, pico_bytes,
@@ -140,7 +140,7 @@ fn layer3_fragment_empty_payload_yields_vle_only() {
         sn: 0,
         payload: vec![],
     }
-    .encode();
+    .encode_to_vec();
     let pico = zenoh_pico_encode_fragment(0, &[]);
     assert_eq!(wz, pico);
     assert_eq!(wz, vec![0x00], "empty Fragment with sn=0 → [0x00]");

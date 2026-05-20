@@ -43,7 +43,7 @@ fn layer3_msg_del_no_flags_single_byte() {
         timestamp: None,
         extensions: None,
     }
-    .encode();
+    .encode_to_vec();
     let pico = zenoh_pico_encode_del_no_flags();
     assert_eq!(wz, pico);
     assert_eq!(wz, vec![MID_Z_DEL], "no-flags DEL is a single MID byte");

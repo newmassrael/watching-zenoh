@@ -97,7 +97,7 @@ async fn echo_demo_msg_put_round_trip() {
             payload_len: 5,
             payload: vec![0xCA, 0xFE, 0xBA, 0xBE, 0x42],
         };
-        let bytes = original.encode();
+        let bytes = original.encode_to_vec();
         driver
             .send(&TxFrame { bytes: &bytes }, Reliability::Reliable)
             .await

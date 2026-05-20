@@ -91,7 +91,7 @@ fn layer3_close_byte_compare_canonical_reasons() {
     ];
 
     for reason in corpus {
-        let wz_bytes = Close { reason }.encode();
+        let wz_bytes = Close { reason }.encode_to_vec();
         let pico_bytes = zenoh_pico_encode_close(reason);
         assert_eq!(
             wz_bytes, pico_bytes,
@@ -108,7 +108,7 @@ fn layer3_close_emits_exactly_one_byte() {
     // multi-byte body (e.g., a future zenoh-pico patch adds an
     // implicit version prefix), this test catches it and forces an
     // explicit decision rather than a silent divergence.
-    let bytes = Close { reason: 0x01 }.encode();
+    let bytes = Close { reason: 0x01 }.encode_to_vec();
     assert_eq!(
         bytes.len(),
         1,

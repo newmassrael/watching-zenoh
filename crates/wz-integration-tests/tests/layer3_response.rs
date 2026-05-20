@@ -10,7 +10,7 @@
 //! peek-byte variant body (reply / err arms; reply itself wraps a
 //! put / del peek-byte body). R88 RFC variant-default-uniformity
 //! applies a three-level chain (response → reply → msg_put) of
-//! declared default arms, so wz `Response::default().encode()`
+//! declared default arms, so wz `Response::default().encode_to_vec()`
 //! reaches the same wire bytes as zenoh-pico after a three-patch
 //! fixture matches the upstream defaults: (1) `_ext_qos._val = 5`
 //! is the Z_N_QOS_DEFAULT sentinel; (2)
@@ -72,7 +72,7 @@ fn zenoh_pico_encode_response_default() -> Vec<u8> {
 
 #[test]
 fn layer3_response_default_byte_equivalent() {
-    let wz = Response::default().encode();
+    let wz = Response::default().encode_to_vec();
     let pico = zenoh_pico_encode_response_default();
     assert_eq!(
         wz, pico,

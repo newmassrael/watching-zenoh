@@ -345,7 +345,7 @@ async fn r90_rx_frame_push_payload_decodes_via_push_codec() {
         header: 0x1D,
         ..Push::default()
     };
-    let push_bytes = push.encode();
+    let push_bytes = push.encode_to_vec();
 
     // Frame envelope: T_MID_FRAME | R flag = 0x25, sn=2 VLE = 0x02,
     // tail = push_bytes.

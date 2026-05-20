@@ -81,7 +81,7 @@ fn layer3_ext_envelope_oracle_byte_equivalent_to_zenoh_pico() {
 
     let mut cursor = SceCursor::new(&ORACLE_WIRE);
     let env = ExtEnvelope::decode(&mut cursor).expect("wz decode oracle");
-    let wz = env.encode();
+    let wz = env.encode_to_vec();
     assert_eq!(
         wz, pico,
         "wz ExtEnvelope encode must byte-match zenoh-pico per-entry encode"

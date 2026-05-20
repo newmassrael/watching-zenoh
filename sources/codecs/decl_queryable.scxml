@@ -38,6 +38,7 @@
        zenoh-pico declarations.c:65-79 `_z_decl_commons_encode`). -->
   <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr">
     <sce:variant-dispatch flag="header.M"/>
+    <sce:flag-bind input="N" source="header.N"/>
   </sce:import>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">

@@ -34,7 +34,7 @@ use wz_codecs::msg_put::MsgPut;
 #[test]
 fn msg_put_default_encode_decode_roundtrip() {
     let put = MsgPut::default();
-    let encoded = put.encode();
+    let encoded = put.encode_to_vec();
     assert!(
         !encoded.is_empty(),
         "Default MsgPut encode produced 0 bytes — at minimum the \
@@ -55,7 +55,7 @@ fn msg_put_default_encode_decode_roundtrip() {
 #[test]
 fn msg_del_default_encode_decode_roundtrip() {
     let del = MsgDel::default();
-    let encoded = del.encode();
+    let encoded = del.encode_to_vec();
     assert!(
         !encoded.is_empty(),
         "Default MsgDel encode produced 0 bytes — at minimum the \
@@ -81,7 +81,7 @@ fn reply_default_encode_decode_roundtrip() {
     use wz_codecs::reply::Reply;
 
     let reply = Reply::default();
-    let encoded = reply.encode();
+    let encoded = reply.encode_to_vec();
     assert!(
         !encoded.is_empty(),
         "default Reply encode produced 0 bytes — header byte expected"
@@ -150,7 +150,7 @@ fn stream_envelope_wire_bytes_match_zenoh_pico_reference() {
             payload_len: payload.len() as u16,
             payload: payload.to_vec(),
         };
-        let wire = env.encode();
+        let wire = env.encode_to_vec();
         assert_eq!(
             wire.len(),
             expected_wire.len(),
@@ -218,7 +218,7 @@ fn err_default_encode_decode_roundtrip() {
     use wz_codecs::err::Err;
 
     let err = Err::default();
-    let encoded = err.encode();
+    let encoded = err.encode_to_vec();
     assert!(
         !encoded.is_empty(),
         "default Err encode produced 0 bytes — header expected"

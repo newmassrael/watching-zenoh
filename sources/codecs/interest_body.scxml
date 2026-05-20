@@ -70,7 +70,9 @@
        wireexpr local-mapping discriminator, so emitting a derive bit
        there would corrupt the CURRENT/FUTURE semantics. The wireexpr
        inner arm choice is a type-level refinement only. -->
-  <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr"/>
+  <sce:import src="wireexpr.scxml" kind="codec" as="codec_zenoh_wireexpr">
+    <sce:flag-bind input="N" source="header.N"/>
+  </sce:import>
   <datamodel>
     <sce:flags id="header" sce:type="uint8" sce:byte="0" sce:bit-size="8">
       <sce:flag name="KE" bit="0"/>
