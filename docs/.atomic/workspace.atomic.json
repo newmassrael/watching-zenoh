@@ -5553,6 +5553,52 @@
         "Nonlocal arm silent gap (R121i-a/b/c): all DECLARE builders are fixed to WireexprLocal default. Interest/Reply paths in R121j may need Nonlocal coverage when the referenced mapping is peer-declared rather than local-declared; audit + extend builders with a Nonlocal arm parameter at that point."
       ]
     },
+    "Round 121i-d": {
+      "decision_summary": "R121i-d closes the WireexprNonlocal-arm silent gap for DECLARE builders by adding three companion builders (subscriber / queryable / token), keeping the existing Local-arm builders untouched.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;` import.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `build_declare_subscriber_nonlocal` / `build_declare_queryable_nonlocal` / `build_declare_token_nonlocal` (post-R121i-b `build_declare_token`). Same `(id, mapping_id, suffix)` signature as the Local-arm builders; inner `Wireexpr` arm flipped to `WireexprNonlocal`; codegen-derived M bit (0x00 vs Local's 0x40 — verified at `wz-codecs-*/out/decl_subscriber.rs` line 134's `_derived_header` match). `build_declare_kexpr` deliberately has no Nonlocal companion — DeclKexpr's encoder-perspective locality is by construction Local (sender installs the (id, literal) pair into its OWN mapping table).",
+        "Each `_nonlocal` builder panics on `keyexpr_mapping_id == 0` mirroring `build_declare_kexpr_rejects_zero_mapping_id`. Rationale: zenoh-pico's `_Z_KEYEXPR_MAPPING_LOCAL` sentinel is `(uintptr_t)0` (core.h:151), so a remote-mapped id=0 refers to the peer's literal-sentinel slot which carries no table entry — the literal case is only representable in the Local arm via `build_declare_subscriber(_, 0, Some(s))`.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added six unit tests in the `tests` mod (one byte-compare + one panic-rejection per builder). Each byte-compare locks alias (mapping_id=7, no suffix) / composite (mapping_id=7 + Some(\"abc\")) / multi-byte VLE boundary (mapping_id=200, no suffix) — three vectors per builder. Locked wire bytes: 0x02 / 0x22 / 0x02 (Nonlocal subscriber header), 0x04 / 0x24 / 0x04 (queryable), 0x06 / 0x26 / 0x06 (token) — all with the M bit clear (Local-arm counterparts emit 0x42 / 0x62, 0x44 / 0x64, 0x46 / 0x66).",
+        "crates/wz-runtime-tokio/src/session_glue.rs — fixed three pre-existing `clippy::doc_overindented_list_items` errors in the R121j-1 `build_request_query_emits_zenoh_pico_compatible_wire_bytes` doc comment (lines 5139, 5142, 5143) by realigning the bullet continuation lines from 7-space indent to 5-space content-aligned indent. These only surfaced once `--all-targets` was added to the clippy invocation locally; the prior session's `cargo clippy` runs did not include test docs."
+      ],
+      "verification_bullets": [
+        "Targeted: `cargo test -p wz-runtime-tokio --lib build_declare_subscriber_nonlocal build_declare_queryable_nonlocal build_declare_token_nonlocal` — 6 passed, 0 failed (3 byte-compare + 3 panic-rejection).",
+        "Regression: `cargo test -p wz-runtime-tokio --lib` — 60 passed, 0 failed (up from 54; +6 R121i-d tests).",
+        "Layer C1 equivalent: `cargo test --workspace` — 6 suites ok, 0 failed.",
+        "Layer C2 equivalent: `cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings` — clean (after the R121j-1 doc reindent fix above).",
+        "Layer E flaky verification (kickoff blocking #0): `bash scripts/run-ci.sh --layer E` at HEAD 83892ab pre-R121i-d — 5/5 tests pass. The 11th-session pre-push hook FAIL on the ledger-only commit 83892ab was therefore a transient flake, not a wz src regression; no carry-forward needed."
+      ],
+      "carry_forward_bullets": [
+        "Inbound DECLARE parser (R121j-5 territory). Outbound 7/7 declarations now cover both M=0 and M=1 arms; once inbound lands, the peer-declared-mapping reception → wz Nonlocal-arm reply cross-validation can fire end-to-end.",
+        "R121h-perf-bump 3 sub-phases still active. SCE drift unchanged this session: vendor pin 54d513af vs SCE main de5d5e9a (+15 commits, B1-α sink series + Axis-1 inversion + Axis-2/3/5 refactors). Next entry path: `R121h-perf-bump-1 — Axis-1 grammar study + init_body.scxml migrate` (study SCE bf41498c canonical reference + 36c0750e / 63daab97 / b8f86b46 / 19b0fcf0 Phase A/B/D).",
+        "Request(Query) layered helpers (consolidation / params / Q-level exts / Request-level exts) carry intact from R121j-1.",
+        "Vec::with_capacity(65537) / frame.bytes.to_vec()+extend perf debt — to be absorbed during R121h-perf-bump-3 (vendor bump + sink-based migration on TcpDriver hot path).",
+        "Undecl_* ext_keyexpr no-ext shape — router cross-validation surface deferred."
+      ],
+      "publishable_decision_summary": "R121i-d closes the WireexprNonlocal-arm silent gap for DECLARE builders by adding three companion builders (subscriber / queryable / token), keeping the existing Local-arm builders untouched.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;` import.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added `build_declare_subscriber_nonlocal` / `build_declare_queryable_nonlocal` / `build_declare_token_nonlocal` (post-R121i-b `build_declare_token`). Same `(id, mapping_id, suffix)` signature as the Local-arm builders; inner `Wireexpr` arm flipped to `WireexprNonlocal`; codegen-derived M bit (0x00 vs Local's 0x40 — verified at `wz-codecs-*/out/decl_subscriber.rs` line 134's `_derived_header` match). `build_declare_kexpr` deliberately has no Nonlocal companion — DeclKexpr's encoder-perspective locality is by construction Local (sender installs the (id, literal) pair into its OWN mapping table).",
+        "Each `_nonlocal` builder panics on `keyexpr_mapping_id == 0` mirroring `build_declare_kexpr_rejects_zero_mapping_id`. Rationale: zenoh-pico's `_Z_KEYEXPR_MAPPING_LOCAL` sentinel is `(uintptr_t)0` (core.h:151), so a remote-mapped id=0 refers to the peer's literal-sentinel slot which carries no table entry — the literal case is only representable in the Local arm via `build_declare_subscriber(_, 0, Some(s))`.",
+        "crates/wz-runtime-tokio/src/session_glue.rs — added six unit tests in the `tests` mod (one byte-compare + one panic-rejection per builder). Each byte-compare locks alias (mapping_id=7, no suffix) / composite (mapping_id=7 + Some(\"abc\")) / multi-byte VLE boundary (mapping_id=200, no suffix) — three vectors per builder. Locked wire bytes: 0x02 / 0x22 / 0x02 (Nonlocal subscriber header), 0x04 / 0x24 / 0x04 (queryable), 0x06 / 0x26 / 0x06 (token) — all with the M bit clear (Local-arm counterparts emit 0x42 / 0x62, 0x44 / 0x64, 0x46 / 0x66).",
+        "crates/wz-runtime-tokio/src/session_glue.rs — fixed three pre-existing `clippy::doc_overindented_list_items` errors in the R121j-1 `build_request_query_emits_zenoh_pico_compatible_wire_bytes` doc comment (lines 5139, 5142, 5143) by realigning the bullet continuation lines from 7-space indent to 5-space content-aligned indent. These only surfaced once `--all-targets` was added to the clippy invocation locally; the prior session's `cargo clippy` runs did not include test docs."
+      ],
+      "publishable_verification_bullets": [
+        "Targeted: `cargo test -p wz-runtime-tokio --lib build_declare_subscriber_nonlocal build_declare_queryable_nonlocal build_declare_token_nonlocal` — 6 passed, 0 failed (3 byte-compare + 3 panic-rejection).",
+        "Regression: `cargo test -p wz-runtime-tokio --lib` — 60 passed, 0 failed (up from 54; +6 R121i-d tests).",
+        "Layer C1 equivalent: `cargo test --workspace` — 6 suites ok, 0 failed.",
+        "Layer C2 equivalent: `cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings` — clean (after the R121j-1 doc reindent fix above).",
+        "Layer E flaky verification (kickoff blocking #0): `bash scripts/run-ci.sh --layer E` at HEAD 83892ab pre-R121i-d — 5/5 tests pass. The 11th-session pre-push hook FAIL on the ledger-only commit 83892ab was therefore a transient flake, not a wz src regression; no carry-forward needed."
+      ],
+      "publishable_carry_forward_bullets": [
+        "Inbound DECLARE parser (R121j-5 territory). Outbound 7/7 declarations now cover both M=0 and M=1 arms; once inbound lands, the peer-declared-mapping reception → wz Nonlocal-arm reply cross-validation can fire end-to-end.",
+        "R121h-perf-bump 3 sub-phases still active. SCE drift unchanged this session: vendor pin 54d513af vs SCE main de5d5e9a (+15 commits, B1-α sink series + Axis-1 inversion + Axis-2/3/5 refactors). Next entry path: `R121h-perf-bump-1 — Axis-1 grammar study + init_body.scxml migrate` (study SCE bf41498c canonical reference + 36c0750e / 63daab97 / b8f86b46 / 19b0fcf0 Phase A/B/D).",
+        "Request(Query) layered helpers (consolidation / params / Q-level exts / Request-level exts) carry intact from R121j-1.",
+        "Vec::with_capacity(65537) / frame.bytes.to_vec()+extend perf debt — to be absorbed during R121h-perf-bump-3 (vendor bump + sink-based migration on TcpDriver hot path).",
+        "Undecl_* ext_keyexpr no-ext shape — router cross-validation surface deferred."
+      ]
+    },
     "Round 121j-1": {
       "decision_summary": "R121j-1 opens the Query/Reply chain — Request(Query) outbound — with build_request_query + SessionLinkActions::send_request_query + encode_frame_with_request (PUSH/DECLARE envelope wrapper mirror), each anchored to zenoh-pico _z_request_encode + _z_query_encode references and gated by 3-vector wire-byte regression tests. AP MVP minimal shape only (no consolidation / params / Query-level exts / Request-level exts); layered helpers for consolidation / params / target / budget / timeout_ms land in follow-up R121j sub-rounds.",
       "changes_bullets": [
