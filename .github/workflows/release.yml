@@ -1,0 +1,163 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# watching-zenoh release — tag-driven release rehearsal.
+#
+# Trigger: pushing a `v*` tag (e.g. `v0.1.0-mvp`).
+#
+# This workflow runs the same 8-lane CI mirror that ci.yml runs
+# (delegated to scripts/run-ci.sh so the two paths cannot drift)
+# and then creates a GitHub release with auto-generated notes
+# anchored to the tag. Actual `cargo publish` to crates.io is a
+# separate manual step — this workflow exercises the dry-run
+# packaging gate per publishable crate so packaging errors
+# surface before the manual publish.
+#
+# Why dry-run only:
+#   - wz-codecs build.rs invokes SCE codegen from vendor/sce; the
+#     full source tree exceeds the 10 MiB crates.io tarball cap.
+#     A `[package.exclude]` pass that prunes vendor/sce + generated
+#     intermediates is the prerequisite for the real publish step,
+#     and the dry-run output identifies exactly which paths need
+#     excluding (cargo lists the packaging contents).
+#   - The first external release (v0.1.0-mvp) ships the source +
+#     GitHub release archive only; crates.io publication is gated
+#     on the manual `cargo publish` invocation after the package
+#     metadata (repository URL, README, exclude list) lands.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release from (e.g. v0.1.0-mvp)'
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  release:
+    name: ci-mirror + dry-run + github-release
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    permissions:
+      contents: write  # for softprops/action-gh-release@v2
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            libclang-dev \
+            clang \
+            perl \
+            python3-yaml \
+            protobuf-compiler
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo registry + build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            crates -> target
+            vendor/sce -> target
+
+      - name: Install mnemosyne-cli
+        run: |
+          if ! command -v mnemosyne-cli >/dev/null 2>&1; then
+            cargo install --git https://github.com/newmassrael/mnemosyne \
+              --branch main --bin mnemosyne-cli mnemosyne-cli || {
+              echo "::warning::mnemosyne-cli install failed; Layer A skipped"
+              echo "MNEMOSYNE_SKIP=1" >> "$GITHUB_ENV"
+            }
+          fi
+
+      - name: Build sce-codegen (vendor/sce)
+        run: bash scripts/build-sce.sh
+
+      - name: Regenerate docs/GENERATED.md
+        if: env.MNEMOSYNE_SKIP != '1'
+        run: mnemosyne-cli generate-docs
+
+      # CI mirror — every Layer must pass before the release artefacts
+      # land. Delegating to scripts/run-ci.sh keeps the two workflows
+      # in lockstep.
+      - name: Layer A — Mnemosyne workspace validate
+        if: env.MNEMOSYNE_SKIP != '1'
+        run: bash scripts/run-ci.sh --layer A
+
+      - name: Layer A2 — Envelope mid value= audit
+        run: bash scripts/run-ci.sh --layer A2
+
+      - name: Layer B — verify-codegen.sh per codec
+        run: bash scripts/run-ci.sh --layer B
+
+      - name: Layer C1 — cargo test --workspace
+        run: bash scripts/run-ci.sh --layer C1
+
+      - name: Layer C2 — cargo clippy --deny warnings
+        run: bash scripts/run-ci.sh --layer C2
+
+      - name: Layer D — deploy/*.yaml schema validate
+        run: bash scripts/run-ci.sh --layer D
+
+      - name: Build zenoh-pico CLI binaries (Layer E dep)
+        run: bash scripts/build-zenoh-pico-cli.sh
+
+      - name: Build wz-ap-demo binary (Layer E dep)
+        run: (cd crates && cargo build -p wz-ap-demo)
+
+      - name: Layer E — wz-ap-demo round-trip vs zenoh-pico z_put
+        run: bash scripts/run-ci.sh --layer E
+
+      # Cargo packaging dry-run — surfaces .crate tarball errors
+      # (size > 10 MiB, missing required metadata, files outside
+      # allowed set) for each publishable crate. The build.rs of
+      # wz-codecs invokes SCE codegen which may fail in the
+      # packaging sandbox; a non-zero exit here is informational
+      # for the operator (logged + continued via `|| true`) so the
+      # release artefacts still land. A future round closes the
+      # gap by either pre-generating wz-codecs out/ or shipping the
+      # SCE binary path through [package.exclude] tuning.
+      - name: cargo publish --dry-run (zenoh-pico-sys)
+        run: (cd crates && cargo publish --dry-run -p zenoh-pico-sys) || echo "::warning::zenoh-pico-sys dry-run non-zero — investigate before manual publish"
+
+      - name: cargo publish --dry-run (wz-codecs)
+        run: (cd crates && cargo publish --dry-run -p wz-codecs) || echo "::warning::wz-codecs dry-run non-zero — likely SCE binary path or size limit; investigate before manual publish"
+
+      - name: cargo publish --dry-run (wz-runtime-tokio)
+        run: (cd crates && cargo publish --dry-run -p wz-runtime-tokio) || echo "::warning::wz-runtime-tokio dry-run non-zero — investigate before manual publish"
+
+      - name: cargo publish --dry-run (wz-runtime-lwip)
+        run: (cd crates && cargo publish --dry-run -p wz-runtime-lwip) || echo "::warning::wz-runtime-lwip dry-run non-zero — investigate before manual publish"
+
+      - name: cargo publish --dry-run (wz-ap-demo)
+        run: (cd crates && cargo publish --dry-run -p wz-ap-demo) || echo "::warning::wz-ap-demo dry-run non-zero — investigate before manual publish"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          draft: true
+          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-mvp') || contains(github.event.inputs.tag || github.ref_name, '-rc') || contains(github.event.inputs.tag || github.ref_name, '-beta') || contains(github.event.inputs.tag || github.ref_name, '-alpha') }}
