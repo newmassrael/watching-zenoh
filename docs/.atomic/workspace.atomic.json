@@ -5409,6 +5409,66 @@
         "Cleanup carry: spurious entry_id='test' entry exists in ledger (entries=180; was 179 pre-R121h-perf-bump-3 session). Publishable half redacted via R295 set_changelog_publishable_* primitives this round; mnemosyne.toml [[publishable_override_ledger]] row still pending because the CLI lacks the emit-publishable-override-ledger-draft subcommand. Surface to user for next-session resolution path"
       ]
     },
+    "Round 121h-perf-bump-4": {
+      "decision_summary": "Three secondary encoders (encode_init / encode_open / encode_close) in session_glue.rs migrated from inner-Vec + extend_from_slice to sink-based encode, saving one allocation per call. Layer-3 byte-compare regression-zero.",
+      "changes_bullets": [
+        "encode_init at crates/wz-runtime-tokio/src/session_glue.rs:1539-1547: pre-reserve Vec capacity = 1 (parent_flags | T_MID_INIT) + InitBody::MAX_ENCODED_BYTES + ext_bytes.len() instead of an ad-hoc body.zid.len() + cookie.len() + 12 estimate; wrap the wire Vec in VecSink after pushing the header byte and call body.encode(&mut sink, s, a) directly, eliminating the intermediate body.encode_to_vec(s, a) allocation. ext_bytes still extended at the end (encode_ext_chain is a separate concern not touched this round)",
+        "encode_open at session_glue.rs:1593-1600: same sink-based shape applied. Pre-reserve = 1 + OpenBody::MAX_ENCODED_BYTES + ext_bytes.len(); body.encode(&mut sink, a) replaces body.encode_to_vec(a) + extend_from_slice. Same ext_bytes extension at end",
+        "encode_close at session_glue.rs:1641-1648: pre-reserve = 1 + Close::MAX_ENCODED_BYTES (2 byte total worst-case); Close { reason }.encode(&mut sink) replaces the encode_to_vec + extend_from_slice pair. Most dramatic per-call ratio (2-byte wire was 2 allocs; now 1)",
+        "encode_ext_chain at session_glue.rs:1614-1633 (the 4th secondary site flagged in the R121h-perf-bump-3 carry) intentionally NOT touched this round -- the per-entry Z-bit byte-patching at index 0 of entry.encode_to_vec() output requires a deeper refactor (either expose a sink with positional rewind, or restructure the ext encode to emit the Z bit conditionally via a flag arg). Defer to a future R121h-perf-bump-5 carry"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio: clean",
+        "cargo test -p wz-runtime-tokio --lib: 98/98 pass (baseline preserved; no test added since the byte-identical guarantee is the contract and the layer 3 byte-compare integration tests are the proof, not new lib tests)",
+        "cargo test -p wz-integration-tests --test layer3_init_body --test layer3_open_body --test layer3_close: 4 + 3 + 2 = 9/9 pass; wire bytes byte-identical to zenoh-pico baseline across S/A flag combinations and OpenSyn vs OpenAck and Close reason byte",
+        "cargo clippy -p wz-runtime-tokio --all-targets: clean",
+        "scripts/run-ci.sh: 8/8 lanes pass on first attempt (no flake this round)"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121h-perf-bump-5: encode_ext_chain (session_glue.rs:1614-1633) still emits each ExtEntry via .encode_to_vec() + byte-patch the index-0 Z bit. Refactor options: (a) extend ExtEntry::encode to accept a chain_continuation: bool arg so the Z bit is emitted natively in the right position; (b) add a sink method position() that lets callers rewind by 1 byte after entry.encode() to patch the Z bit. Option (a) is cleaner if SCE codegen can express it; option (b) is purely consumer-side. Defer pending SCE Phase X decision",
+        "DeclFinal batch entry encode + KeepAlive encode at session_glue.rs were originally flagged in the closure but on closer reading those are NOT direct encoder sites -- the closure mistakenly cited those line numbers. Actual location of those codec calls is inside the dispatch path (declare-final emit + keep-alive emit) which already runs through encode_frame_with_declare / encode_frame_with_push (covered by R121h-perf-bump-3). No separate per-bump-4 work needed",
+        "R121j-3b Reply.source_info setter still pending on ResponseReplyBuilder",
+        "R121j-3c Reply.responder setter (Response-LEVEL ext, distinct from Reply-LEVEL exts; requires extending build() to also push to response.extensions) still pending",
+        "R121j-4b Err.source_info setter + R121j-4c Err.attachment setter still pending on ResponseErrBuilder",
+        "R121j-5 inbound Request(Query) parser + on_query dispatch + QueryableTable struct -- largest single AP MVP weighted jump (+5-7%p); 2-3 sub-rounds = 1 session",
+        "R121k inbound DECLARE parser silent gap (outbound 9/9 vs inbound 0/8); 4-6 sub-rounds = 1-2 sessions",
+        "R121j-1h ergonomic typed wrapper .request_qos_typed over packed-byte; R121j-tstamp setter pending wz_codecs ext_zbuf Timestamp sub-codec wiring"
+      ],
+      "publishable_decision_summary": "Three secondary encoders (encode_init / encode_open / encode_close) in session_glue.rs migrated from inner-Vec + extend_from_slice to sink-based encode, saving one allocation per call. Layer-3 byte-compare regression-zero.",
+      "publishable_changes_bullets": [
+        "encode_init at crates/wz-runtime-tokio/src/session_glue.rs:1539-1547: pre-reserve Vec capacity = 1 (parent_flags | T_MID_INIT) + InitBody::MAX_ENCODED_BYTES + ext_bytes.len() instead of an ad-hoc body.zid.len() + cookie.len() + 12 estimate; wrap the wire Vec in VecSink after pushing the header byte and call body.encode(&mut sink, s, a) directly, eliminating the intermediate body.encode_to_vec(s, a) allocation. ext_bytes still extended at the end (encode_ext_chain is a separate concern not touched this round)",
+        "encode_open at session_glue.rs:1593-1600: same sink-based shape applied. Pre-reserve = 1 + OpenBody::MAX_ENCODED_BYTES + ext_bytes.len(); body.encode(&mut sink, a) replaces body.encode_to_vec(a) + extend_from_slice. Same ext_bytes extension at end",
+        "encode_close at session_glue.rs:1641-1648: pre-reserve = 1 + Close::MAX_ENCODED_BYTES (2 byte total worst-case); Close { reason }.encode(&mut sink) replaces the encode_to_vec + extend_from_slice pair. Most dramatic per-call ratio (2-byte wire was 2 allocs; now 1)",
+        "encode_ext_chain at session_glue.rs:1614-1633 (the 4th secondary site flagged in the R121h-perf-bump-3 carry) intentionally NOT touched this round -- the per-entry Z-bit byte-patching at index 0 of entry.encode_to_vec() output requires a deeper refactor (either expose a sink with positional rewind, or restructure the ext encode to emit the Z bit conditionally via a flag arg). Defer to a future R121h-perf-bump-5 carry"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio: clean",
+        "cargo test -p wz-runtime-tokio --lib: 98/98 pass (baseline preserved; no test added since the byte-identical guarantee is the contract and the layer 3 byte-compare integration tests are the proof, not new lib tests)",
+        "cargo test -p wz-integration-tests --test layer3_init_body --test layer3_open_body --test layer3_close: 4 + 3 + 2 = 9/9 pass; wire bytes byte-identical to zenoh-pico baseline across S/A flag combinations and OpenSyn vs OpenAck and Close reason byte",
+        "cargo clippy -p wz-runtime-tokio --all-targets: clean",
+        "scripts/run-ci.sh: 8/8 lanes pass on first attempt (no flake this round)"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121h-perf-bump-5: encode_ext_chain (session_glue.rs:1614-1633) still emits each ExtEntry via .encode_to_vec() + byte-patch the index-0 Z bit. Refactor options: (a) extend ExtEntry::encode to accept a chain_continuation: bool arg so the Z bit is emitted natively in the right position; (b) add a sink method position() that lets callers rewind by 1 byte after entry.encode() to patch the Z bit. Option (a) is cleaner if SCE codegen can express it; option (b) is purely consumer-side. Defer pending SCE Phase X decision",
+        "DeclFinal batch entry encode + KeepAlive encode at session_glue.rs were originally flagged in the closure but on closer reading those are NOT direct encoder sites -- the closure mistakenly cited those line numbers. Actual location of those codec calls is inside the dispatch path (declare-final emit + keep-alive emit) which already runs through encode_frame_with_declare / encode_frame_with_push (covered by R121h-perf-bump-3). No separate per-bump-4 work needed",
+        "R121j-3b Reply.source_info setter still pending on ResponseReplyBuilder",
+        "R121j-3c Reply.responder setter (Response-LEVEL ext, distinct from Reply-LEVEL exts; requires extending build() to also push to response.extensions) still pending",
+        "R121j-4b Err.source_info setter + R121j-4c Err.attachment setter still pending on ResponseErrBuilder",
+        "R121j-5 inbound Request(Query) parser + on_query dispatch + QueryableTable struct -- largest single AP MVP weighted jump (+5-7%p); 2-3 sub-rounds = 1 session",
+        "R121k inbound DECLARE parser silent gap (outbound 9/9 vs inbound 0/8); 4-6 sub-rounds = 1-2 sessions",
+        "R121j-1h ergonomic typed wrapper .request_qos_typed over packed-byte; R121j-tstamp setter pending wz_codecs ext_zbuf Timestamp sub-codec wiring"
+      ]
+    },
     "Round 121h-perf-bump-attempt": {
       "decision_summary": "R121h-perf-bump-attempt investigated SCE drift +15 commits (vendor pin 54d513af -> SCE main de5d5e9a) and discovered the SCE B1-α series (sink-based encode + encode_to_vec wrapper) already lands the exact zero-alloc fix our R121i-c carry parked as an SCE upstream proposal; deferred the actual vendor bump to a multi-round R121h-perf-bump phase because the Axis-1 inversion that ships in the same drift window strengthens the present-if predicate grammar and 11 wz codec SCXMLs need migration before the bump can land cleanly.",
       "changes_bullets": [

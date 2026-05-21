@@ -1537,11 +1537,16 @@ fn encode_init(
     };
 
     let ext_bytes = encode_ext_chain(extensions);
-    let mut wire = Vec::with_capacity(body.zid.len() + params.cookie.len() + 12 + ext_bytes.len());
+    let mut wire = Vec::with_capacity(
+        1 + InitBody::MAX_ENCODED_BYTES + ext_bytes.len(),
+    );
     wire.push(parent_flags | wire_const::T_MID_INIT);
     let s = (parent_flags >> 6) & 1;
     let a = (parent_flags >> 5) & 1;
-    wire.extend_from_slice(&body.encode_to_vec(s, a));
+    {
+        let mut sink = VecSink::new(&mut wire);
+        body.encode(&mut sink, s, a).expect("VecSink is infallible");
+    }
     wire.extend_from_slice(&ext_bytes);
     wire
 }
@@ -1591,10 +1596,15 @@ fn encode_open(
     };
 
     let ext_bytes = encode_ext_chain(extensions);
-    let mut wire = Vec::with_capacity(cookie_bytes.len() + 24 + ext_bytes.len());
+    let mut wire = Vec::with_capacity(
+        1 + OpenBody::MAX_ENCODED_BYTES + ext_bytes.len(),
+    );
     wire.push(parent_flags | wire_const::T_MID_OPEN);
     let a = (parent_flags >> 5) & 1;
-    wire.extend_from_slice(&body.encode_to_vec(a));
+    {
+        let mut sink = VecSink::new(&mut wire);
+        body.encode(&mut sink, a).expect("VecSink is infallible");
+    }
     wire.extend_from_slice(&ext_bytes);
     wire
 }
@@ -1640,10 +1650,12 @@ fn encode_ext_chain(entries: &[ExtEntry]) -> Vec<u8> {
 /// that the link driver handles directly).
 fn encode_close(reason: u8) -> Vec<u8> {
     let parent_flags = wire_const::FLAG_T_CLOSE_S;
-    let body = Close { reason };
-    let mut wire = Vec::with_capacity(2);
+    let mut wire = Vec::with_capacity(1 + Close::MAX_ENCODED_BYTES);
     wire.push(parent_flags | wire_const::T_MID_CLOSE);
-    wire.extend_from_slice(&body.encode_to_vec());
+    let mut sink = VecSink::new(&mut wire);
+    Close { reason }
+        .encode(&mut sink)
+        .expect("VecSink is infallible");
     wire
 }
 
