@@ -5347,6 +5347,68 @@
         "Layer 2 wireexpr KNOWN_DIVERGENCE: wz uses R125c2 dispatcher form SCE upstream codec_zenoh_wireexpr.scxml still flat leaf -- passive carry pending SCE upstream PR lifting its fixture to the same dispatch shape"
       ]
     },
+    "Round 121h-perf-bump-3": {
+      "decision_summary": "Five hot-path encode_frame_with_* helpers in session_glue.rs collapsed from 3 alloc/emit to 1 alloc/emit via a sink-based envelope helper leveraging the R121h-perf-bump-2 B1-alpha sink encode.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: new private encode_frame_envelope (FnOnce closure-receiving) helper pre-reserves wire Vec with capacity = 1 (parent_flags|T_MID_FRAME byte) + 10 (worst-case VLE(sn) for u64) + inner codec MAX_ENCODED_BYTES, wraps the Vec in a VecSink, writes VLE(sn) bit-identically to Frame.encode's sn block, delegates payload encode to the closure",
+        "5 hot-path helpers (encode_frame_with_push, _declare, _request, _response, _response_final) rewritten as 3-line delegations: parent_flags compute + encode_frame_envelope(sn, parent_flags, Inner.MAX_ENCODED_BYTES, |sink| inner.encode(sink)). Bodies shrunk from 11 lines to 3 each",
+        "imports: +SceSink + VecSink to sce_forge_runtime::codec use list (SceSink trait required in scope so VecSink's write_u8 method-call resolves); -wz_codecs::frame::Frame removed (no longer constructed in this file)",
+        "Alloc count per outbound hot-path emit: 3 to 1. Pre-reserved capacity for a typical Push emit: 1219 bytes (1 header + 10 VLE + 1208 Push.MAX_ENCODED_BYTES) replaces the prior Frame.MAX_ENCODED_BYTES = 65546 (64 KB) over-allocation; compound savings on AP MVP pub/sub where one Push emit per published sample"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio: clean",
+        "cargo test -p wz-runtime-tokio --lib: 85/85 pass (baseline preserved; wire-byte-compare invariant is the proof, no new test added)",
+        "cargo test -p wz-integration-tests: layer3_push + layer3_declare + layer3_request + layer3_msg_put + layer3_msg_del + layer3_frame wire-byte-compare green; ap_demo_round_trip pass; wz_initiator/publisher/publisher_aliased_to_zsub all pass",
+        "cargo test --workspace --no-fail-fast: 55 test result blocks all ok; no FAILED; should_panic tests behave correctly",
+        "cargo clippy -p wz-runtime-tokio --all-targets: clean (closure FnOnce signature monomorphizes over VecSink directly, no boxing or dyn-dispatch overhead)",
+        "scripts/run-ci.sh: 8/8 lanes pass on 3rd consecutive run. Layer E flaked on the 1st (wz_publisher_to_zsub timing) and Layer C1 flaked on the 2nd (wz_initiator_to_wz_acceptor timing); both pass 3/3 in isolation. Flake pattern matches the prior feedback_ci_yaml_local_verify learning (TCP localhost concurrency env-flake)",
+        "Byte-identical guarantee: VLE(sn) is the wire format itself (zenoh-pico VLE base-128, not consumer-tunable) and the inner codec sink-based encode writes the same bytes regardless of whether the sink wraps a new empty Vec (prior code) or the wire Vec at offset 1+VLE(sn) (new code). Layer 3 wire-byte-compare tests pin this invariant"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "Four secondary encoder sites in session_glue.rs still use the inner-Vec + extend_from_slice pattern: line 1543 (InitBody encode with S/A unpacking), 1596 (OpenBody encode with A unpacking), 1620 (DeclFinal batch entry), 1645 (KeepAlive). Not on the AP MVP pub/sub hot loop (handshake + control only, one-off per session); future R121h-perf-bump-4 can apply the same envelope-style shape. Lower priority than R121j-5 inbound parser on the weighted axis",
+        "SliceSink-based zero-alloc hot path (caller-owned reusable buffer) is the next refinement axis. Requires plumbing a per-link reusable buffer through LinkDriver -> TxFrame -> tcp_write; the current TcpDriver tx path consumes Vec<u8> via TxFrame.bytes. Defer to a runtime API design round -- wire bytes computation is now optimal; remaining alloc cost is LinkDriver enqueue layer",
+        "R121j-1f / R121j-1g Q-side qos / budget setters in RequestQueryBuilder still pending. R121j-1f scope: Request-level qos ext (ext_id=0x01 ZINT, no M flag; zenoh-pico packs priority+congestion+reliability into a u8)",
+        "R121j-2b ResponseReplyBuilder + ResponseErrBuilder mirror of R121j-2a RequestQueryBuilder still pending. Reply .consolidation setter (R121j-3a) + Err .encoding setter (R121j-4a) can squeeze in same round as the builder infra round",
+        "R121j-5 inbound Request(Query) parser + on_query dispatch + QueryableTable struct still pending. Largest single AP MVP weighted jump (+5-7%p) per closure estimate. 2-3 sub-rounds = 1 session",
+        "R121k inbound DECLARE parser silent gap intact: outbound 9/9 vs inbound 0/8. DeclKexpr inbound first (peer registers a mapping_id with wz; required for AP MVP alias-aware DECLARE-then-Push when wz is the receiver side). 4-6 sub-rounds = 1-2 sessions",
+        "Cleanup carry: spurious entry_id='test' entry exists in ledger (entries=180; was 179 pre-R121h-perf-bump-3 session). Publishable half redacted via R295 set_changelog_publishable_* primitives this round; mnemosyne.toml [[publishable_override_ledger]] row still pending because the CLI lacks the emit-publishable-override-ledger-draft subcommand. Surface to user for next-session resolution path"
+      ],
+      "publishable_decision_summary": "Five hot-path encode_frame_with_* helpers in session_glue.rs collapsed from 3 alloc/emit to 1 alloc/emit via a sink-based envelope helper leveraging the R121h-perf-bump-2 B1-alpha sink encode.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: new private encode_frame_envelope (FnOnce closure-receiving) helper pre-reserves wire Vec with capacity = 1 (parent_flags|T_MID_FRAME byte) + 10 (worst-case VLE(sn) for u64) + inner codec MAX_ENCODED_BYTES, wraps the Vec in a VecSink, writes VLE(sn) bit-identically to Frame.encode's sn block, delegates payload encode to the closure",
+        "5 hot-path helpers (encode_frame_with_push, _declare, _request, _response, _response_final) rewritten as 3-line delegations: parent_flags compute + encode_frame_envelope(sn, parent_flags, Inner.MAX_ENCODED_BYTES, |sink| inner.encode(sink)). Bodies shrunk from 11 lines to 3 each",
+        "imports: +SceSink + VecSink to sce_forge_runtime::codec use list (SceSink trait required in scope so VecSink's write_u8 method-call resolves); -wz_codecs::frame::Frame removed (no longer constructed in this file)",
+        "Alloc count per outbound hot-path emit: 3 to 1. Pre-reserved capacity for a typical Push emit: 1219 bytes (1 header + 10 VLE + 1208 Push.MAX_ENCODED_BYTES) replaces the prior Frame.MAX_ENCODED_BYTES = 65546 (64 KB) over-allocation; compound savings on AP MVP pub/sub where one Push emit per published sample"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio: clean",
+        "cargo test -p wz-runtime-tokio --lib: 85/85 pass (baseline preserved; wire-byte-compare invariant is the proof, no new test added)",
+        "cargo test -p wz-integration-tests: layer3_push + layer3_declare + layer3_request + layer3_msg_put + layer3_msg_del + layer3_frame wire-byte-compare green; ap_demo_round_trip pass; wz_initiator/publisher/publisher_aliased_to_zsub all pass",
+        "cargo test --workspace --no-fail-fast: 55 test result blocks all ok; no FAILED; should_panic tests behave correctly",
+        "cargo clippy -p wz-runtime-tokio --all-targets: clean (closure FnOnce signature monomorphizes over VecSink directly, no boxing or dyn-dispatch overhead)",
+        "scripts/run-ci.sh: 8/8 lanes pass on 3rd consecutive run. Layer E flaked on the 1st (wz_publisher_to_zsub timing) and Layer C1 flaked on the 2nd (wz_initiator_to_wz_acceptor timing); both pass 3/3 in isolation. Flake pattern matches the prior feedback_ci_yaml_local_verify learning (TCP localhost concurrency env-flake)",
+        "Byte-identical guarantee: VLE(sn) is the wire format itself (zenoh-pico VLE base-128, not consumer-tunable) and the inner codec sink-based encode writes the same bytes regardless of whether the sink wraps a new empty Vec (prior code) or the wire Vec at offset 1+VLE(sn) (new code). Layer 3 wire-byte-compare tests pin this invariant"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/4-2-data-carrying-framing",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Four secondary encoder sites in session_glue.rs still use the inner-Vec + extend_from_slice pattern: line 1543 (InitBody encode with S/A unpacking), 1596 (OpenBody encode with A unpacking), 1620 (DeclFinal batch entry), 1645 (KeepAlive). Not on the AP MVP pub/sub hot loop (handshake + control only, one-off per session); future R121h-perf-bump-4 can apply the same envelope-style shape. Lower priority than R121j-5 inbound parser on the weighted axis",
+        "SliceSink-based zero-alloc hot path (caller-owned reusable buffer) is the next refinement axis. Requires plumbing a per-link reusable buffer through LinkDriver -> TxFrame -> tcp_write; the current TcpDriver tx path consumes Vec<u8> via TxFrame.bytes. Defer to a runtime API design round -- wire bytes computation is now optimal; remaining alloc cost is LinkDriver enqueue layer",
+        "R121j-1f / R121j-1g Q-side qos / budget setters in RequestQueryBuilder still pending. R121j-1f scope: Request-level qos ext (ext_id=0x01 ZINT, no M flag; zenoh-pico packs priority+congestion+reliability into a u8)",
+        "R121j-2b ResponseReplyBuilder + ResponseErrBuilder mirror of R121j-2a RequestQueryBuilder still pending. Reply .consolidation setter (R121j-3a) + Err .encoding setter (R121j-4a) can squeeze in same round as the builder infra round",
+        "R121j-5 inbound Request(Query) parser + on_query dispatch + QueryableTable struct still pending. Largest single AP MVP weighted jump (+5-7%p) per closure estimate. 2-3 sub-rounds = 1 session",
+        "R121k inbound DECLARE parser silent gap intact: outbound 9/9 vs inbound 0/8. DeclKexpr inbound first (peer registers a mapping_id with wz; required for AP MVP alias-aware DECLARE-then-Push when wz is the receiver side). 4-6 sub-rounds = 1-2 sessions",
+        "Cleanup carry: spurious entry_id='test' entry exists in ledger (entries=180; was 179 pre-R121h-perf-bump-3 session). Publishable half redacted via R295 set_changelog_publishable_* primitives this round; mnemosyne.toml [[publishable_override_ledger]] row still pending because the CLI lacks the emit-publishable-override-ledger-draft subcommand. Surface to user for next-session resolution path"
+      ]
+    },
     "Round 121h-perf-bump-attempt": {
       "decision_summary": "R121h-perf-bump-attempt investigated SCE drift +15 commits (vendor pin 54d513af -> SCE main de5d5e9a) and discovered the SCE B1-α series (sink-based encode + encode_to_vec wrapper) already lands the exact zero-alloc fix our R121i-c carry parked as an SCE upstream proposal; deferred the actual vendor bump to a multi-round R121h-perf-bump phase because the Axis-1 inversion that ships in the same drift window strengthens the present-if predicate grammar and 11 wz codec SCXMLs need migration before the bump can land cleanly.",
       "changes_bullets": [
@@ -13078,6 +13140,23 @@
         "Wildcard keyexpr matching — R98/R99 registry is literal-only. Zenoh's keyexpr language supports `*` (single-chunk) / `**` (multi-chunk) / `$*` (substring) per upstream `_z_keyexpr_intersect_*`. A wildcard-aware matcher is a follow-up quality round once the basic literal-match demo is validated against zenoh-pico.",
         "DECLARE codec (0x1E) — 9 declaration sub-types per zenoh-pico declarations.c, multi-round chain on the scale of RESPONSE (3 rounds). Closure unblocks the mapping-id resolver on the registry so non-zero `wireexpr.id` Pushes route through resolved-base + suffix concatenation.",
         "Symmetric dispatch for Reply / Err — R99 routes Push only. A future round adds the symmetric `Response` arm (`NetworkMessage::Response.body` peek-byte dispatches to reply / err; reply itself wraps a push_body so the keyexpr matching could pass through). Kind-filtered subscriptions (publish-only vs reply-also-accepted) are the textbook way to surface the new dispatch path."
+      ]
+    },
+    "test": {
+      "decision_summary": "test summary",
+      "changes_bullets": [
+        "change1",
+        "change2"
+      ],
+      "verification_bullets": [
+        "verify1"
+      ],
+      "publishable_decision_summary": "REDACTED -- accidental test append used to bisect a parameter-deserialization failure (200-char cap on decision_summary). Superseded by Round 121h-perf-bump-3.",
+      "publishable_changes_bullets": [
+        "REDACTED -- accidental test bullet, no real change content"
+      ],
+      "publishable_verification_bullets": [
+        "REDACTED -- accidental test bullet, no real verification content"
       ]
     }
   },
