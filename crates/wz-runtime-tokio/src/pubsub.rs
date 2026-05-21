@@ -408,16 +408,22 @@ impl SubscriberRegistry {
     /// [`drive_session_until_terminal`](crate::session_glue::drive_session_until_terminal)
     /// to matching subscriber callbacks. The adapter pulls
     /// `FramePayload.messages` out of `IterationEvent::Poll` and
-    /// dispatches each record via [`dispatch`](Self::dispatch);
-    /// `Lease` events and non-FramePayload poll outcomes are
-    /// no-ops. Callers use this as the registry's observer
-    /// callback so they need not hand-write the
-    /// `if let Poll(FramePayload { messages, .. })` matcher at the
-    /// integration site.
+    /// dispatches each record via [`dispatch`](Self::dispatch),
+    /// threading the frame's `reliable` discriminator through so the
+    /// downstream `Sample.reliability` carries the link-layer
+    /// classification (R226 — zenoh-pico `_z_trigger_push` argument
+    /// mirror). `Lease` events and non-FramePayload poll outcomes are
+    /// no-ops. Callers use this as the registry's observer callback so
+    /// they need not hand-write the `if let Poll(FramePayload { ... })`
+    /// matcher at the integration site.
     pub fn dispatch_iteration_event(&mut self, event: IterationEvent<'_>) {
-        if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
+        if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+            messages, reliable, ..
+        }) = event
+        {
+            let reliability = Reliability::from_reliable_bool(*reliable);
             for message in messages {
-                self.dispatch(message);
+                self.dispatch(message, reliability);
             }
         }
     }
@@ -430,15 +436,24 @@ impl SubscriberRegistry {
     /// (DeclSubscriber, DeclQueryable, DeclToken, etc.) and other
     /// `NetworkMessage` variants are no-ops in this registry's
     /// scope — the AP MVP path only needs Push round-trip.
-    pub fn dispatch(&mut self, message: &NetworkMessage) {
+    ///
+    /// `reliability` is the link-layer classification of the frame
+    /// that carried this message; it is threaded into Push dispatch so
+    /// the resulting `Sample.reliability` reflects the actual delivery
+    /// guarantee (R226 — see `dispatch_iteration_event` for the
+    /// canonical caller that derives this from
+    /// `FramePayload.reliable`). Declare-arm dispatch ignores
+    /// `reliability` because the peer-mapping absorb is reliability-
+    /// agnostic (declarations always travel on the reliable channel).
+    pub fn dispatch(&mut self, message: &NetworkMessage, reliability: Reliability) {
         match message {
-            NetworkMessage::Push(push) => self.dispatch_push(push),
+            NetworkMessage::Push(push) => self.dispatch_push(push, reliability),
             NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body),
             _ => {}
         }
     }
 
-    fn dispatch_push(&mut self, push: &Push) {
+    fn dispatch_push(&mut self, push: &Push, reliability: Reliability) {
         // R125c2: keyexpr is now a tagged-union (B5-ν parent-tag
         // variant dispatch on parent.M); extract id + suffix from
         // whichever arm the dispatcher selected. Both arms carry the
@@ -548,7 +563,7 @@ impl SubscriberRegistry {
             qos,
             attachment: body_attachment,
             source_info: body_source_info,
-            reliability: Reliability::default(),
+            reliability,
         };
 
         for subscriber in &mut self.subscribers {
@@ -694,7 +709,7 @@ mod tests {
         });
 
         let push = push_with_keyexpr("topic/a");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(
             counter.load(Ordering::SeqCst),
@@ -713,7 +728,7 @@ mod tests {
         });
 
         let push = push_with_keyexpr("topic/b");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(
             counter.load(Ordering::SeqCst),
@@ -741,7 +756,7 @@ mod tests {
         });
 
         let push = push_with_keyexpr("topic/a");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         let log = log.lock().unwrap();
         assert_eq!(
@@ -776,12 +791,83 @@ mod tests {
             },
             ..Push::default()
         };
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(
             counter.load(Ordering::SeqCst),
             0,
             "non-zero mapping id pushes are filtered out (DECLARE table not modeled)"
+        );
+    }
+
+    // ── R226 — reliability projection ──
+
+    #[test]
+    fn dispatch_reliable_records_reliable_on_sample() {
+        let mut registry = SubscriberRegistry::new();
+        let captured = Arc::new(std::sync::Mutex::new(None::<Reliability>));
+        let captured_clone = captured.clone();
+        registry.register("topic/a", move |sample| {
+            *captured_clone.lock().unwrap() = Some(sample.reliability);
+        });
+        let push = push_with_keyexpr("topic/a");
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push)),
+            Reliability::Reliable,
+        );
+        assert_eq!(*captured.lock().unwrap(), Some(Reliability::Reliable));
+    }
+
+    #[test]
+    fn dispatch_best_effort_records_best_effort_on_sample() {
+        let mut registry = SubscriberRegistry::new();
+        let captured = Arc::new(std::sync::Mutex::new(None::<Reliability>));
+        let captured_clone = captured.clone();
+        registry.register("topic/a", move |sample| {
+            *captured_clone.lock().unwrap() = Some(sample.reliability);
+        });
+        let push = push_with_keyexpr("topic/a");
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push)),
+            Reliability::BestEffort,
+        );
+        assert_eq!(*captured.lock().unwrap(), Some(Reliability::BestEffort));
+    }
+
+    #[test]
+    fn dispatch_iteration_event_projects_frame_reliable_bool_to_sample() {
+        use crate::session_glue::IterationEvent;
+        let mut registry = SubscriberRegistry::new();
+        let captured = Arc::new(std::sync::Mutex::new(None::<Reliability>));
+        let captured_clone = captured.clone();
+        registry.register("topic/a", move |sample| {
+            *captured_clone.lock().unwrap() = Some(sample.reliability);
+        });
+        let push = push_with_keyexpr("topic/a");
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: false,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(push))],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        registry.dispatch_iteration_event(IterationEvent::Poll(&outcome));
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some(Reliability::BestEffort),
+            "FramePayload.reliable=false must project to Sample.reliability=BestEffort"
+        );
+    }
+
+    #[test]
+    fn reliability_from_reliable_bool_matches_canonical_pairing() {
+        assert_eq!(
+            Reliability::from_reliable_bool(true),
+            Reliability::Reliable
+        );
+        assert_eq!(
+            Reliability::from_reliable_bool(false),
+            Reliability::BestEffort
         );
     }
 
@@ -798,7 +884,10 @@ mod tests {
         // variant) flowing through dispatch must not invoke any
         // subscriber callback.
         use wz_codecs::response_final::ResponseFinal;
-        registry.dispatch(&NetworkMessage::ResponseFinal(ResponseFinal::default()));
+        registry.dispatch(
+            &NetworkMessage::ResponseFinal(ResponseFinal::default()),
+            Reliability::Reliable,
+        );
 
         assert_eq!(
             counter.load(Ordering::SeqCst),
@@ -992,7 +1081,7 @@ mod tests {
         });
 
         let push = push_with_keyexpr("home/kitchen/temp");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
         assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
@@ -1001,7 +1090,7 @@ mod tests {
 
         // Boundary check: still does not collapse to zero chunks.
         let push = push_with_keyexpr("home/temp");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
         assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
@@ -1023,7 +1112,7 @@ mod tests {
         });
 
         let push = push_with_keyexpr("home/temp");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
         assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
@@ -1044,7 +1133,7 @@ mod tests {
         });
 
         let push = push_with_keyexpr("home/barfoo");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
         assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
@@ -1070,7 +1159,7 @@ mod tests {
         // Dispatch with a structurally valid keyexpr that does NOT
         // contain `?` — no callback fires.
         let push = push_with_keyexpr("home/foobar");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
         assert_eq!(
             counter.load(Ordering::SeqCst),
             0,
@@ -1093,7 +1182,7 @@ mod tests {
         });
 
         let push = push_with_keyexpr("home/temp");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
         assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
@@ -1115,7 +1204,7 @@ mod tests {
         });
 
         let push = push_with_keyexpr("home/temp");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
         assert_eq!(
             counter.load(Ordering::SeqCst),
             1,
@@ -1144,7 +1233,7 @@ mod tests {
         );
 
         let push = push_with_keyexpr("home/temp");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
         assert_eq!(
             counter.load(Ordering::SeqCst),
             0,
@@ -1175,7 +1264,7 @@ mod tests {
         );
 
         let push = push_with_keyexpr("home/temp");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
         assert_eq!(
             any_counter.load(Ordering::SeqCst),
             1,
@@ -1208,7 +1297,7 @@ mod tests {
         );
 
         let push = push_with_keyexpr("home/kitchen/temp");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
         assert_eq!(
             counter.load(Ordering::SeqCst),
             0,
@@ -1247,7 +1336,7 @@ mod tests {
         });
 
         let push = push_with_payload("home/temp", b"23.5");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         let observed = captured.lock().unwrap().clone().expect("callback fired");
         assert_eq!(observed.keyexpr, "home/temp");
@@ -1267,7 +1356,7 @@ mod tests {
         });
 
         let push = push_with_del_body("clear/me");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         let observed = captured.lock().unwrap().clone().expect("callback fired");
         assert_eq!(observed.keyexpr, "clear/me");
@@ -1289,12 +1378,12 @@ mod tests {
             *captured_clone.lock().unwrap() = Some(sample.keyexpr.clone());
         });
 
-        registry.dispatch(&NetworkMessage::Declare(Box::new(declare_kexpr_literal(
-            7,
-            "sensors/room1/temp",
-        ))));
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(7, "sensors/room1/temp"))),
+            Reliability::Reliable,
+        );
         let push = push_with_mapping_id(7, None);
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         let observed = captured.lock().unwrap().clone().expect("callback fired");
         assert_eq!(
@@ -1313,7 +1402,7 @@ mod tests {
         });
 
         let push = push_with_keyexpr("sensors/room1/temp");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(
             counter.load(Ordering::SeqCst),
@@ -1332,7 +1421,7 @@ mod tests {
         });
 
         let push = push_with_keyexpr("home/kitchen/sensor/c");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(
             counter.load(Ordering::SeqCst),
@@ -1352,7 +1441,7 @@ mod tests {
 
         // `sensors/temp` lacks the middle chunk that `*` requires.
         let push = push_with_keyexpr("sensors/temp");
-        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(
             counter.load(Ordering::SeqCst),
@@ -1441,12 +1530,14 @@ mod tests {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         });
 
-        registry.dispatch(&NetworkMessage::Declare(Box::new(
-            declare_kexpr_literal(1, "demo/test"),
-        )));
-        registry.dispatch(&NetworkMessage::Push(Box::new(
-            push_with_mapping_id(1, None),
-        )));
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(1, "demo/test"))),
+            Reliability::Reliable,
+        );
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_with_mapping_id(1, None))),
+            Reliability::Reliable,
+        );
 
         assert_eq!(
             counter.load(Ordering::SeqCst),
@@ -1465,16 +1556,22 @@ mod tests {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         });
 
-        registry.dispatch(&NetworkMessage::Declare(Box::new(
-            declare_kexpr_literal(1, "demo/test"),
-        )));
-        registry.dispatch(&NetworkMessage::Push(Box::new(
-            push_with_mapping_id(1, None),
-        )));
-        registry.dispatch(&NetworkMessage::Declare(Box::new(undeclare_kexpr(1))));
-        registry.dispatch(&NetworkMessage::Push(Box::new(
-            push_with_mapping_id(1, None),
-        )));
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(1, "demo/test"))),
+            Reliability::Reliable,
+        );
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_with_mapping_id(1, None))),
+            Reliability::Reliable,
+        );
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(undeclare_kexpr(1))),
+            Reliability::Reliable,
+        );
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_with_mapping_id(1, None))),
+            Reliability::Reliable,
+        );
 
         assert_eq!(
             counter.load(Ordering::SeqCst),
@@ -1494,12 +1591,14 @@ mod tests {
             counter_clone.fetch_add(1, Ordering::SeqCst);
         });
 
-        registry.dispatch(&NetworkMessage::Declare(Box::new(
-            declare_kexpr_literal(5, "home/sensor/"),
-        )));
-        registry.dispatch(&NetworkMessage::Push(Box::new(
-            push_with_mapping_id(5, Some("temp")),
-        )));
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(5, "home/sensor/"))),
+            Reliability::Reliable,
+        );
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_with_mapping_id(5, Some("temp")))),
+            Reliability::Reliable,
+        );
 
         assert_eq!(
             counter.load(Ordering::SeqCst),
