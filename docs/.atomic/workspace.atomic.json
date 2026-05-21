@@ -8750,6 +8750,56 @@
         "First external release rehearsal (3-5 sub-rounds): README EN primary + deploy.yaml schema + LGPL/Commercial review + cargo publish dry-run + tag v0.1.0-mvp"
       ]
     },
+    "Round 204": {
+      "decision_summary": "R121k-reorg: declare.rs 1147 LoC flat module split into 5 sub-files (subscriber/queryable/liveliness/test_helpers/cross_tests); behavior 0 change.",
+      "changes_bullets": [
+        "new declare/subscriber.rs (377 LoC), declare/queryable.rs (251), declare/liveliness.rs (270), declare/test_helpers.rs (160), declare/cross_tests.rs (116); parent declare.rs shrunk 1147 → 110 LoC",
+        "declare.rs now holds module-level docs + mod declarations + shared resolve_wireexpr (pub(super)) + pub use re-exports of 6 public types",
+        "test_helpers via shared pub(super) fns under #[cfg(test)] so each sub-module's tests + cross_tests.rs share fixture builders",
+        "no consumer-side import change: wz_runtime_tokio::declare::RemoteSubscriberRegistry etc. resolve through the new re-exports verbatim"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib → 169/169 pass (same count as pre-reorg) — 23 declare tests routed to 5 sub-modules with zero loss",
+        "cargo clippy --workspace --all-targets -- -D warnings clean",
+        "scripts/run-ci.sh → 8/8 lanes pass; wz-ap-demo + wz-integration-tests unchanged"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "#3 R121k-7 ApplicationLayerObserver helper struct — production library wrap of 6 registries (sub+queryable+3 Remote*+reply) + dispatch wire; wz-ap-demo refactor",
+        "#4 R121h-perf-bump-5 SCE-a vs wz-b decision pending",
+        "R121j-tstamp ext_zbuf Timestamp prereq + setter (1-2 rounds)",
+        "R121j-1h .request_qos_typed wrapper; R121j-3c-on-responder QueryResponder.with_responder",
+        "SCE drift +9 commits audit + vendor pin bump decision (b0d36449/43ba24ba codegen)",
+        "First external release rehearsal (3-5 sub-rounds): README EN primary + deploy.yaml schema + LGPL/Commercial review + cargo publish dry-run + tag v0.1.0-mvp",
+        "AP MVP weighted ~98-99%; remaining gaps R121j-tstamp + perf-bump-5"
+      ],
+      "publishable_decision_summary": "R121k-reorg: declare.rs 1147 LoC flat module split into 5 sub-files (subscriber/queryable/liveliness/test_helpers/cross_tests); behavior 0 change.",
+      "publishable_changes_bullets": [
+        "new declare/subscriber.rs (377 LoC), declare/queryable.rs (251), declare/liveliness.rs (270), declare/test_helpers.rs (160), declare/cross_tests.rs (116); parent declare.rs shrunk 1147 → 110 LoC",
+        "declare.rs now holds module-level docs + mod declarations + shared resolve_wireexpr (pub(super)) + pub use re-exports of 6 public types",
+        "test_helpers via shared pub(super) fns under #[cfg(test)] so each sub-module's tests + cross_tests.rs share fixture builders",
+        "no consumer-side import change: wz_runtime_tokio::declare::RemoteSubscriberRegistry etc. resolve through the new re-exports verbatim"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib → 169/169 pass (same count as pre-reorg) — 23 declare tests routed to 5 sub-modules with zero loss",
+        "cargo clippy --workspace --all-targets -- -D warnings clean",
+        "scripts/run-ci.sh → 8/8 lanes pass; wz-ap-demo + wz-integration-tests unchanged"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "#3 R121k-7 ApplicationLayerObserver helper struct — production library wrap of 6 registries (sub+queryable+3 Remote*+reply) + dispatch wire; wz-ap-demo refactor",
+        "#4 R121h-perf-bump-5 SCE-a vs wz-b decision pending",
+        "R121j-tstamp ext_zbuf Timestamp prereq + setter (1-2 rounds)",
+        "R121j-1h .request_qos_typed wrapper; R121j-3c-on-responder QueryResponder.with_responder",
+        "SCE drift +9 commits audit + vendor pin bump decision (b0d36449/43ba24ba codegen)",
+        "First external release rehearsal (3-5 sub-rounds): README EN primary + deploy.yaml schema + LGPL/Commercial review + cargo publish dry-run + tag v0.1.0-mvp",
+        "AP MVP weighted ~98-99%; remaining gaps R121j-tstamp + perf-bump-5"
+      ]
+    },
     "Round 21": {
       "decision_summary": "§3 scouting + §5.1 declare sub + §6 payload Z_MID dispatcher 3종 land — scouting_mid_v1_valid (SCOUT/HELLO) + declare_sub_mid_v1_valid (0x00-0x07 + 0x1A) + payload_z_mid_v1_valid (Z_PUT..Z_ERR, Z_OAM 의도적 exclude); R19-R20 dispatcher 패턴 wire-spec MVP top-level MID 표면 완전 종결.",
       "changes_bullets": [
