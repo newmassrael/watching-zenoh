@@ -96,6 +96,11 @@ struct Subscriber {
     /// `*` and `**` appear as single-char chunk entries; matching is
     /// performed by [`keyexpr_pattern_matches`].
     pattern_chunks: Vec<String>,
+    /// R223 — locality filter applied before the callback fires.
+    /// See [`crate::locality`] for the semantics and the wz
+    /// dispatch invariant (every inbound Push is treated as remote
+    /// until self-publish loopback lands in a future round).
+    allowed_origin: crate::locality::Locality,
     callback: SubscriberCallback,
 }
 
@@ -301,9 +306,38 @@ impl SubscriberRegistry {
     /// is stored unchanged and a `log::warn!` is emitted — this is
     /// non-breaking with prior callers; promotion to a Result-
     /// returning signature is deferred to the cluster API rewrite.
+    ///
+    /// R223 — defaults [`Locality::Any`](crate::locality::Locality)
+    /// so both session-local and remote-origin samples fire the
+    /// callback. Use [`register_with_locality`](Self::register_with_locality)
+    /// to restrict to one origin class.
     pub fn register(
         &mut self,
         keyexpr_pattern: impl Into<String>,
+        callback: impl FnMut(&Push) + Send + 'static,
+    ) -> SubscriptionId {
+        self.register_with_locality(
+            keyexpr_pattern,
+            crate::locality::Locality::Any,
+            callback,
+        )
+    }
+
+    /// R223 — variant of [`register`](Self::register) that pins the
+    /// locality filter explicitly. Stores `allowed_origin` on the
+    /// subscriber record; [`dispatch_push`](Self::dispatch_push)
+    /// consults the filter before firing the callback.
+    ///
+    /// wz today treats every Push reaching `dispatch_push` as
+    /// remote (no self-publish loopback). So a
+    /// [`Locality::SessionLocal`](crate::locality::Locality)
+    /// subscription registered now will not fire until a future
+    /// round wires up loopback; this is the correct
+    /// surface-mirrors-zenoh-pico shape, not a bug.
+    pub fn register_with_locality(
+        &mut self,
+        keyexpr_pattern: impl Into<String>,
+        allowed_origin: crate::locality::Locality,
         callback: impl FnMut(&Push) + Send + 'static,
     ) -> SubscriptionId {
         let id = SubscriptionId(self.next_id);
@@ -325,6 +359,7 @@ impl SubscriberRegistry {
         self.subscribers.push(Subscriber {
             id,
             pattern_chunks,
+            allowed_origin,
             callback: Box::new(callback),
         });
         id
@@ -441,6 +476,16 @@ impl SubscriberRegistry {
         };
 
         for subscriber in &mut self.subscribers {
+            // R223 — every Push reaching dispatch_push has been
+            // parsed off the wire, so it is treated as remote in
+            // zenoh-pico's is_remote=true sense. The locality filter
+            // therefore reduces to allows_remote(). When self-publish
+            // loopback lands, the local-origin call path will
+            // similarly route through dispatch_push with an
+            // is_remote=false flag and consult allows_local().
+            if !subscriber.allowed_origin.allows_remote() {
+                continue;
+            }
             let chunks: Vec<&str> =
                 subscriber.pattern_chunks.iter().map(String::as_str).collect();
             if keyexpr_pattern_matches(&chunks, &resolved) {
@@ -954,6 +999,144 @@ mod tests {
             counter.load(Ordering::SeqCst),
             0,
             "invalid pattern stored raw does not spuriously match canonical traffic"
+        );
+    }
+
+    // ── R223 Locality filter behaviour ──
+
+    #[test]
+    fn register_defaults_to_locality_any_and_fires_on_inbound() {
+        // Default register() uses Locality::Any; inbound Pushes
+        // (which wz treats as remote) fire the callback as they did
+        // before R223. Regression guard for the default path.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("home/temp", move |_push| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let push = push_with_keyexpr("home/temp");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "Locality::Any default fires on inbound (remote) Push"
+        );
+    }
+
+    #[test]
+    fn register_with_locality_remote_fires_on_inbound() {
+        // Locality::Remote is the canonical setting for the
+        // wire-only subscription; inbound Pushes still fire because
+        // they originate from the wire (== remote).
+        use crate::locality::Locality;
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register_with_locality("home/temp", Locality::Remote, move |_push| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let push = push_with_keyexpr("home/temp");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "Locality::Remote fires for wire-arrived Push"
+        );
+    }
+
+    #[test]
+    fn register_with_locality_session_local_does_not_fire_on_inbound() {
+        // wz currently has no self-publish loopback — every
+        // inbound Push reaching dispatch_push is remote. A
+        // Locality::SessionLocal subscriber therefore correctly
+        // suppresses every inbound match. This documents the
+        // surface-only-correct shape: SessionLocal will activate
+        // when a future round wires loopback, but today fires zero.
+        use crate::locality::Locality;
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register_with_locality(
+            "home/temp",
+            Locality::SessionLocal,
+            move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        let push = push_with_keyexpr("home/temp");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "Locality::SessionLocal suppresses inbound (remote) Push pre-loopback"
+        );
+    }
+
+    #[test]
+    fn locality_filter_applies_per_subscriber_not_globally() {
+        // Two subscribers on the same keyexpr — one Any, one
+        // SessionLocal — share a registry. An inbound Push fires
+        // exactly the Any one; the SessionLocal one is silent.
+        use crate::locality::Locality;
+        let mut registry = SubscriberRegistry::new();
+        let any_counter = Arc::new(AtomicUsize::new(0));
+        let local_counter = Arc::new(AtomicUsize::new(0));
+        let any_clone = any_counter.clone();
+        let local_clone = local_counter.clone();
+        registry.register("home/temp", move |_push| {
+            any_clone.fetch_add(1, Ordering::SeqCst);
+        });
+        registry.register_with_locality(
+            "home/temp",
+            Locality::SessionLocal,
+            move |_push| {
+                local_clone.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        let push = push_with_keyexpr("home/temp");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            any_counter.load(Ordering::SeqCst),
+            1,
+            "Locality::Any subscriber fires on inbound"
+        );
+        assert_eq!(
+            local_counter.load(Ordering::SeqCst),
+            0,
+            "Locality::SessionLocal subscriber does not fire on inbound"
+        );
+    }
+
+    #[test]
+    fn locality_filter_runs_before_keyexpr_match() {
+        // Even when the keyexpr would match, locality must filter
+        // first — a SessionLocal subscriber on a wildcard pattern
+        // still does not fire on an inbound Push. Guards against
+        // a future refactor that accidentally inverts the check
+        // order.
+        use crate::locality::Locality;
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register_with_locality(
+            "**",
+            Locality::SessionLocal,
+            move |_push| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        let push = push_with_keyexpr("home/kitchen/temp");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "locality short-circuits before keyexpr match (`**` matches everything but is suppressed)"
         );
     }
 
