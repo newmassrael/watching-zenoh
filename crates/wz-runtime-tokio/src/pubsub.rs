@@ -12,14 +12,19 @@
 //!   actually observe pub/sub data over a session; R99 added the
 //!   `dispatch_iteration_event` adapter so the registry plugs into
 //!   `drive_session_until_terminal` as an observer.
-//! - Keyexpr matching follows zenoh-spec chunk wildcards (R100):
-//!   chunks are split on `/`, `*` matches exactly one chunk, `**`
-//!   matches zero or more chunks (including the empty sequence),
-//!   literal chunks compare byte-for-byte. The `$*` intra-chunk
-//!   substring wildcard from full zenoh is NOT modeled — production
-//!   AP MVP use cases (e.g. `home/**`, `sensors/*/temp`) work
-//!   without it, and adding `$*` requires per-chunk pattern
-//!   compilation that doesn't pay off until a consumer surfaces.
+//! - Keyexpr matching follows zenoh-spec chunk wildcards (R100,
+//!   R220): chunks are split on `/`, `*` matches exactly one chunk,
+//!   `**` matches zero or more chunks (including the empty
+//!   sequence), and `$*` is the intra-chunk substring wildcard
+//!   (R220) — a pattern chunk like `prefix$*suffix` matches any
+//!   target chunk that starts with `prefix` and ends with `suffix`
+//!   (with arbitrary intra-chunk content between). Multiple `$*` in
+//!   a chunk anchor non-overlapping sub-parts in order, mirroring
+//!   zenoh-pico's `_z_chunk_right_contains_all_stardsl_subchunks_of_left`.
+//!   `$*` never crosses chunk boundaries — target chunks are split on
+//!   `/` first, so intra-chunk DSL is bounded by the same `/`
+//!   separators as the pattern. Literal chunks (no DSL token)
+//!   continue to compare byte-for-byte.
 //!   Pushes whose `keyexpr.id == 0` and `keyexpr.suffix == Some(s)`
 //!   match against the pattern's wildcard expansion. R121d
 //!   landed the DECLARE-table resolver, so pushes whose
@@ -99,6 +104,13 @@ struct Subscriber {
 ///
 /// * `**` — matches zero or more target chunks.
 /// * `*`  — matches exactly one target chunk (any content).
+/// * a chunk containing `$*` — intra-chunk substring wildcard
+///   (R220). The chunk is split on `$*` into sub-parts; the leading
+///   sub-part (if non-empty) must be a prefix of the target chunk,
+///   the trailing sub-part (if non-empty) must be a suffix, and
+///   each middle sub-part must appear in order in the remaining
+///   slice without overlap. See [`chunk_matches_with_dsl`] for the
+///   full algorithm.
 /// * any other chunk — must compare byte-for-byte against the
 ///   corresponding target chunk.
 ///
@@ -135,7 +147,7 @@ fn matches_chunks(pattern: &[&str], target: &[&str]) -> bool {
                 pi += 1;
                 continue;
             }
-            if pat == "*" || pat == target[ti] {
+            if pat == "*" || chunk_matches(pat, target[ti]) {
                 pi += 1;
                 ti += 1;
                 continue;
@@ -158,6 +170,73 @@ fn matches_chunks(pattern: &[&str], target: &[&str]) -> bool {
         pi += 1;
     }
     pi == pattern.len()
+}
+
+/// Match one pattern chunk against one target chunk. Routes between
+/// the DSL path ([`chunk_matches_with_dsl`]) and a byte-equal
+/// fast-path based on whether the pattern chunk contains the `$*`
+/// token. The `*` and `**` whole-chunk wildcards are handled by the
+/// caller before reaching this function.
+fn chunk_matches(pattern: &str, target: &str) -> bool {
+    if pattern.contains("$*") {
+        chunk_matches_with_dsl(pattern, target)
+    } else {
+        pattern == target
+    }
+}
+
+/// Intra-chunk substring DSL matcher. The pattern chunk is split on
+/// `$*` into sub-parts; each non-empty sub-part must appear in
+/// `target` in order without overlap, anchored as follows:
+///
+/// * If the chunk starts with `$*` (leading sub-part is empty), the
+///   first non-empty sub-part can appear at any byte offset.
+///   Otherwise the first sub-part must align with target byte 0.
+/// * Symmetric for the chunk end: a trailing `$*` lets the last
+///   non-empty sub-part float; otherwise it must align with the
+///   target's last byte.
+/// * Middle sub-parts are located via leftmost-first substring
+///   search, mirroring zenoh-pico's
+///   `_z_chunk_right_contains_all_stardsl_subchunks_of_left`.
+///
+/// Empty middle sub-parts (which only arise from non-canonical
+/// `$*$*` runs, since canonical zenoh collapses them) are treated
+/// as no-ops so the matcher remains equivalent to the canonical
+/// form `$*`.
+fn chunk_matches_with_dsl(pattern: &str, target: &str) -> bool {
+    let parts: Vec<&str> = pattern.split("$*").collect();
+    debug_assert!(
+        parts.len() >= 2,
+        "chunk_matches_with_dsl invoked on a pattern without `$*` — caller routing bug",
+    );
+
+    let n = parts.len();
+    let mut remaining = target;
+
+    let leading = parts[0];
+    if !leading.is_empty() {
+        match remaining.strip_prefix(leading) {
+            Some(rest) => remaining = rest,
+            None => return false,
+        }
+    }
+
+    for &part in &parts[1..n - 1] {
+        if part.is_empty() {
+            continue;
+        }
+        match remaining.find(part) {
+            Some(pos) => remaining = &remaining[pos + part.len()..],
+            None => return false,
+        }
+    }
+
+    let trailing = parts[n - 1];
+    if trailing.is_empty() {
+        true
+    } else {
+        remaining.ends_with(trailing) && remaining.len() >= trailing.len()
+    }
 }
 
 /// Subscriber table backing the FramePayload → callback dispatch.
@@ -633,6 +712,122 @@ mod tests {
         assert!(!keyexpr_pattern_matches(
             &["home", "**", "temp"],
             "home/kitchen/humid"
+        ));
+    }
+
+    // ── R220 `$*` intra-chunk DSL matcher behaviour ──
+
+    #[test]
+    fn keyexpr_pattern_matches_dsl_prefix_suffix_anchors() {
+        // `prefix$*suffix` anchors both ends: target must start with
+        // "sensor_" and end with "_temp", with any (possibly empty)
+        // bytes in between within the same chunk.
+        assert!(keyexpr_pattern_matches(
+            &["sensor_$*_temp"],
+            "sensor_room1_temp"
+        ));
+        assert!(keyexpr_pattern_matches(&["sensor_$*_temp"], "sensor__temp"));
+        // Missing the required suffix → no match.
+        assert!(!keyexpr_pattern_matches(
+            &["sensor_$*_temp"],
+            "sensor_room1_humid"
+        ));
+        // Missing the required prefix → no match.
+        assert!(!keyexpr_pattern_matches(
+            &["sensor_$*_temp"],
+            "device_room1_temp"
+        ));
+    }
+
+    #[test]
+    fn keyexpr_pattern_matches_dsl_leading_only_floats_prefix() {
+        // `$*foo` lets the leading sub-part float; target need only
+        // end with "foo".
+        assert!(keyexpr_pattern_matches(&["$*foo"], "barfoo"));
+        assert!(keyexpr_pattern_matches(&["$*foo"], "foo"));
+        // Target lacks the required suffix.
+        assert!(!keyexpr_pattern_matches(&["$*foo"], "barfo"));
+    }
+
+    #[test]
+    fn keyexpr_pattern_matches_dsl_trailing_only_floats_suffix() {
+        // `foo$*` lets the trailing sub-part float; target need only
+        // start with "foo".
+        assert!(keyexpr_pattern_matches(&["foo$*"], "foobar"));
+        assert!(keyexpr_pattern_matches(&["foo$*"], "foo"));
+        // Target lacks the required prefix.
+        assert!(!keyexpr_pattern_matches(&["foo$*"], "fobar"));
+    }
+
+    #[test]
+    fn keyexpr_pattern_matches_dsl_multiple_dsl_in_order() {
+        // Multiple `$*` in one chunk anchor sub-parts in order
+        // without overlap, mirroring zenoh-pico's
+        // _z_chunk_right_contains_all_stardsl_subchunks_of_left.
+        assert!(keyexpr_pattern_matches(
+            &["$*aa$*bb$*"],
+            "xxaaYYbbZZ"
+        ));
+        // The order is enforced: "bb" before "aa" must not match.
+        assert!(!keyexpr_pattern_matches(&["$*aa$*bb$*"], "xxbbYYaaZZ"));
+        // Overlap is rejected: two non-overlapping "foo" needed.
+        assert!(keyexpr_pattern_matches(&["$*foo$*foo$*"], "foofoo"));
+        assert!(!keyexpr_pattern_matches(&["$*foo$*foo$*"], "foofo"));
+    }
+
+    #[test]
+    fn keyexpr_pattern_matches_dsl_does_not_cross_chunk_boundary() {
+        // `foo$*bar` is bounded by the same `/` separator the pattern
+        // chunk is, so the matching content for `$*` cannot span
+        // across chunks. The target chunk that aligns with the
+        // pattern chunk is `foobaz`; the next pattern chunk is `bar`
+        // which must align with the next target chunk independently.
+        assert!(!keyexpr_pattern_matches(
+            &["home", "foo$*bar"],
+            "home/foobaz/bar"
+        ));
+        // Same chunk → match.
+        assert!(keyexpr_pattern_matches(
+            &["home", "foo$*bar"],
+            "home/foobazbar"
+        ));
+    }
+
+    #[test]
+    fn keyexpr_pattern_matches_dsl_chunk_alone_acts_like_single_star() {
+        // A non-canonical `$*`-only chunk behaves like `*`: any
+        // single-chunk target content matches. (Canonical zenoh
+        // canonizes `$*` chunk to `*`, but wz must produce sane
+        // results for the un-canonized input shape since wz does not
+        // currently canonicalize registered keyexprs.)
+        assert!(keyexpr_pattern_matches(&["home", "$*", "temp"], "home/kitchen/temp"));
+        assert!(keyexpr_pattern_matches(&["home", "$*", "temp"], "home/x/temp"));
+        // Still does not span chunk boundaries.
+        assert!(!keyexpr_pattern_matches(
+            &["home", "$*", "temp"],
+            "home/a/b/temp"
+        ));
+        // Still does not collapse to zero chunks.
+        assert!(!keyexpr_pattern_matches(&["home", "$*", "temp"], "home/temp"));
+    }
+
+    #[test]
+    fn keyexpr_pattern_matches_dsl_combines_with_double_star() {
+        // `**` traversal and intra-chunk `$*` interact orthogonally:
+        // `**` consumes whole chunks, `$*` consumes intra-chunk
+        // substrings within a single chunk.
+        assert!(keyexpr_pattern_matches(
+            &["sensors", "**", "id_$*"],
+            "sensors/room1/sub1/id_42"
+        ));
+        assert!(keyexpr_pattern_matches(
+            &["sensors", "**", "id_$*"],
+            "sensors/id_42"
+        ));
+        // The literal in the DSL chunk must still align.
+        assert!(!keyexpr_pattern_matches(
+            &["sensors", "**", "id_$*"],
+            "sensors/room1/value_42"
         ));
     }
 
