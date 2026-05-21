@@ -9850,6 +9850,54 @@
         "Phase W lwIP / MCU runtime full scaffolding deferred — 20-50 round cluster unchanged"
       ]
     },
+    "Round 224": {
+      "decision_summary": "R224 pre-push hook: stdin ref-tuple short-circuit + flock advisory lock close 22-session false-negative on Everything-up-to-date + concurrent push race",
+      "changes_bullets": [
+        "`.githooks/pre-push` reads the git protocol stdin (`<local_ref> <local_sha> <remote_ref> <remote_sha>` per ref) and fast-exits with status 0 when no row has a non-zero `local_sha` — i.e. empty stdin (redundant push after another invocation updated the remote) or delete-only push (no new commit to validate).",
+        "`.githooks/pre-push` acquires a non-blocking `flock(1)` advisory lock on `$GIT_DIR/run-ci.lock` before entering `scripts/run-ci.sh`; failure exits 1 with an explicit `another run-ci already running` message + lock path so concurrent push attempts fail loud instead of silently racing `crates/target` cargo lock + sce-codegen freshness rebuild.",
+        "`flock(1)` presence guard via `command -v flock` so the advisory lock degrades to a no-op on slimmed containers without util-linux instead of hard-failing the hook.",
+        "Header rationale block extended with R224 retrospect documenting the 22-session false-negative root cause (a) Everything-up-to-date pushes still firing the full ~50s gate against zero work and (b) concurrent run-ci.sh races surfacing phantom Layer X FAIL on a clean tree."
+      ],
+      "verification_bullets": [
+        "Test 1 (empty stdin): `echo -n '' | .githooks/pre-push origin git@example.com:repo.git` exits 0 with `pre-push: nothing to push (no non-delete refs); skipping CI gate`.",
+        "Test 2 (delete-only ref): stdin row with `local_sha = 40*'0'` exits 0 with the same fast-exit message — no ~50s gate spent on ref deletion.",
+        "Test 3 (concurrent lock): sibling process holds `$GIT_DIR/run-ci.lock` via `flock 200; sleep 10` background; hook with normal-ref stdin exits 1 with `another run-ci already running (lock: .git/run-ci.lock)`.",
+        "set -euo pipefail compatibility verified: `while read` EOF returns 1 inside the while-condition (not under `set -e` reject scope), `local_sha` only referenced inside the loop body so unset-variable not triggered.",
+        "`flock` advisory check via `command -v flock` keeps the guard optional; degraded path on slimmed containers still runs the original race-prone scripts/run-ci.sh path (transparent fallback, no new hard dependency)."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "R225 — Sample-type subscriber 5+ field unified surface. R222 lesson #5 (`#[non_exhaustive]` struct is not a partial-surface escape hatch) demotes the closure's R225+R226 split plan to anti-pattern; merge into a single round that adds timestamp + encoding (MsgPut/MsgDel already decode these) + qos + attachment + source_info + reliability (Push outer extensions require an extraction pass). Carry breaks naturally only if the wire-ext decode infra is genuinely missing for some field; otherwise unify.",
+        "R121h-perf-bump-5 SCE-a vs wz-b decision still pending user confirm — surface at an appropriate point in 23-session before further outbound-perf work.",
+        "Self-publish loopback infrastructure (Locality::SessionLocal dispatch path) — depends on Sample completeness from R225; 2-3 rounds estimated.",
+        "SCE upstream drift re-check at each kickoff. 23-session start: SCE origin/main unchanged at ebf3b3ff (local has 14 clippy/refactor commits ahead, none pushed); vendor pin remains ebf3b3ff."
+      ],
+      "publishable_decision_summary": "R224 pre-push hook: stdin ref-tuple short-circuit + flock advisory lock close 22-session false-negative on Everything-up-to-date + concurrent push race",
+      "publishable_changes_bullets": [
+        "`.githooks/pre-push` reads the git protocol stdin (`<local_ref> <local_sha> <remote_ref> <remote_sha>` per ref) and fast-exits with status 0 when no row has a non-zero `local_sha` — i.e. empty stdin (redundant push after another invocation updated the remote) or delete-only push (no new commit to validate).",
+        "`.githooks/pre-push` acquires a non-blocking `flock(1)` advisory lock on `$GIT_DIR/run-ci.lock` before entering `scripts/run-ci.sh`; failure exits 1 with an explicit `another run-ci already running` message + lock path so concurrent push attempts fail loud instead of silently racing `crates/target` cargo lock + sce-codegen freshness rebuild.",
+        "`flock(1)` presence guard via `command -v flock` so the advisory lock degrades to a no-op on slimmed containers without util-linux instead of hard-failing the hook.",
+        "Header rationale block extended with R224 retrospect documenting the 22-session false-negative root cause (a) Everything-up-to-date pushes still firing the full ~50s gate against zero work and (b) concurrent run-ci.sh races surfacing phantom Layer X FAIL on a clean tree."
+      ],
+      "publishable_verification_bullets": [
+        "Test 1 (empty stdin): `echo -n '' | .githooks/pre-push origin git@example.com:repo.git` exits 0 with `pre-push: nothing to push (no non-delete refs); skipping CI gate`.",
+        "Test 2 (delete-only ref): stdin row with `local_sha = 40*'0'` exits 0 with the same fast-exit message — no ~50s gate spent on ref deletion.",
+        "Test 3 (concurrent lock): sibling process holds `$GIT_DIR/run-ci.lock` via `flock 200; sleep 10` background; hook with normal-ref stdin exits 1 with `another run-ci already running (lock: .git/run-ci.lock)`.",
+        "set -euo pipefail compatibility verified: `while read` EOF returns 1 inside the while-condition (not under `set -e` reject scope), `local_sha` only referenced inside the loop body so unset-variable not triggered.",
+        "`flock` advisory check via `command -v flock` keeps the guard optional; degraded path on slimmed containers still runs the original race-prone scripts/run-ci.sh path (transparent fallback, no new hard dependency)."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R225 — Sample-type subscriber 5+ field unified surface. R222 lesson #5 (`#[non_exhaustive]` struct is not a partial-surface escape hatch) demotes the closure's R225+R226 split plan to anti-pattern; merge into a single round that adds timestamp + encoding (MsgPut/MsgDel already decode these) + qos + attachment + source_info + reliability (Push outer extensions require an extraction pass). Carry breaks naturally only if the wire-ext decode infra is genuinely missing for some field; otherwise unify.",
+        "R121h-perf-bump-5 SCE-a vs wz-b decision still pending user confirm — surface at an appropriate point in 23-session before further outbound-perf work.",
+        "Self-publish loopback infrastructure (Locality::SessionLocal dispatch path) — depends on Sample completeness from R225; 2-3 rounds estimated.",
+        "SCE upstream drift re-check at each kickoff. 23-session start: SCE origin/main unchanged at ebf3b3ff (local has 14 clippy/refactor commits ahead, none pushed); vendor pin remains ebf3b3ff."
+      ]
+    },
     "Round 23": {
       "decision_summary": "vle pair test-vector hardening — vle_byte_length + vle_u64_decode 각 3 boundary vectors land; SCE v1 test-vector schema single-`bytes`-param scalar-return 제약 발견, MID validator (uint8 param) 6종 test-vector는 Phase B5 multi-arg/non-bytes 지원 후 deferred carry.",
       "changes_bullets": [
