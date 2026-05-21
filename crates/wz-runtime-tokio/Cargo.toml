@@ -34,6 +34,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+readme.workspace = true
 description = "Tokio + mio epoll runtime for watching-zenoh AP linux target (Phase D.1)."
 
 [lib]

@@ -97,7 +97,7 @@ GitHub Actions workflow.
 | sources/ | SCE Forge input SCXML (codecs + algorithms + session FSM) |
 | crates/wz-codecs | Generated codec types from sources/codecs/*.scxml |
 | crates/wz-runtime-tokio | Tokio-based AP runtime + session glue + builders |
-| crates/wz-runtime-lwip | lwIP / MCU runtime skeleton (Phase W) |
+| crates/wz-runtime-lwip | lwIP / MCU runtime headers + tests (Phase W, not yet a workspace member) |
 | crates/wz-ap-demo | AP MVP demo binary (initiator + acceptor) |
 | crates/wz-integration-tests | Layer 3 wire-interop + round-trip suites |
 | crates/wz-runtime-tokio-test-support | Shared test harness for runtime tests |

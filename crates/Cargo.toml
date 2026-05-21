@@ -55,6 +55,8 @@ edition = "2021"
 rust-version = "1.75"
 license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
 authors = ["newmassrael <newmassrael@gmail.com>"]
+repository = "https://github.com/newmassrael/watching-zenoh"
+readme = "../README.md"
 
 # Production lint policy: any warning fails the build. Per-crate opt-in
 # via `[lints] workspace = true`. Generated-code crates may add local
