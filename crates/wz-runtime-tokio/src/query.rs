@@ -407,11 +407,19 @@ impl QueryableRegistry {
     /// Register a queryable for a keyexpr pattern. Pattern syntax
     /// matches zenoh chunk wildcards (same as
     /// [`crate::pubsub::SubscriberRegistry::register`]): `/`-separated
-    /// chunks where each chunk is a literal, `*` (single chunk), or
-    /// `**` (zero or more chunks). The returned [`QueryableId`] is
+    /// chunks where each chunk is a literal, `*` (single chunk), `**`
+    /// (zero or more chunks), or contains the `$*` intra-chunk
+    /// substring wildcard (R220). The returned [`QueryableId`] is
     /// stable until [`Self::unregister`] is called. Duplicate
     /// patterns produce distinct queryables — `dispatch_request`
     /// fires every matching callback in registration order.
+    ///
+    /// R221 — the pattern is canonicalized via
+    /// [`canonize_keyexpr`](crate::keyexpr_canon::canonize_keyexpr)
+    /// before being split into chunks, so the stored form agrees
+    /// byte-for-byte with the canonical wire form. Structurally
+    /// invalid patterns fall back to the raw form (non-breaking)
+    /// with a `log::warn!` notice.
     pub fn register(
         &mut self,
         keyexpr_pattern: impl Into<String>,
@@ -419,8 +427,19 @@ impl QueryableRegistry {
     ) -> QueryableId {
         let id = QueryableId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
+        let raw = keyexpr_pattern.into();
+        let canonical = match crate::keyexpr_canon::canonize_keyexpr(&raw) {
+            Ok(canon) => canon,
+            Err(err) => {
+                log::warn!(
+                    "QueryableRegistry::register: keyexpr `{raw}` is not canonical \
+                     ({err}); storing raw form."
+                );
+                raw
+            }
+        };
         let pattern_chunks: Vec<String> =
-            keyexpr_pattern.into().split('/').map(String::from).collect();
+            canonical.split('/').map(String::from).collect();
         self.queryables.push(Queryable {
             id,
             pattern_chunks,

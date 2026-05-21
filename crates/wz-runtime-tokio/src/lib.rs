@@ -27,6 +27,14 @@ use wz_codecs::stream_envelope::StreamEnvelope;
 
 pub mod session_glue;
 
+/// R221 — zenoh keyexpr canonicalization mirror. Mirrors the
+/// structural-only canonicalization performed by zenoh-pico's
+/// `_z_keyexpr_canonize` so wz-side subscriber / queryable
+/// registrations store the canonical form a peer would emit on the
+/// wire. See `keyexpr_canon` module doc comment for the scope (no
+/// lowercase / no NFC — pure structural) and the call-site wiring.
+pub mod keyexpr_canon;
+
 /// R98 — application-layer subscriber registry. Routes decoded
 /// `NetworkMessage::Push` records to user-registered callbacks
 /// filtered by literal keyexpr. See `pubsub::SubscriberRegistry`
