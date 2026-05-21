@@ -8364,6 +8364,52 @@
         "SCE drift +7 commits audit entry pending"
       ]
     },
+    "Round 199": {
+      "decision_summary": "R121k-4 — LivelinessRegistry (DeclToken+UndeclToken) closes the three Remote* registries; declare.rs full R121k-2/3/4 surface done.",
+      "changes_bullets": [
+        "declare.rs +LivelinessRegistry (on_token_declared/_undeclared + dispatch_*)",
+        "zenoh-pico parity: _z_liveliness_process_token_declare / _undeclare layer surface",
+        "three Remote* registries scan same FramePayload.messages stream type-safely; zero cross-talk",
+        "cumulative R121k-2/3/4 = 23 lib tests + 3 registries in one declare.rs module"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 147 -> 154, +7 liveliness::tests passing",
+        "cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings: clean (after dead-code fix)",
+        "three-registry composability test confirms parallel dispatch over one stream"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121k-5 absorb_declare or external observer fans Declare body into all three Remote* registries",
+        "R121k-6 integration test parity (mirror wz_queryable_round_trip pattern) for inbound DECLARE",
+        "R121j-6 z_get-side inbound Response.Reply application dispatch (ReplyRegistry)",
+        "R121j-tstamp Request-level Timestamp setter",
+        "SCE drift +7 commits audit entry pending (e4034617 codegen)"
+      ],
+      "publishable_decision_summary": "R121k-4 — LivelinessRegistry (DeclToken+UndeclToken) closes the three Remote* registries; declare.rs full R121k-2/3/4 surface done.",
+      "publishable_changes_bullets": [
+        "declare.rs +LivelinessRegistry (on_token_declared/_undeclared + dispatch_*)",
+        "zenoh-pico parity: _z_liveliness_process_token_declare / _undeclare layer surface",
+        "three Remote* registries scan same FramePayload.messages stream type-safely; zero cross-talk",
+        "cumulative R121k-2/3/4 = 23 lib tests + 3 registries in one declare.rs module"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 147 -> 154, +7 liveliness::tests passing",
+        "cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings: clean (after dead-code fix)",
+        "three-registry composability test confirms parallel dispatch over one stream"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121k-5 absorb_declare or external observer fans Declare body into all three Remote* registries",
+        "R121k-6 integration test parity (mirror wz_queryable_round_trip pattern) for inbound DECLARE",
+        "R121j-6 z_get-side inbound Response.Reply application dispatch (ReplyRegistry)",
+        "R121j-tstamp Request-level Timestamp setter",
+        "SCE drift +7 commits audit entry pending (e4034617 codegen)"
+      ]
+    },
     "Round 2": {
       "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
       "changes_bullets": [
