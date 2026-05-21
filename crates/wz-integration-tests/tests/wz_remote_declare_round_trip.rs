@@ -46,76 +46,18 @@
 //! at the unit level) holds end-to-end. A regression on any one
 //! kind localises through the per-line assertions below.
 
-use std::io::{Read, Seek, SeekFrom};
-use std::net::TcpListener;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-fn project_root() -> PathBuf {
-    let manifest_dir =
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
-    PathBuf::from(manifest_dir)
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|p| p.to_path_buf())
-        .expect("project root resolves from CARGO_MANIFEST_DIR")
-}
-
-fn wz_ap_demo_binary() -> PathBuf {
-    let crates_dir = project_root().join("crates");
-    let candidates = [
-        crates_dir.join("target/debug/wz-ap-demo"),
-        crates_dir.join("target/release/wz-ap-demo"),
-    ];
-    for c in &candidates {
-        if c.is_file() {
-            return c.clone();
-        }
-    }
-    panic!(
-        "wz-ap-demo binary not found in {:?}; run `cargo build -p wz-ap-demo` first",
-        candidates
-    );
-}
-
-fn pick_free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
-    let port = listener.local_addr().expect("local_addr").port();
-    drop(listener);
-    port
-}
-
-fn read_captured(file: &mut std::fs::File) -> String {
-    file.seek(SeekFrom::Start(0)).expect("seek to start");
-    let mut s = String::new();
-    file.read_to_string(&mut s).expect("read captured output");
-    s
-}
-
-fn wait_for_substring(
-    file: &mut std::fs::File,
-    needle: &str,
-    timeout: Duration,
-) -> Result<String, String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let captured = read_captured(file);
-        if captured.contains(needle) {
-            return Ok(captured);
-        }
-        if Instant::now() >= deadline {
-            return Err(captured);
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-}
+use wz_integration_tests::common::{
+    read_captured, wait_for_substring, wz_ap_demo_binary, PortReservation,
+};
 
 #[test]
 fn wz_remote_declare_round_trip_against_wz_initiator() {
     let demo = wz_ap_demo_binary();
-    let port = pick_free_port();
+    let port_res = PortReservation::pick();
+    let port = port_res.port();
     let addr = format!("127.0.0.1:{port}");
     let sub_keyexpr = "demo/sub";
     let q_keyexpr = "demo/q";
@@ -155,6 +97,8 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
              --- captured acceptor stderr ---\n{captured}"
         );
     }
+    // R216 — acceptor bound, release the port-alloc mutex.
+    drop(port_res);
 
     // ── wz initiator (R121f dialer + R121k-5 remote-log callbacks) ─
     let initiator_stderr = tempfile::tempfile().expect("tempfile for initiator stderr");
