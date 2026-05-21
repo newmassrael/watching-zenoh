@@ -43,6 +43,16 @@ pub mod pubsub;
 /// scope, threading, and Responder lifetime contract.
 pub mod query;
 
+/// R121k-2 — application-layer remote-declaration registries. Route
+/// decoded `Declare(Decl*|Undecl*)` records to user-registered
+/// callbacks. This round lands `RemoteSubscriberRegistry`
+/// (DeclSubscriber + UndeclSubscriber); R121k-3 adds
+/// `RemoteQueryableRegistry`, R121k-4 adds `LivelinessRegistry`. The
+/// dispatch wiring that fans inbound `Declare` envelopes through all
+/// three lands in R121k-5. See `declare` module doc comment for the
+/// scope and callback contract.
+pub mod declare;
+
 /// Generated SCXML state machine for the unicast session FSM. The
 /// emit comes from `sources/session/session_fsm_unicast.scxml` via
 /// `build.rs`. Public re-export is module-form rather than
