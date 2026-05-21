@@ -249,6 +249,19 @@ impl SubscriberRegistry {
         self.subscribers.is_empty()
     }
 
+    /// R121j-5c — borrow the peer keyexpr alias table for cross-
+    /// registry use. The [`QueryableRegistry`](crate::query::QueryableRegistry)
+    /// resolves inbound `Request(Query)` keyexpr through the same
+    /// peer mapping that the subscriber side populated via
+    /// [`absorb_declare`](Self::absorb_declare) on inbound
+    /// `Declare(DeclKexpr|UndeclKexpr)`. Lending the table by
+    /// reference avoids dual-write bookkeeping (one DECLARE absorbed
+    /// once, observed by both registries) without requiring
+    /// `Arc<Mutex<…>>` shared state.
+    pub fn peer_keyexpr_table(&self) -> &HashMap<u64, String> {
+        &self.peer_keyexpr_table
+    }
+
     /// Route an `IterationEvent` produced by
     /// [`drive_session_until_terminal`](crate::session_glue::drive_session_until_terminal)
     /// to matching subscriber callbacks. The adapter pulls

@@ -6769,6 +6769,64 @@
         "R121h-perf-bump-5 (encode_ext_chain Z-bit refactor) decision still pending — carried unchanged across this round."
       ]
     },
+    "Round 121j-5c": {
+      "decision_summary": "R121j-5c wiring: QueryableRegistry.dispatch_messages + _iteration_event + response_final_for + SubscriberRegistry.peer_keyexpr_table() getter. +5 lib tests. e2e TCP deferred.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/pubsub.rs gains `pub fn peer_keyexpr_table(&self) -> &HashMap<u64, String>`. Lends the SubscriberRegistry-owned mapping table to the queryable side so DeclKexpr / UndeclKexpr absorbed by the subscriber path automatically informs queryable resolution — no dual-write bookkeeping, no Arc<Mutex<...>> needed. Doc-comment makes the cross-registry sharing contract explicit.",
+        "crates/wz-runtime-tokio/src/query.rs gains `pub fn dispatch_messages(&mut self, messages: &[NetworkMessage], peer_keyexpr_table: &HashMap<u64, String>, pending_replies: &mut Vec<QueryReply>, pending_final_rids: &mut Vec<u64>)`. Iterates messages, routes each NetworkMessage::Request through dispatch_request, and — only when dispatch_request actually emitted at least one Reply for this rid — enqueues the rid into pending_final_rids so the caller emits exactly one ResponseFinal per Reply chain (zenoh-pico parity: many Reply + one Final per Query). Un-resolvable mapping ids, non-Query body arms, and unmatched keyexprs all yield zero Replies and zero Finals — no false 'Final without Reply' wire shape.",
+        "query.rs also adds `pub fn dispatch_iteration_event(...)` adapter that pulls FramePayload.messages out of IterationEvent::Poll(DriverLoopOutcome::FramePayload {messages, ..}) and forwards to dispatch_messages. Mirror of SubscriberRegistry::dispatch_iteration_event so the queryable integration site uses the same observer-callback shape as the subscriber side.",
+        "query.rs gains the module-level helper `pub fn response_final_for(rid: u64) -> ResponseFinal` that constructs a wire-correct ResponseFinal envelope (header = _Z_MID_N_RESPONSE_FINAL = 0x1A; extensions = None today). Uses `..ResponseFinal::default()` spread so the helper stays resilient to future ResponseFinal field additions that land with sensible defaults.",
+        "5 new lib tests on the dispatch_messages + response_final_for surface: dispatch_messages_emits_final_for_each_matched_request (two matched + one unmatched -> exactly two Finals for the matched rids), dispatch_messages_skips_final_when_no_queryable_matched, dispatch_messages_skips_final_when_keyexpr_unresolvable, dispatch_messages_ignores_push_response_declare_variants (non-Query body arms produce no Reply / no Final), response_final_for_uses_default_header_and_explicit_rid (header bit + rid + extensions=None invariants).",
+        "Integration site (TCP-driven wz_initiator <-> wz_acceptor end-to-end Query/Reply round-trip via a registered queryable) intentionally deferred to a follow-up sub-round. R121j-5c stages the wire-level dispatch primitives and tests them in isolation; the e2e harness layering (LinkDriver send + frame-encode sequencing + sn assignment) requires its own design pass to decide the SessionLinkActions vs application-side ownership of the queryable registry. The lib-test surface here pins the wire-shape contract independent of that decision."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio: clean (incremental 0.27s).",
+        "cargo test -p wz-runtime-tokio --lib: 129/129 pass (was 124; +5 new tests as listed in changes).",
+        "cargo clippy -p wz-runtime-tokio --all-targets: clean.",
+        "cargo test -p wz-integration-tests: pubsub round-trips unaffected (wz_publisher_to_zsub + wz_publisher_aliased_to_zsub still pass) — queryable wiring is opt-in via dispatch_iteration_event registration which existing integration tests do not perform.",
+        "Final-only-on-matched-Reply invariant verified directly: dispatch_messages_emits_final_for_each_matched_request asserts a 3-message batch (two matched Queries + one unmatched) yields exactly two pending_final_rids entries [10, 11] with rid 12 dropped; dispatch_messages_skips_final_when_no_queryable_matched + _when_keyexpr_unresolvable pin the negative cases on independent dispatch paths."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants"
+      ],
+      "carry_forward_bullets": [
+        "R121j-5c-e2e (follow-up sub-round): integration test that spins up wz_acceptor with a registered queryable, dials from wz_initiator, sends a Request(Query), and asserts Reply + Final received in order on the wire. Mirror of crates/wz-integration-tests/tests/wz_publisher_to_zsub.rs harness shape. Will exercise dispatch_iteration_event + the encode_frame_with_response / encode_frame_with_response_final outbound path end-to-end through TcpDriver.",
+        "R121j-5c-cross-impl (longer-horizon): same integration but cross-impl (wz_acceptor queryable + zenoh-pico z_get caller). Exercises wire interop for the Reply / Err / Final envelope; pairs with the existing wz_publisher_to_zsub / wz_initiator_to_wz_acceptor cross-impl harness pattern.",
+        "Architectural decision deferred: who owns QueryableRegistry on the acceptor side? Option A: each application creates one and threads it through the dispatch loop directly. Option B: SessionLinkActions grows a queryable: Arc<Mutex<QueryableRegistry>> field analogous to its subscriber: Arc<Mutex<SubscriberRegistry>> (if/when that lands). R121j-5c stays neutral; the e2e harness will surface the natural choice.",
+        "Q-side Request-level ext chain coverage: qos / target / budget / timeout = 4/5 (R121j-tstamp gated on wz_codecs ext_zbuf Timestamp wiring). Independent of R121j-5 scope.",
+        "QueryResponder does not yet expose a .responder(zid, eid) setter for envelope-level responder ext (R121j-3c). When the e2e harness wants the queryable to identify itself, surface this as a QueryReply::Reply::with_responder(zid, eid) builder or a QueryableRegistry::set_default_responder(...) configuration step. Defer until the e2e flow surfaces the need.",
+        "R121h-perf-bump-5 (encode_ext_chain Z-bit refactor) decision still pending — carried unchanged across this round."
+      ],
+      "publishable_decision_summary": "R121j-5c wiring: QueryableRegistry.dispatch_messages + _iteration_event + response_final_for + SubscriberRegistry.peer_keyexpr_table() getter. +5 lib tests. e2e TCP deferred.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/pubsub.rs gains `pub fn peer_keyexpr_table(&self) -> &HashMap<u64, String>`. Lends the SubscriberRegistry-owned mapping table to the queryable side so DeclKexpr / UndeclKexpr absorbed by the subscriber path automatically informs queryable resolution — no dual-write bookkeeping, no Arc<Mutex<...>> needed. Doc-comment makes the cross-registry sharing contract explicit.",
+        "crates/wz-runtime-tokio/src/query.rs gains `pub fn dispatch_messages(&mut self, messages: &[NetworkMessage], peer_keyexpr_table: &HashMap<u64, String>, pending_replies: &mut Vec<QueryReply>, pending_final_rids: &mut Vec<u64>)`. Iterates messages, routes each NetworkMessage::Request through dispatch_request, and — only when dispatch_request actually emitted at least one Reply for this rid — enqueues the rid into pending_final_rids so the caller emits exactly one ResponseFinal per Reply chain (zenoh-pico parity: many Reply + one Final per Query). Un-resolvable mapping ids, non-Query body arms, and unmatched keyexprs all yield zero Replies and zero Finals — no false 'Final without Reply' wire shape.",
+        "query.rs also adds `pub fn dispatch_iteration_event(...)` adapter that pulls FramePayload.messages out of IterationEvent::Poll(DriverLoopOutcome::FramePayload {messages, ..}) and forwards to dispatch_messages. Mirror of SubscriberRegistry::dispatch_iteration_event so the queryable integration site uses the same observer-callback shape as the subscriber side.",
+        "query.rs gains the module-level helper `pub fn response_final_for(rid: u64) -> ResponseFinal` that constructs a wire-correct ResponseFinal envelope (header = _Z_MID_N_RESPONSE_FINAL = 0x1A; extensions = None today). Uses `..ResponseFinal::default()` spread so the helper stays resilient to future ResponseFinal field additions that land with sensible defaults.",
+        "5 new lib tests on the dispatch_messages + response_final_for surface: dispatch_messages_emits_final_for_each_matched_request (two matched + one unmatched -> exactly two Finals for the matched rids), dispatch_messages_skips_final_when_no_queryable_matched, dispatch_messages_skips_final_when_keyexpr_unresolvable, dispatch_messages_ignores_push_response_declare_variants (non-Query body arms produce no Reply / no Final), response_final_for_uses_default_header_and_explicit_rid (header bit + rid + extensions=None invariants).",
+        "Integration site (TCP-driven wz_initiator <-> wz_acceptor end-to-end Query/Reply round-trip via a registered queryable) intentionally deferred to a follow-up sub-round. R121j-5c stages the wire-level dispatch primitives and tests them in isolation; the e2e harness layering (LinkDriver send + frame-encode sequencing + sn assignment) requires its own design pass to decide the SessionLinkActions vs application-side ownership of the queryable registry. The lib-test surface here pins the wire-shape contract independent of that decision."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio: clean (incremental 0.27s).",
+        "cargo test -p wz-runtime-tokio --lib: 129/129 pass (was 124; +5 new tests as listed in changes).",
+        "cargo clippy -p wz-runtime-tokio --all-targets: clean.",
+        "cargo test -p wz-integration-tests: pubsub round-trips unaffected (wz_publisher_to_zsub + wz_publisher_aliased_to_zsub still pass) — queryable wiring is opt-in via dispatch_iteration_event registration which existing integration tests do not perform.",
+        "Final-only-on-matched-Reply invariant verified directly: dispatch_messages_emits_final_for_each_matched_request asserts a 3-message batch (two matched Queries + one unmatched) yields exactly two pending_final_rids entries [10, 11] with rid 12 dropped; dispatch_messages_skips_final_when_no_queryable_matched + _when_keyexpr_unresolvable pin the negative cases on independent dispatch paths."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121j-5c-e2e (follow-up sub-round): integration test that spins up wz_acceptor with a registered queryable, dials from wz_initiator, sends a Request(Query), and asserts Reply + Final received in order on the wire. Mirror of crates/wz-integration-tests/tests/wz_publisher_to_zsub.rs harness shape. Will exercise dispatch_iteration_event + the encode_frame_with_response / encode_frame_with_response_final outbound path end-to-end through TcpDriver.",
+        "R121j-5c-cross-impl (longer-horizon): same integration but cross-impl (wz_acceptor queryable + zenoh-pico z_get caller). Exercises wire interop for the Reply / Err / Final envelope; pairs with the existing wz_publisher_to_zsub / wz_initiator_to_wz_acceptor cross-impl harness pattern.",
+        "Architectural decision deferred: who owns QueryableRegistry on the acceptor side? Option A: each application creates one and threads it through the dispatch loop directly. Option B: SessionLinkActions grows a queryable: Arc<Mutex<QueryableRegistry>> field analogous to its subscriber: Arc<Mutex<SubscriberRegistry>> (if/when that lands). R121j-5c stays neutral; the e2e harness will surface the natural choice.",
+        "Q-side Request-level ext chain coverage: qos / target / budget / timeout = 4/5 (R121j-tstamp gated on wz_codecs ext_zbuf Timestamp wiring). Independent of R121j-5 scope.",
+        "QueryResponder does not yet expose a .responder(zid, eid) setter for envelope-level responder ext (R121j-3c). When the e2e harness wants the queryable to identify itself, surface this as a QueryReply::Reply::with_responder(zid, eid) builder or a QueryableRegistry::set_default_responder(...) configuration step. Defer until the e2e flow surfaces the need.",
+        "R121h-perf-bump-5 (encode_ext_chain Z-bit refactor) decision still pending — carried unchanged across this round."
+      ]
+    },
     "Round 122": {
       "decision_summary": "R122 vendor/sce pin bump 122f851d to 4441431d; LAYER2_KNOWN_DIVERGENCE 6 to 1.",
       "changes_bullets": [
