@@ -6109,6 +6109,64 @@
         "R121h-perf-bump-2 carry intact: blocking on explicit user consent for atomic 12-SCXML migration + vendor pin bump."
       ]
     },
+    "Round 121j-2b": {
+      "decision_summary": "ResponseReplyBuilder + ResponseErrBuilder added mirroring R121j-2a RequestQueryBuilder, with Reply.consolidation setter (R121j-3a squeeze) + Err.encoding(id, schema) setter (R121j-4a squeeze).",
+      "changes_bullets": [
+        "ResponseReplyBuilder struct in crates/wz-runtime-tokio/src/session_glue.rs (request_id + keyexpr_mapping_id + suffix + payload + consolidation). new + .consolidation(ConsolidationMode) + build(); build() delegates to build_response_reply_literal (mapping_id=0+Some) or build_response_reply_aliased (mapping_id!=0) for the minimal-shape baseline, then applies Reply.header.C(0x20) + Reply.consolidation byte if the setter fired",
+        "ResponseErrBuilder struct mirroring the Reply side (request_id + keyexpr_mapping_id + suffix + payload + encoding(id + optional schema)). new + .encoding(id, schema) + build(); build() delegates to build_response_err_literal/aliased then applies Err.header.E(0x40) + Encoding { packed_id = (id << 1) | has_schema_bit, schema_len = schema.len(), schema = schema bytes } per zenoh-pico _z_encoding_encode at vendor/zenoh-pico/src/protocol/codec/core.c",
+        "+ use wz_codecs::encoding::Encoding to session_glue.rs imports (Encoding now constructed in this file via ResponseErrBuilder)",
+        "Both builders enforce literal-path invariant: (mapping_id=0, suffix=None) panics at build() time with the diagnostic 'ResponseXxxBuilder literal path (mapping_id=0) requires a non-empty keyexpr_suffix; use mapping_id != 0 for aliased' so the caller cannot silently produce a zero-id zero-suffix illegal wire shape",
+        "7 new lib tests pin the wire-byte invariants: ReplyBuilder no-setters byte-identical to baseline aliased helper; .consolidation(Latest) sets R_C(0x20) on Reply.header + emits 0x02 at offset 4; ErrBuilder no-setters byte-identical to baseline aliased helper; .encoding(4, None) packs to 0x08 (4<<1|0) + omits schema_len/schema; .encoding(4, Some(schema_v1)) packs to 0x09 (4<<1|1) + emits VLE schema_len=9 + 9 schema bytes; both literal-path validation panics caught via should_panic"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio: clean",
+        "cargo test -p wz-runtime-tokio --lib: 92/92 pass (85 baseline + 7 new builder tests)",
+        "cargo clippy -p wz-runtime-tokio --all-targets: clean",
+        "scripts/run-ci.sh: 8/8 lanes pass on first attempt (no flake observed this round)",
+        "Byte-identical baseline guarantee: ResponseReplyBuilder.new(...).build() and ResponseErrBuilder.new(...).build() produce the exact wire bytes of build_response_reply_aliased / build_response_err_aliased respectively when no setters fire (pinned by the no_setters_matches_aliased_baseline tests on both builders)"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "Reply sub-setters still pending and layer onto ResponseReplyBuilder via the same idiom consolidation introduced this round: R121j-3b source_info (Reply.header.Z + Responder ext on Response.header.Z chain ?? naming TBD by zenoh-pico ext id mapping), R121j-3c responder (Response.header.Z + zid + eid ZBUF ext), R121j-3d MsgDel body variant (swap MsgPut for MsgDel in the inner ReplyVariant arm so a delete-reply is expressible without dropping the builder)",
+        "Err sub-setters still pending: R121j-4b source_info (Err.header.Z + ext chain), R121j-4c attachment (Err.header.Z + ExtZbuf payload ext)",
+        "R121j-1f Request-level qos setter on RequestQueryBuilder (ext_id=0x01 ZINT no M; zenoh-pico packs priority+congestion+reliability into u8); R121j-1g Request-level budget setter (ext_id=0x05 ZINT)",
+        "R121h-perf-bump-4: 4 secondary encoder sites in session_glue.rs (lines 1543/1596/1620/1645 -- InitBody/OpenBody/DeclFinal-batch/KeepAlive) still use the inner-Vec + extend_from_slice pattern; apply the same encode_frame_envelope-style shape for symmetry. Lower priority than R121j-5 on the AP MVP weighted axis",
+        "R121j-5 inbound Request(Query) parser + on_query dispatch + QueryableTable struct (largest single AP MVP weighted jump +5-7%p; 2-3 sub-rounds = 1 session)",
+        "R121k inbound DECLARE parser silent gap (outbound 9/9 vs inbound 0/8; DeclKexpr inbound first for AP MVP alias-aware DECLARE-then-Push when wz is receiver side; 4-6 sub-rounds = 1-2 sessions)",
+        "SliceSink-based zero-alloc hot path (caller-owned reusable buffer plumbed through LinkDriver/TxFrame/tcp_write). Wire bytes computation is now optimal post-R121h-perf-bump-3; remaining alloc is in LinkDriver enqueue layer. Deferred to a runtime API design round"
+      ],
+      "publishable_decision_summary": "ResponseReplyBuilder + ResponseErrBuilder added mirroring R121j-2a RequestQueryBuilder, with Reply.consolidation setter (R121j-3a squeeze) + Err.encoding(id, schema) setter (R121j-4a squeeze).",
+      "publishable_changes_bullets": [
+        "ResponseReplyBuilder struct in crates/wz-runtime-tokio/src/session_glue.rs (request_id + keyexpr_mapping_id + suffix + payload + consolidation). new + .consolidation(ConsolidationMode) + build(); build() delegates to build_response_reply_literal (mapping_id=0+Some) or build_response_reply_aliased (mapping_id!=0) for the minimal-shape baseline, then applies Reply.header.C(0x20) + Reply.consolidation byte if the setter fired",
+        "ResponseErrBuilder struct mirroring the Reply side (request_id + keyexpr_mapping_id + suffix + payload + encoding(id + optional schema)). new + .encoding(id, schema) + build(); build() delegates to build_response_err_literal/aliased then applies Err.header.E(0x40) + Encoding { packed_id = (id << 1) | has_schema_bit, schema_len = schema.len(), schema = schema bytes } per zenoh-pico _z_encoding_encode at vendor/zenoh-pico/src/protocol/codec/core.c",
+        "+ use wz_codecs::encoding::Encoding to session_glue.rs imports (Encoding now constructed in this file via ResponseErrBuilder)",
+        "Both builders enforce literal-path invariant: (mapping_id=0, suffix=None) panics at build() time with the diagnostic 'ResponseXxxBuilder literal path (mapping_id=0) requires a non-empty keyexpr_suffix; use mapping_id != 0 for aliased' so the caller cannot silently produce a zero-id zero-suffix illegal wire shape",
+        "7 new lib tests pin the wire-byte invariants: ReplyBuilder no-setters byte-identical to baseline aliased helper; .consolidation(Latest) sets R_C(0x20) on Reply.header + emits 0x02 at offset 4; ErrBuilder no-setters byte-identical to baseline aliased helper; .encoding(4, None) packs to 0x08 (4<<1|0) + omits schema_len/schema; .encoding(4, Some(schema_v1)) packs to 0x09 (4<<1|1) + emits VLE schema_len=9 + 9 schema bytes; both literal-path validation panics caught via should_panic"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio: clean",
+        "cargo test -p wz-runtime-tokio --lib: 92/92 pass (85 baseline + 7 new builder tests)",
+        "cargo clippy -p wz-runtime-tokio --all-targets: clean",
+        "scripts/run-ci.sh: 8/8 lanes pass on first attempt (no flake observed this round)",
+        "Byte-identical baseline guarantee: ResponseReplyBuilder.new(...).build() and ResponseErrBuilder.new(...).build() produce the exact wire bytes of build_response_reply_aliased / build_response_err_aliased respectively when no setters fire (pinned by the no_setters_matches_aliased_baseline tests on both builders)"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Reply sub-setters still pending and layer onto ResponseReplyBuilder via the same idiom consolidation introduced this round: R121j-3b source_info (Reply.header.Z + Responder ext on Response.header.Z chain ?? naming TBD by zenoh-pico ext id mapping), R121j-3c responder (Response.header.Z + zid + eid ZBUF ext), R121j-3d MsgDel body variant (swap MsgPut for MsgDel in the inner ReplyVariant arm so a delete-reply is expressible without dropping the builder)",
+        "Err sub-setters still pending: R121j-4b source_info (Err.header.Z + ext chain), R121j-4c attachment (Err.header.Z + ExtZbuf payload ext)",
+        "R121j-1f Request-level qos setter on RequestQueryBuilder (ext_id=0x01 ZINT no M; zenoh-pico packs priority+congestion+reliability into u8); R121j-1g Request-level budget setter (ext_id=0x05 ZINT)",
+        "R121h-perf-bump-4: 4 secondary encoder sites in session_glue.rs (lines 1543/1596/1620/1645 -- InitBody/OpenBody/DeclFinal-batch/KeepAlive) still use the inner-Vec + extend_from_slice pattern; apply the same encode_frame_envelope-style shape for symmetry. Lower priority than R121j-5 on the AP MVP weighted axis",
+        "R121j-5 inbound Request(Query) parser + on_query dispatch + QueryableTable struct (largest single AP MVP weighted jump +5-7%p; 2-3 sub-rounds = 1 session)",
+        "R121k inbound DECLARE parser silent gap (outbound 9/9 vs inbound 0/8; DeclKexpr inbound first for AP MVP alias-aware DECLARE-then-Push when wz is receiver side; 4-6 sub-rounds = 1-2 sessions)",
+        "SliceSink-based zero-alloc hot path (caller-owned reusable buffer plumbed through LinkDriver/TxFrame/tcp_write). Wire bytes computation is now optimal post-R121h-perf-bump-3; remaining alloc is in LinkDriver enqueue layer. Deferred to a runtime API design round"
+      ]
+    },
     "Round 121j-3": {
       "decision_summary": "R121j-3 opens the Response/Reply outbound chain with the minimal Response(Reply(MsgPut)) shape (literal + aliased keyexpr variants + frame envelope helper). Foundation for queryable-side reply emission; ext_responder / consolidation / Reply-del are scope-deferred sub-helpers.",
       "changes_bullets": [

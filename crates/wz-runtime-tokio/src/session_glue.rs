@@ -74,6 +74,7 @@ use wz_codecs::undecl_queryable::UndeclQueryable;
 use wz_codecs::undecl_subscriber::UndeclSubscriber;
 use wz_codecs::undecl_token::UndeclToken;
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
+use wz_codecs::encoding::Encoding;
 use wz_codecs::ext_zbuf::ExtZbuf;
 use wz_codecs::ext_zint::ExtZint;
 use wz_codecs::err::Err;
@@ -3318,6 +3319,196 @@ pub fn build_response_err_aliased(
             payload_len: payload.len() as u64,
             payload: payload.to_vec(),
         }),
+    }
+}
+
+/// R121j-2b — fluent builder for `Response(Reply)` that composes the
+/// Reply-layer + Response-layer options on top of the minimal-shape
+/// baseline provided by [`build_response_reply_literal`] /
+/// [`build_response_reply_aliased`]. Mirror of [`RequestQueryBuilder`]
+/// on the Response side.
+///
+/// Keyexpr convention (matches the rest of the wz builder family):
+///   - `(0, Some(s))`: literal — Reply carries inline keyexpr suffix `s`.
+///   - `(N, None)`: pure alias — Reply targets peer's mapping for `N`.
+///   - `(N, Some(s))`: compound — alias `N`'s prefix + suffix `s`.
+///
+/// Reply-layer setters today: `consolidation` (the R121j-3a sub-round
+/// squeezed into the builder infra round). Reply `source_info`
+/// (R121j-3b), `responder` (R121j-3c), and `MsgDel` body variant
+/// (R121j-3d) layer in as separate audit-traced sub-rounds — each
+/// extends this same builder, last-wins idiom.
+pub struct ResponseReplyBuilder {
+    request_id: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<String>,
+    payload: Vec<u8>,
+    // Reply-layer settings.
+    consolidation: Option<ConsolidationMode>,
+}
+
+impl ResponseReplyBuilder {
+    /// Begin a builder rooted in the same baseline contract as
+    /// [`build_response_reply_literal`] / [`build_response_reply_aliased`]:
+    /// minimal Response(Reply) envelope with the keyexpr arm
+    /// (literal id=0 + Some, alias id=N + None, compound id=N + Some).
+    pub fn new(
+        request_id: u64,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+        payload: &[u8],
+    ) -> Self {
+        Self {
+            request_id,
+            keyexpr_mapping_id,
+            keyexpr_suffix: keyexpr_suffix.map(str::to_string),
+            payload: payload.to_vec(),
+            consolidation: None,
+        }
+    }
+
+    /// Set the Reply-body consolidation mode. Subsequent calls
+    /// overwrite (last-wins). Mirror of
+    /// [`RequestQueryBuilder::consolidation`] — same
+    /// [`ConsolidationMode`] enum, same wire-byte contract, applied to
+    /// `Reply.header._Z_FLAG_Z_R_C(0x20)` + 1-byte consolidation.
+    pub fn consolidation(mut self, mode: ConsolidationMode) -> Self {
+        self.consolidation = Some(mode);
+        self
+    }
+
+    /// Materialise the Response. Constructs the baseline envelope via
+    /// the existing literal-or-aliased builder, then applies the
+    /// Reply-layer settings. Panics on `(mapping_id=0, suffix=None)`
+    /// because the literal path requires an inline keyexpr suffix.
+    pub fn build(self) -> Response {
+        let mut response = if self.keyexpr_mapping_id == 0 {
+            let suffix = self.keyexpr_suffix.as_deref().unwrap_or_else(|| {
+                panic!(
+                    "ResponseReplyBuilder literal path (mapping_id=0) requires \
+                     a non-empty keyexpr_suffix; use mapping_id != 0 for aliased",
+                )
+            });
+            build_response_reply_literal(self.request_id, suffix, &self.payload)
+        } else {
+            build_response_reply_aliased(
+                self.request_id,
+                self.keyexpr_mapping_id,
+                self.keyexpr_suffix.as_deref(),
+                &self.payload,
+            )
+        };
+
+        if let ResponseVariant::CodecZenohReply(ref mut reply) = response.body {
+            if let Some(mode) = self.consolidation {
+                reply.header |= 0x20; // _Z_FLAG_Z_R_C
+                reply.consolidation = Some(mode.wire_byte());
+            }
+        } else {
+            unreachable!(
+                "build_response_reply_* must produce a CodecZenohReply body — \
+                 the layered builder relies on this invariant"
+            );
+        }
+
+        response
+    }
+}
+
+/// R121j-2b — fluent builder for `Response(Err)` that composes the
+/// Err-layer options on top of the minimal-shape baseline provided by
+/// [`build_response_err_literal`] / [`build_response_err_aliased`].
+/// Mirror of [`ResponseReplyBuilder`] for the Err inner-body arm.
+///
+/// Err-layer setters today: `encoding(id, schema)` (the R121j-4a
+/// sub-round squeezed into the builder infra round). Err `source_info`
+/// (R121j-4b) and `attachment` (R121j-4c) layer in as separate
+/// audit-traced sub-rounds.
+pub struct ResponseErrBuilder {
+    request_id: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<String>,
+    payload: Vec<u8>,
+    // Err-layer settings. Tuple = (id, optional schema). packed_id =
+    // (id << 1) | has_schema computed at build() time.
+    encoding: Option<(u32, Option<String>)>,
+}
+
+impl ResponseErrBuilder {
+    /// Begin a builder rooted in the same baseline contract as
+    /// [`build_response_err_literal`] / [`build_response_err_aliased`]:
+    /// minimal Response(Err) envelope with the keyexpr arm
+    /// (literal id=0 + Some, alias id=N + None, compound id=N + Some).
+    pub fn new(
+        request_id: u64,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+        payload: &[u8],
+    ) -> Self {
+        Self {
+            request_id,
+            keyexpr_mapping_id,
+            keyexpr_suffix: keyexpr_suffix.map(str::to_string),
+            payload: payload.to_vec(),
+            encoding: None,
+        }
+    }
+
+    /// Set the Err encoding hint. `id` is the zenoh-pico content-type
+    /// prefix (e.g. 4 = application/json — see
+    /// `vendor/zenoh-pico/include/zenoh-pico/api/constants.h`);
+    /// `schema` is the optional schema fragment appended after the
+    /// prefix. The wire `packed_id = (id << 1) | has_schema_bit`
+    /// composition follows zenoh-pico's `_z_encoding_encode` at
+    /// `vendor/zenoh-pico/src/protocol/codec/core.c` — the LSB carries
+    /// the schema-present discriminator so the decoder can parse the
+    /// optional suffix conditionally.
+    pub fn encoding(mut self, id: u32, schema: Option<&str>) -> Self {
+        self.encoding = Some((id, schema.map(str::to_string)));
+        self
+    }
+
+    /// Materialise the Response. Constructs the baseline envelope via
+    /// the existing literal-or-aliased builder, then applies the
+    /// Err-layer settings. Panics on `(mapping_id=0, suffix=None)`
+    /// because the literal path requires an inline keyexpr suffix.
+    pub fn build(self) -> Response {
+        let mut response = if self.keyexpr_mapping_id == 0 {
+            let suffix = self.keyexpr_suffix.as_deref().unwrap_or_else(|| {
+                panic!(
+                    "ResponseErrBuilder literal path (mapping_id=0) requires \
+                     a non-empty keyexpr_suffix; use mapping_id != 0 for aliased",
+                )
+            });
+            build_response_err_literal(self.request_id, suffix, &self.payload)
+        } else {
+            build_response_err_aliased(
+                self.request_id,
+                self.keyexpr_mapping_id,
+                self.keyexpr_suffix.as_deref(),
+                &self.payload,
+            )
+        };
+
+        if let ResponseVariant::CodecZenohErr(ref mut err) = response.body {
+            if let Some((id, schema)) = self.encoding {
+                err.header |= 0x40; // _Z_FLAG_Z_E (Err encoding present)
+                let has_schema = schema.is_some();
+                let packed = (id << 1) | if has_schema { 1 } else { 0 };
+                err.encoding = Some(Encoding {
+                    packed_id: packed,
+                    schema_len: schema.as_ref().map(|s| s.len() as u64),
+                    schema,
+                });
+            }
+        } else {
+            unreachable!(
+                "build_response_err_* must produce a CodecZenohErr body — \
+                 the layered builder relies on this invariant"
+            );
+        }
+
+        response
     }
 }
 
@@ -7086,5 +7277,107 @@ mod tests {
         assert_eq!(actions.next_outbound_frame_sn(), 42, "first SN must equal params.initial_sn");
         assert_eq!(actions.next_outbound_frame_sn(), 43, "subsequent SNs must increment by 1");
         assert_eq!(actions.next_outbound_frame_sn(), 44);
+    }
+
+    /// R121j-2b — ResponseReplyBuilder with no setters must emit the
+    /// exact same wire bytes as the baseline aliased helper. The
+    /// builder is a strictly additive surface; it cannot silently
+    /// change the minimal-shape output.
+    #[test]
+    fn response_reply_builder_no_setters_matches_aliased_baseline() {
+        let direct = build_response_reply_aliased(42, 7, None, b"hello").encode_to_vec();
+        let built = ResponseReplyBuilder::new(42, 7, None, b"hello").build().encode_to_vec();
+        assert_eq!(direct, built, "ReplyBuilder.new+build must match build_response_reply_aliased byte-for-byte");
+    }
+
+    /// R121j-2b — ResponseReplyBuilder.consolidation sets the
+    /// `_Z_FLAG_Z_R_C(0x20)` bit on `Reply.header` and emits the 1-byte
+    /// consolidation immediately after the header. Mirrors zenoh-pico
+    /// `_z_reply_encode` at vendor/zenoh-pico/src/protocol/codec/message.c.
+    #[test]
+    fn response_reply_builder_consolidation_sets_r_c_flag_and_byte() {
+        let baseline = build_response_reply_aliased(42, 7, None, b"hello").encode_to_vec();
+        let with_c = ResponseReplyBuilder::new(42, 7, None, b"hello")
+            .consolidation(ConsolidationMode::Latest)
+            .build()
+            .encode_to_vec();
+        // The C-bit-set wire differs from baseline only in the Reply.header
+        // byte (R_C bit) and a freshly inserted consolidation byte (0x02 =
+        // Latest) directly after it.
+        assert_ne!(baseline, with_c, "consolidation setter must alter the wire bytes");
+        // Locate Reply.header in the encoded Response. The encoded layout
+        // up through Reply.header is:
+        //   Response.header(1) + VLE(rid) + wireexpr + Reply.header(1)
+        // For (rid=42, mapping_id=7, suffix=None) the prefix is small and
+        // we can pin the locations explicitly: Response.header at offset
+        // 0, VLE(42)=1 byte at offset 1, wireexpr(id=7,no suffix)=1 byte
+        // VLE(7) at offset 2, Reply.header at offset 3.
+        assert_eq!(baseline[3] & 0x20, 0, "baseline Reply.header must have R_C clear");
+        assert_eq!(with_c[3] & 0x20, 0x20, "consolidation builder must set R_C(0x20) on Reply.header");
+        assert_eq!(with_c[4], ConsolidationMode::Latest.wire_byte(),
+            "consolidation byte must follow Reply.header carrying the wire-byte mapping");
+    }
+
+    /// R121j-2b — ResponseErrBuilder with no setters must emit the
+    /// exact same wire bytes as the baseline aliased helper.
+    #[test]
+    fn response_err_builder_no_setters_matches_aliased_baseline() {
+        let direct = build_response_err_aliased(42, 7, None, b"oops").encode_to_vec();
+        let built = ResponseErrBuilder::new(42, 7, None, b"oops").build().encode_to_vec();
+        assert_eq!(direct, built, "ErrBuilder.new+build must match build_response_err_aliased byte-for-byte");
+    }
+
+    /// R121j-2b — ResponseErrBuilder.encoding without schema sets the
+    /// `_Z_FLAG_Z_E(0x40)` bit on `Err.header` and emits packed_id =
+    /// (id << 1) | 0 with no schema_len / schema bytes.
+    #[test]
+    fn response_err_builder_encoding_no_schema_packs_id_left_shift_one() {
+        let with_enc = ResponseErrBuilder::new(42, 7, None, b"oops")
+            .encoding(4, None) // 4 = application/json prefix
+            .build()
+            .encode_to_vec();
+        // Layout up through Err.header:
+        //   Response.header(1) + VLE(42)(1) + VLE(7)(1) + Err.header(1) at offset 3
+        assert_eq!(with_enc[3] & 0x40, 0x40, "encoding builder must set E(0x40) on Err.header");
+        // Next byte is VLE(packed_id) where packed_id = 4<<1 = 8.
+        // VLE(8) = single byte 0x08.
+        assert_eq!(with_enc[4], 0x08, "no-schema packed_id = (id << 1) | 0; for id=4 this is 0x08");
+    }
+
+    /// R121j-2b — ResponseErrBuilder.encoding with schema sets E,
+    /// packs LSB=1, and emits the VLE schema_len + schema bytes.
+    #[test]
+    fn response_err_builder_encoding_with_schema_sets_lsb_and_emits_suffix() {
+        let with_enc = ResponseErrBuilder::new(42, 7, None, b"oops")
+            .encoding(4, Some("schema_v1"))
+            .build()
+            .encode_to_vec();
+        assert_eq!(with_enc[3] & 0x40, 0x40, "schema-bearing encoding still sets E on Err.header");
+        // packed_id = (4 << 1) | 1 = 9 → VLE single byte 0x09
+        assert_eq!(with_enc[4], 0x09, "with-schema packed_id = (id << 1) | 1; for id=4 this is 0x09");
+        // VLE(schema_len = 9) = single byte 0x09, then "schema_v1" bytes
+        assert_eq!(with_enc[5], 0x09, "schema_len VLE follows packed_id; 'schema_v1' length = 9");
+        assert_eq!(&with_enc[6..6 + 9], b"schema_v1", "schema bytes follow schema_len");
+    }
+
+    /// R121j-2b — ResponseReplyBuilder literal path requires a
+    /// non-empty keyexpr_suffix; (mapping_id=0, suffix=None) panics
+    /// with the builder's diagnostic message at build() time.
+    #[test]
+    #[should_panic(
+        expected = "ResponseReplyBuilder literal path (mapping_id=0) requires a non-empty keyexpr_suffix"
+    )]
+    fn response_reply_builder_literal_rejects_none_suffix() {
+        let _ = ResponseReplyBuilder::new(42, 0, None, b"hello").build();
+    }
+
+    /// R121j-2b — ResponseErrBuilder literal path requires a
+    /// non-empty keyexpr_suffix.
+    #[test]
+    #[should_panic(
+        expected = "ResponseErrBuilder literal path (mapping_id=0) requires a non-empty keyexpr_suffix"
+    )]
+    fn response_err_builder_literal_rejects_none_suffix() {
+        let _ = ResponseErrBuilder::new(42, 0, None, b"oops").build();
     }
 }
