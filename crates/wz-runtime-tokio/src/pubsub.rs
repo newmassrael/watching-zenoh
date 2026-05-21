@@ -36,6 +36,20 @@
 //! - Reply / Err / Interest / OAM dispatch are NOT routed through
 //!   the registry. They land in a future round once a use case
 //!   surfaces — pub/sub demo is sufficient for the AP MVP.
+//! - R227 — self-publish loopback. An in-process publisher can hand
+//!   a [`Sample`] to [`SubscriberRegistry::local_publish`]; the
+//!   registry walks the same locality + pattern-match dispatch that
+//!   wire-arrived Pushes go through, just with `is_remote = false`
+//!   so the locality predicate selects `allows_local()`. Subscribers
+//!   pinned to [`crate::locality::Locality::SessionLocal`] now fire
+//!   (they were dormant before R227), while subscribers pinned to
+//!   [`crate::locality::Locality::Remote`] are suppressed; the
+//!   [`crate::locality::Locality::Any`] default fires on both
+//!   origins. Mirrors zenoh-pico's `_z_session_deliver_push_locally`
+//!   (`vendor/zenoh-pico/src/session/loopback.c` 70-100) routed
+//!   from `_z_write` (`vendor/zenoh-pico/src/net/primitives.c`
+//!   198-202) when the publisher's
+//!   `allowed_destination.allows_local()` holds.
 //!
 //! ## Threading
 //!
@@ -447,13 +461,35 @@ impl SubscriberRegistry {
     /// agnostic (declarations always travel on the reliable channel).
     pub fn dispatch(&mut self, message: &NetworkMessage, reliability: Reliability) {
         match message {
-            NetworkMessage::Push(push) => self.dispatch_push(push, reliability),
+            // R227 — wire-arrived Push carries `is_remote = true` so
+            // the locality filter selects `allows_remote()`. The
+            // self-publish loopback path (see
+            // [`local_publish`](Self::local_publish)) enters
+            // [`fire_to_subscribers`](Self::fire_to_subscribers)
+            // directly with `is_remote = false`.
+            NetworkMessage::Push(push) => self.dispatch_push(push, reliability, true),
             NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body),
             _ => {}
         }
     }
 
-    fn dispatch_push(&mut self, push: &Push, reliability: Reliability) {
+    /// Project a wire-decoded `Push` into a [`Sample`] and route it
+    /// through [`fire_to_subscribers`](Self::fire_to_subscribers).
+    /// `is_remote` discriminates wire-arrived dispatch
+    /// ([`Locality::allows_remote`](crate::locality::Locality)) from
+    /// self-publish loopback
+    /// ([`Locality::allows_local`](crate::locality::Locality)) — the
+    /// projection + locality + pattern-match path is otherwise
+    /// byte-identical, so the wz subscriber surface sees the same
+    /// `Sample` shape regardless of origin (R227).
+    ///
+    /// Mirrors zenoh-pico's `_z_handle_network_message` dispatch
+    /// lattice: a wire-arrived Push and a loopback Push converge on
+    /// the same subscriber-side handler
+    /// (`vendor/zenoh-pico/src/session/loopback.c` 70-100 calls
+    /// `_z_handle_network_message` with a wz-equivalent
+    /// `is_remote = false` semantic).
+    fn dispatch_push(&mut self, push: &Push, reliability: Reliability, is_remote: bool) {
         // R125c2: keyexpr is now a tagged-union (B5-ν parent-tag
         // variant dispatch on parent.M); extract id + suffix from
         // whichever arm the dispatcher selected. Both arms carry the
@@ -566,23 +602,92 @@ impl SubscriberRegistry {
             reliability,
         };
 
+        self.fire_to_subscribers(&sample, is_remote);
+    }
+
+    /// Apply the locality filter + keyexpr pattern match against every
+    /// registered subscriber and fire the callbacks that pass. Returns
+    /// the count of callbacks that fired so loopback callers can
+    /// verify delivery (the wire-path caller discards the count).
+    ///
+    /// R227 — the single source of truth for subscriber filtering.
+    /// Both [`dispatch_push`](Self::dispatch_push) (wire path) and
+    /// [`local_publish`](Self::local_publish) (self-publish loopback)
+    /// converge here so the locality + pattern-match invariants are
+    /// enforced exactly once. Mirrors zenoh-pico's
+    /// `_z_trigger_subscriptions_impl`
+    /// (`vendor/zenoh-pico/src/session/subscription.c`), which is the
+    /// single trigger both wire-arrived
+    /// (`_z_handle_network_message → _z_trigger_local_subscriptions`)
+    /// and loopback
+    /// (`_z_session_deliver_push_locally → _z_handle_network_message`)
+    /// paths converge on.
+    ///
+    /// `is_remote` selects the locality predicate:
+    /// `true`  → [`Locality::allows_remote`](crate::locality::Locality)
+    /// `false` → [`Locality::allows_local`](crate::locality::Locality).
+    /// Subscribers pinned to
+    /// [`Locality::Any`](crate::locality::Locality) (the
+    /// [`register`](Self::register) default) pass either predicate
+    /// and so fire on both origins.
+    fn fire_to_subscribers(&mut self, sample: &Sample, is_remote: bool) -> usize {
+        let mut fired: usize = 0;
         for subscriber in &mut self.subscribers {
-            // R223 — every Push reaching dispatch_push has been
-            // parsed off the wire, so it is treated as remote in
-            // zenoh-pico's is_remote=true sense. The locality filter
-            // therefore reduces to allows_remote(). When self-publish
-            // loopback lands, the local-origin call path will
-            // similarly route through dispatch_push with an
-            // is_remote=false flag and consult allows_local().
-            if !subscriber.allowed_origin.allows_remote() {
+            let pass = if is_remote {
+                subscriber.allowed_origin.allows_remote()
+            } else {
+                subscriber.allowed_origin.allows_local()
+            };
+            if !pass {
                 continue;
             }
-            let chunks: Vec<&str> =
-                subscriber.pattern_chunks.iter().map(String::as_str).collect();
+            let chunks: Vec<&str> = subscriber
+                .pattern_chunks
+                .iter()
+                .map(String::as_str)
+                .collect();
             if keyexpr_pattern_matches(&chunks, &sample.keyexpr) {
-                (subscriber.callback)(&sample);
+                (subscriber.callback)(sample);
+                fired = fired.saturating_add(1);
             }
         }
+        fired
+    }
+
+    /// R227 — self-publish loopback entry point. Routes `sample`
+    /// through the same locality + pattern-match dispatch as a
+    /// wire-arrived Push, but with `is_remote = false` so subscribers
+    /// pinned to [`Locality::SessionLocal`](crate::locality::Locality)
+    /// fire and subscribers pinned to
+    /// [`Locality::Remote`](crate::locality::Locality) are suppressed.
+    /// [`Locality::Any`](crate::locality::Locality) subscribers (the
+    /// default for [`register`](Self::register)) fire on both wire and
+    /// loopback origins. Returns the number of subscriber callbacks
+    /// that fired so the caller can assert loopback delivery in a
+    /// test or wire it into an observability counter in production.
+    ///
+    /// The caller constructs the [`Sample`] through
+    /// [`Sample::new_put`](crate::sample::Sample::new_put) /
+    /// [`Sample::new_del`](crate::sample::Sample::new_del) plus
+    /// optional `with_*` setters; the registry does not synthesize
+    /// wire-shape metadata for the loopback path because an
+    /// application performing loopback already owns every field it
+    /// just published. This keeps the loopback API a thin Rust idiom
+    /// over zenoh-pico's
+    /// `_z_session_deliver_push_locally`
+    /// (`vendor/zenoh-pico/src/session/loopback.c` 70-100) without
+    /// imposing the codec wire-shape on in-process callers.
+    ///
+    /// The publisher-side locality check (zenoh-pico's
+    /// `allowed_destination.allows_local()` in
+    /// `vendor/zenoh-pico/src/net/primitives.c` 198-202) is the
+    /// caller's responsibility: only invoke `local_publish` when the
+    /// publisher's locality permits a local delivery. The registry's
+    /// `is_remote = false` branch then filters on the subscriber-side
+    /// locality so the Any/Remote/SessionLocal contract holds for
+    /// every receiver.
+    pub fn local_publish(&mut self, sample: &Sample) -> usize {
+        self.fire_to_subscribers(sample, false)
     }
 
     /// R121d — absorb a `Declare` envelope's inner body so the
@@ -1214,12 +1319,11 @@ mod tests {
 
     #[test]
     fn register_with_locality_session_local_does_not_fire_on_inbound() {
-        // wz currently has no self-publish loopback — every
-        // inbound Push reaching dispatch_push is remote. A
-        // Locality::SessionLocal subscriber therefore correctly
-        // suppresses every inbound match. This documents the
-        // surface-only-correct shape: SessionLocal will activate
-        // when a future round wires loopback, but today fires zero.
+        // Wire-arrived Push reaches dispatch_push with `is_remote =
+        // true`; the locality predicate is therefore
+        // `allows_remote()`, which is false for SessionLocal.
+        // SessionLocal subscribers fire only through the
+        // `local_publish` loopback path (R227) — never on inbound.
         use crate::locality::Locality;
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
@@ -1237,7 +1341,7 @@ mod tests {
         assert_eq!(
             counter.load(Ordering::SeqCst),
             0,
-            "Locality::SessionLocal suppresses inbound (remote) Push pre-loopback"
+            "Locality::SessionLocal suppresses wire-arrived (is_remote=true) Push"
         );
     }
 
@@ -1673,5 +1777,334 @@ mod tests {
                 "{name} arm must not mutate the peer keyexpr table"
             );
         }
+    }
+
+    // ── R227 Self-publish loopback (local_publish) ──
+
+    #[test]
+    fn local_publish_fires_any_locality_subscriber() {
+        // Locality::Any subscribers fire on both wire-arrived and
+        // loopback paths. The loopback path runs through
+        // `fire_to_subscribers` with `is_remote = false`, which
+        // selects `allows_local()` — true for `Any`.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("home/temp", move |_sample| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let sample = Sample::new_put("home/temp", b"22.5".to_vec());
+        let fired = registry.local_publish(&sample);
+        assert_eq!(fired, 1, "Any subscriber fires on loopback");
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn local_publish_fires_session_local_subscriber() {
+        // Locality::SessionLocal is the canonical loopback-only
+        // setting: `allows_local()` true, `allows_remote()` false. A
+        // SessionLocal subscription was dormant pre-R227; R227
+        // activates it through `local_publish`.
+        use crate::locality::Locality;
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register_with_locality(
+            "home/temp",
+            Locality::SessionLocal,
+            move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        let sample = Sample::new_put("home/temp", b"22.5".to_vec());
+        let fired = registry.local_publish(&sample);
+        assert_eq!(
+            fired, 1,
+            "Locality::SessionLocal fires on R227 loopback (is_remote=false)"
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn local_publish_suppresses_remote_only_subscriber() {
+        // Locality::Remote is the wire-only setting: `allows_remote()`
+        // true, `allows_local()` false. A Remote subscriber must
+        // never see a self-publish loopback Sample — mirrors
+        // zenoh-pico's `_z_locality_allows_local(Z_LOCALITY_REMOTE)`
+        // returning false.
+        use crate::locality::Locality;
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register_with_locality(
+            "home/temp",
+            Locality::Remote,
+            move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        let sample = Sample::new_put("home/temp", b"22.5".to_vec());
+        let fired = registry.local_publish(&sample);
+        assert_eq!(
+            fired, 0,
+            "Locality::Remote suppresses loopback (allows_local() == false)"
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn local_publish_mixed_locality_isolation() {
+        // Three subscribers on the same keyexpr, each pinned to a
+        // different Locality. Loopback fires Any + SessionLocal,
+        // suppresses Remote. Wire-path (dispatch on equivalent Push)
+        // fires Any + Remote, suppresses SessionLocal. Same registry,
+        // single source of truth for the Locality contract.
+        use crate::locality::Locality;
+        let mut registry = SubscriberRegistry::new();
+        let any_hits = Arc::new(AtomicUsize::new(0));
+        let local_hits = Arc::new(AtomicUsize::new(0));
+        let remote_hits = Arc::new(AtomicUsize::new(0));
+        {
+            let any_clone = any_hits.clone();
+            registry.register_with_locality(
+                "home/temp",
+                Locality::Any,
+                move |_sample| {
+                    any_clone.fetch_add(1, Ordering::SeqCst);
+                },
+            );
+        }
+        {
+            let local_clone = local_hits.clone();
+            registry.register_with_locality(
+                "home/temp",
+                Locality::SessionLocal,
+                move |_sample| {
+                    local_clone.fetch_add(1, Ordering::SeqCst);
+                },
+            );
+        }
+        {
+            let remote_clone = remote_hits.clone();
+            registry.register_with_locality(
+                "home/temp",
+                Locality::Remote,
+                move |_sample| {
+                    remote_clone.fetch_add(1, Ordering::SeqCst);
+                },
+            );
+        }
+
+        let sample = Sample::new_put("home/temp", b"22.5".to_vec());
+        let fired = registry.local_publish(&sample);
+        assert_eq!(
+            fired, 2,
+            "loopback fires Any + SessionLocal, suppresses Remote"
+        );
+        assert_eq!(any_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(local_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(remote_hits.load(Ordering::SeqCst), 0);
+
+        // Same registry, wire-arrived Push: fires Any + Remote,
+        // suppresses SessionLocal. Both paths converge on
+        // `fire_to_subscribers`; the discriminator is `is_remote`.
+        let push = push_with_keyexpr("home/temp");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
+        assert_eq!(
+            any_hits.load(Ordering::SeqCst),
+            2,
+            "Any subscriber fires on both wire and loopback origins"
+        );
+        assert_eq!(
+            local_hits.load(Ordering::SeqCst),
+            1,
+            "SessionLocal subscriber stays at 1 after wire-arrived dispatch"
+        );
+        assert_eq!(
+            remote_hits.load(Ordering::SeqCst),
+            1,
+            "Remote subscriber fires on wire-arrived dispatch only"
+        );
+    }
+
+    #[test]
+    fn local_publish_returns_zero_with_empty_registry() {
+        // No subscribers registered → no callbacks fire → count is 0.
+        // The empty-registry case must not panic on any internal
+        // iteration assumption.
+        let mut registry = SubscriberRegistry::new();
+        let sample = Sample::new_put("home/temp", b"22.5".to_vec());
+        let fired = registry.local_publish(&sample);
+        assert_eq!(fired, 0);
+    }
+
+    #[test]
+    fn local_publish_returns_zero_when_pattern_mismatches() {
+        // Subscriber registered on a literal that does not match the
+        // Sample's keyexpr — locality predicate passes (Any), but the
+        // pattern matcher rejects, so no callback fires.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("kitchen/temp", move |_sample| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let sample = Sample::new_put("home/temp", b"22.5".to_vec());
+        let fired = registry.local_publish(&sample);
+        assert_eq!(fired, 0);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn local_publish_returns_count_for_multiple_matching_subscribers() {
+        // Two subscribers on overlapping literals that both match the
+        // Sample's keyexpr. `local_publish` returns the total count of
+        // subscriber callbacks that fired (2) so loopback callers can
+        // verify multi-listener delivery.
+        let mut registry = SubscriberRegistry::new();
+        let hits_a = Arc::new(AtomicUsize::new(0));
+        let hits_b = Arc::new(AtomicUsize::new(0));
+        {
+            let clone = hits_a.clone();
+            registry.register("home/temp", move |_sample| {
+                clone.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        {
+            let clone = hits_b.clone();
+            registry.register("home/*", move |_sample| {
+                clone.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+
+        let sample = Sample::new_put("home/temp", b"22.5".to_vec());
+        let fired = registry.local_publish(&sample);
+        assert_eq!(fired, 2, "both matching subscribers fire");
+        assert_eq!(hits_a.load(Ordering::SeqCst), 1);
+        assert_eq!(hits_b.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn local_publish_matches_double_star_wildcard() {
+        // Pattern `home/**` matches `home/kitchen/temp` through the
+        // `**` zero-or-more-chunks rule. The matcher is the same
+        // `keyexpr_pattern_matches` the wire path uses, so wildcard
+        // semantics carry across origins.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("home/**", move |_sample| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let sample = Sample::new_put("home/kitchen/temp", b"22.5".to_vec());
+        let fired = registry.local_publish(&sample);
+        assert_eq!(fired, 1, "`home/**` matches `home/kitchen/temp`");
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn local_publish_matches_intra_chunk_dsl() {
+        // R220 intra-chunk `$*` DSL works on loopback too — same
+        // matcher engine, just routed with `is_remote = false`.
+        // Pattern `home/temp_$*` matches `home/temp_42` because
+        // `$*` floats the trailing chunk content.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("home/temp_$*", move |_sample| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let sample = Sample::new_put("home/temp_42", b"22.5".to_vec());
+        let fired = registry.local_publish(&sample);
+        assert_eq!(fired, 1);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn local_publish_propagates_sample_fields_to_callback() {
+        // The Sample handed to `local_publish` reaches the callback
+        // unmodified — keyexpr / kind / payload / reliability /
+        // qos / attachment / timestamp / encoding / source_info
+        // are all caller-owned. R227 does not synthesize any field.
+        use crate::sample::{QosLevel, Reliability as Rel};
+        let mut registry = SubscriberRegistry::new();
+        let observed = Arc::new(std::sync::Mutex::new(None::<Sample>));
+        let observed_clone = observed.clone();
+        registry.register("home/temp", move |sample| {
+            *observed_clone.lock().unwrap() = Some(sample.clone());
+        });
+
+        let sample = Sample::new_put("home/temp", b"payload".to_vec())
+            .with_reliability(Rel::BestEffort)
+            .with_qos(QosLevel::from_raw(0x12))
+            .with_attachment(b"attach".to_vec());
+        let fired = registry.local_publish(&sample);
+        assert_eq!(fired, 1);
+
+        let got = observed
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("callback fired and stored the Sample");
+        assert_eq!(got.keyexpr, "home/temp");
+        assert_eq!(got.kind, SampleKind::Put);
+        assert_eq!(got.payload, b"payload");
+        assert_eq!(got.reliability, Rel::BestEffort);
+        assert_eq!(got.qos, Some(QosLevel::from_raw(0x12)));
+        assert_eq!(got.attachment.as_deref(), Some(b"attach".as_slice()));
+    }
+
+    #[test]
+    fn local_publish_del_kind_routes_to_subscriber() {
+        // Sample::new_del routes through the same `fire_to_subscribers`
+        // branch as Put; the kind discriminator is opaque to the
+        // dispatcher. The subscriber observes SampleKind::Del with an
+        // empty payload.
+        let mut registry = SubscriberRegistry::new();
+        let observed = Arc::new(std::sync::Mutex::new(None::<SampleKind>));
+        let observed_clone = observed.clone();
+        registry.register("home/temp", move |sample| {
+            *observed_clone.lock().unwrap() = Some(sample.kind);
+            assert!(sample.payload.is_empty(), "Del Sample carries no payload");
+        });
+
+        let sample = Sample::new_del("home/temp");
+        let fired = registry.local_publish(&sample);
+        assert_eq!(fired, 1);
+        assert_eq!(*observed.lock().unwrap(), Some(SampleKind::Del));
+    }
+
+    #[test]
+    fn local_publish_passes_only_locality_predicate_not_keyexpr() {
+        // Regression guard for the ordering bug class: even when the
+        // pattern matches, a subscriber whose locality predicate
+        // rejects the loopback origin must not fire. The locality
+        // check runs before the pattern match in
+        // `fire_to_subscribers`; this test pins that ordering.
+        use crate::locality::Locality;
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register_with_locality(
+            "home/**",
+            Locality::Remote,
+            move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        let sample = Sample::new_put("home/kitchen/temp", b"22.5".to_vec());
+        let fired = registry.local_publish(&sample);
+        assert_eq!(
+            fired, 0,
+            "Locality::Remote suppresses loopback even when the wildcard pattern matches"
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 }
