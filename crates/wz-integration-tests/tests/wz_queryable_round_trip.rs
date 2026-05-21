@@ -4,10 +4,10 @@
 //! R121j-5c-e2e — wz↔wz Query/Reply round-trip integration test.
 //!
 //! Pairs two wz-ap-demo instances across a TCP loopback so the
-//! queryable-side wiring landed in R121j-5b (QueryableRegistry +
-//! QueryResponder) + R121j-5c (dispatch_messages + Final scheduling)
-//! + R121j-5c-e2e-action (SessionLinkActions.send_response) +
-//! R121j-5c-e2e-demo (wz-ap-demo --queryable/--reply/--query CLI +
+//! queryable-side wiring landed across R121j-5b (QueryableRegistry,
+//! QueryResponder), R121j-5c (dispatch_messages, Final scheduling),
+//! R121j-5c-e2e-action (SessionLinkActions.send_response), and
+//! R121j-5c-e2e-demo (wz-ap-demo --queryable/--reply/--query CLI,
 //! observer fan-out) round-trips end-to-end on a real socket.
 //!
 //! Test flow:
