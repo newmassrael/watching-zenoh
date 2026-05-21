@@ -6025,6 +6025,62 @@
         "R121h-perf-bump-2 carry intact: blocking on explicit user consent for the atomic 12-SCXML migration + vendor pin bump."
       ]
     },
+    "Round 121j-1f": {
+      "decision_summary": "RequestQueryBuilder.request_qos(packed) setter -- emits Request-level qos ext (ENC_ZINT|id=1, no M) at the head of the ext chain per zenoh-pico encode order qos to tstamp to target to budget to timeout.",
+      "changes_bullets": [
+        "RequestQueryBuilder in crates/wz-runtime-tokio/src/session_glue.rs gains the request_qos: Option<u8> field + the .request_qos(packed: u8) setter. Setter takes the pre-packed byte per zenoh-pico _z_n_qos_create at vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/network.h (bits 0-2 priority, bit 3 nodrop, bit 4 express, bits 5-7 reserved); the wz setter is intentionally low-level so callers integrating directly with zenoh-pico-defined constants can pass _z_n_qos_create's output verbatim",
+        "RequestQueryBuilder.build() pushes the qos ExtEntry FIRST in request_exts (before target + timeout), matching zenoh-pico _z_request_encode chain order at vendor/zenoh-pico/src/protocol/codec/network.c (qos -> tstamp -> target -> budget -> timeout). The Z chain-continuation loop already in build() sets bit 0x80 on every ext except the last, so the emitted chain shape stays consistent as new sub-setters layer in",
+        "qos ExtEntry header = ENC_ZINT(0x20) | id_qos(0x01); NO M(0x10) flag because qos is an informational hint, not mandatory per the ext_qos M=0 convention in zenoh-pico's _z_request_encode. Body is ExtZint { value: packed as u64 }",
+        "2 new lib tests pin the wire shape: single-setter case (header = 0x21, value = packed verbatim, N_Z(0x80) on Request.header), three-layer composition (qos + target + timeout with Z continuation bit on indices 0 and 1, no Z on index 2; qos at index 0 confirms encode-order)"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio: clean",
+        "cargo test -p wz-runtime-tokio --lib: 94/94 pass (92 baseline + 2 new qos tests)",
+        "cargo clippy -p wz-runtime-tokio --all-targets: clean",
+        "scripts/run-ci.sh: 8/8 lanes pass on first attempt (no flake observed this round)"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121j-1g Request-level budget setter (ext_id=0x05 ZINT, no M) -- last remaining Q-side Request-level sub-setter; layers in between target and timeout per the existing chain-order constraint in build()",
+        "R121j-1h ergonomic typed wrapper .request_qos_typed(priority, congestion_drop, express) layering over .request_qos(packed) so callers do not need to memorise the bit layout. Low priority; the packed form is already production-correct",
+        "R121j-3b Reply.source_info setter, R121j-3c Reply.responder setter, R121j-3d Reply.MsgDel body variant still pending on ResponseReplyBuilder",
+        "R121j-4b Err.source_info setter, R121j-4c Err.attachment setter still pending on ResponseErrBuilder",
+        "R121h-perf-bump-4: 4 secondary encoders (InitBody/OpenBody/DeclFinal-batch/KeepAlive at session_glue.rs lines 1543/1596/1620/1645) still use inner-Vec + extend_from_slice. Apply encode_frame_envelope-style shape for symmetry. Lower priority than R121j-5",
+        "R121j-5 inbound Request(Query) parser + on_query dispatch + QueryableTable struct -- largest single AP MVP weighted jump (+5-7%p); 2-3 sub-rounds = 1 session",
+        "R121k inbound DECLARE parser silent gap (outbound 9/9 vs inbound 0/8); 4-6 sub-rounds = 1-2 sessions",
+        "SliceSink-based zero-alloc hot path (LinkDriver/TxFrame/tcp_write reusable buffer) deferred to a runtime API design round"
+      ],
+      "publishable_decision_summary": "RequestQueryBuilder.request_qos(packed) setter -- emits Request-level qos ext (ENC_ZINT|id=1, no M) at the head of the ext chain per zenoh-pico encode order qos to tstamp to target to budget to timeout.",
+      "publishable_changes_bullets": [
+        "RequestQueryBuilder in crates/wz-runtime-tokio/src/session_glue.rs gains the request_qos: Option<u8> field + the .request_qos(packed: u8) setter. Setter takes the pre-packed byte per zenoh-pico _z_n_qos_create at vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/network.h (bits 0-2 priority, bit 3 nodrop, bit 4 express, bits 5-7 reserved); the wz setter is intentionally low-level so callers integrating directly with zenoh-pico-defined constants can pass _z_n_qos_create's output verbatim",
+        "RequestQueryBuilder.build() pushes the qos ExtEntry FIRST in request_exts (before target + timeout), matching zenoh-pico _z_request_encode chain order at vendor/zenoh-pico/src/protocol/codec/network.c (qos -> tstamp -> target -> budget -> timeout). The Z chain-continuation loop already in build() sets bit 0x80 on every ext except the last, so the emitted chain shape stays consistent as new sub-setters layer in",
+        "qos ExtEntry header = ENC_ZINT(0x20) | id_qos(0x01); NO M(0x10) flag because qos is an informational hint, not mandatory per the ext_qos M=0 convention in zenoh-pico's _z_request_encode. Body is ExtZint { value: packed as u64 }",
+        "2 new lib tests pin the wire shape: single-setter case (header = 0x21, value = packed verbatim, N_Z(0x80) on Request.header), three-layer composition (qos + target + timeout with Z continuation bit on indices 0 and 1, no Z on index 2; qos at index 0 confirms encode-order)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio: clean",
+        "cargo test -p wz-runtime-tokio --lib: 94/94 pass (92 baseline + 2 new qos tests)",
+        "cargo clippy -p wz-runtime-tokio --all-targets: clean",
+        "scripts/run-ci.sh: 8/8 lanes pass on first attempt (no flake observed this round)"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121j-1g Request-level budget setter (ext_id=0x05 ZINT, no M) -- last remaining Q-side Request-level sub-setter; layers in between target and timeout per the existing chain-order constraint in build()",
+        "R121j-1h ergonomic typed wrapper .request_qos_typed(priority, congestion_drop, express) layering over .request_qos(packed) so callers do not need to memorise the bit layout. Low priority; the packed form is already production-correct",
+        "R121j-3b Reply.source_info setter, R121j-3c Reply.responder setter, R121j-3d Reply.MsgDel body variant still pending on ResponseReplyBuilder",
+        "R121j-4b Err.source_info setter, R121j-4c Err.attachment setter still pending on ResponseErrBuilder",
+        "R121h-perf-bump-4: 4 secondary encoders (InitBody/OpenBody/DeclFinal-batch/KeepAlive at session_glue.rs lines 1543/1596/1620/1645) still use inner-Vec + extend_from_slice. Apply encode_frame_envelope-style shape for symmetry. Lower priority than R121j-5",
+        "R121j-5 inbound Request(Query) parser + on_query dispatch + QueryableTable struct -- largest single AP MVP weighted jump (+5-7%p); 2-3 sub-rounds = 1 session",
+        "R121k inbound DECLARE parser silent gap (outbound 9/9 vs inbound 0/8); 4-6 sub-rounds = 1-2 sessions",
+        "SliceSink-based zero-alloc hot path (LinkDriver/TxFrame/tcp_write reusable buffer) deferred to a runtime API design round"
+      ]
+    },
     "Round 121j-2": {
       "decision_summary": "R121j-2 adds ResponseFinal outbound to close the Query/Reply sequence — build_response_final + encode_frame_with_response_final + SessionLinkActions::send_response_final — with 2-vector wire-byte byte-compare tests against zenoh-pico _z_response_final_encode (network.c:368-376) covering both single-byte and multi-byte VLE rid cases.",
       "changes_bullets": [
