@@ -8178,6 +8178,50 @@
         "SCE drift +7 commits audit entry pending (e4034617 snake-case Rust struct refs codegen)"
       ]
     },
+    "Round 195": {
+      "decision_summary": "R121j-5c-e2e-test — wz_queryable_round_trip.rs pairs wz acceptor + wz initiator on TCP loopback for full Q/R round-trip integration coverage.",
+      "changes_bullets": [
+        "wz-integration-tests/tests/wz_queryable_round_trip.rs new (264 LoC)",
+        "acceptor --listen --queryable demo/** --reply hello-from-queryable + initiator --connect --query demo/test",
+        "asserts QUERYABLE FIRED with rid=1 + resolved keyexpr + pattern + reply substrings",
+        "asserts QUERY EMITTED on initiator side closes the OUTBOUND Query proof"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-integration-tests --test wz_queryable_round_trip: 1 passed (0.20s)",
+        "cargo test -p wz-integration-tests (all 30+ test files): 0 regression",
+        "AP MVP Q/R outbound (wz queryable side) closes end-to-end on real TCP"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121j-6 z_get-side inbound Response.Reply application dispatch (ReplyRegistry)",
+        "R121j-tstamp Request-level Timestamp setter (ext_zbuf Timestamp prerequisite)",
+        "R121k inbound DECLARE 6 sub-types reconnaissance",
+        "SCE drift +7 commits audit entry pending (e4034617 codegen)"
+      ],
+      "publishable_decision_summary": "R121j-5c-e2e-test — wz_queryable_round_trip.rs pairs wz acceptor + wz initiator on TCP loopback for full Q/R round-trip integration coverage.",
+      "publishable_changes_bullets": [
+        "wz-integration-tests/tests/wz_queryable_round_trip.rs new (264 LoC)",
+        "acceptor --listen --queryable demo/** --reply hello-from-queryable + initiator --connect --query demo/test",
+        "asserts QUERYABLE FIRED with rid=1 + resolved keyexpr + pattern + reply substrings",
+        "asserts QUERY EMITTED on initiator side closes the OUTBOUND Query proof"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-integration-tests --test wz_queryable_round_trip: 1 passed (0.20s)",
+        "cargo test -p wz-integration-tests (all 30+ test files): 0 regression",
+        "AP MVP Q/R outbound (wz queryable side) closes end-to-end on real TCP"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121j-6 z_get-side inbound Response.Reply application dispatch (ReplyRegistry)",
+        "R121j-tstamp Request-level Timestamp setter (ext_zbuf Timestamp prerequisite)",
+        "R121k inbound DECLARE 6 sub-types reconnaissance",
+        "SCE drift +7 commits audit entry pending (e4034617 codegen)"
+      ]
+    },
     "Round 2": {
       "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
       "changes_bullets": [
