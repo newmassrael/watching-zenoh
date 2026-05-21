@@ -9270,6 +9270,54 @@
         "deploy yaml topology nesting migration (R123b deferred) — first external release 이후 일정으로 재명시; v0.1.0-mvp 자체는 pre-topology schema로 충분함"
       ]
     },
+    "Round 213": {
+      "decision_summary": "R213 R121-release-3: .github/workflows/release.yml 신설 — v* tag push 트리거, 8-lane CI mirror + 5 publishable crate cargo publish dry-run + softprops draft GitHub release.",
+      "changes_bullets": [
+        "신규 .github/workflows/release.yml (163 lines). v* tag push (또는 workflow_dispatch input.tag) 결접 계수 ci.yml의 8-lane (Layer 0/A/A2/B/C1/C2/D/E) 공유 계증 등록 — scripts/run-ci.sh --layer X delegation으로 두 워크플로우가 drift하지 않음",
+        "Cargo publish --dry-run 5 publishable crate 순서대로 호출 (zenoh-pico-sys / wz-codecs / wz-runtime-tokio / wz-runtime-lwip / wz-ap-demo). 각 단계가 fail해도 `|| echo ::warning::` 패턴으로 continue — 첫 외부 릴리스 rehearsal 단계의 informational gate",
+        "softprops/action-gh-release@v2로 GitHub release draft 자동 생성 — tag_name + name + generate_release_notes: true + draft: true. prerelease flag는 -mvp / -rc / -beta / -alpha 접미사 자동 감지",
+        "wz-codecs cargo publish 10 MiB cap risk (vendor/sce build.rs 의존) + [package.exclude] tuning carry: dry-run 출력으로 이쉬을 외부화하는 구조로 명시적 처리"
+      ],
+      "verification_bullets": [
+        "python3 -c 'import yaml; yaml.safe_load(open(\".github/workflows/release.yml\"))': jobs key = ['release'] (YAML 결하 OK)",
+        "bash scripts/run-ci.sh --layer A: pass post-edit (validate-workspace clean, T1=0, RT=12/12, sync, entries=212)",
+        "pre-commit validate-workspace clean on commit 2ae023a (build(ci) subject)",
+        "git diff --stat: 1 file changed, 163 insertions — .github/workflows/ 이외 파일 변경 0"
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "부채 #4 sub-4: LGPL-3.0 / LicenseRef-Commercial 텍스트 재검토 + THIRD_PARTY.md 원장 작성 (vendor/sce + vendor/zenoh-pico forge) + 각 publishable crate Cargo.toml 에 repository + readme 필드 추가",
+        "부채 #4 sub-5: cargo publish dry-run 로컴 재현 (release.yml local invocation 테스트) + git tag v0.1.0-mvp + GitHub release draft",
+        "wz-codecs [package.exclude] tuning — dry-run 출력 확인 후 vendor/sce/target/, generated build artifacts, OOB 파일 명시 배제 — 10 MiB cap 대응",
+        "부채 #3 R121h-perf-bump-5 결정 사용자 컨펌 필요; 1 round after decision",
+        "actionlint local install — .github/workflows/ release.yml + ci.yml 디테테 손의적 킭웰 검증 (Layer 0에서 현재 SKIP 상태)"
+      ],
+      "publishable_decision_summary": "R213 R121-release-3: .github/workflows/release.yml 신설 — v* tag push 트리거, 8-lane CI mirror + 5 publishable crate cargo publish dry-run + softprops draft GitHub release.",
+      "publishable_changes_bullets": [
+        "신규 .github/workflows/release.yml (163 lines). v* tag push (또는 workflow_dispatch input.tag) 결접 계수 ci.yml의 8-lane (Layer 0/A/A2/B/C1/C2/D/E) 공유 계증 등록 — scripts/run-ci.sh --layer X delegation으로 두 워크플로우가 drift하지 않음",
+        "Cargo publish --dry-run 5 publishable crate 순서대로 호출 (zenoh-pico-sys / wz-codecs / wz-runtime-tokio / wz-runtime-lwip / wz-ap-demo). 각 단계가 fail해도 `|| echo ::warning::` 패턴으로 continue — 첫 외부 릴리스 rehearsal 단계의 informational gate",
+        "softprops/action-gh-release@v2로 GitHub release draft 자동 생성 — tag_name + name + generate_release_notes: true + draft: true. prerelease flag는 -mvp / -rc / -beta / -alpha 접미사 자동 감지",
+        "wz-codecs cargo publish 10 MiB cap risk (vendor/sce build.rs 의존) + [package.exclude] tuning carry: dry-run 출력으로 이쉬을 외부화하는 구조로 명시적 처리"
+      ],
+      "publishable_verification_bullets": [
+        "python3 -c 'import yaml; yaml.safe_load(open(\".github/workflows/release.yml\"))': jobs key = ['release'] (YAML 결하 OK)",
+        "bash scripts/run-ci.sh --layer A: pass post-edit (validate-workspace clean, T1=0, RT=12/12, sync, entries=212)",
+        "pre-commit validate-workspace clean on commit 2ae023a (build(ci) subject)",
+        "git diff --stat: 1 file changed, 163 insertions — .github/workflows/ 이외 파일 변경 0"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "부채 #4 sub-4: LGPL-3.0 / LicenseRef-Commercial 텍스트 재검토 + THIRD_PARTY.md 원장 작성 (vendor/sce + vendor/zenoh-pico forge) + 각 publishable crate Cargo.toml 에 repository + readme 필드 추가",
+        "부채 #4 sub-5: cargo publish dry-run 로컴 재현 (release.yml local invocation 테스트) + git tag v0.1.0-mvp + GitHub release draft",
+        "wz-codecs [package.exclude] tuning — dry-run 출력 확인 후 vendor/sce/target/, generated build artifacts, OOB 파일 명시 배제 — 10 MiB cap 대응",
+        "부채 #3 R121h-perf-bump-5 결정 사용자 컨펌 필요; 1 round after decision",
+        "actionlint local install — .github/workflows/ release.yml + ci.yml 디테테 손의적 킭웰 검증 (Layer 0에서 현재 SKIP 상태)"
+      ]
+    },
     "Round 22": {
       "decision_summary": "vle_byte_length primitive land — Phase A3 cursor-free TLV chain walker missing piece; vle_u64_decode와 짝으로 §7 extension iterator를 Phase A4 cursor 의존 없이 author-side에서 운영 가능, tlv_advance Phase A4+ 진화의 내부 길이 산출 부분품.",
       "changes_bullets": [
