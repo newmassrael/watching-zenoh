@@ -115,6 +115,7 @@ use wz_codecs::wireexpr::WireexprVariant;
 use wz_runtime_tokio::declare::{LivelinessRegistry, RemoteQueryableRegistry, RemoteSubscriberRegistry};
 use wz_runtime_tokio::pubsub::SubscriberRegistry;
 use wz_runtime_tokio::query::{QueryReply, QueryableRegistry};
+use wz_runtime_tokio::reply::{InboundReplyBody, ReplyRegistry};
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastPolicy;
 use wz_runtime_tokio::session_glue::{
     drive_session_until_terminal, install_session_actions, BoxedLinkDriver, IterationEvent,
@@ -154,6 +155,8 @@ fn print_usage() {
     eprintln!("               [--on-remote-subscriber-log]");
     eprintln!("               [--on-remote-queryable-log]");
     eprintln!("               [--on-remote-liveliness-log]");
+    eprintln!("               [--on-query-reply-log]");
+    eprintln!("               [--on-query-final-log]");
     eprintln!();
     eprintln!("OPTIONS:");
     eprintln!("    --listen <addr>          acceptor mode (e.g. 127.0.0.1:7447)");
@@ -186,6 +189,14 @@ fn print_usage() {
     eprintln!("                             liveliness-equivalent for the queryable side");
     eprintln!("    --on-remote-liveliness-log");
     eprintln!("                             liveliness-equivalent for the DeclToken side");
+    eprintln!("    --on-query-reply-log     install a ReplyRegistry callback that logs");
+    eprintln!("                             'REPLY RECEIVED' on each inbound");
+    eprintln!("                             Response(Reply|Err) for the --query rid");
+    eprintln!("                             (requires --query)");
+    eprintln!("    --on-query-final-log     install a ReplyRegistry on_final callback that");
+    eprintln!("                             logs 'FINAL RECEIVED' when the matching");
+    eprintln!("                             ResponseFinal terminates the reply chain");
+    eprintln!("                             (requires --query)");
     eprintln!("    --help, -h               print this help and exit");
     eprintln!();
     eprintln!("Exactly one of --listen / --connect is required.");
@@ -525,6 +536,14 @@ fn main() -> ExitCode {
     let on_remote_sub_log = rest.iter().any(|a| a == "--on-remote-subscriber-log");
     let on_remote_q_log = rest.iter().any(|a| a == "--on-remote-queryable-log");
     let on_remote_l_log = rest.iter().any(|a| a == "--on-remote-liveliness-log");
+    // R121j-6-e2e — initiator-side ReplyRegistry log flags. Both
+    // require --query (the rid is bound to the outbound Query the
+    // demo emits; without that there is no z_get to consume replies
+    // for). Reject explicitly so a mis-wired argv (`--on-query-reply-log`
+    // on a queryable-side process) surfaces here rather than silently
+    // installing an unreachable callback.
+    let on_query_reply_log = rest.iter().any(|a| a == "--on-query-reply-log");
+    let on_query_final_log = rest.iter().any(|a| a == "--on-query-final-log");
     if key_opt.is_none()
         && publish_opt.is_none()
         && queryable_opt.is_none()
@@ -571,6 +590,15 @@ fn main() -> ExitCode {
     if queryable_opt.is_none() && reply_opt.is_some() {
         eprintln!(
             "wz-ap-demo: --reply is only meaningful with --queryable (rejected to surface mis-wired argv)",
+        );
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    if (on_query_reply_log || on_query_final_log) && query_opt.is_none() {
+        eprintln!(
+            "wz-ap-demo: --on-query-reply-log / --on-query-final-log require --query \
+             (the ReplyRegistry binds to the rid of the outbound Query this demo emits)",
         );
         eprintln!();
         print_usage();
@@ -646,6 +674,12 @@ fn main() -> ExitCode {
     if on_remote_l_log {
         log::info!("on-remote-liveliness-log = true");
     }
+    if on_query_reply_log {
+        log::info!("on-query-reply-log = true");
+    }
+    if on_query_final_log {
+        log::info!("on-query-final-log = true");
+    }
 
     // Build the multi-thread runtime explicitly — OutboundWriteDriver
     // (mirroring TokioLinkDriverAdapter's contract) requires this
@@ -674,15 +708,23 @@ fn main() -> ExitCode {
         on_remote_queryable: on_remote_q_log,
         on_remote_liveliness: on_remote_l_log,
     };
+    let reply_log_spec = ReplyConsumerSpec {
+        on_query_reply: on_query_reply_log,
+        on_query_final: on_query_final_log,
+    };
+    let query_role_spec = QueryRoleSpec {
+        queryable: queryable_spec,
+        query: query_spec,
+    };
     let outcome = runtime.block_on(async move {
         run_demo(
             role,
             key_opt,
             publisher_spec,
-            queryable_spec,
-            query_spec,
+            query_role_spec,
             declare_spec,
             remote_log_spec,
+            reply_log_spec,
         )
         .await
     });
@@ -718,15 +760,46 @@ struct RemoteLogSpec {
     on_remote_liveliness: bool,
 }
 
+/// R121j-6-e2e — bool flag bundle for the initiator-side
+/// ReplyRegistry log callbacks. Both flags require --query (the rid
+/// the registry binds to is the rid of the outbound Query this demo
+/// emits); the validation in `main` rejects mis-wired argv before
+/// this struct is constructed. Each `true` installs a callback that
+/// prints a stderr line on the matching inbound record so an
+/// integration test fixture can grep for the expected line shape.
+struct ReplyConsumerSpec {
+    on_query_reply: bool,
+    on_query_final: bool,
+}
+
+/// R121j-6-e2e — bundle of the Q/R role config. Carries the
+/// queryable side (--queryable + --reply pair) and the z_get side
+/// (--query) so a single demo can act as queryable, z_get, both, or
+/// neither. Kept distinct from the publisher / subscriber / declare
+/// configs because the wire-side dispatch tables (QueryableRegistry,
+/// ReplyRegistry) live in a different module than the pubsub one.
+/// R121j-5c-e2e-demo carried (--queryable, --reply, --query) on
+/// separate run_demo parameters; R121j-6-e2e consolidates them so
+/// run_demo's clippy::too_many_arguments threshold stays satisfied
+/// with the new reply_log_spec.
+struct QueryRoleSpec {
+    queryable: Option<(String, String)>,
+    query: Option<String>,
+}
+
 async fn run_demo(
     role: Role,
     key: Option<String>,
     publisher_spec: Option<(String, String, Option<u64>)>,
-    queryable_spec: Option<(String, String)>,
-    query_spec: Option<String>,
+    query_role_spec: QueryRoleSpec,
     declare_spec: DeclareEmitSpec,
     remote_log_spec: RemoteLogSpec,
+    reply_log_spec: ReplyConsumerSpec,
 ) -> io::Result<()> {
+    let QueryRoleSpec {
+        queryable: queryable_spec,
+        query: query_spec,
+    } = query_role_spec;
     // ── Step 1: TCP setup. Acceptor binds + accepts; Initiator
     //           dials. Both paths land at the same `TcpStream`
     //           value below, after which the FSM-driving code is
@@ -853,6 +926,51 @@ async fn run_demo(
             );
         });
     }
+    // R121j-6-e2e — z_get-side ReplyRegistry. Registered BEFORE the
+    // outbound Query goes out so the inbound Reply chain has a
+    // pending entry to dispatch to (the registry drops silently when
+    // a Reply arrives for an unknown rid; the alternative — register
+    // after send_request_query fires inside query_task — would race
+    // against the peer's first Reply on a fast loopback). Both
+    // callbacks log a stderr line so the paired integration test
+    // fixture can grep for the expected line shape; the on_final
+    // callback also receives the rid the registry auto-drops on.
+    let mut reply_registry = ReplyRegistry::new();
+    if query_spec.is_some() && (reply_log_spec.on_query_reply || reply_log_spec.on_query_final) {
+        let on_reply = reply_log_spec.on_query_reply;
+        let on_final = reply_log_spec.on_query_final;
+        reply_registry.register(
+            QUERY_RID,
+            move |reply| {
+                if !on_reply {
+                    return;
+                }
+                let body_text = match &reply.body {
+                    InboundReplyBody::Put { payload } => format!(
+                        "Put payload={:?}",
+                        String::from_utf8_lossy(payload),
+                    ),
+                    InboundReplyBody::Del => "Del".to_string(),
+                    InboundReplyBody::Err { encoding, payload } => format!(
+                        "Err encoding={:?} payload={:?}",
+                        encoding,
+                        String::from_utf8_lossy(payload),
+                    ),
+                };
+                eprintln!(
+                    "wz-ap-demo: REPLY RECEIVED rid={} keyexpr='{}' body={}",
+                    reply.rid, reply.keyexpr_literal, body_text,
+                );
+            },
+            move |rid| {
+                if !on_final {
+                    return;
+                }
+                eprintln!("wz-ap-demo: FINAL RECEIVED rid={rid}");
+            },
+        );
+    }
+
     let mut liveliness_registry = LivelinessRegistry::new();
     if remote_log_spec.on_remote_liveliness {
         liveliness_registry.on_token_declared(|decl, resolved| {
@@ -1028,6 +1146,16 @@ async fn run_demo(
             remote_sub_registry.dispatch_iteration_event(event, peer_table);
             remote_q_registry.dispatch_iteration_event(event, peer_table);
             liveliness_registry.dispatch_iteration_event(event, peer_table);
+            // R121j-6-e2e — fan the same IterationEvent into the
+            // initiator-side ReplyRegistry. IterationEvent is Copy
+            // (set in R121j-5c-e2e-demo to support multi-consumer
+            // dispatch); reusing the same peer_table snapshot ensures
+            // inbound Reply keyexpr resolution stays consistent with
+            // subscriber + queryable + remote-declare dispatch. The
+            // pending entry registered above auto-drops when the
+            // matching ResponseFinal arrives; subsequent iterations
+            // see an empty registry and the call short-circuits.
+            reply_registry.dispatch_iteration_event(event, peer_table);
             // Drain the staging buffers through the action layer.
             // `send_response` and `send_response_final` enqueue onto
             // the OutboundWriteDriver mpsc channel synchronously, so
