@@ -284,12 +284,23 @@ impl SubscriberRegistry {
 
     /// Register a subscriber for a keyexpr pattern. Pattern syntax
     /// matches zenoh chunk wildcards: `/`-separated chunks where
-    /// each chunk is a literal, `*` (single chunk), or `**` (zero
-    /// or more chunks). The returned `SubscriptionId` is stable
+    /// each chunk is a literal, `*` (single chunk), `**` (zero or
+    /// more chunks), or contains the `$*` intra-chunk substring
+    /// wildcard (R220). The returned `SubscriptionId` is stable
     /// until [`unregister`](Self::unregister) is called. Duplicate
     /// patterns are allowed and produce distinct subscriptions —
     /// `dispatch` fires every matching callback in registration
     /// order.
+    ///
+    /// R221 — the pattern is canonicalized via
+    /// [`canonize_keyexpr`](crate::keyexpr_canon::canonize_keyexpr)
+    /// before being split into chunks, so the stored form agrees
+    /// byte-for-byte with what a peer's `Declare(DeclKexpr)` would
+    /// carry on the wire (lone `$*` chunk → `*`, `**/*` → `**`,
+    /// etc.). If the pattern is structurally invalid the raw form
+    /// is stored unchanged and a `log::warn!` is emitted — this is
+    /// non-breaking with prior callers; promotion to a Result-
+    /// returning signature is deferred to the cluster API rewrite.
     pub fn register(
         &mut self,
         keyexpr_pattern: impl Into<String>,
@@ -297,8 +308,20 @@ impl SubscriberRegistry {
     ) -> SubscriptionId {
         let id = SubscriptionId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
+        let raw = keyexpr_pattern.into();
+        let canonical = match crate::keyexpr_canon::canonize_keyexpr(&raw) {
+            Ok(canon) => canon,
+            Err(err) => {
+                log::warn!(
+                    "SubscriberRegistry::register: keyexpr `{raw}` is not canonical \
+                     ({err}); storing raw form. The matcher still operates but the \
+                     stored chunks may drift from the canonical form a peer emits."
+                );
+                raw
+            }
+        };
         let pattern_chunks: Vec<String> =
-            keyexpr_pattern.into().split('/').map(String::from).collect();
+            canonical.split('/').map(String::from).collect();
         self.subscribers.push(Subscriber {
             id,
             pattern_chunks,
@@ -796,10 +819,12 @@ mod tests {
     #[test]
     fn keyexpr_pattern_matches_dsl_chunk_alone_acts_like_single_star() {
         // A non-canonical `$*`-only chunk behaves like `*`: any
-        // single-chunk target content matches. (Canonical zenoh
-        // canonizes `$*` chunk to `*`, but wz must produce sane
-        // results for the un-canonized input shape since wz does not
-        // currently canonicalize registered keyexprs.)
+        // single-chunk target content matches at the matcher level.
+        // After R221 the registry call sites canonicalize on register
+        // so a registered `home/$*/temp` is stored as
+        // `["home", "*", "temp"]`; this test exercises the matcher
+        // directly with the pre-canonical shape to document the
+        // matcher's own fallback semantics for non-canonical input.
         assert!(keyexpr_pattern_matches(&["home", "$*", "temp"], "home/kitchen/temp"));
         assert!(keyexpr_pattern_matches(&["home", "$*", "temp"], "home/x/temp"));
         // Still does not span chunk boundaries.
@@ -829,6 +854,107 @@ mod tests {
             &["sensors", "**", "id_$*"],
             "sensors/room1/value_42"
         ));
+    }
+
+    // ── R221 canonicalization-on-register behaviour ──
+
+    #[test]
+    fn register_canonicalizes_lone_dollar_star_chunk_to_single_star() {
+        // `home/$*/temp` is non-canonical; the registry should
+        // canonicalize to `home/*/temp` on register so the stored
+        // chunks behave identically to a peer's canonical wire form.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("home/$*/temp", move |_push| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let push = push_with_keyexpr("home/kitchen/temp");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "canonicalized `home/$*/temp` (== `home/*/temp`) matches single-chunk middle"
+        );
+
+        // Boundary check: still does not collapse to zero chunks.
+        let push = push_with_keyexpr("home/temp");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "canonicalized `*` does not match the zero-chunk case"
+        );
+    }
+
+    #[test]
+    fn register_canonicalizes_single_star_after_double_star() {
+        // `home/**/*/temp` canonicalizes to `home/**/temp` (the `*`
+        // after `**` is absorbed). After canon the stored chunks
+        // match the zero-extra-chunk case `home/temp` because `**`
+        // already covers zero or more.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("home/**/*/temp", move |_push| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let push = push_with_keyexpr("home/temp");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "canonicalized `**/*` → `**` matches the zero-extra-chunk case"
+        );
+    }
+
+    #[test]
+    fn register_canonicalizes_dsl_run_collapse() {
+        // `home/$*$*$*foo` canonicalizes to `home/$*foo` via the
+        // singleify pass; the DSL matcher then anchors the trailing
+        // "foo" against the target chunk.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("home/$*$*$*foo", move |_push| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let push = push_with_keyexpr("home/barfoo");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "canonicalized `$*foo` (post-singleify) matches the target's trailing 'foo'"
+        );
+    }
+
+    #[test]
+    fn register_falls_back_to_raw_on_invalid_pattern() {
+        // Structurally invalid pattern (`?` is reserved) — the
+        // registry should not panic; it should store the raw form
+        // and emit a log::warn (not asserted here). The matcher will
+        // simply never fire since no canonical wire keyexpr
+        // contains `?`.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("home/foo?bar", move |_push| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+        // Registry accepted the registration without panicking.
+        assert_eq!(registry.len(), 1);
+        // Dispatch with a structurally valid keyexpr that does NOT
+        // contain `?` — no callback fires.
+        let push = push_with_keyexpr("home/foobar");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "invalid pattern stored raw does not spuriously match canonical traffic"
+        );
     }
 
     #[test]
