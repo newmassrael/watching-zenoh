@@ -4800,6 +4800,16 @@ pub fn check_lease_deadline(
 /// `tokio::select!` arm, so heavy work blocks the loop. Callers
 /// with expensive consumers should buffer (`Vec`, `mpsc::Sender`)
 /// inside the closure and drain on a separate task.
+///
+/// `Copy` because both variants are payload-cheap: `Poll` carries
+/// only a `&DriverLoopOutcome` reference (references are `Copy`),
+/// and `Lease(LeaseCheckOutcome)` is itself a unit-only enum that
+/// derives `Copy`. Making `IterationEvent` `Copy` lets a single
+/// observer callback fan the same event out to multiple
+/// `dispatch_iteration_event` consumers (subscriber + queryable
+/// registries) without having to manually re-construct the variant
+/// or split the dispatch into separate iterations.
+#[derive(Clone, Copy)]
 pub enum IterationEvent<'a> {
     /// `poll_and_dispatch_one` returned. The borrowed outcome
     /// covers all five `DriverLoopOutcome` variants.
