@@ -3418,11 +3418,12 @@ pub fn build_response_err_aliased(
 ///   - `(N, None)`: pure alias — Reply targets peer's mapping for `N`.
 ///   - `(N, Some(s))`: compound — alias `N`'s prefix + suffix `s`.
 ///
-/// Reply-layer setters today: `consolidation` (the R121j-3a sub-round
-/// squeezed into the builder infra round). Reply `source_info`
-/// (R121j-3b), `responder` (R121j-3c), and `MsgDel` body variant
-/// (R121j-3d) layer in as separate audit-traced sub-rounds — each
-/// extends this same builder, last-wins idiom.
+/// Reply-layer setters today: `consolidation` (R121j-3a), `reply_del`
+/// body-arm swap (R121j-3d), and `responder` envelope-level ext
+/// (R121j-3c). R121j-3b (Reply-body source_info as a Reply-LEVEL ext)
+/// is wire-absent per zenoh-pico `_z_reply_encode` at
+/// `src/protocol/codec/message.c:507-519` (no extensions chain on the
+/// Reply body); the carry was retracted in Round 121j-4-retract.
 pub struct ResponseReplyBuilder {
     request_id: u64,
     keyexpr_mapping_id: u64,
@@ -3435,6 +3436,14 @@ pub struct ResponseReplyBuilder {
     body_kind_del: bool,
     // Reply-layer settings.
     consolidation: Option<ConsolidationMode>,
+    // R121j-3c: Response-ENVELOPE-level responder ext (ext_id 0x03 ZBUF).
+    // Tuple = (zid bytes 1..=16, eid). Distinct from R121j-4b Err.source_info
+    // (Err-body-level): responder sits on the outer Response.extensions
+    // chain, applies symmetrically to Reply and Err bodies, and is keyed
+    // by zenoh-pico ext_id 0x03 per network.c:281-291. The Reply/Err inner
+    // body is unaffected; envelope-level Z(0x80) on Response.header
+    // signals chain presence.
+    responder: Option<(Vec<u8>, u32)>,
 }
 
 impl ResponseReplyBuilder {
@@ -3455,6 +3464,7 @@ impl ResponseReplyBuilder {
             payload: payload.to_vec(),
             body_kind_del: false,
             consolidation: None,
+            responder: None,
         }
     }
 
@@ -3481,6 +3491,38 @@ impl ResponseReplyBuilder {
     /// differs.
     pub fn reply_del(mut self) -> Self {
         self.body_kind_del = true;
+        self
+    }
+
+    /// R121j-3c — attach a `responder` extension to the outer Response
+    /// envelope. `zid` is the responder's ZenohId (1..=16 raw bytes,
+    /// packed as `(zid_len - 1) << 4` in the leading byte per
+    /// zenoh-pico's `_z_response_encode` at
+    /// `vendor/zenoh-pico/src/protocol/codec/network.c:281-291`).
+    /// `eid` is the responder's entity-id (z-int).
+    ///
+    /// **Envelope-level vs body-level**: the responder ext sits on
+    /// `Response.extensions` (alongside future qos / timestamp exts —
+    /// network.c emit order is qos → tstamp → responder), NOT on the
+    /// Reply body's own extensions chain. The Reply body has no
+    /// extensions surface (see `_z_reply_encode` message.c:507-519);
+    /// envelope-level identification of the responding queryable is
+    /// the wire-level shape regardless of Reply vs Err inner body.
+    ///
+    /// Today this lands as the sole entry in `Response.extensions`
+    /// (no Z chain-continuation bit). When future envelope exts (qos,
+    /// tstamp) land, the chain-plumb step mirrors
+    /// [`RequestQueryBuilder::build`] at
+    /// session_glue.rs:2772-2782.
+    ///
+    /// Panics if `zid.len()` is outside `1..=16`.
+    pub fn responder(mut self, zid: &[u8], eid: u32) -> Self {
+        assert!(
+            (1..=16).contains(&zid.len()),
+            "ResponseReplyBuilder::responder requires zid length 1..=16 \
+             (zenoh-pico ZenohId wire constraint, transport.h:31-37)"
+        );
+        self.responder = Some((zid.to_vec(), eid));
         self
     }
 
@@ -3533,6 +3575,24 @@ impl ResponseReplyBuilder {
             );
         }
 
+        // Envelope-level extension (Response.extensions). Today the
+        // only ext we expose is responder (R121j-3c); future qos /
+        // tstamp setters layer in here with the same Vec<ExtEntry>
+        // chain-plumb idiom used in RequestQueryBuilder.build.
+        if let Some((zid, eid)) = self.responder {
+            let value = encode_responder_ext_body(&zid, eid);
+            response.header |= 0x80; // _Z_FLAG_Z_Z on Response envelope
+            response.extensions = Some(vec![ExtEntry {
+                // ENC_ZBUF(0x40) | id_responder(0x03). No M flag and no
+                // Z chain-continuation (sole envelope ext today).
+                header: 0x40 | 0x03,
+                body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+                    value_len: value.len() as u64,
+                    value,
+                }),
+            }]);
+        }
+
         response
     }
 }
@@ -3542,9 +3602,11 @@ impl ResponseReplyBuilder {
 /// [`build_response_err_literal`] / [`build_response_err_aliased`].
 /// Mirror of [`ResponseReplyBuilder`] for the Err inner-body arm.
 ///
-/// Err-layer setters today: `encoding(id, schema)` (R121j-4a) and
-/// `source_info(zid, eid, sn)` (R121j-4b). R121j-4c (Err.attachment)
-/// is wire-absent per zenoh-pico `_z_err_encode` at
+/// Err-layer setters today: `encoding(id, schema)` (R121j-4a),
+/// `source_info(zid, eid, sn)` (R121j-4b), and the envelope-level
+/// `responder(zid, eid)` (R121j-3c, applied symmetrically with
+/// [`ResponseReplyBuilder::responder`]). R121j-4c (Err.attachment) is
+/// wire-absent per zenoh-pico `_z_err_encode` at
 /// `src/protocol/codec/message.c:545-573` (only `encoding` flag-driven
 /// inline encode + source_info ext are emitted); the carry was
 /// retracted in Round 121j-4-retract.
@@ -3561,6 +3623,12 @@ pub struct ResponseErrBuilder {
     // wire body packed at build() time via
     // [`encode_source_info_ext_body`] and wrapped in an ExtZbuf entry.
     source_info: Option<(Vec<u8>, u32, u32)>,
+    // R121j-3c: Response-ENVELOPE-level responder ext (ext_id 0x03 ZBUF).
+    // Identical shape and emit-site to [`ResponseReplyBuilder::responder`]
+    // — Response envelope ext applies symmetrically to Reply and Err
+    // inner bodies (zenoh-pico network.c:281-291 has one encoder branch
+    // that fires for both _Z_RESPONSE_BODY_REPLY and _Z_RESPONSE_BODY_ERR).
+    responder: Option<(Vec<u8>, u32)>,
 }
 
 impl ResponseErrBuilder {
@@ -3581,6 +3649,7 @@ impl ResponseErrBuilder {
             payload: payload.to_vec(),
             encoding: None,
             source_info: None,
+            responder: None,
         }
     }
 
@@ -3622,6 +3691,26 @@ impl ResponseErrBuilder {
              (zenoh-pico ZenohId wire constraint, transport.h:31-37)"
         );
         self.source_info = Some((zid.to_vec(), eid, sn));
+        self
+    }
+
+    /// R121j-3c — attach a `responder` extension to the outer Response
+    /// envelope. Mirror of [`ResponseReplyBuilder::responder`]: same
+    /// wire bytes, same emit site (`Response.extensions`), same
+    /// `_Z_FLAG_Z_Z(0x80)` envelope-level header bit. Provided on
+    /// ErrBuilder because zenoh-pico's `_z_response_encode` at
+    /// `vendor/zenoh-pico/src/protocol/codec/network.c:281-291` runs
+    /// the same responder-ext branch for Reply and Err inner bodies;
+    /// the wire is symmetric.
+    ///
+    /// Panics if `zid.len()` is outside `1..=16`.
+    pub fn responder(mut self, zid: &[u8], eid: u32) -> Self {
+        assert!(
+            (1..=16).contains(&zid.len()),
+            "ResponseErrBuilder::responder requires zid length 1..=16 \
+             (zenoh-pico ZenohId wire constraint, transport.h:31-37)"
+        );
+        self.responder = Some((zid.to_vec(), eid));
         self
     }
 
@@ -3684,6 +3773,21 @@ impl ResponseErrBuilder {
             );
         }
 
+        // Envelope-level extension (Response.extensions). Mirror of the
+        // same step in [`ResponseReplyBuilder::build`] — the responder
+        // ext is shared between Reply and Err envelopes.
+        if let Some((zid, eid)) = self.responder {
+            let value = encode_responder_ext_body(&zid, eid);
+            response.header |= 0x80; // _Z_FLAG_Z_Z on Response envelope
+            response.extensions = Some(vec![ExtEntry {
+                header: 0x40 | 0x03,
+                body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+                    value_len: value.len() as u64,
+                    value,
+                }),
+            }]);
+        }
+
         response
     }
 }
@@ -3731,6 +3835,38 @@ fn encode_vle_u64_into(out: &mut Vec<u8>, mut v: u64) {
         v >>= 7;
     }
     out.push(v as u8);
+}
+
+/// R121j-3c — encode the value bytes of a `responder` extension per
+/// zenoh-pico's `_z_response_encode` at
+/// `vendor/zenoh-pico/src/protocol/codec/network.c:281-291`.
+///
+/// Wire layout (the bytes this fn returns; the surrounding ExtZbuf
+/// codec prepends its own `VLE(value_len)` length prefix that maps to
+/// zenoh-pico's leading `zsize(ext_size)`):
+///
+///   [byte 0]            `((zid_len - 1) << 4)` — high nibble carries
+///                        `zid_len - 1` (1..=16 valid, encoded 0..=15).
+///   [byte 1..1+zid_len] raw zid bytes.
+///   [VLE u64]            `eid`.
+///
+/// Distinct from [`encode_source_info_ext_body`] in that no `sn`
+/// trailer is emitted — responder identifies the entity, source_info
+/// identifies the entity + per-source sequence position.
+///
+/// Panics if `zid.len()` is outside `1..=16` (the caller's setter
+/// guards this; the inner assertion is defence-in-depth).
+fn encode_responder_ext_body(zid: &[u8], eid: u32) -> Vec<u8> {
+    assert!(
+        (1..=16).contains(&zid.len()),
+        "responder zid length must be 1..=16 (zenoh-pico ZenohId wire constraint)"
+    );
+    // Capacity = 1 leading byte + zid + VLE(u32) worst-case (5 bytes).
+    let mut out = Vec::with_capacity(1 + zid.len() + 5);
+    out.push(((zid.len() as u8) - 1) << 4);
+    out.extend_from_slice(zid);
+    encode_vle_u64_into(&mut out, eid as u64);
+    out
 }
 
 /// R121h-perf-bump-3 — single-allocation transport-envelope encode.
@@ -7819,6 +7955,190 @@ mod tests {
     )]
     fn response_err_builder_source_info_rejects_empty_zid() {
         let _ = ResponseErrBuilder::new(42, 7, None, b"oops").source_info(&[], 0, 0);
+    }
+
+    /// R121j-3c — ResponseReplyBuilder.responder sets
+    /// `Response.header.Z(0x80)` (envelope-level), prepends a single
+    /// `ExtZbuf` envelope ext (header `ENC_ZBUF(0x40) | id_responder(0x03)
+    /// = 0x43`) carrying `[(zid_len-1)<<4, zid..., VLE(eid)]` per
+    /// zenoh-pico `_z_response_encode` at
+    /// `vendor/zenoh-pico/src/protocol/codec/network.c:281-291`. The
+    /// Reply inner body is unaffected — envelope ext is orthogonal to
+    /// body bits.
+    #[test]
+    fn response_reply_builder_responder_emits_envelope_zbuf_ext_entry() {
+        let baseline = ResponseReplyBuilder::new(42, 7, None, b"hello")
+            .build()
+            .encode_to_vec();
+        let wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+            .responder(&[0xAA; 4], 11)
+            .build()
+            .encode_to_vec();
+        // Envelope: Response.header(1) + VLE(42)(1) + VLE(7)(1) = 3-byte
+        // prefix; responder ext lands at offset 3 (no keyexpr suffix in
+        // the aliased mapping_id=7 + None path).
+        assert_eq!(
+            wire[0],
+            baseline[0] | 0x80,
+            "responder must set Z(0x80) on Response.header; other base bits preserved"
+        );
+        assert_eq!(
+            wire[3], 0x43,
+            "envelope ext header = ENC_ZBUF(0x40) | id_responder(0x03); no Z chain bit on sole entry"
+        );
+        assert_eq!(
+            wire[4], 0x06,
+            "ExtZbuf value_len = 1 leading + 4 zid + 1 VLE(eid) = 6"
+        );
+        assert_eq!(wire[5], 0x30, "leading byte = (4-1) << 4 for zid_len=4");
+        assert_eq!(&wire[6..10], &[0xAA; 4], "raw zid bytes");
+        assert_eq!(wire[10], 0x0B, "VLE(eid=11)");
+        // Inner Reply.header was at offset 3 in baseline; the envelope
+        // ext adds 8 bytes (1 header + 1 value_len + 6 value), so
+        // Reply.header is now at offset 11 with the same byte value.
+        assert_eq!(
+            wire[11], baseline[3],
+            "inner Reply.header preserved at the offset shifted by the envelope ext (8 bytes)"
+        );
+        assert_eq!(
+            wire.len(),
+            baseline.len() + 8,
+            "wire length grows by exactly the envelope ext size (1+1+6=8 bytes)"
+        );
+    }
+
+    /// R121j-3c — responder (envelope-level) composes with consolidation
+    /// (Reply-body-level): the bits land on different bytes — Z on
+    /// Response.header, C on Reply.header — so the two setters are
+    /// orthogonal and may be applied in either order with the same
+    /// wire result.
+    #[test]
+    fn response_reply_builder_responder_composes_with_consolidation() {
+        let wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+            .responder(&[0xBB; 1], 1)
+            .consolidation(ConsolidationMode::Latest)
+            .build()
+            .encode_to_vec();
+        // Envelope Z set on Response.header at offset 0.
+        assert_eq!(wire[0] & 0x80, 0x80, "envelope-level Z(0x80) on Response.header");
+        // Envelope ext: header(0x43) + VLE(value_len = 1+1+1 = 3) + body(3)
+        // at offsets 3..8. Body = [0x00, 0xBB, 0x01].
+        assert_eq!(wire[3], 0x43);
+        assert_eq!(wire[4], 0x03, "value_len = 1 leading + 1 zid + 1 VLE(eid) = 3");
+        assert_eq!(wire[5], 0x00, "leading byte = 0x00 for zid_len=1");
+        assert_eq!(wire[6], 0xBB);
+        assert_eq!(wire[7], 0x01, "VLE(eid=1)");
+        // Inner Reply.header at offset 8 with consolidation C(0x20) bit
+        // set; consolidation byte (LatestSamePeer = 0x02 wire byte) at
+        // offset 9.
+        assert_eq!(
+            wire[8] & 0x20,
+            0x20,
+            "Reply.header.C(0x20) set by consolidation; orthogonal to envelope-level Z"
+        );
+        assert_eq!(
+            wire[9],
+            ConsolidationMode::Latest.wire_byte(),
+            "consolidation byte follows Reply.header"
+        );
+    }
+
+    /// R121j-3c — ResponseErrBuilder.responder mirrors the Reply path:
+    /// envelope-level Z(0x80) + single ExtEntry on Response.extensions.
+    /// The Err inner body (header.E / header.Z for source_info) is
+    /// independent of the envelope ext.
+    #[test]
+    fn response_err_builder_responder_emits_envelope_zbuf_ext_entry() {
+        let baseline = ResponseErrBuilder::new(42, 7, None, b"oops")
+            .build()
+            .encode_to_vec();
+        let wire = ResponseErrBuilder::new(42, 7, None, b"oops")
+            .responder(&[0xCC; 2], 5)
+            .build()
+            .encode_to_vec();
+        assert_eq!(
+            wire[0],
+            baseline[0] | 0x80,
+            "responder must set Z(0x80) on Response.header for Err path too"
+        );
+        assert_eq!(wire[3], 0x43, "same envelope ext header for both Reply and Err paths");
+        assert_eq!(wire[4], 0x04, "value_len = 1 leading + 2 zid + 1 VLE(eid) = 4");
+        assert_eq!(wire[5], 0x10, "leading byte = (2-1) << 4 for zid_len=2");
+        assert_eq!(&wire[6..8], &[0xCC, 0xCC]);
+        assert_eq!(wire[8], 0x05, "VLE(eid=5)");
+        // Inner Err.header preserved (was at offset 3 in baseline, now
+        // shifted by envelope ext size = 1 + 1 + 4 = 6 bytes).
+        assert_eq!(
+            wire[9], baseline[3],
+            "inner Err.header preserved at offset shifted by envelope ext (6 bytes)"
+        );
+        assert_eq!(wire.len(), baseline.len() + 6);
+    }
+
+    /// R121j-3c — Err.responder (envelope) + Err.source_info (Err body)
+    /// compose: envelope-level Z lands on Response.header, body-level
+    /// Z lands on Err.header. Separate bytes, separate ext chains.
+    #[test]
+    fn response_err_builder_responder_composes_with_source_info() {
+        let wire = ResponseErrBuilder::new(42, 7, None, b"oops")
+            .responder(&[0xDD; 1], 9)
+            .source_info(&[0xEE; 1], 3, 4)
+            .build()
+            .encode_to_vec();
+        // Envelope Z on Response.header.
+        assert_eq!(wire[0] & 0x80, 0x80, "envelope Z(0x80) on Response.header for responder");
+        // Envelope ext: 0x43 + VLE(3) + [0x00, 0xDD, 0x09] at offsets 3..8.
+        assert_eq!(wire[3], 0x43);
+        assert_eq!(wire[4], 0x03, "envelope responder value_len = 3");
+        assert_eq!(&wire[5..8], &[0x00, 0xDD, 0x09]);
+        // Err.header at offset 8 with Z(0x80) set by source_info.
+        // E(0x40) clear because no encoding.
+        assert_eq!(
+            wire[8] & 0x80,
+            0x80,
+            "Err.header.Z(0x80) set by source_info; orthogonal to envelope Z"
+        );
+        assert_eq!(wire[8] & 0x40, 0x00, "Err.header.E(0x40) clear (no encoding)");
+        // Err body ext: 0x41 + VLE(value_len = 1+1+1+1 = 4) + body(4)
+        // at offsets 9..14.
+        assert_eq!(wire[9], 0x41, "Err body ext header = source_info (0x41)");
+        assert_eq!(wire[10], 0x04, "source_info value_len = 4");
+        assert_eq!(&wire[11..15], &[0x00, 0xEE, 0x03, 0x04]);
+    }
+
+    /// R121j-3c — responder rejects zid lengths outside 1..=16 on
+    /// both Reply and Err builders (zenoh-pico ZenohId wire constraint,
+    /// transport.h:31-37).
+    #[test]
+    #[should_panic(
+        expected = "ResponseReplyBuilder::responder requires zid length 1..=16"
+    )]
+    fn response_reply_builder_responder_rejects_zid_too_long() {
+        let _ = ResponseReplyBuilder::new(42, 7, None, b"hello").responder(&[0; 17], 0);
+    }
+
+    /// R121j-3c — ResponseErrBuilder.responder shares the same wire
+    /// constraint.
+    #[test]
+    #[should_panic(
+        expected = "ResponseErrBuilder::responder requires zid length 1..=16"
+    )]
+    fn response_err_builder_responder_rejects_empty_zid() {
+        let _ = ResponseErrBuilder::new(42, 7, None, b"oops").responder(&[], 0);
+    }
+
+    /// R121j-3c — direct check on the helper that builds the
+    /// responder ext-body bytes. Distinct from source_info in that no
+    /// `sn` trailer is emitted.
+    #[test]
+    fn encode_responder_ext_body_matches_zenoh_pico_layout() {
+        // zid_len=3 → leading byte = (3-1)<<4 = 0x20
+        let bytes = encode_responder_ext_body(&[0xCA, 0xFE, 0xBA], 0x4000);
+        assert_eq!(bytes[0], 0x20, "leading byte packs zid_len-1 in high nibble");
+        assert_eq!(&bytes[1..4], &[0xCA, 0xFE, 0xBA], "raw zid follows the leading byte");
+        // VLE(16384) = 0x80 0x80 0x01
+        assert_eq!(&bytes[4..7], &[0x80, 0x80, 0x01], "VLE(eid=16384) = 0x80 0x80 0x01");
+        assert_eq!(bytes.len(), 7, "total = 1 leading + 3 zid + 3 VLE(eid) = 7");
     }
 
     /// R121j-4b — direct check on the helper that builds the
