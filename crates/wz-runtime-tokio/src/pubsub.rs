@@ -350,8 +350,15 @@ impl SubscriberRegistry {
     /// R121d — absorb a `Declare` envelope's inner body so the
     /// peer mapping table tracks the peer's locally-declared
     /// keyexpr aliases. Only `DeclKexpr` and `UndeclKexpr` are
-    /// processed; the other 7 Declare sub-variants do not affect
-    /// the keyexpr table.
+    /// processed; the other Declare sub-variants are routed to
+    /// their dedicated registries elsewhere in the runtime and
+    /// must not mutate the keyexpr table.
+    ///
+    /// R218 — every `DeclareVariant` arm is matched explicitly so
+    /// that adding a new arm in the upstream codec catalog
+    /// surfaces as a compile error here rather than a silent
+    /// miss. The intentional no-op arms cite the dedicated
+    /// registry that owns each Declare sub-type.
     fn absorb_declare(&mut self, body: &DeclareVariant) {
         match body {
             DeclareVariant::CodecZenohDeclKexpr(d) => {
@@ -368,8 +375,35 @@ impl SubscriberRegistry {
             DeclareVariant::CodecZenohUndeclKexpr(u) => {
                 self.peer_keyexpr_table.remove(&u.id);
             }
-            // Other sub-variants do not affect the keyexpr table.
-            _ => {}
+            // DeclSubscriber / UndeclSubscriber are observed by
+            // `crate::declare::subscriber::DeclSubscriberRegistry`
+            // so the runtime can fire user callbacks on peer
+            // subscriber lifecycle — not a keyexpr-table concern.
+            DeclareVariant::CodecZenohDeclSubscriber(_)
+            | DeclareVariant::CodecZenohUndeclSubscriber(_) => {}
+            // DeclQueryable / UndeclQueryable are observed by
+            // `crate::declare::queryable::QueryableRegistry` so
+            // the runtime can fire user callbacks on peer
+            // queryable lifecycle — not a keyexpr-table concern.
+            DeclareVariant::CodecZenohDeclQueryable(_)
+            | DeclareVariant::CodecZenohUndeclQueryable(_) => {}
+            // DeclToken / UndeclToken are observed by
+            // `crate::declare::liveliness::TokenRegistry` for the
+            // peer liveliness layer — not a keyexpr-table concern.
+            DeclareVariant::CodecZenohDeclToken(_)
+            | DeclareVariant::CodecZenohUndeclToken(_) => {}
+            // DeclFinal is the terminator marker zenoh emits after
+            // an initial declaration burst. No side effects in
+            // this registry — the runtime's session glue tracks
+            // the marker separately if it cares about burst
+            // completion.
+            DeclareVariant::CodecZenohDeclFinal(_) => {}
+            // Default arm preserves an unknown wire tag for
+            // forward compatibility (codegen generates this for
+            // every variant-dispatch enum). The peer keyexpr
+            // table is by definition not affected by an unknown
+            // Declare sub-type.
+            DeclareVariant::Default { .. } => {}
         }
     }
 
@@ -806,5 +840,72 @@ mod tests {
             "Push id=5 + suffix=temp must resolve to 'home/sensor/temp' \
              via the base+suffix composition rule"
         );
+    }
+
+    // ── R218 absorb_declare explicit-arm coverage ──
+
+    /// R218 — every non-keyexpr `DeclareVariant` arm must be a
+    /// no-op against the peer keyexpr alias table. Each arm is
+    /// dispatched in isolation against a fresh registry; the
+    /// table must remain empty. Failure here means a future
+    /// codegen change accidentally routed a non-keyexpr arm
+    /// through the keyexpr path, OR the explicit match acquired
+    /// an erroneous side-effect on one of the no-op arms.
+    #[test]
+    fn absorb_declare_non_keyexpr_arms_leave_table_empty() {
+        use wz_codecs::decl_final::DeclFinal;
+        use wz_codecs::decl_queryable::DeclQueryable;
+        use wz_codecs::decl_subscriber::DeclSubscriber;
+        use wz_codecs::decl_token::DeclToken;
+        use wz_codecs::undecl_queryable::UndeclQueryable;
+        use wz_codecs::undecl_subscriber::UndeclSubscriber;
+        use wz_codecs::undecl_token::UndeclToken;
+
+        let arms: Vec<(&str, DeclareVariant)> = vec![
+            (
+                "DeclSubscriber",
+                DeclareVariant::CodecZenohDeclSubscriber(DeclSubscriber::default()),
+            ),
+            (
+                "UndeclSubscriber",
+                DeclareVariant::CodecZenohUndeclSubscriber(UndeclSubscriber::default()),
+            ),
+            (
+                "DeclQueryable",
+                DeclareVariant::CodecZenohDeclQueryable(DeclQueryable::default()),
+            ),
+            (
+                "UndeclQueryable",
+                DeclareVariant::CodecZenohUndeclQueryable(UndeclQueryable::default()),
+            ),
+            (
+                "DeclToken",
+                DeclareVariant::CodecZenohDeclToken(DeclToken::default()),
+            ),
+            (
+                "UndeclToken",
+                DeclareVariant::CodecZenohUndeclToken(UndeclToken::default()),
+            ),
+            (
+                "DeclFinal",
+                DeclareVariant::CodecZenohDeclFinal(DeclFinal::default()),
+            ),
+            (
+                "Default",
+                DeclareVariant::Default {
+                    tag: 0xFF,
+                    body: DeclFinal::default(),
+                },
+            ),
+        ];
+
+        for (name, body) in arms {
+            let mut registry = SubscriberRegistry::new();
+            registry.absorb_declare(&body);
+            assert!(
+                registry.peer_keyexpr_table().is_empty(),
+                "{name} arm must not mutate the peer keyexpr table"
+            );
+        }
     }
 }
