@@ -87,6 +87,7 @@ use wz_codecs::oam::Oam;
 use wz_codecs::open_body::OpenBody;
 use wz_codecs::push::{Push, PushVariant};
 use wz_codecs::query::Query;
+use wz_codecs::timestamp::Timestamp;
 use wz_codecs::reply::{Reply, ReplyVariant};
 use wz_codecs::request::{Request, RequestVariant};
 use wz_codecs::response::{Response, ResponseVariant};
@@ -2578,6 +2579,7 @@ pub struct RequestQueryBuilder {
     query_attachment: Option<Vec<u8>>,
     // Request-layer ext settings.
     request_qos: Option<u8>,
+    request_tstamp: Option<Timestamp>,
     request_target: Option<QueryTarget>,
     request_budget: Option<u32>,
     request_timeout_ms: Option<u64>,
@@ -2597,6 +2599,7 @@ impl RequestQueryBuilder {
             parameters: None,
             query_attachment: None,
             request_qos: None,
+            request_tstamp: None,
             request_target: None,
             request_budget: None,
             request_timeout_ms: None,
@@ -2627,6 +2630,54 @@ impl RequestQueryBuilder {
     /// `vendor/zenoh-pico/src/protocol/codec/network.c`.
     pub fn request_qos(mut self, packed: u8) -> Self {
         self.request_qos = Some(packed);
+        self
+    }
+
+    /// Set the Request-level timestamp extension. `time` is the
+    /// 64-bit NTP-style timestamp the requester is correlating against
+    /// (typically `Hal::now_ticks_*` lifted into the zenoh-pico NTP
+    /// 64-bit shape); `zid` is the requester's zid bytes (1..=16 bytes
+    /// per zenoh `_z_id_t` capacity at
+    /// `vendor/zenoh-pico/include/zenoh-pico/protocol/core.h`'s
+    /// `_Z_ID_LENGTH = 16`). Panics on empty zid (zenoh-pico's
+    /// `_z_id_encode_as_slice` at
+    /// `vendor/zenoh-pico/src/protocol/codec/message.c:58-70` rejects
+    /// zero-length zid as a zenoh-protocol violation) and on a zid
+    /// longer than 16 bytes.
+    ///
+    /// Wire shape per `_z_request_encode` at
+    /// `vendor/zenoh-pico/src/protocol/codec/network.c:132-137`:
+    ///
+    /// ```text
+    ///   ext_header  = ENC_ZBUF(0x40) | id_tstamp(0x02)
+    ///                 (NO M flag — zenoh-pico emits ext_tstamp as
+    ///                  non-mandatory; the ext gets only the Z chain-
+    ///                  continuation bit if a later ext follows.)
+    ///   ext_value   = VLE(timestamp_body_len) + Timestamp.encode_bytes
+    ///   Timestamp   = VLE(time) + VLE(zid_len) + zid_bytes
+    /// ```
+    ///
+    /// Emit position in the Request-level ext chain is SECOND (qos →
+    /// tstamp → target → budget → timeout), matching zenoh-pico's
+    /// `_z_request_encode` order. The wire-shape match is verified by
+    /// the byte-stable `request_query_builder_request_tstamp_emits_*`
+    /// tests below.
+    pub fn request_tstamp(mut self, time: u64, zid: &[u8]) -> Self {
+        assert!(
+            !zid.is_empty(),
+            "RequestQueryBuilder::request_tstamp requires a non-empty zid \
+             (zenoh-pico rejects len=0 as a protocol violation)",
+        );
+        assert!(
+            zid.len() <= 16,
+            "RequestQueryBuilder::request_tstamp zid length {} exceeds zenoh _Z_ID_LENGTH (16)",
+            zid.len(),
+        );
+        self.request_tstamp = Some(Timestamp {
+            time,
+            zid_len: zid.len() as u64,
+            zid: zid.to_vec(),
+        });
         self
     }
 
@@ -2754,8 +2805,8 @@ impl RequestQueryBuilder {
 
         // Request-level extensions in zenoh-pico encode order: qos →
         // tstamp → target → budget → timeout (network.c:122-167).
-        // Today qos + target + timeout are exposed; tstamp / budget
-        // setters layer in once their codec wiring lands.
+        // Today qos + tstamp + target + budget + timeout are exposed;
+        // any future ext lands in its position-correct slot here.
         let mut request_exts: Vec<ExtEntry> = Vec::new();
         if let Some(packed) = self.request_qos {
             request_exts.push(ExtEntry {
@@ -2768,6 +2819,26 @@ impl RequestQueryBuilder {
                 header: 0x20 | 0x01,
                 body: ExtEntryVariant::CodecZenohExtZint(ExtZint {
                     value: packed as u64,
+                }),
+            });
+        }
+        if let Some(tstamp) = self.request_tstamp {
+            // ENC_ZBUF(0x40) | id_tstamp(0x02). No M flag — zenoh-pico
+            // emits ext_tstamp as non-mandatory at network.c:132-137
+            // (only the Z chain-continuation bit is OR'd in, no
+            // _Z_MSG_EXT_FLAG_M). Z bit set below as a chain step if
+            // target / budget / timeout follow. The ext value carries
+            // a self-describing length prefix (zenoh-pico's
+            // `_z_timestamp_encode_ext` at message.c:95-100 emits
+            // `_z_zsize_encode(ext_size)` before the Timestamp body;
+            // wz's ExtZbuf encode at ext_zbuf.rs auto-emits
+            // VLE(value_len) + bytes which matches that wire shape).
+            let body_bytes = tstamp.encode_to_vec();
+            request_exts.push(ExtEntry {
+                header: 0x40 | 0x02,
+                body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+                    value_len: body_bytes.len() as u64,
+                    value: body_bytes,
                 }),
             });
         }
@@ -7309,6 +7380,112 @@ mod tests {
     fn request_query_builder_budget_rejects_zero() {
         let _ = RequestQueryBuilder::new(42, 7, None)
             .request_budget(0)
+            .build();
+    }
+
+    /// R121j-tstamp — request_tstamp emits one Request-level ext at
+    /// the position between qos and target (qos → tstamp → target →
+    /// budget → timeout) with header ENC_ZBUF(0x40) | id_tstamp(0x02)
+    /// and NO M flag. The ext body is an ExtZbuf carrying the
+    /// `Timestamp::encode_to_vec()` output verbatim.
+    #[test]
+    fn request_query_builder_request_tstamp_solo_emits_ext_with_no_m_flag() {
+        // Solo case: only tstamp set. time=42, zid=[0xab, 0xcd] keeps
+        // both VLE fields single-byte so the body bytes are auditable
+        // without an online VLE encoder: [VLE(42), VLE(2), 0xab, 0xcd]
+        // = [0x2a, 0x02, 0xab, 0xcd], len=4.
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_tstamp(42, &[0xab, 0xcd])
+            .build();
+        let req_exts = request
+            .extensions
+            .as_ref()
+            .expect("N_Z set → Request.extensions must be Some");
+        assert_eq!(req_exts.len(), 1, "only tstamp ext was set");
+        assert_eq!(
+            req_exts[0].header,
+            0x40 | 0x02,
+            "tstamp ext header = ENC_ZBUF(0x40) | id_tstamp(0x02); no M, no Z (last)",
+        );
+        match &req_exts[0].body {
+            ExtEntryVariant::CodecZenohExtZbuf(zbuf) => {
+                assert_eq!(zbuf.value_len, 4, "Timestamp encode = VLE(42)+VLE(2)+zid[2] = 4 bytes");
+                assert_eq!(
+                    zbuf.value,
+                    vec![0x2a, 0x02, 0xab, 0xcd],
+                    "Timestamp body: VLE(time=42)=0x2a, VLE(zid_len=2)=0x02, zid=[0xab,0xcd]",
+                );
+            }
+            _ => panic!("tstamp ext body must be CodecZenohExtZbuf"),
+        }
+        assert_eq!(
+            request.header & 0x80,
+            0x80,
+            "tstamp setter must flip N_Z(0x80) on Request.header (exts present)",
+        );
+    }
+
+    /// R121j-tstamp — chain position vs zenoh-pico encode order:
+    /// qos[0] → tstamp[1] → target[2] → budget[3] → timeout[4], with
+    /// Z chain-continuation on indices 0..=3 and Z clear on index 4.
+    /// The five-ext sequence pins the entire Request-level ext chain
+    /// against `_z_request_encode` at network.c:126-155.
+    #[test]
+    fn request_query_builder_full_chain_emits_zenoh_pico_encode_order() {
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_qos(0x05)
+            .request_tstamp(7, &[0x01])
+            .request_target(QueryTarget::All)
+            .request_budget(100)
+            .request_timeout_ms(1000)
+            .build();
+        let req_exts = request.extensions.as_ref().expect("5 exts set");
+        assert_eq!(req_exts.len(), 5, "qos + tstamp + target + budget + timeout");
+        assert_eq!(req_exts[0].header & 0x07, 0x01, "index 0: qos id");
+        assert_eq!(req_exts[1].header & 0x07, 0x02, "index 1: tstamp id");
+        assert_eq!(req_exts[2].header & 0x07, 0x04, "index 2: target id");
+        assert_eq!(req_exts[3].header & 0x07, 0x05, "index 3: budget id");
+        assert_eq!(req_exts[4].header & 0x07, 0x06, "index 4: timeout id");
+        // Encoding kind bits (bits 5-6: 0x20 = ZINT, 0x40 = ZBUF).
+        assert_eq!(req_exts[0].header & 0x60, 0x20, "qos uses ENC_ZINT");
+        assert_eq!(req_exts[1].header & 0x60, 0x40, "tstamp uses ENC_ZBUF");
+        assert_eq!(req_exts[2].header & 0x60, 0x20, "target uses ENC_ZINT");
+        assert_eq!(req_exts[3].header & 0x60, 0x20, "budget uses ENC_ZINT");
+        assert_eq!(req_exts[4].header & 0x60, 0x20, "timeout uses ENC_ZINT");
+        // M flag (bit 4): set on target only (M=1 per zenoh-pico),
+        // clear on qos / tstamp / budget / timeout.
+        assert_eq!(req_exts[0].header & 0x10, 0x00, "qos: M clear");
+        assert_eq!(req_exts[1].header & 0x10, 0x00, "tstamp: M clear (non-mandatory per zenoh-pico)");
+        assert_eq!(req_exts[2].header & 0x10, 0x10, "target: M set");
+        assert_eq!(req_exts[3].header & 0x10, 0x00, "budget: M clear");
+        assert_eq!(req_exts[4].header & 0x10, 0x00, "timeout: M clear");
+        // Z chain-continuation: set on 0..=3, clear on 4.
+        assert_eq!(req_exts[0].header & 0x80, 0x80, "qos: Z set (more follows)");
+        assert_eq!(req_exts[1].header & 0x80, 0x80, "tstamp: Z set");
+        assert_eq!(req_exts[2].header & 0x80, 0x80, "target: Z set");
+        assert_eq!(req_exts[3].header & 0x80, 0x80, "budget: Z set");
+        assert_eq!(req_exts[4].header & 0x80, 0x00, "timeout: Z clear (last)");
+    }
+
+    /// R121j-tstamp — request_tstamp rejects an empty zid (mirrors
+    /// zenoh-pico's `_z_id_encode_as_slice` at message.c:58-70 which
+    /// returns `_Z_ERR_MESSAGE_ZENOH_UNKNOWN` on len=0).
+    #[test]
+    #[should_panic(expected = "RequestQueryBuilder::request_tstamp requires a non-empty zid")]
+    fn request_query_builder_tstamp_rejects_empty_zid() {
+        let _ = RequestQueryBuilder::new(42, 7, None)
+            .request_tstamp(0, &[])
+            .build();
+    }
+
+    /// R121j-tstamp — request_tstamp rejects zid longer than the
+    /// zenoh `_z_id_t` 16-byte capacity (`_Z_ID_LENGTH = 16` at
+    /// vendor/zenoh-pico/include/zenoh-pico/protocol/core.h).
+    #[test]
+    #[should_panic(expected = "exceeds zenoh _Z_ID_LENGTH (16)")]
+    fn request_query_builder_tstamp_rejects_zid_over_16_bytes() {
+        let _ = RequestQueryBuilder::new(42, 7, None)
+            .request_tstamp(0, &[0u8; 17])
             .build();
     }
 
