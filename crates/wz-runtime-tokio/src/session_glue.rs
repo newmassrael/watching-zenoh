@@ -61,7 +61,7 @@ use zeroize::Zeroizing;
 use sce_rust_runtime::scripting::{IScriptEngine, NativeMethod, ScriptValue};
 use sce_rust_runtime::Engine;
 
-use sce_forge_runtime::codec::{CodecError, SceCursor};
+use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink, VecSink};
 use wz_codecs::close::Close;
 use wz_codecs::decl_final::DeclFinal;
 use wz_codecs::decl_kexpr::DeclKexpr;
@@ -77,7 +77,6 @@ use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::ext_zbuf::ExtZbuf;
 use wz_codecs::ext_zint::ExtZint;
 use wz_codecs::err::Err;
-use wz_codecs::frame::Frame;
 use wz_codecs::init_body::InitBody;
 use wz_codecs::interest::Interest;
 use wz_codecs::keep_alive::KeepAlive;
@@ -3322,6 +3321,44 @@ pub fn build_response_err_aliased(
     }
 }
 
+/// R121h-perf-bump-3 — single-allocation transport-envelope encode.
+/// Composes the parent-flags byte, `VLE(sn)`, and a sink-encoded
+/// payload into one growable `Vec`, eliminating the prior
+/// `payload.encode_to_vec()` + `Frame.encode_to_vec()` +
+/// `wire.extend_from_slice(&body_bytes)` chain (3 allocations per
+/// hot-path emit). For typical 1–2 KB payloads the reserved capacity
+/// is also dramatically smaller than the 64 KB `Frame::MAX_ENCODED_BYTES`
+/// ceiling, since the inner codec's worst-case bound is used directly.
+///
+/// The `VLE(sn)` loop is bit-identical to `Frame::encode`'s sn block
+/// — it IS the wire format (zenoh-pico VLE base-128 encoding per
+/// `vendor/zenoh-pico/src/protocol/codec/core.c`), not consumer-tunable
+/// logic. Inlining here does not duplicate semantics.
+fn encode_frame_envelope<P>(
+    sn: u64,
+    parent_flags: u8,
+    worst_case_payload: usize,
+    payload_encode: P,
+) -> Vec<u8>
+where
+    P: FnOnce(&mut VecSink<'_>) -> Result<(), CodecError>,
+{
+    let mut wire = Vec::with_capacity(1 + 10 + worst_case_payload);
+    wire.push(parent_flags | wire_const::T_MID_FRAME);
+    {
+        let mut sink = VecSink::new(&mut wire);
+        let mut _vle = sn;
+        while _vle >= 0x80 {
+            sink.write_u8((_vle as u8 & 0x7F) | 0x80)
+                .expect("VecSink is infallible");
+            _vle >>= 7;
+        }
+        sink.write_u8(_vle as u8).expect("VecSink is infallible");
+        payload_encode(&mut sink).expect("VecSink is infallible");
+    }
+    wire
+}
+
 /// R121j-3 — build the wire bytes for a `Frame` transport-message
 /// carrying a single `Response` network-message in its payload.
 /// Mirror of the other `encode_frame_with_*` helpers (PUSH /
@@ -3340,15 +3377,9 @@ pub fn encode_frame_with_response(sn: u64, response: Response, reliable: bool) -
     } else {
         0u8
     };
-    let frame = Frame {
-        sn,
-        payload: response.encode_to_vec(),
-    };
-    let body_bytes = frame.encode_to_vec();
-    let mut wire = Vec::with_capacity(body_bytes.len() + 1);
-    wire.push(parent_flags | wire_const::T_MID_FRAME);
-    wire.extend_from_slice(&body_bytes);
-    wire
+    encode_frame_envelope(sn, parent_flags, Response::MAX_ENCODED_BYTES, |sink| {
+        response.encode(sink)
+    })
 }
 
 /// R121j-2 — build the wire bytes for a `Frame` transport-message
@@ -3372,15 +3403,9 @@ pub fn encode_frame_with_response_final(
     } else {
         0u8
     };
-    let frame = Frame {
-        sn,
-        payload: response_final.encode_to_vec(),
-    };
-    let body_bytes = frame.encode_to_vec();
-    let mut wire = Vec::with_capacity(body_bytes.len() + 1);
-    wire.push(parent_flags | wire_const::T_MID_FRAME);
-    wire.extend_from_slice(&body_bytes);
-    wire
+    encode_frame_envelope(sn, parent_flags, ResponseFinal::MAX_ENCODED_BYTES, |sink| {
+        response_final.encode(sink)
+    })
 }
 
 /// R121j-1 — build the wire bytes for a `Frame` transport-message
@@ -3400,15 +3425,9 @@ pub fn encode_frame_with_request(sn: u64, request: Request, reliable: bool) -> V
     } else {
         0u8
     };
-    let frame = Frame {
-        sn,
-        payload: request.encode_to_vec(),
-    };
-    let body_bytes = frame.encode_to_vec();
-    let mut wire = Vec::with_capacity(body_bytes.len() + 1);
-    wire.push(parent_flags | wire_const::T_MID_FRAME);
-    wire.extend_from_slice(&body_bytes);
-    wire
+    encode_frame_envelope(sn, parent_flags, Request::MAX_ENCODED_BYTES, |sink| {
+        request.encode(sink)
+    })
 }
 
 /// R121g — build the wire bytes for a `Frame` transport-message
@@ -3432,15 +3451,9 @@ pub fn encode_frame_with_declare(sn: u64, declare: Declare, reliable: bool) -> V
     } else {
         0u8
     };
-    let frame = Frame {
-        sn,
-        payload: declare.encode_to_vec(),
-    };
-    let body_bytes = frame.encode_to_vec();
-    let mut wire = Vec::with_capacity(body_bytes.len() + 1);
-    wire.push(parent_flags | wire_const::T_MID_FRAME);
-    wire.extend_from_slice(&body_bytes);
-    wire
+    encode_frame_envelope(sn, parent_flags, Declare::MAX_ENCODED_BYTES, |sink| {
+        declare.encode(sink)
+    })
 }
 
 /// R121e — build the wire bytes for a `Frame` transport-message
@@ -3476,15 +3489,9 @@ pub fn encode_frame_with_push(sn: u64, push: Push, reliable: bool) -> Vec<u8> {
     } else {
         0u8
     };
-    let frame = Frame {
-        sn,
-        payload: push.encode_to_vec(),
-    };
-    let body_bytes = frame.encode_to_vec();
-    let mut wire = Vec::with_capacity(body_bytes.len() + 1);
-    wire.push(parent_flags | wire_const::T_MID_FRAME);
-    wire.extend_from_slice(&body_bytes);
-    wire
+    encode_frame_envelope(sn, parent_flags, Push::MAX_ENCODED_BYTES, |sink| {
+        push.encode(sink)
+    })
 }
 
 // ─────────────────────────── inbound parser ───────────────────────────
