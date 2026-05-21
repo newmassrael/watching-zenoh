@@ -8272,6 +8272,54 @@
         "R121j-6 z_get-side inbound Response.Reply dispatch (ReplyRegistry)"
       ]
     },
+    "Round 197": {
+      "decision_summary": "R121k-2 — RemoteSubscriberRegistry lands in new declare.rs module; DeclSubscriber+UndeclSubscriber callbacks with peer-table-resolved keyexpr.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/declare.rs new (~510 LoC) RemoteSubscriberRegistry with on_subscriber_declared/_undeclared",
+        "DeclSubscriberCallback signature: Fn(&DeclSubscriber, &str) + Send + 'static where &str = resolved literal",
+        "dispatch_declare / dispatch_messages / dispatch_iteration_event mirror SubscriberRegistry+QueryableRegistry",
+        "unresolvable mapping id skips callback (no partial-keyexpr fire); shared resolve_wireexpr helper",
+        "lib.rs pub mod declare; with R121k-2 -> R121k-5 sub-round split documented in module doc-comment"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 131 -> 141, +10 declare::tests::* passing",
+        "cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings: clean",
+        "10 tests cover: empty noop, decl/undecl callbacks, peer-table resolution, unresolvable skip, fan-order, nonlocal arm, drop other arms"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121k-3 RemoteQueryableRegistry (DeclQueryable+UndeclQueryable; same module declare.rs)",
+        "R121k-4 LivelinessRegistry (DeclToken+UndeclToken)",
+        "R121k-5 absorb_declare extended to fan into all three Remote* registries (or external observer fan-out)",
+        "R121k-6 integration test parity (mirror wz_queryable_round_trip pattern)",
+        "SCE drift +7 commits audit entry pending"
+      ],
+      "publishable_decision_summary": "R121k-2 — RemoteSubscriberRegistry lands in new declare.rs module; DeclSubscriber+UndeclSubscriber callbacks with peer-table-resolved keyexpr.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/declare.rs new (~510 LoC) RemoteSubscriberRegistry with on_subscriber_declared/_undeclared",
+        "DeclSubscriberCallback signature: Fn(&DeclSubscriber, &str) + Send + 'static where &str = resolved literal",
+        "dispatch_declare / dispatch_messages / dispatch_iteration_event mirror SubscriberRegistry+QueryableRegistry",
+        "unresolvable mapping id skips callback (no partial-keyexpr fire); shared resolve_wireexpr helper",
+        "lib.rs pub mod declare; with R121k-2 -> R121k-5 sub-round split documented in module doc-comment"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 131 -> 141, +10 declare::tests::* passing",
+        "cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings: clean",
+        "10 tests cover: empty noop, decl/undecl callbacks, peer-table resolution, unresolvable skip, fan-order, nonlocal arm, drop other arms"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121k-3 RemoteQueryableRegistry (DeclQueryable+UndeclQueryable; same module declare.rs)",
+        "R121k-4 LivelinessRegistry (DeclToken+UndeclToken)",
+        "R121k-5 absorb_declare extended to fan into all three Remote* registries (or external observer fan-out)",
+        "R121k-6 integration test parity (mirror wz_queryable_round_trip pattern)",
+        "SCE drift +7 commits audit entry pending"
+      ]
+    },
     "Round 2": {
       "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
       "changes_bullets": [
