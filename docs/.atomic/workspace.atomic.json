@@ -9688,6 +9688,60 @@
         "Phase W lwIP / MCU runtime full scaffolding deferred — 20-50 round cluster unchanged"
       ]
     },
+    "Round 221": {
+      "decision_summary": "R221 zenoh keyexpr canonicalization mirror — keyexpr_canon module + SubscriberRegistry/QueryableRegistry register canonicalize input; 18 unit tests (14 canon + 4 register integration).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/keyexpr_canon.rs new module — pub fn canonize_keyexpr(input: &str) -> Result<String, KeyexprCanonError> + 5-variant KeyexprCanonError (EmptyChunk / ContainsSharpOrQmark / DollarAfterDollarOrStar / StarsInChunk / ContainsUnboundDollar mirroring zenoh-pico's zp_keyexpr_canon_status_t); two internal passes — collapse_dsl_runs (singleify $*$* runs, mirrors zenoh-pico __zp_singleify line 220-259) and canonize_chunks (per-chunk validation + rewriting, mirrors __zp_canon_prefix line 113-218 + second-pass rewrite line 318-430)",
+        "structural-only canonicalization — NO lowercase, NO NFC, NO Unicode normalization (confirmed via direct grep of zenoh-pico keyexpr.c + keyexpr_match_template.h showing no tolower / no normalize / no nfc references). R220 closure's carry text 'lowercase / NFC' was speculative — R221 corrects scope to structural canon only per the actual zenoh-pico semantics",
+        "ChunkShape internal enum classifies each chunk as SingleStar / DoubleStar / LoneDollarStar / Mixed; analyze_chunk per-char state machine (state values 0/1/3 mirror zenoh-pico's in_dollar 0/1/3 encoding so the cross-reference stays mechanical); chunk-level rewrite rules drop `*` and `**` after a prior `**` and rewrite lone `$*` chunk to `*`",
+        "crates/wz-runtime-tokio/src/pubsub.rs::SubscriberRegistry::register and crates/wz-runtime-tokio/src/query.rs::QueryableRegistry::register wired — input keyexpr is canonicalized via canonize_keyexpr before being split into pattern_chunks; canon success replaces stored chunks with canonical form (lone $* → *, **/* → **, $*$* run → $*), canon failure falls back to raw form with log::warn emit (non-breaking — promotion to Result-returning register deferred to cluster API rewrite)",
+        "module docstring documents the structural-only scope, the non-breaking integration choice, and the 3-pass mirror map to zenoh-pico's keyexpr.c line ranges; doc test on canonize_keyexpr's Examples block verifies five canonical and one error case compile + run"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 197 → 215 (+18 R221 tests — 14 keyexpr_canon unit tests covering identity / singleify / lone $* / star-after-double-star / double-star-after-double-star / mixed / 5 error variants + 4 pubsub::tests register-canon integration tests covering lone $* canon / **/* canon / singleify canon / invalid-pattern fallback — all green; existing 197 tests stay green confirming canonicalization is idempotent on already-canonical fixtures)",
+        "cargo test -p wz-integration-tests: 65 tests across all binaries all green — no regression on Push / Del / Query / DECLARE / observer / reply paths (keyexpr canonicalization is additive at register time and idempotent on already-canonical input which is what every existing test fixture uses)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean — new keyexpr_canon module introduces no new lint; the log::warn call sites use log crate that is already a workspace dependency in wz-runtime-tokio Cargo.toml",
+        "cargo test -p wz-runtime-tokio --doc keyexpr_canon: 1/1 doc test passes — Examples block in canonize_keyexpr verifies textbook canonicalization shapes (identity / lone $* / singleify / **/* drop / # rejection) compile + execute correctly"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R220 + R221 closed the matcher + canonicalizer layer of the pubsub inbound cluster. R222 (dispatch_push callback Sample-type projection — API-breaking, raw &Push → Sample { sample_kind, payload, encoding, timestamp, qos, attachment, source_info, reliability }) and R223 (origin/locality filter — subscriber._allowed_origin Local/Remote/Both default) remain",
+        "R221 register-side wiring is non-breaking (canon failure falls back to raw with log::warn). A future round can promote SubscriberRegistry::register and QueryableRegistry::register to Result<SubscriptionId, KeyexprCanonError>-returning signatures so invalid patterns fail-fast at registration time. Defer until R222's API rewrite naturally co-locates the two API changes — bundling reduces churn for the 21+ existing call sites",
+        "R220 closure carry mentioned lowercase/NFC as speculated R221 scope; this round corrected that — zenoh-pico has zero Unicode normalization; canonicalization is structural-only ($* run collapse + lone $* / star-after-doublestar rewrites + per-char grammar validation). Future audit-trace consumers should consult this entry as the authoritative description, not the R220 carry text",
+        "Pub/Sub inbound 25% remainder cluster now has 2 sub-rounds outstanding (R222 / R223); R218+R219+R220+R221 closed the explicit-arm contract + Del path + $* DSL matcher + canonicalization mirror = ~20% of the cluster",
+        "SCE upstream drift carry continues — wz vendor pin ebf3b3ff = SCE origin/main HEAD unchanged across 21st/22nd session; SCE local 5b60e184 (+24 unpushed); no pin bump trigger this round",
+        "R121h-perf-bump-5 encode_ext_chain Z-bit SCE-a vs wz-b decision still pending user confirmation",
+        "Phase W lwIP / MCU runtime full scaffolding deferred — 20-50 round cluster unchanged"
+      ],
+      "publishable_decision_summary": "R221 zenoh keyexpr canonicalization mirror — keyexpr_canon module + SubscriberRegistry/QueryableRegistry register canonicalize input; 18 unit tests (14 canon + 4 register integration).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/keyexpr_canon.rs new module — pub fn canonize_keyexpr(input: &str) -> Result<String, KeyexprCanonError> + 5-variant KeyexprCanonError (EmptyChunk / ContainsSharpOrQmark / DollarAfterDollarOrStar / StarsInChunk / ContainsUnboundDollar mirroring zenoh-pico's zp_keyexpr_canon_status_t); two internal passes — collapse_dsl_runs (singleify $*$* runs, mirrors zenoh-pico __zp_singleify line 220-259) and canonize_chunks (per-chunk validation + rewriting, mirrors __zp_canon_prefix line 113-218 + second-pass rewrite line 318-430)",
+        "structural-only canonicalization — NO lowercase, NO NFC, NO Unicode normalization (confirmed via direct grep of zenoh-pico keyexpr.c + keyexpr_match_template.h showing no tolower / no normalize / no nfc references). R220 closure's carry text 'lowercase / NFC' was speculative — R221 corrects scope to structural canon only per the actual zenoh-pico semantics",
+        "ChunkShape internal enum classifies each chunk as SingleStar / DoubleStar / LoneDollarStar / Mixed; analyze_chunk per-char state machine (state values 0/1/3 mirror zenoh-pico's in_dollar 0/1/3 encoding so the cross-reference stays mechanical); chunk-level rewrite rules drop `*` and `**` after a prior `**` and rewrite lone `$*` chunk to `*`",
+        "crates/wz-runtime-tokio/src/pubsub.rs::SubscriberRegistry::register and crates/wz-runtime-tokio/src/query.rs::QueryableRegistry::register wired — input keyexpr is canonicalized via canonize_keyexpr before being split into pattern_chunks; canon success replaces stored chunks with canonical form (lone $* → *, **/* → **, $*$* run → $*), canon failure falls back to raw form with log::warn emit (non-breaking — promotion to Result-returning register deferred to cluster API rewrite)",
+        "module docstring documents the structural-only scope, the non-breaking integration choice, and the 3-pass mirror map to zenoh-pico's keyexpr.c line ranges; doc test on canonize_keyexpr's Examples block verifies five canonical and one error case compile + run"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 197 → 215 (+18 R221 tests — 14 keyexpr_canon unit tests covering identity / singleify / lone $* / star-after-double-star / double-star-after-double-star / mixed / 5 error variants + 4 pubsub::tests register-canon integration tests covering lone $* canon / **/* canon / singleify canon / invalid-pattern fallback — all green; existing 197 tests stay green confirming canonicalization is idempotent on already-canonical fixtures)",
+        "cargo test -p wz-integration-tests: 65 tests across all binaries all green — no regression on Push / Del / Query / DECLARE / observer / reply paths (keyexpr canonicalization is additive at register time and idempotent on already-canonical input which is what every existing test fixture uses)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean — new keyexpr_canon module introduces no new lint; the log::warn call sites use log crate that is already a workspace dependency in wz-runtime-tokio Cargo.toml",
+        "cargo test -p wz-runtime-tokio --doc keyexpr_canon: 1/1 doc test passes — Examples block in canonize_keyexpr verifies textbook canonicalization shapes (identity / lone $* / singleify / **/* drop / # rejection) compile + execute correctly"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R220 + R221 closed the matcher + canonicalizer layer of the pubsub inbound cluster. R222 (dispatch_push callback Sample-type projection — API-breaking, raw &Push → Sample { sample_kind, payload, encoding, timestamp, qos, attachment, source_info, reliability }) and R223 (origin/locality filter — subscriber._allowed_origin Local/Remote/Both default) remain",
+        "R221 register-side wiring is non-breaking (canon failure falls back to raw with log::warn). A future round can promote SubscriberRegistry::register and QueryableRegistry::register to Result<SubscriptionId, KeyexprCanonError>-returning signatures so invalid patterns fail-fast at registration time. Defer until R222's API rewrite naturally co-locates the two API changes — bundling reduces churn for the 21+ existing call sites",
+        "R220 closure carry mentioned lowercase/NFC as speculated R221 scope; this round corrected that — zenoh-pico has zero Unicode normalization; canonicalization is structural-only ($* run collapse + lone $* / star-after-doublestar rewrites + per-char grammar validation). Future audit-trace consumers should consult this entry as the authoritative description, not the R220 carry text",
+        "Pub/Sub inbound 25% remainder cluster now has 2 sub-rounds outstanding (R222 / R223); R218+R219+R220+R221 closed the explicit-arm contract + Del path + $* DSL matcher + canonicalization mirror = ~20% of the cluster",
+        "SCE upstream drift carry continues — wz vendor pin ebf3b3ff = SCE origin/main HEAD unchanged across 21st/22nd session; SCE local 5b60e184 (+24 unpushed); no pin bump trigger this round",
+        "R121h-perf-bump-5 encode_ext_chain Z-bit SCE-a vs wz-b decision still pending user confirmation",
+        "Phase W lwIP / MCU runtime full scaffolding deferred — 20-50 round cluster unchanged"
+      ]
+    },
     "Round 23": {
       "decision_summary": "vle pair test-vector hardening — vle_byte_length + vle_u64_decode 각 3 boundary vectors land; SCE v1 test-vector schema single-`bytes`-param scalar-return 제약 발견, MID validator (uint8 param) 6종 test-vector는 Phase B5 multi-arg/non-bytes 지원 후 deferred carry.",
       "changes_bullets": [
