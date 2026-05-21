@@ -49,6 +49,26 @@ changelog that authorized the bump.
 - **Upstream-tracking**: pin set during the Layer 3 FFI bring-up
   rounds; bumps follow zenoh-pico release tags rather than main
   branch HEAD.
+- **Build-time divergence (R216)**: `scripts/build-zenoh-pico-cli.sh`
+  applies an in-place patch to `vendor/zenoh-pico/examples/unix/
+  c11/z_put.c` switching the PUT congestion control default from
+  upstream's DROP to BLOCK, then reverts the file via
+  `git checkout` on exit (success, error, or signal — see the
+  `trap restore_z_put EXIT` block). DROP is the upstream default
+  per `include/zenoh-pico/api/constants.h::z_internal_congestion_
+  control_default_push()` and is correct for sustained
+  high-throughput publishers where dropping under back-pressure
+  beats head-of-line blocking; it is wrong for a one-shot CLI
+  where the only PUT silently dropping on a keep_alive task /
+  main thread mutex race (`src/transport/common/tx.c::_z_
+  transport_tx_send_n_msg` calls `try_lock` under DROP and
+  drops on contention) breaks every Layer E integration test
+  that round-trips through `z_put`. Pre-patch flake rate: ~6 %
+  standalone, ~20 % under the parallel 5-test Layer E lane.
+  The patch is unconditional and applies only to the
+  test-harness binary; runtime use of zenoh-pico via
+  `crates/zenoh-pico-sys` FFI is unaffected because that path
+  links against the upstream library, not the patched example.
 
 ## Generated output
 
