@@ -9522,6 +9522,62 @@
         "Phase W lwIP / MCU runtime full scaffolding (crates/wz-runtime-lwip + sce_link_runtime_lwip C11 header) deferred — 20-50 round cluster"
       ]
     },
+    "Round 219": {
+      "decision_summary": "R219 Del-mode publisher path landed — session_glue build/send_push_del literal+aliased + wz-ap-demo --delete CLI + wz_publisher_del_to_zsub integration test + 4 unit tests verify MsgDel wire shape end-to-end.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: pub fn build_push_del_literal(keyexpr_suffix) -> Push and pub fn build_push_del_aliased(mapping_id, suffix) -> Push — mirror builders for the literal-keyexpr and DECLARE-aliased Del paths; PushVariant::CodecZenohMsgDel(MsgDel { header: 0x02, timestamp: None, extensions: None }); aliased variant panics on mapping_id == 0 (literal-sentinel) consistent with build_push_aliased",
+        "crates/wz-runtime-tokio/src/session_glue.rs: SessionLinkActions::send_push_del_literal(keyexpr_suffix, reliable) and SessionLinkActions::send_push_del_aliased(mapping_id, suffix, reliable) — action surfaces that call the builders, allocate an outbound frame SN, encode through encode_frame_with_push, and dispatch through the BoxedLinkDriver under the matching Reliability gate",
+        "crates/wz-ap-demo/src/main.rs: new top-level CLI flag --delete <keyexpr> as a parallel publisher mode to --publish; PushOperation enum { Put { value: String }, Delete } generalizes publisher_task's dispatch step; publisher_spec carries (keyexpr, PushOperation, Option<u64> declare_id); CLI validation rejects --publish + --delete together, --delete + --value, --declare-id without either of the publisher modes; print_usage + module-level help updated",
+        "crates/wz-integration-tests/tests/wz_publisher_del_to_zsub.rs: new test wz_publisher_del_round_trip_against_zenoh_pico_z_sub — mirrors wz_publisher_to_zsub.rs but spawns wz-ap-demo with --delete only (no --value); asserts z_sub captures the 'Received' line with the empty-payload marker \"': '')\" (the Del's wire signature surface inside z_sub.c data_handler which prints keyexpr + payload but does not surface z_sample_kind)",
+        "crates/wz-runtime-tokio/src/session_glue.rs tests: build_push_del_literal_shapes_struct_for_literal_keyexpr (Push outer header + WireexprLocal id=0/suffix shape + MsgDel inner header 0x02); build_push_del_aliased_carries_non_zero_id_with_optional_suffix (pure-aliased N-flag clear / composite N-flag set); build_push_del_aliased_rejects_zero_mapping_id (panic message witness); build_push_del_literal_round_trips_through_frame_decode_as_msg_del (encode → parse_inbound → parse_frame_payload → NetworkMessage::Push assertion that the inner body is CodecZenohMsgDel, not MsgPut) — codec-level Del witness pairing with the e2e z_sub interop test"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 186 → 190 (+4 R219 build/send/round-trip tests for the Del path, all green)",
+        "cargo test -p wz-integration-tests --test wz_publisher_del_to_zsub: 1/1 pass — wz-ap-demo --delete demo/test → z_sub via real TCP, z_sub captures 'Received' with empty-payload marker",
+        "cargo test -p wz-integration-tests --test ap_demo_round_trip --test wz_publisher_to_zsub --test wz_publisher_aliased_to_zsub --test wz_initiator_to_zsub --test wz_initiator_to_wz_acceptor: 5/5 pass — adjacent publisher / round-trip suites green (no regression on Put path)",
+        "cargo test --workspace --lib: every crate's lib suite green (wz-runtime-tokio 190 / wz-codecs 2 / others 0)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean (new PushOperation enum + 4 unit tests + new integration test all pass exhaustiveness / unreachable-pattern lints)"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants"
+      ],
+      "carry_forward_bullets": [
+        "R219 sister sub-rounds from R217 inventory remain — R220 keyexpr_pattern_matches $* DSL intra-chunk wildcard parity with zenoh-pico's keyexpr_match_template.h forward/backward chunk matcher; R221 inbound resolve wireexpr canonicalization (lowercase / NFC pre-match) to mirror zenoh-pico canonical form; R222 dispatch_push callback Sample-type projection (API-breaking, raw &Push → Sample { sample_kind, payload, encoding, timestamp, qos, attachment, source_info, reliability }, deferred to end of cluster); R223 origin/locality filter (subscriber._allowed_origin) for local-only / remote-only / both",
+        "R219 e2e witness via empty-payload marker is sufficient to verify zenoh-pico interop but cannot distinguish 'Del with no payload' from 'Put with empty payload' inside z_sub.c's stock data_handler; the wz-side codec round-trip unit test is what makes the 'this was actually a Del' claim. Future hardening: vendor patch z_sub.c to surface z_sample_kind in its printout (R216 anchor-grep + trap-restore pattern), enabling the integration test to assert KIND=DELETE directly. Deferred until a sub-round explicitly needs it — the dual-witness setup is production-honest as-is",
+        "Pub/Sub inbound 35% remainder cluster still has 4 sub-rounds outstanding (R220 / R221 / R222 / R223 as above); R218+R219 closed the explicit-arm contract + Del path = ~10% of the cluster",
+        "SCE upstream drift carry continues — wz vendor pin ebf3b3ff = SCE origin/main HEAD; SCE local /home/coin/scxml-core-engine 57d51ed7 (+23 unpushed: 19 clippy + 4 result_large_err Box refactors) plus uncommitted sce-build/src/forge/parser.rs WIP; no pin bump trigger",
+        "R121h-perf-bump-5 encode_ext_chain Z-bit SCE-a vs wz-b decision still pending user confirmation",
+        "Phase W lwIP / MCU runtime full scaffolding deferred — 20-50 round cluster unchanged"
+      ],
+      "publishable_decision_summary": "R219 Del-mode publisher path landed — session_glue build/send_push_del literal+aliased + wz-ap-demo --delete CLI + wz_publisher_del_to_zsub integration test + 4 unit tests verify MsgDel wire shape end-to-end.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: pub fn build_push_del_literal(keyexpr_suffix) -> Push and pub fn build_push_del_aliased(mapping_id, suffix) -> Push — mirror builders for the literal-keyexpr and DECLARE-aliased Del paths; PushVariant::CodecZenohMsgDel(MsgDel { header: 0x02, timestamp: None, extensions: None }); aliased variant panics on mapping_id == 0 (literal-sentinel) consistent with build_push_aliased",
+        "crates/wz-runtime-tokio/src/session_glue.rs: SessionLinkActions::send_push_del_literal(keyexpr_suffix, reliable) and SessionLinkActions::send_push_del_aliased(mapping_id, suffix, reliable) — action surfaces that call the builders, allocate an outbound frame SN, encode through encode_frame_with_push, and dispatch through the BoxedLinkDriver under the matching Reliability gate",
+        "crates/wz-ap-demo/src/main.rs: new top-level CLI flag --delete <keyexpr> as a parallel publisher mode to --publish; PushOperation enum { Put { value: String }, Delete } generalizes publisher_task's dispatch step; publisher_spec carries (keyexpr, PushOperation, Option<u64> declare_id); CLI validation rejects --publish + --delete together, --delete + --value, --declare-id without either of the publisher modes; print_usage + module-level help updated",
+        "crates/wz-integration-tests/tests/wz_publisher_del_to_zsub.rs: new test wz_publisher_del_round_trip_against_zenoh_pico_z_sub — mirrors wz_publisher_to_zsub.rs but spawns wz-ap-demo with --delete only (no --value); asserts z_sub captures the 'Received' line with the empty-payload marker \"': '')\" (the Del's wire signature surface inside z_sub.c data_handler which prints keyexpr + payload but does not surface z_sample_kind)",
+        "crates/wz-runtime-tokio/src/session_glue.rs tests: build_push_del_literal_shapes_struct_for_literal_keyexpr (Push outer header + WireexprLocal id=0/suffix shape + MsgDel inner header 0x02); build_push_del_aliased_carries_non_zero_id_with_optional_suffix (pure-aliased N-flag clear / composite N-flag set); build_push_del_aliased_rejects_zero_mapping_id (panic message witness); build_push_del_literal_round_trips_through_frame_decode_as_msg_del (encode → parse_inbound → parse_frame_payload → NetworkMessage::Push assertion that the inner body is CodecZenohMsgDel, not MsgPut) — codec-level Del witness pairing with the e2e z_sub interop test"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 186 → 190 (+4 R219 build/send/round-trip tests for the Del path, all green)",
+        "cargo test -p wz-integration-tests --test wz_publisher_del_to_zsub: 1/1 pass — wz-ap-demo --delete demo/test → z_sub via real TCP, z_sub captures 'Received' with empty-payload marker",
+        "cargo test -p wz-integration-tests --test ap_demo_round_trip --test wz_publisher_to_zsub --test wz_publisher_aliased_to_zsub --test wz_initiator_to_zsub --test wz_initiator_to_wz_acceptor: 5/5 pass — adjacent publisher / round-trip suites green (no regression on Put path)",
+        "cargo test --workspace --lib: every crate's lib suite green (wz-runtime-tokio 190 / wz-codecs 2 / others 0)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean (new PushOperation enum + 4 unit tests + new integration test all pass exhaustiveness / unreachable-pattern lints)"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "wire-spec-subset--watching-zenoh-mvp/6-1-pushbody-variants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R219 sister sub-rounds from R217 inventory remain — R220 keyexpr_pattern_matches $* DSL intra-chunk wildcard parity with zenoh-pico's keyexpr_match_template.h forward/backward chunk matcher; R221 inbound resolve wireexpr canonicalization (lowercase / NFC pre-match) to mirror zenoh-pico canonical form; R222 dispatch_push callback Sample-type projection (API-breaking, raw &Push → Sample { sample_kind, payload, encoding, timestamp, qos, attachment, source_info, reliability }, deferred to end of cluster); R223 origin/locality filter (subscriber._allowed_origin) for local-only / remote-only / both",
+        "R219 e2e witness via empty-payload marker is sufficient to verify zenoh-pico interop but cannot distinguish 'Del with no payload' from 'Put with empty payload' inside z_sub.c's stock data_handler; the wz-side codec round-trip unit test is what makes the 'this was actually a Del' claim. Future hardening: vendor patch z_sub.c to surface z_sample_kind in its printout (R216 anchor-grep + trap-restore pattern), enabling the integration test to assert KIND=DELETE directly. Deferred until a sub-round explicitly needs it — the dual-witness setup is production-honest as-is",
+        "Pub/Sub inbound 35% remainder cluster still has 4 sub-rounds outstanding (R220 / R221 / R222 / R223 as above); R218+R219 closed the explicit-arm contract + Del path = ~10% of the cluster",
+        "SCE upstream drift carry continues — wz vendor pin ebf3b3ff = SCE origin/main HEAD; SCE local /home/coin/scxml-core-engine 57d51ed7 (+23 unpushed: 19 clippy + 4 result_large_err Box refactors) plus uncommitted sce-build/src/forge/parser.rs WIP; no pin bump trigger",
+        "R121h-perf-bump-5 encode_ext_chain Z-bit SCE-a vs wz-b decision still pending user confirmation",
+        "Phase W lwIP / MCU runtime full scaffolding deferred — 20-50 round cluster unchanged"
+      ]
+    },
     "Round 22": {
       "decision_summary": "vle_byte_length primitive land — Phase A3 cursor-free TLV chain walker missing piece; vle_u64_decode와 짝으로 §7 extension iterator를 Phase A4 cursor 의존 없이 author-side에서 운영 가능, tlv_advance Phase A4+ 진화의 내부 길이 산출 부분품.",
       "changes_bullets": [
