@@ -6485,6 +6485,60 @@
         "R121h-perf-bump-2 carry intact: blocking on explicit user consent for the atomic 12-SCXML migration + vendor pin bump."
       ]
     },
+    "Round 121j-4-retract": {
+      "decision_summary": "R121j-4c/-3b carry retraction: wire-absent. zenoh-pico Err has no attachment ext (message.c:545-573); Reply-body has no extensions chain (message.c:507-519). R121j-4b and -3c remain wire-valid.",
+      "changes_bullets": [
+        "R121j-4c (ResponseErrBuilder.attachment): RETRACTED. zenoh-pico _z_err_encode at src/protocol/codec/message.c:545-573 encodes only encoding (via _Z_FLAG_Z_E_E header bit) and source_info ext (_Z_MSG_EXT_ENC_ZBUF | 0x01). No attachment ext (0x05) emitted. _z_err_decode_extension at message.c:574-589 handles 0x01 only; default arm returns _z_msg_ext_unknown_error(extension, 0x0a). Adding .attachment(...) would emit bytes the peer treats as unknown-mandatory error.",
+        "R121j-3b (ResponseReplyBuilder.source_info, as a Reply-body ext): RETRACTED. zenoh-pico _z_reply_encode at message.c:507-519 emits header + optional consolidation byte + inner push_body (MsgPut|MsgDel). No extensions chain at the Reply body level. _z_reply_decode_extension at message.c:520-528 is a stub that always returns _z_msg_ext_unknown_error(extension, 0x0a). Reply-body source_info is wire-absent; source_info on the inner MsgPut body is a separate concern (MsgPut ext, not a Reply-level builder setter).",
+        "Wire-valid carries remaining from R121h-perf-bump-4 closure: R121j-4b (Err source_info ext_id 0x01 ZBUF, verified at message.c:554-558 + 565-568) and R121j-3c (Reply responder ext at Response *envelope* level, verified at network.c:281-291 with header _Z_MSG_EXT_ENC_ZBUF | 0x03 + zid+eid encoding). Both mutate the outer Err/Response envelope, not the Reply inner body.",
+        "Root cause: R121h-perf-bump-4 closure summary listed 4 active sub-rounds based on the R121j-2b builder shape symmetry instinct (Reply mirrors Query with attachment + source_info), without grep-verifying each named ext against zenoh-pico's _z_reply_encode / _z_err_encode. The closure was authored from outbound builder shape, not from inbound wire spec.",
+        "Application of feedback_diagnose_before_carry.md memory: one grep into zenoh-pico/src/protocol/codec/message.c falsified the carries in under 30 seconds. Memory lesson re-validated this round."
+      ],
+      "verification_bullets": [
+        "grep -n '_z_err_encode' /home/coin/zenoh-pico/src/protocol/codec/message.c yields line 545; encoder body at 545-573 lists only encoding flag-driven encode + source_info ext (0x01). No attachment branch.",
+        "grep -n '_z_reply_encode' /home/coin/zenoh-pico/src/protocol/codec/message.c yields line 507; encoder body at 507-519 is header + consolidation byte + push_body call. No extensions chain emission.",
+        "Reply default decode arm (message.c:525) and Err default decode arm (message.c:585) both return _z_msg_ext_unknown_error with reason codes 0x0a — wire-absent setters would actively break interop, not silently degrade.",
+        "No source mutation this round; wz-runtime-tokio lib test baseline preserved (98 pass at HEAD 68f7254)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants"
+      ],
+      "carry_forward_bullets": [
+        "R121j-4b ResponseErrBuilder.source_info(zid, eid, sn) setter — wire-valid per message.c:554-558 + 565-568. ext_id 0x01 ZBUF; sets Err.header.Z. Next round (this session).",
+        "R121j-3c ResponseReplyBuilder.responder(zid, eid) — wire-valid per network.c:281-291. Response-envelope-level (not Reply-body-level) — ext_id 0x03 ZBUF; sets Response.header.Z. First builder that mutates Response envelope extensions; 1-2 rounds depending on builder-field plumbing.",
+        "MsgPut.source_info / attachment as Push-body-level setters exist in zenoh-pico push_body and could be exposed on a future MsgPut helper. Out of scope for R121j-3*/4* Reply/Err closure.",
+        "R121j-5b query.rs + QueryableTable + Fn(Query, &QueryResponder) per R121j-5a design — main AP MVP weighted lever (+5-7%p). Independent of Reply/Err builder closure status.",
+        "Promote to memory: 'verify every carried wire-named ext against zenoh-pico source before adding the setter' — addendum to feedback_diagnose_before_carry.md.",
+        "R121h-perf-bump-5 (encode_ext_chain Z-bit refactor) decision still pending — SCE-side vs wz-side option choice carried unchanged."
+      ],
+      "publishable_decision_summary": "R121j-4c/-3b carry retraction: wire-absent. zenoh-pico Err has no attachment ext (message.c:545-573); Reply-body has no extensions chain (message.c:507-519). R121j-4b and -3c remain wire-valid.",
+      "publishable_changes_bullets": [
+        "R121j-4c (ResponseErrBuilder.attachment): RETRACTED. zenoh-pico _z_err_encode at src/protocol/codec/message.c:545-573 encodes only encoding (via _Z_FLAG_Z_E_E header bit) and source_info ext (_Z_MSG_EXT_ENC_ZBUF | 0x01). No attachment ext (0x05) emitted. _z_err_decode_extension at message.c:574-589 handles 0x01 only; default arm returns _z_msg_ext_unknown_error(extension, 0x0a). Adding .attachment(...) would emit bytes the peer treats as unknown-mandatory error.",
+        "R121j-3b (ResponseReplyBuilder.source_info, as a Reply-body ext): RETRACTED. zenoh-pico _z_reply_encode at message.c:507-519 emits header + optional consolidation byte + inner push_body (MsgPut|MsgDel). No extensions chain at the Reply body level. _z_reply_decode_extension at message.c:520-528 is a stub that always returns _z_msg_ext_unknown_error(extension, 0x0a). Reply-body source_info is wire-absent; source_info on the inner MsgPut body is a separate concern (MsgPut ext, not a Reply-level builder setter).",
+        "Wire-valid carries remaining from R121h-perf-bump-4 closure: R121j-4b (Err source_info ext_id 0x01 ZBUF, verified at message.c:554-558 + 565-568) and R121j-3c (Reply responder ext at Response *envelope* level, verified at network.c:281-291 with header _Z_MSG_EXT_ENC_ZBUF | 0x03 + zid+eid encoding). Both mutate the outer Err/Response envelope, not the Reply inner body.",
+        "Root cause: R121h-perf-bump-4 closure summary listed 4 active sub-rounds based on the R121j-2b builder shape symmetry instinct (Reply mirrors Query with attachment + source_info), without grep-verifying each named ext against zenoh-pico's _z_reply_encode / _z_err_encode. The closure was authored from outbound builder shape, not from inbound wire spec.",
+        "Application of feedback_diagnose_before_carry.md memory: one grep into zenoh-pico/src/protocol/codec/message.c falsified the carries in under 30 seconds. Memory lesson re-validated this round."
+      ],
+      "publishable_verification_bullets": [
+        "grep -n '_z_err_encode' /home/coin/zenoh-pico/src/protocol/codec/message.c yields line 545; encoder body at 545-573 lists only encoding flag-driven encode + source_info ext (0x01). No attachment branch.",
+        "grep -n '_z_reply_encode' /home/coin/zenoh-pico/src/protocol/codec/message.c yields line 507; encoder body at 507-519 is header + consolidation byte + push_body call. No extensions chain emission.",
+        "Reply default decode arm (message.c:525) and Err default decode arm (message.c:585) both return _z_msg_ext_unknown_error with reason codes 0x0a — wire-absent setters would actively break interop, not silently degrade.",
+        "No source mutation this round; wz-runtime-tokio lib test baseline preserved (98 pass at HEAD 68f7254)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121j-4b ResponseErrBuilder.source_info(zid, eid, sn) setter — wire-valid per message.c:554-558 + 565-568. ext_id 0x01 ZBUF; sets Err.header.Z. Next round (this session).",
+        "R121j-3c ResponseReplyBuilder.responder(zid, eid) — wire-valid per network.c:281-291. Response-envelope-level (not Reply-body-level) — ext_id 0x03 ZBUF; sets Response.header.Z. First builder that mutates Response envelope extensions; 1-2 rounds depending on builder-field plumbing.",
+        "MsgPut.source_info / attachment as Push-body-level setters exist in zenoh-pico push_body and could be exposed on a future MsgPut helper. Out of scope for R121j-3*/4* Reply/Err closure.",
+        "R121j-5b query.rs + QueryableTable + Fn(Query, &QueryResponder) per R121j-5a design — main AP MVP weighted lever (+5-7%p). Independent of Reply/Err builder closure status.",
+        "Promote to memory: 'verify every carried wire-named ext against zenoh-pico source before adding the setter' — addendum to feedback_diagnose_before_carry.md.",
+        "R121h-perf-bump-5 (encode_ext_chain Z-bit refactor) decision still pending — SCE-side vs wz-side option choice carried unchanged."
+      ]
+    },
     "Round 121j-5a": {
       "decision_summary": "R121j-5a reconnaissance: Request inbound parser already wired via parse_frame_payload; R121j-5b/c carry QueryableTable in new query.rs + Fn(Query, &QueryResponder) on_query dispatch and Reply emit.",
       "changes_bullets": [
