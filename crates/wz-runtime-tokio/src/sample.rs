@@ -181,24 +181,12 @@ pub struct SourceInfo {
     pub sn: u32,
 }
 
-/// Reliability classification of a Sample.
-///
-/// zenoh-pico mirror: `z_reliability_t`
-/// (`vendor/zenoh-pico/include/zenoh-pico/api/constants.h`). The default
-/// value matches zenoh-pico's `Z_RELIABILITY_DEFAULT = Z_RELIABILITY_RELIABLE`
-/// contract so subscribers that do not inspect the field observe the
-/// most permissive delivery guarantee.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[repr(u8)]
-pub enum Reliability {
-    /// Best-effort delivery — samples may be dropped (zenoh-pico
-    /// `Z_RELIABILITY_BEST_EFFORT`).
-    BestEffort = 0,
-    /// Reliable delivery — link layer guarantees ordering and delivery
-    /// (zenoh-pico `Z_RELIABILITY_RELIABLE`, the default).
-    #[default]
-    Reliable = 1,
-}
+// R226 — Reliability was hoisted to the crate root so the outbound
+// driver hint (session_glue::send_*) and the inbound Sample
+// classification share a single typed surface. Re-export keeps the
+// sample-module path stable for callers that already imported through
+// here.
+pub use crate::Reliability;
 
 /// Application-layer view of a single inbound Push record.
 ///
