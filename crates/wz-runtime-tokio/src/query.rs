@@ -1,0 +1,794 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! Application-layer queryable registry — routes decoded
+//! `NetworkMessage::Request(Query)` records to user-registered
+//! on_query callbacks filtered by keyexpr literal.
+//!
+//! Q-side mirror of [`SubscriberRegistry`](crate::pubsub::SubscriberRegistry):
+//!
+//! | Inbound message            | Routes via                |
+//! |----------------------------|---------------------------|
+//! | `NetworkMessage::Push`     | [`SubscriberRegistry`]    |
+//! | `NetworkMessage::Request`  | [`QueryableRegistry`]     |
+//!
+//! Both follow the same keyexpr-wildcard matching contract
+//! (`*` single chunk, `**` zero-or-more chunks; matcher reused from
+//! [`pubsub::keyexpr_pattern_matches`](crate::pubsub::keyexpr_pattern_matches))
+//! and the same peer-alias resolution rule (mapping_id != 0 → look up
+//! a literal in the peer keyexpr table populated by inbound
+//! `Declare(DeclKexpr)`; mapping_id == 0 → use suffix verbatim).
+//!
+//! ## Scope (R121j-5b)
+//!
+//! - Request(Query) arm only. The other three `RequestVariant` arms
+//!   (`MsgPut`, `MsgDel`, `Default`) are not application-visible —
+//!   they fall through `dispatch_request` as no-ops, matching
+//!   zenoh-pico's `_z_handle_request` which dispatches only Query
+//!   bodies through the queryable callback path.
+//! - Callbacks accumulate Replies / Errs via a [`QueryResponder`]
+//!   into a caller-owned `Vec<QueryReply>`. Actual outbound frame
+//!   encode + send is the caller's concern (R121j-5c wires the
+//!   accumulated Vec through [`encode_frame_with_response`] +
+//!   [`encode_frame_with_response_final`](
+//!   crate::session_glue::encode_frame_with_response_final) so a
+//!   queryable response round-trip closes on the wire).
+//! - Peer-alias resolution is delegated to a `&HashMap<u64, String>`
+//!   parameter on `dispatch_request` rather than owning a private
+//!   copy. The integration site (R121j-5c) holds the
+//!   [`SubscriberRegistry`]'s table and lends it on every dispatch,
+//!   so DeclKexpr / UndeclKexpr absorbed by the subscriber path
+//!   automatically informs queryable resolution too — no dual-write
+//!   bookkeeping, no Arc-shared state.
+//!
+//! ## Why a separate Responder rather than direct frame emit
+//!
+//! - **Testability**: callbacks run without a tokio runtime or a
+//!   `LinkDriver` — the Responder is just a `&mut Vec<QueryReply>`
+//!   borrow; tests inspect the accumulated replies directly.
+//! - **MCU runtime compatibility**: `FnMut` callbacks, no `async fn`,
+//!   no `Future` in the trait surface; the dispatch path stays
+//!   suitable for the `(c11, bare_metal)` runtime crate target.
+//! - **Separation of concerns**: "what to reply" lives in user code
+//!   ([`QueryResponder::send_reply`] / `_del` / `_err`); "how to
+//!   reply" (frame envelope, sn assignment, link write) lives in
+//!   the runtime (R121j-5c).
+//!
+//! ## QueryResponder lifetime and ownership
+//!
+//! [`QueryResponder`] is a short-lived borrow constructed by
+//! `dispatch_request` for each matched queryable. It holds the
+//! request id (echoed back into Response.request_id so the
+//! requester correlates the reply) and the resolved keyexpr literal
+//! (echoed as the Reply's keyexpr with `mapping_id == 0` per zenoh's
+//! literal-form composition). The borrow is dropped before
+//! `dispatch_request` advances to the next queryable so user
+//! closures cannot hold the Responder past the callback boundary.
+//!
+//! ## Threading
+//!
+//! `!Sync` by construction (mirror of [`SubscriberRegistry`]).
+//! Callers that need cross-task sharing wrap in `Arc<Mutex<…>>` or
+//! `Arc<tokio::sync::Mutex<…>>`.
+
+use std::collections::HashMap;
+
+use wz_codecs::query::Query;
+use wz_codecs::request::{Request, RequestVariant};
+use wz_codecs::response::Response;
+use wz_codecs::wireexpr::WireexprVariant;
+
+use crate::pubsub::keyexpr_pattern_matches;
+use crate::session_glue::{ResponseErrBuilder, ResponseReplyBuilder};
+
+/// Boxed callback invoked when an inbound `Request(Query)`'s
+/// keyexpr matches a registered queryable. The callback receives
+/// the decoded [`Query`] by reference (the body of the inbound
+/// Request) and a `&mut QueryResponder` it uses to emit zero or
+/// more Replies / Errs. See module-level docs for the lifetime
+/// contract.
+pub type QueryableCallback = Box<dyn FnMut(&Query, &mut QueryResponder<'_>) + Send + 'static>;
+
+/// Stable handle returned by [`QueryableRegistry::register`] so the
+/// caller can later unregister the queryable without re-keying on
+/// the keyexpr pattern (duplicate-pattern queryables are explicitly
+/// allowed: e.g. a metrics responder and a domain responder on the
+/// same keyexpr).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct QueryableId(u64);
+
+impl QueryableId {
+    /// The numeric id behind the handle. Exposed for diagnostic
+    /// surfaces; callers should not depend on the exact value across
+    /// runs since the registry assigns ids monotonically from the
+    /// session-local counter.
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+struct Queryable {
+    id: QueryableId,
+    /// Pre-split pattern chunks. Same shape as
+    /// [`crate::pubsub::SubscriberRegistry`]: literal chunks (incl.
+    /// empty for `a//b`), `*` (single-chunk wildcard), `**` (zero-or-
+    /// more-chunk wildcard). Matching is performed by the shared
+    /// [`keyexpr_pattern_matches`] helper.
+    pattern_chunks: Vec<String>,
+    callback: QueryableCallback,
+}
+
+/// Body arm for a `QueryReply::Reply` — mirrors zenoh-pico's
+/// `_z_reply` inner `_z_push_body_t` dispatch on `_z_is_put` (Put
+/// path = data Reply; Del path = delete-keyexpr Reply).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplyBody {
+    /// Standard data reply. Payload bytes are the application
+    /// payload the queryable wants to return; encoded as the inner
+    /// `MsgPut` body of the Reply.
+    Put(Vec<u8>),
+    /// Delete-keyexpr reply. No payload bytes (the inner `MsgDel`
+    /// body carries only a header + optional timestamp + ext chain).
+    /// Used by queryables whose semantic is "the value at this
+    /// keyexpr no longer exists / has been cleared".
+    Del,
+}
+
+/// One outbound Reply or Err record produced by a queryable callback.
+/// The registry accumulates these into a caller-owned `Vec` so the
+/// runtime (R121j-5c) can wire each entry through the corresponding
+/// [`ResponseReplyBuilder`] / [`ResponseErrBuilder`] + the
+/// `encode_frame_with_response` envelope helper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryReply {
+    /// Successful reply — typed as Put or Del per [`ReplyBody`].
+    Reply {
+        /// Echo of the inbound Request.rid so the requester
+        /// correlates this reply with their pending `z_get`.
+        rid: u64,
+        /// Resolved keyexpr literal the inbound Request matched
+        /// against. Echoed back as the Reply's keyexpr in literal
+        /// form (`mapping_id = 0`, `suffix = Some(literal)`).
+        keyexpr_literal: String,
+        /// Reply body arm (Put or Del).
+        body: ReplyBody,
+    },
+    /// Error reply — `MID = _Z_MID_Z_ERR(0x05)`. The `encoding` tuple
+    /// (id, optional schema) maps onto
+    /// [`ResponseErrBuilder::encoding`] at frame-emit time. `payload`
+    /// is the application-level error blob (often a UTF-8 message
+    /// but no wire-level encoding is mandated).
+    Err {
+        rid: u64,
+        keyexpr_literal: String,
+        encoding: Option<(u32, Option<String>)>,
+        payload: Vec<u8>,
+    },
+}
+
+impl QueryReply {
+    /// Compose the wire-form [`Response`] for this Reply / Err using
+    /// the existing layered builders. Consumes `self` so the
+    /// allocated payload bytes flow directly into the builder
+    /// (callers can `take_pending_replies()` and `.into_iter().map(
+    /// QueryReply::into_response)` without intermediate clones).
+    ///
+    /// The Reply keyexpr is emitted in literal form
+    /// (`mapping_id = 0` + `suffix = Some(literal)`); this is the
+    /// zenoh-pico parity choice for queryables that have not yet
+    /// declared a peer-side alias (which is the AP MVP shape — alias
+    /// declaration on the responder side is a Phase D+ optimisation).
+    pub fn into_response(self) -> Response {
+        match self {
+            QueryReply::Reply {
+                rid,
+                keyexpr_literal,
+                body,
+            } => match body {
+                ReplyBody::Put(payload) => {
+                    ResponseReplyBuilder::new(rid, 0, Some(&keyexpr_literal), &payload).build()
+                }
+                ReplyBody::Del => {
+                    // The payload slot is unused on the Del path (the
+                    // builder drops it when reply_del() flips the
+                    // inner arm to MsgDel — see
+                    // session_glue.rs:3519-3523). Passing an empty
+                    // slice here is the natural shape.
+                    ResponseReplyBuilder::new(rid, 0, Some(&keyexpr_literal), &[])
+                        .reply_del()
+                        .build()
+                }
+            },
+            QueryReply::Err {
+                rid,
+                keyexpr_literal,
+                encoding,
+                payload,
+            } => {
+                let mut builder =
+                    ResponseErrBuilder::new(rid, 0, Some(&keyexpr_literal), &payload);
+                if let Some((id, schema)) = encoding {
+                    builder = builder.encoding(id, schema.as_deref());
+                }
+                builder.build()
+            }
+        }
+    }
+}
+
+/// Short-lived borrow handed to a user `on_query` callback. The
+/// callback uses [`Self::send_reply`] / [`Self::send_reply_del`] /
+/// [`Self::send_err`] to push outbound records into the registry-
+/// owned [`QueryReply`] queue. The Responder is dropped before the
+/// dispatch loop advances to the next matched queryable, so user
+/// closures cannot retain the borrow.
+pub struct QueryResponder<'a> {
+    rid: u64,
+    keyexpr_literal: String,
+    replies: &'a mut Vec<QueryReply>,
+}
+
+impl<'a> QueryResponder<'a> {
+    /// Emit a Put-form data reply with the given payload bytes.
+    /// Multiple calls accumulate; the registry passes the
+    /// caller-owned `Vec<QueryReply>` back so each push is one
+    /// outbound Response frame on the wire (per zenoh-pico's "many
+    /// replies + one final" semantics).
+    pub fn send_reply(&mut self, payload: &[u8]) {
+        self.replies.push(QueryReply::Reply {
+            rid: self.rid,
+            keyexpr_literal: self.keyexpr_literal.clone(),
+            body: ReplyBody::Put(payload.to_vec()),
+        });
+    }
+
+    /// Emit a Del-form reply — the queryable signals that the value
+    /// at this keyexpr is being deleted / cleared. No payload bytes
+    /// (the inner `MsgDel` body carries only a header + optional
+    /// timestamp).
+    pub fn send_reply_del(&mut self) {
+        self.replies.push(QueryReply::Reply {
+            rid: self.rid,
+            keyexpr_literal: self.keyexpr_literal.clone(),
+            body: ReplyBody::Del,
+        });
+    }
+
+    /// Emit an Err reply. `encoding_id` (with optional `schema`)
+    /// maps onto [`ResponseErrBuilder::encoding`] at frame-emit
+    /// time — pass `None` to skip the encoding ext and rely on the
+    /// peer's default interpretation of `payload`.
+    pub fn send_err(
+        &mut self,
+        encoding_id: Option<u32>,
+        schema: Option<&str>,
+        payload: &[u8],
+    ) {
+        let encoding = encoding_id.map(|id| (id, schema.map(str::to_string)));
+        self.replies.push(QueryReply::Err {
+            rid: self.rid,
+            keyexpr_literal: self.keyexpr_literal.clone(),
+            encoding,
+            payload: payload.to_vec(),
+        });
+    }
+
+    /// Inbound Request id this Responder is replying to. Exposed for
+    /// diagnostic surfaces; user closures normally don't need it
+    /// (the registry pre-fills it into every push).
+    pub fn rid(&self) -> u64 {
+        self.rid
+    }
+
+    /// Resolved keyexpr literal this Responder is bound to. Exposed
+    /// so user closures can use the same literal in other side-
+    /// effects (e.g. log lines, metrics labels) without having to
+    /// re-resolve the inbound Request keyexpr themselves.
+    pub fn keyexpr_literal(&self) -> &str {
+        &self.keyexpr_literal
+    }
+}
+
+/// Queryable table backing the inbound `Request(Query)` → callback
+/// dispatch. `!Sync` by construction; cross-task sharing goes
+/// through `Arc<Mutex<…>>`. See module-level docs for scope.
+pub struct QueryableRegistry {
+    queryables: Vec<Queryable>,
+    next_id: u64,
+}
+
+impl Default for QueryableRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl QueryableRegistry {
+    /// New empty registry. Queryable ids start at 1 so 0 stays
+    /// available as a sentinel "no queryable" value for any caller-
+    /// side wrapper that needs one.
+    pub fn new() -> Self {
+        Self {
+            queryables: Vec::new(),
+            next_id: 1,
+        }
+    }
+
+    /// Register a queryable for a keyexpr pattern. Pattern syntax
+    /// matches zenoh chunk wildcards (same as
+    /// [`crate::pubsub::SubscriberRegistry::register`]): `/`-separated
+    /// chunks where each chunk is a literal, `*` (single chunk), or
+    /// `**` (zero or more chunks). The returned [`QueryableId`] is
+    /// stable until [`Self::unregister`] is called. Duplicate
+    /// patterns produce distinct queryables — `dispatch_request`
+    /// fires every matching callback in registration order.
+    pub fn register(
+        &mut self,
+        keyexpr_pattern: impl Into<String>,
+        callback: impl FnMut(&Query, &mut QueryResponder<'_>) + Send + 'static,
+    ) -> QueryableId {
+        let id = QueryableId(self.next_id);
+        self.next_id = self.next_id.saturating_add(1);
+        let pattern_chunks: Vec<String> =
+            keyexpr_pattern.into().split('/').map(String::from).collect();
+        self.queryables.push(Queryable {
+            id,
+            pattern_chunks,
+            callback: Box::new(callback),
+        });
+        id
+    }
+
+    /// Remove a previously-registered queryable. Returns `true` if
+    /// the id was found and removed. Idempotent — calling on an id
+    /// that was never registered or already removed returns `false`
+    /// without panicking.
+    pub fn unregister(&mut self, id: QueryableId) -> bool {
+        let before = self.queryables.len();
+        self.queryables.retain(|q| q.id != id);
+        before != self.queryables.len()
+    }
+
+    /// Number of currently-registered queryables.
+    pub fn len(&self) -> usize {
+        self.queryables.len()
+    }
+
+    /// Whether the registry holds any queryable.
+    pub fn is_empty(&self) -> bool {
+        self.queryables.is_empty()
+    }
+
+    /// Route an inbound [`Request`] through the queryable table.
+    ///
+    /// - Requests whose body is not `RequestVariant::CodecZenohQuery`
+    ///   (i.e. MsgPut / MsgDel / Default arms) are no-ops here. The
+    ///   AP MVP responder path only handles Query bodies; the other
+    ///   arms are accepted by the inbound parser for wire-shape
+    ///   completeness but have no application-visible side effect in
+    ///   the queryable surface.
+    /// - The Request keyexpr is resolved through `peer_keyexpr_table`
+    ///   (the shared mapping populated by the subscriber side's
+    ///   `absorb_declare` from inbound `Declare(DeclKexpr)`). The
+    ///   composition rule mirrors `dispatch_push`:
+    ///   * `id == 0`                    → keyexpr = suffix or empty
+    ///   * `id != 0`, suffix = None     → keyexpr = table[id]
+    ///   * `id != 0`, suffix = Some(s)  → keyexpr = table[id] + s
+    ///
+    ///   Un-resolvable mapping ids (peer hasn't declared the id yet,
+    ///   or the declaration arrived through a path the table has not
+    ///   yet absorbed) drop the dispatch silently rather than firing
+    ///   on a partial keyexpr.
+    /// - Each matched queryable fires once, in registration order.
+    ///   The callback's `&mut QueryResponder` pushes outbound
+    ///   replies into `replies`; the caller drains `replies` after
+    ///   `dispatch_request` returns and encodes each into a
+    ///   Response frame on the wire (R121j-5c).
+    pub fn dispatch_request(
+        &mut self,
+        request: &Request,
+        peer_keyexpr_table: &HashMap<u64, String>,
+        replies: &mut Vec<QueryReply>,
+    ) {
+        // Only the Query body arm triggers application-visible
+        // dispatch — see scope note above.
+        let query = match &request.body {
+            RequestVariant::CodecZenohQuery(q) => q,
+            _ => return,
+        };
+
+        let (id, suffix_opt) = match &request.keyexpr.body {
+            WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
+            WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
+        };
+        let resolved: String = if id == 0 {
+            match suffix_opt {
+                Some(s) => s.to_string(),
+                None => return,
+            }
+        } else {
+            let base = match peer_keyexpr_table.get(&id) {
+                Some(s) => s.clone(),
+                None => return,
+            };
+            match suffix_opt {
+                Some(s) => {
+                    let mut out = base;
+                    out.push_str(s);
+                    out
+                }
+                None => base,
+            }
+        };
+
+        for queryable in &mut self.queryables {
+            let chunks: Vec<&str> = queryable
+                .pattern_chunks
+                .iter()
+                .map(String::as_str)
+                .collect();
+            if keyexpr_pattern_matches(&chunks, &resolved) {
+                let mut responder = QueryResponder {
+                    rid: request.rid,
+                    keyexpr_literal: resolved.clone(),
+                    replies,
+                };
+                (queryable.callback)(query, &mut responder);
+                // Responder dropped here; the borrow of `replies`
+                // ends so the loop can re-borrow for the next match.
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use wz_codecs::msg_put::MsgPut;
+    use wz_codecs::wireexpr::Wireexpr;
+    use wz_codecs::wireexpr_local::WireexprLocal;
+    use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+
+    fn request_query(rid: u64, mapping_id: u64, suffix: Option<&str>) -> Request {
+        // Construct a minimal Request whose body is a default Query.
+        // The Local arm (zero-init mapping = LOCAL on the zenoh-pico
+        // side, mirrored by push_with_keyexpr at pubsub.rs:398-415) is
+        // the canonical default; both arms surface (id, suffix)
+        // identically through dispatch's WireexprVariant match
+        // (pubsub.rs:292-294), so the test only needs one arm to
+        // exercise the dispatch logic.
+        let suffix_owned = suffix.map(str::to_string);
+        let suffix_len = suffix.map(|s| s.len() as u64);
+        let keyexpr = Wireexpr {
+            body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
+                id: mapping_id,
+                suffix_len,
+                suffix: suffix_owned,
+            }),
+        };
+        Request {
+            header: 0x1c, // _Z_MID_N_REQUEST default
+            rid,
+            keyexpr,
+            extensions: None,
+            body: RequestVariant::CodecZenohQuery(Query::default()),
+        }
+    }
+
+    fn request_put(rid: u64, suffix: &str) -> Request {
+        let keyexpr = Wireexpr {
+            body: wz_codecs::wireexpr::WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                id: 0,
+                suffix_len: Some(suffix.len() as u64),
+                suffix: Some(suffix.to_string()),
+            }),
+        };
+        Request {
+            header: 0x1c,
+            rid,
+            keyexpr,
+            extensions: None,
+            body: RequestVariant::CodecZenohMsgPut(MsgPut::default()),
+        }
+    }
+
+    #[test]
+    fn empty_registry_dispatch_is_noop_and_no_replies_emitted() {
+        let mut reg = QueryableRegistry::new();
+        let req = request_query(42, 0, Some("home/temp"));
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        assert!(reg.is_empty());
+        assert_eq!(reg.len(), 0);
+        assert!(replies.is_empty(), "no queryables → no replies");
+    }
+
+    #[test]
+    fn register_assigns_monotonic_ids_starting_from_one() {
+        let mut reg = QueryableRegistry::new();
+        let id1 = reg.register("home/temp", |_q, _r| {});
+        let id2 = reg.register("home/temp", |_q, _r| {});
+        let id3 = reg.register("home/humid", |_q, _r| {});
+        assert_eq!(id1.as_u64(), 1);
+        assert_eq!(id2.as_u64(), 2);
+        assert_eq!(id3.as_u64(), 3);
+        assert_eq!(reg.len(), 3);
+        // Duplicate patterns are explicitly allowed.
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn unregister_is_idempotent_and_removes_only_matching_id() {
+        let mut reg = QueryableRegistry::new();
+        let id1 = reg.register("home/temp", |_q, _r| {});
+        let id2 = reg.register("home/humid", |_q, _r| {});
+        assert!(reg.unregister(id1));
+        assert!(!reg.unregister(id1), "second unregister of same id is a no-op");
+        assert_eq!(reg.len(), 1);
+        assert!(reg.unregister(id2));
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn dispatch_fires_callback_on_literal_match_and_accumulates_reply() {
+        let mut reg = QueryableRegistry::new();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        reg.register("home/temp", move |_query, responder| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            responder.send_reply(b"42.0");
+        });
+
+        let req = request_query(7, 0, Some("home/temp"));
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+
+        assert_eq!(invocations.load(Ordering::SeqCst), 1);
+        assert_eq!(replies.len(), 1);
+        match &replies[0] {
+            QueryReply::Reply { rid, keyexpr_literal, body } => {
+                assert_eq!(*rid, 7, "rid echoed from inbound Request");
+                assert_eq!(keyexpr_literal, "home/temp", "resolved literal echoed back");
+                assert_eq!(*body, ReplyBody::Put(b"42.0".to_vec()));
+            }
+            other => panic!("expected Reply::Put, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_with_wildcard_pattern_matches_multiple_chunks() {
+        let mut reg = QueryableRegistry::new();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        reg.register("home/**", move |_q, responder| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            responder.send_reply(b"ok");
+        });
+
+        // Three different keyexpr literals should all match `home/**`.
+        let mut replies = Vec::new();
+        for suffix in ["home", "home/temp", "home/zone/1/temp"] {
+            reg.dispatch_request(&request_query(1, 0, Some(suffix)), &HashMap::new(), &mut replies);
+        }
+        assert_eq!(invocations.load(Ordering::SeqCst), 3);
+        assert_eq!(replies.len(), 3);
+    }
+
+    #[test]
+    fn dispatch_resolves_mapping_id_against_peer_table() {
+        let mut reg = QueryableRegistry::new();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        reg.register("sensors/temp", move |_q, _r| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let mut peer_table = HashMap::new();
+        peer_table.insert(11u64, "sensors/temp".to_string());
+
+        // mapping_id=11, no suffix → table lookup yields "sensors/temp"
+        let req = request_query(1, 11, None);
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &peer_table, &mut replies);
+        assert_eq!(invocations.load(Ordering::SeqCst), 1);
+
+        // mapping_id=11, suffix=Some(""/extra") → concat
+        let req2 = request_query(2, 11, Some(""));
+        reg.dispatch_request(&req2, &peer_table, &mut replies);
+        assert_eq!(invocations.load(Ordering::SeqCst), 2);
+
+        // mapping_id=99 not in table → silent drop, no callback
+        let req3 = request_query(3, 99, None);
+        reg.dispatch_request(&req3, &peer_table, &mut replies);
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            2,
+            "unresolvable mapping id must drop silently without firing the callback"
+        );
+    }
+
+    #[test]
+    fn dispatch_ignores_non_query_request_body_arms() {
+        let mut reg = QueryableRegistry::new();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        reg.register("home/temp", move |_q, _r| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let mut replies = Vec::new();
+        let put_req = request_put(1, "home/temp");
+        reg.dispatch_request(&put_req, &HashMap::new(), &mut replies);
+
+        assert_eq!(invocations.load(Ordering::SeqCst), 0, "MsgPut body must not invoke queryable callbacks");
+        assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn responder_send_reply_del_emits_del_arm() {
+        let mut reg = QueryableRegistry::new();
+        reg.register("clear/me", |_q, responder| {
+            responder.send_reply_del();
+        });
+
+        let mut replies = Vec::new();
+        reg.dispatch_request(
+            &request_query(99, 0, Some("clear/me")),
+            &HashMap::new(),
+            &mut replies,
+        );
+
+        assert_eq!(replies.len(), 1);
+        match &replies[0] {
+            QueryReply::Reply { rid, keyexpr_literal, body } => {
+                assert_eq!(*rid, 99);
+                assert_eq!(keyexpr_literal, "clear/me");
+                assert_eq!(*body, ReplyBody::Del);
+            }
+            other => panic!("expected Reply::Del, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn responder_send_err_emits_err_with_encoding_tuple() {
+        let mut reg = QueryableRegistry::new();
+        reg.register("error/path", |_q, responder| {
+            responder.send_err(Some(4), Some("schema_v1"), b"oops");
+        });
+
+        let mut replies = Vec::new();
+        reg.dispatch_request(
+            &request_query(5, 0, Some("error/path")),
+            &HashMap::new(),
+            &mut replies,
+        );
+
+        assert_eq!(replies.len(), 1);
+        match &replies[0] {
+            QueryReply::Err { rid, keyexpr_literal, encoding, payload } => {
+                assert_eq!(*rid, 5);
+                assert_eq!(keyexpr_literal, "error/path");
+                assert_eq!(*encoding, Some((4, Some("schema_v1".to_string()))));
+                assert_eq!(payload, b"oops");
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn responder_supports_multiple_replies_per_query() {
+        let mut reg = QueryableRegistry::new();
+        reg.register("series/data", |_q, responder| {
+            responder.send_reply(b"sample-1");
+            responder.send_reply(b"sample-2");
+            responder.send_reply(b"sample-3");
+        });
+
+        let mut replies = Vec::new();
+        reg.dispatch_request(
+            &request_query(123, 0, Some("series/data")),
+            &HashMap::new(),
+            &mut replies,
+        );
+
+        assert_eq!(replies.len(), 3, "queryable may emit many replies per query");
+        for (i, reply) in replies.iter().enumerate() {
+            match reply {
+                QueryReply::Reply { rid, body, .. } => {
+                    assert_eq!(*rid, 123, "every reply echoes the same rid");
+                    let expected = format!("sample-{}", i + 1);
+                    assert_eq!(*body, ReplyBody::Put(expected.into_bytes()));
+                }
+                other => panic!("expected Reply::Put, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn query_reply_into_response_put_path_round_trips_via_builder() {
+        let reply = QueryReply::Reply {
+            rid: 42,
+            keyexpr_literal: "home/temp".to_string(),
+            body: ReplyBody::Put(b"hello".to_vec()),
+        };
+        let response = reply.into_response();
+        // The Response should encode to the same bytes as the
+        // ResponseReplyBuilder direct path with the same args.
+        let via_builder = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"hello")
+            .build()
+            .encode_to_vec();
+        assert_eq!(
+            response.encode_to_vec(),
+            via_builder,
+            "QueryReply::into_response (Put) must match the direct builder path byte-for-byte"
+        );
+    }
+
+    #[test]
+    fn query_reply_into_response_del_path_flips_inner_arm() {
+        let reply = QueryReply::Reply {
+            rid: 42,
+            keyexpr_literal: "clear/me".to_string(),
+            body: ReplyBody::Del,
+        };
+        let response = reply.into_response();
+        let via_builder = ResponseReplyBuilder::new(42, 0, Some("clear/me"), &[])
+            .reply_del()
+            .build()
+            .encode_to_vec();
+        assert_eq!(
+            response.encode_to_vec(),
+            via_builder,
+            "QueryReply::into_response (Del) must match builder.reply_del path"
+        );
+    }
+
+    #[test]
+    fn query_reply_into_response_err_path_threads_encoding_tuple() {
+        let reply = QueryReply::Err {
+            rid: 42,
+            keyexpr_literal: "error/path".to_string(),
+            encoding: Some((4, Some("schema_v1".to_string()))),
+            payload: b"oops".to_vec(),
+        };
+        let response = reply.into_response();
+        let via_builder = ResponseErrBuilder::new(42, 0, Some("error/path"), b"oops")
+            .encoding(4, Some("schema_v1"))
+            .build()
+            .encode_to_vec();
+        assert_eq!(
+            response.encode_to_vec(),
+            via_builder,
+            "QueryReply::into_response (Err) must match the builder path with the same encoding tuple"
+        );
+    }
+
+    #[test]
+    fn multiple_queryables_match_same_keyexpr_fire_in_registration_order() {
+        let mut reg = QueryableRegistry::new();
+        let order = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+        let order_a = order.clone();
+        let id_a = reg.register("metrics/cpu", move |_q, responder| {
+            order_a.lock().unwrap().push(1);
+            responder.send_reply(b"first");
+        });
+        let order_b = order.clone();
+        let id_b = reg.register("metrics/cpu", move |_q, responder| {
+            order_b.lock().unwrap().push(2);
+            responder.send_reply(b"second");
+        });
+        assert_ne!(id_a, id_b);
+
+        let mut replies = Vec::new();
+        reg.dispatch_request(
+            &request_query(1, 0, Some("metrics/cpu")),
+            &HashMap::new(),
+            &mut replies,
+        );
+        assert_eq!(*order.lock().unwrap(), vec![1, 2], "callbacks fire in registration order");
+        assert_eq!(replies.len(), 2);
+    }
+
+}

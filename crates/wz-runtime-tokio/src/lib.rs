@@ -33,6 +33,16 @@ pub mod session_glue;
 /// doc comment for the scope and threading contract.
 pub mod pubsub;
 
+/// R121j-5b — application-layer queryable registry. Q-side mirror of
+/// [`pubsub::SubscriberRegistry`]: routes inbound
+/// `NetworkMessage::Request` records (Query body arm) to user-
+/// registered `on_query` callbacks, which emit Reply / Err records
+/// via a [`query::QueryResponder`] borrow. The runtime wiring that
+/// turns the accumulated `Vec<QueryReply>` into outbound Response
+/// frames lands in R121j-5c. See `query` module doc comment for the
+/// scope, threading, and Responder lifetime contract.
+pub mod query;
+
 /// Generated SCXML state machine for the unicast session FSM. The
 /// emit comes from `sources/session/session_fsm_unicast.scxml` via
 /// `build.rs`. Public re-export is module-form rather than
