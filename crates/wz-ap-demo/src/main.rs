@@ -112,6 +112,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use wz_codecs::wireexpr::WireexprVariant;
+use wz_runtime_tokio::declare::{LivelinessRegistry, RemoteQueryableRegistry, RemoteSubscriberRegistry};
 use wz_runtime_tokio::pubsub::SubscriberRegistry;
 use wz_runtime_tokio::query::{QueryReply, QueryableRegistry};
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastPolicy;
@@ -147,6 +148,12 @@ fn print_usage() {
     eprintln!("               [--publish <keyexpr> --value <text>]");
     eprintln!("               [--queryable <keyexpr> --reply <text>]");
     eprintln!("               [--query <keyexpr>]");
+    eprintln!("               [--declare-subscriber <keyexpr>]");
+    eprintln!("               [--declare-queryable <keyexpr>]");
+    eprintln!("               [--declare-token <keyexpr>]");
+    eprintln!("               [--on-remote-subscriber-log]");
+    eprintln!("               [--on-remote-queryable-log]");
+    eprintln!("               [--on-remote-liveliness-log]");
     eprintln!();
     eprintln!("OPTIONS:");
     eprintln!("    --listen <addr>          acceptor mode (e.g. 127.0.0.1:7447)");
@@ -161,10 +168,29 @@ fn print_usage() {
     eprintln!("                             (required with --queryable)");
     eprintln!("    --query <keyexpr>        send a single Request(Query) on this keyexpr");
     eprintln!("                             literal once the session reaches Established");
+    eprintln!("    --declare-subscriber <keyexpr>");
+    eprintln!("                             send a single Declare(DeclSubscriber) on this");
+    eprintln!("                             keyexpr literal once the session reaches Established");
+    eprintln!("    --declare-queryable <keyexpr>");
+    eprintln!("                             send a single Declare(DeclQueryable) on this");
+    eprintln!("                             keyexpr literal once the session reaches Established");
+    eprintln!("    --declare-token <keyexpr>");
+    eprintln!("                             send a single Declare(DeclToken) on this keyexpr");
+    eprintln!("                             literal once the session reaches Established");
+    eprintln!("    --on-remote-subscriber-log");
+    eprintln!("                             install a RemoteSubscriberRegistry callback that");
+    eprintln!("                             logs 'REMOTE SUBSCRIBER DECLARED' on inbound");
+    eprintln!("                             Declare(DeclSubscriber); paired with");
+    eprintln!("                             'REMOTE SUBSCRIBER UNDECLARED' on UndeclSubscriber");
+    eprintln!("    --on-remote-queryable-log");
+    eprintln!("                             liveliness-equivalent for the queryable side");
+    eprintln!("    --on-remote-liveliness-log");
+    eprintln!("                             liveliness-equivalent for the DeclToken side");
     eprintln!("    --help, -h               print this help and exit");
     eprintln!();
     eprintln!("Exactly one of --listen / --connect is required.");
-    eprintln!("At least one of --key / --publish / --queryable / --query must be supplied.");
+    eprintln!("At least one of --key / --publish / --queryable / --query / --declare-*");
+    eprintln!("/ --on-remote-* must be supplied.");
 }
 
 fn parse_pair(args: &[String], flag: &str) -> Option<String> {
@@ -492,13 +518,27 @@ fn main() -> ExitCode {
     let queryable_opt = parse_pair(rest, "--queryable");
     let reply_opt = parse_pair(rest, "--reply");
     let query_opt = parse_pair(rest, "--query");
+    // R121k-5 — declare emit + remote-declare callback CLI surface.
+    let declare_subscriber_opt = parse_pair(rest, "--declare-subscriber");
+    let declare_queryable_opt = parse_pair(rest, "--declare-queryable");
+    let declare_token_opt = parse_pair(rest, "--declare-token");
+    let on_remote_sub_log = rest.iter().any(|a| a == "--on-remote-subscriber-log");
+    let on_remote_q_log = rest.iter().any(|a| a == "--on-remote-queryable-log");
+    let on_remote_l_log = rest.iter().any(|a| a == "--on-remote-liveliness-log");
     if key_opt.is_none()
         && publish_opt.is_none()
         && queryable_opt.is_none()
         && query_opt.is_none()
+        && declare_subscriber_opt.is_none()
+        && declare_queryable_opt.is_none()
+        && declare_token_opt.is_none()
+        && !on_remote_sub_log
+        && !on_remote_q_log
+        && !on_remote_l_log
     {
         eprintln!(
-            "wz-ap-demo: at least one of --key / --publish / --queryable / --query must be supplied",
+            "wz-ap-demo: at least one of --key / --publish / --queryable / --query / \
+             --declare-* / --on-remote-* must be supplied",
         );
         eprintln!();
         print_usage();
@@ -588,6 +628,24 @@ fn main() -> ExitCode {
     if let Some(q) = &query_spec {
         log::info!("query   = {q}");
     }
+    if let Some(d) = &declare_subscriber_opt {
+        log::info!("declare-subscriber = {d}");
+    }
+    if let Some(d) = &declare_queryable_opt {
+        log::info!("declare-queryable = {d}");
+    }
+    if let Some(d) = &declare_token_opt {
+        log::info!("declare-token = {d}");
+    }
+    if on_remote_sub_log {
+        log::info!("on-remote-subscriber-log = true");
+    }
+    if on_remote_q_log {
+        log::info!("on-remote-queryable-log = true");
+    }
+    if on_remote_l_log {
+        log::info!("on-remote-liveliness-log = true");
+    }
 
     // Build the multi-thread runtime explicitly — OutboundWriteDriver
     // (mirroring TokioLinkDriverAdapter's contract) requires this
@@ -606,8 +664,27 @@ fn main() -> ExitCode {
         }
     };
 
+    let declare_spec = DeclareEmitSpec {
+        subscriber_keyexpr: declare_subscriber_opt,
+        queryable_keyexpr: declare_queryable_opt,
+        token_keyexpr: declare_token_opt,
+    };
+    let remote_log_spec = RemoteLogSpec {
+        on_remote_subscriber: on_remote_sub_log,
+        on_remote_queryable: on_remote_q_log,
+        on_remote_liveliness: on_remote_l_log,
+    };
     let outcome = runtime.block_on(async move {
-        run_demo(role, key_opt, publisher_spec, queryable_spec, query_spec).await
+        run_demo(
+            role,
+            key_opt,
+            publisher_spec,
+            queryable_spec,
+            query_spec,
+            declare_spec,
+            remote_log_spec,
+        )
+        .await
     });
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
@@ -618,12 +695,37 @@ fn main() -> ExitCode {
     }
 }
 
+/// R121k-5 — bundle of `--declare-subscriber/queryable/token`
+/// keyexprs the demo emits once the session reaches Established.
+/// Each `Option<String>` is the keyexpr literal; the id is hard-coded
+/// to a per-kind sentinel (1001 / 2001 / 3001) so a paired
+/// integration test can assert on the wire shape without an extra
+/// CLI knob. Production deployments source ids from a per-session
+/// counter the same way as send_declare_keyexpr / publisher mapping.
+struct DeclareEmitSpec {
+    subscriber_keyexpr: Option<String>,
+    queryable_keyexpr: Option<String>,
+    token_keyexpr: Option<String>,
+}
+
+/// R121k-5 — bool flag bundle for the three Remote* registry log
+/// callbacks. Each `true` installs a callback that prints a
+/// stderr line on the matching inbound Declare arm so an integration
+/// test fixture can grep for the expected line shape.
+struct RemoteLogSpec {
+    on_remote_subscriber: bool,
+    on_remote_queryable: bool,
+    on_remote_liveliness: bool,
+}
+
 async fn run_demo(
     role: Role,
     key: Option<String>,
     publisher_spec: Option<(String, String, Option<u64>)>,
     queryable_spec: Option<(String, String)>,
     query_spec: Option<String>,
+    declare_spec: DeclareEmitSpec,
+    remote_log_spec: RemoteLogSpec,
 ) -> io::Result<()> {
     // ── Step 1: TCP setup. Acceptor binds + accepts; Initiator
     //           dials. Both paths land at the same `TcpStream`
@@ -715,6 +817,58 @@ async fn run_demo(
         });
     }
 
+    // R121k-5 — three Remote* registries. Each tracks the peer's
+    // outbound Declare(Decl*|Undecl*) records and fires user-installed
+    // callbacks on resolved keyexprs. The callbacks installed below
+    // log stderr lines so an integration test fixture can grep for
+    // them; production deployments wire metrics or route-table
+    // updates here instead.
+    let mut remote_sub_registry = RemoteSubscriberRegistry::new();
+    if remote_log_spec.on_remote_subscriber {
+        remote_sub_registry.on_subscriber_declared(|decl, resolved| {
+            eprintln!(
+                "wz-ap-demo: REMOTE SUBSCRIBER DECLARED id={} keyexpr='{}'",
+                decl.id, resolved,
+            );
+        });
+        remote_sub_registry.on_subscriber_undeclared(|undecl| {
+            eprintln!(
+                "wz-ap-demo: REMOTE SUBSCRIBER UNDECLARED id={}",
+                undecl.id,
+            );
+        });
+    }
+    let mut remote_q_registry = RemoteQueryableRegistry::new();
+    if remote_log_spec.on_remote_queryable {
+        remote_q_registry.on_queryable_declared(|decl, resolved| {
+            eprintln!(
+                "wz-ap-demo: REMOTE QUERYABLE DECLARED id={} keyexpr='{}'",
+                decl.id, resolved,
+            );
+        });
+        remote_q_registry.on_queryable_undeclared(|undecl| {
+            eprintln!(
+                "wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={}",
+                undecl.id,
+            );
+        });
+    }
+    let mut liveliness_registry = LivelinessRegistry::new();
+    if remote_log_spec.on_remote_liveliness {
+        liveliness_registry.on_token_declared(|decl, resolved| {
+            eprintln!(
+                "wz-ap-demo: REMOTE TOKEN DECLARED id={} keyexpr='{}'",
+                decl.id, resolved,
+            );
+        });
+        liveliness_registry.on_token_undeclared(|undecl| {
+            eprintln!(
+                "wz-ap-demo: REMOTE TOKEN UNDECLARED id={}",
+                undecl.id,
+            );
+        });
+    }
+
     // ── Step 4: session FSM + Lua engine + actions. Production
     //          callers MUST source SessionInitParams from
     //          deploy.yaml; the demo uses fixed MVP values per the
@@ -761,6 +915,24 @@ async fn run_demo(
         let keyexpr = keyexpr.clone();
         tokio::spawn(query_task(actions_for_query, keyexpr))
     });
+
+    // R121k-5 — declare emit task. Bundles all three optional
+    // `--declare-*` keyexprs into one task so a single Established
+    // gate covers the whole batch. Each declare emits via
+    // SessionLinkActions.send_declare_* on the reliable channel; the
+    // SN-window ordering matches what zenoh-pico's
+    // _z_session_recv_declaration expects (one declare per frame,
+    // reliable channel, peer registers id -> keyexpr before any
+    // dependent message).
+    let has_declares = declare_spec.subscriber_keyexpr.is_some()
+        || declare_spec.queryable_keyexpr.is_some()
+        || declare_spec.token_keyexpr.is_some();
+    let declare_handle = if has_declares {
+        let actions_for_declare = actions.clone();
+        Some(tokio::spawn(declare_task(actions_for_declare, declare_spec)))
+    } else {
+        None
+    };
 
     // ── Step 4b: activate the session FSM role. The
     //          `session_fsm_unicast.scxml` starts in `Init` and
@@ -846,6 +1018,16 @@ async fn run_demo(
                 &mut pending_replies,
                 &mut pending_final_rids,
             );
+            // R121k-5 — fan into the three Remote* registries on the
+            // SAME peer_table snapshot. Each one matches a different
+            // Declare body arm (Sub/Queryable/Token), so the dispatch
+            // is exclusive — at most one registry will fire per
+            // matching arm. Empty registries (no callbacks installed)
+            // are zero-cost; the dispatch path short-circuits when
+            // the inner `Vec<…>` callback list is empty.
+            remote_sub_registry.dispatch_iteration_event(event, peer_table);
+            remote_q_registry.dispatch_iteration_event(event, peer_table);
+            liveliness_registry.dispatch_iteration_event(event, peer_table);
             // Drain the staging buffers through the action layer.
             // `send_response` and `send_response_final` enqueue onto
             // the OutboundWriteDriver mpsc channel synchronously, so
@@ -880,6 +1062,9 @@ async fn run_demo(
         let _ = tokio::time::timeout(Duration::from_millis(200), handle).await;
     }
     if let Some(handle) = query_handle {
+        let _ = tokio::time::timeout(Duration::from_millis(200), handle).await;
+    }
+    if let Some(handle) = declare_handle {
         let _ = tokio::time::timeout(Duration::from_millis(200), handle).await;
     }
 
@@ -946,6 +1131,71 @@ const PUBLISHER_BURST_INTERVAL_MS: u64 = 200;
 const QUERY_HANDSHAKE_POLL_INTERVAL_MS: u64 = 50;
 const QUERY_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
 const QUERY_RID: u64 = 1;
+
+/// R121k-5 — declare emit task. Bundles the three optional
+/// `--declare-*` keyexprs into one Established-gated batch so the
+/// peer sees Sub/Queryable/Token declares in deterministic order
+/// (subscriber → queryable → token). Each declare goes on the
+/// reliable channel — zenoh-pico's `_z_session_recv_declaration`
+/// requires the declare to land before any dependent message that
+/// would alias the declared id.
+///
+/// Hard-coded ids:
+///   subscriber  = 1001
+///   queryable   = 2001
+///   token       = 3001
+/// Ids are picked per-kind so a wire-capture or integration test can
+/// distinguish at a glance which kind a given declare body belongs
+/// to. Production deployments would source ids from a per-session
+/// counter (the wz-ap-demo binary is intentionally minimal here).
+const DECLARE_SUBSCRIBER_ID: u64 = 1001;
+const DECLARE_QUERYABLE_ID: u64 = 2001;
+const DECLARE_TOKEN_ID: u64 = 3001;
+const DECLARE_HANDSHAKE_POLL_INTERVAL_MS: u64 = 50;
+const DECLARE_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
+const DECLARE_INTER_EMIT_MS: u64 = 100;
+
+async fn declare_task(
+    actions: Arc<wz_runtime_tokio::session_glue::SessionLinkActions>,
+    spec: DeclareEmitSpec,
+) {
+    let deadline = std::time::Instant::now()
+        + Duration::from_millis(DECLARE_HANDSHAKE_TIMEOUT_MS);
+    loop {
+        if actions.trace_snapshot().record_established_at > 0 {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            log::warn!(
+                "wz-ap-demo: declare_task gave up waiting for Established \
+                 after {DECLARE_HANDSHAKE_TIMEOUT_MS}ms (record_established_at \
+                 never fired)"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(DECLARE_HANDSHAKE_POLL_INTERVAL_MS)).await;
+    }
+    if let Some(keyexpr) = spec.subscriber_keyexpr.as_deref() {
+        actions.send_declare_subscriber(DECLARE_SUBSCRIBER_ID, /*mapping_id=*/ 0, Some(keyexpr));
+        eprintln!(
+            "wz-ap-demo: DECLARED SUBSCRIBER id={DECLARE_SUBSCRIBER_ID} keyexpr='{keyexpr}'"
+        );
+        tokio::time::sleep(Duration::from_millis(DECLARE_INTER_EMIT_MS)).await;
+    }
+    if let Some(keyexpr) = spec.queryable_keyexpr.as_deref() {
+        actions.send_declare_queryable(DECLARE_QUERYABLE_ID, /*mapping_id=*/ 0, Some(keyexpr));
+        eprintln!(
+            "wz-ap-demo: DECLARED QUERYABLE id={DECLARE_QUERYABLE_ID} keyexpr='{keyexpr}'"
+        );
+        tokio::time::sleep(Duration::from_millis(DECLARE_INTER_EMIT_MS)).await;
+    }
+    if let Some(keyexpr) = spec.token_keyexpr.as_deref() {
+        actions.send_declare_token(DECLARE_TOKEN_ID, /*mapping_id=*/ 0, Some(keyexpr));
+        eprintln!(
+            "wz-ap-demo: DECLARED TOKEN id={DECLARE_TOKEN_ID} keyexpr='{keyexpr}'"
+        );
+    }
+}
 
 async fn query_task(
     actions: Arc<wz_runtime_tokio::session_glue::SessionLinkActions>,
