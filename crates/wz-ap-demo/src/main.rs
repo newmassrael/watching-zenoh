@@ -113,9 +113,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use wz_codecs::wireexpr::WireexprVariant;
 use wz_runtime_tokio::pubsub::SubscriberRegistry;
+use wz_runtime_tokio::query::{QueryReply, QueryableRegistry};
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastPolicy;
 use wz_runtime_tokio::session_glue::{
-    drive_session_until_terminal, install_session_actions, BoxedLinkDriver,
+    drive_session_until_terminal, install_session_actions, BoxedLinkDriver, IterationEvent,
     SessionInitParams, SessionLinkActions, SigningKey,
 };
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
@@ -144,6 +145,8 @@ fn print_usage() {
     eprintln!("    wz-ap-demo (--listen <addr> | --connect <addr>)");
     eprintln!("               [--key <keyexpr>]");
     eprintln!("               [--publish <keyexpr> --value <text>]");
+    eprintln!("               [--queryable <keyexpr> --reply <text>]");
+    eprintln!("               [--query <keyexpr>]");
     eprintln!();
     eprintln!("OPTIONS:");
     eprintln!("    --listen <addr>          acceptor mode (e.g. 127.0.0.1:7447)");
@@ -151,10 +154,17 @@ fn print_usage() {
     eprintln!("    --key <keyexpr>          DECLARE subscriber keyexpr (e.g. demo/example)");
     eprintln!("    --publish <keyexpr>      publisher keyexpr literal (e.g. demo/test)");
     eprintln!("    --value <text>           publisher payload text (required with --publish)");
+    eprintln!("    --queryable <keyexpr>    register a queryable for the given pattern;");
+    eprintln!("                             each inbound Request(Query) whose keyexpr matches");
+    eprintln!("                             fires a callback that emits one Reply via --reply");
+    eprintln!("    --reply <text>           reply payload for the registered queryable");
+    eprintln!("                             (required with --queryable)");
+    eprintln!("    --query <keyexpr>        send a single Request(Query) on this keyexpr");
+    eprintln!("                             literal once the session reaches Established");
     eprintln!("    --help, -h               print this help and exit");
     eprintln!();
     eprintln!("Exactly one of --listen / --connect is required.");
-    eprintln!("At least one of --key / --publish must be supplied.");
+    eprintln!("At least one of --key / --publish / --queryable / --query must be supplied.");
 }
 
 fn parse_pair(args: &[String], flag: &str) -> Option<String> {
@@ -471,8 +481,25 @@ fn main() -> ExitCode {
     // `id=N`. Defaults to None (literal-keyexpr path, R121e shape).
     // Only meaningful when --publish is set.
     let declare_id_opt = parse_pair(rest, "--declare-id");
-    if key_opt.is_none() && publish_opt.is_none() {
-        eprintln!("wz-ap-demo: at least one of --key / --publish must be supplied");
+    // R121j-5c-e2e-demo — queryable / query CLI surface.
+    // --queryable + --reply registers an inbound Request(Query) callback
+    // that emits one Put-form Reply with the --reply payload. --query
+    // emits a single outbound Request(Query) on the given keyexpr once
+    // the session reaches Established (mirror of --publish timing
+    // gate). Both are independent of --key / --publish; one demo
+    // instance can act simultaneously as publisher + queryable + query
+    // emitter if the corresponding argv combination is supplied.
+    let queryable_opt = parse_pair(rest, "--queryable");
+    let reply_opt = parse_pair(rest, "--reply");
+    let query_opt = parse_pair(rest, "--query");
+    if key_opt.is_none()
+        && publish_opt.is_none()
+        && queryable_opt.is_none()
+        && query_opt.is_none()
+    {
+        eprintln!(
+            "wz-ap-demo: at least one of --key / --publish / --queryable / --query must be supplied",
+        );
         eprintln!();
         print_usage();
         return ExitCode::from(2);
@@ -495,6 +522,20 @@ fn main() -> ExitCode {
         print_usage();
         return ExitCode::from(2);
     }
+    if queryable_opt.is_some() && reply_opt.is_none() {
+        eprintln!("wz-ap-demo: --queryable requires --reply");
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    if queryable_opt.is_none() && reply_opt.is_some() {
+        eprintln!(
+            "wz-ap-demo: --reply is only meaningful with --queryable (rejected to surface mis-wired argv)",
+        );
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
     let declare_id_parsed: Option<u64> = match declare_id_opt {
         Some(s) => match s.parse::<u64>() {
             Ok(0) => {
@@ -513,6 +554,11 @@ fn main() -> ExitCode {
         (Some(k), Some(v)) => Some((k, v, declare_id_parsed)),
         _ => None,
     };
+    let queryable_spec: Option<(String, String)> = match (queryable_opt, reply_opt) {
+        (Some(p), Some(r)) => Some((p, r)),
+        _ => None,
+    };
+    let query_spec: Option<String> = query_opt;
 
     // env_logger reads RUST_LOG (defaults to off). The integration
     // test fixture (R121c) sets RUST_LOG=info to surface subscriber-
@@ -535,6 +581,13 @@ fn main() -> ExitCode {
             log::info!("declare-id = {n} (R121g DECLARE-aliased mode)");
         }
     }
+    if let Some((p, r)) = &queryable_spec {
+        log::info!("queryable = {p}");
+        log::info!("reply     = {r}");
+    }
+    if let Some(q) = &query_spec {
+        log::info!("query   = {q}");
+    }
 
     // Build the multi-thread runtime explicitly — OutboundWriteDriver
     // (mirroring TokioLinkDriverAdapter's contract) requires this
@@ -553,8 +606,9 @@ fn main() -> ExitCode {
         }
     };
 
-    let outcome =
-        runtime.block_on(async move { run_demo(role, key_opt, publisher_spec).await });
+    let outcome = runtime.block_on(async move {
+        run_demo(role, key_opt, publisher_spec, queryable_spec, query_spec).await
+    });
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -568,6 +622,8 @@ async fn run_demo(
     role: Role,
     key: Option<String>,
     publisher_spec: Option<(String, String, Option<u64>)>,
+    queryable_spec: Option<(String, String)>,
+    query_spec: Option<String>,
 ) -> io::Result<()> {
     // ── Step 1: TCP setup. Acceptor binds + accepts; Initiator
     //           dials. Both paths land at the same `TcpStream`
@@ -635,6 +691,30 @@ async fn run_demo(
         });
     }
 
+    // R121j-5c-e2e-demo — queryable registry. Mirrors the subscriber
+    // registration above for the inbound Request(Query) path: the
+    // callback emits one Put-form Reply with the --reply payload and
+    // logs `QUERYABLE FIRED` to stderr so the integration test fixture
+    // can grep for the line shape. The registry is wired into the
+    // `drive_session_until_terminal` observer below so each iteration's
+    // FramePayload.messages are scanned for Request bodies the same
+    // way the subscriber registry scans for Push bodies.
+    let mut queryable_registry = QueryableRegistry::new();
+    if let Some((pattern, reply_text)) = queryable_spec.as_ref() {
+        let pattern_for_callback = pattern.clone();
+        let reply_text_for_callback = reply_text.clone();
+        queryable_registry.register(pattern.clone(), move |_query, responder| {
+            responder.send_reply(reply_text_for_callback.as_bytes());
+            eprintln!(
+                "wz-ap-demo: QUERYABLE FIRED pattern='{}' rid={} keyexpr='{}' reply='{}'",
+                pattern_for_callback,
+                responder.rid(),
+                responder.keyexpr_literal(),
+                reply_text_for_callback,
+            );
+        });
+    }
+
     // ── Step 4: session FSM + Lua engine + actions. Production
     //          callers MUST source SessionInitParams from
     //          deploy.yaml; the demo uses fixed MVP values per the
@@ -668,6 +748,19 @@ async fn run_demo(
             let declare_id = *declare_id;
             tokio::spawn(publisher_task(actions_for_publisher, keyexpr, value, declare_id))
         });
+
+    // R121j-5c-e2e-demo — query_task spawn (initiator-style: emit a
+    // single outbound Request(Query) once the session reaches
+    // Established). Same Established gate as publisher_task — the
+    // role-agnostic `record_established_at` counter fires on both
+    // acceptor and initiator sides. rid is hard-coded to 1 for the
+    // demo; production callers will source unique rids from a per-
+    // session counter once a z_get adapter lands (carry).
+    let query_handle = query_spec.as_ref().map(|keyexpr| {
+        let actions_for_query = actions.clone();
+        let keyexpr = keyexpr.clone();
+        tokio::spawn(query_task(actions_for_query, keyexpr))
+    });
 
     // ── Step 4b: activate the session FSM role. The
     //          `session_fsm_unicast.scxml` starts in `Init` and
@@ -711,6 +804,17 @@ async fn run_demo(
     //          Push records reach the registered --key callback.
     //          Cap iterations at a generous bound — a hung peer
     //          would otherwise leave the demo blocking forever.
+    // R121j-5c-e2e-demo — outbound Reply / ResponseFinal staging
+    // buffers shared between the queryable dispatch (inside the
+    // observer closure) and the action layer that flushes them on the
+    // wire. Owned by the closure so a single observer call can fan
+    // multiple Replies into multiple `send_response` calls and finally
+    // one `send_response_final` per matched rid (zenoh-pico's
+    // "many Reply + exactly one Final per Query" semantic).
+    let mut pending_replies: Vec<QueryReply> = Vec::new();
+    let mut pending_final_rids: Vec<u64> = Vec::new();
+    let actions_for_observer = actions.clone();
+
     log::info!("wz-ap-demo: driving session FSM");
     let mut driver = inbound;
     let outcome = drive_session_until_terminal(
@@ -718,7 +822,7 @@ async fn run_demo(
         &actions,
         &mut engine,
         Some(10_000),
-        |event| {
+        |event: IterationEvent<'_>| {
             // Per-iteration trace stays at `debug` so an
             // `RUST_LOG=info` production run does not flood the
             // log on every Push frame. The integration test sets
@@ -727,7 +831,33 @@ async fn run_demo(
             // hiding this trace behind `debug` does not regress
             // the test surface.
             log::debug!("wz-ap-demo: iteration event = {event:?}");
-            registry.dispatch_iteration_event(event)
+            registry.dispatch_iteration_event(event);
+            // R121j-5c-e2e-demo — fan the same iteration event into
+            // the queryable registry. IterationEvent is `Copy` per
+            // session_glue.rs so this is a zero-cost reuse; the
+            // queryable side reads the shared peer_keyexpr_table
+            // populated by `registry` above (DeclKexpr / UndeclKexpr
+            // absorbed there inform queryable resolution too without
+            // any dual-write bookkeeping).
+            let peer_table = registry.peer_keyexpr_table();
+            queryable_registry.dispatch_iteration_event(
+                event,
+                peer_table,
+                &mut pending_replies,
+                &mut pending_final_rids,
+            );
+            // Drain the staging buffers through the action layer.
+            // `send_response` and `send_response_final` enqueue onto
+            // the OutboundWriteDriver mpsc channel synchronously, so
+            // ordering on the wire mirrors enqueue order: every
+            // Reply for rid R precedes the matching ResponseFinal
+            // for R (zenoh-pico's z_get correlator depends on this).
+            for reply in pending_replies.drain(..) {
+                actions_for_observer.send_response(reply.into_response());
+            }
+            for rid in pending_final_rids.drain(..) {
+                actions_for_observer.send_response_final(rid);
+            }
         },
     )
     .await;
@@ -747,6 +877,9 @@ async fn run_demo(
     // wedged publisher is dropped here rather than blocking
     // shutdown indefinitely.
     if let Some(handle) = publisher_handle {
+        let _ = tokio::time::timeout(Duration::from_millis(200), handle).await;
+    }
+    if let Some(handle) = query_handle {
         let _ = tokio::time::timeout(Duration::from_millis(200), handle).await;
     }
 
@@ -798,6 +931,51 @@ const PUBLISHER_HANDSHAKE_POLL_INTERVAL_MS: u64 = 50;
 const PUBLISHER_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
 const PUBLISHER_BURST_COUNT: usize = 5;
 const PUBLISHER_BURST_INTERVAL_MS: u64 = 200;
+
+/// R121j-5c-e2e-demo — single-shot query emit task. Mirrors
+/// [`publisher_task`]'s timing gate: wait for the role-agnostic
+/// `record_established_at` counter to fire, then send exactly one
+/// `Request(Query)` on `keyexpr` (literal form, `mapping_id = 0`,
+/// `rid = 1`). The peer's queryable registry produces zero or more
+/// `Response(Reply)` frames followed by exactly one `ResponseFinal`
+/// terminating the chain; this task does not currently consume
+/// the inbound Reply chain (no application-side z_get adapter
+/// yet — R121j-6 carry). The demo binary's purpose here is to
+/// drive the OUTBOUND Query path so a paired wz-ap-demo --queryable
+/// peer can fire its callback on the matched keyexpr.
+const QUERY_HANDSHAKE_POLL_INTERVAL_MS: u64 = 50;
+const QUERY_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
+const QUERY_RID: u64 = 1;
+
+async fn query_task(
+    actions: Arc<wz_runtime_tokio::session_glue::SessionLinkActions>,
+    keyexpr: String,
+) {
+    let deadline = std::time::Instant::now()
+        + Duration::from_millis(QUERY_HANDSHAKE_TIMEOUT_MS);
+    loop {
+        if actions.trace_snapshot().record_established_at > 0 {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            log::warn!(
+                "wz-ap-demo: query_task gave up waiting for Established \
+                 after {QUERY_HANDSHAKE_TIMEOUT_MS}ms (record_established_at \
+                 never fired)"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(QUERY_HANDSHAKE_POLL_INTERVAL_MS)).await;
+    }
+    log::info!(
+        "wz-ap-demo: query_task observed Established; emitting Query \
+         on keyexpr='{keyexpr}' rid={QUERY_RID}"
+    );
+    actions.send_request_query(QUERY_RID, /*mapping_id=*/ 0, Some(&keyexpr));
+    eprintln!(
+        "wz-ap-demo: QUERY EMITTED keyexpr='{keyexpr}' rid={QUERY_RID}"
+    );
+}
 
 async fn publisher_task(
     actions: Arc<wz_runtime_tokio::session_glue::SessionLinkActions>,
