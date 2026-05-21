@@ -9368,6 +9368,54 @@
         "SCE upstream pin ebf3b3ff + 14 unpushed clippy chores in /home/coin/scxml-core-engine — 다음 pin bump round에서 origin push 이후 재평가 (THIRD_PARTY.md에 현 pin 명시됨)"
       ]
     },
+    "Round 215": {
+      "decision_summary": "R215 R121-release-5: cargo publish dry-run 로컬 평가 — v0.1.0-mvp cargo publish 차단 (vendored submodule build dep + path-only crate dep). GitHub release tarball flow 채택, crates.io는 post-MVP carry.",
+      "changes_bullets": [
+        "zenoh-pico-sys dry-run: package 자체는 9 파일 / 41.5 KiB compressed (10 MiB cap 명확하게 하회) 세계용 OK. verify 단계에서 build.rs:44 `canonicalize vendor/zenoh-pico` 결이게 Os{code:2, NotFound} — .crate 결립터리에 vendor submodule 미포함, build.rs가 상대경로 원본에 의존",
+        "wz-codecs dry-run: manifest verify 실패 — `dependency 'sce-forge-runtime' does not specify a version`. path-only deps는 crates.io 계시 시 path 제거 + version requirement 요구. wz-codecs/wz-runtime-tokio/wz-ap-demo 동일 패턴",
+        "결론 — 4 publishable crate 전체가 v0.1.0-mvp 시점에 cargo publish 차단. 근본 원인: (a) vendored submodule로 SCE/zenoh-pico 자체 풋핀트 + (b) sce-forge-runtime / sce-build / wz-codecs 관계가 path-only",
+        "v0.1.0-mvp 출시 전략: GitHub release tarball 단일 탕 — release.yml은 8-lane CI mirror + softprops draft 생성까지만 수행, cargo publish 단계는 `|| echo ::warning::` graceful degradation으로 이미 처리됨 (R213)",
+        "Post-MVP carry 명시: (1) sce-forge-runtime / sce-build / wz-codecs / wz-runtime-tokio / wz-ap-demo 각각을 version-tagged crate 형태로 분리 게시 + (2) zenoh-pico-sys build.rs를 crates.io 시나리오에서 vendor/zenoh-pico fallback or feature-gate"
+      ],
+      "verification_bullets": [
+        "cd crates && cargo publish --dry-run -p zenoh-pico-sys: tarball pack OK (41.5 KiB) / verify FAIL (canonicalize vendor/zenoh-pico NotFound build.rs:44)",
+        "cd crates && cargo publish --dry-run -p wz-codecs: manifest verify FAIL (sce-forge-runtime version missing) — packing 이전 단계에서 차단",
+        "release.yml `|| echo ::warning::` 패턴이 두 실패를 경고로 전환해 release 흐름을 막지 않는 구조임을 확인 (R213에서 이미 설계)",
+        "bash scripts/run-ci.sh: 8 lanes pass (Layer 0/A/A2/B/C1/C2/D/E) — 코드 변경 0 자체가 회귀 부재를 보장"
+      ],
+      "impact_refs": [
+        "watching-zenoh/license"
+      ],
+      "carry_forward_bullets": [
+        "v0.1.0-mvp 태그 생성 + GitHub release draft 수동 단계 — user push consent 이후 있을 때 `git tag v0.1.0-mvp -m 'AP MVP first external release' && git push origin v0.1.0-mvp` 호출 시 release.yml 자동 트리거 (8-lane CI mirror + draft release create)",
+        "Post-MVP crates.io 게시 클러스터: (a) sce-forge-runtime / sce-build 세파레이트 계시 (upstream SCE 작업) + (b) wz-codecs path → version-spec'd dependency 키 교체 + (c) zenoh-pico-sys vendor/zenoh-pico fallback path or feature-gate",
+        "부채 #3 R121h-perf-bump-5 결정 사용자 컨펌 필요; 1 round after decision",
+        "release rehearsal 총결: sub-1 → sub-5 5 sub-rounds 완료; v0.1.0-mvp 실제 릴리스는 user push consent 기다림"
+      ],
+      "publishable_decision_summary": "R215 R121-release-5: cargo publish dry-run 로컬 평가 — v0.1.0-mvp cargo publish 차단 (vendored submodule build dep + path-only crate dep). GitHub release tarball flow 채택, crates.io는 post-MVP carry.",
+      "publishable_changes_bullets": [
+        "zenoh-pico-sys dry-run: package 자체는 9 파일 / 41.5 KiB compressed (10 MiB cap 명확하게 하회) 세계용 OK. verify 단계에서 build.rs:44 `canonicalize vendor/zenoh-pico` 결이게 Os{code:2, NotFound} — .crate 결립터리에 vendor submodule 미포함, build.rs가 상대경로 원본에 의존",
+        "wz-codecs dry-run: manifest verify 실패 — `dependency 'sce-forge-runtime' does not specify a version`. path-only deps는 crates.io 계시 시 path 제거 + version requirement 요구. wz-codecs/wz-runtime-tokio/wz-ap-demo 동일 패턴",
+        "결론 — 4 publishable crate 전체가 v0.1.0-mvp 시점에 cargo publish 차단. 근본 원인: (a) vendored submodule로 SCE/zenoh-pico 자체 풋핀트 + (b) sce-forge-runtime / sce-build / wz-codecs 관계가 path-only",
+        "v0.1.0-mvp 출시 전략: GitHub release tarball 단일 탕 — release.yml은 8-lane CI mirror + softprops draft 생성까지만 수행, cargo publish 단계는 `|| echo ::warning::` graceful degradation으로 이미 처리됨 (R213)",
+        "Post-MVP carry 명시: (1) sce-forge-runtime / sce-build / wz-codecs / wz-runtime-tokio / wz-ap-demo 각각을 version-tagged crate 형태로 분리 게시 + (2) zenoh-pico-sys build.rs를 crates.io 시나리오에서 vendor/zenoh-pico fallback or feature-gate"
+      ],
+      "publishable_verification_bullets": [
+        "cd crates && cargo publish --dry-run -p zenoh-pico-sys: tarball pack OK (41.5 KiB) / verify FAIL (canonicalize vendor/zenoh-pico NotFound build.rs:44)",
+        "cd crates && cargo publish --dry-run -p wz-codecs: manifest verify FAIL (sce-forge-runtime version missing) — packing 이전 단계에서 차단",
+        "release.yml `|| echo ::warning::` 패턴이 두 실패를 경고로 전환해 release 흐름을 막지 않는 구조임을 확인 (R213에서 이미 설계)",
+        "bash scripts/run-ci.sh: 8 lanes pass (Layer 0/A/A2/B/C1/C2/D/E) — 코드 변경 0 자체가 회귀 부재를 보장"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/license"
+      ],
+      "publishable_carry_forward_bullets": [
+        "v0.1.0-mvp 태그 생성 + GitHub release draft 수동 단계 — user push consent 이후 있을 때 `git tag v0.1.0-mvp -m 'AP MVP first external release' && git push origin v0.1.0-mvp` 호출 시 release.yml 자동 트리거 (8-lane CI mirror + draft release create)",
+        "Post-MVP crates.io 게시 클러스터: (a) sce-forge-runtime / sce-build 세파레이트 계시 (upstream SCE 작업) + (b) wz-codecs path → version-spec'd dependency 키 교체 + (c) zenoh-pico-sys vendor/zenoh-pico fallback path or feature-gate",
+        "부채 #3 R121h-perf-bump-5 결정 사용자 컨펌 필요; 1 round after decision",
+        "release rehearsal 총결: sub-1 → sub-5 5 sub-rounds 완료; v0.1.0-mvp 실제 릴리스는 user push consent 기다림"
+      ]
+    },
     "Round 22": {
       "decision_summary": "vle_byte_length primitive land — Phase A3 cursor-free TLV chain walker missing piece; vle_u64_decode와 짝으로 §7 extension iterator를 Phase A4 cursor 의존 없이 author-side에서 운영 가능, tlv_advance Phase A4+ 진화의 내부 길이 산출 부분품.",
       "changes_bullets": [
