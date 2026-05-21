@@ -8,10 +8,27 @@
 # rejected them. The fix is to mirror CI's full gate-set locally
 # so push-time catches what land-then-CI used to.
 #
+# R224 retrospect: two corner cases produced false-negative gate
+# failures in concurrent / no-op push scenarios:
+#   (a) Git fires pre-push even for "nothing to push" invocations
+#       (e.g. redundant `git push` after another invocation already
+#       updated the remote). Without a stdin guard the hook ran the
+#       full ~50s CI gate against zero work, which then
+#   (b) raced cargo `crates/target` lock + sce-codegen rebuild
+#       against a concurrent run-ci.sh from an earlier push, surfacing
+#       spurious "Layer X FAIL" against a clean tree.
+# Two textbook guards (mirror the git protocol contract + the
+# coreutils flock(1) advisory-lock pattern):
+#   (a) Read the stdin ref tuples and short-circuit when no
+#       non-delete ref needs validation.
+#   (b) Acquire a non-blocking advisory lock around the run-ci
+#       execution so concurrent invocations fail explicitly
+#       instead of silently racing into phantom gate failures.
+#
 # Delegates to `scripts/run-ci.sh` so CI and pre-push share one
 # source of truth for the lane definitions (Layer 0 actionlint /
-# A mnemosyne / B verify-codegen / C1 cargo test / C2 clippy /
-# D deploy yaml).
+# A mnemosyne / A2 audit / B verify-codegen / C1 cargo test /
+# C2 clippy / D deploy yaml / E ap-demo round-trip).
 #
 # Time cost (warm cache): ~50s typical; up to ~5min on cold
 # compile. The hook can be bypassed via `git push --no-verify`
@@ -24,6 +41,48 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+# ─── R224 guard (a) — empty-ref / delete-only short-circuit ─────────
+# Git protocol: pre-push receives one whitespace-separated tuple per
+# ref on stdin as `<local_ref> <local_sha> <remote_ref> <remote_sha>`.
+# `local_sha == 40*"0"` means a delete-ref push (no new local commit
+# to validate). Empty stdin means "nothing to push" (a redundant
+# invocation racing another that already updated the remote). Either
+# case has zero work for the CI gate, so fast-exit before doing the
+# ~50s compile dance.
+zero_sha="0000000000000000000000000000000000000000"
+has_work=0
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+    if [[ "$local_sha" != "$zero_sha" ]]; then
+        has_work=1
+    fi
+done
+if [[ $has_work -eq 0 ]]; then
+    echo "pre-push: nothing to push (no non-delete refs); skipping CI gate"
+    exit 0
+fi
+
+# ─── R224 guard (b) — non-blocking concurrent run-ci lock ───────────
+# Two concurrent `git push` invocations both fire pre-push and both
+# enter scripts/run-ci.sh, racing the shared `crates/target` cargo
+# lock + sce-codegen freshness rebuild + atomic store read paths.
+# flock(1) `-n` (non-blocking) acquires an advisory lock on a
+# git-dir-scoped sentinel; failure means another run-ci is already
+# in flight, in which case the textbook response is to fail loud
+# (so the user notices and re-pushes after the prior one finishes)
+# rather than to silently race or to wait an unbounded interval.
+# `flock` is part of util-linux on every Linux distro and on macOS
+# via Homebrew `flock`; mark the guard advisory so a missing binary
+# (e.g. a slimmed container) does not turn into a hard hook failure.
+if command -v flock >/dev/null 2>&1; then
+    lockfile="$(git rev-parse --git-dir)/run-ci.lock"
+    exec 200>"$lockfile"
+    if ! flock -n 200; then
+        echo "pre-push: another run-ci already running (lock: $lockfile)" >&2
+        echo "          wait for it to finish, then retry the push." >&2
+        exit 1
+    fi
+fi
+
 if [[ ! -x scripts/run-ci.sh ]]; then
     echo "pre-push: scripts/run-ci.sh missing or not executable" >&2
     echo "  chmod +x scripts/run-ci.sh" >&2
@@ -34,7 +93,7 @@ echo "pre-push: running CI-equivalent gate (scripts/run-ci.sh) ..."
 if ! scripts/run-ci.sh; then
     echo "" >&2
     echo "pre-push: CI-equivalent gate failed — fix locally before push." >&2
-    echo "          Bypass with `git push --no-verify` only for genuine hotfixes." >&2
+    echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
     exit 1
 fi
 
