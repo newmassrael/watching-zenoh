@@ -44,13 +44,14 @@ pub mod keyexpr_canon;
 /// and the surface-vs-dispatch distinction.
 pub mod locality;
 
-/// R222 — application-layer `Sample` type for subscriber callbacks.
-/// Mirrors zenoh-pico's `z_sample_t` projection — resolved keyexpr +
-/// SampleKind (Put / Del) + payload bytes. Subscriber callbacks now
-/// receive `&Sample` instead of the raw `&Push` so they avoid the
-/// re-extract-keyexpr + tagged-union-match boilerplate that every
-/// caller previously repeated. See `sample` module doc for the
-/// non-exhaustive future-additive contract.
+/// R222 / R225 — application-layer `Sample` type for subscriber callbacks.
+/// Mirrors zenoh-pico's `_z_sample_t` projection. R222 introduced the
+/// three load-bearing fields (`keyexpr` / `kind` / `payload`); R225
+/// extends the parity surface with `timestamp` / `encoding` / `qos` /
+/// `attachment` / `source_info` / `reliability` so subscribers no longer
+/// need to dig into `Push.extensions` to inspect Sample metadata. See
+/// the `sample` module doc for the wire-decode origin of each field
+/// and the `#[non_exhaustive]` future-additive contract.
 pub mod sample;
 
 /// R98 — application-layer subscriber registry. Routes decoded
