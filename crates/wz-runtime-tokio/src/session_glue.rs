@@ -1249,6 +1249,37 @@ impl SessionLinkActions {
         let wire = encode_frame_with_response_final(sn, response_final, /*reliable=*/ true);
         self.driver.send_blocking(&wire, Reliability::Reliable);
     }
+
+    /// R121j-5c-e2e — encode + dispatch an already-constructed
+    /// [`Response`] on the outbound link. The Response is typically
+    /// built upstream by [`ResponseReplyBuilder`] /
+    /// [`ResponseErrBuilder`] (or composed from a
+    /// [`crate::query::QueryReply::into_response`] call drained out of
+    /// [`crate::query::QueryableRegistry::dispatch_messages`]).
+    ///
+    /// Always reliable — Reply data delivery loss would leave the
+    /// requesting peer's `z_get` future waiting for a reply that never
+    /// arrives, and then for the matching `ResponseFinal` that the
+    /// queryable never re-emits (because from its perspective the
+    /// reply was sent). Mirrors the [`send_response_final`] reliability
+    /// choice. The lower-level [`encode_frame_with_response`] helper
+    /// still accepts a `reliable` flag for fuzz / negative-test paths,
+    /// but the production action layer pins it.
+    ///
+    /// Owns the `Response` so the caller can drain a `Vec<QueryReply>`
+    /// via `.into_iter().map(QueryReply::into_response)` without
+    /// intermediate clones. The dispatch path is:
+    ///
+    /// ```text
+    /// QueryableRegistry.dispatch_messages(.., &mut pending_replies, &mut pending_final_rids);
+    /// for reply in pending_replies.drain(..) { actions.send_response(reply.into_response()); }
+    /// for rid   in pending_final_rids.drain(..) { actions.send_response_final(rid); }
+    /// ```
+    pub fn send_response(&self, response: Response) {
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_response(sn, response, /*reliable=*/ true);
+        self.driver.send_blocking(&wire, Reliability::Reliable);
+    }
 }
 
 impl ActionTrace {
@@ -7713,6 +7744,121 @@ mod tests {
             wire_best_effort[0],
             wire_const::T_MID_FRAME,
             "best-effort Frame must omit FLAG_T_FRAME_R",
+        );
+    }
+
+    /// R121j-5c-e2e — `SessionLinkActions::send_response` emits the
+    /// exact same wire bytes as the underlying
+    /// `encode_frame_with_response` helper with the SN drawn from
+    /// `next_outbound_frame_sn`. The action layer must not silently
+    /// transform the Response between the builder and the wire.
+    #[test]
+    fn send_response_emits_reliable_frame_with_seeded_sn() {
+        use std::sync::Mutex;
+
+        struct RecordingDriver {
+            frames: Mutex<Vec<(Vec<u8>, Reliability)>>,
+        }
+        impl BoxedLinkDriver for RecordingDriver {
+            fn send_blocking(&self, bytes: &[u8], r: Reliability) {
+                self.frames.lock().unwrap().push((bytes.to_vec(), r));
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+        }
+
+        let driver = Arc::new(RecordingDriver {
+            frames: Mutex::new(Vec::new()),
+        });
+        let params = SessionInitParams {
+            version: 0x09,
+            whatami: 0x02,
+            zid: vec![0x01, 0x02, 0x03, 0x04],
+            seq_num_res: 2,
+            req_id_res: 2,
+            batch_size: 65535,
+            lease: 10_000,
+            lease_in_seconds: false,
+            initial_sn: 100,
+            cookie: Vec::new(),
+            cookie_signing_key: SigningKey::new(vec![0xAB; 32])
+                .expect("32-byte demo key satisfies the >=32 invariant"),
+        };
+        let actions = SessionLinkActions::new(driver.clone(), params);
+
+        let response = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"21.0").build();
+        let expected_wire = encode_frame_with_response(
+            100,
+            ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"21.0").build(),
+            /*reliable=*/ true,
+        );
+        actions.send_response(response);
+
+        let frames = driver.frames.lock().unwrap();
+        assert_eq!(frames.len(), 1, "exactly one send_blocking call per send_response");
+        assert_eq!(
+            frames[0].0, expected_wire,
+            "wire bytes must match encode_frame_with_response output byte-for-byte"
+        );
+        assert_eq!(
+            frames[0].1,
+            Reliability::Reliable,
+            "Reply data delivery pinned reliable at the action layer"
+        );
+    }
+
+    /// R121j-5c-e2e — `send_response` and `send_response_final`
+    /// advance the SN counter together so a `Reply` followed by its
+    /// terminating `ResponseFinal` carry consecutive SNs on the
+    /// reliable channel (zenoh-pico SN-window ordering depends on
+    /// this; a Reply that races ahead of the Final out-of-order would
+    /// stall the requester's z_get future).
+    #[test]
+    fn send_response_and_final_share_sn_counter() {
+        use std::sync::Mutex;
+
+        struct RecordingDriver {
+            frames: Mutex<Vec<Vec<u8>>>,
+        }
+        impl BoxedLinkDriver for RecordingDriver {
+            fn send_blocking(&self, bytes: &[u8], _r: Reliability) {
+                self.frames.lock().unwrap().push(bytes.to_vec());
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+        }
+
+        let driver = Arc::new(RecordingDriver {
+            frames: Mutex::new(Vec::new()),
+        });
+        let params = SessionInitParams {
+            version: 0x09,
+            whatami: 0x02,
+            zid: vec![0x01, 0x02, 0x03, 0x04],
+            seq_num_res: 2,
+            req_id_res: 2,
+            batch_size: 65535,
+            lease: 10_000,
+            lease_in_seconds: false,
+            initial_sn: 7,
+            cookie: Vec::new(),
+            cookie_signing_key: SigningKey::new(vec![0xAB; 32])
+                .expect("32-byte demo key satisfies the >=32 invariant"),
+        };
+        let actions = SessionLinkActions::new(driver.clone(), params);
+
+        actions.send_response(
+            ResponseReplyBuilder::new(99, 0, Some("k"), b"v").build(),
+        );
+        actions.send_response_final(99);
+
+        let frames = driver.frames.lock().unwrap();
+        assert_eq!(frames.len(), 2);
+        // Reply frame SN byte is at offset 1 (Frame header + VLE(sn)).
+        assert_eq!(frames[0][1], 7, "first frame uses initial_sn=7");
+        assert_eq!(
+            frames[1][1], 8,
+            "second frame increments to 8 — Reply + ResponseFinal carry consecutive SNs",
         );
     }
 
