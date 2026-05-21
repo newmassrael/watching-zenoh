@@ -8094,6 +8094,48 @@
         "Phase E (README 저작) — Mnemosyne migration 마지막, LICENSE/SPDX 안내 포함 carry"
       ]
     },
+    "Round 193": {
+      "decision_summary": "R121j-5c-e2e-action — SessionLinkActions.send_response wraps Reply/Err via next_outbound_frame_sn with reliable pin.",
+      "changes_bullets": [
+        "session_glue.rs L1252: send_response(Response) action layer",
+        "wraps next_outbound_frame_sn + encode_frame_with_response + Reliability::Reliable pin",
+        "doc cites QueryReply::into_response drain pattern from R121j-5b registry"
+      ],
+      "verification_bullets": [
+        "send_response_emits_reliable_frame_with_seeded_sn: byte-identical to encode_frame_with_response",
+        "send_response_and_final_share_sn_counter: Reply+Final consecutive SNs (7,8)",
+        "cargo test -p wz-runtime-tokio --lib: 129 -> 131, +2 passing",
+        "cargo clippy -p wz-runtime-tokio --lib --all-targets -- -D warnings: clean"
+      ],
+      "impact_refs": [
+        "66"
+      ],
+      "carry_forward_bullets": [
+        "R121j-5c-e2e-demo: wz-ap-demo --queryable / --query / --reply args + observer wires dispatch_iteration_event",
+        "R121j-5c-e2e-test: wz_queryable_round_trip.rs integration test (TCP wz<->wz)",
+        "SCE drift +7 commits audit entry pending (e4034617 snake-case Rust struct refs codegen)"
+      ],
+      "publishable_decision_summary": "R121j-5c-e2e-action — SessionLinkActions.send_response wraps Reply/Err via next_outbound_frame_sn with reliable pin.",
+      "publishable_changes_bullets": [
+        "session_glue.rs L1252: send_response(Response) action layer",
+        "wraps next_outbound_frame_sn + encode_frame_with_response + Reliability::Reliable pin",
+        "doc cites QueryReply::into_response drain pattern from R121j-5b registry"
+      ],
+      "publishable_verification_bullets": [
+        "send_response_emits_reliable_frame_with_seeded_sn: byte-identical to encode_frame_with_response",
+        "send_response_and_final_share_sn_counter: Reply+Final consecutive SNs (7,8)",
+        "cargo test -p wz-runtime-tokio --lib: 129 -> 131, +2 passing",
+        "cargo clippy -p wz-runtime-tokio --lib --all-targets -- -D warnings: clean"
+      ],
+      "publishable_impact_refs": [
+        "66"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121j-5c-e2e-demo: wz-ap-demo --queryable / --query / --reply args + observer wires dispatch_iteration_event",
+        "R121j-5c-e2e-test: wz_queryable_round_trip.rs integration test (TCP wz<->wz)",
+        "SCE drift +7 commits audit entry pending (e4034617 snake-case Rust struct refs codegen)"
+      ]
+    },
     "Round 2": {
       "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
       "changes_bullets": [
