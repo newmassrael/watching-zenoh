@@ -9640,6 +9640,54 @@
         "Phase E (README 저작) — Mnemosyne migration 마지막, LICENSE/SPDX 안내 포함"
       ]
     },
+    "Round 220": {
+      "decision_summary": "R220 keyexpr_pattern_matches $* intra-chunk DSL — chunk_matches_with_dsl mirrors zenoh-pico stardsl_subchunks_of_left; 7 boundary-case unit tests.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/pubsub.rs adds chunk_matches() router + chunk_matches_with_dsl() splitter — pattern chunk is split on '$*' into sub-parts; non-empty leading anchors target prefix, non-empty trailing anchors target suffix, middle sub-parts located by leftmost-first str::find — mirrors zenoh-pico's _z_chunk_forward_X + _z_chunk_special_X + _z_chunk_right_contains_all_stardsl_subchunks_of_left from vendor/zenoh-pico/include/zenoh-pico/session/keyexpr_match_template.h (lines 70-97 + 195-268 + 380-424); includes-only semantics so single-function form replaces the C macro template's intersects/includes split",
+        "crates/wz-runtime-tokio/src/pubsub.rs::matches_chunks literal compare upgraded — `pat == target[ti]` replaced by `chunk_matches(pat, target[ti])` so any pattern chunk containing '$*' routes through the DSL splitter while the byte-equal fast-path remains for plain chunks; '**' (zero-or-more) and '*' (one-chunk) handling unchanged so the two-cursor `**` backtrack frame stays intact",
+        "crates/wz-runtime-tokio/src/pubsub.rs module-level doc updated — R100 wildcard surface description replaced by R100+R220 description that documents $* support, multi-DSL anchor-and-find semantics, and the explicit chunk-boundary invariant ($* never crosses '/'); keyexpr_pattern_matches doc enumerates four chunk shapes (**/*/$*/literal) with chunk_matches_with_dsl algorithm pointer",
+        "crates/wz-runtime-tokio/src/pubsub.rs adds 7 unit tests — keyexpr_pattern_matches_dsl_prefix_suffix_anchors / leading_only_floats_prefix / trailing_only_floats_suffix / multiple_dsl_in_order / does_not_cross_chunk_boundary / chunk_alone_acts_like_single_star / combines_with_double_star — cover empty-anchor floats, multi-DSL anchor-order and overlap rejection, chunk-boundary invariant, lone $* chunk equivalence to *, ** + $* orthogonal interaction"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 190 → 197 (+7 R220 DSL boundary-case unit tests all green; the existing R100 single_chunk_wildcard / double_star_zero_or_more / literal_equality tests stay green so the byte-equal fast-path + ** backtrack are preserved)",
+        "cargo test -p wz-integration-tests: all binaries pass with 0 failed across the workspace — no regression on Push / Del / Query / DECLARE paths (keyexpr_pattern_matches is shared by pubsub dispatch and query dispatch via the explicit `use crate::pubsub::keyexpr_pattern_matches` in query.rs line 83 + line 520 call site)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean — new chunk_matches and chunk_matches_with_dsl helpers introduce no new lint; the DSL splitter allocates one Vec<&str> per DSL-bearing chunk (zenoh-pico's C version inlines the same scan; matching the algorithmic cost-model) and the byte-equal fast-path remains alloc-free"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R220 sister sub-rounds from R217 inventory remain — R221 inbound resolve wireexpr canonicalization (lowercase / NFC pre-match) to mirror zenoh-pico canonical form; R222 dispatch_push callback Sample-type projection (API-breaking, raw &Push → Sample { sample_kind, payload, encoding, timestamp, qos, attachment, source_info, reliability }, deferred to end of cluster); R223 origin/locality filter (subscriber._allowed_origin Local/Remote/Both default)",
+        "wz keyexpr_pattern_matches operates on already-/-split pattern chunks; chunk_matches_with_dsl does NOT apply zenoh-pico's canonicalization (lone $* chunk → *, double-$* run collapse → single $*, STAR_AFTER_DSL rejection). wz currently accepts any chunk shape as-is and produces sane fail-modes for non-canonical input ($* alone behaves like *, $*$* behaves like $*, **$* fails to match arbitrary chunks). Pattern canonicalization on register / pre-dispatch is a future round if real-world patterns surface that need it — currently zenoh-pico canonicalizes on encode so wire-received patterns are already canonical",
+        "Pub/Sub inbound 30% remainder cluster now has 3 sub-rounds outstanding (R221 / R222 / R223); R218+R219+R220 closed the explicit-arm contract + Del path + $* DSL = ~15% of the cluster",
+        "SCE upstream drift carry continues — wz vendor pin ebf3b3ff = SCE origin/main HEAD unchanged across 21st / 22nd session; SCE local /home/coin/scxml-core-engine 5b60e184 (+24 unpushed: 19 clippy + 4 result_large_err Box refactors + 1 neg_cmp_op_on_partial_ord refactor over R219 baseline 57d51ed7) plus uncommitted sce-build/src/forge/parser.rs WIP; no pin bump trigger this round",
+        "R121h-perf-bump-5 encode_ext_chain Z-bit SCE-a vs wz-b decision still pending user confirmation",
+        "Phase W lwIP / MCU runtime full scaffolding deferred — 20-50 round cluster unchanged"
+      ],
+      "publishable_decision_summary": "R220 keyexpr_pattern_matches $* intra-chunk DSL — chunk_matches_with_dsl mirrors zenoh-pico stardsl_subchunks_of_left; 7 boundary-case unit tests.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/pubsub.rs adds chunk_matches() router + chunk_matches_with_dsl() splitter — pattern chunk is split on '$*' into sub-parts; non-empty leading anchors target prefix, non-empty trailing anchors target suffix, middle sub-parts located by leftmost-first str::find — mirrors zenoh-pico's _z_chunk_forward_X + _z_chunk_special_X + _z_chunk_right_contains_all_stardsl_subchunks_of_left from vendor/zenoh-pico/include/zenoh-pico/session/keyexpr_match_template.h (lines 70-97 + 195-268 + 380-424); includes-only semantics so single-function form replaces the C macro template's intersects/includes split",
+        "crates/wz-runtime-tokio/src/pubsub.rs::matches_chunks literal compare upgraded — `pat == target[ti]` replaced by `chunk_matches(pat, target[ti])` so any pattern chunk containing '$*' routes through the DSL splitter while the byte-equal fast-path remains for plain chunks; '**' (zero-or-more) and '*' (one-chunk) handling unchanged so the two-cursor `**` backtrack frame stays intact",
+        "crates/wz-runtime-tokio/src/pubsub.rs module-level doc updated — R100 wildcard surface description replaced by R100+R220 description that documents $* support, multi-DSL anchor-and-find semantics, and the explicit chunk-boundary invariant ($* never crosses '/'); keyexpr_pattern_matches doc enumerates four chunk shapes (**/*/$*/literal) with chunk_matches_with_dsl algorithm pointer",
+        "crates/wz-runtime-tokio/src/pubsub.rs adds 7 unit tests — keyexpr_pattern_matches_dsl_prefix_suffix_anchors / leading_only_floats_prefix / trailing_only_floats_suffix / multiple_dsl_in_order / does_not_cross_chunk_boundary / chunk_alone_acts_like_single_star / combines_with_double_star — cover empty-anchor floats, multi-DSL anchor-order and overlap rejection, chunk-boundary invariant, lone $* chunk equivalence to *, ** + $* orthogonal interaction"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 190 → 197 (+7 R220 DSL boundary-case unit tests all green; the existing R100 single_chunk_wildcard / double_star_zero_or_more / literal_equality tests stay green so the byte-equal fast-path + ** backtrack are preserved)",
+        "cargo test -p wz-integration-tests: all binaries pass with 0 failed across the workspace — no regression on Push / Del / Query / DECLARE paths (keyexpr_pattern_matches is shared by pubsub dispatch and query dispatch via the explicit `use crate::pubsub::keyexpr_pattern_matches` in query.rs line 83 + line 520 call site)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean — new chunk_matches and chunk_matches_with_dsl helpers introduce no new lint; the DSL splitter allocates one Vec<&str> per DSL-bearing chunk (zenoh-pico's C version inlines the same scan; matching the algorithmic cost-model) and the byte-equal fast-path remains alloc-free"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R220 sister sub-rounds from R217 inventory remain — R221 inbound resolve wireexpr canonicalization (lowercase / NFC pre-match) to mirror zenoh-pico canonical form; R222 dispatch_push callback Sample-type projection (API-breaking, raw &Push → Sample { sample_kind, payload, encoding, timestamp, qos, attachment, source_info, reliability }, deferred to end of cluster); R223 origin/locality filter (subscriber._allowed_origin Local/Remote/Both default)",
+        "wz keyexpr_pattern_matches operates on already-/-split pattern chunks; chunk_matches_with_dsl does NOT apply zenoh-pico's canonicalization (lone $* chunk → *, double-$* run collapse → single $*, STAR_AFTER_DSL rejection). wz currently accepts any chunk shape as-is and produces sane fail-modes for non-canonical input ($* alone behaves like *, $*$* behaves like $*, **$* fails to match arbitrary chunks). Pattern canonicalization on register / pre-dispatch is a future round if real-world patterns surface that need it — currently zenoh-pico canonicalizes on encode so wire-received patterns are already canonical",
+        "Pub/Sub inbound 30% remainder cluster now has 3 sub-rounds outstanding (R221 / R222 / R223); R218+R219+R220 closed the explicit-arm contract + Del path + $* DSL = ~15% of the cluster",
+        "SCE upstream drift carry continues — wz vendor pin ebf3b3ff = SCE origin/main HEAD unchanged across 21st / 22nd session; SCE local /home/coin/scxml-core-engine 5b60e184 (+24 unpushed: 19 clippy + 4 result_large_err Box refactors + 1 neg_cmp_op_on_partial_ord refactor over R219 baseline 57d51ed7) plus uncommitted sce-build/src/forge/parser.rs WIP; no pin bump trigger this round",
+        "R121h-perf-bump-5 encode_ext_chain Z-bit SCE-a vs wz-b decision still pending user confirmation",
+        "Phase W lwIP / MCU runtime full scaffolding deferred — 20-50 round cluster unchanged"
+      ]
+    },
     "Round 23": {
       "decision_summary": "vle pair test-vector hardening — vle_byte_length + vle_u64_decode 각 3 boundary vectors land; SCE v1 test-vector schema single-`bytes`-param scalar-return 제약 발견, MID validator (uint8 param) 6종 test-vector는 Phase B5 multi-arg/non-bytes 지원 후 deferred carry.",
       "changes_bullets": [
