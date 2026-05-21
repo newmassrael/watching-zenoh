@@ -8136,6 +8136,48 @@
         "SCE drift +7 commits audit entry pending (e4034617 snake-case Rust struct refs codegen)"
       ]
     },
+    "Round 194": {
+      "decision_summary": "R121j-5c-e2e-demo — wz-ap-demo --queryable/--reply/--query CLI + observer fans IterationEvent into Q-registry with drain wiring.",
+      "changes_bullets": [
+        "wz-ap-demo: --queryable/--reply/--query CLI surface + validation matrix",
+        "observer fans IterationEvent into QueryableRegistry, drains replies/finals through actions.send_response*",
+        "IterationEvent gains Clone+Copy derive so subscriber+queryable share one event per iteration",
+        "query_task: single-shot Request(Query) emit on Established gate (mirror of publisher_task)"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-ap-demo: clean",
+        "cargo clippy -p wz-ap-demo -p wz-runtime-tokio --all-targets -- -D warnings: clean",
+        "cargo test -p wz-runtime-tokio --lib: 131 passing (no regression)"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121j-5c-e2e-test: wz_queryable_round_trip.rs TCP wz<->wz integration test",
+        "R121j-6 z_get-side inbound Response.Reply application dispatch (ReplyRegistry)",
+        "SCE drift +7 commits audit entry pending (e4034617 snake-case Rust struct refs codegen)"
+      ],
+      "publishable_decision_summary": "R121j-5c-e2e-demo — wz-ap-demo --queryable/--reply/--query CLI + observer fans IterationEvent into Q-registry with drain wiring.",
+      "publishable_changes_bullets": [
+        "wz-ap-demo: --queryable/--reply/--query CLI surface + validation matrix",
+        "observer fans IterationEvent into QueryableRegistry, drains replies/finals through actions.send_response*",
+        "IterationEvent gains Clone+Copy derive so subscriber+queryable share one event per iteration",
+        "query_task: single-shot Request(Query) emit on Established gate (mirror of publisher_task)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-ap-demo: clean",
+        "cargo clippy -p wz-ap-demo -p wz-runtime-tokio --all-targets -- -D warnings: clean",
+        "cargo test -p wz-runtime-tokio --lib: 131 passing (no regression)"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121j-5c-e2e-test: wz_queryable_round_trip.rs TCP wz<->wz integration test",
+        "R121j-6 z_get-side inbound Response.Reply application dispatch (ReplyRegistry)",
+        "SCE drift +7 commits audit entry pending (e4034617 snake-case Rust struct refs codegen)"
+      ]
+    },
     "Round 2": {
       "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
       "changes_bullets": [
