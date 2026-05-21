@@ -9470,6 +9470,58 @@
         "Phase W lwIP / MCU runtime scaffolding (crates/wz-runtime-lwip Cargo.toml + sce_link_runtime_lwip C11 header) deferred — 20-50 rounds cluster"
       ]
     },
+    "Round 218": {
+      "decision_summary": "R218 pubsub.rs absorb_declare DeclareVariant 10-arm explicit match (no catch-all) + 8 non-keyexpr arm no-op coverage test; upstream codegen growth surfaces as compile error here instead of silent miss.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/pubsub.rs::SubscriberRegistry::absorb_declare: catch-all `_ => {}` replaced with 10 explicit DeclareVariant arms — CodecZenohDeclKexpr / UndeclKexpr (existing keyexpr-table mutators) + CodecZenohDeclSubscriber / UndeclSubscriber + CodecZenohDeclQueryable / UndeclQueryable + CodecZenohDeclToken / UndeclToken + CodecZenohDeclFinal + Default { tag, body } (8 explicit no-op arms)",
+        "Each no-op arm carries a one-block comment citing the dedicated owner registry — DeclSubscriber/Undecl → declare::subscriber::DeclSubscriberRegistry, DeclQueryable/Undecl → declare::queryable::QueryableRegistry, DeclToken/Undecl → declare::liveliness::TokenRegistry, DeclFinal → session-glue burst marker, Default → forward-compat unknown-tag preservation",
+        "Function-level doc bumped to explain the explicit-arm contract — a future codegen variant in wz-codecs DeclareVariant enum will surface as a compile error inside absorb_declare rather than slipping through the prior catch-all",
+        "New unit test pubsub::tests::absorb_declare_non_keyexpr_arms_leave_table_empty — iterates DeclareVariant::CodecZenohDecl{Subscriber,Queryable,Token} + their Undecl pairs + DeclFinal + Default { tag:0xFF, body:DeclFinal::default() } against a fresh SubscriberRegistry, asserting peer_keyexpr_table().is_empty() after each absorb_declare call"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 185 → 186 (R218 absorb_declare_non_keyexpr_arms_leave_table_empty +1, all green)",
+        "cargo test --workspace --lib: every crate's lib suite green (no regression on the other 5 crates' lib tests)",
+        "cargo test -p wz-integration-tests --test layer3_declare --test layer3_inbound_declare: 6/6 pass — Declare-path integration tests still green (no behavior change for the keyexpr-mutating arms)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean — explicit-arm match compiles without exhaustiveness or unreachable-pattern warnings",
+        "Pre-commit / commit-msg hooks pass (mnemosyne-cli validate-workspace baseline preserved: docs=12/12, T1=0, round-trip=12/12, sync)"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants"
+      ],
+      "carry_forward_bullets": [
+        "R218 same explicit-arm pattern (catch-all → 10 explicit arms) is replicable to declare::subscriber::DeclSubscriberRegistry / declare::queryable::QueryableRegistry / declare::liveliness::TokenRegistry observe_declare methods + pubsub.rs::SubscriberRegistry::dispatch (NetworkMessage outer enum) — pending sub-rounds for codegen-growth detection surface expansion",
+        "Pub/Sub inbound 35% remainder cluster — next candidate sub-rounds from R217 inventory: R219 Inbound Del PushBody integration test (wz-ap-demo --delete + ap_demo_round_trip_del); R220 keyexpr_pattern_matches $* DSL intra-chunk wildcard parity with zenoh-pico; R221 inbound resolve wireexpr canonicalization; R222 dispatch_push callback Sample-type projection (API-breaking, deferred); R223 origin/locality filter",
+        "SCE upstream drift carry continues — wz vendor pin ebf3b3ff still matches SCE origin/main; SCE local /home/coin/scxml-core-engine 57d51ed7 (+23 unpushed: 19 clippy + 4 result_large_err Box refactors) plus uncommitted sce-build/src/forge/parser.rs WIP; pin bump deferred until SCE origin/main advances",
+        "R121h-perf-bump-5 encode_ext_chain Z-bit SCE-a vs wz-b decision still pending user confirmation",
+        "Phase W lwIP / MCU runtime full scaffolding (crates/wz-runtime-lwip + sce_link_runtime_lwip C11 header) deferred — 20-50 round cluster"
+      ],
+      "publishable_decision_summary": "R218 pubsub.rs absorb_declare DeclareVariant 10-arm explicit match (no catch-all) + 8 non-keyexpr arm no-op coverage test; upstream codegen growth surfaces as compile error here instead of silent miss.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/pubsub.rs::SubscriberRegistry::absorb_declare: catch-all `_ => {}` replaced with 10 explicit DeclareVariant arms — CodecZenohDeclKexpr / UndeclKexpr (existing keyexpr-table mutators) + CodecZenohDeclSubscriber / UndeclSubscriber + CodecZenohDeclQueryable / UndeclQueryable + CodecZenohDeclToken / UndeclToken + CodecZenohDeclFinal + Default { tag, body } (8 explicit no-op arms)",
+        "Each no-op arm carries a one-block comment citing the dedicated owner registry — DeclSubscriber/Undecl → declare::subscriber::DeclSubscriberRegistry, DeclQueryable/Undecl → declare::queryable::QueryableRegistry, DeclToken/Undecl → declare::liveliness::TokenRegistry, DeclFinal → session-glue burst marker, Default → forward-compat unknown-tag preservation",
+        "Function-level doc bumped to explain the explicit-arm contract — a future codegen variant in wz-codecs DeclareVariant enum will surface as a compile error inside absorb_declare rather than slipping through the prior catch-all",
+        "New unit test pubsub::tests::absorb_declare_non_keyexpr_arms_leave_table_empty — iterates DeclareVariant::CodecZenohDecl{Subscriber,Queryable,Token} + their Undecl pairs + DeclFinal + Default { tag:0xFF, body:DeclFinal::default() } against a fresh SubscriberRegistry, asserting peer_keyexpr_table().is_empty() after each absorb_declare call"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 185 → 186 (R218 absorb_declare_non_keyexpr_arms_leave_table_empty +1, all green)",
+        "cargo test --workspace --lib: every crate's lib suite green (no regression on the other 5 crates' lib tests)",
+        "cargo test -p wz-integration-tests --test layer3_declare --test layer3_inbound_declare: 6/6 pass — Declare-path integration tests still green (no behavior change for the keyexpr-mutating arms)",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean — explicit-arm match compiles without exhaustiveness or unreachable-pattern warnings",
+        "Pre-commit / commit-msg hooks pass (mnemosyne-cli validate-workspace baseline preserved: docs=12/12, T1=0, round-trip=12/12, sync)"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R218 same explicit-arm pattern (catch-all → 10 explicit arms) is replicable to declare::subscriber::DeclSubscriberRegistry / declare::queryable::QueryableRegistry / declare::liveliness::TokenRegistry observe_declare methods + pubsub.rs::SubscriberRegistry::dispatch (NetworkMessage outer enum) — pending sub-rounds for codegen-growth detection surface expansion",
+        "Pub/Sub inbound 35% remainder cluster — next candidate sub-rounds from R217 inventory: R219 Inbound Del PushBody integration test (wz-ap-demo --delete + ap_demo_round_trip_del); R220 keyexpr_pattern_matches $* DSL intra-chunk wildcard parity with zenoh-pico; R221 inbound resolve wireexpr canonicalization; R222 dispatch_push callback Sample-type projection (API-breaking, deferred); R223 origin/locality filter",
+        "SCE upstream drift carry continues — wz vendor pin ebf3b3ff still matches SCE origin/main; SCE local /home/coin/scxml-core-engine 57d51ed7 (+23 unpushed: 19 clippy + 4 result_large_err Box refactors) plus uncommitted sce-build/src/forge/parser.rs WIP; pin bump deferred until SCE origin/main advances",
+        "R121h-perf-bump-5 encode_ext_chain Z-bit SCE-a vs wz-b decision still pending user confirmation",
+        "Phase W lwIP / MCU runtime full scaffolding (crates/wz-runtime-lwip + sce_link_runtime_lwip C11 header) deferred — 20-50 round cluster"
+      ]
+    },
     "Round 22": {
       "decision_summary": "vle_byte_length primitive land — Phase A3 cursor-free TLV chain walker missing piece; vle_u64_decode와 짝으로 §7 extension iterator를 Phase A4 cursor 의존 없이 author-side에서 운영 가능, tlv_advance Phase A4+ 진화의 내부 길이 산출 부분품.",
       "changes_bullets": [
