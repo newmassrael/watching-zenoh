@@ -8320,6 +8320,50 @@
         "SCE drift +7 commits audit entry pending"
       ]
     },
+    "Round 198": {
+      "decision_summary": "R121k-3 — RemoteQueryableRegistry lands in declare.rs as Q-side parity of R121k-2 RemoteSubscriberRegistry.",
+      "changes_bullets": [
+        "declare.rs +RemoteQueryableRegistry (on_queryable_declared/_undeclared + dispatch_*)",
+        "shape mirror of R121k-2; codec records DeclQueryable/UndeclQueryable identical to Subscriber-side",
+        "subscriber+queryable registries scan the same FramePayload.messages slice independently (type-safe split)",
+        "matches zenoh-pico's Z_FEATURE_SUBSCRIPTION vs Z_FEATURE_QUERYABLE compile-time feature boundary"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 141 -> 147, +6 queryable::tests passing",
+        "cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings: clean",
+        "cross-registry composability test confirms parallel dispatch over shared message stream"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121k-4 LivelinessRegistry (DeclToken+UndeclToken)",
+        "R121k-5 absorb_declare or external observer fans Declare body into all three Remote* registries",
+        "R121k-6 integration test parity (mirror wz_queryable_round_trip pattern)",
+        "SCE drift +7 commits audit entry pending"
+      ],
+      "publishable_decision_summary": "R121k-3 — RemoteQueryableRegistry lands in declare.rs as Q-side parity of R121k-2 RemoteSubscriberRegistry.",
+      "publishable_changes_bullets": [
+        "declare.rs +RemoteQueryableRegistry (on_queryable_declared/_undeclared + dispatch_*)",
+        "shape mirror of R121k-2; codec records DeclQueryable/UndeclQueryable identical to Subscriber-side",
+        "subscriber+queryable registries scan the same FramePayload.messages slice independently (type-safe split)",
+        "matches zenoh-pico's Z_FEATURE_SUBSCRIPTION vs Z_FEATURE_QUERYABLE compile-time feature boundary"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 141 -> 147, +6 queryable::tests passing",
+        "cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings: clean",
+        "cross-registry composability test confirms parallel dispatch over shared message stream"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121k-4 LivelinessRegistry (DeclToken+UndeclToken)",
+        "R121k-5 absorb_declare or external observer fans Declare body into all three Remote* registries",
+        "R121k-6 integration test parity (mirror wz_queryable_round_trip pattern)",
+        "SCE drift +7 commits audit entry pending"
+      ]
+    },
     "Round 2": {
       "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
       "changes_bullets": [
