@@ -147,8 +147,11 @@ jobs:
       - name: cargo publish --dry-run (wz-runtime-tokio)
         run: (cd crates && cargo publish --dry-run -p wz-runtime-tokio) || echo "::warning::wz-runtime-tokio dry-run non-zero — investigate before manual publish"
 
-      - name: cargo publish --dry-run (wz-runtime-lwip)
-        run: (cd crates && cargo publish --dry-run -p wz-runtime-lwip) || echo "::warning::wz-runtime-lwip dry-run non-zero — investigate before manual publish"
+      # wz-runtime-lwip is not yet a workspace member (Phase W). The
+      # crates/wz-runtime-lwip directory ships only include/ + tests/
+      # ahead of the runtime crate landing; no Cargo.toml exists, so
+      # there is no dry-run target here. Reintroduce once Phase W
+      # crate scaffolding lands.
 
       - name: cargo publish --dry-run (wz-ap-demo)
         run: (cd crates && cargo publish --dry-run -p wz-ap-demo) || echo "::warning::wz-ap-demo dry-run non-zero — investigate before manual publish"

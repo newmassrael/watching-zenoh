@@ -38,6 +38,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+readme.workspace = true
 description = "AP MVP demo binary — exercises wz-runtime-tokio + wz-codecs against an external zenoh-pico CLI peer for round-trip wire interop."
 
 [[bin]]

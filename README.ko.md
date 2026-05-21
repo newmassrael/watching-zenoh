@@ -92,7 +92,7 @@ docs/.atomic/ 의 atomic changelog 가 최신본.
 | sources/ | SCE Forge 입력 SCXML (codec + algorithm + session FSM) |
 | crates/wz-codecs | sources/codecs/*.scxml 에서 생성된 codec 타입 |
 | crates/wz-runtime-tokio | Tokio 기반 AP 런타임 + session glue + builder |
-| crates/wz-runtime-lwip | lwIP / MCU 런타임 skeleton (Phase W) |
+| crates/wz-runtime-lwip | lwIP / MCU 런타임 헤더 + 테스트 (Phase W, 아직 workspace member 아님) |
 | crates/wz-ap-demo | AP MVP demo binary (initiator + acceptor) |
 | crates/wz-integration-tests | Layer 3 wire-interop + round-trip suite |
 | crates/wz-runtime-tokio-test-support | 런타임 테스트용 shared harness |
