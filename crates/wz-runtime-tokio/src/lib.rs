@@ -63,6 +63,17 @@ pub mod declare;
 /// for scope, callback shape, and threading.
 pub mod reply;
 
+/// R121k-7 — application-layer observer bundle. Combines the six
+/// per-domain registries (subscribers, queryables, remote_subscribers,
+/// remote_queryables, liveliness, replies) plus the queryable side's
+/// pending-reply / pending-final staging buffers into one cohesive
+/// struct so production callers drive the whole dispatch graph with
+/// a single [`observer::ApplicationLayerObserver::dispatch`] call per
+/// [`session_glue::IterationEvent`]. See `observer` module doc
+/// comment for the rationale, dispatch flow, and what is NOT in
+/// scope.
+pub mod observer;
+
 /// Generated SCXML state machine for the unicast session FSM. The
 /// emit comes from `sources/session/session_fsm_unicast.scxml` via
 /// `build.rs`. Public re-export is module-form rather than
