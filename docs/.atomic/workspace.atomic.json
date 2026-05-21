@@ -6327,6 +6327,62 @@
         "R121h-perf-bump-2 carry intact: still blocking on explicit user consent for the atomic 12-SCXML migration + vendor pin bump."
       ]
     },
+    "Round 121j-3d": {
+      "decision_summary": "ResponseReplyBuilder.reply_del() setter -- swaps the inner ReplyVariant arm from CodecZenohMsgPut to CodecZenohMsgDel. Inner MID flips 0x01 -> 0x02; payload bytes from constructor are dropped (MsgDel carries no payload).",
+      "changes_bullets": [
+        "+ use wz_codecs::msg_del::MsgDel to session_glue.rs imports (MsgDel now constructed in this file via the .reply_del() setter)",
+        "ResponseReplyBuilder in crates/wz-runtime-tokio/src/session_glue.rs gains the body_kind_del: bool field (default false = MsgPut, the existing put-data reply) + the .reply_del() setter that flips the bool to true (the delete-keyexpr reply). Doc-comment captures the payload-drop behaviour: payload supplied to ::new() is unused on the Del path because MsgDel struct has no payload, only an optional timestamp + optional ext chain",
+        "build() now branches on body_kind_del after delegating to the existing put one-shot helpers: if Del, the freshly-built MsgPut arm is swapped for ReplyVariant::CodecZenohMsgDel(MsgDel { header: 0x02, timestamp: None, extensions: None }). The delegate-then-swap shape keeps build_response_reply_literal/aliased one-shot helpers unchanged (additive contract); the cost is one wasted MsgPut struct per Del-reply build, acceptable for the additive shape",
+        "2 new lib tests pin the wire-level effect: reply_del() flips inner MID from 0x01 to 0x02 and reduces the wire length by exactly 6 bytes (the VLE(5) length prefix + 5 payload bytes of b'hello' that MsgPut would emit but MsgDel does not); composes cleanly with .consolidation(Latest) so Reply.header.C(0x20) + 1 byte consolidation sit between Reply.header and the MsgDel inner MID"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio: clean",
+        "cargo test -p wz-runtime-tokio --lib: 98/98 pass (96 baseline + 2 new reply_del tests)",
+        "cargo clippy -p wz-runtime-tokio --all-targets: clean",
+        "scripts/run-ci.sh: 8/8 lanes pass on first attempt (no flake this round)",
+        "Byte-level invariant pin: put_wire.len() - del_wire.len() == 6 confirms the MsgDel payload-omission contract holds at the wire boundary. The +6 difference decomposes as VLE(payload_len=5) = 1 byte + 5 'hello' payload bytes that MsgPut emits and MsgDel does not"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121j-3b Reply.source_info setter (Reply.header.Z + source-info ZBUF ext) still pending on ResponseReplyBuilder",
+        "R121j-3c Reply.responder setter (Response.header.Z + responder ZBUF ext) still pending; this is the only Response-LEVEL ext on Reply path, distinct from the Reply-LEVEL exts. Wiring requires extending the existing build() to also push to response.extensions (currently only reply.extensions is touched)",
+        "R121j-4b Err.source_info setter, R121j-4c Err.attachment setter still pending on ResponseErrBuilder",
+        "R121h-perf-bump-4: 4 secondary encoders (InitBody/OpenBody/DeclFinal-batch/KeepAlive at session_glue.rs lines 1543/1596/1620/1645) still use inner-Vec + extend_from_slice. Apply encode_frame_envelope-style shape for symmetry. Lower priority than R121j-5",
+        "R121j-5 inbound Request(Query) parser + on_query dispatch + QueryableTable struct -- largest single AP MVP weighted jump (+5-7%p); 2-3 sub-rounds = 1 session",
+        "R121k inbound DECLARE parser silent gap (outbound 9/9 vs inbound 0/8); 4-6 sub-rounds = 1-2 sessions",
+        "R121j-1h ergonomic typed wrapper over .request_qos(packed). R121j-tstamp setter pending wz_codecs ext_zbuf Timestamp sub-codec wiring"
+      ],
+      "publishable_decision_summary": "ResponseReplyBuilder.reply_del() setter -- swaps the inner ReplyVariant arm from CodecZenohMsgPut to CodecZenohMsgDel. Inner MID flips 0x01 -> 0x02; payload bytes from constructor are dropped (MsgDel carries no payload).",
+      "publishable_changes_bullets": [
+        "+ use wz_codecs::msg_del::MsgDel to session_glue.rs imports (MsgDel now constructed in this file via the .reply_del() setter)",
+        "ResponseReplyBuilder in crates/wz-runtime-tokio/src/session_glue.rs gains the body_kind_del: bool field (default false = MsgPut, the existing put-data reply) + the .reply_del() setter that flips the bool to true (the delete-keyexpr reply). Doc-comment captures the payload-drop behaviour: payload supplied to ::new() is unused on the Del path because MsgDel struct has no payload, only an optional timestamp + optional ext chain",
+        "build() now branches on body_kind_del after delegating to the existing put one-shot helpers: if Del, the freshly-built MsgPut arm is swapped for ReplyVariant::CodecZenohMsgDel(MsgDel { header: 0x02, timestamp: None, extensions: None }). The delegate-then-swap shape keeps build_response_reply_literal/aliased one-shot helpers unchanged (additive contract); the cost is one wasted MsgPut struct per Del-reply build, acceptable for the additive shape",
+        "2 new lib tests pin the wire-level effect: reply_del() flips inner MID from 0x01 to 0x02 and reduces the wire length by exactly 6 bytes (the VLE(5) length prefix + 5 payload bytes of b'hello' that MsgPut would emit but MsgDel does not); composes cleanly with .consolidation(Latest) so Reply.header.C(0x20) + 1 byte consolidation sit between Reply.header and the MsgDel inner MID"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio: clean",
+        "cargo test -p wz-runtime-tokio --lib: 98/98 pass (96 baseline + 2 new reply_del tests)",
+        "cargo clippy -p wz-runtime-tokio --all-targets: clean",
+        "scripts/run-ci.sh: 8/8 lanes pass on first attempt (no flake this round)",
+        "Byte-level invariant pin: put_wire.len() - del_wire.len() == 6 confirms the MsgDel payload-omission contract holds at the wire boundary. The +6 difference decomposes as VLE(payload_len=5) = 1 byte + 5 'hello' payload bytes that MsgPut emits and MsgDel does not"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121j-3b Reply.source_info setter (Reply.header.Z + source-info ZBUF ext) still pending on ResponseReplyBuilder",
+        "R121j-3c Reply.responder setter (Response.header.Z + responder ZBUF ext) still pending; this is the only Response-LEVEL ext on Reply path, distinct from the Reply-LEVEL exts. Wiring requires extending the existing build() to also push to response.extensions (currently only reply.extensions is touched)",
+        "R121j-4b Err.source_info setter, R121j-4c Err.attachment setter still pending on ResponseErrBuilder",
+        "R121h-perf-bump-4: 4 secondary encoders (InitBody/OpenBody/DeclFinal-batch/KeepAlive at session_glue.rs lines 1543/1596/1620/1645) still use inner-Vec + extend_from_slice. Apply encode_frame_envelope-style shape for symmetry. Lower priority than R121j-5",
+        "R121j-5 inbound Request(Query) parser + on_query dispatch + QueryableTable struct -- largest single AP MVP weighted jump (+5-7%p); 2-3 sub-rounds = 1 session",
+        "R121k inbound DECLARE parser silent gap (outbound 9/9 vs inbound 0/8); 4-6 sub-rounds = 1-2 sessions",
+        "R121j-1h ergonomic typed wrapper over .request_qos(packed). R121j-tstamp setter pending wz_codecs ext_zbuf Timestamp sub-codec wiring"
+      ]
+    },
     "Round 121j-4": {
       "decision_summary": "R121j-4 closes the Response(Err) outbound mirror of R121j-3 (Reply), giving the queryable-side a way to emit error responses for failed Query handling.",
       "changes_bullets": [
