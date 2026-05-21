@@ -2535,6 +2535,7 @@ pub struct RequestQueryBuilder {
     // Request-layer ext settings.
     request_qos: Option<u8>,
     request_target: Option<QueryTarget>,
+    request_budget: Option<u32>,
     request_timeout_ms: Option<u64>,
 }
 
@@ -2553,6 +2554,7 @@ impl RequestQueryBuilder {
             query_attachment: None,
             request_qos: None,
             request_target: None,
+            request_budget: None,
             request_timeout_ms: None,
         }
     }
@@ -2636,6 +2638,23 @@ impl RequestQueryBuilder {
         self
     }
 
+    /// Set the Request-level budget extension. Panics on zero
+    /// (zenoh-pico's `_z_n_msg_request_needed_exts` at
+    /// `vendor/zenoh-pico/src/protocol/definitions/network.c`
+    /// declares `ext_budget = msg->_ext_budget != 0`, so a zero
+    /// budget is encoded as "ext absent"). The value is the
+    /// per-Query reply-volume budget; emit position sits between
+    /// target and timeout in the Request-level ext chain.
+    pub fn request_budget(mut self, value: u32) -> Self {
+        assert!(
+            value != 0,
+            "RequestQueryBuilder::request_budget requires a non-zero budget; \
+             zenoh-pico's ext_budget predicate clears the ext on zero",
+        );
+        self.request_budget = Some(value);
+        self
+    }
+
     /// Set the Request-level timeout extension. Panics on zero (the
     /// zenoh-pico encoder predicate clears the ext on zero).
     pub fn request_timeout_ms(mut self, timeout_ms: u64) -> Self {
@@ -2716,6 +2735,16 @@ impl RequestQueryBuilder {
                 body: ExtEntryVariant::CodecZenohExtZint(ExtZint {
                     value: target.wire_byte() as u64,
                 }),
+            });
+        }
+        if let Some(budget) = self.request_budget {
+            request_exts.push(ExtEntry {
+                // ENC_ZINT(0x20) | id_budget(0x05). No M flag —
+                // budget is informational per zenoh-pico's encode
+                // pattern at network.c:144-149. Position between
+                // target and timeout per the same source.
+                header: 0x20 | 0x05,
+                body: ExtEntryVariant::CodecZenohExtZint(ExtZint { value: budget as u64 }),
             });
         }
         if let Some(timeout_ms) = self.request_timeout_ms {
@@ -6899,6 +6928,62 @@ mod tests {
         // timeout last: ENC_ZINT | id_timeout(6), no Z
         assert_eq!(req_exts[2].header, 0x20 | 0x06,
             "timeout ext at index 2 (last) must NOT carry Z");
+    }
+
+    /// R121j-1g — RequestQueryBuilder.request_budget emits a single
+    /// Request-level ext between target and timeout (per zenoh-pico
+    /// _z_request_encode order) with header ENC_ZINT(0x20) |
+    /// id_budget(0x05) and no M flag.
+    #[test]
+    fn request_query_builder_request_budget_emits_ext_between_target_and_timeout() {
+        // Solo case: only budget set. Ext at index 0 (chain head), no
+        // Z (it is the only ext, hence the last).
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_budget(0x1234_5678)
+            .build();
+        let req_exts = request.extensions.as_ref().expect("budget setter must populate exts");
+        assert_eq!(req_exts.len(), 1, "only budget ext was set");
+        assert_eq!(
+            req_exts[0].header,
+            0x20 | 0x05,
+            "budget ext header = ENC_ZINT(0x20) | id_budget(0x05); no M, no Z (last)",
+        );
+        match &req_exts[0].body {
+            ExtEntryVariant::CodecZenohExtZint(zint) => {
+                assert_eq!(zint.value, 0x1234_5678, "budget u32 widens into u64 ZINT value verbatim");
+            }
+            _ => panic!("budget ext body must be CodecZenohExtZint"),
+        }
+
+        // Chain-order case: qos + target + budget + timeout. Position
+        // must be qos[0]->target[1]->budget[2]->timeout[3] per
+        // zenoh-pico _z_request_encode at network.c:126-155. Z
+        // continuation set on indices 0/1/2, clear on index 3.
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_qos(0x05)
+            .request_target(QueryTarget::All)
+            .request_budget(100)
+            .request_timeout_ms(1000)
+            .build();
+        let req_exts = request.extensions.as_ref().expect("4 exts set");
+        assert_eq!(req_exts.len(), 4, "qos + target + budget + timeout");
+        assert_eq!(req_exts[0].header & 0x07, 0x01, "index 0: qos id");
+        assert_eq!(req_exts[1].header & 0x07, 0x04, "index 1: target id");
+        assert_eq!(req_exts[2].header & 0x07, 0x05, "index 2: budget id (between target and timeout)");
+        assert_eq!(req_exts[3].header & 0x07, 0x06, "index 3: timeout id (last)");
+        assert_eq!(req_exts[3].header & 0x80, 0x00, "timeout last → Z must be clear");
+        assert_eq!(req_exts[2].header & 0x80, 0x80, "budget at index 2 → Z must be set (timeout follows)");
+    }
+
+    /// R121j-1g — request_budget rejects zero (mirrors zenoh-pico's
+    /// ext_budget = budget != 0 encoder predicate at
+    /// vendor/zenoh-pico/src/protocol/definitions/network.c:26).
+    #[test]
+    #[should_panic(expected = "RequestQueryBuilder::request_budget requires a non-zero budget")]
+    fn request_query_builder_budget_rejects_zero() {
+        let _ = RequestQueryBuilder::new(42, 7, None)
+            .request_budget(0)
+            .build();
     }
 
     /// R121j-2a — Per-setter validation flows through to the builder.

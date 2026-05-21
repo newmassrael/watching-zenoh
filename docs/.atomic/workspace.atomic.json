@@ -6081,6 +6081,64 @@
         "SliceSink-based zero-alloc hot path (LinkDriver/TxFrame/tcp_write reusable buffer) deferred to a runtime API design round"
       ]
     },
+    "Round 121j-1g": {
+      "decision_summary": "RequestQueryBuilder.request_budget(value: u32) setter -- emits Request-level budget ext between target and timeout per zenoh-pico encode order. Panics on zero matching ext_budget != 0 encoder predicate.",
+      "changes_bullets": [
+        "RequestQueryBuilder in crates/wz-runtime-tokio/src/session_glue.rs gains the request_budget: Option<u32> field + the .request_budget(value: u32) setter. Panics on value=0 because zenoh-pico _z_n_msg_request_needed_exts at vendor/zenoh-pico/src/protocol/definitions/network.c:26 declares ext_budget = msg->_ext_budget != 0 so a zero budget would round-trip as ext absent",
+        "build() pushes the budget ExtEntry between target and timeout in the request_exts chain, matching zenoh-pico _z_request_encode at vendor/zenoh-pico/src/protocol/codec/network.c:144-149 (chain order: qos -> tstamp -> target -> budget -> timeout)",
+        "budget ExtEntry header = ENC_ZINT(0x20) | id_budget(0x05); no M flag (budget is informational, matching the M=0 emit in network.c:146 unlike target which carries M=0x10). Body widens the u32 budget into ExtZint { value: budget as u64 }",
+        "2 new lib tests pin: single-setter case (header = 0x25, value = 0x12345678 lifts verbatim into ZINT u64), four-layer chain composition (qos + target + budget + timeout with Z continuation bit on indices 0/1/2, clear on index 3; budget at index 2 confirms encode-order placement). 1 new should_panic test pins the zero-value validation"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio: clean",
+        "cargo test -p wz-runtime-tokio --lib: 96/96 pass (94 baseline + 2 new budget tests)",
+        "cargo clippy -p wz-runtime-tokio --all-targets: clean",
+        "scripts/run-ci.sh: 8/8 lanes pass on first attempt (no flake this round)",
+        "Q-side Request-level ext-chain coverage now complete for the 4 actually-implemented setters: qos / target / budget / timeout. The 5th zenoh-pico-defined Request ext (tstamp at id_tstamp=0x02 ENC_ZBUF) is intentionally deferred -- the wz codec does not currently expose a Timestamp sub-codec on the Request ext path; layering it requires extending the wz_codecs ext_zbuf variant set"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121j-1h ergonomic typed wrapper .request_qos_typed(priority, congestion_drop, express) over .request_qos(packed). Low priority; the packed form is production-correct",
+        "R121j-tstamp setter (last unimplemented Request ext, id_tstamp=0x02 ENC_ZBUF) needs the wz_codecs ext_zbuf Timestamp sub-codec wiring before it can land. Defer until z_timestamp is needed by an AP MVP path",
+        "R121j-3b Reply.source_info setter, R121j-3c Reply.responder setter, R121j-3d Reply.MsgDel body variant still pending on ResponseReplyBuilder",
+        "R121j-4b Err.source_info setter, R121j-4c Err.attachment setter still pending on ResponseErrBuilder",
+        "R121h-perf-bump-4: 4 secondary encoders (InitBody/OpenBody/DeclFinal-batch/KeepAlive at session_glue.rs lines 1543/1596/1620/1645) still use inner-Vec + extend_from_slice. Apply encode_frame_envelope-style shape for symmetry. Lower priority than R121j-5",
+        "R121j-5 inbound Request(Query) parser + on_query dispatch + QueryableTable struct -- largest single AP MVP weighted jump (+5-7%p); 2-3 sub-rounds = 1 session",
+        "R121k inbound DECLARE parser silent gap (outbound 9/9 vs inbound 0/8); 4-6 sub-rounds = 1-2 sessions",
+        "SliceSink-based zero-alloc hot path deferred to a runtime API design round"
+      ],
+      "publishable_decision_summary": "RequestQueryBuilder.request_budget(value: u32) setter -- emits Request-level budget ext between target and timeout per zenoh-pico encode order. Panics on zero matching ext_budget != 0 encoder predicate.",
+      "publishable_changes_bullets": [
+        "RequestQueryBuilder in crates/wz-runtime-tokio/src/session_glue.rs gains the request_budget: Option<u32> field + the .request_budget(value: u32) setter. Panics on value=0 because zenoh-pico _z_n_msg_request_needed_exts at vendor/zenoh-pico/src/protocol/definitions/network.c:26 declares ext_budget = msg->_ext_budget != 0 so a zero budget would round-trip as ext absent",
+        "build() pushes the budget ExtEntry between target and timeout in the request_exts chain, matching zenoh-pico _z_request_encode at vendor/zenoh-pico/src/protocol/codec/network.c:144-149 (chain order: qos -> tstamp -> target -> budget -> timeout)",
+        "budget ExtEntry header = ENC_ZINT(0x20) | id_budget(0x05); no M flag (budget is informational, matching the M=0 emit in network.c:146 unlike target which carries M=0x10). Body widens the u32 budget into ExtZint { value: budget as u64 }",
+        "2 new lib tests pin: single-setter case (header = 0x25, value = 0x12345678 lifts verbatim into ZINT u64), four-layer chain composition (qos + target + budget + timeout with Z continuation bit on indices 0/1/2, clear on index 3; budget at index 2 confirms encode-order placement). 1 new should_panic test pins the zero-value validation"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio: clean",
+        "cargo test -p wz-runtime-tokio --lib: 96/96 pass (94 baseline + 2 new budget tests)",
+        "cargo clippy -p wz-runtime-tokio --all-targets: clean",
+        "scripts/run-ci.sh: 8/8 lanes pass on first attempt (no flake this round)",
+        "Q-side Request-level ext-chain coverage now complete for the 4 actually-implemented setters: qos / target / budget / timeout. The 5th zenoh-pico-defined Request ext (tstamp at id_tstamp=0x02 ENC_ZBUF) is intentionally deferred -- the wz codec does not currently expose a Timestamp sub-codec on the Request ext path; layering it requires extending the wz_codecs ext_zbuf variant set"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121j-1h ergonomic typed wrapper .request_qos_typed(priority, congestion_drop, express) over .request_qos(packed). Low priority; the packed form is production-correct",
+        "R121j-tstamp setter (last unimplemented Request ext, id_tstamp=0x02 ENC_ZBUF) needs the wz_codecs ext_zbuf Timestamp sub-codec wiring before it can land. Defer until z_timestamp is needed by an AP MVP path",
+        "R121j-3b Reply.source_info setter, R121j-3c Reply.responder setter, R121j-3d Reply.MsgDel body variant still pending on ResponseReplyBuilder",
+        "R121j-4b Err.source_info setter, R121j-4c Err.attachment setter still pending on ResponseErrBuilder",
+        "R121h-perf-bump-4: 4 secondary encoders (InitBody/OpenBody/DeclFinal-batch/KeepAlive at session_glue.rs lines 1543/1596/1620/1645) still use inner-Vec + extend_from_slice. Apply encode_frame_envelope-style shape for symmetry. Lower priority than R121j-5",
+        "R121j-5 inbound Request(Query) parser + on_query dispatch + QueryableTable struct -- largest single AP MVP weighted jump (+5-7%p); 2-3 sub-rounds = 1 session",
+        "R121k inbound DECLARE parser silent gap (outbound 9/9 vs inbound 0/8); 4-6 sub-rounds = 1-2 sessions",
+        "SliceSink-based zero-alloc hot path deferred to a runtime API design round"
+      ]
+    },
     "Round 121j-2": {
       "decision_summary": "R121j-2 adds ResponseFinal outbound to close the Query/Reply sequence — build_response_final + encode_frame_with_response_final + SessionLinkActions::send_response_final — with 2-vector wire-byte byte-compare tests against zenoh-pico _z_response_final_encode (network.c:368-376) covering both single-byte and multi-byte VLE rid cases.",
       "changes_bullets": [
