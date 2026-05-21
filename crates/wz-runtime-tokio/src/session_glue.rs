@@ -81,6 +81,7 @@ use wz_codecs::err::Err;
 use wz_codecs::init_body::InitBody;
 use wz_codecs::interest::Interest;
 use wz_codecs::keep_alive::KeepAlive;
+use wz_codecs::msg_del::MsgDel;
 use wz_codecs::msg_put::MsgPut;
 use wz_codecs::oam::Oam;
 use wz_codecs::open_body::OpenBody;
@@ -3415,6 +3416,11 @@ pub struct ResponseReplyBuilder {
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<String>,
     payload: Vec<u8>,
+    // Reply-body-arm selector. Default false = MsgPut (the put-data
+    // reply); .reply_del() flips to MsgDel (the delete-keyexpr reply).
+    // Payload is unused when body_kind_del is true — the MsgDel body
+    // carries no payload, just an optional timestamp + ext chain.
+    body_kind_del: bool,
     // Reply-layer settings.
     consolidation: Option<ConsolidationMode>,
 }
@@ -3435,6 +3441,7 @@ impl ResponseReplyBuilder {
             keyexpr_mapping_id,
             keyexpr_suffix: keyexpr_suffix.map(str::to_string),
             payload: payload.to_vec(),
+            body_kind_del: false,
             consolidation: None,
         }
     }
@@ -3446,6 +3453,22 @@ impl ResponseReplyBuilder {
     /// `Reply.header._Z_FLAG_Z_R_C(0x20)` + 1-byte consolidation.
     pub fn consolidation(mut self, mode: ConsolidationMode) -> Self {
         self.consolidation = Some(mode);
+        self
+    }
+
+    /// Swap the inner Reply body arm from `MsgPut` (the default
+    /// put-data reply) to `MsgDel` (the delete-keyexpr reply). The
+    /// payload supplied to [`Self::new`] is dropped on the MsgDel
+    /// path — `MsgDel` carries no payload, only an optional
+    /// timestamp + ext chain.
+    ///
+    /// Mirrors zenoh-pico's `_z_reply_encode` dispatch on the inner
+    /// MID byte: `_Z_MID_Z_PUT(0x01)` vs `_Z_MID_Z_DEL(0x02)`. The
+    /// outer Response envelope (header / rid / wireexpr) is identical
+    /// between the two arms; only the body inner MID + body shape
+    /// differs.
+    pub fn reply_del(mut self) -> Self {
+        self.body_kind_del = true;
         self
     }
 
@@ -3472,6 +3495,21 @@ impl ResponseReplyBuilder {
         };
 
         if let ResponseVariant::CodecZenohReply(ref mut reply) = response.body {
+            if self.body_kind_del {
+                // Swap MsgPut arm for MsgDel arm. The MsgPut allocated
+                // by build_response_reply_literal/aliased gets dropped
+                // here — the perf cost is one wasted MsgPut struct per
+                // del-reply build, acceptable for the additive shape
+                // of this round. A future refactor can split the
+                // baseline helpers to expose envelope-only construction
+                // without the put body, but the present additive
+                // shape keeps the one-shot helpers unchanged.
+                reply.body = ReplyVariant::CodecZenohMsgDel(MsgDel {
+                    header: 0x02, // _Z_MID_Z_DEL
+                    timestamp: None,
+                    extensions: None,
+                });
+            }
             if let Some(mode) = self.consolidation {
                 reply.header |= 0x20; // _Z_FLAG_Z_R_C
                 reply.consolidation = Some(mode.wire_byte());
@@ -7566,5 +7604,54 @@ mod tests {
     )]
     fn response_err_builder_literal_rejects_none_suffix() {
         let _ = ResponseErrBuilder::new(42, 0, None, b"oops").build();
+    }
+
+    /// R121j-3d — ResponseReplyBuilder.reply_del() swaps the inner
+    /// ReplyVariant arm from CodecZenohMsgPut to CodecZenohMsgDel.
+    /// Wire-level effect: inner MID byte flips from 0x01 (Put) to
+    /// 0x02 (Del); the payload bytes the constructor received are
+    /// dropped (MsgDel has no payload).
+    #[test]
+    fn response_reply_builder_reply_del_swaps_inner_arm_to_msgdel() {
+        let put_wire = ResponseReplyBuilder::new(42, 7, None, b"hello").build().encode_to_vec();
+        let del_wire = ResponseReplyBuilder::new(42, 7, None, b"hello").reply_del().build().encode_to_vec();
+        // Layout up through Reply.header: Response.header(1) + VLE(42)(1) +
+        // VLE(7)(1) + Reply.header(1) at offset 3. Inner MID at offset 4.
+        assert_eq!(put_wire[4], 0x01, "Put path inner MID = _Z_MID_Z_PUT(0x01)");
+        assert_eq!(del_wire[4], 0x02, "Del path inner MID = _Z_MID_Z_DEL(0x02)");
+        // The Del wire is shorter than Put because MsgPut emits VLE(payload_len)
+        // + payload bytes (1 + 5 = 6 bytes for b"hello") while MsgDel emits
+        // nothing after its header. Specifically del_wire ends right after
+        // the Reply.header for MsgDel (no Reply exts, no MsgDel exts).
+        assert!(
+            del_wire.len() < put_wire.len(),
+            "Del wire must be strictly shorter than Put wire (no payload)",
+        );
+        // Pinpoint: Put adds VLE(5) + 5 payload bytes = 6 bytes after the
+        // inner MID byte. Del adds nothing. So Put length - Del length == 6.
+        assert_eq!(
+            put_wire.len() - del_wire.len(),
+            6,
+            "Del path must drop exactly VLE(5)+5 = 6 payload bytes from the Put baseline",
+        );
+    }
+
+    /// R121j-3d — reply_del() composes with consolidation. The
+    /// Reply.header.C bit must still be set when MsgDel + consolidation
+    /// are combined; the consolidation byte sits between Reply.header
+    /// and the MsgDel inner MID, not between Put header and payload.
+    #[test]
+    fn response_reply_builder_reply_del_composes_with_consolidation() {
+        let wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+            .reply_del()
+            .consolidation(ConsolidationMode::Latest)
+            .build()
+            .encode_to_vec();
+        // Reply.header at offset 3 must carry R_C(0x20).
+        assert_eq!(wire[3] & 0x20, 0x20, "consolidation must set R_C(0x20) on Reply.header even on Del path");
+        // Consolidation byte at offset 4 (between Reply.header and MsgDel).
+        assert_eq!(wire[4], ConsolidationMode::Latest.wire_byte(), "consolidation byte follows Reply.header");
+        // MsgDel inner MID at offset 5.
+        assert_eq!(wire[5], 0x02, "MsgDel inner MID follows consolidation byte");
     }
 }
