@@ -63,7 +63,10 @@ use wz_codecs::declare::DeclareVariant;
 use wz_codecs::push::{Push, PushVariant};
 use wz_codecs::wireexpr::WireexprVariant;
 
-use crate::sample::{Sample, SampleKind};
+use crate::sample::{
+    extract_attachment, extract_qos, extract_source_info, EncodingHint, Reliability, Sample,
+    SampleKind, TimestampHint,
+};
 use crate::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
 
 /// Boxed callback invoked when a Push message's keyexpr matches a
@@ -477,11 +480,27 @@ impl SubscriberRegistry {
             }
         };
 
-        // R222 — project the decoded Push into a Sample once per
-        // dispatch_push. Put bodies surface payload bytes, Del
-        // bodies surface an empty payload. This is the canonical
-        // shape every subscriber wants — no more per-callback
-        // tagged-union dispatch on `push.body` arms.
+        // R222 / R225 — project the decoded Push into a Sample once
+        // per dispatch_push. R222 handled the three load-bearing
+        // fields (keyexpr / kind / payload); R225 extends the
+        // projection to surface body-level timestamp + encoding
+        // (already decoded inline by MsgPut / MsgDel), outer-level
+        // QoS (Push.extensions, ext_id=0x01 ZInt), and body-level
+        // attachment + source_info (MsgPut/MsgDel.extensions,
+        // ext_id=0x03 ZBuf and ext_id=0x01 ZBuf respectively). The
+        // canonical zenoh-pico subscriber path
+        // (`_z_trigger_subscriptions_impl`) consumes a complete
+        // `_z_sample_t`; this projection brings parity so wz
+        // subscribers no longer need to dig into Push.extensions or
+        // MsgPut.extensions to inspect Sample metadata.
+        //
+        // Encoding is Put-only on the wire: zenoh-pico's _Z_FLAG_Z_P_E
+        // lives in `_z_msg_put_t` but not `_z_msg_del_t`, so the Del
+        // arm fills None for encoding. Reliability is filled with the
+        // zenoh-pico default Reliable — transport-context wire-up so
+        // wz can surface the actual link-layer reliability is an R226+
+        // carry (Sample::with_reliability is the surface the future
+        // wire-up will use).
         //
         // PushVariant::Default { .. } is the catalog's fallback arm
         // for unknown body tags (RFC variant-default-uniformity).
@@ -489,17 +508,47 @@ impl SubscriberRegistry {
         // through a Sample callback with arbitrary `tag` would
         // semantically lie about the kind (it is neither a
         // confirmed Put nor a confirmed Del).
-        let (kind, payload) = match &push.body {
-            PushVariant::CodecZenohMsgPut(put) => {
-                (SampleKind::Put, put.payload.clone())
-            }
-            PushVariant::CodecZenohMsgDel(_) => (SampleKind::Del, Vec::new()),
-            PushVariant::Default { .. } => return,
-        };
+        let (kind, payload, body_timestamp, body_encoding, body_attachment, body_source_info) =
+            match &push.body {
+                PushVariant::CodecZenohMsgPut(put) => {
+                    let body_exts: &[wz_codecs::ext_entry::ExtEntry] =
+                        put.extensions.as_deref().unwrap_or(&[]);
+                    (
+                        SampleKind::Put,
+                        put.payload.clone(),
+                        put.timestamp.as_ref().map(TimestampHint::from_codec),
+                        put.encoding.as_ref().map(EncodingHint::from_codec),
+                        extract_attachment(body_exts),
+                        extract_source_info(body_exts),
+                    )
+                }
+                PushVariant::CodecZenohMsgDel(del) => {
+                    let body_exts: &[wz_codecs::ext_entry::ExtEntry] =
+                        del.extensions.as_deref().unwrap_or(&[]);
+                    (
+                        SampleKind::Del,
+                        Vec::new(),
+                        del.timestamp.as_ref().map(TimestampHint::from_codec),
+                        None,
+                        extract_attachment(body_exts),
+                        extract_source_info(body_exts),
+                    )
+                }
+                PushVariant::Default { .. } => return,
+            };
+        let outer_exts: &[wz_codecs::ext_entry::ExtEntry] =
+            push.extensions.as_deref().unwrap_or(&[]);
+        let qos = extract_qos(outer_exts);
         let sample = Sample {
             keyexpr: resolved,
             kind,
             payload,
+            timestamp: body_timestamp,
+            encoding: body_encoding,
+            qos,
+            attachment: body_attachment,
+            source_info: body_source_info,
+            reliability: Reliability::default(),
         };
 
         for subscriber in &mut self.subscribers {
