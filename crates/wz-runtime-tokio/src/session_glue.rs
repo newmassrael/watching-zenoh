@@ -3542,10 +3542,12 @@ impl ResponseReplyBuilder {
 /// [`build_response_err_literal`] / [`build_response_err_aliased`].
 /// Mirror of [`ResponseReplyBuilder`] for the Err inner-body arm.
 ///
-/// Err-layer setters today: `encoding(id, schema)` (the R121j-4a
-/// sub-round squeezed into the builder infra round). Err `source_info`
-/// (R121j-4b) and `attachment` (R121j-4c) layer in as separate
-/// audit-traced sub-rounds.
+/// Err-layer setters today: `encoding(id, schema)` (R121j-4a) and
+/// `source_info(zid, eid, sn)` (R121j-4b). R121j-4c (Err.attachment)
+/// is wire-absent per zenoh-pico `_z_err_encode` at
+/// `src/protocol/codec/message.c:545-573` (only `encoding` flag-driven
+/// inline encode + source_info ext are emitted); the carry was
+/// retracted in Round 121j-4-retract.
 pub struct ResponseErrBuilder {
     request_id: u64,
     keyexpr_mapping_id: u64,
@@ -3554,6 +3556,11 @@ pub struct ResponseErrBuilder {
     // Err-layer settings. Tuple = (id, optional schema). packed_id =
     // (id << 1) | has_schema computed at build() time.
     encoding: Option<(u32, Option<String>)>,
+    // R121j-4b: Err-body source_info ext (ext_id 0x01 ZBUF). Tuple =
+    // (zid bytes 1..=16, eid, sn). zid owned to outlive the builder;
+    // wire body packed at build() time via
+    // [`encode_source_info_ext_body`] and wrapped in an ExtZbuf entry.
+    source_info: Option<(Vec<u8>, u32, u32)>,
 }
 
 impl ResponseErrBuilder {
@@ -3573,6 +3580,7 @@ impl ResponseErrBuilder {
             keyexpr_suffix: keyexpr_suffix.map(str::to_string),
             payload: payload.to_vec(),
             encoding: None,
+            source_info: None,
         }
     }
 
@@ -3587,6 +3595,33 @@ impl ResponseErrBuilder {
     /// optional suffix conditionally.
     pub fn encoding(mut self, id: u32, schema: Option<&str>) -> Self {
         self.encoding = Some((id, schema.map(str::to_string)));
+        self
+    }
+
+    /// R121j-4b — set the Err-body `source_info` extension. `zid` is the
+    /// peer's ZenohId (1..=16 raw bytes; `(zid_len - 1) << 4` packs the
+    /// length into the leading ext byte per zenoh-pico's
+    /// `_z_source_info_encode_ext` at
+    /// `vendor/zenoh-pico/src/protocol/codec/message.c:243-254`). `eid`
+    /// is the peer's entity-id; `sn` is the per-source sequence number
+    /// that scopes Reply ordering on the requester side.
+    ///
+    /// The ext lands as the sole entry in `Err.extensions` because
+    /// zenoh-pico's `_z_err_encode` (`message.c:545-573`) emits
+    /// source_info as the only ext-chain element with header
+    /// `_Z_MSG_EXT_ENC_ZBUF | 0x01` and no Z chain-continuation bit.
+    /// When future Err-level exts land they will plumb the chain bits
+    /// through a `Vec<ExtEntry>` build mirroring
+    /// [`RequestQueryBuilder::build`].
+    ///
+    /// Panics if `zid.len()` is outside `1..=16`.
+    pub fn source_info(mut self, zid: &[u8], eid: u32, sn: u32) -> Self {
+        assert!(
+            (1..=16).contains(&zid.len()),
+            "ResponseErrBuilder::source_info requires zid length 1..=16 \
+             (zenoh-pico ZenohId wire constraint, transport.h:31-37)"
+        );
+        self.source_info = Some((zid.to_vec(), eid, sn));
         self
     }
 
@@ -3623,6 +3658,25 @@ impl ResponseErrBuilder {
                     schema,
                 });
             }
+            if let Some((zid, eid, sn)) = self.source_info {
+                let value = encode_source_info_ext_body(&zid, eid, sn);
+                // _Z_FLAG_Z_Z(0x80) signals ext-chain presence to the
+                // peer's `_z_err_decode` (message.c:594-595).
+                err.header |= 0x80;
+                err.extensions = Some(vec![ExtEntry {
+                    // ENC_ZBUF(0x40) | id_source_info(0x01). No M flag
+                    // (informational hint) and no Z chain-continuation
+                    // (single entry today; the chain-plumb step lands
+                    // once a second Err ext exists, mirroring
+                    // RequestQueryBuilder.build at
+                    // session_glue.rs:2772-2782).
+                    header: 0x40 | 0x01,
+                    body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+                        value_len: value.len() as u64,
+                        value,
+                    }),
+                }]);
+            }
         } else {
             unreachable!(
                 "build_response_err_* must produce a CodecZenohErr body — \
@@ -3632,6 +3686,51 @@ impl ResponseErrBuilder {
 
         response
     }
+}
+
+/// R121j-4b — encode the value bytes of a `source_info` extension per
+/// zenoh-pico's `_z_source_info_encode_ext` at
+/// `vendor/zenoh-pico/src/protocol/codec/message.c:243-254`.
+///
+/// Wire layout (the bytes this fn returns; the surrounding ExtZbuf
+/// codec prepends its own `VLE(value_len)` length prefix that maps to
+/// zenoh-pico's leading `zsize(ext_size)`):
+///
+///   [byte 0]            `((zid_len - 1) << 4)` — high nibble carries
+///                        `zid_len - 1` (1..=16 valid, encoded 0..=15).
+///   [byte 1..1+zid_len] raw zid bytes (caller's MSB-first id slice).
+///   [VLE u64]            `eid`.
+///   [VLE u64]            `sn`.
+///
+/// Panics if `zid.len()` is outside `1..=16` (the caller's setter
+/// guards this; the inner assertion is defence-in-depth).
+fn encode_source_info_ext_body(zid: &[u8], eid: u32, sn: u32) -> Vec<u8> {
+    assert!(
+        (1..=16).contains(&zid.len()),
+        "source_info zid length must be 1..=16 (zenoh-pico ZenohId wire constraint)"
+    );
+    // Capacity = 1 leading byte + zid + VLE(u32) worst-case (5 bytes) ×2.
+    let mut out = Vec::with_capacity(1 + zid.len() + 5 + 5);
+    out.push(((zid.len() as u8) - 1) << 4);
+    out.extend_from_slice(zid);
+    encode_vle_u64_into(&mut out, eid as u64);
+    encode_vle_u64_into(&mut out, sn as u64);
+    out
+}
+
+/// R121j-4b — base-128 VLE u64 emit into a `Vec<u8>`. Mirrors the
+/// inline loop in [`encode_frame_envelope`] and zenoh-pico's
+/// `_z_zsize_encode` at
+/// `vendor/zenoh-pico/src/protocol/codec/core.c`. Free-function shape
+/// because source_info ext-body construction happens before any
+/// `SceSink` is in scope — the ext body lives inside `ExtZbuf.value`
+/// and the surrounding codec sink only sees the already-built `Vec`.
+fn encode_vle_u64_into(out: &mut Vec<u8>, mut v: u64) {
+    while v >= 0x80 {
+        out.push((v as u8 & 0x7F) | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
 }
 
 /// R121h-perf-bump-3 — single-allocation transport-envelope encode.
@@ -7616,6 +7715,130 @@ mod tests {
     )]
     fn response_err_builder_literal_rejects_none_suffix() {
         let _ = ResponseErrBuilder::new(42, 0, None, b"oops").build();
+    }
+
+    /// R121j-4b — ResponseErrBuilder.source_info sets `Err.header.Z(0x80)`
+    /// and emits a single `ExtZbuf` ext entry with header
+    /// `ENC_ZBUF(0x40) | id_source_info(0x01) = 0x41`. The value body is
+    /// `[(zid_len-1)<<4, zid..., VLE(eid), VLE(sn)]` per zenoh-pico
+    /// `_z_source_info_encode_ext` at `vendor/zenoh-pico/src/protocol/
+    /// codec/message.c:243-254`.
+    #[test]
+    fn response_err_builder_source_info_emits_zbuf_ext_entry() {
+        let wire = ResponseErrBuilder::new(42, 7, None, b"oops")
+            .source_info(&[0xAA; 4], 11, 17)
+            .build()
+            .encode_to_vec();
+        // Layout up through Err.header: Response.header(1) + VLE(42)(1)
+        // + VLE(7)(1) + Err.header(1) at offset 3. The source_info
+        // setter must set Z(0x80) and leave E(0x40) clear (no encoding
+        // in this test).
+        assert_eq!(
+            wire[3] & 0x80,
+            0x80,
+            "source_info builder must set Z(0x80) on Err.header"
+        );
+        assert_eq!(
+            wire[3] & 0x40,
+            0x00,
+            "source_info-only builder must leave E(0x40) clear on Err.header"
+        );
+        // ExtEntry.header at offset 4: ENC_ZBUF(0x40) | id_source_info(0x01).
+        // No Z chain-continuation bit because this is the sole entry.
+        assert_eq!(
+            wire[4], 0x41,
+            "source_info ext header = ENC_ZBUF(0x40) | id_source_info(0x01); no Z chain bit on the sole entry"
+        );
+        // ExtZbuf value_len VLE at offset 5: leading byte(1) + zid(4)
+        // + VLE(eid=11)(1) + VLE(sn=17)(1) = 7 bytes.
+        assert_eq!(
+            wire[5], 0x07,
+            "ExtZbuf value_len = 1 leading + 4 zid + 1 VLE(eid) + 1 VLE(sn) = 7"
+        );
+        // value[0] = (4-1) << 4 = 0x30 at offset 6.
+        assert_eq!(wire[6], 0x30, "leading byte = (zid_len-1) << 4 = 0x30 for zid_len=4");
+        // value[1..5] = zid bytes [0xAA; 4] at offsets 7..11.
+        assert_eq!(&wire[7..11], &[0xAA; 4], "zid bytes follow the leading byte");
+        // value[5] = VLE(eid=11) at offset 11.
+        assert_eq!(wire[11], 0x0B, "VLE(eid=11) = single byte 0x0B");
+        // value[6] = VLE(sn=17) at offset 12.
+        assert_eq!(wire[12], 0x11, "VLE(sn=17) = single byte 0x11");
+        // Payload tail: VLE(payload_len=4) at offset 13, then "oops".
+        assert_eq!(wire[13], 0x04, "VLE(payload_len=4) follows the ext chain");
+        assert_eq!(&wire[14..18], b"oops", "payload bytes follow the length prefix");
+    }
+
+    /// R121j-4b — `source_info` and `encoding` compose: both Err.header
+    /// bits (E + Z) set, the encoded `Encoding` field sits between the
+    /// header and the ext chain (Err::encode order at
+    /// `wz-codecs/.../out/err.rs:171-200`).
+    #[test]
+    fn response_err_builder_source_info_composes_with_encoding() {
+        let wire = ResponseErrBuilder::new(42, 7, None, b"oops")
+            .encoding(4, None)
+            .source_info(&[0xBB; 1], 1, 2)
+            .build()
+            .encode_to_vec();
+        // Err.header at offset 3: E(0x40) | Z(0x80) = 0xC0.
+        assert_eq!(
+            wire[3] & 0xC0,
+            0xC0,
+            "compose path must set both E(0x40) and Z(0x80) on Err.header"
+        );
+        // Encoding at offset 4: packed_id = (4<<1)|0 = 8 → VLE 0x08.
+        // (Schema absent so no schema_len / schema bytes follow.)
+        assert_eq!(wire[4], 0x08, "encoding packed_id = (id << 1) | 0; for id=4 this is 0x08");
+        // ExtEntry.header at offset 5: 0x41.
+        assert_eq!(wire[5], 0x41, "ext header follows encoding when both are set");
+        // VLE(value_len=4) at offset 6 (1 leading + 1 zid + 1 VLE(eid) + 1 VLE(sn)).
+        assert_eq!(wire[6], 0x04, "value_len = 1 + 1 + 1 + 1 = 4 for 1-byte zid");
+        // value[0] = (1-1)<<4 = 0x00 at offset 7.
+        assert_eq!(wire[7], 0x00, "leading byte = 0x00 for zid_len=1");
+        assert_eq!(wire[8], 0xBB, "zid byte");
+        assert_eq!(wire[9], 0x01, "VLE(eid=1)");
+        assert_eq!(wire[10], 0x02, "VLE(sn=2)");
+        // VLE(payload_len=4) + "oops".
+        assert_eq!(wire[11], 0x04, "payload_len VLE follows the ext body");
+        assert_eq!(&wire[12..16], b"oops");
+    }
+
+    /// R121j-4b — source_info rejects zid lengths outside the
+    /// zenoh-pico ZenohId wire constraint (1..=16, transport.h:31-37).
+    #[test]
+    #[should_panic(
+        expected = "ResponseErrBuilder::source_info requires zid length 1..=16"
+    )]
+    fn response_err_builder_source_info_rejects_zid_too_long() {
+        let _ = ResponseErrBuilder::new(42, 7, None, b"oops").source_info(&[0; 17], 0, 0);
+    }
+
+    /// R121j-4b — empty zid is also rejected (lower bound of 1..=16).
+    #[test]
+    #[should_panic(
+        expected = "ResponseErrBuilder::source_info requires zid length 1..=16"
+    )]
+    fn response_err_builder_source_info_rejects_empty_zid() {
+        let _ = ResponseErrBuilder::new(42, 7, None, b"oops").source_info(&[], 0, 0);
+    }
+
+    /// R121j-4b — direct check on the helper that builds the
+    /// source_info ext-body bytes. Locks the wire shape independently
+    /// of the builder so future helpers (Push.source_info, Query
+    /// source_info) can re-use the helper with the same guarantees.
+    #[test]
+    fn encode_source_info_ext_body_matches_zenoh_pico_layout() {
+        // zid_len=2 → leading byte = (2-1)<<4 = 0x10
+        let bytes = encode_source_info_ext_body(&[0xDE, 0xAD], 0x80, 0x4000);
+        // Expected: [0x10, 0xDE, 0xAD, VLE(0x80)..., VLE(0x4000)...]
+        // VLE(0x80): 0x80 needs 2 bytes (first 0x80|0x00=0x80, second 0x01)
+        // VLE(0x4000): 0x4000 needs 3 bytes (0x80, 0x80, 0x01)
+        assert_eq!(bytes[0], 0x10, "leading byte packs zid_len-1 in high nibble");
+        assert_eq!(&bytes[1..3], &[0xDE, 0xAD], "raw zid follows the leading byte");
+        // VLE(128) = 0x80, 0x01 (continuation bit on first byte, value 1 in second)
+        assert_eq!(&bytes[3..5], &[0x80, 0x01], "VLE(eid=128) = 0x80 0x01 (2 bytes)");
+        // VLE(16384) = 0x80, 0x80, 0x01
+        assert_eq!(&bytes[5..8], &[0x80, 0x80, 0x01], "VLE(sn=16384) = 0x80 0x80 0x01 (3 bytes)");
+        assert_eq!(bytes.len(), 8, "total = 1 leading + 2 zid + 2 VLE(eid) + 3 VLE(sn) = 8");
     }
 
     /// R121j-3d — ResponseReplyBuilder.reply_del() swaps the inner
