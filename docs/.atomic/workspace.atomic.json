@@ -9224,6 +9224,52 @@
         "SCE upstream pin ebf3b3ff + 14 unpushed clippy chores in /home/coin/scxml-core-engine — 다음 pin bump round에서 origin push 이후 재평가"
       ]
     },
+    "Round 212": {
+      "decision_summary": "R212 R121-release-2: deploy/README.md 신설 (43 lines) — 3 deploy classes overview + validate-deploy.sh + R50/R123b carry pointer; sub-dir orientation for first external release.",
+      "changes_bullets": [
+        "신규 파일 deploy/README.md (43 lines, English primary). SPDX 헤더 + 3 deploy classes 테이블 (ap_standalone / mcu_target / ap_mcu_pair) — runtime (wz-runtime-tokio / wz-runtime-lwip) + Phase status 연결",
+        "Validation section에 scripts/validate-deploy.sh lightweight schema check (YAML 결하 + machines: top-level + per-machine 필수 필드) + Layer D CI 연결 명시; sce-codegen build subcommand R50/R123b carry 안내",
+        "Editing section에 author-side 수정 원칙 — numeric default 주석 (zenoh-pico precedent or empirical measurement) preservation contract 명시"
+      ],
+      "verification_bullets": [
+        "bash scripts/run-ci.sh --layer A: pass (validate-workspace clean, T1=0, RT=12/12, sync, entries=211 경유)",
+        "bash scripts/run-ci.sh --layer D: pass (validate-deploy.sh 동일 결과; 신규 README 추가가 기존 deploy/*.yaml 검증경로 영향 0)",
+        "pre-commit validate-workspace clean on commit a067b9c (docs(deploy) subject)",
+        "git diff --stat: 1 file changed, 43 insertions — deploy/ 이외 파일 변경 0"
+      ],
+      "impact_refs": [
+        "watching-zenoh/directory-layout"
+      ],
+      "carry_forward_bullets": [
+        "부채 #4 sub-3: .github/workflows/release.yml 작성 — tag push trigger + cargo publish dry-run + GitHub release 자동화",
+        "부채 #4 sub-4: LGPL-3.0 / LicenseRef-Commercial 텍스트 재검토 + THIRD_PARTY.md 원장 작성 (vendor/sce + vendor/zenoh-pico forge ledger)",
+        "부채 #4 sub-5: cargo publish dry-run + git tag v0.1.0-mvp + GitHub release draft",
+        "부채 #3 R121h-perf-bump-5 결정 사용자 컨펌 필요; 1 round after decision",
+        "deploy yaml topology nesting migration (R123b deferred) — first external release 이후 일정으로 재명시; v0.1.0-mvp 자체는 pre-topology schema로 충분함"
+      ],
+      "publishable_decision_summary": "R212 R121-release-2: deploy/README.md 신설 (43 lines) — 3 deploy classes overview + validate-deploy.sh + R50/R123b carry pointer; sub-dir orientation for first external release.",
+      "publishable_changes_bullets": [
+        "신규 파일 deploy/README.md (43 lines, English primary). SPDX 헤더 + 3 deploy classes 테이블 (ap_standalone / mcu_target / ap_mcu_pair) — runtime (wz-runtime-tokio / wz-runtime-lwip) + Phase status 연결",
+        "Validation section에 scripts/validate-deploy.sh lightweight schema check (YAML 결하 + machines: top-level + per-machine 필수 필드) + Layer D CI 연결 명시; sce-codegen build subcommand R50/R123b carry 안내",
+        "Editing section에 author-side 수정 원칙 — numeric default 주석 (zenoh-pico precedent or empirical measurement) preservation contract 명시"
+      ],
+      "publishable_verification_bullets": [
+        "bash scripts/run-ci.sh --layer A: pass (validate-workspace clean, T1=0, RT=12/12, sync, entries=211 경유)",
+        "bash scripts/run-ci.sh --layer D: pass (validate-deploy.sh 동일 결과; 신규 README 추가가 기존 deploy/*.yaml 검증경로 영향 0)",
+        "pre-commit validate-workspace clean on commit a067b9c (docs(deploy) subject)",
+        "git diff --stat: 1 file changed, 43 insertions — deploy/ 이외 파일 변경 0"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/directory-layout"
+      ],
+      "publishable_carry_forward_bullets": [
+        "부채 #4 sub-3: .github/workflows/release.yml 작성 — tag push trigger + cargo publish dry-run + GitHub release 자동화",
+        "부채 #4 sub-4: LGPL-3.0 / LicenseRef-Commercial 텍스트 재검토 + THIRD_PARTY.md 원장 작성 (vendor/sce + vendor/zenoh-pico forge ledger)",
+        "부채 #4 sub-5: cargo publish dry-run + git tag v0.1.0-mvp + GitHub release draft",
+        "부채 #3 R121h-perf-bump-5 결정 사용자 컨펌 필요; 1 round after decision",
+        "deploy yaml topology nesting migration (R123b deferred) — first external release 이후 일정으로 재명시; v0.1.0-mvp 자체는 pre-topology schema로 충분함"
+      ]
+    },
     "Round 22": {
       "decision_summary": "vle_byte_length primitive land — Phase A3 cursor-free TLV chain walker missing piece; vle_u64_decode와 짝으로 §7 extension iterator를 Phase A4 cursor 의존 없이 author-side에서 운영 가능, tlv_advance Phase A4+ 진화의 내부 길이 산출 부분품.",
       "changes_bullets": [
