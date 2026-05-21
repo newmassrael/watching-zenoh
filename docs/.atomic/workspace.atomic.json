@@ -6485,6 +6485,68 @@
         "R121h-perf-bump-2 carry intact: blocking on explicit user consent for the atomic 12-SCXML migration + vendor pin bump."
       ]
     },
+    "Round 121j-5a": {
+      "decision_summary": "R121j-5a reconnaissance: Request inbound parser already wired via parse_frame_payload; R121j-5b/c carry QueryableTable in new query.rs + Fn(Query, &QueryResponder) on_query dispatch and Reply emit.",
+      "changes_bullets": [
+        "Reconnaissance round; no source code mutation. Design decisions only, materialized in carry_forward for R121j-5b/c sub-rounds.",
+        "Verified Request::decode already complete via SCE codegen at crates/target/debug/build/wz-codecs-*/out/request.rs:97-147 — 1:1 with zenoh-pico _z_request_decode (network.c:209-238): rid(VLE) + keyexpr(N/M flag) + extensions(Z flag, ExtEntry chain capacity 4) + 4-variant body dispatch (MsgPut/MsgDel/Query/Default).",
+        "Verified parse_frame_payload at crates/wz-runtime-tokio/src/session_glue.rs:4172 already emits NetworkMessage::Request(Box<Request>) from Frame.payload bytes — the silent gap is *not* parser absence but downstream dispatch absence.",
+        "Silent gap identified: registry.dispatch arms at crates/wz-runtime-tokio/src/pubsub.rs:278-282 cover only NetworkMessage::Push (dispatch_push) and NetworkMessage::Declare (absorb_declare). Request/Response/ResponseFinal/Interest/Oam variants fall through silently with no panic or trace.",
+        "Design decision A — location: QueryableTable lives in a new crates/wz-runtime-tokio/src/query.rs module, mirroring pubsub.rs's SubscriberRegistry pattern. Rationale: separation of concerns, session_glue.rs already 5500+ lines, and Reply emit helpers naturally colocate with the table they emit on behalf of.",
+        "Design decision B — callback shape: on_query: Fn(Query, &QueryResponder) where QueryResponder exposes send_reply / send_err / send_final methods matching the zenoh API split (z_query_reply / z_query_reply_err / z_query_reply_final). Multi-reply and per-reply error reporting are supported without forcing an async-stream return shape that would conflict with the MCU runtime contract.",
+        "Design decision C — dispatch wiring: R121j-5c will add a third arm to pubsub.rs registry.dispatch (or, equivalently, pass a sibling QueryableRegistry into poll_and_dispatch_one alongside SubscriberRegistry) so NetworkMessage::Request invokes QueryableTable::dispatch_request before the message is dropped. QueryableTable lookup keyed by Request.keyexpr resolved through the existing inbound DeclKexpr mapping table state on SubscriberRegistry (pubsub.rs:172)."
+      ],
+      "verification_bullets": [
+        "grep -n 'NetworkMessage::' crates/wz-runtime-tokio/src/pubsub.rs confirmed lines 280-281 are the only dispatch arms in registry.dispatch — Push and Declare only; Request not routed.",
+        "Read of crates/target/debug/build/wz-codecs-b22c022e9cc543f4/out/request.rs:97-147 confirmed Request::decode signature: header byte peek+advance, rid VLE-u64, keyexpr with N/M flags from header bits 5/6, optional ExtEntry chain via header bit-7 (Z), 4-arm body match (MID 0x01 MsgPut / 0x02 MsgDel / 0x03 Query / other → Default catch-all Query).",
+        "Read of crates/wz-runtime-tokio/src/session_glue.rs:4165-4210 confirmed parse_frame_payload's match arm at line 4172-4175 calls Request::decode and pushes NetworkMessage::Request(Box::new(req)) for MID = wire_const::N_MID_REQUEST; same shape for Push/Response/ResponseFinal/Oam/Interest/Declare.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1084 doc-comment from R121i-b ('declared keyexpr will then trigger the wz-side on_query') confirms on_query was already the documented future surface from the Q-side DeclQueryable round — R121j-5 realizes that documented future, no new architectural commitment.",
+        "No code mutation this round; cargo check / cargo test baselines unchanged (98 wz-runtime-tokio lib tests pass at HEAD 24a4a2f per session-start baseline capture)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants"
+      ],
+      "carry_forward_bullets": [
+        "R121j-5b: create crates/wz-runtime-tokio/src/query.rs with QueryableTable struct (likely Mutex<HashMap<KeyexprId, Box<dyn QueryableHandler + Send + Sync>>>), a QueryableHandler trait or Fn-alias for the on_query closure shape, a QueryResponder struct holding (rid, keyexpr-resolved, link-handle / SessionLinkActions arc) for Reply emit context, and a stubbed QueryableTable::dispatch_request entry point. Add a #[cfg(test)] table_register / table_lookup unit test pair. No callback invocation yet — wiring lands in R121j-5c.",
+        "R121j-5c: wire dispatch_request into pubsub.rs registry.dispatch (or add QueryableRegistry as a sibling Arc passed to poll_and_dispatch_one) so NetworkMessage::Request routes through QueryableTable before any silent drop. Implement QueryResponder::{send_reply, send_err, send_final} which compose R121j-2b ResponseReplyBuilder / ResponseErrBuilder / encode_frame_with_response_final on top of the existing session_glue send_frame infrastructure. End-to-end test: register a Queryable, send a Request through TcpDriver, expect Reply+Final on the wire.",
+        "AP MVP weighted +5-7%p target after R121j-5c lands: Q-side and R-side parity for the Query/Reply lifecycle, raising the inbound 65% number toward ~100% for the Query/Reply path. Per-closure estimate from R121h-perf-bump-4 carry stands.",
+        "Open sub-question for R121j-5b: function pointer (Fn(Query, &QueryResponder) + 'static + Send + Sync) vs boxed trait object (Box<dyn QueryableHandler>) for the table value type? Recommend boxed dyn for closure-capture flexibility (zenoh-pico's typical use case captures user state by reference); revisit at R121j-5b implementation only if a no_std/MCU constraint surfaces that forbids alloc.",
+        "Reply emit will consume R121j-2b ResponseReplyBuilder + R121j-4 ResponseErrBuilder + R121j-3d reply_del + encode_frame_with_response + encode_frame_with_response_final + send_frame. Reply payload encoding currently has no streaming back-pressure consideration; out of scope for R121j-5 (single-reply synchronous z_get / z_get_reply happy path is the AP MVP target).",
+        "R121j-tstamp Request-level Timestamp setter still gated on wz_codecs ext_zbuf Timestamp sub-codec wiring; not blocked by R121j-5 and not blocking it — independent active carry.",
+        "R121h-perf-bump-5 (encode_ext_chain Z-bit refactor) decision still pending — SCE-side option (a: ExtEntry::encode signature adds chain_continuation: bool, codegen template change) vs wz-side option (b: sink position-rewind, consumer-only change). Carry from R121h-perf-bump-4."
+      ],
+      "publishable_decision_summary": "R121j-5a reconnaissance: Request inbound parser already wired via parse_frame_payload; R121j-5b/c carry QueryableTable in new query.rs + Fn(Query, &QueryResponder) on_query dispatch and Reply emit.",
+      "publishable_changes_bullets": [
+        "Reconnaissance round; no source code mutation. Design decisions only, materialized in carry_forward for R121j-5b/c sub-rounds.",
+        "Verified Request::decode already complete via SCE codegen at crates/target/debug/build/wz-codecs-*/out/request.rs:97-147 — 1:1 with zenoh-pico _z_request_decode (network.c:209-238): rid(VLE) + keyexpr(N/M flag) + extensions(Z flag, ExtEntry chain capacity 4) + 4-variant body dispatch (MsgPut/MsgDel/Query/Default).",
+        "Verified parse_frame_payload at crates/wz-runtime-tokio/src/session_glue.rs:4172 already emits NetworkMessage::Request(Box<Request>) from Frame.payload bytes — the silent gap is *not* parser absence but downstream dispatch absence.",
+        "Silent gap identified: registry.dispatch arms at crates/wz-runtime-tokio/src/pubsub.rs:278-282 cover only NetworkMessage::Push (dispatch_push) and NetworkMessage::Declare (absorb_declare). Request/Response/ResponseFinal/Interest/Oam variants fall through silently with no panic or trace.",
+        "Design decision A — location: QueryableTable lives in a new crates/wz-runtime-tokio/src/query.rs module, mirroring pubsub.rs's SubscriberRegistry pattern. Rationale: separation of concerns, session_glue.rs already 5500+ lines, and Reply emit helpers naturally colocate with the table they emit on behalf of.",
+        "Design decision B — callback shape: on_query: Fn(Query, &QueryResponder) where QueryResponder exposes send_reply / send_err / send_final methods matching the zenoh API split (z_query_reply / z_query_reply_err / z_query_reply_final). Multi-reply and per-reply error reporting are supported without forcing an async-stream return shape that would conflict with the MCU runtime contract.",
+        "Design decision C — dispatch wiring: R121j-5c will add a third arm to pubsub.rs registry.dispatch (or, equivalently, pass a sibling QueryableRegistry into poll_and_dispatch_one alongside SubscriberRegistry) so NetworkMessage::Request invokes QueryableTable::dispatch_request before the message is dropped. QueryableTable lookup keyed by Request.keyexpr resolved through the existing inbound DeclKexpr mapping table state on SubscriberRegistry (pubsub.rs:172)."
+      ],
+      "publishable_verification_bullets": [
+        "grep -n 'NetworkMessage::' crates/wz-runtime-tokio/src/pubsub.rs confirmed lines 280-281 are the only dispatch arms in registry.dispatch — Push and Declare only; Request not routed.",
+        "Read of crates/target/debug/build/wz-codecs-b22c022e9cc543f4/out/request.rs:97-147 confirmed Request::decode signature: header byte peek+advance, rid VLE-u64, keyexpr with N/M flags from header bits 5/6, optional ExtEntry chain via header bit-7 (Z), 4-arm body match (MID 0x01 MsgPut / 0x02 MsgDel / 0x03 Query / other → Default catch-all Query).",
+        "Read of crates/wz-runtime-tokio/src/session_glue.rs:4165-4210 confirmed parse_frame_payload's match arm at line 4172-4175 calls Request::decode and pushes NetworkMessage::Request(Box::new(req)) for MID = wire_const::N_MID_REQUEST; same shape for Push/Response/ResponseFinal/Oam/Interest/Declare.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1084 doc-comment from R121i-b ('declared keyexpr will then trigger the wz-side on_query') confirms on_query was already the documented future surface from the Q-side DeclQueryable round — R121j-5 realizes that documented future, no new architectural commitment.",
+        "No code mutation this round; cargo check / cargo test baselines unchanged (98 wz-runtime-tokio lib tests pass at HEAD 24a4a2f per session-start baseline capture)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "wire-spec-subset--watching-zenoh-mvp/6-2-requestbody-variants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121j-5b: create crates/wz-runtime-tokio/src/query.rs with QueryableTable struct (likely Mutex<HashMap<KeyexprId, Box<dyn QueryableHandler + Send + Sync>>>), a QueryableHandler trait or Fn-alias for the on_query closure shape, a QueryResponder struct holding (rid, keyexpr-resolved, link-handle / SessionLinkActions arc) for Reply emit context, and a stubbed QueryableTable::dispatch_request entry point. Add a #[cfg(test)] table_register / table_lookup unit test pair. No callback invocation yet — wiring lands in R121j-5c.",
+        "R121j-5c: wire dispatch_request into pubsub.rs registry.dispatch (or add QueryableRegistry as a sibling Arc passed to poll_and_dispatch_one) so NetworkMessage::Request routes through QueryableTable before any silent drop. Implement QueryResponder::{send_reply, send_err, send_final} which compose R121j-2b ResponseReplyBuilder / ResponseErrBuilder / encode_frame_with_response_final on top of the existing session_glue send_frame infrastructure. End-to-end test: register a Queryable, send a Request through TcpDriver, expect Reply+Final on the wire.",
+        "AP MVP weighted +5-7%p target after R121j-5c lands: Q-side and R-side parity for the Query/Reply lifecycle, raising the inbound 65% number toward ~100% for the Query/Reply path. Per-closure estimate from R121h-perf-bump-4 carry stands.",
+        "Open sub-question for R121j-5b: function pointer (Fn(Query, &QueryResponder) + 'static + Send + Sync) vs boxed trait object (Box<dyn QueryableHandler>) for the table value type? Recommend boxed dyn for closure-capture flexibility (zenoh-pico's typical use case captures user state by reference); revisit at R121j-5b implementation only if a no_std/MCU constraint surfaces that forbids alloc.",
+        "Reply emit will consume R121j-2b ResponseReplyBuilder + R121j-4 ResponseErrBuilder + R121j-3d reply_del + encode_frame_with_response + encode_frame_with_response_final + send_frame. Reply payload encoding currently has no streaming back-pressure consideration; out of scope for R121j-5 (single-reply synchronous z_get / z_get_reply happy path is the AP MVP target).",
+        "R121j-tstamp Request-level Timestamp setter still gated on wz_codecs ext_zbuf Timestamp sub-codec wiring; not blocked by R121j-5 and not blocking it — independent active carry.",
+        "R121h-perf-bump-5 (encode_ext_chain Z-bit refactor) decision still pending — SCE-side option (a: ExtEntry::encode signature adds chain_continuation: bool, codegen template change) vs wz-side option (b: sink position-rewind, consumer-only change). Carry from R121h-perf-bump-4."
+      ]
+    },
     "Round 122": {
       "decision_summary": "R122 vendor/sce pin bump 122f851d to 4441431d; LAYER2_KNOWN_DIVERGENCE 6 to 1.",
       "changes_bullets": [
