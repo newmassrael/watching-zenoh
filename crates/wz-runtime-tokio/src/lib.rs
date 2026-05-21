@@ -53,6 +53,16 @@ pub mod query;
 /// scope and callback contract.
 pub mod declare;
 
+/// R121j-6 — application-layer reply registry. Z_get-side mirror of
+/// [`query::QueryableRegistry`]: routes inbound
+/// `NetworkMessage::Response(Reply|Err)` and
+/// `NetworkMessage::ResponseFinal` records to per-rid callbacks
+/// registered by `z_get`-side callers. Pending entries auto-
+/// unregister on `ResponseFinal` (zenoh-pico "exactly one Final
+/// terminates the chain" semantics). See `reply` module doc comment
+/// for scope, callback shape, and threading.
+pub mod reply;
+
 /// Generated SCXML state machine for the unicast session FSM. The
 /// emit comes from `sources/session/session_fsm_unicast.scxml` via
 /// `build.rs`. Public re-export is module-form rather than
