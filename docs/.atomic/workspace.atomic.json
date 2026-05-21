@@ -8222,6 +8222,56 @@
         "SCE drift +7 commits audit entry pending (e4034617 codegen)"
       ]
     },
+    "Round 196": {
+      "decision_summary": "R121k-1 reconnaissance — inbound DECLARE 6 sub-types (Sub+Queryable+Token decl/undecl) silent gap + callback shape design.",
+      "changes_bullets": [
+        "zenoh-pico rx.c:39-85 _z_handle_declare analyzed: 9 tags (Kexpr/UndeclKexpr handled in wz; 6 sub-types + DeclFinal silent gap)",
+        "wz pubsub.rs:355-374 absorb_declare handles only DeclKexpr/UndeclKexpr; other 6 fall through default arm",
+        "wz-codecs already generates all 6 sub-type codecs (decl_subscriber/queryable/token + undecl_*); silent gap is dispatch only",
+        "callback shape design: Box<dyn FnMut(&DeclX) + Send + 'static> mirror of SubscriberRegistry/QueryableRegistry",
+        "RemoteSubscriberRegistry/RemoteQueryableRegistry/LivelinessRegistry split mirrors zenoh-pico's interest + liveliness layer separation"
+      ],
+      "verification_bullets": [
+        "design-only reconnaissance — code change = 0",
+        "zenoh-pico parity surface analyzed; wz scope narrower (no interest router; wz is peer-leaf in AP MVP)",
+        "decision: 6 sub-types each get an independent Remote*Registry with FnMut callback, dispatched from absorb_declare"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R121k-2 DeclSubscriber/UndeclSubscriber RemoteSubscriberRegistry + FnMut callback",
+        "R121k-3 DeclQueryable/UndeclQueryable RemoteQueryableRegistry (informs z_get-side topology)",
+        "R121k-4 DeclToken/UndeclToken LivelinessRegistry callback for liveliness signal",
+        "R121k-5 absorb_declare extended to fan into all three Remote* registries",
+        "R121k-6 integration test parity mirror wz_queryable_round_trip pattern (TCP wz<->wz)",
+        "R121j-6 z_get-side inbound Response.Reply dispatch (ReplyRegistry)"
+      ],
+      "publishable_decision_summary": "R121k-1 reconnaissance — inbound DECLARE 6 sub-types (Sub+Queryable+Token decl/undecl) silent gap + callback shape design.",
+      "publishable_changes_bullets": [
+        "zenoh-pico rx.c:39-85 _z_handle_declare analyzed: 9 tags (Kexpr/UndeclKexpr handled in wz; 6 sub-types + DeclFinal silent gap)",
+        "wz pubsub.rs:355-374 absorb_declare handles only DeclKexpr/UndeclKexpr; other 6 fall through default arm",
+        "wz-codecs already generates all 6 sub-type codecs (decl_subscriber/queryable/token + undecl_*); silent gap is dispatch only",
+        "callback shape design: Box<dyn FnMut(&DeclX) + Send + 'static> mirror of SubscriberRegistry/QueryableRegistry",
+        "RemoteSubscriberRegistry/RemoteQueryableRegistry/LivelinessRegistry split mirrors zenoh-pico's interest + liveliness layer separation"
+      ],
+      "publishable_verification_bullets": [
+        "design-only reconnaissance — code change = 0",
+        "zenoh-pico parity surface analyzed; wz scope narrower (no interest router; wz is peer-leaf in AP MVP)",
+        "decision: 6 sub-types each get an independent Remote*Registry with FnMut callback, dispatched from absorb_declare"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R121k-2 DeclSubscriber/UndeclSubscriber RemoteSubscriberRegistry + FnMut callback",
+        "R121k-3 DeclQueryable/UndeclQueryable RemoteQueryableRegistry (informs z_get-side topology)",
+        "R121k-4 DeclToken/UndeclToken LivelinessRegistry callback for liveliness signal",
+        "R121k-5 absorb_declare extended to fan into all three Remote* registries",
+        "R121k-6 integration test parity mirror wz_queryable_round_trip pattern (TCP wz<->wz)",
+        "R121j-6 z_get-side inbound Response.Reply dispatch (ReplyRegistry)"
+      ]
+    },
     "Round 2": {
       "decision_summary": "Phase A complete — oq-w15-ratification-summary.md 7-section atomic decomposition landed as first full-doc atomic migration trial.",
       "changes_bullets": [
