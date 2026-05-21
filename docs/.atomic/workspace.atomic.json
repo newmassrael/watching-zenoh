@@ -9416,6 +9416,60 @@
         "release rehearsal 총결: sub-1 → sub-5 5 sub-rounds 완료; v0.1.0-mvp 실제 릴리스는 user push consent 기다림"
       ]
     },
+    "Round 216": {
+      "decision_summary": "Layer E flake root-caused to z_put intra-process keep_alive race; BLOCK-congestion build-time patch + DRY test harness common module",
+      "changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs: pub mod common with PortReservation (process-global mutex guard) + wait_for_substring + read_captured + project_root + wz_ap_demo_binary + zenoh_pico_cli_binary (5 helpers + 1 guard)",
+        "9 round-trip tests (ap_demo_round_trip / wz_publisher_to_zsub / wz_initiator_to_wz_acceptor / wz_initiator_to_zsub / wz_publisher_aliased_to_zsub / wz_query_reply_round_trip / wz_queryable_round_trip / wz_remote_declare_round_trip / wz_publisher_aliased_to_zsub) migrated from per-file duplicates (45 fn copies eliminated) to use wz_integration_tests::common::* ; PortReservation released after listening-on confirmation per test",
+        "scripts/build-zenoh-pico-cli.sh: in-place sed patch on vendor/zenoh-pico/examples/unix/c11/z_put.c switching the PUT congestion_control default from upstream Z_CONGESTION_CONTROL_DROP (constants.h::z_internal_congestion_control_default_push) to Z_CONGESTION_CONTROL_BLOCK; trap restore_z_put EXIT reverts via git checkout on success/error/signal; pre-patch idempotent restore + anchor-grep refusal on upstream shape drift",
+        "THIRD_PARTY.md vendor/zenoh-pico section: Build-time divergence (R216) entry documenting the wz-side z_put.c BLOCK patch + the lifecycle / scope / non-affected runtime-FFI path"
+      ],
+      "verification_bullets": [
+        "ap_demo_round_trip 50x pre-patch standalone: 40 pass / 10 fail (20% flake) — root cause: zenoh-pico tx.c::_z_transport_tx_send_n_msg DROP semantics try_lock contended with keep_alive worker blocking lock per common/tx.c:286-306",
+        "ap_demo_round_trip 50x post-patch standalone: 50 pass / 0 fail (363s wall)",
+        "wz_initiator_to_wz_acceptor 50x post-patch standalone: 50 pass / 0 fail (309s wall) — R209 carry-reported flake not reproducible standalone with patch in place",
+        "Layer E full 5-test parallel suite 50x post-patch: 50 pass / 0 fail (458s wall)",
+        "cargo test --workspace pass; wz-runtime-tokio lib 185 tests unchanged (R210 baseline)",
+        "cargo clippy --workspace --all-targets -- -D warnings clean",
+        "git -C vendor/zenoh-pico status clean (trap revert restored z_put.c to committed state)"
+      ],
+      "impact_refs": [
+        "watching-zenoh/build-and-verify",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "SCE upstream drift carry continues — vendor pin ebf3b3ff matches SCE origin/main HEAD; local /home/coin/scxml-core-engine has +19 unpushed clippy chores (dbf7fc4f); pin bump deferred until SCE origin/main advances",
+        "Pub/Sub inbound 35% remainder is the next zenoh-pico parity round; first sub-round = remote keyexpr table strength + Push absorber via session_glue inbound dispatch",
+        "R121h-perf-bump-5 encode_ext_chain Z-bit refactor SCE-a vs wz-b decision still pending user confirmation",
+        "Phase W lwIP / MCU runtime scaffolding (crates/wz-runtime-lwip Cargo.toml + sce_link_runtime_lwip C11 header) deferred — 20-50 rounds cluster"
+      ],
+      "publishable_decision_summary": "Layer E flake root-caused to z_put intra-process keep_alive race; BLOCK-congestion build-time patch + DRY test harness common module",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs: pub mod common with PortReservation (process-global mutex guard) + wait_for_substring + read_captured + project_root + wz_ap_demo_binary + zenoh_pico_cli_binary (5 helpers + 1 guard)",
+        "9 round-trip tests (ap_demo_round_trip / wz_publisher_to_zsub / wz_initiator_to_wz_acceptor / wz_initiator_to_zsub / wz_publisher_aliased_to_zsub / wz_query_reply_round_trip / wz_queryable_round_trip / wz_remote_declare_round_trip / wz_publisher_aliased_to_zsub) migrated from per-file duplicates (45 fn copies eliminated) to use wz_integration_tests::common::* ; PortReservation released after listening-on confirmation per test",
+        "scripts/build-zenoh-pico-cli.sh: in-place sed patch on vendor/zenoh-pico/examples/unix/c11/z_put.c switching the PUT congestion_control default from upstream Z_CONGESTION_CONTROL_DROP (constants.h::z_internal_congestion_control_default_push) to Z_CONGESTION_CONTROL_BLOCK; trap restore_z_put EXIT reverts via git checkout on success/error/signal; pre-patch idempotent restore + anchor-grep refusal on upstream shape drift",
+        "THIRD_PARTY.md vendor/zenoh-pico section: Build-time divergence (R216) entry documenting the wz-side z_put.c BLOCK patch + the lifecycle / scope / non-affected runtime-FFI path"
+      ],
+      "publishable_verification_bullets": [
+        "ap_demo_round_trip 50x pre-patch standalone: 40 pass / 10 fail (20% flake) — root cause: zenoh-pico tx.c::_z_transport_tx_send_n_msg DROP semantics try_lock contended with keep_alive worker blocking lock per common/tx.c:286-306",
+        "ap_demo_round_trip 50x post-patch standalone: 50 pass / 0 fail (363s wall)",
+        "wz_initiator_to_wz_acceptor 50x post-patch standalone: 50 pass / 0 fail (309s wall) — R209 carry-reported flake not reproducible standalone with patch in place",
+        "Layer E full 5-test parallel suite 50x post-patch: 50 pass / 0 fail (458s wall)",
+        "cargo test --workspace pass; wz-runtime-tokio lib 185 tests unchanged (R210 baseline)",
+        "cargo clippy --workspace --all-targets -- -D warnings clean",
+        "git -C vendor/zenoh-pico status clean (trap revert restored z_put.c to committed state)"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/build-and-verify",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "SCE upstream drift carry continues — vendor pin ebf3b3ff matches SCE origin/main HEAD; local /home/coin/scxml-core-engine has +19 unpushed clippy chores (dbf7fc4f); pin bump deferred until SCE origin/main advances",
+        "Pub/Sub inbound 35% remainder is the next zenoh-pico parity round; first sub-round = remote keyexpr table strength + Push absorber via session_glue inbound dispatch",
+        "R121h-perf-bump-5 encode_ext_chain Z-bit refactor SCE-a vs wz-b decision still pending user confirmation",
+        "Phase W lwIP / MCU runtime scaffolding (crates/wz-runtime-lwip Cargo.toml + sce_link_runtime_lwip C11 header) deferred — 20-50 rounds cluster"
+      ]
+    },
     "Round 22": {
       "decision_summary": "vle_byte_length primitive land — Phase A3 cursor-free TLV chain walker missing piece; vle_u64_decode와 짝으로 §7 extension iterator를 Phase A4 cursor 의존 없이 author-side에서 운영 가능, tlv_advance Phase A4+ 진화의 내부 길이 산출 부분품.",
       "changes_bullets": [
