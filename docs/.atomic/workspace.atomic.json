@@ -9116,6 +9116,58 @@
         "Phase E (README 저작) — Mnemosyne migration 마지막, LICENSE/SPDX 안내 포함"
       ]
     },
+    "Round 210": {
+      "decision_summary": "R210 R121j-3c-on-responder: QueryResponder.with_responder(zid,eid) stamps subsequent sends; QueryReply.responder field + into_response chain; +3 lib tests (182→185); 8-lane CI green.",
+      "changes_bullets": [
+        "QueryResponder에 with_responder(zid, eid) / clear_responder / responder() getter 추가 (&mut self pattern). zid 길이 1..=16 assertion (zenoh-pico ZenohId wire 제약)",
+        "QueryReply::Reply / Err에 responder: Option<(Vec<u8>, u32)> field 추가; send_reply / send_reply_del / send_err가 self.responder.clone()로 stamp propagation",
+        "QueryReply::into_response Put/Del/Err arm 모두 responder Some일 때 builder.responder(&zid, eid) chaining — ResponseReplyBuilder / ResponseErrBuilder의 기존 .responder() setter로 thread",
+        "기존 QueryReply match 패턴 3군데 .. rest pattern 추가 (온고 reply.rs:739, 833, 858); 3 construction site에 responder: None 추가 (into_response 자체 test 3개)",
+        "dispatch_request 내 QueryResponder 구축 site에 responder: None initialization",
+        "3 신규 lib tests: query_responder_with_responder_stamps_subsequent_replies (before+after+clear sequence), stamps_err_payload (Err path), into_response_with_responder_matches_builder (full chain byte-stable vs builder.responder 경로)"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 185 passed (prev 182 + 3 new); responder 별칭 13 tests 전반 green",
+        "cargo clippy --workspace --all-targets -- -D warnings clean",
+        "bash scripts/run-ci.sh: 8 lanes pass (Layer 0/A/A2/B/C1/C2/D/E)",
+        "pre-commit validate-workspace: T1=0, RT=12/12, GENERATED.md=sync, entries=209 unchanged",
+        "git commit 8e66c92 (feat(runtime) subject): 1 file changed, 228 insertions + 17 deletions"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "AP MVP strict scope 100% 접근 — Response envelope responder ext stamp을 user-facing handle에서 직접 단일-call로 제어 가능; 외부 가시 query/reply round-trip의 최후 1 조각 닫힘",
+        "부채 #3 R121h-perf-bump-5 encode_ext_chain Z-bit refactor — SCE-a (template 수정) vs wz-b (SceSink position 노출) 결정 사용자 컨펌 필요; 1 round after decision",
+        "부채 #4 first external release rehearsal (3-5 sub-rounds) — README 영문 primary + README.ko.md 보강 / deploy.yaml 정리 / GH Actions release flow / LGPL+Commercial 텍스트 + THIRD_PARTY.md / cargo publish dry-run + v0.1.0-mvp tag",
+        "SCE upstream pin ebf3b3ff + 14 unpushed clippy chores in /home/coin/scxml-core-engine (dbf7fc4f HEAD) — 다음 pin bump round에서 origin push 이후 재평가"
+      ],
+      "publishable_decision_summary": "R210 R121j-3c-on-responder: QueryResponder.with_responder(zid,eid) stamps subsequent sends; QueryReply.responder field + into_response chain; +3 lib tests (182→185); 8-lane CI green.",
+      "publishable_changes_bullets": [
+        "QueryResponder에 with_responder(zid, eid) / clear_responder / responder() getter 추가 (&mut self pattern). zid 길이 1..=16 assertion (zenoh-pico ZenohId wire 제약)",
+        "QueryReply::Reply / Err에 responder: Option<(Vec<u8>, u32)> field 추가; send_reply / send_reply_del / send_err가 self.responder.clone()로 stamp propagation",
+        "QueryReply::into_response Put/Del/Err arm 모두 responder Some일 때 builder.responder(&zid, eid) chaining — ResponseReplyBuilder / ResponseErrBuilder의 기존 .responder() setter로 thread",
+        "기존 QueryReply match 패턴 3군데 .. rest pattern 추가 (온고 reply.rs:739, 833, 858); 3 construction site에 responder: None 추가 (into_response 자체 test 3개)",
+        "dispatch_request 내 QueryResponder 구축 site에 responder: None initialization",
+        "3 신규 lib tests: query_responder_with_responder_stamps_subsequent_replies (before+after+clear sequence), stamps_err_payload (Err path), into_response_with_responder_matches_builder (full chain byte-stable vs builder.responder 경로)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 185 passed (prev 182 + 3 new); responder 별칭 13 tests 전반 green",
+        "cargo clippy --workspace --all-targets -- -D warnings clean",
+        "bash scripts/run-ci.sh: 8 lanes pass (Layer 0/A/A2/B/C1/C2/D/E)",
+        "pre-commit validate-workspace: T1=0, RT=12/12, GENERATED.md=sync, entries=209 unchanged",
+        "git commit 8e66c92 (feat(runtime) subject): 1 file changed, 228 insertions + 17 deletions"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "AP MVP strict scope 100% 접근 — Response envelope responder ext stamp을 user-facing handle에서 직접 단일-call로 제어 가능; 외부 가시 query/reply round-trip의 최후 1 조각 닫힘",
+        "부채 #3 R121h-perf-bump-5 encode_ext_chain Z-bit refactor — SCE-a (template 수정) vs wz-b (SceSink position 노출) 결정 사용자 컨펌 필요; 1 round after decision",
+        "부채 #4 first external release rehearsal (3-5 sub-rounds) — README 영문 primary + README.ko.md 보강 / deploy.yaml 정리 / GH Actions release flow / LGPL+Commercial 텍스트 + THIRD_PARTY.md / cargo publish dry-run + v0.1.0-mvp tag",
+        "SCE upstream pin ebf3b3ff + 14 unpushed clippy chores in /home/coin/scxml-core-engine (dbf7fc4f HEAD) — 다음 pin bump round에서 origin push 이후 재평가"
+      ]
+    },
     "Round 22": {
       "decision_summary": "vle_byte_length primitive land — Phase A3 cursor-free TLV chain walker missing piece; vle_u64_decode와 짝으로 §7 extension iterator를 Phase A4 cursor 의존 없이 author-side에서 운영 가능, tlv_advance Phase A4+ 진화의 내부 길이 산출 부분품.",
       "changes_bullets": [
