@@ -2533,6 +2533,7 @@ pub struct RequestQueryBuilder {
     parameters: Option<Vec<u8>>,
     query_attachment: Option<Vec<u8>>,
     // Request-layer ext settings.
+    request_qos: Option<u8>,
     request_target: Option<QueryTarget>,
     request_timeout_ms: Option<u64>,
 }
@@ -2550,9 +2551,37 @@ impl RequestQueryBuilder {
             consolidation: None,
             parameters: None,
             query_attachment: None,
+            request_qos: None,
             request_target: None,
             request_timeout_ms: None,
         }
+    }
+
+    /// Set the Request-level qos extension to the caller-supplied
+    /// packed byte. Bit layout per zenoh-pico's `_z_n_qos_create`
+    /// (`vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/network.h`):
+    ///
+    /// ```text
+    ///   bits 0-2: priority (0-7; zenoh-pico z_priority_t)
+    ///   bit  3:   nodrop   (1 = BLOCK on congestion; 0 = DROP)
+    ///   bit  4:   express  (1 = express path; 0 = normal)
+    ///   bits 5-7: reserved (zero)
+    /// ```
+    ///
+    /// The setter is intentionally low-level — wz exposes the
+    /// pre-packed byte so callers integrating directly with
+    /// zenoh-pico-defined constants can pass `_z_n_qos_create`'s
+    /// output verbatim. A typed wrapper layering over this setter
+    /// (`.request_qos_typed(priority, congestion, express)`) is a
+    /// future ergonomic refinement.
+    ///
+    /// Emit position in the Request-level ext chain is FIRST (qos →
+    /// tstamp → target → budget → timeout), matching zenoh-pico's
+    /// `_z_request_encode` order at
+    /// `vendor/zenoh-pico/src/protocol/codec/network.c`.
+    pub fn request_qos(mut self, packed: u8) -> Self {
+        self.request_qos = Some(packed);
+        self
     }
 
     /// Set the Query-body consolidation mode. Subsequent calls
@@ -2662,9 +2691,23 @@ impl RequestQueryBuilder {
 
         // Request-level extensions in zenoh-pico encode order: qos →
         // tstamp → target → budget → timeout (network.c:122-167).
-        // Today only target + timeout are exposed; qos / tstamp /
-        // budget setters layer in once their codec wiring lands.
+        // Today qos + target + timeout are exposed; tstamp / budget
+        // setters layer in once their codec wiring lands.
         let mut request_exts: Vec<ExtEntry> = Vec::new();
+        if let Some(packed) = self.request_qos {
+            request_exts.push(ExtEntry {
+                // ENC_ZINT(0x20) | id_qos(0x01). No M flag — qos is
+                // an informational hint, not mandatory per the
+                // ext_qos M=0 convention at zenoh-pico
+                // vendor/zenoh-pico/src/protocol/codec/network.c.
+                // Z bit set below as a chain-continuation step if a
+                // later ext follows.
+                header: 0x20 | 0x01,
+                body: ExtEntryVariant::CodecZenohExtZint(ExtZint {
+                    value: packed as u64,
+                }),
+            });
+        }
         if let Some(target) = self.request_target {
             request_exts.push(ExtEntry {
                 // ENC_ZINT(0x20) | M(0x10) | id_target(0x04). Z bit
@@ -6797,6 +6840,65 @@ mod tests {
             0x00,
             "timeout ext must NOT carry Z (it is the last entry)",
         );
+    }
+
+    /// R121j-1f — RequestQueryBuilder.request_qos emits a single
+    /// Request-level ext at the head of the chain (qos → tstamp →
+    /// target → budget → timeout) with header ENC_ZINT(0x20) |
+    /// id_qos(0x01) and no M flag (qos is informational).
+    #[test]
+    fn request_query_builder_request_qos_emits_first_ext_with_no_m_flag() {
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_qos(0x05) // priority=5, no nodrop, no express
+            .build();
+        let req_exts = request
+            .extensions
+            .as_ref()
+            .expect("N_Z set → Request.extensions must be Some");
+        assert_eq!(req_exts.len(), 1, "only qos ext was set");
+        assert_eq!(
+            req_exts[0].header,
+            0x20 | 0x01,
+            "qos ext header = ENC_ZINT(0x20) | id_qos(0x01); no M, no Z (last)",
+        );
+        match &req_exts[0].body {
+            ExtEntryVariant::CodecZenohExtZint(zint) => {
+                assert_eq!(zint.value, 0x05, "qos packed byte 0x05 lifts into ZINT VLE value verbatim");
+            }
+            _ => panic!("qos ext body must be CodecZenohExtZint"),
+        }
+        assert_eq!(
+            request.header & 0x80,
+            0x80,
+            "qos setter must flip N_Z(0x80) on Request.header (exts present)",
+        );
+    }
+
+    /// R121j-1f — request_qos composes with request_target +
+    /// request_timeout_ms in the correct zenoh-pico encode order:
+    /// qos comes first (with Z-chain continuation), target next
+    /// (with Z-chain continuation), timeout last (no Z).
+    #[test]
+    fn request_query_builder_request_qos_target_timeout_chain_order_matches_zenoh_pico() {
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_qos(0x05)
+            .request_target(QueryTarget::All)
+            .request_timeout_ms(1000)
+            .build();
+        let req_exts = request
+            .extensions
+            .as_ref()
+            .expect("3 Request-level exts set → extensions must be Some");
+        assert_eq!(req_exts.len(), 3, "qos + target + timeout");
+        // qos first: ENC_ZINT | id_qos(1), Z continuation set
+        assert_eq!(req_exts[0].header, 0x80 | 0x20 | 0x01,
+            "qos ext at index 0 must carry Z continuation (more follows)");
+        // target second: ENC_ZINT | M | id_target(4), Z continuation set
+        assert_eq!(req_exts[1].header, 0x80 | 0x20 | 0x10 | 0x04,
+            "target ext at index 1 must carry M(0x10) + Z continuation");
+        // timeout last: ENC_ZINT | id_timeout(6), no Z
+        assert_eq!(req_exts[2].header, 0x20 | 0x06,
+            "timeout ext at index 2 (last) must NOT carry Z");
     }
 
     /// R121j-2a — Per-setter validation flows through to the builder.
