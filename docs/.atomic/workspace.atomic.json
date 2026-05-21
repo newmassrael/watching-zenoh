@@ -9950,6 +9950,50 @@
         "SCE upstream drift carry: SCE origin/main unchanged at ebf3b3ff; SCE local 14 commits ahead (clippy / refactor cleanup, none pushed). 23-session kickoff confirmed no vendor pin bump needed."
       ]
     },
+    "Round 226": {
+      "decision_summary": "R226 unifies Reliability enum + threads link-layer reliability from FramePayload.reliable through dispatch chain into Sample.reliability, closing R225 carry",
+      "changes_bullets": [
+        "`crates/wz-runtime-tokio/src/lib.rs` extends the crate-root `Reliability` enum with `Default` / `Hash` / `repr(u8)` / explicit discriminants (`BestEffort=0`, `Reliable=1`, default `Reliable`) so the outbound driver hint and inbound `Sample.reliability` share a single typed surface. New `Reliability::from_reliable_bool` adapter maps the `DriverLoopOutcome::FramePayload.reliable` discriminator to the typed enum.",
+        "`crates/wz-runtime-tokio/src/sample.rs` retires the duplicate `Reliability` enum that R225 introduced under the sample module; the previous `pub enum Reliability { ... }` is replaced with `pub use crate::Reliability;` so the sample-module re-export keeps `crate::sample::Reliability` source-compatible for callers while collapsing to one definition.",
+        "`crates/wz-runtime-tokio/src/pubsub.rs::dispatch_iteration_event` now destructures `FramePayload.reliable`, converts it via `Reliability::from_reliable_bool`, and threads the value through every per-message `dispatch` call. `dispatch(message, reliability)` and `dispatch_push(push, reliability)` grow an explicit `Reliability` argument so the link-layer classification reaches the `Sample` literal instead of the R225 placeholder `Reliability::default()`.",
+        "All 30 in-crate `registry.dispatch(...)` call sites (28 in pubsub.rs tests + 2 in the ResponseFinal / undeclare paths) now pass `Reliability::Reliable` explicitly. The Declare-arm absorb stays reliability-agnostic (declarations always travel on the reliable channel per session-fsm §6); the argument is consumed only by the Push arm via `dispatch_push`."
+      ],
+      "verification_bullets": [
+        "`cargo test -p wz-runtime-tokio --lib`: 252 -> 256 (+4) all pass. New tests cover `dispatch(_, Reliable)` -> `Sample.reliability == Reliable`, `dispatch(_, BestEffort)` -> `Sample.reliability == BestEffort`, `dispatch_iteration_event(FramePayload { reliable: false, .. })` -> `Sample.reliability == BestEffort` (end-to-end frame -> sample projection), and `Reliability::from_reliable_bool(true|false)` adapter pairing.",
+        "`cargo test -p wz-integration-tests`: 65 / 65 pass, regression 0. The full e2e suite (pubsub round-trips against zenoh-pico, queryable / reply, remote declare, ap_demo) continues to interop with the now-threaded reliability argument because `dispatch_iteration_event` keeps its external signature; the new argument lives only on `dispatch` / `dispatch_push` whose external callers are limited to internal unit tests (already updated).",
+        "`cargo clippy --workspace --all-targets -- -D warnings`: clean across wz-codecs / wz-runtime-tokio / wz-runtime-tokio-test-support / wz-integration-tests / wz-ap-demo / zenoh-pico-sys. The duplicate-enum cleanup did not surface any new lints; `pub use crate::Reliability` re-export is unambiguous."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R227+ Self-publish loopback infrastructure (R222 cluster carry). `dispatch_push(push, reliability)` now has a stable shape; the self-publish path will reuse it by routing the local Sample through the same dispatcher with the registry's default reliability (or a per-publisher override). Locality::SessionLocal short-circuit in the allows_remote() branch from R223 is the matching dormant surface that activates with this work.",
+        "R121h-perf-bump-5 SCE-a vs wz-b decision still pending user confirm.",
+        "SCE upstream drift carry: re-check at next kickoff. SCE origin/main unchanged at ebf3b3ff at the start of this session.",
+        "Operating pattern (R225 lesson #4 next-step refinement): cluster-level enum / type-surface review BEFORE adding a new enum. R225 added `sample::Reliability` without first searching for an existing crate-level enum of the same semantic; R226 had to retire it within one round. Future kickoffs: when introducing a typed surface that maps a wire concept (reliability, locality, kind, priority, etc.), grep `pub enum <Name>` and `pub use ... as <Name>` across the crate root + every module before authoring; if the concept already exists, extend it rather than introducing a sibling."
+      ],
+      "publishable_decision_summary": "R226 unifies Reliability enum + threads link-layer reliability from FramePayload.reliable through dispatch chain into Sample.reliability, closing R225 carry",
+      "publishable_changes_bullets": [
+        "`crates/wz-runtime-tokio/src/lib.rs` extends the crate-root `Reliability` enum with `Default` / `Hash` / `repr(u8)` / explicit discriminants (`BestEffort=0`, `Reliable=1`, default `Reliable`) so the outbound driver hint and inbound `Sample.reliability` share a single typed surface. New `Reliability::from_reliable_bool` adapter maps the `DriverLoopOutcome::FramePayload.reliable` discriminator to the typed enum.",
+        "`crates/wz-runtime-tokio/src/sample.rs` retires the duplicate `Reliability` enum that R225 introduced under the sample module; the previous `pub enum Reliability { ... }` is replaced with `pub use crate::Reliability;` so the sample-module re-export keeps `crate::sample::Reliability` source-compatible for callers while collapsing to one definition.",
+        "`crates/wz-runtime-tokio/src/pubsub.rs::dispatch_iteration_event` now destructures `FramePayload.reliable`, converts it via `Reliability::from_reliable_bool`, and threads the value through every per-message `dispatch` call. `dispatch(message, reliability)` and `dispatch_push(push, reliability)` grow an explicit `Reliability` argument so the link-layer classification reaches the `Sample` literal instead of the R225 placeholder `Reliability::default()`.",
+        "All 30 in-crate `registry.dispatch(...)` call sites (28 in pubsub.rs tests + 2 in the ResponseFinal / undeclare paths) now pass `Reliability::Reliable` explicitly. The Declare-arm absorb stays reliability-agnostic (declarations always travel on the reliable channel per session-fsm §6); the argument is consumed only by the Push arm via `dispatch_push`."
+      ],
+      "publishable_verification_bullets": [
+        "`cargo test -p wz-runtime-tokio --lib`: 252 -> 256 (+4) all pass. New tests cover `dispatch(_, Reliable)` -> `Sample.reliability == Reliable`, `dispatch(_, BestEffort)` -> `Sample.reliability == BestEffort`, `dispatch_iteration_event(FramePayload { reliable: false, .. })` -> `Sample.reliability == BestEffort` (end-to-end frame -> sample projection), and `Reliability::from_reliable_bool(true|false)` adapter pairing.",
+        "`cargo test -p wz-integration-tests`: 65 / 65 pass, regression 0. The full e2e suite (pubsub round-trips against zenoh-pico, queryable / reply, remote declare, ap_demo) continues to interop with the now-threaded reliability argument because `dispatch_iteration_event` keeps its external signature; the new argument lives only on `dispatch` / `dispatch_push` whose external callers are limited to internal unit tests (already updated).",
+        "`cargo clippy --workspace --all-targets -- -D warnings`: clean across wz-codecs / wz-runtime-tokio / wz-runtime-tokio-test-support / wz-integration-tests / wz-ap-demo / zenoh-pico-sys. The duplicate-enum cleanup did not surface any new lints; `pub use crate::Reliability` re-export is unambiguous."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R227+ Self-publish loopback infrastructure (R222 cluster carry). `dispatch_push(push, reliability)` now has a stable shape; the self-publish path will reuse it by routing the local Sample through the same dispatcher with the registry's default reliability (or a per-publisher override). Locality::SessionLocal short-circuit in the allows_remote() branch from R223 is the matching dormant surface that activates with this work.",
+        "R121h-perf-bump-5 SCE-a vs wz-b decision still pending user confirm.",
+        "SCE upstream drift carry: re-check at next kickoff. SCE origin/main unchanged at ebf3b3ff at the start of this session.",
+        "Operating pattern (R225 lesson #4 next-step refinement): cluster-level enum / type-surface review BEFORE adding a new enum. R225 added `sample::Reliability` without first searching for an existing crate-level enum of the same semantic; R226 had to retire it within one round. Future kickoffs: when introducing a typed surface that maps a wire concept (reliability, locality, kind, priority, etc.), grep `pub enum <Name>` and `pub use ... as <Name>` across the crate root + every module before authoring; if the concept already exists, extend it rather than introducing a sibling."
+      ]
+    },
     "Round 23": {
       "decision_summary": "vle pair test-vector hardening — vle_byte_length + vle_u64_decode 각 3 boundary vectors land; SCE v1 test-vector schema single-`bytes`-param scalar-return 제약 발견, MID validator (uint8 param) 6종 test-vector는 Phase B5 multi-arg/non-bytes 지원 후 deferred carry.",
       "changes_bullets": [
