@@ -9318,6 +9318,56 @@
         "actionlint local install — .github/workflows/ release.yml + ci.yml 디테테 손의적 킭웰 검증 (Layer 0에서 현재 SKIP 상태)"
       ]
     },
+    "Round 214": {
+      "decision_summary": "R214 R121-release-4: workspace.package에 repository+readme 추가 + 4 publishable crate opt-in + THIRD_PARTY.md 신설 + wz-runtime-lwip 미-crate 정정.",
+      "changes_bullets": [
+        "crates/Cargo.toml workspace.package에 repository = 'https://github.com/newmassrael/watching-zenoh' + readme = '../README.md' 2 필드 추가 — cargo publish 필수 메타데이터 충족",
+        "4 publishable crate (wz-codecs / wz-runtime-tokio / zenoh-pico-sys / wz-ap-demo) Cargo.toml에 repository.workspace = true + readme.workspace = true 명시 opt-in",
+        "신규 THIRD_PARTY.md (60 lines): vendor/sce (pin ebf3b3ff, dual LGPL-2.1+Static Linking Exception OR Commercial) + vendor/zenoh-pico (pin 3b3ab65c, Apache-2.0 OR EPL-2.0) ledger 장젝 (Origin / Commit pin / License / Scope / Upstream-tracking 5 축)",
+        "README.md + README.ko.md의 wz-runtime-lwip directory entry를 '아직 workspace member 아님'로 정도함 — 실제 crates/wz-runtime-lwip에는 Cargo.toml 없이 include/ + tests/만 존재 (Phase W skeleton state)",
+        ".github/workflows/release.yml의 wz-runtime-lwip dry-run 단계 제거 + Phase W note 주석으로 교체 — 현재 존재하지 않는 -p target 호출 차단"
+      ],
+      "verification_bullets": [
+        "cargo build --workspace --all-targets: clean (9 crates compile pass)",
+        "bash scripts/run-ci.sh --layer A: pass post-edit (validate-workspace clean, T1=0, RT=12/12, sync, entries=213)",
+        "pre-commit validate-workspace clean on commit d23c0a5 (build(meta) subject)",
+        "git diff --stat: 9 files changed, 88 insertions + 4 deletions — 새파일 1 (THIRD_PARTY.md) + 수정 8 (Cargo.toml ×5, README ×2, release.yml ×1)"
+      ],
+      "impact_refs": [
+        "watching-zenoh/license",
+        "watching-zenoh/directory-layout"
+      ],
+      "carry_forward_bullets": [
+        "부채 #4 sub-5: cargo publish dry-run 로컴 재현 (release.yml 경로 입력 verify) + git tag v0.1.0-mvp + GitHub release draft 수동 생성. wz-codecs 10 MiB cap risk (vendor/sce build.rs 의존) [package.exclude] 튜닝 평가",
+        "부채 #3 R121h-perf-bump-5 결정 사용자 컨펌 필요; 1 round after decision",
+        "actionlint local install — .github/workflows/ release.yml + ci.yml 디테테 손의적 킭웰 (Layer 0에서 현재 SKIP)",
+        "SCE upstream pin ebf3b3ff + 14 unpushed clippy chores in /home/coin/scxml-core-engine — 다음 pin bump round에서 origin push 이후 재평가 (THIRD_PARTY.md에 현 pin 명시됨)"
+      ],
+      "publishable_decision_summary": "R214 R121-release-4: workspace.package에 repository+readme 추가 + 4 publishable crate opt-in + THIRD_PARTY.md 신설 + wz-runtime-lwip 미-crate 정정.",
+      "publishable_changes_bullets": [
+        "crates/Cargo.toml workspace.package에 repository = 'https://github.com/newmassrael/watching-zenoh' + readme = '../README.md' 2 필드 추가 — cargo publish 필수 메타데이터 충족",
+        "4 publishable crate (wz-codecs / wz-runtime-tokio / zenoh-pico-sys / wz-ap-demo) Cargo.toml에 repository.workspace = true + readme.workspace = true 명시 opt-in",
+        "신규 THIRD_PARTY.md (60 lines): vendor/sce (pin ebf3b3ff, dual LGPL-2.1+Static Linking Exception OR Commercial) + vendor/zenoh-pico (pin 3b3ab65c, Apache-2.0 OR EPL-2.0) ledger 장젝 (Origin / Commit pin / License / Scope / Upstream-tracking 5 축)",
+        "README.md + README.ko.md의 wz-runtime-lwip directory entry를 '아직 workspace member 아님'로 정도함 — 실제 crates/wz-runtime-lwip에는 Cargo.toml 없이 include/ + tests/만 존재 (Phase W skeleton state)",
+        ".github/workflows/release.yml의 wz-runtime-lwip dry-run 단계 제거 + Phase W note 주석으로 교체 — 현재 존재하지 않는 -p target 호출 차단"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build --workspace --all-targets: clean (9 crates compile pass)",
+        "bash scripts/run-ci.sh --layer A: pass post-edit (validate-workspace clean, T1=0, RT=12/12, sync, entries=213)",
+        "pre-commit validate-workspace clean on commit d23c0a5 (build(meta) subject)",
+        "git diff --stat: 9 files changed, 88 insertions + 4 deletions — 새파일 1 (THIRD_PARTY.md) + 수정 8 (Cargo.toml ×5, README ×2, release.yml ×1)"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/license",
+        "watching-zenoh/directory-layout"
+      ],
+      "publishable_carry_forward_bullets": [
+        "부채 #4 sub-5: cargo publish dry-run 로컴 재현 (release.yml 경로 입력 verify) + git tag v0.1.0-mvp + GitHub release draft 수동 생성. wz-codecs 10 MiB cap risk (vendor/sce build.rs 의존) [package.exclude] 튜닝 평가",
+        "부채 #3 R121h-perf-bump-5 결정 사용자 컨펌 필요; 1 round after decision",
+        "actionlint local install — .github/workflows/ release.yml + ci.yml 디테테 손의적 킭웰 (Layer 0에서 현재 SKIP)",
+        "SCE upstream pin ebf3b3ff + 14 unpushed clippy chores in /home/coin/scxml-core-engine — 다음 pin bump round에서 origin push 이후 재평가 (THIRD_PARTY.md에 현 pin 명시됨)"
+      ]
+    },
     "Round 22": {
       "decision_summary": "vle_byte_length primitive land — Phase A3 cursor-free TLV chain walker missing piece; vle_u64_decode와 짝으로 §7 extension iterator를 Phase A4 cursor 의존 없이 author-side에서 운영 가능, tlv_advance Phase A4+ 진화의 내부 길이 산출 부분품.",
       "changes_bullets": [
