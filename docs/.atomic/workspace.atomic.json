@@ -9168,6 +9168,62 @@
         "SCE upstream pin ebf3b3ff + 14 unpushed clippy chores in /home/coin/scxml-core-engine (dbf7fc4f HEAD) — 다음 pin bump round에서 origin push 이후 재평가"
       ]
     },
+    "Round 211": {
+      "decision_summary": "R211 R121-release-1: README primary 영문 + README.ko.md를 Round 210 baseline에 동기화 — snapshot/test count/CI lane/codec count 갱신 + first external release framing 도입.",
+      "changes_bullets": [
+        "README.md / README.ko.md 스냅샷 일자 Round 116 (2026-05-18) → Round 210 (2026-05-21)로 갱신",
+        "spec doc 개수 11 → 12, codec catalog 개수 19 → 35, atomic entries 134 → 210, workspace test 개수 159 → ~333 (wz-runtime-tokio lib 단독 185)",
+        "CI lane 6 → 8 (Layer 0/A/A2/B/C1/C2/D/E) 명시; Phase C section을 unicast 트랙 closed + Pub/Sub outbound 100% / DECLARE 9-out + 6-in / Query+Reply outbound+inbound 100% (Request ext chain + Response responder ext R210 포함)로 다시 쓰기",
+        "Next milestone을 ‘AP MVP demo binary’에서 ‘First external release (v0.1.0-mvp)’로 처음 명시; 5 sub-round 단계 (README + deploy.yaml + GitHub Actions release flow + THIRD_PARTY.md + cargo publish dry-run + tag) 소개",
+        "Stale reference 정리 — notes/NEXT_SESSION.md (Round 7 이후 제거됨) 언급 삭제; 세션 인수인계는 atomic changelog로 단일화되었다고 명시",
+        "Directory layout 테이블을 crate 별로 세분화 (wz-codecs / wz-runtime-tokio / wz-runtime-lwip / wz-ap-demo / wz-integration-tests / wz-runtime-tokio-test-support / zenoh-pico-sys); 기존 한 줄 요약 파냐이트 해소"
+      ],
+      "verification_bullets": [
+        "bash scripts/run-ci.sh --layer A: pass (mnemosyne-cli validate-workspace clean post-edit; T1=0 / RT=12/12 / GENERATED.md=sync / entries=210)",
+        "pre-commit validate-workspace clean on commit ab37a45 (docs: subject)",
+        "git diff --stat: 2 files changed, 108 insertions + 81 deletions — README.md 189 → 202 lines, README.ko.md 182 → 196 lines",
+        "wc -l README.md README.ko.md 재확인 후 커밋 대상 변경 외 다른 파일 없음"
+      ],
+      "impact_refs": [
+        "watching-zenoh/current-status",
+        "watching-zenoh/directory-layout"
+      ],
+      "carry_forward_bullets": [
+        "부채 #4 sub-2: deploy.yaml schema 정리 + sample deploy/ap_standalone.yaml 검토 — 현재 topology nesting (R123b 1차 시도 deferred)와 wz pre-topology yaml schema gap 재평가",
+        "부채 #4 sub-3: .github/workflows/release.yml 작성 — tag push → cargo publish dry-run + GitHub release 자동화",
+        "부채 #4 sub-4: LGPL-3.0 / LicenseRef-Commercial 텍스트 재검토 + THIRD_PARTY.md 원장 작성 (vendor/sce + vendor/zenoh-pico forge 등)",
+        "부채 #4 sub-5: cargo publish dry-run + git tag v0.1.0-mvp + GitHub release draft",
+        "부채 #3 R121h-perf-bump-5 encode_ext_chain Z-bit refactor — SCE-a vs wz-b 결정 사용자 컨펌 필요; 1 round after decision",
+        "SCE upstream pin ebf3b3ff + 14 unpushed clippy chores in /home/coin/scxml-core-engine — 다음 pin bump round에서 origin push 이후 재평가"
+      ],
+      "publishable_decision_summary": "R211 R121-release-1: README primary 영문 + README.ko.md를 Round 210 baseline에 동기화 — snapshot/test count/CI lane/codec count 갱신 + first external release framing 도입.",
+      "publishable_changes_bullets": [
+        "README.md / README.ko.md 스냅샷 일자 Round 116 (2026-05-18) → Round 210 (2026-05-21)로 갱신",
+        "spec doc 개수 11 → 12, codec catalog 개수 19 → 35, atomic entries 134 → 210, workspace test 개수 159 → ~333 (wz-runtime-tokio lib 단독 185)",
+        "CI lane 6 → 8 (Layer 0/A/A2/B/C1/C2/D/E) 명시; Phase C section을 unicast 트랙 closed + Pub/Sub outbound 100% / DECLARE 9-out + 6-in / Query+Reply outbound+inbound 100% (Request ext chain + Response responder ext R210 포함)로 다시 쓰기",
+        "Next milestone을 ‘AP MVP demo binary’에서 ‘First external release (v0.1.0-mvp)’로 처음 명시; 5 sub-round 단계 (README + deploy.yaml + GitHub Actions release flow + THIRD_PARTY.md + cargo publish dry-run + tag) 소개",
+        "Stale reference 정리 — notes/NEXT_SESSION.md (Round 7 이후 제거됨) 언급 삭제; 세션 인수인계는 atomic changelog로 단일화되었다고 명시",
+        "Directory layout 테이블을 crate 별로 세분화 (wz-codecs / wz-runtime-tokio / wz-runtime-lwip / wz-ap-demo / wz-integration-tests / wz-runtime-tokio-test-support / zenoh-pico-sys); 기존 한 줄 요약 파냐이트 해소"
+      ],
+      "publishable_verification_bullets": [
+        "bash scripts/run-ci.sh --layer A: pass (mnemosyne-cli validate-workspace clean post-edit; T1=0 / RT=12/12 / GENERATED.md=sync / entries=210)",
+        "pre-commit validate-workspace clean on commit ab37a45 (docs: subject)",
+        "git diff --stat: 2 files changed, 108 insertions + 81 deletions — README.md 189 → 202 lines, README.ko.md 182 → 196 lines",
+        "wc -l README.md README.ko.md 재확인 후 커밋 대상 변경 외 다른 파일 없음"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/current-status",
+        "watching-zenoh/directory-layout"
+      ],
+      "publishable_carry_forward_bullets": [
+        "부채 #4 sub-2: deploy.yaml schema 정리 + sample deploy/ap_standalone.yaml 검토 — 현재 topology nesting (R123b 1차 시도 deferred)와 wz pre-topology yaml schema gap 재평가",
+        "부채 #4 sub-3: .github/workflows/release.yml 작성 — tag push → cargo publish dry-run + GitHub release 자동화",
+        "부채 #4 sub-4: LGPL-3.0 / LicenseRef-Commercial 텍스트 재검토 + THIRD_PARTY.md 원장 작성 (vendor/sce + vendor/zenoh-pico forge 등)",
+        "부채 #4 sub-5: cargo publish dry-run + git tag v0.1.0-mvp + GitHub release draft",
+        "부채 #3 R121h-perf-bump-5 encode_ext_chain Z-bit refactor — SCE-a vs wz-b 결정 사용자 컨펌 필요; 1 round after decision",
+        "SCE upstream pin ebf3b3ff + 14 unpushed clippy chores in /home/coin/scxml-core-engine — 다음 pin bump round에서 origin push 이후 재평가"
+      ]
+    },
     "Round 22": {
       "decision_summary": "vle_byte_length primitive land — Phase A3 cursor-free TLV chain walker missing piece; vle_u64_decode와 짝으로 §7 extension iterator를 Phase A4 cursor 의존 없이 author-side에서 운영 가능, tlv_advance Phase A4+ 진화의 내부 길이 산출 부분품.",
       "changes_bullets": [
