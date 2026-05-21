@@ -116,9 +116,16 @@ struct Queryable {
     /// Pre-split pattern chunks. Same shape as
     /// [`crate::pubsub::SubscriberRegistry`]: literal chunks (incl.
     /// empty for `a//b`), `*` (single-chunk wildcard), `**` (zero-or-
-    /// more-chunk wildcard). Matching is performed by the shared
-    /// [`keyexpr_pattern_matches`] helper.
+    /// more-chunk wildcard), or a chunk containing `$*` (intra-chunk
+    /// substring wildcard, R220). Matching is performed by the
+    /// shared [`keyexpr_pattern_matches`] helper.
     pattern_chunks: Vec<String>,
+    /// R223 — locality filter applied before the callback fires.
+    /// Identical semantics to
+    /// [`crate::pubsub::SubscriberRegistry`] —
+    /// `dispatch_request` consults `allows_remote()` since every
+    /// Request reaching it has been parsed off the wire.
+    allowed_origin: crate::locality::Locality,
     callback: QueryableCallback,
 }
 
@@ -420,9 +427,31 @@ impl QueryableRegistry {
     /// byte-for-byte with the canonical wire form. Structurally
     /// invalid patterns fall back to the raw form (non-breaking)
     /// with a `log::warn!` notice.
+    ///
+    /// R223 — defaults [`Locality::Any`](crate::locality::Locality);
+    /// use [`register_with_locality`](Self::register_with_locality)
+    /// to restrict to one origin class.
     pub fn register(
         &mut self,
         keyexpr_pattern: impl Into<String>,
+        callback: impl FnMut(&Query, &mut QueryResponder<'_>) + Send + 'static,
+    ) -> QueryableId {
+        self.register_with_locality(
+            keyexpr_pattern,
+            crate::locality::Locality::Any,
+            callback,
+        )
+    }
+
+    /// R223 — variant of [`register`](Self::register) that pins the
+    /// locality filter explicitly. See
+    /// [`crate::pubsub::SubscriberRegistry::register_with_locality`]
+    /// for the dispatch-invariant rationale (every inbound Request
+    /// is remote until self-publish loopback lands).
+    pub fn register_with_locality(
+        &mut self,
+        keyexpr_pattern: impl Into<String>,
+        allowed_origin: crate::locality::Locality,
         callback: impl FnMut(&Query, &mut QueryResponder<'_>) + Send + 'static,
     ) -> QueryableId {
         let id = QueryableId(self.next_id);
@@ -443,6 +472,7 @@ impl QueryableRegistry {
         self.queryables.push(Queryable {
             id,
             pattern_chunks,
+            allowed_origin,
             callback: Box::new(callback),
         });
         id
@@ -531,6 +561,14 @@ impl QueryableRegistry {
         };
 
         for queryable in &mut self.queryables {
+            // R223 — every Request reaching dispatch_request has
+            // been parsed off the wire, so it is treated as remote
+            // and the locality filter reduces to allows_remote().
+            // Self-publish loopback (deferred) will route through
+            // this same dispatcher with an is_remote=false flag.
+            if !queryable.allowed_origin.allows_remote() {
+                continue;
+            }
             let chunks: Vec<&str> = queryable
                 .pattern_chunks
                 .iter()
@@ -831,6 +869,60 @@ mod tests {
 
         assert_eq!(invocations.load(Ordering::SeqCst), 0, "MsgPut body must not invoke queryable callbacks");
         assert!(replies.is_empty());
+    }
+
+    // ── R223 Locality filter on QueryableRegistry ──
+
+    #[test]
+    fn query_register_with_locality_remote_fires_on_inbound_query() {
+        use crate::locality::Locality;
+        let mut reg = QueryableRegistry::new();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        reg.register_with_locality(
+            "home/temp",
+            Locality::Remote,
+            move |_q, _r| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        let req = request_query(1, 0, Some("home/temp"));
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            1,
+            "Locality::Remote fires on wire-arrived (remote) Query"
+        );
+    }
+
+    #[test]
+    fn query_register_with_locality_session_local_suppresses_inbound() {
+        // Mirror of pubsub's
+        // register_with_locality_session_local_does_not_fire_on_inbound
+        // — Queryable side surface-only-correct until self-publish
+        // loopback lands.
+        use crate::locality::Locality;
+        let mut reg = QueryableRegistry::new();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        reg.register_with_locality(
+            "home/temp",
+            Locality::SessionLocal,
+            move |_q, _r| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        let req = request_query(1, 0, Some("home/temp"));
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "Locality::SessionLocal suppresses inbound (remote) Query pre-loopback"
+        );
     }
 
     #[test]

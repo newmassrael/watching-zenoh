@@ -35,6 +35,15 @@ pub mod session_glue;
 /// lowercase / no NFC — pure structural) and the call-site wiring.
 pub mod keyexpr_canon;
 
+/// R223 — zenoh-style locality filter for subscribers and queryables.
+/// Mirrors zenoh-pico's `z_locality_t` enum and the
+/// `_z_locality_allows_local` / `_z_locality_allows_remote` helpers
+/// so applications can register subscriptions that fire only on
+/// session-local samples, only on remote samples, or both
+/// (default). See `locality` module doc for the dispatch invariant
+/// and the surface-vs-dispatch distinction.
+pub mod locality;
+
 /// R98 — application-layer subscriber registry. Routes decoded
 /// `NetworkMessage::Push` records to user-registered callbacks
 /// filtered by literal keyexpr. See `pubsub::SubscriberRegistry`
