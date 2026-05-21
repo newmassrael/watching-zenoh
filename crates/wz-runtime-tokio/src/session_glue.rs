@@ -2633,6 +2633,34 @@ impl RequestQueryBuilder {
         self
     }
 
+    /// Typed wrapper over [`Self::request_qos`] — packs `(priority,
+    /// congestion, express)` into the wire byte using the exact bit
+    /// layout zenoh-pico's `_z_n_qos_create` produces at
+    /// `vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/network.h:84-89`:
+    ///
+    /// ```text
+    ///   packed = (express << 4) | (nodrop << 3) | priority
+    ///   where nodrop = (congestion == Block ? 1 : 0)
+    /// ```
+    ///
+    /// Caller-facing typed inputs keep the priority / congestion /
+    /// express semantics legible at the call site (vs the raw
+    /// [`Self::request_qos`] packed-byte form). The wrapper does NOT
+    /// validate the bit layout itself — it delegates to the same
+    /// [`Self::request_qos`] storage so the chain emit path stays
+    /// uniform.
+    pub fn request_qos_typed(
+        self,
+        priority: Priority,
+        congestion: CongestionControl,
+        express: bool,
+    ) -> Self {
+        let packed = ((express as u8) << 4)
+            | (congestion.wire_bit() << 3)
+            | priority.wire_byte();
+        self.request_qos(packed)
+    }
+
     /// Set the Request-level timestamp extension. `time` is the
     /// 64-bit NTP-style timestamp the requester is correlating against
     /// (typically `Hal::now_ticks_*` lifted into the zenoh-pico NTP
@@ -2885,6 +2913,73 @@ impl RequestQueryBuilder {
         }
 
         request
+    }
+}
+
+/// R121j-1h — mirror of zenoh-pico's `z_priority_t` enum at
+/// `vendor/zenoh-pico/include/zenoh-pico/api/constants.h:241-251`.
+/// 8 priorities, 0..=7, with `Data` as the default. The wire byte
+/// occupies the qos packed byte's low 3 bits per
+/// `_z_n_qos_create` at network.h:84-89.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Priority {
+    /// `_Z_PRIORITY_CONTROL = 0`. Reserved for internal control
+    /// messages in zenoh-pico (the leading-underscore name signals
+    /// "implementation detail" upstream); application traffic should
+    /// pick one of the public priorities below.
+    Control = 0,
+    /// `Z_PRIORITY_REAL_TIME = 1`. Highest application priority.
+    RealTime = 1,
+    /// `Z_PRIORITY_INTERACTIVE_HIGH = 2`.
+    InteractiveHigh = 2,
+    /// `Z_PRIORITY_INTERACTIVE_LOW = 3`.
+    InteractiveLow = 3,
+    /// `Z_PRIORITY_DATA_HIGH = 4`.
+    DataHigh = 4,
+    /// `Z_PRIORITY_DATA = 5` — `Z_PRIORITY_DEFAULT` per the same
+    /// constants.h. Pick this when no other priority justifies an
+    /// explicit override.
+    Data = 5,
+    /// `Z_PRIORITY_DATA_LOW = 6`.
+    DataLow = 6,
+    /// `Z_PRIORITY_BACKGROUND = 7`. Lowest priority.
+    Background = 7,
+}
+
+impl Priority {
+    /// Wire byte value as written into the qos packed byte's low 3
+    /// bits. Mirrors the enum literal values verbatim per
+    /// `_z_n_qos_create` at network.h:87.
+    pub const fn wire_byte(self) -> u8 {
+        self as u8
+    }
+}
+
+/// R121j-1h — mirror of zenoh-pico's `z_congestion_control_t` enum
+/// at `vendor/zenoh-pico/include/zenoh-pico/api/constants.h:216-218`.
+/// The wire mapping inverts the enum's integer value: `Block = 1`
+/// in zenoh-pico's enum lifts into the `nodrop = 1` bit (bit 3) of
+/// the qos packed byte per `_z_n_qos_create` at network.h:86-87.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CongestionControl {
+    /// `Z_CONGESTION_CONTROL_DROP = 0` (also `Z_CONGESTION_CONTROL_DEFAULT`).
+    /// Messages may be dropped on congestion; nodrop bit cleared.
+    Drop,
+    /// `Z_CONGESTION_CONTROL_BLOCK = 1`. Producer blocks on
+    /// congestion rather than dropping; nodrop bit set.
+    Block,
+}
+
+impl CongestionControl {
+    /// Wire-side `nodrop` bit value (0 for Drop, 1 for Block) that
+    /// the qos packed byte's bit 3 carries. Named `wire_bit` rather
+    /// than `wire_byte` to keep the boolean semantics legible at the
+    /// call site in [`RequestQueryBuilder::request_qos_typed`].
+    pub const fn wire_bit(self) -> u8 {
+        match self {
+            Self::Drop => 0,
+            Self::Block => 1,
+        }
     }
 }
 
@@ -7487,6 +7582,101 @@ mod tests {
         let _ = RequestQueryBuilder::new(42, 7, None)
             .request_tstamp(0, &[0u8; 17])
             .build();
+    }
+
+    /// R121j-1h — request_qos_typed packs `(Priority, CongestionControl,
+    /// express)` into the wire byte exactly as zenoh-pico's
+    /// `_z_n_qos_create` at network.h:84-89 produces:
+    /// `(express << 4) | (nodrop << 3) | priority`. Verifies the byte
+    /// then delegates to the same storage as request_qos so the chain
+    /// emit path stays uniform — same Z chain-continuation / index
+    /// semantics as the raw setter.
+    #[test]
+    fn request_qos_typed_packs_per_zenoh_pico_z_n_qos_create_layout() {
+        // Drop + Background priority + no express: priority=7 → low 3
+        // bits = 0b111; congestion Drop → nodrop=0; express=false →
+        // bit4=0. Expected packed byte = 0x07.
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_qos_typed(Priority::Background, CongestionControl::Drop, false)
+            .build();
+        let req_exts = request.extensions.as_ref().expect("qos ext present");
+        match &req_exts[0].body {
+            ExtEntryVariant::CodecZenohExtZint(zint) => {
+                assert_eq!(zint.value, 0x07, "Background(7) + Drop + !express = 0x07");
+            }
+            _ => panic!("qos body must be ExtZint"),
+        }
+
+        // Block + RealTime + express: priority=1 (bits 0-2 = 0b001),
+        // nodrop=1 (bit 3 = 0b1000), express=1 (bit 4 = 0b10000).
+        // Expected packed byte = 0x10 | 0x08 | 0x01 = 0x19.
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_qos_typed(Priority::RealTime, CongestionControl::Block, true)
+            .build();
+        let req_exts = request.extensions.as_ref().expect("qos ext present");
+        match &req_exts[0].body {
+            ExtEntryVariant::CodecZenohExtZint(zint) => {
+                assert_eq!(zint.value, 0x19, "RealTime(1) + Block + express = 0x10|0x08|0x01");
+            }
+            _ => panic!("qos body must be ExtZint"),
+        }
+
+        // Default (Data priority, Drop, !express): priority=5
+        // (0b101), nodrop=0, express=0 → 0x05. Sanity check that the
+        // default-aligned values produce a clean low-bits byte.
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_qos_typed(Priority::Data, CongestionControl::Drop, false)
+            .build();
+        let req_exts = request.extensions.as_ref().expect("qos ext present");
+        match &req_exts[0].body {
+            ExtEntryVariant::CodecZenohExtZint(zint) => {
+                assert_eq!(zint.value, 0x05, "Data(5) + Drop + !express = 0x05");
+            }
+            _ => panic!("qos body must be ExtZint"),
+        }
+    }
+
+    /// R121j-1h — Priority::wire_byte and CongestionControl::wire_bit
+    /// match the zenoh-pico enum literal values verbatim. Decouples
+    /// the typed-wrapper test from RequestQueryBuilder so a future
+    /// re-use of Priority / CongestionControl (e.g. in a Push-side
+    /// QoS setter) inherits the same invariant.
+    #[test]
+    fn priority_and_congestion_wire_values_match_zenoh_pico_constants() {
+        assert_eq!(Priority::Control.wire_byte(), 0);
+        assert_eq!(Priority::RealTime.wire_byte(), 1);
+        assert_eq!(Priority::InteractiveHigh.wire_byte(), 2);
+        assert_eq!(Priority::InteractiveLow.wire_byte(), 3);
+        assert_eq!(Priority::DataHigh.wire_byte(), 4);
+        assert_eq!(Priority::Data.wire_byte(), 5);
+        assert_eq!(Priority::DataLow.wire_byte(), 6);
+        assert_eq!(Priority::Background.wire_byte(), 7);
+
+        assert_eq!(CongestionControl::Drop.wire_bit(), 0);
+        assert_eq!(CongestionControl::Block.wire_bit(), 1);
+    }
+
+    /// R121j-1h — request_qos_typed composes with request_target +
+    /// request_timeout_ms identically to the raw request_qos setter
+    /// (Z chain-continuation bits, ext order). Pins that the typed
+    /// wrapper is purely a packing convenience over the raw setter.
+    #[test]
+    fn request_qos_typed_composes_with_chain_identically_to_raw_qos() {
+        let typed = RequestQueryBuilder::new(42, 7, None)
+            .request_qos_typed(Priority::RealTime, CongestionControl::Block, true)
+            .request_target(QueryTarget::All)
+            .request_timeout_ms(1000)
+            .build();
+        let raw = RequestQueryBuilder::new(42, 7, None)
+            .request_qos(0x19) // same packed byte as the typed call
+            .request_target(QueryTarget::All)
+            .request_timeout_ms(1000)
+            .build();
+        assert_eq!(
+            typed.encode_to_vec(),
+            raw.encode_to_vec(),
+            "typed and raw qos setters must produce byte-identical wire emit",
+        );
     }
 
     /// R121j-2a — Per-setter validation flows through to the builder.
