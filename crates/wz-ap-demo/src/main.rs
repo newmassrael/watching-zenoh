@@ -112,10 +112,8 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use wz_codecs::wireexpr::WireexprVariant;
-use wz_runtime_tokio::declare::{LivelinessRegistry, RemoteQueryableRegistry, RemoteSubscriberRegistry};
-use wz_runtime_tokio::pubsub::SubscriberRegistry;
-use wz_runtime_tokio::query::{QueryReply, QueryableRegistry};
-use wz_runtime_tokio::reply::{InboundReplyBody, ReplyRegistry};
+use wz_runtime_tokio::observer::ApplicationLayerObserver;
+use wz_runtime_tokio::reply::InboundReplyBody;
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastPolicy;
 use wz_runtime_tokio::session_glue::{
     drive_session_until_terminal, install_session_actions, BoxedLinkDriver, IterationEvent,
@@ -848,10 +846,20 @@ async fn run_demo(
     //          greps stderr for the expected line shape.
     //          R121e: --key is now optional (publisher-only mode
     //          skips the subscriber registration).
-    let mut registry = SubscriberRegistry::new();
+    //
+    // R121k-7-refactor: the six per-domain registries
+    // (subscribers / queryables / remote_subscribers / remote_queryables /
+    // liveliness / replies) plus the queryable side's pending-reply +
+    // pending-final staging buffers are now wrapped in a single
+    // ApplicationLayerObserver. Application code registers callbacks
+    // on each contained registry directly (observer.subscribers.register
+    // etc.) and a single observer.dispatch call inside the
+    // drive_session loop fans the IterationEvent into every registry +
+    // drains the staged outbound records through the action layer.
+    let mut observer = ApplicationLayerObserver::new();
     if let Some(ref k) = key {
         let key_for_callback = k.clone();
-        registry.register(k.clone(), move |push| {
+        observer.subscribers.register(k.clone(), move |push| {
             // R125c2: keyexpr is a tagged-union; extract id+suffix
             // from whichever arm the dispatcher selected for
             // stderr logging.
@@ -866,19 +874,14 @@ async fn run_demo(
         });
     }
 
-    // R121j-5c-e2e-demo — queryable registry. Mirrors the subscriber
-    // registration above for the inbound Request(Query) path: the
-    // callback emits one Put-form Reply with the --reply payload and
-    // logs `QUERYABLE FIRED` to stderr so the integration test fixture
-    // can grep for the line shape. The registry is wired into the
-    // `drive_session_until_terminal` observer below so each iteration's
-    // FramePayload.messages are scanned for Request bodies the same
-    // way the subscriber registry scans for Push bodies.
-    let mut queryable_registry = QueryableRegistry::new();
+    // R121j-5c-e2e-demo — queryable callback. The observer's
+    // dispatch fans inbound Request(Query) records into this registry
+    // automatically; we just install the callback that emits one
+    // Reply per match + logs `QUERYABLE FIRED`.
     if let Some((pattern, reply_text)) = queryable_spec.as_ref() {
         let pattern_for_callback = pattern.clone();
         let reply_text_for_callback = reply_text.clone();
-        queryable_registry.register(pattern.clone(), move |_query, responder| {
+        observer.queryables.register(pattern.clone(), move |_query, responder| {
             responder.send_reply(reply_text_for_callback.as_bytes());
             eprintln!(
                 "wz-ap-demo: QUERYABLE FIRED pattern='{}' rid={} keyexpr='{}' reply='{}'",
@@ -890,36 +893,32 @@ async fn run_demo(
         });
     }
 
-    // R121k-5 — three Remote* registries. Each tracks the peer's
+    // R121k-5 — Remote* registry callbacks. Each tracks the peer's
     // outbound Declare(Decl*|Undecl*) records and fires user-installed
-    // callbacks on resolved keyexprs. The callbacks installed below
-    // log stderr lines so an integration test fixture can grep for
-    // them; production deployments wire metrics or route-table
-    // updates here instead.
-    let mut remote_sub_registry = RemoteSubscriberRegistry::new();
+    // callbacks on resolved keyexprs. Production deployments wire
+    // metrics or route-table updates here instead of stderr logging.
     if remote_log_spec.on_remote_subscriber {
-        remote_sub_registry.on_subscriber_declared(|decl, resolved| {
+        observer.remote_subscribers.on_subscriber_declared(|decl, resolved| {
             eprintln!(
                 "wz-ap-demo: REMOTE SUBSCRIBER DECLARED id={} keyexpr='{}'",
                 decl.id, resolved,
             );
         });
-        remote_sub_registry.on_subscriber_undeclared(|undecl| {
+        observer.remote_subscribers.on_subscriber_undeclared(|undecl| {
             eprintln!(
                 "wz-ap-demo: REMOTE SUBSCRIBER UNDECLARED id={}",
                 undecl.id,
             );
         });
     }
-    let mut remote_q_registry = RemoteQueryableRegistry::new();
     if remote_log_spec.on_remote_queryable {
-        remote_q_registry.on_queryable_declared(|decl, resolved| {
+        observer.remote_queryables.on_queryable_declared(|decl, resolved| {
             eprintln!(
                 "wz-ap-demo: REMOTE QUERYABLE DECLARED id={} keyexpr='{}'",
                 decl.id, resolved,
             );
         });
-        remote_q_registry.on_queryable_undeclared(|undecl| {
+        observer.remote_queryables.on_queryable_undeclared(|undecl| {
             eprintln!(
                 "wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={}",
                 undecl.id,
@@ -935,11 +934,10 @@ async fn run_demo(
     // callbacks log a stderr line so the paired integration test
     // fixture can grep for the expected line shape; the on_final
     // callback also receives the rid the registry auto-drops on.
-    let mut reply_registry = ReplyRegistry::new();
     if query_spec.is_some() && (reply_log_spec.on_query_reply || reply_log_spec.on_query_final) {
         let on_reply = reply_log_spec.on_query_reply;
         let on_final = reply_log_spec.on_query_final;
-        reply_registry.register(
+        observer.replies.register(
             QUERY_RID,
             move |reply| {
                 if !on_reply {
@@ -971,15 +969,14 @@ async fn run_demo(
         );
     }
 
-    let mut liveliness_registry = LivelinessRegistry::new();
     if remote_log_spec.on_remote_liveliness {
-        liveliness_registry.on_token_declared(|decl, resolved| {
+        observer.liveliness.on_token_declared(|decl, resolved| {
             eprintln!(
                 "wz-ap-demo: REMOTE TOKEN DECLARED id={} keyexpr='{}'",
                 decl.id, resolved,
             );
         });
-        liveliness_registry.on_token_undeclared(|undecl| {
+        observer.liveliness.on_token_undeclared(|undecl| {
             eprintln!(
                 "wz-ap-demo: REMOTE TOKEN UNDECLARED id={}",
                 undecl.id,
@@ -1088,21 +1085,17 @@ async fn run_demo(
         }
     }
 
-    // ── Step 5: drive the session FSM until terminal. The observer
-    //          callback routes IterationEvent::Poll(FramePayload {
-    //          messages, .. }) through the subscriber registry so
-    //          Push records reach the registered --key callback.
-    //          Cap iterations at a generous bound — a hung peer
-    //          would otherwise leave the demo blocking forever.
-    // R121j-5c-e2e-demo — outbound Reply / ResponseFinal staging
-    // buffers shared between the queryable dispatch (inside the
-    // observer closure) and the action layer that flushes them on the
-    // wire. Owned by the closure so a single observer call can fan
-    // multiple Replies into multiple `send_response` calls and finally
-    // one `send_response_final` per matched rid (zenoh-pico's
-    // "many Reply + exactly one Final per Query" semantic).
-    let mut pending_replies: Vec<QueryReply> = Vec::new();
-    let mut pending_final_rids: Vec<u64> = Vec::new();
+    // ── Step 5: drive the session FSM until terminal. The
+    //          ApplicationLayerObserver's dispatch fans the
+    //          IterationEvent into every contained registry +
+    //          drains the queryable side's pending replies / finals
+    //          through the action layer. Cap iterations at a
+    //          generous bound — a hung peer would otherwise leave
+    //          the demo blocking forever. R121k-7-refactor collapsed
+    //          the 8-line fan-out + drain block into the single
+    //          observer.dispatch call below; the per-iteration trace
+    //          stays at debug level so `RUST_LOG=info` production
+    //          runs are not noisy on every Push frame.
     let actions_for_observer = actions.clone();
 
     log::info!("wz-ap-demo: driving session FSM");
@@ -1113,61 +1106,8 @@ async fn run_demo(
         &mut engine,
         Some(10_000),
         |event: IterationEvent<'_>| {
-            // Per-iteration trace stays at `debug` so an
-            // `RUST_LOG=info` production run does not flood the
-            // log on every Push frame. The integration test sets
-            // `RUST_LOG=info` and asserts only on the SUBSCRIBER
-            // FIRED line emitted by the registered callback, so
-            // hiding this trace behind `debug` does not regress
-            // the test surface.
             log::debug!("wz-ap-demo: iteration event = {event:?}");
-            registry.dispatch_iteration_event(event);
-            // R121j-5c-e2e-demo — fan the same iteration event into
-            // the queryable registry. IterationEvent is `Copy` per
-            // session_glue.rs so this is a zero-cost reuse; the
-            // queryable side reads the shared peer_keyexpr_table
-            // populated by `registry` above (DeclKexpr / UndeclKexpr
-            // absorbed there inform queryable resolution too without
-            // any dual-write bookkeeping).
-            let peer_table = registry.peer_keyexpr_table();
-            queryable_registry.dispatch_iteration_event(
-                event,
-                peer_table,
-                &mut pending_replies,
-                &mut pending_final_rids,
-            );
-            // R121k-5 — fan into the three Remote* registries on the
-            // SAME peer_table snapshot. Each one matches a different
-            // Declare body arm (Sub/Queryable/Token), so the dispatch
-            // is exclusive — at most one registry will fire per
-            // matching arm. Empty registries (no callbacks installed)
-            // are zero-cost; the dispatch path short-circuits when
-            // the inner `Vec<…>` callback list is empty.
-            remote_sub_registry.dispatch_iteration_event(event, peer_table);
-            remote_q_registry.dispatch_iteration_event(event, peer_table);
-            liveliness_registry.dispatch_iteration_event(event, peer_table);
-            // R121j-6-e2e — fan the same IterationEvent into the
-            // initiator-side ReplyRegistry. IterationEvent is Copy
-            // (set in R121j-5c-e2e-demo to support multi-consumer
-            // dispatch); reusing the same peer_table snapshot ensures
-            // inbound Reply keyexpr resolution stays consistent with
-            // subscriber + queryable + remote-declare dispatch. The
-            // pending entry registered above auto-drops when the
-            // matching ResponseFinal arrives; subsequent iterations
-            // see an empty registry and the call short-circuits.
-            reply_registry.dispatch_iteration_event(event, peer_table);
-            // Drain the staging buffers through the action layer.
-            // `send_response` and `send_response_final` enqueue onto
-            // the OutboundWriteDriver mpsc channel synchronously, so
-            // ordering on the wire mirrors enqueue order: every
-            // Reply for rid R precedes the matching ResponseFinal
-            // for R (zenoh-pico's z_get correlator depends on this).
-            for reply in pending_replies.drain(..) {
-                actions_for_observer.send_response(reply.into_response());
-            }
-            for rid in pending_final_rids.drain(..) {
-                actions_for_observer.send_response_final(rid);
-            }
+            observer.dispatch(event, &actions_for_observer);
         },
     )
     .await;
