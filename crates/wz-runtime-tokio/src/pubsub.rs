@@ -60,15 +60,17 @@
 use std::collections::HashMap;
 
 use wz_codecs::declare::DeclareVariant;
-use wz_codecs::push::Push;
+use wz_codecs::push::{Push, PushVariant};
 use wz_codecs::wireexpr::WireexprVariant;
 
+use crate::sample::{Sample, SampleKind};
 use crate::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
 
 /// Boxed callback invoked when a Push message's keyexpr matches a
-/// registered subscriber. See module-level docs for the lifetime and
-/// thread-safety contract.
-pub type SubscriberCallback = Box<dyn FnMut(&Push) + Send + 'static>;
+/// registered subscriber. R222 — receives `&Sample` (resolved
+/// keyexpr + SampleKind + payload bytes), no longer the raw `&Push`.
+/// See module-level docs for the lifetime and thread-safety contract.
+pub type SubscriberCallback = Box<dyn FnMut(&Sample) + Send + 'static>;
 
 /// Stable handle returned by `register` so the caller can later
 /// unregister the subscriber without holding a string-typed key
@@ -314,7 +316,7 @@ impl SubscriberRegistry {
     pub fn register(
         &mut self,
         keyexpr_pattern: impl Into<String>,
-        callback: impl FnMut(&Push) + Send + 'static,
+        callback: impl FnMut(&Sample) + Send + 'static,
     ) -> SubscriptionId {
         self.register_with_locality(
             keyexpr_pattern,
@@ -338,7 +340,7 @@ impl SubscriberRegistry {
         &mut self,
         keyexpr_pattern: impl Into<String>,
         allowed_origin: crate::locality::Locality,
-        callback: impl FnMut(&Push) + Send + 'static,
+        callback: impl FnMut(&Sample) + Send + 'static,
     ) -> SubscriptionId {
         let id = SubscriptionId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
@@ -475,6 +477,31 @@ impl SubscriberRegistry {
             }
         };
 
+        // R222 — project the decoded Push into a Sample once per
+        // dispatch_push. Put bodies surface payload bytes, Del
+        // bodies surface an empty payload. This is the canonical
+        // shape every subscriber wants — no more per-callback
+        // tagged-union dispatch on `push.body` arms.
+        //
+        // PushVariant::Default { .. } is the catalog's fallback arm
+        // for unknown body tags (RFC variant-default-uniformity).
+        // We drop the dispatch silently — surfacing such a body
+        // through a Sample callback with arbitrary `tag` would
+        // semantically lie about the kind (it is neither a
+        // confirmed Put nor a confirmed Del).
+        let (kind, payload) = match &push.body {
+            PushVariant::CodecZenohMsgPut(put) => {
+                (SampleKind::Put, put.payload.clone())
+            }
+            PushVariant::CodecZenohMsgDel(_) => (SampleKind::Del, Vec::new()),
+            PushVariant::Default { .. } => return,
+        };
+        let sample = Sample {
+            keyexpr: resolved,
+            kind,
+            payload,
+        };
+
         for subscriber in &mut self.subscribers {
             // R223 — every Push reaching dispatch_push has been
             // parsed off the wire, so it is treated as remote in
@@ -488,8 +515,8 @@ impl SubscriberRegistry {
             }
             let chunks: Vec<&str> =
                 subscriber.pattern_chunks.iter().map(String::as_str).collect();
-            if keyexpr_pattern_matches(&chunks, &resolved) {
-                (subscriber.callback)(push);
+            if keyexpr_pattern_matches(&chunks, &sample.keyexpr) {
+                (subscriber.callback)(&sample);
             }
         }
     }
@@ -1137,6 +1164,93 @@ mod tests {
             counter.load(Ordering::SeqCst),
             0,
             "locality short-circuits before keyexpr match (`**` matches everything but is suppressed)"
+        );
+    }
+
+    // ── R222 Push -> Sample projection behaviour ──
+
+    fn push_with_payload(keyexpr: &str, payload: &[u8]) -> Push {
+        let mut push = push_with_keyexpr(keyexpr);
+        if let wz_codecs::push::PushVariant::CodecZenohMsgPut(ref mut put) = push.body {
+            put.payload_len = payload.len() as u64;
+            put.payload = payload.to_vec();
+        }
+        push
+    }
+
+    fn push_with_del_body(keyexpr: &str) -> Push {
+        let mut push = push_with_keyexpr(keyexpr);
+        push.body = wz_codecs::push::PushVariant::CodecZenohMsgDel(
+            wz_codecs::msg_del::MsgDel::default(),
+        );
+        push
+    }
+
+    #[test]
+    fn dispatch_projects_put_push_into_sample_put_with_payload() {
+        use crate::sample::SampleKind;
+        use std::sync::Mutex;
+        let mut registry = SubscriberRegistry::new();
+        let captured = Arc::new(Mutex::new(None::<crate::sample::Sample>));
+        let captured_clone = captured.clone();
+        registry.register("home/temp", move |sample| {
+            *captured_clone.lock().unwrap() = Some(sample.clone());
+        });
+
+        let push = push_with_payload("home/temp", b"23.5");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+
+        let observed = captured.lock().unwrap().clone().expect("callback fired");
+        assert_eq!(observed.keyexpr, "home/temp");
+        assert_eq!(observed.kind, SampleKind::Put);
+        assert_eq!(observed.payload, b"23.5");
+    }
+
+    #[test]
+    fn dispatch_projects_del_push_into_sample_del_with_empty_payload() {
+        use crate::sample::SampleKind;
+        use std::sync::Mutex;
+        let mut registry = SubscriberRegistry::new();
+        let captured = Arc::new(Mutex::new(None::<crate::sample::Sample>));
+        let captured_clone = captured.clone();
+        registry.register("clear/me", move |sample| {
+            *captured_clone.lock().unwrap() = Some(sample.clone());
+        });
+
+        let push = push_with_del_body("clear/me");
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+
+        let observed = captured.lock().unwrap().clone().expect("callback fired");
+        assert_eq!(observed.keyexpr, "clear/me");
+        assert_eq!(observed.kind, SampleKind::Del);
+        assert!(observed.payload.is_empty(), "Del has no payload on the wire");
+    }
+
+    #[test]
+    fn dispatch_sample_keyexpr_carries_resolved_form_not_wire_id() {
+        // Models the DECLARE-then-Push flow: peer declares mapping
+        // id=7 → "sensors/room1/temp"; subsequent Push with id=7 +
+        // suffix=None must surface Sample.keyexpr == the resolved
+        // literal, NOT the raw id form.
+        use std::sync::Mutex;
+        let mut registry = SubscriberRegistry::new();
+        let captured = Arc::new(Mutex::new(None::<String>));
+        let captured_clone = captured.clone();
+        registry.register("sensors/**", move |sample| {
+            *captured_clone.lock().unwrap() = Some(sample.keyexpr.clone());
+        });
+
+        registry.dispatch(&NetworkMessage::Declare(Box::new(declare_kexpr_literal(
+            7,
+            "sensors/room1/temp",
+        ))));
+        let push = push_with_mapping_id(7, None);
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)));
+
+        let observed = captured.lock().unwrap().clone().expect("callback fired");
+        assert_eq!(
+            observed, "sensors/room1/temp",
+            "Sample.keyexpr surfaces the resolved literal, not the mapping id"
         );
     }
 

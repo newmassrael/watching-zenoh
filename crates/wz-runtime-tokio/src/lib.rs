@@ -44,6 +44,15 @@ pub mod keyexpr_canon;
 /// and the surface-vs-dispatch distinction.
 pub mod locality;
 
+/// R222 — application-layer `Sample` type for subscriber callbacks.
+/// Mirrors zenoh-pico's `z_sample_t` projection — resolved keyexpr +
+/// SampleKind (Put / Del) + payload bytes. Subscriber callbacks now
+/// receive `&Sample` instead of the raw `&Push` so they avoid the
+/// re-extract-keyexpr + tagged-union-match boilerplate that every
+/// caller previously repeated. See `sample` module doc for the
+/// non-exhaustive future-additive contract.
+pub mod sample;
+
 /// R98 — application-layer subscriber registry. Routes decoded
 /// `NetworkMessage::Push` records to user-registered callbacks
 /// filtered by literal keyexpr. See `pubsub::SubscriberRegistry`

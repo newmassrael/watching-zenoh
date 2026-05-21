@@ -111,7 +111,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
-use wz_codecs::wireexpr::WireexprVariant;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::reply::InboundReplyBody;
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastPolicy;
@@ -916,17 +915,17 @@ async fn run_demo(
     let mut observer = ApplicationLayerObserver::new();
     if let Some(ref k) = key {
         let key_for_callback = k.clone();
-        observer.subscribers.register(k.clone(), move |push| {
-            // R125c2: keyexpr is a tagged-union; extract id+suffix
-            // from whichever arm the dispatcher selected for
-            // stderr logging.
-            let (mid, suffix) = match &push.keyexpr.body {
-                WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.clone()),
-                WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.clone()),
-            };
+        observer.subscribers.register(k.clone(), move |sample| {
+            // R222 — Sample carries the resolved keyexpr literal +
+            // the SampleKind discriminant + payload bytes directly,
+            // so the prior `match push.keyexpr.body` + tagged-union
+            // arm extraction is no longer required at the call site.
             eprintln!(
-                "wz-ap-demo: SUBSCRIBER FIRED key='{}' wireexpr_id={} suffix={:?}",
-                key_for_callback, mid, suffix
+                "wz-ap-demo: SUBSCRIBER FIRED filter='{}' keyexpr='{}' kind={:?} payload_len={}",
+                key_for_callback,
+                sample.keyexpr,
+                sample.kind,
+                sample.payload.len(),
             );
         });
     }
