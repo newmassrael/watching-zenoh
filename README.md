@@ -18,12 +18,12 @@ author-side files.
 This repo builds two things at once.
 
 1. **Wire compatibility** — an MVP subset of the wire format that
-   zenoh-pico 1.5.x clients and zenoh 1.5.x routers / peers
-   exchange. The subset scope is pinned in
-   docs/wire-spec-subset.md: scouting layer, transport session
-   layer, network routing layer, zenoh payload layer, and
-   extension chain mechanism. Optional surfaces (compression,
-   patch, full liveliness, etc.) are deferred to Phase B+.
+   zenoh-pico 1.x clients and zenoh 1.x routers / peers exchange.
+   The subset scope is pinned in docs/wire-spec-subset.md:
+   scouting layer, transport session layer, network routing
+   layer, zenoh payload layer, and extension chain mechanism.
+   Optional surfaces (compression, patch, full liveliness) are
+   deferred to later phases.
 
 2. **Single-source six-backend codegen** — the same SCXML sources
    under sources/ generate to Rust no_std (MCU) / C11 / C++ /
@@ -31,54 +31,60 @@ This repo builds two things at once.
    harnesses exercise all six languages from the same vectors.
    Design RFC lives in docs/rfc-sce-protocol-synthesis.md.
 
-Design SSoT entry is ARCHITECTURE.md. The 11 spec docs under
+Design SSoT entry is ARCHITECTURE.md. The 12 spec docs under
 docs/ are governed by Mnemosyne (atomic-store + GENERATED.md
 lifecycle); the operating rules are in CLAUDE.md.
 
 ## Current status
 
-Snapshot last refreshed at Round 116 (2026-05-18). The atomic
+Snapshot last refreshed at Round 210 (2026-05-21). The atomic
 changelog under docs/.atomic/ has the latest per-round delta.
 
 - **Phase A** (author-side SCXML primitives — algorithms): CLOSED.
-  9 algorithm-kind SCXML files verified across all six backends
+  All algorithm-kind SCXML files verified across the six backends
   (CRC16, VLE u64 decode, VLE byte length, KeyExpr
   intersect/includes, extension dispatch, MID validators for
   scouting / session / network / declare-sub / payload-Z).
-- **Phase B** (codec catalog): closed for the wire-spec subset.
-  19 wz-emitted codecs cover the full transport + network +
-  declaration envelope set: 5 transport MIDs (INIT / OPEN / CLOSE /
-  KEEP_ALIVE / FRAME), 7 network MIDs (REQUEST / PUSH /
-  RESPONSE_FINAL / OAM / INTEREST / RESPONSE / DECLARE), 9
-  declaration sub-MIDs (DECL_KEXPR + sub-types and their UNDECL
-  pairs + DECL_FINAL), plus the shared codecs (ext_envelope /
-  ext_entry / ext_unit / ext_zint / ext_zbuf / wireexpr / locator /
-  hello / scout / encoding / timestamp / fragment / msg_put /
-  msg_del / interest_body / reply / err / open_body / init_body /
-  join). Every envelope has byte-equivalent Layer 3 wire-interop
-  vs zenoh-pico `_z_*_encode` (see
+- **Phase B** (codec catalog): CLOSED for the wire-spec subset.
+  35 wz-emitted codecs cover transport (INIT / OPEN / CLOSE /
+  KEEP_ALIVE / FRAME), network (REQUEST / PUSH / RESPONSE /
+  RESPONSE_FINAL / OAM / INTEREST / DECLARE), declaration
+  sub-MIDs (DECL_KEXPR / SUBSCRIBER / QUERYABLE / TOKEN /
+  INTEREST / FINAL + UNDECL pairs), payload bodies (Reply / Err /
+  MsgPut / MsgDel / Query), and shared infrastructure
+  (ext_envelope / ext_entry / ext_unit / ext_zint / ext_zbuf +
+  wireexpr / locator / hello / scout / encoding / timestamp /
+  fragment / open_body / init_body / join). Every envelope is
+  byte-equivalent to zenoh-pico's `_z_*_encode` (Layer 3
+  wire-interop tests under
   crates/wz-integration-tests/tests/layer3_*.rs).
-- **Phase C** (session-FSM + integration): unicast track in
-  flight. session_fsm_unicast.scxml carries the 4 timer events
-  (link.open_timeout=5s / init_ack.timeout=2s /
-  open_ack.timeout=2s / closing.timeout=100ms) plus the
-  Init→Established and the close paths; the wz-runtime-tokio
-  crate wires the FSM to a tokio LinkDriver via session_glue.rs.
+- **Phase C** (session FSM + AP MVP runtime): unicast track
+  closed. session_fsm_unicast.scxml carries the timer events
+  (link.open_timeout=5s, init/open_ack=2s, closing=100ms) plus
+  the full Init→Established→Close path. TCP transport complete.
   Cookie HMAC-SHA256 (RFC 4231 TC1-TC7) verified at R70.
-  Scouting / multicast / reassembly tracks deferred to later
-  rounds.
-- **Phase W** (lwIP / MCU runtime): not started. R58 NOP-stub
-  reverted at R63 (no document-around-hack); reintroduction
-  blocked on AP MVP demo binary closure.
-- **AP MVP demo binary** (next milestone): Linux + tokio peer
-  doing round-trip query against an external zenoh-pico CLI
-  process. 3-5 rounds expected.
+  Pub/Sub outbound 100% / inbound 65%. DECLARE outbound 9/9 +
+  inbound 6/6 complete. Query/Reply outbound + inbound
+  complete, including Request-level qos / tstamp / target /
+  budget / timeout extension chain and Response-level responder
+  ext via `QueryResponder::with_responder` (R210). Scouting,
+  multicast, reassembly, and fragmentation defer to later
+  phases.
+- **Phase W** (lwIP / MCU runtime): scheduled after the first
+  external release. R58 NOP-stub reverted at R63 — no
+  document-around-hack; reintroduction lands once the cargo
+  publish dry-run + tagged release flow ships.
+- **First external release** (v0.1.0-mvp): next milestone. Five
+  sub-rounds cover README polish, deploy.yaml schema cleanup,
+  GitHub Actions release flow, THIRD_PARTY.md ledger, and the
+  cargo publish dry-run + tag.
 
 Round-by-round decisions live in the atomic changelog
-(docs/.atomic/workspace.atomic.json). Currently at 134 entries
-across 214 atomic sections; 159 workspace tests pass; the
-local 6-lane CI (Layer 0 / A / A2 / B / C1 / C2 / D in
-scripts/run-ci.sh) mirrors the GitHub Actions workflow.
+(docs/.atomic/workspace.atomic.json). Currently 210 entries
+across 214 atomic sections; ~333 workspace tests pass (185 in
+wz-runtime-tokio lib alone); the local 8-lane CI (Layer 0 / A /
+A2 / B / C1 / C2 / D / E in scripts/run-ci.sh) mirrors the
+GitHub Actions workflow.
 
 ## Directory layout
 
@@ -89,7 +95,13 @@ scripts/run-ci.sh) mirrors the GitHub Actions workflow.
 | docs/.atomic/ | Atomic-store sidecar (mutate only via typed primitives) |
 | docs/GENERATED.md | Cascade-rendered output (gitignored, never edit) |
 | sources/ | SCE Forge input SCXML (codecs + algorithms + session FSM) |
-| crates/ | wz-codecs / wz-runtime-tokio / wz-integration-tests / -test-support / zenoh-pico-sys |
+| crates/wz-codecs | Generated codec types from sources/codecs/*.scxml |
+| crates/wz-runtime-tokio | Tokio-based AP runtime + session glue + builders |
+| crates/wz-runtime-lwip | lwIP / MCU runtime skeleton (Phase W) |
+| crates/wz-ap-demo | AP MVP demo binary (initiator + acceptor) |
+| crates/wz-integration-tests | Layer 3 wire-interop + round-trip suites |
+| crates/wz-runtime-tokio-test-support | Shared test harness for runtime tests |
+| crates/zenoh-pico-sys | Vendored zenoh-pico FFI bindings (smoke layer) |
 | scripts/ | build-sce.sh + verify-codegen.sh + run-ci.sh + audit-mid-values.sh |
 | vendor/sce/ | SCE submodule, vendor pin |
 | .githooks/ | pre-commit / commit-msg / pre-push gates |
@@ -185,5 +197,6 @@ The SSOT contract, atomic-store lifecycle, and SPDX header
 policy are core to this project. New contributors should read
 CLAUDE.md — it is framed as the AI-agent operating guide, but
 the governance rules apply equally to human contributors.
-Decisions land as atomic changelog Round entries; activity
-notes live in notes/NEXT_SESSION.md.
+Decisions land as atomic changelog Round entries in
+docs/.atomic/workspace.atomic.json; cross-session handoff lives
+there (no out-of-band activity log).
