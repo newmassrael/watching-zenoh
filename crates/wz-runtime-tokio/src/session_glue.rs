@@ -1041,6 +1041,50 @@ impl SessionLinkActions {
         self.driver.send_blocking(&wire, reliability);
     }
 
+    /// R219 — encode + dispatch a literal-keyexpr `Push(MsgDel)` on
+    /// the outbound link. Delete-keyexpr signal mirror of
+    /// [`Self::send_push_literal`]: zenoh-pico's subscriber callback
+    /// fires with `z_sample_kind = DELETE` on receipt.
+    ///
+    /// `MsgDel` carries no payload so the action accepts only the
+    /// keyexpr suffix. Reliability gating + Established-state
+    /// preconditions match [`Self::send_push_literal`].
+    pub fn send_push_del_literal(&self, keyexpr_suffix: &str, reliable: bool) {
+        let push = build_push_del_literal(keyexpr_suffix);
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_push(sn, push, reliable);
+        let reliability = if reliable {
+            Reliability::Reliable
+        } else {
+            Reliability::BestEffort
+        };
+        self.driver.send_blocking(&wire, reliability);
+    }
+
+    /// R219 — encode + dispatch a DECLARE-aliased `Push(MsgDel)`
+    /// (id != 0) on the outbound link. Delete-keyexpr signal mirror
+    /// of [`Self::send_push_aliased`]. Same prior-`DeclKexpr`
+    /// precondition as the Put variant: the peer must have absorbed
+    /// a Declare for `mapping_id` earlier on the same session so
+    /// the receive-side resolver can map it back to a literal
+    /// keyexpr before firing the subscriber callback.
+    pub fn send_push_del_aliased(
+        &self,
+        mapping_id: u64,
+        suffix: Option<&str>,
+        reliable: bool,
+    ) {
+        let push = build_push_del_aliased(mapping_id, suffix);
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_push(sn, push, reliable);
+        let reliability = if reliable {
+            Reliability::Reliable
+        } else {
+            Reliability::BestEffort
+        };
+        self.driver.send_blocking(&wire, reliability);
+    }
+
     /// R121i — encode + dispatch a `Declare(DeclSubscriber)` on the
     /// outbound link, registering a subscription on the peer for the
     /// keyexpr resolved by `(keyexpr_mapping_id, keyexpr_suffix)`. The
@@ -1819,6 +1863,96 @@ pub fn build_push_aliased(mapping_id: u64, suffix: Option<&str>, value: &[u8]) -
             extensions: None,
             payload_len,
             payload: payload_bytes,
+        }),
+    }
+}
+
+/// R219 — build a literal-keyexpr `Push` whose body is a `MsgDel`
+/// (delete-keyexpr signal) instead of `MsgPut`. Mirror of
+/// [`build_push_literal`] for the deletion-of-resource path that
+/// zenoh-pico emits on `z_delete` (`vendor/zenoh-pico/src/api/api.c`
+/// `z_delete` → `_z_write` with `Z_SAMPLE_KIND_DELETE`).
+///
+/// Wire-shape differences from [`build_push_literal`]:
+///
+/// * `MsgDel` body carries:
+///   - `header` = 0x02 (msg_del MID, no timestamp / ext flags
+///     — payload-less Del per network.c:118 mapping table).
+///   - No `payload_len` / `payload` fields — `MsgDel` is a marker
+///     message; the keyexpr identifies the resource being deleted.
+/// * Push.header N flag (0x20) is set the same as the literal-keyexpr
+///   Put path; M flag derives at encode time from the WireexprLocal
+///   arm selection.
+///
+/// Subscriber-side observation: zenoh-pico's `_z_trigger_subscriptions`
+/// fires the registered callback with `z_sample_kind = DELETE`. The
+/// stock `z_sub` example does not surface the kind in its printout
+/// (only the keyexpr + payload), so an integration test against
+/// `z_sub` sees the Del as a `Received` line with an empty value
+/// substring — distinguishable from a Put-with-empty-value only by
+/// the wz-side codec round-trip witness.
+pub fn build_push_del_literal(keyexpr_suffix: &str) -> Push {
+    let suffix_string = keyexpr_suffix.to_string();
+    let suffix_len = suffix_string.len() as u64;
+    Push {
+        // `N_MID_PUSH | N_flag(0x20)` — M flag derives from the
+        // WireexprLocal arm at encode time (push.rs:189). Identical
+        // header shape to the Put path; only the inner body MID
+        // (0x02 vs 0x01) and the absence of payload bytes differ
+        // on the wire.
+        header: wire_const::N_MID_PUSH | 0x20,
+        keyexpr: Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len: Some(suffix_len),
+                suffix: Some(suffix_string),
+            }),
+        },
+        extensions: None,
+        body: PushVariant::CodecZenohMsgDel(MsgDel {
+            header: 0x02,
+            timestamp: None,
+            extensions: None,
+        }),
+    }
+}
+
+/// R219 — build a DECLARE-aliased `Push` whose body is `MsgDel`.
+/// Mirror of [`build_push_aliased`] for the deletion path. Same
+/// aliased-keyexpr precondition as the Put variant: the peer must
+/// have absorbed a `Declare(DeclKexpr(mapping_id, ...))` earlier
+/// so its keyexpr table can resolve the id.
+///
+/// Panics if `mapping_id == 0` — id zero is the literal-keyexpr
+/// sentinel ([`build_push_del_literal`]'s arm). The split keeps
+/// the two shapes apart at the API surface so a caller cannot
+/// silently invert them.
+pub fn build_push_del_aliased(mapping_id: u64, suffix: Option<&str>) -> Push {
+    assert!(
+        mapping_id != 0,
+        "build_push_del_aliased requires a non-zero mapping id; use build_push_del_literal for id=0",
+    );
+    let suffix_string = suffix.map(str::to_string);
+    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    // Same N-flag derivation as build_push_aliased: bit 5 set when
+    // a per-Push suffix tail is present, cleared for the
+    // pure-aliased shape. The flag has identical decoder semantics
+    // regardless of the inner body MID (Put vs Del).
+    let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
+    Push {
+        header: wire_const::N_MID_PUSH | n_flag,
+        keyexpr: Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: mapping_id,
+                suffix_len,
+                suffix: suffix_string,
+            }),
+        },
+        extensions: None,
+        body: PushVariant::CodecZenohMsgDel(MsgDel {
+            header: 0x02,
+            timestamp: None,
+            extensions: None,
         }),
     }
 }
@@ -5685,6 +5819,160 @@ mod tests {
     #[should_panic(expected = "build_push_aliased requires a non-zero mapping id")]
     fn build_push_aliased_rejects_zero_mapping_id() {
         let _ = build_push_aliased(0, Some("demo"), b"");
+    }
+
+    /// R219 — `build_push_del_literal` produces a literal-keyexpr
+    /// Push whose body is the `MsgDel` arm (inner header 0x02,
+    /// no payload, no timestamp / extensions). The outer Push
+    /// header + WireexprLocal shape match the Put literal path.
+    #[test]
+    fn build_push_del_literal_shapes_struct_for_literal_keyexpr() {
+        let push = build_push_del_literal("demo/test");
+        assert_eq!(
+            push.header, 0x3D,
+            "Push.header must carry N_MID_PUSH (0x1D) | N flag (0x20) — same as the Put literal path"
+        );
+        match &push.keyexpr.body {
+            WireexprVariant::WireexprLocal(arm) => {
+                assert_eq!(arm.id, 0, "literal-keyexpr path uses id=0 sentinel");
+                assert_eq!(
+                    arm.suffix.as_deref(),
+                    Some("demo/test"),
+                    "suffix must carry the literal keyexpr string"
+                );
+                assert_eq!(
+                    arm.suffix_len,
+                    Some(9),
+                    "suffix_len must match suffix.len() for the VLE writer"
+                );
+            }
+            WireexprVariant::WireexprNonlocal(_) => {
+                panic!("literal-keyexpr path must select the WireexprLocal arm (M=1)")
+            }
+        }
+        match &push.body {
+            PushVariant::CodecZenohMsgDel(del) => {
+                assert_eq!(del.header, 0x02, "MsgDel header MID = 0x02 with no flags");
+                assert!(
+                    del.timestamp.is_none(),
+                    "MVP Del path emits no timestamp flag"
+                );
+                assert!(
+                    del.extensions.is_none(),
+                    "MVP Del path emits no MsgDel-level extensions"
+                );
+            }
+            other => panic!("build_push_del_literal must emit MsgDel body, got {:?}", match other {
+                PushVariant::CodecZenohMsgPut(_) => "MsgPut",
+                PushVariant::Default { .. } => "Default",
+                PushVariant::CodecZenohMsgDel(_) => unreachable!(),
+            }),
+        }
+        assert!(push.extensions.is_none(), "no Push-level extensions on the MVP path");
+    }
+
+    /// R219 — `build_push_del_aliased` produces a DECLARE-aliased
+    /// Push whose body is the `MsgDel` arm. Both pure-aliased
+    /// (suffix=None) and composite-aliased (suffix=Some) shapes are
+    /// exercised so the N-flag derivation matches the Put aliased
+    /// path. The MsgDel body content is identical across shapes.
+    #[test]
+    fn build_push_del_aliased_carries_non_zero_id_with_optional_suffix() {
+        let pure = build_push_del_aliased(7, None);
+        assert_eq!(
+            pure.header,
+            wire_const::N_MID_PUSH,
+            "pure aliased Push (no suffix) must clear the N flag",
+        );
+        match &pure.keyexpr.body {
+            WireexprVariant::WireexprLocal(w) => {
+                assert_eq!(w.id, 7, "pure aliased Push id must equal mapping_id");
+                assert_eq!(w.suffix, None, "pure aliased Push must omit suffix");
+                assert_eq!(w.suffix_len, None, "pure aliased Push must omit suffix_len");
+            }
+            _ => panic!("build_push_del_aliased must produce a WireexprLocal arm"),
+        }
+        match &pure.body {
+            PushVariant::CodecZenohMsgDel(d) => {
+                assert_eq!(d.header, 0x02);
+            }
+            _ => panic!("build_push_del_aliased must wrap a MsgDel body"),
+        }
+
+        let composite = build_push_del_aliased(7, Some("tail"));
+        assert_eq!(
+            composite.header,
+            wire_const::N_MID_PUSH | 0x20,
+            "composite aliased Push (suffix present) must set the N flag",
+        );
+        match &composite.keyexpr.body {
+            WireexprVariant::WireexprLocal(w) => {
+                assert_eq!(w.id, 7);
+                assert_eq!(w.suffix.as_deref(), Some("tail"));
+                assert_eq!(w.suffix_len, Some(4));
+            }
+            _ => panic!("composite aliased Push must produce a WireexprLocal arm"),
+        }
+        match &composite.body {
+            PushVariant::CodecZenohMsgDel(d) => {
+                assert_eq!(d.header, 0x02);
+            }
+            _ => panic!("composite aliased Push must wrap a MsgDel body"),
+        }
+    }
+
+    /// R219 — `build_push_del_aliased` rejects `mapping_id == 0` so
+    /// a caller cannot silently produce a literal-keyexpr Del Push
+    /// via the aliased entry point.
+    #[test]
+    #[should_panic(expected = "build_push_del_aliased requires a non-zero mapping id")]
+    fn build_push_del_aliased_rejects_zero_mapping_id() {
+        let _ = build_push_del_aliased(0, Some("demo"));
+    }
+
+    /// R219 — round-trip the literal-keyexpr Del path through
+    /// `encode_frame_with_push` + `parse_inbound` so the wz
+    /// receive-side parser surfaces the `MsgDel` inner body
+    /// (not `MsgPut`) on the decoded `Push`. Establishes the wire-
+    /// shape witness that pairs with the e2e zenoh-pico interop
+    /// test — z_sub's printout cannot distinguish Del from
+    /// empty-Put, so the codec-level round-trip is the definitive
+    /// proof that the wz-side encoder emits the Del MID.
+    #[test]
+    fn build_push_del_literal_round_trips_through_frame_decode_as_msg_del() {
+        let push = build_push_del_literal("demo/test");
+        let wire = encode_frame_with_push(/*sn=*/ 0, push, /*reliable=*/ true);
+        let parsed = parse_inbound(&wire).expect("parse_inbound on Del-bearing Frame");
+        let payload = match parsed {
+            InboundFrame::Frame { payload, .. } => payload,
+            _ => panic!("expected Frame variant from parse_inbound"),
+        };
+        let messages =
+            parse_frame_payload(&payload).expect("parse_frame_payload on Del-bearing Frame");
+        assert_eq!(
+            messages.len(),
+            1,
+            "Frame must carry exactly one Push record after round-trip"
+        );
+        match &messages[0] {
+            NetworkMessage::Push(p) => match &p.body {
+                PushVariant::CodecZenohMsgDel(d) => {
+                    assert_eq!(
+                        d.header, 0x02,
+                        "round-tripped MsgDel must preserve its MID byte"
+                    );
+                }
+                other => panic!(
+                    "round-tripped Push body must be MsgDel, got {:?}",
+                    match other {
+                        PushVariant::CodecZenohMsgPut(_) => "MsgPut",
+                        PushVariant::Default { .. } => "Default",
+                        PushVariant::CodecZenohMsgDel(_) => unreachable!(),
+                    }
+                ),
+            },
+            _ => panic!("expected NetworkMessage::Push from round-trip"),
+        }
     }
 
     /// R121g — `build_declare_kexpr` wraps a `DeclKexpr` registering

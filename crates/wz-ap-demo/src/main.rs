@@ -138,6 +138,21 @@ enum Role {
     Initiator { connect: String },
 }
 
+/// R219 — publisher-task operation kind. `Put` carries the
+/// application payload (`--value <text>`); `Delete` is payload-
+/// less (zenoh-pico's `z_delete` wire form: `MsgDel` body, no
+/// `payload_len`/`payload` fields). The same publisher_task drives
+/// both shapes — Established-gating, optional `DECLARE` preamble,
+/// and the BURST_COUNT emission loop are invariant; only the
+/// inner action call (`send_push_literal`/`_aliased` vs
+/// `send_push_del_literal`/`_aliased`) differs at the dispatch
+/// site.
+#[derive(Clone, Debug)]
+enum PushOperation {
+    Put { value: String },
+    Delete,
+}
+
 fn print_usage() {
     eprintln!("{ABOUT}");
     eprintln!();
@@ -145,6 +160,7 @@ fn print_usage() {
     eprintln!("    wz-ap-demo (--listen <addr> | --connect <addr>)");
     eprintln!("               [--key <keyexpr>]");
     eprintln!("               [--publish <keyexpr> --value <text>]");
+    eprintln!("               [--delete <keyexpr>]");
     eprintln!("               [--queryable <keyexpr> --reply <text>]");
     eprintln!("               [--query <keyexpr>]");
     eprintln!("               [--declare-subscriber <keyexpr>]");
@@ -162,6 +178,8 @@ fn print_usage() {
     eprintln!("    --key <keyexpr>          DECLARE subscriber keyexpr (e.g. demo/example)");
     eprintln!("    --publish <keyexpr>      publisher keyexpr literal (e.g. demo/test)");
     eprintln!("    --value <text>           publisher payload text (required with --publish)");
+    eprintln!("    --delete <keyexpr>       delete-keyexpr publisher (R219 MsgDel body)");
+    eprintln!("                             mutually exclusive with --publish; no --value");
     eprintln!("    --queryable <keyexpr>    register a queryable for the given pattern;");
     eprintln!("                             each inbound Request(Query) whose keyexpr matches");
     eprintln!("                             fires a callback that emits one Reply via --reply");
@@ -198,7 +216,7 @@ fn print_usage() {
     eprintln!("    --help, -h               print this help and exit");
     eprintln!();
     eprintln!("Exactly one of --listen / --connect is required.");
-    eprintln!("At least one of --key / --publish / --queryable / --query / --declare-*");
+    eprintln!("At least one of --key / --publish / --delete / --queryable / --query / --declare-*");
     eprintln!("/ --on-remote-* must be supplied.");
 }
 
@@ -510,11 +528,18 @@ fn main() -> ExitCode {
     let key_opt = parse_pair(rest, "--key");
     let publish_opt = parse_pair(rest, "--publish");
     let value_opt = parse_pair(rest, "--value");
+    // R219 — `--delete <keyexpr>` opts the demo into the
+    // delete-keyexpr publisher mode: each burst tick emits a
+    // `Frame[Push(MsgDel)]` instead of `Frame[Push(MsgPut(payload))]`.
+    // Mutually exclusive with --publish (the two are distinct
+    // application semantics; a publisher emits either Puts or
+    // Deletes, not both, on a single run).
+    let delete_opt = parse_pair(rest, "--delete");
     // R121g — `--declare-id <N>` opts the publisher into the
     // DECLARE-aliased path: send one `Declare(DeclKexpr(N, suffix))`
     // before the burst, then emit aliased Pushes carrying only
     // `id=N`. Defaults to None (literal-keyexpr path, R121e shape).
-    // Only meaningful when --publish is set.
+    // R219 — meaningful when EITHER --publish OR --delete is set.
     let declare_id_opt = parse_pair(rest, "--declare-id");
     // R121j-5c-e2e-demo — queryable / query CLI surface.
     // --queryable + --reply registers an inbound Request(Query) callback
@@ -544,6 +569,7 @@ fn main() -> ExitCode {
     let on_query_final_log = rest.iter().any(|a| a == "--on-query-final-log");
     if key_opt.is_none()
         && publish_opt.is_none()
+        && delete_opt.is_none()
         && queryable_opt.is_none()
         && query_opt.is_none()
         && declare_subscriber_opt.is_none()
@@ -554,7 +580,7 @@ fn main() -> ExitCode {
         && !on_remote_l_log
     {
         eprintln!(
-            "wz-ap-demo: at least one of --key / --publish / --queryable / --query / \
+            "wz-ap-demo: at least one of --key / --publish / --delete / --queryable / --query / \
              --declare-* / --on-remote-* must be supplied",
         );
         eprintln!();
@@ -573,8 +599,25 @@ fn main() -> ExitCode {
         print_usage();
         return ExitCode::from(2);
     }
-    if declare_id_opt.is_some() && publish_opt.is_none() {
-        eprintln!("wz-ap-demo: --declare-id is only meaningful with --publish");
+    // R219 — --delete and --publish are distinct publisher modes; a
+    // single run emits either Puts (Put payloads via --value) or
+    // Deletes (no payload). Mixing both on one run does not match
+    // any real-world application surface and would complicate
+    // publisher_task's dispatch — reject explicitly here.
+    if publish_opt.is_some() && delete_opt.is_some() {
+        eprintln!("wz-ap-demo: --publish and --delete are mutually exclusive (pick one publisher mode per run)");
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    if delete_opt.is_some() && value_opt.is_some() {
+        eprintln!("wz-ap-demo: --delete does not accept --value (MsgDel carries no payload — rejected to surface mis-wired argv)");
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    if declare_id_opt.is_some() && publish_opt.is_none() && delete_opt.is_none() {
+        eprintln!("wz-ap-demo: --declare-id is only meaningful with --publish or --delete");
         eprintln!();
         print_usage();
         return ExitCode::from(2);
@@ -616,10 +659,17 @@ fn main() -> ExitCode {
         },
         None => None,
     };
-    let publisher_spec: Option<(String, String, Option<u64>)> = match (publish_opt, value_opt) {
-        (Some(k), Some(v)) => Some((k, v, declare_id_parsed)),
-        _ => None,
-    };
+    // R219 — publisher_spec carries both Put and Delete modes through
+    // a single channel into publisher_task. Put requires --value
+    // (validated above); Delete carries no payload.
+    let publisher_spec: Option<(String, PushOperation, Option<u64>)> =
+        match (publish_opt, value_opt, delete_opt) {
+            (Some(k), Some(v), None) => {
+                Some((k, PushOperation::Put { value: v }, declare_id_parsed))
+            }
+            (None, None, Some(k)) => Some((k, PushOperation::Delete, declare_id_parsed)),
+            _ => None,
+        };
     let queryable_spec: Option<(String, String)> = match (queryable_opt, reply_opt) {
         (Some(p), Some(r)) => Some((p, r)),
         _ => None,
@@ -640,9 +690,16 @@ fn main() -> ExitCode {
     if let Some(k) = &key_opt {
         log::info!("key     = {k}");
     }
-    if let Some((k, v, id)) = &publisher_spec {
-        log::info!("publish = {k}");
-        log::info!("value   = {v}");
+    if let Some((k, op, id)) = &publisher_spec {
+        match op {
+            PushOperation::Put { value } => {
+                log::info!("publish = {k}");
+                log::info!("value   = {value}");
+            }
+            PushOperation::Delete => {
+                log::info!("delete  = {k} (R219 Del-mode, no payload)");
+            }
+        }
         if let Some(n) = id {
             log::info!("declare-id = {n} (R121g DECLARE-aliased mode)");
         }
@@ -788,7 +845,7 @@ struct QueryRoleSpec {
 async fn run_demo(
     role: Role,
     key: Option<String>,
-    publisher_spec: Option<(String, String, Option<u64>)>,
+    publisher_spec: Option<(String, PushOperation, Option<u64>)>,
     query_role_spec: QueryRoleSpec,
     declare_spec: DeclareEmitSpec,
     remote_log_spec: RemoteLogSpec,
@@ -1010,12 +1067,17 @@ async fn run_demo(
     //                    `max_iters` is reached.
     let publisher_handle = publisher_spec
         .as_ref()
-        .map(|(keyexpr, value, declare_id)| {
+        .map(|(keyexpr, operation, declare_id)| {
             let actions_for_publisher = actions.clone();
             let keyexpr = keyexpr.clone();
-            let value = value.clone();
+            let operation = operation.clone();
             let declare_id = *declare_id;
-            tokio::spawn(publisher_task(actions_for_publisher, keyexpr, value, declare_id))
+            tokio::spawn(publisher_task(
+                actions_for_publisher,
+                keyexpr,
+                operation,
+                declare_id,
+            ))
         });
 
     // R121j-5c-e2e-demo — query_task spawn (initiator-style: emit a
@@ -1298,7 +1360,7 @@ async fn query_task(
 async fn publisher_task(
     actions: Arc<wz_runtime_tokio::session_glue::SessionLinkActions>,
     keyexpr: String,
-    value: String,
+    operation: PushOperation,
     declare_id: Option<u64>,
 ) {
     // ── Step 1: wait for Established. Both acceptor and initiator
@@ -1337,10 +1399,16 @@ async fn publisher_task(
         }
         tokio::time::sleep(Duration::from_millis(PUBLISHER_HANDSHAKE_POLL_INTERVAL_MS)).await;
     }
-    log::info!(
-        "wz-ap-demo: publisher_task observed Established; emitting {PUBLISHER_BURST_COUNT} Pushes \
-         on keyexpr='{keyexpr}' value='{value}'"
-    );
+    match &operation {
+        PushOperation::Put { value } => log::info!(
+            "wz-ap-demo: publisher_task observed Established; emitting {PUBLISHER_BURST_COUNT} Put Pushes \
+             on keyexpr='{keyexpr}' value='{value}'"
+        ),
+        PushOperation::Delete => log::info!(
+            "wz-ap-demo: publisher_task observed Established; emitting {PUBLISHER_BURST_COUNT} Del Pushes \
+             on keyexpr='{keyexpr}' (R219 MsgDel body, no payload)"
+        ),
+    }
 
     // ── Step 2 (R121g): if --declare-id was supplied, send a
     //           Frame[Declare(DeclKexpr(id, suffix=keyexpr))] once
@@ -1367,27 +1435,43 @@ async fn publisher_task(
     }
 
     // ── Step 3: emit the burst. Each call composes a
-    //           Frame[Push(literal | aliased keyexpr, MsgPut(payload))]
+    //           Frame[Push(literal | aliased keyexpr, MsgPut|MsgDel)]
     //           and dispatches via the OutboundWriteDriver mpsc
     //           channel. `reliable=true` matches z_sub's default
     //           subscription reliability. When `declare_id` is
     //           supplied, the aliased Pushes carry only the
     //           mapping id (suffix=None), which is the
     //           bandwidth-efficient shape (one declared keyexpr
-    //           amortised across N Pushes).
+    //           amortised across N Pushes). R219 — switching on
+    //           `operation` selects the Put (with payload) or
+    //           Delete (no payload) action call; the surrounding
+    //           Established gate + declare preamble + cadence loop
+    //           are invariant.
     for i in 0..PUBLISHER_BURST_COUNT {
-        match declare_id {
-            Some(mapping_id) => {
+        match (&operation, declare_id) {
+            (PushOperation::Put { value }, Some(mapping_id)) => {
                 actions.send_push_aliased(mapping_id, None, value.as_bytes(), true);
                 eprintln!(
                     "wz-ap-demo: PUBLISHER EMITTED ALIASED mapping_id={mapping_id} \
                      value='{value}' idx={i}"
                 );
             }
-            None => {
+            (PushOperation::Put { value }, None) => {
                 actions.send_push_literal(&keyexpr, value.as_bytes(), true);
                 eprintln!(
                     "wz-ap-demo: PUBLISHER EMITTED keyexpr='{keyexpr}' value='{value}' idx={i}"
+                );
+            }
+            (PushOperation::Delete, Some(mapping_id)) => {
+                actions.send_push_del_aliased(mapping_id, None, true);
+                eprintln!(
+                    "wz-ap-demo: PUBLISHER EMITTED DEL ALIASED mapping_id={mapping_id} idx={i}"
+                );
+            }
+            (PushOperation::Delete, None) => {
+                actions.send_push_del_literal(&keyexpr, true);
+                eprintln!(
+                    "wz-ap-demo: PUBLISHER EMITTED DEL keyexpr='{keyexpr}' idx={i}"
                 );
             }
         }
