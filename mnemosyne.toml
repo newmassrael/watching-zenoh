@@ -168,3 +168,19 @@ target_id = "test"
 reason = "Accidental minimal-content test entry appended during R121h-perf-bump-3 while bisecting an MCP append_changelog_entry_v2 deserialization failure. Root cause turned out to be a 200-char cap on decision_summary (Round 161 §41 MAX_INTENT_CHAR threshold) surfacing as a misleading 'missing field changes_bullets' parse-cascade error. Once the real R121h-perf-bump-3 entry was authored within the cap, append succeeded normally. The 'test' entry's audit half preserves the original test content (decision_summary='test summary', changes_bullets=[change1, change2], verification_bullets=[verify1]) as historical record of the bisection step; publishable half redacted via set_changelog_publishable_decision_summary / _changes / _verification to neutralize the spurious surface. Frozen-ledger gap accepted by recording the override here; no removal because Mnemosyne has no remove-entry primitive (frozen-ledger invariant)."
 applied_in = "R121h-perf-bump-3 in-flight"
 content_hash_after = "d9a919dfa7d92cdb6b86983e68bff3d2bad674e9398a3e019440c0f085a1d6a4"
+
+# Round 193 atomic-internal orphan absorb — R121j-5c-e2e-action surfaced
+# SessionLinkActions.send_response (tokio runtime trait surface change);
+# the impact_refs citation should have pointed at the
+# `runtime-crate--sce_link_runtime_tokio` atomic section, not RFC §66
+# (the RFC sec numbering tops out at §16; §66 does not exist as a
+# workspace section). Frozen-ledger preserves Round 193 body; the
+# dangling atomic_entry_ref is absorbed via the Round 254 ledger
+# mechanism so validate-workspace exits 0 with `new orphan = 0`.
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 193"
+to = "66"
+reason = "R121j-5c-e2e-action — Round 193 impact_refs §66 typo. Intended atomic section: runtime-crate--sce_link_runtime_tokio. RFC sec numbering tops out at §16; §66 is not a workspace section. R254 absorb."
+since = "Round 193"
