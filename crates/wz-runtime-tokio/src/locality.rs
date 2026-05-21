@@ -17,23 +17,26 @@
 //! * [`Locality::Remote`] (`Z_LOCALITY_REMOTE = 2`) — fire only for
 //!   samples that arrived over the wire from another peer.
 //!
-//! ## wz dispatch invariant (R223 surface scope)
+//! ## wz dispatch invariant (R227 — Subscriber loopback active)
 //!
-//! `SubscriberRegistry::dispatch_push` and
-//! `QueryableRegistry::dispatch_request` only see records that have
-//! already been parsed off the wire — wz does not yet implement
-//! local-publish loopback (an application that calls a publisher
-//! API does not also see its own sample go through its own
-//! subscriber registry). Therefore every record reaching dispatch
-//! is "remote" in zenoh-pico's `is_remote=true` sense, and the
-//! locality check reduces to [`Locality::allows_remote`].
+//! `SubscriberRegistry::dispatch_push` routes wire-arrived Pushes
+//! with `is_remote = true`, applying [`Locality::allows_remote`] —
+//! subscribers pinned to [`Locality::SessionLocal`] are suppressed,
+//! [`Locality::Any`] and [`Locality::Remote`] subscribers fire.
 //!
-//! A [`Locality::SessionLocal`]-only subscription registered today
-//! will not fire at all. This is the correct partial-implementation
-//! shape — the surface matches zenoh-pico so applications written
-//! against the canonical API compile against wz, and the local
-//! path activates the moment a future round wires up self-publish
-//! loopback (carry: not in any current cluster).
+//! `SubscriberRegistry::local_publish` (R227) routes a caller-built
+//! [`crate::sample::Sample`] with `is_remote = false`, applying
+//! [`Locality::allows_local`] — subscribers pinned to
+//! [`Locality::Remote`] are suppressed, [`Locality::Any`] and
+//! [`Locality::SessionLocal`] subscribers fire. Both paths converge
+//! on the same `fire_to_subscribers` helper so the locality contract
+//! is enforced exactly once.
+//!
+//! `QueryableRegistry::dispatch_request` still only sees wire-arrived
+//! records and treats them as remote — Queryable-side loopback is a
+//! follow-up that will mirror this round's Subscriber-side shape
+//! when the use case surfaces (`_z_session_deliver_query_locally` in
+//! `vendor/zenoh-pico/src/session/loopback.c` 121-142).
 
 /// Locality filter applied to inbound samples before subscriber /
 /// queryable callbacks fire.
