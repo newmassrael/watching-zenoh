@@ -78,8 +78,12 @@ use wz_codecs::request::{Request, RequestVariant};
 use wz_codecs::response::Response;
 use wz_codecs::wireexpr::WireexprVariant;
 
+use wz_codecs::response_final::ResponseFinal;
+
 use crate::pubsub::keyexpr_pattern_matches;
-use crate::session_glue::{ResponseErrBuilder, ResponseReplyBuilder};
+use crate::session_glue::{
+    DriverLoopOutcome, IterationEvent, NetworkMessage, ResponseErrBuilder, ResponseReplyBuilder,
+};
 
 /// Boxed callback invoked when an inbound `Request(Query)`'s
 /// keyexpr matches a registered queryable. The callback receives
@@ -439,6 +443,103 @@ impl QueryableRegistry {
             }
         }
     }
+
+    /// R121j-5c — drain a `Vec<NetworkMessage>` (typically the
+    /// `FramePayload.messages` field surfaced by
+    /// [`crate::session_glue::drive_session_until_terminal`]) through
+    /// the queryable table. Each `NetworkMessage::Request` triggers
+    /// at most one `dispatch_request` and, when at least one queryable
+    /// matched the inbound keyexpr, also enqueues a
+    /// `pending_final_rids` entry so the caller emits exactly one
+    /// matching [`ResponseFinal`] after all per-rid replies have been
+    /// sent (zenoh-pico semantics: "many Reply + exactly one Final"
+    /// per Query).
+    ///
+    /// `pending_replies` accumulates outbound replies in arrival
+    /// order. `pending_final_rids` accumulates the rids for which
+    /// the caller still owes a Final. Both vecs are caller-owned so
+    /// the caller may batch multiple poll cycles before draining,
+    /// e.g. for backpressure or coalesced send.
+    ///
+    /// A `Request(Query)` whose keyexpr is un-resolvable (mapping_id
+    /// references an entry the peer never declared) does NOT enqueue
+    /// a Final — the dispatch dropped silently, so the wire-level
+    /// contract is "no Reply, no Final" rather than "no Reply, one
+    /// Final" (the latter would falsely promise the requester a
+    /// terminal that never comes from an unmatched queryable).
+    ///
+    /// Non-Query body arms (MsgPut|MsgDel|Default) are no-ops at
+    /// this layer per the scope note on
+    /// [`Self::dispatch_request`]; they do not enqueue a Final
+    /// either.
+    pub fn dispatch_messages(
+        &mut self,
+        messages: &[NetworkMessage],
+        peer_keyexpr_table: &HashMap<u64, String>,
+        pending_replies: &mut Vec<QueryReply>,
+        pending_final_rids: &mut Vec<u64>,
+    ) {
+        for message in messages {
+            if let NetworkMessage::Request(req) = message {
+                // Only Query bodies are queryable-visible; only
+                // resolvable keyexprs schedule a Final. We detect
+                // both by snapshotting the replies length before/
+                // after dispatch_request — a delta of zero means
+                // either non-Query body, un-resolvable keyexpr, or
+                // no queryable matched. In all three cases we owe
+                // no Final (the requester sees no Reply chain at
+                // all from this peer for this rid).
+                let before = pending_replies.len();
+                self.dispatch_request(req, peer_keyexpr_table, pending_replies);
+                if pending_replies.len() > before {
+                    pending_final_rids.push(req.rid);
+                }
+            }
+        }
+    }
+
+    /// R121j-5c — convenience adapter that pulls the
+    /// `FramePayload.messages` out of an
+    /// [`IterationEvent::Poll(DriverLoopOutcome::FramePayload)`]
+    /// surface and forwards to [`Self::dispatch_messages`]. Mirror
+    /// of [`crate::pubsub::SubscriberRegistry::dispatch_iteration_event`]
+    /// for the queryable side. Other `IterationEvent` variants
+    /// (`Lease`, non-FramePayload Poll outcomes) are no-ops.
+    pub fn dispatch_iteration_event(
+        &mut self,
+        event: IterationEvent<'_>,
+        peer_keyexpr_table: &HashMap<u64, String>,
+        pending_replies: &mut Vec<QueryReply>,
+        pending_final_rids: &mut Vec<u64>,
+    ) {
+        if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
+            self.dispatch_messages(messages, peer_keyexpr_table, pending_replies, pending_final_rids);
+        }
+    }
+}
+
+/// R121j-5c — build the wire-form [`ResponseFinal`] envelope that
+/// terminates a Reply chain for `rid`. zenoh-pico semantics require
+/// exactly one Final per inbound Query whose dispatch produced at
+/// least one Reply (or Err); the caller passes each rid recorded in
+/// `pending_final_rids` through this helper before the next outbound
+/// frame.
+///
+/// The construction is shape-frozen by the SCE codegen for
+/// [`ResponseFinal`]: `header = _Z_MID_N_RESPONSE_FINAL(0x1A)` + the
+/// per-rid VLE. Future qos / responder envelope exts on ResponseFinal
+/// will land via a separate setter (none exist on the wire today —
+/// zenoh-pico's `_z_response_final_encode` emits only header + rid).
+pub fn response_final_for(rid: u64) -> ResponseFinal {
+    ResponseFinal {
+        request_id: rid,
+        // header = 0x1a (_Z_MID_N_RESPONSE_FINAL) and extensions =
+        // None come from ResponseFinal::default() (see
+        // wz-codecs/.../out/response_final.rs:38-47); the spread
+        // keeps this helper resilient to future field additions
+        // that land with sensible defaults.
+        ..ResponseFinal::default()
+    }
 }
 
 #[cfg(test)]
@@ -763,6 +864,91 @@ mod tests {
             via_builder,
             "QueryReply::into_response (Err) must match the builder path with the same encoding tuple"
         );
+    }
+
+    #[test]
+    fn dispatch_messages_emits_final_for_each_matched_request() {
+        let mut reg = QueryableRegistry::new();
+        reg.register("home/temp", |_q, responder| {
+            responder.send_reply(b"21.0");
+        });
+
+        // Two Query requests on the matched keyexpr + one unmatched.
+        let messages = vec![
+            NetworkMessage::Request(Box::new(request_query(10, 0, Some("home/temp")))),
+            NetworkMessage::Request(Box::new(request_query(11, 0, Some("home/temp")))),
+            NetworkMessage::Request(Box::new(request_query(12, 0, Some("garden/temp")))),
+        ];
+        let mut replies = Vec::new();
+        let mut finals = Vec::new();
+        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+
+        assert_eq!(replies.len(), 2, "two matched Queries produce two Replies");
+        assert_eq!(finals, vec![10u64, 11u64], "one Final per matched rid, unmatched rid 12 dropped");
+    }
+
+    #[test]
+    fn dispatch_messages_skips_final_when_no_queryable_matched() {
+        let mut reg = QueryableRegistry::new();
+        reg.register("home/temp", |_q, responder| {
+            responder.send_reply(b"21.0");
+        });
+
+        let messages = vec![NetworkMessage::Request(Box::new(request_query(
+            7,
+            0,
+            Some("garden/humid"),
+        )))];
+        let mut replies = Vec::new();
+        let mut finals = Vec::new();
+        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+        assert!(replies.is_empty());
+        assert!(finals.is_empty(), "no matched queryable -> no Final to terminate");
+    }
+
+    #[test]
+    fn dispatch_messages_skips_final_when_keyexpr_unresolvable() {
+        let mut reg = QueryableRegistry::new();
+        reg.register("sensors/temp", |_q, responder| {
+            responder.send_reply(b"21.0");
+        });
+
+        // mapping_id=99 not in peer table -> dispatch drops silently.
+        let messages = vec![NetworkMessage::Request(Box::new(request_query(99, 99, None)))];
+        let mut replies = Vec::new();
+        let mut finals = Vec::new();
+        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+        assert!(replies.is_empty());
+        assert!(finals.is_empty(), "un-resolvable mapping id must not enqueue a Final");
+    }
+
+    #[test]
+    fn dispatch_messages_ignores_push_response_declare_variants() {
+        let mut reg = QueryableRegistry::new();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        reg.register("**", move |_q, _r| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+
+        // A Request with a non-Query body arm (MsgPut) and a
+        // hypothetical Push routed through this registry must not
+        // invoke the queryable callback or schedule a Final.
+        let messages = vec![NetworkMessage::Request(Box::new(request_put(1, "home/temp")))];
+        let mut replies = Vec::new();
+        let mut finals = Vec::new();
+        reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
+        assert_eq!(invocations.load(Ordering::SeqCst), 0);
+        assert!(replies.is_empty());
+        assert!(finals.is_empty());
+    }
+
+    #[test]
+    fn response_final_for_uses_default_header_and_explicit_rid() {
+        let final_msg = response_final_for(123);
+        assert_eq!(final_msg.header, 0x1a, "header = _Z_MID_N_RESPONSE_FINAL");
+        assert_eq!(final_msg.request_id, 123);
+        assert!(final_msg.extensions.is_none(), "no envelope ext today");
     }
 
     #[test]
