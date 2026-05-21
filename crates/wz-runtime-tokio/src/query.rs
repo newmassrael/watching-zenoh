@@ -143,6 +143,14 @@ pub enum ReplyBody {
 /// runtime (R121j-5c) can wire each entry through the corresponding
 /// [`ResponseReplyBuilder`] / [`ResponseErrBuilder`] + the
 /// `encode_frame_with_response` envelope helper.
+///
+/// The optional `responder` tuple — set via
+/// [`QueryResponder::with_responder`] before any send_*/send_err call —
+/// propagates onto the wire as the Response-envelope-level responder
+/// extension (zenoh-pico ext_id 0x03 ZBUF; see
+/// [`crate::session_glue::ResponseReplyBuilder::responder`]). Same shape
+/// for Reply and Err paths since the ext lives on the outer Response,
+/// not the inner Reply / Err body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryReply {
     /// Successful reply — typed as Put or Del per [`ReplyBody`].
@@ -156,6 +164,11 @@ pub enum QueryReply {
         keyexpr_literal: String,
         /// Reply body arm (Put or Del).
         body: ReplyBody,
+        /// Optional `(zid bytes, eid)` carried as the envelope-level
+        /// responder ext on the emitted Response. `None` skips the ext;
+        /// `Some` packs the bytes via
+        /// [`crate::session_glue::ResponseReplyBuilder::responder`].
+        responder: Option<(Vec<u8>, u32)>,
     },
     /// Error reply — `MID = _Z_MID_Z_ERR(0x05)`. The `encoding` tuple
     /// (id, optional schema) maps onto
@@ -167,6 +180,10 @@ pub enum QueryReply {
         keyexpr_literal: String,
         encoding: Option<(u32, Option<String>)>,
         payload: Vec<u8>,
+        /// Optional `(zid bytes, eid)` carried as the envelope-level
+        /// responder ext on the emitted Response. Mirror of
+        /// [`Self::Reply::responder`] — same shape, same wire slot.
+        responder: Option<(Vec<u8>, u32)>,
     },
 }
 
@@ -188,31 +205,40 @@ impl QueryReply {
                 rid,
                 keyexpr_literal,
                 body,
-            } => match body {
-                ReplyBody::Put(payload) => {
-                    ResponseReplyBuilder::new(rid, 0, Some(&keyexpr_literal), &payload).build()
+                responder,
+            } => {
+                let mut builder = match body {
+                    ReplyBody::Put(payload) => {
+                        ResponseReplyBuilder::new(rid, 0, Some(&keyexpr_literal), &payload)
+                    }
+                    ReplyBody::Del => {
+                        // The payload slot is unused on the Del path
+                        // (the builder drops it when reply_del() flips
+                        // the inner arm to MsgDel — see
+                        // session_glue.rs:3519-3523). Passing an empty
+                        // slice here is the natural shape.
+                        ResponseReplyBuilder::new(rid, 0, Some(&keyexpr_literal), &[]).reply_del()
+                    }
+                };
+                if let Some((zid, eid)) = responder {
+                    builder = builder.responder(&zid, eid);
                 }
-                ReplyBody::Del => {
-                    // The payload slot is unused on the Del path (the
-                    // builder drops it when reply_del() flips the
-                    // inner arm to MsgDel — see
-                    // session_glue.rs:3519-3523). Passing an empty
-                    // slice here is the natural shape.
-                    ResponseReplyBuilder::new(rid, 0, Some(&keyexpr_literal), &[])
-                        .reply_del()
-                        .build()
-                }
-            },
+                builder.build()
+            }
             QueryReply::Err {
                 rid,
                 keyexpr_literal,
                 encoding,
                 payload,
+                responder,
             } => {
                 let mut builder =
                     ResponseErrBuilder::new(rid, 0, Some(&keyexpr_literal), &payload);
                 if let Some((id, schema)) = encoding {
                     builder = builder.encoding(id, schema.as_deref());
+                }
+                if let Some((zid, eid)) = responder {
+                    builder = builder.responder(&zid, eid);
                 }
                 builder.build()
             }
@@ -230,6 +256,14 @@ pub struct QueryResponder<'a> {
     rid: u64,
     keyexpr_literal: String,
     replies: &'a mut Vec<QueryReply>,
+    /// R121j-3c — optional responder identity attached to every
+    /// subsequent send_reply / send_reply_del / send_err. `None`
+    /// emits no envelope-level responder ext; `Some` stamps the
+    /// tuple onto every pushed [`QueryReply`] so
+    /// [`QueryReply::into_response`] threads it into
+    /// [`ResponseReplyBuilder::responder`] / [`ResponseErrBuilder::responder`].
+    /// Set via [`Self::with_responder`]; clears via [`Self::clear_responder`].
+    responder: Option<(Vec<u8>, u32)>,
 }
 
 impl<'a> QueryResponder<'a> {
@@ -243,6 +277,7 @@ impl<'a> QueryResponder<'a> {
             rid: self.rid,
             keyexpr_literal: self.keyexpr_literal.clone(),
             body: ReplyBody::Put(payload.to_vec()),
+            responder: self.responder.clone(),
         });
     }
 
@@ -255,6 +290,7 @@ impl<'a> QueryResponder<'a> {
             rid: self.rid,
             keyexpr_literal: self.keyexpr_literal.clone(),
             body: ReplyBody::Del,
+            responder: self.responder.clone(),
         });
     }
 
@@ -274,7 +310,47 @@ impl<'a> QueryResponder<'a> {
             keyexpr_literal: self.keyexpr_literal.clone(),
             encoding,
             payload: payload.to_vec(),
+            responder: self.responder.clone(),
         });
+    }
+
+    /// R121j-3c — attach a responder identity that every subsequent
+    /// `send_reply` / `send_reply_del` / `send_err` call stamps onto
+    /// the pushed [`QueryReply`]. The stamp propagates through
+    /// [`QueryReply::into_response`] into
+    /// [`crate::session_glue::ResponseReplyBuilder::responder`] /
+    /// [`crate::session_glue::ResponseErrBuilder::responder`], which
+    /// emits the envelope-level responder ext (zenoh-pico ext_id 0x03
+    /// ZBUF) per `_z_response_encode` at
+    /// `vendor/zenoh-pico/src/protocol/codec/network.c:281-291`.
+    ///
+    /// The setter is idempotent within a single callback invocation —
+    /// calling it twice replaces the previous identity (last-wins,
+    /// matching the standard builder idiom). Replies emitted before
+    /// this call carry no responder ext; replies after carry the
+    /// stamp. Callers wishing to mix responder-stamped and unstamped
+    /// replies within one callback must order send_* calls accordingly
+    /// (or call [`Self::clear_responder`] mid-stream).
+    ///
+    /// Panics on `zid` length outside `1..=16` (the zenoh-pico
+    /// ZenohId wire constraint at `core.h::_Z_ID_LENGTH = 16`).
+    pub fn with_responder(&mut self, zid: &[u8], eid: u32) -> &mut Self {
+        assert!(
+            (1..=16).contains(&zid.len()),
+            "QueryResponder::with_responder requires zid length 1..=16 \
+             (zenoh-pico ZenohId wire constraint)"
+        );
+        self.responder = Some((zid.to_vec(), eid));
+        self
+    }
+
+    /// Clear any responder identity previously attached via
+    /// [`Self::with_responder`]. Subsequent send_* calls emit no
+    /// envelope-level responder ext until [`Self::with_responder`] is
+    /// invoked again.
+    pub fn clear_responder(&mut self) -> &mut Self {
+        self.responder = None;
+        self
     }
 
     /// Inbound Request id this Responder is replying to. Exposed for
@@ -290,6 +366,16 @@ impl<'a> QueryResponder<'a> {
     /// re-resolve the inbound Request keyexpr themselves.
     pub fn keyexpr_literal(&self) -> &str {
         &self.keyexpr_literal
+    }
+
+    /// Current responder identity (read-only view). `None` until
+    /// [`Self::with_responder`] is called; reset by
+    /// [`Self::clear_responder`]. Exposed for diagnostic surfaces and
+    /// tests; user closures typically only set and forget.
+    pub fn responder(&self) -> Option<(&[u8], u32)> {
+        self.responder
+            .as_ref()
+            .map(|(zid, eid)| (zid.as_slice(), *eid))
     }
 }
 
@@ -436,6 +522,7 @@ impl QueryableRegistry {
                     rid: request.rid,
                     keyexpr_literal: resolved.clone(),
                     replies,
+                    responder: None,
                 };
                 (queryable.callback)(query, &mut responder);
                 // Responder dropped here; the borrow of `replies`
@@ -649,7 +736,7 @@ mod tests {
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
         assert_eq!(replies.len(), 1);
         match &replies[0] {
-            QueryReply::Reply { rid, keyexpr_literal, body } => {
+            QueryReply::Reply { rid, keyexpr_literal, body, .. } => {
                 assert_eq!(*rid, 7, "rid echoed from inbound Request");
                 assert_eq!(keyexpr_literal, "home/temp", "resolved literal echoed back");
                 assert_eq!(*body, ReplyBody::Put(b"42.0".to_vec()));
@@ -743,7 +830,7 @@ mod tests {
 
         assert_eq!(replies.len(), 1);
         match &replies[0] {
-            QueryReply::Reply { rid, keyexpr_literal, body } => {
+            QueryReply::Reply { rid, keyexpr_literal, body, .. } => {
                 assert_eq!(*rid, 99);
                 assert_eq!(keyexpr_literal, "clear/me");
                 assert_eq!(*body, ReplyBody::Del);
@@ -768,7 +855,7 @@ mod tests {
 
         assert_eq!(replies.len(), 1);
         match &replies[0] {
-            QueryReply::Err { rid, keyexpr_literal, encoding, payload } => {
+            QueryReply::Err { rid, keyexpr_literal, encoding, payload, .. } => {
                 assert_eq!(*rid, 5);
                 assert_eq!(keyexpr_literal, "error/path");
                 assert_eq!(*encoding, Some((4, Some("schema_v1".to_string()))));
@@ -807,12 +894,134 @@ mod tests {
         }
     }
 
+    /// R121j-3c — `QueryResponder::with_responder` stamps the
+    /// (zid, eid) tuple onto every subsequent `send_reply` /
+    /// `send_reply_del` push. Pushes emitted before the call carry
+    /// `responder = None`; pushes after carry `Some` with the same
+    /// tuple. `clear_responder` reverts to `None` for later pushes.
+    #[test]
+    fn query_responder_with_responder_stamps_subsequent_replies() {
+        let mut reg = QueryableRegistry::new();
+        reg.register("home/temp", |_q, responder| {
+            responder.send_reply(b"before");
+            responder.with_responder(&[0xAA; 4], 11);
+            responder.send_reply(b"stamped-put");
+            responder.send_reply_del();
+            responder.clear_responder();
+            responder.send_reply(b"after-clear");
+        });
+
+        let mut replies = Vec::new();
+        reg.dispatch_request(
+            &request_query(7, 0, Some("home/temp")),
+            &HashMap::new(),
+            &mut replies,
+        );
+
+        assert_eq!(replies.len(), 4, "all four pushes recorded");
+        let unstamped_expected: Option<(Vec<u8>, u32)> = None;
+        let stamped_expected: Option<(Vec<u8>, u32)> = Some((vec![0xAA; 4], 11));
+        match &replies[0] {
+            QueryReply::Reply { body, responder, .. } => {
+                assert_eq!(*body, ReplyBody::Put(b"before".to_vec()));
+                assert_eq!(*responder, unstamped_expected, "pre-with_responder push has None");
+            }
+            other => panic!("expected Reply::Put, got {other:?}"),
+        }
+        match &replies[1] {
+            QueryReply::Reply { body, responder, .. } => {
+                assert_eq!(*body, ReplyBody::Put(b"stamped-put".to_vec()));
+                assert_eq!(*responder, stamped_expected, "post-with_responder send_reply stamped");
+            }
+            other => panic!("expected Reply::Put, got {other:?}"),
+        }
+        match &replies[2] {
+            QueryReply::Reply { body, responder, .. } => {
+                assert_eq!(*body, ReplyBody::Del, "send_reply_del flows the same stamp");
+                assert_eq!(*responder, stamped_expected, "send_reply_del stamped identically");
+            }
+            other => panic!("expected Reply::Del, got {other:?}"),
+        }
+        match &replies[3] {
+            QueryReply::Reply { body, responder, .. } => {
+                assert_eq!(*body, ReplyBody::Put(b"after-clear".to_vec()));
+                assert_eq!(*responder, unstamped_expected, "clear_responder reverts to None");
+            }
+            other => panic!("expected Reply::Put, got {other:?}"),
+        }
+    }
+
+    /// R121j-3c — `send_err` propagates the stamp identically to
+    /// `send_reply`; the responder ext lives on the outer Response
+    /// envelope so the Reply / Err inner-body discriminant is
+    /// irrelevant to the stamp.
+    #[test]
+    fn query_responder_with_responder_stamps_err_payload() {
+        let mut reg = QueryableRegistry::new();
+        reg.register("error/path", |_q, responder| {
+            responder.with_responder(&[0xCC; 2], 5);
+            responder.send_err(Some(4), Some("schema_v1"), b"oops");
+        });
+
+        let mut replies = Vec::new();
+        reg.dispatch_request(
+            &request_query(9, 0, Some("error/path")),
+            &HashMap::new(),
+            &mut replies,
+        );
+
+        assert_eq!(replies.len(), 1);
+        match &replies[0] {
+            QueryReply::Err { encoding, payload, responder, .. } => {
+                assert_eq!(*encoding, Some((4, Some("schema_v1".to_string()))));
+                assert_eq!(payload, b"oops");
+                assert_eq!(*responder, Some((vec![0xCC; 2], 5_u32)));
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    /// R121j-3c — full end-to-end: `QueryResponder::with_responder` →
+    /// `send_reply` → `QueryReply::into_response` emits Response wire
+    /// bytes identical to the direct `ResponseReplyBuilder.responder`
+    /// path. This locks the propagation chain against future drift
+    /// between the user-facing handle and the wire-build layer.
+    #[test]
+    fn query_reply_into_response_with_responder_matches_builder() {
+        let mut reg = QueryableRegistry::new();
+        reg.register("home/temp", |_q, responder| {
+            responder.with_responder(&[0xBB; 1], 1);
+            responder.send_reply(b"hello");
+        });
+
+        let mut replies = Vec::new();
+        reg.dispatch_request(
+            &request_query(42, 0, Some("home/temp")),
+            &HashMap::new(),
+            &mut replies,
+        );
+
+        assert_eq!(replies.len(), 1);
+        let via_chain = replies.pop().unwrap().into_response().encode_to_vec();
+        let via_builder =
+            ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"hello")
+                .responder(&[0xBB; 1], 1)
+                .build()
+                .encode_to_vec();
+        assert_eq!(
+            via_chain, via_builder,
+            "QueryResponder.with_responder → send_reply → into_response must equal the direct \
+             ResponseReplyBuilder.responder path byte-for-byte"
+        );
+    }
+
     #[test]
     fn query_reply_into_response_put_path_round_trips_via_builder() {
         let reply = QueryReply::Reply {
             rid: 42,
             keyexpr_literal: "home/temp".to_string(),
             body: ReplyBody::Put(b"hello".to_vec()),
+            responder: None,
         };
         let response = reply.into_response();
         // The Response should encode to the same bytes as the
@@ -833,6 +1042,7 @@ mod tests {
             rid: 42,
             keyexpr_literal: "clear/me".to_string(),
             body: ReplyBody::Del,
+            responder: None,
         };
         let response = reply.into_response();
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("clear/me"), &[])
@@ -853,6 +1063,7 @@ mod tests {
             keyexpr_literal: "error/path".to_string(),
             encoding: Some((4, Some("schema_v1".to_string()))),
             payload: b"oops".to_vec(),
+            responder: None,
         };
         let response = reply.into_response();
         let via_builder = ResponseErrBuilder::new(42, 0, Some("error/path"), b"oops")
