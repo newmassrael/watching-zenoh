@@ -86,6 +86,19 @@ impl TimestampHint {
             zid: ts.zid.clone(),
         }
     }
+
+    /// R233 — inverse of [`from_codec`]: produce a fresh codec
+    /// [`wz_codecs::timestamp::Timestamp`] from a wz-side hint so
+    /// the publish wire branch can attach a caller-set timestamp to
+    /// an outbound `MsgPut`/`MsgDel`. Mirrors the same byte-level
+    /// shape (NTP64 `time` word + variable-length `zid` prefix).
+    pub fn to_codec(&self) -> wz_codecs::timestamp::Timestamp {
+        wz_codecs::timestamp::Timestamp {
+            time: self.time,
+            zid_len: self.zid.len() as u64,
+            zid: self.zid.clone(),
+        }
+    }
 }
 
 /// Application-level mirror of [`wz_codecs::encoding::Encoding`].
@@ -114,6 +127,21 @@ impl EncodingHint {
         Self {
             packed_id: encoding.packed_id,
             schema: encoding.schema.clone(),
+        }
+    }
+
+    /// R233 — inverse of [`from_codec`]: produce a fresh codec
+    /// [`wz_codecs::encoding::Encoding`] from a wz-side hint so the
+    /// publish wire branch can attach a caller-set encoding to an
+    /// outbound `MsgPut`. The codec `Encoding` decides whether to
+    /// emit a schema string based on `packed_id & 0x1` and a
+    /// non-empty `schema`; the hint preserves both fields verbatim.
+    pub fn to_codec(&self) -> wz_codecs::encoding::Encoding {
+        let schema_len = self.schema.as_ref().map(|s| s.len() as u64);
+        wz_codecs::encoding::Encoding {
+            packed_id: self.packed_id,
+            schema_len,
+            schema: self.schema.clone(),
         }
     }
 }
