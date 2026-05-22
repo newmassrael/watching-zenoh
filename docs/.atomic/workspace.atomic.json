@@ -12434,6 +12434,84 @@
         "R256 lesson: small carry-retire rounds in batch (std::error::Error retire + GAT design-claim pin) compose into one coherent round when the changes share a doc-comment trail to the original design choice. The R252 std::error::Error carry + the R251 GAT-vs-impl-Future doc-comment both pointed forward to R256 as the natural closure point; closing both in one commit keeps the audit trail dense without bundling unrelated work."
       ]
     },
+    "Round 257": {
+      "decision_summary": "R257 JoinError disambiguation: RuntimeError::JoinCancelled variant added + TokioJoinHandle::abort surface; JoinFailed semantic narrowed to panic-only matching zenoh-pico shutdown signal vocabulary.",
+      "changes_bullets": [
+        "crates/wz-runtime-core/src/error.rs: RuntimeError::JoinCancelled variant added (mirror of tokio::task::JoinError::is_cancelled()). JoinFailed doc-comment narrowed: 'spawned task panicked' (was: panic+cancellation union). Display strings updated to match.",
+        "crates/wz-runtime-tokio/src/runtime_impl.rs TokioJoinHandle: new pub fn abort(&self) struct-level method (NOT trait-level — the Runtime trait skeleton scoped abort out per R251; this is the pragmatic AP-profile escape hatch zenoh-pico shutdown paths need).",
+        "TokioJoinHandle Future impl: poll() now disambiguates JoinError. is_cancelled() routes to RuntimeError::JoinCancelled; is_panic() routes to JoinFailed; is_cancelled wins when both true (shutdown intent dominates).",
+        "Two new lib tests: (1) abort + await resolves to JoinCancelled; (2) side-by-side panic + abort spawns surface the two variants distinctly (panic_outcome != cancel_outcome).",
+        "Existing panic test (tokio_runtime_spawn_panic_resolves_to_join_failed) untouched: still asserts JoinFailed, just with the narrowed semantic.",
+        "Doc-comment list formatting: clippy::doc_list_item_without_indentation surfaced + fixed by adding blank doc-line terminator after bullet block (textbook rustdoc pattern).",
+        "non_exhaustive shield protects external callers from match-arm fragility: the new JoinCancelled variant does not break existing exhaustive matches because the enum is already #[non_exhaustive].",
+        "wz-runtime-tokio lib tests 473 -> 475 (+2). wz-runtime-core std_error_tests test (boxable) updated to match new 'panicked' Display wording."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-core --features std --lib: 2/2 pass.",
+        "cargo test -p wz-runtime-tokio --lib runtime_impl: 11/11 pass (R252 8 + R256 1 + R257 2).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates after the doc-list-indentation fix.",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A-E 9/9).",
+        "pre-commit hook validate_workspace clean (T1=0, RT 12/12, sync).",
+        "commit f3c187b (feat(runtime-core): R257 JoinError disambiguation + abort; 2 files +123 / -21)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R258+ Cancellable trait or Runtime trait abort method extension: TokioJoinHandle::abort is currently struct-level only. A future round can promote it to either (a) a Cancellable trait that JoinHandle impls separately or (b) extend the Runtime::JoinHandle GAT bound with abort. Decision waits for first MCU caller shape that needs cross-runtime cancellation.",
+        "R258+ RuntimeError inner-cause variants: with the panic vs cancel split, the next natural extension is `JoinFailed { panic_payload: Option<Box<dyn Any + Send>> }` so callers can introspect the panic value. Behind alloc/std feature because Box requires alloc.",
+        "R258+ wz-runtime-tokio internal sleep migration (session_glue lease-deadline). API-breaking on drive_session_until_terminal signature — hold for user confirm.",
+        "R258+ Session struct reparameterisation per §5.P leaf-first guidance. Architectural decision pending Mutex/RwLock contract resolution.",
+        "R258+ core::error::Error replacement for std::error::Error impl once MSRV bumps to 1.81+.",
+        "Liveliness Token wz-ap-demo migration (R250 carry; declare_task Established-gate + LivelinessToken Drop lifetime do not compose without cross-task handoff).",
+        "ReplyRegistry timeout sweep (TimeSource production-validated; next strong candidate for a substantial round).",
+        "Q_B / Q_E wire codec slots.",
+        "Querier / Publisher get_matching_status.",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff (no wz call sites — pin bump deferred).",
+        "Phase W full lwIP integration / Cortex-M cross-compile / deploy yaml.",
+        "Interest 70% / QoS 75-90% / Multicast 90% / 5 transports 85-100% / W3C conformance 100% remaining.",
+        "R257 lesson: variant-split with non_exhaustive shield is the textbook way to enrich an error type without breaking existing callers. The is_cancelled vs is_panic dispatch ordering (is_cancelled wins on both-true) is documented as defence-in-depth; tokio's is_cancelled and is_panic are practically mutually exclusive, but the explicit ordering keeps the contract crisp."
+      ],
+      "publishable_decision_summary": "R257 JoinError disambiguation: RuntimeError::JoinCancelled variant added + TokioJoinHandle::abort surface; JoinFailed semantic narrowed to panic-only matching zenoh-pico shutdown signal vocabulary.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-core/src/error.rs: RuntimeError::JoinCancelled variant added (mirror of tokio::task::JoinError::is_cancelled()). JoinFailed doc-comment narrowed: 'spawned task panicked' (was: panic+cancellation union). Display strings updated to match.",
+        "crates/wz-runtime-tokio/src/runtime_impl.rs TokioJoinHandle: new pub fn abort(&self) struct-level method (NOT trait-level — the Runtime trait skeleton scoped abort out per R251; this is the pragmatic AP-profile escape hatch zenoh-pico shutdown paths need).",
+        "TokioJoinHandle Future impl: poll() now disambiguates JoinError. is_cancelled() routes to RuntimeError::JoinCancelled; is_panic() routes to JoinFailed; is_cancelled wins when both true (shutdown intent dominates).",
+        "Two new lib tests: (1) abort + await resolves to JoinCancelled; (2) side-by-side panic + abort spawns surface the two variants distinctly (panic_outcome != cancel_outcome).",
+        "Existing panic test (tokio_runtime_spawn_panic_resolves_to_join_failed) untouched: still asserts JoinFailed, just with the narrowed semantic.",
+        "Doc-comment list formatting: clippy::doc_list_item_without_indentation surfaced + fixed by adding blank doc-line terminator after bullet block (textbook rustdoc pattern).",
+        "non_exhaustive shield protects external callers from match-arm fragility: the new JoinCancelled variant does not break existing exhaustive matches because the enum is already #[non_exhaustive].",
+        "wz-runtime-tokio lib tests 473 -> 475 (+2). wz-runtime-core std_error_tests test (boxable) updated to match new 'panicked' Display wording."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-core --features std --lib: 2/2 pass.",
+        "cargo test -p wz-runtime-tokio --lib runtime_impl: 11/11 pass (R252 8 + R256 1 + R257 2).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates after the doc-list-indentation fix.",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A-E 9/9).",
+        "pre-commit hook validate_workspace clean (T1=0, RT 12/12, sync).",
+        "commit f3c187b (feat(runtime-core): R257 JoinError disambiguation + abort; 2 files +123 / -21)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R258+ Cancellable trait or Runtime trait abort method extension: TokioJoinHandle::abort is currently struct-level only. A future round can promote it to either (a) a Cancellable trait that JoinHandle impls separately or (b) extend the Runtime::JoinHandle GAT bound with abort. Decision waits for first MCU caller shape that needs cross-runtime cancellation.",
+        "R258+ RuntimeError inner-cause variants: with the panic vs cancel split, the next natural extension is `JoinFailed { panic_payload: Option<Box<dyn Any + Send>> }` so callers can introspect the panic value. Behind alloc/std feature because Box requires alloc.",
+        "R258+ wz-runtime-tokio internal sleep migration (session_glue lease-deadline). API-breaking on drive_session_until_terminal signature — hold for user confirm.",
+        "R258+ Session struct reparameterisation per §5.P leaf-first guidance. Architectural decision pending Mutex/RwLock contract resolution.",
+        "R258+ core::error::Error replacement for std::error::Error impl once MSRV bumps to 1.81+.",
+        "Liveliness Token wz-ap-demo migration (R250 carry; declare_task Established-gate + LivelinessToken Drop lifetime do not compose without cross-task handoff).",
+        "ReplyRegistry timeout sweep (TimeSource production-validated; next strong candidate for a substantial round).",
+        "Q_B / Q_E wire codec slots.",
+        "Querier / Publisher get_matching_status.",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff (no wz call sites — pin bump deferred).",
+        "Phase W full lwIP integration / Cortex-M cross-compile / deploy yaml.",
+        "Interest 70% / QoS 75-90% / Multicast 90% / 5 transports 85-100% / W3C conformance 100% remaining.",
+        "R257 lesson: variant-split with non_exhaustive shield is the textbook way to enrich an error type without breaking existing callers. The is_cancelled vs is_panic dispatch ordering (is_cancelled wins on both-true) is documented as defence-in-depth; tokio's is_cancelled and is_panic are practically mutually exclusive, but the explicit ordering keeps the contract crisp."
+      ]
+    },
     "Round 26": {
       "decision_summary": "R26 codebase Korean cleanup — fix 2 non-md files (mnemosyne.toml line 60 + scripts/verify-codegen.sh line 17) and establish non-md-English-only convention; historical atomic.json Korean (17 entries) and the legacy KO atomic section id remain locked by T2 frozen-ledger and the missing rename_section primitive respectively.",
       "changes_bullets": [
