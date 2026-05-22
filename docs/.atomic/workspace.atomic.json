@@ -11600,6 +11600,70 @@
         "R246 lesson: 6-handle surface symmetry closure (Publisher/PublisherAliased/Subscriber/Querier/QuerierAliased/Queryable) reached via R244+R245+R246 trio — z_subscriber/queryable mirror differs from z_publisher/querier in the !Clone + RAII Drop shape because they hold unique unregister handles."
       ]
     },
+    "Round 247": {
+      "decision_summary": "R247 Layer E hotfix-carry retire: 5eba424 #[ignore]-silenced wz_initiator_to_wz_acceptor + wz_publisher_aliased_to_zsub mismatches normalised against R222/R235 API drift; all 9 Layer E tests pass.",
+      "changes_bullets": [
+        "wz_initiator_to_wz_acceptor.rs: removed `fired_text.contains(\"wireexpr_id=0\")` assertion (R222 SubscriberRegistry callback no longer surfaces wireexpr id; Sample carries resolved literal only).",
+        "wz_publisher_aliased_to_zsub.rs: replaced `PUBLISHER EMITTED ALIASED` token assertion with `mode=aliased` matching R235 wz-ap-demo log restructure (key=value form).",
+        "Both fixes are test-side only — source code paths unchanged. The dispatch invariants the dropped tokens were pinning are now covered by the remaining assertions (keyexpr literal check on the subscriber side; mode=aliased value on the publisher side).",
+        "#[ignore = \"binary-dep e2e ...\"] markers retained on both tests — their purpose is to skip Layer C1 when wz-ap-demo binary is not built (5eba424 R235-hotfix intent); Layer E runs them via `cargo test ... -- --ignored` regardless.",
+        "5eba424 R235-hotfix retrospectively understood: #[ignore] addition was meaningful (binary-missing skip) but also masked stale assertion drift; this round retires the masked carry by fixing the assertions, not by lifting the ignore."
+      ],
+      "verification_bullets": [
+        "bash scripts/run-ci.sh --layer E: Layer E pass (all 9 binary-dep e2e tests pass; ap_demo_round_trip + wz_initiator_to_wz_acceptor + wz_initiator_to_zsub + wz_publisher_aliased_to_zsub + wz_publisher_del_to_zsub + wz_publisher_to_zsub + wz_initiator_consumes_reply + wz_queryable_round_trip + wz_remote_declare_round_trip).",
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 450 unchanged (test-only change; no library code touched)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "carry_forward_bullets": [
+        "R248+ pre-push hook chicken-and-egg defence: when a commit modifies run-ci.sh itself, hook should re-source run-ci.sh from the staged commit content rather than the pre-commit working-tree state to avoid 5eba424-style self-add-Layer-E gap.",
+        "R248+ Liveliness Token struct (z_liveliness_token_t mirror) RAII handle on token-declaring side.",
+        "R248+ wz-ap-demo migration to handle API (Subscriber / Publisher / Queryable / Querier) — retire raw register*/unregister sites where applicable.",
+        "R248+ ReplyRegistry timeout sweep: cancel pending entry + synthesise Final when QueryOptions.timeout_ms passes; needs Hal time abstraction (wz-runtime-core).",
+        "R248+ Q_B / Q_E wire codec slots (Query body payload + encoding) require SCE-side codec extension.",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R247 lesson: when a 'fix' commit silences a regression with #[ignore] instead of fixing the underlying mismatch, the carry must be named explicitly in the audit entry so a future round retires it. 5eba424 omitted this naming; this round audits the omission and closes the carry."
+      ],
+      "publishable_decision_summary": "R247 Layer E hotfix-carry retire: 5eba424 #[ignore]-silenced wz_initiator_to_wz_acceptor + wz_publisher_aliased_to_zsub mismatches normalised against R222/R235 API drift; all 9 Layer E tests pass.",
+      "publishable_changes_bullets": [
+        "wz_initiator_to_wz_acceptor.rs: removed `fired_text.contains(\"wireexpr_id=0\")` assertion (R222 SubscriberRegistry callback no longer surfaces wireexpr id; Sample carries resolved literal only).",
+        "wz_publisher_aliased_to_zsub.rs: replaced `PUBLISHER EMITTED ALIASED` token assertion with `mode=aliased` matching R235 wz-ap-demo log restructure (key=value form).",
+        "Both fixes are test-side only — source code paths unchanged. The dispatch invariants the dropped tokens were pinning are now covered by the remaining assertions (keyexpr literal check on the subscriber side; mode=aliased value on the publisher side).",
+        "#[ignore = \"binary-dep e2e ...\"] markers retained on both tests — their purpose is to skip Layer C1 when wz-ap-demo binary is not built (5eba424 R235-hotfix intent); Layer E runs them via `cargo test ... -- --ignored` regardless.",
+        "5eba424 R235-hotfix retrospectively understood: #[ignore] addition was meaningful (binary-missing skip) but also masked stale assertion drift; this round retires the masked carry by fixing the assertions, not by lifting the ignore."
+      ],
+      "publishable_verification_bullets": [
+        "bash scripts/run-ci.sh --layer E: Layer E pass (all 9 binary-dep e2e tests pass; ap_demo_round_trip + wz_initiator_to_wz_acceptor + wz_initiator_to_zsub + wz_publisher_aliased_to_zsub + wz_publisher_del_to_zsub + wz_publisher_to_zsub + wz_initiator_consumes_reply + wz_queryable_round_trip + wz_remote_declare_round_trip).",
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 450 unchanged (test-only change; no library code touched)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R248+ pre-push hook chicken-and-egg defence: when a commit modifies run-ci.sh itself, hook should re-source run-ci.sh from the staged commit content rather than the pre-commit working-tree state to avoid 5eba424-style self-add-Layer-E gap.",
+        "R248+ Liveliness Token struct (z_liveliness_token_t mirror) RAII handle on token-declaring side.",
+        "R248+ wz-ap-demo migration to handle API (Subscriber / Publisher / Queryable / Querier) — retire raw register*/unregister sites where applicable.",
+        "R248+ ReplyRegistry timeout sweep: cancel pending entry + synthesise Final when QueryOptions.timeout_ms passes; needs Hal time abstraction (wz-runtime-core).",
+        "R248+ Q_B / Q_E wire codec slots (Query body payload + encoding) require SCE-side codec extension.",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R247 lesson: when a 'fix' commit silences a regression with #[ignore] instead of fixing the underlying mismatch, the carry must be named explicitly in the audit entry so a future round retires it. 5eba424 omitted this naming; this round audits the omission and closes the carry."
+      ]
+    },
     "Round 25": {
       "decision_summary": "Phase E register — README.md workspace.docs 재등록 land; R24 한국어 본문을 영문 primary로 재작성 + README.ko.md satellite로 분리 (사용자 정정 'README는 영문 primary, KO 번역은 별도 링크'); 첫 시도 11 parser orphan (URL 링크 + plain §N) → 파서-친화 form 으로 해결 후 12/12 docs clean.",
       "changes_bullets": [
