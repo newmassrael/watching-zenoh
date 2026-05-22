@@ -13774,6 +13774,54 @@
         "Continued: Instant->u64ms, Liveliness Token, Querier matching status, Q_B/Q_E codecs"
       ]
     },
+    "Round 277": {
+      "decision_summary": "R277 migrates wz-ap-demo declare_task to Session::declare_token + LivelinessToken; oneshot hands token to run_demo; explicit drop before drop(actions) emits UndeclToken on graceful shutdown.",
+      "changes_bullets": [
+        "declare_task signature: Arc<SessionLinkActions> -> Session; new token_tx: Option<oneshot::Sender> param",
+        "Internal: session.actions() for sub/queryable; Session::declare_token for token branch (RAII)",
+        "run_demo creates oneshot when token_keyexpr.is_some(); explicit drop before drop(actions)",
+        "wz_remote_declare_round_trip: id=3001 -> id=0 in 4 sites (doc + 2 assert + test header)",
+        "DECLARE_TOKEN_ID const retired; token id sourced from token.id() (alloc_next_token_id)",
+        "Existing unit test liveliness_token_drop_emits_undeclare_wire_frame gates Drop semantics"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-ap-demo + clippy --workspace --all-targets -D warnings: clean",
+        "cargo test --workspace: all pass (no FAILED in output)",
+        "scripts/run-ci.sh: 10/10 lanes pass including Layer E (wz_remote_declare_round_trip e2e)",
+        "Pre-mutation validate: entries=275 / sections=215 / T1=0 / RT 12/12 / sync (R276 close)",
+        "Post-mutation validate: entries=276 / sections=215 / T1=0 / RT 12/12 / sync (this audit)"
+      ],
+      "carry_forward_bullets": [
+        "R277 SIGKILL caveat: integration test child.kill() bypasses UndeclToken Drop",
+        "Carry: graceful-shutdown signal handler for wz-ap-demo to emit UndeclToken end-to-end",
+        "Closes R250 Liveliness Token wz-ap-demo migration carry (1-2R estimate; landed at 1R)",
+        "Open R267-R270 architectural carries: Querier matching status, Session reparam, Instant->u64ms",
+        "Continued: Cancellable YAGNI, Phase W full lwIP (20-50R), Q_B/Q_E codecs (SCE-side first)"
+      ],
+      "publishable_decision_summary": "R277 migrates wz-ap-demo declare_task to Session::declare_token + LivelinessToken; oneshot hands token to run_demo; explicit drop before drop(actions) emits UndeclToken on graceful shutdown.",
+      "publishable_changes_bullets": [
+        "declare_task signature: Arc<SessionLinkActions> -> Session; new token_tx: Option<oneshot::Sender> param",
+        "Internal: session.actions() for sub/queryable; Session::declare_token for token branch (RAII)",
+        "run_demo creates oneshot when token_keyexpr.is_some(); explicit drop before drop(actions)",
+        "wz_remote_declare_round_trip: id=3001 -> id=0 in 4 sites (doc + 2 assert + test header)",
+        "DECLARE_TOKEN_ID const retired; token id sourced from token.id() (alloc_next_token_id)",
+        "Existing unit test liveliness_token_drop_emits_undeclare_wire_frame gates Drop semantics"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-ap-demo + clippy --workspace --all-targets -D warnings: clean",
+        "cargo test --workspace: all pass (no FAILED in output)",
+        "scripts/run-ci.sh: 10/10 lanes pass including Layer E (wz_remote_declare_round_trip e2e)",
+        "Pre-mutation validate: entries=275 / sections=215 / T1=0 / RT 12/12 / sync (R276 close)",
+        "Post-mutation validate: entries=276 / sections=215 / T1=0 / RT 12/12 / sync (this audit)"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R277 SIGKILL caveat: integration test child.kill() bypasses UndeclToken Drop",
+        "Carry: graceful-shutdown signal handler for wz-ap-demo to emit UndeclToken end-to-end",
+        "Closes R250 Liveliness Token wz-ap-demo migration carry (1-2R estimate; landed at 1R)",
+        "Open R267-R270 architectural carries: Querier matching status, Session reparam, Instant->u64ms",
+        "Continued: Cancellable YAGNI, Phase W full lwIP (20-50R), Q_B/Q_E codecs (SCE-side first)"
+      ]
+    },
     "Round 28": {
       "decision_summary": "Phase A control-plane SCXML round — 3 new algorithm-kind validators (whatami / payload-ext-id / transport-ext-id) covering §3 Hello body, §7.1 payload-layer per-context extension allowlist, §4.4 transport-layer per-control-message extension allowlist.",
       "changes_bullets": [
