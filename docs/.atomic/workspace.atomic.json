@@ -11324,6 +11324,98 @@
         "R243 lesson: Option<impl Into<String>> turbofish-incompatible (impl Trait in generic position); prefer Option<&str> for None-typeable surfaces."
       ]
     },
+    "Round 244": {
+      "decision_summary": "R244 Publisher + PublisherAliased mirror R242/R243 Querier on pub side: literal + aliased variants, no-wire declare, put/delete delegate to Session::publish / publish_aliased_auto.",
+      "changes_bullets": [
+        "session.rs Publisher struct (Session, keyexpr: String, PublishOptions) non_exhaustive + Clone.",
+        "session.rs PublisherAliased struct (Session, mapping_id: u64, inline_suffix: Option<String>, PublishOptions) non_exhaustive + Clone.",
+        "session.rs Session::declare_publisher(keyexpr, options) -> Publisher (no wire emit).",
+        "session.rs Session::declare_publisher_aliased(mapping_id, Option<&str>, options) -> PublisherAliased (no wire emit).",
+        "Publisher::put(payload) overrides opts.kind to Put, delegates to Session::publish; returns loopback fire count.",
+        "Publisher::delete() overrides opts.kind to Del, payload = empty slice (MsgDel carries none).",
+        "PublisherAliased::put(payload) / delete() return Result<usize, PublishAliasError> via publish_aliased_auto.",
+        "Mirrors zenoh-pico z_publisher_t + z_declare_publisher + z_publisher_put + z_publisher_delete API.",
+        "Pub-side / query-side handle surface now symmetric: {Publisher, PublisherAliased, Querier, QuerierAliased}.",
+        "lib test declare_publisher_returns_handle_with_keyexpr_and_options.",
+        "lib test declare_publisher_does_not_emit_wire_frame.",
+        "lib test publisher_put_fires_loopback_subscriber.",
+        "lib test publisher_delete_routes_to_del_kind_and_drops_payload.",
+        "lib test publisher_clone_shares_session_and_driver.",
+        "lib test declare_publisher_aliased_returns_handle_with_mapping_id_and_options.",
+        "lib test declare_publisher_aliased_does_not_emit_wire_frame.",
+        "lib test publisher_aliased_put_resolves_loopback_through_outbound_table.",
+        "lib test publisher_aliased_unknown_mapping_returns_err_and_skips_both_branches.",
+        "lib test publisher_aliased_delete_routes_to_del_kind."
+      ],
+      "verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 415 -> 425 (+10 R244 cases).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R243 65 no-regression)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R245+ ReplyRegistry timeout sweep: cancel pending entry + synthesise Final when QueryOptions.timeout_ms passes; needs Hal time abstraction (wz-runtime-core) for MCU portability.",
+        "R245+ Q_B / Q_E wire codec slots (Query body payload + encoding) require SCE-side codec extension.",
+        "R245+ Subscriber struct (z_subscriber_t mirror) symmetric to Queryable handle on the sub side.",
+        "R245+ Querier::get_matching_status (z_querier_get_matching_status mirror) + Publisher::get_matching_status (z_publisher_get_matching_status mirror).",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R244 lesson: pub-side and query-side handle surfaces hit symmetric closure with 4 structs (Publisher, PublisherAliased, Querier, QuerierAliased); declare-no-wire pattern is the textbook shape when the protocol has no peer-side handle resource."
+      ],
+      "publishable_decision_summary": "R244 Publisher + PublisherAliased mirror R242/R243 Querier on pub side: literal + aliased variants, no-wire declare, put/delete delegate to Session::publish / publish_aliased_auto.",
+      "publishable_changes_bullets": [
+        "session.rs Publisher struct (Session, keyexpr: String, PublishOptions) non_exhaustive + Clone.",
+        "session.rs PublisherAliased struct (Session, mapping_id: u64, inline_suffix: Option<String>, PublishOptions) non_exhaustive + Clone.",
+        "session.rs Session::declare_publisher(keyexpr, options) -> Publisher (no wire emit).",
+        "session.rs Session::declare_publisher_aliased(mapping_id, Option<&str>, options) -> PublisherAliased (no wire emit).",
+        "Publisher::put(payload) overrides opts.kind to Put, delegates to Session::publish; returns loopback fire count.",
+        "Publisher::delete() overrides opts.kind to Del, payload = empty slice (MsgDel carries none).",
+        "PublisherAliased::put(payload) / delete() return Result<usize, PublishAliasError> via publish_aliased_auto.",
+        "Mirrors zenoh-pico z_publisher_t + z_declare_publisher + z_publisher_put + z_publisher_delete API.",
+        "Pub-side / query-side handle surface now symmetric: {Publisher, PublisherAliased, Querier, QuerierAliased}.",
+        "lib test declare_publisher_returns_handle_with_keyexpr_and_options.",
+        "lib test declare_publisher_does_not_emit_wire_frame.",
+        "lib test publisher_put_fires_loopback_subscriber.",
+        "lib test publisher_delete_routes_to_del_kind_and_drops_payload.",
+        "lib test publisher_clone_shares_session_and_driver.",
+        "lib test declare_publisher_aliased_returns_handle_with_mapping_id_and_options.",
+        "lib test declare_publisher_aliased_does_not_emit_wire_frame.",
+        "lib test publisher_aliased_put_resolves_loopback_through_outbound_table.",
+        "lib test publisher_aliased_unknown_mapping_returns_err_and_skips_both_branches.",
+        "lib test publisher_aliased_delete_routes_to_del_kind."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 415 -> 425 (+10 R244 cases).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R243 65 no-regression)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R245+ ReplyRegistry timeout sweep: cancel pending entry + synthesise Final when QueryOptions.timeout_ms passes; needs Hal time abstraction (wz-runtime-core) for MCU portability.",
+        "R245+ Q_B / Q_E wire codec slots (Query body payload + encoding) require SCE-side codec extension.",
+        "R245+ Subscriber struct (z_subscriber_t mirror) symmetric to Queryable handle on the sub side.",
+        "R245+ Querier::get_matching_status (z_querier_get_matching_status mirror) + Publisher::get_matching_status (z_publisher_get_matching_status mirror).",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R244 lesson: pub-side and query-side handle surfaces hit symmetric closure with 4 structs (Publisher, PublisherAliased, Querier, QuerierAliased); declare-no-wire pattern is the textbook shape when the protocol has no peer-side handle resource."
+      ]
+    },
     "Round 25": {
       "decision_summary": "Phase E register — README.md workspace.docs 재등록 land; R24 한국어 본문을 영문 primary로 재작성 + README.ko.md satellite로 분리 (사용자 정정 'README는 영문 primary, KO 번역은 별도 링크'); 첫 시도 11 parser orphan (URL 링크 + plain §N) → 파서-친화 form 으로 해결 후 12/12 docs clean.",
       "changes_bullets": [
