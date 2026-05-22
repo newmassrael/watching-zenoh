@@ -67,6 +67,7 @@ use wz_codecs::query::Query;
 
 use crate::locality::Locality;
 use crate::observer::ApplicationLayerObserver;
+use crate::pubsub::SubscriptionId;
 use crate::query::QueryReply;
 use crate::reply::{InboundReply, ReplyHandle};
 use crate::sample::{
@@ -1124,6 +1125,86 @@ impl Session {
             options,
         }
     }
+
+    /// R245 — declare a [`Subscriber`] for `keyexpr` + `options`
+    /// that fires `callback` on every matching inbound `Sample`.
+    /// Returns a [`Subscriber`] handle whose `Drop` auto-unregisters
+    /// the subscription from the underlying
+    /// [`crate::pubsub::SubscriberRegistry`] (RAII).
+    ///
+    /// Mirrors zenoh-pico's `z_declare_subscriber` shape: caller
+    /// supplies the keyexpr pattern + options + callback at declare
+    /// time; the runtime fires the callback synchronously inside
+    /// [`crate::pubsub::SubscriberRegistry::dispatch_push`] (wire
+    /// arrival) and
+    /// [`crate::pubsub::SubscriberRegistry::local_publish`]
+    /// (loopback, R227+). No wire frame is emitted at declare time —
+    /// `Declare(DeclareSubscriber)` is a router-mode feature wz
+    /// elides today (peer-only) per the same router-less rationale
+    /// as [`Self::declare_publisher`].
+    pub fn declare_subscriber(
+        &self,
+        keyexpr: impl Into<String>,
+        options: SubscribeOptions,
+        callback: impl FnMut(&Sample) + Send + 'static,
+    ) -> Subscriber {
+        let keyexpr_string = keyexpr.into();
+        let id = self
+            .observer
+            .lock()
+            .expect("Session observer mutex poisoned — a subscriber callback panicked")
+            .subscribers
+            .register_with_locality(keyexpr_string.clone(), options.allowed_origin, callback);
+        Subscriber {
+            session: self.clone(),
+            id,
+            keyexpr: keyexpr_string,
+            options,
+        }
+    }
+
+    /// R245 — aliased-keyexpr counterpart of
+    /// [`Self::declare_subscriber`]. Resolves `mapping_id` +
+    /// `inline_suffix` to the literal form *at declare time* via the
+    /// outbound mapping table and registers the subscriber against
+    /// the resolved literal.
+    ///
+    /// Unlike [`Self::query_aliased_auto`] /
+    /// [`Self::publish_aliased_auto`] (which resolve at call time
+    /// and so can fail on every call), subscribers resolve once at
+    /// declare and the [`Subscriber`] handle thereafter holds the
+    /// resolved literal. A later
+    /// [`SessionLinkActions::send_undeclare_kexpr`] retracting
+    /// `mapping_id` does NOT affect this Subscriber — the
+    /// registration already captured the literal pattern. Mirrors
+    /// zenoh-pico's `_z_register_subscription` resolving the
+    /// keyexpr once at declare and storing the literal on
+    /// `_z_subscription_t`.
+    ///
+    /// Returns `Err(SubscribeAliasError::UnknownMapping(id))` only
+    /// when the mapping is absent at declare time — no
+    /// caller-facing error on every callback fire.
+    pub fn declare_subscriber_aliased(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        options: SubscribeOptions,
+        callback: impl FnMut(&Sample) + Send + 'static,
+    ) -> Result<Subscriber, SubscribeAliasError> {
+        let base = self
+            .actions
+            .resolve_outbound_mapping(mapping_id)
+            .ok_or(SubscribeAliasError::UnknownMapping(mapping_id))?;
+        let resolved = match inline_suffix {
+            None => base,
+            Some(s) => {
+                let mut composed = base;
+                composed.push_str(s);
+                composed
+            }
+        };
+        Ok(self.declare_subscriber(resolved, options, callback))
+    }
 }
 
 /// R241 — typed error returned by [`Session::query_aliased_auto`]
@@ -1440,6 +1521,167 @@ impl PublisherAliased {
         )
     }
 }
+
+/// R245 — options bundle for [`Session::declare_subscriber`].
+/// Mirrors zenoh-pico's `z_subscriber_options_t`
+/// (`vendor/zenoh-pico/include/zenoh-pico/api/types.h`) which
+/// today carries only `allowed_origin`. `#[non_exhaustive]` so
+/// future rounds add fields (e.g. `complete` for queryable-side
+/// fast-path, or a callback-drop-sync handle) without an API break.
+///
+/// Construct via [`Self::default`] / [`Self::new`] plus optional
+/// [`Self::with_allowed_origin`].
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct SubscribeOptions {
+    /// Subscriber-side locality predicate. `Any` (default) fires on
+    /// every matching Sample regardless of origin; `Remote` fires
+    /// only on wire-arrived Samples; `SessionLocal` fires only on
+    /// loopback Samples (R227+
+    /// [`crate::pubsub::SubscriberRegistry::local_publish`]).
+    pub allowed_origin: Locality,
+}
+
+impl SubscribeOptions {
+    /// Default options — `allowed_origin = Locality::Any`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pin the subscriber-side locality predicate.
+    pub fn with_allowed_origin(mut self, locality: Locality) -> Self {
+        self.allowed_origin = locality;
+        self
+    }
+}
+
+/// R245 — handle for a subscription declared through
+/// [`Session::declare_subscriber`] / [`Session::declare_subscriber_aliased`].
+/// Holds the [`SubscriptionId`] returned by the underlying
+/// [`crate::pubsub::SubscriberRegistry::register_with_locality`]
+/// call so [`Drop`] can auto-unregister.
+///
+/// ## Lifetime
+///
+/// The subscription stays active as long as this handle is alive.
+/// Dropping the handle auto-unregisters (RAII); calling
+/// [`Self::undeclare`] explicitly is the early-unregister
+/// alternative (consumes the handle so the `Drop` does not run
+/// a second time).
+///
+/// `!Clone` by construction — the underlying `SubscriptionId` is a
+/// unique handle; cloning would let two drops race to unregister
+/// the same id, and the second would silently no-op. Callers
+/// wanting "multiple subscriptions on the same keyexpr" should
+/// call [`Session::declare_subscriber`] multiple times instead
+/// (the registry supports duplicate-keyexpr subscribers and fires
+/// each callback in registration order).
+///
+/// `#[non_exhaustive]`. Construct only through
+/// [`Session::declare_subscriber`] / [`Session::declare_subscriber_aliased`].
+#[non_exhaustive]
+pub struct Subscriber {
+    session: Session,
+    id: SubscriptionId,
+    keyexpr: String,
+    options: SubscribeOptions,
+}
+
+impl Subscriber {
+    /// The stable id assigned by
+    /// [`crate::pubsub::SubscriberRegistry::register_with_locality`].
+    /// Exposed for diagnostics; callers should not rely on the
+    /// exact value across runs.
+    pub fn id(&self) -> SubscriptionId {
+        self.id
+    }
+
+    /// The keyexpr the subscription was registered against. For
+    /// [`Session::declare_subscriber_aliased`] this is the resolved
+    /// literal form (the alias was resolved at declare time and
+    /// stored).
+    pub fn keyexpr(&self) -> &str {
+        &self.keyexpr
+    }
+
+    /// Borrow the declared options.
+    pub fn options(&self) -> &SubscribeOptions {
+        &self.options
+    }
+
+    /// Explicitly unregister this subscription. Consumes the
+    /// handle so the [`Drop`] impl will not run a second time
+    /// against an already-removed id. Returns `true` if the
+    /// registry had the id and removed it; `false` if a concurrent
+    /// caller already removed it (currently no public API exposes
+    /// raw `unregister(id)` outside this handle, so the false case
+    /// is reachable only via a future round adding such a surface).
+    pub fn undeclare(self) -> bool {
+        let removed = self
+            .session
+            .observer
+            .lock()
+            .expect("Session observer mutex poisoned — a subscriber callback panicked")
+            .subscribers
+            .unregister(self.id);
+        // Skip the Drop impl so it does not no-op-unregister an
+        // already-removed id (cosmetic — second unregister is a
+        // boolean false, not a panic, but std::mem::forget makes
+        // the intent explicit at the call site).
+        std::mem::forget(self);
+        removed
+    }
+}
+
+impl Drop for Subscriber {
+    fn drop(&mut self) {
+        // RAII unregister. A poisoned observer mutex (a subscriber
+        // callback panicked) is recovered with `into_inner` —
+        // panicking again from Drop would abort the whole process
+        // with a double-panic, which is strictly worse than
+        // running unregister against possibly-inconsistent state.
+        // The `unregister` call itself is panic-free (boolean
+        // return), so the worst-case observable outcome is "id
+        // stays registered" — caller can manually
+        // re-poison-recover and re-call `undeclare` if it matters.
+        match self.session.observer.lock() {
+            Ok(mut obs) => {
+                let _ = obs.subscribers.unregister(self.id);
+            }
+            Err(poisoned) => {
+                let mut obs = poisoned.into_inner();
+                let _ = obs.subscribers.unregister(self.id);
+            }
+        }
+    }
+}
+
+/// R245 — typed error returned by
+/// [`Session::declare_subscriber_aliased`] when the requested
+/// mapping id was never declared on the outbound mapping table
+/// (or was retracted before declare time). Mirror of
+/// [`PublishAliasError`] / [`QueryAliasError`] on the sub side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscribeAliasError {
+    /// No prior `send_declare_keyexpr` registered this id on the
+    /// outbound mapping table (or a later `send_undeclare_kexpr`
+    /// retracted it before the declare_subscriber_aliased call).
+    UnknownMapping(u64),
+}
+
+impl std::fmt::Display for SubscribeAliasError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubscribeAliasError::UnknownMapping(id) => write!(
+                f,
+                "SubscribeAliasError: mapping id {id} not present in outbound table; \
+                 call SessionLinkActions::send_declare_keyexpr({id}, …) first"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SubscribeAliasError {}
 
 /// R234 — typed error returned by
 /// [`Session::publish_aliased_auto`] when the requested mapping id
@@ -3973,5 +4215,230 @@ mod tests {
         );
         pa.delete().expect("declared mapping resolves");
         assert_eq!(*kind_seen.lock().unwrap(), Some(SampleKind::Del));
+    }
+
+    // ── R245 Subscriber + SubscribeOptions + declare_subscriber{_aliased} ──
+
+    #[test]
+    fn subscribe_options_default_is_any_locality() {
+        let opts = SubscribeOptions::default();
+        assert_eq!(opts.allowed_origin, Locality::Any);
+    }
+
+    #[test]
+    fn subscribe_options_with_allowed_origin_pins_locality() {
+        let opts = SubscribeOptions::new().with_allowed_origin(Locality::SessionLocal);
+        assert_eq!(opts.allowed_origin, Locality::SessionLocal);
+    }
+
+    #[test]
+    fn declare_subscriber_returns_handle_with_keyexpr_and_options() {
+        let (session, _driver) = build_session();
+        let sub = session.declare_subscriber(
+            "home/temp",
+            SubscribeOptions::new().with_allowed_origin(Locality::SessionLocal),
+            |_sample| {},
+        );
+        assert_eq!(sub.keyexpr(), "home/temp");
+        assert_eq!(sub.options().allowed_origin, Locality::SessionLocal);
+    }
+
+    #[test]
+    fn declare_subscriber_does_not_emit_wire_frame() {
+        let (session, driver) = build_session();
+        let _sub = session.declare_subscriber(
+            "home/temp",
+            SubscribeOptions::default(),
+            |_| {},
+        );
+        assert_eq!(driver.frame_count(), 0, "declare_subscriber is a no-op on the wire");
+    }
+
+    #[test]
+    fn declared_subscriber_fires_on_loopback_publish() {
+        let (session, _driver) = build_session();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        let _sub = session.declare_subscriber(
+            "home/temp",
+            SubscribeOptions::default(),
+            move |_sample| { fired_cb.fetch_add(1, Ordering::SeqCst); },
+        );
+
+        session.publish(
+            "home/temp",
+            b"22.5",
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn subscriber_drop_auto_unregisters() {
+        let (session, _driver) = build_session();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        {
+            let _sub = session.declare_subscriber(
+                "home/temp",
+                SubscribeOptions::default(),
+                move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); },
+            );
+            // First publish fires.
+            session.publish(
+                "home/temp",
+                b"21.0",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            );
+            assert_eq!(fired.load(Ordering::SeqCst), 1);
+        } // Subscriber drops here -> auto-unregister
+        // Second publish must NOT fire — the callback is gone.
+        session.publish(
+            "home/temp",
+            b"22.0",
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 1, "Drop auto-unregistered the callback");
+    }
+
+    #[test]
+    fn subscriber_undeclare_returns_true_and_skips_drop() {
+        let (session, _driver) = build_session();
+        let sub = session.declare_subscriber(
+            "home/temp",
+            SubscribeOptions::default(),
+            |_| {},
+        );
+        let removed = sub.undeclare();
+        assert!(removed, "first undeclare returns true");
+        // Empty registry: subsequent publish fires no callback (no panic).
+        session.publish(
+            "home/temp",
+            b"22.0",
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        );
+    }
+
+    #[test]
+    fn declare_subscriber_with_locality_remote_skips_loopback_publish() {
+        let (session, _driver) = build_session();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        let _sub = session.declare_subscriber(
+            "home/temp",
+            SubscribeOptions::new().with_allowed_origin(Locality::Remote),
+            move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); },
+        );
+
+        session.publish(
+            "home/temp",
+            b"22.5",
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        );
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "Remote-only subscriber must NOT fire on loopback publish"
+        );
+    }
+
+    #[test]
+    fn declare_subscriber_aliased_resolves_literal_at_declare_time() {
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        let sub = session
+            .declare_subscriber_aliased(
+                7,
+                None,
+                SubscribeOptions::default(),
+                move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); },
+            )
+            .expect("declared mapping resolves");
+        assert_eq!(sub.keyexpr(), "home/temp", "resolved literal stored on handle");
+
+        session.publish(
+            "home/temp",
+            b"22.5",
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn declare_subscriber_aliased_with_inline_suffix_composes_literal() {
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+        let sub = session
+            .declare_subscriber_aliased(
+                7,
+                Some("/kitchen"),
+                SubscribeOptions::default(),
+                |_| {},
+            )
+            .expect("declared mapping resolves");
+        assert_eq!(sub.keyexpr(), "home/temp/kitchen");
+    }
+
+    #[test]
+    fn declare_subscriber_aliased_unknown_mapping_returns_err() {
+        let (session, _driver) = build_session();
+        let err = session.declare_subscriber_aliased(
+            99,
+            None,
+            SubscribeOptions::default(),
+            |_| {},
+        );
+        assert!(
+            matches!(err, Err(SubscribeAliasError::UnknownMapping(99))),
+            "expected Err(UnknownMapping(99))"
+        );
+        // Registry stays empty.
+        assert_eq!(
+            session.observer().lock().unwrap().subscribers.len(),
+            0,
+            "no subscriber registered on declare failure"
+        );
+    }
+
+    #[test]
+    fn declare_subscriber_aliased_survives_mapping_retract_after_declare() {
+        // Mapping resolved at declare time; later send_undeclare_kexpr
+        // must not affect the already-registered subscriber (zenoh-pico
+        // _z_register_subscription mirror: resolution happens once).
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        let _sub = session
+            .declare_subscriber_aliased(
+                7,
+                None,
+                SubscribeOptions::default(),
+                move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); },
+            )
+            .expect("declared mapping resolves");
+
+        // Retract the mapping.
+        session.actions().send_undeclare_kexpr(7);
+
+        // Publish on the literal — subscriber still fires (already
+        // registered against the resolved literal).
+        session.publish(
+            "home/temp",
+            b"22.5",
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn subscribe_alias_error_display_message_hints_remediation() {
+        let err = SubscribeAliasError::UnknownMapping(42);
+        let msg = format!("{err}");
+        assert!(msg.contains("42"));
+        assert!(msg.contains("send_declare_keyexpr"));
     }
 }
