@@ -1262,12 +1262,17 @@ async fn run_demo(
     let mut driver = inbound;
     let observer_for_dispatch = observer.clone();
     // R260 — TimeSource-mediated sleep replaces the prior internal
-    // `tokio::time::sleep` in the lease-deadline race. The TokioTime
-    // here is owned locally; it does NOT need to share epoch with the
-    // declare/query/publisher tasks above (each TokioTime samples its
-    // own monotonic baseline; the lease branch uses `clock.sleep(ms)`
-    // only, not cross-instance `now_monotonic_ms` comparison).
+    // `tokio::time::sleep` in the lease-deadline race. R262 also uses
+    // this same clock to fire per-iteration ticks that sweep
+    // ReplyRegistry timeouts; the on_tick closure below is the
+    // demo-side hook that performs the sweep. Once R263 wires the
+    // demo's query timeout exercise through QueryOptions, the
+    // QUERY_RID register call site above will switch from
+    // deadline_ms = None to a clock-computed deadline, and the
+    // shared epoch becomes load-bearing — the same TokioTime
+    // instance MUST cover both register and sweep sites then.
     let clock_for_drive = TokioTime::new();
+    let observer_for_tick = observer.clone();
     let outcome = drive_session_until_terminal(
         &mut driver,
         &actions,
@@ -1280,6 +1285,17 @@ async fn run_demo(
                 .lock()
                 .expect("observer mutex poisoned by panic in subscriber callback")
                 .dispatch(event, &actions);
+        },
+        move |now_ms: u64| {
+            // R262 per-iteration tick: sweep ReplyRegistry timeouts.
+            // No-op while every pending entry was registered with
+            // deadline_ms = None (R261 state); becomes load-bearing
+            // once R263 wires demo-side timeout_ms through
+            // QueryOptions and the QUERY_RID register call site.
+            let mut obs = observer_for_tick
+                .lock()
+                .expect("observer mutex poisoned by panic in reply callback");
+            let _ = obs.replies.sweep_timed_out(now_ms);
         },
     )
     .await;
