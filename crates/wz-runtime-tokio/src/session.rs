@@ -65,7 +65,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::locality::Locality;
 use crate::observer::ApplicationLayerObserver;
-use crate::sample::{Reliability, Sample, SampleKind};
+use crate::sample::{
+    EncodingHint, QosLevel, Reliability, Sample, SampleKind, SourceInfo, TimestampHint,
+};
 use crate::session_glue::SessionLinkActions;
 
 /// Options bundle for [`Session::publish`]. Carries the locality
@@ -85,7 +87,7 @@ use crate::session_glue::SessionLinkActions;
 /// `send_push_literal` learns to accept them. Construct through the
 /// builder API rather than struct-literal so the future-additive
 /// contract holds.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct PublishOptions {
     /// Publisher-side locality predicate (zenoh-pico
@@ -101,16 +103,35 @@ pub struct PublishOptions {
     /// carries an empty payload (the keyexpr is the entire payload).
     /// Default: `Put`.
     pub kind: SampleKind,
-}
-
-impl Default for PublishOptions {
-    fn default() -> Self {
-        Self {
-            allowed_destination: Locality::default(),
-            reliability: Reliability::default(),
-            kind: SampleKind::Put,
-        }
-    }
+    /// R232 — body-level timestamp propagated to subscribers via
+    /// `Sample.timestamp`. On the loopback branch the value lands
+    /// verbatim. On the wire branch the value will encode into the
+    /// `MsgPut`/`MsgDel` body (R233 carry — current wire branch drops
+    /// this field). `None` (default) means no timestamp attached.
+    pub timestamp: Option<TimestampHint>,
+    /// R232 — body-level encoding propagated to Put-kind subscribers
+    /// via `Sample.encoding`. Del-kind ignores this field (zenoh-pico
+    /// `_z_msg_del_t` has no encoding slot). Wire-side propagation is
+    /// the R233 carry; loopback honours it from R232.
+    pub encoding: Option<EncodingHint>,
+    /// R232 — body-level source identification propagated to
+    /// `Sample.source_info`. Cooperates with the R231 self-echo dedup:
+    /// when the dispatcher fires on a wire-arrived Push whose
+    /// `source_info.zid` matches the session's own zid, the dedup
+    /// suppresses the duplicate fire so a `Locality::Any` publish only
+    /// invokes any-locality subscribers once. Wire-side propagation is
+    /// the R233 carry; loopback honours it from R232.
+    pub source_info: Option<SourceInfo>,
+    /// R232 — body-level attachment blob propagated to
+    /// `Sample.attachment`. Wire-side propagation is the R233 carry;
+    /// loopback honours it from R232.
+    pub attachment: Option<Vec<u8>>,
+    /// R232 — outer-level QoS metadata propagated to `Sample.qos`.
+    /// zenoh-pico mirror: the Push outer `_Z_MSG_EXT_ENC_ZINT | 0x01`
+    /// extension carrying priority + congestion-control + express
+    /// packed into one byte. Wire-side propagation is the R233 carry;
+    /// loopback honours it from R232.
+    pub qos: Option<QosLevel>,
 }
 
 impl PublishOptions {
@@ -146,6 +167,45 @@ impl PublishOptions {
     /// Pin the Sample kind.
     pub fn with_kind(mut self, kind: SampleKind) -> Self {
         self.kind = kind;
+        self
+    }
+
+    /// R232 — attach a body-level timestamp. The loopback branch
+    /// propagates this into `Sample.timestamp` for the subscriber
+    /// callback. Wire-side propagation lands in R233.
+    pub fn with_timestamp(mut self, timestamp: TimestampHint) -> Self {
+        self.timestamp = Some(timestamp);
+        self
+    }
+
+    /// R232 — attach a body-level encoding (Put kind only; Del kind
+    /// ignores the field per zenoh-pico `_z_msg_del_t` layout).
+    pub fn with_encoding(mut self, encoding: EncodingHint) -> Self {
+        self.encoding = Some(encoding);
+        self
+    }
+
+    /// R232 — attach a body-level source identification. Pairs with
+    /// the R231 self-echo dedup: when the wire receives a publish
+    /// whose `source_info.zid` matches the session's own zid, the
+    /// dispatch suppresses to avoid double-firing local subscribers
+    /// in mesh / router-echo topologies.
+    pub fn with_source_info(mut self, source_info: SourceInfo) -> Self {
+        self.source_info = Some(source_info);
+        self
+    }
+
+    /// R232 — attach a body-level attachment blob.
+    pub fn with_attachment(mut self, attachment: Vec<u8>) -> Self {
+        self.attachment = Some(attachment);
+        self
+    }
+
+    /// R232 — attach outer-level QoS metadata (priority / congestion
+    /// control / express byte). Mirrors zenoh-pico's
+    /// `_Z_MSG_EXT_ENC_ZINT | 0x01` Push outer extension.
+    pub fn with_qos(mut self, qos: QosLevel) -> Self {
+        self.qos = Some(qos);
         self
     }
 
@@ -259,15 +319,31 @@ impl Session {
     /// * [`Locality::allows_local`] → loopback dispatch via
     ///   [`crate::pubsub::SubscriberRegistry::local_publish`] with a
     ///   newly-built [`Sample`] carrying `keyexpr` / `payload` /
-    ///   `opts.kind` / `opts.reliability` (R228 scope) and default
-    ///   `None` for `qos` / `attachment` / `timestamp` / `encoding` /
-    ///   `source_info` (R229+ carries).
+    ///   `opts.kind` / `opts.reliability` plus every metadata field
+    ///   the caller attached via `opts.with_*` (R232 — timestamp /
+    ///   encoding / source_info / attachment / qos).
     ///
     /// Returns the number of subscriber callbacks the loopback branch
     /// fired (0 if `allows_local()` is false OR no subscribers match
     /// the keyexpr). Wire-branch outcomes are not reported through
     /// this return value — fire-and-forget per
     /// [`SessionLinkActions::send_push_literal`]'s shape.
+    ///
+    /// ## R233 carry — wire-side metadata propagation
+    ///
+    /// The wire branch currently drops the four body-level metadata
+    /// fields (timestamp, encoding, source_info, attachment) and the
+    /// outer QoS extension because the existing `send_push_literal`
+    /// and `send_push_del_literal` signatures predate metadata
+    /// threading. Loopback subscribers see the full caller-attached
+    /// metadata via `Sample.*` projection; wire peers receive only
+    /// the keyexpr, payload, and reliability bit. R233 will extend
+    /// the action surface with `send_push_with_meta_*` variants that
+    /// encode each field into the `MsgPut` / `MsgDel` body slots and
+    /// the appropriate ext-id extension entries, restoring full
+    /// wire-vs-loopback parity. Callers that need wire-side metadata
+    /// in the interim must drive [`SessionLinkActions`] directly with
+    /// custom Push builders.
     ///
     /// Mirrors zenoh-pico's `_z_write` `vendor/zenoh-pico/src/net/primitives.c`
     /// 170-205: wire branch under `allows_remote()`, loopback branch
@@ -292,15 +368,7 @@ impl Session {
             }
         }
         if opts.allowed_destination.allows_local() {
-            let sample = match opts.kind {
-                SampleKind::Put => {
-                    Sample::new_put(keyexpr, payload.to_vec())
-                        .with_reliability(opts.reliability)
-                }
-                SampleKind::Del => {
-                    Sample::new_del(keyexpr).with_reliability(opts.reliability)
-                }
-            };
+            let sample = build_loopback_sample(keyexpr, payload, &opts);
             self.observer
                 .lock()
                 .expect("Session observer mutex poisoned — a subscriber callback panicked")
@@ -381,16 +449,7 @@ impl Session {
             }
         }
         if opts.allowed_destination.allows_local() {
-            let sample = match opts.kind {
-                SampleKind::Put => {
-                    Sample::new_put(loopback_keyexpr, payload.to_vec())
-                        .with_reliability(opts.reliability)
-                }
-                SampleKind::Del => {
-                    Sample::new_del(loopback_keyexpr)
-                        .with_reliability(opts.reliability)
-                }
-            };
+            let sample = build_loopback_sample(loopback_keyexpr, payload, &opts);
             self.observer
                 .lock()
                 .expect("Session observer mutex poisoned — a subscriber callback panicked")
@@ -400,6 +459,45 @@ impl Session {
             0
         }
     }
+}
+
+/// R232 — shared loopback Sample assembly for [`Session::publish`] and
+/// [`Session::publish_aliased`]. Constructs a Put or Del Sample on the
+/// supplied keyexpr + payload, threads every metadata field the caller
+/// attached to [`PublishOptions`] via `with_*` setters, and leaves the
+/// Del-encoding slot empty (zenoh-pico `_z_msg_del_t` carries no
+/// encoding so the loopback parity mirrors that wire constraint).
+///
+/// Keeps the metadata-threading rules in one place so a future R232
+/// follow-up that adjusts the propagation policy (e.g. validating QoS
+/// bits or trimming an over-long attachment) only edits this function.
+fn build_loopback_sample(keyexpr: &str, payload: &[u8], opts: &PublishOptions) -> Sample {
+    let mut sample = match opts.kind {
+        SampleKind::Put => Sample::new_put(keyexpr, payload.to_vec()),
+        SampleKind::Del => Sample::new_del(keyexpr),
+    };
+    sample = sample.with_reliability(opts.reliability);
+    if let Some(ts) = opts.timestamp.clone() {
+        sample = sample.with_timestamp(ts);
+    }
+    // Encoding is Put-only on the wire; mirror the constraint on
+    // loopback so a caller mis-attaching encoding to a Del kind sees
+    // the same "encoding=None" the wire path would project.
+    if opts.kind == SampleKind::Put {
+        if let Some(enc) = opts.encoding.clone() {
+            sample = sample.with_encoding(enc);
+        }
+    }
+    if let Some(si) = opts.source_info.clone() {
+        sample = sample.with_source_info(si);
+    }
+    if let Some(att) = opts.attachment.clone() {
+        sample = sample.with_attachment(att);
+    }
+    if let Some(qos) = opts.qos {
+        sample = sample.with_qos(qos);
+    }
+    sample
 }
 
 #[cfg(test)]
@@ -1171,5 +1269,234 @@ mod tests {
                 .is_none(),
             "Session::clear_own_zid must forward the release down to the registry"
         );
+    }
+
+    // ── R232 PublishOptions metadata propagation ──
+
+    /// Capture every sample fired through the loopback path so the
+    /// metadata-propagation tests can assert against the projected
+    /// Sample without racing the subscriber callback.
+    fn record_loopback_samples(session: &Session, pattern: &str) -> Arc<Mutex<Vec<Sample>>> {
+        let captured = Arc::new(Mutex::new(Vec::<Sample>::new()));
+        let captured_clone = captured.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .register(pattern, move |s| {
+                captured_clone.lock().unwrap().push(s.clone());
+            });
+        captured
+    }
+
+    #[test]
+    fn publish_options_with_metadata_setters_chain() {
+        // Builder ergonomics: every R232 with_* setter is chainable
+        // and pins exactly the field it names, leaving the other
+        // four metadata slots untouched.
+        let opts = PublishOptions::put()
+            .with_timestamp(TimestampHint {
+                time: 0x1122_3344_5566_7788,
+                zid: vec![0xAA, 0xBB],
+            })
+            .with_encoding(EncodingHint {
+                packed_id: 13,
+                schema: Some("application/json".into()),
+            })
+            .with_source_info(SourceInfo::new(&[0x01, 0x02, 0x03, 0x04], 7, 42))
+            .with_attachment(b"meta".to_vec())
+            .with_qos(QosLevel::from_raw(0b0001_1010));
+        let ts = opts.timestamp.as_ref().unwrap();
+        assert_eq!(ts.time, 0x1122_3344_5566_7788);
+        assert_eq!(ts.zid, vec![0xAA, 0xBB]);
+        let enc = opts.encoding.as_ref().unwrap();
+        assert_eq!(enc.packed_id, 13);
+        assert_eq!(enc.schema.as_deref(), Some("application/json"));
+        let si = opts.source_info.as_ref().unwrap();
+        assert_eq!(si.zid_len, 4);
+        assert_eq!(si.eid, 7);
+        assert_eq!(si.sn, 42);
+        assert_eq!(opts.attachment.as_deref(), Some(&b"meta"[..]));
+        assert_eq!(opts.qos.unwrap().raw, 0b0001_1010);
+    }
+
+    #[test]
+    fn publish_loopback_propagates_timestamp_to_sample() {
+        let (session, _driver) = build_session();
+        let captured = record_loopback_samples(&session, "home/temp");
+
+        let opts = PublishOptions::put()
+            .with_locality(Locality::SessionLocal)
+            .with_timestamp(TimestampHint {
+                time: 0xDEAD_BEEF,
+                zid: vec![1, 2, 3],
+            });
+        let fired = session.publish("home/temp", b"22.5", opts);
+        assert_eq!(fired, 1);
+
+        let s = captured.lock().unwrap();
+        let ts = s[0].timestamp.as_ref().unwrap();
+        assert_eq!(ts.time, 0xDEAD_BEEF);
+        assert_eq!(ts.zid, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn publish_loopback_propagates_encoding_to_put_sample() {
+        let (session, _driver) = build_session();
+        let captured = record_loopback_samples(&session, "home/temp");
+
+        let opts = PublishOptions::put()
+            .with_locality(Locality::SessionLocal)
+            .with_encoding(EncodingHint {
+                packed_id: 5,
+                schema: Some("text/plain".into()),
+            });
+        session.publish("home/temp", b"22.5", opts);
+
+        let s = captured.lock().unwrap();
+        let enc = s[0].encoding.as_ref().unwrap();
+        assert_eq!(enc.packed_id, 5);
+        assert_eq!(enc.schema.as_deref(), Some("text/plain"));
+    }
+
+    #[test]
+    fn publish_loopback_omits_encoding_for_del_kind_even_when_opts_supplied() {
+        // Mirror zenoh-pico's wire constraint: _z_msg_del_t has no
+        // encoding field. The wire-arrival dispatch projects Del with
+        // encoding=None unconditionally; the loopback path must
+        // match so caller code that mistakenly attaches encoding to
+        // a Del publish sees the same projection on either origin.
+        let (session, _driver) = build_session();
+        let captured = record_loopback_samples(&session, "home/temp");
+
+        let opts = PublishOptions::del()
+            .with_locality(Locality::SessionLocal)
+            .with_encoding(EncodingHint {
+                packed_id: 5,
+                schema: None,
+            });
+        session.publish("home/temp", b"", opts);
+
+        let s = captured.lock().unwrap();
+        assert_eq!(s[0].kind, SampleKind::Del);
+        assert!(
+            s[0].encoding.is_none(),
+            "Del kind must drop encoding on loopback to mirror wire-arrival projection"
+        );
+    }
+
+    #[test]
+    fn publish_loopback_propagates_source_info_to_sample() {
+        let (session, _driver) = build_session();
+        let captured = record_loopback_samples(&session, "home/temp");
+
+        let si = SourceInfo::new(&[0xDE, 0xAD, 0xBE, 0xEF], 7, 42);
+        let opts = PublishOptions::put()
+            .with_locality(Locality::SessionLocal)
+            .with_source_info(si.clone());
+        session.publish("home/temp", b"22.5", opts);
+
+        let s = captured.lock().unwrap();
+        let got = s[0].source_info.as_ref().unwrap();
+        assert_eq!(got.zid_len, 4);
+        assert_eq!(got.zid_prefix(), &[0xDE, 0xAD, 0xBE, 0xEF][..]);
+        assert_eq!(got.eid, 7);
+        assert_eq!(got.sn, 42);
+    }
+
+    #[test]
+    fn publish_loopback_propagates_attachment_to_sample() {
+        let (session, _driver) = build_session();
+        let captured = record_loopback_samples(&session, "home/temp");
+
+        let opts = PublishOptions::put()
+            .with_locality(Locality::SessionLocal)
+            .with_attachment(b"attach-payload".to_vec());
+        session.publish("home/temp", b"22.5", opts);
+
+        let s = captured.lock().unwrap();
+        assert_eq!(s[0].attachment.as_deref(), Some(&b"attach-payload"[..]));
+    }
+
+    #[test]
+    fn publish_loopback_propagates_qos_to_sample() {
+        let (session, _driver) = build_session();
+        let captured = record_loopback_samples(&session, "home/temp");
+
+        let opts = PublishOptions::put()
+            .with_locality(Locality::SessionLocal)
+            .with_qos(QosLevel::from_raw(0b0001_1010));
+        session.publish("home/temp", b"22.5", opts);
+
+        let s = captured.lock().unwrap();
+        assert_eq!(s[0].qos.unwrap().raw, 0b0001_1010);
+        assert!(
+            s[0].qos.unwrap().is_express(),
+            "raw bit 4 set must surface through is_express()"
+        );
+    }
+
+    #[test]
+    fn publish_loopback_propagates_all_metadata_in_one_chain() {
+        // Composition: every R232 metadata field set together must
+        // surface together on the projected Sample, in the same
+        // shape the wire-arrival dispatcher produces. Mirrors what a
+        // production caller does on a metadata-rich publish.
+        let (session, _driver) = build_session();
+        let captured = record_loopback_samples(&session, "home/temp");
+
+        let opts = PublishOptions::put()
+            .with_locality(Locality::SessionLocal)
+            .with_reliability(Reliability::BestEffort)
+            .with_timestamp(TimestampHint {
+                time: 0x0102_0304,
+                zid: vec![0x11],
+            })
+            .with_encoding(EncodingHint {
+                packed_id: 9,
+                schema: None,
+            })
+            .with_source_info(SourceInfo::new(&[0xAA, 0xBB], 1, 2))
+            .with_attachment(vec![0xCC, 0xDD])
+            .with_qos(QosLevel::from_raw(0x10));
+        session.publish("home/temp", b"payload", opts);
+
+        let s = captured.lock().unwrap();
+        let got = &s[0];
+        assert_eq!(got.keyexpr, "home/temp");
+        assert_eq!(got.kind, SampleKind::Put);
+        assert_eq!(got.payload, b"payload");
+        assert_eq!(got.reliability, Reliability::BestEffort);
+        assert_eq!(got.timestamp.as_ref().unwrap().time, 0x0102_0304);
+        assert_eq!(got.encoding.as_ref().unwrap().packed_id, 9);
+        assert_eq!(got.source_info.as_ref().unwrap().eid, 1);
+        assert_eq!(got.attachment.as_deref(), Some(&[0xCC, 0xDD][..]));
+        assert_eq!(got.qos.unwrap().raw, 0x10);
+    }
+
+    #[test]
+    fn publish_aliased_loopback_propagates_metadata_to_sample() {
+        // Parity check: publish_aliased's loopback branch shares the
+        // same build_loopback_sample helper as publish, so metadata
+        // must flow identically. This pins the shared-helper contract
+        // — a future refactor that splits the helper or re-implements
+        // either path independently surfaces here.
+        let (session, _driver) = build_session();
+        let captured = record_loopback_samples(&session, "home/temp");
+
+        let opts = PublishOptions::put()
+            .with_locality(Locality::SessionLocal)
+            .with_timestamp(TimestampHint {
+                time: 0xAABB_CCDD,
+                zid: vec![0x42],
+            })
+            .with_attachment(b"aliased-meta".to_vec());
+        let fired = session.publish_aliased(7, None, "home/temp", b"x", opts);
+        assert_eq!(fired, 1);
+
+        let s = captured.lock().unwrap();
+        assert_eq!(s[0].timestamp.as_ref().unwrap().time, 0xAABB_CCDD);
+        assert_eq!(s[0].attachment.as_deref(), Some(&b"aliased-meta"[..]));
     }
 }
