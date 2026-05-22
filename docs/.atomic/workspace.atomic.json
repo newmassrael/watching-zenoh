@@ -11888,6 +11888,74 @@
         "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무"
       ]
     },
+    "Round 250": {
+      "decision_summary": "R250 pre-push hook re-sources scripts/run-ci.sh from HEAD content; defends against self-add-Layer-X chicken-and-egg from R247 carry.",
+      "changes_bullets": [
+        ".githooks/pre-push: replaced direct `scripts/run-ci.sh` invocation with `git show HEAD:scripts/run-ci.sh` extraction to a mktemp tmpfile + `bash $tmpfile` execution; CWD stays at repo_root so relative paths inside the script (scripts/audit-mid-values.sh, scripts/verify-codegen.sh, deploy/*.yaml) continue to resolve against the working tree.",
+        "Fallback path: when `git show HEAD:scripts/run-ci.sh` returns no content (first-bootstrap push or HEAD lacks the script), the hook reverts to invoking the working-tree `scripts/run-ci.sh` so the first push after `mnemosyne-init` / fresh clone still works.",
+        "trap-on-EXIT cleans up the tmpfile regardless of pass/fail/early-exit; lock acquisition (R224 advisory flock) sequence preserved.",
+        "Inline comment block explains the R247 retrospect, the Git-protocol contract that HEAD already points at the to-be-pushed tip in pre-push, and the specific failure mode being defended (working tree dirtied between commit and push)."
+      ],
+      "verification_bullets": [
+        "Manual hook simulation: `echo 'refs/heads/main <HEAD-sha> refs/heads/main 0*40' | bash .githooks/pre-push` ran all Layer A-E lanes successfully against the extracted HEAD:scripts/run-ci.sh.",
+        "pre-commit hook + commit-msg hook passed at commit time (validate_workspace clean; COMMIT_FORMAT.md 72-byte gate clean).",
+        "commit b087e52 (build(githooks): R250 pre-push re-sources run-ci.sh from HEAD; 1 file +34 / -2).",
+        "No regression in lane behaviour: same Layer A-E pass output observed via simulated push as via direct `scripts/run-ci.sh` invocation."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "carry_forward_bullets": [
+        "R251+ CI yaml mirror: `.github/workflows/ci.yml` runs `scripts/run-ci.sh` directly without the HEAD-extraction defence; same chicken-and-egg theoretically applies there but the CI runner always checks out a clean tree at HEAD so the working-tree-vs-HEAD divergence cannot fire — mirror change is therefore not required for parity, only the local pre-push hook needed the defence.",
+        "R251+ Liveliness Token wz-ap-demo migration: line 1378 actions.send_declare_token(DECLARE_TOKEN_ID=3001, 0, Some(keyexpr)) site is currently the last raw-actions call site outside the wire-emit-as-test-fixture cluster; migration to session.declare_token requires e2e log fixture refresh because Layer E greps `id=3001` literally.",
+        "ReplyRegistry timeout sweep needs Hal time abstraction (wz-runtime-core).",
+        "Q_B / Q_E wire codec slots require SCE-side codec extension.",
+        "LivelinessToken local_tokens table for history fan-out: defer until Liveliness Subscriber history.",
+        "LivelinessToken Drop catch_unwind defensive wrap: defer until driver path panic surfaces.",
+        "Querier::get_matching_status / Publisher::get_matching_status.",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff; pin bump deferred (wz call sites = 0).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R250 lesson: pre-push hook chicken-and-egg defence is cheap (mktemp + git show + bash) and the only meaningful cost is one extra `git show` per push; the CI runner already gets the right behaviour for free because its checkout-at-HEAD invariant makes working-tree-vs-HEAD divergence impossible on the runner side."
+      ],
+      "publishable_decision_summary": "R250 pre-push hook re-sources scripts/run-ci.sh from HEAD content; defends against self-add-Layer-X chicken-and-egg from R247 carry.",
+      "publishable_changes_bullets": [
+        ".githooks/pre-push: replaced direct `scripts/run-ci.sh` invocation with `git show HEAD:scripts/run-ci.sh` extraction to a mktemp tmpfile + `bash $tmpfile` execution; CWD stays at repo_root so relative paths inside the script (scripts/audit-mid-values.sh, scripts/verify-codegen.sh, deploy/*.yaml) continue to resolve against the working tree.",
+        "Fallback path: when `git show HEAD:scripts/run-ci.sh` returns no content (first-bootstrap push or HEAD lacks the script), the hook reverts to invoking the working-tree `scripts/run-ci.sh` so the first push after `mnemosyne-init` / fresh clone still works.",
+        "trap-on-EXIT cleans up the tmpfile regardless of pass/fail/early-exit; lock acquisition (R224 advisory flock) sequence preserved.",
+        "Inline comment block explains the R247 retrospect, the Git-protocol contract that HEAD already points at the to-be-pushed tip in pre-push, and the specific failure mode being defended (working tree dirtied between commit and push)."
+      ],
+      "publishable_verification_bullets": [
+        "Manual hook simulation: `echo 'refs/heads/main <HEAD-sha> refs/heads/main 0*40' | bash .githooks/pre-push` ran all Layer A-E lanes successfully against the extracted HEAD:scripts/run-ci.sh.",
+        "pre-commit hook + commit-msg hook passed at commit time (validate_workspace clean; COMMIT_FORMAT.md 72-byte gate clean).",
+        "commit b087e52 (build(githooks): R250 pre-push re-sources run-ci.sh from HEAD; 1 file +34 / -2).",
+        "No regression in lane behaviour: same Layer A-E pass output observed via simulated push as via direct `scripts/run-ci.sh` invocation."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R251+ CI yaml mirror: `.github/workflows/ci.yml` runs `scripts/run-ci.sh` directly without the HEAD-extraction defence; same chicken-and-egg theoretically applies there but the CI runner always checks out a clean tree at HEAD so the working-tree-vs-HEAD divergence cannot fire — mirror change is therefore not required for parity, only the local pre-push hook needed the defence.",
+        "R251+ Liveliness Token wz-ap-demo migration: line 1378 actions.send_declare_token(DECLARE_TOKEN_ID=3001, 0, Some(keyexpr)) site is currently the last raw-actions call site outside the wire-emit-as-test-fixture cluster; migration to session.declare_token requires e2e log fixture refresh because Layer E greps `id=3001` literally.",
+        "ReplyRegistry timeout sweep needs Hal time abstraction (wz-runtime-core).",
+        "Q_B / Q_E wire codec slots require SCE-side codec extension.",
+        "LivelinessToken local_tokens table for history fan-out: defer until Liveliness Subscriber history.",
+        "LivelinessToken Drop catch_unwind defensive wrap: defer until driver path panic surfaces.",
+        "Querier::get_matching_status / Publisher::get_matching_status.",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff; pin bump deferred (wz call sites = 0).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R250 lesson: pre-push hook chicken-and-egg defence is cheap (mktemp + git show + bash) and the only meaningful cost is one extra `git show` per push; the CI runner already gets the right behaviour for free because its checkout-at-HEAD invariant makes working-tree-vs-HEAD divergence impossible on the runner side."
+      ]
+    },
     "Round 26": {
       "decision_summary": "R26 codebase Korean cleanup — fix 2 non-md files (mnemosyne.toml line 60 + scripts/verify-codegen.sh line 17) and establish non-md-English-only convention; historical atomic.json Korean (17 entries) and the legacy KO atomic section id remain locked by T2 frozen-ledger and the missing rename_section primitive respectively.",
       "changes_bullets": [
