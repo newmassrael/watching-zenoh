@@ -13556,6 +13556,60 @@
         "Open R264/R267/R268/R269/R270/R271 carries otherwise unchanged: Instant -> u64 ms migration (3-5R) / Cancellable trait promotion (R257, YAGNI hold) / Session<R, T> reparam (3-7R + design) / Liveliness Token wz-ap-demo migration (R250, 1-2R) / Q_B Q_E wire codec slots (5-10R) / Querier::get_matching_status (1-2R) / Phase W full lwIP (20-50R) / FinalCallback FinalCause Normal vs TimedOut (YAGNI hold) / SCE drift (vendor pin ebf3b3ff vs upstream ~90 commits, wz call sites=0)."
       ]
     },
+    "Round 273": {
+      "decision_summary": "R273 refreshes 4 README + 4 README.ko `MVP` scope-descriptor sites to `wire-spec subset` / `AP runtime` / `AP demo binary` language. Closes R271 carry (a); no MVP references remain in README.",
+      "changes_bullets": [
+        "README.md:10 lead paragraph: `an MVP subset of the zenoh wire protocol` -> `a wire-spec subset of the zenoh protocol`. The `wire-spec subset` phrasing is round-stable (it matches the existing docs/wire-spec-subset.md doc-name); `MVP` carried a release-milestone connotation that conflicted with the R267-ratified single-track-to-zenoh-cpp policy.",
+        "README.md:20 Wire compatibility bullet: `an MVP subset of the wire format that ...` -> `a wire-format subset that ...`. The clause is functionally identical (the next sentence already enumerates the subset scope by pointing at docs/wire-spec-subset.md); `MVP` removed for the same reason.",
+        "README.md:61 Phase C bullet: `(session FSM + AP MVP runtime)` -> `(session FSM + AP runtime)`. The MVP qualifier added nothing functional — the bullet then describes the actual runtime state in detail — and the milestone connotation no longer matches the R267 policy.",
+        "README.md:101 directory layout table: `crates/wz-ap-demo | AP MVP demo binary (initiator + acceptor)` -> `crates/wz-ap-demo | AP demo binary (initiator + acceptor)`. The crate is a long-lived dual-purpose CLI tool (developer-facing demo + Layer E binary-dep test peer); the MVP label was misleading because the demo will stay even after wz hits full zenoh-cpp parity.",
+        "README.ko.md mirrors the same 4 edits with equivalent Korean prose: `MVP 부분집합` -> `wire-spec 부분집합` / `wire format 부분집합`; `AP MVP runtime` -> `AP runtime`; `AP MVP demo binary` -> `AP demo binary`. `grep MVP README.md README.ko.md` returns zero hits post-R273. R271 carry (a) `MVP subset of the wire format` scope-descriptor refresh CLOSED."
+      ],
+      "verification_bullets": [
+        "validate_workspace post-edit: docs=12/12, T1 orphan total=0 (delta=0), round-trip mandatory=12/12 (preserved — prose-only edits within existing H2 sections + within a table cell; no slug change), T3 warn=856 unchanged, atomic ledger entries=271 (pre-R273-audit), sections=215, GENERATED.md=sync.",
+        "bash scripts/run-ci.sh: 10/10 lanes pass (Layer 0/A/A2/B/C0/C1/C1b/C2/D/E). Layer A parses README.md without surfacing any new T1 / round-trip issues post-refresh.",
+        "Manual grep: `grep MVP README.md README.ko.md` returns zero hits. The only remaining MVP-adjacent term in the workspace is the historical `Pub/Sub outbound 100% / inbound 65%` percentage in README.md:66 (Phase C bullet), which is unrelated to release-milestone framing.",
+        "Pre-mutation atomic baseline: entries=271 (R272 closure), sections=215, T1=0 (ledger=1 R193 known-stale), round-trip 12/12. Post-mutation validate_workspace shows entries=272 (this R273 entry), sections=215, T1=0, RT 12/12, sync."
+      ],
+      "impact_refs": [
+        "watching-zenoh",
+        "watching-zenoh/what-it-does",
+        "watching-zenoh/current-status",
+        "watching-zenoh/directory-layout"
+      ],
+      "carry_forward_bullets": [
+        "R271 carry (a) `MVP subset of the wire format` scope-descriptor refresh CLOSED at R273. README + README.ko now contain zero MVP references.",
+        "R271 carry (c) atomic Section body sync via typed primitives still open. R27 set_section_intent / _rationale calls populated the atomic Section bodies for the 8 README sections with pre-R7/R58-scope-correction prose (`11 spec docs`, `notes/NEXT_SESSION.md` activity-log reference, `MVP wire-compatible subset` summary). The atomic store and the README markdown now diverge in language (post-R273 README has no MVP; atomic Section bodies still say `an MVP wire-compatible subset of zenoh`). Resync requires a typed-primitive-only round: set_section_intent + set_section_rationale across watching-zenoh/what-it-does / current-status / directory-layout. Medium scope (~6-10 primitive calls); textbook candidate for a future autonomous round.",
+        "R273 lesson: when a scope-descriptor language change crosses both the human-facing markdown surface (README) and the atomic Section bodies, doing the markdown surface first (R273) creates a temporary divergence with the atomic store. The divergence is observable only via direct query_section (the parser-side round-trip stays green because round-trip parses the markdown, not the atomic body), so it does not surface as a validate_workspace fail. The fix is a follow-up typed-primitive round; the divergence is acceptable as a transitional state.",
+        "Open R267/R268/R269/R270/R271 carries otherwise unchanged: Instant -> u64 ms migration (3-5R) / Cancellable trait promotion (R257, YAGNI hold) / Session<R, T> reparam (3-7R + design) / Liveliness Token wz-ap-demo migration (R250, 1-2R) / Q_B Q_E wire codec slots (5-10R) / Querier::get_matching_status (1-2R) / Phase W full lwIP (20-50R) / FinalCallback FinalCause Normal vs TimedOut (YAGNI hold) / SCE drift (vendor pin ebf3b3ff vs upstream ~90 commits, wz call sites=0)."
+      ],
+      "publishable_decision_summary": "R273 refreshes 4 README + 4 README.ko `MVP` scope-descriptor sites to `wire-spec subset` / `AP runtime` / `AP demo binary` language. Closes R271 carry (a); no MVP references remain in README.",
+      "publishable_changes_bullets": [
+        "README.md:10 lead paragraph: `an MVP subset of the zenoh wire protocol` -> `a wire-spec subset of the zenoh protocol`. The `wire-spec subset` phrasing is round-stable (it matches the existing docs/wire-spec-subset.md doc-name); `MVP` carried a release-milestone connotation that conflicted with the R267-ratified single-track-to-zenoh-cpp policy.",
+        "README.md:20 Wire compatibility bullet: `an MVP subset of the wire format that ...` -> `a wire-format subset that ...`. The clause is functionally identical (the next sentence already enumerates the subset scope by pointing at docs/wire-spec-subset.md); `MVP` removed for the same reason.",
+        "README.md:61 Phase C bullet: `(session FSM + AP MVP runtime)` -> `(session FSM + AP runtime)`. The MVP qualifier added nothing functional — the bullet then describes the actual runtime state in detail — and the milestone connotation no longer matches the R267 policy.",
+        "README.md:101 directory layout table: `crates/wz-ap-demo | AP MVP demo binary (initiator + acceptor)` -> `crates/wz-ap-demo | AP demo binary (initiator + acceptor)`. The crate is a long-lived dual-purpose CLI tool (developer-facing demo + Layer E binary-dep test peer); the MVP label was misleading because the demo will stay even after wz hits full zenoh-cpp parity.",
+        "README.ko.md mirrors the same 4 edits with equivalent Korean prose: `MVP 부분집합` -> `wire-spec 부분집합` / `wire format 부분집합`; `AP MVP runtime` -> `AP runtime`; `AP MVP demo binary` -> `AP demo binary`. `grep MVP README.md README.ko.md` returns zero hits post-R273. R271 carry (a) `MVP subset of the wire format` scope-descriptor refresh CLOSED."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace post-edit: docs=12/12, T1 orphan total=0 (delta=0), round-trip mandatory=12/12 (preserved — prose-only edits within existing H2 sections + within a table cell; no slug change), T3 warn=856 unchanged, atomic ledger entries=271 (pre-R273-audit), sections=215, GENERATED.md=sync.",
+        "bash scripts/run-ci.sh: 10/10 lanes pass (Layer 0/A/A2/B/C0/C1/C1b/C2/D/E). Layer A parses README.md without surfacing any new T1 / round-trip issues post-refresh.",
+        "Manual grep: `grep MVP README.md README.ko.md` returns zero hits. The only remaining MVP-adjacent term in the workspace is the historical `Pub/Sub outbound 100% / inbound 65%` percentage in README.md:66 (Phase C bullet), which is unrelated to release-milestone framing.",
+        "Pre-mutation atomic baseline: entries=271 (R272 closure), sections=215, T1=0 (ledger=1 R193 known-stale), round-trip 12/12. Post-mutation validate_workspace shows entries=272 (this R273 entry), sections=215, T1=0, RT 12/12, sync."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh",
+        "watching-zenoh/what-it-does",
+        "watching-zenoh/current-status",
+        "watching-zenoh/directory-layout"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R271 carry (a) `MVP subset of the wire format` scope-descriptor refresh CLOSED at R273. README + README.ko now contain zero MVP references.",
+        "R271 carry (c) atomic Section body sync via typed primitives still open. R27 set_section_intent / _rationale calls populated the atomic Section bodies for the 8 README sections with pre-R7/R58-scope-correction prose (`11 spec docs`, `notes/NEXT_SESSION.md` activity-log reference, `MVP wire-compatible subset` summary). The atomic store and the README markdown now diverge in language (post-R273 README has no MVP; atomic Section bodies still say `an MVP wire-compatible subset of zenoh`). Resync requires a typed-primitive-only round: set_section_intent + set_section_rationale across watching-zenoh/what-it-does / current-status / directory-layout. Medium scope (~6-10 primitive calls); textbook candidate for a future autonomous round.",
+        "R273 lesson: when a scope-descriptor language change crosses both the human-facing markdown surface (README) and the atomic Section bodies, doing the markdown surface first (R273) creates a temporary divergence with the atomic store. The divergence is observable only via direct query_section (the parser-side round-trip stays green because round-trip parses the markdown, not the atomic body), so it does not surface as a validate_workspace fail. The fix is a follow-up typed-primitive round; the divergence is acceptable as a transitional state.",
+        "Open R267/R268/R269/R270/R271 carries otherwise unchanged: Instant -> u64 ms migration (3-5R) / Cancellable trait promotion (R257, YAGNI hold) / Session<R, T> reparam (3-7R + design) / Liveliness Token wz-ap-demo migration (R250, 1-2R) / Q_B Q_E wire codec slots (5-10R) / Querier::get_matching_status (1-2R) / Phase W full lwIP (20-50R) / FinalCallback FinalCause Normal vs TimedOut (YAGNI hold) / SCE drift (vendor pin ebf3b3ff vs upstream ~90 commits, wz call sites=0)."
+      ]
+    },
     "Round 28": {
       "decision_summary": "Phase A control-plane SCXML round — 3 new algorithm-kind validators (whatami / payload-ext-id / transport-ext-id) covering §3 Hello body, §7.1 payload-layer per-context extension allowlist, §4.4 transport-layer per-control-message extension allowlist.",
       "changes_bullets": [
