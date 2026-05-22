@@ -286,6 +286,24 @@ pub struct SubscriberRegistry {
     /// downstream Push referencing them is filtered as "no
     /// resolution" rather than firing on a partial keyexpr.
     peer_keyexpr_table: HashMap<u64, String>,
+    /// R231 — this session's own zid prefix (1..=16 bytes),
+    /// negotiated during the session-FSM open handshake. When set,
+    /// [`dispatch_push`](Self::dispatch_push) suppresses wire-arrived
+    /// Push records whose `source_info.zid` prefix-matches this
+    /// value (with equal effective length), preventing
+    /// `Locality::Any` self-publishes from double-firing local
+    /// subscribers in mesh / router-echo topologies. `None` disables
+    /// the dedup (safe default — never silently swallows samples,
+    /// only suppresses confirmed self-echoes).
+    ///
+    /// Mirrors the zenoh-cpp / zenoh-rust self-origin guard rather
+    /// than the zenoh-pico client-mode dispatch path (pico's
+    /// `peer == NULL` distinguishes local-vs-wire by call site, not
+    /// by source identity, because the pico client has no router
+    /// that could echo a publish back). When wz operates in
+    /// single-peer unicast mode the dedup is a no-op; the
+    /// production correctness payoff is the mesh / router topology.
+    own_zid: Option<Vec<u8>>,
 }
 
 impl Default for SubscriberRegistry {
@@ -303,7 +321,48 @@ impl SubscriberRegistry {
             subscribers: Vec::new(),
             next_id: 1,
             peer_keyexpr_table: HashMap::new(),
+            own_zid: None,
         }
+    }
+
+    /// R231 — install this session's own zid (1..=16 bytes) so
+    /// [`dispatch_push`](Self::dispatch_push) can recognise and
+    /// suppress wire-arrived self-echoes. The wire-form `_z_id_t`
+    /// range is `1..=16` bytes; this setter rejects out-of-range
+    /// inputs (returns `false`) without mutating state so a buggy
+    /// caller cannot silently disable dedup with an invalid value.
+    /// Returns `true` on a successful install, `false` on an
+    /// invalid length.
+    ///
+    /// Production deployment path: the session-FSM open handshake
+    /// completes with both sides' zids known (zenoh-pico's
+    /// `_z_session_t._local_zid` slot); the wz session-FSM should
+    /// forward its own zid here once the handshake settles. The
+    /// integration is currently caller-driven (see
+    /// [`crate::session::Session::set_own_zid`]); an auto-wire from
+    /// the session-FSM completion event is an R232+ carry.
+    pub fn set_own_zid(&mut self, zid: Vec<u8>) -> bool {
+        if !(1..=16).contains(&zid.len()) {
+            return false;
+        }
+        self.own_zid = Some(zid);
+        true
+    }
+
+    /// R231 — release the previously-installed own zid (e.g. on
+    /// session close or re-init). Subsequent dispatches behave as
+    /// if `set_own_zid` had never been called: no self-echo dedup,
+    /// every wire-arrived Push fires its matching subscribers.
+    pub fn clear_own_zid(&mut self) {
+        self.own_zid = None;
+    }
+
+    /// R231 — expose the currently-installed own zid for diagnostic
+    /// and test purposes. Returns the same slice that
+    /// [`dispatch_push`](Self::dispatch_push) compares against
+    /// `source_info.zid_prefix()`.
+    pub fn own_zid(&self) -> Option<&[u8]> {
+        self.own_zid.as_deref()
     }
 
     /// Register a subscriber for a keyexpr pattern. Pattern syntax
@@ -601,6 +660,33 @@ impl SubscriberRegistry {
             source_info: body_source_info,
             reliability,
         };
+
+        // R231 — self-echo dedup. When this dispatch is on the
+        // wire-arrival path (is_remote=true) AND the decoded sample
+        // carries a source_info matching this session's own zid
+        // prefix (equal length AND equal bytes), the sample is a
+        // mesh / router echo of a publish we just issued; firing it
+        // here would double-invoke any Locality::Any subscriber that
+        // already fired on the loopback path. Suppress all callbacks
+        // for this dispatch.
+        //
+        // Cautious defaults: dedup is skipped when own_zid is unset,
+        // when source_info is absent, when source_info's prefix is
+        // empty (sentinel / malformed record), or when is_remote is
+        // false (loopback is the authoritative source — no dedup
+        // needed and applying it here would silently suppress
+        // legitimate fires). Length equality is required so a
+        // 4-byte own_zid does not falsely match an 8-byte peer zid
+        // that happens to share the first 4 bytes.
+        if is_remote {
+            if let (Some(own), Some(info)) = (self.own_zid.as_deref(), sample.source_info.as_ref())
+            {
+                let prefix = info.zid_prefix();
+                if !prefix.is_empty() && prefix == own {
+                    return;
+                }
+            }
+        }
 
         self.fire_to_subscribers(&sample, is_remote);
     }
@@ -2106,5 +2192,289 @@ mod tests {
             "Locality::Remote suppresses loopback even when the wildcard pattern matches"
         );
         assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    // ─── R231: self-echo dedup ─────────────────────────────────────
+
+    /// Build a literal-keyexpr Push (id=0, suffix=keyexpr) carrying a
+    /// MsgPut body whose extension chain contains a source_info entry
+    /// with the supplied zid prefix (1..=16 bytes), eid=0, sn=0. The
+    /// wire-form source_info payload mirrors
+    /// `session_glue::encode_source_info_ext_body`: header byte
+    /// `(zidlen-1) << 4`, raw zid bytes, then VLE eid + sn.
+    fn push_put_literal_with_source_info(keyexpr: &str, source_zid: &[u8]) -> Push {
+        assert!(
+            (1..=16).contains(&source_zid.len()),
+            "test helper: source_zid len must be 1..=16"
+        );
+        let mut ext = wz_codecs::ext_entry::ExtEntry::new();
+        ext.set_ext_id(0x01); // source_info ext_id
+        ext.set_enc(0x02); // ENC_ZBUF
+        let mut payload = vec![((source_zid.len() as u8) - 1) << 4];
+        payload.extend_from_slice(source_zid);
+        payload.push(0); // VLE eid = 0
+        payload.push(0); // VLE sn = 0
+        ext.body =
+            wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
+                value_len: payload.len() as u64,
+                value: payload,
+            });
+        let put = wz_codecs::msg_put::MsgPut {
+            extensions: Some(vec![ext]),
+            ..wz_codecs::msg_put::MsgPut::default()
+        };
+        Push {
+            keyexpr: wz_codecs::wireexpr::Wireexpr {
+                body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(keyexpr.len() as u64),
+                    suffix: Some(keyexpr.to_string()),
+                }),
+            },
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(put),
+            ..Push::default()
+        }
+    }
+
+    #[test]
+    fn dispatch_push_suppresses_self_echo_when_zid_matches() {
+        // Self-publish via Locality::Any fires the loopback path; the
+        // mesh / router then echoes the wire form back to us with the
+        // same source_info.zid we just sent. Without dedup the
+        // Any-locality subscriber would fire twice. With own_zid
+        // installed the wire-arrival path matches and suppresses.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("demo/temp", move |_s| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+        let own = vec![0x01, 0x02, 0x03, 0x04];
+        assert!(registry.set_own_zid(own.clone()));
+
+        let push = push_put_literal_with_source_info("demo/temp", &own);
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push)),
+            Reliability::Reliable,
+        );
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "wire-arrived self-echo (source_info.zid == own_zid) must not fire local subscribers"
+        );
+    }
+
+    #[test]
+    fn dispatch_push_fires_when_source_zid_differs_from_own() {
+        // Genuine remote-origin sample (peer's zid differs from
+        // ours). Dedup must not engage; the subscriber must fire.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("demo/temp", move |_s| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(registry.set_own_zid(vec![0x01, 0x02, 0x03, 0x04]));
+
+        let push = push_put_literal_with_source_info("demo/temp", &[0xAA, 0xBB, 0xCC, 0xDD]);
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push)),
+            Reliability::Reliable,
+        );
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "remote-origin sample (source zid differs from own) must fire the subscriber"
+        );
+    }
+
+    #[test]
+    fn dispatch_push_fires_when_source_info_absent() {
+        // No source_info on the wire → dedup cannot decide → cautious
+        // default is to fire. Suppressing a metadata-stripped sample
+        // would silently swallow legitimate publishes from older /
+        // simpler peers that never attach source_info.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("demo/temp", move |_s| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(registry.set_own_zid(vec![0x01, 0x02, 0x03, 0x04]));
+
+        // push_with_mapping_id builds a Push::default() body which
+        // has no MsgPut extensions and therefore no source_info.
+        // To reach dispatch_push's PushVariant arm with no source_info
+        // we hand in a MsgPut with `extensions = None`.
+        let push = Push {
+            keyexpr: wz_codecs::wireexpr::Wireexpr {
+                body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
+                    id: 0,
+                    suffix_len: Some("demo/temp".len() as u64),
+                    suffix: Some("demo/temp".to_string()),
+                }),
+            },
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(
+                wz_codecs::msg_put::MsgPut::default(),
+            ),
+            ..Push::default()
+        };
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push)),
+            Reliability::Reliable,
+        );
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "absent source_info means cautious default fires the subscriber"
+        );
+    }
+
+    #[test]
+    fn dispatch_push_fires_when_own_zid_not_set() {
+        // Without an installed own_zid the registry cannot recognise
+        // self-echo. Fire normally — this is the default state from
+        // SubscriberRegistry::new() and the production behaviour
+        // before the session-FSM handshake settles.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("demo/temp", move |_s| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(
+            registry.own_zid().is_none(),
+            "fresh registry must have no own_zid installed"
+        );
+
+        let push = push_put_literal_with_source_info("demo/temp", &[0x01, 0x02, 0x03, 0x04]);
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push)),
+            Reliability::Reliable,
+        );
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "no own_zid installed → no dedup, subscriber fires"
+        );
+    }
+
+    #[test]
+    fn dispatch_push_does_not_dedup_on_length_mismatch_prefix_collision() {
+        // own_zid = 4 bytes, peer zid = 8 bytes whose first 4 bytes
+        // coincide with own. The padded [u8;16] representations both
+        // begin with the same 4 bytes, so a naive memcmp on the
+        // padded buffer would false-positive. The zid_len-based
+        // comparison must reject this.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("demo/temp", move |_s| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(registry.set_own_zid(vec![0x01, 0x02, 0x03, 0x04]));
+
+        let push = push_put_literal_with_source_info(
+            "demo/temp",
+            &[0x01, 0x02, 0x03, 0x04, 0xAA, 0xBB, 0xCC, 0xDD],
+        );
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push)),
+            Reliability::Reliable,
+        );
+
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "length-mismatched zid (4 vs 8) must not match even when prefix coincides"
+        );
+    }
+
+    #[test]
+    fn local_publish_ignores_own_zid_dedup() {
+        // Loopback path (is_remote=false) bypasses the dedup branch.
+        // Otherwise a `Session::publish(Locality::SessionLocal, ...)`
+        // by a session that has installed its own_zid would never fire
+        // any subscriber — applying the dedup to loopback would
+        // silently swallow legitimate in-process publishes.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("demo/temp", move |_s| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+        let own = vec![0x01, 0x02, 0x03, 0x04];
+        assert!(registry.set_own_zid(own.clone()));
+
+        // Loopback sample carrying source_info.zid == own_zid. dedup
+        // must NOT engage because is_remote=false.
+        let sample = Sample::new_put("demo/temp", b"local".to_vec())
+            .with_source_info(crate::sample::SourceInfo::new(&own, 0, 0));
+        let fired = registry.local_publish(&sample);
+
+        assert_eq!(fired, 1, "loopback path must fire even when source matches own_zid");
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn set_own_zid_rejects_invalid_lengths() {
+        // 0 bytes or 17 bytes are outside the zenoh-pico _Z_ID_LENGTH
+        // wire-form range. The setter must reject without mutating
+        // state — a silent accept of length 0 would store an empty
+        // own_zid that matches every empty source_info.zid_prefix()
+        // (i.e. every absent or sentinel source_info) and break the
+        // cautious-default contract.
+        let mut registry = SubscriberRegistry::new();
+        assert!(!registry.set_own_zid(vec![]));
+        assert!(registry.own_zid().is_none());
+        assert!(!registry.set_own_zid(vec![0u8; 17]));
+        assert!(registry.own_zid().is_none());
+        assert!(registry.set_own_zid(vec![0x42]));
+        assert_eq!(registry.own_zid(), Some(&[0x42u8][..]));
+        assert!(registry.set_own_zid(vec![0u8; 16]));
+        assert_eq!(registry.own_zid(), Some(&[0u8; 16][..]));
+    }
+
+    #[test]
+    fn clear_own_zid_reenables_callback_fire() {
+        // After clear_own_zid a wire-arrived push that would
+        // previously have been suppressed as self-echo fires the
+        // subscriber. Models the session-close / re-init path.
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        registry.register("demo/temp", move |_s| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
+        let own = vec![0x09, 0x08, 0x07, 0x06];
+        assert!(registry.set_own_zid(own.clone()));
+
+        // First dispatch: self-echo, suppressed.
+        let push = push_put_literal_with_source_info("demo/temp", &own);
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push)),
+            Reliability::Reliable,
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+
+        // clear_own_zid re-disables dedup.
+        registry.clear_own_zid();
+        assert!(registry.own_zid().is_none());
+
+        // Same wire content now fires — no dedup state to suppress it.
+        let push2 = push_put_literal_with_source_info("demo/temp", &own);
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push2)),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "clear_own_zid must re-enable normal fire on wire-arrived samples"
+        );
     }
 }
