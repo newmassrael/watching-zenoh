@@ -1,7 +1,7 @@
 # watching-zenoh — AI Agent Operating Guide
 
 This file is auto-read by Claude Code at every session start. It defines
-**Mnemosyne SSOT operating rules** for the 13 design docs registered in
+**Mnemosyne SSOT operating rules** for the 12 design docs registered in
 `mnemosyne.toml`.
 
 Prior-session context is recovered from the atomic store changelog
@@ -12,7 +12,7 @@ are the audit-traced replacement.
 
 ## SSOT contract
 
-The 13 docs in `mnemosyne.toml::workspace.docs` are governed by Mnemosyne.
+The 12 docs in `mnemosyne.toml::workspace.docs` are governed by Mnemosyne.
 For these docs, mutations route through the Mnemosyne MCP server, not
 through `Edit` / `Write` on the raw markdown. The justification is the
 same as for any audit-traced spec system: a typed primitive validates
@@ -64,58 +64,38 @@ silently drifts structure.
 - If a mutation needs to reference a section that does not exist yet,
   add the target section first (avoid creating new orphans).
 
-## Atomic store adoption — full migration plan
+## Atomic store baseline
 
-`docs/.atomic/workspace.atomic.json` is initialized
-(`schema_version=1`, `sections={}`, `changelog_entries={}` as of
-2026-05-08). The full atomic mutate API surface (14 primitives) is now
-usable on this workspace.
+`docs/.atomic/workspace.atomic.json` holds the workspace as 215
+atomic Sections + 274 ChangelogEntries across the 12 registered docs
+(R275 baseline). The full atomic mutate API surface (14 primitives)
+is the only path for mutating Section / ChangelogEntry bodies.
 
 `docs/GENERATED.md` is the cascade output of every MCP mutate
 primitive (the MCP tool schema has no `--no-regenerate`; only
 `mnemosyne-cli` does). For watching-zenoh it is **not the
-human-readable surface** — the 13 prose docs in
-`mnemosyne.toml::workspace.docs` remain the human-readable surface
-during migration. `docs/GENERATED.md` is therefore listed in
-`.gitignore` and treated as a byproduct.
+human-readable surface** — the 12 prose docs in
+`mnemosyne.toml::workspace.docs` remain the human-readable surface;
+`docs/GENERATED.md` is gitignored and treated as a byproduct.
 
-Long-term direction: **all 13 docs migrate to atomic Section +
-CrossRef decomposition.** No NarrativeSection / `prose_blocks`
-escape-hatch — that route is `mnemosyne://concepts/anti-patterns` #9
-violation (schema extensions are out of scope; the 4 entity types are
-closed-form per Round 60 ratify). If a piece of prose appears
-"un-decomposable", that is a signal to restructure the prose, not to
-add an escape-hatch field.
+No NarrativeSection / `prose_blocks` escape-hatch — that route is
+`mnemosyne://concepts/anti-patterns` #9 violation (schema extensions
+are out of scope; the 4 entity types are closed-form per Round 60
+ratify). If a piece of prose appears "un-decomposable", that is a
+signal to restructure the prose, not to add an escape-hatch field.
 
-Phased rollout (one phase per session, do not bundle):
-- **Phase A (next session)**: `oq-w15-ratification-summary.md` — 7
-  sections, decision-record-shaped, smallest blast radius. First
-  mapping trial of intent / rationale / alternatives_rejected /
-  impact_scope / inputs / outputs across a complete doc.
-- **Phase B**: `rfc-sce-protocol-synthesis.md` §5 kinds atomic
-  decompose — ~11 kinds × ~6 atomic fields each. Heaviest phase.
-- **Phase C**: 3 FSM docs (`session-fsm.md` / `scouting-fsm.md` /
-  `reassembly-fsm.md`) — each state = 1 Section, transition =
-  CrossRef edge, Mermaid / state diagram in `examples` field.
-- **Phase D**: residual prose (`intrinsics-runtime-symbols.md`,
-  `runtime-crate-{lwip,tokio}.md`, `wire-spec-subset.md`,
-  `ARCHITECTURE.md`). README.md (0-byte stub) and SESSION_KICKOFF.md
-  (activity-log genre) removed from workspace.docs per Round 7 scope
-  correction; latter moved to `notes/`. README prose authoring
-  deferred to Phase E (re-register on completion).
+Phase A / B / C / D / E atomic-decompose migration completed at
+Round 27 (Phase E final — README atomic decompose). All 12 registered
+docs live in the atomic store with typed Section bodies; no doc
+remains in the transitional raw-markdown state.
 
-## Raw `Edit` carve-out — transitional only, per-doc
+## Raw `Edit` carve-out — closed
 
-While a doc still lives in raw markdown form (i.e. before its phase
-above completes), raw `Edit` / `Write` on that doc is permissible
-**only when**:
-1. `validate_workspace` passes before the edit (clean baseline).
-2. The edit preserves round-trip (re-validate after).
-3. T1 orphan delta = 0 (no new orphans introduced).
-
-Once a doc completes its phase migration its sections live in the
-atomic store; the carve-out no longer applies to that doc — mutation
-must route through the typed primitives.
+The transitional `Edit` / `Write` carve-out applied while docs were
+mid-migration from raw markdown to atomic Section form. With migration
+complete at Round 27, no registered doc remains in the transitional
+state; all Section body mutations route through the typed primitives.
+The clause is preserved here as historical context only.
 
 ## Local CI gates
 
@@ -151,9 +131,8 @@ LGPL-3 obligations including anti-tivoization) OR
 `LICENSE-GPL-3.0.md` for the verbatim free-tier texts, and
 `LICENSE-COMMERCIAL.md` for the commercial alternative.
 
-When Phase A coding lands (SCXML sources, Rust runtime crates, C/Rust
-runtime adapters, deploy yamls), every author-side source file must
-carry the SPDX header:
+Author-side source files (SCXML, Rust, C, header, deploy YAML) carry
+the SPDX header:
 
 ```
 SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
@@ -187,7 +166,7 @@ in-file SPDX headers.
   rewrite — Round 138 tier mobility ratify, the warning surface is
   intentionally non-zero.
 
-## External references (carry from SESSION_KICKOFF)
+## External references
 
 - SCE source: `/home/coin/scxml-core-engine/` — read directly when SCE
   state is in question, do not infer from memory.
