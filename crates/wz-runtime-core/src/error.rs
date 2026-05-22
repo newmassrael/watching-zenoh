@@ -15,14 +15,14 @@ use alloc::boxed::Box;
 /// (e.g. a future `SleepTimeout` variant for time-source impls that
 /// surface deadline misses) without breaking external matchers.
 ///
-/// `core::error::Error` impl is omitted: it requires MSRV 1.81
-/// (Error trait was moved into `core` in that release), while the
-/// workspace MSRV is 1.75. The `std::error::Error` impl below
-/// (gated on the `std` feature flag, added in R256 retiring the
-/// R252 carry) provides AP-profile `Box<dyn std::error::Error>`
-/// composability via the `std::error::Error` trait that has been
-/// in `std` since 1.0; the `core::error::Error` no_std parity
-/// arrives when the workspace MSRV bumps to 1.81+.
+/// `core::error::Error` impl is available unconditionally (R267
+/// MSRV bump to 1.81). Prior to R267 the workspace MSRV was 1.75
+/// and only `std::error::Error` was reachable, so the impl was
+/// gated on `feature = "std"`. With 1.81+ the trait lives in
+/// `core::error` and is reachable from no_std too; the impl is
+/// therefore no-feature-gated, and both std builds (via the
+/// `pub use core::error::Error` re-export in std) and no_std
+/// builds get the impl from one source.
 ///
 /// ## R266 — `JoinFailed` panic payload
 ///
@@ -215,27 +215,29 @@ impl fmt::Display for RuntimeError {
     }
 }
 
-/// R256 — `std::error::Error` impl behind the `std` feature so
-/// AP-profile callers can wrap `RuntimeError` in
-/// `Box<dyn std::error::Error>` / use it with `?` against other
-/// `std::error::Error`-bound returns. R266 — the default `source`
-/// chain stays `None` because the panic payload is type-erased
-/// `dyn Any`, not `dyn Error`; a downcast-aware caller fetches it
-/// via [`RuntimeError::panic_payload`] and inspects the
-/// concrete type explicitly. Wrapping the panic payload in a
-/// `dyn Error` adapter is rejected as misleading — `Any` is the
-/// honest type for catch-unwind output and callers should not be
-/// led to expect a `source` chain that doesn't structurally
-/// exist.
+/// R256 — Error trait impl so AP-profile callers can wrap
+/// `RuntimeError` in `Box<dyn core::error::Error>` / use it with
+/// `?` against other `Error`-bound returns. R266 — the default
+/// `source` chain stays `None` because the panic payload is
+/// type-erased `dyn Any`, not `dyn Error`; a downcast-aware
+/// caller fetches it via [`RuntimeError::panic_payload`] and
+/// inspects the concrete type explicitly. Wrapping the panic
+/// payload in a `dyn Error` adapter is rejected as misleading —
+/// `Any` is the honest type for catch-unwind output and callers
+/// should not be led to expect a `source` chain that doesn't
+/// structurally exist.
 ///
-/// Stays behind `feature = "std"` because `std::error::Error` is
-/// not accessible from `no_std` targets; the `core::error::Error`
-/// equivalent lives on stable Rust 1.81+ which the workspace MSRV
-/// has not yet committed to. When the MSRV bumps, this impl
-/// becomes default-on (no feature gate) and a `core::error::Error`
-/// blanket impl replaces it.
-#[cfg(feature = "std")]
-impl std::error::Error for RuntimeError {}
+/// R267 — impl uses `core::error::Error` (no longer
+/// `std::error::Error`) and no longer requires the `std` feature
+/// gate. The workspace MSRV bumped to 1.81 in this round, which
+/// is the release that lifted the `Error` trait into `core` (it
+/// remains accessible via the `std::error::Error` re-export, so
+/// AP-profile callers that imported `std::error::Error` see no
+/// breakage). The no-feature-gated impl means MCU profiles
+/// compiling without the `std` feature also get the `Error`
+/// impl, which closes the long-standing R252 carry around no_std
+/// error composition.
+impl core::error::Error for RuntimeError {}
 
 #[cfg(test)]
 mod compile_time_assertions {
@@ -283,13 +285,16 @@ mod std_error_tests {
     use super::*;
 
     #[test]
-    fn runtime_error_is_std_error_compatible_boxable() {
-        // Pin the std::error::Error contract: RuntimeError must be
-        // boxable into Box<dyn std::error::Error>. This is the
-        // typical Rust idiom for "any error, no matter the type"
-        // return slots that AP-profile callers use (CLI tools,
-        // top-level main() returns, etc.).
-        let err: Box<dyn std::error::Error> = Box::new(RuntimeError::join_failed());
+    fn runtime_error_is_error_trait_compatible_boxable() {
+        // R267 — Pin the core::error::Error contract: RuntimeError
+        // must be boxable into Box<dyn core::error::Error>. This is
+        // the typical Rust idiom for "any error, no matter the
+        // type" return slots; the trait moved from std into core in
+        // 1.81 (workspace MSRV as of R267). The `std::error::Error`
+        // re-export remains, so existing AP-profile call sites that
+        // imported `std::error::Error` still match. The test uses
+        // `core::error::Error` directly to pin the canonical path.
+        let err: Box<dyn core::error::Error> = Box::new(RuntimeError::join_failed());
         // R257 — JoinFailed Display narrowed to "panicked"; the
         // generic "did not produce an output" wording moved to
         // the new JoinCancelled variant doc-comment.
@@ -300,9 +305,9 @@ mod std_error_tests {
     fn runtime_error_source_chain_is_empty_for_flat_variants() {
         // R266 — `source()` is still None for every variant. The
         // panic payload is exposed via panic_payload(), not via
-        // source() — see the std::error::Error impl doc-comment
+        // source() — see the core::error::Error impl doc-comment
         // for the rationale.
-        use std::error::Error;
+        use core::error::Error;
         let err = RuntimeError::Shutdown;
         assert!(err.source().is_none());
         let cancel = RuntimeError::JoinCancelled;
