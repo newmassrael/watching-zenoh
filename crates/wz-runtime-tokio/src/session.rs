@@ -1052,6 +1052,29 @@ impl Session {
             options,
         }
     }
+
+    /// R243 — aliased-keyexpr counterpart of [`Self::declare_querier`].
+    /// Holds the `(mapping_id, inline_suffix, options)` triple so
+    /// subsequent [`QuerierAliased::get`] calls route through
+    /// [`Self::query_aliased_auto`] without restating them.
+    ///
+    /// Same no-wire-emit contract as [`Self::declare_querier`]: the
+    /// outbound `send_declare_keyexpr` that registers `mapping_id`
+    /// on the peer is the caller's earlier responsibility; this
+    /// constructor only aggregates state on the caller side.
+    pub fn declare_querier_aliased(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        options: QueryOptions,
+    ) -> QuerierAliased {
+        QuerierAliased {
+            session: self.clone(),
+            mapping_id,
+            inline_suffix: inline_suffix.map(str::to_string),
+            options,
+        }
+    }
 }
 
 /// R241 — typed error returned by [`Session::query_aliased_auto`]
@@ -1154,6 +1177,85 @@ impl Querier {
     ) -> ReplyHandle {
         self.session
             .query(&self.keyexpr, self.options.clone(), on_reply, on_final)
+    }
+}
+
+/// R243 — aliased-keyexpr counterpart of [`Querier`]. Mirror of
+/// [`Querier`] holding `(mapping_id, inline_suffix, options)`
+/// rather than a literal keyexpr; each [`Self::get`] call
+/// delegates to [`Session::query_aliased_auto`] which resolves the
+/// loopback literal through the session's outbound mapping table
+/// before fanning both wire and loopback branches.
+///
+/// Returns `Err(QueryAliasError::UnknownMapping(id))` from
+/// [`Self::get`] when the declared mapping id was never registered
+/// on the outbound table (or was retracted via
+/// [`SessionLinkActions::send_undeclare_kexpr`] between
+/// [`Session::declare_querier_aliased`] and [`Self::get`]). The
+/// caller treats this as a contract violation matching the
+/// declare-before-query invariant.
+///
+/// Like [`Querier`], the declaration is a caller-side aggregation
+/// and emits NO wire frame at declare time — declare_querier_aliased
+/// does not register a peer-side resource (the
+/// [`SessionLinkActions::send_declare_keyexpr`] call that populates
+/// the outbound mapping is a separate, earlier step under the
+/// caller's control).
+///
+/// `#[non_exhaustive]`. Construct only through
+/// [`Session::declare_querier_aliased`].
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct QuerierAliased {
+    session: Session,
+    mapping_id: u64,
+    inline_suffix: Option<String>,
+    options: QueryOptions,
+}
+
+impl QuerierAliased {
+    /// The declared mapping id. Must have been previously registered
+    /// via [`SessionLinkActions::send_declare_keyexpr`] for
+    /// [`Self::get`] to succeed.
+    pub fn mapping_id(&self) -> u64 {
+        self.mapping_id
+    }
+
+    /// The optional inline suffix. `None` emits a pure-aliased
+    /// query (declared literal is the full keyexpr); `Some(s)`
+    /// emits a composite query (declared prefix + `s`).
+    pub fn inline_suffix(&self) -> Option<&str> {
+        self.inline_suffix.as_deref()
+    }
+
+    /// Borrow the declared options. Same accessor shape as
+    /// [`Querier::options`].
+    pub fn options(&self) -> &QueryOptions {
+        &self.options
+    }
+
+    /// Emit one outbound aliased query. Returns
+    /// `Err(QueryAliasError::UnknownMapping(id))` when the declared
+    /// `mapping_id` is no longer present on the outbound mapping
+    /// table — neither wire nor loopback branch fires in that case
+    /// (matching [`Session::query_aliased_auto`]'s no-silent-partial
+    /// contract).
+    ///
+    /// On the success path each call allocates a fresh rid; the
+    /// returned [`ReplyHandle`] tracks the pending entry on
+    /// [`crate::reply::ReplyRegistry`].
+    pub fn get(
+        &self,
+        on_reply: impl FnMut(&InboundReply) + Send + 'static,
+        on_final: impl FnMut(u64) + Send + 'static,
+    ) -> Result<ReplyHandle, QueryAliasError> {
+        self.session.query_aliased_auto(
+            self.mapping_id,
+            self.inline_suffix.as_deref(),
+            self.options.clone(),
+            on_reply,
+            on_final,
+        )
     }
 }
 
@@ -3382,5 +3484,143 @@ mod tests {
         let q2 = clone.get(|_| {}, |_| {});
         assert_eq!(q1.rid(), 0);
         assert_eq!(q2.rid(), 1, "clones share the same rid allocator");
+    }
+
+    // ── R243 QuerierAliased ──
+
+    #[test]
+    fn declare_querier_aliased_returns_handle_with_mapping_id_and_options() {
+        let (session, _driver) = build_session();
+        let opts = QueryOptions::get().with_target(QueryTarget::All);
+        let qa = session.declare_querier_aliased(7, Some("/kitchen"), opts.clone());
+        assert_eq!(qa.mapping_id(), 7);
+        assert_eq!(qa.inline_suffix(), Some("/kitchen"));
+        assert_eq!(qa.options().target, opts.target);
+    }
+
+    #[test]
+    fn declare_querier_aliased_does_not_emit_wire_frame() {
+        let (session, driver) = build_session();
+        let _qa = session.declare_querier_aliased(7, None, QueryOptions::get());
+        assert_eq!(driver.frame_count(), 0, "declare_querier_aliased is a no-op on the wire");
+    }
+
+    #[test]
+    fn querier_aliased_get_resolves_loopback_through_outbound_mapping_table() {
+        let (session, driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+
+        let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
+        let cap_cb = captured.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("home/temp", |_q, responder| {
+                responder.send_reply(b"22.5");
+            });
+
+        let qa = session.declare_querier_aliased(
+            7,
+            None,
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+        );
+        let handle = qa
+            .get(
+                move |reply| { *cap_cb.lock().unwrap() = Some(reply.clone()); },
+                |_| {},
+            )
+            .expect("declared mapping resolves");
+
+        assert_eq!(handle.rid(), 0);
+        let got = captured.lock().unwrap().clone().expect("loopback fired");
+        assert_eq!(got.keyexpr_literal, "home/temp");
+        assert_eq!(driver.frame_count(), 1, "DeclKexpr frame only (SessionLocal skips Query wire)");
+    }
+
+    #[test]
+    fn querier_aliased_get_unknown_mapping_returns_err_and_skips_both_branches() {
+        let (session, driver) = build_session();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("home/temp", move |_q, _r| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            });
+
+        let qa = session.declare_querier_aliased(99, None, QueryOptions::get());
+        let err = qa.get(|_| {}, |_| {});
+        assert_eq!(err, Err(QueryAliasError::UnknownMapping(99)));
+        assert_eq!(fired.load(Ordering::SeqCst), 0);
+        assert_eq!(driver.frame_count(), 0);
+    }
+
+    #[test]
+    fn querier_aliased_get_threads_inline_suffix_into_composite_literal() {
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+
+        let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
+        let cap_cb = captured.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("home/temp/kitchen", |_q, responder| {
+                responder.send_reply(b"21.0");
+            });
+
+        let qa = session.declare_querier_aliased(
+            7,
+            Some("/kitchen"),
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+        );
+        qa.get(
+            move |reply| { *cap_cb.lock().unwrap() = Some(reply.clone()); },
+            |_| {},
+        )
+        .expect("declared mapping resolves");
+
+        let got = captured.lock().unwrap().clone().expect("composite literal matched");
+        assert_eq!(got.keyexpr_literal, "home/temp/kitchen");
+    }
+
+    #[test]
+    fn querier_aliased_get_twice_allocates_independent_rids() {
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+        let qa = session.declare_querier_aliased(
+            7,
+            None,
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+        );
+        let h0 = qa.get(|_| {}, |_| {}).unwrap();
+        let h1 = qa.get(|_| {}, |_| {}).unwrap();
+        assert_eq!(h0.rid(), 0);
+        assert_eq!(h1.rid(), 1);
+    }
+
+    #[test]
+    fn querier_aliased_clone_shares_session_and_options() {
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+        let qa = session.declare_querier_aliased(
+            7,
+            None,
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+        );
+        let clone = qa.clone();
+        assert_eq!(clone.mapping_id(), qa.mapping_id());
+        assert_eq!(clone.inline_suffix(), qa.inline_suffix());
+        let h0 = qa.get(|_| {}, |_| {}).unwrap();
+        let h1 = clone.get(|_| {}, |_| {}).unwrap();
+        assert_eq!(h0.rid(), 0);
+        assert_eq!(h1.rid(), 1, "clones share the same rid allocator");
     }
 }
