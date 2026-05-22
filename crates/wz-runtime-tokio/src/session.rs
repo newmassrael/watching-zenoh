@@ -271,11 +271,47 @@ impl Session {
     /// [`SessionLinkActions::new`](crate::session_glue::SessionLinkActions::new);
     /// `observer` is a freshly-wrapped
     /// [`ApplicationLayerObserver::new`](crate::observer::ApplicationLayerObserver::new).
+    ///
+    /// ## R236 — auto-wire self-echo dedup from `SessionInitParams.zid`
+    ///
+    /// When `actions.params.zid` carries a valid 1..=16 byte zid
+    /// (the wire-form `_z_id_t` range), this constructor forwards it
+    /// into the inbound subscriber registry via
+    /// [`Session::set_own_zid`] so the application is shielded by the
+    /// R231 self-echo dedup guard without writing an explicit hook
+    /// against a future FSM `Established` event. Mirrors
+    /// zenoh-pico's `_z_session_init` which stamps the local zid
+    /// into `_z_session_t._local_zid` at session creation —
+    /// `vendor/zenoh-pico/src/session/session.c` (`_z_session_init`
+    /// initializes `_local_zid` before any RX/TX driver runs).
+    ///
+    /// Silent skip on `zid.is_empty()` so test fixtures that
+    /// construct a Session with a placeholder `SessionInitParams`
+    /// (no zid declared) are not affected; the registry's `own_zid`
+    /// stays `None`, dedup remains disabled, and every wire-arrived
+    /// Push fires its matching subscribers (the pre-R231 default).
+    /// Silent skip also on `zid.len() > 16` for the same reason —
+    /// `set_own_zid`'s range check rejects the install and returns
+    /// `false`; no panic, no diagnostic noise during construction.
+    /// An application that wants to override or re-install the
+    /// dedup zid after construction still has the explicit
+    /// `set_own_zid` / `clear_own_zid` surface available.
     pub fn new(
         actions: Arc<SessionLinkActions>,
         observer: Arc<Mutex<ApplicationLayerObserver>>,
     ) -> Self {
-        Self { actions, observer }
+        let session = Self { actions, observer };
+        // R236 — forward the local zid from SessionInitParams into
+        // the subscriber registry so wire-arrived self-echo Pushes
+        // are dedup'd from session creation onward. The `1..=16`
+        // range check inside `set_own_zid` quietly rejects an
+        // out-of-range value (returns `false`); empty zid skipped
+        // here so the registry stays in its pre-R231 default state
+        // for test fixtures that don't supply a zid.
+        if !session.actions.params.zid.is_empty() {
+            let _ = session.set_own_zid(session.actions.params.zid.clone());
+        }
+        session
     }
 
     /// Borrow the outbound action handle. Useful when the caller
@@ -310,12 +346,18 @@ impl Session {
     /// (`SessionInitParams.zid` is the local zid passed into
     /// outbound `InitSyn`; the peer's zid lands in
     /// [`crate::session_glue::SessionLinkActions::inbound_peer_zid`]).
-    /// Once the handshake completes, the application calls this
-    /// method with the local zid and the dedup activates. The
-    /// auto-wire from a session-FSM completion event is an R232+
-    /// carry — today the wiring is caller-driven so the surface
-    /// stays additive (no breakage to callers that never enable
-    /// dedup; the absence remains a safe default).
+    /// The local zid is therefore already authoritative at
+    /// [`Session::new`] time, so R236 wires the install
+    /// automatically from `actions.params.zid` — the application
+    /// no longer needs to call this method explicitly after the
+    /// handshake completes. The method remains public for two
+    /// scenarios: (1) explicit override when the application
+    /// derives a per-session zid outside the
+    /// `SessionInitParams` block (rare but supported), and
+    /// (2) session re-init flows where a prior
+    /// [`Session::clear_own_zid`] released the install and the
+    /// caller now wants to reinstate the dedup guard with the
+    /// same or a different zid.
     pub fn set_own_zid(&self, zid: Vec<u8>) -> bool {
         let mut observer = self
             .observer
@@ -1299,7 +1341,14 @@ mod tests {
         // future refactor that splits the observer mutex or renames
         // the subscriber field surfaces here as a compile / runtime
         // error rather than silently disabling the dedup.
+        //
+        // R236 — `Session::new` now auto-wires own_zid from
+        // `actions.params.zid`, so a fresh `build_session()` already
+        // carries the fixture zid. Clear it before exercising the
+        // forwarder so this test targets `set_own_zid`'s explicit
+        // path rather than measuring the constructor's auto-install.
         let (session, _driver) = build_session();
+        session.clear_own_zid();
         assert!(
             session
                 .observer()
@@ -1308,7 +1357,7 @@ mod tests {
                 .subscribers
                 .own_zid()
                 .is_none(),
-            "fresh session has no own_zid installed"
+            "post-clear session has no own_zid installed"
         );
 
         let zid = vec![0x01, 0x02, 0x03, 0x04];
@@ -1384,6 +1433,86 @@ mod tests {
                 .own_zid()
                 .is_none(),
             "Session::clear_own_zid must forward the release down to the registry"
+        );
+    }
+
+    // ── R236 Session::new auto-wire from SessionInitParams.zid ──
+
+    #[test]
+    fn session_new_auto_wires_set_own_zid_from_params() {
+        // R236 — Session::new forwards `actions.params.zid` into the
+        // subscriber registry's own_zid slot at construction time so
+        // the application is shielded by the R231 self-echo dedup
+        // guard without an explicit hook against the FSM
+        // open-handshake completion event. Mirrors zenoh-pico's
+        // `_z_session_init` which stamps `_local_zid` at session
+        // creation (vendor/zenoh-pico/src/session/session.c).
+        let (session, _driver) = build_session();
+        let fixture_zid: Vec<u8> = vec![0x01, 0x02, 0x03, 0x04];
+        assert_eq!(
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .subscribers
+                .own_zid(),
+            Some(&fixture_zid[..]),
+            "Session::new auto-wires own_zid from SessionInitParams.zid"
+        );
+    }
+
+    #[test]
+    fn session_new_with_empty_zid_skips_auto_wire() {
+        // R236 — empty zid in SessionInitParams (test fixtures or a
+        // pre-handshake placeholder) results in no auto-install. The
+        // registry stays in its pre-R231 default state, dedup is
+        // disabled, and every wire-arrived Push fires its matching
+        // subscribers (the safe default that preserves
+        // backwards-compatible behavior for callers who never opt
+        // into dedup).
+        let driver = Arc::new(RecordingDriver::new());
+        let mut params = fixture_params();
+        params.zid = Vec::new();
+        let actions = SessionLinkActions::new(driver.clone(), params);
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let session = Session::new(actions, observer);
+        assert!(
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .subscribers
+                .own_zid()
+                .is_none(),
+            "Session::new with empty params.zid leaves own_zid uninstalled"
+        );
+    }
+
+    #[test]
+    fn session_new_with_overlength_zid_silently_skips_auto_wire() {
+        // R236 — params.zid.len() > 16 violates the wire-form
+        // `_z_id_t` range (transport.h: zid_len ∈ 1..=16).
+        // `set_own_zid`'s internal range check rejects the install
+        // (returns false) and the constructor swallows the
+        // rejection — no panic, no log noise at construction
+        // boundary. The registry stays uninstalled; the application
+        // can still call `set_own_zid` later with a valid zid to
+        // opt into dedup.
+        let driver = Arc::new(RecordingDriver::new());
+        let mut params = fixture_params();
+        params.zid = vec![0u8; 17];
+        let actions = SessionLinkActions::new(driver.clone(), params);
+        let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+        let session = Session::new(actions, observer);
+        assert!(
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .subscribers
+                .own_zid()
+                .is_none(),
+            "Session::new with len-17 params.zid silently skips auto-wire"
         );
     }
 
