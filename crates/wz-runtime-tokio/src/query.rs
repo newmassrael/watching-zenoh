@@ -560,13 +560,99 @@ impl QueryableRegistry {
             }
         };
 
+        // R223 — every Request reaching dispatch_request has been
+        // parsed off the wire, so the inner fan-out treats this as a
+        // remote-origin dispatch. R238 — the same fan-out logic is
+        // shared with [`Self::local_query`] (is_remote=false) so the
+        // pattern-match / responder-build / callback-fire body lives
+        // in [`Self::fire_matching_queryables`] once. The "deferred
+        // self-publish loopback" carry note prior to R238 lands here:
+        // the helper switch is the textbook resolution.
+        self.fire_matching_queryables(
+            request.rid,
+            &resolved,
+            query,
+            replies,
+            /* is_remote = */ true,
+        );
+    }
+
+    /// R238 — in-process query loopback mirror of
+    /// [`crate::pubsub::SubscriberRegistry::local_publish`]. Fans the
+    /// `(rid, keyexpr, query)` triple into every matching queryable
+    /// that allows `Locality::SessionLocal` (or `Locality::Any`),
+    /// pushing each callback's emitted [`QueryReply`] records into
+    /// `replies`. The caller drains `replies` after the call —
+    /// typically into an in-process [`crate::reply::ReplyRegistry`]
+    /// pending entry so the self-`z_get` requester observes its own
+    /// queryables' replies without a wire round-trip.
+    ///
+    /// Caller precondition: `keyexpr` is the already-resolved literal
+    /// form. Unlike [`Self::dispatch_request`], this method does NOT
+    /// consult the peer keyexpr table — the loopback path bypasses
+    /// the peer's DECLARE alias table because the caller is local.
+    /// If the application uses outbound aliasing
+    /// (`SessionLinkActions::send_declare_keyexpr` +
+    /// `Session::publish_aliased_auto`), the caller should resolve
+    /// the alias through `SessionLinkActions::resolve_outbound_mapping`
+    /// or pre-known literal before invoking `local_query`. Typical
+    /// caller: a future `Session::query` API (carry) routes the
+    /// requester's literal keyexpr into both the outbound
+    /// `send_request_query` (wire branch) and `local_query` (loopback
+    /// branch) per the same `Locality` predicate that
+    /// `Session::publish` uses on the publish side.
+    ///
+    /// Returns nothing; the count of fired callbacks can be inferred
+    /// from `replies.len()` delta when at least one Reply is emitted
+    /// per callback (typical AP pattern). Mirrors zenoh-pico's
+    /// `_z_trigger_queryables` invoked with `_z_query_t.zn_session ==
+    /// self` (the in-process variant); the wire path's
+    /// `_z_trigger_queryables_impl` is the `dispatch_request`
+    /// equivalent here.
+    pub fn local_query(
+        &mut self,
+        rid: u64,
+        keyexpr: &str,
+        query: &Query,
+        replies: &mut Vec<QueryReply>,
+    ) {
+        self.fire_matching_queryables(
+            rid,
+            keyexpr,
+            query,
+            replies,
+            /* is_remote = */ false,
+        );
+    }
+
+    /// R238 — shared fan-out body for [`Self::dispatch_request`]
+    /// (is_remote=true) and [`Self::local_query`] (is_remote=false).
+    /// The locality predicate split happens here so the rest of the
+    /// pattern-match / responder-build / callback-fire path stays
+    /// identical across wire and loopback origins. Mirrors the R227
+    /// `SubscriberRegistry::fire_to_subscribers(sample, is_remote)`
+    /// internal split for the queryable side.
+    ///
+    /// `keyexpr` is the already-resolved literal; the responder
+    /// echoes it back into each [`QueryReply::Reply::keyexpr_literal`]
+    /// so the requester sees the same literal regardless of whether
+    /// the dispatch came off the wire (alias-resolved through
+    /// `peer_keyexpr_table`) or in-process (caller-supplied literal).
+    fn fire_matching_queryables(
+        &mut self,
+        rid: u64,
+        keyexpr: &str,
+        query: &Query,
+        replies: &mut Vec<QueryReply>,
+        is_remote: bool,
+    ) {
         for queryable in &mut self.queryables {
-            // R223 — every Request reaching dispatch_request has
-            // been parsed off the wire, so it is treated as remote
-            // and the locality filter reduces to allows_remote().
-            // Self-publish loopback (deferred) will route through
-            // this same dispatcher with an is_remote=false flag.
-            if !queryable.allowed_origin.allows_remote() {
+            let allowed = if is_remote {
+                queryable.allowed_origin.allows_remote()
+            } else {
+                queryable.allowed_origin.allows_local()
+            };
+            if !allowed {
                 continue;
             }
             let chunks: Vec<&str> = queryable
@@ -574,10 +660,10 @@ impl QueryableRegistry {
                 .iter()
                 .map(String::as_str)
                 .collect();
-            if keyexpr_pattern_matches(&chunks, &resolved) {
+            if keyexpr_pattern_matches(&chunks, keyexpr) {
                 let mut responder = QueryResponder {
-                    rid: request.rid,
-                    keyexpr_literal: resolved.clone(),
+                    rid,
+                    keyexpr_literal: keyexpr.to_string(),
                     replies,
                     responder: None,
                 };
@@ -900,9 +986,12 @@ mod tests {
     #[test]
     fn query_register_with_locality_session_local_suppresses_inbound() {
         // Mirror of pubsub's
-        // register_with_locality_session_local_does_not_fire_on_inbound
-        // — Queryable side surface-only-correct until self-publish
-        // loopback lands.
+        // register_with_locality_session_local_does_not_fire_on_inbound.
+        // R238 — self-query loopback landed via
+        // [`QueryableRegistry::local_query`]; on the inbound
+        // (wire-arrived) path the SessionLocal suppression still
+        // holds (this test). The new loopback path is verified by
+        // `local_query_fires_session_local_queryable` below.
         use crate::locality::Locality;
         let mut reg = QueryableRegistry::new();
         let invocations = Arc::new(AtomicUsize::new(0));
@@ -1299,4 +1388,154 @@ mod tests {
         assert_eq!(replies.len(), 2);
     }
 
+    // ── R238 Self-query loopback (local_query) ──
+
+    #[test]
+    fn local_query_fires_any_locality_queryable() {
+        // Locality::Any queryables fire on both wire-arrived and
+        // loopback paths. The loopback path runs through
+        // fire_matching_queryables(is_remote=false) which selects
+        // allows_local() — true for Any. Mirrors pubsub's
+        // local_publish_fires_any_locality_subscriber.
+        let mut reg = QueryableRegistry::new();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        reg.register("home/temp", move |_q, responder| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            responder.send_reply(b"22.5");
+        });
+
+        let mut replies = Vec::new();
+        let query = Query::default();
+        reg.local_query(/*rid=*/ 7, "home/temp", &query, &mut replies);
+
+        assert_eq!(invocations.load(Ordering::SeqCst), 1);
+        assert_eq!(replies.len(), 1);
+        match &replies[0] {
+            QueryReply::Reply { rid, keyexpr_literal, body, .. } => {
+                assert_eq!(*rid, 7, "rid echoed from local_query call");
+                assert_eq!(keyexpr_literal, "home/temp", "caller-supplied literal echoed");
+                assert_eq!(*body, ReplyBody::Put(b"22.5".to_vec()));
+            }
+            other => panic!("expected Reply::Put, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn local_query_fires_session_local_queryable() {
+        // Locality::SessionLocal is the canonical loopback-only
+        // setting: allows_local() true, allows_remote() false. A
+        // SessionLocal queryable was dormant pre-R238; R238 activates
+        // it through local_query. Mirrors pubsub's
+        // local_publish_fires_session_local_subscriber.
+        use crate::locality::Locality;
+        let mut reg = QueryableRegistry::new();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        reg.register_with_locality(
+            "home/temp",
+            Locality::SessionLocal,
+            move |_q, responder| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                responder.send_reply(b"22.5");
+            },
+        );
+
+        let mut replies = Vec::new();
+        let query = Query::default();
+        reg.local_query(1, "home/temp", &query, &mut replies);
+
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            1,
+            "Locality::SessionLocal fires on R238 loopback (is_remote=false)"
+        );
+        assert_eq!(replies.len(), 1);
+    }
+
+    #[test]
+    fn local_query_suppresses_remote_only_queryable() {
+        // Locality::Remote is the wire-only setting: allows_remote()
+        // true, allows_local() false. A Remote queryable must never
+        // see a self-query loopback — mirrors zenoh-pico's
+        // _z_locality_allows_local(Z_LOCALITY_REMOTE) returning
+        // false. Mirrors pubsub's
+        // local_publish_suppresses_remote_only_subscriber.
+        use crate::locality::Locality;
+        let mut reg = QueryableRegistry::new();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        reg.register_with_locality(
+            "home/temp",
+            Locality::Remote,
+            move |_q, _responder| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        let mut replies = Vec::new();
+        let query = Query::default();
+        reg.local_query(1, "home/temp", &query, &mut replies);
+
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "Locality::Remote suppresses R238 loopback"
+        );
+        assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn local_query_returns_no_replies_when_pattern_mismatches() {
+        // A loopback whose literal does not match any registered
+        // queryable pattern is a silent no-op — the registry yields
+        // nothing rather than failing. Mirrors pubsub's
+        // local_publish_returns_zero_when_pattern_mismatches.
+        let mut reg = QueryableRegistry::new();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        reg.register("home/temp", move |_q, _responder| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let mut replies = Vec::new();
+        let query = Query::default();
+        reg.local_query(1, "home/humid", &query, &mut replies);
+
+        assert_eq!(invocations.load(Ordering::SeqCst), 0);
+        assert!(replies.is_empty());
+    }
+
+    #[test]
+    fn dispatch_request_still_treats_inbound_as_remote_after_r238_split() {
+        // R238 invariance check: extracting the fan-out body into
+        // fire_matching_queryables MUST NOT change dispatch_request's
+        // wire-arrived semantics. A Locality::SessionLocal queryable
+        // continues to be suppressed when the Request arrives via the
+        // wire path (the pre-R238 surface contract every existing
+        // integration test depends on). The new local_query API is
+        // the only entry point that flips the is_remote flag.
+        use crate::locality::Locality;
+        let mut reg = QueryableRegistry::new();
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let counter = invocations.clone();
+        reg.register_with_locality(
+            "home/temp",
+            Locality::SessionLocal,
+            move |_q, _responder| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        let req = request_query(1, 0, Some("home/temp"));
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "dispatch_request preserves the remote-origin filter \
+             (Locality::SessionLocal stays suppressed on wire arrival)"
+        );
+    }
 }
