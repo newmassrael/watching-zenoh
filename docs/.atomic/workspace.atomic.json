@@ -11160,6 +11160,88 @@
         "R241 lesson: action layer's send_request_query already accepts (mapping_id, suffix) → aliased form needs no new action surface; only the Session wrapper splits literal vs aliased. Smaller round than publish_aliased (R229) which needed new build_push_aliased."
       ]
     },
+    "Round 242": {
+      "decision_summary": "R242 Querier struct (z_querier_t mirror): reusable (keyexpr, QueryOptions) target. Session::declare_querier no-op on wire; Querier::get reuses Session::query single-dispatch path.",
+      "changes_bullets": [
+        "session.rs Querier struct (session: Session, keyexpr: String, options: QueryOptions) non_exhaustive + Clone.",
+        "session.rs Session::declare_querier(keyexpr, options) -> Querier (no wire emit — declaration is caller-side aggregation only).",
+        "session.rs Querier::get(on_reply, on_final) -> ReplyHandle delegates to Session::query.",
+        "session.rs Querier::keyexpr() + options() accessors.",
+        "QueryOptions::clone() per get call mirrors zenoh-pico's z_querier_get_options_t copy-on-call shape.",
+        "Mirrors zenoh-pico z_querier_t (api/types.h:266), z_declare_querier + z_querier_get (api/primitives.h:2577,2600).",
+        "Successive get() calls allocate independent rids through the same SessionLinkActions.next_outbound_request_id counter.",
+        "Querier::clone shares the same Arc-backed Session + value-clone of QueryOptions; clones still allocate distinct rids.",
+        "lib test declare_querier_returns_handle_with_keyexpr_and_options.",
+        "lib test declare_querier_does_not_emit_wire_frame_at_declare_time.",
+        "lib test querier_get_fires_loopback_through_session_query_session_local.",
+        "lib test querier_get_called_twice_allocates_independent_rids.",
+        "lib test querier_get_threads_target_option_into_wire.",
+        "lib test querier_clone_shares_session_and_options."
+      ],
+      "verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 402 -> 408 (+6 R242 cases).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R241 65 no-regression)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R243+ QuerierAliased variant (aliased mapping_id + inline_suffix + auto-resolve loopback through outbound table).",
+        "R243+ ReplyRegistry timeout sweep: cancel pending entry + synthesise Final when QueryOptions.timeout_ms passes without peer Final.",
+        "R243+ Q_B / Q_E wire codec slots (Query body payload + encoding) require SCE-side codec extension.",
+        "R243+ Querier::get_matching_status (z_querier_get_matching_status mirror) — needs wire RemoteQueryableRegistry coverage check.",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R242 lesson: 'declaration' that's purely caller-side aggregation (no peer state) is a no-op on the wire by design — do not invent a fake DeclareQuerier wire message to mirror zenoh-pico c-ergo of declare-vs-get split."
+      ],
+      "publishable_decision_summary": "R242 Querier struct (z_querier_t mirror): reusable (keyexpr, QueryOptions) target. Session::declare_querier no-op on wire; Querier::get reuses Session::query single-dispatch path.",
+      "publishable_changes_bullets": [
+        "session.rs Querier struct (session: Session, keyexpr: String, options: QueryOptions) non_exhaustive + Clone.",
+        "session.rs Session::declare_querier(keyexpr, options) -> Querier (no wire emit — declaration is caller-side aggregation only).",
+        "session.rs Querier::get(on_reply, on_final) -> ReplyHandle delegates to Session::query.",
+        "session.rs Querier::keyexpr() + options() accessors.",
+        "QueryOptions::clone() per get call mirrors zenoh-pico's z_querier_get_options_t copy-on-call shape.",
+        "Mirrors zenoh-pico z_querier_t (api/types.h:266), z_declare_querier + z_querier_get (api/primitives.h:2577,2600).",
+        "Successive get() calls allocate independent rids through the same SessionLinkActions.next_outbound_request_id counter.",
+        "Querier::clone shares the same Arc-backed Session + value-clone of QueryOptions; clones still allocate distinct rids.",
+        "lib test declare_querier_returns_handle_with_keyexpr_and_options.",
+        "lib test declare_querier_does_not_emit_wire_frame_at_declare_time.",
+        "lib test querier_get_fires_loopback_through_session_query_session_local.",
+        "lib test querier_get_called_twice_allocates_independent_rids.",
+        "lib test querier_get_threads_target_option_into_wire.",
+        "lib test querier_clone_shares_session_and_options."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 402 -> 408 (+6 R242 cases).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R241 65 no-regression)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R243+ QuerierAliased variant (aliased mapping_id + inline_suffix + auto-resolve loopback through outbound table).",
+        "R243+ ReplyRegistry timeout sweep: cancel pending entry + synthesise Final when QueryOptions.timeout_ms passes without peer Final.",
+        "R243+ Q_B / Q_E wire codec slots (Query body payload + encoding) require SCE-side codec extension.",
+        "R243+ Querier::get_matching_status (z_querier_get_matching_status mirror) — needs wire RemoteQueryableRegistry coverage check.",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R242 lesson: 'declaration' that's purely caller-side aggregation (no peer state) is a no-op on the wire by design — do not invent a fake DeclareQuerier wire message to mirror zenoh-pico c-ergo of declare-vs-get split."
+      ]
+    },
     "Round 25": {
       "decision_summary": "Phase E register — README.md workspace.docs 재등록 land; R24 한국어 본문을 영문 primary로 재작성 + README.ko.md satellite로 분리 (사용자 정정 'README는 영문 primary, KO 번역은 별도 링크'); 첫 시도 11 parser orphan (URL 링크 + plain §N) → 파서-친화 form 으로 해결 후 12/12 docs clean.",
       "changes_bullets": [
