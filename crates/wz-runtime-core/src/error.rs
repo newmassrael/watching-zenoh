@@ -23,16 +23,31 @@ use core::fmt;
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeError {
-    /// The spawned task did not complete normally — it panicked, was
-    /// cancelled before producing an `Output`, or otherwise failed
-    /// to deliver a result through the `JoinHandle`. Mirror of
-    /// `tokio::task::JoinError`'s "panicked or cancelled" union
-    /// (tokio splits the two via [`JoinError::is_panic`] /
-    /// `is_cancelled`; we collapse them at the trait boundary
-    /// because MCU runtimes generally do not distinguish).
+    /// The spawned task panicked before producing its `Output`.
+    /// Distinct from [`Self::JoinCancelled`] which signals a
+    /// deliberate shutdown / abort path. Mirror of
+    /// `tokio::task::JoinError::is_panic()`.
+    ///
+    /// R257 — prior to this round the variant collapsed both
+    /// panic and cancellation cases. zenoh-pico semantics
+    /// distinguish "the code broke" from "we asked the task to
+    /// stop"; this round splits the variants so callers can
+    /// react appropriately (panic = log + bail; cancellation =
+    /// expected during shutdown). MCU runtimes that genuinely
+    /// can't distinguish may surface `JoinFailed` for both
+    /// failure modes without violating the trait contract — the
+    /// variant pair lets richer impls (tokio, embassy with
+    /// explicit cancel signal) be honest about what happened.
     ///
     /// [`JoinError::is_panic`]: https://docs.rs/tokio/latest/tokio/task/struct.JoinError.html#method.is_panic
     JoinFailed,
+    /// The spawned task was cancelled before producing its
+    /// `Output`. This is the deliberate-shutdown / abort case:
+    /// either an explicit `abort()` call on the handle, or a
+    /// runtime-level shutdown that aborts every outstanding
+    /// task. Distinct from [`Self::JoinFailed`] (panic).
+    /// Mirror of `tokio::task::JoinError::is_cancelled()`.
+    JoinCancelled,
     /// The runtime is shutting down and refuses to accept new spawn
     /// requests or queue new sleeps. Used by impls that have an
     /// explicit shutdown signal (tokio runtime drop, embassy
@@ -44,8 +59,9 @@ pub enum RuntimeError {
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::JoinFailed => {
-                f.write_str("RuntimeError: spawned task did not produce an output")
+            Self::JoinFailed => f.write_str("RuntimeError: spawned task panicked"),
+            Self::JoinCancelled => {
+                f.write_str("RuntimeError: spawned task was cancelled before completion")
             }
             Self::Shutdown => {
                 f.write_str("RuntimeError: runtime is shutting down; new work refused")
@@ -84,7 +100,10 @@ mod std_error_tests {
         // return slots that AP-profile callers use (CLI tools,
         // top-level main() returns, etc.).
         let err: Box<dyn std::error::Error> = Box::new(RuntimeError::JoinFailed);
-        assert!(err.to_string().contains("did not produce an output"));
+        // R257 — JoinFailed Display narrowed to "panicked"; the
+        // generic "did not produce an output" wording moved to
+        // the new JoinCancelled variant doc-comment.
+        assert!(err.to_string().contains("panicked"));
     }
 
     #[test]

@@ -93,14 +93,48 @@ impl Runtime for TokioRuntime {
 /// [`Runtime::JoinHandle`] GAT bounds.
 ///
 /// Dropping a `TokioJoinHandle` does NOT cancel the spawned task —
-/// tokio's `JoinHandle::abort` is opt-in, and this wrapper does not
-/// (yet) expose an abort method. The R251 trait contract says drop
-/// = "no cancellation" so the wrapper enforces that by hiding
-/// `abort` from the public surface. A future round can add an
-/// explicit [`Self::abort`] method if a caller motivates it.
+/// matches tokio's own `JoinHandle` semantics where `abort` is
+/// opt-in and `drop` only releases the join channel. For deliberate
+/// task cancellation, call [`Self::abort`] explicitly (R257).
+///
+/// ## R257 — JoinError disambiguation
+///
+/// The [`Future`] impl maps `tokio::task::JoinError` to one of two
+/// [`RuntimeError`] variants based on `JoinError::is_cancelled()`
+/// vs `JoinError::is_panic()`:
+///
+/// - panic → [`RuntimeError::JoinFailed`]
+/// - cancellation → [`RuntimeError::JoinCancelled`]
+///
+/// Prior rounds collapsed both into JoinFailed; the disambiguation
+/// lets shutdown paths distinguish "code broke" from "we asked the
+/// task to stop". The trait-level contract (`Result<T,
+/// RuntimeError>`) is unchanged; only the variant routing
+/// sharpened.
 #[derive(Debug)]
 pub struct TokioJoinHandle<T> {
     inner: tokio::task::JoinHandle<T>,
+}
+
+impl<T> TokioJoinHandle<T> {
+    /// R257 — abort the spawned task. Cooperative cancellation:
+    /// the task receives a cancellation signal at its next yield
+    /// point (every `.await` is a yield point under tokio). After
+    /// abort, polling the handle eventually resolves to
+    /// `Err(RuntimeError::JoinCancelled)`. Idempotent — calling
+    /// abort on an already-completed task is a no-op.
+    ///
+    /// Mirrors `tokio::task::JoinHandle::abort` with the trait
+    /// crate's error vocabulary. Not exposed on the
+    /// [`crate::runtime_impl::TokioRuntime`] trait surface
+    /// because the [`Runtime`] trait skeleton (R251) deliberately
+    /// scoped abort out — adding it would require either a trait
+    /// extension or a separate `Cancellable` trait. The
+    /// struct-level abort here is the pragmatic AP-profile escape
+    /// hatch zenoh-pico shutdown paths need.
+    pub fn abort(&self) {
+        self.inner.abort();
+    }
 }
 
 impl<T> Future for TokioJoinHandle<T>
@@ -116,12 +150,19 @@ where
         match Pin::new(&mut self.inner).poll(cx) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(value)) => Poll::Ready(Ok(value)),
-            // tokio's JoinError disambiguates panic vs cancel via
-            // `is_panic` / `is_cancelled`; the trait collapses both
-            // to `JoinFailed` because MCU runtimes generally do not
-            // distinguish. The disambiguation is recoverable from a
-            // future round by adding a richer error variant.
-            Poll::Ready(Err(_join_error)) => Poll::Ready(Err(RuntimeError::JoinFailed)),
+            Poll::Ready(Err(join_error)) => {
+                // R257 — disambiguate JoinError. `is_cancelled()`
+                // wins over `is_panic()` when both happen to be
+                // true (zenoh-pico semantic: shutdown intent
+                // dominates even if the task also panicked mid-
+                // cancellation). The two are mutually exclusive in
+                // practice; the ordering is a defence-in-depth.
+                if join_error.is_cancelled() {
+                    Poll::Ready(Err(RuntimeError::JoinCancelled))
+                } else {
+                    Poll::Ready(Err(RuntimeError::JoinFailed))
+                }
+            }
         }
     }
 }
@@ -222,12 +263,54 @@ mod tests {
 
     #[tokio::test]
     async fn tokio_runtime_spawn_panic_resolves_to_join_failed() {
+        // R257 — JoinFailed now means panic specifically (not the
+        // earlier collapsed panic+cancel union). Cancellation
+        // resolves to JoinCancelled per the sibling abort test.
         let rt = TokioRuntime;
         let handle = rt.spawn(async {
             panic!("intentional panic for JoinFailed test");
         });
         let result: Result<(), RuntimeError> = handle.await;
         assert_eq!(result, Err(RuntimeError::JoinFailed));
+    }
+
+    #[tokio::test]
+    async fn tokio_runtime_aborted_handle_resolves_to_join_cancelled() {
+        // R257 — abort() routes to RuntimeError::JoinCancelled
+        // (distinct from JoinFailed which is panic-only). Spawn a
+        // task that would never complete on its own; abort it
+        // immediately; the join returns the cancellation variant.
+        // The task body's `tokio::time::sleep` reaches a yield
+        // point where the cancellation signal lands.
+        let rt = TokioRuntime;
+        let handle = rt.spawn(async {
+            tokio::time::sleep(TokioDuration::from_secs(60)).await;
+        });
+        handle.abort();
+        let result: Result<(), RuntimeError> = handle.await;
+        assert_eq!(result, Err(RuntimeError::JoinCancelled));
+    }
+
+    #[tokio::test]
+    async fn tokio_runtime_join_error_routes_panic_vs_cancel_distinctly() {
+        // R257 — JoinFailed vs JoinCancelled disambiguation is
+        // observable from the trait surface; pin the contract
+        // with side-by-side spawns.
+        let rt = TokioRuntime;
+        let panic_handle = rt.spawn(async {
+            panic!("panic path");
+        });
+        let cancel_handle = rt.spawn(async {
+            tokio::time::sleep(TokioDuration::from_secs(60)).await;
+        });
+        cancel_handle.abort();
+        let panic_outcome: Result<(), RuntimeError> = panic_handle.await;
+        let cancel_outcome: Result<(), RuntimeError> = cancel_handle.await;
+        assert_eq!(panic_outcome, Err(RuntimeError::JoinFailed));
+        assert_eq!(cancel_outcome, Err(RuntimeError::JoinCancelled));
+        // Sanity: the two variants are NOT structurally equal,
+        // which is the whole point of the R257 split.
+        assert_ne!(RuntimeError::JoinFailed, RuntimeError::JoinCancelled);
     }
 
     #[tokio::test]
