@@ -16,12 +16,16 @@
 #   Layer A  — mnemosyne-cli validate-workspace
 #   Layer A2 — scripts/audit-mid-values.sh (envelope mid value= gate; R111)
 #   Layer B  — verify-codegen.sh per codec (L1+L2+L3)
+#   Layer C0 — binary-dep test #[ignore] discipline pre-flight
+#              (R235-hotfix; rejects new e2e tests that would panic
+#              Layer C1 on fresh CI checkouts)
 #   Layer C1 — cargo test --workspace
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
 #   Layer D  — deploy/*.yaml schema validate
-#   Layer E  — ap_demo + initiator round-trip suite (R121c z_put →
-#              wz subscriber + R121e wz publisher → z_sub + R121f
-#              wz initiator → wz acceptor; three tests in one lane)
+#   Layer E  — binary-dep e2e suite via `cargo test ... -- --ignored`
+#              (auto-includes every #[ignore]-marked test in the
+#              wz-integration-tests crate; wz-ap-demo + zenoh-pico CLI
+#              must be built first or the lane SKIPs gracefully)
 #   Layer 0  — (optional) actionlint .github/workflows/
 #
 # Exit codes:
@@ -246,6 +250,69 @@ layer_b_verify_codegen() {
     return $fail
 }
 
+# ─── Layer C0 — binary-dep test discipline pre-flight ───────────────
+# R235-hotfix: Layer C1 runs `cargo test --workspace` which fans
+# every `#[test]` fn in `crates/wz-integration-tests/tests/`. Tests
+# that spawn the wz-ap-demo binary or a zenoh-pico CLI binary panic
+# with "binary not found" when those artifacts are not yet built —
+# on the local developer machine the cached binaries usually exist
+# so the panic stays hidden, but a fresh CI checkout has empty
+# `target/` and the cargo test --workspace lane fails before the
+# "Build wz-ap-demo binary (Layer E dep)" step ever runs.
+#
+# The discipline fix is to mark every binary-dep test with
+# `#[ignore = "..."]` so Layer C1 skips them and Layer E picks them
+# up via `cargo test ... -- --ignored`. Layer C0 enforces the
+# discipline mechanically: any test file that calls
+# `wz_ap_demo_binary()` or `zenoh_pico_cli_binary(` MUST pair every
+# `#[test]` with an adjacent `#[ignore]` (next non-blank line). A
+# violation fails the lane with a file:line pointer and a copy-
+# pastable fix line.
+#
+# Runs before Layer C1 in the dispatch order so a developer who
+# adds a new e2e test without #[ignore] sees a fast localised
+# failure instead of waiting for the full cargo test --workspace
+# panic message.
+layer_c0_test_discipline() {
+    local exit_code=0
+    local violations_count=0
+    while IFS= read -r f; do
+        if ! grep -q 'wz_ap_demo_binary()\|zenoh_pico_cli_binary(' "$f"; then
+            continue
+        fi
+        local report
+        report=$(awk '
+            /^#\[test\]/ {
+                test_count++
+                test_line = NR
+                if ((getline next_line) > 0 && next_line ~ /^#\[ignore/) {
+                    next
+                }
+                print FILENAME ":" test_line ": #[test] missing adjacent #[ignore]"
+            }
+        ' "$f")
+        if [[ -n "$report" ]]; then
+            echo "$report" >&2
+            violations_count=$((violations_count + 1))
+            exit_code=1
+        fi
+    done < <(find crates/wz-integration-tests/tests -maxdepth 1 -name '*.rs' | sort)
+
+    if [[ $exit_code -ne 0 ]]; then
+        echo "" >&2
+        echo "Layer C0: $violations_count binary-dep test file(s) violate the" >&2
+        echo "  #[test] + #[ignore] discipline. Layer C1 (cargo test" >&2
+        echo "  --workspace) would panic on these on fresh CI checkouts" >&2
+        echo "  where wz-ap-demo + zenoh-pico CLI binaries are not yet" >&2
+        echo "  built (R235-hotfix root cause)." >&2
+        echo "" >&2
+        echo "Fix: add this line immediately after the offending #[test]:" >&2
+        echo "  #[ignore = \"binary-dep e2e (wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored\"]" >&2
+        return 1
+    fi
+    return 0
+}
+
 # ─── Layer C1 — cargo test --workspace ──────────────────────────────
 layer_c1_cargo_test() {
     (cd crates && cargo test --workspace --quiet)
@@ -333,13 +400,19 @@ layer_e_ap_demo_round_trip() {
     # unit-level wire-byte gate
     # (`build_declare_kexpr_emits_zenoh_pico_compatible_wire_bytes`)
     # and the integration test here.
-    (cd crates && cargo test -p wz-integration-tests \
-        --test ap_demo_round_trip \
-        --test wz_publisher_to_zsub \
-        --test wz_initiator_to_wz_acceptor \
-        --test wz_initiator_to_zsub \
-        --test wz_publisher_aliased_to_zsub \
-        --quiet)
+    # R235-hotfix — every binary-dep test in
+    # crates/wz-integration-tests/tests/ is marked `#[ignore = "..."]`
+    # so Layer C1 (`cargo test --workspace`) skips them on fresh CI
+    # checkouts where wz-ap-demo + zenoh-pico CLI are not built yet.
+    # Layer C0 enforces the discipline as a pre-flight gate. Here
+    # Layer E runs the ignored set via `-- --ignored`; new binary-dep
+    # tests are auto-included as long as they keep the convention,
+    # so the per-test `--test foo` list no longer needs hand-sync
+    # with the actual fileset. The legacy R121e+R121f+R121g+R121h
+    # five-test bundle is preserved in spirit — `--ignored` runs the
+    # superset (every binary-dep test in the crate) which matches
+    # the e2e gate intent.
+    (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored)
 }
 
 # ─── dispatch ──────────────────────────────────────────────────────
@@ -348,6 +421,7 @@ run_layer 0 layer_0_actionlint || overall=1
 run_layer A layer_a_mnemosyne || overall=1
 run_layer A2 layer_a2_audit_mid_values || overall=1
 run_layer B layer_b_verify_codegen || overall=1
+run_layer C0 layer_c0_test_discipline || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer D layer_d_validate_deploy || overall=1

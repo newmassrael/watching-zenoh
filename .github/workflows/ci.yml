@@ -173,6 +173,17 @@ jobs:
       - name: Layer B — verify-codegen.sh per codec
         run: bash scripts/run-ci.sh --layer B
 
+      - name: Layer C0 — binary-dep test #[ignore] discipline
+        # R235-hotfix — pre-flight scan: any wz-integration-tests
+        # `tests/*.rs` that calls wz_ap_demo_binary() or
+        # zenoh_pico_cli_binary( MUST mark every #[test] with an
+        # adjacent #[ignore = "..."] so Layer C1 (cargo test
+        # --workspace) skips it on fresh CI checkouts where the
+        # required binaries are not yet built. Catches the bug
+        # class at PR time rather than after Layer C1 panics with
+        # "binary not found" downstream.
+        run: bash scripts/run-ci.sh --layer C0
+
       - name: Layer C1 — cargo test --workspace
         run: bash scripts/run-ci.sh --layer C1
 
