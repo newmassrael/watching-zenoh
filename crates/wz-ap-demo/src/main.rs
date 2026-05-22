@@ -322,8 +322,28 @@ fn demo_session_init_params(role: &Role) -> SessionInitParams {
 /// never emits outbound bytes — the FSM's outbound path is wired
 /// through `OutboundWriteDriver` (`BoxedLinkDriver` shape) held by
 /// `SessionLinkActions`.
+///
+/// R265 — `read_state` carries partial-read bytes across
+/// `tokio::select!` cancellations of `poll_event` so a future that
+/// loses a select race does not drop in-flight wire bytes. Mirrors
+/// the same state machine on `wz_runtime_tokio::TcpDriver`; see the
+/// `wz_runtime_tokio::ReadState` doc-comment for the cancel-safety
+/// rationale.
 struct InboundReadDriver {
     reader: OwnedReadHalf,
+    read_state: InboundReadState,
+}
+
+/// R265 — cancel-safe partial-read state for
+/// [`InboundReadDriver::poll_event`]. Mirrors `wz_runtime_tokio::
+/// ReadState` (kept locally so the binary does not depend on a
+/// library-internal type). See that doc-comment for the rationale.
+#[derive(Default)]
+enum InboundReadState {
+    #[default]
+    Idle,
+    Length { prefix: [u8; 2], offset: usize },
+    Payload { frame: Vec<u8>, offset: usize },
 }
 
 impl LinkDriver for InboundReadDriver {
@@ -358,33 +378,76 @@ impl LinkDriver for InboundReadDriver {
     }
 
     async fn poll_event(&mut self) -> LinkEvent {
-        let mut len_buf = [0u8; 2];
-        match self.reader.read_exact(&mut len_buf).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                return LinkEvent::Lost {
-                    cause: LostCause::PeerClosed,
-                };
+        // R265 — cancel-safe state machine; each `.await` is a
+        // single `.read()` syscall, partial-read bytes survive
+        // a `tokio::select!` drop in `self.read_state`. See
+        // `InboundReadState` for the state graph and
+        // `wz_runtime_tokio::ReadState` for the full rationale.
+        loop {
+            match &mut self.read_state {
+                InboundReadState::Idle => {
+                    self.read_state = InboundReadState::Length {
+                        prefix: [0u8; 2],
+                        offset: 0,
+                    };
+                }
+                InboundReadState::Length { prefix, offset } => {
+                    match self.reader.read(&mut prefix[*offset..]).await {
+                        Ok(0) => {
+                            self.read_state = InboundReadState::Idle;
+                            return LinkEvent::Lost {
+                                cause: LostCause::PeerClosed,
+                            };
+                        }
+                        Ok(n) => {
+                            *offset += n;
+                            if *offset == 2 {
+                                let payload_len =
+                                    u16::from_le_bytes(*prefix) as usize;
+                                self.read_state = InboundReadState::Payload {
+                                    frame: vec![0u8; payload_len],
+                                    offset: 0,
+                                };
+                            }
+                        }
+                        Err(_) => {
+                            self.read_state = InboundReadState::Idle;
+                            return LinkEvent::Lost {
+                                cause: LostCause::OsError,
+                            };
+                        }
+                    }
+                }
+                InboundReadState::Payload { frame, offset } => {
+                    if *offset == frame.len() {
+                        let bytes = std::mem::take(frame);
+                        self.read_state = InboundReadState::Idle;
+                        log::debug!(
+                            "wz-ap-demo: inbound frame len={} bytes={:02x?}",
+                            bytes.len(),
+                            bytes
+                        );
+                        return LinkEvent::Rx(RxFrame { bytes });
+                    }
+                    match self.reader.read(&mut frame[*offset..]).await {
+                        Ok(0) => {
+                            self.read_state = InboundReadState::Idle;
+                            return LinkEvent::Lost {
+                                cause: LostCause::PeerClosed,
+                            };
+                        }
+                        Ok(n) => {
+                            *offset += n;
+                        }
+                        Err(_) => {
+                            self.read_state = InboundReadState::Idle;
+                            return LinkEvent::Lost {
+                                cause: LostCause::OsError,
+                            };
+                        }
+                    }
+                }
             }
-            Err(_) => {
-                return LinkEvent::Lost {
-                    cause: LostCause::OsError,
-                };
-            }
-        }
-        let len = u16::from_le_bytes(len_buf) as usize;
-        let mut buf = vec![0u8; len];
-        match self.reader.read_exact(&mut buf).await {
-            Ok(_) => {
-                log::debug!(
-                    "wz-ap-demo: inbound frame len={} bytes={:02x?}",
-                    len, buf
-                );
-                LinkEvent::Rx(RxFrame { bytes: buf })
-            }
-            Err(_) => LinkEvent::Lost {
-                cause: LostCause::PeerClosed,
-            },
         }
     }
 }
@@ -937,7 +1000,10 @@ async fn run_demo(
     //          owns the `OwnedWriteHalf`; the FSM-facing
     //          `OutboundWriteDriver` holds only the sender.
     let (reader, writer) = stream.into_split();
-    let inbound = InboundReadDriver { reader };
+    let inbound = InboundReadDriver {
+        reader,
+        read_state: InboundReadState::Idle,
+    };
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let writer_handle = tokio::spawn(writer_task(writer, outbound_rx));
     let outbound = Arc::new(OutboundWriteDriver { tx: outbound_tx });

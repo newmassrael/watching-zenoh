@@ -263,6 +263,54 @@ pub trait LinkDriver {
 /// length sniff; the structural decode runs through the codec.
 pub struct TcpDriver {
     stream: Option<TcpStream>,
+    /// R265 — partial-read state machine for the cancel-safe
+    /// poll_event implementation. Carries the in-flight length
+    /// prefix or payload bytes across `tokio::select!` cancellations
+    /// of `poll_event`, so the next iteration resumes from the
+    /// last byte offset rather than re-syncing from a mid-frame
+    /// socket cursor. See [`ReadState`] for the state graph.
+    read_state: ReadState,
+}
+
+/// R265 — cancel-safe partial-read state for [`TcpDriver::poll_event`]
+/// (the same shape is mirrored on `wz-ap-demo`'s `InboundReadDriver`).
+///
+/// Background. The `tokio::io::AsyncReadExt::read_exact` future loops
+/// internally over `.read()` calls; if its outer future is dropped
+/// (e.g. by `tokio::select!` losing the race) any bytes already
+/// consumed from the socket are discarded. For a length-prefixed
+/// envelope (2 byte length, N byte payload) that means the next
+/// poll re-reads from the socket cursor at an offset that no longer
+/// aligns with a frame boundary, and the decoder mis-interprets
+/// payload bytes as the next frame's length. R264 fixture surfaced
+/// this when a sub-second sweep cadence inside `drive_session_until_-
+/// terminal` race-cancelled `poll_and_dispatch_one` 10x/s.
+///
+/// Fix shape. The state machine keeps the partial-read buffers in
+/// `&mut self`, and the only `.await` point per state transition is
+/// a single `.read()` syscall. `AsyncReadExt::read` is documented as
+/// cancel-safe (no bytes consumed if the future is dropped before
+/// completion), so dropping `poll_event` mid-state leaves the
+/// captured offset / buffer intact for the next invocation.
+#[derive(Default)]
+enum ReadState {
+    /// No partial read in flight. Next `poll_event` enters
+    /// `Length` and begins reading the 2-byte prefix.
+    #[default]
+    Idle,
+    /// Length prefix partially read. `prefix[..offset]` holds the
+    /// bytes consumed so far; `offset < 2`. Once `offset == 2`,
+    /// the prefix is decoded and the state transitions to
+    /// `Payload` with a sized buffer.
+    Length { prefix: [u8; 2], offset: usize },
+    /// Payload partially read into `frame[..offset]`; `frame`
+    /// includes the 2-byte length prefix at `frame[..2]` so the
+    /// codec decode at frame-complete operates on the wire-shape
+    /// bytes verbatim. `offset < frame.len()` while reading;
+    /// `offset == frame.len()` means the frame is complete and
+    /// the state machine emits a `LinkEvent::Rx` + transitions
+    /// back to `Idle` on the next iteration.
+    Payload { frame: Vec<u8>, offset: usize },
 }
 
 impl TcpDriver {
@@ -271,6 +319,7 @@ impl TcpDriver {
     pub fn from_stream(stream: TcpStream) -> Self {
         Self {
             stream: Some(stream),
+            read_state: ReadState::Idle,
         }
     }
 }
@@ -328,49 +377,90 @@ impl LinkDriver for TcpDriver {
                 cause: LostCause::PeerClosed,
             },
         };
-        // Two-step read: the codec_stream_envelope wire shape is
-        // `uint16 payload_len LE + bytes payload[payload_len]` and the
-        // payload size is needed before the second read can be sized.
-        // Sniff the 2-byte prefix raw, then read the payload into the
-        // tail of a single frame buffer, then decode the full frame
-        // through `StreamEnvelope::decode` for byte-stable SSOT (the
-        // 2-byte sniff mirrors stream_envelope.scxml's min frame
-        // bytes; future SCE round may expose `MIN_FRAME_BYTES` as an
-        // associated const so this hardcoded `2` can also be removed).
-        let mut prefix = [0u8; 2];
-        match stream.read_exact(&mut prefix).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                return LinkEvent::Lost {
-                    cause: LostCause::PeerClosed,
-                };
-            }
-            Err(_) => {
-                return LinkEvent::Lost {
-                    cause: LostCause::OsError,
-                };
+        // R265 — cancel-safe state machine. Each `.await` is a
+        // single `.read()` syscall (cancel-safe per tokio
+        // contract); the buffered partial read survives across
+        // `tokio::select!` drops in `self.read_state`. See the
+        // `ReadState` doc-comment for the cancellation rationale.
+        // Frame-complete branch is the only exit path that emits
+        // `LinkEvent::Rx`; error / EOF branches reset
+        // `self.read_state` to `Idle` so a future open()+retry
+        // path does not inherit a partial buffer from the lost
+        // connection.
+        loop {
+            match &mut self.read_state {
+                ReadState::Idle => {
+                    self.read_state = ReadState::Length {
+                        prefix: [0u8; 2],
+                        offset: 0,
+                    };
+                }
+                ReadState::Length { prefix, offset } => {
+                    match stream.read(&mut prefix[*offset..]).await {
+                        Ok(0) => {
+                            self.read_state = ReadState::Idle;
+                            return LinkEvent::Lost {
+                                cause: LostCause::PeerClosed,
+                            };
+                        }
+                        Ok(n) => {
+                            *offset += n;
+                            if *offset == 2 {
+                                let payload_len =
+                                    u16::from_le_bytes(*prefix) as usize;
+                                let mut frame = vec![0u8; 2 + payload_len];
+                                frame[..2].copy_from_slice(prefix);
+                                self.read_state = ReadState::Payload {
+                                    frame,
+                                    offset: 2,
+                                };
+                            }
+                        }
+                        Err(_) => {
+                            self.read_state = ReadState::Idle;
+                            return LinkEvent::Lost {
+                                cause: LostCause::OsError,
+                            };
+                        }
+                    }
+                }
+                ReadState::Payload { frame, offset } => {
+                    if *offset == frame.len() {
+                        // Frame complete. Take the buffer out
+                        // before decoding so the state reset is
+                        // visible if the codec rejects.
+                        let bytes = std::mem::take(frame);
+                        self.read_state = ReadState::Idle;
+                        let mut cursor = SceCursor::new(&bytes);
+                        return match StreamEnvelope::decode(&mut cursor) {
+                            Ok(env) => LinkEvent::Rx(RxFrame {
+                                bytes: env.payload,
+                            }),
+                            Err(_) => LinkEvent::Lost {
+                                cause: LostCause::PeerClosed,
+                            },
+                        };
+                    }
+                    match stream.read(&mut frame[*offset..]).await {
+                        Ok(0) => {
+                            self.read_state = ReadState::Idle;
+                            return LinkEvent::Lost {
+                                cause: LostCause::PeerClosed,
+                            };
+                        }
+                        Ok(n) => {
+                            *offset += n;
+                        }
+                        Err(_) => {
+                            self.read_state = ReadState::Idle;
+                            return LinkEvent::Lost {
+                                cause: LostCause::OsError,
+                            };
+                        }
+                    }
+                }
             }
         }
-        let payload_len = u16::from_le_bytes(prefix) as usize;
-        let mut frame = vec![0u8; 2 + payload_len];
-        frame[..2].copy_from_slice(&prefix);
-        if stream.read_exact(&mut frame[2..]).await.is_err() {
-            return LinkEvent::Lost {
-                cause: LostCause::PeerClosed,
-            };
-        }
-        let mut cursor = SceCursor::new(&frame);
-        let envelope = match StreamEnvelope::decode(&mut cursor) {
-            Ok(e) => e,
-            Err(_) => {
-                return LinkEvent::Lost {
-                    cause: LostCause::PeerClosed,
-                };
-            }
-        };
-        LinkEvent::Rx(RxFrame {
-            bytes: envelope.payload,
-        })
     }
 }
 
