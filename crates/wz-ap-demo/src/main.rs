@@ -177,6 +177,7 @@ fn print_usage() {
     eprintln!("               [--on-query-reply-log]");
     eprintln!("               [--on-query-final-log]");
     eprintln!("               [--query-timeout-ms <ms>]");
+    eprintln!("               [--sweep-cadence-ms <ms>]");
     eprintln!();
     eprintln!("OPTIONS:");
     eprintln!("    --listen <addr>          acceptor mode (e.g. 127.0.0.1:7447)");
@@ -225,6 +226,12 @@ fn print_usage() {
     eprintln!("                             (timeout_ms + driver-loop-tick) of register");
     eprintln!("                             time if no peer Final arrives. 0 (default)");
     eprintln!("                             disables the timeout (requires --query)");
+    eprintln!("    --sweep-cadence-ms <ms>  R264 sweep_task tick period in ms. Each tick");
+    eprintln!("                             invokes ReplyRegistry::sweep_timed_out so");
+    eprintln!("                             expired --query-timeout-ms entries fire their");
+    eprintln!("                             on_final callback. Lower = tighter bound on");
+    eprintln!("                             post-deadline wall-time at the cost of more");
+    eprintln!("                             wake-ups. Must be > 0. Default 100");
     eprintln!("    --help, -h               print this help and exit");
     eprintln!();
     eprintln!("Exactly one of --listen / --connect is required.");
@@ -659,6 +666,31 @@ fn main() -> ExitCode {
         },
         None => 0,
     };
+    // R270 — optional --sweep-cadence-ms <N> sets the R264 sweep_task
+    // tick period. Must be > 0 (0 would be a busy loop); default 100
+    // matches the pre-R270 hardcoded constant. R264 carry closed here:
+    // the cadence is now a CLI-tunable knob rather than a literal at
+    // the sleep call site, so wall-time-bounded tests + topology-
+    // specific tuning have a first-class entry point.
+    let sweep_cadence_ms_opt = parse_pair(rest, "--sweep-cadence-ms");
+    let sweep_cadence_ms: u32 = match sweep_cadence_ms_opt {
+        Some(s) => match s.parse::<u32>() {
+            Ok(0) => {
+                eprintln!(
+                    "wz-ap-demo: --sweep-cadence-ms must be > 0 (0 would busy-loop)",
+                );
+                return ExitCode::from(2);
+            }
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!(
+                    "wz-ap-demo: --sweep-cadence-ms must be a u32 (got {s:?})",
+                );
+                return ExitCode::from(2);
+            }
+        },
+        None => 100,
+    };
     if key_opt.is_none()
         && publish_opt.is_none()
         && delete_opt.is_none()
@@ -868,6 +900,7 @@ fn main() -> ExitCode {
         on_query_reply: on_query_reply_log,
         on_query_final: on_query_final_log,
         query_timeout_ms,
+        sweep_cadence_ms,
     };
     let query_role_spec = QueryRoleSpec {
         queryable: queryable_spec,
@@ -935,6 +968,15 @@ struct ReplyConsumerSpec {
     /// R264 sweep_task surfaces on_final within that wall-clock
     /// budget when no Final arrives.
     query_timeout_ms: u32,
+    /// R270 — sweep_task tick period (ms). Lower values tighten
+    /// the bound on `on_final`'s post-deadline wall-time at the cost
+    /// of more wake-ups. Must be > 0 (the main-side parser rejects
+    /// 0 explicitly so this struct field can stay an unwrapped u32).
+    /// The pre-R270 hardcoded value (100 ms) is the default the
+    /// parser supplies when `--sweep-cadence-ms` is absent, so
+    /// every existing wz-ap-demo invocation retains identical
+    /// behaviour.
+    sweep_cadence_ms: u32,
 }
 
 /// R121j-6-e2e — bundle of the Q/R role config. Carries the
@@ -1389,33 +1431,38 @@ async fn run_demo(
     // computation above (when --query-timeout-ms > 0).
     //
     // R264 — sweep_task is a dedicated `TimeSource::sleep`-driven
-    // ticker that fires `ReplyRegistry::sweep_timed_out` every 100 ms
-    // as a peer task to `drive_session_until_terminal`. The sweep
-    // runs here rather than inside the drive_session loop because
+    // ticker that fires `ReplyRegistry::sweep_timed_out` at the
+    // `--sweep-cadence-ms` interval (R270; default 100 ms preserves
+    // the pre-R270 hardcoded cadence) as a peer task to
+    // `drive_session_until_terminal`. The sweep runs here rather
+    // than inside the drive_session loop because
     // `poll_and_dispatch_one` is NOT cancel-safe for length-prefixed
     // link drivers such as the `InboundReadDriver` above
     // (cancellation between the u16 length read and the payload
     // read drops captured bytes). Clamping the drive_session loop's
-    // sleep arm to 100 ms would cancel the in-flight poll 10x/s;
-    // running the sweep as a peer task means the drive_session
-    // loop's poll future runs to completion without competing
-    // select arms.
+    // sleep arm to the sweep cadence would cancel the in-flight
+    // poll once per tick; running the sweep as a peer task means
+    // the drive_session loop's poll future runs to completion
+    // without competing select arms.
     //
-    // Sweep cadence sizing (100 ms): production AP wz-ap-demo
-    // advertises `--query-timeout-ms` as a user-facing knob with
-    // implicit sub-second resolution. 100 ms bounds on_final's
-    // wall-time at `deadline_ms + 100 ms + scheduler_jitter` (sub-
-    // millisecond on tokio's multi-thread scheduler). MCU profiles
-    // inherit the same constant once Phase W lwIP integration lands
-    // unless a deploy-side knob surfaces; the implementation uses
-    // only `TimeSource::sleep` so the same code is MCU-portable
-    // (does not depend on `tokio::time::interval` specifics — the
-    // sleep-loop shape was chosen for trait portability).
+    // Sweep cadence sizing: production AP wz-ap-demo advertises
+    // `--query-timeout-ms` as a user-facing knob with implicit
+    // sub-second resolution. The default 100 ms cadence bounds
+    // on_final's wall-time at `deadline_ms + cadence + scheduler_
+    // jitter` (sub-millisecond on tokio's multi-thread scheduler).
+    // Operators tuning for tighter / looser bounds set
+    // `--sweep-cadence-ms` directly. MCU profiles will inherit the
+    // same knob once Phase W lwIP integration lands; the
+    // implementation uses only `TimeSource::sleep` so the same code
+    // is MCU-portable (does not depend on `tokio::time::interval`
+    // specifics — the sleep-loop shape was chosen for trait
+    // portability).
     let sweep_clock = session_clock;
     let observer_for_sweep = observer.clone();
+    let sweep_cadence_ms = u64::from(reply_log_spec.sweep_cadence_ms);
     let sweep_task = tokio::spawn(async move {
         loop {
-            sweep_clock.sleep(100).await;
+            sweep_clock.sleep(sweep_cadence_ms).await;
             // Lock the observer for the minimum window: a single
             // sweep call. Holding the lock across an await would
             // serialise this task against drive_session's inbound
