@@ -52,6 +52,20 @@ pub type UndeclQueryableCallback =
 pub struct RemoteQueryableRegistry {
     on_decl: Vec<DeclQueryableCallback>,
     on_undecl: Vec<UndeclQueryableCallback>,
+    /// R288 — peer-declared queryables tracked by `{id -> resolved
+    /// keyexpr}`. Populated on every inbound `DeclQueryable` whose
+    /// keyexpr resolves through `peer_keyexpr_table`, and entries
+    /// removed on the matching `UndeclQueryable`. Backbone for
+    /// [`Querier::get_matching_status`] which iterates this map at
+    /// consult time to decide whether any currently-declared peer
+    /// queryable's keyexpr intersects the querier's keyexpr.
+    ///
+    /// Why a HashMap (rather than a Vec or BTreeMap): the membership
+    /// invariant is by id, undeclare removal is keyed by id, and the
+    /// only iteration consumer ([`Self::has_matching`]) does not
+    /// depend on ordering. HashMap gives O(1) insert + remove + the
+    /// rare full-iteration on get_matching_status calls.
+    declared: HashMap<u64, String>,
 }
 
 impl Default for RemoteQueryableRegistry {
@@ -68,6 +82,7 @@ impl RemoteQueryableRegistry {
         Self {
             on_decl: Vec::new(),
             on_undecl: Vec::new(),
+            declared: HashMap::new(),
         }
     }
 
@@ -101,6 +116,65 @@ impl RemoteQueryableRegistry {
         self.on_undecl.len()
     }
 
+    /// R288 — count of currently-declared peer queryables (those whose
+    /// inbound `DeclQueryable` has been dispatched and whose
+    /// `UndeclQueryable` has not). Exposed for diagnostic surfaces
+    /// (test fixtures, metrics) and for the `get_matching_status`
+    /// implementation that wants to short-circuit when no peer is
+    /// declared at all.
+    pub fn declared_count(&self) -> usize {
+        self.declared.len()
+    }
+
+    /// R288 — iterate over currently-declared peer queryables as
+    /// `(id, resolved_keyexpr)` pairs. Ordering is unspecified (the
+    /// backing storage is a `HashMap`). Useful for debug surfaces
+    /// that want to enumerate every peer-side declaration; the
+    /// `has_matching` accessor below is the production consult
+    /// path.
+    pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
+        self.declared.iter().map(|(id, ke)| (*id, ke.as_str()))
+    }
+
+    /// R288 — backbone for `Querier::get_matching_status`. Returns
+    /// `true` iff at least one currently-declared peer queryable's
+    /// keyexpr matches `query_keyexpr` under the bidirectional
+    /// asymmetric pattern-match approximation:
+    ///
+    /// * `peer_keyexpr` as pattern covering the literal
+    ///   `query_keyexpr`, OR
+    /// * `query_keyexpr` as pattern covering the literal
+    ///   `peer_keyexpr`.
+    ///
+    /// Catches the common cases:
+    /// * both literals (the two arms reduce to byte-equality),
+    /// * one-side pattern covering the other-side literal (either
+    ///   asymmetric form fires),
+    /// * one pattern fully containing the other (the containing
+    ///   pattern covers any literal under it, so the
+    ///   covered-pattern's keyexpr passes the pattern-match arm).
+    ///
+    /// Approximation boundary — two patterns with partial overlap
+    /// where neither contains the other (e.g. `home/*/temp` vs
+    /// `*/sensor/temp`) are NOT caught by either arm. Honest
+    /// keyexpr intersection across two patterns is a future-round
+    /// carry; the wz keyexpr v1 spec (RFC §5.A line 311) currently
+    /// locks intersect to exact uint32 ID equality for MVP, which
+    /// would be even narrower than this approximation. The
+    /// bidirectional pattern-match shape used here strictly extends
+    /// MVP intersect for the practical declare-then-match
+    /// production patterns (`home/temp` literal + `home/**` peer
+    /// pattern, etc.) without introducing the wildcard-vs-wildcard
+    /// intersect algorithm.
+    pub fn has_matching(&self, query_keyexpr: &str) -> bool {
+        let query_chunks: Vec<&str> = query_keyexpr.split('/').collect();
+        self.declared.values().any(|peer_keyexpr| {
+            let peer_chunks: Vec<&str> = peer_keyexpr.split('/').collect();
+            crate::pubsub::keyexpr_pattern_matches(&peer_chunks, query_keyexpr)
+                || crate::pubsub::keyexpr_pattern_matches(&query_chunks, peer_keyexpr)
+        })
+    }
+
     /// Route an inbound `Declare` envelope's inner body through the
     /// remote-queryable callbacks. Same scope rules as
     /// [`crate::declare::RemoteSubscriberRegistry::dispatch_declare`]:
@@ -118,11 +192,26 @@ impl RemoteQueryableRegistry {
                     Some(s) => s,
                     None => return,
                 };
+                // R288 — track peer-declared queryable so
+                // get_matching_status can consult the membership at
+                // a later point. Late-arrival semantics — a
+                // subsequent declare with the same id overwrites
+                // the prior entry (peer renamed the keyexpr), which
+                // matches zenoh-pico's same-id-replaces behaviour.
+                self.declared.insert(decl.id, resolved.clone());
                 for cb in &mut self.on_decl {
                     cb(decl, &resolved);
                 }
             }
             DeclareVariant::CodecZenohUndeclQueryable(undecl) => {
+                // R288 — drop the membership entry first so a
+                // get_matching_status fired from inside the
+                // on_undecl callback chain observes the post-
+                // undeclare state. Missing-id remove is silent
+                // (peer sent UndeclQueryable for an id we never
+                // saw a DeclQueryable for; this is a peer-side
+                // contract violation we do not surface here).
+                self.declared.remove(&undecl.id);
                 for cb in &mut self.on_undecl {
                     cb(undecl);
                 }
@@ -215,6 +304,102 @@ mod tests {
             DeclareVariant::CodecZenohUndeclQueryable(undecl_queryable(99));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(*captured.lock().unwrap(), vec![99]);
+    }
+
+    #[test]
+    fn queryable_declared_count_starts_at_zero_and_tracks_decl_undecl_lifecycle() {
+        let mut reg = RemoteQueryableRegistry::new();
+        assert_eq!(reg.declared_count(), 0);
+
+        // DeclQueryable id=10 keyexpr=home/temp → count 1
+        let decl1 =
+            DeclareVariant::CodecZenohDeclQueryable(decl_queryable(10, 0, Some("home/temp")));
+        reg.dispatch_declare(&decl1, &HashMap::new());
+        assert_eq!(reg.declared_count(), 1);
+
+        // DeclQueryable id=11 keyexpr=home/door → count 2
+        let decl2 =
+            DeclareVariant::CodecZenohDeclQueryable(decl_queryable(11, 0, Some("home/door")));
+        reg.dispatch_declare(&decl2, &HashMap::new());
+        assert_eq!(reg.declared_count(), 2);
+
+        // UndeclQueryable id=10 → count 1 (only id=11 remains)
+        let undecl1 = DeclareVariant::CodecZenohUndeclQueryable(undecl_queryable(10));
+        reg.dispatch_declare(&undecl1, &HashMap::new());
+        assert_eq!(reg.declared_count(), 1);
+        let remaining: Vec<(u64, &str)> = reg.iter_declared().collect();
+        assert_eq!(remaining, vec![(11, "home/door")]);
+
+        // UndeclQueryable id=11 → count 0
+        let undecl2 = DeclareVariant::CodecZenohUndeclQueryable(undecl_queryable(11));
+        reg.dispatch_declare(&undecl2, &HashMap::new());
+        assert_eq!(reg.declared_count(), 0);
+    }
+
+    #[test]
+    fn queryable_has_matching_false_on_empty_registry() {
+        let reg = RemoteQueryableRegistry::new();
+        assert!(!reg.has_matching("home/temp"));
+        assert!(!reg.has_matching("anything"));
+    }
+
+    #[test]
+    fn queryable_has_matching_true_on_literal_keyexpr_equality() {
+        let mut reg = RemoteQueryableRegistry::new();
+        let body = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(7, 0, Some("home/temp")));
+        reg.dispatch_declare(&body, &HashMap::new());
+        assert!(reg.has_matching("home/temp"));
+        assert!(!reg.has_matching("home/door"));
+    }
+
+    #[test]
+    fn queryable_has_matching_true_when_peer_pattern_covers_query_literal() {
+        let mut reg = RemoteQueryableRegistry::new();
+        let body = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(8, 0, Some("home/**")));
+        reg.dispatch_declare(&body, &HashMap::new());
+        assert!(reg.has_matching("home/temp"));
+        assert!(reg.has_matching("home/door/inner"));
+        assert!(!reg.has_matching("other/x"));
+    }
+
+    #[test]
+    fn queryable_has_matching_true_when_query_pattern_covers_peer_literal() {
+        let mut reg = RemoteQueryableRegistry::new();
+        let body = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(9, 0, Some("home/temp")));
+        reg.dispatch_declare(&body, &HashMap::new());
+        assert!(reg.has_matching("home/**"));
+        assert!(reg.has_matching("**"));
+        assert!(!reg.has_matching("other/**"));
+    }
+
+    #[test]
+    fn queryable_has_matching_false_after_undeclare() {
+        let mut reg = RemoteQueryableRegistry::new();
+        let decl =
+            DeclareVariant::CodecZenohDeclQueryable(decl_queryable(12, 0, Some("home/temp")));
+        reg.dispatch_declare(&decl, &HashMap::new());
+        assert!(reg.has_matching("home/temp"));
+        let undecl = DeclareVariant::CodecZenohUndeclQueryable(undecl_queryable(12));
+        reg.dispatch_declare(&undecl, &HashMap::new());
+        assert!(!reg.has_matching("home/temp"));
+    }
+
+    #[test]
+    fn queryable_has_matching_with_mixed_peers_finds_any_match() {
+        let mut reg = RemoteQueryableRegistry::new();
+        let d1 = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(20, 0, Some("other/foo")));
+        let d2 = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(21, 0, Some("home/temp")));
+        let d3 = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(22, 0, Some("a/b/c")));
+        reg.dispatch_declare(&d1, &HashMap::new());
+        reg.dispatch_declare(&d2, &HashMap::new());
+        reg.dispatch_declare(&d3, &HashMap::new());
+        assert_eq!(reg.declared_count(), 3);
+        // Match on the middle entry; other entries do not interfere.
+        assert!(reg.has_matching("home/temp"));
+        // Match on the last entry via query-pattern asymmetric arm.
+        assert!(reg.has_matching("a/**"));
+        // No match on either side.
+        assert!(!reg.has_matching("nothing/here"));
     }
 
     #[test]
