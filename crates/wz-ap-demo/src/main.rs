@@ -110,14 +110,15 @@ use sce_rust_runtime::{Engine, IScriptEngine};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::reply::InboundReplyBody;
 use wz_runtime_tokio::sample::SampleKind;
 use wz_runtime_core::TimeSource;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{
-    PublishAliasError, PublishOptions, QueryableOptions, Session, SubscribeOptions,
+    LivelinessOptions, LivelinessToken, PublishAliasError, PublishOptions, QueryableOptions,
+    Session, SubscribeOptions,
 };
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastPolicy;
 use wz_runtime_tokio::session_glue::{
@@ -1351,15 +1352,35 @@ async fn run_demo(
     let has_declares = declare_spec.subscriber_keyexpr.is_some()
         || declare_spec.queryable_keyexpr.is_some()
         || declare_spec.token_keyexpr.is_some();
+    // R277 — if a `--declare-token` was requested, create a oneshot so
+    // declare_task can hand the resulting `LivelinessToken` back to
+    // run_demo. The token's `Drop` emits `Declare(UndeclToken)` on the
+    // wire (RAII; see `LivelinessToken` in wz-runtime-tokio/session.rs).
+    // Holding the token at run_demo scope is the textbook cross-task
+    // lifetime — the peer keeps the liveliness declaration alive for
+    // as long as this demo holds the handle, and the explicit drop
+    // before `drop(actions)` below guarantees the retraction frame is
+    // enqueued while the writer task is still draining.
+    let (token_tx, token_rx) = if declare_spec.token_keyexpr.is_some() {
+        let (tx, rx) = oneshot::channel::<LivelinessToken>();
+        (Some(tx), Some(rx))
+    } else {
+        (None, None)
+    };
     let declare_handle = if has_declares {
-        let actions_for_declare = actions.clone();
+        let session_for_declare = session.clone();
         // R253 — declare_task is generic over T: TimeSource. R263 —
         // copy the shared session_clock so every task uses the same
-        // monotonic epoch.
+        // monotonic epoch. R277 — declare_task now takes `Session`
+        // (not `Arc<SessionLinkActions>`) so it can call
+        // `Session::declare_token` for the LivelinessToken RAII path;
+        // sub / queryable still emit via `session.actions()` (no
+        // Session-level handle API for those declare arms yet).
         Some(tokio::spawn(declare_task(
-            actions_for_declare,
+            session_for_declare,
             declare_spec,
             session_clock,
+            token_tx,
         )))
     } else {
         None
@@ -1520,6 +1541,30 @@ async fn run_demo(
         let _ = tokio::time::timeout(Duration::from_millis(200), handle).await;
     }
 
+    // R277 — receive the LivelinessToken that declare_task handed
+    // back via the oneshot. Drop the token explicitly BEFORE
+    // `drop(actions)` so its RAII `Drop` runs
+    // `actions.send_undeclare_token(id)` while the writer task is
+    // still draining the outbound channel. Order matters:
+    //   1. token.Drop enqueues `Declare(UndeclToken)`
+    //   2. explicit drop(actions) below releases our local Arc
+    //   3. writer task drains the queue (including UndeclToken)
+    //      then sees channel close once its own Arc is the last
+    //      to drop.
+    // Reverse order (drop(actions) first) would tear down the
+    // writer's send channel before the token's Drop could enqueue
+    // the retraction frame, and the peer would never see the
+    // DELETE sample on the liveliness subscription. The 200ms
+    // timeout matches the declare_handle join cap so a stuck
+    // declare_task does not block shutdown.
+    if let Some(rx) = token_rx {
+        let token = match tokio::time::timeout(Duration::from_millis(200), rx).await {
+            Ok(Ok(token)) => Some(token),
+            _ => None,
+        };
+        drop(token);
+    }
+
     // Drop the FSM-side sender so the writer task observes the
     // channel close and exits cleanly. `actions` holds another
     // clone through the BoxedLinkDriver, so dropping `actions`
@@ -1602,7 +1647,11 @@ const QUERY_RID: u64 = 1;
 /// counter (the wz-ap-demo binary is intentionally minimal here).
 const DECLARE_SUBSCRIBER_ID: u64 = 1001;
 const DECLARE_QUERYABLE_ID: u64 = 2001;
-const DECLARE_TOKEN_ID: u64 = 3001;
+// R277 — DECLARE_TOKEN_ID retired. The token branch routes through
+// `Session::declare_token` (RAII LivelinessToken handle) which
+// allocates ids via `SessionLinkActions::alloc_next_token_id`. The
+// first auto-allocated id in this demo is 0 (the per-session
+// counter starts at 0 and uses `fetch_add(1, Relaxed)`).
 const DECLARE_HANDSHAKE_POLL_INTERVAL_MS: u64 = 50;
 const DECLARE_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
 const DECLARE_INTER_EMIT_MS: u64 = 100;
@@ -1623,13 +1672,36 @@ const DECLARE_INTER_EMIT_MS: u64 = 100;
 /// `std::time::Instant::now() + Duration::from_millis(MS)` pattern
 /// because no_std targets have no `Instant` type. The trait surface
 /// stays unchanged — same `now_monotonic_ms()` everyone already had.
+///
+/// R277 — takes [`Session`] (not `Arc<SessionLinkActions>`) so the
+/// token branch can route through [`Session::declare_token`] for the
+/// `LivelinessToken` RAII handle. The handle is moved back to
+/// `run_demo` via `token_tx` (oneshot) so its `Drop` — which emits
+/// `Declare(UndeclToken)` on the wire — fires at `run_demo` scope,
+/// not at this task's stack-frame end. Sub / queryable arms still
+/// route through `session.actions()` because no `Session`-level
+/// handle API exists for them yet (R245/R246 covered subscriber +
+/// queryable but only with same-process callback wiring; the
+/// declare-time wire emit still goes through `SessionLinkActions`).
+///
+/// SIGKILL caveat: the existing
+/// `wz_remote_declare_round_trip_against_wz_initiator` integration
+/// test uses `child.kill()` (SIGKILL) on both wz-ap-demo processes,
+/// which bypasses Rust's `Drop` entirely. The RAII `UndeclToken`
+/// emit is only observable end-to-end under graceful shutdown (FSM
+/// hits terminal, run_demo unwinds cleanly). Unit-level Drop
+/// semantics are gated by
+/// `liveliness_token_drop_emits_undeclare_wire_frame` in
+/// `wz-runtime-tokio/src/session.rs`.
 async fn declare_task<T>(
-    actions: Arc<wz_runtime_tokio::session_glue::SessionLinkActions>,
+    session: Session,
     spec: DeclareEmitSpec,
     clock: T,
+    token_tx: Option<oneshot::Sender<LivelinessToken>>,
 ) where
     T: TimeSource + Send + 'static,
 {
+    let actions = session.actions();
     let deadline_ms = clock.now_monotonic_ms() + DECLARE_HANDSHAKE_TIMEOUT_MS;
     loop {
         if actions.trace_snapshot().record_established_at > 0 {
@@ -1660,10 +1732,27 @@ async fn declare_task<T>(
         clock.sleep(DECLARE_INTER_EMIT_MS).await;
     }
     if let Some(keyexpr) = spec.token_keyexpr.as_deref() {
-        actions.send_declare_token(DECLARE_TOKEN_ID, /*mapping_id=*/ 0, Some(keyexpr));
+        let token = session.declare_token(keyexpr.to_string(), LivelinessOptions::default());
         eprintln!(
-            "wz-ap-demo: DECLARED TOKEN id={DECLARE_TOKEN_ID} keyexpr='{keyexpr}'"
+            "wz-ap-demo: DECLARED TOKEN id={id} keyexpr='{keyexpr}'",
+            id = token.id()
         );
+        if let Some(tx) = token_tx {
+            // Hand the LivelinessToken back to run_demo. If the
+            // receiver was already dropped (e.g. run_demo bailed
+            // before this gate fired), tx.send returns Err and
+            // the token drops here — same `Declare(UndeclToken)`
+            // is emitted, just immediately after the DeclToken.
+            let _ = tx.send(token);
+        }
+        // else: no oneshot was created (spec.token_keyexpr was
+        // None at spawn time), but we reached this arm because
+        // it became Some between then and now. Cannot happen
+        // with the current spawn-site invariants — token_tx is
+        // Some IFF spec.token_keyexpr was Some at spawn — but
+        // the else branch keeps the code total: token drops here
+        // emitting UndeclToken back-to-back with DeclToken,
+        // signalling the keyexpr surface transition only.
     }
 }
 

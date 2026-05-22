@@ -15,8 +15,11 @@
 //!   2. Spawn acceptor: `wz-ap-demo --listen <addr> \
 //!         --declare-subscriber demo/sub --declare-queryable demo/q \
 //!         --declare-token demo/token`. The acceptor emits one Decl
-//!      of each kind once Established, using hard-coded ids
-//!      1001 / 2001 / 3001 per kind.
+//!      of each kind once Established. Subscriber + Queryable use
+//!      hard-coded ids 1001 / 2001. Token id is auto-allocated by
+//!      `SessionLinkActions::alloc_next_token_id` (R277 migration);
+//!      the first call returns 0 because the per-session counter
+//!      starts at 0 and uses `fetch_add(1, Relaxed)`.
 //!   3. Wait up to 5s for the acceptor's stderr to contain
 //!      "listening on" — bind succeeded.
 //!   4. Spawn initiator: `wz-ap-demo --connect <addr> \
@@ -28,7 +31,7 @@
 //!   6. Wait up to 10s for the initiator's stderr to contain all three
 //!      lines "REMOTE SUBSCRIBER DECLARED id=1001 keyexpr='demo/sub'",
 //!      "REMOTE QUERYABLE DECLARED id=2001 keyexpr='demo/q'", and
-//!      "REMOTE TOKEN DECLARED id=3001 keyexpr='demo/token'" — proving
+//!      "REMOTE TOKEN DECLARED id=0 keyexpr='demo/token'" — proving
 //!      the full path: TCP → stream envelope → Frame →
 //!      parse_frame_payload → NetworkMessage::Declare →
 //!      Remote*Registry → callback.
@@ -186,9 +189,14 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
          RemoteQueryableRegistry dispatch regressed.\n\
          --- initiator stderr ---\n{final_text}"
     );
+    // R277 — token id is no longer hard-coded; it comes from
+    // `SessionLinkActions::alloc_next_token_id` (per-session
+    // AtomicU64 counter that starts at 0). First call in the demo
+    // returns 0. If a future round adds a token alloc earlier than
+    // declare_task, this assertion will need to track that.
     assert!(
         final_text.contains(&format!(
-            "REMOTE TOKEN DECLARED id=3001 keyexpr='{token_keyexpr}'"
+            "REMOTE TOKEN DECLARED id=0 keyexpr='{token_keyexpr}'"
         )),
         "initiator stderr missing REMOTE TOKEN DECLARED line — \
          LivelinessRegistry dispatch regressed.\n\
@@ -213,10 +221,12 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
          send_declare_queryable did not fire.\n\
          --- acceptor stderr ---\n{acceptor_captured}"
     );
+    // R277 — token id is auto-allocated; see comment above on the
+    // initiator-side assertion.
     assert!(
-        acceptor_captured.contains("DECLARED TOKEN id=3001"),
-        "acceptor stderr lacks 'DECLARED TOKEN id=3001' — \
-         send_declare_token did not fire.\n\
+        acceptor_captured.contains("DECLARED TOKEN id=0"),
+        "acceptor stderr lacks 'DECLARED TOKEN id=0' — \
+         Session::declare_token did not fire.\n\
          --- acceptor stderr ---\n{acceptor_captured}"
     );
 }
