@@ -13870,6 +13870,64 @@
         "Open R267-R270 architectural carries unchanged: Querier matching, Session reparam, etc."
       ]
     },
+    "Round 279": {
+      "decision_summary": "R279 lands Interest outbound emit primitives (build_interest_liveliness_subscriber / build_interest_final / encode_frame_with_interest / send_interest_*) plus the next_outbound_interest_id counter, paving the way for Session::declare_liveliness_subscriber RAII at R280.",
+      "changes_bullets": [
+        "SessionLinkActions::next_outbound_interest_id: AtomicU64 + alloc_next_interest_id() (id counter)",
+        "build_interest_liveliness_subscriber(interest_id, history, mapping_id, suffix) builder — outer C/F + body KE|TO|R|N|M flags",
+        "build_interest_final(interest_id) builder — two-byte InterestFinal (C=F=Z=0)",
+        "encode_frame_with_interest(sn, interest, reliable) frame envelope encoder mirroring encode_frame_with_declare",
+        "send_interest_liveliness_subscriber / send_interest_final actions wired through driver.send_blocking",
+        "interest_body::InterestBody import added to session_glue.rs",
+        "Two new wire-shape tests pin 4 zenoh-pico-compatible Interest vectors (future-only literal / current+future / alias / composite) + InterestFinal small/large VLE forms"
+      ],
+      "verification_bullets": [
+        "cargo test --workspace --lib: 488/488 pass (+2 from R278)",
+        "cargo clippy --workspace --all-targets: clean (no new warnings)",
+        "build_interest_liveliness_subscriber_emits_zenoh_pico_compatible_wire_bytes: 4 cases match expected bytes",
+        "build_interest_final_emits_two_byte_marker: [N_MID_INTEREST, VLE(id)] verified small + multi-byte",
+        "Pre-mutation validate: entries=277 / sections=215 / T1=0 / RT 12/12 / sync (R278 close)",
+        "Post-mutation validate target: entries=278 / sections=215 / T1=0 / RT 12/12 / sync (this audit)"
+      ],
+      "carry_forward_bullets": [
+        "R280 next: LivelinessSubscriberRegistry sibling registry under declare/liveliness_subscriber.rs (keyexpr filter + history flag + sample callback PUT/DELETE)",
+        "R280 next: Session::declare_liveliness_subscriber API + RAII LivelinessSubscriberHandle (Drop emits InterestFinal + registry cleanup)",
+        "R281 next: ObserverRouter wire-up — LivelinessRegistry + LivelinessSubscriberRegistry both consume IterationEvent (fan-out)",
+        "R281 next: NetworkMessage::Interest inbound dispatch — recognize peer-side InterestFinal for our outbound interest_ids if any",
+        "R282 next: wz_liveliness_subscriber_round_trip e2e — declare subscriber on responder, observe DeclToken+UndeclToken, exit on RAII",
+        "R283 carry (architectural): peer-side non-final Interest inbound — wz declares LivelinessToken, peer asks via Interest with TOKENS+RESTRICTED, wz responds with DeclTokens (bilateral)",
+        "R278 follow-up unchanged: post SessionClose to FSM before signal exit (low priority graceful Close handshake completeness)",
+        "Open R267-R270 architectural carries unchanged: Querier matching, Session reparam, Instant→u64 ms"
+      ],
+      "publishable_decision_summary": "R279 lands Interest outbound emit primitives (build_interest_liveliness_subscriber / build_interest_final / encode_frame_with_interest / send_interest_*) plus the next_outbound_interest_id counter, paving the way for Session::declare_liveliness_subscriber RAII at R280.",
+      "publishable_changes_bullets": [
+        "SessionLinkActions::next_outbound_interest_id: AtomicU64 + alloc_next_interest_id() (id counter)",
+        "build_interest_liveliness_subscriber(interest_id, history, mapping_id, suffix) builder — outer C/F + body KE|TO|R|N|M flags",
+        "build_interest_final(interest_id) builder — two-byte InterestFinal (C=F=Z=0)",
+        "encode_frame_with_interest(sn, interest, reliable) frame envelope encoder mirroring encode_frame_with_declare",
+        "send_interest_liveliness_subscriber / send_interest_final actions wired through driver.send_blocking",
+        "interest_body::InterestBody import added to session_glue.rs",
+        "Two new wire-shape tests pin 4 zenoh-pico-compatible Interest vectors (future-only literal / current+future / alias / composite) + InterestFinal small/large VLE forms"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace --lib: 488/488 pass (+2 from R278)",
+        "cargo clippy --workspace --all-targets: clean (no new warnings)",
+        "build_interest_liveliness_subscriber_emits_zenoh_pico_compatible_wire_bytes: 4 cases match expected bytes",
+        "build_interest_final_emits_two_byte_marker: [N_MID_INTEREST, VLE(id)] verified small + multi-byte",
+        "Pre-mutation validate: entries=277 / sections=215 / T1=0 / RT 12/12 / sync (R278 close)",
+        "Post-mutation validate target: entries=278 / sections=215 / T1=0 / RT 12/12 / sync (this audit)"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R280 next: LivelinessSubscriberRegistry sibling registry under declare/liveliness_subscriber.rs (keyexpr filter + history flag + sample callback PUT/DELETE)",
+        "R280 next: Session::declare_liveliness_subscriber API + RAII LivelinessSubscriberHandle (Drop emits InterestFinal + registry cleanup)",
+        "R281 next: ObserverRouter wire-up — LivelinessRegistry + LivelinessSubscriberRegistry both consume IterationEvent (fan-out)",
+        "R281 next: NetworkMessage::Interest inbound dispatch — recognize peer-side InterestFinal for our outbound interest_ids if any",
+        "R282 next: wz_liveliness_subscriber_round_trip e2e — declare subscriber on responder, observe DeclToken+UndeclToken, exit on RAII",
+        "R283 carry (architectural): peer-side non-final Interest inbound — wz declares LivelinessToken, peer asks via Interest with TOKENS+RESTRICTED, wz responds with DeclTokens (bilateral)",
+        "R278 follow-up unchanged: post SessionClose to FSM before signal exit (low priority graceful Close handshake completeness)",
+        "Open R267-R270 architectural carries unchanged: Querier matching, Session reparam, Instant→u64 ms"
+      ]
+    },
     "Round 28": {
       "decision_summary": "Phase A control-plane SCXML round — 3 new algorithm-kind validators (whatami / payload-ext-id / transport-ext-id) covering §3 Hello body, §7.1 payload-layer per-context extension allowlist, §4.4 transport-layer per-control-message extension allowlist.",
       "changes_bullets": [
