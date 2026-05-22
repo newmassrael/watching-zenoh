@@ -1022,6 +1022,36 @@ impl Session {
             on_final,
         ))
     }
+
+    /// R242 — declare a reusable [`Querier`] bound to `keyexpr` +
+    /// `options`. The returned Querier holds a clone of this
+    /// session and emits subsequent outbound queries through
+    /// [`Querier::get`] without restating the keyexpr or options
+    /// on every call.
+    ///
+    /// Unlike zenoh-pico's `z_declare_querier`, this constructor
+    /// does NOT emit any wire frame at declare time — there is no
+    /// peer-side state to register (the Query side has no
+    /// `DeclareQueryable`-equivalent emitted from the requester
+    /// side; queryables live on the responder). The "declaration"
+    /// is purely a caller-side aggregation of (keyexpr, options).
+    /// Matches the zenoh-pico C API ergonomically while skipping
+    /// the no-op wire emit.
+    ///
+    /// Use [`Querier::get`] to issue each query; the rid allocator
+    /// hands a fresh rid per call so concurrent gets through the
+    /// same Querier remain independent.
+    pub fn declare_querier(
+        &self,
+        keyexpr: impl Into<String>,
+        options: QueryOptions,
+    ) -> Querier {
+        Querier {
+            session: self.clone(),
+            keyexpr: keyexpr.into(),
+            options,
+        }
+    }
 }
 
 /// R241 — typed error returned by [`Session::query_aliased_auto`]
@@ -1055,6 +1085,77 @@ impl std::fmt::Display for QueryAliasError {
 }
 
 impl std::error::Error for QueryAliasError {}
+
+/// R242 — reusable query target with pre-set keyexpr + options.
+/// Mirror of zenoh-pico's `z_querier_t`
+/// (`vendor/zenoh-pico/include/zenoh-pico/api/types.h:266`): a
+/// caller declares the querier once
+/// ([`Session::declare_querier`]) and emits repeated outbound
+/// `Request(Query)` records through [`Self::get`] without
+/// restating the keyexpr or options on every call.
+///
+/// The Rust API collapses zenoh-pico's `z_querier_options_t`
+/// (declare-time) and `z_querier_get_options_t` (get-time) into a
+/// single [`QueryOptions`] held by the Querier — Rust's owned
+/// borrow model makes the c-ergonomic split unnecessary. Callers
+/// who want a per-call options override can clone the Querier's
+/// options, mutate, and call [`Session::query`] directly.
+///
+/// `Clone` is cheap (the inner `Session` is itself Clone-cheap
+/// `Arc`s, and `QueryOptions` is a `Clone` value struct). A
+/// background task can hold a per-task Querier clone without
+/// touching shared state on every get call.
+///
+/// `#[non_exhaustive]` so future rounds add fields (e.g. a
+/// declare-time matching_status callback hook) without breaking
+/// callers. Construct only through [`Session::declare_querier`].
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct Querier {
+    session: Session,
+    keyexpr: String,
+    options: QueryOptions,
+}
+
+impl Querier {
+    /// Borrow the declared keyexpr. The literal form supplied to
+    /// [`Session::declare_querier`]; identical to what each
+    /// [`Self::get`] call threads to [`Session::query`].
+    pub fn keyexpr(&self) -> &str {
+        &self.keyexpr
+    }
+
+    /// Borrow the declared options. Useful when a caller wants to
+    /// derive an override (`.clone().with_*()`) for a single
+    /// [`Session::query`] call without disturbing the Querier's
+    /// baseline.
+    pub fn options(&self) -> &QueryOptions {
+        &self.options
+    }
+
+    /// Emit one outbound query through the declared keyexpr +
+    /// options. Returns the [`ReplyHandle`] from the underlying
+    /// [`Session::query`] call so the caller can
+    /// [`crate::reply::ReplyRegistry::unregister`] before the Final
+    /// arrives if the application cancels the pending z_get.
+    ///
+    /// Each call allocates a fresh rid (via
+    /// [`SessionLinkActions::alloc_next_request_id`]) so successive
+    /// calls are independent pending entries — concurrent gets on
+    /// the same Querier do not collide on the rid keyspace.
+    ///
+    /// Mirrors zenoh-pico's `z_querier_get`
+    /// (`vendor/zenoh-pico/src/api/api.c:1902` —
+    /// `_z_query(&sess_rc, _z_optional_id_make_some(querier->_id), ...)`).
+    pub fn get(
+        &self,
+        on_reply: impl FnMut(&InboundReply) + Send + 'static,
+        on_final: impl FnMut(u64) + Send + 'static,
+    ) -> ReplyHandle {
+        self.session
+            .query(&self.keyexpr, self.options.clone(), on_reply, on_final)
+    }
+}
 
 /// R234 — typed error returned by
 /// [`Session::publish_aliased_auto`] when the requested mapping id
@@ -3157,5 +3258,129 @@ mod tests {
             msg.contains("send_declare_keyexpr"),
             "error message hints at the remediation API"
         );
+    }
+
+    // ── R242 Querier (z_querier_t mirror) ──
+
+    #[test]
+    fn declare_querier_returns_handle_with_keyexpr_and_options() {
+        let (session, _driver) = build_session();
+        let opts = QueryOptions::get()
+            .with_target(QueryTarget::All)
+            .with_consolidation(ConsolidationMode::Latest)
+            .with_timeout_ms(5_000);
+        let querier = session.declare_querier("home/temp", opts.clone());
+        assert_eq!(querier.keyexpr(), "home/temp");
+        assert_eq!(querier.options().target, opts.target);
+        assert_eq!(querier.options().consolidation, opts.consolidation);
+        assert_eq!(querier.options().timeout_ms, opts.timeout_ms);
+    }
+
+    #[test]
+    fn declare_querier_does_not_emit_wire_frame_at_declare_time() {
+        // The querier "declaration" is purely a caller-side
+        // aggregation; the Query side has no peer-side state to
+        // register (unlike DeclareSubscriber / DeclareQueryable).
+        let (session, driver) = build_session();
+        let _querier = session.declare_querier("home/temp", QueryOptions::get());
+        assert_eq!(driver.frame_count(), 0, "declare_querier is a no-op on the wire");
+    }
+
+    #[test]
+    fn querier_get_fires_loopback_through_session_query_session_local() {
+        let (session, driver) = build_session();
+        let reply_count = Arc::new(AtomicUsize::new(0));
+        let final_count = Arc::new(AtomicUsize::new(0));
+
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("home/temp", |_q, responder| {
+                responder.send_reply(b"22.5");
+            });
+
+        let querier = session.declare_querier(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+        );
+        let r = reply_count.clone();
+        let f = final_count.clone();
+        querier.get(
+            move |_| { r.fetch_add(1, Ordering::SeqCst); },
+            move |_| { f.fetch_add(1, Ordering::SeqCst); },
+        );
+
+        assert_eq!(reply_count.load(Ordering::SeqCst), 1);
+        assert_eq!(final_count.load(Ordering::SeqCst), 1);
+        assert_eq!(driver.frame_count(), 0, "SessionLocal skips wire");
+    }
+
+    #[test]
+    fn querier_get_called_twice_allocates_independent_rids() {
+        let (session, _driver) = build_session();
+        let querier = session.declare_querier(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+        );
+        let h0 = querier.get(|_| {}, |_| {});
+        let h1 = querier.get(|_| {}, |_| {});
+        assert_eq!(h0.rid(), 0);
+        assert_eq!(h1.rid(), 1, "successive querier.get() calls get monotonic rids");
+        assert_eq!(
+            session.observer().lock().unwrap().replies.len(),
+            2,
+            "both pending entries preserved (Locality::Remote awaits wire Final)"
+        );
+    }
+
+    #[test]
+    fn querier_get_threads_target_option_into_wire() {
+        // Single-knob verification: declare with target=All, observe
+        // the wire frame containing the with-target Request encoding.
+        // (Multi-knob composite verify lives in R240's
+        // send_request_query_with_meta tests — we don't duplicate it
+        // here; the contract this test pins is "Querier::get really
+        // does thread its declare-time options through to
+        // Session::query and onward to the wire".)
+        let (session, driver) = build_session();
+        let querier = session.declare_querier(
+            "home/temp",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::Remote)
+                .with_target(QueryTarget::All),
+        );
+        querier.get(|_| {}, |_| {});
+
+        use crate::session_glue::build_request_query_with_target;
+        let standalone =
+            build_request_query_with_target(0, 0, Some("home/temp"), QueryTarget::All);
+        let standalone_bytes = standalone.encode_to_vec();
+        let frame = &driver.frames.lock().unwrap()[0].0;
+        assert!(
+            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            "Querier::get must thread declare-time target option into the wire frame"
+        );
+    }
+
+    #[test]
+    fn querier_clone_shares_session_and_options() {
+        let (session, _driver) = build_session();
+        let querier = session.declare_querier("home/temp", QueryOptions::get());
+        let clone = querier.clone();
+        assert_eq!(clone.keyexpr(), querier.keyexpr());
+        assert_eq!(
+            clone.options().allowed_destination,
+            querier.options().allowed_destination
+        );
+        // Both clones can issue independent gets — verify by emitting
+        // through both and checking the pending count.
+        let q1 = querier
+            .clone()
+            .get(|_| {}, |_| {});
+        let q2 = clone.get(|_| {}, |_| {});
+        assert_eq!(q1.rid(), 0);
+        assert_eq!(q2.rid(), 1, "clones share the same rid allocator");
     }
 }
