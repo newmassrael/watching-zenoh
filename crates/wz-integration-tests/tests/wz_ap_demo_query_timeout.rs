@@ -5,14 +5,13 @@
 //
 // Closes the verification debt from R263. R263 wired the
 // --query-timeout-ms CLI flag through ReplyConsumerSpec to the
-// QUERY_RID register call's `deadline_ms` and made
-// `drive_session_until_terminal`'s on_tick sweep load-bearing for
-// that register site (a peer that never replies should surface
-// `FINAL RECEIVED rid=1` within (timeout_ms + driver-loop-tick) of
-// register time). R263 verification was in-process at the unit level
-// only; this round adds the cross-process integration fixture so the
-// full register-deadline -> drive_session sweep -> on_final fire
-// chain is exercised at the actual process boundary.
+// QUERY_RID register call's `deadline_ms` and made the wz-ap-demo
+// sweep_task load-bearing for that register site (a peer that never
+// replies should surface `FINAL RECEIVED rid=1` within (timeout_ms +
+// sweep-tick) of register time). R263 verification was in-process at
+// the unit level only; this round adds the cross-process integration
+// fixture so the full register-deadline -> sweep_task -> on_final
+// fire chain is exercised at the actual process boundary.
 //
 // Peer pattern (chosen R264 kickoff):
 //   - Acceptor `wz-ap-demo --listen <port> --key demo/timeout`
@@ -27,23 +26,23 @@
 //     --query-timeout-ms 500 --on-query-final-log` sends one
 //     outbound Query once the session reaches Established. The
 //     register call computes deadline_ms = session_clock.now + 500.
-//     The drive_session on_tick sweep below fires when
-//     clock.now > deadline_ms; that sweep invokes the on_final
-//     callback which logs `FINAL RECEIVED rid=1` to stderr.
+//     The wz-ap-demo sweep_task fires every 100 ms; the first sweep
+//     after clock.now > deadline_ms invokes the on_final callback
+//     which logs `FINAL RECEIVED rid=1` to stderr.
 //
 // Wall-time bounds (chosen R264 kickoff):
 //   - Lower 400 ms — catches a regression where `deadline_ms` is
 //     mis-registered as 0 (would fire on the first sweep tick after
-//     register, ~50 ms after handshake). 400 ms is conservative
+//     register, ~100 ms after handshake). 400 ms is conservative
 //     below the configured 500 ms timeout to absorb file-poll
 //     quantisation (50 ms) and the unavoidable post-spawn /
 //     pre-register window.
 //   - Upper 2000 ms — catches a regression where the sweep cadence
-//     stalls (e.g. lease-branch sleep growing unbounded, or on_tick
-//     skipping the sweep call). Expected steady-state on a quiet
-//     loopback: spawn ~50 ms + handshake ~100 ms + 500 ms timeout +
-//     driver-loop-tick ~50-200 ms = ~700-850 ms. 2000 ms absorbs
-//     CI-runner jitter without masking real regressions.
+//     stalls (e.g. the sweep_task panicking, or the 100 ms cadence
+//     drifting). Expected steady-state on a quiet loopback: spawn
+//     ~50 ms + handshake ~100 ms + 500 ms timeout + sweep-tick
+//     ~50-100 ms = ~700-850 ms. 2000 ms absorbs CI-runner jitter
+//     without masking real regressions.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -152,7 +151,7 @@ fn wz_ap_demo_query_timeout_fires_final_callback() {
         panic!(
             "initiator wz-ap-demo did not log 'FINAL RECEIVED rid=1' within 2s; \
              --query-timeout-ms=500 should have fired the ReplyRegistry on_final \
-             callback via the drive_session on_tick sweep.\n\
+             callback via the R264 sweep_task.\n\
              --- captured initiator stderr at deadline ---\n{c}"
         );
     }

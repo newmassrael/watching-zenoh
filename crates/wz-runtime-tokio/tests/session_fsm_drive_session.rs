@@ -163,8 +163,7 @@ async fn r76b_returns_terminated_when_engine_already_final() {
         Some(5),
         &clock,
         |_| {},
-                |_| {},
-        )
+    )
     .await;
     assert!(
         matches!(outcome, DriverOutcome::Terminated),
@@ -197,8 +196,7 @@ async fn r76b_iteration_limit_when_loop_cannot_terminate() {
         Some(0),
         &clock,
         |_| {},
-                |_| {},
-        )
+    )
     .await;
     assert_eq!(
         outcome,
@@ -228,8 +226,7 @@ async fn r76b_link_lost_event_drives_loop_to_terminated() {
         Some(5),
         &clock,
         |_| {},
-                |_| {},
-        )
+    )
     .await;
     assert!(
         matches!(outcome, DriverOutcome::Terminated),
@@ -265,8 +262,7 @@ async fn r76b_lease_branch_fires_with_silent_peer() {
         Some(8),
         &clock,
         |_| {},
-                |_| {},
-        )
+    )
     .await;
 
     // The outcome is Terminated (FSM reached Closed via Closing) or
@@ -319,8 +315,7 @@ async fn r85_unlimited_iters_terminates_on_finite_event_sequence() {
         None, // unlimited
         &clock,
         |_| {},
-                |_| {},
-        )
+    )
     .await;
 
     assert!(
@@ -380,8 +375,7 @@ async fn r83_observer_captures_framepayload_and_linklost_in_order() {
                 .unwrap()
                 .push(format!("{ev:?}"));
         },
-                |_| {},
-        )
+    )
     .await;
 
     assert!(
@@ -450,8 +444,7 @@ async fn r83_observer_reads_framepayload_messages_through_reference() {
                 counts_for_observer.lock().unwrap().push(messages.len());
             }
         },
-                |_| {},
-        )
+    )
     .await;
 
     let counts = payload_record_counts.lock().unwrap();
@@ -546,8 +539,7 @@ async fn r99_subscriber_registry_routes_framepayload_push_to_callback() {
                 .unwrap()
                 .dispatch_iteration_event(ev);
         },
-                |_| {},
-        )
+    )
     .await;
 
     assert_eq!(
@@ -582,8 +574,7 @@ async fn r83_observer_fires_on_lease_branch() {
                 outcomes_for_observer.lock().unwrap().push(o);
             }
         },
-                |_| {},
-        )
+    )
     .await;
 
     let captured = lease_outcomes.lock().unwrap();
@@ -594,86 +585,3 @@ async fn r83_observer_fires_on_lease_branch() {
     );
 }
 
-// ── R262 Scenario: on_tick fires per iteration and a sweep wired
-//                   into the on_tick closure surfaces an expired
-//                   ReplyRegistry entry's on_final exactly once
-//                   within one driver-loop tick of the deadline.
-//
-// Wiring: a stand-alone ReplyRegistry (no full ApplicationLayerObserver
-// dependency) holds a single pending entry whose deadline_ms = 0
-// (always expired). The on_tick closure handed to drive_session_until_terminal
-// performs `reg.sweep_timed_out(now_ms)` on every iteration top.
-// A QueueDriver stages one LinkEvent::Lost so the loop terminates
-// cleanly after a single iteration; that one iteration's on_tick
-// fires the sweep + on_final fires exactly once.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn r262_drive_session_on_tick_sweep_surfaces_expired_pending_on_final() {
-    use std::sync::atomic::AtomicUsize;
-    use wz_runtime_tokio::reply::ReplyRegistry;
-
-    let (actions, mut engine) = fresh_setup();
-    engine.process_event(E::OutboundStart);
-    assert_eq!(engine.get_current_state(), S::LinkOpening);
-
-    let clock = TokioTime::new();
-    let registry: Arc<Mutex<ReplyRegistry>> = Arc::new(Mutex::new(ReplyRegistry::new()));
-    let on_final_count = Arc::new(AtomicUsize::new(0));
-
-    // Pre-register a pending entry with deadline_ms = 0 (always
-    // expired). on_final increments a counter when the sweep
-    // surfaces the timeout.
-    {
-        let on_final_count_cb = on_final_count.clone();
-        let mut reg = registry.lock().unwrap();
-        reg.register(
-            7,
-            1,
-            Some(0),
-            |_| {},
-            move |rid| {
-                assert_eq!(rid, 7, "on_final must carry the registered rid");
-                on_final_count_cb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            },
-        );
-    }
-
-    // QueueDriver stages a single Lost — LinkOpening → link.lost →
-    // Closed (final). The first iteration's on_tick runs before the
-    // select! poll branch resolves the Lost; that one tick performs
-    // the sweep.
-    let mut driver = QueueDriver::with(vec![LinkEvent::Lost {
-        cause: LostCause::PeerClosed,
-    }]);
-
-    let registry_for_tick = registry.clone();
-    let outcome = drive_session_until_terminal(
-        &mut driver,
-        &actions,
-        &mut engine,
-        Some(5),
-        &clock,
-        |_| {},
-        move |now_ms| {
-            let mut reg = registry_for_tick
-                .lock()
-                .expect("test registry mutex poisoned by panic in on_final callback");
-            let _ = reg.sweep_timed_out(now_ms);
-        },
-    )
-    .await;
-
-    assert!(
-        matches!(outcome, DriverOutcome::Terminated),
-        "staged Lost must drive loop to Terminated; got {outcome:?}"
-    );
-    assert_eq!(
-        on_final_count.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "drive_session on_tick sweep must surface the timed-out pending \
-         entry's on_final exactly once",
-    );
-    assert!(
-        registry.lock().unwrap().is_empty(),
-        "sweep must remove the expired pending entry from the registry",
-    );
-}

@@ -5895,54 +5895,28 @@ pub enum DriverOutcome {
 /// callers will pass an embassy / FreeRTOS impl once Phase W lwIP
 /// integration arrives.
 ///
-/// R262 — `on_tick: G` (`G: FnMut(u64)`) is a per-iteration tick
-/// callback fired once at the top of every loop iteration with the
-/// current `clock.now_monotonic_ms()` value. Production callers
-/// wrap a [`crate::reply::ReplyRegistry::sweep_timed_out`] call so
-/// pending z_get registrations whose deadline has passed surface
-/// their `on_final` callback within one driver-loop tick of the
-/// deadline expiry. Test callers that do not need sweep pass
-/// `|_| {}`. The tick fires BEFORE the `tokio::select!` race so
-/// the sweep observation is consistent with the lease-deadline
-/// math on the same iteration. **The `clock` instance used here
-/// MUST share monotonic epoch with the clock used at
-/// [`crate::session::Session::query`] register time** so
-/// `sweep_timed_out` can compare correctly. In wz-ap-demo this
-/// means a single `let session_clock = TokioTime::new()` is shared
-/// between the query register site and this `drive_session`
-/// invocation (`TokioTime` is `Copy`, so `.clone()` or `&` reuse
-/// preserves the epoch).
-///
-/// R264 cancel-safety carry — adding a sweep_tick_ms parameter
-/// inside this loop (clamp every sleep arm by N ms so on_tick
-/// fires every N ms) was attempted and reverted because
-/// `poll_and_dispatch_one` is NOT cancel-safe for length-prefixed
-/// drivers such as wz-ap-demo's `InboundReadDriver`: cancelling
-/// the future mid-frame (between the u16 length read and the
-/// payload read) drops the captured length and the next poll
-/// re-syncs from the wrong byte offset. R264 fixture surfaced
-/// this as a regression in wz_query_reply_round_trip's reply
-/// chain when the sweep cadence was set to 100 ms. Sub-second
-/// sweep cadence therefore belongs in a separate task that does
-/// not race `poll_and_dispatch_one`. wz-ap-demo spawns such a
-/// task (search for `sweep_task` in run_demo). The lease-bound
-/// in-loop sweep is left in place for defense-in-depth — it
-/// fires once per lease tick (10 s on production AP params) but
-/// is harmless because `sweep_timed_out` is idempotent for
-/// already-fired entries.
-pub async fn drive_session_until_terminal<D, F, G, T>(
+/// R268 — the prior `on_tick: G` per-iteration tick parameter
+/// (R262) was removed after R264 relocated the sole production
+/// consumer ([`crate::reply::ReplyRegistry::sweep_timed_out`]) to
+/// a dedicated peer task. Every remaining caller passed a no-op
+/// closure, so the parameter was dead surface; sub-second sweep
+/// cadence belongs in a peer task that does not race
+/// `poll_and_dispatch_one` (which is not cancel-safe for
+/// length-prefixed drivers — cancelling between the u16 length
+/// read and the payload read drops captured bytes). Future
+/// per-iteration observability uses can re-introduce a similar
+/// hook when an actual consumer materialises (YAGNI hold).
+pub async fn drive_session_until_terminal<D, F, T>(
     driver: &mut D,
     actions: &Arc<SessionLinkActions>,
     engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy>,
     max_iters: Option<usize>,
     clock: &T,
     mut on_event: F,
-    mut on_tick: G,
 ) -> DriverOutcome
 where
     D: LinkDriver,
     F: FnMut(IterationEvent<'_>),
-    G: FnMut(u64),
     T: TimeSource,
 {
     let lease = if actions.params.lease_in_seconds {
@@ -5961,13 +5935,6 @@ where
             }
             iter += 1;
         }
-        // R262 — fire the per-iteration tick BEFORE the
-        // poll/lease race. Production callers wrap
-        // ReplyRegistry::sweep_timed_out here; test callers pass
-        // |_| {}. Calling after final-state + iteration-limit
-        // checks ensures a tick does not fire for an
-        // already-terminal or iter-exhausted loop.
-        on_tick(clock.now_monotonic_ms());
         let lease_deadline = {
             let stamp = *actions.last_inbound_keepalive_at.lock().unwrap();
             stamp.map(|s| s + lease)

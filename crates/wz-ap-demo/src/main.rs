@@ -932,8 +932,8 @@ struct ReplyConsumerSpec {
     /// timeout" (deadline_ms = None at register; pre-R263 behaviour
     /// preserved). Value > 0 means "compute deadline_ms =
     /// session_clock.now_monotonic_ms() + query_timeout_ms" so the
-    /// drive_session on_tick sweep surfaces on_final within that
-    /// wall-clock budget when no Final arrives.
+    /// R264 sweep_task surfaces on_final within that wall-clock
+    /// budget when no Final arrives.
     query_timeout_ms: u32,
 }
 
@@ -1040,11 +1040,12 @@ async fn run_demo(
     let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
     // R263 — single TokioTime instance shared across declare_task /
     // query_task / publisher_task / drive_session_until_terminal /
-    // the QUERY_RID ReplyRegistry register call below. TokioTime is
-    // Copy + Clone, so each call site receives a value-copy that
-    // preserves the original epoch field. The shared epoch is
-    // load-bearing for register-time deadline_ms vs sweep-time
-    // now_ms comparison (R261/R262 contract).
+    // the QUERY_RID ReplyRegistry register call below + the R264
+    // sweep_task. TokioTime is Copy + Clone, so each call site
+    // receives a value-copy that preserves the original epoch
+    // field. The shared epoch is load-bearing for register-time
+    // deadline_ms vs sweep-time now_ms comparison (R261 deadline
+    // contract + R264 sweep_task pairing).
     let session_clock = TokioTime::new();
     {
         let mut observer_lock = observer.lock().expect("observer mutex poisoned");
@@ -1109,8 +1110,8 @@ async fn run_demo(
             // R263 — deadline_ms from --query-timeout-ms. timeout_ms
             // == 0 means "no timeout" → register with None (pre-R263
             // behaviour). timeout_ms > 0 → absolute deadline computed
-            // against the shared session_clock so the drive_session
-            // on_tick sweep below can compare epoch-compatibly.
+            // against the shared session_clock so the R264 sweep_task
+            // below can compare epoch-compatibly.
             let deadline_ms = (reply_log_spec.query_timeout_ms > 0).then(|| {
                 session_clock.now_monotonic_ms() + reply_log_spec.query_timeout_ms as u64
             });
@@ -1388,18 +1389,17 @@ async fn run_demo(
     // computation above (when --query-timeout-ms > 0).
     //
     // R264 — sweep_task is a dedicated `TimeSource::sleep`-driven
-    // ticker that fires `ReplyRegistry::sweep_timed_out` every 100 ms.
-    // It exists separately from `drive_session_until_terminal`'s
-    // R262 on_tick because the drive_session loop's
-    // `poll_and_dispatch_one` future is NOT cancel-safe for
-    // length-prefixed link drivers such as the `InboundReadDriver`
-    // above (cancellation between the u16 length read and the
-    // payload read drops captured bytes — see the R264 cancel-safety
-    // carry in `drive_session_until_terminal`'s doc-comment).
-    // Clamping the drive_session loop's sleep arm to 100 ms would
-    // cancel the in-flight poll 10x/s; running the sweep here as a
-    // peer task means the drive_session loop's poll future runs to
-    // completion without competing select arms.
+    // ticker that fires `ReplyRegistry::sweep_timed_out` every 100 ms
+    // as a peer task to `drive_session_until_terminal`. The sweep
+    // runs here rather than inside the drive_session loop because
+    // `poll_and_dispatch_one` is NOT cancel-safe for length-prefixed
+    // link drivers such as the `InboundReadDriver` above
+    // (cancellation between the u16 length read and the payload
+    // read drops captured bytes). Clamping the drive_session loop's
+    // sleep arm to 100 ms would cancel the in-flight poll 10x/s;
+    // running the sweep as a peer task means the drive_session
+    // loop's poll future runs to completion without competing
+    // select arms.
     //
     // Sweep cadence sizing (100 ms): production AP wz-ap-demo
     // advertises `--query-timeout-ms` as a user-facing knob with
@@ -1440,15 +1440,6 @@ async fn run_demo(
                 .lock()
                 .expect("observer mutex poisoned by panic in subscriber callback")
                 .dispatch(event, &actions);
-        },
-        |_now_ms: u64| {
-            // R264 — sweep moved to the dedicated `sweep_task`
-            // above; the in-loop on_tick is a no-op so the
-            // drive_session iteration cadence (~once per
-            // lease-tick or inbound frame) does not double-fire
-            // the sweep. The on_tick parameter is preserved on
-            // the trait surface for future per-iteration
-            // observability uses.
         },
     )
     .await;
