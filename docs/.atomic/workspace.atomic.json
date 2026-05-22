@@ -12144,6 +12144,78 @@
         "R252 lesson: unit struct + ::default() call site triggers clippy::default_constructed_unit_structs which is included in `-D warnings`; the textbook fix is to remove the ::default() call (the literal `TokioRuntime` is the same value). Pattern to remember when authoring future zero-state runtime impls."
       ]
     },
+    "Round 253": {
+      "decision_summary": "R253 first leaf caller migration: wz-ap-demo declare_task threads T: TimeSource generic + three sleep sites use clock.sleep(ms); validates R252 TokioRuntime + TokioTime trait contract end-to-end.",
+      "changes_bullets": [
+        "crates/wz-ap-demo/Cargo.toml: wz-runtime-core path dep with std feature.",
+        "crates/wz-ap-demo/src/main.rs: imports extended (wz_runtime_core::TimeSource + wz_runtime_tokio::runtime_impl::TokioTime).",
+        "declare_task signature: `async fn declare_task<T>(actions, spec, clock: T) where T: TimeSource + Send + 'static` (was `async fn declare_task(actions, spec)` with direct tokio::time::sleep).",
+        "Three call sites inside declare_task body migrated from `tokio::time::sleep(Duration::from_millis(MS)).await` to `clock.sleep(MS).await` (handshake-poll loop + 2 inter-emit gaps).",
+        "Caller (run_demo at line 1186 area): tokio::spawn(declare_task(actions_for_declare, declare_spec, TokioTime::new())) supplies the AP-profile concrete impl. TokioTime is Copy + 'static so the value moves cleanly into the spawned future.",
+        "deadline check on std::time::Instant kept verbatim (R251 trait scope-out: TimeSource is monotonic-ms only, not Instant-arithmetic; carry to R254+).",
+        "publisher_task + query_task + their respective sleep sites NOT migrated in this round — staged for R254+ continuation; one function at a time is the textbook leaf-first cadence."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-ap-demo --bin wz-ap-demo: clean (one binary across the workspace).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates.",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A-E 9/9).",
+        "Layer E specifically (wz_initiator_to_wz_acceptor / wz_initiator_to_zsub / wz_queryable_round_trip / wz_remote_declare_round_trip): pass with byte-equivalent stderr log shape (the migration is purely behind-the-scenes trait dispatch; observable side unchanged).",
+        "pre-commit hook validate_workspace clean.",
+        "commit 6105f4b (feat(demo): R253 wz-ap-demo declare_task via TimeSource trait; 2 files +41 / -6)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R254 continue leaf-first migration: publisher_task (3 tokio::time::sleep sites at lines 1489/1530/1602 area) + query_task (1 sleep site at ~1429). Same pattern: generic T + clock: T parameter + TokioTime::new() at spawn site.",
+        "R254+ Instant-arithmetic trait gap: declare_task / publisher_task / query_task all still use std::time::Instant for deadline math. Either extend TimeSource with an Instant-shaped surface (e.g. fn now() -> impl SubAssign<Duration> + Ord) or wrap now_monotonic_ms() arithmetic to replace std::time::Instant entirely. Decision: which call-site shape forces it?",
+        "R254+ Mutex / RwLock contract decision still deferred.",
+        "R255+ Session struct reparameterisation: §5.P guidance says Session LAST. Once all leaf tasks (declare_task / publisher_task / query_task / publisher_handle internal) are migrated, Session itself can take an R: Runtime + T: TimeSource pair (or a single Bundle trait that fuses both, design open). This is the multi-round payoff of the Phase W entry.",
+        "Liveliness Token wz-ap-demo migration (R250 carry).",
+        "ReplyRegistry timeout sweep (now actively unblocked — next non-trivial TimeSource consumer after the wz-ap-demo migration completes).",
+        "Q_B / Q_E wire codec slots.",
+        "Querier / Publisher get_matching_status.",
+        "SCE drift carry.",
+        "Interest 70% / QoS 75-90% / Multicast 90% / 5 transports 85-100% / W3C conformance 100% remaining.",
+        "R253 lesson: leaf migration is structurally invisible at the binary boundary (e2e log shape byte-equivalent), which is the right invariant — the trait dispatch is a refactoring lens. Two-step textbook (R252 impl + R253 caller in same session) closed the impl-with-no-caller risk window inside one session, matching the R244+R245+R248 'infrastructure-first split, next round caller-integration' precedent."
+      ],
+      "publishable_decision_summary": "R253 first leaf caller migration: wz-ap-demo declare_task threads T: TimeSource generic + three sleep sites use clock.sleep(ms); validates R252 TokioRuntime + TokioTime trait contract end-to-end.",
+      "publishable_changes_bullets": [
+        "crates/wz-ap-demo/Cargo.toml: wz-runtime-core path dep with std feature.",
+        "crates/wz-ap-demo/src/main.rs: imports extended (wz_runtime_core::TimeSource + wz_runtime_tokio::runtime_impl::TokioTime).",
+        "declare_task signature: `async fn declare_task<T>(actions, spec, clock: T) where T: TimeSource + Send + 'static` (was `async fn declare_task(actions, spec)` with direct tokio::time::sleep).",
+        "Three call sites inside declare_task body migrated from `tokio::time::sleep(Duration::from_millis(MS)).await` to `clock.sleep(MS).await` (handshake-poll loop + 2 inter-emit gaps).",
+        "Caller (run_demo at line 1186 area): tokio::spawn(declare_task(actions_for_declare, declare_spec, TokioTime::new())) supplies the AP-profile concrete impl. TokioTime is Copy + 'static so the value moves cleanly into the spawned future.",
+        "deadline check on std::time::Instant kept verbatim (R251 trait scope-out: TimeSource is monotonic-ms only, not Instant-arithmetic; carry to R254+).",
+        "publisher_task + query_task + their respective sleep sites NOT migrated in this round — staged for R254+ continuation; one function at a time is the textbook leaf-first cadence."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-ap-demo --bin wz-ap-demo: clean (one binary across the workspace).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates.",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A-E 9/9).",
+        "Layer E specifically (wz_initiator_to_wz_acceptor / wz_initiator_to_zsub / wz_queryable_round_trip / wz_remote_declare_round_trip): pass with byte-equivalent stderr log shape (the migration is purely behind-the-scenes trait dispatch; observable side unchanged).",
+        "pre-commit hook validate_workspace clean.",
+        "commit 6105f4b (feat(demo): R253 wz-ap-demo declare_task via TimeSource trait; 2 files +41 / -6)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R254 continue leaf-first migration: publisher_task (3 tokio::time::sleep sites at lines 1489/1530/1602 area) + query_task (1 sleep site at ~1429). Same pattern: generic T + clock: T parameter + TokioTime::new() at spawn site.",
+        "R254+ Instant-arithmetic trait gap: declare_task / publisher_task / query_task all still use std::time::Instant for deadline math. Either extend TimeSource with an Instant-shaped surface (e.g. fn now() -> impl SubAssign<Duration> + Ord) or wrap now_monotonic_ms() arithmetic to replace std::time::Instant entirely. Decision: which call-site shape forces it?",
+        "R254+ Mutex / RwLock contract decision still deferred.",
+        "R255+ Session struct reparameterisation: §5.P guidance says Session LAST. Once all leaf tasks (declare_task / publisher_task / query_task / publisher_handle internal) are migrated, Session itself can take an R: Runtime + T: TimeSource pair (or a single Bundle trait that fuses both, design open). This is the multi-round payoff of the Phase W entry.",
+        "Liveliness Token wz-ap-demo migration (R250 carry).",
+        "ReplyRegistry timeout sweep (now actively unblocked — next non-trivial TimeSource consumer after the wz-ap-demo migration completes).",
+        "Q_B / Q_E wire codec slots.",
+        "Querier / Publisher get_matching_status.",
+        "SCE drift carry.",
+        "Interest 70% / QoS 75-90% / Multicast 90% / 5 transports 85-100% / W3C conformance 100% remaining.",
+        "R253 lesson: leaf migration is structurally invisible at the binary boundary (e2e log shape byte-equivalent), which is the right invariant — the trait dispatch is a refactoring lens. Two-step textbook (R252 impl + R253 caller in same session) closed the impl-with-no-caller risk window inside one session, matching the R244+R245+R248 'infrastructure-first split, next round caller-integration' precedent."
+      ]
+    },
     "Round 26": {
       "decision_summary": "R26 codebase Korean cleanup — fix 2 non-md files (mnemosyne.toml line 60 + scripts/verify-codegen.sh line 17) and establish non-md-English-only convention; historical atomic.json Korean (17 entries) and the legacy KO atomic section id remain locked by T2 frozen-ledger and the missing rename_section primitive respectively.",
       "changes_bullets": [
