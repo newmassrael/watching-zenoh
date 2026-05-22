@@ -12512,6 +12512,78 @@
         "R257 lesson: variant-split with non_exhaustive shield is the textbook way to enrich an error type without breaking existing callers. The is_cancelled vs is_panic dispatch ordering (is_cancelled wins on both-true) is documented as defence-in-depth; tokio's is_cancelled and is_panic are practically mutually exclusive, but the explicit ordering keeps the contract crisp."
       ]
     },
+    "Round 258": {
+      "decision_summary": "R258 pins Phase W public contract trait bounds at compile time + smoke-tests <R: Runtime, T: TimeSource> generic composition; defensive structural fixity layer over the R251-R257 trait surface.",
+      "changes_bullets": [
+        "crates/wz-runtime-core/src/error.rs: compile_time_assertions module added. _assert_send/_assert_sync/_assert_clone/_assert_eq fn-bound check pattern. runtime_error_trait_bounds_compile() exercises Send+Sync+Clone+Eq on RuntimeError. Functions never called; their bodies are bound-checks that fail the build if any trait impl regresses.",
+        "crates/wz-runtime-tokio/src/runtime_impl.rs: compile_time_assertions module added. TokioRuntime + TokioTime asserted Send+Sync; TokioJoinHandle<()> + TokioJoinHandle<String> asserted Send-only (NOT Sync — mirrors tokio::task::JoinHandle which is Send + !Sync; single-consumer join semantic).",
+        "Generic composition smoke fn runtime_and_time_compose_in_generic_code<R: Runtime, T: TimeSource + Clone + Send + 'static>: exercises rt.spawn(async block) returning R::JoinHandle<u64>, captures clock by clone into the spawned task, calls clock.sleep(1).await + clock.now_monotonic_ms() inside the task. Validates the trait pair is actually usable in production-shape generic code (the trajectory toward Session<R, T> reparameterisation).",
+        "Pattern is dead-code by design — #[allow(dead_code)] on the assertion functions because cargo would warn about uncalled test-module functions otherwise. Trade-off accepted: the build-time check is more valuable than the unused-fn lint.",
+        "No production code changed; no test count change (475 lib tests in wz-runtime-tokio unchanged). The compile-time assertions live in #[cfg(test)] modules so they only build under `cargo test` / `cargo check --tests` — zero footprint in the release binary."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-core --features std --lib: 2/2 pass + compile_time_assertions module compiled (no run, just bound-check).",
+        "cargo test -p wz-runtime-tokio --lib: 475/475 pass + compile_time_assertions module compiled.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates.",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A-E 9/9).",
+        "pre-commit hook validate_workspace clean (T1=0, RT 12/12, sync).",
+        "commit 58a09d3 (test(runtime-core): R258 Send/Sync compile-time + generic composition; 2 files +68 / -0)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R259+ Cancellable trait or Runtime trait abort extension (R257 carry continues).",
+        "R259+ RuntimeError inner-cause variants (e.g. JoinFailed { panic_payload: Option<Box<dyn Any + Send>> }) behind alloc/std feature.",
+        "R259+ wz-runtime-tokio internal sleep migration (drive_session_until_terminal clock param; API-breaking; user confirm required).",
+        "R259+ Session struct reparameterisation per §5.P leaf-first guidance; gated on Mutex/RwLock contract decision.",
+        "R259+ core::error::Error replacement once MSRV bumps to 1.81+.",
+        "Liveliness Token wz-ap-demo migration (R250 carry; declare_task Established-gate + RAII drop lifetime mismatch).",
+        "ReplyRegistry timeout sweep (TimeSource production-validated; strongest candidate for the next substantive feature round).",
+        "Q_B / Q_E wire codec slots.",
+        "Querier / Publisher get_matching_status.",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff.",
+        "Phase W full lwIP integration / Cortex-M cross-compile / deploy yaml.",
+        "Interest 70% / QoS 75-90% / Multicast 90% / 5 transports 85-100% / W3C conformance 100% remaining.",
+        "R258 lesson: compile-time trait-bound assertions (the _assert_send<T: Send>() pattern) are zero-cost production-grade contract fixity. They surface regressions earlier than runtime tests and require no runtime resources — textbook pattern for any public trait crate. The generic-composition smoke test similarly validates that the trait surface composes in real generic code without consuming actual scheduling resources."
+      ],
+      "publishable_decision_summary": "R258 pins Phase W public contract trait bounds at compile time + smoke-tests <R: Runtime, T: TimeSource> generic composition; defensive structural fixity layer over the R251-R257 trait surface.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-core/src/error.rs: compile_time_assertions module added. _assert_send/_assert_sync/_assert_clone/_assert_eq fn-bound check pattern. runtime_error_trait_bounds_compile() exercises Send+Sync+Clone+Eq on RuntimeError. Functions never called; their bodies are bound-checks that fail the build if any trait impl regresses.",
+        "crates/wz-runtime-tokio/src/runtime_impl.rs: compile_time_assertions module added. TokioRuntime + TokioTime asserted Send+Sync; TokioJoinHandle<()> + TokioJoinHandle<String> asserted Send-only (NOT Sync — mirrors tokio::task::JoinHandle which is Send + !Sync; single-consumer join semantic).",
+        "Generic composition smoke fn runtime_and_time_compose_in_generic_code<R: Runtime, T: TimeSource + Clone + Send + 'static>: exercises rt.spawn(async block) returning R::JoinHandle<u64>, captures clock by clone into the spawned task, calls clock.sleep(1).await + clock.now_monotonic_ms() inside the task. Validates the trait pair is actually usable in production-shape generic code (the trajectory toward Session<R, T> reparameterisation).",
+        "Pattern is dead-code by design — #[allow(dead_code)] on the assertion functions because cargo would warn about uncalled test-module functions otherwise. Trade-off accepted: the build-time check is more valuable than the unused-fn lint.",
+        "No production code changed; no test count change (475 lib tests in wz-runtime-tokio unchanged). The compile-time assertions live in #[cfg(test)] modules so they only build under `cargo test` / `cargo check --tests` — zero footprint in the release binary."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-core --features std --lib: 2/2 pass + compile_time_assertions module compiled (no run, just bound-check).",
+        "cargo test -p wz-runtime-tokio --lib: 475/475 pass + compile_time_assertions module compiled.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates.",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A-E 9/9).",
+        "pre-commit hook validate_workspace clean (T1=0, RT 12/12, sync).",
+        "commit 58a09d3 (test(runtime-core): R258 Send/Sync compile-time + generic composition; 2 files +68 / -0)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R259+ Cancellable trait or Runtime trait abort extension (R257 carry continues).",
+        "R259+ RuntimeError inner-cause variants (e.g. JoinFailed { panic_payload: Option<Box<dyn Any + Send>> }) behind alloc/std feature.",
+        "R259+ wz-runtime-tokio internal sleep migration (drive_session_until_terminal clock param; API-breaking; user confirm required).",
+        "R259+ Session struct reparameterisation per §5.P leaf-first guidance; gated on Mutex/RwLock contract decision.",
+        "R259+ core::error::Error replacement once MSRV bumps to 1.81+.",
+        "Liveliness Token wz-ap-demo migration (R250 carry; declare_task Established-gate + RAII drop lifetime mismatch).",
+        "ReplyRegistry timeout sweep (TimeSource production-validated; strongest candidate for the next substantive feature round).",
+        "Q_B / Q_E wire codec slots.",
+        "Querier / Publisher get_matching_status.",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff.",
+        "Phase W full lwIP integration / Cortex-M cross-compile / deploy yaml.",
+        "Interest 70% / QoS 75-90% / Multicast 90% / 5 transports 85-100% / W3C conformance 100% remaining.",
+        "R258 lesson: compile-time trait-bound assertions (the _assert_send<T: Send>() pattern) are zero-cost production-grade contract fixity. They surface regressions earlier than runtime tests and require no runtime resources — textbook pattern for any public trait crate. The generic-composition smoke test similarly validates that the trait surface composes in real generic code without consuming actual scheduling resources."
+      ]
+    },
     "Round 26": {
       "decision_summary": "R26 codebase Korean cleanup — fix 2 non-md files (mnemosyne.toml line 60 + scripts/verify-codegen.sh line 17) and establish non-md-English-only convention; historical atomic.json Korean (17 entries) and the legacy KO atomic section id remain locked by T2 frozen-ledger and the missing rename_section primitive respectively.",
       "changes_bullets": [
