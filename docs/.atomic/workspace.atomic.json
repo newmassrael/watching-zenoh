@@ -10830,6 +10830,106 @@
         "R238 lesson: 'mesh integration tier' bucket label is a category, not a temporal gate; R227 split precedent governs infrastructure-first rounds."
       ]
     },
+    "Round 239": {
+      "decision_summary": "R239 Session::query + QueryOptions + ReplyRegistry expected_finals (Any=2, Remote/Local=1); single dispatch via deliver_local_reply / fire_replies_for shared with wire path.",
+      "changes_bullets": [
+        "session.rs Session::query(keyexpr, QueryOptions, on_reply, on_final) -> ReplyHandle added.",
+        "session.rs QueryOptions struct (allowed_destination / target / consolidation / payload / encoding / attachment / timeout_ms) non_exhaustive + 7 with_* setters.",
+        "session_glue.rs SessionLinkActions.next_outbound_request_id: AtomicU64 + alloc_next_request_id() -> u64 (zenoh-pico _z_query_id mirror, starts at 0).",
+        "reply.rs ReplyRegistry::register signature adds expected_finals: u32 (zenoh-pico _remaining_finals mirror); 17 existing call sites updated to expected_finals=1.",
+        "reply.rs ReplyRegistry::deliver_local_reply(&InboundReply) + deliver_local_final(u64) added (loopback dispatch entry points).",
+        "reply.rs fire_replies_for / fire_final_for shared helpers extracted (R238 single-dispatch mirror); fire_final_for decrements remaining_finals, fires + drops only on zero.",
+        "reply.rs impl From<QueryReply> for InboundReply (consumer-side loopback projection).",
+        "wz-ap-demo/src/main.rs replies.register call site updated to expected_finals=1 (wire-only z_get).",
+        "lib test (reply.rs) deliver_local_reply_fires_on_reply_for_matching_rid + drops_on_unknown_rid.",
+        "lib test (reply.rs) deliver_local_final_decrements_and_fires_when_expected_finals_was_one.",
+        "lib test (reply.rs) deliver_local_final_with_expected_finals_two_keeps_entry_until_second_final.",
+        "lib test (reply.rs) dispatch_response_final_decrements_with_expected_finals_two (symmetric).",
+        "lib test (reply.rs) deliver_local_final_on_unknown_rid_is_silent_noop.",
+        "lib test (reply.rs) from_query_reply_put / del / err projection.",
+        "lib test (session.rs) query_options_default_is_any_locality_unset_metadata + get_constructor + with_setters_chain + expected_finals_matches_locality.",
+        "lib test (session.rs) query_locality_session_local_fires_loopback_only_and_completes_inline.",
+        "lib test (session.rs) query_locality_remote_fires_wire_only_and_keeps_pending_until_wire_final.",
+        "lib test (session.rs) query_locality_any_fires_both_branches_and_waits_for_wire_final.",
+        "lib test (session.rs) query_handle_carries_rid_zero_for_first_call_then_monotonic.",
+        "lib test (session.rs) query_loopback_propagates_put / del / err body via deliver_local_reply.",
+        "lib test (session.rs) query_with_no_matching_queryable_completes_loopback_with_zero_replies.",
+        "lib test (session.rs) query_session_local_skips_remote_only_queryable + with_session_local_queryable_fires + locality_remote_alone_skips_local_queryable.",
+        "lib test (session.rs) alloc_next_request_id_increments_and_starts_at_zero."
+      ],
+      "verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 351 -> 375 (+24 R239 cases; reply.rs +8, session.rs +16).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R238 65 no-regression)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R240+ wire-side propagation of QueryOptions.target / consolidation / payload / encoding / attachment (current send_request_query is minimal MVP shape).",
+        "R240+ ReplyRegistry timeout sweep: cancel pending entry + synthetic Final when QueryOptions.timeout_ms passes without peer Final.",
+        "R240+ Session::query_aliased mirror of publish_aliased_auto (mapping_id + inline_suffix + auto-resolved literal for loopback).",
+        "R240+ Querier struct (zenoh-pico z_querier_t mirror; reusable Session::query target with pre-set options).",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R239 lesson: API-breaking infrastructure (register signature) lands cleanly when external call sites <=1; second R238/R239 instance of infrastructure-first split (R227->R228 was first)."
+      ],
+      "publishable_decision_summary": "R239 Session::query + QueryOptions + ReplyRegistry expected_finals (Any=2, Remote/Local=1); single dispatch via deliver_local_reply / fire_replies_for shared with wire path.",
+      "publishable_changes_bullets": [
+        "session.rs Session::query(keyexpr, QueryOptions, on_reply, on_final) -> ReplyHandle added.",
+        "session.rs QueryOptions struct (allowed_destination / target / consolidation / payload / encoding / attachment / timeout_ms) non_exhaustive + 7 with_* setters.",
+        "session_glue.rs SessionLinkActions.next_outbound_request_id: AtomicU64 + alloc_next_request_id() -> u64 (zenoh-pico _z_query_id mirror, starts at 0).",
+        "reply.rs ReplyRegistry::register signature adds expected_finals: u32 (zenoh-pico _remaining_finals mirror); 17 existing call sites updated to expected_finals=1.",
+        "reply.rs ReplyRegistry::deliver_local_reply(&InboundReply) + deliver_local_final(u64) added (loopback dispatch entry points).",
+        "reply.rs fire_replies_for / fire_final_for shared helpers extracted (R238 single-dispatch mirror); fire_final_for decrements remaining_finals, fires + drops only on zero.",
+        "reply.rs impl From<QueryReply> for InboundReply (consumer-side loopback projection).",
+        "wz-ap-demo/src/main.rs replies.register call site updated to expected_finals=1 (wire-only z_get).",
+        "lib test (reply.rs) deliver_local_reply_fires_on_reply_for_matching_rid + drops_on_unknown_rid.",
+        "lib test (reply.rs) deliver_local_final_decrements_and_fires_when_expected_finals_was_one.",
+        "lib test (reply.rs) deliver_local_final_with_expected_finals_two_keeps_entry_until_second_final.",
+        "lib test (reply.rs) dispatch_response_final_decrements_with_expected_finals_two (symmetric).",
+        "lib test (reply.rs) deliver_local_final_on_unknown_rid_is_silent_noop.",
+        "lib test (reply.rs) from_query_reply_put / del / err projection.",
+        "lib test (session.rs) query_options_default_is_any_locality_unset_metadata + get_constructor + with_setters_chain + expected_finals_matches_locality.",
+        "lib test (session.rs) query_locality_session_local_fires_loopback_only_and_completes_inline.",
+        "lib test (session.rs) query_locality_remote_fires_wire_only_and_keeps_pending_until_wire_final.",
+        "lib test (session.rs) query_locality_any_fires_both_branches_and_waits_for_wire_final.",
+        "lib test (session.rs) query_handle_carries_rid_zero_for_first_call_then_monotonic.",
+        "lib test (session.rs) query_loopback_propagates_put / del / err body via deliver_local_reply.",
+        "lib test (session.rs) query_with_no_matching_queryable_completes_loopback_with_zero_replies.",
+        "lib test (session.rs) query_session_local_skips_remote_only_queryable + with_session_local_queryable_fires + locality_remote_alone_skips_local_queryable.",
+        "lib test (session.rs) alloc_next_request_id_increments_and_starts_at_zero."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 351 -> 375 (+24 R239 cases; reply.rs +8, session.rs +16).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R238 65 no-regression)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R240+ wire-side propagation of QueryOptions.target / consolidation / payload / encoding / attachment (current send_request_query is minimal MVP shape).",
+        "R240+ ReplyRegistry timeout sweep: cancel pending entry + synthetic Final when QueryOptions.timeout_ms passes without peer Final.",
+        "R240+ Session::query_aliased mirror of publish_aliased_auto (mapping_id + inline_suffix + auto-resolved literal for loopback).",
+        "R240+ Querier struct (zenoh-pico z_querier_t mirror; reusable Session::query target with pre-set options).",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R239 lesson: API-breaking infrastructure (register signature) lands cleanly when external call sites <=1; second R238/R239 instance of infrastructure-first split (R227->R228 was first)."
+      ]
+    },
     "Round 24": {
       "decision_summary": "Phase E start — README.md 본문 저작 (16 byte stub → 150+ line prose); project overview + Phase A/B+ 상태 + 디렉터리 / 빌드 / Local CI gates / 라이센스 / 외부 참조 / 기여 절차. workspace.docs 재등록 + atomic decompose는 R25+ carry (R7 scope correction 직후 단계 분리).",
       "changes_bullets": [
