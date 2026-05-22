@@ -38,8 +38,15 @@
 //!   7. Belt-and-suspenders id + keyexpr assertions so a regression
 //!      on any of (id echo, keyexpr resolution, registry routing)
 //!      localises here.
-//!   8. SIGTERM both children + surface captured stderr on any
-//!      failed assertion.
+//!   8. R278 — SIGTERM the acceptor (the side holding the
+//!      LivelinessToken) so its graceful-shutdown path runs:
+//!      `shutdown_signal()` cancels `drive_session`, the held
+//!      `LivelinessToken` drops, `Declare(UndeclToken)` emits on
+//!      the wire, and the initiator's `LivelinessRegistry`
+//!      callback logs `REMOTE TOKEN UNDECLARED id=0`. Assertion
+//!      9 below gates that flow end-to-end.
+//!   9. Wait for `REMOTE TOKEN UNDECLARED id=0` on initiator
+//!      stderr (5 s budget) then SIGKILL the initiator.
 //!
 //! Why this consolidated test rather than three per-kind tests:
 //! the three Remote* registries share the same observer fan-out and
@@ -139,10 +146,33 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
         Duration::from_secs(10),
     );
 
+    // R278 — graceful shutdown of the acceptor (the side holding the
+    // LivelinessToken). SIGTERM triggers the `shutdown_signal()` arm
+    // of wz-ap-demo's top-level `tokio::select!`, which cancels
+    // `drive_session_until_terminal`, joins the spawned tasks, then
+    // drops the held `LivelinessToken` BEFORE dropping `actions`.
+    // The token's `Drop` impl emits `Declare(UndeclToken)` on the
+    // wire; the initiator's `LivelinessRegistry` callback observes
+    // it and logs `REMOTE TOKEN UNDECLARED id=0`. Hard SIGKILL
+    // fallback caps the wait at 2 s so a wedged graceful path does
+    // not block the test indefinitely.
+    graceful_terminate(&mut acceptor_child, Duration::from_secs(2));
+
+    // Once the acceptor has exited gracefully (UndeclToken on the
+    // wire), give the initiator a window to drain its inbound queue
+    // and log the corresponding `REMOTE TOKEN UNDECLARED` line. 5 s
+    // is generous — the actual interval is dominated by the TCP
+    // stream drain + observer dispatch, both well under 100 ms in
+    // local-loopback runs.
+    let undecl_substr = "REMOTE TOKEN UNDECLARED";
+    let undecl_captured = wait_for_substring(
+        &mut initiator_stderr_reader,
+        undecl_substr,
+        Duration::from_secs(5),
+    );
+
     let _ = initiator_child.kill();
     let _ = initiator_child.wait();
-    let _ = acceptor_child.kill();
-    let _ = acceptor_child.wait();
 
     let acceptor_captured = read_captured(&mut acceptor_stderr_reader);
     let initiator_captured = read_captured(&mut initiator_stderr_reader);
@@ -229,4 +259,67 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
          Session::declare_token did not fire.\n\
          --- acceptor stderr ---\n{acceptor_captured}"
     );
+
+    // R278 — graceful-shutdown end-to-end gate. The acceptor's
+    // `LivelinessToken::Drop` (R277 RAII) runs during the
+    // `shutdown_signal()` -> drop(token) sequence under SIGTERM,
+    // emitting `Declare(UndeclToken)` on the wire. The initiator's
+    // `LivelinessRegistry` observer callback prints
+    // `REMOTE TOKEN UNDECLARED id=0` (the `id=` value matches the
+    // R277 auto-allocated token id from the DECLARED side). This
+    // assertion is the only end-to-end gate on the R277 RAII
+    // contract — the unit-level Drop test in
+    // `wz-runtime-tokio/src/session.rs` covers the in-process
+    // emission, this covers the cross-process wire path.
+    let undecl_text = match undecl_captured {
+        Ok(c) => c,
+        Err(c) => panic!(
+            "wz initiator did not log '{undecl_substr}' within 5 s — \
+             R278 graceful-shutdown UndeclToken path regressed. Likely \
+             causes: (a) shutdown_signal() not wired into the \
+             tokio::select!; (b) LivelinessToken drop ordering moved \
+             after drop(actions); (c) writer task drained before the \
+             retraction frame was enqueued; (d) acceptor SIGTERM \
+             handler not installed (failed signalfd setup).\n\
+             --- captured initiator stderr at deadline ---\n{c}\n\
+             --- captured acceptor stderr ---\n{acceptor_captured}"
+        ),
+    };
+    assert!(
+        undecl_text.contains("REMOTE TOKEN UNDECLARED id=0"),
+        "initiator stderr missing 'REMOTE TOKEN UNDECLARED id=0' — \
+         R278 LivelinessToken RAII Drop did not fire end-to-end.\n\
+         --- initiator stderr ---\n{undecl_text}"
+    );
+}
+
+/// R278 — send SIGTERM to `child` and poll its exit status until
+/// either (a) it exits cleanly or (b) `timeout` elapses, in which
+/// case SIGKILL is sent as a fallback. Used to drive wz-ap-demo's
+/// graceful-shutdown path from integration tests so the R277
+/// `LivelinessToken::Drop` actually fires (SIGKILL bypasses Rust
+/// `Drop` entirely).
+///
+/// Implementation uses the system `kill` command rather than the
+/// `nix` crate to avoid pulling another dep into the test harness;
+/// `kill -TERM <pid>` is portable across all the Unix targets
+/// wz-ap-demo currently builds for (Linux, macOS, BSD, QNX).
+fn graceful_terminate(child: &mut std::process::Child, timeout: Duration) {
+    let pid = child.id().to_string();
+    let _ = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(&pid)
+        .status();
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        match child.try_wait() {
+            Ok(Some(_status)) => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(_) => break,
+        }
+    }
+    // SIGTERM did not produce a graceful exit within the budget —
+    // fall back to SIGKILL so the test does not hang.
+    let _ = child.kill();
+    let _ = child.wait();
 }

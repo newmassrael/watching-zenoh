@@ -1496,27 +1496,58 @@ async fn run_demo(
         }
     });
 
-    let outcome = drive_session_until_terminal(
-        &mut driver,
-        &actions,
-        &mut engine,
-        Some(10_000),
-        &session_clock,
-        |event: IterationEvent<'_>| {
-            log::debug!("wz-ap-demo: iteration event = {event:?}");
-            observer_for_dispatch
-                .lock()
-                .expect("observer mutex poisoned by panic in subscriber callback")
-                .dispatch(event, &actions);
-        },
-    )
-    .await;
+    // R278 — race `drive_session_until_terminal` against the
+    // graceful-shutdown signal. Three completion paths:
+    //   1. FSM reaches terminal naturally (peer Close received, max
+    //      iters hit, lease timeout, etc.) → outcome = Some(...)
+    //   2. SIGTERM / SIGINT arrives → outcome = None; drive_session
+    //      future is dropped mid-iteration (cancel-safe — the engine
+    //      lives in run_demo's stack, not inside the future).
+    //   3. (Future) administrative shutdown via in-process channel
+    //      → same Future-drop semantics as (2).
+    // In all three paths the subsequent teardown sequence
+    // (sweep_task.abort + task joins + token drop + drop(actions) +
+    // writer drain) runs identically. The cancel arm does NOT post
+    // `SessionClose` to the FSM before exiting — sending the wire
+    // `Close` frame requires re-entering the drive loop which would
+    // re-block on signal cancellation. The peer therefore observes
+    // a connection EOF rather than a Close frame on signal
+    // shutdown; the `Declare(UndeclToken)` retraction frame
+    // emitted by `LivelinessToken::Drop` further down still goes
+    // out on the wire ahead of the EOF, which is the R277/R278
+    // end-to-end contract this round delivers.
+    let outcome = tokio::select! {
+        o = drive_session_until_terminal(
+            &mut driver,
+            &actions,
+            &mut engine,
+            Some(10_000),
+            &session_clock,
+            |event: IterationEvent<'_>| {
+                log::debug!("wz-ap-demo: iteration event = {event:?}");
+                observer_for_dispatch
+                    .lock()
+                    .expect("observer mutex poisoned by panic in subscriber callback")
+                    .dispatch(event, &actions);
+            },
+        ) => Some(o),
+        _ = shutdown_signal() => {
+            log::info!(
+                "wz-ap-demo: shutdown signal received; halting drive_session \
+                 (writer task remains alive to drain UndeclToken + tail frames)"
+            );
+            None
+        }
+    };
     // R264 — terminate the sweep task; abort() is sufficient since
     // the task body has no shared mutable state beyond the
     // observer (cleanly dropped at task join) and no on-Drop
     // cleanup requirements.
     sweep_task.abort();
-    log::info!("wz-ap-demo: session ended: {outcome:?}");
+    match &outcome {
+        Some(o) => log::info!("wz-ap-demo: session ended: {o:?}"),
+        None => log::info!("wz-ap-demo: session cancelled by graceful-shutdown signal"),
+    }
     log::info!("wz-ap-demo: action trace = {:?}", actions.trace_snapshot());
 
     // R121e — give the publisher task a brief window to finish
@@ -1640,11 +1671,14 @@ const QUERY_RID: u64 = 1;
 /// Hard-coded ids:
 ///   subscriber  = 1001
 ///   queryable   = 2001
-///   token       = 3001
+///   token       = auto-allocated by SessionLinkActions::alloc_next_token_id
+///                 (first call returns 0; R277 migration to LivelinessToken)
 /// Ids are picked per-kind so a wire-capture or integration test can
 /// distinguish at a glance which kind a given declare body belongs
-/// to. Production deployments would source ids from a per-session
-/// counter (the wz-ap-demo binary is intentionally minimal here).
+/// to. Production deployments would source sub / queryable ids from a
+/// per-session counter (the wz-ap-demo binary is intentionally minimal
+/// here for those arms); token already routes through the
+/// per-session counter via Session::declare_token at R277.
 const DECLARE_SUBSCRIBER_ID: u64 = 1001;
 const DECLARE_QUERYABLE_ID: u64 = 2001;
 // R277 — DECLARE_TOKEN_ID retired. The token branch routes through
@@ -1655,6 +1689,68 @@ const DECLARE_QUERYABLE_ID: u64 = 2001;
 const DECLARE_HANDSHAKE_POLL_INTERVAL_MS: u64 = 50;
 const DECLARE_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
 const DECLARE_INTER_EMIT_MS: u64 = 100;
+
+/// R278 — graceful-shutdown signal future. Resolves on the first of
+/// SIGTERM or SIGINT (Ctrl-C). Used as the cancellation arm of a
+/// `tokio::select!` around `drive_session_until_terminal` so the demo
+/// can unwind cleanly — joining its tasks, dropping the held
+/// `LivelinessToken` (which emits `Declare(UndeclToken)` on the wire
+/// per R277 RAII contract), then dropping `actions` so the writer
+/// task drains. SIGKILL still bypasses all of this; for that path
+/// the peer only sees connection EOF, no `UndeclToken`.
+///
+/// Why two signals: SIGINT is the Ctrl-C path for interactive shell
+/// sessions, SIGTERM is what `kill <pid>` / process-supervision
+/// frameworks (systemd, k8s) emit during planned shutdown. Both
+/// should route through the same graceful path. SIGQUIT and
+/// SIGKILL are intentionally not handled — SIGQUIT signals
+/// abnormal termination (core dump) and SIGKILL cannot be caught
+/// from userspace at all.
+///
+/// Failure handling: if the signal handler install fails (rare —
+/// usually only when running outside a tokio runtime or in a
+/// container that filters `signalfd`), we log a warning and fall
+/// back to the Ctrl-C-only path. A wedged demo can still be
+/// `kill -9`'d in the worst case.
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigterm = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!(
+                "wz-ap-demo: failed to install SIGTERM handler ({e}); \
+                 falling back to ctrl_c-only graceful shutdown"
+            );
+            let _ = tokio::signal::ctrl_c().await;
+            log::info!("wz-ap-demo: SIGINT received (SIGTERM unavailable)");
+            return;
+        }
+    };
+    tokio::select! {
+        _ = sigterm.recv() => {
+            log::info!("wz-ap-demo: SIGTERM received; graceful shutdown");
+        }
+        r = tokio::signal::ctrl_c() => {
+            if let Err(e) = r {
+                log::warn!("wz-ap-demo: ctrl_c handler error: {e}");
+            }
+            log::info!("wz-ap-demo: SIGINT received; graceful shutdown");
+        }
+    }
+}
+
+/// R278 — non-Unix fallback. Windows + WASM only support Ctrl-C
+/// here; the Unix-only SIGTERM path is omitted because there is no
+/// portable analogue (Windows uses `CTRL_BREAK_EVENT` /
+/// `WM_CLOSE` / etc. which are not yet wired into the demo).
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    if let Err(e) = tokio::signal::ctrl_c().await {
+        log::warn!("wz-ap-demo: ctrl_c handler error: {e}");
+    }
+    log::info!("wz-ap-demo: Ctrl-C received; graceful shutdown");
+}
 
 /// R253 — first leaf caller migration: this function previously
 /// reached for `tokio::time::sleep` directly; the three sleep sites
@@ -1684,15 +1780,19 @@ const DECLARE_INTER_EMIT_MS: u64 = 100;
 /// queryable but only with same-process callback wiring; the
 /// declare-time wire emit still goes through `SessionLinkActions`).
 ///
-/// SIGKILL caveat: the existing
-/// `wz_remote_declare_round_trip_against_wz_initiator` integration
-/// test uses `child.kill()` (SIGKILL) on both wz-ap-demo processes,
-/// which bypasses Rust's `Drop` entirely. The RAII `UndeclToken`
-/// emit is only observable end-to-end under graceful shutdown (FSM
-/// hits terminal, run_demo unwinds cleanly). Unit-level Drop
-/// semantics are gated by
-/// `liveliness_token_drop_emits_undeclare_wire_frame` in
-/// `wz-runtime-tokio/src/session.rs`.
+/// Shutdown semantics: end-to-end UndeclToken emission requires
+/// graceful unwinding of `run_demo` (FSM hits terminal OR R278
+/// `shutdown_signal()` arm of the `tokio::select!` fires).
+/// Signal-driven shutdown was wired in R278 — sending SIGTERM /
+/// SIGINT to wz-ap-demo now drops the held LivelinessToken (RAII)
+/// before drop(actions), so the peer observes the
+/// `Declare(UndeclToken)` retraction frame ahead of the connection
+/// EOF. The integration test
+/// `wz_remote_declare_round_trip_against_wz_initiator` exercises
+/// the graceful path against the acceptor and asserts
+/// `REMOTE TOKEN UNDECLARED id=0` in initiator stderr.
+/// SIGKILL still bypasses Rust `Drop` entirely; under that path
+/// the peer only sees connection EOF.
 async fn declare_task<T>(
     session: Session,
     spec: DeclareEmitSpec,

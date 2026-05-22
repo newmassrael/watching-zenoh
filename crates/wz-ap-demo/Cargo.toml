@@ -69,7 +69,7 @@ sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
 sce-rust-lua = { path = "../../vendor/sce/sce-rust-lua" }
 # Tokio multi-thread runtime — required by TokioLinkDriverAdapter's
 # block_on contract per session_glue.rs:445.
-tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal"] }
 # Logging plumbing — env_logger reads RUST_LOG / WZ_DEMO_LOG to
 # surface session FSM transitions + subscriber dispatch events.
 log = "0.4"
