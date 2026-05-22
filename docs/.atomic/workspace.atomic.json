@@ -10468,6 +10468,60 @@
         "R232 lesson: doc lines starting with `+` token trigger clippy doc_list_item_without_indentation; reflow."
       ]
     },
+    "Round 233": {
+      "decision_summary": "R233 wire metadata parity: PushMetadata + 4 build_push_*_with_meta + 4 send_push_with_meta_* methods; Session::publish wire branch threads all 5 metadata fields.",
+      "changes_bullets": [
+        "sample.rs: TimestampHint::to_codec + EncodingHint::to_codec inverse conversions.",
+        "session_glue.rs: PushMetadata struct + build_body_extensions + build_push_outer_extensions helpers.",
+        "build_msg_put_with_meta sets T/E/Z flags; build_msg_del_with_meta drops encoding param entirely.",
+        "4 build_push_*_with_meta + 4 send_push_with_meta_* methods on SessionLinkActions surface.",
+        "apply_chain_z_bits helper sets Z chain-continuation bit on all entries except last in chain.",
+        "Session::publish + publish_aliased wire branch routes through with_meta via opts.push_metadata()."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 316 -> 329 (+13 R233 builder/round-trip/dispatch tests).",
+        "cargo test -p wz-integration-tests: 65 unchanged, no regression.",
+        "cargo clippy --workspace --all-targets -D warnings: clean (after Z chain bit fix)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R234 wz outbound mapping table (R229 carry, _local_resources mirror, retires caller-asserted loopback_keyexpr).",
+        "R235+ wz-ap-demo Session API migration (R228+R229+R232 carry, 4 publish + 11 observer + 1 dispatch site).",
+        "R236+ auto-wire Session::set_own_zid on FSM open-handshake completion event (R231 carry).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwip integration.",
+        "R233 lesson: SCE-emitted MsgPut/MsgDel/Push::encode iterates ext Vec without flipping Z chain bit.",
+        "R233 lesson: author owns Z chain-continuation; apply_chain_z_bits centralises the rule."
+      ],
+      "publishable_decision_summary": "R233 wire metadata parity: PushMetadata + 4 build_push_*_with_meta + 4 send_push_with_meta_* methods; Session::publish wire branch threads all 5 metadata fields.",
+      "publishable_changes_bullets": [
+        "sample.rs: TimestampHint::to_codec + EncodingHint::to_codec inverse conversions.",
+        "session_glue.rs: PushMetadata struct + build_body_extensions + build_push_outer_extensions helpers.",
+        "build_msg_put_with_meta sets T/E/Z flags; build_msg_del_with_meta drops encoding param entirely.",
+        "4 build_push_*_with_meta + 4 send_push_with_meta_* methods on SessionLinkActions surface.",
+        "apply_chain_z_bits helper sets Z chain-continuation bit on all entries except last in chain.",
+        "Session::publish + publish_aliased wire branch routes through with_meta via opts.push_metadata()."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 316 -> 329 (+13 R233 builder/round-trip/dispatch tests).",
+        "cargo test -p wz-integration-tests: 65 unchanged, no regression.",
+        "cargo clippy --workspace --all-targets -D warnings: clean (after Z chain bit fix)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R234 wz outbound mapping table (R229 carry, _local_resources mirror, retires caller-asserted loopback_keyexpr).",
+        "R235+ wz-ap-demo Session API migration (R228+R229+R232 carry, 4 publish + 11 observer + 1 dispatch site).",
+        "R236+ auto-wire Session::set_own_zid on FSM open-handshake completion event (R231 carry).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwip integration.",
+        "R233 lesson: SCE-emitted MsgPut/MsgDel/Push::encode iterates ext Vec without flipping Z chain bit.",
+        "R233 lesson: author owns Z chain-continuation; apply_chain_z_bits centralises the rule."
+      ]
+    },
     "Round 24": {
       "decision_summary": "Phase E start — README.md 본문 저작 (16 byte stub → 150+ line prose); project overview + Phase A/B+ 상태 + 디렉터리 / 빌드 / Local CI gates / 라이센스 / 외부 참조 / 기여 절차. workspace.docs 재등록 + atomic decompose는 R25+ carry (R7 scope correction 직후 단계 분리).",
       "changes_bullets": [
