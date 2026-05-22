@@ -68,7 +68,7 @@ use crate::observer::ApplicationLayerObserver;
 use crate::sample::{
     EncodingHint, QosLevel, Reliability, Sample, SampleKind, SourceInfo, TimestampHint,
 };
-use crate::session_glue::SessionLinkActions;
+use crate::session_glue::{PushMetadata, SessionLinkActions};
 
 /// Options bundle for [`Session::publish`]. Carries the locality
 /// routing predicate (`allowed_destination`), the reliability hint
@@ -216,6 +216,25 @@ impl PublishOptions {
     fn reliable_bool(&self) -> bool {
         matches!(self.reliability, Reliability::Reliable)
     }
+
+    /// R233 — extract the wire-encoder-facing metadata bundle from a
+    /// PublishOptions instance so [`Session::publish`] can hand it
+    /// to [`crate::session_glue::SessionLinkActions::send_push_with_meta_literal`]
+    /// without the lower module learning about
+    /// [`Locality`] / [`Reliability`] / [`SampleKind`] (those stay
+    /// on the dispatch-time surface). Clones each owned slot — the
+    /// expected publish path performs one extraction per publish
+    /// call so the allocation cost is amortised against the wire
+    /// frame's existing copies.
+    fn push_metadata(&self) -> PushMetadata {
+        PushMetadata {
+            timestamp: self.timestamp.clone(),
+            encoding: self.encoding.clone(),
+            source_info: self.source_info.clone(),
+            attachment: self.attachment.clone(),
+            qos: self.qos,
+        }
+    }
 }
 
 /// Application-level session bundle. Owns the outbound action handle
@@ -329,21 +348,20 @@ impl Session {
     /// this return value — fire-and-forget per
     /// [`SessionLinkActions::send_push_literal`]'s shape.
     ///
-    /// ## R233 carry — wire-side metadata propagation
+    /// ## R233 — wire-side metadata parity
     ///
-    /// The wire branch currently drops the four body-level metadata
-    /// fields (timestamp, encoding, source_info, attachment) and the
-    /// outer QoS extension because the existing `send_push_literal`
-    /// and `send_push_del_literal` signatures predate metadata
-    /// threading. Loopback subscribers see the full caller-attached
-    /// metadata via `Sample.*` projection; wire peers receive only
-    /// the keyexpr, payload, and reliability bit. R233 will extend
-    /// the action surface with `send_push_with_meta_*` variants that
-    /// encode each field into the `MsgPut` / `MsgDel` body slots and
-    /// the appropriate ext-id extension entries, restoring full
-    /// wire-vs-loopback parity. Callers that need wire-side metadata
-    /// in the interim must drive [`SessionLinkActions`] directly with
-    /// custom Push builders.
+    /// The wire branch routes through
+    /// [`SessionLinkActions::send_push_with_meta_literal`] /
+    /// [`SessionLinkActions::send_push_del_with_meta_literal`],
+    /// threading every caller-set [`PublishOptions`] metadata field
+    /// (timestamp, encoding, source_info, attachment, qos) onto the
+    /// outbound `MsgPut`/`MsgDel` so the peer's
+    /// `_z_trigger_subscriptions_impl` projects the same
+    /// `_z_sample_t` shape the loopback branch projects in-process.
+    /// Encoding is dropped silently for Del kind (mirrors
+    /// `_z_msg_del_t`'s missing encoding slot); the loopback path
+    /// applies the same projection in
+    /// [`build_loopback_sample`].
     ///
     /// Mirrors zenoh-pico's `_z_write` `vendor/zenoh-pico/src/net/primitives.c`
     /// 170-205: wire branch under `allows_remote()`, loopback branch
@@ -358,12 +376,15 @@ impl Session {
     ) -> usize {
         let reliable = opts.reliable_bool();
         if opts.allowed_destination.allows_remote() {
+            let meta = opts.push_metadata();
             match opts.kind {
                 SampleKind::Put => {
-                    self.actions.send_push_literal(keyexpr, payload, reliable);
+                    self.actions
+                        .send_push_with_meta_literal(keyexpr, payload, reliable, &meta);
                 }
                 SampleKind::Del => {
-                    self.actions.send_push_del_literal(keyexpr, reliable);
+                    self.actions
+                        .send_push_del_with_meta_literal(keyexpr, reliable, &meta);
                 }
             }
         }
@@ -437,14 +458,24 @@ impl Session {
     ) -> usize {
         let reliable = opts.reliable_bool();
         if opts.allowed_destination.allows_remote() {
+            let meta = opts.push_metadata();
             match opts.kind {
                 SampleKind::Put => {
-                    self.actions
-                        .send_push_aliased(mapping_id, inline_suffix, payload, reliable);
+                    self.actions.send_push_with_meta_aliased(
+                        mapping_id,
+                        inline_suffix,
+                        payload,
+                        reliable,
+                        &meta,
+                    );
                 }
                 SampleKind::Del => {
-                    self.actions
-                        .send_push_del_aliased(mapping_id, inline_suffix, reliable);
+                    self.actions.send_push_del_with_meta_aliased(
+                        mapping_id,
+                        inline_suffix,
+                        reliable,
+                        &meta,
+                    );
                 }
             }
         }
