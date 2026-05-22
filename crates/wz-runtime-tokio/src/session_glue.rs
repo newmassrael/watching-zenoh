@@ -5894,17 +5894,37 @@ pub enum DriverOutcome {
 /// `&TokioTime::new()` (or any owned `TokioTime` reference); MCU
 /// callers will pass an embassy / FreeRTOS impl once Phase W lwIP
 /// integration arrives.
-pub async fn drive_session_until_terminal<D, F, T>(
+///
+/// R262 — `on_tick: G` (`G: FnMut(u64)`) is a per-iteration tick
+/// callback fired once at the top of every loop iteration with the
+/// current `clock.now_monotonic_ms()` value. Production callers
+/// wrap a [`crate::reply::ReplyRegistry::sweep_timed_out`] call so
+/// pending z_get registrations whose deadline has passed surface
+/// their `on_final` callback within one driver-loop tick of the
+/// deadline expiry. Test callers that do not need sweep pass
+/// `|_| {}`. The tick fires BEFORE the `tokio::select!` race so
+/// the sweep observation is consistent with the lease-deadline
+/// math on the same iteration. **The `clock` instance used here
+/// MUST share monotonic epoch with the clock used at
+/// [`crate::session::Session::query`] register time** so
+/// `sweep_timed_out` can compare correctly. In wz-ap-demo this
+/// means a single `let session_clock = TokioTime::new()` is shared
+/// between the query register site and this `drive_session`
+/// invocation (`TokioTime` is `Copy`, so `.clone()` or `&` reuse
+/// preserves the epoch).
+pub async fn drive_session_until_terminal<D, F, G, T>(
     driver: &mut D,
     actions: &Arc<SessionLinkActions>,
     engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy>,
     max_iters: Option<usize>,
     clock: &T,
     mut on_event: F,
+    mut on_tick: G,
 ) -> DriverOutcome
 where
     D: LinkDriver,
     F: FnMut(IterationEvent<'_>),
+    G: FnMut(u64),
     T: TimeSource,
 {
     let lease = if actions.params.lease_in_seconds {
@@ -5923,6 +5943,13 @@ where
             }
             iter += 1;
         }
+        // R262 — fire the per-iteration tick BEFORE the
+        // poll/lease race. Production callers wrap
+        // ReplyRegistry::sweep_timed_out here; test callers pass
+        // |_| {}. Calling after final-state + iteration-limit
+        // checks ensures a tick does not fire for an
+        // already-terminal or iter-exhausted loop.
+        on_tick(clock.now_monotonic_ms());
         let lease_deadline = {
             let stamp = *actions.last_inbound_keepalive_at.lock().unwrap();
             stamp.map(|s| s + lease)
