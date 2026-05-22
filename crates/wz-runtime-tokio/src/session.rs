@@ -842,9 +842,16 @@ impl Session {
                 .observer
                 .lock()
                 .expect("Session observer mutex poisoned — a reply callback panicked");
+            // R261 — deadline_ms is None for the Session::query API
+            // until R262 threads a clock through this call site. The
+            // pending entry will not be swept by sweep_timed_out;
+            // semantics match pre-R261 behaviour exactly (Final
+            // arrival is the sole termination signal). R262 will add
+            // a clock parameter and compute deadline_ms from
+            // opts.timeout_ms here.
             let handle = observer
                 .replies
-                .register(rid, expected_finals, on_reply, on_final);
+                .register(rid, expected_finals, None, on_reply, on_final);
             if allows_local {
                 let mut replies: Vec<QueryReply> = Vec::new();
                 let query = Query::default();
@@ -939,9 +946,12 @@ impl Session {
                 .observer
                 .lock()
                 .expect("Session observer mutex poisoned — a reply callback panicked");
+            // R261 — deadline_ms is None for the Session::query_aliased
+            // API until R262 threads a clock through this call site.
+            // Symmetric with Session::query above.
             let handle = observer
                 .replies
-                .register(rid, expected_finals, on_reply, on_final);
+                .register(rid, expected_finals, None, on_reply, on_final);
             if allows_local {
                 let mut replies: Vec<QueryReply> = Vec::new();
                 let query = Query::default();
