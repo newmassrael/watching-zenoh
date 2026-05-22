@@ -11956,6 +11956,102 @@
         "R250 lesson: pre-push hook chicken-and-egg defence is cheap (mktemp + git show + bash) and the only meaningful cost is one extra `git show` per push; the CI runner already gets the right behaviour for free because its checkout-at-HEAD invariant makes working-tree-vs-HEAD divergence impossible on the runner side."
       ]
     },
+    "Round 251": {
+      "decision_summary": "R251 Phase W entry: wz-runtime-core trait skeleton landed (Runtime + TimeSource + Allocator + RuntimeError). R230 §5.P spec moves from 0% impl to skeleton-only; AP/MCU dual-target compile path opened.",
+      "changes_bullets": [
+        "crates/wz-runtime-core/ new crate (no_std default + std/alloc opt-in features). Workspace member added; MSRV 1.75 retained.",
+        "src/runtime.rs Runtime trait: type JoinHandle<T: Send + 'static>: Future<Output = Result<T, RuntimeError>> + Send + 'static GAT + spawn<F: Future + Send + 'static>(fut: F) -> Self::JoinHandle<F::Output>. Mirrors tokio JoinHandle as a Future contract so tokio impl can satisfy directly via JoinError -> RuntimeError::JoinFailed wrap.",
+        "src/time.rs TimeSource trait: now_monotonic_ms(&self) -> u64 + sleep(&self, ms: u64) -> impl Future<Output=()> + Send + '_ (RPITIT shape user-confirmed; Rust 1.75 stable).",
+        "src/allocator.rs Allocator trait: alloc(&self, Layout) -> Option<NonNull<u8>> + unsafe dealloc(&self, NonNull<u8>, Layout). Local trait (NOT core::alloc::Allocator which is nightly-only on MSRV 1.75) with explicit Option-on-OOM failure surface; buffer-pool / TLSF allocator pivot space preserved.",
+        "src/error.rs RuntimeError enum: JoinFailed + Shutdown variants, non_exhaustive. Display impl. core::error::Error impl deferred (requires MSRV 1.81); std::error::Error impl behind std feature deferred to R252+ AP integration round.",
+        "src/lib.rs cfg_attr no_std gate + alloc extern + module re-exports. deny(missing_docs) for trait-surface doc completeness.",
+        "Documentation throughout the crate cites R230 §5.P (parent spec), R63 (anti-stub rule: no NOP impl ships), §5.I (intrinsics tier — distinct layer), 111 std/tokio call site R230 inventory baseline (the R252+ migration target).",
+        "Carries explicit in lib.rs module doc: Mutex/RwLock shape deferred (HKT-vs-type-alias-vs-cfg-cond design tied to actual MCU work shape); TokioRuntime impl deferred (R252+); LwipRuntime + EmbassyRuntime deferred (Phase W lwIP integration round).",
+        "0 production site change; 0 wz upper layer reparameterization; 0 impl. Pure type-level scaffold (per user-confirmed scope)."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-core: clean (default features, no extras).",
+        "cargo build -p wz-runtime-core --no-default-features: clean (no_std core path).",
+        "cargo build -p wz-runtime-core --features std: clean (std-gated path).",
+        "cargo build -p wz-runtime-core --features alloc: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates (now including wz-runtime-core).",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A mnemosyne + A2 audit + B verify-codegen + C1 cargo test 464 + C2 clippy + D deploy + E binary-dep e2e 9/9).",
+        "pre-commit hook: validate_workspace clean (T1=0, RT 12/12, sync preserved).",
+        "pre-push hook simulation passed at commit time via the R250 HEAD-extracted run-ci.sh path.",
+        "commit a8c7094 (feat(runtime-core): R251 Phase W entry wz-runtime-core trait skeleton; 8 new files +381 / -0)."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R252+ TokioRuntime concrete impl in wz-runtime-tokio: spawn via tokio::task::spawn returning tokio::task::JoinHandle wrapped to convert JoinError -> RuntimeError::JoinFailed. TimeSource via tokio::time::Instant + tokio::time::sleep. impl-with-no-caller pattern from R244/R245/R248 quartet — next round must wire one caller to avoid dead-code rot.",
+        "R253+ first caller migration: pick a leaf wz-runtime-tokio site (likely a tokio::time::sleep call in a timeout path) to validate the trait contract carries actual production semantics. §5.P guidance: 'leaf crates first, Session struct last' — do not start with Session reparameterization.",
+        "Mutex / RwLock contract decision: deferred from R251 design. Pick between (a) per-runtime `Mutex<T>` type alias re-exported from runtime crate, (b) `MutexFamily` GAT trait, or (c) cfg-conditional direct std vs embassy use. Best resolved when first real Mutex-using site needs to compile under MCU profile.",
+        "Allocator first concrete impl: deferred until MCU buffer-pool round (Phase W lwIP integration). AP profile keeps std GlobalAlloc until then — no impl needed in wz-runtime-tokio because tokio + std default heap already covers AP.",
+        "core::error::Error impl on RuntimeError: gated on MSRV bump to 1.81+. Until then, std::error::Error impl behind `std` feature is the cleaner path (lands with R252 TokioRuntime).",
+        "wz-runtime-lwip crate re-introduction: tracking the R63 removal carry; the empty-stub anti-pattern is preserved — lwip crate reintroduces only when there is actual lwIP integration code to ship.",
+        "Liveliness Token wz-ap-demo migration (R250 carry).",
+        "ReplyRegistry timeout sweep (needs TimeSource concrete impl from R252+, so naturally chains).",
+        "Q_B / Q_E wire codec slots (SCE-side codec extension).",
+        "LivelinessToken local_tokens table for history fan-out.",
+        "LivelinessToken Drop catch_unwind defensive wrap.",
+        "Querier::get_matching_status / Publisher::get_matching_status.",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff; pin bump deferred.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R251 lesson: Phase W entry is the smallest defensible architectural commitment — trait skeleton + cfg gating only, 0 impl, 0 caller. The 26-session textbook anchor (AskUserQuestion + code preview for architectural decisions) was applied: user confirmed (1) scope = trait skeleton only, (2) sleep shape = RPITIT. Trait shape decisions that genuinely require caller-shape evidence (Mutex/RwLock) were explicitly deferred rather than guessed. The R63 anti-stub rule held: no NOP impl shipped; the contract exists, the first impl waits for the first caller."
+      ],
+      "publishable_decision_summary": "R251 Phase W entry: wz-runtime-core trait skeleton landed (Runtime + TimeSource + Allocator + RuntimeError). R230 §5.P spec moves from 0% impl to skeleton-only; AP/MCU dual-target compile path opened.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-core/ new crate (no_std default + std/alloc opt-in features). Workspace member added; MSRV 1.75 retained.",
+        "src/runtime.rs Runtime trait: type JoinHandle<T: Send + 'static>: Future<Output = Result<T, RuntimeError>> + Send + 'static GAT + spawn<F: Future + Send + 'static>(fut: F) -> Self::JoinHandle<F::Output>. Mirrors tokio JoinHandle as a Future contract so tokio impl can satisfy directly via JoinError -> RuntimeError::JoinFailed wrap.",
+        "src/time.rs TimeSource trait: now_monotonic_ms(&self) -> u64 + sleep(&self, ms: u64) -> impl Future<Output=()> + Send + '_ (RPITIT shape user-confirmed; Rust 1.75 stable).",
+        "src/allocator.rs Allocator trait: alloc(&self, Layout) -> Option<NonNull<u8>> + unsafe dealloc(&self, NonNull<u8>, Layout). Local trait (NOT core::alloc::Allocator which is nightly-only on MSRV 1.75) with explicit Option-on-OOM failure surface; buffer-pool / TLSF allocator pivot space preserved.",
+        "src/error.rs RuntimeError enum: JoinFailed + Shutdown variants, non_exhaustive. Display impl. core::error::Error impl deferred (requires MSRV 1.81); std::error::Error impl behind std feature deferred to R252+ AP integration round.",
+        "src/lib.rs cfg_attr no_std gate + alloc extern + module re-exports. deny(missing_docs) for trait-surface doc completeness.",
+        "Documentation throughout the crate cites R230 §5.P (parent spec), R63 (anti-stub rule: no NOP impl ships), §5.I (intrinsics tier — distinct layer), 111 std/tokio call site R230 inventory baseline (the R252+ migration target).",
+        "Carries explicit in lib.rs module doc: Mutex/RwLock shape deferred (HKT-vs-type-alias-vs-cfg-cond design tied to actual MCU work shape); TokioRuntime impl deferred (R252+); LwipRuntime + EmbassyRuntime deferred (Phase W lwIP integration round).",
+        "0 production site change; 0 wz upper layer reparameterization; 0 impl. Pure type-level scaffold (per user-confirmed scope)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-core: clean (default features, no extras).",
+        "cargo build -p wz-runtime-core --no-default-features: clean (no_std core path).",
+        "cargo build -p wz-runtime-core --features std: clean (std-gated path).",
+        "cargo build -p wz-runtime-core --features alloc: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates (now including wz-runtime-core).",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A mnemosyne + A2 audit + B verify-codegen + C1 cargo test 464 + C2 clippy + D deploy + E binary-dep e2e 9/9).",
+        "pre-commit hook: validate_workspace clean (T1=0, RT 12/12, sync preserved).",
+        "pre-push hook simulation passed at commit time via the R250 HEAD-extracted run-ci.sh path.",
+        "commit a8c7094 (feat(runtime-core): R251 Phase W entry wz-runtime-core trait skeleton; 8 new files +381 / -0)."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R252+ TokioRuntime concrete impl in wz-runtime-tokio: spawn via tokio::task::spawn returning tokio::task::JoinHandle wrapped to convert JoinError -> RuntimeError::JoinFailed. TimeSource via tokio::time::Instant + tokio::time::sleep. impl-with-no-caller pattern from R244/R245/R248 quartet — next round must wire one caller to avoid dead-code rot.",
+        "R253+ first caller migration: pick a leaf wz-runtime-tokio site (likely a tokio::time::sleep call in a timeout path) to validate the trait contract carries actual production semantics. §5.P guidance: 'leaf crates first, Session struct last' — do not start with Session reparameterization.",
+        "Mutex / RwLock contract decision: deferred from R251 design. Pick between (a) per-runtime `Mutex<T>` type alias re-exported from runtime crate, (b) `MutexFamily` GAT trait, or (c) cfg-conditional direct std vs embassy use. Best resolved when first real Mutex-using site needs to compile under MCU profile.",
+        "Allocator first concrete impl: deferred until MCU buffer-pool round (Phase W lwIP integration). AP profile keeps std GlobalAlloc until then — no impl needed in wz-runtime-tokio because tokio + std default heap already covers AP.",
+        "core::error::Error impl on RuntimeError: gated on MSRV bump to 1.81+. Until then, std::error::Error impl behind `std` feature is the cleaner path (lands with R252 TokioRuntime).",
+        "wz-runtime-lwip crate re-introduction: tracking the R63 removal carry; the empty-stub anti-pattern is preserved — lwip crate reintroduces only when there is actual lwIP integration code to ship.",
+        "Liveliness Token wz-ap-demo migration (R250 carry).",
+        "ReplyRegistry timeout sweep (needs TimeSource concrete impl from R252+, so naturally chains).",
+        "Q_B / Q_E wire codec slots (SCE-side codec extension).",
+        "LivelinessToken local_tokens table for history fan-out.",
+        "LivelinessToken Drop catch_unwind defensive wrap.",
+        "Querier::get_matching_status / Publisher::get_matching_status.",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff; pin bump deferred.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R251 lesson: Phase W entry is the smallest defensible architectural commitment — trait skeleton + cfg gating only, 0 impl, 0 caller. The 26-session textbook anchor (AskUserQuestion + code preview for architectural decisions) was applied: user confirmed (1) scope = trait skeleton only, (2) sleep shape = RPITIT. Trait shape decisions that genuinely require caller-shape evidence (Mutex/RwLock) were explicitly deferred rather than guessed. The R63 anti-stub rule held: no NOP impl shipped; the contract exists, the first impl waits for the first caller."
+      ]
+    },
     "Round 26": {
       "decision_summary": "R26 codebase Korean cleanup — fix 2 non-md files (mnemosyne.toml line 60 + scripts/verify-codegen.sh line 17) and establish non-md-English-only convention; historical atomic.json Korean (17 entries) and the legacy KO atomic section id remain locked by T2 frozen-ledger and the missing rename_section primitive respectively.",
       "changes_bullets": [
