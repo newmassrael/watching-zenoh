@@ -111,6 +111,21 @@ impl Runtime for TokioRuntime {
 /// task to stop". The trait-level contract (`Result<T,
 /// RuntimeError>`) is unchanged; only the variant routing
 /// sharpened.
+///
+/// ## R266 — JoinFailed panic payload capture
+///
+/// When `is_panic()` matches, the impl extracts the panic payload
+/// via `JoinError::into_panic()` and stuffs it into
+/// `RuntimeError::JoinFailed { payload: Some(box) }` (available
+/// under `feature = "alloc"`, which the AP profile transitively
+/// enables via `wz-runtime-core`'s `std` feature). Callers
+/// downcast the payload through
+/// [`RuntimeError::panic_payload`] to recover the original panic
+/// message — typically `String` (from `panic!("{}", msg)`) or
+/// `&'static str` (from `panic!("literal")`). Display surfaces
+/// the message inline when one of those two types matches; an
+/// unknown payload type falls back to the plain "panicked"
+/// message string.
 #[derive(Debug)]
 pub struct TokioJoinHandle<T> {
     inner: tokio::task::JoinHandle<T>,
@@ -160,7 +175,18 @@ where
                 if join_error.is_cancelled() {
                     Poll::Ready(Err(RuntimeError::JoinCancelled))
                 } else {
-                    Poll::Ready(Err(RuntimeError::JoinFailed))
+                    // R266 — extract the panic payload via
+                    // JoinError::into_panic(). This consumes the
+                    // JoinError (the ownership transfer is
+                    // explicit: into_panic moves the boxed Any
+                    // out of the JoinError). The matching
+                    // !is_cancelled branch above guarantees
+                    // is_panic() == true, so into_panic does not
+                    // panic on a non-panic JoinError.
+                    let payload = join_error.into_panic();
+                    Poll::Ready(Err(RuntimeError::join_failed_with_payload(Some(
+                        payload,
+                    ))))
                 }
             }
         }
@@ -289,7 +315,12 @@ mod tests {
         let rt = TokioRuntime;
         let handle = rt.spawn(async { 42_u32 });
         let result = handle.await;
-        assert_eq!(result, Ok(42));
+        // R266 — RuntimeError no longer impls PartialEq under
+        // `feature = "alloc"`, so `Result<T, RuntimeError>` is
+        // not PartialEq either. Switch to unwrap + value compare;
+        // the unwrap panics surface the actual error variant in
+        // the test output for diagnosis.
+        assert_eq!(result.expect("spawn succeeded"), 42);
     }
 
     #[tokio::test]
@@ -301,7 +332,8 @@ mod tests {
             fired_cb.fetch_add(1, Ordering::SeqCst);
         });
         let result = handle.await;
-        assert_eq!(result, Ok(()));
+        // R266 — see panic_resolves_to_join_failed comment.
+        result.expect("spawn returned RuntimeError");
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 
@@ -315,7 +347,70 @@ mod tests {
             panic!("intentional panic for JoinFailed test");
         });
         let result: Result<(), RuntimeError> = handle.await;
-        assert_eq!(result, Err(RuntimeError::JoinFailed));
+        // R266 — RuntimeError no longer implements PartialEq under
+        // `feature = "alloc"` (the JoinFailed payload `Box<dyn Any
+        // + Send>` is not comparable); switch the assertion to
+        // matches! which keys on the variant shape. The payload
+        // is verified separately by the panic_payload downcast
+        // test below.
+        assert!(
+            matches!(result, Err(RuntimeError::JoinFailed { .. })),
+            "expected JoinFailed, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tokio_runtime_panic_payload_round_trips_through_join_handle() {
+        // R266 — the panic payload extracted from
+        // JoinError::into_panic must round-trip through
+        // RuntimeError::panic_payload and downcast to the
+        // original `&'static str`. Pins the wire contract that
+        // `panic!("literal")` panics surface their message bytes
+        // via the payload accessor.
+        let rt = TokioRuntime;
+        let handle = rt.spawn(async {
+            panic!("payload-round-trip-marker");
+        });
+        let result: Result<(), RuntimeError> = handle.await;
+        let err = result.expect_err("task should have panicked");
+        let payload = err
+            .panic_payload()
+            .expect("JoinFailed carries the captured panic payload");
+        let msg = payload
+            .downcast_ref::<&'static str>()
+            .expect("panic from a string literal downcasts to &'static str");
+        assert_eq!(*msg, "payload-round-trip-marker");
+        // Also pin Display surface: the message must appear in
+        // the formatted error so log-grep callers can pull it
+        // out without a separate downcast call.
+        assert!(
+            err.to_string().contains("payload-round-trip-marker"),
+            "Display should embed the payload string, got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tokio_runtime_panic_string_payload_round_trips() {
+        // R266 — companion to the `&'static str` test: panics
+        // produced via `panic!("{}", formatted)` surface a
+        // `String` payload (allocated by the panic formatter).
+        // The same panic_payload accessor downcasts to String
+        // and Display extracts the suffix.
+        let rt = TokioRuntime;
+        let handle = rt.spawn(async {
+            let dynamic = "formatted-payload-marker".to_string();
+            panic!("{}", dynamic);
+        });
+        let result: Result<(), RuntimeError> = handle.await;
+        let err = result.expect_err("task should have panicked");
+        let payload = err
+            .panic_payload()
+            .expect("JoinFailed carries the captured panic payload");
+        let msg = payload
+            .downcast_ref::<String>()
+            .expect("panic from a formatted message downcasts to String");
+        assert_eq!(msg, "formatted-payload-marker");
+        assert!(err.to_string().contains("formatted-payload-marker"));
     }
 
     #[tokio::test]
@@ -331,7 +426,9 @@ mod tests {
         // Generous wait to let the trivial task complete.
         tokio::time::sleep(TokioDuration::from_millis(50)).await;
         handle.abort();
-        assert_eq!(handle.await, Ok(42));
+        // R266 — Result<T, RuntimeError> not PartialEq under
+        // alloc; unwrap + value compare.
+        assert_eq!(handle.await.expect("post-completion abort no-op"), 42);
     }
 
     #[tokio::test]
@@ -350,7 +447,10 @@ mod tests {
         handle.abort();
         handle.abort();
         let result: Result<(), RuntimeError> = handle.await;
-        assert_eq!(result, Err(RuntimeError::JoinCancelled));
+        assert!(
+            matches!(result, Err(RuntimeError::JoinCancelled)),
+            "expected JoinCancelled, got {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -367,7 +467,10 @@ mod tests {
         });
         handle.abort();
         let result: Result<(), RuntimeError> = handle.await;
-        assert_eq!(result, Err(RuntimeError::JoinCancelled));
+        assert!(
+            matches!(result, Err(RuntimeError::JoinCancelled)),
+            "expected JoinCancelled, got {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -385,11 +488,19 @@ mod tests {
         cancel_handle.abort();
         let panic_outcome: Result<(), RuntimeError> = panic_handle.await;
         let cancel_outcome: Result<(), RuntimeError> = cancel_handle.await;
-        assert_eq!(panic_outcome, Err(RuntimeError::JoinFailed));
-        assert_eq!(cancel_outcome, Err(RuntimeError::JoinCancelled));
-        // Sanity: the two variants are NOT structurally equal,
-        // which is the whole point of the R257 split.
-        assert_ne!(RuntimeError::JoinFailed, RuntimeError::JoinCancelled);
+        assert!(
+            matches!(panic_outcome, Err(RuntimeError::JoinFailed { .. })),
+            "expected JoinFailed for panic path, got {panic_outcome:?}"
+        );
+        assert!(
+            matches!(cancel_outcome, Err(RuntimeError::JoinCancelled)),
+            "expected JoinCancelled for abort path, got {cancel_outcome:?}"
+        );
+        // Sanity: the two outcomes route to structurally distinct
+        // variants — the whole point of the R257 split, preserved
+        // by R266's payload-bearing JoinFailed reshape.
+        assert!(!matches!(panic_outcome, Err(RuntimeError::JoinCancelled)));
+        assert!(!matches!(cancel_outcome, Err(RuntimeError::JoinFailed { .. })));
     }
 
     #[tokio::test]
@@ -401,7 +512,11 @@ mod tests {
         // and round-trips through the handle.
         let rt = TokioRuntime;
         let handle = rt.spawn(async { String::from("payload") });
-        assert_eq!(handle.await, Ok(String::from("payload")));
+        // R266 — Result<T, RuntimeError> not PartialEq under alloc.
+        assert_eq!(
+            handle.await.expect("spawn succeeded"),
+            String::from("payload")
+        );
     }
 
     #[tokio::test]
