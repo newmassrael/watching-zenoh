@@ -101,6 +101,16 @@ pub mod reply;
 /// scope.
 pub mod observer;
 
+/// R228 — application-level [`session::Session`] bundle. Owns an
+/// outbound [`session_glue::SessionLinkActions`] handle plus a
+/// shared [`observer::ApplicationLayerObserver`] reference so a
+/// single [`session::Session::publish`] call routes through both the
+/// wire-side codec and the in-process subscriber loopback per
+/// [`session::PublishOptions::allowed_destination`]. Mirrors
+/// zenoh-pico's `_z_session_t`. R228 scope: literal-keyexpr Put +
+/// Del. Aliased publish + full Sample metadata are R229+ carries.
+pub mod session;
+
 /// Generated SCXML state machine for the unicast session FSM. The
 /// emit comes from `sources/session/session_fsm_unicast.scxml` via
 /// `build.rs`. Public re-export is module-form rather than
