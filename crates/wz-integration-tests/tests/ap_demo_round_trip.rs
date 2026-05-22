@@ -48,6 +48,7 @@ use wz_integration_tests::common::{
 };
 
 #[test]
+#[ignore = "binary-dep e2e (wz-ap-demo + zenoh-pico CLI); Layer E runs via --ignored"]
 fn ap_demo_round_trip_against_zenoh_pico_z_put() {
     let demo = wz_ap_demo_binary();
     let z_put = zenoh_pico_cli_binary("z_put");

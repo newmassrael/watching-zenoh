@@ -53,6 +53,7 @@ use wz_integration_tests::common::{
 };
 
 #[test]
+#[ignore = "binary-dep e2e (wz-ap-demo bin); Layer E runs via --ignored"]
 fn wz_queryable_round_trip_against_wz_initiator() {
     let demo = wz_ap_demo_binary();
     let port_res = PortReservation::pick();
