@@ -176,6 +176,7 @@ fn print_usage() {
     eprintln!("               [--on-remote-liveliness-log]");
     eprintln!("               [--on-query-reply-log]");
     eprintln!("               [--on-query-final-log]");
+    eprintln!("               [--query-timeout-ms <ms>]");
     eprintln!();
     eprintln!("OPTIONS:");
     eprintln!("    --listen <addr>          acceptor mode (e.g. 127.0.0.1:7447)");
@@ -218,6 +219,12 @@ fn print_usage() {
     eprintln!("                             logs 'FINAL RECEIVED' when the matching");
     eprintln!("                             ResponseFinal terminates the reply chain");
     eprintln!("                             (requires --query)");
+    eprintln!("    --query-timeout-ms <ms>  set a ReplyRegistry timeout for the outbound");
+    eprintln!("                             Query's pending entry. When >0, the");
+    eprintln!("                             on_final callback fires within");
+    eprintln!("                             (timeout_ms + driver-loop-tick) of register");
+    eprintln!("                             time if no peer Final arrives. 0 (default)");
+    eprintln!("                             disables the timeout (requires --query)");
     eprintln!("    --help, -h               print this help and exit");
     eprintln!();
     eprintln!("Exactly one of --listen / --connect is required.");
@@ -572,6 +579,23 @@ fn main() -> ExitCode {
     // installing an unreachable callback.
     let on_query_reply_log = rest.iter().any(|a| a == "--on-query-reply-log");
     let on_query_final_log = rest.iter().any(|a| a == "--on-query-final-log");
+    // R263 — optional --query-timeout-ms <N> sets the ReplyRegistry
+    // pending-entry deadline so a peer that never replies surfaces
+    // the demo's on_final callback within N + driver-loop-tick wall
+    // time. Default 0 = no timeout (pre-R263 behaviour preserved).
+    let query_timeout_ms_opt = parse_pair(rest, "--query-timeout-ms");
+    let query_timeout_ms: u32 = match query_timeout_ms_opt {
+        Some(s) => match s.parse::<u32>() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!(
+                    "wz-ap-demo: --query-timeout-ms must be a u32 (got {s:?})",
+                );
+                return ExitCode::from(2);
+            }
+        },
+        None => 0,
+    };
     if key_opt.is_none()
         && publish_opt.is_none()
         && delete_opt.is_none()
@@ -645,6 +669,15 @@ fn main() -> ExitCode {
         eprintln!(
             "wz-ap-demo: --on-query-reply-log / --on-query-final-log require --query \
              (the ReplyRegistry binds to the rid of the outbound Query this demo emits)",
+        );
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    if query_timeout_ms > 0 && query_opt.is_none() {
+        eprintln!(
+            "wz-ap-demo: --query-timeout-ms requires --query (the timeout binds to \
+             the pending entry the outbound Query registers)",
         );
         eprintln!();
         print_usage();
@@ -771,6 +804,7 @@ fn main() -> ExitCode {
     let reply_log_spec = ReplyConsumerSpec {
         on_query_reply: on_query_reply_log,
         on_query_final: on_query_final_log,
+        query_timeout_ms,
     };
     let query_role_spec = QueryRoleSpec {
         queryable: queryable_spec,
@@ -830,6 +864,14 @@ struct RemoteLogSpec {
 struct ReplyConsumerSpec {
     on_query_reply: bool,
     on_query_final: bool,
+    /// R263 — pending-entry deadline (ms) propagated to the
+    /// observer.replies.register call below. Value 0 means "no
+    /// timeout" (deadline_ms = None at register; pre-R263 behaviour
+    /// preserved). Value > 0 means "compute deadline_ms =
+    /// session_clock.now_monotonic_ms() + query_timeout_ms" so the
+    /// drive_session on_tick sweep surfaces on_final within that
+    /// wall-clock budget when no Final arrives.
+    query_timeout_ms: u32,
 }
 
 /// R121j-6-e2e — bundle of the Q/R role config. Carries the
@@ -930,6 +972,14 @@ async fn run_demo(
     // critical section is the per-event fan-out which is already the
     // serial bottleneck in the registry model).
     let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    // R263 — single TokioTime instance shared across declare_task /
+    // query_task / publisher_task / drive_session_until_terminal /
+    // the QUERY_RID ReplyRegistry register call below. TokioTime is
+    // Copy + Clone, so each call site receives a value-copy that
+    // preserves the original epoch field. The shared epoch is
+    // load-bearing for register-time deadline_ms vs sweep-time
+    // now_ms comparison (R261/R262 contract).
+    let session_clock = TokioTime::new();
     {
         let mut observer_lock = observer.lock().expect("observer mutex poisoned");
 
@@ -990,6 +1040,14 @@ async fn run_demo(
         {
             let on_reply = reply_log_spec.on_query_reply;
             let on_final = reply_log_spec.on_query_final;
+            // R263 — deadline_ms from --query-timeout-ms. timeout_ms
+            // == 0 means "no timeout" → register with None (pre-R263
+            // behaviour). timeout_ms > 0 → absolute deadline computed
+            // against the shared session_clock so the drive_session
+            // on_tick sweep below can compare epoch-compatibly.
+            let deadline_ms = (reply_log_spec.query_timeout_ms > 0).then(|| {
+                session_clock.now_monotonic_ms() + reply_log_spec.query_timeout_ms as u64
+            });
             observer_lock.replies.register(
                 QUERY_RID,
                 // R239 — wz-ap-demo issues an outbound Request(Query)
@@ -997,9 +1055,7 @@ async fn run_demo(
                 // only, no loopback fan), so the pending entry
                 // expects exactly one Final from the peer.
                 1,
-                // R261 — deadline_ms is None until R263 wires the
-                // demo's timeout exercise through QueryOptions.
-                None,
+                deadline_ms,
                 move |reply| {
                     if !on_reply {
                         return;
@@ -1147,15 +1203,15 @@ async fn run_demo(
             let keyexpr = keyexpr.clone();
             let operation = operation.clone();
             let declare_id = *declare_id;
-            // R254 — publisher_task generic over TimeSource since
-            // R254; supply TokioTime concrete impl.
-            let clock_for_publisher = TokioTime::new();
+            // R254 — publisher_task generic over TimeSource. R263 —
+            // copy the shared session_clock here (TokioTime is Copy)
+            // so every task uses the same monotonic epoch.
             tokio::spawn(publisher_task(
                 session_for_publisher,
                 keyexpr,
                 operation,
                 declare_id,
-                clock_for_publisher,
+                session_clock,
             ))
         });
 
@@ -1169,10 +1225,10 @@ async fn run_demo(
     let query_handle = query_spec.as_ref().map(|keyexpr| {
         let actions_for_query = actions.clone();
         let keyexpr = keyexpr.clone();
-        // R254 — query_task generic over TimeSource since R254;
-        // supply TokioTime concrete impl.
-        let clock_for_query = TokioTime::new();
-        tokio::spawn(query_task(actions_for_query, keyexpr, clock_for_query))
+        // R254 — query_task generic over TimeSource. R263 — copy the
+        // shared session_clock so the task's sleep epoch matches the
+        // QUERY_RID register-time deadline computation above.
+        tokio::spawn(query_task(actions_for_query, keyexpr, session_clock))
     });
 
     // R121k-5 — declare emit task. Bundles all three optional
@@ -1188,15 +1244,13 @@ async fn run_demo(
         || declare_spec.token_keyexpr.is_some();
     let declare_handle = if has_declares {
         let actions_for_declare = actions.clone();
-        // R253 — declare_task is generic over T: TimeSource since
-        // R253; supply the AP-profile TokioTime concrete impl. The
-        // TokioTime is Copy + 'static so it moves freely into the
-        // spawned future without lifetime threading.
-        let clock_for_declare = TokioTime::new();
+        // R253 — declare_task is generic over T: TimeSource. R263 —
+        // copy the shared session_clock so every task uses the same
+        // monotonic epoch.
         Some(tokio::spawn(declare_task(
             actions_for_declare,
             declare_spec,
-            clock_for_declare,
+            session_clock,
         )))
     } else {
         None
@@ -1262,23 +1316,21 @@ async fn run_demo(
     let mut driver = inbound;
     let observer_for_dispatch = observer.clone();
     // R260 — TimeSource-mediated sleep replaces the prior internal
-    // `tokio::time::sleep` in the lease-deadline race. R262 also uses
-    // this same clock to fire per-iteration ticks that sweep
-    // ReplyRegistry timeouts; the on_tick closure below is the
-    // demo-side hook that performs the sweep. Once R263 wires the
-    // demo's query timeout exercise through QueryOptions, the
-    // QUERY_RID register call site above will switch from
-    // deadline_ms = None to a clock-computed deadline, and the
-    // shared epoch becomes load-bearing — the same TokioTime
-    // instance MUST cover both register and sweep sites then.
-    let clock_for_drive = TokioTime::new();
+    // `tokio::time::sleep` in the lease-deadline race. R262 also
+    // uses this same clock to fire per-iteration ticks that sweep
+    // ReplyRegistry timeouts. R263 — drive_session_until_terminal
+    // now reads the shared `session_clock` reference so the sweep's
+    // now_monotonic_ms() shares monotonic epoch with the
+    // register-time deadline_ms (when query_timeout_ms > 0). See
+    // the session_clock construction above for the full epoch-
+    // sharing contract.
     let observer_for_tick = observer.clone();
     let outcome = drive_session_until_terminal(
         &mut driver,
         &actions,
         &mut engine,
         Some(10_000),
-        &clock_for_drive,
+        &session_clock,
         |event: IterationEvent<'_>| {
             log::debug!("wz-ap-demo: iteration event = {event:?}");
             observer_for_dispatch
@@ -1288,10 +1340,10 @@ async fn run_demo(
         },
         move |now_ms: u64| {
             // R262 per-iteration tick: sweep ReplyRegistry timeouts.
-            // No-op while every pending entry was registered with
-            // deadline_ms = None (R261 state); becomes load-bearing
-            // once R263 wires demo-side timeout_ms through
-            // QueryOptions and the QUERY_RID register call site.
+            // R263 — once --query-timeout-ms > 0, the QUERY_RID
+            // pending entry below carries a Some(deadline_ms) and
+            // this sweep surfaces its on_final within
+            // (timeout_ms + lease-tick-quantum) of the deadline.
             let mut obs = observer_for_tick
                 .lock()
                 .expect("observer mutex poisoned by panic in reply callback");
