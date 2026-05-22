@@ -7,7 +7,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 > Primary / English: README.md
 
-zenoh 와이어 프로토콜의 MVP 부분집합을 임베디드 (zenoh-pico) 와
+zenoh 와이어 프로토콜의 wire-spec 부분집합을 임베디드 (zenoh-pico) 와
 서버 (zenoh) 양면 interop 기준으로 재구현하는 6 backend codegen
 프로젝트. Source of truth 는 SCXML, Rust no_std / C11 / C++ /
 Kotlin / Go / Python 6 언어가 동일 author-side 파일에서 생성된다.
@@ -17,7 +17,7 @@ Kotlin / Go / Python 6 언어가 동일 author-side 파일에서 생성된다.
 이 저장소는 두 가지를 동시에 만든다.
 
 1. **와이어 호환성** — zenoh-pico 1.x 클라이언트와 zenoh 1.x
-   라우터 / 피어가 주고받는 wire format 의 MVP 부분집합. 범위는
+   라우터 / 피어가 주고받는 wire format 부분집합. 범위는
    docs/wire-spec-subset.md 에 명시: 스카우팅 계층, transport
    session 계층, 네트워크 라우팅 계층, zenoh payload 계층,
    extension chain mechanism. 부가 surface (compression, patch,
@@ -55,7 +55,7 @@ docs/.atomic/ 의 atomic changelog 가 최신본.
   전체가 zenoh-pico `_z_*_encode` 와 byte-equivalent Layer 3
   wire-interop 보유 (crates/wz-integration-tests/tests/
   layer3_*.rs).
-- **Phase C** (session-FSM + AP MVP runtime): unicast 트랙
+- **Phase C** (session-FSM + AP runtime): unicast 트랙
   closed. session_fsm_unicast.scxml 가 timer event
   (link.open_timeout=5s, init/open_ack=2s, closing=100ms) +
   Init→Established→Close 전 경로 보유. TCP transport 완료.
@@ -90,7 +90,7 @@ E binary-dep e2e fixture 가 로컬 10-lane CI (scripts/run-ci.sh
 | crates/wz-codecs | sources/codecs/*.scxml 에서 생성된 codec 타입 |
 | crates/wz-runtime-tokio | Tokio 기반 AP 런타임 + session glue + builder |
 | crates/wz-runtime-lwip | lwIP / MCU 런타임 헤더 + 테스트 (Phase W, 아직 workspace member 아님) |
-| crates/wz-ap-demo | AP MVP demo binary (initiator + acceptor) |
+| crates/wz-ap-demo | AP demo binary (initiator + acceptor) |
 | crates/wz-integration-tests | Layer 3 wire-interop + round-trip suite |
 | crates/wz-runtime-tokio-test-support | 런타임 테스트용 shared harness |
 | crates/zenoh-pico-sys | vendored zenoh-pico FFI binding (smoke layer) |
