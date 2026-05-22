@@ -10760,6 +10760,76 @@
         "R237 lesson: ergonomic single-id accessors mirror outbound/inbound symmetry."
       ]
     },
+    "Round 238": {
+      "decision_summary": "R238 QueryableRegistry::local_query loopback + fire_matching_queryables(is_remote) helper mirror R227 split; Session::query caller integration deferred to R239.",
+      "changes_bullets": [
+        "query.rs QueryableRegistry::local_query(rid, &keyexpr, &Query, &mut Vec<QueryReply>) added.",
+        "fire_matching_queryables(rid, keyexpr, query, replies, is_remote) helper extracted from dispatch_request fan-out body.",
+        "dispatch_request keeps wire semantics: is_remote=true selects allows_remote().",
+        "local_query selects allows_local() for Locality::Any|SessionLocal callers; Remote suppressed.",
+        "Mirrors R227 SubscriberRegistry::local_publish + fire_to_subscribers split for the queryable side.",
+        "lib test local_query_fires_any_locality_queryable.",
+        "lib test local_query_fires_session_local_queryable.",
+        "lib test local_query_suppresses_remote_only_queryable.",
+        "lib test local_query_returns_no_replies_when_pattern_mismatches.",
+        "lib test dispatch_request_still_treats_inbound_as_remote_after_r238_split (wire-arrival invariance)."
+      ],
+      "verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 346 -> 351 (+5 R238 cases; query::* 24 -> 29).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R237 65 no-regression)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R239 Session::query API + outbound send_request_query + loopback local_query fan-out per allowed_destination (R228 mirror).",
+        "R238 closure note: infrastructure-only round is not dead-code only because R239 wires Session::query as caller (R227 -> R228 precedent).",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R238 lesson: 'mesh integration tier' bucket label is a category, not a temporal gate; R227 split precedent governs infrastructure-first rounds."
+      ],
+      "publishable_decision_summary": "R238 QueryableRegistry::local_query loopback + fire_matching_queryables(is_remote) helper mirror R227 split; Session::query caller integration deferred to R239.",
+      "publishable_changes_bullets": [
+        "query.rs QueryableRegistry::local_query(rid, &keyexpr, &Query, &mut Vec<QueryReply>) added.",
+        "fire_matching_queryables(rid, keyexpr, query, replies, is_remote) helper extracted from dispatch_request fan-out body.",
+        "dispatch_request keeps wire semantics: is_remote=true selects allows_remote().",
+        "local_query selects allows_local() for Locality::Any|SessionLocal callers; Remote suppressed.",
+        "Mirrors R227 SubscriberRegistry::local_publish + fire_to_subscribers split for the queryable side.",
+        "lib test local_query_fires_any_locality_queryable.",
+        "lib test local_query_fires_session_local_queryable.",
+        "lib test local_query_suppresses_remote_only_queryable.",
+        "lib test local_query_returns_no_replies_when_pattern_mismatches.",
+        "lib test dispatch_request_still_treats_inbound_as_remote_after_r238_split (wire-arrival invariance)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 346 -> 351 (+5 R238 cases; query::* 24 -> 29).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R237 65 no-regression)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R239 Session::query API + outbound send_request_query + loopback local_query fan-out per allowed_destination (R228 mirror).",
+        "R238 closure note: infrastructure-only round is not dead-code only because R239 wires Session::query as caller (R227 -> R228 precedent).",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R238 lesson: 'mesh integration tier' bucket label is a category, not a temporal gate; R227 split precedent governs infrastructure-first rounds."
+      ]
+    },
     "Round 24": {
       "decision_summary": "Phase E start — README.md 본문 저작 (16 byte stub → 150+ line prose); project overview + Phase A/B+ 상태 + 디렉터리 / 빌드 / Local CI gates / 라이센스 / 외부 참조 / 기여 절차. workspace.docs 재등록 + atomic decompose는 R25+ carry (R7 scope correction 직후 단계 분리).",
       "changes_bullets": [
