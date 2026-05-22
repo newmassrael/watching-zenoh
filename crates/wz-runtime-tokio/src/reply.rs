@@ -81,6 +81,7 @@ use wz_codecs::response::{Response, ResponseVariant};
 use wz_codecs::response_final::ResponseFinal;
 use wz_codecs::wireexpr::WireexprVariant;
 
+use crate::query::{QueryReply, ReplyBody};
 use crate::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
 
 /// Body arm of an inbound reply record. Mirrors the producer-side
@@ -137,6 +138,61 @@ pub struct InboundReply {
     pub body: InboundReplyBody,
 }
 
+/// R239 — in-process loopback adapter: project a producer-side
+/// [`QueryReply`] (emitted by a queryable callback into the
+/// [`crate::query::QueryableRegistry`] reply buffer) into the
+/// consumer-side [`InboundReply`] shape the z_get caller's
+/// `on_reply` callback expects.
+///
+/// This is the loopback counterpart of [`Self::dispatch_response`]:
+/// the wire path decodes a peer-sent `Response` into `InboundReply`;
+/// the loopback path projects a locally-fired `QueryReply` into the
+/// same shape so the same callback runs against both origins. The
+/// producer's `responder` tuple (envelope-level identity) is dropped
+/// in the projection — the AP MVP consumer surface does not expose
+/// the responder ext on `InboundReply` either way, so loopback
+/// matches the wire branch's information loss exactly.
+///
+/// Consumes `self` so producer-allocated payload bytes flow directly
+/// into the consumer body without an intermediate clone. Mirrors the
+/// existing producer-side [`QueryReply::into_response`] adapter on
+/// the wire-emit side — every `QueryReply` carries enough state to
+/// be projected to *either* a wire `Response` (outbound) *or* an
+/// in-process `InboundReply` (loopback).
+impl From<QueryReply> for InboundReply {
+    fn from(reply: QueryReply) -> Self {
+        match reply {
+            QueryReply::Reply {
+                rid,
+                keyexpr_literal,
+                body,
+                responder: _,
+            } => {
+                let body = match body {
+                    ReplyBody::Put(payload) => InboundReplyBody::Put { payload },
+                    ReplyBody::Del => InboundReplyBody::Del,
+                };
+                Self {
+                    rid,
+                    keyexpr_literal,
+                    body,
+                }
+            }
+            QueryReply::Err {
+                rid,
+                keyexpr_literal,
+                encoding,
+                payload,
+                responder: _,
+            } => Self {
+                rid,
+                keyexpr_literal,
+                body: InboundReplyBody::Err { encoding, payload },
+            },
+        }
+    }
+}
+
 /// Boxed callback invoked on each inbound `Response(Reply|Err)` whose
 /// `request_id` matches a registered pending z_get. Fires multiple
 /// times per registration (zenoh-pico "many Reply" semantics). The
@@ -172,6 +228,26 @@ impl ReplyHandle {
 
 struct Pending {
     rid: u64,
+    /// R239 — number of `Final` records this pending entry expects
+    /// before it fires `on_final` and drops from the table. Mirrors
+    /// zenoh-pico's `_z_pending_query_t._remaining_finals`
+    /// (`vendor/zenoh-pico/include/zenoh-pico/session/query.h`;
+    /// `_z_trigger_query_reply_final` in
+    /// `vendor/zenoh-pico/src/session/query.c:222-256` decrements
+    /// and fires on zero).
+    ///
+    /// For a wire-only `Locality::Remote` z_get the value is `1` (the
+    /// peer emits exactly one `ResponseFinal`). For a SessionLocal
+    /// z_get the value is `1` (the loopback emits one final after the
+    /// queryable callbacks drain). For a `Locality::Any` z_get with
+    /// at least one local queryable AND a wire branch the value is
+    /// `2` (one loopback final + one peer final). Future mesh
+    /// integration may expect N > 2 when multiple peers can each
+    /// emit a final per query (zenoh-cpp router-fanout topology).
+    ///
+    /// `u32` matches zenoh-pico's `_remaining_finals` width and is
+    /// wide enough for every plausible mesh fan-out.
+    remaining_finals: u32,
     on_reply: ReplyCallback,
     on_final: FinalCallback,
 }
@@ -205,9 +281,21 @@ impl ReplyRegistry {
 
     /// Register a pending z_get. The `on_reply` callback fires once
     /// per inbound `Response(Reply|Err)` whose `request_id == rid`;
-    /// the `on_final` callback fires once when the matching
-    /// `ResponseFinal` arrives, at which point the entry is
-    /// auto-unregistered.
+    /// the `on_final` callback fires exactly once — when the entry's
+    /// `expected_finals` counter reaches zero. At that point the
+    /// entry is auto-unregistered.
+    ///
+    /// `expected_finals` mirrors zenoh-pico's
+    /// `_z_pending_query_t._remaining_finals` slot
+    /// (`vendor/zenoh-pico/src/session/query.c:222-256`): one for a
+    /// pure-wire (`Locality::Remote`) z_get expecting one peer
+    /// `ResponseFinal`; one for a pure-loopback
+    /// (`Locality::SessionLocal`) z_get expecting one synthetic
+    /// final from [`Self::deliver_local_final`]; two for a
+    /// `Locality::Any` z_get with at least one local queryable AND a
+    /// wire branch. Producers feeding this registry know which case
+    /// they are in at register-time because they own the
+    /// `allowed_destination` predicate.
     ///
     /// The returned [`ReplyHandle`] is the rid wrapped — exposed so
     /// callers that allocate rids opaquely (e.g. a future
@@ -216,11 +304,13 @@ impl ReplyRegistry {
     pub fn register(
         &mut self,
         rid: u64,
+        expected_finals: u32,
         on_reply: impl FnMut(&InboundReply) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> ReplyHandle {
         self.pending.push(Pending {
             rid,
+            remaining_finals: expected_finals,
             on_reply: Box::new(on_reply),
             on_final: Box::new(on_final),
         });
@@ -311,11 +401,7 @@ impl ReplyRegistry {
             keyexpr_literal: resolved,
             body,
         };
-        for pending in &mut self.pending {
-            if pending.rid == inbound.rid {
-                (pending.on_reply)(&inbound);
-            }
-        }
+        self.fire_replies_for(&inbound);
     }
 
     /// Route an inbound [`ResponseFinal`] through the pending table.
@@ -325,25 +411,92 @@ impl ReplyRegistry {
     /// registration order) and all are removed in the same dispatch.
     /// Unknown rids drop silently.
     pub fn dispatch_response_final(&mut self, response_final: &ResponseFinal) {
-        let target = response_final.request_id;
-        // Partition: take ownership of every matching entry, leave the
-        // rest in place. Vec::retain would force us to mutate the
-        // callback in-place which the borrow checker rejects (we need
-        // to call `(on_final)(rid)` which requires `&mut Pending`); we
-        // instead drain the matches into a stash and fire after the
+        self.fire_final_for(response_final.request_id);
+    }
+
+    /// R239 — loopback delivery of an in-process [`InboundReply`].
+    /// Used by [`crate::session::Session::query`]'s loopback branch to
+    /// fan a [`QueryReply`] (produced by a local queryable through
+    /// [`crate::query::QueryableRegistry::local_query`]) into every
+    /// pending registration whose `rid` matches, mirroring exactly
+    /// the wire-arrival fan in [`Self::dispatch_response`] without the
+    /// wire-decode + keyexpr-resolution prefix (the loopback caller
+    /// already knows the literal). Single dispatch path — wire and
+    /// loopback origins fire through the same
+    /// [`Self::fire_replies_for`] helper so the per-entry behaviour
+    /// (multiple registrations on the same rid, entry retained until
+    /// Final) is identical across origins.
+    pub fn deliver_local_reply(&mut self, inbound: &InboundReply) {
+        self.fire_replies_for(inbound);
+    }
+
+    /// R239 — loopback delivery of an in-process `ResponseFinal`-
+    /// equivalent. Used by [`crate::session::Session::query`]'s
+    /// loopback branch after the queryable callbacks have emitted all
+    /// their replies through [`Self::deliver_local_reply`]; this call
+    /// fires the matching `on_final` callbacks and removes the pending
+    /// entries from the table, matching the wire-arrival behaviour in
+    /// [`Self::dispatch_response_final`] exactly (single dispatch path
+    /// via [`Self::fire_final_for`]).
+    pub fn deliver_local_final(&mut self, rid: u64) {
+        self.fire_final_for(rid);
+    }
+
+    /// R239 — shared reply fan body for wire ([`Self::dispatch_response`])
+    /// and loopback ([`Self::deliver_local_reply`]) origins. Each
+    /// pending entry whose `rid == inbound.rid` fires its `on_reply`
+    /// callback once; the entry stays in the table (only `Final`
+    /// removes it). Mirrors the R238 `fire_matching_queryables` split
+    /// on the queryable side.
+    fn fire_replies_for(&mut self, inbound: &InboundReply) {
+        for pending in &mut self.pending {
+            if pending.rid == inbound.rid {
+                (pending.on_reply)(inbound);
+            }
+        }
+    }
+
+    /// R239 — shared final fan body for wire
+    /// ([`Self::dispatch_response_final`]) and loopback
+    /// ([`Self::deliver_local_final`]) origins. Decrements each
+    /// matching entry's `remaining_finals` counter; entries that
+    /// reach zero fire their `on_final` callback in registration
+    /// order and are dropped from the table. Entries whose counter
+    /// is still positive remain pending — this is the
+    /// `Locality::Any` two-final case (one loopback final + one peer
+    /// final must both arrive before the application sees the user
+    /// `on_final`). Duplicate-rid registrations are processed
+    /// independently (each entry decrements its own counter).
+    /// Unknown rids drop silently — the partition fires zero entries
+    /// and the keep vec equals the pre-call pending vec.
+    ///
+    /// Mirrors zenoh-pico's `_z_trigger_query_reply_final`
+    /// (`vendor/zenoh-pico/src/session/query.c:222-256`): `if
+    /// (pen_qry->_remaining_finals > 0) { pen_qry->_remaining_finals--;
+    /// } bool do_finalize = (pen_qry->_remaining_finals == 0);`.
+    fn fire_final_for(&mut self, rid: u64) {
+        // Partition: take ownership of every matching entry that
+        // reaches zero, leave the rest (decremented but non-zero, or
+        // non-matching) in place. Vec::retain would force us to mutate
+        // the callback in-place which the borrow checker rejects (we
+        // need to call `(on_final)(rid)` which requires `&mut Pending`);
+        // we instead drain the matches into a stash and fire after the
         // retain-pass releases the &mut self.pending borrow.
         let mut fired: Vec<Pending> = Vec::new();
         let mut keep: Vec<Pending> = Vec::with_capacity(self.pending.len());
-        for entry in self.pending.drain(..) {
-            if entry.rid == target {
-                fired.push(entry);
-            } else {
-                keep.push(entry);
+        for mut entry in self.pending.drain(..) {
+            if entry.rid == rid && entry.remaining_finals > 0 {
+                entry.remaining_finals -= 1;
+                if entry.remaining_finals == 0 {
+                    fired.push(entry);
+                    continue;
+                }
             }
+            keep.push(entry);
         }
         self.pending = keep;
         for mut entry in fired {
-            (entry.on_final)(target);
+            (entry.on_final)(rid);
         }
     }
 
@@ -531,8 +684,8 @@ mod tests {
     #[test]
     fn register_assigns_handle_and_grows_table() {
         let mut reg = ReplyRegistry::new();
-        let h1 = reg.register(7, |_| {}, |_| {});
-        let h2 = reg.register(8, |_| {}, |_| {});
+        let h1 = reg.register(7, 1, |_| {}, |_| {});
+        let h2 = reg.register(8, 1, |_| {}, |_| {});
         assert_eq!(h1.rid(), 7);
         assert_eq!(h2.rid(), 8);
         assert_eq!(reg.len(), 2);
@@ -541,8 +694,8 @@ mod tests {
     #[test]
     fn unregister_is_idempotent_and_removes_only_matching_rid() {
         let mut reg = ReplyRegistry::new();
-        reg.register(7, |_| {}, |_| {});
-        reg.register(8, |_| {}, |_| {});
+        reg.register(7, 1, |_| {}, |_| {});
+        reg.register(8, 1, |_| {}, |_| {});
         assert!(reg.unregister(7));
         assert!(!reg.unregister(7), "second unregister of same rid is a no-op");
         assert_eq!(reg.len(), 1);
@@ -557,6 +710,7 @@ mod tests {
         let captured_cb = captured.clone();
         reg.register(
             42,
+            1,
             move |reply| captured_cb.lock().unwrap().push(reply.clone()),
             |_| {},
         );
@@ -582,6 +736,7 @@ mod tests {
         let count_cb = count.clone();
         reg.register(
             9,
+            1,
             move |reply| {
                 count_cb.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(reply.body, InboundReplyBody::Del, "expected Del body");
@@ -601,6 +756,7 @@ mod tests {
         let captured_cb = captured.clone();
         reg.register(
             5,
+            1,
             move |reply| *captured_cb.lock().unwrap() = Some(reply.clone()),
             |_| {},
         );
@@ -625,7 +781,7 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let count = Arc::new(AtomicUsize::new(0));
         let count_cb = count.clone();
-        reg.register(7, move |_| { count_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
+        reg.register(7, 1, move |_| { count_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
 
         let resp = response_reply_put(99, 0, Some("home/temp"), b"x");
         reg.dispatch_response(&resp, &HashMap::new());
@@ -640,6 +796,7 @@ mod tests {
         let final_count_cb = final_count.clone();
         reg.register(
             42,
+            1,
             |_| {},
             move |rid| {
                 assert_eq!(rid, 42, "on_final must receive the registered rid");
@@ -658,7 +815,7 @@ mod tests {
     #[test]
     fn dispatch_response_final_with_unknown_rid_is_silent_noop() {
         let mut reg = ReplyRegistry::new();
-        reg.register(42, |_| {}, |_| panic!("on_final must not fire on unknown rid"));
+        reg.register(42, 1, |_| {}, |_| panic!("on_final must not fire on unknown rid"));
 
         reg.dispatch_response_final(&response_final_for(99));
         assert_eq!(reg.len(), 1, "unknown-rid Final preserves all pending entries");
@@ -670,6 +827,7 @@ mod tests {
         let captured_literal: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let captured_cb = captured_literal.clone();
         reg.register(
+            1,
             1,
             move |reply| *captured_cb.lock().unwrap() = Some(reply.keyexpr_literal.clone()),
             |_| {},
@@ -691,7 +849,7 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
-        reg.register(1, move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
+        reg.register(1, 1, move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
 
         // mapping_id=99 not in peer table — dispatch must drop silently
         // before reaching the callback.
@@ -705,7 +863,7 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let count = Arc::new(AtomicUsize::new(0));
         let count_cb = count.clone();
-        reg.register(7, move |_| { count_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
+        reg.register(7, 1, move |_| { count_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
 
         for payload in [b"sample-1".as_ref(), b"sample-2".as_ref(), b"sample-3".as_ref()] {
             reg.dispatch_response(
@@ -722,9 +880,9 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let order: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let order_a = order.clone();
-        reg.register(7, move |_| order_a.lock().unwrap().push(1), |_| {});
+        reg.register(7, 1, move |_| order_a.lock().unwrap().push(1), |_| {});
         let order_b = order.clone();
-        reg.register(7, move |_| order_b.lock().unwrap().push(2), |_| {});
+        reg.register(7, 1, move |_| order_b.lock().unwrap().push(2), |_| {});
 
         reg.dispatch_response(
             &response_reply_put(7, 0, Some("home/temp"), b"21.0"),
@@ -746,6 +904,7 @@ mod tests {
         let f = final_count.clone();
         reg.register(
             42,
+            1,
             move |_| { r.fetch_add(1, Ordering::SeqCst); },
             move |_| { f.fetch_add(1, Ordering::SeqCst); },
         );
@@ -767,7 +926,7 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
-        reg.register(7, move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
+        reg.register(7, 1, move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
 
         // Unknown variant must NOT touch the registry.
         let messages = vec![NetworkMessage::Unknown {
@@ -777,5 +936,199 @@ mod tests {
         reg.dispatch_messages(&messages, &HashMap::new());
         assert_eq!(fired.load(Ordering::SeqCst), 0);
         assert_eq!(reg.len(), 1, "pending entry preserved across non-Response messages");
+    }
+
+    // ── R239 Self-query loopback + expected_finals semantics ──
+
+    #[test]
+    fn deliver_local_reply_fires_on_reply_for_matching_rid() {
+        // Loopback delivery routes the InboundReply through the same
+        // pending entry as a wire-arrived Response. Single dispatch
+        // path: deliver_local_reply -> fire_replies_for; the entry
+        // stays in the table (only Final removes it).
+        let mut reg = ReplyRegistry::new();
+        let captured: Arc<Mutex<Vec<InboundReply>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_cb = captured.clone();
+        reg.register(
+            7,
+            1,
+            move |reply| captured_cb.lock().unwrap().push(reply.clone()),
+            |_| {},
+        );
+
+        let inbound = InboundReply {
+            rid: 7,
+            keyexpr_literal: "home/temp".to_string(),
+            body: InboundReplyBody::Put { payload: b"21.0".to_vec() },
+        };
+        reg.deliver_local_reply(&inbound);
+
+        let snapshot = captured.lock().unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0], inbound);
+        assert_eq!(reg.len(), 1, "loopback reply does NOT auto-unregister");
+    }
+
+    #[test]
+    fn deliver_local_reply_drops_on_unknown_rid() {
+        let mut reg = ReplyRegistry::new();
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_cb = count.clone();
+        reg.register(7, 1, move |_| { count_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
+
+        let inbound = InboundReply {
+            rid: 99,
+            keyexpr_literal: "home/temp".to_string(),
+            body: InboundReplyBody::Del,
+        };
+        reg.deliver_local_reply(&inbound);
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn deliver_local_final_decrements_and_fires_when_expected_finals_was_one() {
+        // expected_finals = 1 means one Final closes the chain. After
+        // deliver_local_final the entry must be removed and on_final
+        // must have fired exactly once.
+        let mut reg = ReplyRegistry::new();
+        let final_count = Arc::new(AtomicUsize::new(0));
+        let final_count_cb = final_count.clone();
+        reg.register(
+            1,
+            1,
+            |_| {},
+            move |rid| {
+                assert_eq!(rid, 1);
+                final_count_cb.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        reg.deliver_local_final(1);
+        assert_eq!(final_count.load(Ordering::SeqCst), 1);
+        assert!(reg.is_empty(), "expected_finals=1 closes on the loopback final");
+    }
+
+    #[test]
+    fn deliver_local_final_with_expected_finals_two_keeps_entry_until_second_final() {
+        // expected_finals = 2 (Locality::Any path) — one loopback
+        // final + one wire final must BOTH arrive before on_final
+        // fires and the entry drops. Mirrors zenoh-pico's
+        // _z_pending_query_t._remaining_finals counter semantic.
+        let mut reg = ReplyRegistry::new();
+        let final_count = Arc::new(AtomicUsize::new(0));
+        let final_count_cb = final_count.clone();
+        reg.register(
+            5,
+            2,
+            |_| {},
+            move |_| { final_count_cb.fetch_add(1, Ordering::SeqCst); },
+        );
+
+        reg.deliver_local_final(5);
+        assert_eq!(
+            final_count.load(Ordering::SeqCst),
+            0,
+            "first Final must NOT fire on_final when expected_finals = 2"
+        );
+        assert_eq!(reg.len(), 1, "entry preserved after first of two Finals");
+
+        reg.dispatch_response_final(&response_final_for(5));
+        assert_eq!(
+            final_count.load(Ordering::SeqCst),
+            1,
+            "second Final closes the chain"
+        );
+        assert!(reg.is_empty(), "entry dropped after the closing Final");
+    }
+
+    #[test]
+    fn deliver_local_final_on_unknown_rid_is_silent_noop() {
+        let mut reg = ReplyRegistry::new();
+        reg.register(7, 1, |_| {}, |_| panic!("on_final must not fire on unknown rid"));
+
+        reg.deliver_local_final(99);
+        assert_eq!(reg.len(), 1, "unknown-rid loopback final preserves the entry");
+    }
+
+    #[test]
+    fn dispatch_response_final_decrements_with_expected_finals_two() {
+        // Symmetric to deliver_local_final_with_expected_finals_two_*:
+        // wire Final decrements but does not fire when a second
+        // Final is still expected; the loopback final closes it.
+        let mut reg = ReplyRegistry::new();
+        let final_count = Arc::new(AtomicUsize::new(0));
+        let final_count_cb = final_count.clone();
+        reg.register(
+            9,
+            2,
+            |_| {},
+            move |_| { final_count_cb.fetch_add(1, Ordering::SeqCst); },
+        );
+
+        reg.dispatch_response_final(&response_final_for(9));
+        assert_eq!(final_count.load(Ordering::SeqCst), 0, "first Final must NOT fire");
+        assert_eq!(reg.len(), 1, "entry preserved after first Final");
+
+        reg.deliver_local_final(9);
+        assert_eq!(final_count.load(Ordering::SeqCst), 1, "second Final closes");
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn from_query_reply_put_projects_to_inbound_put() {
+        use crate::query::{QueryReply, ReplyBody};
+        let qr = QueryReply::Reply {
+            rid: 11,
+            keyexpr_literal: "sensors/a".to_string(),
+            body: ReplyBody::Put(b"value".to_vec()),
+            responder: None,
+        };
+        let inbound: InboundReply = qr.into();
+        assert_eq!(inbound.rid, 11);
+        assert_eq!(inbound.keyexpr_literal, "sensors/a");
+        match inbound.body {
+            InboundReplyBody::Put { payload } => assert_eq!(payload, b"value"),
+            other => panic!("expected Put, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_query_reply_del_projects_to_inbound_del() {
+        use crate::query::{QueryReply, ReplyBody};
+        let qr = QueryReply::Reply {
+            rid: 12,
+            keyexpr_literal: "sensors/b".to_string(),
+            body: ReplyBody::Del,
+            responder: Some((vec![0xaa, 0xbb], 5)),
+        };
+        let inbound: InboundReply = qr.into();
+        assert_eq!(inbound.rid, 12);
+        assert_eq!(inbound.keyexpr_literal, "sensors/b");
+        assert_eq!(inbound.body, InboundReplyBody::Del);
+        // responder is intentionally dropped in projection (loopback
+        // mirrors the wire branch's information loss exactly — the
+        // consumer InboundReply surface does not expose responder).
+    }
+
+    #[test]
+    fn from_query_reply_err_projects_to_inbound_err() {
+        use crate::query::QueryReply;
+        let qr = QueryReply::Err {
+            rid: 13,
+            keyexpr_literal: "sensors/c".to_string(),
+            encoding: Some((4, Some("schema_v1".to_string()))),
+            payload: b"err-payload".to_vec(),
+            responder: None,
+        };
+        let inbound: InboundReply = qr.into();
+        assert_eq!(inbound.rid, 13);
+        assert_eq!(inbound.keyexpr_literal, "sensors/c");
+        match inbound.body {
+            InboundReplyBody::Err { encoding, payload } => {
+                assert_eq!(encoding, Some((4, Some("schema_v1".to_string()))));
+                assert_eq!(payload, b"err-payload");
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
     }
 }

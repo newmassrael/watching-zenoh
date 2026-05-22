@@ -1017,6 +1017,11 @@ async fn run_demo(
             let on_final = reply_log_spec.on_query_final;
             observer_lock.replies.register(
                 QUERY_RID,
+                // R239 — wz-ap-demo issues an outbound Request(Query)
+                // via SessionLinkActions::send_request_query (wire-
+                // only, no loopback fan), so the pending entry
+                // expects exactly one Final from the peer.
+                1,
                 move |reply| {
                     if !on_reply {
                         return;
