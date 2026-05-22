@@ -68,7 +68,7 @@ use wz_codecs::query::Query;
 use crate::locality::Locality;
 use crate::observer::ApplicationLayerObserver;
 use crate::pubsub::SubscriptionId;
-use crate::query::QueryReply;
+use crate::query::{QueryReply, QueryResponder, QueryableId};
 use crate::reply::{InboundReply, ReplyHandle};
 use crate::sample::{
     EncodingHint, QosLevel, Reliability, Sample, SampleKind, SourceInfo, TimestampHint,
@@ -1205,6 +1205,70 @@ impl Session {
         };
         Ok(self.declare_subscriber(resolved, options, callback))
     }
+
+    /// R246 — declare a [`Queryable`] for `keyexpr` + `options` that
+    /// fires `callback` on every matching inbound `Request(Query)`.
+    /// Pub/sub mirror of [`Self::declare_subscriber`] on the
+    /// responder/replier side. Returns a [`Queryable`] handle whose
+    /// `Drop` auto-unregisters the queryable from the underlying
+    /// [`crate::query::QueryableRegistry`] (RAII).
+    ///
+    /// Mirrors zenoh-pico's `z_declare_queryable` shape: caller
+    /// supplies the keyexpr pattern + options + callback at declare
+    /// time; the runtime fires the callback synchronously inside
+    /// [`crate::query::QueryableRegistry::dispatch_request`] (wire
+    /// arrival) and
+    /// [`crate::query::QueryableRegistry::local_query`] (loopback,
+    /// R238+). No wire frame is emitted at declare time — router-mode
+    /// `DeclareQueryable` is elided in peer-only operation.
+    pub fn declare_queryable(
+        &self,
+        keyexpr: impl Into<String>,
+        options: QueryableOptions,
+        callback: impl FnMut(&wz_codecs::query::Query, &mut QueryResponder<'_>) + Send + 'static,
+    ) -> Queryable {
+        let keyexpr_string = keyexpr.into();
+        let id = self
+            .observer
+            .lock()
+            .expect("Session observer mutex poisoned — a queryable callback panicked")
+            .queryables
+            .register_with_locality(keyexpr_string.clone(), options.allowed_origin, callback);
+        Queryable {
+            session: self.clone(),
+            id,
+            keyexpr: keyexpr_string,
+            options,
+        }
+    }
+
+    /// R246 — aliased-keyexpr counterpart of
+    /// [`Self::declare_queryable`]. Resolves the
+    /// `(mapping_id, inline_suffix)` pair through the outbound
+    /// mapping table at declare time. Same one-shot-resolution
+    /// contract as [`Self::declare_subscriber_aliased`]: subsequent
+    /// `send_undeclare_kexpr` does NOT affect the Queryable handle.
+    pub fn declare_queryable_aliased(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        options: QueryableOptions,
+        callback: impl FnMut(&wz_codecs::query::Query, &mut QueryResponder<'_>) + Send + 'static,
+    ) -> Result<Queryable, QueryableAliasError> {
+        let base = self
+            .actions
+            .resolve_outbound_mapping(mapping_id)
+            .ok_or(QueryableAliasError::UnknownMapping(mapping_id))?;
+        let resolved = match inline_suffix {
+            None => base,
+            Some(s) => {
+                let mut composed = base;
+                composed.push_str(s);
+                composed
+            }
+        };
+        Ok(self.declare_queryable(resolved, options, callback))
+    }
 }
 
 /// R241 — typed error returned by [`Session::query_aliased_auto`]
@@ -1682,6 +1746,137 @@ impl std::fmt::Display for SubscribeAliasError {
 }
 
 impl std::error::Error for SubscribeAliasError {}
+
+/// R246 — options bundle for [`Session::declare_queryable`].
+/// Mirrors zenoh-pico's `z_queryable_options_t` minus the
+/// `complete` flag (which lands as a follow-up when the
+/// queryable-side completeness signal is wired). `#[non_exhaustive]`.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct QueryableOptions {
+    /// Queryable-side locality predicate. `Any` (default) fires on
+    /// every matching Query regardless of origin; `Remote` fires
+    /// only on wire-arrived Queries; `SessionLocal` fires only on
+    /// loopback Queries (R238+
+    /// [`crate::query::QueryableRegistry::local_query`]).
+    pub allowed_origin: Locality,
+}
+
+impl QueryableOptions {
+    /// Default options — `allowed_origin = Locality::Any`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Pin the queryable-side locality predicate.
+    pub fn with_allowed_origin(mut self, locality: Locality) -> Self {
+        self.allowed_origin = locality;
+        self
+    }
+}
+
+/// R246 — handle for a queryable declared through
+/// [`Session::declare_queryable`] / [`Session::declare_queryable_aliased`].
+/// Responder-side mirror of [`Subscriber`]. Holds the
+/// [`QueryableId`] returned by
+/// [`crate::query::QueryableRegistry::register_with_locality`]
+/// so [`Drop`] can auto-unregister.
+///
+/// `!Clone` by construction for the same reason as [`Subscriber`]:
+/// the underlying id is a unique handle; cloning would race two
+/// drops to unregister the same id.
+///
+/// `#[non_exhaustive]`. Construct only through
+/// [`Session::declare_queryable`] / [`Session::declare_queryable_aliased`].
+#[non_exhaustive]
+pub struct Queryable {
+    session: Session,
+    id: QueryableId,
+    keyexpr: String,
+    options: QueryableOptions,
+}
+
+impl Queryable {
+    /// The stable id assigned by
+    /// [`crate::query::QueryableRegistry::register_with_locality`].
+    pub fn id(&self) -> QueryableId {
+        self.id
+    }
+
+    /// The keyexpr the queryable was registered against. For
+    /// [`Session::declare_queryable_aliased`] this is the resolved
+    /// literal form.
+    pub fn keyexpr(&self) -> &str {
+        &self.keyexpr
+    }
+
+    /// Borrow the declared options.
+    pub fn options(&self) -> &QueryableOptions {
+        &self.options
+    }
+
+    /// Explicitly unregister this queryable. Consumes the handle so
+    /// the [`Drop`] impl will not run a second time. Mirrors
+    /// [`Subscriber::undeclare`].
+    pub fn undeclare(self) -> bool {
+        let removed = self
+            .session
+            .observer
+            .lock()
+            .expect("Session observer mutex poisoned — a queryable callback panicked")
+            .queryables
+            .unregister(self.id);
+        std::mem::forget(self);
+        removed
+    }
+}
+
+impl Drop for Queryable {
+    fn drop(&mut self) {
+        // RAII unregister with poison-recover, mirroring Subscriber.
+        // unregister is panic-free (boolean return), so the
+        // worst-case observable outcome on a corrupted observer is
+        // "queryable stays registered" — caller can manually
+        // poison-recover and re-undeclare if it matters.
+        match self.session.observer.lock() {
+            Ok(mut obs) => {
+                let _ = obs.queryables.unregister(self.id);
+            }
+            Err(poisoned) => {
+                let mut obs = poisoned.into_inner();
+                let _ = obs.queryables.unregister(self.id);
+            }
+        }
+    }
+}
+
+/// R246 — typed error returned by
+/// [`Session::declare_queryable_aliased`] when the requested
+/// mapping id was never declared on the outbound mapping table
+/// (or was retracted before declare time). Mirror of
+/// [`SubscribeAliasError`] / [`PublishAliasError`] /
+/// [`QueryAliasError`] on the queryable side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryableAliasError {
+    /// No prior `send_declare_keyexpr` registered this id on the
+    /// outbound mapping table (or a later `send_undeclare_kexpr`
+    /// retracted it before the declare_queryable_aliased call).
+    UnknownMapping(u64),
+}
+
+impl std::fmt::Display for QueryableAliasError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueryableAliasError::UnknownMapping(id) => write!(
+                f,
+                "QueryableAliasError: mapping id {id} not present in outbound table; \
+                 call SessionLinkActions::send_declare_keyexpr({id}, …) first"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for QueryableAliasError {}
 
 /// R234 — typed error returned by
 /// [`Session::publish_aliased_auto`] when the requested mapping id
@@ -4437,6 +4632,206 @@ mod tests {
     #[test]
     fn subscribe_alias_error_display_message_hints_remediation() {
         let err = SubscribeAliasError::UnknownMapping(42);
+        let msg = format!("{err}");
+        assert!(msg.contains("42"));
+        assert!(msg.contains("send_declare_keyexpr"));
+    }
+
+    // ── R246 Queryable + QueryableOptions + declare_queryable{,_aliased} ──
+
+    #[test]
+    fn queryable_options_default_is_any_locality() {
+        let opts = QueryableOptions::default();
+        assert_eq!(opts.allowed_origin, Locality::Any);
+    }
+
+    #[test]
+    fn queryable_options_with_allowed_origin_pins_locality() {
+        let opts = QueryableOptions::new().with_allowed_origin(Locality::SessionLocal);
+        assert_eq!(opts.allowed_origin, Locality::SessionLocal);
+    }
+
+    #[test]
+    fn declare_queryable_returns_handle_with_keyexpr_and_options() {
+        let (session, _driver) = build_session();
+        let q = session.declare_queryable(
+            "home/temp",
+            QueryableOptions::new().with_allowed_origin(Locality::SessionLocal),
+            |_query, _responder| {},
+        );
+        assert_eq!(q.keyexpr(), "home/temp");
+        assert_eq!(q.options().allowed_origin, Locality::SessionLocal);
+    }
+
+    #[test]
+    fn declare_queryable_does_not_emit_wire_frame() {
+        let (session, driver) = build_session();
+        let _q = session.declare_queryable(
+            "home/temp",
+            QueryableOptions::default(),
+            |_q, _r| {},
+        );
+        assert_eq!(driver.frame_count(), 0);
+    }
+
+    #[test]
+    fn declared_queryable_fires_on_loopback_query() {
+        let (session, _driver) = build_session();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        let _q = session.declare_queryable(
+            "home/temp",
+            QueryableOptions::default(),
+            move |_query, responder| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+                responder.send_reply(b"22.5");
+            },
+        );
+
+        let replies = Arc::new(AtomicUsize::new(0));
+        let r = replies.clone();
+        session.query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |_reply| { r.fetch_add(1, Ordering::SeqCst); },
+            |_| {},
+        );
+
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+        assert_eq!(replies.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn queryable_drop_auto_unregisters() {
+        let (session, _driver) = build_session();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        {
+            let _q = session.declare_queryable(
+                "home/temp",
+                QueryableOptions::default(),
+                move |_q, responder| {
+                    fired_cb.fetch_add(1, Ordering::SeqCst);
+                    responder.send_reply(b"22.5");
+                },
+            );
+            session.query(
+                "home/temp",
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                |_| {},
+                |_| {},
+            );
+            assert_eq!(fired.load(Ordering::SeqCst), 1, "first query fires");
+        } // Drop unregisters
+
+        // Second query: no queryable matches.
+        session.query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 1, "Drop auto-unregistered the queryable");
+    }
+
+    #[test]
+    fn queryable_undeclare_returns_true_and_skips_drop() {
+        let (session, _driver) = build_session();
+        let q = session.declare_queryable(
+            "home/temp",
+            QueryableOptions::default(),
+            |_q, _r| {},
+        );
+        assert!(q.undeclare(), "first undeclare returns true");
+    }
+
+    #[test]
+    fn declare_queryable_with_locality_remote_skips_loopback_query() {
+        let (session, _driver) = build_session();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        let _q = session.declare_queryable(
+            "home/temp",
+            QueryableOptions::new().with_allowed_origin(Locality::Remote),
+            move |_q, _r| { fired_cb.fetch_add(1, Ordering::SeqCst); },
+        );
+
+        session.query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "Remote-only queryable must NOT fire on loopback query"
+        );
+    }
+
+    #[test]
+    fn declare_queryable_aliased_resolves_literal_at_declare_time() {
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        let q = session
+            .declare_queryable_aliased(
+                7,
+                None,
+                QueryableOptions::default(),
+                move |_q, responder| {
+                    fired_cb.fetch_add(1, Ordering::SeqCst);
+                    responder.send_reply(b"22.5");
+                },
+            )
+            .expect("declared mapping resolves");
+        assert_eq!(q.keyexpr(), "home/temp");
+
+        session.query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn declare_queryable_aliased_with_inline_suffix_composes_literal() {
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+        let q = session
+            .declare_queryable_aliased(
+                7,
+                Some("/kitchen"),
+                QueryableOptions::default(),
+                |_q, _r| {},
+            )
+            .expect("declared mapping resolves");
+        assert_eq!(q.keyexpr(), "home/temp/kitchen");
+    }
+
+    #[test]
+    fn declare_queryable_aliased_unknown_mapping_returns_err() {
+        let (session, _driver) = build_session();
+        let err = session.declare_queryable_aliased(
+            99,
+            None,
+            QueryableOptions::default(),
+            |_q, _r| {},
+        );
+        assert!(matches!(err, Err(QueryableAliasError::UnknownMapping(99))));
+        assert_eq!(
+            session.observer().lock().unwrap().queryables.len(),
+            0,
+            "no queryable registered on declare failure"
+        );
+    }
+
+    #[test]
+    fn queryable_alias_error_display_message_hints_remediation() {
+        let err = QueryableAliasError::UnknownMapping(42);
         let msg = format!("{err}");
         assert!(msg.contains("42"));
         assert!(msg.contains("send_declare_keyexpr"));
