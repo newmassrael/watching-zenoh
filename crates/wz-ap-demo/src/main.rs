@@ -114,6 +114,8 @@ use tokio::sync::mpsc;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::reply::InboundReplyBody;
 use wz_runtime_tokio::sample::SampleKind;
+use wz_runtime_core::TimeSource;
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{
     PublishAliasError, PublishOptions, QueryableOptions, Session, SubscribeOptions,
 };
@@ -1176,7 +1178,16 @@ async fn run_demo(
         || declare_spec.token_keyexpr.is_some();
     let declare_handle = if has_declares {
         let actions_for_declare = actions.clone();
-        Some(tokio::spawn(declare_task(actions_for_declare, declare_spec)))
+        // R253 — declare_task is generic over T: TimeSource since
+        // R253; supply the AP-profile TokioTime concrete impl. The
+        // TokioTime is Copy + 'static so it moves freely into the
+        // spawned future without lifetime threading.
+        let clock_for_declare = TokioTime::new();
+        Some(tokio::spawn(declare_task(
+            actions_for_declare,
+            declare_spec,
+            clock_for_declare,
+        )))
     } else {
         None
     };
@@ -1366,10 +1377,29 @@ const DECLARE_HANDSHAKE_POLL_INTERVAL_MS: u64 = 50;
 const DECLARE_HANDSHAKE_TIMEOUT_MS: u64 = 5_000;
 const DECLARE_INTER_EMIT_MS: u64 = 100;
 
-async fn declare_task(
+/// R253 — first leaf caller migration: this function previously
+/// reached for `tokio::time::sleep` directly; the three sleep sites
+/// now go through the [`TimeSource`] trait (concrete impl supplied
+/// by the caller, currently [`TokioTime`] but swappable for an MCU
+/// profile's TimeSource without touching this function body). The
+/// `T: TimeSource + Send + 'static` generic parameter is monomorphised
+/// at the `tokio::spawn(declare_task(.., TokioTime::new()))` call
+/// site in `run_demo`.
+///
+/// The deadline check still uses `std::time::Instant::now()` directly
+/// — that's a separate wall-clock / monotonic-instant API surface
+/// that the R251 trait skeleton explicitly scoped out (`TimeSource`
+/// is monotonic-ms-only, not Instant-arithmetic). A future round
+/// either extends the trait with an Instant-shaped surface or wraps
+/// `now_monotonic_ms` arithmetic to replace the `std::time::Instant`
+/// comparison; carry note on the audit ledger.
+async fn declare_task<T>(
     actions: Arc<wz_runtime_tokio::session_glue::SessionLinkActions>,
     spec: DeclareEmitSpec,
-) {
+    clock: T,
+) where
+    T: TimeSource + Send + 'static,
+{
     let deadline = std::time::Instant::now()
         + Duration::from_millis(DECLARE_HANDSHAKE_TIMEOUT_MS);
     loop {
@@ -1384,21 +1414,21 @@ async fn declare_task(
             );
             return;
         }
-        tokio::time::sleep(Duration::from_millis(DECLARE_HANDSHAKE_POLL_INTERVAL_MS)).await;
+        clock.sleep(DECLARE_HANDSHAKE_POLL_INTERVAL_MS).await;
     }
     if let Some(keyexpr) = spec.subscriber_keyexpr.as_deref() {
         actions.send_declare_subscriber(DECLARE_SUBSCRIBER_ID, /*mapping_id=*/ 0, Some(keyexpr));
         eprintln!(
             "wz-ap-demo: DECLARED SUBSCRIBER id={DECLARE_SUBSCRIBER_ID} keyexpr='{keyexpr}'"
         );
-        tokio::time::sleep(Duration::from_millis(DECLARE_INTER_EMIT_MS)).await;
+        clock.sleep(DECLARE_INTER_EMIT_MS).await;
     }
     if let Some(keyexpr) = spec.queryable_keyexpr.as_deref() {
         actions.send_declare_queryable(DECLARE_QUERYABLE_ID, /*mapping_id=*/ 0, Some(keyexpr));
         eprintln!(
             "wz-ap-demo: DECLARED QUERYABLE id={DECLARE_QUERYABLE_ID} keyexpr='{keyexpr}'"
         );
-        tokio::time::sleep(Duration::from_millis(DECLARE_INTER_EMIT_MS)).await;
+        clock.sleep(DECLARE_INTER_EMIT_MS).await;
     }
     if let Some(keyexpr) = spec.token_keyexpr.as_deref() {
         actions.send_declare_token(DECLARE_TOKEN_ID, /*mapping_id=*/ 0, Some(keyexpr));
