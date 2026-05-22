@@ -1780,6 +1780,42 @@ impl SessionLinkActions {
         let wire = encode_frame_with_response(sn, response, /*reliable=*/ true);
         self.driver.send_blocking(&wire, Reliability::Reliable);
     }
+
+    /// R284 — encode + dispatch a session-layer `Close` frame
+    /// (`T_MID_CLOSE` with `_Z_FLAG_T_CLOSE_S` for session-close
+    /// semantics, body carries the single-byte reason discriminator).
+    /// Rust-side counterpart of the Lua-bound
+    /// `send_close_frame_with_reason` action, taking `reason`
+    /// explicitly rather than reading it from
+    /// [`ActionTrace::close_reason`] — the caller is outside the
+    /// scxml FSM and the trace slot would not have been pre-set by
+    /// `set_close_reason_*` actions.
+    ///
+    /// Use case: signal-cancellation paths (SIGTERM / SIGINT) that
+    /// exit `drive_session_until_terminal` without driving the FSM
+    /// through its normal `Closing` state. Calling this primitive
+    /// from such a path lets the peer observe an explicit graceful
+    /// `Close` frame before the connection EOF, matching the
+    /// zenoh-pico `_z_send_close` shape rather than a bare TCP RST.
+    /// Mirrors `vendor/zenoh-pico/src/transport/unicast/transport.c`
+    /// graceful-close path.
+    ///
+    /// Bumps `ActionTrace::send_close_frame_with_reason` for trace
+    /// symmetry with the Lua-bound action — tests counting Close
+    /// emits across script + Rust paths see the unified count.
+    ///
+    /// Independent of FSM state: this is a wire-side primitive that
+    /// emits regardless of [`Self::is_established`]. A caller wanting
+    /// state-conditional emit (e.g. only after Established) should
+    /// gate at its own layer.
+    pub fn send_close_with_reason(&self, reason: CloseReason) {
+        self.trace
+            .lock()
+            .expect("trace poisoned by an earlier panicked Lua action")
+            .send_close_frame_with_reason += 1;
+        let bytes = encode_close(reason as u8);
+        self.driver.send_blocking(&bytes, Reliability::Reliable);
+    }
 }
 
 impl ActionTrace {
@@ -9668,6 +9704,102 @@ mod tests {
             Reliability::Reliable,
             "Reply data delivery pinned reliable at the action layer"
         );
+    }
+
+    /// R284 — `send_close_with_reason` is the Rust-side counterpart of
+    /// the Lua-bound `send_close_frame_with_reason` action. The two
+    /// must produce byte-identical wire frames for the same
+    /// `CloseReason`, otherwise a signal-cancellation path that uses
+    /// the Rust primitive would emit a Close the peer cannot decode
+    /// against the same zenoh-pico `_z_close_decode` reference the
+    /// FSM-driven Close goes through.
+    ///
+    /// Four-vector check across all `CloseReason` variants pins the
+    /// reason discriminator byte; `_Z_FLAG_T_CLOSE_S` (graceful
+    /// session close) is hard-set inside `encode_close`, so the outer
+    /// header byte is invariant. Reliable channel is hard-pinned too
+    /// (zenoh-pico drops Close on best-effort).
+    ///
+    /// The trace counter for Close emits bumps once per call so a
+    /// downstream test counting Close emits across the script + Rust
+    /// paths sees the unified count.
+    #[test]
+    fn send_close_with_reason_emits_zenoh_pico_compatible_wire_bytes() {
+        use std::sync::Mutex;
+
+        struct RecordingDriver {
+            frames: Mutex<Vec<(Vec<u8>, Reliability)>>,
+        }
+        impl BoxedLinkDriver for RecordingDriver {
+            fn send_blocking(&self, bytes: &[u8], r: Reliability) {
+                self.frames.lock().unwrap().push((bytes.to_vec(), r));
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+        }
+
+        for (variant, reason_byte) in [
+            (CloseReason::Generic, 0u8),
+            (CloseReason::Invalid, 1u8),
+            (CloseReason::Expired, 2u8),
+            (CloseReason::Unresponsive, 3u8),
+        ] {
+            let driver = Arc::new(RecordingDriver {
+                frames: Mutex::new(Vec::new()),
+            });
+            let params = SessionInitParams {
+                version: 0x09,
+                whatami: 0x02,
+                zid: vec![0x01, 0x02, 0x03, 0x04],
+                seq_num_res: 2,
+                req_id_res: 2,
+                batch_size: 65535,
+                lease: 10_000,
+                lease_in_seconds: false,
+                initial_sn: 1,
+                cookie: Vec::new(),
+                cookie_signing_key: SigningKey::new(vec![0xAB; 32])
+                    .expect("32-byte demo key satisfies the >=32 invariant"),
+            };
+            let actions = SessionLinkActions::new(driver.clone(), params);
+            assert_eq!(
+                actions.trace_snapshot().send_close_frame_with_reason,
+                0,
+                "trace counter starts at zero",
+            );
+
+            actions.send_close_with_reason(variant);
+
+            let frames = driver.frames.lock().unwrap();
+            assert_eq!(
+                frames.len(),
+                1,
+                "exactly one wire emit per send_close_with_reason ({variant:?})",
+            );
+            // Outer header = T_MID_CLOSE | _Z_FLAG_T_CLOSE_S. Body =
+            // reason byte. Total 2 bytes — Close has no other body
+            // fields (the Close codec is a fixed single-byte
+            // discriminator) and we hard-set FLAG_T_CLOSE_S to
+            // request graceful session close.
+            let expected = vec![
+                wire_const::T_MID_CLOSE | wire_const::FLAG_T_CLOSE_S,
+                reason_byte,
+            ];
+            assert_eq!(
+                frames[0].0, expected,
+                "wire bytes must match encode_close output for {variant:?}",
+            );
+            assert_eq!(
+                frames[0].1,
+                Reliability::Reliable,
+                "Close pinned reliable — zenoh-pico drops Close on best-effort",
+            );
+            assert_eq!(
+                actions.trace_snapshot().send_close_frame_with_reason,
+                1,
+                "trace counter bumps once per send_close_with_reason ({variant:?})",
+            );
+        }
     }
 
     /// R121j-5c-e2e — `send_response` and `send_response_final`

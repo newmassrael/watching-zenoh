@@ -123,8 +123,8 @@ use wz_runtime_tokio::session::{
 };
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastPolicy;
 use wz_runtime_tokio::session_glue::{
-    drive_session_until_terminal, install_session_actions, BoxedLinkDriver, IterationEvent,
-    SessionInitParams, SessionLinkActions, SigningKey,
+    drive_session_until_terminal, install_session_actions, BoxedLinkDriver, CloseReason,
+    IterationEvent, SessionInitParams, SessionLinkActions, SigningKey,
 };
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 
@@ -1576,17 +1576,20 @@ async fn run_demo(
     //      lives in run_demo's stack, not inside the future).
     //   3. (Future) administrative shutdown via in-process channel
     //      → same Future-drop semantics as (2).
-    // In all three paths the subsequent teardown sequence
-    // (sweep_task.abort + task joins + token drop + drop(actions) +
-    // writer drain) runs identically. The cancel arm does NOT post
-    // `SessionClose` to the FSM before exiting — sending the wire
-    // `Close` frame requires re-entering the drive loop which would
-    // re-block on signal cancellation. The peer therefore observes
-    // a connection EOF rather than a Close frame on signal
-    // shutdown; the `Declare(UndeclToken)` retraction frame
-    // emitted by `LivelinessToken::Drop` further down still goes
-    // out on the wire ahead of the EOF, which is the R277/R278
-    // end-to-end contract this round delivers.
+    //
+    // R284 — the cancel arm posts an explicit `SessionClose` frame
+    // (`CloseReason::Generic`) via `actions.send_close_with_reason`
+    // BEFORE the writer drain phase. The Rust-side primitive
+    // bypasses the FSM driver entirely (no re-entry into the drive
+    // loop required — the wire emit is a direct
+    // `actions.driver.send_blocking` of the encoded Close frame), so
+    // the cancel arm and the FSM-driven natural exit produce
+    // equivalent wire-side handshakes: peer observes a graceful
+    // `Close` frame ahead of the connection EOF, matching the
+    // zenoh-pico `_z_send_close` shape rather than a bare TCP RST.
+    // The subsequent `Declare(UndeclToken)` retraction frame emitted
+    // by `LivelinessToken::Drop` further down still goes out on the
+    // wire after the Close, in the writer-task drain phase.
     let outcome = tokio::select! {
         o = drive_session_until_terminal(
             &mut driver,
@@ -1605,7 +1608,7 @@ async fn run_demo(
         _ = shutdown_signal() => {
             log::info!(
                 "wz-ap-demo: shutdown signal received; halting drive_session \
-                 (writer task remains alive to drain UndeclToken + tail frames)"
+                 (writer task remains alive to drain Close + UndeclToken + tail frames)"
             );
             None
         }
@@ -1617,7 +1620,10 @@ async fn run_demo(
     sweep_task.abort();
     match &outcome {
         Some(o) => log::info!("wz-ap-demo: session ended: {o:?}"),
-        None => log::info!("wz-ap-demo: session cancelled by graceful-shutdown signal"),
+        None => log::info!(
+            "wz-ap-demo: session cancelled by graceful-shutdown signal; \
+             Close(Generic) enqueues after UndeclToken in the writer drain"
+        ),
     }
     log::info!("wz-ap-demo: action trace = {:?}", actions.trace_snapshot());
 
@@ -1665,6 +1671,26 @@ async fn run_demo(
             _ => None,
         };
         drop(token);
+    }
+
+    // R284 — on the signal-cancel path emit an explicit graceful
+    // `Close(Generic)` so the peer observes a clean session
+    // termination handshake. ORDER MATTERS: this MUST run AFTER the
+    // LivelinessToken drop above (which enqueues `Declare(UndeclToken)`
+    // on the writer channel) so the peer sees the UndeclToken — and
+    // its DELETE sample for liveliness subscribers — BEFORE the Close
+    // frame tears down the session. Reverse order regresses
+    // wz_liveliness_subscriber_round_trip (peer terminates on Close
+    // before processing the trailing UndeclToken).
+    //
+    // Idempotent against the natural-exit path: if
+    // drive_session_until_terminal returned via the FSM's `Closing`
+    // state, the script-driven `send_close_frame_with_reason` already
+    // fired from the FSM's set_close_reason_* triggers. The Rust-side
+    // emit here is for the signal-cancel case where the FSM was
+    // dropped mid-iteration and never reached its Closing transition.
+    if outcome.is_none() {
+        actions.send_close_with_reason(CloseReason::Generic);
     }
 
     // Drop the FSM-side sender so the writer task observes the
