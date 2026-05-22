@@ -12712,6 +12712,78 @@
         "vendor/sce pin update policy — R14 carry, audit entry mandatory on each pin bump"
       ]
     },
+    "Round 260": {
+      "decision_summary": "R260 routes drive_session_until_terminal lease-branch sleep through TimeSource::sleep; last internal tokio::time::sleep site in wz-runtime-tokio gone; storage unchanged.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: drive_session_until_terminal signature adds <T: TimeSource> and clock: &T as the 5th positional param between max_iters and on_event. The tokio::select! lease branch now awaits clock.sleep(remaining_ms) (u64 ms cast from saturating_duration_since(now).as_millis()) instead of direct tokio::time::sleep(remaining). use wz_runtime_core::TimeSource import added.",
+        "crates/wz-runtime-tokio/tests/session_fsm_drive_session.rs: 9 callers across r76b_returns_terminated_when_engine_already_final / r76b_iteration_limit_when_loop_cannot_terminate / r76b_link_lost_event_drives_loop_to_terminated / r76b_lease_branch_fires_with_silent_peer / r85_unlimited_iters_terminates_on_finite_event_sequence / r83_observer_captures_framepayload_and_linklost_in_order / r83_observer_reads_framepayload_messages_through_reference / r99_subscriber_registry_routes_framepayload_push_to_callback / r83_observer_fires_on_lease_branch each construct let clock = TokioTime::new() and pass &clock between max_iters and the closure. use wz_runtime_tokio::runtime_impl::TokioTime added.",
+        "crates/wz-ap-demo/src/main.rs: production caller constructs a dedicated clock_for_drive: TokioTime alongside the existing R253/R254 clock_for_declare / clock_for_query / clock_for_publisher instances. Each TokioTime samples its own monotonic epoch; the drive instance does not need to share epoch with the task instances because the lease branch uses clock.sleep(ms) only, not cross-instance now_monotonic_ms comparison.",
+        "Instant storage in SessionLinkActions (last_inbound_keepalive_at: Mutex<Option<Instant>> and established_at: Mutex<Option<Instant>>) is unchanged this round; the local Instant::now() / saturating_duration_since lease comparator path stays as before. Full Instant -> u64 ms storage migration deferred to a future round because of cross-consumer reach (check_lease_deadline, handle_inbound write site at line 960, record_established_at Lua action, and all observer consumers that read these stamps).",
+        "wz-runtime-tokio's last internal tokio::time::sleep direct call site closes. The only remaining tokio::time::sleep / Instant usage in wz-runtime-tokio is runtime_impl::TokioTime (the trait impl itself; expected) and tests/echo_demo*.rs (50ms test budget waits in integration test infra). Production runtime code is fully on the §5.P trait-mediated time-dispatch path."
+      ],
+      "verification_bullets": [
+        "cargo test --manifest-path crates/Cargo.toml -p wz-runtime-tokio --test session_fsm_drive_session: 9/9 pass (all r76b/r83/r85/r99 + lease branch scenarios).",
+        "cargo test --manifest-path crates/Cargo.toml -p wz-runtime-tokio --lib: 477/477 pass (R259 baseline preserved; no test count change because R260 is a refactor of an existing site, not a new contract).",
+        "cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings: clean across all 7 workspace crates.",
+        "bash scripts/run-ci.sh: Layer A-E 9/9 pass (workspace check + clippy + tests + integration + run-ci envelope).",
+        "pre-commit hook validate_workspace clean: T1=0 (ledger=1 R193 §66 carry, new=+0), round-trip 12/12, sections=215, GENERATED.md=sync. atomic ledger entries 258 -> 259 (this entry).",
+        "commit 37c315e (feat(runtime-tokio): R260 drive_session clock TimeSource param; 3 files +77 / -15). Pre-commit commit-msg gate passed (subject 62 bytes, all body lines <= 72 bytes, 3 bullets per COMMIT_FORMAT.md ceiling)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R261+ full Instant -> u64 ms storage migration (SessionLinkActions.last_inbound_keepalive_at + established_at + check_lease_deadline + handle_inbound write site + record_established_at Lua action + all observer consumers); separate substantive round (3-5 round estimate) because of cross-consumer reach. Architectural decision needed first: u64 ms relative to which epoch (per-session start vs per-TokioTime epoch vs SystemTime::now since UNIX)? Per-session start matches lease semantics; the TokioTime epoch is also viable but couples session storage to runtime instance lifecycle.",
+        "R260 closes wz-runtime-tokio's last internal tokio::time::sleep direct call site. Phase W internal time-dispatch in production code is now fully trait-mediated. Test infrastructure (tests/echo_demo.rs, tests/echo_demo_del_and_udp.rs) still has direct tokio::time::sleep at 3 sites (50ms test budget waits); these are test-only and not on the MCU compile path.",
+        "Cancellable trait promotion (R257 carry): YAGNI hold until first MCU caller motivates trait-level surface. R259 abort edge-case pins remain authoritative for struct-level surface.",
+        "RuntimeError inner-cause variants (panic_payload behind alloc/std feature) — 1 round textbook candidate; autonomous-runnable scope.",
+        "Session struct reparameterisation per §5.P leaf-first; gated on Mutex/RwLock contract decision (R251 open: per-runtime type alias vs MutexFamily GAT vs cfg-conditional direct call sites).",
+        "core::error::Error replacement once MSRV bumps to 1.81+.",
+        "Liveliness Token wz-ap-demo migration (R250 carry; declare_task Established-gate timing + LivelinessToken Drop lifetime do not compose without cross-task handoff).",
+        "ReplyRegistry timeout sweep (TimeSource production-validated; with R260 drive_session sleep migration done, ReplyRegistry timeout is the next natural substantive feature candidate — cancel pending + synthesise Final on timeout_ms passage, 2-3 round estimate).",
+        "Q_B / Q_E wire codec slots (SCE-side codec extension).",
+        "Querier / Publisher get_matching_status (architectural placement: where to consult RemoteQueryableRegistry from Querier handle).",
+        "SCE drift = ~80+ commits since vendor pin ebf3b3ff (kickoff observation: upstream HEAD 5b7f2574 vs wz vendor ebf3b3ff; wz call sites = 0 so pin bump remains deferred).",
+        "Phase W full lwIP integration / Cortex-M cross-compile / deploy yaml.",
+        "R260 lesson: API-breaking generic param addition is a 1-round cost when call sites are concentrated (10 here: 9 tests + 1 demo, all updateable in two files). When the next round considers storage-type migration (Instant -> u64 ms) the fan-out is much wider (~30+ consumer sites) and the same single-round cadence will not fit — that round needs its own audit decomposition (write sites first, read sites second, lease comparator third)."
+      ],
+      "publishable_decision_summary": "R260 routes drive_session_until_terminal lease-branch sleep through TimeSource::sleep; last internal tokio::time::sleep site in wz-runtime-tokio gone; storage unchanged.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: drive_session_until_terminal signature adds <T: TimeSource> and clock: &T as the 5th positional param between max_iters and on_event. The tokio::select! lease branch now awaits clock.sleep(remaining_ms) (u64 ms cast from saturating_duration_since(now).as_millis()) instead of direct tokio::time::sleep(remaining). use wz_runtime_core::TimeSource import added.",
+        "crates/wz-runtime-tokio/tests/session_fsm_drive_session.rs: 9 callers across r76b_returns_terminated_when_engine_already_final / r76b_iteration_limit_when_loop_cannot_terminate / r76b_link_lost_event_drives_loop_to_terminated / r76b_lease_branch_fires_with_silent_peer / r85_unlimited_iters_terminates_on_finite_event_sequence / r83_observer_captures_framepayload_and_linklost_in_order / r83_observer_reads_framepayload_messages_through_reference / r99_subscriber_registry_routes_framepayload_push_to_callback / r83_observer_fires_on_lease_branch each construct let clock = TokioTime::new() and pass &clock between max_iters and the closure. use wz_runtime_tokio::runtime_impl::TokioTime added.",
+        "crates/wz-ap-demo/src/main.rs: production caller constructs a dedicated clock_for_drive: TokioTime alongside the existing R253/R254 clock_for_declare / clock_for_query / clock_for_publisher instances. Each TokioTime samples its own monotonic epoch; the drive instance does not need to share epoch with the task instances because the lease branch uses clock.sleep(ms) only, not cross-instance now_monotonic_ms comparison.",
+        "Instant storage in SessionLinkActions (last_inbound_keepalive_at: Mutex<Option<Instant>> and established_at: Mutex<Option<Instant>>) is unchanged this round; the local Instant::now() / saturating_duration_since lease comparator path stays as before. Full Instant -> u64 ms storage migration deferred to a future round because of cross-consumer reach (check_lease_deadline, handle_inbound write site at line 960, record_established_at Lua action, and all observer consumers that read these stamps).",
+        "wz-runtime-tokio's last internal tokio::time::sleep direct call site closes. The only remaining tokio::time::sleep / Instant usage in wz-runtime-tokio is runtime_impl::TokioTime (the trait impl itself; expected) and tests/echo_demo*.rs (50ms test budget waits in integration test infra). Production runtime code is fully on the §5.P trait-mediated time-dispatch path."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --manifest-path crates/Cargo.toml -p wz-runtime-tokio --test session_fsm_drive_session: 9/9 pass (all r76b/r83/r85/r99 + lease branch scenarios).",
+        "cargo test --manifest-path crates/Cargo.toml -p wz-runtime-tokio --lib: 477/477 pass (R259 baseline preserved; no test count change because R260 is a refactor of an existing site, not a new contract).",
+        "cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings: clean across all 7 workspace crates.",
+        "bash scripts/run-ci.sh: Layer A-E 9/9 pass (workspace check + clippy + tests + integration + run-ci envelope).",
+        "pre-commit hook validate_workspace clean: T1=0 (ledger=1 R193 §66 carry, new=+0), round-trip 12/12, sections=215, GENERATED.md=sync. atomic ledger entries 258 -> 259 (this entry).",
+        "commit 37c315e (feat(runtime-tokio): R260 drive_session clock TimeSource param; 3 files +77 / -15). Pre-commit commit-msg gate passed (subject 62 bytes, all body lines <= 72 bytes, 3 bullets per COMMIT_FORMAT.md ceiling)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R261+ full Instant -> u64 ms storage migration (SessionLinkActions.last_inbound_keepalive_at + established_at + check_lease_deadline + handle_inbound write site + record_established_at Lua action + all observer consumers); separate substantive round (3-5 round estimate) because of cross-consumer reach. Architectural decision needed first: u64 ms relative to which epoch (per-session start vs per-TokioTime epoch vs SystemTime::now since UNIX)? Per-session start matches lease semantics; the TokioTime epoch is also viable but couples session storage to runtime instance lifecycle.",
+        "R260 closes wz-runtime-tokio's last internal tokio::time::sleep direct call site. Phase W internal time-dispatch in production code is now fully trait-mediated. Test infrastructure (tests/echo_demo.rs, tests/echo_demo_del_and_udp.rs) still has direct tokio::time::sleep at 3 sites (50ms test budget waits); these are test-only and not on the MCU compile path.",
+        "Cancellable trait promotion (R257 carry): YAGNI hold until first MCU caller motivates trait-level surface. R259 abort edge-case pins remain authoritative for struct-level surface.",
+        "RuntimeError inner-cause variants (panic_payload behind alloc/std feature) — 1 round textbook candidate; autonomous-runnable scope.",
+        "Session struct reparameterisation per §5.P leaf-first; gated on Mutex/RwLock contract decision (R251 open: per-runtime type alias vs MutexFamily GAT vs cfg-conditional direct call sites).",
+        "core::error::Error replacement once MSRV bumps to 1.81+.",
+        "Liveliness Token wz-ap-demo migration (R250 carry; declare_task Established-gate timing + LivelinessToken Drop lifetime do not compose without cross-task handoff).",
+        "ReplyRegistry timeout sweep (TimeSource production-validated; with R260 drive_session sleep migration done, ReplyRegistry timeout is the next natural substantive feature candidate — cancel pending + synthesise Final on timeout_ms passage, 2-3 round estimate).",
+        "Q_B / Q_E wire codec slots (SCE-side codec extension).",
+        "Querier / Publisher get_matching_status (architectural placement: where to consult RemoteQueryableRegistry from Querier handle).",
+        "SCE drift = ~80+ commits since vendor pin ebf3b3ff (kickoff observation: upstream HEAD 5b7f2574 vs wz vendor ebf3b3ff; wz call sites = 0 so pin bump remains deferred).",
+        "Phase W full lwIP integration / Cortex-M cross-compile / deploy yaml.",
+        "R260 lesson: API-breaking generic param addition is a 1-round cost when call sites are concentrated (10 here: 9 tests + 1 demo, all updateable in two files). When the next round considers storage-type migration (Instant -> u64 ms) the fan-out is much wider (~30+ consumer sites) and the same single-round cadence will not fit — that round needs its own audit decomposition (write sites first, read sites second, lease comparator third)."
+      ]
+    },
     "Round 27": {
       "decision_summary": "Phase E final — README atomic decompose into 8 H2 sections under watching-zenoh root + heading slug stabilization (current-status heading drops round/date suffix); sections 206 → 214, docs 12/12 clean.",
       "changes_bullets": [
