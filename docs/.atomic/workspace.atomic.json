@@ -14554,6 +14554,54 @@
         "SCE-side: Python statechart emitter unsupported at vendor pin 1473f99f. Low priority (no deploy uses Python for state machine targets); not a blocker. Optional upstream PR for SCE to close the 6/6 parity gap on statechart kind."
       ]
     },
+    "Round 290": {
+      "decision_summary": "R290 lands Publisher::get_matching_status + PublisherAliased::get_matching_status — pub-side mirror of R288/R289; consults the per-session RemoteSubscriberRegistry membership against the publisher's keyexpr under the same bidirectional asymmetric pattern-match approximation landed in R288.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/declare/subscriber.rs — RemoteSubscriberRegistry gains `declared: HashMap<u64, String>` field (pub-side mirror of R288's RemoteQueryableRegistry extension) populated on DeclSubscriber, removed on UndeclSubscriber. New pub fns: declared_count, iter_declared, has_matching(publish_keyexpr) using the same bidirectional asymmetric pattern-match approximation.",
+        "crates/wz-runtime-tokio/src/session.rs — new pub Publisher::get_matching_status -> MatchingStatus (consults remote_subscribers.has_matching against literal keyexpr) and PublisherAliased::get_matching_status -> Result<MatchingStatus, PublishAliasError> (resolves mapping_id + inline_suffix to effective keyexpr first; UnknownMapping arm mirrors Publisher / PublisherAliased::put / delete contract).",
+        "crates/wz-runtime-tokio/src/declare/subscriber.rs (tests) — 6 new unit tests: subscriber_declared_count_starts_at_zero_and_tracks_decl_undecl_lifecycle, subscriber_has_matching_false_on_empty_registry, subscriber_has_matching_true_on_literal_keyexpr_equality, subscriber_has_matching_true_when_peer_pattern_covers_publish_literal, subscriber_has_matching_true_when_publish_pattern_covers_peer_literal, subscriber_has_matching_false_after_undeclare. Pub-side mirror of the R288 Q-side registry tests.",
+        "crates/wz-runtime-tokio/src/session.rs (tests) — 8 new unit tests under '── R290 Publisher / PublisherAliased::get_matching_status ──': 5 publisher_get_matching_status_* (fresh / peer literal match / peer pattern arm / Undecl flip / non-matching peer) plus 3 publisher_aliased_get_matching_status_* (UnknownMapping err / inline_suffix-composed match / post-undeclare_kexpr UnknownMapping). Local helpers make_decl_subscriber / make_undecl_subscriber mirror the R288 make_decl_queryable / make_undecl_queryable shape."
+      ],
+      "verification_bullets": [
+        "cargo check / cargo clippy --workspace --all-targets --no-deps -- -D warnings clean across 7 crates after the additions.",
+        "cargo test wz-runtime-tokio --lib --filter publisher_get_matching_status passes 5/5; --filter publisher_aliased_get_matching_status passes 3/3; --filter subscriber_has_matching passes 5/5; --filter subscriber_declared_count passes 1/1. Cumulative wz-runtime-tokio lib test count 530 -> 544 (+14 R290 tests).",
+        "scripts/run-ci.sh all 10 lanes green: Layer 0 / A / A2 / B / C0 / C1 / C1b / C2 / D / E. Behavioural impact on Layer E e2e is none (no existing test exercised Publisher/PublisherAliased::get_matching_status; the new methods are purely additive). The RemoteSubscriberRegistry `declared` HashMap is additive — existing callback paths fire in the same order, the membership tracking happens before the callback chain runs.",
+        "API symmetry verified end-to-end across the four handle types: Querier::get_matching_status -> MatchingStatus (R288, literal), QuerierAliased::get_matching_status -> Result<MatchingStatus, QueryAliasError> (R289, aliased), Publisher::get_matching_status -> MatchingStatus (R290, literal), PublisherAliased::get_matching_status -> Result<MatchingStatus, PublishAliasError> (R290, aliased). The aliased-side error types mirror the per-domain *AliasError already on the get / put / delete methods."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R291 carry — honest two-pattern keyexpr intersection algorithm to replace the bidirectional asymmetric pattern-match approximation used by has_matching on both RemoteQueryableRegistry and RemoteSubscriberRegistry. The wz keyexpr v1 spec currently locks intersect to exact uint32 ID equality for MVP (RFC §5.A line 311); promoting to wildcard-vs-wildcard intersection is spec-touching (RFC body amend + 6-backend codegen drift gate via Phase A). The two-pattern overlap edge case (e.g. home/*/temp vs */sensor/temp) is the practical gap.",
+        "Closed: R290 follow-up carry from R289 — Publisher / PublisherAliased::get_matching_status realised; the matching_status API surface is now complete across all four declare-style handles (Querier, QuerierAliased, Publisher, PublisherAliased).",
+        "R284 carry from R283 still open: uniform Established gate across the 4 non-aliased declare_* methods.",
+        "R283 architectural carry still open: peer-side non-final Interest inbound (bilateral).",
+        "Open R267-R270 architectural carries unchanged: Session<R,T> reparam, Instant -> u64ms migration."
+      ],
+      "publishable_decision_summary": "R290 lands Publisher::get_matching_status + PublisherAliased::get_matching_status — pub-side mirror of R288/R289; consults the per-session RemoteSubscriberRegistry membership against the publisher's keyexpr under the same bidirectional asymmetric pattern-match approximation landed in R288.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/declare/subscriber.rs — RemoteSubscriberRegistry gains `declared: HashMap<u64, String>` field (pub-side mirror of R288's RemoteQueryableRegistry extension) populated on DeclSubscriber, removed on UndeclSubscriber. New pub fns: declared_count, iter_declared, has_matching(publish_keyexpr) using the same bidirectional asymmetric pattern-match approximation.",
+        "crates/wz-runtime-tokio/src/session.rs — new pub Publisher::get_matching_status -> MatchingStatus (consults remote_subscribers.has_matching against literal keyexpr) and PublisherAliased::get_matching_status -> Result<MatchingStatus, PublishAliasError> (resolves mapping_id + inline_suffix to effective keyexpr first; UnknownMapping arm mirrors Publisher / PublisherAliased::put / delete contract).",
+        "crates/wz-runtime-tokio/src/declare/subscriber.rs (tests) — 6 new unit tests: subscriber_declared_count_starts_at_zero_and_tracks_decl_undecl_lifecycle, subscriber_has_matching_false_on_empty_registry, subscriber_has_matching_true_on_literal_keyexpr_equality, subscriber_has_matching_true_when_peer_pattern_covers_publish_literal, subscriber_has_matching_true_when_publish_pattern_covers_peer_literal, subscriber_has_matching_false_after_undeclare. Pub-side mirror of the R288 Q-side registry tests.",
+        "crates/wz-runtime-tokio/src/session.rs (tests) — 8 new unit tests under '── R290 Publisher / PublisherAliased::get_matching_status ──': 5 publisher_get_matching_status_* (fresh / peer literal match / peer pattern arm / Undecl flip / non-matching peer) plus 3 publisher_aliased_get_matching_status_* (UnknownMapping err / inline_suffix-composed match / post-undeclare_kexpr UnknownMapping). Local helpers make_decl_subscriber / make_undecl_subscriber mirror the R288 make_decl_queryable / make_undecl_queryable shape."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check / cargo clippy --workspace --all-targets --no-deps -- -D warnings clean across 7 crates after the additions.",
+        "cargo test wz-runtime-tokio --lib --filter publisher_get_matching_status passes 5/5; --filter publisher_aliased_get_matching_status passes 3/3; --filter subscriber_has_matching passes 5/5; --filter subscriber_declared_count passes 1/1. Cumulative wz-runtime-tokio lib test count 530 -> 544 (+14 R290 tests).",
+        "scripts/run-ci.sh all 10 lanes green: Layer 0 / A / A2 / B / C0 / C1 / C1b / C2 / D / E. Behavioural impact on Layer E e2e is none (no existing test exercised Publisher/PublisherAliased::get_matching_status; the new methods are purely additive). The RemoteSubscriberRegistry `declared` HashMap is additive — existing callback paths fire in the same order, the membership tracking happens before the callback chain runs.",
+        "API symmetry verified end-to-end across the four handle types: Querier::get_matching_status -> MatchingStatus (R288, literal), QuerierAliased::get_matching_status -> Result<MatchingStatus, QueryAliasError> (R289, aliased), Publisher::get_matching_status -> MatchingStatus (R290, literal), PublisherAliased::get_matching_status -> Result<MatchingStatus, PublishAliasError> (R290, aliased). The aliased-side error types mirror the per-domain *AliasError already on the get / put / delete methods."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R291 carry — honest two-pattern keyexpr intersection algorithm to replace the bidirectional asymmetric pattern-match approximation used by has_matching on both RemoteQueryableRegistry and RemoteSubscriberRegistry. The wz keyexpr v1 spec currently locks intersect to exact uint32 ID equality for MVP (RFC §5.A line 311); promoting to wildcard-vs-wildcard intersection is spec-touching (RFC body amend + 6-backend codegen drift gate via Phase A). The two-pattern overlap edge case (e.g. home/*/temp vs */sensor/temp) is the practical gap.",
+        "Closed: R290 follow-up carry from R289 — Publisher / PublisherAliased::get_matching_status realised; the matching_status API surface is now complete across all four declare-style handles (Querier, QuerierAliased, Publisher, PublisherAliased).",
+        "R284 carry from R283 still open: uniform Established gate across the 4 non-aliased declare_* methods.",
+        "R283 architectural carry still open: peer-side non-final Interest inbound (bilateral).",
+        "Open R267-R270 architectural carries unchanged: Session<R,T> reparam, Instant -> u64ms migration."
+      ]
+    },
     "Round 3": {
       "decision_summary": "Phase B complete — RFC §5 thirteen kind sub-sections atomic decomposition (5.A-5.F, 5.I-5.O); Phase 2 deferred 5.G/5.H skipped.",
       "changes_bullets": [
