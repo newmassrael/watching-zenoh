@@ -13822,6 +13822,54 @@
         "Continued: Cancellable YAGNI, Phase W full lwIP (20-50R), Q_B/Q_E codecs (SCE-side first)"
       ]
     },
+    "Round 278": {
+      "decision_summary": "R278 wires tokio::signal SIGTERM/SIGINT into wz-ap-demo via shutdown_signal() + tokio::select around drive_session; LivelinessToken Drop now emits UndeclToken on graceful shutdown end-to-end.",
+      "changes_bullets": [
+        "shutdown_signal() async fn: SIGTERM + SIGINT branches; ctrl_c fallback on SIGTERM install fail",
+        "drive_session_until_terminal wrapped in tokio::select!; outcome = Some(..) | None",
+        "Cargo.toml: tokio features += signal",
+        "wz_remote_declare_round_trip: SIGTERM via graceful_terminate helper + 2s wait + SIGKILL fallback",
+        "wz_remote_declare_round_trip: new REMOTE TOKEN UNDECLARED id=0 assertion gates RAII path",
+        "Closes R277 SIGKILL caveat carry; end-to-end RAII chain verified at Layer E"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-ap-demo + clippy --workspace --all-targets -D warnings: clean",
+        "scripts/run-ci.sh: 10/10 lanes pass including Layer E wz_remote_declare_round_trip",
+        "Layer E exercises new SIGTERM path; REMOTE TOKEN UNDECLARED assertion passes end-to-end",
+        "Pre-mutation validate: entries=276 / sections=215 / T1=0 / RT 12/12 / sync (R277 close)",
+        "Post-mutation validate: entries=277 / sections=215 / T1=0 / RT 12/12 / sync (this audit)"
+      ],
+      "carry_forward_bullets": [
+        "R277 SIGKILL caveat CLOSED at R278; LivelinessToken RAII chain verified end-to-end",
+        "R278 limitation: signal arm does not post SessionClose to FSM (peer sees EOF, no Close)",
+        "R278 follow-up (low priority): post SessionClose + drain Close handshake before signal exit",
+        "Non-Unix shutdown_signal() omits SIGTERM equivalent (no portable Windows analogue)",
+        "Open R267-R270 architectural carries unchanged: Querier matching, Session reparam, etc."
+      ],
+      "publishable_decision_summary": "R278 wires tokio::signal SIGTERM/SIGINT into wz-ap-demo via shutdown_signal() + tokio::select around drive_session; LivelinessToken Drop now emits UndeclToken on graceful shutdown end-to-end.",
+      "publishable_changes_bullets": [
+        "shutdown_signal() async fn: SIGTERM + SIGINT branches; ctrl_c fallback on SIGTERM install fail",
+        "drive_session_until_terminal wrapped in tokio::select!; outcome = Some(..) | None",
+        "Cargo.toml: tokio features += signal",
+        "wz_remote_declare_round_trip: SIGTERM via graceful_terminate helper + 2s wait + SIGKILL fallback",
+        "wz_remote_declare_round_trip: new REMOTE TOKEN UNDECLARED id=0 assertion gates RAII path",
+        "Closes R277 SIGKILL caveat carry; end-to-end RAII chain verified at Layer E"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-ap-demo + clippy --workspace --all-targets -D warnings: clean",
+        "scripts/run-ci.sh: 10/10 lanes pass including Layer E wz_remote_declare_round_trip",
+        "Layer E exercises new SIGTERM path; REMOTE TOKEN UNDECLARED assertion passes end-to-end",
+        "Pre-mutation validate: entries=276 / sections=215 / T1=0 / RT 12/12 / sync (R277 close)",
+        "Post-mutation validate: entries=277 / sections=215 / T1=0 / RT 12/12 / sync (this audit)"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R277 SIGKILL caveat CLOSED at R278; LivelinessToken RAII chain verified end-to-end",
+        "R278 limitation: signal arm does not post SessionClose to FSM (peer sees EOF, no Close)",
+        "R278 follow-up (low priority): post SessionClose + drain Close handshake before signal exit",
+        "Non-Unix shutdown_signal() omits SIGTERM equivalent (no portable Windows analogue)",
+        "Open R267-R270 architectural carries unchanged: Querier matching, Session reparam, etc."
+      ]
+    },
     "Round 28": {
       "decision_summary": "Phase A control-plane SCXML round — 3 new algorithm-kind validators (whatami / payload-ext-id / transport-ext-id) covering §3 Hello body, §7.1 payload-layer per-context extension allowlist, §4.4 transport-layer per-control-message extension allowlist.",
       "changes_bullets": [
