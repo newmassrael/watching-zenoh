@@ -11744,6 +11744,86 @@
         "R248 lesson: handle surface 7-piece closure reached via R244+R245+R246+R248 quartet; LivelinessToken is the structural outlier (Drop-emits-wire) because retraction MUST notify peer's liveliness subscribers (PUT/DELETE sample fan-out) — contrast with Subscriber/Queryable Drop which only unregister local registry under peer-only (router-less) wz operation."
       ]
     },
+    "Round 249": {
+      "decision_summary": "R249 wz-ap-demo subscriber + queryable register sites migrated to Session::declare_subscriber / Session::declare_queryable RAII handle API (R245/R246 surface).",
+      "changes_bullets": [
+        "wz-ap-demo/src/main.rs: removed observer_lock.subscribers.register call (raw register pattern) from the pre-Session observer.lock() block.",
+        "wz-ap-demo/src/main.rs: removed observer_lock.queryables.register call from the same block.",
+        "wz-ap-demo/src/main.rs: imports extended with SubscribeOptions + QueryableOptions on the session module use line.",
+        "wz-ap-demo/src/main.rs: inserted post-Session::new session.declare_subscriber + session.declare_queryable calls; handles bind to _subscriber_handle / _queryable_handle locals so RAII Drop fires at run_demo body exit (registry unregister).",
+        "Callback bodies preserved verbatim (R222 Sample-shape assertions + R121j-5c-e2e-demo log line wording unchanged) so Layer E e2e binary-dep tests that grep on the stderr log line continue to match.",
+        "R121c-3 timing requirement (register before drive_session starts so handshake-time z_put echo routes through the subscriber) preserved: Session::new + the new declare_* calls all complete before Step 4a publisher_task spawn and Step 5 drive_session loop.",
+        "Wire-side actions.send_declare_subscriber / send_declare_queryable / send_declare_token sites at lines 1364 / 1371 / 1378 untouched — those exercise the raw outbound DECLARE wire emit path (peer-side e2e regression coverage) which is independent from local registry registration; R249 scope was the local register migration only."
+      ],
+      "verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 464 unchanged (no library code touched).",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A unit + B integration + C wire-fixture + D-fmt + E binary-dep e2e 9/9).",
+        "Layer E e2e specifically (ap_demo_round_trip / wz_initiator_to_wz_acceptor / wz_initiator_to_zsub / wz_publisher_aliased_to_zsub / wz_publisher_del_to_zsub / wz_publisher_to_zsub / wz_initiator_consumes_reply / wz_queryable_round_trip / wz_remote_declare_round_trip): all pass with identical stderr log shape (handle API is byte-equivalent at the externally-observable boundary).",
+        "pre-commit hook validate_workspace + commit-msg COMMIT_FORMAT.md gate: passed at commit time.",
+        "commit df375e4 (feat(demo): R249 wz-ap-demo subscriber + queryable to handle API; 1 file +63 / -37)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "carry_forward_bullets": [
+        "R250+ wz-ap-demo Liveliness Token migration: line 1378 actions.send_declare_token(DECLARE_TOKEN_ID=3001, 0, Some(keyexpr)) site could route through session.declare_token(keyexpr, LivelinessOptions::default()) instead — deferred because session.declare_token auto-allocates token_id starting from 0 (R248 next_outbound_token_id counter) and the hardcoded 3001 in the stderr log line `DECLARED TOKEN id=3001` is e2e-grepped by Layer E fixtures; needs e2e log fixture refresh round.",
+        "R250+ wz-ap-demo declare_emit wire migration: lines 1364 / 1371 (send_declare_subscriber / send_declare_queryable raw wire emit) intentionally untouched in R249 — these are router-mode wire emits exercised for peer regression; not replaceable by session.declare_subscriber / declare_queryable (which are peer-only no-wire-emit). A dedicated round could collapse into an explicit ScratchWireDeclare helper if the duplicated id/keyexpr threading becomes a friction point.",
+        "R250+ pre-push hook chicken-and-egg defence (carried from R247): when commit modifies run-ci.sh itself, hook should re-source run-ci.sh from staged commit content rather than working-tree state.",
+        "ReplyRegistry timeout sweep needs Hal time abstraction (wz-runtime-core).",
+        "Q_B / Q_E wire codec slots require SCE-side codec extension.",
+        "LivelinessToken local_tokens table for history fan-out: defer until Liveliness Subscriber history.",
+        "LivelinessToken Drop catch_unwind defensive wrap: defer until driver path panic surfaces.",
+        "Querier::get_matching_status / Publisher::get_matching_status (RemoteQueryableRegistry coverage check).",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff; pin bump deferred (wz call sites = 0).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R249 lesson: handle API migration retains byte-equivalent e2e log shape when the callback body is preserved verbatim; the structural change (raw observer.X.register vs session.declare_X) is invisible at the binary boundary, which is the right invariant — R245/R246 handle surface is a refactoring lens, not a behavior change."
+      ],
+      "publishable_decision_summary": "R249 wz-ap-demo subscriber + queryable register sites migrated to Session::declare_subscriber / Session::declare_queryable RAII handle API (R245/R246 surface).",
+      "publishable_changes_bullets": [
+        "wz-ap-demo/src/main.rs: removed observer_lock.subscribers.register call (raw register pattern) from the pre-Session observer.lock() block.",
+        "wz-ap-demo/src/main.rs: removed observer_lock.queryables.register call from the same block.",
+        "wz-ap-demo/src/main.rs: imports extended with SubscribeOptions + QueryableOptions on the session module use line.",
+        "wz-ap-demo/src/main.rs: inserted post-Session::new session.declare_subscriber + session.declare_queryable calls; handles bind to _subscriber_handle / _queryable_handle locals so RAII Drop fires at run_demo body exit (registry unregister).",
+        "Callback bodies preserved verbatim (R222 Sample-shape assertions + R121j-5c-e2e-demo log line wording unchanged) so Layer E e2e binary-dep tests that grep on the stderr log line continue to match.",
+        "R121c-3 timing requirement (register before drive_session starts so handshake-time z_put echo routes through the subscriber) preserved: Session::new + the new declare_* calls all complete before Step 4a publisher_task spawn and Step 5 drive_session loop.",
+        "Wire-side actions.send_declare_subscriber / send_declare_queryable / send_declare_token sites at lines 1364 / 1371 / 1378 untouched — those exercise the raw outbound DECLARE wire emit path (peer-side e2e regression coverage) which is independent from local registry registration; R249 scope was the local register migration only."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 464 unchanged (no library code touched).",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A unit + B integration + C wire-fixture + D-fmt + E binary-dep e2e 9/9).",
+        "Layer E e2e specifically (ap_demo_round_trip / wz_initiator_to_wz_acceptor / wz_initiator_to_zsub / wz_publisher_aliased_to_zsub / wz_publisher_del_to_zsub / wz_publisher_to_zsub / wz_initiator_consumes_reply / wz_queryable_round_trip / wz_remote_declare_round_trip): all pass with identical stderr log shape (handle API is byte-equivalent at the externally-observable boundary).",
+        "pre-commit hook validate_workspace + commit-msg COMMIT_FORMAT.md gate: passed at commit time.",
+        "commit df375e4 (feat(demo): R249 wz-ap-demo subscriber + queryable to handle API; 1 file +63 / -37)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R250+ wz-ap-demo Liveliness Token migration: line 1378 actions.send_declare_token(DECLARE_TOKEN_ID=3001, 0, Some(keyexpr)) site could route through session.declare_token(keyexpr, LivelinessOptions::default()) instead — deferred because session.declare_token auto-allocates token_id starting from 0 (R248 next_outbound_token_id counter) and the hardcoded 3001 in the stderr log line `DECLARED TOKEN id=3001` is e2e-grepped by Layer E fixtures; needs e2e log fixture refresh round.",
+        "R250+ wz-ap-demo declare_emit wire migration: lines 1364 / 1371 (send_declare_subscriber / send_declare_queryable raw wire emit) intentionally untouched in R249 — these are router-mode wire emits exercised for peer regression; not replaceable by session.declare_subscriber / declare_queryable (which are peer-only no-wire-emit). A dedicated round could collapse into an explicit ScratchWireDeclare helper if the duplicated id/keyexpr threading becomes a friction point.",
+        "R250+ pre-push hook chicken-and-egg defence (carried from R247): when commit modifies run-ci.sh itself, hook should re-source run-ci.sh from staged commit content rather than working-tree state.",
+        "ReplyRegistry timeout sweep needs Hal time abstraction (wz-runtime-core).",
+        "Q_B / Q_E wire codec slots require SCE-side codec extension.",
+        "LivelinessToken local_tokens table for history fan-out: defer until Liveliness Subscriber history.",
+        "LivelinessToken Drop catch_unwind defensive wrap: defer until driver path panic surfaces.",
+        "Querier::get_matching_status / Publisher::get_matching_status (RemoteQueryableRegistry coverage check).",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff; pin bump deferred (wz call sites = 0).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R249 lesson: handle API migration retains byte-equivalent e2e log shape when the callback body is preserved verbatim; the structural change (raw observer.X.register vs session.declare_X) is invisible at the binary boundary, which is the right invariant — R245/R246 handle surface is a refactoring lens, not a behavior change."
+      ]
+    },
     "Round 25": {
       "decision_summary": "Phase E register — README.md workspace.docs 재등록 land; R24 한국어 본문을 영문 primary로 재작성 + README.ko.md satellite로 분리 (사용자 정정 'README는 영문 primary, KO 번역은 별도 링크'); 첫 시도 11 parser orphan (URL 링크 + plain §N) → 파서-친화 form 으로 해결 후 12/12 docs clean.",
       "changes_bullets": [
