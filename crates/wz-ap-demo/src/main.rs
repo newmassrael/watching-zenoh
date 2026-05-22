@@ -1258,11 +1258,19 @@ async fn run_demo(
     log::info!("wz-ap-demo: driving session FSM");
     let mut driver = inbound;
     let observer_for_dispatch = observer.clone();
+    // R260 — TimeSource-mediated sleep replaces the prior internal
+    // `tokio::time::sleep` in the lease-deadline race. The TokioTime
+    // here is owned locally; it does NOT need to share epoch with the
+    // declare/query/publisher tasks above (each TokioTime samples its
+    // own monotonic baseline; the lease branch uses `clock.sleep(ms)`
+    // only, not cross-instance `now_monotonic_ms` comparison).
+    let clock_for_drive = TokioTime::new();
     let outcome = drive_session_until_terminal(
         &mut driver,
         &actions,
         &mut engine,
         Some(10_000),
+        &clock_for_drive,
         |event: IterationEvent<'_>| {
             log::debug!("wz-ap-demo: iteration event = {event:?}");
             observer_for_dispatch

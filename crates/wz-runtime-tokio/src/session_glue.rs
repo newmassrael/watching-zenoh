@@ -96,6 +96,7 @@ use wz_codecs::response_final::ResponseFinal;
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
 use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+use wz_runtime_core::TimeSource;
 
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
@@ -5881,16 +5882,30 @@ pub enum DriverOutcome {
 /// dispatcher, telemetry, logging) — without it the loop would
 /// discard the outcomes silently. Test callers that do not care
 /// about per-iteration events pass `|_| {}` as a no-op closure.
-pub async fn drive_session_until_terminal<D, F>(
+///
+/// R260 — `clock: &T` (`T: TimeSource`) is the trait-mediated sleep
+/// source used to race the lease deadline. The lease comparator
+/// itself still reads `std::time::Instant` (the stamp / deadline
+/// storage types in [`SessionLinkActions`] are unchanged this round
+/// — full `Instant -> u64 ms` storage migration is a separate
+/// future round); only the `tokio::select!` sleep branch routes
+/// through `TimeSource::sleep` so wz-runtime-tokio's last internal
+/// `tokio::time::sleep` site disappears. Production AP callers pass
+/// `&TokioTime::new()` (or any owned `TokioTime` reference); MCU
+/// callers will pass an embassy / FreeRTOS impl once Phase W lwIP
+/// integration arrives.
+pub async fn drive_session_until_terminal<D, F, T>(
     driver: &mut D,
     actions: &Arc<SessionLinkActions>,
     engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy>,
     max_iters: Option<usize>,
+    clock: &T,
     mut on_event: F,
 ) -> DriverOutcome
 where
     D: LinkDriver,
     F: FnMut(IterationEvent<'_>),
+    T: TimeSource,
 {
     let lease = if actions.params.lease_in_seconds {
         Duration::from_secs(actions.params.lease)
@@ -5915,12 +5930,12 @@ where
         match lease_deadline {
             Some(deadline) => {
                 let now = Instant::now();
-                let remaining = deadline.saturating_duration_since(now);
+                let remaining_ms = deadline.saturating_duration_since(now).as_millis() as u64;
                 tokio::select! {
                     outcome = poll_and_dispatch_one(driver, actions, engine) => {
                         on_event(IterationEvent::Poll(&outcome));
                     }
-                    _ = tokio::time::sleep(remaining) => {
+                    _ = clock.sleep(remaining_ms) => {
                         let lease_outcome =
                             check_lease_deadline(actions, engine, Instant::now());
                         on_event(IterationEvent::Lease(lease_outcome));
