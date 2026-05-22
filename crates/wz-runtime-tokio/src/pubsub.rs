@@ -477,6 +477,32 @@ impl SubscriberRegistry {
         &self.peer_keyexpr_table
     }
 
+    /// R237 — single-id resolver mirroring R234
+    /// [`crate::session_glue::SessionLinkActions::resolve_outbound_mapping`].
+    /// Returns the literal keyexpr the peer declared for `id`, or
+    /// `None` if no `DeclKexpr` for `id` has arrived (or an
+    /// `UndeclKexpr` retracted it).
+    ///
+    /// The full [`Self::peer_keyexpr_table`] accessor remains for
+    /// cross-registry borrow (the canonical zero-clone path used by
+    /// `QueryableRegistry` and other in-process observers); this
+    /// single-id form is the ergonomic application-facing surface for
+    /// callers that only need one resolution per call site and
+    /// prefer an owned `String` over keeping the registry borrow
+    /// live. Mirrors zenoh-pico's `_z_get_resource_by_id` lookup on
+    /// the inbound side
+    /// (`vendor/zenoh-pico/src/session/resource.c`).
+    ///
+    /// The returned `String` is a clone of the table entry so the
+    /// caller can drop the registry borrow before further use — the
+    /// alternative (returning `&str`) would tie the registry lock
+    /// (or the registry borrow lifetime) to every downstream
+    /// operation, which is the same trade-off the outbound mirror
+    /// makes intentionally.
+    pub fn resolve_inbound_mapping(&self, id: u64) -> Option<String> {
+        self.peer_keyexpr_table.get(&id).cloned()
+    }
+
     /// Route an `IterationEvent` produced by
     /// [`drive_session_until_terminal`](crate::session_glue::drive_session_until_terminal)
     /// to matching subscriber callbacks. The adapter pulls
@@ -1795,6 +1821,94 @@ mod tests {
             1,
             "Push id=5 + suffix=temp must resolve to 'home/sensor/temp' \
              via the base+suffix composition rule"
+        );
+    }
+
+    // ── R237 resolve_inbound_mapping single-id accessor ──
+
+    #[test]
+    fn resolve_inbound_mapping_returns_none_for_unknown_id() {
+        // A fresh registry has no peer-declared mappings; every id
+        // queried must resolve to None. This pins the "absent =
+        // None" contract so a future refactor that defaults a
+        // missing slot to the empty string (silent mis-mapping)
+        // surfaces here.
+        let registry = SubscriberRegistry::new();
+        assert_eq!(registry.resolve_inbound_mapping(0), None);
+        assert_eq!(registry.resolve_inbound_mapping(1), None);
+        assert_eq!(registry.resolve_inbound_mapping(u64::MAX), None);
+    }
+
+    #[test]
+    fn resolve_inbound_mapping_returns_literal_after_decl_kexpr() {
+        // After absorbing a `Declare(DeclKexpr(id=7, "home/temp"))`,
+        // the resolver must return Some("home/temp") for id=7 and
+        // None for every other id. The returned String is owned —
+        // the caller may drop the registry borrow before further
+        // use, matching the R234 outbound mirror contract.
+        let mut registry = SubscriberRegistry::new();
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(7, "home/temp"))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            registry.resolve_inbound_mapping(7),
+            Some("home/temp".to_string()),
+        );
+        assert_eq!(registry.resolve_inbound_mapping(8), None);
+    }
+
+    #[test]
+    fn resolve_inbound_mapping_returns_none_after_undecl_kexpr() {
+        // `Declare(UndeclKexpr(id))` removes the entry; the
+        // resolver must immediately reflect the retraction
+        // (mirrors zenoh-pico's `_z_unregister_resource` flushing
+        // `_z_session_t._remote_resources` so subsequent
+        // resolutions miss).
+        let mut registry = SubscriberRegistry::new();
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(7, "home/temp"))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            registry.resolve_inbound_mapping(7),
+            Some("home/temp".to_string()),
+        );
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(undeclare_kexpr(7))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            registry.resolve_inbound_mapping(7),
+            None,
+            "post-undeclare resolution must return None — the peer \
+             retracted the mapping and any further reference is \
+             unresolvable until a fresh DeclKexpr arrives"
+        );
+    }
+
+    #[test]
+    fn resolve_inbound_mapping_returns_latest_literal_on_redeclare() {
+        // Two `DeclKexpr` records for the same id must overwrite
+        // (latest-wins semantics) — mirrors zenoh-pico's
+        // `_z_register_resource` accepting an overwrite without
+        // raising an error. The resolver must reflect the latest
+        // declared literal so an application-visible publish
+        // routed under the same id lands on the new literal's
+        // subscriber set rather than the stale one.
+        let mut registry = SubscriberRegistry::new();
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(7, "home/temp"))),
+            Reliability::Reliable,
+        );
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(7, "home/humid"))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            registry.resolve_inbound_mapping(7),
+            Some("home/humid".to_string()),
+            "second DeclKexpr(7) must overwrite the first literal"
         );
     }
 
