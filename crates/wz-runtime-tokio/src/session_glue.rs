@@ -659,6 +659,30 @@ pub struct SessionLinkActions {
     /// is sufficient — id uniqueness is the only invariant and
     /// `fetch_add` is atomic under every ordering.
     pub next_outbound_request_id: AtomicU64,
+    /// R248 — monotonic outbound liveliness `token_id` allocator.
+    /// Mirrors zenoh-pico's `_z_get_entity_id`
+    /// (`vendor/zenoh-pico/src/net/liveliness.c:58` — the entity-id
+    /// counter consumed by `_z_declare_liveliness_token`). Each
+    /// [`crate::session::Session::declare_token`] /
+    /// [`crate::session::Session::declare_token_aliased`] call reserves
+    /// the next id through [`Self::alloc_next_token_id`] so the
+    /// [`crate::session::LivelinessToken`] RAII handle holds the same
+    /// id used in the outbound `Declare(DeclToken)` wire frame and
+    /// later matches it on the `Declare(UndeclToken)` retraction emit
+    /// triggered by `Drop` / `undeclare`.
+    ///
+    /// Starts at `0` matching the queryside convention. The wire
+    /// carries token ids as the `id` field of the inner
+    /// `decl_token` / `undecl_token` codec, keyed independently from
+    /// `subscriber_id`, `queryable_id`, and `request_id` on the peer
+    /// (each entity type owns its own intmap on the receiver side per
+    /// `zenoh-pico/src/net/liveliness.c:69` —
+    /// `_local_tokens` vs `_remote_tokens` are distinct from
+    /// `_remote_subscriptions` etc.), so a wz session that allocates
+    /// `token_id = 0` while also having previously allocated
+    /// `subscriber_id = 0` does not collide on the wire. `Relaxed`
+    /// ordering matches the request-id rationale.
+    pub next_outbound_token_id: AtomicU64,
 }
 
 /// R121d — peer-announced sizing caps captured from `InitSyn` for
@@ -786,6 +810,7 @@ impl SessionLinkActions {
             outbound_frame_sn: AtomicU64::new(initial_frame_sn),
             outbound_mappings: Mutex::new(HashMap::new()),
             next_outbound_request_id: AtomicU64::new(0),
+            next_outbound_token_id: AtomicU64::new(0),
         })
     }
 
@@ -980,6 +1005,25 @@ impl SessionLinkActions {
     /// [`Self::next_outbound_frame_sn`]).
     pub fn alloc_next_request_id(&self) -> u64 {
         self.next_outbound_request_id
+            .fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// R248 — outbound liveliness `token_id` generator. Returns the
+    /// next token id and advances the internal counter by one. The
+    /// id is consumed by [`Self::send_declare_token`] /
+    /// [`Self::send_undeclare_token`] as the inner
+    /// `decl_token`/`undecl_token` codec's `id` field and is kept on
+    /// the [`crate::session::LivelinessToken`] RAII handle so the
+    /// `Drop` impl can retract the same id without the caller
+    /// threading it manually.
+    ///
+    /// Mirrors zenoh-pico's `_z_get_entity_id` consumed by
+    /// `_z_declare_liveliness_token`
+    /// (`vendor/zenoh-pico/src/net/liveliness.c:58`); first call
+    /// returns `0` matching the post-increment-from-zero convention.
+    /// `Relaxed` ordering — uniqueness is the only invariant.
+    pub fn alloc_next_token_id(&self) -> u64 {
+        self.next_outbound_token_id
             .fetch_add(1, Ordering::Relaxed)
     }
 

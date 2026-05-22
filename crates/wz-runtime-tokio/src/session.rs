@@ -1269,6 +1269,112 @@ impl Session {
         };
         Ok(self.declare_queryable(resolved, options, callback))
     }
+
+    /// R248 — declare a [`LivelinessToken`] on `keyexpr` + `options`,
+    /// emitting a `Declare(DeclToken)` on the outbound link so the
+    /// peer's liveliness-token table can fan the declaration out to
+    /// any subscribers that intersect the keyexpr. Mirrors
+    /// zenoh-pico's `_z_declare_liveliness_token`
+    /// (`vendor/zenoh-pico/src/net/liveliness.c:52-95`):
+    /// `_z_get_entity_id` allocation → `_z_liveliness_send_declare_token`.
+    ///
+    /// Wire-side semantics: a fresh `token_id` is allocated via
+    /// [`SessionLinkActions::alloc_next_token_id`] (independent
+    /// counter from subscriber / queryable / request id spaces, see
+    /// the field comment on
+    /// [`SessionLinkActions::next_outbound_token_id`]) and embedded
+    /// in both the `Declare(DeclToken)` emitted here and the
+    /// `Declare(UndeclToken)` emitted by the returned handle's
+    /// `Drop` (or explicit [`LivelinessToken::undeclare`]). The
+    /// keyexpr is sent in inline-literal form
+    /// (`mapping_id = 0, suffix = Some(literal)`); for the
+    /// previously-declared-keyexpr alias form use
+    /// [`Self::declare_token_aliased`].
+    ///
+    /// Contrast with [`Self::declare_subscriber`] /
+    /// [`Self::declare_queryable`]: those declare APIs are peer-only
+    /// (no wire emit at declare time) because zenoh-pico's
+    /// router-mode `DeclareSubscriber` / `DeclareQueryable` fan-out
+    /// is out of scope for wz. The Liveliness Token is the inverse —
+    /// it MUST emit wire on both declare and undeclare so the peer's
+    /// liveliness subscribers receive PUT + DELETE samples (per
+    /// zenoh-pico's `z_liveliness_declare_token` doc-comment:
+    /// "subscribers on an intersecting key expression will receive a
+    /// PUT sample when connectivity is achieved, and a DELETE
+    /// sample if it's lost").
+    ///
+    /// Returns a [`LivelinessToken`] handle whose `Drop` emits
+    /// `Declare(UndeclToken)` (RAII), retracting the token from the
+    /// peer. The token stays alive on the peer for as long as this
+    /// handle is alive on the local session.
+    pub fn declare_token(
+        &self,
+        keyexpr: impl Into<String>,
+        options: LivelinessOptions,
+    ) -> LivelinessToken {
+        let keyexpr_string = keyexpr.into();
+        let token_id = self.actions.alloc_next_token_id();
+        self.actions
+            .send_declare_token(token_id, /*mapping_id=*/ 0, Some(&keyexpr_string));
+        LivelinessToken {
+            session: self.clone(),
+            id: token_id,
+            keyexpr: keyexpr_string,
+            options,
+        }
+    }
+
+    /// R248 — aliased-keyexpr counterpart of
+    /// [`Self::declare_token`]. Resolves `(mapping_id,
+    /// inline_suffix)` to the literal form via the outbound mapping
+    /// table at declare time (the literal is stored on the returned
+    /// handle for introspection symmetry with R245/R246 aliased
+    /// flows) AND emits `Declare(DeclToken)` carrying the alias on
+    /// the wire (`send_declare_token(token_id, mapping_id,
+    /// inline_suffix)` — the more bandwidth-efficient form
+    /// zenoh-pico picks natively when the caller hands a previously
+    /// `z_declared_keyexpr_t`-form keyexpr to
+    /// `z_liveliness_declare_token`).
+    ///
+    /// Subsequent retraction of `mapping_id` via
+    /// [`SessionLinkActions::send_undeclare_kexpr`] does NOT affect
+    /// this handle's bookkeeping — the wire frame already left the
+    /// session and the peer resolved + stored the literal at
+    /// receive time. Same R245/R246 one-shot-resolution contract.
+    ///
+    /// Returns `Err(LivelinessAliasError::UnknownMapping(id))` only
+    /// when the mapping is absent at declare time. Mirror of
+    /// [`SubscribeAliasError`] / [`QueryableAliasError`] /
+    /// [`QueryAliasError`] / [`PublishAliasError`] on the token
+    /// side.
+    pub fn declare_token_aliased(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        options: LivelinessOptions,
+    ) -> Result<LivelinessToken, LivelinessAliasError> {
+        let base = self
+            .actions
+            .resolve_outbound_mapping(mapping_id)
+            .ok_or(LivelinessAliasError::UnknownMapping(mapping_id))?;
+        let resolved = match inline_suffix {
+            None => base,
+            Some(s) => {
+                let mut composed = base;
+                composed.push_str(s);
+                composed
+            }
+        };
+        let token_id = self.actions.alloc_next_token_id();
+        self.actions
+            .send_declare_token(token_id, mapping_id, inline_suffix);
+        Ok(LivelinessToken {
+            session: self.clone(),
+            id: token_id,
+            keyexpr: resolved,
+            options,
+        })
+    }
 }
 
 /// R241 — typed error returned by [`Session::query_aliased_auto`]
@@ -1877,6 +1983,172 @@ impl std::fmt::Display for QueryableAliasError {
 }
 
 impl std::error::Error for QueryableAliasError {}
+
+/// R248 — options bundle for [`Session::declare_token`] /
+/// [`Session::declare_token_aliased`]. Mirrors zenoh-pico's
+/// `z_liveliness_token_options_t` which carries only a single
+/// `uint8_t __dummy` placeholder field today
+/// (`vendor/zenoh-pico/include/zenoh-pico/api/liveliness.h:44-46`)
+/// — the struct exists in the C ABI as a forward-compatible
+/// placeholder for future per-token options that the upstream Zenoh
+/// protocol has not yet defined.
+///
+/// Empty `#[non_exhaustive]` so a future round can add per-token
+/// fields (e.g. completeness flag, expiry hint, attachment) without
+/// breaking external callers. Construct via [`Self::default`] /
+/// [`Self::new`].
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct LivelinessOptions {}
+
+impl LivelinessOptions {
+    /// Default options — currently empty, mirroring zenoh-pico's
+    /// `z_liveliness_token_options_default` which zeroes out the
+    /// `__dummy` slot.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// R248 — handle for a liveliness token declared through
+/// [`Session::declare_token`] / [`Session::declare_token_aliased`].
+/// Holds the `token_id` allocated by
+/// [`SessionLinkActions::alloc_next_token_id`] so `Drop` can emit
+/// the matching `Declare(UndeclToken)` retraction on the outbound
+/// link.
+///
+/// ## Lifetime + wire emit on Drop
+///
+/// The token stays declared on the peer for as long as this handle
+/// is alive on the local session. `Drop` emits
+/// `Declare(UndeclToken)` so the peer's liveliness subscribers
+/// receive the DELETE sample at retraction time — that is the
+/// whole purpose of the liveliness signal. This differs from
+/// [`Subscriber`] / [`Queryable`] `Drop` which only unregister
+/// from the local registry (no wire emit), because zenoh-pico's
+/// router-mode subscriber/queryable declarations are out of scope
+/// for wz while the liveliness path is end-to-end peer-driven.
+///
+/// `!Clone` by construction — the underlying `token_id` is a
+/// unique handle; cloning would let two drops race to emit
+/// `UndeclToken` for the same id, and the peer would treat the
+/// second as a no-op against a now-absent entry (zenoh-pico
+/// `_z_liveliness_handle_undecl_token` ignores absent ids). Code
+/// wanting "the same liveliness keyexpr from two places" should
+/// call [`Session::declare_token`] twice and accept two distinct
+/// token ids — that matches zenoh-pico semantics, where each
+/// `z_liveliness_declare_token` call allocates a fresh entity id.
+///
+/// ## Panic semantics on Drop
+///
+/// [`SessionLinkActions::send_undeclare_token`] runs the encode +
+/// `driver.send_blocking` chain without taking any wz-level
+/// `Mutex::lock` that could be poison-recovered the way
+/// [`Subscriber::drop`] handles the observer mutex. The
+/// `driver.send_blocking` path is panic-free under normal AP MVP
+/// operation, so this `Drop` does not wrap the call in
+/// `catch_unwind`. If a future round surfaces a panic from the
+/// driver path (e.g. a poisoned internal mutex on a TLS / lwIP
+/// driver), wrapping this call defensively is the textbook
+/// follow-up — carry note on the audit ledger.
+///
+/// `#[non_exhaustive]`. Construct only through
+/// [`Session::declare_token`] / [`Session::declare_token_aliased`].
+#[non_exhaustive]
+pub struct LivelinessToken {
+    session: Session,
+    id: u64,
+    keyexpr: String,
+    options: LivelinessOptions,
+}
+
+impl LivelinessToken {
+    /// The stable token id allocated at declare time by
+    /// [`SessionLinkActions::alloc_next_token_id`]. Exposed for
+    /// diagnostics; callers should not rely on the exact value
+    /// across runs since the counter is session-scoped + Relaxed
+    /// ordering.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// The keyexpr the token was declared against. For
+    /// [`Session::declare_token_aliased`] this is the resolved
+    /// literal form (the alias was resolved at declare time via
+    /// [`SessionLinkActions::resolve_outbound_mapping`] and the
+    /// literal stored here for introspection symmetry with R245
+    /// [`Subscriber::keyexpr`] / R246 [`Queryable::keyexpr`]). The
+    /// wire frame may carry either the literal or the alias form
+    /// depending on which constructor was used — see the
+    /// [`Session::declare_token_aliased`] doc-comment for the wire
+    /// shape detail.
+    pub fn keyexpr(&self) -> &str {
+        &self.keyexpr
+    }
+
+    /// Borrow the declared options.
+    pub fn options(&self) -> &LivelinessOptions {
+        &self.options
+    }
+
+    /// Explicitly retract this liveliness token. Emits
+    /// `Declare(UndeclToken)` on the outbound link
+    /// (`SessionLinkActions::send_undeclare_token`) and consumes
+    /// the handle so the [`Drop`] impl will not emit a second
+    /// duplicate undeclare against an already-retracted id. Mirrors
+    /// [`Subscriber::undeclare`] / [`Queryable::undeclare`].
+    ///
+    /// `std::mem::forget(self)` keeps the intent explicit — the
+    /// peer ignoring a second `UndeclToken` for the same id is the
+    /// expected zenoh-pico behaviour but the cosmetic "do not emit
+    /// a duplicate" rule matches the textbook RAII consume contract
+    /// across the wz handle family.
+    pub fn undeclare(self) {
+        self.session.actions.send_undeclare_token(self.id);
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for LivelinessToken {
+    fn drop(&mut self) {
+        // R248 RAII — emit Declare(UndeclToken) so the peer's
+        // liveliness subscribers receive the DELETE sample. See
+        // the struct-level doc-comment on panic semantics: the
+        // wire path is panic-free under normal operation so no
+        // catch_unwind wrapping; a poisoned driver path is a
+        // future-round carry.
+        self.session.actions.send_undeclare_token(self.id);
+    }
+}
+
+/// R248 — typed error returned by
+/// [`Session::declare_token_aliased`] when the requested mapping
+/// id was never declared on the outbound mapping table (or was
+/// retracted before the `declare_token_aliased` call). Mirror of
+/// [`SubscribeAliasError`] / [`QueryableAliasError`] /
+/// [`QueryAliasError`] / [`PublishAliasError`] on the liveliness
+/// token side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LivelinessAliasError {
+    /// No prior `send_declare_keyexpr` registered this id on the
+    /// outbound mapping table (or a later `send_undeclare_kexpr`
+    /// retracted it before the declare_token_aliased call).
+    UnknownMapping(u64),
+}
+
+impl std::fmt::Display for LivelinessAliasError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LivelinessAliasError::UnknownMapping(id) => write!(
+                f,
+                "LivelinessAliasError: mapping id {id} not present in outbound table; \
+                 call SessionLinkActions::send_declare_keyexpr({id}, …) first"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LivelinessAliasError {}
 
 /// R234 — typed error returned by
 /// [`Session::publish_aliased_auto`] when the requested mapping id
@@ -4835,5 +5107,229 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("42"));
         assert!(msg.contains("send_declare_keyexpr"));
+    }
+
+    // ── R248 LivelinessToken + LivelinessOptions + declare_token{,_aliased} ──
+
+    #[test]
+    fn liveliness_options_default_is_constructible() {
+        // Empty options today (mirror zenoh-pico
+        // z_liveliness_token_options_t::__dummy placeholder). The
+        // contract is that both ::default() and ::new() construct
+        // without arguments and are interchangeable; future fields
+        // arrive via with_* setters per the R245/R246 pattern.
+        let a = LivelinessOptions::default();
+        let b = LivelinessOptions::new();
+        // Empty struct → fmt::Debug round-trip is the cheapest
+        // equivalence proxy without deriving PartialEq.
+        assert_eq!(format!("{a:?}"), format!("{b:?}"));
+    }
+
+    #[test]
+    fn declare_token_returns_handle_with_keyexpr_and_id_zero() {
+        let (session, _driver) = build_session();
+        let token = session.declare_token("liveliness/devA", LivelinessOptions::default());
+        assert_eq!(token.id(), 0, "first allocation returns id=0 per zenoh-pico convention");
+        assert_eq!(token.keyexpr(), "liveliness/devA");
+        // Options accessor — empty struct just confirms the borrow shape.
+        let _: &LivelinessOptions = token.options();
+    }
+
+    #[test]
+    fn declare_token_emits_exactly_one_reliable_wire_frame() {
+        let (session, driver) = build_session();
+        let _token = session.declare_token("liveliness/devA", LivelinessOptions::default());
+        assert_eq!(driver.frame_count(), 1, "declare emits one outbound Declare(DeclToken)");
+        assert_eq!(
+            driver.frame_reliability(0),
+            Reliability::Reliable,
+            "Declare frames travel on the reliable channel per send_declare_token contract",
+        );
+        // Hold the handle until end-of-scope; the drop is exercised in
+        // a dedicated test below.
+        std::mem::forget(_token);
+    }
+
+    #[test]
+    fn declare_token_wire_frame_contains_decl_token_bytes() {
+        use crate::session_glue::build_declare_token;
+        let (session, driver) = build_session();
+        let _token = session.declare_token("liveliness/devA", LivelinessOptions::default());
+
+        let expected =
+            build_declare_token(0, /*mapping_id=*/ 0, Some("liveliness/devA")).encode_to_vec();
+        let frame = &driver.frames.lock().unwrap()[0].0;
+        assert!(
+            frame.windows(expected.len()).any(|w| w == expected),
+            "Session::declare_token wire frame must contain the build_declare_token byte stream"
+        );
+        // Cancel drop emit — wire-shape test does not care about the
+        // retraction path.
+        std::mem::forget(_token);
+    }
+
+    #[test]
+    fn declare_token_assigns_monotonic_ids_per_session() {
+        let (session, _driver) = build_session();
+        let t0 = session.declare_token("liveliness/x", LivelinessOptions::default());
+        let t1 = session.declare_token("liveliness/y", LivelinessOptions::default());
+        let t2 = session.declare_token("liveliness/z", LivelinessOptions::default());
+        assert_eq!((t0.id(), t1.id(), t2.id()), (0, 1, 2));
+        // Avoid drop wire emits in this counter-only test.
+        std::mem::forget(t0);
+        std::mem::forget(t1);
+        std::mem::forget(t2);
+    }
+
+    #[test]
+    fn liveliness_token_drop_emits_undeclare_wire_frame() {
+        let (session, driver) = build_session();
+        {
+            let _token = session.declare_token("liveliness/devA", LivelinessOptions::default());
+            assert_eq!(driver.frame_count(), 1, "declare emit before scope end");
+        }
+        assert_eq!(
+            driver.frame_count(),
+            2,
+            "Drop must emit Declare(UndeclToken) so peer liveliness subscribers see DELETE"
+        );
+        assert_eq!(driver.frame_reliability(1), Reliability::Reliable);
+    }
+
+    #[test]
+    fn liveliness_token_drop_wire_frame_contains_undecl_token_bytes() {
+        use crate::session_glue::build_undeclare_token;
+        let (session, driver) = build_session();
+        {
+            let _token = session.declare_token("liveliness/devA", LivelinessOptions::default());
+            // Token id 0 was just allocated; drop will retract it.
+        }
+        let expected = build_undeclare_token(0).encode_to_vec();
+        let frame = &driver.frames.lock().unwrap()[1].0;
+        assert!(
+            frame.windows(expected.len()).any(|w| w == expected),
+            "Drop must emit a Declare(UndeclToken) carrying the allocated token_id"
+        );
+    }
+
+    #[test]
+    fn liveliness_token_undeclare_consumes_handle_and_does_not_double_emit() {
+        let (session, driver) = build_session();
+        let token = session.declare_token("liveliness/devA", LivelinessOptions::default());
+        assert_eq!(driver.frame_count(), 1);
+        token.undeclare();
+        assert_eq!(driver.frame_count(), 2, "explicit undeclare emits the retraction");
+        // After undeclare(self), the handle is forgotten via
+        // std::mem::forget, so Drop does NOT run — frame_count stays
+        // at 2 even after the scope ends.
+        assert_eq!(
+            driver.frame_count(),
+            2,
+            "consumed handle must not emit a duplicate UndeclToken via Drop",
+        );
+    }
+
+    #[test]
+    fn declare_token_aliased_resolves_literal_at_declare_time() {
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        let token = session
+            .declare_token_aliased(7, None, LivelinessOptions::default())
+            .expect("declared mapping resolves");
+        assert_eq!(
+            token.keyexpr(),
+            "liveliness/dev7",
+            "aliased declare stores the resolved literal on the handle for introspection",
+        );
+        std::mem::forget(token);
+    }
+
+    #[test]
+    fn declare_token_aliased_with_inline_suffix_composes_literal() {
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        let token = session
+            .declare_token_aliased(7, Some("/sensor"), LivelinessOptions::default())
+            .expect("declared mapping resolves");
+        assert_eq!(token.keyexpr(), "liveliness/dev7/sensor");
+        std::mem::forget(token);
+    }
+
+    #[test]
+    fn declare_token_aliased_unknown_mapping_returns_err_without_wire_emit() {
+        let (session, driver) = build_session();
+        let err = session.declare_token_aliased(99, None, LivelinessOptions::default());
+        assert!(
+            matches!(err, Err(LivelinessAliasError::UnknownMapping(99))),
+            "expected Err(UnknownMapping(99))",
+        );
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "no wire emit on unknown-mapping early-return path",
+        );
+    }
+
+    #[test]
+    fn declare_token_aliased_wire_frame_uses_alias_form() {
+        // Aliased declare emits the bandwidth-efficient alias-form
+        // wire (Declare(DeclToken) with WireexprLocal { id=mapping_id,
+        // suffix }), matching zenoh-pico's
+        // _z_declared_keyexpr_alias_to_wire behaviour when the caller
+        // hands a previously-declared keyexpr to
+        // z_liveliness_declare_token.
+        use crate::session_glue::build_declare_token;
+        let (session, driver) = build_session();
+        // Send the keyexpr declare so the mapping table holds (7 ->
+        // "liveliness/dev7"); first wire frame is this Declare(DeclKexpr).
+        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        let baseline_frames = driver.frame_count();
+
+        let _token = session
+            .declare_token_aliased(7, Some("/sensor"), LivelinessOptions::default())
+            .expect("declared mapping resolves");
+
+        assert_eq!(
+            driver.frame_count(),
+            baseline_frames + 1,
+            "aliased declare emits exactly one Declare(DeclToken) frame",
+        );
+        let expected =
+            build_declare_token(/*token_id=*/ 0, /*mapping_id=*/ 7, Some("/sensor"))
+                .encode_to_vec();
+        let token_frame = &driver.frames.lock().unwrap()[baseline_frames].0;
+        assert!(
+            token_frame.windows(expected.len()).any(|w| w == expected),
+            "wire frame must carry alias-form DeclToken bytes (mapping_id=7, suffix=/sensor)",
+        );
+        std::mem::forget(_token);
+    }
+
+    #[test]
+    fn liveliness_alias_error_display_message_hints_remediation() {
+        let err = LivelinessAliasError::UnknownMapping(42);
+        let msg = format!("{err}");
+        assert!(msg.contains("42"));
+        assert!(msg.contains("send_declare_keyexpr"));
+    }
+
+    #[test]
+    fn liveliness_token_id_counter_independent_of_request_id() {
+        // Token id space is a separate AtomicU64 from the request id
+        // counter (R239) — declaring a token before any query must
+        // still start the token counter at 0 regardless of how many
+        // request ids were burned, and vice versa. This pins the
+        // independent-counter invariant documented on
+        // SessionLinkActions::next_outbound_token_id.
+        let (session, _driver) = build_session();
+        // Burn three request ids first.
+        let r0 = session.actions().alloc_next_request_id();
+        let r1 = session.actions().alloc_next_request_id();
+        let r2 = session.actions().alloc_next_request_id();
+        assert_eq!((r0, r1, r2), (0, 1, 2));
+        // Token allocation still starts from 0.
+        let t = session.declare_token("liveliness/x", LivelinessOptions::default());
+        assert_eq!(t.id(), 0, "token id counter independent from request id counter");
+        std::mem::forget(t);
     }
 }
