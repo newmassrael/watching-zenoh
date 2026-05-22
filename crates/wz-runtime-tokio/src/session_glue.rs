@@ -81,6 +81,7 @@ use wz_codecs::ext_zint::ExtZint;
 use wz_codecs::err::Err;
 use wz_codecs::init_body::InitBody;
 use wz_codecs::interest::Interest;
+use wz_codecs::interest_body::InterestBody;
 use wz_codecs::keep_alive::KeepAlive;
 use wz_codecs::msg_del::MsgDel;
 use wz_codecs::msg_put::MsgPut;
@@ -684,6 +685,31 @@ pub struct SessionLinkActions {
     /// `subscriber_id = 0` does not collide on the wire. `Relaxed`
     /// ordering matches the request-id rationale.
     pub next_outbound_token_id: AtomicU64,
+
+    /// R279 — outbound liveliness-subscriber `interest_id` generator.
+    /// Returns the next interest id and advances the internal counter
+    /// by one. Consumed by
+    /// [`Self::send_interest_liveliness_subscriber`] /
+    /// [`Self::send_interest_final`] as the inner `Interest::interest_id`
+    /// field, and kept on the
+    /// [`crate::session::LivelinessSubscriber`] RAII handle so the
+    /// `Drop` impl can emit the matching `InterestFinal` without the
+    /// caller threading the id manually.
+    ///
+    /// Independent counter from the four sibling outbound id spaces
+    /// (request / token / subscriber / queryable) so a wz session that
+    /// allocates `interest_id = 0` while also having previously
+    /// allocated `request_id = 0` does not collide on the wire — the
+    /// peer indexes Interest acks via `_z_interest_t._id` which is a
+    /// distinct table from the request / subscriber / queryable /
+    /// token id spaces (`vendor/zenoh-pico/src/session/interest.c`:
+    /// `_z_interests_local` list keyed by `_id`). Mirrors zenoh-pico's
+    /// `_z_get_entity_id` consumed by
+    /// `_z_register_liveliness_subscriber`
+    /// (`vendor/zenoh-pico/src/net/liveliness.c:169-198`); first call
+    /// returns `0` matching the post-increment-from-zero convention.
+    /// `Relaxed` ordering — uniqueness is the only invariant.
+    pub next_outbound_interest_id: AtomicU64,
 }
 
 /// R121d — peer-announced sizing caps captured from `InitSyn` for
@@ -812,6 +838,7 @@ impl SessionLinkActions {
             outbound_mappings: Mutex::new(HashMap::new()),
             next_outbound_request_id: AtomicU64::new(0),
             next_outbound_token_id: AtomicU64::new(0),
+            next_outbound_interest_id: AtomicU64::new(0),
         })
     }
 
@@ -1025,6 +1052,26 @@ impl SessionLinkActions {
     /// `Relaxed` ordering — uniqueness is the only invariant.
     pub fn alloc_next_token_id(&self) -> u64 {
         self.next_outbound_token_id
+            .fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// R279 — outbound liveliness-subscriber `interest_id` generator.
+    /// Returns the next interest id and advances the internal counter
+    /// by one. The id is consumed by
+    /// [`Self::send_interest_liveliness_subscriber`] /
+    /// [`Self::send_interest_final`] as the inner `Interest::interest_id`
+    /// field and is kept on the
+    /// [`crate::session::LivelinessSubscriber`] RAII handle so the
+    /// `Drop` impl can emit the matching `InterestFinal` (ending the
+    /// `FUTURE` flow) without the caller threading the id manually.
+    ///
+    /// Mirrors zenoh-pico's `_z_get_entity_id` consumed by
+    /// `_z_register_liveliness_subscriber`
+    /// (`vendor/zenoh-pico/src/net/liveliness.c:169-198`); first call
+    /// returns `0` matching the post-increment-from-zero convention.
+    /// `Relaxed` ordering — uniqueness is the only invariant.
+    pub fn alloc_next_interest_id(&self) -> u64 {
+        self.next_outbound_interest_id
             .fetch_add(1, Ordering::Relaxed)
     }
 
@@ -1471,6 +1518,96 @@ impl SessionLinkActions {
         let declare = build_declare_final();
         let sn = self.next_outbound_frame_sn();
         let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+        self.driver.send_blocking(&wire, Reliability::Reliable);
+    }
+
+    /// R279 — encode + dispatch an `Interest` network-message
+    /// requesting future + (optionally) current `DeclToken` records
+    /// from the peer, restricted to a specific keyexpr. Mirror of
+    /// zenoh-pico's `_z_register_liveliness_subscriber`
+    /// (`vendor/zenoh-pico/src/net/liveliness.c:169-198`) emit path,
+    /// which calls `_z_n_interest_encode` with `flags = KEYEXPRS |
+    /// TOKENS | RESTRICTED | FUTURE [| CURRENT]` (interest.c:204-209).
+    ///
+    /// Wire shape after the `N_MID_INTEREST` envelope (composes the
+    /// outer header + interest_id with the inner `InterestBody`
+    /// body_flags byte + R-gated wireexpr):
+    ///
+    /// ```text
+    ///   [Interest.header = N_MID_INTEREST (0x19)
+    ///                       | (history ? 0x20 : 0)  // C = CURRENT
+    ///                       | 0x40                  // F = FUTURE (always)
+    ///                       | (Z extensions = 0 here)]
+    ///   VLE(interest_id)
+    ///   [InterestBody.header = 0x01 (KE) | 0x08 (TO) | 0x10 (R)
+    ///                          | (suffix.is_some() ? 0x20 : 0)  // N
+    ///                          | 0x40                            // M (Local)
+    ///                          ]
+    ///   wireexpr.encode  (id VLE + optional suffix_len VLE + suffix bytes)
+    /// ```
+    ///
+    /// `history = true` instructs the peer to immediately replay the
+    /// current matching `DeclToken` set (per zenoh-pico's
+    /// `_z_liveliness_subscription_trigger_history` at
+    /// `vendor/zenoh-pico/src/net/liveliness.c:133`); after that, the
+    /// FUTURE bit keeps the subscription live so subsequent peer
+    /// declarations / undeclarations stream in. `history = false`
+    /// only registers for future events.
+    ///
+    /// `keyexpr_mapping_id == 0` with `keyexpr_suffix = Some(s)`
+    /// targets a literal keyexpr (RESTRICTED + KE filter). Pure
+    /// alias (mapping_id != 0, suffix=None) and composite
+    /// (mapping_id != 0, suffix=Some) forms are emitted via the
+    /// `Local` wireexpr arm; the `Nonlocal` arm (M=0) for keyexprs
+    /// rooted in the peer's mapping table is reserved for a future
+    /// `_nonlocal` companion builder mirroring the DECLARE pattern.
+    ///
+    /// Reliable channel — same SN-window ordering reason as the
+    /// DECLARE path: the peer must observe the Interest before any
+    /// matching DeclToken / UndeclToken arrives, otherwise the peer's
+    /// `_z_interest_process_*` resolves to no-match and the
+    /// declaration silently drops.
+    pub fn send_interest_liveliness_subscriber(
+        &self,
+        interest_id: u64,
+        history: bool,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) {
+        let interest = build_interest_liveliness_subscriber(
+            interest_id,
+            history,
+            keyexpr_mapping_id,
+            keyexpr_suffix,
+        );
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
+        self.driver.send_blocking(&wire, Reliability::Reliable);
+    }
+
+    /// R279 — encode + dispatch an `Interest(Final)` (no C, no F)
+    /// network-message terminating a previously emitted Interest
+    /// stream. Mirror of zenoh-pico's
+    /// `_z_undeclare_liveliness_subscriber` at
+    /// `vendor/zenoh-pico/src/net/liveliness.c:232-243`, which calls
+    /// `_z_n_interest_encode` with `is_final = true`.
+    ///
+    /// Wire shape: two bytes — `[N_MID_INTEREST, VLE(interest_id)]`.
+    /// No inner body, no extensions (the `_Z_INTEREST_NOT_FINAL_MASK`
+    /// gate at `vendor/zenoh-pico/include/zenoh-pico/protocol/
+    /// definitions/interest.h:35` — C||F — is clear for the final
+    /// form, suppressing the body embed per
+    /// `interest_body.scxml::body::present-if`).
+    ///
+    /// Reliable channel — the peer's `_z_interest_process_interest_final`
+    /// (`vendor/zenoh-pico/src/session/interest.c:524`) removes the
+    /// matching entry from its `_z_session_t._remote_interests` table.
+    /// An unreliable Final would race against in-flight DeclToken
+    /// replays and risk leaving a stale interest on the peer side.
+    pub fn send_interest_final(&self, interest_id: u64) {
+        let interest = build_interest_final(interest_id);
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
         self.driver.send_blocking(&wire, Reliability::Reliable);
     }
 
@@ -3273,6 +3410,130 @@ pub fn build_declare_final() -> Declare {
     }
 }
 
+/// R279 — build an `Interest` network-message that subscribes to the
+/// peer's `DeclToken` / `UndeclToken` stream restricted to a specific
+/// keyexpr. Mirrors zenoh-pico `_z_n_interest_encode` at
+/// `vendor/zenoh-pico/src/protocol/codec/network.c:452-486` invoked
+/// from `_z_register_liveliness_subscriber` with
+/// `flags = KEYEXPRS | TOKENS | RESTRICTED | FUTURE [| CURRENT]`
+/// (`vendor/zenoh-pico/src/net/liveliness.c:169-198` via
+/// `vendor/zenoh-pico/src/session/interest.c:204-209`).
+///
+/// Wire shape (composed by `Interest::encode` from the
+/// `sources/codecs/interest.scxml` envelope + `interest_body.scxml`
+/// inner body):
+///
+/// ```text
+///   [outer header = N_MID_INTEREST (0x19)
+///                    | (history ? 0x20 : 0)   // C = CURRENT
+///                    | 0x40                    // F = FUTURE
+///                    | (Z extensions = 0 here)]
+///   VLE(interest_id)
+///   [InterestBody.header = 0x01 (KE) | 0x08 (TO) | 0x10 (R)
+///                          | (suffix.is_some() ? 0x20 : 0) // N
+///                          | 0x40                           // M (Local)
+///                          ]
+///   wireexpr.encode  (id VLE + optional suffix_len VLE + suffix bytes)
+/// ```
+///
+/// N/M bit positions on `InterestBody.header` (bits 5 and 6) coincide
+/// with the C/F bit positions on the outer `Interest.header` — that
+/// is intentional and matches zenoh-pico's `_Z_INTEREST_FLAG_COPY_MASK
+/// = 0x9F` reorder at `vendor/zenoh-pico/src/protocol/codec/interest.c:37`:
+/// the encoder hoists C/F to the outer header, clears them from the
+/// body, and stores N/M (wireexpr codec flags) at the freed positions.
+/// The two `header` bytes are distinct wire bytes so the apparent
+/// overload causes no collision; the body carrier owns its own bit
+/// layout per `interest_body.scxml::header` flags carrier definition.
+///
+/// `history = true` instructs the peer to immediately replay the
+/// current matching `DeclToken` set (zenoh-pico's
+/// `_z_liveliness_subscription_trigger_history` fires after the
+/// register call); `history = false` only registers for future
+/// events. The `FUTURE` (F) bit is always set — a wz liveliness
+/// subscriber that does not want future events would
+/// [`Self::send_interest_final`] immediately after the declare and
+/// the peer would remove the interest before any future event
+/// arrives, which is the wrong shape (use a one-shot Query path for
+/// "current matching set only").
+///
+/// `keyexpr_mapping_id == 0` with `keyexpr_suffix = Some(s)` targets
+/// a literal keyexpr. Pure-alias (mapping_id != 0, suffix=None) and
+/// composite (mapping_id != 0, suffix=Some) forms emit via the
+/// `Local` wireexpr arm; the `Nonlocal` arm (M=0) for keyexprs
+/// rooted in the peer's mapping table is reserved for a future
+/// `_nonlocal` companion builder mirroring the DECLARE pattern.
+pub fn build_interest_liveliness_subscriber(
+    interest_id: u64,
+    history: bool,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+) -> Interest {
+    let suffix_string = keyexpr_suffix.map(str::to_string);
+    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+
+    // Outer header: MID 0x19 | F (always) | C (if history). Z stays
+    // clear — wz emits no Interest-level extensions today; the
+    // wz-codecs envelope leaves bit 7 free for a future ext-chain.
+    let c_flag = if history { 0x20u8 } else { 0x00u8 };
+    let f_flag = 0x40u8;
+
+    // Inner body header carries the appetite bits (KE/SU/QU/TO/AG),
+    // the restricted gate (R), and the wireexpr codec flags (N/M).
+    // For a liveliness subscriber we set KE (the interest carries a
+    // keyexpr), TO (we want token records), and R (restricted to the
+    // attached keyexpr). SU/QU/AG stay clear because the AP MVP does
+    // not subscribe to peer-declared subscribers / queryables /
+    // aggregated keyexprs through this path.
+    let ke_flag = 0x01u8;
+    let to_flag = 0x08u8;
+    let r_flag = 0x10u8;
+    let n_flag = if keyexpr_suffix.is_some() {
+        0x20u8
+    } else {
+        0x00u8
+    };
+    let m_flag = 0x40u8; // Local arm (M=1)
+    let body_header = ke_flag | to_flag | r_flag | n_flag | m_flag;
+
+    Interest {
+        header: wire_const::N_MID_INTEREST | c_flag | f_flag,
+        interest_id,
+        body: Some(InterestBody {
+            header: body_header,
+            keyexpr: Some(Wireexpr {
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: keyexpr_mapping_id,
+                    suffix_len,
+                    suffix: suffix_string,
+                }),
+            }),
+        }),
+        extensions: None,
+    }
+}
+
+/// R279 — build an `Interest(Final)` network-message (C=0, F=0) that
+/// terminates a previously emitted Interest. Mirrors zenoh-pico's
+/// `_z_make_interest_final` at
+/// `vendor/zenoh-pico/src/protocol/definitions/interest.c:27` and the
+/// encoder-side path through `_z_n_interest_encode(.., is_final=true)`
+/// at `vendor/zenoh-pico/src/protocol/codec/network.c:452-486` (the
+/// `is_final` branch skips the inner body emit per interest.c:43-46).
+///
+/// Wire shape: `[N_MID_INTEREST (0x19), VLE(interest_id)]` — exactly
+/// two bytes for `interest_id <= 0xFF`. No inner body (the
+/// `_Z_INTEREST_NOT_FINAL_MASK` gate at interest.h:35 — C||F — is
+/// clear), no extensions.
+pub fn build_interest_final(interest_id: u64) -> Interest {
+    Interest {
+        header: wire_const::N_MID_INTEREST,
+        interest_id,
+        body: None,
+        extensions: None,
+    }
+}
+
 /// R121j-1 — build a `Request` network-message that carries a
 /// `Query` body, addressed to the keyexpr resolved by
 /// `(keyexpr_mapping_id, keyexpr_suffix)`. Mirrors zenoh-pico
@@ -5021,6 +5282,34 @@ pub fn encode_frame_with_declare(sn: u64, declare: Declare, reliable: bool) -> V
     };
     encode_frame_envelope(sn, parent_flags, Declare::MAX_ENCODED_BYTES, |sink| {
         declare.encode(sink)
+    })
+}
+
+/// R279 — build the wire bytes for a `Frame` transport-message
+/// carrying a single `Interest` network-message in its payload.
+/// Mirror of [`encode_frame_with_declare`] for the INTEREST outbound
+/// path (declarations-discovery / liveliness-subscriber registration).
+///
+/// `parent_flags` carries `FLAG_T_FRAME_R (0x20)` when `reliable`,
+/// matching zenoh-pico's `_z_frame_encode` at
+/// `vendor/zenoh-pico/src/protocol/codec/transport.c:380`. INTEREST
+/// outbound is always reliable in the wz path: the peer's
+/// `_z_interest_process_*` runs against an ordered stream of
+/// DeclToken / UndeclToken / InterestFinal records on the reliable
+/// channel, and the SN-window orders the Interest before any peer
+/// reply just as the DECLARE path orders DeclSubscriber before any
+/// resolving Push. Callers passing `reliable=false` accept that the
+/// Interest may arrive after a peer-side state change and the peer's
+/// resolver may serve a stale history snapshot — useful only for
+/// fuzz / negative tests.
+pub fn encode_frame_with_interest(sn: u64, interest: Interest, reliable: bool) -> Vec<u8> {
+    let parent_flags = if reliable {
+        wire_const::FLAG_T_FRAME_R
+    } else {
+        0u8
+    };
+    encode_frame_envelope(sn, parent_flags, Interest::MAX_ENCODED_BYTES, |sink| {
+        interest.encode(sink)
     })
 }
 
@@ -7649,6 +7938,171 @@ mod tests {
             }
             _ => panic!("build_declare_final must produce CodecZenohDeclFinal"),
         }
+    }
+
+    /// R279 — `build_interest_liveliness_subscriber` produces an
+    /// `Interest` envelope with the inner `InterestBody` carrier
+    /// emitting `flags = KEYEXPRS | TOKENS | RESTRICTED | FUTURE
+    /// [| CURRENT]` per zenoh-pico's
+    /// `_z_register_liveliness_subscriber`
+    /// (`vendor/zenoh-pico/src/net/liveliness.c:169-198` via
+    /// `vendor/zenoh-pico/src/session/interest.c:204-209`). Four
+    /// vectors lock the four semantic cases (literal-future,
+    /// literal-current, alias, composite) so a future codegen
+    /// regression on either the outer C/F gate, the body N/M
+    /// derivation, or the wireexpr arm choice fires immediately.
+    #[test]
+    fn build_interest_liveliness_subscriber_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — literal keyexpr, history=false (FUTURE only).
+        //   outer header = MID(0x19) | F(0x40) = 0x59
+        //   VLE(interest_id=7) = 0x07
+        //   body header = KE(0x01) | TO(0x08) | R(0x10) | N(0x20) | M(0x40) = 0x79
+        //   wireexpr.id VLE(0) = 0x00
+        //   suffix_len VLE(14) = 0x0E
+        //   suffix bytes = "liveliness/dev"
+        let future_only = build_interest_liveliness_subscriber(
+            7,
+            /*history=*/ false,
+            /*mapping_id=*/ 0,
+            Some("liveliness/dev"),
+        );
+        let future_only_wire = future_only.encode_to_vec();
+        let mut future_only_expected = vec![
+            0x59u8, // outer: MID | F
+            0x07,   // VLE(interest_id=7)
+            0x79,   // body: KE | TO | R | N | M
+            0x00,   // wireexpr.id VLE(0) literal sentinel
+            0x0E,   // suffix_len VLE(14)
+        ];
+        future_only_expected.extend_from_slice(b"liveliness/dev");
+        assert_eq!(
+            future_only_wire, future_only_expected,
+            "future-only literal Interest wire bytes must match zenoh-pico reference",
+        );
+
+        // Case 2 — literal keyexpr, history=true (CURRENT + FUTURE).
+        //   outer header = MID | C(0x20) | F(0x40) = 0x79
+        //   VLE(3) = 0x03
+        //   body header = KE | TO | R | N | M = 0x79
+        //   wireexpr.id VLE(0) | suffix_len VLE(1) | "a"
+        let current_future = build_interest_liveliness_subscriber(
+            3,
+            /*history=*/ true,
+            /*mapping_id=*/ 0,
+            Some("a"),
+        );
+        let current_future_wire = current_future.encode_to_vec();
+        let mut current_future_expected = vec![
+            0x79u8, // outer: MID | C | F
+            0x03,   // VLE(interest_id=3)
+            0x79,   // body: KE | TO | R | N | M
+            0x00,   // wireexpr.id VLE(0)
+            0x01,   // suffix_len VLE(1)
+        ];
+        current_future_expected.extend_from_slice(b"a");
+        assert_eq!(
+            current_future_wire, current_future_expected,
+            "current+future literal Interest wire bytes must match zenoh-pico reference",
+        );
+
+        // Case 3 — pure alias (no suffix).
+        //   outer header = MID | F = 0x59
+        //   VLE(5) = 0x05
+        //   body header = KE | TO | R | M (no N) = 0x59
+        //   wireexpr.id VLE(11) = 0x0B  (no suffix bytes)
+        let alias = build_interest_liveliness_subscriber(
+            5,
+            /*history=*/ false,
+            /*mapping_id=*/ 11,
+            None,
+        );
+        let alias_wire = alias.encode_to_vec();
+        assert_eq!(
+            alias_wire,
+            vec![0x59u8, 0x05, 0x59, 0x0B],
+            "alias Interest wire bytes must match zenoh-pico reference",
+        );
+
+        // Case 4 — composite (alias + tail).
+        //   body header = KE | TO | R | N | M = 0x79
+        //   wireexpr.id VLE(11) | suffix_len VLE(5) | "/tail"
+        let composite = build_interest_liveliness_subscriber(
+            5,
+            /*history=*/ false,
+            /*mapping_id=*/ 11,
+            Some("/tail"),
+        );
+        let composite_wire = composite.encode_to_vec();
+        let mut composite_expected = vec![
+            0x59u8, 0x05, 0x79, 0x0B, 0x05,
+        ];
+        composite_expected.extend_from_slice(b"/tail");
+        assert_eq!(
+            composite_wire, composite_expected,
+            "composite alias Interest wire bytes must match zenoh-pico reference",
+        );
+
+        // Structural assertions on Case 1 — verify the InterestBody
+        // is present and carries the expected wireexpr arm.
+        match &future_only.body {
+            Some(body) => {
+                assert_eq!(
+                    body.header, 0x79,
+                    "InterestBody.header must carry KE | TO | R | N | M",
+                );
+                match &body.keyexpr {
+                    Some(Wireexpr {
+                        body: WireexprVariant::WireexprLocal(w),
+                    }) => {
+                        assert_eq!(w.id, 0, "literal-keyexpr → wireexpr.id=0 sentinel");
+                        assert_eq!(
+                            w.suffix.as_deref(),
+                            Some("liveliness/dev"),
+                            "literal suffix must round-trip",
+                        );
+                    }
+                    _ => panic!(
+                        "build_interest_liveliness_subscriber must wrap the keyexpr in WireexprLocal",
+                    ),
+                }
+            }
+            None => panic!(
+                "future-only/current+future Interest must carry an InterestBody (C||F is set)",
+            ),
+        }
+    }
+
+    /// R279 — `build_interest_final` produces an `Interest` envelope
+    /// in the C=0 F=0 Z=0 form. Mirror of zenoh-pico's
+    /// `_z_make_interest_final` at
+    /// `vendor/zenoh-pico/src/protocol/definitions/interest.c:27`. The
+    /// wire reduces to `[N_MID_INTEREST, VLE(interest_id)]` — no inner
+    /// body (the `_Z_INTEREST_NOT_FINAL_MASK` gate at interest.h:35 is
+    /// clear so the body embed is suppressed) and no extensions.
+    #[test]
+    fn build_interest_final_emits_two_byte_marker() {
+        let small = build_interest_final(7);
+        let small_wire = small.encode_to_vec();
+        assert_eq!(
+            small_wire,
+            vec![wire_const::N_MID_INTEREST, 0x07],
+            "InterestFinal small-id wire bytes must equal [N_MID_INTEREST, VLE(id)]",
+        );
+        assert!(
+            small.body.is_none(),
+            "InterestFinal must carry no inner body — C||F is clear",
+        );
+        assert!(
+            small.extensions.is_none(),
+            "InterestFinal must carry no extensions — Z stays clear in the wz emit path",
+        );
+
+        let large = build_interest_final(200);
+        assert_eq!(
+            large.encode_to_vec(),
+            vec![wire_const::N_MID_INTEREST, 0xC8, 0x01],
+            "InterestFinal multi-byte VLE id wire bytes must match zenoh-pico reference",
+        );
     }
 
     /// R121j-1 — `build_request_query` produces a Request envelope
