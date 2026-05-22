@@ -7,8 +7,8 @@ SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 > 한국어 / Korean translation: see README.ko.md
 
-A six-backend codegen implementation of an MVP subset of the
-zenoh wire protocol, targeting both embedded (zenoh-pico) and
+A six-backend codegen implementation of a wire-spec subset of
+the zenoh protocol, targeting both embedded (zenoh-pico) and
 server (zenoh) interop. Source of truth lives in SCXML, generated
 into Rust no_std / C11 / C++ / Kotlin / Go / Python from the same
 author-side files.
@@ -17,8 +17,8 @@ author-side files.
 
 This repo builds two things at once.
 
-1. **Wire compatibility** — an MVP subset of the wire format that
-   zenoh-pico 1.x clients and zenoh 1.x routers / peers exchange.
+1. **Wire compatibility** — a wire-format subset that zenoh-pico
+   1.x clients and zenoh 1.x routers / peers exchange.
    The subset scope is pinned in docs/wire-spec-subset.md:
    scouting layer, transport session layer, network routing
    layer, zenoh payload layer, and extension chain mechanism.
@@ -58,7 +58,7 @@ changelog under docs/.atomic/ has the latest per-round delta.
   byte-equivalent to zenoh-pico's `_z_*_encode` (Layer 3
   wire-interop tests under
   crates/wz-integration-tests/tests/layer3_*.rs).
-- **Phase C** (session FSM + AP MVP runtime): unicast track
+- **Phase C** (session FSM + AP runtime): unicast track
   closed. session_fsm_unicast.scxml carries the timer events
   (link.open_timeout=5s, init/open_ack=2s, closing=100ms) plus
   the full Init→Established→Close path. TCP transport complete.
@@ -95,7 +95,7 @@ mirrored by the GitHub Actions workflow.
 | crates/wz-codecs | Generated codec types from sources/codecs/*.scxml |
 | crates/wz-runtime-tokio | Tokio-based AP runtime + session glue + builders |
 | crates/wz-runtime-lwip | lwIP / MCU runtime headers + tests (Phase W, not yet a workspace member) |
-| crates/wz-ap-demo | AP MVP demo binary (initiator + acceptor) |
+| crates/wz-ap-demo | AP demo binary (initiator + acceptor) |
 | crates/wz-integration-tests | Layer 3 wire-interop + round-trip suites |
 | crates/wz-runtime-tokio-test-support | Shared test harness for runtime tests |
 | crates/zenoh-pico-sys | Vendored zenoh-pico FFI bindings (smoke layer) |
