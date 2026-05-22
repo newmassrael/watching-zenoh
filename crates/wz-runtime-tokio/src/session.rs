@@ -1779,6 +1779,57 @@ impl Querier {
             on_final,
         )
     }
+
+    /// R288 — mirror of zenoh-pico's `z_querier_get_matching_status`
+    /// (`vendor/zenoh-pico/src/api/api.c:1988`). Returns a
+    /// [`MatchingStatus`] whose `matching` field is `true` iff at
+    /// least one peer has currently declared a queryable whose
+    /// keyexpr matches the querier's keyexpr.
+    ///
+    /// The match is computed against the
+    /// [`crate::declare::RemoteQueryableRegistry`] inside the
+    /// session's observer; the registry tracks the
+    /// `{peer_decl_id -> resolved keyexpr}` membership maintained by
+    /// the drive_session loop dispatch of inbound
+    /// `Declare(DeclQueryable)` / `Declare(UndeclQueryable)`
+    /// records. Lock contention is the single observer mutex held
+    /// briefly to consult the membership; no wire frame is emitted.
+    ///
+    /// The match algorithm is the bidirectional asymmetric
+    /// pattern-match approximation described on
+    /// [`crate::declare::RemoteQueryableRegistry::has_matching`].
+    /// Honest two-pattern wildcard intersection is a future-round
+    /// carry; the wz keyexpr v1 spec currently locks intersect to
+    /// exact uint32 ID equality for MVP (RFC §5.A line 311).
+    pub fn get_matching_status(&self) -> MatchingStatus {
+        let observer = self.session.observer();
+        let obs = match observer.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        MatchingStatus {
+            matching: obs.remote_queryables.has_matching(&self.keyexpr),
+        }
+    }
+}
+
+/// R288 — return type of [`Querier::get_matching_status`]. Mirror
+/// of zenoh-pico's `z_matching_status_t`
+/// (`vendor/zenoh-pico/include/zenoh-pico/session/matching.h:26`)
+/// which carries a single `matching: bool` field. The `#[non_exhaustive]`
+/// attribute reserves the API shape for future fields (peer count,
+/// per-peer-id matches, recheck timestamp) without breaking callers
+/// that pattern-match on the struct.
+///
+/// `Clone + Copy` so the value can be cheaply returned by value and
+/// captured by callbacks; `Debug` so the demo binary's log lines and
+/// integration test asserts can stringify it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct MatchingStatus {
+    /// `true` iff at least one peer-declared queryable matches the
+    /// querier's keyexpr at consult time.
+    pub matching: bool,
 }
 
 /// R243 — aliased-keyexpr counterpart of [`Querier`]. Mirror of
@@ -4984,6 +5035,200 @@ mod tests {
         let q2 = clone.get(&clock, |_| {}, |_| {});
         assert_eq!(q1.rid(), 0);
         assert_eq!(q2.rid(), 1, "clones share the same rid allocator");
+    }
+
+    // ── R288 Querier::get_matching_status ──
+
+    /// Local construction helper for inbound `DeclQueryable` /
+    /// `UndeclQueryable` records that exercise the
+    /// `remote_queryables` registry from session.rs tests. The
+    /// `crate::declare::test_helpers` versions are
+    /// `pub(super)`-scoped to the declare module so we cannot import
+    /// them here; the constructors are intentionally small so
+    /// inlining is cheaper than relaxing the helper visibility.
+    fn make_decl_queryable(
+        id: u64,
+        keyexpr_literal: &str,
+    ) -> wz_codecs::declare::DeclareVariant {
+        use wz_codecs::decl_queryable::DeclQueryable;
+        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+        use wz_codecs::wireexpr_local::WireexprLocal;
+        let suffix = keyexpr_literal.to_string();
+        let suffix_len = Some(suffix.len() as u64);
+        let keyexpr = Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len,
+                suffix: Some(suffix),
+            }),
+        };
+        wz_codecs::declare::DeclareVariant::CodecZenohDeclQueryable(DeclQueryable {
+            id,
+            keyexpr,
+            ..DeclQueryable::default()
+        })
+    }
+
+    fn make_undecl_queryable(
+        id: u64,
+    ) -> wz_codecs::declare::DeclareVariant {
+        use wz_codecs::undecl_queryable::UndeclQueryable;
+        wz_codecs::declare::DeclareVariant::CodecZenohUndeclQueryable(UndeclQueryable {
+            id,
+            ..UndeclQueryable::default()
+        })
+    }
+
+    #[test]
+    fn querier_get_matching_status_false_on_fresh_session_with_no_peers() {
+        let (session, _driver) = build_session();
+        let querier = session.declare_querier("home/temp", QueryOptions::get());
+        assert_eq!(
+            querier.get_matching_status(),
+            MatchingStatus { matching: false },
+            "no peer DeclQueryable dispatched yet — matching is false"
+        );
+    }
+
+    #[test]
+    fn querier_get_matching_status_true_after_peer_decl_with_matching_keyexpr() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        let querier = session.declare_querier("home/temp", QueryOptions::get());
+        // Drive a DeclQueryable into the registry directly (no FSM
+        // dispatch needed for this assertion — the registry's
+        // dispatch_declare is the contract surface).
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_queryables
+            .dispatch_declare(&make_decl_queryable(42, "home/temp"), &HashMap::new());
+        assert_eq!(
+            querier.get_matching_status(),
+            MatchingStatus { matching: true },
+            "peer DeclQueryable for the literal keyexpr — matching is true"
+        );
+    }
+
+    #[test]
+    fn querier_get_matching_status_true_when_peer_pattern_covers_querier_literal() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        let querier = session.declare_querier("home/temp", QueryOptions::get());
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_queryables
+            .dispatch_declare(&make_decl_queryable(43, "home/**"), &HashMap::new());
+        assert_eq!(
+            querier.get_matching_status(),
+            MatchingStatus { matching: true },
+            "peer pattern home/** covers the literal home/temp — matching is true"
+        );
+    }
+
+    #[test]
+    fn querier_get_matching_status_true_when_querier_pattern_covers_peer_literal() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        let querier = session.declare_querier("home/**", QueryOptions::get());
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_queryables
+            .dispatch_declare(&make_decl_queryable(44, "home/door"), &HashMap::new());
+        assert_eq!(
+            querier.get_matching_status(),
+            MatchingStatus { matching: true },
+            "querier pattern home/** covers peer literal home/door — matching is true"
+        );
+    }
+
+    #[test]
+    fn querier_get_matching_status_false_after_peer_undeclare() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        let querier = session.declare_querier("home/temp", QueryOptions::get());
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_queryables
+            .dispatch_declare(&make_decl_queryable(45, "home/temp"), &HashMap::new());
+        assert_eq!(querier.get_matching_status(), MatchingStatus { matching: true });
+        // Peer retracts the queryable.
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_queryables
+            .dispatch_declare(&make_undecl_queryable(45), &HashMap::new());
+        assert_eq!(
+            querier.get_matching_status(),
+            MatchingStatus { matching: false },
+            "post-UndeclQueryable — matching falls back to false"
+        );
+    }
+
+    #[test]
+    fn querier_get_matching_status_false_with_non_matching_peer_keyexpr() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        let querier = session.declare_querier("home/temp", QueryOptions::get());
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_queryables
+            .dispatch_declare(&make_decl_queryable(46, "other/foo"), &HashMap::new());
+        assert_eq!(
+            querier.get_matching_status(),
+            MatchingStatus { matching: false },
+            "peer keyexpr does not intersect querier keyexpr — matching is false"
+        );
+    }
+
+    #[test]
+    fn querier_get_matching_status_true_when_any_of_many_peer_decls_matches() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        let querier = session.declare_querier("home/temp", QueryOptions::get());
+        let mut obs = session.observer().lock().unwrap();
+        obs.remote_queryables
+            .dispatch_declare(&make_decl_queryable(50, "other/foo"), &HashMap::new());
+        obs.remote_queryables
+            .dispatch_declare(&make_decl_queryable(51, "home/temp"), &HashMap::new());
+        obs.remote_queryables
+            .dispatch_declare(&make_decl_queryable(52, "a/b/c"), &HashMap::new());
+        assert_eq!(obs.remote_queryables.declared_count(), 3);
+        drop(obs);
+        assert_eq!(
+            querier.get_matching_status(),
+            MatchingStatus { matching: true },
+            "any one matching peer decl suffices — matching is true"
+        );
+    }
+
+    #[test]
+    fn querier_clone_shares_matching_status_view() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        let querier = session.declare_querier("home/temp", QueryOptions::get());
+        let querier_clone = querier.clone();
+        assert_eq!(querier.get_matching_status(), MatchingStatus { matching: false });
+        assert_eq!(querier_clone.get_matching_status(), MatchingStatus { matching: false });
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_queryables
+            .dispatch_declare(&make_decl_queryable(60, "home/temp"), &HashMap::new());
+        // Both clones observe the same registry membership change.
+        assert_eq!(querier.get_matching_status(), MatchingStatus { matching: true });
+        assert_eq!(querier_clone.get_matching_status(), MatchingStatus { matching: true });
     }
 
     // ── R243 QuerierAliased ──
