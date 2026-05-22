@@ -14152,6 +14152,66 @@
         "Phase W lwIP, zenoh-cpp router/plugin/SHM/multicast remain long-term destinations"
       ]
     },
+    "Round 283": {
+      "decision_summary": "R283 lands the session-FSM Established gate on declare_liveliness_subscriber_aliased via SessionLinkActions::is_established() + NotEstablished error variant; non-aliased entry remains best-effort.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs — add SessionLinkActions::is_established() predicate; poison-safe read of established_at: Mutex<Option<Instant>> (returns false on a poisoned mutex, matching the conservative idiom used elsewhere); doc-comment cross-refs the record_established_at Lua action wired to Established.onentry in session_fsm_unicast.scxml + the zenoh-pico implicit declare-after-z_open contract",
+        "crates/wz-runtime-tokio/src/session.rs — add Session::is_established() thin proxy over SessionLinkActions::is_established(); doc-comment notes the gate asymmetry (aliased gated, non-aliased best-effort) and caller-side polling option",
+        "crates/wz-runtime-tokio/src/session.rs — extend LivelinessSubscriberAliasError with NotEstablished variant; update Display impl with remediation hint ('wait for Session::is_established() to flip to true'); doc-comment names the variant ordering rule (UnknownMapping checked first since FSM-state-independent + cheaper, then NotEstablished)",
+        "crates/wz-runtime-tokio/src/session.rs — gate declare_liveliness_subscriber_aliased: UnknownMapping check first (existing), then is_established() check returning Err(NotEstablished); no interest-id allocation, no slot register, no wire emit on either early-return path; doc-comment Errors block expanded to two variants + ordering rationale",
+        "crates/wz-runtime-tokio/src/session.rs — declare_liveliness_subscriber doc-comment 'Established gate — asymmetric with the aliased counterpart' block: documents the non-aliased remains best-effort, names the polling workaround, names the future-round uniform-gate carry across declare_* surface",
+        "crates/wz-runtime-tokio/src/session.rs (tests) — mark_session_established(&session) test helper added; 4 R282 aliased tests (resolves/inline_suffix/wire_frame/survives_mapping_retract) updated to mark Established before declare; unknown_mapping_returns_err_without_wire_emit unchanged (UnknownMapping checked first regardless of FSM state)",
+        "crates/wz-runtime-tokio/src/session.rs (tests) — add 3 new gate tests: declare_liveliness_subscriber_aliased_pre_established_returns_err_without_wire_emit, declare_liveliness_subscriber_aliased_unknown_mapping_takes_precedence_over_not_established (pins variant ordering rule), is_established_predicate_flips_after_record_established_at; Display test extended to cover NotEstablished branch",
+        "crates/wz-ap-demo/src/main.rs — update the declare_liveliness_subscriber call-site comment to reflect R283 reality: gate landed on aliased only, non-aliased remains best-effort; replaces the speculative 'R283+ formalises' note from R280"
+      ],
+      "verification_bullets": [
+        "cargo clippy --workspace --all-targets --no-deps -- -D warnings clean",
+        "wz-runtime-tokio lib test count 506 -> 509 (+3 R283 gate tests); all 509 pass",
+        "scripts/run-ci.sh all 10 lanes green (Layer 0/A/A2/B/C0/C1/C1b/C2/D/E)",
+        "is_established_predicate_flips_after_record_established_at confirms the predicate tracks established_at in lockstep on both Session and SessionLinkActions surfaces",
+        "declare_liveliness_subscriber_aliased_unknown_mapping_takes_precedence_over_not_established pins the variant ordering rule: with both UnknownMapping AND NotEstablished conditions live, caller sees UnknownMapping (the bug-class error), preventing futile retry against the transient state",
+        "declare_liveliness_subscriber_aliased_pre_established_returns_err_without_wire_emit asserts driver.frame_count() unchanged + slot_count() == 0 on the early-return path — no orphan slot, no orphan wire emit",
+        "wz-ap-demo still builds cleanly with the updated R283 doc-comment on the non-aliased call site"
+      ],
+      "carry_forward_bullets": [
+        "R281 carry (b) realized — Established gate landed for outbound Interest emit on declare_liveliness_subscriber_aliased; gate is asymmetric (non-aliased remains best-effort)",
+        "R284 carry: uniform Established gate across the non-aliased declare_* surface (declare_liveliness_subscriber, declare_token, declare_subscriber, declare_queryable). Requires Result-typed signature change for those 4 methods, plus a sibling NotEstablished variant on the corresponding error enums (LivelinessAliasError, SubscribeAliasError, QueryableAliasError). Multi-round design lock advised — dedicated round for the surface-wide breaking change. Includes wz-ap-demo + e2e test caller fan-out updates.",
+        "R283 architectural carry still open: peer-side non-final Interest inbound (bilateral); wz declares LivelinessToken, peer asks via Interest, wz emits matching DeclTokens as wire response — not done in R283 (R283 was the aliased-Established gate scope only)",
+        "R278 follow-up unchanged: post SessionClose to FSM before signal exit",
+        "Open R267-R270 architectural carries unchanged: Querier::get_matching_status, Session<R,T> reparameterisation, Instant -> u64ms storage migration",
+        "wz-ap-demo main.rs decomposition carry (R281 NEW): main.rs 1900+ lines, R283 added 6 lines of comment update only (no growth)",
+        "Phase W lwIP, zenoh-cpp router/plugin/SHM/multicast remain long-term destinations"
+      ],
+      "publishable_decision_summary": "R283 lands the session-FSM Established gate on declare_liveliness_subscriber_aliased via SessionLinkActions::is_established() + NotEstablished error variant; non-aliased entry remains best-effort.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs — add SessionLinkActions::is_established() predicate; poison-safe read of established_at: Mutex<Option<Instant>> (returns false on a poisoned mutex, matching the conservative idiom used elsewhere); doc-comment cross-refs the record_established_at Lua action wired to Established.onentry in session_fsm_unicast.scxml + the zenoh-pico implicit declare-after-z_open contract",
+        "crates/wz-runtime-tokio/src/session.rs — add Session::is_established() thin proxy over SessionLinkActions::is_established(); doc-comment notes the gate asymmetry (aliased gated, non-aliased best-effort) and caller-side polling option",
+        "crates/wz-runtime-tokio/src/session.rs — extend LivelinessSubscriberAliasError with NotEstablished variant; update Display impl with remediation hint ('wait for Session::is_established() to flip to true'); doc-comment names the variant ordering rule (UnknownMapping checked first since FSM-state-independent + cheaper, then NotEstablished)",
+        "crates/wz-runtime-tokio/src/session.rs — gate declare_liveliness_subscriber_aliased: UnknownMapping check first (existing), then is_established() check returning Err(NotEstablished); no interest-id allocation, no slot register, no wire emit on either early-return path; doc-comment Errors block expanded to two variants + ordering rationale",
+        "crates/wz-runtime-tokio/src/session.rs — declare_liveliness_subscriber doc-comment 'Established gate — asymmetric with the aliased counterpart' block: documents the non-aliased remains best-effort, names the polling workaround, names the future-round uniform-gate carry across declare_* surface",
+        "crates/wz-runtime-tokio/src/session.rs (tests) — mark_session_established(&session) test helper added; 4 R282 aliased tests (resolves/inline_suffix/wire_frame/survives_mapping_retract) updated to mark Established before declare; unknown_mapping_returns_err_without_wire_emit unchanged (UnknownMapping checked first regardless of FSM state)",
+        "crates/wz-runtime-tokio/src/session.rs (tests) — add 3 new gate tests: declare_liveliness_subscriber_aliased_pre_established_returns_err_without_wire_emit, declare_liveliness_subscriber_aliased_unknown_mapping_takes_precedence_over_not_established (pins variant ordering rule), is_established_predicate_flips_after_record_established_at; Display test extended to cover NotEstablished branch",
+        "crates/wz-ap-demo/src/main.rs — update the declare_liveliness_subscriber call-site comment to reflect R283 reality: gate landed on aliased only, non-aliased remains best-effort; replaces the speculative 'R283+ formalises' note from R280"
+      ],
+      "publishable_verification_bullets": [
+        "cargo clippy --workspace --all-targets --no-deps -- -D warnings clean",
+        "wz-runtime-tokio lib test count 506 -> 509 (+3 R283 gate tests); all 509 pass",
+        "scripts/run-ci.sh all 10 lanes green (Layer 0/A/A2/B/C0/C1/C1b/C2/D/E)",
+        "is_established_predicate_flips_after_record_established_at confirms the predicate tracks established_at in lockstep on both Session and SessionLinkActions surfaces",
+        "declare_liveliness_subscriber_aliased_unknown_mapping_takes_precedence_over_not_established pins the variant ordering rule: with both UnknownMapping AND NotEstablished conditions live, caller sees UnknownMapping (the bug-class error), preventing futile retry against the transient state",
+        "declare_liveliness_subscriber_aliased_pre_established_returns_err_without_wire_emit asserts driver.frame_count() unchanged + slot_count() == 0 on the early-return path — no orphan slot, no orphan wire emit",
+        "wz-ap-demo still builds cleanly with the updated R283 doc-comment on the non-aliased call site"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R281 carry (b) realized — Established gate landed for outbound Interest emit on declare_liveliness_subscriber_aliased; gate is asymmetric (non-aliased remains best-effort)",
+        "R284 carry: uniform Established gate across the non-aliased declare_* surface (declare_liveliness_subscriber, declare_token, declare_subscriber, declare_queryable). Requires Result-typed signature change for those 4 methods, plus a sibling NotEstablished variant on the corresponding error enums (LivelinessAliasError, SubscribeAliasError, QueryableAliasError). Multi-round design lock advised — dedicated round for the surface-wide breaking change. Includes wz-ap-demo + e2e test caller fan-out updates.",
+        "R283 architectural carry still open: peer-side non-final Interest inbound (bilateral); wz declares LivelinessToken, peer asks via Interest, wz emits matching DeclTokens as wire response — not done in R283 (R283 was the aliased-Established gate scope only)",
+        "R278 follow-up unchanged: post SessionClose to FSM before signal exit",
+        "Open R267-R270 architectural carries unchanged: Querier::get_matching_status, Session<R,T> reparameterisation, Instant -> u64ms storage migration",
+        "wz-ap-demo main.rs decomposition carry (R281 NEW): main.rs 1900+ lines, R283 added 6 lines of comment update only (no growth)",
+        "Phase W lwIP, zenoh-cpp router/plugin/SHM/multicast remain long-term destinations"
+      ]
+    },
     "Round 29": {
       "decision_summary": "Phase C8 entry — first statechart-kind SCXML lands. sources/session/session_fsm_unicast.scxml encodes unicast handshake (Init/LinkOpening/Opening/Accepting/Established/Closing/Closed) per docs/session-fsm.md §2.1-§2.7 minus deferred sub-scopes (multicast, scouting state, Established sub-regions, stateless_accept variant).",
       "changes_bullets": [
