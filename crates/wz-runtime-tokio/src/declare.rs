@@ -66,6 +66,7 @@ use std::collections::HashMap;
 use wz_codecs::wireexpr::WireexprVariant;
 
 mod liveliness;
+mod liveliness_subscriber;
 mod queryable;
 mod subscriber;
 
@@ -75,6 +76,10 @@ mod cross_tests;
 mod test_helpers;
 
 pub use liveliness::{DeclTokenCallback, LivelinessRegistry, UndeclTokenCallback};
+pub use liveliness_subscriber::{
+    LivelinessSample, LivelinessSampleCallback, LivelinessSampleKind,
+    LivelinessSubscriberRegistry,
+};
 pub use queryable::{DeclQueryableCallback, RemoteQueryableRegistry, UndeclQueryableCallback};
 pub use subscriber::{DeclSubscriberCallback, RemoteSubscriberRegistry, UndeclSubscriberCallback};
 
