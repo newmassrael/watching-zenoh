@@ -18,9 +18,10 @@ use alloc::boxed::Box;
 /// `core::error::Error` impl is available unconditionally (R267
 /// MSRV bump to 1.81). Prior to R267 the workspace MSRV was 1.75
 /// and only `std::error::Error` was reachable, so the impl was
-/// gated on `feature = "std"`. With 1.81+ the trait lives in
-/// `core::error` and is reachable from no_std too; the impl is
-/// therefore no-feature-gated, and both std builds (via the
+/// gated on the now-retired `feature = "std"` (removed in R269 —
+/// the dead marker had no remaining consumer once the Error trait
+/// moved to `core`). With 1.81+ the trait lives in `core::error`
+/// and is reachable from no_std too; both std builds (via the
 /// `pub use core::error::Error` re-export in std) and no_std
 /// builds get the impl from one source.
 ///
@@ -280,9 +281,11 @@ mod compile_time_assertions {
     }
 }
 
-#[cfg(all(test, feature = "std"))]
-mod std_error_tests {
+#[cfg(all(test, feature = "alloc"))]
+mod alloc_error_tests {
     use super::*;
+    use alloc::boxed::Box;
+    use alloc::string::{String, ToString};
 
     #[test]
     fn runtime_error_is_error_trait_compatible_boxable() {

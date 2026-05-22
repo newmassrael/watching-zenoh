@@ -55,8 +55,10 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio" }
 # R253 — TimeSource trait surface (used by declare_task generic
 # parameter so wz-ap-demo no longer reaches for tokio::time::sleep
 # directly; the AP-profile concrete impl `TokioTime` is re-exported
-# from wz-runtime-tokio and supplied at the spawn call site).
-wz-runtime-core = { path = "../wz-runtime-core", features = ["std"] }
+# from wz-runtime-tokio and supplied at the spawn call site). The
+# `alloc` feature pulls in the R266 panic-payload-capable JoinFailed
+# variant (this binary is AP and links std at the linker level anyway).
+wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 # Generated codec types for inbound Push decode + outbound handshake.
 wz-codecs = { path = "../wz-codecs" }
 # SCE Rust runtime — Engine + IScriptEngine trait surface for the

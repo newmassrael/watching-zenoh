@@ -48,7 +48,7 @@
 //!   calls; this is the multi-round R252+ work, with `Session` last
 //!   per "leaf crates first, Session struct last" §5.P guidance.
 
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_std]
 #![deny(missing_docs)]
 
 #[cfg(feature = "alloc")]

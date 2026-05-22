@@ -52,9 +52,11 @@ wz-codecs = { path = "../wz-codecs" }
 # (this crate) bridges tokio + std into the trait contract authored in
 # R251; the MCU profile (future wz-runtime-lwip) will provide the same
 # trait implementations against lwIP + an embedded async executor. The
-# `std` feature is on because tokio + this crate are AP-only by design;
-# the trait crate itself stays no_std-capable.
-wz-runtime-core = { path = "../wz-runtime-core", features = ["std"] }
+# `alloc` feature is on because tokio + this crate are AP-only by design
+# and need the R266 `RuntimeError::JoinFailed { payload: Box<...> }`
+# panic-capture variant; the trait crate itself stays unconditionally
+# no_std (std is available at the binary linker level for AP).
+wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
 sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
 sce-rust-lua = { path = "../../vendor/sce/sce-rust-lua" }
