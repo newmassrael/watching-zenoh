@@ -11242,6 +11242,88 @@
         "R242 lesson: 'declaration' that's purely caller-side aggregation (no peer state) is a no-op on the wire by design — do not invent a fake DeclareQuerier wire message to mirror zenoh-pico c-ergo of declare-vs-get split."
       ]
     },
+    "Round 243": {
+      "decision_summary": "R243 QuerierAliased + Session::declare_querier_aliased: R242 Querier mirror with R241 aliased semantics. No wire emit at declare; get() delegates to query_aliased_auto for outbound-table resolution.",
+      "changes_bullets": [
+        "session.rs QuerierAliased struct (session: Session, mapping_id: u64, inline_suffix: Option<String>, options: QueryOptions) non_exhaustive + Clone.",
+        "session.rs Session::declare_querier_aliased(mapping_id, Option<&str> inline_suffix, options) -> QuerierAliased (no wire emit).",
+        "session.rs QuerierAliased::get(on_reply, on_final) -> Result<ReplyHandle, QueryAliasError> delegates to query_aliased_auto.",
+        "session.rs QuerierAliased::mapping_id() + inline_suffix() + options() accessors.",
+        "Returns Err(QueryAliasError::UnknownMapping(id)) when declared mapping no longer present on outbound table.",
+        "Mirrors R242 Querier shape with R241 aliased semantics; both Querier variants now cover the literal + aliased z_get surface.",
+        "Successive get() calls allocate independent rids through the same SessionLinkActions counter.",
+        "lib test declare_querier_aliased_returns_handle_with_mapping_id_and_options.",
+        "lib test declare_querier_aliased_does_not_emit_wire_frame.",
+        "lib test querier_aliased_get_resolves_loopback_through_outbound_mapping_table.",
+        "lib test querier_aliased_get_unknown_mapping_returns_err_and_skips_both_branches.",
+        "lib test querier_aliased_get_threads_inline_suffix_into_composite_literal.",
+        "lib test querier_aliased_get_twice_allocates_independent_rids.",
+        "lib test querier_aliased_clone_shares_session_and_options."
+      ],
+      "verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 408 -> 415 (+7 R243 cases).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R242 65 no-regression)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R244+ ReplyRegistry timeout sweep: cancel pending entry + synthesise Final when QueryOptions.timeout_ms passes; needs Hal time abstraction (wz-runtime-core) for MCU portability.",
+        "R244+ Q_B / Q_E wire codec slots (Query body payload + encoding) require SCE-side codec extension.",
+        "R244+ Querier::get_matching_status (z_querier_get_matching_status mirror) — needs RemoteQueryableRegistry coverage check + per-querier matching state.",
+        "R244+ Publisher struct (z_publisher_t mirror) symmetric to Querier on the pub/sub side.",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R243 lesson: Option<impl Into<String>> turbofish-incompatible (impl Trait in generic position); prefer Option<&str> for None-typeable surfaces."
+      ],
+      "publishable_decision_summary": "R243 QuerierAliased + Session::declare_querier_aliased: R242 Querier mirror with R241 aliased semantics. No wire emit at declare; get() delegates to query_aliased_auto for outbound-table resolution.",
+      "publishable_changes_bullets": [
+        "session.rs QuerierAliased struct (session: Session, mapping_id: u64, inline_suffix: Option<String>, options: QueryOptions) non_exhaustive + Clone.",
+        "session.rs Session::declare_querier_aliased(mapping_id, Option<&str> inline_suffix, options) -> QuerierAliased (no wire emit).",
+        "session.rs QuerierAliased::get(on_reply, on_final) -> Result<ReplyHandle, QueryAliasError> delegates to query_aliased_auto.",
+        "session.rs QuerierAliased::mapping_id() + inline_suffix() + options() accessors.",
+        "Returns Err(QueryAliasError::UnknownMapping(id)) when declared mapping no longer present on outbound table.",
+        "Mirrors R242 Querier shape with R241 aliased semantics; both Querier variants now cover the literal + aliased z_get surface.",
+        "Successive get() calls allocate independent rids through the same SessionLinkActions counter.",
+        "lib test declare_querier_aliased_returns_handle_with_mapping_id_and_options.",
+        "lib test declare_querier_aliased_does_not_emit_wire_frame.",
+        "lib test querier_aliased_get_resolves_loopback_through_outbound_mapping_table.",
+        "lib test querier_aliased_get_unknown_mapping_returns_err_and_skips_both_branches.",
+        "lib test querier_aliased_get_threads_inline_suffix_into_composite_literal.",
+        "lib test querier_aliased_get_twice_allocates_independent_rids.",
+        "lib test querier_aliased_clone_shares_session_and_options."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 408 -> 415 (+7 R243 cases).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R242 65 no-regression)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R244+ ReplyRegistry timeout sweep: cancel pending entry + synthesise Final when QueryOptions.timeout_ms passes; needs Hal time abstraction (wz-runtime-core) for MCU portability.",
+        "R244+ Q_B / Q_E wire codec slots (Query body payload + encoding) require SCE-side codec extension.",
+        "R244+ Querier::get_matching_status (z_querier_get_matching_status mirror) — needs RemoteQueryableRegistry coverage check + per-querier matching state.",
+        "R244+ Publisher struct (z_publisher_t mirror) symmetric to Querier on the pub/sub side.",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R243 lesson: Option<impl Into<String>> turbofish-incompatible (impl Trait in generic position); prefer Option<&str> for None-typeable surfaces."
+      ]
+    },
     "Round 25": {
       "decision_summary": "Phase E register — README.md workspace.docs 재등록 land; R24 한국어 본문을 영문 primary로 재작성 + README.ko.md satellite로 분리 (사용자 정정 'README는 영문 primary, KO 번역은 별도 링크'); 첫 시도 11 parser orphan (URL 링크 + plain §N) → 파서-친화 form 으로 해결 후 12/12 docs clean.",
       "changes_bullets": [
