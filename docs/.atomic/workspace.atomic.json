@@ -12052,6 +12052,98 @@
         "R251 lesson: Phase W entry is the smallest defensible architectural commitment — trait skeleton + cfg gating only, 0 impl, 0 caller. The 26-session textbook anchor (AskUserQuestion + code preview for architectural decisions) was applied: user confirmed (1) scope = trait skeleton only, (2) sleep shape = RPITIT. Trait shape decisions that genuinely require caller-shape evidence (Mutex/RwLock) were explicitly deferred rather than guessed. The R63 anti-stub rule held: no NOP impl shipped; the contract exists, the first impl waits for the first caller."
       ]
     },
+    "Round 252": {
+      "decision_summary": "R252 TokioRuntime + TokioTime concrete impls land in wz-runtime-tokio; R251 trait skeleton gains AP-profile binding (spawn via tokio::task::spawn, sleep via tokio::time::sleep).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/Cargo.toml: wz-runtime-core path dep added with features = [\"std\"].",
+        "crates/wz-runtime-tokio/src/lib.rs: pub mod runtime_impl added with doc-comment citing R251 / R252 / §5.P leaf-first migration guidance.",
+        "crates/wz-runtime-tokio/src/runtime_impl.rs (new, ~330 lines): TokioRuntime unit struct, impl Runtime via tokio::task::spawn; TokioJoinHandle<T> newtype wrapping tokio::task::JoinHandle, impl Future<Output=Result<T, RuntimeError>> with JoinError -> RuntimeError::JoinFailed mapping.",
+        "TokioTime { epoch: tokio::time::Instant } with new() + Default + Copy + Clone; impl TimeSource via epoch.elapsed().as_millis() as u64 cast + tokio::time::sleep(Duration::from_millis(ms)).",
+        "8 lib tests: spawn resolves to future output, spawn unit Output, spawn panic -> JoinFailed, Send-bound positive case (String), monotonic non-decreasing, sleep waits at least requested duration (with 5ms jitter slack), sleep(0) is yield-not-busy-spin (50ms timeout bound), runtime+time independent zero-state composition.",
+        "Mutex / RwLock / Allocator concrete impls deliberately NOT included (R251 carry preserved — shape decision waits for first MCU call-site shape).",
+        "0 wz upper-layer site reparameterised in R252 — R253 (sibling commit) wires the first leaf caller to validate the trait contract; the impl-with-no-caller anti-pattern is closed inside the same session.",
+        "clippy::default_constructed_unit_structs surfaced + fixed: TokioRuntime::default() removed from tests; doc-comment updated to document the unit-struct preferred-construction pattern (`TokioRuntime` directly).",
+        "JoinHandle wrapper is Unpin-friendly because tokio::task::JoinHandle is itself Unpin — the Future impl projects without pin-project / unsafe."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio --lib: clean.",
+        "cargo test -p wz-runtime-tokio --lib runtime_impl: 8/8 pass (spawn output, unit output, panic JoinFailed, Send bound, monotonic, sleep duration, sleep zero, composition).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates after the unit-struct default fix.",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A mnemosyne + A2 audit + B verify-codegen + C1 cargo test 472 + C2 clippy + D deploy + E binary-dep e2e 9/9).",
+        "wz-runtime-tokio lib test count: 464 -> 472 (+8).",
+        "pre-commit hook validate_workspace clean (T1=0, RT 12/12, sync).",
+        "commit c925b22 (feat(runtime): R252 TokioRuntime + TokioTime impl; 4 files +327)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R253 (sibling next commit this session): first leaf caller migration — wz-ap-demo declare_task three tokio::time::sleep sites to clock.sleep(ms) via T: TimeSource generic parameter. Validates the trait contract carries actual production semantics.",
+        "R254+ continue leaf-first migration of the 111 std/tokio call sites (R230 §5.P inventory baseline). publisher_task / query_task sleep sites in wz-ap-demo are the next natural batch.",
+        "R254+ Mutex / RwLock contract decision: still deferred until a real MCU call-site shape constrains the choice (per-runtime type alias vs MutexFamily GAT vs cfg-cond). R252 did not introduce a TokioMutex wrapper to keep the decision uncontaminated.",
+        "R254+ std::time::Instant comparison sites (R253 declare_task deadline check still uses std::time::Instant::now() directly) — trait surface for Instant-arithmetic is an explicit gap; either extend TimeSource with an Instant-shaped API or wrap now_monotonic_ms() arithmetic to replace the std::time::Instant comparison.",
+        "R254+ Allocator first concrete impl deferred until MCU buffer-pool round.",
+        "R254+ core::error::Error / std::error::Error impl on RuntimeError behind std feature.",
+        "wz-runtime-lwip crate re-introduction (Phase W lwIP integration round).",
+        "Liveliness Token wz-ap-demo migration (R250 carry).",
+        "ReplyRegistry timeout sweep (now unblocked since TokioTime exists in R252 — next session candidate).",
+        "Q_B / Q_E wire codec slots (SCE-side codec extension).",
+        "Querier / Publisher get_matching_status.",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff (no wz call sites — pin bump remains deferred).",
+        "Interest 70% remaining.",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R252 lesson: unit struct + ::default() call site triggers clippy::default_constructed_unit_structs which is included in `-D warnings`; the textbook fix is to remove the ::default() call (the literal `TokioRuntime` is the same value). Pattern to remember when authoring future zero-state runtime impls."
+      ],
+      "publishable_decision_summary": "R252 TokioRuntime + TokioTime concrete impls land in wz-runtime-tokio; R251 trait skeleton gains AP-profile binding (spawn via tokio::task::spawn, sleep via tokio::time::sleep).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/Cargo.toml: wz-runtime-core path dep added with features = [\"std\"].",
+        "crates/wz-runtime-tokio/src/lib.rs: pub mod runtime_impl added with doc-comment citing R251 / R252 / §5.P leaf-first migration guidance.",
+        "crates/wz-runtime-tokio/src/runtime_impl.rs (new, ~330 lines): TokioRuntime unit struct, impl Runtime via tokio::task::spawn; TokioJoinHandle<T> newtype wrapping tokio::task::JoinHandle, impl Future<Output=Result<T, RuntimeError>> with JoinError -> RuntimeError::JoinFailed mapping.",
+        "TokioTime { epoch: tokio::time::Instant } with new() + Default + Copy + Clone; impl TimeSource via epoch.elapsed().as_millis() as u64 cast + tokio::time::sleep(Duration::from_millis(ms)).",
+        "8 lib tests: spawn resolves to future output, spawn unit Output, spawn panic -> JoinFailed, Send-bound positive case (String), monotonic non-decreasing, sleep waits at least requested duration (with 5ms jitter slack), sleep(0) is yield-not-busy-spin (50ms timeout bound), runtime+time independent zero-state composition.",
+        "Mutex / RwLock / Allocator concrete impls deliberately NOT included (R251 carry preserved — shape decision waits for first MCU call-site shape).",
+        "0 wz upper-layer site reparameterised in R252 — R253 (sibling commit) wires the first leaf caller to validate the trait contract; the impl-with-no-caller anti-pattern is closed inside the same session.",
+        "clippy::default_constructed_unit_structs surfaced + fixed: TokioRuntime::default() removed from tests; doc-comment updated to document the unit-struct preferred-construction pattern (`TokioRuntime` directly).",
+        "JoinHandle wrapper is Unpin-friendly because tokio::task::JoinHandle is itself Unpin — the Future impl projects without pin-project / unsafe."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio --lib: clean.",
+        "cargo test -p wz-runtime-tokio --lib runtime_impl: 8/8 pass (spawn output, unit output, panic JoinFailed, Send bound, monotonic, sleep duration, sleep zero, composition).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates after the unit-struct default fix.",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A mnemosyne + A2 audit + B verify-codegen + C1 cargo test 472 + C2 clippy + D deploy + E binary-dep e2e 9/9).",
+        "wz-runtime-tokio lib test count: 464 -> 472 (+8).",
+        "pre-commit hook validate_workspace clean (T1=0, RT 12/12, sync).",
+        "commit c925b22 (feat(runtime): R252 TokioRuntime + TokioTime impl; 4 files +327)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R253 (sibling next commit this session): first leaf caller migration — wz-ap-demo declare_task three tokio::time::sleep sites to clock.sleep(ms) via T: TimeSource generic parameter. Validates the trait contract carries actual production semantics.",
+        "R254+ continue leaf-first migration of the 111 std/tokio call sites (R230 §5.P inventory baseline). publisher_task / query_task sleep sites in wz-ap-demo are the next natural batch.",
+        "R254+ Mutex / RwLock contract decision: still deferred until a real MCU call-site shape constrains the choice (per-runtime type alias vs MutexFamily GAT vs cfg-cond). R252 did not introduce a TokioMutex wrapper to keep the decision uncontaminated.",
+        "R254+ std::time::Instant comparison sites (R253 declare_task deadline check still uses std::time::Instant::now() directly) — trait surface for Instant-arithmetic is an explicit gap; either extend TimeSource with an Instant-shaped API or wrap now_monotonic_ms() arithmetic to replace the std::time::Instant comparison.",
+        "R254+ Allocator first concrete impl deferred until MCU buffer-pool round.",
+        "R254+ core::error::Error / std::error::Error impl on RuntimeError behind std feature.",
+        "wz-runtime-lwip crate re-introduction (Phase W lwIP integration round).",
+        "Liveliness Token wz-ap-demo migration (R250 carry).",
+        "ReplyRegistry timeout sweep (now unblocked since TokioTime exists in R252 — next session candidate).",
+        "Q_B / Q_E wire codec slots (SCE-side codec extension).",
+        "Querier / Publisher get_matching_status.",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff (no wz call sites — pin bump remains deferred).",
+        "Interest 70% remaining.",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R252 lesson: unit struct + ::default() call site triggers clippy::default_constructed_unit_structs which is included in `-D warnings`; the textbook fix is to remove the ::default() call (the literal `TokioRuntime` is the same value). Pattern to remember when authoring future zero-state runtime impls."
+      ]
+    },
     "Round 26": {
       "decision_summary": "R26 codebase Korean cleanup — fix 2 non-md files (mnemosyne.toml line 60 + scripts/verify-codegen.sh line 17) and establish non-md-English-only convention; historical atomic.json Korean (17 entries) and the legacy KO atomic section id remain locked by T2 frozen-ledger and the missing rename_section primitive respectively.",
       "changes_bullets": [
