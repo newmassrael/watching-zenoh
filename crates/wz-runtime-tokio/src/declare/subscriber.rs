@@ -41,6 +41,21 @@ pub type UndeclSubscriberCallback =
 pub struct RemoteSubscriberRegistry {
     on_decl: Vec<DeclSubscriberCallback>,
     on_undecl: Vec<UndeclSubscriberCallback>,
+    /// R290 — peer-declared subscribers tracked by `{id -> resolved
+    /// keyexpr}`. Pub-side analogue of the `declared` map landed on
+    /// [`crate::declare::RemoteQueryableRegistry`] in R288. Populated
+    /// on every inbound `DeclSubscriber` whose keyexpr resolves
+    /// through `peer_keyexpr_table`, and entries removed on the
+    /// matching `UndeclSubscriber`. Backbone for
+    /// [`crate::session::Publisher::get_matching_status`] which
+    /// iterates this map at consult time to decide whether any
+    /// currently-declared peer subscriber's keyexpr intersects the
+    /// publisher's keyexpr.
+    ///
+    /// Same HashMap rationale as the Q-side: by-id membership
+    /// invariant, by-id Undecl removal, no ordering dependency on
+    /// the rare full-iteration consult path.
+    declared: HashMap<u64, String>,
 }
 
 impl Default for RemoteSubscriberRegistry {
@@ -56,6 +71,7 @@ impl RemoteSubscriberRegistry {
         Self {
             on_decl: Vec::new(),
             on_undecl: Vec::new(),
+            declared: HashMap::new(),
         }
     }
 
@@ -92,6 +108,39 @@ impl RemoteSubscriberRegistry {
         self.on_undecl.len()
     }
 
+    /// R290 — count of currently-declared peer subscribers (those
+    /// whose inbound `DeclSubscriber` has been dispatched and whose
+    /// `UndeclSubscriber` has not). Pub-side mirror of
+    /// [`crate::declare::RemoteQueryableRegistry::declared_count`].
+    pub fn declared_count(&self) -> usize {
+        self.declared.len()
+    }
+
+    /// R290 — iterate over currently-declared peer subscribers as
+    /// `(id, resolved_keyexpr)` pairs. Pub-side mirror of
+    /// [`crate::declare::RemoteQueryableRegistry::iter_declared`].
+    /// Ordering is unspecified (HashMap iteration).
+    pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
+        self.declared.iter().map(|(id, ke)| (*id, ke.as_str()))
+    }
+
+    /// R290 — backbone for `Publisher::get_matching_status`. Pub-
+    /// side mirror of
+    /// [`crate::declare::RemoteQueryableRegistry::has_matching`]:
+    /// returns `true` iff at least one currently-declared peer
+    /// subscriber's keyexpr matches `publish_keyexpr` under the
+    /// bidirectional asymmetric pattern-match approximation. The
+    /// approximation boundary documented on the Q-side has_matching
+    /// applies symmetrically here.
+    pub fn has_matching(&self, publish_keyexpr: &str) -> bool {
+        let publish_chunks: Vec<&str> = publish_keyexpr.split('/').collect();
+        self.declared.values().any(|peer_keyexpr| {
+            let peer_chunks: Vec<&str> = peer_keyexpr.split('/').collect();
+            crate::pubsub::keyexpr_pattern_matches(&peer_chunks, publish_keyexpr)
+                || crate::pubsub::keyexpr_pattern_matches(&publish_chunks, peer_keyexpr)
+        })
+    }
+
     /// Route an inbound `Declare` envelope's inner body through the
     /// remote-subscriber callbacks. `DeclareVariant` arms other than
     /// `DeclSubscriber` / `UndeclSubscriber` are no-ops here —
@@ -116,11 +165,20 @@ impl RemoteSubscriberRegistry {
                     Some(s) => s,
                     None => return,
                 };
+                // R290 — same membership-tracking pattern as the
+                // Q-side registry: same-id-replaces semantic, no
+                // explicit conflict surfacing.
+                self.declared.insert(decl.id, resolved.clone());
                 for cb in &mut self.on_decl {
                     cb(decl, &resolved);
                 }
             }
             DeclareVariant::CodecZenohUndeclSubscriber(undecl) => {
+                // R290 — drop the membership entry first so a
+                // get_matching_status fired from inside the
+                // on_undecl callback chain observes the post-
+                // undeclare state.
+                self.declared.remove(&undecl.id);
                 for cb in &mut self.on_undecl {
                     cb(undecl);
                 }
@@ -373,5 +431,84 @@ mod tests {
         reg.dispatch_messages(&messages, &HashMap::new());
         assert_eq!(decl_count.load(Ordering::SeqCst), 2);
         assert_eq!(undecl_count.load(Ordering::SeqCst), 1);
+    }
+
+    // ── R290 declared / has_matching membership surface ──
+
+    #[test]
+    fn subscriber_declared_count_starts_at_zero_and_tracks_decl_undecl_lifecycle() {
+        let mut reg = RemoteSubscriberRegistry::new();
+        assert_eq!(reg.declared_count(), 0);
+
+        let decl1 =
+            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(10, 0, Some("home/temp")));
+        reg.dispatch_declare(&decl1, &HashMap::new());
+        assert_eq!(reg.declared_count(), 1);
+
+        let decl2 =
+            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(11, 0, Some("home/door")));
+        reg.dispatch_declare(&decl2, &HashMap::new());
+        assert_eq!(reg.declared_count(), 2);
+
+        let undecl1 = DeclareVariant::CodecZenohUndeclSubscriber(undecl_subscriber(10));
+        reg.dispatch_declare(&undecl1, &HashMap::new());
+        assert_eq!(reg.declared_count(), 1);
+        let remaining: Vec<(u64, &str)> = reg.iter_declared().collect();
+        assert_eq!(remaining, vec![(11, "home/door")]);
+
+        let undecl2 = DeclareVariant::CodecZenohUndeclSubscriber(undecl_subscriber(11));
+        reg.dispatch_declare(&undecl2, &HashMap::new());
+        assert_eq!(reg.declared_count(), 0);
+    }
+
+    #[test]
+    fn subscriber_has_matching_false_on_empty_registry() {
+        let reg = RemoteSubscriberRegistry::new();
+        assert!(!reg.has_matching("home/temp"));
+        assert!(!reg.has_matching("anything"));
+    }
+
+    #[test]
+    fn subscriber_has_matching_true_on_literal_keyexpr_equality() {
+        let mut reg = RemoteSubscriberRegistry::new();
+        let body =
+            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(7, 0, Some("home/temp")));
+        reg.dispatch_declare(&body, &HashMap::new());
+        assert!(reg.has_matching("home/temp"));
+        assert!(!reg.has_matching("home/door"));
+    }
+
+    #[test]
+    fn subscriber_has_matching_true_when_peer_pattern_covers_publish_literal() {
+        let mut reg = RemoteSubscriberRegistry::new();
+        let body =
+            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(8, 0, Some("home/**")));
+        reg.dispatch_declare(&body, &HashMap::new());
+        assert!(reg.has_matching("home/temp"));
+        assert!(reg.has_matching("home/door/inner"));
+        assert!(!reg.has_matching("other/x"));
+    }
+
+    #[test]
+    fn subscriber_has_matching_true_when_publish_pattern_covers_peer_literal() {
+        let mut reg = RemoteSubscriberRegistry::new();
+        let body =
+            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(9, 0, Some("home/temp")));
+        reg.dispatch_declare(&body, &HashMap::new());
+        assert!(reg.has_matching("home/**"));
+        assert!(reg.has_matching("**"));
+        assert!(!reg.has_matching("other/**"));
+    }
+
+    #[test]
+    fn subscriber_has_matching_false_after_undeclare() {
+        let mut reg = RemoteSubscriberRegistry::new();
+        let decl =
+            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(12, 0, Some("home/temp")));
+        reg.dispatch_declare(&decl, &HashMap::new());
+        assert!(reg.has_matching("home/temp"));
+        let undecl = DeclareVariant::CodecZenohUndeclSubscriber(undecl_subscriber(12));
+        reg.dispatch_declare(&undecl, &HashMap::new());
+        assert!(!reg.has_matching("home/temp"));
     }
 }

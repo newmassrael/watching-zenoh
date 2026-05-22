@@ -2016,6 +2016,37 @@ impl Publisher {
         opts.kind = SampleKind::Del;
         self.session.publish(&self.keyexpr, &[], opts)
     }
+
+    /// R290 — pub-side mirror of [`Querier::get_matching_status`].
+    /// Mirror of zenoh-pico's `z_publisher_get_matching_status`
+    /// (`vendor/zenoh-pico/src/api/api.c`): returns a
+    /// [`MatchingStatus`] whose `matching` field is `true` iff at
+    /// least one peer has currently declared a subscriber whose
+    /// keyexpr matches the publisher's keyexpr.
+    ///
+    /// Consults
+    /// [`crate::declare::RemoteSubscriberRegistry::has_matching`]
+    /// inside the session's observer (the registry tracks the
+    /// `{peer_decl_id -> resolved keyexpr}` membership maintained
+    /// by the drive_session loop dispatch of inbound
+    /// `Declare(DeclSubscriber)` / `Declare(UndeclSubscriber)`
+    /// records). Lock contention is the single observer mutex held
+    /// briefly to consult the membership; no wire frame is emitted.
+    ///
+    /// Match algorithm is the same bidirectional asymmetric pattern-
+    /// match approximation used by [`Querier::get_matching_status`]
+    /// — see that doc-comment for the boundary description and the
+    /// R291 honest-intersection carry.
+    pub fn get_matching_status(&self) -> MatchingStatus {
+        let observer = self.session.observer();
+        let obs = match observer.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        MatchingStatus {
+            matching: obs.remote_subscribers.has_matching(&self.keyexpr),
+        }
+    }
 }
 
 /// R244 — aliased-keyexpr counterpart of [`Publisher`]. Holds
@@ -2084,6 +2115,42 @@ impl PublisherAliased {
             &[],
             opts,
         )
+    }
+
+    /// R290 — aliased-keyexpr counterpart of
+    /// [`Publisher::get_matching_status`]. Mirrors
+    /// [`QuerierAliased::get_matching_status`] on the pub side:
+    /// resolves the declared `mapping_id` through the outbound
+    /// keyexpr table, composes the optional `inline_suffix` to the
+    /// effective keyexpr, and consults
+    /// [`crate::declare::RemoteSubscriberRegistry::has_matching`].
+    /// Returns `Err(PublishAliasError::UnknownMapping(id))` when
+    /// the declared `mapping_id` is not present on the outbound
+    /// mapping table — same contract as [`Self::put`] /
+    /// [`Self::delete`], mirroring the declare-before-publish
+    /// invariant for the matching-status consult path.
+    pub fn get_matching_status(&self) -> Result<MatchingStatus, PublishAliasError> {
+        let base = self
+            .session
+            .actions()
+            .resolve_outbound_mapping(self.mapping_id)
+            .ok_or(PublishAliasError::UnknownMapping(self.mapping_id))?;
+        let effective_keyexpr = match self.inline_suffix.as_deref() {
+            None => base,
+            Some(s) => {
+                let mut composed = base;
+                composed.push_str(s);
+                composed
+            }
+        };
+        let observer = self.session.observer();
+        let obs = match observer.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        Ok(MatchingStatus {
+            matching: obs.remote_subscribers.has_matching(&effective_keyexpr),
+        })
     }
 }
 
@@ -5700,6 +5767,184 @@ mod tests {
         );
         pa.delete().expect("declared mapping resolves");
         assert_eq!(*kind_seen.lock().unwrap(), Some(SampleKind::Del));
+    }
+
+    // ── R290 Publisher / PublisherAliased::get_matching_status ──
+
+    /// R290 — local DeclSubscriber / UndeclSubscriber constructors
+    /// for session.rs tests. Mirror of the R288 make_decl_queryable /
+    /// make_undecl_queryable helpers; the
+    /// crate::declare::test_helpers versions are pub(super)-scoped
+    /// to the declare module and not visible here.
+    fn make_decl_subscriber(
+        id: u64,
+        keyexpr_literal: &str,
+    ) -> wz_codecs::declare::DeclareVariant {
+        use wz_codecs::decl_subscriber::DeclSubscriber;
+        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+        use wz_codecs::wireexpr_local::WireexprLocal;
+        let suffix = keyexpr_literal.to_string();
+        let suffix_len = Some(suffix.len() as u64);
+        let keyexpr = Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len,
+                suffix: Some(suffix),
+            }),
+        };
+        wz_codecs::declare::DeclareVariant::CodecZenohDeclSubscriber(DeclSubscriber {
+            id,
+            keyexpr,
+            ..DeclSubscriber::default()
+        })
+    }
+
+    fn make_undecl_subscriber(id: u64) -> wz_codecs::declare::DeclareVariant {
+        use wz_codecs::undecl_subscriber::UndeclSubscriber;
+        wz_codecs::declare::DeclareVariant::CodecZenohUndeclSubscriber(UndeclSubscriber {
+            id,
+            ..UndeclSubscriber::default()
+        })
+    }
+
+    #[test]
+    fn publisher_get_matching_status_false_on_fresh_session_with_no_peers() {
+        let (session, _driver) = build_session();
+        let publisher = session.declare_publisher("home/temp", PublishOptions::put());
+        assert_eq!(
+            publisher.get_matching_status(),
+            MatchingStatus { matching: false },
+            "no peer DeclSubscriber dispatched yet — matching is false"
+        );
+    }
+
+    #[test]
+    fn publisher_get_matching_status_true_after_peer_decl_with_matching_keyexpr() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        let publisher = session.declare_publisher("home/temp", PublishOptions::put());
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_subscribers
+            .dispatch_declare(&make_decl_subscriber(42, "home/temp"), &HashMap::new());
+        assert_eq!(
+            publisher.get_matching_status(),
+            MatchingStatus { matching: true },
+            "peer DeclSubscriber for the literal keyexpr — matching is true"
+        );
+    }
+
+    #[test]
+    fn publisher_get_matching_status_true_when_peer_pattern_covers_publisher_literal() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        let publisher = session.declare_publisher("home/temp", PublishOptions::put());
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_subscribers
+            .dispatch_declare(&make_decl_subscriber(43, "home/**"), &HashMap::new());
+        assert_eq!(
+            publisher.get_matching_status(),
+            MatchingStatus { matching: true },
+            "peer pattern home/** covers the literal home/temp — matching is true"
+        );
+    }
+
+    #[test]
+    fn publisher_get_matching_status_false_after_peer_undeclare() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        let publisher = session.declare_publisher("home/temp", PublishOptions::put());
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_subscribers
+            .dispatch_declare(&make_decl_subscriber(45, "home/temp"), &HashMap::new());
+        assert_eq!(publisher.get_matching_status(), MatchingStatus { matching: true });
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_subscribers
+            .dispatch_declare(&make_undecl_subscriber(45), &HashMap::new());
+        assert_eq!(
+            publisher.get_matching_status(),
+            MatchingStatus { matching: false },
+            "post-UndeclSubscriber — matching falls back to false"
+        );
+    }
+
+    #[test]
+    fn publisher_get_matching_status_false_with_non_matching_peer_keyexpr() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        let publisher = session.declare_publisher("home/temp", PublishOptions::put());
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_subscribers
+            .dispatch_declare(&make_decl_subscriber(46, "other/foo"), &HashMap::new());
+        assert_eq!(
+            publisher.get_matching_status(),
+            MatchingStatus { matching: false }
+        );
+    }
+
+    #[test]
+    fn publisher_aliased_get_matching_status_returns_err_on_unknown_mapping() {
+        let (session, _driver) = build_session();
+        let pa = session.declare_publisher_aliased(88, None, PublishOptions::put());
+        assert_eq!(
+            pa.get_matching_status(),
+            Err(PublishAliasError::UnknownMapping(88)),
+            "unresolvable mapping surfaces as PublishAliasError::UnknownMapping"
+        );
+    }
+
+    #[test]
+    fn publisher_aliased_get_matching_status_threads_inline_suffix_into_consult() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+        let pa = session.declare_publisher_aliased(7, Some("/kitchen"), PublishOptions::put());
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_subscribers
+            .dispatch_declare(&make_decl_subscriber(71, "home/**"), &HashMap::new());
+        assert_eq!(
+            pa.get_matching_status(),
+            Ok(MatchingStatus { matching: true }),
+            "inline_suffix-composed effective keyexpr matches peer pattern home/**"
+        );
+    }
+
+    #[test]
+    fn publisher_aliased_get_matching_status_false_after_undeclared_mapping_drop() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+        let pa = session.declare_publisher_aliased(7, None, PublishOptions::put());
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_subscribers
+            .dispatch_declare(&make_decl_subscriber(73, "home/temp"), &HashMap::new());
+        assert_eq!(pa.get_matching_status(), Ok(MatchingStatus { matching: true }));
+        session.actions().send_undeclare_kexpr(7);
+        assert_eq!(
+            pa.get_matching_status(),
+            Err(PublishAliasError::UnknownMapping(7)),
+            "post-undeclare_kexpr — mapping unresolvable, surfaces UnknownMapping"
+        );
     }
 
     // ── R245 Subscriber + SubscribeOptions + declare_subscriber{_aliased} ──
