@@ -5912,6 +5912,24 @@ pub enum DriverOutcome {
 /// between the query register site and this `drive_session`
 /// invocation (`TokioTime` is `Copy`, so `.clone()` or `&` reuse
 /// preserves the epoch).
+///
+/// R264 cancel-safety carry — adding a sweep_tick_ms parameter
+/// inside this loop (clamp every sleep arm by N ms so on_tick
+/// fires every N ms) was attempted and reverted because
+/// `poll_and_dispatch_one` is NOT cancel-safe for length-prefixed
+/// drivers such as wz-ap-demo's `InboundReadDriver`: cancelling
+/// the future mid-frame (between the u16 length read and the
+/// payload read) drops the captured length and the next poll
+/// re-syncs from the wrong byte offset. R264 fixture surfaced
+/// this as a regression in wz_query_reply_round_trip's reply
+/// chain when the sweep cadence was set to 100 ms. Sub-second
+/// sweep cadence therefore belongs in a separate task that does
+/// not race `poll_and_dispatch_one`. wz-ap-demo spawns such a
+/// task (search for `sweep_task` in run_demo). The lease-bound
+/// in-loop sweep is left in place for defense-in-depth — it
+/// fires once per lease tick (10 s on production AP params) but
+/// is harmless because `sweep_timed_out` is idempotent for
+/// already-fired entries.
 pub async fn drive_session_until_terminal<D, F, G, T>(
     driver: &mut D,
     actions: &Arc<SessionLinkActions>,

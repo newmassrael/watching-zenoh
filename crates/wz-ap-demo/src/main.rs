@@ -1316,15 +1316,52 @@ async fn run_demo(
     let mut driver = inbound;
     let observer_for_dispatch = observer.clone();
     // R260 — TimeSource-mediated sleep replaces the prior internal
-    // `tokio::time::sleep` in the lease-deadline race. R262 also
-    // uses this same clock to fire per-iteration ticks that sweep
-    // ReplyRegistry timeouts. R263 — drive_session_until_terminal
-    // now reads the shared `session_clock` reference so the sweep's
-    // now_monotonic_ms() shares monotonic epoch with the
-    // register-time deadline_ms (when query_timeout_ms > 0). See
-    // the session_clock construction above for the full epoch-
-    // sharing contract.
-    let observer_for_tick = observer.clone();
+    // `tokio::time::sleep` in the lease-deadline race of
+    // `drive_session_until_terminal`. R263 — `&session_clock` shares
+    // monotonic epoch with the QUERY_RID register-time deadline_ms
+    // computation above (when --query-timeout-ms > 0).
+    //
+    // R264 — sweep_task is a dedicated `TimeSource::sleep`-driven
+    // ticker that fires `ReplyRegistry::sweep_timed_out` every 100 ms.
+    // It exists separately from `drive_session_until_terminal`'s
+    // R262 on_tick because the drive_session loop's
+    // `poll_and_dispatch_one` future is NOT cancel-safe for
+    // length-prefixed link drivers such as the `InboundReadDriver`
+    // above (cancellation between the u16 length read and the
+    // payload read drops captured bytes — see the R264 cancel-safety
+    // carry in `drive_session_until_terminal`'s doc-comment).
+    // Clamping the drive_session loop's sleep arm to 100 ms would
+    // cancel the in-flight poll 10x/s; running the sweep here as a
+    // peer task means the drive_session loop's poll future runs to
+    // completion without competing select arms.
+    //
+    // Sweep cadence sizing (100 ms): production AP wz-ap-demo
+    // advertises `--query-timeout-ms` as a user-facing knob with
+    // implicit sub-second resolution. 100 ms bounds on_final's
+    // wall-time at `deadline_ms + 100 ms + scheduler_jitter` (sub-
+    // millisecond on tokio's multi-thread scheduler). MCU profiles
+    // inherit the same constant once Phase W lwIP integration lands
+    // unless a deploy-side knob surfaces; the implementation uses
+    // only `TimeSource::sleep` so the same code is MCU-portable
+    // (does not depend on `tokio::time::interval` specifics — the
+    // sleep-loop shape was chosen for trait portability).
+    let sweep_clock = session_clock;
+    let observer_for_sweep = observer.clone();
+    let sweep_task = tokio::spawn(async move {
+        loop {
+            sweep_clock.sleep(100).await;
+            // Lock the observer for the minimum window: a single
+            // sweep call. Holding the lock across an await would
+            // serialise this task against drive_session's inbound
+            // dispatch (also holds observer.lock()).
+            let mut obs = match observer_for_sweep.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let _ = obs.replies.sweep_timed_out(sweep_clock.now_monotonic_ms());
+        }
+    });
+
     let outcome = drive_session_until_terminal(
         &mut driver,
         &actions,
@@ -1338,19 +1375,22 @@ async fn run_demo(
                 .expect("observer mutex poisoned by panic in subscriber callback")
                 .dispatch(event, &actions);
         },
-        move |now_ms: u64| {
-            // R262 per-iteration tick: sweep ReplyRegistry timeouts.
-            // R263 — once --query-timeout-ms > 0, the QUERY_RID
-            // pending entry below carries a Some(deadline_ms) and
-            // this sweep surfaces its on_final within
-            // (timeout_ms + lease-tick-quantum) of the deadline.
-            let mut obs = observer_for_tick
-                .lock()
-                .expect("observer mutex poisoned by panic in reply callback");
-            let _ = obs.replies.sweep_timed_out(now_ms);
+        |_now_ms: u64| {
+            // R264 — sweep moved to the dedicated `sweep_task`
+            // above; the in-loop on_tick is a no-op so the
+            // drive_session iteration cadence (~once per
+            // lease-tick or inbound frame) does not double-fire
+            // the sweep. The on_tick parameter is preserved on
+            // the trait surface for future per-iteration
+            // observability uses.
         },
     )
     .await;
+    // R264 — terminate the sweep task; abort() is sufficient since
+    // the task body has no shared mutable state beyond the
+    // observer (cleanly dropped at task join) and no on-Drop
+    // cleanup requirements.
+    sweep_task.abort();
     log::info!("wz-ap-demo: session ended: {outcome:?}");
     log::info!("wz-ap-demo: action trace = {:?}", actions.trace_snapshot());
 
