@@ -10638,6 +10638,64 @@
         "R235 behavioral note: loopback branch fires self-publish on matched keyexpr (was wire-only pre-R235)."
       ]
     },
+    "Round 236": {
+      "decision_summary": "R236 Session::new auto-wires set_own_zid from SessionInitParams.zid; FSM event hook deferred in favor of constructor-time install (R231 carry retire).",
+      "changes_bullets": [
+        "session.rs Session::new forwards actions.params.zid -> set_own_zid at construction.",
+        "Silent skip on empty zid (test fixtures); silent skip on len>16 (set_own_zid rejects).",
+        "R231 set_own_zid doc updated: caller-driven note retired; method retained for override/re-init.",
+        "Mirrors zenoh-pico _z_session_init stamping _local_zid at session creation.",
+        "lib test session_new_auto_wires_set_own_zid_from_params (fixture zid asserted).",
+        "lib test session_new_with_empty_zid_skips_auto_wire (own_zid stays None).",
+        "lib test session_new_with_overlength_zid_silently_skips_auto_wire (len-17 rejected).",
+        "lib test set_own_zid_forwards_to_subscriber_registry updated to clear before assert."
+      ],
+      "verification_bullets": [
+        "cargo build --package wz-ap-demo --package wz-runtime-tokio: clean (0.48s).",
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 339 -> 342 (+3 R236 cases).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (65 no-regression)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R237 inbound peer keyexpr mapping table integration / resolve_inbound_mapping accessor.",
+        "QueryableRegistry self-loopback (R227 follow-up, 2-3 round; mesh integration tier).",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "R236 lesson: handshake-completion hook unnecessary when state is constructor-known."
+      ],
+      "publishable_decision_summary": "R236 Session::new auto-wires set_own_zid from SessionInitParams.zid; FSM event hook deferred in favor of constructor-time install (R231 carry retire).",
+      "publishable_changes_bullets": [
+        "session.rs Session::new forwards actions.params.zid -> set_own_zid at construction.",
+        "Silent skip on empty zid (test fixtures); silent skip on len>16 (set_own_zid rejects).",
+        "R231 set_own_zid doc updated: caller-driven note retired; method retained for override/re-init.",
+        "Mirrors zenoh-pico _z_session_init stamping _local_zid at session creation.",
+        "lib test session_new_auto_wires_set_own_zid_from_params (fixture zid asserted).",
+        "lib test session_new_with_empty_zid_skips_auto_wire (own_zid stays None).",
+        "lib test session_new_with_overlength_zid_silently_skips_auto_wire (len-17 rejected).",
+        "lib test set_own_zid_forwards_to_subscriber_registry updated to clear before assert."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build --package wz-ap-demo --package wz-runtime-tokio: clean (0.48s).",
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 339 -> 342 (+3 R236 cases).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (65 no-regression)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R237 inbound peer keyexpr mapping table integration / resolve_inbound_mapping accessor.",
+        "QueryableRegistry self-loopback (R227 follow-up, 2-3 round; mesh integration tier).",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "R236 lesson: handshake-completion hook unnecessary when state is constructor-known."
+      ]
+    },
     "Round 24": {
       "decision_summary": "Phase E start — README.md 본문 저작 (16 byte stub → 150+ line prose); project overview + Phase A/B+ 상태 + 디렉터리 / 빌드 / Local CI gates / 라이센스 / 외부 참조 / 기여 절차. workspace.docs 재등록 + atomic decompose는 R25+ carry (R7 scope correction 직후 단계 분리).",
       "changes_bullets": [
