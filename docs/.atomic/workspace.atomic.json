@@ -13730,6 +13730,50 @@
         "Continued: Instant->u64ms, Cancellable YAGNI, Phase W full lwIP, Q_B/Q_E codecs, SCE pin OK"
       ]
     },
+    "Round 276": {
+      "decision_summary": "R276 purges CLAUDE.md staleness: 13->12 docs (3 sites), Phase A-E migration plan + Raw Edit carve-out sections retired post-R27, tense + parenthetical fixes.",
+      "changes_bullets": [
+        "CLAUDE.md lines 4-5 + 15 + 77: `13 docs` -> `12 docs` (3 sites total)",
+        "CLAUDE.md `## Atomic store adoption` section: 39 lines -> 22-line `## Atomic store baseline`",
+        "CLAUDE.md `## Raw Edit carve-out -- transitional` 12 lines -> 7-line `closed` summary",
+        "CLAUDE.md `When Phase A coding lands` -> `Author-side source files` (Phase A code closed)",
+        "CLAUDE.md `## External references (carry from SESSION_KICKOFF)` -> `## External references`"
+      ],
+      "verification_bullets": [
+        "Pre-edit baseline: entries=274 / sections=215 / T1=0 / RT 12/12 / sync (R275 close)",
+        "Post-edit validate: same (CLAUDE.md outside workspace.docs, no atomic delta)",
+        "grep zero hits on `13 design`, `13 docs in`, `Phase A coding lands`, SESSION_KICKOFF parenthetical",
+        "CLAUDE.md line count: 224 -> 203 (-21); git diff +32 -53; T3 / RT / T1 unchanged"
+      ],
+      "carry_forward_bullets": [
+        "CLAUDE.md staleness purged at R276; no further governance-doc audit candidate visible.",
+        "R276 lesson: CLAUDE.md is non-atomic; audit recorded via empty impact_refs convention",
+        "R275 carry `CLAUDE.md residual staleness` CLOSED at R276 (migration-plan + carve-out historical)",
+        "Open R267-R270 architectural carries unchanged; next textbook candidate = architectural ask",
+        "Continued: Instant->u64ms, Liveliness Token, Querier matching status, Q_B/Q_E codecs"
+      ],
+      "publishable_decision_summary": "R276 purges CLAUDE.md staleness: 13->12 docs (3 sites), Phase A-E migration plan + Raw Edit carve-out sections retired post-R27, tense + parenthetical fixes.",
+      "publishable_changes_bullets": [
+        "CLAUDE.md lines 4-5 + 15 + 77: `13 docs` -> `12 docs` (3 sites total)",
+        "CLAUDE.md `## Atomic store adoption` section: 39 lines -> 22-line `## Atomic store baseline`",
+        "CLAUDE.md `## Raw Edit carve-out -- transitional` 12 lines -> 7-line `closed` summary",
+        "CLAUDE.md `When Phase A coding lands` -> `Author-side source files` (Phase A code closed)",
+        "CLAUDE.md `## External references (carry from SESSION_KICKOFF)` -> `## External references`"
+      ],
+      "publishable_verification_bullets": [
+        "Pre-edit baseline: entries=274 / sections=215 / T1=0 / RT 12/12 / sync (R275 close)",
+        "Post-edit validate: same (CLAUDE.md outside workspace.docs, no atomic delta)",
+        "grep zero hits on `13 design`, `13 docs in`, `Phase A coding lands`, SESSION_KICKOFF parenthetical",
+        "CLAUDE.md line count: 224 -> 203 (-21); git diff +32 -53; T3 / RT / T1 unchanged"
+      ],
+      "publishable_carry_forward_bullets": [
+        "CLAUDE.md staleness purged at R276; no further governance-doc audit candidate visible.",
+        "R276 lesson: CLAUDE.md is non-atomic; audit recorded via empty impact_refs convention",
+        "R275 carry `CLAUDE.md residual staleness` CLOSED at R276 (migration-plan + carve-out historical)",
+        "Open R267-R270 architectural carries unchanged; next textbook candidate = architectural ask",
+        "Continued: Instant->u64ms, Liveliness Token, Querier matching status, Q_B/Q_E codecs"
+      ]
+    },
     "Round 28": {
       "decision_summary": "Phase A control-plane SCXML round — 3 new algorithm-kind validators (whatami / payload-ext-id / transport-ext-id) covering §3 Hello body, §7.1 payload-layer per-context extension allowlist, §4.4 transport-layer per-control-message extension allowlist.",
       "changes_bullets": [
