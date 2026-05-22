@@ -72,7 +72,9 @@ use crate::reply::{InboundReply, ReplyHandle};
 use crate::sample::{
     EncodingHint, QosLevel, Reliability, Sample, SampleKind, SourceInfo, TimestampHint,
 };
-use crate::session_glue::{ConsolidationMode, PushMetadata, QueryTarget, SessionLinkActions};
+use crate::session_glue::{
+    ConsolidationMode, PushMetadata, QueryMetadata, QueryTarget, SessionLinkActions,
+};
 
 /// Options bundle for [`Session::publish`]. Carries the locality
 /// routing predicate (`allowed_destination`), the reliability hint
@@ -389,6 +391,31 @@ impl QueryOptions {
             n += 1;
         }
         n
+    }
+
+    /// R240 — extract the wire-encoder-facing metadata bundle from a
+    /// QueryOptions instance so [`Session::query`] can hand it to
+    /// [`crate::session_glue::SessionLinkActions::send_request_query_with_meta`]
+    /// without the lower module learning about [`Locality`] /
+    /// `allowed_destination` (those stay on the dispatch-time
+    /// surface). The `payload` and `encoding` slots are intentionally
+    /// not threaded here — current wz codec has no Q_B / Q_E slot
+    /// on the outbound `Request(Query)`, so they stay on
+    /// [`QueryOptions`] as future-additive carries (R241+ when the
+    /// codec lands them).
+    ///
+    /// Clones owned slots (attachment Vec); the expected query path
+    /// performs one extraction per Session::query call so the
+    /// allocation cost is amortised against the wire frame's existing
+    /// copies. Mirrors R233's
+    /// [`PublishOptions::push_metadata`] pattern verbatim.
+    fn query_metadata(&self) -> QueryMetadata {
+        QueryMetadata {
+            target: self.target,
+            consolidation: self.consolidation,
+            attachment: self.attachment.clone(),
+            timeout_ms: self.timeout_ms,
+        }
     }
 }
 
@@ -840,7 +867,20 @@ impl Session {
         };
 
         if allows_remote {
-            self.actions.send_request_query(rid, 0, Some(keyexpr));
+            // R240 — thread QueryOptions metadata (target /
+            // consolidation / attachment / timeout_ms) through the
+            // wire branch. The R233 PushMetadata pattern is mirrored
+            // here: empty bundle short-circuits to the no-metadata
+            // builder so the byte-stable
+            // `send_request_query` wire shape stays unchanged for
+            // callers that pass `QueryOptions::default()`.
+            let meta = opts.query_metadata();
+            if meta.is_empty() {
+                self.actions.send_request_query(rid, 0, Some(keyexpr));
+            } else {
+                self.actions
+                    .send_request_query_with_meta(rid, 0, Some(keyexpr), &meta);
+            }
         }
 
         handle
@@ -2534,5 +2574,168 @@ mod tests {
         assert_eq!(actions.alloc_next_request_id(), 0);
         assert_eq!(actions.alloc_next_request_id(), 1);
         assert_eq!(actions.alloc_next_request_id(), 2);
+    }
+
+    // ── R240 wire-side QueryOptions propagation ──
+
+    #[test]
+    fn query_options_query_metadata_extracts_wire_fields() {
+        // R240 — QueryOptions::query_metadata must surface the
+        // wire-propagatable subset (target / consolidation /
+        // attachment / timeout_ms). payload / encoding stay on
+        // QueryOptions as future-additive carries until the wz
+        // codec lands the Q_B / Q_E slots; the extracted
+        // QueryMetadata MUST NOT carry them.
+        let opts = QueryOptions::get()
+            .with_target(QueryTarget::AllComplete)
+            .with_consolidation(ConsolidationMode::Monotonic)
+            .with_attachment(b"q-att".to_vec())
+            .with_timeout_ms(5_000)
+            .with_payload(b"unused-payload".to_vec())
+            .with_encoding(EncodingHint { packed_id: 1, schema: None });
+        let meta = opts.query_metadata();
+        assert_eq!(meta.target, Some(QueryTarget::AllComplete));
+        assert_eq!(meta.consolidation, Some(ConsolidationMode::Monotonic));
+        assert_eq!(meta.attachment.as_deref(), Some(&b"q-att"[..]));
+        assert_eq!(meta.timeout_ms, 5_000);
+    }
+
+    #[test]
+    fn query_options_default_query_metadata_is_empty() {
+        let meta = QueryOptions::default().query_metadata();
+        assert!(meta.is_empty(), "default options produce empty wire metadata");
+    }
+
+    #[test]
+    fn query_wire_branch_with_empty_meta_emits_no_meta_fast_path_frame() {
+        // Session::query with default options (Locality::Any, no
+        // metadata) MUST take the no-meta fast path → wire frame is
+        // byte-identical to a standalone send_request_query call.
+        // Pins the R240 short-circuit invariant at the Session
+        // level.
+        let (session, driver) = build_session();
+        session.query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+            |_| {},
+            |_| {},
+        );
+        let session_frame = driver.frames.lock().unwrap()[0].0.clone();
+
+        // Mirror the call against an independent recording driver +
+        // SessionLinkActions, using the bare no-metadata API, and
+        // assert byte parity. Construct a fresh session so the
+        // outbound Frame SN starts from the same initial_sn=1; the
+        // alloc_next_request_id counter also starts at 0 so the
+        // request_id matches.
+        let driver2 = Arc::new(RecordingDriver::new());
+        let actions2 = SessionLinkActions::new(driver2.clone(), fixture_params());
+        let rid = actions2.alloc_next_request_id();
+        actions2.send_request_query(rid, 0, Some("home/temp"));
+        let baseline = driver2.frames.lock().unwrap()[0].0.clone();
+
+        assert_eq!(
+            session_frame, baseline,
+            "Session::query with default options must produce byte-stable parity"
+        );
+    }
+
+    #[test]
+    fn query_wire_branch_with_target_threads_target_through_with_meta() {
+        // QueryOptions::with_target lands on the outbound Request via
+        // the with-meta path. Pins the R240 Session-level integration
+        // between QueryOptions.target → QueryMetadata.target →
+        // RequestQueryBuilder::request_target.
+        let (session, driver) = build_session();
+        session.query(
+            "home/temp",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::Remote)
+                .with_target(QueryTarget::AllComplete),
+            |_| {},
+            |_| {},
+        );
+
+        // Re-encode an equivalent standalone Request with target=All
+        // and assert the wire bytes appear verbatim in the recorded
+        // frame.
+        use crate::session_glue::build_request_query_with_target;
+        let standalone =
+            build_request_query_with_target(0, 0, Some("home/temp"), QueryTarget::AllComplete);
+        let standalone_bytes = standalone.encode_to_vec();
+        let frame = &driver.frames.lock().unwrap()[0].0;
+        assert!(
+            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            "Session::query wire frame must contain with-target Request bytes"
+        );
+    }
+
+    #[test]
+    fn query_wire_branch_with_attachment_threads_attachment_through_with_meta() {
+        let (session, driver) = build_session();
+        session.query(
+            "home/temp",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::Remote)
+                .with_attachment(b"q-att".to_vec()),
+            |_| {},
+            |_| {},
+        );
+
+        use crate::session_glue::build_request_query_with_attachment;
+        let standalone = build_request_query_with_attachment(0, 0, Some("home/temp"), b"q-att");
+        let standalone_bytes = standalone.encode_to_vec();
+        let frame = &driver.frames.lock().unwrap()[0].0;
+        assert!(
+            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            "wire frame must contain with-attachment Request bytes"
+        );
+    }
+
+    #[test]
+    fn query_wire_branch_with_consolidation_threads_consolidation_through_with_meta() {
+        let (session, driver) = build_session();
+        session.query(
+            "home/temp",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::Remote)
+                .with_consolidation(ConsolidationMode::Latest),
+            |_| {},
+            |_| {},
+        );
+
+        use crate::session_glue::build_request_query_with_consolidation;
+        let standalone =
+            build_request_query_with_consolidation(0, 0, Some("home/temp"), ConsolidationMode::Latest);
+        let standalone_bytes = standalone.encode_to_vec();
+        let frame = &driver.frames.lock().unwrap()[0].0;
+        assert!(
+            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            "wire frame must contain with-consolidation Request bytes"
+        );
+    }
+
+    #[test]
+    fn query_session_local_with_any_metadata_skips_wire_branch_entirely() {
+        // R240 invariance: even with non-empty QueryMetadata, a
+        // Locality::SessionLocal query MUST NOT touch the wire. The
+        // meta extraction happens regardless but the actions surface
+        // is never invoked.
+        let (session, driver) = build_session();
+        session.query(
+            "home/temp",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::SessionLocal)
+                .with_target(QueryTarget::All)
+                .with_attachment(b"q-att".to_vec())
+                .with_timeout_ms(1_000),
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "SessionLocal must skip the wire branch regardless of metadata"
+        );
     }
 }
