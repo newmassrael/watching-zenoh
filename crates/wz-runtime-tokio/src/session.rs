@@ -1453,11 +1453,16 @@ impl Session {
     /// dropping. Same ordering rule as
     /// [`crate::pubsub::SubscriberRegistry::register`].
     ///
-    /// ## Future-additive surface
+    /// ## Aliased counterpart
     ///
-    /// An aliased counterpart (`declare_liveliness_subscriber_aliased`)
-    /// mirroring [`Self::declare_token_aliased`] is reserved for a
-    /// future round; the literal form is the entry point for R280.
+    /// For previously-declared-keyexpr alias form use
+    /// [`Self::declare_liveliness_subscriber_aliased`] (R282) — same
+    /// one-shot-resolution contract as
+    /// [`Self::declare_subscriber_aliased`] /
+    /// [`Self::declare_token_aliased`], plus the wire-side
+    /// bandwidth-efficient alias-form `Interest` emit. The literal
+    /// form on this method stays the entry point when the caller has
+    /// no prior `send_declare_keyexpr` mapping for the pattern.
     pub fn declare_liveliness_subscriber(
         &self,
         keyexpr: impl Into<String>,
@@ -1494,6 +1499,105 @@ impl Session {
             keyexpr: keyexpr_string,
             options,
         }
+    }
+
+    /// R282 — aliased-keyexpr counterpart of
+    /// [`Self::declare_liveliness_subscriber`]. Resolves `mapping_id` +
+    /// `inline_suffix` to the literal form *at declare time* via the
+    /// outbound mapping table and registers the slot against the
+    /// resolved literal; the outbound `Interest` frame carries the
+    /// alias form (`mapping_id` + optional `inline_suffix`) on the
+    /// wire so the peer's `_z_n_interest_decode` can pick the
+    /// bandwidth-efficient form natively — same rationale as
+    /// [`Self::declare_token_aliased`].
+    ///
+    /// ## One-shot resolution
+    ///
+    /// Resolution runs once at declare time. A subsequent
+    /// [`SessionLinkActions::send_undeclare_kexpr`] retracting
+    /// `mapping_id` does NOT affect this handle's bookkeeping:
+    ///
+    /// - the local slot already captured the resolved literal pattern
+    ///   so callback dispatch (which matches inbound `Decl*Token`
+    ///   resolved keyexprs against the slot's stored pattern) keeps
+    ///   firing;
+    /// - the wire frame already left the session, so the peer's
+    ///   `remote-interests` table already holds the resolved
+    ///   subscription.
+    ///
+    /// Same contract as [`Self::declare_subscriber_aliased`] /
+    /// [`Self::declare_queryable_aliased`] /
+    /// [`Self::declare_token_aliased`] on their respective sides.
+    ///
+    /// ## Registration ordering
+    ///
+    /// Slot register precedes wire emit, identical to
+    /// [`Self::declare_liveliness_subscriber`] — the race against an
+    /// inbound `DeclToken` arriving before our `Interest` is processed
+    /// by the peer (or against a re-declared subscriber after a
+    /// session-layer Reconnect, R267+ topology) needs the slot ready
+    /// at callback-dispatch time.
+    ///
+    /// ## Errors
+    ///
+    /// Returns `Err(LivelinessSubscriberAliasError::UnknownMapping(id))`
+    /// only when the mapping is absent at declare time — no
+    /// caller-facing error on every callback fire. Mirror of
+    /// [`SubscribeAliasError`] / [`QueryableAliasError`] /
+    /// [`QueryAliasError`] / [`PublishAliasError`] /
+    /// [`LivelinessAliasError`] on the liveliness subscriber side.
+    pub fn declare_liveliness_subscriber_aliased(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        options: LivelinessSubscriberOptions,
+        callback: impl FnMut(LivelinessSample<'_>) + Send + 'static,
+    ) -> Result<LivelinessSubscriber, LivelinessSubscriberAliasError> {
+        let base = self
+            .actions
+            .resolve_outbound_mapping(mapping_id)
+            .ok_or(LivelinessSubscriberAliasError::UnknownMapping(mapping_id))?;
+        let resolved = match inline_suffix {
+            None => base,
+            Some(s) => {
+                let mut composed = base;
+                composed.push_str(s);
+                composed
+            }
+        };
+        let interest_id = self.actions.alloc_next_interest_id();
+        // Register first against the resolved literal so any racing
+        // inbound dispatch (peer responding to an earlier
+        // session-arming Interest, an out-of-order DeclToken that
+        // arrives before our Interest is processed by the peer) finds
+        // the slot ready and fires the callback. Same ordering rule
+        // as `declare_liveliness_subscriber`.
+        self.observer
+            .lock()
+            .expect("observer mutex poisoned by an earlier panicked callback")
+            .liveliness_subscribers
+            .register(
+                interest_id,
+                resolved.clone(),
+                options.history,
+                Box::new(callback) as LivelinessSampleCallback,
+            );
+        // Wire emit carries the alias form so the peer pays the
+        // mapping_id + optional inline_suffix cost rather than the
+        // full literal each time — bandwidth parity with
+        // `declare_token_aliased`'s aliased wire emit.
+        self.actions.send_interest_liveliness_subscriber(
+            interest_id,
+            options.history,
+            mapping_id,
+            inline_suffix,
+        );
+        Ok(LivelinessSubscriber {
+            session: self.clone(),
+            interest_id,
+            keyexpr: resolved,
+            options,
+        })
     }
 }
 
@@ -2445,6 +2549,37 @@ impl Drop for LivelinessSubscriber {
             .send_interest_final(self.interest_id);
     }
 }
+
+/// R282 — typed error returned by
+/// [`Session::declare_liveliness_subscriber_aliased`] when the
+/// requested mapping id was never declared on the outbound mapping
+/// table (or was retracted before the
+/// `declare_liveliness_subscriber_aliased` call). Mirror of
+/// [`SubscribeAliasError`] / [`QueryableAliasError`] /
+/// [`QueryAliasError`] / [`PublishAliasError`] /
+/// [`LivelinessAliasError`] on the liveliness subscriber side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LivelinessSubscriberAliasError {
+    /// No prior `send_declare_keyexpr` registered this id on the
+    /// outbound mapping table (or a later `send_undeclare_kexpr`
+    /// retracted it before the declare_liveliness_subscriber_aliased
+    /// call).
+    UnknownMapping(u64),
+}
+
+impl std::fmt::Display for LivelinessSubscriberAliasError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LivelinessSubscriberAliasError::UnknownMapping(id) => write!(
+                f,
+                "LivelinessSubscriberAliasError: mapping id {id} not present in outbound table; \
+                 call SessionLinkActions::send_declare_keyexpr({id}, …) first"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LivelinessSubscriberAliasError {}
 
 /// R234 — typed error returned by
 /// [`Session::publish_aliased_auto`] when the requested mapping id
@@ -5673,6 +5808,180 @@ mod tests {
     #[test]
     fn liveliness_alias_error_display_message_hints_remediation() {
         let err = LivelinessAliasError::UnknownMapping(42);
+        let msg = format!("{err}");
+        assert!(msg.contains("42"));
+        assert!(msg.contains("send_declare_keyexpr"));
+    }
+
+    // ── R282 declare_liveliness_subscriber_aliased — mirrors the
+    // R245 declare_subscriber_aliased and R248 declare_token_aliased
+    // test patterns: resolve-at-declare-time, alias-form wire emit,
+    // mapping-retract survival, and error-shape Display. ───────────
+
+    #[test]
+    fn declare_liveliness_subscriber_aliased_resolves_literal_at_declare_time() {
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        let sub = session
+            .declare_liveliness_subscriber_aliased(
+                7,
+                None,
+                LivelinessSubscriberOptions::default(),
+                |_| {},
+            )
+            .expect("declared mapping resolves");
+        assert_eq!(
+            sub.keyexpr(),
+            "liveliness/dev7",
+            "aliased declare stores the resolved literal on the handle for introspection",
+        );
+        // Slot is keyed by the freshly-allocated interest id and stores
+        // the resolved literal for inbound DeclToken matching.
+        assert_eq!(
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .liveliness_subscribers
+                .keyexpr(sub.interest_id()),
+            Some("liveliness/dev7"),
+            "slot stores resolved literal for keyexpr-pattern matching",
+        );
+    }
+
+    #[test]
+    fn declare_liveliness_subscriber_aliased_with_inline_suffix_composes_literal() {
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        let sub = session
+            .declare_liveliness_subscriber_aliased(
+                7,
+                Some("/sensor"),
+                LivelinessSubscriberOptions::default(),
+                |_| {},
+            )
+            .expect("declared mapping resolves");
+        assert_eq!(sub.keyexpr(), "liveliness/dev7/sensor");
+        assert_eq!(
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .liveliness_subscribers
+                .keyexpr(sub.interest_id()),
+            Some("liveliness/dev7/sensor"),
+        );
+    }
+
+    #[test]
+    fn declare_liveliness_subscriber_aliased_unknown_mapping_returns_err_without_wire_emit() {
+        let (session, driver) = build_session();
+        let err = session.declare_liveliness_subscriber_aliased(
+            99,
+            None,
+            LivelinessSubscriberOptions::default(),
+            |_| {},
+        );
+        assert!(
+            matches!(err, Err(LivelinessSubscriberAliasError::UnknownMapping(99))),
+            "expected Err(UnknownMapping(99))",
+        );
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "no wire emit on unknown-mapping early-return path",
+        );
+        assert_eq!(
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .liveliness_subscribers
+                .slot_count(),
+            0,
+            "no slot registered on declare failure",
+        );
+    }
+
+    #[test]
+    fn declare_liveliness_subscriber_aliased_wire_frame_uses_alias_form() {
+        // Aliased declare emits the bandwidth-efficient alias-form
+        // wire (Interest with WireexprLocal { id=mapping_id,
+        // suffix }), matching zenoh-pico's
+        // _z_n_interest_encode behaviour when the caller hands a
+        // previously-declared keyexpr to z_liveliness_declare_subscriber.
+        use crate::session_glue::build_interest_liveliness_subscriber;
+        let (session, driver) = build_session();
+        // Install the keyexpr mapping (7 -> "liveliness/dev7"); first
+        // wire frame is this Declare(DeclKexpr).
+        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        let baseline_frames = driver.frame_count();
+
+        let _sub = session
+            .declare_liveliness_subscriber_aliased(
+                7,
+                Some("/sensor"),
+                LivelinessSubscriberOptions::default(),
+                |_| {},
+            )
+            .expect("declared mapping resolves");
+
+        assert_eq!(
+            driver.frame_count(),
+            baseline_frames + 1,
+            "aliased declare emits exactly one Interest frame",
+        );
+        let expected = build_interest_liveliness_subscriber(
+            /*interest_id=*/ 0,
+            /*history=*/ false,
+            /*mapping_id=*/ 7,
+            Some("/sensor"),
+        )
+        .encode_to_vec();
+        let interest_frame = &driver.frames.lock().unwrap()[baseline_frames].0;
+        assert!(
+            interest_frame.windows(expected.len()).any(|w| w == expected),
+            "wire frame must carry alias-form Interest bytes (mapping_id=7, suffix=/sensor)",
+        );
+    }
+
+    #[test]
+    fn declare_liveliness_subscriber_aliased_survives_mapping_retract_after_declare() {
+        // Mapping resolved at declare time; later send_undeclare_kexpr
+        // must not affect the already-registered slot (R245 one-shot
+        // resolution contract). The slot still holds the resolved
+        // literal, matching is unaffected.
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        let sub = session
+            .declare_liveliness_subscriber_aliased(
+                7,
+                None,
+                LivelinessSubscriberOptions::default(),
+                |_| {},
+            )
+            .expect("declared mapping resolves");
+        let interest_id = sub.interest_id();
+
+        // Retract the mapping.
+        session.actions().send_undeclare_kexpr(7);
+
+        // Slot still keyed against the resolved literal.
+        assert_eq!(
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .liveliness_subscribers
+                .keyexpr(interest_id),
+            Some("liveliness/dev7"),
+            "slot survives mapping retract — resolution is one-shot at declare time",
+        );
+    }
+
+    #[test]
+    fn liveliness_subscriber_alias_error_display_message_hints_remediation() {
+        let err = LivelinessSubscriberAliasError::UnknownMapping(42);
         let msg = format!("{err}");
         assert!(msg.contains("42"));
         assert!(msg.contains("send_declare_keyexpr"));
