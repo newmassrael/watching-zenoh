@@ -14310,6 +14310,50 @@
         "Open R267-R270 architectural carries unchanged: Querier::get_matching_status (RemoteQueryableRegistry consult ownership), Session<R,T> reparameterisation (Mutex/RwLock contract gate), Instant -> u64 ms storage migration (~30+ consumer sites)."
       ]
     },
+    "Round 286": {
+      "decision_summary": "R286 lands wz-ap-demo main.rs Phase 2 module decomposition; the 3 Established-gated background tasks (declare / query / publisher) + their 12 timing constants move into a new tasks.rs sibling.",
+      "changes_bullets": [
+        "crates/wz-ap-demo/src/tasks.rs new — pub(crate) declare_task / query_task / publisher_task async fns extracted verbatim from main.rs. All three keep the existing T: TimeSource + Send + 'static generic bound so the demo monomorphises with TokioTime at the spawn site in run_demo; bound + body unchanged.",
+        "crates/wz-ap-demo/src/tasks.rs — 12 timing constants colocated with their owning task: PUBLISHER_HANDSHAKE_POLL_INTERVAL_MS / _TIMEOUT_MS / _BURST_COUNT / _BURST_INTERVAL_MS (4), QUERY_HANDSHAKE_POLL_INTERVAL_MS / _TIMEOUT_MS / QUERY_RID (3), DECLARE_SUBSCRIBER_ID / DECLARE_QUERYABLE_ID / DECLARE_HANDSHAKE_POLL_INTERVAL_MS / _TIMEOUT_MS / DECLARE_INTER_EMIT_MS (5). Eleven stay module-private; QUERY_RID is `pub(crate)` because run_demo's ReplyRegistry register site keys on the same rid (single-source comment added).",
+        "crates/wz-ap-demo/src/main.rs — import block re-stratified: drop wz_runtime_tokio::sample::SampleKind, ::session::{LivelinessOptions, PublishAliasError, PublishOptions}, ::Reliability (all tasks-only). Keep wz_runtime_core::TimeSource (run_demo references it for sweep_clock.now_monotonic_ms() / sleep), keep oneshot (run_demo creates the LivelinessToken oneshot channel), keep Arc + SessionLinkActions (run_demo holds shared handles). Add mod tasks; + use crate::tasks::{declare_task, publisher_task, query_task, QUERY_RID}.",
+        "crates/wz-ap-demo/src/main.rs trimmed 1595 -> 1198 lines (-397 lines, -25% in this round; cumulative across R285+R286: 2165 -> 1198, -45%). Tasks region (lines ~1200 -> EOF) removed wholesale; nothing else in run_demo body touched."
+      ],
+      "verification_bullets": [
+        "cargo check --manifest-path crates/Cargo.toml -p wz-ap-demo clean (finished in 0.14s after the rebuild).",
+        "cargo clippy --workspace --all-targets --no-deps -- -D warnings clean across 7 crates.",
+        "scripts/run-ci.sh all 10 lanes green: Layer 0 / A / A2 / B / C0 / C1 / C1b / C2 / D / E. Layer E exercises every binary-dep e2e (wz_liveliness_subscriber_round_trip_against_wz_acceptor, wz_remote_declare_round_trip_against_wz_initiator, wz_publisher_round_trip_against_zenoh_pico_z_sub, wz_publisher_del_round_trip_against_zenoh_pico_z_sub, wz_publisher_aliased_round_trip_against_zenoh_pico_z_sub, wz_initiator_round_trip_against_wz_acceptor, wz_initiator_round_trip_against_zenoh_pico_z_sub_peer_listen, wz_initiator_consumes_reply_chain_from_wz_queryable, wz_queryable_round_trip_against_wz_initiator, wz_remote_declare_round_trip_against_wz_initiator, ap_demo_round_trip_against_zenoh_pico_z_put, wz_ap_demo_query_timeout_fires_final_callback) — every spawn site (declare_task via run_demo:935, query_task via run_demo:901, publisher_task via run_demo:879) still wires through identical timing constants and binds the same TokioTime monomorphisation."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R287 carry — Phase 3 main.rs decomposition: decompose async fn run_demo (683 lines) into declare-block / drive-loop / teardown sub-fns following the R230 §5.P inventory pattern. Architectural shape stays — sub-fns are private to main.rs (or to a new demo_runner.rs sibling). End state: main.rs below 700 lines; the entry point becomes a thin assembly site.",
+        "R284 carry from R283 still open: uniform Established gate across the 4 non-aliased declare_* methods (declare_token / declare_subscriber / declare_queryable / declare_liveliness_subscriber). 3-5R + multi-R design lock recommended.",
+        "R283 architectural carry still open: peer-side non-final Interest inbound (bilateral).",
+        "Open R267-R270 architectural carries unchanged: Querier::get_matching_status, Session<R,T> reparameterisation, Instant -> u64 ms storage migration."
+      ],
+      "publishable_decision_summary": "R286 lands wz-ap-demo main.rs Phase 2 module decomposition; the 3 Established-gated background tasks (declare / query / publisher) + their 12 timing constants move into a new tasks.rs sibling.",
+      "publishable_changes_bullets": [
+        "crates/wz-ap-demo/src/tasks.rs new — pub(crate) declare_task / query_task / publisher_task async fns extracted verbatim from main.rs. All three keep the existing T: TimeSource + Send + 'static generic bound so the demo monomorphises with TokioTime at the spawn site in run_demo; bound + body unchanged.",
+        "crates/wz-ap-demo/src/tasks.rs — 12 timing constants colocated with their owning task: PUBLISHER_HANDSHAKE_POLL_INTERVAL_MS / _TIMEOUT_MS / _BURST_COUNT / _BURST_INTERVAL_MS (4), QUERY_HANDSHAKE_POLL_INTERVAL_MS / _TIMEOUT_MS / QUERY_RID (3), DECLARE_SUBSCRIBER_ID / DECLARE_QUERYABLE_ID / DECLARE_HANDSHAKE_POLL_INTERVAL_MS / _TIMEOUT_MS / DECLARE_INTER_EMIT_MS (5). Eleven stay module-private; QUERY_RID is `pub(crate)` because run_demo's ReplyRegistry register site keys on the same rid (single-source comment added).",
+        "crates/wz-ap-demo/src/main.rs — import block re-stratified: drop wz_runtime_tokio::sample::SampleKind, ::session::{LivelinessOptions, PublishAliasError, PublishOptions}, ::Reliability (all tasks-only). Keep wz_runtime_core::TimeSource (run_demo references it for sweep_clock.now_monotonic_ms() / sleep), keep oneshot (run_demo creates the LivelinessToken oneshot channel), keep Arc + SessionLinkActions (run_demo holds shared handles). Add mod tasks; + use crate::tasks::{declare_task, publisher_task, query_task, QUERY_RID}.",
+        "crates/wz-ap-demo/src/main.rs trimmed 1595 -> 1198 lines (-397 lines, -25% in this round; cumulative across R285+R286: 2165 -> 1198, -45%). Tasks region (lines ~1200 -> EOF) removed wholesale; nothing else in run_demo body touched."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --manifest-path crates/Cargo.toml -p wz-ap-demo clean (finished in 0.14s after the rebuild).",
+        "cargo clippy --workspace --all-targets --no-deps -- -D warnings clean across 7 crates.",
+        "scripts/run-ci.sh all 10 lanes green: Layer 0 / A / A2 / B / C0 / C1 / C1b / C2 / D / E. Layer E exercises every binary-dep e2e (wz_liveliness_subscriber_round_trip_against_wz_acceptor, wz_remote_declare_round_trip_against_wz_initiator, wz_publisher_round_trip_against_zenoh_pico_z_sub, wz_publisher_del_round_trip_against_zenoh_pico_z_sub, wz_publisher_aliased_round_trip_against_zenoh_pico_z_sub, wz_initiator_round_trip_against_wz_acceptor, wz_initiator_round_trip_against_zenoh_pico_z_sub_peer_listen, wz_initiator_consumes_reply_chain_from_wz_queryable, wz_queryable_round_trip_against_wz_initiator, wz_remote_declare_round_trip_against_wz_initiator, ap_demo_round_trip_against_zenoh_pico_z_put, wz_ap_demo_query_timeout_fires_final_callback) — every spawn site (declare_task via run_demo:935, query_task via run_demo:901, publisher_task via run_demo:879) still wires through identical timing constants and binds the same TokioTime monomorphisation."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R287 carry — Phase 3 main.rs decomposition: decompose async fn run_demo (683 lines) into declare-block / drive-loop / teardown sub-fns following the R230 §5.P inventory pattern. Architectural shape stays — sub-fns are private to main.rs (or to a new demo_runner.rs sibling). End state: main.rs below 700 lines; the entry point becomes a thin assembly site.",
+        "R284 carry from R283 still open: uniform Established gate across the 4 non-aliased declare_* methods (declare_token / declare_subscriber / declare_queryable / declare_liveliness_subscriber). 3-5R + multi-R design lock recommended.",
+        "R283 architectural carry still open: peer-side non-final Interest inbound (bilateral).",
+        "Open R267-R270 architectural carries unchanged: Querier::get_matching_status, Session<R,T> reparameterisation, Instant -> u64 ms storage migration."
+      ]
+    },
     "Round 29": {
       "decision_summary": "Phase C8 entry — first statechart-kind SCXML lands. sources/session/session_fsm_unicast.scxml encodes unicast handshake (Init/LinkOpening/Opening/Accepting/Established/Closing/Closed) per docs/session-fsm.md §2.1-§2.7 minus deferred sub-scopes (multicast, scouting state, Established sub-regions, stateless_accept variant).",
       "changes_bullets": [
