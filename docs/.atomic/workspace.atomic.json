@@ -13508,6 +13508,54 @@
         "Open R264/R267/R268/R269/R270 carries unchanged: Instant -> u64 ms storage migration (3-5R) / Cancellable trait promotion (R257, YAGNI hold) / Session<R, T> reparam (3-7R + design) / Liveliness Token wz-ap-demo migration (R250, 1-2R) / Q_B Q_E wire codec slots (5-10R) / Querier::get_matching_status (1-2R) / Phase W full lwIP (20-50R) / FinalCallback FinalCause Normal vs TimedOut (YAGNI hold) / SCE drift (vendor pin ebf3b3ff vs upstream ~90 commits, wz call sites=0)."
       ]
     },
+    "Round 272": {
+      "decision_summary": "R272 refreshes README + README.ko snapshot numerics: Round 210 -> 271, 210 entries / 214 sections -> 270 / 215, 8-lane CI -> 10-lane CI. Closes R271 carry (b).",
+      "changes_bullets": [
+        "README.md current-status preamble: `Snapshot last refreshed at Round 210 (2026-05-21)` -> `Snapshot last refreshed at Round 271 (2026-05-22)`. The date is the R267 carry-forward date as the user is currently in the 2026-05-22 session arc; future snapshot rounds should refresh against the then-current date.",
+        "README.md current-status footer block: `210 entries across 214 atomic sections; ~333 workspace tests pass (185 in wz-runtime-tokio lib alone); the local 8-lane CI (Layer 0 / A / A2 / B / C1 / C2 / D / E ...)` -> `270 entries across 215 atomic sections; the workspace test suites + Layer E binary-dep e2e fixtures pass via the local 10-lane CI (Layer 0 / A / A2 / B / C0 / C1 / C1b / C2 / D / E ...)`. Specific test count `~333 / 185` dropped intentionally — the number rotates every round and forcing manual sync per round was the root cause of the R210 snapshot drift; `the workspace test suites pass` is the round-stable form. Lane list now reflects R235 Layer C0 addition + R269 Layer C1b addition (post-R210 changes that the prior snapshot missed).",
+        "README.ko.md current-status preamble + footer mirrored with equivalent Korean prose: `Round 210 (2026-05-21)` -> `Round 271 (2026-05-22)`; `210 entry / 214 atomic section; workspace test ~333 통과 (...) 8-lane CI` -> `270 entry / 215 atomic section; workspace test suite + Layer E binary-dep e2e fixture 가 로컬 10-lane CI 를 통해 통과`. Korean translation remains satellite-file outside workspace.docs governance per README language convention.",
+        "R271 carry (b) `Outdated snapshot numbers in current-status body` CLOSED via this round. Remaining R271 carries: (a) `MVP subset of the wire format` framing at README.md:10/20/101 (scope-descriptor refresh) and (c) atomic Section body sync via typed primitives. Both deferred."
+      ],
+      "verification_bullets": [
+        "validate_workspace post-edit: docs=12/12, T1 orphan total=0 (delta=0), round-trip mandatory=12/12 (preserved — prose-only edit within the existing current-status H2 section), T3 warn=856 unchanged, atomic ledger entries=270 (pre-R272-audit), sections=215, GENERATED.md=sync.",
+        "bash scripts/run-ci.sh: 10/10 lanes pass (Layer 0/A/A2/B/C0/C1/C1b/C2/D/E). Layer A's README.md parser still recognises the current-status section with the updated numbers; no slug change so no T1 break.",
+        "Manual visual inspection: both README files show `Round 271 (2026-05-22)` as snapshot date; both reference `270 entries / 215 sections / 10-lane CI` in the footer; lane list explicitly includes C0 + C1b for completeness.",
+        "Pre-mutation atomic baseline: entries=270 (R271 closure), sections=215, T1=0 (ledger=1 R193 known-stale), round-trip 12/12. Post-mutation validate_workspace shows entries=271, sections=215, T1=0, RT 12/12, sync."
+      ],
+      "impact_refs": [
+        "watching-zenoh/current-status"
+      ],
+      "carry_forward_bullets": [
+        "R271 carry (b) `README snapshot numerics outdated` CLOSED at R272.",
+        "R272 carry: future snapshot-refresh rounds should keep the round-stable `the workspace test suites + Layer E e2e fixtures pass via the local N-lane CI` phrasing rather than reintroducing a specific test count — the rotation cost outweighed the marginal precision benefit (the R210 -> R272 drift was 61 rounds of stale `~333 workspace tests pass` text, while no consumer of the README actually needed the exact count).",
+        "R271 carry (a) `MVP subset of the wire format` scope-descriptor refresh at README.md:10/20/101 still open. Soft cleanup, not policy violation; defer until a session that has bandwidth for scope-language judgment.",
+        "R271 carry (c) atomic Section body sync via typed primitives still open. R27 set_section_intent / _rationale for 8 README sections still hold pre-R7/R58-scope-correction prose (`11 spec docs`, `notes/NEXT_SESSION.md` references). Typed-primitive round, medium scope.",
+        "Open R264/R267/R268/R269/R270/R271 carries otherwise unchanged: Instant -> u64 ms migration (3-5R) / Cancellable trait promotion (R257, YAGNI hold) / Session<R, T> reparam (3-7R + design) / Liveliness Token wz-ap-demo migration (R250, 1-2R) / Q_B Q_E wire codec slots (5-10R) / Querier::get_matching_status (1-2R) / Phase W full lwIP (20-50R) / FinalCallback FinalCause Normal vs TimedOut (YAGNI hold) / SCE drift (vendor pin ebf3b3ff vs upstream ~90 commits, wz call sites=0)."
+      ],
+      "publishable_decision_summary": "R272 refreshes README + README.ko snapshot numerics: Round 210 -> 271, 210 entries / 214 sections -> 270 / 215, 8-lane CI -> 10-lane CI. Closes R271 carry (b).",
+      "publishable_changes_bullets": [
+        "README.md current-status preamble: `Snapshot last refreshed at Round 210 (2026-05-21)` -> `Snapshot last refreshed at Round 271 (2026-05-22)`. The date is the R267 carry-forward date as the user is currently in the 2026-05-22 session arc; future snapshot rounds should refresh against the then-current date.",
+        "README.md current-status footer block: `210 entries across 214 atomic sections; ~333 workspace tests pass (185 in wz-runtime-tokio lib alone); the local 8-lane CI (Layer 0 / A / A2 / B / C1 / C2 / D / E ...)` -> `270 entries across 215 atomic sections; the workspace test suites + Layer E binary-dep e2e fixtures pass via the local 10-lane CI (Layer 0 / A / A2 / B / C0 / C1 / C1b / C2 / D / E ...)`. Specific test count `~333 / 185` dropped intentionally — the number rotates every round and forcing manual sync per round was the root cause of the R210 snapshot drift; `the workspace test suites pass` is the round-stable form. Lane list now reflects R235 Layer C0 addition + R269 Layer C1b addition (post-R210 changes that the prior snapshot missed).",
+        "README.ko.md current-status preamble + footer mirrored with equivalent Korean prose: `Round 210 (2026-05-21)` -> `Round 271 (2026-05-22)`; `210 entry / 214 atomic section; workspace test ~333 통과 (...) 8-lane CI` -> `270 entry / 215 atomic section; workspace test suite + Layer E binary-dep e2e fixture 가 로컬 10-lane CI 를 통해 통과`. Korean translation remains satellite-file outside workspace.docs governance per README language convention.",
+        "R271 carry (b) `Outdated snapshot numbers in current-status body` CLOSED via this round. Remaining R271 carries: (a) `MVP subset of the wire format` framing at README.md:10/20/101 (scope-descriptor refresh) and (c) atomic Section body sync via typed primitives. Both deferred."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace post-edit: docs=12/12, T1 orphan total=0 (delta=0), round-trip mandatory=12/12 (preserved — prose-only edit within the existing current-status H2 section), T3 warn=856 unchanged, atomic ledger entries=270 (pre-R272-audit), sections=215, GENERATED.md=sync.",
+        "bash scripts/run-ci.sh: 10/10 lanes pass (Layer 0/A/A2/B/C0/C1/C1b/C2/D/E). Layer A's README.md parser still recognises the current-status section with the updated numbers; no slug change so no T1 break.",
+        "Manual visual inspection: both README files show `Round 271 (2026-05-22)` as snapshot date; both reference `270 entries / 215 sections / 10-lane CI` in the footer; lane list explicitly includes C0 + C1b for completeness.",
+        "Pre-mutation atomic baseline: entries=270 (R271 closure), sections=215, T1=0 (ledger=1 R193 known-stale), round-trip 12/12. Post-mutation validate_workspace shows entries=271, sections=215, T1=0, RT 12/12, sync."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/current-status"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R271 carry (b) `README snapshot numerics outdated` CLOSED at R272.",
+        "R272 carry: future snapshot-refresh rounds should keep the round-stable `the workspace test suites + Layer E e2e fixtures pass via the local N-lane CI` phrasing rather than reintroducing a specific test count — the rotation cost outweighed the marginal precision benefit (the R210 -> R272 drift was 61 rounds of stale `~333 workspace tests pass` text, while no consumer of the README actually needed the exact count).",
+        "R271 carry (a) `MVP subset of the wire format` scope-descriptor refresh at README.md:10/20/101 still open. Soft cleanup, not policy violation; defer until a session that has bandwidth for scope-language judgment.",
+        "R271 carry (c) atomic Section body sync via typed primitives still open. R27 set_section_intent / _rationale for 8 README sections still hold pre-R7/R58-scope-correction prose (`11 spec docs`, `notes/NEXT_SESSION.md` references). Typed-primitive round, medium scope.",
+        "Open R264/R267/R268/R269/R270/R271 carries otherwise unchanged: Instant -> u64 ms migration (3-5R) / Cancellable trait promotion (R257, YAGNI hold) / Session<R, T> reparam (3-7R + design) / Liveliness Token wz-ap-demo migration (R250, 1-2R) / Q_B Q_E wire codec slots (5-10R) / Querier::get_matching_status (1-2R) / Phase W full lwIP (20-50R) / FinalCallback FinalCause Normal vs TimedOut (YAGNI hold) / SCE drift (vendor pin ebf3b3ff vs upstream ~90 commits, wz call sites=0)."
+      ]
+    },
     "Round 28": {
       "decision_summary": "Phase A control-plane SCXML round — 3 new algorithm-kind validators (whatami / payload-ext-id / transport-ext-id) covering §3 Hello body, §7.1 payload-layer per-context extension allowlist, §4.4 transport-layer per-control-message extension allowlist.",
       "changes_bullets": [
