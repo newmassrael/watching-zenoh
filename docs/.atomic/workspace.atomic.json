@@ -2686,15 +2686,18 @@
       "title": "Current status",
       "parent_doc": "README.md",
       "parent_section": "watching-zenoh",
-      "intent": "Snapshot of Phase A3 / A4 / B+ progress at the latest refresh round, with pointers to the atomic changelog for per-round detail.",
+      "intent": "Snapshot at Round 271 (2026-05-22) of Phase A (algorithms) / B (codecs) / C (session FSM + AP runtime) / W (lwIP runtime) progress, with atomic-changelog pointer for per-round delta.",
       "rationale_bullets": [
-        "Phase A3 = 9 algorithm SCXMLs verified across six backends",
-        "Phase A4 blocked on SCE upstream cursor/Result types and the const-fold gate",
-        "Phase B+ covers SCE schema extensions and external ratify dependencies"
+        "Phase A (algorithm SCXML): CLOSED — 9 algorithms verified across six backends",
+        "Phase B (codec catalog): CLOSED for wire-spec subset — 35 codecs byte-equiv to zenoh-pico",
+        "Phase C (session FSM + AP runtime): unicast closed; TCP + cookie HMAC; Pub/Sub out 100% / in 65%",
+        "Phase C: DECLARE 9/9 out + 6/6 in; Q/R out + in; Request/Response ext chain at R210",
+        "Phase W (lwIP/MCU runtime): trait skeleton landed R251 in wz-runtime-core; lwIP integration ahead"
       ],
       "caveats_bullets": [
         "Per-round decisions live in docs/.atomic/workspace.atomic.json",
-        "Activity log lives in notes/NEXT_SESSION.md"
+        "Activity log lives in notes/NEXT_SESSION.md",
+        "R274 correction: notes/NEXT_SESSION.md removed at R58; activity log moved to atomic changelog"
       ],
       "decision_status": "active"
     },
@@ -2702,18 +2705,24 @@
       "title": "Directory layout",
       "parent_doc": "README.md",
       "parent_section": "watching-zenoh",
-      "intent": "Path-to-role map for the repository.",
+      "intent": "Path-to-role map for the repository covering 5 top-level dirs (docs/, sources/, scripts/, vendor/sce/, deploy/) plus 7 crates under crates/.",
       "outputs_bullets": [
         "ARCHITECTURE.md — design entry point",
-        "docs/ — 11 Mnemosyne-managed spec docs",
-        "docs/.atomic/ — atomic-store sidecar, typed-primitive mutation only",
-        "docs/GENERATED.md — cascade-rendered output, gitignored",
-        "sources/ — SCE Forge input SCXML (sources/README.md for detail)",
-        "scripts/ — build-sce.sh + verify-codegen.sh",
+        "docs/ — 12 Mnemosyne-managed spec docs",
+        "docs/.atomic/ — atomic-store sidecar (mutate only via typed primitives)",
+        "docs/GENERATED.md — cascade-rendered output (gitignored, never edit)",
+        "sources/ — SCE Forge input SCXML (codecs + algorithms + session FSM)",
+        "crates/wz-codecs — generated codec types from sources/codecs/*.scxml",
+        "crates/wz-runtime-tokio — Tokio-based AP runtime + session glue + builders",
+        "crates/wz-runtime-lwip — lwIP/MCU runtime (Phase W, not yet a workspace member)",
+        "crates/wz-ap-demo — AP demo binary (initiator + acceptor)",
+        "crates/wz-integration-tests — Layer 3 wire-interop + round-trip suites",
+        "crates/wz-runtime-tokio-test-support — shared test harness for runtime tests",
+        "crates/zenoh-pico-sys — vendored zenoh-pico FFI bindings (smoke layer)",
+        "scripts/ — build-sce.sh + verify-codegen.sh + run-ci.sh + audit-mid-values.sh",
         "vendor/sce/ — SCE submodule, vendor pin",
-        "notes/ — activity-log genre, outside Mnemosyne",
         ".githooks/ — pre-commit / commit-msg / pre-push gates",
-        "deploy/ — deploy.yaml skeletons (Phase B+)"
+        "deploy/ — deploy.yaml skeletons (ap_standalone / mcu_target / ap_mcu_pair)"
       ],
       "decision_status": "active"
     },
@@ -2772,11 +2781,11 @@
       "title": "What it does",
       "parent_doc": "README.md",
       "parent_section": "watching-zenoh",
-      "intent": "Two builds at once: an MVP wire-compatible subset of zenoh plus a single-source six-backend codegen pipeline.",
+      "intent": "Twin output: a wire-spec subset interoperable with zenoh-pico 1.x and zenoh 1.x, plus a single-source six-backend codegen (Rust no_std / C11 / C++ / Kotlin / Go / Python) from shared SCXML.",
       "rationale_bullets": [
-        "zenoh-pico 1.5.x + zenoh 1.5.x wire interop for MVP subset, optional surfaces deferred to Phase B+",
-        "Same SCXML sources generate six backends via SCE Forge",
-        "Design SSoT is ARCHITECTURE.md; 11 spec docs governed by Mnemosyne"
+        "Wire subset scope pinned in docs/wire-spec-subset.md; interops with zenoh-pico 1.x + zenoh 1.x peers",
+        "Same SCXML in sources/ generates Rust no_std / C11 / C++ / Kotlin / Go / Python via SCE Forge",
+        "Design SSoT entry is ARCHITECTURE.md; 12 spec docs under docs/ governed by Mnemosyne lifecycle"
       ],
       "decision_status": "active"
     },
@@ -13608,6 +13617,66 @@
         "R271 carry (c) atomic Section body sync via typed primitives still open. R27 set_section_intent / _rationale calls populated the atomic Section bodies for the 8 README sections with pre-R7/R58-scope-correction prose (`11 spec docs`, `notes/NEXT_SESSION.md` activity-log reference, `MVP wire-compatible subset` summary). The atomic store and the README markdown now diverge in language (post-R273 README has no MVP; atomic Section bodies still say `an MVP wire-compatible subset of zenoh`). Resync requires a typed-primitive-only round: set_section_intent + set_section_rationale across watching-zenoh/what-it-does / current-status / directory-layout. Medium scope (~6-10 primitive calls); textbook candidate for a future autonomous round.",
         "R273 lesson: when a scope-descriptor language change crosses both the human-facing markdown surface (README) and the atomic Section bodies, doing the markdown surface first (R273) creates a temporary divergence with the atomic store. The divergence is observable only via direct query_section (the parser-side round-trip stays green because round-trip parses the markdown, not the atomic body), so it does not surface as a validate_workspace fail. The fix is a follow-up typed-primitive round; the divergence is acceptable as a transitional state.",
         "Open R267/R268/R269/R270/R271 carries otherwise unchanged: Instant -> u64 ms migration (3-5R) / Cancellable trait promotion (R257, YAGNI hold) / Session<R, T> reparam (3-7R + design) / Liveliness Token wz-ap-demo migration (R250, 1-2R) / Q_B Q_E wire codec slots (5-10R) / Querier::get_matching_status (1-2R) / Phase W full lwIP (20-50R) / FinalCallback FinalCause Normal vs TimedOut (YAGNI hold) / SCE drift (vendor pin ebf3b3ff vs upstream ~90 commits, wz call sites=0)."
+      ]
+    },
+    "Round 274": {
+      "decision_summary": "R274 closes R271 (c) atomic Section body sync. 7 typed-primitive calls align watching-zenoh/what-it-does + current-status + directory-layout atomic bodies with R273 post-edit README.",
+      "changes_bullets": [
+        "watching-zenoh/what-it-does: set_section_intent — MVP wording replaced with wire-spec subset language",
+        "watching-zenoh/what-it-does: set_section_rationale — 3 bullets: wire subset / six-backend codegen / SSoT",
+        "watching-zenoh/current-status: set_section_intent — Phase A3/A4/B+ replaced with Phase A/B/C/W R271 snapshot",
+        "watching-zenoh/current-status: set_section_rationale — 5 bullets: A+B CLOSED, C unicast closed, W skeleton landed",
+        "watching-zenoh/current-status: add_section_caveat — R274 marks pre-R58 notes/NEXT_SESSION.md caveat obsolete",
+        "watching-zenoh/directory-layout: set_section_intent — refreshed to enumerate 5 top-level dirs + 7 crates",
+        "watching-zenoh/directory-layout: set_section_outputs — 16 bullets mirroring R273 README table 1:1"
+      ],
+      "verification_bullets": [
+        "Pre-mutation validate: entries=272 / sections=215 / T1=0 (ledger=1) / RT 12/12 / sync (R273 close)",
+        "Post-7-mutation validate: entries=272 / sections=215 / T1=0 / RT 12/12 / sync; cascade re-regen OK",
+        "query_section post: zero MVP / Phase A3 / 11 spec docs hits in 3 affected atomic Section bodies",
+        "Typed-primitive only round: no README.md / README.ko.md edit; markdown source untouched"
+      ],
+      "impact_refs": [
+        "watching-zenoh/what-it-does",
+        "watching-zenoh/current-status",
+        "watching-zenoh/directory-layout"
+      ],
+      "carry_forward_bullets": [
+        "R271 (c) atomic Section body sync CLOSED at R274. R271 carries (a)(b)(c) all closed.",
+        "R274 lesson: carry estimates should inspect rendered field mapping before counting calls",
+        "Mnemosyne API gap: no set_section_caveats primitive (only add). Candidate improvement, non-blocking.",
+        "Open R267-R270 carries unchanged: Liveliness Token, Querier::get_matching_status, Session reparam",
+        "Continued: Instant->u64ms migration, Cancellable promotion YAGNI, Phase W full lwIP, Q_B/Q_E codecs",
+        "SCE vendor pin ebf3b3ff drift continues; wz call sites=0, no pin bump required"
+      ],
+      "publishable_decision_summary": "R274 closes R271 (c) atomic Section body sync. 7 typed-primitive calls align watching-zenoh/what-it-does + current-status + directory-layout atomic bodies with R273 post-edit README.",
+      "publishable_changes_bullets": [
+        "watching-zenoh/what-it-does: set_section_intent — MVP wording replaced with wire-spec subset language",
+        "watching-zenoh/what-it-does: set_section_rationale — 3 bullets: wire subset / six-backend codegen / SSoT",
+        "watching-zenoh/current-status: set_section_intent — Phase A3/A4/B+ replaced with Phase A/B/C/W R271 snapshot",
+        "watching-zenoh/current-status: set_section_rationale — 5 bullets: A+B CLOSED, C unicast closed, W skeleton landed",
+        "watching-zenoh/current-status: add_section_caveat — R274 marks pre-R58 notes/NEXT_SESSION.md caveat obsolete",
+        "watching-zenoh/directory-layout: set_section_intent — refreshed to enumerate 5 top-level dirs + 7 crates",
+        "watching-zenoh/directory-layout: set_section_outputs — 16 bullets mirroring R273 README table 1:1"
+      ],
+      "publishable_verification_bullets": [
+        "Pre-mutation validate: entries=272 / sections=215 / T1=0 (ledger=1) / RT 12/12 / sync (R273 close)",
+        "Post-7-mutation validate: entries=272 / sections=215 / T1=0 / RT 12/12 / sync; cascade re-regen OK",
+        "query_section post: zero MVP / Phase A3 / 11 spec docs hits in 3 affected atomic Section bodies",
+        "Typed-primitive only round: no README.md / README.ko.md edit; markdown source untouched"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/what-it-does",
+        "watching-zenoh/current-status",
+        "watching-zenoh/directory-layout"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R271 (c) atomic Section body sync CLOSED at R274. R271 carries (a)(b)(c) all closed.",
+        "R274 lesson: carry estimates should inspect rendered field mapping before counting calls",
+        "Mnemosyne API gap: no set_section_caveats primitive (only add). Candidate improvement, non-blocking.",
+        "Open R267-R270 carries unchanged: Liveliness Token, Querier::get_matching_status, Session reparam",
+        "Continued: Instant->u64ms migration, Cancellable promotion YAGNI, Phase W full lwIP, Q_B/Q_E codecs",
+        "SCE vendor pin ebf3b3ff drift continues; wz call sites=0, no pin bump required"
       ]
     },
     "Round 28": {
