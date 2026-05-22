@@ -1144,11 +1144,15 @@ async fn run_demo(
             let keyexpr = keyexpr.clone();
             let operation = operation.clone();
             let declare_id = *declare_id;
+            // R254 — publisher_task generic over TimeSource since
+            // R254; supply TokioTime concrete impl.
+            let clock_for_publisher = TokioTime::new();
             tokio::spawn(publisher_task(
                 session_for_publisher,
                 keyexpr,
                 operation,
                 declare_id,
+                clock_for_publisher,
             ))
         });
 
@@ -1162,7 +1166,10 @@ async fn run_demo(
     let query_handle = query_spec.as_ref().map(|keyexpr| {
         let actions_for_query = actions.clone();
         let keyexpr = keyexpr.clone();
-        tokio::spawn(query_task(actions_for_query, keyexpr))
+        // R254 — query_task generic over TimeSource since R254;
+        // supply TokioTime concrete impl.
+        let clock_for_query = TokioTime::new();
+        tokio::spawn(query_task(actions_for_query, keyexpr, clock_for_query))
     });
 
     // R121k-5 — declare emit task. Bundles all three optional
@@ -1438,10 +1445,17 @@ async fn declare_task<T>(
     }
 }
 
-async fn query_task(
+/// R254 — `clock: T` generic + 1 sleep site migrated to
+/// [`TimeSource::sleep`], continuing the R253 leaf-first cadence.
+/// std::time::Instant deadline math stays verbatim pending the
+/// R254+ Instant-arithmetic trait gap resolution (carry).
+async fn query_task<T>(
     actions: Arc<wz_runtime_tokio::session_glue::SessionLinkActions>,
     keyexpr: String,
-) {
+    clock: T,
+) where
+    T: TimeSource + Send + 'static,
+{
     let deadline = std::time::Instant::now()
         + Duration::from_millis(QUERY_HANDSHAKE_TIMEOUT_MS);
     loop {
@@ -1456,7 +1470,7 @@ async fn query_task(
             );
             return;
         }
-        tokio::time::sleep(Duration::from_millis(QUERY_HANDSHAKE_POLL_INTERVAL_MS)).await;
+        clock.sleep(QUERY_HANDSHAKE_POLL_INTERVAL_MS).await;
     }
     log::info!(
         "wz-ap-demo: query_task observed Established; emitting Query \
@@ -1468,12 +1482,20 @@ async fn query_task(
     );
 }
 
-async fn publisher_task(
+/// R254 — `clock: T` generic + 3 sleep sites migrated to
+/// [`TimeSource::sleep`] (handshake-poll, post-DECLARE drain, burst
+/// cadence). Continues R253 leaf-first migration; std::time::Instant
+/// deadline math stays verbatim per the R254+ Instant-arithmetic
+/// trait gap carry.
+async fn publisher_task<T>(
     session: Session,
     keyexpr: String,
     operation: PushOperation,
     declare_id: Option<u64>,
-) {
+    clock: T,
+) where
+    T: TimeSource + Send + 'static,
+{
     // R235 — borrow the outbound actions handle for `trace_snapshot`
     // (Established gate polling) + `send_declare_keyexpr` (the
     // pre-burst R121g declare preamble). Push emission itself routes
@@ -1516,7 +1538,7 @@ async fn publisher_task(
             );
             return;
         }
-        tokio::time::sleep(Duration::from_millis(PUBLISHER_HANDSHAKE_POLL_INTERVAL_MS)).await;
+        clock.sleep(PUBLISHER_HANDSHAKE_POLL_INTERVAL_MS).await;
     }
     match &operation {
         PushOperation::Put { value } => log::info!(
@@ -1557,7 +1579,7 @@ async fn publisher_task(
         // application-order on the wire, but the peer's receive
         // task is independent of our writer — a brief pause makes
         // the test less reliant on scheduling fairness.
-        tokio::time::sleep(Duration::from_millis(PUBLISHER_BURST_INTERVAL_MS)).await;
+        clock.sleep(PUBLISHER_BURST_INTERVAL_MS).await;
     }
 
     // ── Step 3: emit the burst. Each iteration composes a
@@ -1629,7 +1651,7 @@ async fn publisher_task(
         // one — the run_demo cleanup gives the writer a brief
         // drain window).
         if i + 1 < PUBLISHER_BURST_COUNT {
-            tokio::time::sleep(Duration::from_millis(PUBLISHER_BURST_INTERVAL_MS)).await;
+            clock.sleep(PUBLISHER_BURST_INTERVAL_MS).await;
         }
     }
     log::info!("wz-ap-demo: publisher_task finished emission burst");
