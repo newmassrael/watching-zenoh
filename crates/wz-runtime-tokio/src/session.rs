@@ -1911,6 +1911,47 @@ impl QuerierAliased {
             on_final,
         )
     }
+
+    /// R289 — aliased-keyexpr counterpart of
+    /// [`Querier::get_matching_status`]. Resolves the declared
+    /// `mapping_id` through the outbound keyexpr table to a base
+    /// literal, composes the optional `inline_suffix` to the
+    /// effective keyexpr, and consults
+    /// [`crate::declare::RemoteQueryableRegistry::has_matching`].
+    /// Returns `Err(QueryAliasError::UnknownMapping(id))` when the
+    /// declared `mapping_id` is not present on the outbound mapping
+    /// table — same contract as [`Self::get`], mirroring the
+    /// declare-before-query invariant for the matching-status
+    /// consult path.
+    ///
+    /// On the success path the returned [`MatchingStatus`] reflects
+    /// the registry membership at the moment of the consult; the
+    /// observer mutex is held only across the resolve + has_matching
+    /// arms (no wire emit, no allocation beyond the small
+    /// `effective_keyexpr` composition).
+    pub fn get_matching_status(&self) -> Result<MatchingStatus, QueryAliasError> {
+        let base = self
+            .session
+            .actions()
+            .resolve_outbound_mapping(self.mapping_id)
+            .ok_or(QueryAliasError::UnknownMapping(self.mapping_id))?;
+        let effective_keyexpr = match self.inline_suffix.as_deref() {
+            None => base,
+            Some(s) => {
+                let mut composed = base;
+                composed.push_str(s);
+                composed
+            }
+        };
+        let observer = self.session.observer();
+        let obs = match observer.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        Ok(MatchingStatus {
+            matching: obs.remote_queryables.has_matching(&effective_keyexpr),
+        })
+    }
 }
 
 /// R244 — reusable publish target with pre-set keyexpr + options.
@@ -5374,6 +5415,122 @@ mod tests {
         let h1 = clone.get(&clock, |_| {}, |_| {}).unwrap();
         assert_eq!(h0.rid(), 0);
         assert_eq!(h1.rid(), 1, "clones share the same rid allocator");
+    }
+
+    // ── R289 QuerierAliased::get_matching_status ──
+
+    #[test]
+    fn querier_aliased_get_matching_status_returns_err_on_unknown_mapping() {
+        let (session, _driver) = build_session();
+        // No send_declare_keyexpr for id=88 — mapping is unknown.
+        let qa = session.declare_querier_aliased(88, None, QueryOptions::get());
+        assert_eq!(
+            qa.get_matching_status(),
+            Err(QueryAliasError::UnknownMapping(88)),
+            "unresolvable mapping surfaces as QueryAliasError::UnknownMapping"
+        );
+    }
+
+    #[test]
+    fn querier_aliased_get_matching_status_false_after_declare_with_no_peer() {
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+        let qa = session.declare_querier_aliased(7, None, QueryOptions::get());
+        assert_eq!(
+            qa.get_matching_status(),
+            Ok(MatchingStatus { matching: false }),
+            "mapping resolved but no peer DeclQueryable — matching is false"
+        );
+    }
+
+    #[test]
+    fn querier_aliased_get_matching_status_true_when_peer_decl_matches_base_literal() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+        let qa = session.declare_querier_aliased(7, None, QueryOptions::get());
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_queryables
+            .dispatch_declare(&make_decl_queryable(70, "home/temp"), &HashMap::new());
+        assert_eq!(
+            qa.get_matching_status(),
+            Ok(MatchingStatus { matching: true }),
+            "base mapping resolves to home/temp; peer DeclQueryable on home/temp matches"
+        );
+    }
+
+    #[test]
+    fn querier_aliased_get_matching_status_threads_inline_suffix_into_consult() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+        // QuerierAliased with inline_suffix produces effective
+        // keyexpr "home/temp/kitchen"; peer DeclQueryable on
+        // "home/**" should match via the peer-pattern asymmetric
+        // arm.
+        let qa = session.declare_querier_aliased(7, Some("/kitchen"), QueryOptions::get());
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_queryables
+            .dispatch_declare(&make_decl_queryable(71, "home/**"), &HashMap::new());
+        assert_eq!(
+            qa.get_matching_status(),
+            Ok(MatchingStatus { matching: true }),
+            "inline_suffix-composed effective keyexpr matches peer pattern home/**"
+        );
+
+        // Peer pattern home/door/** does NOT cover home/temp/kitchen
+        // — verify the inline_suffix actually narrows the consult
+        // (a literal-without-suffix consult against "home/door/**"
+        // also fails to match home/temp, but the composed
+        // home/temp/kitchen + home/door/** case is the more
+        // diagnostic one).
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_queryables
+            .dispatch_declare(&make_undecl_queryable(71), &HashMap::new());
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_queryables
+            .dispatch_declare(&make_decl_queryable(72, "home/door/**"), &HashMap::new());
+        assert_eq!(
+            qa.get_matching_status(),
+            Ok(MatchingStatus { matching: false }),
+            "peer pattern home/door/** does not cover effective home/temp/kitchen"
+        );
+    }
+
+    #[test]
+    fn querier_aliased_get_matching_status_false_after_undeclared_mapping_drop() {
+        use std::collections::HashMap;
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+        let qa = session.declare_querier_aliased(7, None, QueryOptions::get());
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .remote_queryables
+            .dispatch_declare(&make_decl_queryable(73, "home/temp"), &HashMap::new());
+        assert_eq!(qa.get_matching_status(), Ok(MatchingStatus { matching: true }));
+        // Local-side retracts the keyexpr mapping — subsequent
+        // get_matching_status surfaces UnknownMapping just like
+        // QuerierAliased::get does.
+        session.actions().send_undeclare_kexpr(7);
+        assert_eq!(
+            qa.get_matching_status(),
+            Err(QueryAliasError::UnknownMapping(7)),
+            "post-undeclare_kexpr — mapping unresolvable, surfaces UnknownMapping"
+        );
     }
 
     // ── R244 Publisher + PublisherAliased ──
