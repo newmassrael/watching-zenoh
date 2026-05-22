@@ -89,8 +89,40 @@ if [[ ! -x scripts/run-ci.sh ]]; then
     exit 1
 fi
 
-echo "pre-push: running CI-equivalent gate (scripts/run-ci.sh) ..."
-if ! scripts/run-ci.sh; then
+# ─── R250 defence — re-source run-ci.sh from HEAD content ──────────
+# R247 retrospect: a commit can stage Layer X test sources + a
+# `scripts/run-ci.sh` edit that defines Layer X in the same change;
+# the hook should then exercise the NEW Layer X. The standard
+# Git contract is "pre-push fires after the commit lands on the
+# local branch", so `HEAD` already points at the to-be-pushed tip
+# and `git show HEAD:scripts/run-ci.sh` is the *committed* content
+# we should run — not the working-tree copy, which the user may
+# have dirtied (manual rollback, stash pop, partial-staging weirdness)
+# between commit-time and push-time.
+#
+# Mechanism: extract HEAD's `run-ci.sh` to a temp file and run that
+# under bash, keeping CWD at repo_root so the script's relative
+# references (`scripts/audit-mid-values.sh`, `scripts/verify-codegen.sh`,
+# `deploy/*.yaml`, etc.) resolve against the working-tree paths.
+# Even if `scripts/run-ci.sh` were reverted in the working tree
+# between the commit and the push, the hook still runs the version
+# the push would actually publish.
+#
+# `git show HEAD:<path>` exits non-zero when the path doesn't exist
+# in HEAD's tree (e.g. very first commit on a clone). Fall back to
+# the working-tree script in that edge case so first-bootstrap pushes
+# still work.
+tmp_run_ci="$(mktemp -t wz-run-ci.XXXXXX)"
+trap 'rm -f "$tmp_run_ci"' EXIT
+if git show HEAD:scripts/run-ci.sh >"$tmp_run_ci" 2>/dev/null \
+    && [[ -s "$tmp_run_ci" ]]; then
+    echo "pre-push: running CI-equivalent gate (HEAD:scripts/run-ci.sh) ..."
+    gate_cmd=(bash "$tmp_run_ci")
+else
+    echo "pre-push: HEAD has no scripts/run-ci.sh; falling back to working tree."
+    gate_cmd=(scripts/run-ci.sh)
+fi
+if ! "${gate_cmd[@]}"; then
     echo "" >&2
     echo "pre-push: CI-equivalent gate failed — fix locally before push." >&2
     echo "          Bypass with \`git push --no-verify\` only for genuine hotfixes." >&2
