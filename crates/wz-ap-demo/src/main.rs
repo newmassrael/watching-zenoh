@@ -107,6 +107,7 @@ mod link_driver;
 mod runner;
 mod shutdown;
 mod tasks;
+mod teardown;
 mod usage;
 
 use crate::args::{

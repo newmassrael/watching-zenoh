@@ -24,17 +24,21 @@
 //     spawn + the optional `LivelinessToken` oneshot return path.
 //
 // Behaviour is identical to the pre-R287 inlined version. The
-// teardown sequence after drive_session ends (LivelinessToken
-// drop → Close emit → actions drop → writer drain) stays inline
-// in `run_demo` because its ordering invariant is load-bearing
-// per the R284 lesson — extracting it would obscure the
-// "UndeclToken before Close" cause-and-effect chain that the
-// integration test `wz_liveliness_subscriber_round_trip_against_
-// wz_acceptor` exercises.
+// teardown sequence after drive_session ends (sweep abort ->
+// tasks join -> LivelinessToken drop -> Close emit -> actions
+// drop -> writer drain) was retained inline in R287 because the
+// R284 ordering invariant was load-bearing and only doc-enforced.
+// R292 lifts the entire seven-step sequence into the sibling
+// `teardown` module as a typestate sequence wrapper
+// (TeardownInitial -> TasksJoined -> TokenDropped -> CloseEmitted
+// -> ActionsDropped -> WriterDrained); the canonical chain is
+// the only path from drive_session exit to a returned
+// `WriterDrained`, so a hypothetical reorder is now rejected at
+// compile time instead of at e2e time
+// (`wz_liveliness_subscriber_round_trip_against_wz_acceptor`).
 
 use std::io;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use sce_rust_lua::LuaEngine;
 use sce_rust_runtime::{Engine, IScriptEngine};
@@ -52,8 +56,7 @@ use wz_runtime_tokio::session::{
 };
 use wz_runtime_tokio::session_fsm_unicast::{SessionFsmUnicastEvent, SessionFsmUnicastPolicy};
 use wz_runtime_tokio::session_glue::{
-    drive_session_until_terminal, install_session_actions, CloseReason, IterationEvent,
-    SessionLinkActions,
+    drive_session_until_terminal, install_session_actions, IterationEvent, SessionLinkActions,
 };
 
 use crate::args::{
@@ -63,6 +66,7 @@ use crate::args::{
 use crate::link_driver::{writer_task, InboundReadDriver, OutboundWriteDriver};
 use crate::shutdown::shutdown_signal;
 use crate::tasks::{declare_task, publisher_task, query_task, QUERY_RID};
+use crate::teardown;
 
 /// RAII keepers for the local Session-level declarations
 /// ([`Subscriber`], [`LivelinessSubscriber`], [`Queryable`]). Held
@@ -461,31 +465,27 @@ fn activate_role(engine: &mut Engine<SessionFsmUnicastPolicy>, role: &Role) {
 /// parsing has been validated and the spec bundles
 /// ([`DeclareEmitSpec`], [`RemoteLogSpec`], [`ReplyConsumerSpec`],
 /// [`QueryRoleSpec`]) have been assembled. The body is a thin
-/// assembly of the six sub-fns above plus the inline drive +
-/// teardown sequence.
+/// assembly of the six sub-fns above plus the drive_session loop
+/// and the R292 teardown typestate chain.
 ///
-/// Teardown ordering invariant (load-bearing — see R278 + R284):
+/// Teardown ordering invariant (R277 + R278 + R284, compile-time
+/// enforced by the `teardown` module since R292). After
+/// drive_session_until_terminal returns or shutdown_signal fires,
+/// the seven-step teardown runs as the `TeardownInitial ->
+/// TasksJoined -> TokenDropped -> CloseEmitted -> ActionsDropped
+/// -> WriterDrained` typestate chain. Each step consumes its
+/// predecessor by value, so the only path from `TeardownInitial`
+/// to `WriterDrained` is the canonical order; per-step rationale
+/// (sweep abort, 200ms task join, LivelinessToken Drop emits
+/// UndeclToken before the Close frame so the peer observes the
+/// retraction before the teardown handshake, Arc drop drains the
+/// writer-task sender clones, 50ms tail drain) lives in the
+/// per-state doc-comments in `crate::teardown`.
 ///
-///   1. drive_session_until_terminal returns OR shutdown_signal
-///      fires.
-///   2. sweep_task is aborted.
-///   3. publisher / query / declare tasks each get a 200ms
-///      timeout-join window.
-///   4. The `LivelinessToken` (if any) is received from `token_rx`
-///      and dropped — its RAII Drop enqueues
-///      `Declare(UndeclToken)` on the writer channel.
-///   5. On the cancel arm only, `actions.send_close_with_reason(
-///      Generic)` enqueues a graceful Close frame AFTER the
-///      UndeclToken so the peer observes the retraction before the
-///      session-tear-down handshake.
-///   6. `drop(actions)` releases our local Arc; the writer task's
-///      `mpsc::UnboundedSender` clones drain on its own Arc drop.
-///   7. The writer task gets a 50ms drain window to push the tail
-///      frames (Close, UndeclToken, any pending Push) to the peer.
-///
-/// Reverse order of steps 4-5 regresses
-/// `wz_liveliness_subscriber_round_trip` (peer terminates on Close
-/// before processing the trailing UndeclToken).
+/// Reverse order of the UndeclToken / Close steps regresses
+/// `wz_liveliness_subscriber_round_trip_against_wz_acceptor` (peer
+/// terminates on Close before processing the trailing UndeclToken);
+/// the typestate signature makes that reorder a type error.
 pub(crate) async fn run_demo(
     role: Role,
     key: Option<String>,
@@ -661,11 +661,6 @@ pub(crate) async fn run_demo(
             None
         }
     };
-    // R264 — terminate the sweep task; abort() is sufficient since
-    // the task body has no shared mutable state beyond the
-    // observer (cleanly dropped at task join) and no on-Drop
-    // cleanup requirements.
-    sweep_task.abort();
     match &outcome {
         Some(o) => log::info!("wz-ap-demo: session ended: {o:?}"),
         None => log::info!(
@@ -675,71 +670,34 @@ pub(crate) async fn run_demo(
     }
     log::info!("wz-ap-demo: action trace = {:?}", actions.trace_snapshot());
 
-    // ── Step 6 (R121e teardown): give the spawned tasks a brief
-    //           window to finish before tearing down. The 200ms
-    //           ceiling absorbs publisher's normal emission tail
-    //           (1 Push, 200ms spacing window not yet elapsed); a
-    //           wedged task is dropped here rather than blocking
-    //           shutdown indefinitely.
-    if let Some(handle) = publisher_handle {
-        let _ = tokio::time::timeout(Duration::from_millis(200), handle).await;
+    // R292 — seven-step teardown invariant lifted from inline
+    // doc-comment to a typestate chain. The fluent sequence below
+    // is the only path from drive_session exit to a returned
+    // `WriterDrained`; reordering becomes a type error rather than
+    // a runtime regression surfaced by
+    // `wz_liveliness_subscriber_round_trip_against_wz_acceptor`.
+    // Per-step rationale (sweep abort, 200ms task join,
+    // LivelinessToken Drop -> UndeclToken on writer channel, Close
+    // frame after UndeclToken, Arc-drop drains writer-task sender
+    // clones, 50ms tail drain) lives in `crate::teardown`.
+    let _: teardown::WriterDrained = teardown::TeardownInitial {
+        sweep_task,
+        publisher_handle,
+        query_handle,
+        declare_handle,
+        token_rx,
+        actions,
+        writer_handle,
+        was_cancelled: outcome.is_none(),
     }
-    if let Some(handle) = query_handle {
-        let _ = tokio::time::timeout(Duration::from_millis(200), handle).await;
-    }
-    if let Some(handle) = declare_handle {
-        let _ = tokio::time::timeout(Duration::from_millis(200), handle).await;
-    }
+    .abort_sweep_join_tasks()
+    .await
+    .drop_liveliness_token()
+    .await
+    .emit_close_if_cancelled()
+    .drop_actions()
+    .drain_writer()
+    .await;
 
-    // R277 — receive the LivelinessToken that declare_task handed
-    // back via the oneshot. Drop the token explicitly BEFORE
-    // `drop(actions)` so its RAII `Drop` runs
-    // `actions.send_undeclare_token(id)` while the writer task is
-    // still draining the outbound channel. Reverse order
-    // (drop(actions) first) would tear down the writer's send
-    // channel before the token's Drop could enqueue the retraction
-    // frame, and the peer would never see the DELETE sample on the
-    // liveliness subscription.
-    if let Some(rx) = token_rx {
-        let token = match tokio::time::timeout(Duration::from_millis(200), rx).await {
-            Ok(Ok(token)) => Some(token),
-            _ => None,
-        };
-        drop(token);
-    }
-
-    // R284 — on the signal-cancel path emit an explicit graceful
-    // `Close(Generic)` so the peer observes a clean session
-    // termination handshake. ORDER MATTERS: this MUST run AFTER the
-    // LivelinessToken drop above (which enqueues
-    // `Declare(UndeclToken)` on the writer channel) so the peer
-    // sees the UndeclToken — and its DELETE sample for liveliness
-    // subscribers — BEFORE the Close frame tears down the session.
-    // Reverse order regresses
-    // `wz_liveliness_subscriber_round_trip_against_wz_acceptor`
-    // (peer terminates on Close before processing the trailing
-    // UndeclToken).
-    //
-    // Idempotent against the natural-exit path: if
-    // drive_session_until_terminal returned via the FSM's `Closing`
-    // state, the script-driven `send_close_frame_with_reason`
-    // already fired from the FSM's `set_close_reason_*` triggers.
-    // The Rust-side emit here is for the signal-cancel case where
-    // the FSM was dropped mid-iteration and never reached its
-    // Closing transition.
-    if outcome.is_none() {
-        actions.send_close_with_reason(CloseReason::Generic);
-    }
-
-    // Drop the FSM-side sender so the writer task observes the
-    // channel close and exits cleanly. `actions` holds another
-    // clone through the BoxedLinkDriver, so dropping `actions`
-    // explicitly is the textbook signal — every Sender clone must
-    // drop for `rx.recv()` in the writer task to return `None`.
-    drop(actions);
-    // Give the writer task a brief window to drain any tail frame
-    // (e.g. a Close frame the FSM enqueued during the final
-    // transition) before we return and the runtime shuts down.
-    let _ = tokio::time::timeout(Duration::from_millis(50), writer_handle).await;
     Ok(())
 }
