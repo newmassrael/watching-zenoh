@@ -264,6 +264,96 @@ impl Session {
             0
         }
     }
+
+    /// R229 — aliased-keyexpr counterpart of [`Session::publish`].
+    /// Routes the wire branch through
+    /// [`SessionLinkActions::send_push_aliased`] (Put) or
+    /// [`SessionLinkActions::send_push_del_aliased`] (Del) so the
+    /// peer resolves the keyexpr through its inbound mapping table
+    /// (populated by an earlier
+    /// [`SessionLinkActions::send_declare_keyexpr`] from this side),
+    /// and routes the loopback branch through the same
+    /// [`crate::pubsub::SubscriberRegistry::local_publish`] as
+    /// [`Session::publish`] using `loopback_keyexpr` as the resolved
+    /// literal form.
+    ///
+    /// `inline_suffix = None` emits a pure-aliased Push (the declared
+    /// literal is the full keyexpr). `inline_suffix = Some(s)` emits
+    /// a composite Push (declared prefix + `s`) — the wire branch
+    /// passes the pair through to the peer as-is; the loopback branch
+    /// trusts `loopback_keyexpr` to already be the resolved form
+    /// (typically `<declared prefix> + s`).
+    ///
+    /// ## Caller precondition
+    ///
+    /// `loopback_keyexpr` MUST equal the literal form the peer would
+    /// resolve `(mapping_id, inline_suffix)` to through its inbound
+    /// mapping table. Typical usage:
+    ///
+    /// 1. `session.actions().send_declare_keyexpr(7, "home/temp")` —
+    ///    registers `7 -> "home/temp"` on the peer.
+    /// 2. `session.publish_aliased(7, None, "home/temp", payload, opts)`
+    ///    — wire carries `(id=7, suffix=None)`; loopback fires on the
+    ///    literal `"home/temp"`.
+    /// 3. `session.publish_aliased(7, Some("/kitchen"), "home/temp/kitchen", payload, opts)`
+    ///    — wire carries `(id=7, suffix="/kitchen")`; loopback fires
+    ///    on `"home/temp/kitchen"`.
+    ///
+    /// A wz-side outbound mapping table that auto-resolves the
+    /// `loopback_keyexpr` from `(mapping_id, inline_suffix)` is an
+    /// R230+ carry; until that lands, the caller's assertion is the
+    /// single source of truth for the loopback literal.
+    ///
+    /// Returns the number of loopback subscriber callbacks that
+    /// fired, same as [`Session::publish`].
+    ///
+    /// Mirrors zenoh-pico's `_z_write` with a `_z_declared_keyexpr_t`
+    /// carrying both the aliased pair and the resolved literal —
+    /// zenoh-pico embeds both forms in one type
+    /// (`vendor/zenoh-pico/include/zenoh-pico/session/resource.h`),
+    /// the wz R229 surface separates them for now since wz lacks the
+    /// outbound mapping table that would produce them as a pair.
+    pub fn publish_aliased(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        loopback_keyexpr: &str,
+        payload: &[u8],
+        opts: PublishOptions,
+    ) -> usize {
+        let reliable = opts.reliable_bool();
+        if opts.allowed_destination.allows_remote() {
+            match opts.kind {
+                SampleKind::Put => {
+                    self.actions
+                        .send_push_aliased(mapping_id, inline_suffix, payload, reliable);
+                }
+                SampleKind::Del => {
+                    self.actions
+                        .send_push_del_aliased(mapping_id, inline_suffix, reliable);
+                }
+            }
+        }
+        if opts.allowed_destination.allows_local() {
+            let sample = match opts.kind {
+                SampleKind::Put => {
+                    Sample::new_put(loopback_keyexpr, payload.to_vec())
+                        .with_reliability(opts.reliability)
+                }
+                SampleKind::Del => {
+                    Sample::new_del(loopback_keyexpr)
+                        .with_reliability(opts.reliability)
+                }
+            };
+            self.observer
+                .lock()
+                .expect("Session observer mutex poisoned — a subscriber callback panicked")
+                .subscribers
+                .local_publish(&sample)
+        } else {
+            0
+        }
+    }
 }
 
 #[cfg(test)]
@@ -649,5 +739,294 @@ mod tests {
             0,
             "Locality::SessionLocal suppresses the wire branch"
         );
+    }
+
+    // ── R229 publish_aliased (mapping-id keyexpr) ──
+
+    #[test]
+    fn publish_aliased_locality_any_fires_wire_and_loopback() {
+        let (session, driver) = build_session();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .register("home/temp", move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            });
+
+        // Caller has previously (in prod) called send_declare_keyexpr(7,
+        // "home/temp"); the loopback_keyexpr argument restates that
+        // resolved form so loopback fires on "home/temp" even though
+        // the wire side carries only mapping_id = 7.
+        let fired = session.publish_aliased(
+            7,
+            None,
+            "home/temp",
+            b"22.5",
+            PublishOptions::put(),
+        );
+        assert_eq!(fired, 1, "loopback fires on resolved literal");
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "wire branch emits one aliased Push frame"
+        );
+    }
+
+    #[test]
+    fn publish_aliased_locality_remote_fires_wire_only() {
+        let (session, driver) = build_session();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .register("home/temp", move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            });
+
+        let opts = PublishOptions::put().with_locality(Locality::Remote);
+        let fired = session.publish_aliased(7, None, "home/temp", b"22.5", opts);
+        assert_eq!(fired, 0);
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        assert_eq!(driver.frame_count(), 1);
+    }
+
+    #[test]
+    fn publish_aliased_locality_session_local_fires_loopback_only() {
+        let (session, driver) = build_session();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .register("home/temp", move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            });
+
+        let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
+        let fired = session.publish_aliased(7, None, "home/temp", b"22.5", opts);
+        assert_eq!(fired, 1);
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "SessionLocal suppresses the wire-aliased branch"
+        );
+    }
+
+    #[test]
+    fn publish_aliased_del_kind_routes_to_del_aliased_with_empty_payload() {
+        let (session, driver) = build_session();
+        let captured = Arc::new(Mutex::new(None::<(SampleKind, Vec<u8>, String)>));
+        let captured_clone = captured.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .register("home/temp", move |sample| {
+                *captured_clone.lock().unwrap() = Some((
+                    sample.kind,
+                    sample.payload.clone(),
+                    sample.keyexpr.clone(),
+                ));
+            });
+
+        let opts = PublishOptions::del();
+        let fired = session.publish_aliased(7, None, "home/temp", b"ignored", opts);
+        assert_eq!(fired, 1);
+        let (kind, payload, keyexpr) =
+            captured.lock().unwrap().clone().expect("fired");
+        assert_eq!(kind, SampleKind::Del);
+        assert!(payload.is_empty(), "Del Sample carries no payload");
+        assert_eq!(keyexpr, "home/temp", "loopback uses resolved literal");
+        assert_eq!(driver.frame_count(), 1, "send_push_del_aliased fired once");
+    }
+
+    #[test]
+    fn publish_aliased_reliability_propagates_to_wire_and_sample() {
+        let (session, driver) = build_session();
+        let captured = Arc::new(Mutex::new(None::<Reliability>));
+        let captured_clone = captured.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .register("home/temp", move |sample| {
+                *captured_clone.lock().unwrap() = Some(sample.reliability);
+            });
+
+        let opts = PublishOptions::put().with_reliability(Reliability::BestEffort);
+        let fired = session.publish_aliased(7, None, "home/temp", b"x", opts);
+        assert_eq!(fired, 1);
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some(Reliability::BestEffort),
+            "Sample.reliability mirrors opts.reliability"
+        );
+        assert_eq!(driver.frame_count(), 1);
+        assert_eq!(
+            driver.frame_reliability(0),
+            Reliability::BestEffort,
+            "wire-frame reliability mirrors opts.reliability"
+        );
+    }
+
+    #[test]
+    fn publish_aliased_inline_suffix_passes_through_to_wire() {
+        // The wire builder appends the inline suffix to the
+        // mapping-id-prefixed Push; the loopback branch uses
+        // `loopback_keyexpr` verbatim and does not auto-concatenate.
+        // This test pins the contract: caller is responsible for the
+        // loopback literal even when an inline suffix is present.
+        let (session, driver) = build_session();
+        let captured = Arc::new(Mutex::new(None::<String>));
+        let captured_clone = captured.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .register("home/temp/kitchen", move |sample| {
+                *captured_clone.lock().unwrap() = Some(sample.keyexpr.clone());
+            });
+
+        let fired = session.publish_aliased(
+            7,
+            Some("/kitchen"),
+            "home/temp/kitchen",
+            b"x",
+            PublishOptions::put(),
+        );
+        assert_eq!(fired, 1);
+        assert_eq!(
+            *captured.lock().unwrap(),
+            Some(String::from("home/temp/kitchen")),
+            "loopback keyexpr is the caller-resolved literal"
+        );
+        assert_eq!(driver.frame_count(), 1, "wire send fires once");
+    }
+
+    #[test]
+    fn publish_aliased_returns_zero_with_no_loopback_subscriber() {
+        let (session, driver) = build_session();
+        let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
+        let fired =
+            session.publish_aliased(7, None, "home/temp", b"x", opts);
+        assert_eq!(fired, 0, "empty registry yields zero fired callbacks");
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "SessionLocal locality still suppresses wire branch"
+        );
+    }
+
+    #[test]
+    fn publish_aliased_loopback_independent_of_wire_keyexpr_form() {
+        // Pathological-but-instructive contract assertion: the
+        // loopback_keyexpr argument is structurally independent of the
+        // (mapping_id, inline_suffix) wire-side pair. Production
+        // callers will pass the matching resolved form, but the
+        // mechanism does not enforce equivalence — that responsibility
+        // sits with the caller per the documented precondition.
+        let (session, _driver) = build_session();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .register("intentionally_decoupled", move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            });
+
+        let fired = session.publish_aliased(
+            42,
+            Some("/whatever"),
+            "intentionally_decoupled",
+            b"x",
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        );
+        assert_eq!(
+            fired, 1,
+            "loopback fires on the caller-asserted literal regardless of the wire pair"
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn publish_aliased_mixed_locality_isolation_matches_publish_literal() {
+        // Symmetric to publish_locality_session_local_skips_remote_subscribers:
+        // mixed Any + SessionLocal + Remote subscribers on the loopback
+        // literal, publish_aliased with SessionLocal fires Any +
+        // SessionLocal, suppresses Remote, no wire frame.
+        let (session, driver) = build_session();
+        let any_hits = Arc::new(AtomicUsize::new(0));
+        let local_hits = Arc::new(AtomicUsize::new(0));
+        let remote_hits = Arc::new(AtomicUsize::new(0));
+        {
+            let clone = any_hits.clone();
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .subscribers
+                .register_with_locality(
+                    "home/temp",
+                    Locality::Any,
+                    move |_s| {
+                        clone.fetch_add(1, Ordering::SeqCst);
+                    },
+                );
+        }
+        {
+            let clone = local_hits.clone();
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .subscribers
+                .register_with_locality(
+                    "home/temp",
+                    Locality::SessionLocal,
+                    move |_s| {
+                        clone.fetch_add(1, Ordering::SeqCst);
+                    },
+                );
+        }
+        {
+            let clone = remote_hits.clone();
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .subscribers
+                .register_with_locality(
+                    "home/temp",
+                    Locality::Remote,
+                    move |_s| {
+                        clone.fetch_add(1, Ordering::SeqCst);
+                    },
+                );
+        }
+
+        let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
+        let fired = session.publish_aliased(7, None, "home/temp", b"x", opts);
+        assert_eq!(fired, 2);
+        assert_eq!(any_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(local_hits.load(Ordering::SeqCst), 1);
+        assert_eq!(remote_hits.load(Ordering::SeqCst), 0);
+        assert_eq!(driver.frame_count(), 0);
     }
 }
