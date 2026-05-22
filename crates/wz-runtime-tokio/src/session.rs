@@ -63,12 +63,16 @@
 
 use std::sync::{Arc, Mutex};
 
+use wz_codecs::query::Query;
+
 use crate::locality::Locality;
 use crate::observer::ApplicationLayerObserver;
+use crate::query::QueryReply;
+use crate::reply::{InboundReply, ReplyHandle};
 use crate::sample::{
     EncodingHint, QosLevel, Reliability, Sample, SampleKind, SourceInfo, TimestampHint,
 };
-use crate::session_glue::{PushMetadata, SessionLinkActions};
+use crate::session_glue::{ConsolidationMode, PushMetadata, QueryTarget, SessionLinkActions};
 
 /// Options bundle for [`Session::publish`]. Carries the locality
 /// routing predicate (`allowed_destination`), the reliability hint
@@ -234,6 +238,157 @@ impl PublishOptions {
             attachment: self.attachment.clone(),
             qos: self.qos,
         }
+    }
+}
+
+/// R239 — options bundle for [`Session::query`]. Mirrors zenoh-pico's
+/// `z_get_options_t` (`vendor/zenoh-pico/include/zenoh-pico/api/types.h`
+/// 487-497, defaulted by `z_get_options_default`
+/// `vendor/zenoh-pico/src/api/api.c:1723`).
+///
+/// At R239 the *load-bearing* knob is `allowed_destination`: it
+/// selects which branches of [`Session::query`] actually run (wire,
+/// loopback, or both). The remaining slots (target, consolidation,
+/// payload, encoding, attachment, timeout_ms) are captured for
+/// future-additive propagation — the AP MVP `send_request_query`
+/// path takes none of them today, and the loopback path's
+/// in-process [`crate::query::QueryableRegistry::local_query`]
+/// only inspects the keyexpr. The R232 → R233 split precedent
+/// applies: loopback-side propagation lands first (the in-process
+/// `Query` shape exposes these fields), wire-side propagation
+/// follows in a subsequent round when the layered
+/// `RequestQueryBuilder` is wired through
+/// `Session::query`.
+///
+/// `#[non_exhaustive]` so future rounds add fields without breaking
+/// callers. Construct via [`QueryOptions::get`] (or `default`) plus
+/// optional `with_*` setters — never struct-literal externally.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct QueryOptions {
+    /// Query-side locality predicate. `Any` (default) routes both
+    /// wire and loopback; `Remote` to wire only; `SessionLocal` to
+    /// loopback only. Mirrors zenoh-pico's `opt.allowed_destination`
+    /// in `z_get_with_parameters_substr`.
+    pub allowed_destination: Locality,
+    /// Reply target hint propagated to the peer. `None` (default)
+    /// elides the wire byte → zenoh-pico decodes
+    /// `Z_QUERY_TARGET_DEFAULT` = `BEST_MATCHING`. `Some(target)`
+    /// sets the Q_T flag and emits the target byte per
+    /// [`crate::session_glue::QueryTarget`]. Loopback ignores
+    /// target (single-host fan-out has no selection axis).
+    pub target: Option<QueryTarget>,
+    /// Reply consolidation hint propagated to the peer. `None`
+    /// (default) elides → zenoh-pico decodes
+    /// `Z_CONSOLIDATION_MODE_AUTO`. `Some(mode)` sets the Q_C flag
+    /// and emits the consolidation byte per
+    /// [`crate::session_glue::ConsolidationMode`]. Loopback ignores
+    /// consolidation (single-source replies have no duplicate to
+    /// fold).
+    pub consolidation: Option<ConsolidationMode>,
+    /// Optional Query-body payload propagated to the queryable
+    /// callback. R239 carry — current `send_request_query` wire
+    /// builder does not thread the Q_B payload byte; loopback's
+    /// `Query` struct does not surface `payload` to the responder
+    /// callback either. The slot is reserved so a future round that
+    /// adds the wire builder + the `Query.payload` field lands
+    /// without an API break.
+    pub payload: Option<Vec<u8>>,
+    /// Optional encoding metadata for the Query body. Mirror of
+    /// `z_get_options_t.encoding`. R239 carry on both wire and
+    /// loopback propagation — see `payload`.
+    pub encoding: Option<EncodingHint>,
+    /// Optional Query-level attachment blob. Mirror of
+    /// `z_get_options_t.attachment`. R239 carry.
+    pub attachment: Option<Vec<u8>>,
+    /// Query timeout in milliseconds (`0` = default = use
+    /// `Z_GET_TIMEOUT_DEFAULT`). Used by a future R240+
+    /// ReplyRegistry-side timeout sweep that cancels the pending
+    /// entry and fires `on_final` synthetically when the deadline
+    /// passes without a peer Final. Loopback is synchronous so the
+    /// timeout never trips on the loopback branch.
+    pub timeout_ms: u32,
+}
+
+impl QueryOptions {
+    /// Default `Locality::Any` options — fans both wire and loopback
+    /// branches. Mirror of zenoh-pico's `z_get_options_default`
+    /// in semantic intent (everything cleared / unset).
+    pub fn get() -> Self {
+        Self::default()
+    }
+
+    /// Pin the query-side locality predicate.
+    pub fn with_allowed_destination(mut self, locality: Locality) -> Self {
+        self.allowed_destination = locality;
+        self
+    }
+
+    /// Pin the reply target hint. `Some(target)` flips the Q_T flag
+    /// on the outbound Query so the peer respects the selection.
+    pub fn with_target(mut self, target: QueryTarget) -> Self {
+        self.target = Some(target);
+        self
+    }
+
+    /// Pin the reply consolidation hint. `Some(mode)` flips the Q_C
+    /// flag on the outbound Query so the peer applies the mode.
+    pub fn with_consolidation(mut self, consolidation: ConsolidationMode) -> Self {
+        self.consolidation = Some(consolidation);
+        self
+    }
+
+    /// Attach a Query-body payload. Wire + loopback propagation
+    /// lands in a follow-up round (current R239 wire builder does
+    /// not encode Q_B; loopback's `Query` does not surface payload
+    /// to the responder callback either).
+    pub fn with_payload(mut self, payload: Vec<u8>) -> Self {
+        self.payload = Some(payload);
+        self
+    }
+
+    /// Attach Query-body encoding metadata. Wire + loopback
+    /// propagation lands in a follow-up round.
+    pub fn with_encoding(mut self, encoding: EncodingHint) -> Self {
+        self.encoding = Some(encoding);
+        self
+    }
+
+    /// Attach a Query-level attachment blob. Wire + loopback
+    /// propagation lands in a follow-up round.
+    pub fn with_attachment(mut self, attachment: Vec<u8>) -> Self {
+        self.attachment = Some(attachment);
+        self
+    }
+
+    /// Pin a per-query timeout in milliseconds. `0` leaves the
+    /// default in place. Wire-side enforcement lands with the R240+
+    /// ReplyRegistry timeout sweep; loopback ignores the value
+    /// (synchronous round-trip).
+    pub fn with_timeout_ms(mut self, timeout_ms: u32) -> Self {
+        self.timeout_ms = timeout_ms;
+        self
+    }
+
+    /// R239 — compute the `expected_finals` count for the
+    /// [`crate::reply::ReplyRegistry::register`] call. Mirrors
+    /// zenoh-pico's `_z_pending_query_t._remaining_finals`
+    /// initialisation in `_z_query`
+    /// (`vendor/zenoh-pico/src/net/query.c`): one final per
+    /// branch that will eventually emit a Final on this rid.
+    ///
+    /// * `Locality::Remote` → 1 (peer Final only).
+    /// * `Locality::SessionLocal` → 1 (loopback Final only).
+    /// * `Locality::Any` → 2 (loopback Final + peer Final).
+    fn expected_finals(&self) -> u32 {
+        let mut n = 0u32;
+        if self.allowed_destination.allows_remote() {
+            n += 1;
+        }
+        if self.allowed_destination.allows_local() {
+            n += 1;
+        }
+        n
     }
 }
 
@@ -587,6 +742,109 @@ impl Session {
         };
         Ok(self.publish_aliased(mapping_id, inline_suffix, &loopback_keyexpr, payload, opts))
     }
+
+    /// R239 — issue a query on `keyexpr` and route replies to
+    /// `on_reply` (one fire per Reply or Err) plus `on_final` (one
+    /// fire after every expected branch has emitted its Final).
+    ///
+    /// Routes both branches per `opts.allowed_destination`:
+    ///
+    /// * [`Locality::allows_remote`] → wire send via
+    ///   [`SessionLinkActions::send_request_query`] with
+    ///   `(mapping_id = 0, suffix = Some(keyexpr))` (literal-only at
+    ///   R239; aliased / suffix-composite form is a follow-up).
+    /// * [`Locality::allows_local`] → loopback fan via
+    ///   [`crate::query::QueryableRegistry::local_query`] (R238)
+    ///   into every locally-registered queryable that matches the
+    ///   keyexpr pattern. Each emitted [`QueryReply`] projects into
+    ///   an [`InboundReply`] (via `From<QueryReply>`) and routes
+    ///   through [`crate::reply::ReplyRegistry::deliver_local_reply`]
+    ///   so the same callback fires regardless of wire vs loopback
+    ///   origin — the R239 single-dispatch-path commitment.
+    ///
+    /// The rid is allocated through
+    /// [`SessionLinkActions::alloc_next_request_id`] so wire and
+    /// loopback branches see the same id; the
+    /// [`crate::reply::ReplyRegistry`] pending entry registers with
+    /// `expected_finals = opts.allows_remote() as u32 +
+    /// opts.allows_local() as u32`, mirroring zenoh-pico's
+    /// `_z_pending_query_t._remaining_finals` initialisation so
+    /// `on_final` fires exactly once after every contributing branch
+    /// has emitted its Final (loopback is synchronous so its Final
+    /// arrives before this call returns; the wire Final arrives
+    /// asynchronously via [`crate::reply::ReplyRegistry::dispatch_response_final`]).
+    ///
+    /// Order of effects:
+    /// 1. Allocate `rid = actions.alloc_next_request_id()`.
+    /// 2. Take the observer lock; register the pending entry on
+    ///    `observer.replies`. If `allows_local()` holds, fan the
+    ///    loopback inline (queryable callbacks → `QueryReply` →
+    ///    `InboundReply` → `deliver_local_reply` → eventually
+    ///    `deliver_local_final`) under the same lock so the
+    ///    pending entry's `remaining_finals` decrement happens
+    ///    while no Final from the wire can race in.
+    /// 3. Drop the observer lock. If `allows_remote()` holds, dispatch
+    ///    the outbound wire `Request(Query)` via
+    ///    [`SessionLinkActions::send_request_query`].
+    ///
+    /// The wire send happens OUTSIDE the observer lock so the actions
+    /// layer's outbound mutex (driver channel) doesn't nest with the
+    /// observer mutex — order discipline mirrors
+    /// [`Session::publish`]'s wire-after-loopback (or wire-only)
+    /// dispatch pattern.
+    ///
+    /// Mirrors zenoh-pico's `_z_query` (`vendor/zenoh-pico/src/net/query.c`):
+    /// `_z_unsafe_register_pending_query` inside the session mutex,
+    /// `_z_send_n_msg` outside, `_z_session_deliver_query_locally`
+    /// reads the local queryable table under the session mutex.
+    pub fn query(
+        &self,
+        keyexpr: &str,
+        opts: QueryOptions,
+        on_reply: impl FnMut(&InboundReply) + Send + 'static,
+        on_final: impl FnMut(u64) + Send + 'static,
+    ) -> ReplyHandle {
+        let rid = self.actions.alloc_next_request_id();
+        let expected_finals = opts.expected_finals();
+        let allows_remote = opts.allowed_destination.allows_remote();
+        let allows_local = opts.allowed_destination.allows_local();
+
+        let handle = {
+            let mut observer = self
+                .observer
+                .lock()
+                .expect("Session observer mutex poisoned — a reply callback panicked");
+            let handle = observer
+                .replies
+                .register(rid, expected_finals, on_reply, on_final);
+            if allows_local {
+                let mut replies: Vec<QueryReply> = Vec::new();
+                let query = Query::default();
+                observer
+                    .queryables
+                    .local_query(rid, keyexpr, &query, &mut replies);
+                for reply in replies.drain(..) {
+                    let inbound: InboundReply = reply.into();
+                    observer.replies.deliver_local_reply(&inbound);
+                }
+                // Synthetic Final closes the loopback half of the
+                // pending entry's `remaining_finals` counter so a
+                // SessionLocal-only z_get finalises immediately and a
+                // Locality::Any z_get still needs the peer Final to
+                // finalise (matching zenoh-pico
+                // `_z_session_deliver_query_locally`'s emit-final
+                // step at the tail of the local deliver path).
+                observer.replies.deliver_local_final(rid);
+            }
+            handle
+        };
+
+        if allows_remote {
+            self.actions.send_request_query(rid, 0, Some(keyexpr));
+        }
+
+        handle
+    }
 }
 
 /// R234 — typed error returned by
@@ -662,6 +920,7 @@ fn build_loopback_sample(keyexpr: &str, payload: &[u8], opts: &PublishOptions) -
 mod tests {
     use super::*;
     use crate::observer::ApplicationLayerObserver;
+    use crate::reply::InboundReplyBody;
     use crate::session_glue::{BoxedLinkDriver, SessionInitParams, SigningKey};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1846,5 +2105,434 @@ mod tests {
         let s = captured.lock().unwrap();
         assert_eq!(s[0].timestamp.as_ref().unwrap().time, 0xAABB_CCDD);
         assert_eq!(s[0].attachment.as_deref(), Some(&b"aliased-meta"[..]));
+    }
+
+    // ── R239 QueryOptions + Session::query ──
+
+    #[test]
+    fn query_options_default_is_any_locality_unset_metadata() {
+        let opts = QueryOptions::default();
+        assert_eq!(opts.allowed_destination, Locality::Any);
+        assert!(opts.target.is_none());
+        assert!(opts.consolidation.is_none());
+        assert!(opts.payload.is_none());
+        assert!(opts.encoding.is_none());
+        assert!(opts.attachment.is_none());
+        assert_eq!(opts.timeout_ms, 0);
+    }
+
+    #[test]
+    fn query_options_get_constructor_matches_default() {
+        let get = QueryOptions::get();
+        let dflt = QueryOptions::default();
+        assert_eq!(get.allowed_destination, dflt.allowed_destination);
+        assert_eq!(get.target, dflt.target);
+        assert_eq!(get.consolidation, dflt.consolidation);
+    }
+
+    #[test]
+    fn query_options_with_setters_chain() {
+        let opts = QueryOptions::get()
+            .with_allowed_destination(Locality::SessionLocal)
+            .with_target(QueryTarget::All)
+            .with_consolidation(ConsolidationMode::Latest)
+            .with_payload(b"q-payload".to_vec())
+            .with_attachment(b"q-attach".to_vec())
+            .with_timeout_ms(5_000);
+        assert_eq!(opts.allowed_destination, Locality::SessionLocal);
+        assert_eq!(opts.target, Some(QueryTarget::All));
+        assert_eq!(opts.consolidation, Some(ConsolidationMode::Latest));
+        assert_eq!(opts.payload.as_deref(), Some(&b"q-payload"[..]));
+        assert_eq!(opts.attachment.as_deref(), Some(&b"q-attach"[..]));
+        assert_eq!(opts.timeout_ms, 5_000);
+    }
+
+    #[test]
+    fn query_options_expected_finals_matches_locality() {
+        assert_eq!(
+            QueryOptions::default()
+                .with_allowed_destination(Locality::Any)
+                .expected_finals(),
+            2,
+            "Locality::Any expects loopback final + peer final"
+        );
+        assert_eq!(
+            QueryOptions::default()
+                .with_allowed_destination(Locality::Remote)
+                .expected_finals(),
+            1,
+            "Locality::Remote expects peer final only"
+        );
+        assert_eq!(
+            QueryOptions::default()
+                .with_allowed_destination(Locality::SessionLocal)
+                .expected_finals(),
+            1,
+            "Locality::SessionLocal expects loopback final only"
+        );
+    }
+
+    #[test]
+    fn query_locality_session_local_fires_loopback_only_and_completes_inline() {
+        let (session, driver) = build_session();
+        let reply_count = Arc::new(AtomicUsize::new(0));
+        let final_count = Arc::new(AtomicUsize::new(0));
+
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("home/temp", |_query, responder| {
+                responder.send_reply(b"22.5");
+            });
+
+        let r = reply_count.clone();
+        let f = final_count.clone();
+        let _handle = session.query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| {
+                r.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(reply.keyexpr_literal, "home/temp");
+                assert_eq!(reply.body, InboundReplyBody::Put { payload: b"22.5".to_vec() });
+            },
+            move |_rid| { f.fetch_add(1, Ordering::SeqCst); },
+        );
+
+        assert_eq!(reply_count.load(Ordering::SeqCst), 1, "loopback reply fires inline");
+        assert_eq!(final_count.load(Ordering::SeqCst), 1, "SessionLocal final completes inline");
+        assert_eq!(driver.frame_count(), 0, "SessionLocal must NOT touch the wire");
+        assert!(
+            session.observer().lock().unwrap().replies.is_empty(),
+            "expected_finals=1 closes the pending entry on the loopback final"
+        );
+    }
+
+    #[test]
+    fn query_locality_remote_fires_wire_only_and_keeps_pending_until_wire_final() {
+        let (session, driver) = build_session();
+        let reply_count = Arc::new(AtomicUsize::new(0));
+        let final_count = Arc::new(AtomicUsize::new(0));
+
+        // Local queryable that would fire on a loopback round must
+        // stay dormant on Locality::Remote — verifies the loopback
+        // branch is entirely skipped.
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("home/temp", |_q, responder| {
+                responder.send_reply(b"loopback-should-not-fire");
+            });
+
+        let r = reply_count.clone();
+        let f = final_count.clone();
+        let _handle = session.query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+            move |_reply| { r.fetch_add(1, Ordering::SeqCst); },
+            move |_rid| { f.fetch_add(1, Ordering::SeqCst); },
+        );
+
+        assert_eq!(reply_count.load(Ordering::SeqCst), 0, "Remote suppresses loopback");
+        assert_eq!(final_count.load(Ordering::SeqCst), 0, "wire Final has not arrived yet");
+        assert_eq!(driver.frame_count(), 1, "wire Request(Query) frame on the driver");
+        assert_eq!(
+            session.observer().lock().unwrap().replies.len(),
+            1,
+            "pending entry preserved waiting for the peer's Final"
+        );
+    }
+
+    #[test]
+    fn query_locality_any_fires_both_branches_and_waits_for_wire_final() {
+        let (session, driver) = build_session();
+        let reply_count = Arc::new(AtomicUsize::new(0));
+        let final_count = Arc::new(AtomicUsize::new(0));
+
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("home/temp", |_q, responder| {
+                responder.send_reply(b"22.5");
+            });
+
+        let r = reply_count.clone();
+        let f = final_count.clone();
+        let _handle = session.query(
+            "home/temp",
+            QueryOptions::get(), // Any (default)
+            move |_reply| { r.fetch_add(1, Ordering::SeqCst); },
+            move |_rid| { f.fetch_add(1, Ordering::SeqCst); },
+        );
+
+        // Inline observations:
+        assert_eq!(reply_count.load(Ordering::SeqCst), 1, "loopback reply fires inline");
+        assert_eq!(
+            final_count.load(Ordering::SeqCst),
+            0,
+            "Locality::Any on_final must wait for the wire Final too (expected_finals=2)"
+        );
+        assert_eq!(driver.frame_count(), 1, "wire branch dispatched one Request(Query)");
+        assert_eq!(
+            session.observer().lock().unwrap().replies.len(),
+            1,
+            "pending entry preserved waiting for the remaining wire Final"
+        );
+
+        // Simulate the peer's ResponseFinal — the second of the two
+        // expected finals — and observe on_final fire then.
+        use wz_codecs::response_final::ResponseFinal;
+        let mut observer = session.observer().lock().unwrap();
+        observer
+            .replies
+            .dispatch_response_final(&ResponseFinal { request_id: 0, ..ResponseFinal::default() });
+        drop(observer);
+
+        assert_eq!(final_count.load(Ordering::SeqCst), 1, "second Final closes the chain");
+        assert!(
+            session.observer().lock().unwrap().replies.is_empty(),
+            "pending entry dropped after the closing Final"
+        );
+    }
+
+    #[test]
+    fn query_handle_carries_rid_zero_for_first_call_then_monotonic() {
+        let (session, _driver) = build_session();
+        let h0 = session.query(
+            "k",
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+            |_| {},
+            |_| {},
+        );
+        let h1 = session.query(
+            "k",
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(h0.rid(), 0);
+        assert_eq!(h1.rid(), 1, "alloc_next_request_id increments monotonically");
+    }
+
+    #[test]
+    fn query_loopback_propagates_del_body() {
+        let (session, _driver) = build_session();
+        let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
+        let cap_cb = captured.clone();
+
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("clear/me", |_q, responder| {
+                responder.send_reply_del();
+            });
+
+        session.query(
+            "clear/me",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| { *cap_cb.lock().unwrap() = Some(reply.clone()); },
+            |_| {},
+        );
+
+        let got = captured.lock().unwrap().clone().expect("on_reply must fire");
+        assert_eq!(got.body, InboundReplyBody::Del);
+        assert_eq!(got.keyexpr_literal, "clear/me");
+    }
+
+    #[test]
+    fn query_loopback_propagates_err_body_with_encoding_tuple() {
+        let (session, _driver) = build_session();
+        let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
+        let cap_cb = captured.clone();
+
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("error/path", |_q, responder| {
+                responder.send_err(Some(4), Some("schema_v1"), b"oops");
+            });
+
+        session.query(
+            "error/path",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |reply| { *cap_cb.lock().unwrap() = Some(reply.clone()); },
+            |_| {},
+        );
+
+        let got = captured.lock().unwrap().clone().expect("on_reply must fire");
+        assert_eq!(got.keyexpr_literal, "error/path");
+        match &got.body {
+            InboundReplyBody::Err { encoding, payload } => {
+                assert_eq!(*encoding, Some((4, Some("schema_v1".to_string()))));
+                assert_eq!(payload, b"oops");
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn query_with_no_matching_queryable_completes_loopback_with_zero_replies() {
+        let (session, _driver) = build_session();
+        let reply_count = Arc::new(AtomicUsize::new(0));
+        let final_count = Arc::new(AtomicUsize::new(0));
+
+        // Register a queryable on a different keyexpr; the query's
+        // pattern won't match → zero replies, but the loopback's
+        // synthetic Final still closes the SessionLocal pending entry.
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("home/humidity", |_q, responder| {
+                responder.send_reply(b"99");
+            });
+
+        let r = reply_count.clone();
+        let f = final_count.clone();
+        session.query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |_| { r.fetch_add(1, Ordering::SeqCst); },
+            move |_| { f.fetch_add(1, Ordering::SeqCst); },
+        );
+
+        assert_eq!(reply_count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            final_count.load(Ordering::SeqCst),
+            1,
+            "loopback Final still fires even when no queryable matched"
+        );
+        assert!(session.observer().lock().unwrap().replies.is_empty());
+    }
+
+    #[test]
+    fn query_session_local_skips_remote_only_queryable() {
+        // A Locality::Remote-only queryable must NOT fire on a
+        // Locality::SessionLocal query (loopback path uses
+        // allows_local() — Remote returns false). Mirrors the
+        // publish-side suppression pattern at the queryable side.
+        let (session, _driver) = build_session();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register_with_locality(
+                "home/temp",
+                Locality::Remote,
+                move |_q, _responder| {
+                    fired_cb.fetch_add(1, Ordering::SeqCst);
+                },
+            );
+
+        let reply_count = Arc::new(AtomicUsize::new(0));
+        let final_count = Arc::new(AtomicUsize::new(0));
+        let r = reply_count.clone();
+        let f = final_count.clone();
+        session.query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |_| { r.fetch_add(1, Ordering::SeqCst); },
+            move |_| { f.fetch_add(1, Ordering::SeqCst); },
+        );
+
+        assert_eq!(fired.load(Ordering::SeqCst), 0, "Remote-only queryable must skip loopback");
+        assert_eq!(reply_count.load(Ordering::SeqCst), 0);
+        assert_eq!(final_count.load(Ordering::SeqCst), 1, "loopback Final still fires");
+    }
+
+    #[test]
+    fn query_session_local_with_session_local_queryable_fires() {
+        // SessionLocal queryable on SessionLocal query: both
+        // allows_local() — must fire. Verifies the loopback path is
+        // not accidentally gated on allows_remote().
+        let (session, _driver) = build_session();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register_with_locality(
+                "home/temp",
+                Locality::SessionLocal,
+                move |_q, responder| {
+                    fired_cb.fetch_add(1, Ordering::SeqCst);
+                    responder.send_reply(b"22.5");
+                },
+            );
+
+        let reply_count = Arc::new(AtomicUsize::new(0));
+        let r = reply_count.clone();
+        session.query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |_| { r.fetch_add(1, Ordering::SeqCst); },
+            |_| {},
+        );
+
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+        assert_eq!(reply_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn query_locality_remote_alone_skips_local_queryable() {
+        // A local Locality::Any queryable does fire on its own
+        // session's Remote-only query? NO — the loopback branch is
+        // gated on opts.allowed_destination.allows_local(); Remote
+        // sets that to false. Mirrors the publish-side
+        // publish_locality_remote_fires_wire_only invariant for the
+        // queryable side.
+        let (session, driver) = build_session();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("home/temp", move |_q, responder| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+                responder.send_reply(b"22.5");
+            });
+
+        let reply_count = Arc::new(AtomicUsize::new(0));
+        let r = reply_count.clone();
+        session.query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+            move |_| { r.fetch_add(1, Ordering::SeqCst); },
+            |_| {},
+        );
+
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "Remote query does NOT trigger local queryable through the loopback branch"
+        );
+        assert_eq!(reply_count.load(Ordering::SeqCst), 0);
+        assert_eq!(driver.frame_count(), 1, "wire branch sent");
+    }
+
+    #[test]
+    fn alloc_next_request_id_increments_and_starts_at_zero() {
+        let driver = Arc::new(RecordingDriver::new());
+        let actions = SessionLinkActions::new(driver, fixture_params());
+        assert_eq!(actions.alloc_next_request_id(), 0);
+        assert_eq!(actions.alloc_next_request_id(), 1);
+        assert_eq!(actions.alloc_next_request_id(), 2);
     }
 }

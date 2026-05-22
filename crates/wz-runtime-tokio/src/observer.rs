@@ -39,7 +39,7 @@
 //! let mut observer = ApplicationLayerObserver::new();
 //! observer.subscribers.register("home/temp", on_temp);
 //! observer.queryables.register("metrics/**", on_metric);
-//! observer.replies.register(rid, on_reply, on_final);
+//! observer.replies.register(rid, expected_finals, on_reply, on_final);
 //! // … later, inside the drive_session observer closure:
 //! observer.dispatch(event, &actions);
 //! ```

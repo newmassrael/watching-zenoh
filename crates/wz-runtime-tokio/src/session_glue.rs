@@ -641,6 +641,24 @@ pub struct SessionLinkActions {
     /// would dwarf the read parallelism gain at the expected
     /// access pattern.
     pub outbound_mappings: Mutex<HashMap<u64, String>>,
+    /// R239 — monotonic outbound `Request.request_id` allocator.
+    /// Mirrors zenoh-pico's `_z_session_t._query_id` slot
+    /// (`vendor/zenoh-pico/src/session/query.c:99` —
+    /// `_z_zint_t qid = zn->_query_id++` post-increment from 0).
+    /// Each [`crate::session::Session::query`] call (and any future
+    /// caller emitting an outbound `Request(Query)` that registers
+    /// a pending entry with [`crate::reply::ReplyRegistry`])
+    /// reserves the next id through [`Self::alloc_next_request_id`]
+    /// so wire and loopback branches see the same id without the
+    /// caller threading an explicit counter.
+    ///
+    /// Starts at `0` matching the zenoh-pico convention so the first
+    /// query emitted from this session uses `request_id = 0`; the
+    /// peer's pending-table lookup is rid-keyed regardless of the
+    /// starting value, so the choice is cosmetic. `Relaxed` ordering
+    /// is sufficient — id uniqueness is the only invariant and
+    /// `fetch_add` is atomic under every ordering.
+    pub next_outbound_request_id: AtomicU64,
 }
 
 /// R121d — peer-announced sizing caps captured from `InitSyn` for
@@ -767,6 +785,7 @@ impl SessionLinkActions {
             inbound_peer_init_caps: Mutex::new(None),
             outbound_frame_sn: AtomicU64::new(initial_frame_sn),
             outbound_mappings: Mutex::new(HashMap::new()),
+            next_outbound_request_id: AtomicU64::new(0),
         })
     }
 
@@ -941,6 +960,27 @@ impl SessionLinkActions {
     /// vs. the codec encode + TCP write below it.
     pub fn next_outbound_frame_sn(&self) -> u64 {
         self.outbound_frame_sn.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// R239 — outbound `Request.request_id` generator. Returns the
+    /// next rid and advances the internal counter by one. Mirrors
+    /// zenoh-pico's `_z_unsafe_register_pending_query`
+    /// (`vendor/zenoh-pico/src/session/query.c:99` —
+    /// `_z_zint_t qid = zn->_query_id++` post-increment from 0). The
+    /// first call returns `0`; each subsequent call returns the next
+    /// integer.
+    ///
+    /// `Relaxed` ordering is sufficient — uniqueness is the only
+    /// invariant the caller depends on and `fetch_add` is atomic
+    /// under every ordering. The wire `req_id_res` resolution window
+    /// (`params.req_id_res = 0..=3` → 8/16/32/64-bit) is not enforced
+    /// here either; production code with long-running sessions
+    /// emitting more than `1 << req_bits` queries needs an explicit
+    /// modulo (same carry as
+    /// [`Self::next_outbound_frame_sn`]).
+    pub fn alloc_next_request_id(&self) -> u64 {
+        self.next_outbound_request_id
+            .fetch_add(1, Ordering::Relaxed)
     }
 
     /// R121e — encode + dispatch a `Push` (literal keyexpr, `Put`
