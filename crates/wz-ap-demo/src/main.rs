@@ -102,7 +102,7 @@
 use std::env;
 use std::io;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sce_rust_lua::LuaEngine;
@@ -113,6 +113,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::reply::InboundReplyBody;
+use wz_runtime_tokio::sample::SampleKind;
+use wz_runtime_tokio::session::{PublishAliasError, PublishOptions, Session};
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastPolicy;
 use wz_runtime_tokio::session_glue::{
     drive_session_until_terminal, install_session_actions, BoxedLinkDriver, IterationEvent,
@@ -912,132 +914,156 @@ async fn run_demo(
     // etc.) and a single observer.dispatch call inside the
     // drive_session loop fans the IterationEvent into every registry +
     // drains the staged outbound records through the action layer.
-    let mut observer = ApplicationLayerObserver::new();
-    if let Some(ref k) = key {
-        let key_for_callback = k.clone();
-        observer.subscribers.register(k.clone(), move |sample| {
-            // R222 — Sample carries the resolved keyexpr literal +
-            // the SampleKind discriminant + payload bytes directly,
-            // so the prior `match push.keyexpr.body` + tagged-union
-            // arm extraction is no longer required at the call site.
-            eprintln!(
-                "wz-ap-demo: SUBSCRIBER FIRED filter='{}' keyexpr='{}' kind={:?} payload_len={}",
-                key_for_callback,
-                sample.keyexpr,
-                sample.kind,
-                sample.payload.len(),
-            );
-        });
-    }
-
-    // R121j-5c-e2e-demo — queryable callback. The observer's
-    // dispatch fans inbound Request(Query) records into this registry
-    // automatically; we just install the callback that emits one
-    // Reply per match + logs `QUERYABLE FIRED`.
-    if let Some((pattern, reply_text)) = queryable_spec.as_ref() {
-        let pattern_for_callback = pattern.clone();
-        let reply_text_for_callback = reply_text.clone();
-        observer.queryables.register(pattern.clone(), move |_query, responder| {
-            responder.send_reply(reply_text_for_callback.as_bytes());
-            eprintln!(
-                "wz-ap-demo: QUERYABLE FIRED pattern='{}' rid={} keyexpr='{}' reply='{}'",
-                pattern_for_callback,
-                responder.rid(),
-                responder.keyexpr_literal(),
-                reply_text_for_callback,
-            );
-        });
-    }
-
-    // R121k-5 — Remote* registry callbacks. Each tracks the peer's
-    // outbound Declare(Decl*|Undecl*) records and fires user-installed
-    // callbacks on resolved keyexprs. Production deployments wire
-    // metrics or route-table updates here instead of stderr logging.
-    if remote_log_spec.on_remote_subscriber {
-        observer.remote_subscribers.on_subscriber_declared(|decl, resolved| {
-            eprintln!(
-                "wz-ap-demo: REMOTE SUBSCRIBER DECLARED id={} keyexpr='{}'",
-                decl.id, resolved,
-            );
-        });
-        observer.remote_subscribers.on_subscriber_undeclared(|undecl| {
-            eprintln!(
-                "wz-ap-demo: REMOTE SUBSCRIBER UNDECLARED id={}",
-                undecl.id,
-            );
-        });
-    }
-    if remote_log_spec.on_remote_queryable {
-        observer.remote_queryables.on_queryable_declared(|decl, resolved| {
-            eprintln!(
-                "wz-ap-demo: REMOTE QUERYABLE DECLARED id={} keyexpr='{}'",
-                decl.id, resolved,
-            );
-        });
-        observer.remote_queryables.on_queryable_undeclared(|undecl| {
-            eprintln!(
-                "wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={}",
-                undecl.id,
-            );
-        });
-    }
-    // R121j-6-e2e — z_get-side ReplyRegistry. Registered BEFORE the
-    // outbound Query goes out so the inbound Reply chain has a
-    // pending entry to dispatch to (the registry drops silently when
-    // a Reply arrives for an unknown rid; the alternative — register
-    // after send_request_query fires inside query_task — would race
-    // against the peer's first Reply on a fast loopback). Both
-    // callbacks log a stderr line so the paired integration test
-    // fixture can grep for the expected line shape; the on_final
-    // callback also receives the rid the registry auto-drops on.
-    if query_spec.is_some() && (reply_log_spec.on_query_reply || reply_log_spec.on_query_final) {
-        let on_reply = reply_log_spec.on_query_reply;
-        let on_final = reply_log_spec.on_query_final;
-        observer.replies.register(
-            QUERY_RID,
-            move |reply| {
-                if !on_reply {
-                    return;
-                }
-                let body_text = match &reply.body {
-                    InboundReplyBody::Put { payload } => format!(
-                        "Put payload={:?}",
-                        String::from_utf8_lossy(payload),
-                    ),
-                    InboundReplyBody::Del => "Del".to_string(),
-                    InboundReplyBody::Err { encoding, payload } => format!(
-                        "Err encoding={:?} payload={:?}",
-                        encoding,
-                        String::from_utf8_lossy(payload),
-                    ),
-                };
+    //
+    // R235 — observer is now wrapped in `Arc<Mutex<>>` so the
+    // application can hand the same observer to the drive_session
+    // dispatch closure AND to a Session bundle whose loopback branch
+    // (`Session::publish`) needs to reach the subscriber registry.
+    // The 11 callback installs below run inside one lock scope so the
+    // init phase incurs a single lock+drop; the drive_session loop and
+    // any background `Session::publish` callers take the lock on each
+    // dispatch / loopback fire (mutex contention is negligible — the
+    // critical section is the per-event fan-out which is already the
+    // serial bottleneck in the registry model).
+    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
+    {
+        let mut observer_lock = observer.lock().expect("observer mutex poisoned");
+        if let Some(ref k) = key {
+            let key_for_callback = k.clone();
+            observer_lock.subscribers.register(k.clone(), move |sample| {
+                // R222 — Sample carries the resolved keyexpr literal +
+                // the SampleKind discriminant + payload bytes directly,
+                // so the prior `match push.keyexpr.body` + tagged-union
+                // arm extraction is no longer required at the call site.
                 eprintln!(
-                    "wz-ap-demo: REPLY RECEIVED rid={} keyexpr='{}' body={}",
-                    reply.rid, reply.keyexpr_literal, body_text,
+                    "wz-ap-demo: SUBSCRIBER FIRED filter='{}' keyexpr='{}' kind={:?} payload_len={}",
+                    key_for_callback,
+                    sample.keyexpr,
+                    sample.kind,
+                    sample.payload.len(),
                 );
-            },
-            move |rid| {
-                if !on_final {
-                    return;
-                }
-                eprintln!("wz-ap-demo: FINAL RECEIVED rid={rid}");
-            },
-        );
-    }
+            });
+        }
 
-    if remote_log_spec.on_remote_liveliness {
-        observer.liveliness.on_token_declared(|decl, resolved| {
-            eprintln!(
-                "wz-ap-demo: REMOTE TOKEN DECLARED id={} keyexpr='{}'",
-                decl.id, resolved,
+        // R121j-5c-e2e-demo — queryable callback. The observer's
+        // dispatch fans inbound Request(Query) records into this
+        // registry automatically; we just install the callback that
+        // emits one Reply per match + logs `QUERYABLE FIRED`.
+        if let Some((pattern, reply_text)) = queryable_spec.as_ref() {
+            let pattern_for_callback = pattern.clone();
+            let reply_text_for_callback = reply_text.clone();
+            observer_lock
+                .queryables
+                .register(pattern.clone(), move |_query, responder| {
+                    responder.send_reply(reply_text_for_callback.as_bytes());
+                    eprintln!(
+                        "wz-ap-demo: QUERYABLE FIRED pattern='{}' rid={} keyexpr='{}' reply='{}'",
+                        pattern_for_callback,
+                        responder.rid(),
+                        responder.keyexpr_literal(),
+                        reply_text_for_callback,
+                    );
+                });
+        }
+
+        // R121k-5 — Remote* registry callbacks. Each tracks the peer's
+        // outbound Declare(Decl*|Undecl*) records and fires user-installed
+        // callbacks on resolved keyexprs. Production deployments wire
+        // metrics or route-table updates here instead of stderr logging.
+        if remote_log_spec.on_remote_subscriber {
+            observer_lock
+                .remote_subscribers
+                .on_subscriber_declared(|decl, resolved| {
+                    eprintln!(
+                        "wz-ap-demo: REMOTE SUBSCRIBER DECLARED id={} keyexpr='{}'",
+                        decl.id, resolved,
+                    );
+                });
+            observer_lock
+                .remote_subscribers
+                .on_subscriber_undeclared(|undecl| {
+                    eprintln!("wz-ap-demo: REMOTE SUBSCRIBER UNDECLARED id={}", undecl.id);
+                });
+        }
+        if remote_log_spec.on_remote_queryable {
+            observer_lock
+                .remote_queryables
+                .on_queryable_declared(|decl, resolved| {
+                    eprintln!(
+                        "wz-ap-demo: REMOTE QUERYABLE DECLARED id={} keyexpr='{}'",
+                        decl.id, resolved,
+                    );
+                });
+            observer_lock
+                .remote_queryables
+                .on_queryable_undeclared(|undecl| {
+                    eprintln!("wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={}", undecl.id);
+                });
+        }
+        // R121j-6-e2e — z_get-side ReplyRegistry. Registered BEFORE
+        // the outbound Query goes out so the inbound Reply chain has
+        // a pending entry to dispatch to (the registry drops silently
+        // when a Reply arrives for an unknown rid; the alternative —
+        // register after send_request_query fires inside query_task
+        // — would race against the peer's first Reply on a fast
+        // loopback). Both callbacks log a stderr line so the paired
+        // integration test fixture can grep for the expected line
+        // shape; the on_final callback also receives the rid the
+        // registry auto-drops on.
+        if query_spec.is_some()
+            && (reply_log_spec.on_query_reply || reply_log_spec.on_query_final)
+        {
+            let on_reply = reply_log_spec.on_query_reply;
+            let on_final = reply_log_spec.on_query_final;
+            observer_lock.replies.register(
+                QUERY_RID,
+                move |reply| {
+                    if !on_reply {
+                        return;
+                    }
+                    let body_text = match &reply.body {
+                        InboundReplyBody::Put { payload } => {
+                            format!("Put payload={:?}", String::from_utf8_lossy(payload))
+                        }
+                        InboundReplyBody::Del => "Del".to_string(),
+                        InboundReplyBody::Err { encoding, payload } => format!(
+                            "Err encoding={:?} payload={:?}",
+                            encoding,
+                            String::from_utf8_lossy(payload),
+                        ),
+                    };
+                    eprintln!(
+                        "wz-ap-demo: REPLY RECEIVED rid={} keyexpr='{}' body={}",
+                        reply.rid, reply.keyexpr_literal, body_text,
+                    );
+                },
+                move |rid| {
+                    if !on_final {
+                        return;
+                    }
+                    eprintln!("wz-ap-demo: FINAL RECEIVED rid={rid}");
+                },
             );
-        });
-        observer.liveliness.on_token_undeclared(|undecl| {
-            eprintln!(
-                "wz-ap-demo: REMOTE TOKEN UNDECLARED id={}",
-                undecl.id,
-            );
-        });
+        }
+
+        if remote_log_spec.on_remote_liveliness {
+            observer_lock
+                .liveliness
+                .on_token_declared(|decl, resolved| {
+                    eprintln!(
+                        "wz-ap-demo: REMOTE TOKEN DECLARED id={} keyexpr='{}'",
+                        decl.id, resolved,
+                    );
+                });
+            observer_lock
+                .liveliness
+                .on_token_undeclared(|undecl| {
+                    eprintln!("wz-ap-demo: REMOTE TOKEN UNDECLARED id={}", undecl.id);
+                });
+        }
+        // observer_lock drops here; subsequent users (drive_session
+        // dispatch closure, Session::publish loopback branch) re-lock
+        // per-event.
     }
 
     // ── Step 4: session FSM + Lua engine + actions. Production
@@ -1053,26 +1079,40 @@ async fn run_demo(
         Engine::new(SessionFsmUnicastPolicy::new(script_engine));
     engine.initialize();
 
+    // R235 — bundle the outbound actions handle and the inbound
+    // observer into a single `Session`. Background tasks (publisher,
+    // declare emitter, query emitter) take their own cheap clone of
+    // the bundle; each clone shares the same `Arc<SessionLinkActions>`
+    // and the same `Arc<Mutex<ApplicationLayerObserver>>`, so
+    // `session.publish` / `publish_aliased_auto` from any task fans
+    // through to the loopback subscriber registry while the
+    // drive_session loop's `observer.dispatch` is observing inbound
+    // wire frames on the same registry.
+    let session = Session::new(actions.clone(), observer.clone());
+
     // ── Step 4a (R121e): spawn the publisher task BEFORE the
     //                    drive_session loop so the task can wait on
     //                    the handshake's send_open_ack trace counter
     //                    concurrently with the loop's inbound poll.
-    //                    The task receives an Arc<SessionLinkActions>
-    //                    clone so it can call `send_push_literal`
-    //                    independently of the FSM's script-action
-    //                    dispatch. The task exits after emitting the
-    //                    configured number of Pushes; drive_session
-    //                    continues until the peer closes or
-    //                    `max_iters` is reached.
+    //                    R235 — the task now receives a `Session`
+    //                    clone instead of a bare
+    //                    `Arc<SessionLinkActions>`, so it can route
+    //                    Put/Del Pushes through `Session::publish`
+    //                    (literal keyexpr) or
+    //                    `Session::publish_aliased_auto` (when
+    //                    `--declare-id` is supplied). The bundle
+    //                    keeps the loopback branch live so a
+    //                    self-`--key` co-located subscriber will fire
+    //                    on the local Push without crossing the wire.
     let publisher_handle = publisher_spec
         .as_ref()
         .map(|(keyexpr, operation, declare_id)| {
-            let actions_for_publisher = actions.clone();
+            let session_for_publisher = session.clone();
             let keyexpr = keyexpr.clone();
             let operation = operation.clone();
             let declare_id = *declare_id;
             tokio::spawn(publisher_task(
-                actions_for_publisher,
+                session_for_publisher,
                 keyexpr,
                 operation,
                 declare_id,
@@ -1157,10 +1197,18 @@ async fn run_demo(
     //          observer.dispatch call below; the per-iteration trace
     //          stays at debug level so `RUST_LOG=info` production
     //          runs are not noisy on every Push frame.
-    let actions_for_observer = actions.clone();
-
+    //
+    // R235 — observer is `Arc<Mutex<ApplicationLayerObserver>>` so
+    // each iteration relocks per dispatch. A `Session::publish`
+    // callback that fires synchronously from a subscriber (loopback
+    // re-publish) does NOT deadlock because `local_publish` releases
+    // the registry borrow before invoking the user callback —
+    // contention is therefore only between this loop and background
+    // task `Session::publish` calls, which serialize naturally on the
+    // mutex without livelock.
     log::info!("wz-ap-demo: driving session FSM");
     let mut driver = inbound;
+    let observer_for_dispatch = observer.clone();
     let outcome = drive_session_until_terminal(
         &mut driver,
         &actions,
@@ -1168,7 +1216,10 @@ async fn run_demo(
         Some(10_000),
         |event: IterationEvent<'_>| {
             log::debug!("wz-ap-demo: iteration event = {event:?}");
-            observer.dispatch(event, &actions_for_observer);
+            observer_for_dispatch
+                .lock()
+                .expect("observer mutex poisoned by panic in subscriber callback")
+                .dispatch(event, &actions);
         },
     )
     .await;
@@ -1357,11 +1408,19 @@ async fn query_task(
 }
 
 async fn publisher_task(
-    actions: Arc<wz_runtime_tokio::session_glue::SessionLinkActions>,
+    session: Session,
     keyexpr: String,
     operation: PushOperation,
     declare_id: Option<u64>,
 ) {
+    // R235 — borrow the outbound actions handle for `trace_snapshot`
+    // (Established gate polling) + `send_declare_keyexpr` (the
+    // pre-burst R121g declare preamble). Push emission itself routes
+    // through `Session::publish` / `publish_aliased_auto` which keep
+    // the loopback branch live so a co-located subscriber on the
+    // publish keyexpr fires in-process without crossing the wire.
+    let actions = session.actions();
+
     // ── Step 1: wait for Established. Both acceptor and initiator
     //           reach Established on the same `record_established_at`
     //           script-action that fires on `Established.onentry`
@@ -1418,6 +1477,13 @@ async fn publisher_task(
     //           ordering on the reliable channel — the SN window
     //           preserves "DECLARE before any dependent Push" on
     //           the peer side.
+    //
+    //           R234 — `send_declare_keyexpr` also registers
+    //           `mapping_id -> keyexpr` in this session's outbound
+    //           mapping table, so the subsequent
+    //           `Session::publish_aliased_auto(mapping_id, None, …)`
+    //           resolves the loopback literal without the caller
+    //           restating it.
     if let Some(mapping_id) = declare_id {
         actions.send_declare_keyexpr(mapping_id, &keyexpr);
         eprintln!(
@@ -1433,44 +1499,68 @@ async fn publisher_task(
         tokio::time::sleep(Duration::from_millis(PUBLISHER_BURST_INTERVAL_MS)).await;
     }
 
-    // ── Step 3: emit the burst. Each call composes a
-    //           Frame[Push(literal | aliased keyexpr, MsgPut|MsgDel)]
-    //           and dispatches via the OutboundWriteDriver mpsc
-    //           channel. `reliable=true` matches z_sub's default
-    //           subscription reliability. When `declare_id` is
-    //           supplied, the aliased Pushes carry only the
-    //           mapping id (suffix=None), which is the
-    //           bandwidth-efficient shape (one declared keyexpr
-    //           amortised across N Pushes). R219 — switching on
-    //           `operation` selects the Put (with payload) or
-    //           Delete (no payload) action call; the surrounding
-    //           Established gate + declare preamble + cadence loop
-    //           are invariant.
+    // ── Step 3: emit the burst. Each iteration composes a
+    //           `PublishOptions` carrying `SampleKind::Put` or
+    //           `SampleKind::Del` and `Reliability::Reliable` (the
+    //           pre-R235 direct-action calls passed `reliable=true`
+    //           explicitly; the default `Locality::Any` keeps the
+    //           wire branch firing while also enabling the loopback
+    //           branch). `Session::publish_aliased_auto` looks up
+    //           the mapping id in the outbound table (populated by
+    //           the Step 2 declare); if the table is missing the id
+    //           — caller contract violation — neither branch fires
+    //           and the iteration logs a hard error instead of
+    //           silently mis-delivering.
+    //
+    //           R235 — co-located subscriber semantics: when a
+    //           subscriber on `keyexpr` is registered on the SAME
+    //           process (`--key foo` + `--publish foo` in this
+    //           demo), the loopback branch fires the local
+    //           callback in addition to the wire send; the
+    //           `loopback_fired` counter in the log line records the
+    //           number of local callbacks invoked per iteration so a
+    //           test fixture can distinguish loopback vs wire fans.
     for i in 0..PUBLISHER_BURST_COUNT {
-        match (&operation, declare_id) {
-            (PushOperation::Put { value }, Some(mapping_id)) => {
-                actions.send_push_aliased(mapping_id, None, value.as_bytes(), true);
+        let mut opts = PublishOptions::default().with_reliability(Reliability::Reliable);
+        let (kind_tag, payload): (&str, &[u8]) = match &operation {
+            PushOperation::Put { value } => {
+                opts.kind = SampleKind::Put;
+                ("PUT", value.as_bytes())
+            }
+            PushOperation::Delete => {
+                opts.kind = SampleKind::Del;
+                ("DEL", &[])
+            }
+        };
+        let dispatch_outcome: Result<(usize, &'static str), PublishAliasError> = match declare_id {
+            Some(mapping_id) => session
+                .publish_aliased_auto(mapping_id, None, payload, opts)
+                .map(|fired| (fired, "aliased")),
+            None => Ok((session.publish(&keyexpr, payload, opts), "literal")),
+        };
+        match dispatch_outcome {
+            Ok((loopback_fired, mode)) => {
                 eprintln!(
-                    "wz-ap-demo: PUBLISHER EMITTED ALIASED mapping_id={mapping_id} \
-                     value='{value}' idx={i}"
+                    "wz-ap-demo: PUBLISHER EMITTED kind={kind_tag} mode={mode} \
+                     keyexpr='{keyexpr}' declare_id={declare_id:?} payload_len={payload_len} \
+                     idx={i} loopback_fired={loopback_fired}",
+                    payload_len = payload.len(),
                 );
             }
-            (PushOperation::Put { value }, None) => {
-                actions.send_push_literal(&keyexpr, value.as_bytes(), true);
-                eprintln!(
-                    "wz-ap-demo: PUBLISHER EMITTED keyexpr='{keyexpr}' value='{value}' idx={i}"
-                );
-            }
-            (PushOperation::Delete, Some(mapping_id)) => {
-                actions.send_push_del_aliased(mapping_id, None, true);
-                eprintln!(
-                    "wz-ap-demo: PUBLISHER EMITTED DEL ALIASED mapping_id={mapping_id} idx={i}"
-                );
-            }
-            (PushOperation::Delete, None) => {
-                actions.send_push_del_literal(&keyexpr, true);
-                eprintln!(
-                    "wz-ap-demo: PUBLISHER EMITTED DEL keyexpr='{keyexpr}' idx={i}"
+            Err(PublishAliasError::UnknownMapping(id)) => {
+                // R234 contract: publisher_task called
+                // `send_declare_keyexpr` in Step 2 before entering
+                // this loop, so an UnknownMapping here means the
+                // mapping was either never registered (Step 2 took
+                // the None branch yet the publisher still asked for
+                // aliased dispatch — wiring bug) or was retracted
+                // by a concurrent `send_undeclare_kexpr`. Log hard
+                // and skip the iteration so the burst still
+                // terminates; the test fixture distinguishes this
+                // line from the EMITTED line.
+                log::error!(
+                    "wz-ap-demo: publisher_task UnknownMapping id={id} on idx={i} — \
+                     declare-before-publish contract violated; skipping this iteration"
                 );
             }
         }
