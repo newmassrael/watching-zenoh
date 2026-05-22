@@ -12288,6 +12288,80 @@
         "R254 lesson: leaf-first cadence in two consecutive rounds (R253 declare_task + R254 query_task + publisher_task) drove wz-ap-demo tokio::time::sleep direct count from 7 to 0 with byte-equivalent e2e log shape. The trait dispatch is a refactoring lens — the binary's external surface is unaffected, which is the right invariant for production-level migration."
       ]
     },
+    "Round 255": {
+      "decision_summary": "R255 wz-ap-demo deadline math refactor from std::time::Instant arithmetic to clock.now_monotonic_ms() u64 ms pattern; R254 carry option (b) chosen as MCU-friendly path that needs no trait extension.",
+      "changes_bullets": [
+        "wz-ap-demo declare_task/query_task/publisher_task: deadline pattern changed from `let deadline = std::time::Instant::now() + Duration::from_millis(MS); ... if std::time::Instant::now() >= deadline { ... }` to `let deadline_ms = clock.now_monotonic_ms() + MS; ... if clock.now_monotonic_ms() >= deadline_ms { ... }`.",
+        "Doc-comments on the three functions updated to reflect the R255 migration; the prior 'std::time::Instant stays verbatim' text replaced with R255 notes citing R254 option (b) decision.",
+        "std::time::Instant call-site count in wz-ap-demo task functions: 3 -> 0. Remaining 3 mentions in main.rs are doc-comment historical references (intentional migration trace).",
+        "Trait surface (wz_runtime_core::TimeSource) NOT extended — the existing now_monotonic_ms()/sleep() pair is sufficient for u64 ms deadlines; the alternative path (option (a) Instant-shaped trait API) would have required adding `type Instant: Add<Duration, ...> + Ord + Copy` to the trait, which is heavier and not no_std-friendly.",
+        "Behavior equivalence: u64 ms deadlines are identical to std::time::Instant deadlines at the wall-clock-millisecond resolution the task functions actually need (timeout windows are 5_000 ms and 200 ms ranges; sub-ms drift is irrelevant to handshake-gate semantics)."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-ap-demo --bin wz-ap-demo: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates.",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A-E 9/9 binary-dep e2e).",
+        "Layer E e2e specifically: all 9 tests pass with byte-equivalent stderr log shape (timeout-warn line wording verbatim; the migration is a clock-source swap, not a semantic change).",
+        "pre-commit hook validate_workspace clean (T1=0, RT 12/12, sync).",
+        "commit c1a112a (feat(demo): R255 wz-ap-demo deadline math via TimeSource; 1 file +19 / -21)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R256+ wz-runtime-tokio internal tokio::time::sleep + std::time::Instant call-site migration: session_glue.rs lease-deadline select branch has at least 1 tokio::time::sleep direct call (line ~5923 area). Migration there requires SessionLinkActions / Session to carry a TimeSource handle. Tied to R256+ Session reparameterisation — textbook coupling.",
+        "R256+ Session struct reparameterisation per §5.P 'leaf crates first, Session struct last' guidance. Either (i) Session<R: Runtime, T: TimeSource> double-generic, (ii) Session<Bundle: RuntimeBundle> single-generic with Bundle: Runtime + TimeSource. Decision waits on observable site-shape evidence (how many sites consume both? how many consume just one?).",
+        "R256+ Mutex / RwLock contract decision still actively constrains Session shape. The R251 carry stays open.",
+        "R256+ Allocator first concrete impl deferred until MCU buffer-pool round.",
+        "R256+ core::error::Error / std::error::Error impl on RuntimeError behind std feature.",
+        "wz-runtime-lwip crate re-introduction (Phase W lwIP integration round).",
+        "Liveliness Token wz-ap-demo migration (R250 carry).",
+        "ReplyRegistry timeout sweep (TimeSource is now production-validated through 4 leaf task migrations; next round is a strong candidate to land this).",
+        "Q_B / Q_E wire codec slots (SCE-side codec extension).",
+        "Querier / Publisher get_matching_status.",
+        "SCE drift carry.",
+        "Phase W full lwIP integration / Cortex-M cross-compile / deploy yaml.",
+        "Interest 70% / QoS 75-90% / Multicast 90% / 5 transports 85-100% / W3C conformance 100% remaining.",
+        "R255 lesson: trait-extension vs call-site-refactor is a frequent design fork. The textbook bias is toward the smaller surface change (don't extend the trait until a call-site shape forces it). R254 carry framed the choice explicitly + R255 resolved it with no trait extension; the u64 ms pattern composes with the existing now_monotonic_ms() and works on every conceivable target (no_std MCU, AP, even bare-metal). Pattern to remember when temptation to extend a trait surfaces."
+      ],
+      "publishable_decision_summary": "R255 wz-ap-demo deadline math refactor from std::time::Instant arithmetic to clock.now_monotonic_ms() u64 ms pattern; R254 carry option (b) chosen as MCU-friendly path that needs no trait extension.",
+      "publishable_changes_bullets": [
+        "wz-ap-demo declare_task/query_task/publisher_task: deadline pattern changed from `let deadline = std::time::Instant::now() + Duration::from_millis(MS); ... if std::time::Instant::now() >= deadline { ... }` to `let deadline_ms = clock.now_monotonic_ms() + MS; ... if clock.now_monotonic_ms() >= deadline_ms { ... }`.",
+        "Doc-comments on the three functions updated to reflect the R255 migration; the prior 'std::time::Instant stays verbatim' text replaced with R255 notes citing R254 option (b) decision.",
+        "std::time::Instant call-site count in wz-ap-demo task functions: 3 -> 0. Remaining 3 mentions in main.rs are doc-comment historical references (intentional migration trace).",
+        "Trait surface (wz_runtime_core::TimeSource) NOT extended — the existing now_monotonic_ms()/sleep() pair is sufficient for u64 ms deadlines; the alternative path (option (a) Instant-shaped trait API) would have required adding `type Instant: Add<Duration, ...> + Ord + Copy` to the trait, which is heavier and not no_std-friendly.",
+        "Behavior equivalence: u64 ms deadlines are identical to std::time::Instant deadlines at the wall-clock-millisecond resolution the task functions actually need (timeout windows are 5_000 ms and 200 ms ranges; sub-ms drift is irrelevant to handshake-gate semantics)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-ap-demo --bin wz-ap-demo: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates.",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A-E 9/9 binary-dep e2e).",
+        "Layer E e2e specifically: all 9 tests pass with byte-equivalent stderr log shape (timeout-warn line wording verbatim; the migration is a clock-source swap, not a semantic change).",
+        "pre-commit hook validate_workspace clean (T1=0, RT 12/12, sync).",
+        "commit c1a112a (feat(demo): R255 wz-ap-demo deadline math via TimeSource; 1 file +19 / -21)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R256+ wz-runtime-tokio internal tokio::time::sleep + std::time::Instant call-site migration: session_glue.rs lease-deadline select branch has at least 1 tokio::time::sleep direct call (line ~5923 area). Migration there requires SessionLinkActions / Session to carry a TimeSource handle. Tied to R256+ Session reparameterisation — textbook coupling.",
+        "R256+ Session struct reparameterisation per §5.P 'leaf crates first, Session struct last' guidance. Either (i) Session<R: Runtime, T: TimeSource> double-generic, (ii) Session<Bundle: RuntimeBundle> single-generic with Bundle: Runtime + TimeSource. Decision waits on observable site-shape evidence (how many sites consume both? how many consume just one?).",
+        "R256+ Mutex / RwLock contract decision still actively constrains Session shape. The R251 carry stays open.",
+        "R256+ Allocator first concrete impl deferred until MCU buffer-pool round.",
+        "R256+ core::error::Error / std::error::Error impl on RuntimeError behind std feature.",
+        "wz-runtime-lwip crate re-introduction (Phase W lwIP integration round).",
+        "Liveliness Token wz-ap-demo migration (R250 carry).",
+        "ReplyRegistry timeout sweep (TimeSource is now production-validated through 4 leaf task migrations; next round is a strong candidate to land this).",
+        "Q_B / Q_E wire codec slots (SCE-side codec extension).",
+        "Querier / Publisher get_matching_status.",
+        "SCE drift carry.",
+        "Phase W full lwIP integration / Cortex-M cross-compile / deploy yaml.",
+        "Interest 70% / QoS 75-90% / Multicast 90% / 5 transports 85-100% / W3C conformance 100% remaining.",
+        "R255 lesson: trait-extension vs call-site-refactor is a frequent design fork. The textbook bias is toward the smaller surface change (don't extend the trait until a call-site shape forces it). R254 carry framed the choice explicitly + R255 resolved it with no trait extension; the u64 ms pattern composes with the existing now_monotonic_ms() and works on every conceivable target (no_std MCU, AP, even bare-metal). Pattern to remember when temptation to extend a trait surfaces."
+      ]
+    },
     "Round 26": {
       "decision_summary": "R26 codebase Korean cleanup — fix 2 non-md files (mnemosyne.toml line 60 + scripts/verify-codegen.sh line 17) and establish non-md-English-only convention; historical atomic.json Korean (17 entries) and the legacy KO atomic section id remain locked by T2 frozen-ledger and the missing rename_section primitive respectively.",
       "changes_bullets": [
