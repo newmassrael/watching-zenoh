@@ -84,7 +84,8 @@
 //! [`Self::dispatch`] form.
 
 use crate::declare::{
-    LivelinessRegistry, RemoteQueryableRegistry, RemoteSubscriberRegistry,
+    LivelinessRegistry, LivelinessSubscriberRegistry, RemoteQueryableRegistry,
+    RemoteSubscriberRegistry,
 };
 use crate::pubsub::SubscriberRegistry;
 use crate::query::{QueryReply, QueryableRegistry};
@@ -110,6 +111,15 @@ pub struct ApplicationLayerObserver {
     /// Peer's outbound `DeclToken` / `UndeclToken` records — the
     /// liveliness signal layer.
     pub liveliness: LivelinessRegistry,
+    /// R280 — local liveliness subscribers declared by
+    /// [`crate::session::Session::declare_liveliness_subscriber`]. A
+    /// keyexpr-filtered counterpart to [`Self::liveliness`]: the
+    /// generic-observer registry fans EVERY peer `Decl*Token` into its
+    /// callbacks, while this registry routes only the peer tokens
+    /// whose resolved keyexpr matches a subscriber slot's pattern.
+    /// Both registries receive the same `IterationEvent` from
+    /// [`Self::dispatch_event`]; they are independent fan-out paths.
+    pub liveliness_subscribers: LivelinessSubscriberRegistry,
     /// Initiator-side `Response(Reply|Err)` + `ResponseFinal`
     /// callbacks (`z_get` consumer). Pending entries auto-unregister
     /// when their matching `ResponseFinal` arrives.
@@ -136,6 +146,7 @@ impl ApplicationLayerObserver {
             remote_subscribers: RemoteSubscriberRegistry::new(),
             remote_queryables: RemoteQueryableRegistry::new(),
             liveliness: LivelinessRegistry::new(),
+            liveliness_subscribers: LivelinessSubscriberRegistry::new(),
             replies: ReplyRegistry::new(),
             pending_replies: Vec::new(),
             pending_final_rids: Vec::new(),
@@ -170,6 +181,8 @@ impl ApplicationLayerObserver {
         self.remote_subscribers.dispatch_iteration_event(event, peer_table);
         self.remote_queryables.dispatch_iteration_event(event, peer_table);
         self.liveliness.dispatch_iteration_event(event, peer_table);
+        self.liveliness_subscribers
+            .dispatch_iteration_event(event, peer_table);
         self.replies.dispatch_iteration_event(event, peer_table);
     }
 

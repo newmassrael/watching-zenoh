@@ -67,6 +67,7 @@ use wz_codecs::query::Query;
 use wz_runtime_core::TimeSource;
 
 use crate::locality::Locality;
+use crate::declare::{LivelinessSample, LivelinessSampleCallback};
 use crate::observer::ApplicationLayerObserver;
 use crate::pubsub::SubscriptionId;
 use crate::query::{QueryReply, QueryResponder, QueryableId};
@@ -1412,6 +1413,88 @@ impl Session {
             options,
         })
     }
+
+    /// R280 — declare a liveliness subscriber on a literal `keyexpr`
+    /// pattern, registering a [`LivelinessSampleCallback`] that fires
+    /// for every peer `Decl*Token` whose resolved keyexpr matches the
+    /// pattern. Returns a [`LivelinessSubscriber`] RAII handle whose
+    /// `Drop` emits `Interest(Final)` on the outbound link and
+    /// removes the slot from the local
+    /// [`crate::declare::LivelinessSubscriberRegistry`].
+    ///
+    /// Mirrors zenoh-pico's `z_liveliness_declare_subscriber`
+    /// (`vendor/zenoh-pico/src/net/liveliness.c:220-235`):
+    /// `_z_register_liveliness_subscriber` allocates the entity id and
+    /// inserts the slot; `_z_n_interest_encode` emits the Interest
+    /// frame; the optional `history` flag in zenoh-pico's
+    /// `z_liveliness_subscriber_options_t` becomes the `CURRENT` bit
+    /// on the outbound Interest header and gates the peer's
+    /// `_z_liveliness_subscription_trigger_history` replay
+    /// (interest.c:198).
+    ///
+    /// ## Wire side
+    ///
+    /// One `Interest` frame on the reliable channel with body
+    /// `flags = KEYEXPRS | TOKENS | RESTRICTED | FUTURE [| CURRENT]`
+    /// carrying the literal keyexpr. The peer registers the
+    /// subscription against its remote-interests table; subsequent
+    /// `Declare(DeclToken)` / `Declare(UndeclToken)` records that the
+    /// peer emits for matching keyexprs arrive here through the
+    /// session loop and surface to the application as
+    /// [`LivelinessSample`] callbacks with kind `Put` / `Delete`.
+    ///
+    /// ## Registration ordering
+    ///
+    /// The local slot register runs BEFORE the wire emit so any
+    /// racing inbound dispatch (the peer responding to an earlier
+    /// session-arming Interest, an out-of-order DeclToken that
+    /// arrives before our Interest is processed by the peer) finds
+    /// the slot ready and fires the callback instead of silently
+    /// dropping. Same ordering rule as
+    /// [`crate::pubsub::SubscriberRegistry::register`].
+    ///
+    /// ## Future-additive surface
+    ///
+    /// An aliased counterpart (`declare_liveliness_subscriber_aliased`)
+    /// mirroring [`Self::declare_token_aliased`] is reserved for a
+    /// future round; the literal form is the entry point for R280.
+    pub fn declare_liveliness_subscriber(
+        &self,
+        keyexpr: impl Into<String>,
+        options: LivelinessSubscriberOptions,
+        callback: impl FnMut(LivelinessSample<'_>) + Send + 'static,
+    ) -> LivelinessSubscriber {
+        let keyexpr_string = keyexpr.into();
+        let interest_id = self.actions.alloc_next_interest_id();
+        // Register first, emit Interest second — the order matters for
+        // races against an inbound DeclToken whose Interest reached
+        // the peer earlier (e.g. a re-declared subscriber after a
+        // session-layer Reconnect, R267+ topology). The wire-emit
+        // panic-free invariant from `send_declare_token` applies
+        // equally to `send_interest_liveliness_subscriber`.
+        self.observer
+            .lock()
+            .expect("observer mutex poisoned by an earlier panicked callback")
+            .liveliness_subscribers
+            .register(
+                interest_id,
+                keyexpr_string.clone(),
+                options.history,
+                Box::new(callback) as LivelinessSampleCallback,
+            );
+        self.actions.send_interest_liveliness_subscriber(
+            interest_id,
+            options.history,
+            /*keyexpr_mapping_id=*/ 0,
+            Some(&keyexpr_string),
+        );
+        LivelinessSubscriber {
+            session: self.clone(),
+            interest_id,
+            keyexpr: keyexpr_string,
+            options,
+        }
+    }
 }
 
 /// R241 — typed error returned by [`Session::query_aliased_auto`]
@@ -2194,6 +2277,174 @@ impl std::fmt::Display for LivelinessAliasError {
 }
 
 impl std::error::Error for LivelinessAliasError {}
+
+/// R280 — options bundle for
+/// [`Session::declare_liveliness_subscriber`]. Mirrors zenoh-pico's
+/// `z_liveliness_subscriber_options_t`
+/// (`vendor/zenoh-pico/include/zenoh-pico/api/liveliness.h:88-90`):
+/// a single `history` boolean today; `#[non_exhaustive]` so a
+/// future round can add fields without breaking external callers.
+///
+/// `history = true` instructs the peer to immediately replay the
+/// matching liveliness-token snapshot through `Decl*Token` records
+/// before any future-only signal arrives — sets the `CURRENT` bit
+/// (`_Z_INTEREST_FLAG_CURRENT`) on the outbound Interest header per
+/// `vendor/zenoh-pico/src/net/liveliness.c:198`. `history = false`
+/// (default) only subscribes for future events.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct LivelinessSubscriberOptions {
+    /// `true` to request a current-state replay from the peer at
+    /// declare time, `false` to subscribe only to future events.
+    pub history: bool,
+}
+
+impl LivelinessSubscriberOptions {
+    /// Default options — `history = false`. Mirrors zenoh-pico's
+    /// `z_liveliness_subscriber_options_default`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Builder — set the `history` flag explicitly.
+    pub fn with_history(mut self, history: bool) -> Self {
+        self.history = history;
+        self
+    }
+}
+
+/// R280 — handle for a liveliness subscriber declared through
+/// [`Session::declare_liveliness_subscriber`]. Holds the
+/// `interest_id` allocated by
+/// [`crate::session_glue::SessionLinkActions::alloc_next_interest_id`]
+/// so `Drop` can emit the matching `Interest(Final)` retraction on
+/// the outbound link AND remove the slot from the local
+/// [`crate::declare::LivelinessSubscriberRegistry`].
+///
+/// ## Lifetime + wire emit on Drop
+///
+/// The subscriber stays declared on the peer for as long as this
+/// handle is alive on the local session. `Drop` emits
+/// `Interest(Final)` so the peer's
+/// `_z_interest_process_interest_final` removes our entry from its
+/// remote-interests table — mirror of zenoh-pico's
+/// `_z_undeclare_liveliness_subscriber` at
+/// `vendor/zenoh-pico/src/net/liveliness.c:232-243`. Local slot
+/// removal runs first so any inbound dispatch racing the wire emit
+/// does not fire a callback against a slot that is about to
+/// disappear from the registry.
+///
+/// `!Clone` by construction — the underlying `interest_id` is a
+/// unique handle; cloning would let two drops race to emit
+/// `InterestFinal` for the same id, and the peer would treat the
+/// second as a no-op. Code wanting "the same liveliness subscription
+/// from two places" should call
+/// [`Session::declare_liveliness_subscriber`] twice and accept two
+/// distinct interest ids — that matches zenoh-pico semantics.
+///
+/// ## Panic semantics on Drop
+///
+/// The wire-emit path (`send_interest_final`) is panic-free under
+/// normal AP MVP operation, matching the [`LivelinessToken`]
+/// contract. The observer mutex lock could in principle be poisoned
+/// by an earlier callback panic; the Drop impl `map`s over the
+/// `Result` so a poisoned mutex still produces an idempotent
+/// no-op rather than a double panic (same shape as
+/// [`crate::pubsub::Subscriber::drop`] guard).
+///
+/// `#[non_exhaustive]`. Construct only through
+/// [`Session::declare_liveliness_subscriber`].
+#[non_exhaustive]
+pub struct LivelinessSubscriber {
+    session: Session,
+    interest_id: u64,
+    keyexpr: String,
+    options: LivelinessSubscriberOptions,
+}
+
+impl LivelinessSubscriber {
+    /// The stable interest id allocated at declare time by
+    /// [`crate::session_glue::SessionLinkActions::alloc_next_interest_id`].
+    /// Exposed for diagnostics; callers should not rely on the exact
+    /// value across runs since the counter is session-scoped +
+    /// Relaxed ordering.
+    pub fn interest_id(&self) -> u64 {
+        self.interest_id
+    }
+
+    /// The keyexpr pattern the subscriber was declared on. Useful
+    /// for debug logging and matching the handle back to its
+    /// originating call site.
+    pub fn keyexpr(&self) -> &str {
+        &self.keyexpr
+    }
+
+    /// Borrow the declared options.
+    pub fn options(&self) -> &LivelinessSubscriberOptions {
+        &self.options
+    }
+
+    /// `true` when the subscriber requested `history = true` AND the
+    /// peer has signaled history-complete by emitting
+    /// `Interest(Final)` for our `interest_id`. Returns `false` for a
+    /// `history = false` subscriber (no replay was requested → the
+    /// flag is meaningless and stays `false`) and for a
+    /// history-enabled subscriber that has not yet observed its
+    /// matching `InterestFinal`.
+    ///
+    /// Mirrors zenoh-pico's `_z_interest_process_interest_final`
+    /// post-condition (`vendor/zenoh-pico/src/session/interest.c:524`):
+    /// `InterestFinal` arrival marks the subscription's historical
+    /// replay complete; subsequent `Decl*Token` records arrive as
+    /// new (future) events.
+    pub fn history_complete(&self) -> bool {
+        self.session
+            .observer()
+            .lock()
+            .map(|observer| {
+                observer
+                    .liveliness_subscribers
+                    .history_complete(self.interest_id)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Explicitly retract this liveliness subscriber. Emits
+    /// `Interest(Final)` on the outbound link and consumes the
+    /// handle so the [`Drop`] impl will not emit a second duplicate
+    /// against an already-retracted id. Mirror of
+    /// [`LivelinessToken::undeclare`]; same `std::mem::forget(self)`
+    /// pattern keeps the intent explicit.
+    pub fn undeclare(self) {
+        if let Ok(mut observer) = self.session.observer().lock() {
+            observer
+                .liveliness_subscribers
+                .unregister(self.interest_id);
+        }
+        self.session
+            .actions()
+            .send_interest_final(self.interest_id);
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for LivelinessSubscriber {
+    fn drop(&mut self) {
+        // R280 RAII — unregister the local slot first so any racing
+        // inbound dispatch sees no slot, then emit Interest(Final) so
+        // the peer drops its end of the subscription. Poisoned mutex
+        // (an earlier callback panicked) is treated as idempotent
+        // no-op — `map` over the lock Result rather than panicking.
+        if let Ok(mut observer) = self.session.observer.lock() {
+            observer
+                .liveliness_subscribers
+                .unregister(self.interest_id);
+        }
+        self.session
+            .actions
+            .send_interest_final(self.interest_id);
+    }
+}
 
 /// R234 — typed error returned by
 /// [`Session::publish_aliased_auto`] when the requested mapping id
