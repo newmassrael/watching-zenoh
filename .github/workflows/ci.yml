@@ -187,6 +187,14 @@ jobs:
       - name: Layer C1 — cargo test --workspace
         run: bash scripts/run-ci.sh --layer C1
 
+      - name: Layer C1b — cargo test -p wz-runtime-core --features alloc
+        # R269 — workspace test uses default features so the alloc-
+        # gated panic_payload / Error-trait tests in wz-runtime-core
+        # would otherwise never run in CI. This lane runs them
+        # explicitly; the crate's MCU-target no-default-features
+        # build is still validated by Layer C2 (-D warnings).
+        run: bash scripts/run-ci.sh --layer C1b
+
       - name: Layer C2 — cargo clippy --deny warnings
         run: bash scripts/run-ci.sh --layer C2
 

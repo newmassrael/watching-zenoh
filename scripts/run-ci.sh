@@ -20,6 +20,10 @@
 #              (R235-hotfix; rejects new e2e tests that would panic
 #              Layer C1 on fresh CI checkouts)
 #   Layer C1 — cargo test --workspace
+#   Layer C1b — cargo test -p wz-runtime-core --features alloc
+#              (R269; the workspace lane uses default features so the
+#              alloc-gated panic_payload tests would otherwise never
+#              run in CI — see crates/wz-runtime-core/Cargo.toml)
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
 #   Layer D  — deploy/*.yaml schema validate
 #   Layer E  — binary-dep e2e suite via `cargo test ... -- --ignored`
@@ -318,6 +322,21 @@ layer_c1_cargo_test() {
     (cd crates && cargo test --workspace --quiet)
 }
 
+# ─── Layer C1b — cargo test -p wz-runtime-core --features alloc ────
+#
+# wz-runtime-core's default features = [] (the crate must compile clean
+# for MCU bare-metal where no heap exists). The 7 R266/R267
+# panic_payload + Error-trait tests live behind `cfg(feature = "alloc")`
+# because they construct `Box<dyn Any + Send>` payloads. Layer C1's
+# `cargo test --workspace` runs each member crate with that member's
+# OWN default features, so wz-runtime-core's test binary compiles with
+# zero features and the alloc-gated mod is `cfg(false)` — i.e. the
+# tests silently do not run. This lane runs them explicitly so the
+# alloc-mode behaviour is gated in CI.
+layer_c1b_cargo_test_alloc() {
+    (cd crates && cargo test -p wz-runtime-core --features alloc --quiet)
+}
+
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
 layer_c2_cargo_clippy() {
     (cd crates && cargo clippy --workspace --all-targets --quiet -- -D warnings)
@@ -423,6 +442,7 @@ run_layer A2 layer_a2_audit_mid_values || overall=1
 run_layer B layer_b_verify_codegen || overall=1
 run_layer C0 layer_c0_test_discipline || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
+run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer D layer_d_validate_deploy || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1

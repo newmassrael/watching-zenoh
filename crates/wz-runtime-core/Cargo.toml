@@ -17,11 +17,14 @@
 # baseline counted. The R63 anti-stub rule applies: no NOP impl ships
 # here; concrete impls land alongside real callers.
 #
-# `no_std` by default + opt-in `alloc` feature so the trait surface
-# compiles for Cortex-M targets where `std` is unavailable. `std` feature
-# layers `std::error::Error` + a couple of std-only conveniences for the
-# tokio/AP profile (still pending; this round leaves the feature flag in
-# place but no std-gated code path yet).
+# Unconditional `no_std` lib + opt-in `alloc` feature. The crate exposes
+# only traits + a flat error enum, none of which need std; AP-profile
+# binaries (wz-runtime-tokio / wz-ap-demo) link std at the binary level
+# anyway, so a separate `std` feature was redundant and removed in R269.
+# The `alloc` feature gates the `RuntimeError::JoinFailed { payload:
+# Box<...> }` variant (R266 panic-payload capture) — AP profile turns it
+# on; MCU bare-metal profiles without a heap leave it off and rely on
+# the unit-variant JoinFailed shape.
 
 [package]
 name = "wz-runtime-core"
@@ -36,15 +39,11 @@ description = "Phase W runtime-services-tier trait skeleton (Runtime/TimeSource/
 
 [features]
 default = []
-# Bring std into scope (needed by the AP/tokio profile for things like
-# std::time + tokio's task model). Disabled by default so MCU builds stay
-# no_std. Currently this feature only flips the no_std attribute on
-# lib.rs; std-only convenience impls land alongside TokioRuntime in R252+.
-std = ["alloc"]
-# Bring `alloc` into scope so trait method bodies can reference Box etc.
-# when needed. MCU profiles that supply a heap will turn this on; bare-
-# metal profiles without a heap leave it off and rely on stack/static
-# allocation only.
+# Bring `alloc` into scope so trait method bodies + error variants can
+# reference Box etc. when needed (R266 panic-payload capture is the
+# load-bearing consumer). MCU profiles that supply a heap turn this on;
+# bare-metal profiles without a heap leave it off and rely on the unit-
+# variant JoinFailed shape + stack/static allocation only.
 alloc = []
 
 [lints]
