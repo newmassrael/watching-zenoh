@@ -316,68 +316,6 @@
         "5/5.4"
       ]
     },
-    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier": {
-      "title": "§5.P — Runtime services tier (wz-runtime-core)",
-      "parent_doc": "docs/rfc-sce-protocol-synthesis.md",
-      "intent": "High-level runtime services tier (task/mutex/time/alloc) above SCE-emitted code so wz upper layers compile against tokio (AP) and lwIP (MCU) unchanged.",
-      "rationale_bullets": [
-        "R227-R229 Session bundle binds std::sync::Mutex + tokio::spawn directly; lwip path blocked.",
-        "Current site count: 111 std/tokio uses across crates (R230 inventory baseline).",
-        "R63 lwip-stub anti-pattern: NOP impl forbidden; concrete impl waits for Phase W integration.",
-        "Distinct from §5.I HAL tier — that scope is CPU intrinsics; this scope is OS/runtime services.",
-        "Late commitment cost: site count grows 1-3 per round; retire cost super-linear in age."
-      ],
-      "inputs_bullets": [
-        "Three-tier deploy profile: full / ap / mcu (Cargo features + RFC-side classification).",
-        "Runtime trait shape: spawn + Mutex + RwLock + JoinHandle (async-runtime contract).",
-        "Allocator trait shape: alloc + dealloc + Box equivalent (no_std-friendly contract).",
-        "TimeSource trait shape: now_monotonic_ms + sleep (deterministic time provider)."
-      ],
-      "outputs_bullets": [
-        "Per-profile concrete impl binding (TokioRuntime / LwipRuntime / EmbassyRuntime).",
-        "wz upper layers (Session, SubscriberRegistry) reparameterized over R: Runtime.",
-        "Cargo profile.full / profile.ap / profile.mcu feature gates wired to crate selection.",
-        "Site retire migration path: 111 sites → trait-mediated calls (R231+ rounds)."
-      ],
-      "caveats_bullets": [
-        "R230 is spec-only — no Runtime/Allocator/TimeSource code lands this round.",
-        "R63 NOP-stub lesson: concrete impl waits for real lwip integration (Phase W).",
-        "HAL trait (§5.I, intrinsics) and Runtime trait (§5.P) MUST stay layer-distinct in code.",
-        "Site retire multi-round (R231-R233+); leaf crates first, Session struct last.",
-        "Async coloring: Runtime::spawn must produce same Future shape across tokio/embassy.",
-        "Reliability/Sample types stay in wz-runtime-tokio until trait surfaces stabilize.",
-        "profile-mcu may not reach all 6 backends; lwip-only initial scope per Phase W.",
-        "PublishOptions metadata propagation (R228 carry) orthogonal — separate retire round."
-      ],
-      "alternatives_rejected": [
-        {
-          "alternative": "B1 wz outbound mapping table",
-          "reason": "local R229 carry, narrow scope, no MCU enablement."
-        },
-        {
-          "alternative": "B2 wz-ap-demo Session migration",
-          "reason": "single-app refactor, doesn't address dual-target."
-        },
-        {
-          "alternative": "B3 PublishOptions metadata propagation",
-          "reason": "wire vs loopback parity only, no MCU benefit."
-        },
-        {
-          "alternative": "Defer to R235+",
-          "reason": "std/tokio sites grow 1-3 per round; retire cost super-linear in age."
-        }
-      ],
-      "impact_scope": [
-        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
-        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i.0-tier-definitions",
-        "intrinsics-runtime--symbol-surface",
-        "intrinsics-runtime--symbol-surface/5-3-trait-placement-rationale",
-        "runtime-crate--sce_link_runtime_tokio",
-        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
-        "architecture--watching-zenoh"
-      ],
-      "decision_status": "active"
-    },
     "6": {
       "intent": "Build stages from SCXML+SCE through codegen, out/, cargo, to AP/MCU artifacts; per-target artifact list.",
       "impact_scope": [
@@ -1783,6 +1721,68 @@
         "architecture--watching-zenoh",
         "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w16--generated-source-traceability-state-path-delimiter-and-rust-sce-map-preservation"
       ]
+    },
+    "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier": {
+      "title": "§5.P — Runtime services tier (wz-runtime-core)",
+      "parent_doc": "docs/rfc-sce-protocol-synthesis.md",
+      "intent": "High-level runtime services tier (task/mutex/time/alloc) above SCE-emitted code so wz upper layers compile against tokio (AP) and lwIP (MCU) unchanged.",
+      "rationale_bullets": [
+        "R227-R229 Session bundle binds std::sync::Mutex + tokio::spawn directly; lwip path blocked.",
+        "Current site count: 111 std/tokio uses across crates (R230 inventory baseline).",
+        "R63 lwip-stub anti-pattern: NOP impl forbidden; concrete impl waits for Phase W integration.",
+        "Distinct from §5.I HAL tier — that scope is CPU intrinsics; this scope is OS/runtime services.",
+        "Late commitment cost: site count grows 1-3 per round; retire cost super-linear in age."
+      ],
+      "inputs_bullets": [
+        "Three-tier deploy profile: full / ap / mcu (Cargo features + RFC-side classification).",
+        "Runtime trait shape: spawn + Mutex + RwLock + JoinHandle (async-runtime contract).",
+        "Allocator trait shape: alloc + dealloc + Box equivalent (no_std-friendly contract).",
+        "TimeSource trait shape: now_monotonic_ms + sleep (deterministic time provider)."
+      ],
+      "outputs_bullets": [
+        "Per-profile concrete impl binding (TokioRuntime / LwipRuntime / EmbassyRuntime).",
+        "wz upper layers (Session, SubscriberRegistry) reparameterized over R: Runtime.",
+        "Cargo profile.full / profile.ap / profile.mcu feature gates wired to crate selection.",
+        "Site retire migration path: 111 sites → trait-mediated calls (R231+ rounds)."
+      ],
+      "caveats_bullets": [
+        "R230 is spec-only — no Runtime/Allocator/TimeSource code lands this round.",
+        "R63 NOP-stub lesson: concrete impl waits for real lwip integration (Phase W).",
+        "HAL trait (§5.I, intrinsics) and Runtime trait (§5.P) MUST stay layer-distinct in code.",
+        "Site retire multi-round (R231-R233+); leaf crates first, Session struct last.",
+        "Async coloring: Runtime::spawn must produce same Future shape across tokio/embassy.",
+        "Reliability/Sample types stay in wz-runtime-tokio until trait surfaces stabilize.",
+        "profile-mcu may not reach all 6 backends; lwip-only initial scope per Phase W.",
+        "PublishOptions metadata propagation (R228 carry) orthogonal — separate retire round."
+      ],
+      "alternatives_rejected": [
+        {
+          "alternative": "B1 wz outbound mapping table",
+          "reason": "local R229 carry, narrow scope, no MCU enablement."
+        },
+        {
+          "alternative": "B2 wz-ap-demo Session migration",
+          "reason": "single-app refactor, doesn't address dual-target."
+        },
+        {
+          "alternative": "B3 PublishOptions metadata propagation",
+          "reason": "wire vs loopback parity only, no MCU benefit."
+        },
+        {
+          "alternative": "Defer to R235+",
+          "reason": "std/tokio sites grow 1-3 per round; retire cost super-linear in age."
+        }
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i.0-tier-definitions",
+        "intrinsics-runtime--symbol-surface",
+        "intrinsics-runtime--symbol-surface/5-3-trait-placement-rationale",
+        "runtime-crate--sce_link_runtime_tokio",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "architecture--watching-zenoh"
+      ],
+      "decision_status": "active"
     },
     "runtime-crate--sce_link_runtime_lwip-c11-header-shape": {
       "intent": "C11 runtime crate sce_link_runtime_lwip; canonical header for MCU bare_metal lwIP-driver bindings, Phase A blocker.",
@@ -10362,6 +10362,58 @@
         "R229 caller-asserted loopback_keyexpr: needs wz outbound mapping table (pico mirror).",
         "R228+R229 wz-ap-demo Session API migration: 4 publish + 11 observer + 1 dispatch site.",
         "SCE drift: pin ebf3b3ff vs origin ae139888. Pin bump unneeded (wz set_current_event sites = 0)."
+      ]
+    },
+    "Round 231": {
+      "decision_summary": "R231 self-echo dedup: source_info.zid_len + SubscriberRegistry::set_own_zid + Session::set_own_zid; wire-arrived echo with matching zid suppressed.",
+      "changes_bullets": [
+        "Sample.SourceInfo: added zid_len (u8) + non_exhaustive + new() ctor + zid_prefix() accessor.",
+        "Decoder records wire-header (zidlen-1) nibble; existing extract_source_info test asserts zid_len.",
+        "SubscriberRegistry: own_zid: Option<Vec<u8>> field + set_own_zid/clear_own_zid/own_zid() API.",
+        "dispatch_push gains source_info dedup branch (cautious defaults skip dedup when ambiguous).",
+        "Session: set_own_zid/clear_own_zid thin forwarders onto observer.subscribers."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 290 -> 307 (+17 dedup/SourceInfo tests, all pass).",
+        "cargo test -p wz-integration-tests: 64 unchanged, no regression.",
+        "cargo clippy --workspace --all-targets -D warnings: clean."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R232 auto-wire Session::set_own_zid on FSM open-handshake completion event.",
+        "R232/R233 wire vs loopback metadata propagation (R228 carry, publish wire branch drops 4 fields).",
+        "R233/R234 wz outbound mapping table (R229 carry, _local_resources mirror).",
+        "R234+ wz-ap-demo Session API migration (R228/R229 carry, 4 publish + 11 observer + 1 dispatch).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwip integration.",
+        "QueryableRegistry self-loopback (R227 follow-up, dedup deferred pre-mesh integration)."
+      ],
+      "publishable_decision_summary": "R231 self-echo dedup: source_info.zid_len + SubscriberRegistry::set_own_zid + Session::set_own_zid; wire-arrived echo with matching zid suppressed.",
+      "publishable_changes_bullets": [
+        "Sample.SourceInfo: added zid_len (u8) + non_exhaustive + new() ctor + zid_prefix() accessor.",
+        "Decoder records wire-header (zidlen-1) nibble; existing extract_source_info test asserts zid_len.",
+        "SubscriberRegistry: own_zid: Option<Vec<u8>> field + set_own_zid/clear_own_zid/own_zid() API.",
+        "dispatch_push gains source_info dedup branch (cautious defaults skip dedup when ambiguous).",
+        "Session: set_own_zid/clear_own_zid thin forwarders onto observer.subscribers."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 290 -> 307 (+17 dedup/SourceInfo tests, all pass).",
+        "cargo test -p wz-integration-tests: 64 unchanged, no regression.",
+        "cargo clippy --workspace --all-targets -D warnings: clean."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R232 auto-wire Session::set_own_zid on FSM open-handshake completion event.",
+        "R232/R233 wire vs loopback metadata propagation (R228 carry, publish wire branch drops 4 fields).",
+        "R233/R234 wz outbound mapping table (R229 carry, _local_resources mirror).",
+        "R234+ wz-ap-demo Session API migration (R228/R229 carry, 4 publish + 11 observer + 1 dispatch).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwip integration.",
+        "QueryableRegistry self-loopback (R227 follow-up, dedup deferred pre-mesh integration)."
       ]
     },
     "Round 24": {
