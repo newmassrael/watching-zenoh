@@ -2620,9 +2620,11 @@
       ]
     },
     "watching-zenoh": {
-      "intent": "Project landing stub for watching-zenoh; canonical entry pointer to ARCHITECTURE.md design.",
+      "intent": "Six-backend codegen of a zenoh wire-spec subset (Rust no_std / C11 / C++ / Kotlin / Go / Python), targeting embedded (zenoh-pico) + server (zenoh) interop with SCXML as single source of truth.",
       "impact_scope": [
-        "1"
+        "architecture--watching-zenoh",
+        "wire-spec-subset--watching-zenoh-mvp",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis"
       ]
     },
     "watching-zenoh--다음-세션-시작-스크립트": {
@@ -2678,7 +2680,8 @@
       "caveats_bullets": [
         "Decisions land as atomic changelog Round entries",
         "Activity notes live in notes/NEXT_SESSION.md",
-        "SSOT contract + atomic-store lifecycle + SPDX header policy are core to the project"
+        "SSOT contract + atomic-store lifecycle + SPDX header policy are core to the project",
+        "R275 correction: notes/NEXT_SESSION.md removed at R58; same R274 finding for current-status"
       ],
       "decision_status": "active"
     },
@@ -13677,6 +13680,54 @@
         "Open R267-R270 carries unchanged: Liveliness Token, Querier::get_matching_status, Session reparam",
         "Continued: Instant->u64ms migration, Cancellable promotion YAGNI, Phase W full lwIP, Q_B/Q_E codecs",
         "SCE vendor pin ebf3b3ff drift continues; wz call sites=0, no pin bump required"
+      ]
+    },
+    "Round 275": {
+      "decision_summary": "R275 refreshes watching-zenoh root intent + impact_scope (§1 placeholder replaced with 3 cross-doc refs) and appends contributing R275 correction caveat for notes/NEXT_SESSION.md staleness.",
+      "changes_bullets": [
+        "watching-zenoh root: set_section_intent — six-backend codegen wire-spec subset lead replaces stub",
+        "watching-zenoh root: set_section_impact_scope — §1 placeholder replaced with 3 cross-doc refs",
+        "watching-zenoh/contributing: add_section_caveat — R275 correction for notes/NEXT_SESSION.md"
+      ],
+      "verification_bullets": [
+        "Pre-mutation validate: entries=273 / sections=215 / T1=0 / RT 12/12 / sync (R274 close)",
+        "Post-mutation validate: entries=274 / sections=215 / T1=0 / RT 12/12 / sync; T3 warn 856->855",
+        "query_term scan: zero MVP / Phase A3 / Phase A4 / 11-Mnemosyne hits remaining in section bodies",
+        "Typed-primitive only round; cascade auto-regenerates GENERATED.md; no markdown edit"
+      ],
+      "impact_refs": [
+        "watching-zenoh",
+        "watching-zenoh/contributing"
+      ],
+      "carry_forward_bullets": [
+        "R271(c) follow-up: root + contributing atomic body sync done at R275. README scan complete.",
+        "R275 lesson: query_term scope=sections is the textbook sweep tool for staleness audit",
+        "CLAUDE.md residual staleness: `13 design docs` + Phased rollout block now historical debt",
+        "Open R267-R270 architectural carries unchanged (Liveliness Token, Querier matching status...)",
+        "Continued: Instant->u64ms, Cancellable YAGNI, Phase W full lwIP, Q_B/Q_E codecs, SCE pin OK"
+      ],
+      "publishable_decision_summary": "R275 refreshes watching-zenoh root intent + impact_scope (§1 placeholder replaced with 3 cross-doc refs) and appends contributing R275 correction caveat for notes/NEXT_SESSION.md staleness.",
+      "publishable_changes_bullets": [
+        "watching-zenoh root: set_section_intent — six-backend codegen wire-spec subset lead replaces stub",
+        "watching-zenoh root: set_section_impact_scope — §1 placeholder replaced with 3 cross-doc refs",
+        "watching-zenoh/contributing: add_section_caveat — R275 correction for notes/NEXT_SESSION.md"
+      ],
+      "publishable_verification_bullets": [
+        "Pre-mutation validate: entries=273 / sections=215 / T1=0 / RT 12/12 / sync (R274 close)",
+        "Post-mutation validate: entries=274 / sections=215 / T1=0 / RT 12/12 / sync; T3 warn 856->855",
+        "query_term scan: zero MVP / Phase A3 / Phase A4 / 11-Mnemosyne hits remaining in section bodies",
+        "Typed-primitive only round; cascade auto-regenerates GENERATED.md; no markdown edit"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh",
+        "watching-zenoh/contributing"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R271(c) follow-up: root + contributing atomic body sync done at R275. README scan complete.",
+        "R275 lesson: query_term scope=sections is the textbook sweep tool for staleness audit",
+        "CLAUDE.md residual staleness: `13 design docs` + Phased rollout block now historical debt",
+        "Open R267-R270 architectural carries unchanged (Liveliness Token, Querier matching status...)",
+        "Continued: Instant->u64ms, Cancellable YAGNI, Phase W full lwIP, Q_B/Q_E codecs, SCE pin OK"
       ]
     },
     "Round 28": {
