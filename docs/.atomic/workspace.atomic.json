@@ -10574,6 +10574,70 @@
         "R234 lesson: zenoh-pico _z_register_resource overwrites on re-declare; outbound table mirrors that."
       ]
     },
+    "Round 235": {
+      "decision_summary": "R235 wz-ap-demo Session API migration: observer Arc<Mutex<>>, publisher_task through Session::publish + publish_aliased_auto (R228+R229+R232+R234 carry retire).",
+      "changes_bullets": [
+        "wz-ap-demo/src/main.rs: observer = Arc<Mutex<ApplicationLayerObserver>> wrap (line 915).",
+        "11 register/on_* callback installs collapsed into one observer.lock() init scope.",
+        "drive_session dispatch closure re-locks per-event via observer_for_dispatch.lock().",
+        "Session::new(actions.clone(), observer.clone()) bundle introduced post-engine init.",
+        "publisher_task signature: Arc<SessionLinkActions> -> Session (R234 carry retire).",
+        "publisher_task 4 send_push_* dispatch sites -> 2 (literal/aliased) via PublishOptions.kind.",
+        "PublishOptions::default().with_reliability(Reliable) + kind = SampleKind::{Put,Del}.",
+        "PublishAliasError::UnknownMapping logged + iteration skipped (R234 contract).",
+        "wz-runtime-tokio/src/session.rs: Session derives Clone (both fields Arc; cheap shallow)."
+      ],
+      "verification_bullets": [
+        "cargo build --package wz-ap-demo --package wz-runtime-tokio: clean (1.08s).",
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 339 passed (R234 closure unchanged, +0).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R234 65 no-regression)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R236 auto-wire Session::set_own_zid on FSM open-handshake completion event (1-2 round).",
+        "R237 inbound peer keyexpr mapping table integration / resolve_inbound_mapping accessor.",
+        "QueryableRegistry self-loopback (R227 follow-up, 2-3 round; mesh integration tier).",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "R235 lesson: Session struct Clone enables per-task bundle clone without Arc<Session> wrap.",
+        "R235 behavioral note: loopback branch fires self-publish on matched keyexpr (was wire-only pre-R235)."
+      ],
+      "publishable_decision_summary": "R235 wz-ap-demo Session API migration: observer Arc<Mutex<>>, publisher_task through Session::publish + publish_aliased_auto (R228+R229+R232+R234 carry retire).",
+      "publishable_changes_bullets": [
+        "wz-ap-demo/src/main.rs: observer = Arc<Mutex<ApplicationLayerObserver>> wrap (line 915).",
+        "11 register/on_* callback installs collapsed into one observer.lock() init scope.",
+        "drive_session dispatch closure re-locks per-event via observer_for_dispatch.lock().",
+        "Session::new(actions.clone(), observer.clone()) bundle introduced post-engine init.",
+        "publisher_task signature: Arc<SessionLinkActions> -> Session (R234 carry retire).",
+        "publisher_task 4 send_push_* dispatch sites -> 2 (literal/aliased) via PublishOptions.kind.",
+        "PublishOptions::default().with_reliability(Reliable) + kind = SampleKind::{Put,Del}.",
+        "PublishAliasError::UnknownMapping logged + iteration skipped (R234 contract).",
+        "wz-runtime-tokio/src/session.rs: Session derives Clone (both fields Arc; cheap shallow)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build --package wz-ap-demo --package wz-runtime-tokio: clean (1.08s).",
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 339 passed (R234 closure unchanged, +0).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R234 65 no-regression)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R236 auto-wire Session::set_own_zid on FSM open-handshake completion event (1-2 round).",
+        "R237 inbound peer keyexpr mapping table integration / resolve_inbound_mapping accessor.",
+        "QueryableRegistry self-loopback (R227 follow-up, 2-3 round; mesh integration tier).",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "R235 lesson: Session struct Clone enables per-task bundle clone without Arc<Session> wrap.",
+        "R235 behavioral note: loopback branch fires self-publish on matched keyexpr (was wire-only pre-R235)."
+      ]
+    },
     "Round 24": {
       "decision_summary": "Phase E start — README.md 본문 저작 (16 byte stub → 150+ line prose); project overview + Phase A/B+ 상태 + 디렉터리 / 빌드 / Local CI gates / 라이센스 / 외부 참조 / 기여 절차. workspace.docs 재등록 + atomic decompose는 R25+ carry (R7 scope correction 직후 단계 분리).",
       "changes_bullets": [
