@@ -88,6 +88,30 @@ impl fmt::Display for RuntimeError {
 #[cfg(feature = "std")]
 impl std::error::Error for RuntimeError {}
 
+#[cfg(test)]
+mod compile_time_assertions {
+    use super::*;
+
+    // R258 — pin RuntimeError trait bounds structurally so any
+    // future regression on Send / Sync / Clone / PartialEq
+    // surfaces as a compile error rather than a runtime puzzle.
+    // The `_assert_*` functions are never called; their bodies
+    // are bound-checks that only compile when the trait
+    // implementation is in place.
+    fn _assert_send<T: Send>() {}
+    fn _assert_sync<T: Sync>() {}
+    fn _assert_clone<T: Clone>() {}
+    fn _assert_eq<T: Eq>() {}
+
+    #[allow(dead_code)]
+    fn runtime_error_trait_bounds_compile() {
+        _assert_send::<RuntimeError>();
+        _assert_sync::<RuntimeError>();
+        _assert_clone::<RuntimeError>();
+        _assert_eq::<RuntimeError>();
+    }
+}
+
 #[cfg(all(test, feature = "std"))]
 mod std_error_tests {
     use super::*;
