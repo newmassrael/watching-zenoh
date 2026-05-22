@@ -319,6 +319,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tokio_runtime_abort_after_completion_is_noop() {
+        // R259 — abort against an already-completed task is a
+        // no-op (tokio contract: "If the task has already
+        // completed, calling abort will not have any effect.").
+        // Pin the contract from the wz wrapper's perspective: a
+        // post-completion abort does NOT flip Ok(value) into
+        // Err(JoinCancelled).
+        let rt = TokioRuntime;
+        let handle = rt.spawn(async { 42_u32 });
+        // Generous wait to let the trivial task complete.
+        tokio::time::sleep(TokioDuration::from_millis(50)).await;
+        handle.abort();
+        assert_eq!(handle.await, Ok(42));
+    }
+
+    #[tokio::test]
+    async fn tokio_runtime_abort_is_idempotent_across_repeated_calls() {
+        // R259 — repeated abort calls collapse to a single
+        // cancellation outcome. The first abort signals the
+        // task; subsequent abort calls are silent no-ops at the
+        // tokio layer. Pin from the wz wrapper: triple-abort
+        // still resolves to a single JoinCancelled, never
+        // panicking or surfacing a different variant.
+        let rt = TokioRuntime;
+        let handle = rt.spawn(async {
+            tokio::time::sleep(TokioDuration::from_secs(60)).await;
+        });
+        handle.abort();
+        handle.abort();
+        handle.abort();
+        let result: Result<(), RuntimeError> = handle.await;
+        assert_eq!(result, Err(RuntimeError::JoinCancelled));
+    }
+
+    #[tokio::test]
     async fn tokio_runtime_aborted_handle_resolves_to_join_cancelled() {
         // R257 — abort() routes to RuntimeError::JoinCancelled
         // (distinct from JoinFailed which is panic-only). Spawn a
