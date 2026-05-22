@@ -490,7 +490,82 @@ impl Session {
             0
         }
     }
+
+    /// R234 — auto-resolved counterpart of [`Self::publish_aliased`].
+    /// Looks up `mapping_id` in the outbound keyexpr table populated
+    /// by prior
+    /// [`SessionLinkActions::send_declare_keyexpr`] calls, composes
+    /// with `inline_suffix` per the same rule as the caller-asserted
+    /// form (`id != 0, suffix = None` → declared literal; `id != 0,
+    /// suffix = Some(s)` → declared literal + `s`), then routes both
+    /// wire and loopback branches without the caller restating the
+    /// resolved literal. Mirrors zenoh-pico's
+    /// `_z_session_t._local_resources` lookup on the publish path
+    /// (`_z_write` → `_z_resource_get_by_id`), retiring the R229
+    /// caller-asserted `loopback_keyexpr` workaround on this surface.
+    ///
+    /// Returns `Err(PublishAliasError::UnknownMapping(id))` when no
+    /// prior `send_declare_keyexpr` registered `mapping_id` OR when
+    /// a subsequent `send_undeclare_kexpr` retracted it. In the
+    /// error case NEITHER branch fires — sending a wire Push with an
+    /// id the peer cannot resolve would also fail there, and
+    /// running the loopback branch on a guess at the literal would
+    /// silently mis-deliver. The caller treats `Err` as a contract
+    /// violation (declare-before-publish ordering bug) and either
+    /// re-declares the mapping or falls back to
+    /// [`Self::publish_aliased`] with an explicit loopback literal.
+    pub fn publish_aliased_auto(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        payload: &[u8],
+        opts: PublishOptions,
+    ) -> Result<usize, PublishAliasError> {
+        let base = self
+            .actions
+            .resolve_outbound_mapping(mapping_id)
+            .ok_or(PublishAliasError::UnknownMapping(mapping_id))?;
+        let loopback_keyexpr = match inline_suffix {
+            None => base,
+            Some(s) => {
+                let mut composed = base;
+                composed.push_str(s);
+                composed
+            }
+        };
+        Ok(self.publish_aliased(mapping_id, inline_suffix, &loopback_keyexpr, payload, opts))
+    }
 }
+
+/// R234 — typed error returned by
+/// [`Session::publish_aliased_auto`] when the requested mapping id
+/// was never declared on this session's outbound link (or was
+/// retracted via [`SessionLinkActions::send_undeclare_kexpr`]). The
+/// caller's contract is "declare before publish"; this enum names
+/// the violation explicitly so a buggy caller does not silently
+/// emit wire frames the peer will reject + run loopback on a
+/// guessed literal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublishAliasError {
+    /// No prior `send_declare_keyexpr` registered this id on the
+    /// outbound mapping table (or a later `send_undeclare_kexpr`
+    /// retracted it). The wrapped value is the offending mapping id.
+    UnknownMapping(u64),
+}
+
+impl std::fmt::Display for PublishAliasError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PublishAliasError::UnknownMapping(id) => write!(
+                f,
+                "PublishAliasError: mapping id {id} not present in outbound table; \
+                 call SessionLinkActions::send_declare_keyexpr({id}, …) first"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PublishAliasError {}
 
 /// R232 — shared loopback Sample assembly for [`Session::publish`] and
 /// [`Session::publish_aliased`]. Constructs a Put or Del Sample on the
@@ -1504,6 +1579,109 @@ mod tests {
         assert_eq!(got.source_info.as_ref().unwrap().eid, 1);
         assert_eq!(got.attachment.as_deref(), Some(&[0xCC, 0xDD][..]));
         assert_eq!(got.qos.unwrap().raw, 0x10);
+    }
+
+    // ── R234 publish_aliased_auto (outbound mapping table) ──
+
+    #[test]
+    fn publish_aliased_auto_resolves_loopback_from_outbound_table() {
+        let (session, driver) = build_session();
+        let captured = record_loopback_samples(&session, "home/temp");
+
+        // Declare 7 → "home/temp", then publish_aliased_auto without
+        // restating the literal — the table lookup feeds loopback.
+        session.actions().send_declare_keyexpr(7, "home/temp");
+        let fired = session
+            .publish_aliased_auto(7, None, b"22.5", PublishOptions::put())
+            .expect("declared mapping resolves cleanly");
+        assert_eq!(fired, 1, "loopback fires on resolved literal");
+
+        let s = captured.lock().unwrap();
+        assert_eq!(s[0].keyexpr, "home/temp");
+        // Wire branch fired too: declare frame + push frame = 2.
+        assert_eq!(
+            driver.frame_count(),
+            2,
+            "declare frame then aliased push frame on the wire"
+        );
+    }
+
+    #[test]
+    fn publish_aliased_auto_composes_inline_suffix_with_table_base() {
+        // Composition rule: declared prefix + inline_suffix forms the
+        // loopback literal. Mirrors the manual publish_aliased path
+        // where the caller would have asserted the composition by
+        // hand.
+        let (session, _driver) = build_session();
+        let captured = record_loopback_samples(&session, "home/**");
+
+        session.actions().send_declare_keyexpr(7, "home");
+        let fired = session
+            .publish_aliased_auto(7, Some("/temp/kitchen"), b"22.5", PublishOptions::put())
+            .expect("declared mapping resolves");
+        assert_eq!(fired, 1);
+
+        let s = captured.lock().unwrap();
+        assert_eq!(s[0].keyexpr, "home/temp/kitchen");
+    }
+
+    #[test]
+    fn publish_aliased_auto_returns_unknown_mapping_when_never_declared() {
+        // Mapping id 42 was never declared on this session. The
+        // typed error path fires; neither wire nor loopback emit.
+        let (session, driver) = build_session();
+        let captured = record_loopback_samples(&session, "home/**");
+
+        let err = session
+            .publish_aliased_auto(42, None, b"x", PublishOptions::put())
+            .expect_err("undeclared mapping must error out");
+        assert_eq!(err, PublishAliasError::UnknownMapping(42));
+
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "loopback must not fire on the error path"
+        );
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "wire must not emit on the error path"
+        );
+    }
+
+    #[test]
+    fn publish_aliased_auto_returns_unknown_mapping_after_undeclare() {
+        // The error path fires whether the id was never declared OR
+        // was declared and then retracted. Both share the same
+        // "table lookup returned None" failure mode.
+        let (session, _driver) = build_session();
+
+        session.actions().send_declare_keyexpr(7, "home/temp");
+        // First publish OK.
+        session
+            .publish_aliased_auto(7, None, b"a", PublishOptions::put())
+            .expect("first publish succeeds after declare");
+
+        // Retract the mapping.
+        session.actions().send_undeclare_kexpr(7);
+
+        // Second publish fails typed.
+        let err = session
+            .publish_aliased_auto(7, None, b"b", PublishOptions::put())
+            .expect_err("retracted mapping must error out");
+        assert_eq!(err, PublishAliasError::UnknownMapping(7));
+    }
+
+    #[test]
+    fn publish_aliased_auto_error_display_names_the_violating_id() {
+        // Display impl must surface the id so a logged error line is
+        // diagnosable without reflection.
+        let err = PublishAliasError::UnknownMapping(123);
+        let s = err.to_string();
+        assert!(s.contains("123"), "error message must contain the mapping id");
+        assert!(
+            s.contains("send_declare_keyexpr"),
+            "error message hints at the remediation API"
+        );
     }
 
     #[test]

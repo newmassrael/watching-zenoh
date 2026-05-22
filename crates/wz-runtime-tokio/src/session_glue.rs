@@ -50,6 +50,7 @@
 //! secret); the integration test uses a fixed 8-byte cookie so
 //! the assertion against zenoh-pico's reference is deterministic.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -623,6 +624,23 @@ pub struct SessionLinkActions {
     /// explicit modulo at `next_outbound_frame_sn` (R121e
     /// carry — surface when a measurement justifies it).
     pub outbound_frame_sn: AtomicU64,
+    /// R234 — outbound keyexpr mapping table. Mirrors zenoh-pico's
+    /// `_z_session_t._local_resources` slot: every time
+    /// [`Self::send_declare_keyexpr`] emits a `Declare(DeclKexpr)`
+    /// the (mapping_id, suffix) pair is recorded here so a later
+    /// [`crate::session::Session::publish_aliased_auto`] (or the
+    /// loopback branch of a metadata-rich aliased publish) can
+    /// resolve the literal form without the caller asserting it
+    /// out-of-band. [`Self::send_undeclare_kexpr`] removes the
+    /// entry so the resolver returns `None` for retracted ids.
+    ///
+    /// Mutex<HashMap> chosen over RwLock because table writes
+    /// happen on the session-setup path (rare) and reads happen on
+    /// the publish hot path (frequent but short-lived under a
+    /// single-key lookup); the contended-write penalty of RwLock
+    /// would dwarf the read parallelism gain at the expected
+    /// access pattern.
+    pub outbound_mappings: Mutex<HashMap<u64, String>>,
 }
 
 /// R121d — peer-announced sizing caps captured from `InitSyn` for
@@ -748,6 +766,7 @@ impl SessionLinkActions {
             open_ack_ext: Mutex::new(Vec::new()),
             inbound_peer_init_caps: Mutex::new(None),
             outbound_frame_sn: AtomicU64::new(initial_frame_sn),
+            outbound_mappings: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1008,6 +1027,17 @@ impl SessionLinkActions {
         let sn = self.next_outbound_frame_sn();
         let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
         self.driver.send_blocking(&wire, Reliability::Reliable);
+        // R234 — record the (mapping_id, suffix) pair in the outbound
+        // table so later `publish_aliased_auto` calls can resolve the
+        // literal without caller assertion. Insertion happens AFTER
+        // the wire send so a driver-side panic does not leave a
+        // table entry that the peer never saw. Mirrors zenoh-pico's
+        // `_z_register_resource` which executes on the local-side
+        // declaration emit path.
+        self.outbound_mappings
+            .lock()
+            .expect("outbound_mappings poisoned by an earlier panicked publish")
+            .insert(mapping_id, suffix.to_string());
     }
 
     /// R121g — encode + dispatch a DECLARE-aliased `Push` (id != 0).
@@ -1280,6 +1310,35 @@ impl SessionLinkActions {
         let sn = self.next_outbound_frame_sn();
         let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
         self.driver.send_blocking(&wire, Reliability::Reliable);
+        // R234 — drop the (mapping_id, suffix) pair so subsequent
+        // `publish_aliased_auto` calls return `None` on this id and
+        // the caller knows the alias is stale. Idempotent: removing
+        // an absent id is a no-op. Mirrors zenoh-pico's
+        // `_z_unregister_resource` invoked on the local-side
+        // undeclare emit path.
+        self.outbound_mappings
+            .lock()
+            .expect("outbound_mappings poisoned by an earlier panicked publish")
+            .remove(&mapping_id);
+    }
+
+    /// R234 — look up the literal keyexpr a previously-emitted
+    /// [`Self::send_declare_keyexpr`] registered for `mapping_id`.
+    /// Returns `None` when no declaration was ever sent for that id
+    /// OR when a subsequent [`Self::send_undeclare_kexpr`] retracted
+    /// it. The owned `String` is cloned out of the table so the
+    /// caller can release the table lock immediately and avoid
+    /// holding the publish hot path under contention.
+    ///
+    /// zenoh-pico mirror: the read-side of
+    /// `_z_session_t._local_resources`, queried via
+    /// `_z_get_resource_by_id` on the publish path.
+    pub fn resolve_outbound_mapping(&self, mapping_id: u64) -> Option<String> {
+        self.outbound_mappings
+            .lock()
+            .expect("outbound_mappings poisoned by an earlier panicked publish")
+            .get(&mapping_id)
+            .cloned()
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclSubscriber)` on
@@ -9787,5 +9846,85 @@ mod tests {
         }
         fn open_blocking(&self) {}
         fn close_blocking(&self) {}
+    }
+
+    // ── R234 outbound mapping table ──
+
+    #[test]
+    fn send_declare_keyexpr_populates_outbound_mapping_table() {
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        assert!(actions.resolve_outbound_mapping(7).is_none(), "fresh table empty");
+
+        actions.send_declare_keyexpr(7, "home/temp");
+        assert_eq!(
+            actions.resolve_outbound_mapping(7).as_deref(),
+            Some("home/temp"),
+            "send_declare_keyexpr must record the (id, suffix) pair"
+        );
+        // Multiple declarations on different ids accumulate.
+        actions.send_declare_keyexpr(8, "home/humidity");
+        assert_eq!(actions.resolve_outbound_mapping(7).as_deref(), Some("home/temp"));
+        assert_eq!(
+            actions.resolve_outbound_mapping(8).as_deref(),
+            Some("home/humidity")
+        );
+    }
+
+    #[test]
+    fn send_declare_keyexpr_overwrites_existing_mapping_for_same_id() {
+        // zenoh-pico's _z_register_resource OVERWRITES on
+        // re-declaration with the same id (it's idempotent: same id,
+        // possibly different suffix). The outbound table must mirror
+        // that semantic so a caller re-declaring a mapping doesn't
+        // see stale resolution for later publishes.
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        actions.send_declare_keyexpr(7, "home/v1");
+        actions.send_declare_keyexpr(7, "home/v2");
+        assert_eq!(
+            actions.resolve_outbound_mapping(7).as_deref(),
+            Some("home/v2"),
+            "re-declaring same id must replace the prior suffix"
+        );
+    }
+
+    #[test]
+    fn send_undeclare_kexpr_removes_mapping_from_table() {
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        actions.send_declare_keyexpr(7, "home/temp");
+        assert!(actions.resolve_outbound_mapping(7).is_some());
+
+        actions.send_undeclare_kexpr(7);
+        assert!(
+            actions.resolve_outbound_mapping(7).is_none(),
+            "undeclare must drop the table entry so later publishes fail typed"
+        );
+    }
+
+    #[test]
+    fn send_undeclare_kexpr_idempotent_on_unknown_id() {
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        // Calling undeclare on an id that was never declared must not
+        // panic — the HashMap::remove on absent key is a no-op.
+        actions.send_undeclare_kexpr(42);
+        assert!(actions.resolve_outbound_mapping(42).is_none());
+    }
+
+    #[test]
+    fn resolve_outbound_mapping_returns_owned_string_independent_of_table() {
+        // The returned String must be a clone — a caller holding it
+        // across a later send_undeclare_kexpr must still see the
+        // value they originally fetched. This pins the contract
+        // that callers don't accidentally borrow the table slot.
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        actions.send_declare_keyexpr(7, "home/temp");
+        let resolved = actions.resolve_outbound_mapping(7).unwrap();
+        actions.send_undeclare_kexpr(7);
+        assert_eq!(resolved, "home/temp", "owned clone survives table mutation");
+        assert!(actions.resolve_outbound_mapping(7).is_none());
     }
 }
