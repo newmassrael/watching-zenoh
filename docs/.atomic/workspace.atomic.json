@@ -11416,6 +11416,98 @@
         "R244 lesson: pub-side and query-side handle surfaces hit symmetric closure with 4 structs (Publisher, PublisherAliased, Querier, QuerierAliased); declare-no-wire pattern is the textbook shape when the protocol has no peer-side handle resource."
       ]
     },
+    "Round 245": {
+      "decision_summary": "R245 Subscriber + SubscribeOptions + declare_subscriber{_aliased}: RAII handle on Drop, aliased variant resolves outbound mapping at declare time so retracts after declare do not break the subscriber.",
+      "changes_bullets": [
+        "session.rs SubscribeOptions { allowed_origin: Locality } non_exhaustive + new() + with_allowed_origin.",
+        "session.rs Subscriber struct (Session, SubscriptionId, keyexpr: String, SubscribeOptions) non_exhaustive + !Clone.",
+        "session.rs Subscriber::id() + keyexpr() + options() accessors.",
+        "session.rs Subscriber::undeclare() consumes self + std::mem::forget to skip Drop.",
+        "session.rs Subscriber Drop impl: lock observer (poison-recover), unregister id, ignore returned bool.",
+        "session.rs Session::declare_subscriber(keyexpr, options, callback) -> Subscriber wraps register_with_locality.",
+        "session.rs Session::declare_subscriber_aliased(mapping_id, suffix, options, callback) -> Result<Subscriber, SubscribeAliasError> resolves outbound mapping at declare time and stores the literal.",
+        "session.rs SubscribeAliasError::UnknownMapping(u64) + Display + std::error::Error (PublishAliasError/QueryAliasError mirror).",
+        "Resolution-once-at-declare contract: subsequent send_undeclare_kexpr does NOT affect already-registered Subscriber (zenoh-pico _z_register_subscription mirror).",
+        "Mirrors zenoh-pico z_subscriber_t + z_declare_subscriber + z_undeclare_subscriber.",
+        "lib test subscribe_options_default_is_any_locality + with_allowed_origin_pins_locality.",
+        "lib test declare_subscriber_returns_handle_with_keyexpr_and_options + does_not_emit_wire_frame.",
+        "lib test declared_subscriber_fires_on_loopback_publish.",
+        "lib test subscriber_drop_auto_unregisters (RAII).",
+        "lib test subscriber_undeclare_returns_true_and_skips_drop.",
+        "lib test declare_subscriber_with_locality_remote_skips_loopback_publish.",
+        "lib test declare_subscriber_aliased_resolves_literal_at_declare_time + composes inline_suffix + unknown_mapping_returns_err.",
+        "lib test declare_subscriber_aliased_survives_mapping_retract_after_declare.",
+        "lib test subscribe_alias_error_display_message_hints_remediation."
+      ],
+      "verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 425 -> 438 (+13 R245 cases).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R244 65 no-regression)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R246+ Queryable struct (z_queryable_t mirror) RAII handle on the queryable side (responder/replier).",
+        "R246+ ReplyRegistry timeout sweep: cancel pending entry + synthesise Final when QueryOptions.timeout_ms passes; needs Hal time abstraction (wz-runtime-core) for MCU portability.",
+        "R246+ Q_B / Q_E wire codec slots (Query body payload + encoding) require SCE-side codec extension.",
+        "R246+ Liveliness Token struct (z_liveliness_token_t mirror) RAII handle.",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R245 lesson: subscriber-side resolution-at-declare-time differs from publisher/querier resolution-at-call-time — stays consistent with zenoh-pico semantic (_z_register_subscription stores keyexpr once); RAII Drop with poison-recover prevents double-panic abort."
+      ],
+      "publishable_decision_summary": "R245 Subscriber + SubscribeOptions + declare_subscriber{_aliased}: RAII handle on Drop, aliased variant resolves outbound mapping at declare time so retracts after declare do not break the subscriber.",
+      "publishable_changes_bullets": [
+        "session.rs SubscribeOptions { allowed_origin: Locality } non_exhaustive + new() + with_allowed_origin.",
+        "session.rs Subscriber struct (Session, SubscriptionId, keyexpr: String, SubscribeOptions) non_exhaustive + !Clone.",
+        "session.rs Subscriber::id() + keyexpr() + options() accessors.",
+        "session.rs Subscriber::undeclare() consumes self + std::mem::forget to skip Drop.",
+        "session.rs Subscriber Drop impl: lock observer (poison-recover), unregister id, ignore returned bool.",
+        "session.rs Session::declare_subscriber(keyexpr, options, callback) -> Subscriber wraps register_with_locality.",
+        "session.rs Session::declare_subscriber_aliased(mapping_id, suffix, options, callback) -> Result<Subscriber, SubscribeAliasError> resolves outbound mapping at declare time and stores the literal.",
+        "session.rs SubscribeAliasError::UnknownMapping(u64) + Display + std::error::Error (PublishAliasError/QueryAliasError mirror).",
+        "Resolution-once-at-declare contract: subsequent send_undeclare_kexpr does NOT affect already-registered Subscriber (zenoh-pico _z_register_subscription mirror).",
+        "Mirrors zenoh-pico z_subscriber_t + z_declare_subscriber + z_undeclare_subscriber.",
+        "lib test subscribe_options_default_is_any_locality + with_allowed_origin_pins_locality.",
+        "lib test declare_subscriber_returns_handle_with_keyexpr_and_options + does_not_emit_wire_frame.",
+        "lib test declared_subscriber_fires_on_loopback_publish.",
+        "lib test subscriber_drop_auto_unregisters (RAII).",
+        "lib test subscriber_undeclare_returns_true_and_skips_drop.",
+        "lib test declare_subscriber_with_locality_remote_skips_loopback_publish.",
+        "lib test declare_subscriber_aliased_resolves_literal_at_declare_time + composes inline_suffix + unknown_mapping_returns_err.",
+        "lib test declare_subscriber_aliased_survives_mapping_retract_after_declare.",
+        "lib test subscribe_alias_error_display_message_hints_remediation."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 425 -> 438 (+13 R245 cases).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R244 65 no-regression)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R246+ Queryable struct (z_queryable_t mirror) RAII handle on the queryable side (responder/replier).",
+        "R246+ ReplyRegistry timeout sweep: cancel pending entry + synthesise Final when QueryOptions.timeout_ms passes; needs Hal time abstraction (wz-runtime-core) for MCU portability.",
+        "R246+ Q_B / Q_E wire codec slots (Query body payload + encoding) require SCE-side codec extension.",
+        "R246+ Liveliness Token struct (z_liveliness_token_t mirror) RAII handle.",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R245 lesson: subscriber-side resolution-at-declare-time differs from publisher/querier resolution-at-call-time — stays consistent with zenoh-pico semantic (_z_register_subscription stores keyexpr once); RAII Drop with poison-recover prevents double-panic abort."
+      ]
+    },
     "Round 25": {
       "decision_summary": "Phase E register — README.md workspace.docs 재등록 land; R24 한국어 본문을 영문 primary로 재작성 + README.ko.md satellite로 분리 (사용자 정정 'README는 영문 primary, KO 번역은 별도 링크'); 첫 시도 11 parser orphan (URL 링크 + plain §N) → 파서-친화 form 으로 해결 후 12/12 docs clean.",
       "changes_bullets": [
