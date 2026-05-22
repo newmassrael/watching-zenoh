@@ -12362,6 +12362,78 @@
         "R255 lesson: trait-extension vs call-site-refactor is a frequent design fork. The textbook bias is toward the smaller surface change (don't extend the trait until a call-site shape forces it). R254 carry framed the choice explicitly + R255 resolved it with no trait extension; the u64 ms pattern composes with the existing now_monotonic_ms() and works on every conceivable target (no_std MCU, AP, even bare-metal). Pattern to remember when temptation to extend a trait surfaces."
       ]
     },
+    "Round 256": {
+      "decision_summary": "R256 retires the R252 std::error::Error carry + pins the R251 GAT-vs-impl-Future design claim with a Vec<JoinHandle> batch-spawn composition test.",
+      "changes_bullets": [
+        "crates/wz-runtime-core/src/error.rs: `#[cfg(feature = \"std\")] impl std::error::Error for RuntimeError {}` block added. Default impl (no custom `source` chain) because RuntimeError variants are flat today; future inner-cause wrapping extends `source` here. Doc-comment updated to retire the R252 carry text and note core::error::Error MSRV 1.81 dependency.",
+        "Two #[cfg(all(test, feature = \"std\"))] tests: (1) RuntimeError::JoinFailed boxes into Box<dyn std::error::Error> and Display surfaces \"did not produce an output\"; (2) std::error::Error::source() returns None for current flat variants (pinning the contract a future inner-cause round must override).",
+        "crates/wz-runtime-tokio/src/runtime_impl.rs: new `tokio_runtime_join_handle_composes_into_a_vec` #[tokio::test]. Spawns 5 tasks, stores TokioRuntime::JoinHandle<u32> in Vec, awaits each, accumulates outputs. Validates the R251 Runtime trait doc-claim that GAT (over `impl Future` return position) lets callers collect handles — the fundamental pattern for Session per-subscriber dispatch fan-out.",
+        "wz-runtime-core lib tests: 0 -> 2 (R256 first tests on this crate; previously trait-skeleton-only).",
+        "wz-runtime-tokio lib tests: 472 -> 473 (+1 Vec composition test).",
+        "No behavior change on existing paths; both additions are pure additive."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-core --features std --lib: 2/2 pass (std_error_tests cluster).",
+        "cargo test -p wz-runtime-tokio --lib runtime_impl: 9/9 pass (R252 8 + R256 1 = 9).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates.",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A-E 9/9 binary-dep e2e).",
+        "pre-commit hook validate_workspace clean (T1=0, RT 12/12, sync).",
+        "commit cab8773 (feat(runtime-core): R256 std::error::Error + GAT Vec composition test; 2 files +78 / -5)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R257+ wz-runtime-tokio internal time / spawn site migration: session_glue.rs drive_session_until_terminal embeds tokio::time::sleep + std::time::Instant; migration requires adding a clock parameter to the function (API-breaking change with ~7 test caller updates). Hold for user confirm per textbook anchor on API-breaking entries.",
+        "R257+ Session struct reparameterisation per §5.P leaf-first guidance. Same architectural-decision-pending-user-input bar; the Mutex/RwLock contract decision is the gating sub-question.",
+        "R257+ core::error::Error replacement for the std::error::Error impl once MSRV bumps to 1.81+. Trivial change but contingent on the MSRV bump round.",
+        "R257+ richer RuntimeError variants: an inner-cause source chain (e.g. wrapping the underlying tokio::task::JoinError when JoinFailed surfaces) is the natural next step. Pin the contract by extending the source-returns-none test (R256 added) to source-returns-the-original-cause once a variant carries an inner.",
+        "Liveliness Token wz-ap-demo migration (R250 carry): documented obstruction = declare_task's Established-gate timing + LivelinessToken Drop lifetime do not compose cleanly without cross-task handoff (oneshot channel or session-held bag). Carry stays open.",
+        "ReplyRegistry timeout sweep: TimeSource is now production-validated through 5 leaf consumers (R252 4 tests + R256 1 test + R253/R254/R255 4 task migrations + 1 GAT vec test).",
+        "Q_B / Q_E wire codec slots (SCE-side codec extension).",
+        "Querier / Publisher get_matching_status (RemoteQueryableRegistry coverage check).",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff (no wz call sites — pin bump deferred).",
+        "Phase W full lwIP integration / Cortex-M cross-compile / deploy yaml (~20-50 round multi-session).",
+        "Interest 70% / QoS 75-90% / Multicast 90% / 5 transports 85-100% / W3C conformance 100% remaining.",
+        "R256 lesson: small carry-retire rounds in batch (std::error::Error retire + GAT design-claim pin) compose into one coherent round when the changes share a doc-comment trail to the original design choice. The R252 std::error::Error carry + the R251 GAT-vs-impl-Future doc-comment both pointed forward to R256 as the natural closure point; closing both in one commit keeps the audit trail dense without bundling unrelated work."
+      ],
+      "publishable_decision_summary": "R256 retires the R252 std::error::Error carry + pins the R251 GAT-vs-impl-Future design claim with a Vec<JoinHandle> batch-spawn composition test.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-core/src/error.rs: `#[cfg(feature = \"std\")] impl std::error::Error for RuntimeError {}` block added. Default impl (no custom `source` chain) because RuntimeError variants are flat today; future inner-cause wrapping extends `source` here. Doc-comment updated to retire the R252 carry text and note core::error::Error MSRV 1.81 dependency.",
+        "Two #[cfg(all(test, feature = \"std\"))] tests: (1) RuntimeError::JoinFailed boxes into Box<dyn std::error::Error> and Display surfaces \"did not produce an output\"; (2) std::error::Error::source() returns None for current flat variants (pinning the contract a future inner-cause round must override).",
+        "crates/wz-runtime-tokio/src/runtime_impl.rs: new `tokio_runtime_join_handle_composes_into_a_vec` #[tokio::test]. Spawns 5 tasks, stores TokioRuntime::JoinHandle<u32> in Vec, awaits each, accumulates outputs. Validates the R251 Runtime trait doc-claim that GAT (over `impl Future` return position) lets callers collect handles — the fundamental pattern for Session per-subscriber dispatch fan-out.",
+        "wz-runtime-core lib tests: 0 -> 2 (R256 first tests on this crate; previously trait-skeleton-only).",
+        "wz-runtime-tokio lib tests: 472 -> 473 (+1 Vec composition test).",
+        "No behavior change on existing paths; both additions are pure additive."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-core --features std --lib: 2/2 pass (std_error_tests cluster).",
+        "cargo test -p wz-runtime-tokio --lib runtime_impl: 9/9 pass (R252 8 + R256 1 = 9).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates.",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A-E 9/9 binary-dep e2e).",
+        "pre-commit hook validate_workspace clean (T1=0, RT 12/12, sync).",
+        "commit cab8773 (feat(runtime-core): R256 std::error::Error + GAT Vec composition test; 2 files +78 / -5)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R257+ wz-runtime-tokio internal time / spawn site migration: session_glue.rs drive_session_until_terminal embeds tokio::time::sleep + std::time::Instant; migration requires adding a clock parameter to the function (API-breaking change with ~7 test caller updates). Hold for user confirm per textbook anchor on API-breaking entries.",
+        "R257+ Session struct reparameterisation per §5.P leaf-first guidance. Same architectural-decision-pending-user-input bar; the Mutex/RwLock contract decision is the gating sub-question.",
+        "R257+ core::error::Error replacement for the std::error::Error impl once MSRV bumps to 1.81+. Trivial change but contingent on the MSRV bump round.",
+        "R257+ richer RuntimeError variants: an inner-cause source chain (e.g. wrapping the underlying tokio::task::JoinError when JoinFailed surfaces) is the natural next step. Pin the contract by extending the source-returns-none test (R256 added) to source-returns-the-original-cause once a variant carries an inner.",
+        "Liveliness Token wz-ap-demo migration (R250 carry): documented obstruction = declare_task's Established-gate timing + LivelinessToken Drop lifetime do not compose cleanly without cross-task handoff (oneshot channel or session-held bag). Carry stays open.",
+        "ReplyRegistry timeout sweep: TimeSource is now production-validated through 5 leaf consumers (R252 4 tests + R256 1 test + R253/R254/R255 4 task migrations + 1 GAT vec test).",
+        "Q_B / Q_E wire codec slots (SCE-side codec extension).",
+        "Querier / Publisher get_matching_status (RemoteQueryableRegistry coverage check).",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff (no wz call sites — pin bump deferred).",
+        "Phase W full lwIP integration / Cortex-M cross-compile / deploy yaml (~20-50 round multi-session).",
+        "Interest 70% / QoS 75-90% / Multicast 90% / 5 transports 85-100% / W3C conformance 100% remaining.",
+        "R256 lesson: small carry-retire rounds in batch (std::error::Error retire + GAT design-claim pin) compose into one coherent round when the changes share a doc-comment trail to the original design choice. The R252 std::error::Error carry + the R251 GAT-vs-impl-Future doc-comment both pointed forward to R256 as the natural closure point; closing both in one commit keeps the audit trail dense without bundling unrelated work."
+      ]
+    },
     "Round 26": {
       "decision_summary": "R26 codebase Korean cleanup — fix 2 non-md files (mnemosyne.toml line 60 + scripts/verify-codegen.sh line 17) and establish non-md-English-only convention; historical atomic.json Korean (17 entries) and the legacy KO atomic section id remain locked by T2 frozen-ledger and the missing rename_section primitive respectively.",
       "changes_bullets": [
