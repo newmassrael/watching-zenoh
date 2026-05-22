@@ -169,16 +169,71 @@ impl QosLevel {
 /// where `_z_entity_global_id_t = { _z_id_t zid; uint32_t eid; }` and
 /// `_z_id_t` is a 16-byte Zenoh identifier (right-zero-padded when the
 /// effective length is shorter; the wire transmits only the prefix).
+///
+/// R231 — `zid_len` carries the effective prefix length (1..=16) so the
+/// wire-form `(zidlen - 1)` header nibble round-trips and self-echo
+/// dedup can compare against an arbitrary-length `own_zid` without
+/// ambiguity (a 4-byte own_zid coincidentally matching the first 4
+/// bytes of an 8-byte peer zid would otherwise false-positive). The
+/// `Default` impl produces `zid_len = 0` as a sentinel for "no source
+/// info" — any value outside `1..=16` should be treated by consumers
+/// as an absence-of-source, not a 0-byte zid.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub struct SourceInfo {
     /// Source Zenoh ID, right-zero-padded to 16 bytes. zenoh-pico
-    /// mirror: `_z_id_t.id[16]`.
+    /// mirror: `_z_id_t.id[16]`. Only the first `zid_len` bytes are
+    /// semantically meaningful.
     pub zid: [u8; 16],
+    /// Effective length of `zid` in bytes (1..=16 for a valid record;
+    /// 0 marks the `Default::default()` sentinel). Mirrors the wire
+    /// header's `(zidlen - 1)` high nibble via `zid_len = nibble + 1`.
+    pub zid_len: u8,
     /// Source entity ID. zenoh-pico mirror: `_z_entity_global_id_t.eid`.
     pub eid: u32,
     /// Source sequence number. zenoh-pico mirror:
     /// `_z_source_info_t._source_sn`.
     pub sn: u32,
+}
+
+impl SourceInfo {
+    /// Construct a `SourceInfo` from a variable-length zid prefix plus
+    /// the entity id + sequence number. Right-zero-pads the zid into
+    /// the fixed 16-byte buffer and records the effective length.
+    ///
+    /// Panics if `zid_bytes.len()` is outside `1..=16` (the zenoh-pico
+    /// `_Z_ID_LENGTH = 16` wire constraint matches the high-nibble
+    /// `(zidlen - 1)` encoding range).
+    pub fn new(zid_bytes: &[u8], eid: u32, sn: u32) -> Self {
+        assert!(
+            (1..=16).contains(&zid_bytes.len()),
+            "SourceInfo::new requires zid length 1..=16 \
+             (zenoh-pico _Z_ID_LENGTH wire constraint)"
+        );
+        let mut zid = [0u8; 16];
+        zid[..zid_bytes.len()].copy_from_slice(zid_bytes);
+        Self {
+            zid,
+            zid_len: zid_bytes.len() as u8,
+            eid,
+            sn,
+        }
+    }
+
+    /// Borrow the meaningful zid prefix (the first `zid_len` bytes of
+    /// the padded buffer). Returns an empty slice when `zid_len` is
+    /// outside the valid `1..=16` range (i.e. the `Default::default()`
+    /// sentinel or an invalid record) so callers performing equality
+    /// checks against an `own_zid` slice cannot accidentally match the
+    /// all-zero default.
+    pub fn zid_prefix(&self) -> &[u8] {
+        let len = self.zid_len as usize;
+        if (1..=16).contains(&len) {
+            &self.zid[..len]
+        } else {
+            &[]
+        }
+    }
 }
 
 // R226 — Reliability was hoisted to the crate root so the outbound
@@ -422,6 +477,7 @@ fn decode_source_info_payload(bytes: &[u8]) -> Option<SourceInfo> {
     }
     Some(SourceInfo {
         zid,
+        zid_len: zidlen as u8,
         eid: eid_val as u32,
         sn: sn_val as u32,
     })
@@ -516,11 +572,7 @@ mod tests {
             })
             .with_qos(QosLevel::from_raw(0b0001_1010))
             .with_attachment(b"meta".to_vec())
-            .with_source_info(SourceInfo {
-                zid: [1u8; 16],
-                eid: 7,
-                sn: 42,
-            })
+            .with_source_info(SourceInfo::new(&[1u8; 16], 7, 42))
             .with_reliability(Reliability::BestEffort);
         let ts = sample.timestamp.unwrap();
         assert_eq!(ts.time, 0x1234_5678_9ABC_DEF0);
@@ -532,9 +584,83 @@ mod tests {
         assert_eq!(sample.attachment.unwrap(), b"meta");
         let si = sample.source_info.unwrap();
         assert_eq!(si.zid, [1u8; 16]);
+        assert_eq!(si.zid_len, 16);
+        assert_eq!(si.zid_prefix(), &[1u8; 16][..]);
         assert_eq!(si.eid, 7);
         assert_eq!(si.sn, 42);
         assert_eq!(sample.reliability, Reliability::BestEffort);
+    }
+
+    #[test]
+    fn source_info_new_pads_zid_and_records_length() {
+        // R231 — variable-length zid (1..=16) is right-zero-padded
+        // into the fixed [u8; 16] buffer; zid_len carries the
+        // effective prefix length so dedup comparisons stay
+        // unambiguous (4-byte own_zid vs 8-byte peer that happens to
+        // share the first 4 bytes must NOT match).
+        let info = SourceInfo::new(&[0xAA, 0xBB, 0xCC, 0xDD], 7, 42);
+        assert_eq!(info.zid_len, 4);
+        assert_eq!(info.zid_prefix(), &[0xAA, 0xBB, 0xCC, 0xDD][..]);
+        // Padding bytes are zero past the effective length.
+        assert!(info.zid[4..].iter().all(|&b| b == 0));
+        assert_eq!(info.eid, 7);
+        assert_eq!(info.sn, 42);
+    }
+
+    #[test]
+    fn source_info_zid_prefix_returns_empty_for_default_sentinel() {
+        // R231 — the derived Default has zid_len = 0 which is outside
+        // the valid 1..=16 range. zid_prefix() must return an empty
+        // slice for the sentinel so equality checks against any
+        // non-empty own_zid cannot accidentally match the zero default.
+        let info = SourceInfo::default();
+        assert_eq!(info.zid_len, 0);
+        assert!(info.zid_prefix().is_empty());
+    }
+
+    #[test]
+    fn source_info_zid_prefix_returns_empty_when_len_out_of_range() {
+        // R231 — defensive: a malformed record (zid_len > 16) must
+        // not panic-index into the buffer. zid_prefix() filters it
+        // out by returning empty.
+        let info = SourceInfo {
+            zid: [0xFFu8; 16],
+            zid_len: 99,
+            eid: 0,
+            sn: 0,
+        };
+        assert!(info.zid_prefix().is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "SourceInfo::new requires zid length 1..=16")]
+    fn source_info_new_panics_on_zero_length_zid() {
+        let _ = SourceInfo::new(&[], 0, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "SourceInfo::new requires zid length 1..=16")]
+    fn source_info_new_panics_on_17_byte_zid() {
+        let _ = SourceInfo::new(&[0u8; 17], 0, 0);
+    }
+
+    #[test]
+    fn source_info_decode_round_trips_zid_len_through_wire_form() {
+        // R231 — the decode path now records zid_len from the wire
+        // header's `(zidlen - 1)` high nibble. A 3-byte zid encodes
+        // as header `(3-1) << 4 = 0x20`, followed by 3 zid bytes,
+        // then VLE eid + sn.
+        let mut bytes = vec![0x20]; // (3-1) << 4 = 0x20, low nibble 0
+        bytes.extend_from_slice(&[0xDE, 0xAD, 0xBE]);
+        bytes.push(0x05); // VLE eid = 5
+        bytes.push(0x07); // VLE sn = 7
+        let info = decode_source_info_payload(&bytes).expect("decode");
+        assert_eq!(info.zid_len, 3);
+        assert_eq!(info.zid_prefix(), &[0xDE, 0xAD, 0xBE][..]);
+        // Padding past zid_len is zero.
+        assert!(info.zid[3..].iter().all(|&b| b == 0));
+        assert_eq!(info.eid, 5);
+        assert_eq!(info.sn, 7);
     }
 
     #[test]
@@ -683,6 +809,9 @@ mod tests {
         let mut expected_zid = [0u8; 16];
         expected_zid[..5].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
         assert_eq!(si.zid, expected_zid);
+        // R231 — zid_len records the effective wire-header prefix length.
+        assert_eq!(si.zid_len, 5);
+        assert_eq!(si.zid_prefix(), &[0xAA, 0xBB, 0xCC, 0xDD, 0xEE][..]);
         assert_eq!(si.eid, 7);
         assert_eq!(si.sn, 42);
     }

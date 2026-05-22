@@ -203,6 +203,52 @@ impl Session {
         &self.observer
     }
 
+    /// R231 — forward this session's own zid (1..=16 bytes) to the
+    /// inbound subscriber registry so wire-arrived self-echoes (a
+    /// `Locality::Any` publish that the network routes back to its
+    /// publisher) are recognised by
+    /// [`crate::pubsub::SubscriberRegistry::dispatch_push`] and
+    /// suppressed before the local callback fires a second time.
+    ///
+    /// Returns `true` when the registry accepted the install,
+    /// `false` when `zid.len()` was outside `1..=16` (the wire-form
+    /// `_z_id_t` range) — an invalid length is a hard reject so a
+    /// buggy caller cannot accidentally silence dedup with a
+    /// length-0 or length-17 input.
+    ///
+    /// Production deployment path: the session-FSM open handshake
+    /// settles with both peers' zids known
+    /// (`SessionInitParams.zid` is the local zid passed into
+    /// outbound `InitSyn`; the peer's zid lands in
+    /// [`crate::session_glue::SessionLinkActions::inbound_peer_zid`]).
+    /// Once the handshake completes, the application calls this
+    /// method with the local zid and the dedup activates. The
+    /// auto-wire from a session-FSM completion event is an R232+
+    /// carry — today the wiring is caller-driven so the surface
+    /// stays additive (no breakage to callers that never enable
+    /// dedup; the absence remains a safe default).
+    pub fn set_own_zid(&self, zid: Vec<u8>) -> bool {
+        let mut observer = self
+            .observer
+            .lock()
+            .expect("ApplicationLayerObserver mutex poisoned");
+        observer.subscribers.set_own_zid(zid)
+    }
+
+    /// R231 — release the previously-installed own zid (paired with
+    /// [`Session::set_own_zid`]). After clear, every wire-arrived
+    /// Push fires its matching subscribers; the self-echo guard
+    /// stays disabled until a fresh `set_own_zid` install. Useful
+    /// in session re-init / close scenarios where the prior zid
+    /// must not bleed into a new session's dispatch state.
+    pub fn clear_own_zid(&self) {
+        let mut observer = self
+            .observer
+            .lock()
+            .expect("ApplicationLayerObserver mutex poisoned");
+        observer.subscribers.clear_own_zid();
+    }
+
     /// Publish a literal-keyexpr Sample. Routes both branches per
     /// `opts.allowed_destination`:
     ///
@@ -1028,5 +1074,102 @@ mod tests {
         assert_eq!(local_hits.load(Ordering::SeqCst), 1);
         assert_eq!(remote_hits.load(Ordering::SeqCst), 0);
         assert_eq!(driver.frame_count(), 0);
+    }
+
+    // ── R231 own_zid forwarding ──
+
+    #[test]
+    fn set_own_zid_forwards_to_subscriber_registry() {
+        // Session::set_own_zid is a thin forwarder onto
+        // observer.subscribers.set_own_zid. This pins the wiring so a
+        // future refactor that splits the observer mutex or renames
+        // the subscriber field surfaces here as a compile / runtime
+        // error rather than silently disabling the dedup.
+        let (session, _driver) = build_session();
+        assert!(
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .subscribers
+                .own_zid()
+                .is_none(),
+            "fresh session has no own_zid installed"
+        );
+
+        let zid = vec![0x01, 0x02, 0x03, 0x04];
+        assert!(session.set_own_zid(zid.clone()));
+        assert_eq!(
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .subscribers
+                .own_zid(),
+            Some(&zid[..])
+        );
+    }
+
+    #[test]
+    fn set_own_zid_rejects_invalid_length_without_mutating_registry() {
+        // Length-0 and length-17 inputs must be rejected (return
+        // false) AND must not mutate the registry's slot. Silent
+        // accept of length 0 would store an empty own_zid that
+        // could match an empty source_info.zid_prefix() — breaking
+        // the cautious-default contract from the registry layer.
+        let (session, _driver) = build_session();
+        let initial = vec![0x42];
+        assert!(session.set_own_zid(initial.clone()));
+
+        assert!(!session.set_own_zid(vec![]));
+        assert_eq!(
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .subscribers
+                .own_zid(),
+            Some(&initial[..]),
+            "rejected length-0 install must not mutate previously-installed zid"
+        );
+
+        assert!(!session.set_own_zid(vec![0u8; 17]));
+        assert_eq!(
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .subscribers
+                .own_zid(),
+            Some(&initial[..]),
+            "rejected length-17 install must not mutate previously-installed zid"
+        );
+    }
+
+    #[test]
+    fn clear_own_zid_forwards_to_subscriber_registry() {
+        let (session, _driver) = build_session();
+        assert!(session.set_own_zid(vec![0x09, 0x08, 0x07, 0x06]));
+        assert!(
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .subscribers
+                .own_zid()
+                .is_some()
+        );
+
+        session.clear_own_zid();
+        assert!(
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .subscribers
+                .own_zid()
+                .is_none(),
+            "Session::clear_own_zid must forward the release down to the registry"
+        );
     }
 }
