@@ -12584,6 +12584,72 @@
         "R258 lesson: compile-time trait-bound assertions (the _assert_send<T: Send>() pattern) are zero-cost production-grade contract fixity. They surface regressions earlier than runtime tests and require no runtime resources — textbook pattern for any public trait crate. The generic-composition smoke test similarly validates that the trait surface composes in real generic code without consuming actual scheduling resources."
       ]
     },
+    "Round 259": {
+      "decision_summary": "R259 closes the R257 abort contract by pinning two edge cases: abort against an already-completed task is a no-op (Ok value preserved); repeated aborts collapse to a single JoinCancelled outcome (idempotent).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/runtime_impl.rs: two new #[tokio::test] cases. tokio_runtime_abort_after_completion_is_noop verifies that calling abort() on a completed task does NOT flip Ok(value) into Err(JoinCancelled). tokio_runtime_abort_is_idempotent_across_repeated_calls verifies triple-abort still resolves to a single Err(JoinCancelled).",
+        "Both tests pin tokio contract from the wz wrapper perspective: 'If the task has already completed, calling abort will not have any effect' (tokio JoinHandle::abort doc) + the repeated-abort silent-no-op convention.",
+        "wz-runtime-tokio lib tests: 475 -> 477 (+2 R259 edge cases). Total Phase W test surface: R252 8 + R256 1 + R257 2 + R259 2 = 13 runtime_impl tests + 1 compile-time module + 2 std-feature error tests + 1 compile-time error module = comprehensive."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib runtime_impl: 13/13 pass.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates.",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A-E 9/9).",
+        "pre-commit hook validate_workspace clean (T1=0, RT 12/12, sync).",
+        "commit 3502462 (test(runtime): R259 TokioJoinHandle abort edge cases; 1 file +35 / -0)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R260+ Cancellable trait promotion (R257 carry): elevate struct-level abort to a separate trait so generic <H: JoinHandle + Cancellable> code can cancel any Runtime's task. Hold until a real caller motivates it (YAGNI discipline).",
+        "R260+ RuntimeError inner-cause variants (panic_payload behind alloc/std feature).",
+        "R260+ wz-runtime-tokio internal sleep migration (drive_session_until_terminal clock parameter, API-breaking; user confirm required).",
+        "R260+ Session struct reparameterisation per §5.P leaf-first; gated on Mutex/RwLock contract decision (R251 open).",
+        "R260+ core::error::Error replacement once MSRV bumps to 1.81+.",
+        "Liveliness Token wz-ap-demo migration (R250 carry; declare_task Established-gate timing + LivelinessToken Drop lifetime do not compose without cross-task handoff).",
+        "ReplyRegistry timeout sweep (TimeSource production-validated; strongest substantive candidate for next session).",
+        "Q_B / Q_E wire codec slots (SCE-side codec extension).",
+        "Querier / Publisher get_matching_status (architectural placement: where to consult RemoteQueryableRegistry from Querier handle).",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff (no wz call sites — pin bump remains deferred).",
+        "Phase W full lwIP integration / Cortex-M cross-compile / deploy yaml.",
+        "Interest 70% / QoS 75-90% / Multicast 90% / 5 transports 85-100% / W3C conformance 100% remaining.",
+        "R259 lesson: pinning edge-case contracts via explicit tests (no-op-after-completion + idempotent) makes contract drift impossible to miss — a future round that changes abort semantics will fail these tests and surface the breaking change at PR review rather than at production debug time. Pattern: every public API surface deserves both happy-path coverage + 2-3 edge-case pin tests."
+      ],
+      "publishable_decision_summary": "R259 closes the R257 abort contract by pinning two edge cases: abort against an already-completed task is a no-op (Ok value preserved); repeated aborts collapse to a single JoinCancelled outcome (idempotent).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/runtime_impl.rs: two new #[tokio::test] cases. tokio_runtime_abort_after_completion_is_noop verifies that calling abort() on a completed task does NOT flip Ok(value) into Err(JoinCancelled). tokio_runtime_abort_is_idempotent_across_repeated_calls verifies triple-abort still resolves to a single Err(JoinCancelled).",
+        "Both tests pin tokio contract from the wz wrapper perspective: 'If the task has already completed, calling abort will not have any effect' (tokio JoinHandle::abort doc) + the repeated-abort silent-no-op convention.",
+        "wz-runtime-tokio lib tests: 475 -> 477 (+2 R259 edge cases). Total Phase W test surface: R252 8 + R256 1 + R257 2 + R259 2 = 13 runtime_impl tests + 1 compile-time module + 2 std-feature error tests + 1 compile-time error module = comprehensive."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib runtime_impl: 13/13 pass.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean across 7 crates.",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A-E 9/9).",
+        "pre-commit hook validate_workspace clean (T1=0, RT 12/12, sync).",
+        "commit 3502462 (test(runtime): R259 TokioJoinHandle abort edge cases; 1 file +35 / -0)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R260+ Cancellable trait promotion (R257 carry): elevate struct-level abort to a separate trait so generic <H: JoinHandle + Cancellable> code can cancel any Runtime's task. Hold until a real caller motivates it (YAGNI discipline).",
+        "R260+ RuntimeError inner-cause variants (panic_payload behind alloc/std feature).",
+        "R260+ wz-runtime-tokio internal sleep migration (drive_session_until_terminal clock parameter, API-breaking; user confirm required).",
+        "R260+ Session struct reparameterisation per §5.P leaf-first; gated on Mutex/RwLock contract decision (R251 open).",
+        "R260+ core::error::Error replacement once MSRV bumps to 1.81+.",
+        "Liveliness Token wz-ap-demo migration (R250 carry; declare_task Established-gate timing + LivelinessToken Drop lifetime do not compose without cross-task handoff).",
+        "ReplyRegistry timeout sweep (TimeSource production-validated; strongest substantive candidate for next session).",
+        "Q_B / Q_E wire codec slots (SCE-side codec extension).",
+        "Querier / Publisher get_matching_status (architectural placement: where to consult RemoteQueryableRegistry from Querier handle).",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff (no wz call sites — pin bump remains deferred).",
+        "Phase W full lwIP integration / Cortex-M cross-compile / deploy yaml.",
+        "Interest 70% / QoS 75-90% / Multicast 90% / 5 transports 85-100% / W3C conformance 100% remaining.",
+        "R259 lesson: pinning edge-case contracts via explicit tests (no-op-after-completion + idempotent) makes contract drift impossible to miss — a future round that changes abort semantics will fail these tests and surface the breaking change at PR review rather than at production debug time. Pattern: every public API surface deserves both happy-path coverage + 2-3 edge-case pin tests."
+      ]
+    },
     "Round 26": {
       "decision_summary": "R26 codebase Korean cleanup — fix 2 non-md files (mnemosyne.toml line 60 + scripts/verify-codegen.sh line 17) and establish non-md-English-only convention; historical atomic.json Korean (17 entries) and the legacy KO atomic section id remain locked by T2 frozen-ledger and the missing rename_section primitive respectively.",
       "changes_bullets": [
