@@ -248,6 +248,15 @@ struct Pending {
     /// `u32` matches zenoh-pico's `_remaining_finals` width and is
     /// wide enough for every plausible mesh fan-out.
     remaining_finals: u32,
+    /// R261 — absolute monotonic-ms deadline (clock baseline-agnostic
+    /// snapshot taken at register time as `clock.now_monotonic_ms() +
+    /// timeout_ms`). `None` means the pending entry never expires
+    /// (matches the pre-R261 contract; `QueryOptions::timeout_ms == 0`
+    /// callers pass `None`). A `Some(d)` entry is swept by
+    /// [`ReplyRegistry::sweep_timed_out`] when the caller-supplied
+    /// `now_ms >= d`. The deadline uses absolute ms so the sweep call
+    /// only needs to compare without re-reading the clock per entry.
+    deadline_ms: Option<u64>,
     on_reply: ReplyCallback,
     on_final: FinalCallback,
 }
@@ -305,12 +314,14 @@ impl ReplyRegistry {
         &mut self,
         rid: u64,
         expected_finals: u32,
+        deadline_ms: Option<u64>,
         on_reply: impl FnMut(&InboundReply) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> ReplyHandle {
         self.pending.push(Pending {
             rid,
             remaining_finals: expected_finals,
+            deadline_ms,
             on_reply: Box::new(on_reply),
             on_final: Box::new(on_final),
         });
@@ -440,6 +451,61 @@ impl ReplyRegistry {
     /// via [`Self::fire_final_for`]).
     pub fn deliver_local_final(&mut self, rid: u64) {
         self.fire_final_for(rid);
+    }
+
+    /// R261 — fire `on_final` + drop every pending entry whose
+    /// caller-supplied `deadline_ms` is at or before `now_ms`. Returns
+    /// the number of pending entries swept (zero if no entry has
+    /// timed out, which is the common case when the production sweep
+    /// runs on every drive_session iteration).
+    ///
+    /// The fired `on_final` carries the entry's `rid` only — the
+    /// callback cannot distinguish "timed out" from a normal Final via
+    /// the rid argument. This matches the R261 architectural pick
+    /// (opaque cause, FinalCallback signature unchanged): callers that
+    /// need a timeout signal observe it indirectly by inspecting their
+    /// own outstanding-rid map at sweep time, or by treating the
+    /// `on_final` as a stream-terminated signal regardless of cause.
+    /// Future rounds may extend `FinalCallback` to carry an explicit
+    /// `FinalCause` enum if a concrete user need arises (R261 carry).
+    ///
+    /// Entries with `deadline_ms == None` (the `QueryOptions::timeout_ms
+    /// == 0` "never expire" path) are skipped — they remain pending
+    /// across an arbitrary number of sweep passes until a wire or
+    /// loopback Final actually arrives. Idempotent: a second
+    /// `sweep_timed_out` call with the same `now_ms` returns 0
+    /// (everything that could have expired already did).
+    ///
+    /// `now_ms` is supplied by the caller (typically
+    /// `clock.now_monotonic_ms()`) so the registry test surface
+    /// remains deterministic — a unit test can drive the sweep with a
+    /// hand-picked `now_ms` value without needing to advance a real
+    /// clock or mock TimeSource.
+    pub fn sweep_timed_out(&mut self, now_ms: u64) -> usize {
+        // Same drain-then-fire pattern as fire_final_for: the
+        // borrow-checker forbids calling the captured on_final while a
+        // &mut self.pending iteration is active, so we partition first
+        // and fire after the partition releases the borrow. This also
+        // ensures a panicking on_final does NOT leave half-swept entries
+        // in the registry — every fired entry has already been removed
+        // from self.pending by the time its callback runs.
+        let mut fired: Vec<Pending> = Vec::new();
+        let mut keep: Vec<Pending> = Vec::with_capacity(self.pending.len());
+        for entry in self.pending.drain(..) {
+            let expired = matches!(entry.deadline_ms, Some(d) if d <= now_ms);
+            if expired {
+                fired.push(entry);
+            } else {
+                keep.push(entry);
+            }
+        }
+        self.pending = keep;
+        let swept = fired.len();
+        for mut entry in fired {
+            let rid = entry.rid;
+            (entry.on_final)(rid);
+        }
+        swept
     }
 
     /// R239 — shared reply fan body for wire ([`Self::dispatch_response`])
@@ -684,8 +750,8 @@ mod tests {
     #[test]
     fn register_assigns_handle_and_grows_table() {
         let mut reg = ReplyRegistry::new();
-        let h1 = reg.register(7, 1, |_| {}, |_| {});
-        let h2 = reg.register(8, 1, |_| {}, |_| {});
+        let h1 = reg.register(7, 1, None, |_| {}, |_| {});
+        let h2 = reg.register(8, 1, None, |_| {}, |_| {});
         assert_eq!(h1.rid(), 7);
         assert_eq!(h2.rid(), 8);
         assert_eq!(reg.len(), 2);
@@ -694,8 +760,8 @@ mod tests {
     #[test]
     fn unregister_is_idempotent_and_removes_only_matching_rid() {
         let mut reg = ReplyRegistry::new();
-        reg.register(7, 1, |_| {}, |_| {});
-        reg.register(8, 1, |_| {}, |_| {});
+        reg.register(7, 1, None, |_| {}, |_| {});
+        reg.register(8, 1, None, |_| {}, |_| {});
         assert!(reg.unregister(7));
         assert!(!reg.unregister(7), "second unregister of same rid is a no-op");
         assert_eq!(reg.len(), 1);
@@ -711,6 +777,7 @@ mod tests {
         reg.register(
             42,
             1,
+            None,
             move |reply| captured_cb.lock().unwrap().push(reply.clone()),
             |_| {},
         );
@@ -737,6 +804,7 @@ mod tests {
         reg.register(
             9,
             1,
+            None,
             move |reply| {
                 count_cb.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(reply.body, InboundReplyBody::Del, "expected Del body");
@@ -757,6 +825,7 @@ mod tests {
         reg.register(
             5,
             1,
+            None,
             move |reply| *captured_cb.lock().unwrap() = Some(reply.clone()),
             |_| {},
         );
@@ -781,7 +850,7 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let count = Arc::new(AtomicUsize::new(0));
         let count_cb = count.clone();
-        reg.register(7, 1, move |_| { count_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
+        reg.register(7, 1, None, move |_| { count_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
 
         let resp = response_reply_put(99, 0, Some("home/temp"), b"x");
         reg.dispatch_response(&resp, &HashMap::new());
@@ -797,6 +866,7 @@ mod tests {
         reg.register(
             42,
             1,
+            None,
             |_| {},
             move |rid| {
                 assert_eq!(rid, 42, "on_final must receive the registered rid");
@@ -815,7 +885,7 @@ mod tests {
     #[test]
     fn dispatch_response_final_with_unknown_rid_is_silent_noop() {
         let mut reg = ReplyRegistry::new();
-        reg.register(42, 1, |_| {}, |_| panic!("on_final must not fire on unknown rid"));
+        reg.register(42, 1, None, |_| {}, |_| panic!("on_final must not fire on unknown rid"));
 
         reg.dispatch_response_final(&response_final_for(99));
         assert_eq!(reg.len(), 1, "unknown-rid Final preserves all pending entries");
@@ -829,6 +899,7 @@ mod tests {
         reg.register(
             1,
             1,
+            None,
             move |reply| *captured_cb.lock().unwrap() = Some(reply.keyexpr_literal.clone()),
             |_| {},
         );
@@ -849,7 +920,7 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
-        reg.register(1, 1, move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
+        reg.register(1, 1, None, move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
 
         // mapping_id=99 not in peer table — dispatch must drop silently
         // before reaching the callback.
@@ -863,7 +934,7 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let count = Arc::new(AtomicUsize::new(0));
         let count_cb = count.clone();
-        reg.register(7, 1, move |_| { count_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
+        reg.register(7, 1, None, move |_| { count_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
 
         for payload in [b"sample-1".as_ref(), b"sample-2".as_ref(), b"sample-3".as_ref()] {
             reg.dispatch_response(
@@ -880,9 +951,9 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let order: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let order_a = order.clone();
-        reg.register(7, 1, move |_| order_a.lock().unwrap().push(1), |_| {});
+        reg.register(7, 1, None, move |_| order_a.lock().unwrap().push(1), |_| {});
         let order_b = order.clone();
-        reg.register(7, 1, move |_| order_b.lock().unwrap().push(2), |_| {});
+        reg.register(7, 1, None, move |_| order_b.lock().unwrap().push(2), |_| {});
 
         reg.dispatch_response(
             &response_reply_put(7, 0, Some("home/temp"), b"21.0"),
@@ -905,6 +976,7 @@ mod tests {
         reg.register(
             42,
             1,
+            None,
             move |_| { r.fetch_add(1, Ordering::SeqCst); },
             move |_| { f.fetch_add(1, Ordering::SeqCst); },
         );
@@ -926,7 +998,7 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
-        reg.register(7, 1, move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
+        reg.register(7, 1, None, move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
 
         // Unknown variant must NOT touch the registry.
         let messages = vec![NetworkMessage::Unknown {
@@ -952,6 +1024,7 @@ mod tests {
         reg.register(
             7,
             1,
+            None,
             move |reply| captured_cb.lock().unwrap().push(reply.clone()),
             |_| {},
         );
@@ -974,7 +1047,7 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let count = Arc::new(AtomicUsize::new(0));
         let count_cb = count.clone();
-        reg.register(7, 1, move |_| { count_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
+        reg.register(7, 1, None, move |_| { count_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
 
         let inbound = InboundReply {
             rid: 99,
@@ -996,6 +1069,7 @@ mod tests {
         reg.register(
             1,
             1,
+            None,
             |_| {},
             move |rid| {
                 assert_eq!(rid, 1);
@@ -1020,6 +1094,7 @@ mod tests {
         reg.register(
             5,
             2,
+            None,
             |_| {},
             move |_| { final_count_cb.fetch_add(1, Ordering::SeqCst); },
         );
@@ -1044,7 +1119,7 @@ mod tests {
     #[test]
     fn deliver_local_final_on_unknown_rid_is_silent_noop() {
         let mut reg = ReplyRegistry::new();
-        reg.register(7, 1, |_| {}, |_| panic!("on_final must not fire on unknown rid"));
+        reg.register(7, 1, None, |_| {}, |_| panic!("on_final must not fire on unknown rid"));
 
         reg.deliver_local_final(99);
         assert_eq!(reg.len(), 1, "unknown-rid loopback final preserves the entry");
@@ -1061,6 +1136,7 @@ mod tests {
         reg.register(
             9,
             2,
+            None,
             |_| {},
             move |_| { final_count_cb.fetch_add(1, Ordering::SeqCst); },
         );
@@ -1130,5 +1206,180 @@ mod tests {
             }
             other => panic!("expected Err, got {other:?}"),
         }
+    }
+
+    // ── R261 sweep_timed_out unit tests ──
+
+    #[test]
+    fn sweep_timed_out_drops_expired_pending_and_fires_on_final() {
+        let mut reg = ReplyRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        // deadline = 1000ms; on_final asserts rid + counts firing.
+        reg.register(
+            7,
+            1,
+            Some(1000),
+            |_| {},
+            move |rid| {
+                assert_eq!(rid, 7, "on_final must carry the registered rid");
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        // now_ms = 1500 > deadline 1000 → expired.
+        let swept = reg.sweep_timed_out(1500);
+        assert_eq!(swept, 1, "one expired entry must be swept");
+        assert_eq!(fired.load(Ordering::SeqCst), 1, "on_final fires once");
+        assert!(reg.is_empty(), "expired entry must be removed from table");
+    }
+
+    #[test]
+    fn sweep_timed_out_keeps_unexpired_pending_and_fires_nothing() {
+        let mut reg = ReplyRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        reg.register(
+            9,
+            1,
+            Some(2000),
+            |_| {},
+            move |_| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        // now_ms = 500 < deadline 2000 → not expired.
+        let swept = reg.sweep_timed_out(500);
+        assert_eq!(swept, 0, "no entry must be swept");
+        assert_eq!(fired.load(Ordering::SeqCst), 0, "on_final must not fire");
+        assert_eq!(reg.len(), 1, "unexpired entry must remain pending");
+    }
+
+    #[test]
+    fn sweep_timed_out_skips_none_deadline_entries() {
+        // deadline_ms = None ("never expire") entries must survive any
+        // sweep_timed_out call, regardless of now_ms. This pins the
+        // contract for the QueryOptions::timeout_ms == 0 path that the
+        // R261 Session::query production callers exercise.
+        let mut reg = ReplyRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        reg.register(
+            13,
+            1,
+            None,
+            |_| {},
+            move |_| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        let swept = reg.sweep_timed_out(u64::MAX);
+        assert_eq!(swept, 0, "None-deadline entry must not be swept");
+        assert_eq!(fired.load(Ordering::SeqCst), 0, "on_final must not fire");
+        assert_eq!(reg.len(), 1, "None-deadline entry must remain pending");
+    }
+
+    #[test]
+    fn sweep_timed_out_partitions_mixed_batch_correctly() {
+        // Three entries: one expired, one unexpired, one None-deadline.
+        // After sweep at now_ms = 1500: only the expired entry is
+        // dropped + fires on_final. The other two stay.
+        let mut reg = ReplyRegistry::new();
+        let fired_a = Arc::new(AtomicUsize::new(0));
+        let fired_b = Arc::new(AtomicUsize::new(0));
+        let fired_c = Arc::new(AtomicUsize::new(0));
+        let fa = fired_a.clone();
+        let fb = fired_b.clone();
+        let fc = fired_c.clone();
+        reg.register(1, 1, Some(1000), |_| {}, move |_| {
+            fa.fetch_add(1, Ordering::SeqCst);
+        });
+        reg.register(2, 1, Some(2000), |_| {}, move |_| {
+            fb.fetch_add(1, Ordering::SeqCst);
+        });
+        reg.register(3, 1, None, |_| {}, move |_| {
+            fc.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let swept = reg.sweep_timed_out(1500);
+        assert_eq!(swept, 1, "only entry 1 (deadline=1000) must be swept");
+        assert_eq!(fired_a.load(Ordering::SeqCst), 1, "rid=1 on_final fires");
+        assert_eq!(fired_b.load(Ordering::SeqCst), 0, "rid=2 on_final does NOT fire");
+        assert_eq!(fired_c.load(Ordering::SeqCst), 0, "rid=3 on_final does NOT fire");
+        assert_eq!(reg.len(), 2, "rid=2 + rid=3 remain pending");
+    }
+
+    #[test]
+    fn sweep_timed_out_boundary_now_ms_equals_deadline_is_expired() {
+        // The contract uses `deadline <= now_ms` (inclusive). At the
+        // exact deadline tick the entry is considered expired so a
+        // sweep call running at the same ms as the deadline does not
+        // miss the entry on a one-tick granularity.
+        let mut reg = ReplyRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        reg.register(
+            5,
+            1,
+            Some(1000),
+            |_| {},
+            move |_| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        let swept = reg.sweep_timed_out(1000);
+        assert_eq!(swept, 1, "entry at deadline==now must be swept (inclusive)");
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn sweep_timed_out_is_idempotent_second_call_returns_zero() {
+        // After the first sweep removes the expired entry, a second
+        // sweep at the same (or any later) now_ms must return 0 and
+        // leave the registry untouched. No double-fire of on_final.
+        let mut reg = ReplyRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        reg.register(
+            7,
+            1,
+            Some(1000),
+            |_| {},
+            move |_| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        assert_eq!(reg.sweep_timed_out(1500), 1, "first sweep finds the expired entry");
+        assert_eq!(reg.sweep_timed_out(1500), 0, "second sweep is a no-op");
+        assert_eq!(reg.sweep_timed_out(u64::MAX), 0, "later sweep is also a no-op");
+        assert_eq!(fired.load(Ordering::SeqCst), 1, "on_final fires exactly once total");
+    }
+
+    #[test]
+    fn sweep_timed_out_drops_duplicate_rid_entries_independently() {
+        // Duplicate-rid registrations with the same deadline_ms must
+        // both be swept on a single sweep call. on_final fires once
+        // per entry (registration order). Mirrors the duplicate-rid
+        // contract on the wire/loopback Final path.
+        let mut reg = ReplyRegistry::new();
+        let order: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
+        let order_a = order.clone();
+        let order_b = order.clone();
+        reg.register(7, 1, Some(1000), |_| {}, move |rid| order_a.lock().unwrap().push(rid));
+        reg.register(7, 1, Some(1000), |_| {}, move |rid| order_b.lock().unwrap().push(rid));
+
+        let swept = reg.sweep_timed_out(1500);
+        assert_eq!(swept, 2, "both duplicate-rid entries must be swept");
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec![7, 7],
+            "on_final fires once per entry (registration order preserved)",
+        );
+        assert!(reg.is_empty());
     }
 }

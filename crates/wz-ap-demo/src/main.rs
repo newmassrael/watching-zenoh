@@ -997,6 +997,9 @@ async fn run_demo(
                 // only, no loopback fan), so the pending entry
                 // expects exactly one Final from the peer.
                 1,
+                // R261 — deadline_ms is None until R263 wires the
+                // demo's timeout exercise through QueryOptions.
+                None,
                 move |reply| {
                     if !on_reply {
                         return;
