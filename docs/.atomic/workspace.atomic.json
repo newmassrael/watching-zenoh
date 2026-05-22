@@ -11078,6 +11078,88 @@
         "R240 lesson: R233 PushMetadata pattern mirrors directly to QueryMetadata when the wire encoder already exposes layered builder (RequestQueryBuilder.{target,consolidation,attachment,timeout_ms}); the wz codec gap (payload/encoding) splits cleanly into R241+."
       ]
     },
+    "Round 241": {
+      "decision_summary": "R241 Session::query_aliased + query_aliased_auto mirror publish_aliased / publish_aliased_auto (R229+R234) on the z_get side; QueryAliasError typed contract; outbound mapping table reused.",
+      "changes_bullets": [
+        "session.rs Session::query_aliased(mapping_id, inline_suffix, loopback_keyexpr, opts, on_reply, on_final) -> ReplyHandle added.",
+        "session.rs Session::query_aliased_auto(mapping_id, inline_suffix, opts, on_reply, on_final) -> Result<ReplyHandle, QueryAliasError>.",
+        "session.rs QueryAliasError::UnknownMapping(u64) + std::fmt::Display + std::error::Error.",
+        "Wire branch reuses send_request_query / send_request_query_with_meta with mapping_id (aliased form already supported, no new action surface).",
+        "Loopback branch trusts caller-asserted loopback_keyexpr for query_aliased; query_aliased_auto resolves base + inline_suffix from outbound_mappings table.",
+        "UnknownMapping skips BOTH branches (no silent partial fire); mirrors publish_aliased_auto R234 contract.",
+        "lib test query_aliased_locality_session_local_fires_loopback_only.",
+        "lib test query_aliased_locality_remote_fires_wire_with_mapping_id (byte-stable verify via build_request_query).",
+        "lib test query_aliased_locality_any_fires_both_branches (expected_finals=2 invariant).",
+        "lib test query_aliased_inline_suffix_passes_through_to_wire_and_loopback.",
+        "lib test query_aliased_auto_resolves_loopback_from_outbound_mapping_table.",
+        "lib test query_aliased_auto_unknown_mapping_returns_err_and_skips_both_branches.",
+        "lib test query_aliased_auto_with_inline_suffix_concatenates_for_loopback.",
+        "lib test query_aliased_with_meta_threads_attachment_through_wire (R240 with-meta carry-through).",
+        "lib test query_alias_error_display_message_hints_remediation."
+      ],
+      "verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 393 -> 402 (+9 R241 cases).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R240 65 no-regression)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R242+ Querier struct (zenoh-pico z_querier_t mirror; reusable Session::query target with pre-set options and aliased keyexpr).",
+        "R242+ ReplyRegistry timeout sweep: cancel pending entry + synthesise Final when QueryOptions.timeout_ms passes without peer Final.",
+        "R242+ Q_B / Q_E wire codec slots (Query body payload + encoding) require SCE-side codec extension.",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R241 lesson: action layer's send_request_query already accepts (mapping_id, suffix) → aliased form needs no new action surface; only the Session wrapper splits literal vs aliased. Smaller round than publish_aliased (R229) which needed new build_push_aliased."
+      ],
+      "publishable_decision_summary": "R241 Session::query_aliased + query_aliased_auto mirror publish_aliased / publish_aliased_auto (R229+R234) on the z_get side; QueryAliasError typed contract; outbound mapping table reused.",
+      "publishable_changes_bullets": [
+        "session.rs Session::query_aliased(mapping_id, inline_suffix, loopback_keyexpr, opts, on_reply, on_final) -> ReplyHandle added.",
+        "session.rs Session::query_aliased_auto(mapping_id, inline_suffix, opts, on_reply, on_final) -> Result<ReplyHandle, QueryAliasError>.",
+        "session.rs QueryAliasError::UnknownMapping(u64) + std::fmt::Display + std::error::Error.",
+        "Wire branch reuses send_request_query / send_request_query_with_meta with mapping_id (aliased form already supported, no new action surface).",
+        "Loopback branch trusts caller-asserted loopback_keyexpr for query_aliased; query_aliased_auto resolves base + inline_suffix from outbound_mappings table.",
+        "UnknownMapping skips BOTH branches (no silent partial fire); mirrors publish_aliased_auto R234 contract.",
+        "lib test query_aliased_locality_session_local_fires_loopback_only.",
+        "lib test query_aliased_locality_remote_fires_wire_with_mapping_id (byte-stable verify via build_request_query).",
+        "lib test query_aliased_locality_any_fires_both_branches (expected_finals=2 invariant).",
+        "lib test query_aliased_inline_suffix_passes_through_to_wire_and_loopback.",
+        "lib test query_aliased_auto_resolves_loopback_from_outbound_mapping_table.",
+        "lib test query_aliased_auto_unknown_mapping_returns_err_and_skips_both_branches.",
+        "lib test query_aliased_auto_with_inline_suffix_concatenates_for_loopback.",
+        "lib test query_aliased_with_meta_threads_attachment_through_wire (R240 with-meta carry-through).",
+        "lib test query_alias_error_display_message_hints_remediation."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 393 -> 402 (+9 R241 cases).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R240 65 no-regression)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R242+ Querier struct (zenoh-pico z_querier_t mirror; reusable Session::query target with pre-set options and aliased keyexpr).",
+        "R242+ ReplyRegistry timeout sweep: cancel pending entry + synthesise Final when QueryOptions.timeout_ms passes without peer Final.",
+        "R242+ Q_B / Q_E wire codec slots (Query body payload + encoding) require SCE-side codec extension.",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R241 lesson: action layer's send_request_query already accepts (mapping_id, suffix) → aliased form needs no new action surface; only the Session wrapper splits literal vs aliased. Smaller round than publish_aliased (R229) which needed new build_push_aliased."
+      ]
+    },
     "Round 25": {
       "decision_summary": "Phase E register — README.md workspace.docs 재등록 land; R24 한국어 본문을 영문 primary로 재작성 + README.ko.md satellite로 분리 (사용자 정정 'README는 영문 primary, KO 번역은 별도 링크'); 첫 시도 11 parser orphan (URL 링크 + plain §N) → 파서-친화 form 으로 해결 후 12/12 docs clean.",
       "changes_bullets": [
