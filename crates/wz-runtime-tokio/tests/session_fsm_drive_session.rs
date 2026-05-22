@@ -26,10 +26,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use sce_rust_runtime::Engine;
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
-use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
     drive_session_until_terminal, BoxedLinkDriver, DriverLoopOutcome, DriverOutcome,
     IterationEvent, LeaseCheckOutcome, SessionLinkActions,
@@ -73,11 +73,7 @@ impl LinkDriver for QueueDriver {
     async fn open(&mut self) -> io::Result<()> {
         Ok(())
     }
-    async fn send(
-        &mut self,
-        _frame: &TxFrame<'_>,
-        _reliability: Reliability,
-    ) -> io::Result<()> {
+    async fn send(&mut self, _frame: &TxFrame<'_>, _reliability: Reliability) -> io::Result<()> {
         Ok(())
     }
     async fn close(&mut self) -> io::Result<()> {
@@ -101,11 +97,7 @@ impl LinkDriver for HangingDriver {
     async fn open(&mut self) -> io::Result<()> {
         Ok(())
     }
-    async fn send(
-        &mut self,
-        _frame: &TxFrame<'_>,
-        _reliability: Reliability,
-    ) -> io::Result<()> {
+    async fn send(&mut self, _frame: &TxFrame<'_>, _reliability: Reliability) -> io::Result<()> {
         Ok(())
     }
     async fn close(&mut self) -> io::Result<()> {
@@ -156,15 +148,9 @@ async fn r76b_returns_terminated_when_engine_already_final() {
 
     let mut driver = QueueDriver::with(vec![]);
     let clock = TokioTime::new();
-    let outcome = drive_session_until_terminal(
-        &mut driver,
-        &actions,
-        &mut engine,
-        Some(5),
-        &clock,
-        |_| {},
-    )
-    .await;
+    let outcome =
+        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(5), &clock, |_| {})
+            .await;
     assert!(
         matches!(outcome, DriverOutcome::Terminated),
         "already-final engine must return Terminated; got {outcome:?}"
@@ -189,15 +175,9 @@ async fn r76b_iteration_limit_when_loop_cannot_terminate() {
     // limit check at iteration top.
     let mut driver = HangingDriver;
     let clock = TokioTime::new();
-    let outcome = drive_session_until_terminal(
-        &mut driver,
-        &actions,
-        &mut engine,
-        Some(0),
-        &clock,
-        |_| {},
-    )
-    .await;
+    let outcome =
+        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(0), &clock, |_| {})
+            .await;
     assert_eq!(
         outcome,
         DriverOutcome::IterationLimit,
@@ -219,15 +199,9 @@ async fn r76b_link_lost_event_drives_loop_to_terminated() {
         cause: LostCause::PeerClosed,
     }]);
     let clock = TokioTime::new();
-    let outcome = drive_session_until_terminal(
-        &mut driver,
-        &actions,
-        &mut engine,
-        Some(5),
-        &clock,
-        |_| {},
-    )
-    .await;
+    let outcome =
+        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(5), &clock, |_| {})
+            .await;
     assert!(
         matches!(outcome, DriverOutcome::Terminated),
         "staged Lost must drive loop to Terminated; got {outcome:?}"
@@ -255,15 +229,9 @@ async fn r76b_lease_branch_fires_with_silent_peer() {
 
     let mut driver = HangingDriver;
     let clock = TokioTime::new();
-    let outcome = drive_session_until_terminal(
-        &mut driver,
-        &actions,
-        &mut engine,
-        Some(8),
-        &clock,
-        |_| {},
-    )
-    .await;
+    let outcome =
+        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(8), &clock, |_| {})
+            .await;
 
     // The outcome is Terminated (FSM reached Closed via Closing) or
     // IterationLimit (if the test host is slow enough that 8 iters
@@ -363,20 +331,14 @@ async fn r83_observer_captures_framepayload_and_linklost_in_order() {
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let captured_for_observer = captured.clone();
     let clock = TokioTime::new();
-    let outcome = drive_session_until_terminal(
-        &mut driver,
-        &actions,
-        &mut engine,
-        Some(5),
-        &clock,
-        |ev| {
+    let outcome =
+        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(5), &clock, |ev| {
             captured_for_observer
                 .lock()
                 .unwrap()
                 .push(format!("{ev:?}"));
-        },
-    )
-    .await;
+        })
+        .await;
 
     assert!(
         matches!(outcome, DriverOutcome::Terminated),
@@ -425,27 +387,16 @@ async fn r83_observer_reads_framepayload_messages_through_reference() {
         },
     ]);
 
-    let payload_record_counts: Arc<Mutex<Vec<usize>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let payload_record_counts: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
     let counts_for_observer = payload_record_counts.clone();
     let clock = TokioTime::new();
-    let _ = drive_session_until_terminal(
-        &mut driver,
-        &actions,
-        &mut engine,
-        Some(5),
-        &clock,
-        |ev| {
-            if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
-                messages,
-                ..
-            }) = ev
-            {
+    let _ =
+        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(5), &clock, |ev| {
+            if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = ev {
                 counts_for_observer.lock().unwrap().push(messages.len());
             }
-        },
-    )
-    .await;
+        })
+        .await;
 
     let counts = payload_record_counts.lock().unwrap();
     assert_eq!(
@@ -527,20 +478,14 @@ async fn r99_subscriber_registry_routes_framepayload_push_to_callback() {
 
     let registry_for_observer = registry.clone();
     let clock = TokioTime::new();
-    let _ = drive_session_until_terminal(
-        &mut driver,
-        &actions,
-        &mut engine,
-        Some(5),
-        &clock,
-        |ev| {
+    let _ =
+        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(5), &clock, |ev| {
             registry_for_observer
                 .lock()
                 .unwrap()
                 .dispatch_iteration_event(ev);
-        },
-    )
-    .await;
+        })
+        .await;
 
     assert_eq!(
         hit_count.load(Ordering::SeqCst),
@@ -559,23 +504,16 @@ async fn r83_observer_fires_on_lease_branch() {
     *actions.last_inbound_keepalive_at.lock().unwrap() = Some(Instant::now());
 
     let mut driver = HangingDriver;
-    let lease_outcomes: Arc<Mutex<Vec<LeaseCheckOutcome>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let lease_outcomes: Arc<Mutex<Vec<LeaseCheckOutcome>>> = Arc::new(Mutex::new(Vec::new()));
     let outcomes_for_observer = lease_outcomes.clone();
     let clock = TokioTime::new();
-    let _ = drive_session_until_terminal(
-        &mut driver,
-        &actions,
-        &mut engine,
-        Some(8),
-        &clock,
-        |ev| {
+    let _ =
+        drive_session_until_terminal(&mut driver, &actions, &mut engine, Some(8), &clock, |ev| {
             if let IterationEvent::Lease(o) = ev {
                 outcomes_for_observer.lock().unwrap().push(o);
             }
-        },
-    )
-    .await;
+        })
+        .await;
 
     let captured = lease_outcomes.lock().unwrap();
     assert!(
@@ -584,4 +522,3 @@ async fn r83_observer_fires_on_lease_branch() {
          (short lease + silent peer); captured={captured:?}"
     );
 }
-

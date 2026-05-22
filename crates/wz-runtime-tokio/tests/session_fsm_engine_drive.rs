@@ -27,9 +27,7 @@ use sce_rust_runtime::Engine;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
 };
-use wz_runtime_tokio::session_glue::{
-    BoxedLinkDriver, SessionLinkActions,
-};
+use wz_runtime_tokio::session_glue::{BoxedLinkDriver, SessionLinkActions};
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{
     fixture_session_init_params, install_session_actions_for_test,
@@ -66,8 +64,7 @@ impl BoxedLinkDriver for RecordingDriver {
 #[test]
 fn r55b_engine_drives_link_opening_onentry_script() {
     let driver = Arc::new(RecordingDriver::default());
-    let actions =
-        SessionLinkActions::new(driver.clone(), fixture_session_init_params());
+    let actions = SessionLinkActions::new(driver.clone(), fixture_session_init_params());
     let lua = install_session_actions_for_test(actions.clone());
 
     let mut engine: Engine<SessionFsmUnicastPolicy> =

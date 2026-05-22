@@ -30,7 +30,14 @@
 #              (auto-includes every #[ignore]-marked test in the
 #              wz-integration-tests crate; wz-ap-demo + zenoh-pico CLI
 #              must be built first or the lane SKIPs gracefully)
-#   Layer 0  — (optional) actionlint .github/workflows/
+#   Layer 0  — preflight lints: cargo fmt --check (mandatory) +
+#              actionlint (optional, SKIPs if not installed). The
+#              fmt gate is mandatory because R285–R287 wz-ap-demo
+#              decomposition merged without local fmt enforcement
+#              and the workspace accumulated multi-hundred-KB drift
+#              before R291 caught it; the gate here prevents that
+#              recurrence by failing pre-push if rustfmt would
+#              reformat any tracked file.
 #
 # Exit codes:
 #   0  every required layer passed
@@ -43,7 +50,7 @@
 #   scripts/run-ci.sh --layer A        # run only the named layer
 #
 # Time cost (warm cache):
-#   Layer A: <1s   B: ~30s   C1: ~10s   C2: ~5s   D: <1s
+#   Layer 0: <2s   A: <1s   B: ~30s   C1: ~10s   C2: ~5s   D: <1s
 #   Total ~50s on incremental build, ~5min on cold compile.
 
 set -uo pipefail
@@ -94,10 +101,31 @@ run_layer() {
     fi
 }
 
-# ─── Layer 0 — actionlint (optional, runs first to catch CI yaml regressions early) ──
-layer_0_actionlint() {
+# ─── Layer 0 — preflight lints (fmt mandatory + actionlint optional) ──
+#
+# R291: cargo fmt --check is promoted into Layer 0 as a mandatory
+# preflight gate. Rationale — R285→R287 wz-ap-demo decomposition
+# pushed multi-hundred-KB of fmt drift onto main without local
+# rejection because the prior Layer 0 only carried optional
+# actionlint and no lane invoked rustfmt at all. The mandatory
+# fmt gate here is exactly the R64.1 single-source-of-truth
+# invariant applied to rustfmt: the same gate fires locally
+# (pre-push hook) and remotely (.github/workflows/ci.yml), so a
+# fmt-dirty commit cannot reach origin/main again.
+#
+# actionlint stays optional (SKIP if not installed) — yaml workflow
+# lint is a nice-to-have, not a correctness gate.
+layer_0_preflight_lints() {
+    # 0.1 cargo fmt --check (mandatory)
+    if ! (cd crates && cargo fmt --all -- --check); then
+        echo "  fmt --check FAIL — run \`(cd crates && cargo fmt --all)\` to fix" >&2
+        return 1
+    fi
+    echo "  fmt --check OK"
+
+    # 0.2 actionlint (optional)
     if ! command -v actionlint >/dev/null 2>&1; then
-        echo "Layer 0 SKIP (actionlint not installed; install: go install github.com/rhysd/actionlint/cmd/actionlint@latest)"
+        echo "  actionlint SKIP (not installed; install: go install github.com/rhysd/actionlint/cmd/actionlint@latest)"
         return 0
     fi
     actionlint .github/workflows/*.yml
@@ -436,7 +464,7 @@ layer_e_ap_demo_round_trip() {
 
 # ─── dispatch ──────────────────────────────────────────────────────
 overall=0
-run_layer 0 layer_0_actionlint || overall=1
+run_layer 0 layer_0_preflight_lints || overall=1
 run_layer A layer_a_mnemosyne || overall=1
 run_layer A2 layer_a2_audit_mid_values || overall=1
 run_layer B layer_b_verify_codegen || overall=1

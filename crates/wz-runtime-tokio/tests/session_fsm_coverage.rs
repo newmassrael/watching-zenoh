@@ -39,9 +39,7 @@ use sce_rust_runtime::Engine;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
-use wz_runtime_tokio::session_glue::{
-    BoxedLinkDriver, CloseReason, SessionLinkActions,
-};
+use wz_runtime_tokio::session_glue::{BoxedLinkDriver, CloseReason, SessionLinkActions};
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{
     fixture_session_init_params, install_session_actions_for_test,
@@ -68,10 +66,7 @@ impl BoxedLinkDriver for RecordingDriver {
 /// Build a driver + actions + Engine triple for one scenario. Each
 /// call yields an independent `LuaEngine` (R79 per-instance DI), so
 /// concurrent test scenarios cannot contend on shared state.
-fn fresh_engine() -> (
-    Arc<SessionLinkActions>,
-    Engine<SessionFsmUnicastPolicy>,
-) {
+fn fresh_engine() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(RecordingDriver::default());
     let actions = SessionLinkActions::new(driver, fixture_session_init_params());
     let lua = install_session_actions_for_test(actions.clone());
@@ -108,10 +103,8 @@ fn r61_listener_path_inbound_to_established() {
     // InitSyn + OpenSyn arrival.
     let fixture_peer_zid = vec![0xB0, 0xB1, 0xB2, 0xB3];
     *actions.inbound_peer_zid.lock().unwrap() = Some(fixture_peer_zid.clone());
-    let expected_cookie = generate_cookie_hmac_sha256(
-        &actions.params.cookie_signing_key,
-        &fixture_peer_zid,
-    );
+    let expected_cookie =
+        generate_cookie_hmac_sha256(&actions.params.cookie_signing_key, &fixture_peer_zid);
     *actions.inbound_opensyn_cookie.lock().unwrap() = Some(expected_cookie);
 
     engine.process_event(E::InitSynReceived);

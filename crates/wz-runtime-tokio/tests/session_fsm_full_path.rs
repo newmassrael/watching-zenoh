@@ -47,9 +47,7 @@ use sce_rust_runtime::Engine;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
 };
-use wz_runtime_tokio::session_glue::{
-    BoxedLinkDriver, SessionLinkActions,
-};
+use wz_runtime_tokio::session_glue::{BoxedLinkDriver, SessionLinkActions};
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{
     fixture_session_init_params, install_session_actions_for_test,
@@ -96,7 +94,10 @@ fn r59_engine_drives_full_outbound_initiator_happy_path() {
 
     // ─── outbound.start ─→ LinkOpening ──────────────────────────
     engine.process_event(SessionFsmUnicastEvent::OutboundStart);
-    assert_eq!(engine.get_current_state(), SessionFsmUnicastState::LinkOpening);
+    assert_eq!(
+        engine.get_current_state(),
+        SessionFsmUnicastState::LinkOpening
+    );
     {
         let t = actions.trace_snapshot();
         assert_eq!(t.link_driver_open, 1);
@@ -124,7 +125,10 @@ fn r59_engine_drives_full_outbound_initiator_happy_path() {
 
     // ─── init_ack.received ─→ Opening.GotInitAck ────────────────
     engine.process_event(SessionFsmUnicastEvent::InitAckReceived);
-    assert_eq!(engine.get_current_state(), SessionFsmUnicastState::GotInitAck);
+    assert_eq!(
+        engine.get_current_state(),
+        SessionFsmUnicastState::GotInitAck
+    );
     {
         let t = actions.trace_snapshot();
         assert_eq!(t.send_open_syn, 1);

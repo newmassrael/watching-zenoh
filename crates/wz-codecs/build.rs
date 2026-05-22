@@ -34,44 +34,44 @@ const CODECS: &[&str] = &[
     "ext_zint",
     "ext_zbuf",
     "stream_envelope", // §4.0 streamed-link wire envelope (u16 LE len + payload) — R121h
-    "close", // §4.1 session-close, 1-byte reason — R42 Layer 3 ✓
-    "frame", // §4.2 data-carrying VLE sn + tail payload — R43 Layer 3 ✓
-    "fragment", // §4.2 same shape as frame, distinct MID — R43 ✓
-    "scout", // §3 scouting — cbyte multi-bit pack — R44 Layer 3 ✓
-    "init_body", // §4.1 Init body — parent.S + parent.A gates — R44 ✓
-    "open_body", // §4.1 Open body — parent.A NEGATION gate — R44 ✓
-    "join",      // §4.1 Join body — parent.S + multi-VLE — R44 ✓
-    "locator",   // §3 hello locator element — R45 (hello dep)
-    "keep_alive",// §4.1 empty body (transport keepalive) — R47 trivial
-    "decl_final", // §5 declare-final leaf — 1-byte header MID 0x1A — R110a
-    "undecl_kexpr", // §5 undecl kexpr leaf — header + id VLE, MID 0x01 — R110b
+    "close",           // §4.1 session-close, 1-byte reason — R42 Layer 3 ✓
+    "frame",           // §4.2 data-carrying VLE sn + tail payload — R43 Layer 3 ✓
+    "fragment",        // §4.2 same shape as frame, distinct MID — R43 ✓
+    "scout",           // §3 scouting — cbyte multi-bit pack — R44 Layer 3 ✓
+    "init_body",       // §4.1 Init body — parent.S + parent.A gates — R44 ✓
+    "open_body",       // §4.1 Open body — parent.A NEGATION gate — R44 ✓
+    "join",            // §4.1 Join body — parent.S + multi-VLE — R44 ✓
+    "locator",         // §3 hello locator element — R45 (hello dep)
+    "keep_alive",      // §4.1 empty body (transport keepalive) — R47 trivial
+    "decl_final",      // §5 declare-final leaf — 1-byte header MID 0x1A — R110a
+    "undecl_kexpr",    // §5 undecl kexpr leaf — header + id VLE, MID 0x01 — R110b
     "undecl_subscriber", // §5 undecl subscriber leaf — header + id VLE, MID 0x03 — R110d
-    "undecl_queryable",  // §5 undecl queryable leaf — header + id VLE, MID 0x05 — R110d
-    "undecl_token",      // §5 undecl token leaf — header + id VLE, MID 0x07 — R110d
+    "undecl_queryable", // §5 undecl queryable leaf — header + id VLE, MID 0x05 — R110d
+    "undecl_token",    // §5 undecl token leaf — header + id VLE, MID 0x07 — R110d
     // Composing codecs
-    "hello",     // §3 Hello body — parent.L + repeat<locator> — R45
-    "ext_entry", // imports ext_unit / ext_zint / ext_zbuf
-    "ext_envelope", // imports ext_entry — R67 generic ext chain (RFC §5.B B5-ε)
-    "msg_put",   // imports timestamp / encoding / ext_entry
-    "msg_del",   // imports timestamp / ext_entry
+    "hello",             // §3 Hello body — parent.L + repeat<locator> — R45
+    "ext_entry",         // imports ext_unit / ext_zint / ext_zbuf
+    "ext_envelope",      // imports ext_entry — R67 generic ext chain (RFC §5.B B5-ε)
+    "msg_put",           // imports timestamp / encoding / ext_entry
+    "msg_del",           // imports timestamp / ext_entry
     "wireexpr_local",    // §5 wireexpr Local arm — R125b leaf; R125c2 dispatched
     "wireexpr_nonlocal", // §5 wireexpr Nonlocal arm — R125b leaf; R125c2 dispatched
-    "wireexpr",  // §5 keyexpr fragment — R125c2 B5-ν dispatcher (pin b35dbb66)
-    "query",     // §6.2 Query body — header gates + tlv-chain — R47
-    "request",   // §5 Z_REQUEST envelope — peek-byte dispatch — R47
-    "push",      // §5 Z_PUSH envelope — peek-byte dispatch — R90
-    "response_final", // §5 Z_RESPONSE_FINAL marker — header + rid — R91
-    "oam",       // §5 Z_OAM envelope — header.enc variant dispatch — R92
-    "interest_body", // §5 Z_INTEREST inner body — flags + R-gated wireexpr — R94
-    "interest",  // §5 Z_INTEREST envelope — header + VLE id + ext-chain — R93/R94
-    "reply",     // §6.3 Z_REPLY inner body — C-gated consolidation + put/del peek — R95
-    "err",       // §6.3 Z_ERR inner body — E-gated encoding + Z ext + payload — R96
-    "response",  // §5 Z_RESPONSE envelope — reply/err peek-byte dispatch — R97
-    "decl_kexpr", // §5 decl kexpr — header + id VLE + wireexpr embed, MID 0x00 — R110b
-    "decl_subscriber", // §5 decl subscriber — _z_decl_commons shape, MID 0x02 — R110c
-    "decl_queryable",  // §5 decl queryable — _z_decl_commons shape, MID 0x04 — R110c
-    "decl_token",      // §5 decl token — _z_decl_commons shape, MID 0x06 — R110c
-    "declare",   // §5 Z_DECLARE envelope — header + I-gated id + Z ext + sub-MID variant — R110a
+    "wireexpr",          // §5 keyexpr fragment — R125c2 B5-ν dispatcher (pin b35dbb66)
+    "query",             // §6.2 Query body — header gates + tlv-chain — R47
+    "request",           // §5 Z_REQUEST envelope — peek-byte dispatch — R47
+    "push",              // §5 Z_PUSH envelope — peek-byte dispatch — R90
+    "response_final",    // §5 Z_RESPONSE_FINAL marker — header + rid — R91
+    "oam",               // §5 Z_OAM envelope — header.enc variant dispatch — R92
+    "interest_body",     // §5 Z_INTEREST inner body — flags + R-gated wireexpr — R94
+    "interest",          // §5 Z_INTEREST envelope — header + VLE id + ext-chain — R93/R94
+    "reply",             // §6.3 Z_REPLY inner body — C-gated consolidation + put/del peek — R95
+    "err",               // §6.3 Z_ERR inner body — E-gated encoding + Z ext + payload — R96
+    "response",          // §5 Z_RESPONSE envelope — reply/err peek-byte dispatch — R97
+    "decl_kexpr",        // §5 decl kexpr — header + id VLE + wireexpr embed, MID 0x00 — R110b
+    "decl_subscriber",   // §5 decl subscriber — _z_decl_commons shape, MID 0x02 — R110c
+    "decl_queryable",    // §5 decl queryable — _z_decl_commons shape, MID 0x04 — R110c
+    "decl_token",        // §5 decl token — _z_decl_commons shape, MID 0x06 — R110c
+    "declare", // §5 Z_DECLARE envelope — header + I-gated id + Z ext + sub-MID variant — R110a
 ];
 
 fn main() {

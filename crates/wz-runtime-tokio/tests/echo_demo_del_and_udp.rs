@@ -21,9 +21,7 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::oneshot;
 use wz_codecs::msg_del::MsgDel;
 use wz_codecs::msg_put::MsgPut;
-use wz_runtime_tokio::{
-    LinkDriver, LinkEvent, Reliability, TcpDriver, TxFrame, UdpDriver,
-};
+use wz_runtime_tokio::{LinkDriver, LinkEvent, Reliability, TcpDriver, TxFrame, UdpDriver};
 
 const MID_Z_PUT: u8 = 0x01;
 const MID_Z_DEL: u8 = 0x02;

@@ -9,8 +9,8 @@
 
 use std::collections::HashMap;
 
-use wz_codecs::declare::DeclareVariant;
 use wz_codecs::decl_token::DeclToken;
+use wz_codecs::declare::DeclareVariant;
 use wz_codecs::undecl_token::UndeclToken;
 
 use super::resolve_wireexpr;
@@ -21,8 +21,7 @@ use crate::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
 /// "an entity (process / device / sub-system) just declared itself
 /// alive on keyexpr X". Consumers wire this into watchdog or
 /// presence-detection logic, e.g. a UI that surfaces "online" badges.
-pub type DeclTokenCallback =
-    Box<dyn FnMut(&DeclToken, &str) + Send + 'static>;
+pub type DeclTokenCallback = Box<dyn FnMut(&DeclToken, &str) + Send + 'static>;
 
 /// Boxed callback invoked when an inbound `Declare(UndeclToken)` is
 /// decoded. The undeclare body carries only `id: u64`; the peer
@@ -30,8 +29,7 @@ pub type DeclTokenCallback =
 /// earlier `DeclToken`. Liveliness signal — "the entity that was
 /// alive on keyexpr X is now gone (graceful undeclare; lease-based
 /// expiry surfaces separately through the session FSM)".
-pub type UndeclTokenCallback =
-    Box<dyn FnMut(&UndeclToken) + Send + 'static>;
+pub type UndeclTokenCallback = Box<dyn FnMut(&UndeclToken) + Send + 'static>;
 
 /// Application-layer registry tracking the peer's outbound
 /// `DeclToken` / `UndeclToken` records — the liveliness layer in
@@ -73,19 +71,13 @@ impl LivelinessRegistry {
     /// `Declare(DeclToken)` whose keyexpr resolves through the peer
     /// keyexpr table. Duplicate callbacks allowed; dispatch fires
     /// them in registration order.
-    pub fn on_token_declared(
-        &mut self,
-        callback: impl FnMut(&DeclToken, &str) + Send + 'static,
-    ) {
+    pub fn on_token_declared(&mut self, callback: impl FnMut(&DeclToken, &str) + Send + 'static) {
         self.on_decl.push(Box::new(callback));
     }
 
     /// Install a callback fired on every inbound
     /// `Declare(UndeclToken)`.
-    pub fn on_token_undeclared(
-        &mut self,
-        callback: impl FnMut(&UndeclToken) + Send + 'static,
-    ) {
+    pub fn on_token_undeclared(&mut self, callback: impl FnMut(&UndeclToken) + Send + 'static) {
         self.on_undecl.push(Box::new(callback));
     }
 
@@ -155,8 +147,8 @@ impl LivelinessRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::test_helpers::*;
+    use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -175,9 +167,13 @@ mod tests {
         let captured: Arc<Mutex<Vec<(u64, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_cb = captured.clone();
         reg.on_token_declared(move |decl, resolved| {
-            captured_for_cb.lock().unwrap().push((decl.id, resolved.to_string()));
+            captured_for_cb
+                .lock()
+                .unwrap()
+                .push((decl.id, resolved.to_string()));
         });
-        let body = DeclareVariant::CodecZenohDeclToken(decl_token(11, 0, Some("liveliness/device42")));
+        let body =
+            DeclareVariant::CodecZenohDeclToken(decl_token(11, 0, Some("liveliness/device42")));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(
             *captured.lock().unwrap(),
@@ -231,11 +227,15 @@ mod tests {
 
         let messages = vec![
             NetworkMessage::Declare(Box::new(declare_envelope_decl_token(decl_token(
-                1, 0, Some("x"),
+                1,
+                0,
+                Some("x"),
             )))),
             NetworkMessage::Declare(Box::new(declare_envelope_undecl_token(undecl_token(1)))),
             NetworkMessage::Declare(Box::new(declare_envelope_decl_token(decl_token(
-                2, 0, Some("y"),
+                2,
+                0,
+                Some("y"),
             )))),
         ];
         reg.dispatch_messages(&messages, &HashMap::new());
@@ -253,18 +253,27 @@ mod tests {
         });
 
         // Subscriber + Queryable + Token mix — only Token arm routes.
-        let messages = vec![
-            NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
-                decl_subscriber(1, 0, Some("a")),
-            ))),
-            NetworkMessage::Declare(Box::new(declare_envelope_decl_queryable(
-                decl_queryable(2, 0, Some("b")),
-            ))),
-            NetworkMessage::Declare(Box::new(declare_envelope_decl_token(
-                decl_token(3, 0, Some("liveliness/c")),
-            ))),
-        ];
+        let messages =
+            vec![
+                NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
+                    decl_subscriber(1, 0, Some("a")),
+                ))),
+                NetworkMessage::Declare(Box::new(declare_envelope_decl_queryable(decl_queryable(
+                    2,
+                    0,
+                    Some("b"),
+                )))),
+                NetworkMessage::Declare(Box::new(declare_envelope_decl_token(decl_token(
+                    3,
+                    0,
+                    Some("liveliness/c"),
+                )))),
+            ];
         reg.dispatch_messages(&messages, &HashMap::new());
-        assert_eq!(counter.load(Ordering::SeqCst), 1, "only DeclToken routes into LivelinessRegistry");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "only DeclToken routes into LivelinessRegistry"
+        );
     }
 }

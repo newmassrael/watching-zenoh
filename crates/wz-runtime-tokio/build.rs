@@ -137,8 +137,10 @@ fn audit_script_names(resource_dir: &Path) {
         }
     }
 
-    let expected: HashSet<String> =
-        EXPECTED_SCRIPT_NAMES.iter().map(|s| s.to_string()).collect();
+    let expected: HashSet<String> = EXPECTED_SCRIPT_NAMES
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
 
     let missing_in_expected: Vec<_> = found.difference(&expected).cloned().collect();
     let missing_in_found: Vec<_> = expected.difference(&found).cloned().collect();
@@ -204,9 +206,7 @@ fn find_cond_names(content: &str) -> Vec<String> {
         while i < bytes.len() {
             if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
                 let start = i;
-                while i < bytes.len()
-                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
-                {
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i += 1;
                 }
                 if i < bytes.len() && bytes[i] == b'(' {

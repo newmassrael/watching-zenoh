@@ -45,11 +45,23 @@ fn msg_put_default_encode_decode_roundtrip() {
     let decoded = MsgPut::decode(&mut cursor).expect("decode default MsgPut bytes");
 
     assert_eq!(decoded.header, put.header, "header byte round-trip");
-    assert_eq!(decoded.payload_len, put.payload_len, "payload_len round-trip");
+    assert_eq!(
+        decoded.payload_len, put.payload_len,
+        "payload_len round-trip"
+    );
     assert_eq!(decoded.payload, put.payload, "payload bytes round-trip");
-    assert!(decoded.timestamp.is_none(), "timestamp gate cleared in default");
-    assert!(decoded.encoding.is_none(), "encoding gate cleared in default");
-    assert!(decoded.extensions.is_none(), "extensions gate cleared in default");
+    assert!(
+        decoded.timestamp.is_none(),
+        "timestamp gate cleared in default"
+    );
+    assert!(
+        decoded.encoding.is_none(),
+        "encoding gate cleared in default"
+    );
+    assert!(
+        decoded.extensions.is_none(),
+        "extensions gate cleared in default"
+    );
 }
 
 #[test]
@@ -95,7 +107,10 @@ fn reply_default_encode_decode_roundtrip() {
     let decoded = Reply::decode(&mut cursor).expect("decode default Reply bytes");
 
     assert_eq!(decoded.header, reply.header, "header round-trip");
-    assert!(decoded.consolidation.is_none(), "C clear => consolidation absent");
+    assert!(
+        decoded.consolidation.is_none(),
+        "C clear => consolidation absent"
+    );
     assert!(decoded.extensions.is_none(), "Z clear => extensions absent");
 }
 
@@ -124,10 +139,7 @@ fn stream_envelope_wire_bytes_match_zenoh_pico_reference() {
 
     let cases: [(&[u8], &[u8]); 5] = [
         (&[], &[0x00, 0x00]),
-        (
-            &[0xAB, 0xCD, 0xEF],
-            &[0x03, 0x00, 0xAB, 0xCD, 0xEF],
-        ),
+        (&[0xAB, 0xCD, 0xEF], &[0x03, 0x00, 0xAB, 0xCD, 0xEF]),
         (
             &[0x42; 255],
             // First two bytes [0xFF, 0x00] then 255 × 0x42; assemble
@@ -135,14 +147,8 @@ fn stream_envelope_wire_bytes_match_zenoh_pico_reference() {
             // syntax cannot embed a repeat-count macro.
             &expected_wire_255()[..],
         ),
-        (
-            &[0x42; 256],
-            &expected_wire_256()[..],
-        ),
-        (
-            &[0x42; 300],
-            &expected_wire_300()[..],
-        ),
+        (&[0x42; 256], &expected_wire_256()[..]),
+        (&[0x42; 300], &expected_wire_300()[..]),
     ];
 
     for (i, (payload, expected_wire)) in cases.iter().enumerate() {

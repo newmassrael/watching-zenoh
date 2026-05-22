@@ -87,8 +87,9 @@ fn wz_liveliness_subscriber_round_trip_against_wz_acceptor() {
     // graceful shutdown; that is the source of the initiator's
     // DELETE sample.
     let acceptor_stderr = tempfile::tempfile().expect("tempfile for acceptor stderr");
-    let acceptor_stderr_writer =
-        acceptor_stderr.try_clone().expect("dup acceptor stderr handle");
+    let acceptor_stderr_writer = acceptor_stderr
+        .try_clone()
+        .expect("dup acceptor stderr handle");
     let mut acceptor_stderr_reader = acceptor_stderr;
 
     let mut acceptor_child = Command::new(&demo)
@@ -123,8 +124,9 @@ fn wz_liveliness_subscriber_round_trip_against_wz_acceptor() {
     // callback logs to stderr as `LIVELINESS SAMPLE PUT/DELETE
     // filter=... keyexpr=... token_id=...`.
     let initiator_stderr = tempfile::tempfile().expect("tempfile for initiator stderr");
-    let initiator_stderr_writer =
-        initiator_stderr.try_clone().expect("dup initiator stderr handle");
+    let initiator_stderr_writer = initiator_stderr
+        .try_clone()
+        .expect("dup initiator stderr handle");
     let mut initiator_stderr_reader = initiator_stderr;
 
     let mut initiator_child = Command::new(&demo)

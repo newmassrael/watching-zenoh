@@ -96,7 +96,16 @@ fn ap_demo_round_trip_against_zenoh_pico_z_put() {
     // Spawn z_put against the demo's endpoint. zenoh-pico's client
     // mode is the typical pattern for an initiator-side z_put.
     let z_put_status = Command::new(&z_put)
-        .args(["-k", key, "-v", "hello-from-z_put", "-e", &endpoint, "-m", "client"])
+        .args([
+            "-k",
+            key,
+            "-v",
+            "hello-from-z_put",
+            "-e",
+            &endpoint,
+            "-m",
+            "client",
+        ])
         .status();
 
     // Two-stage wait: first the conservative `accepted peer` line
@@ -107,10 +116,16 @@ fn ap_demo_round_trip_against_zenoh_pico_z_put() {
     // localizes the failure: missing `accepted peer` means TCP
     // never connected; missing `SUBSCRIBER FIRED` means the wire
     // reached the FSM but a handshake / resolver step regressed.
-    let accepted_result =
-        wait_for_substring(&mut stderr_capture_reader, "accepted peer", Duration::from_secs(5));
-    let subscriber_result =
-        wait_for_substring(&mut stderr_capture_reader, "SUBSCRIBER FIRED", Duration::from_secs(5));
+    let accepted_result = wait_for_substring(
+        &mut stderr_capture_reader,
+        "accepted peer",
+        Duration::from_secs(5),
+    );
+    let subscriber_result = wait_for_substring(
+        &mut stderr_capture_reader,
+        "SUBSCRIBER FIRED",
+        Duration::from_secs(5),
+    );
 
     // Tear down the demo. SIGTERM via kill(); on Unix this is SIGKILL
     // through std::process::Child — sufficient for test cleanup.

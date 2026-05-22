@@ -8,8 +8,8 @@
 
 use std::collections::HashMap;
 
-use wz_codecs::declare::DeclareVariant;
 use wz_codecs::decl_queryable::DeclQueryable;
+use wz_codecs::declare::DeclareVariant;
 use wz_codecs::undecl_queryable::UndeclQueryable;
 
 use super::resolve_wireexpr;
@@ -24,14 +24,12 @@ use crate::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
 /// signal mirrors the subscriber surface; consumers may install a
 /// queryable-side counterpart of every subscriber-side hook (metrics,
 /// route table, debug log).
-pub type DeclQueryableCallback =
-    Box<dyn FnMut(&DeclQueryable, &str) + Send + 'static>;
+pub type DeclQueryableCallback = Box<dyn FnMut(&DeclQueryable, &str) + Send + 'static>;
 
 /// Boxed callback invoked when an inbound
 /// `Declare(UndeclQueryable)` is decoded. The undeclare body has no
 /// keyexpr field; the peer identifies the prior queryable by `id`.
-pub type UndeclQueryableCallback =
-    Box<dyn FnMut(&UndeclQueryable) + Send + 'static>;
+pub type UndeclQueryableCallback = Box<dyn FnMut(&UndeclQueryable) + Send + 'static>;
 
 /// Application-layer registry tracking the peer's outbound
 /// `DeclQueryable` / `UndeclQueryable` records. Q-side mirror of
@@ -251,8 +249,8 @@ impl RemoteQueryableRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::test_helpers::*;
+    use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -271,12 +269,17 @@ mod tests {
         let captured: Arc<Mutex<Vec<(u64, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_cb = captured.clone();
         reg.on_queryable_declared(move |decl, resolved| {
-            captured_for_cb.lock().unwrap().push((decl.id, resolved.to_string()));
+            captured_for_cb
+                .lock()
+                .unwrap()
+                .push((decl.id, resolved.to_string()));
         });
-        let body =
-            DeclareVariant::CodecZenohDeclQueryable(decl_queryable(8, 0, Some("home/door")));
+        let body = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(8, 0, Some("home/door")));
         reg.dispatch_declare(&body, &HashMap::new());
-        assert_eq!(*captured.lock().unwrap(), vec![(8, "home/door".to_string())]);
+        assert_eq!(
+            *captured.lock().unwrap(),
+            vec![(8, "home/door".to_string())]
+        );
     }
 
     #[test]
@@ -300,8 +303,7 @@ mod tests {
         reg.on_queryable_undeclared(move |u| {
             captured_for_cb.lock().unwrap().push(u.id);
         });
-        let body =
-            DeclareVariant::CodecZenohUndeclQueryable(undecl_queryable(99));
+        let body = DeclareVariant::CodecZenohUndeclQueryable(undecl_queryable(99));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(*captured.lock().unwrap(), vec![99]);
     }
@@ -418,19 +420,26 @@ mod tests {
 
         // Mix of Subscriber + Queryable envelopes — only Queryable
         // arms route into this registry.
-        let messages = vec![
-            NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
-                decl_subscriber(1, 0, Some("not-this")),
-            ))),
-            NetworkMessage::Declare(Box::new(declare_envelope_decl_queryable(
-                decl_queryable(2, 0, Some("yes-this")),
-            ))),
-            NetworkMessage::Declare(Box::new(declare_envelope_undecl_queryable(
-                undecl_queryable(2),
-            ))),
-        ];
+        let messages =
+            vec![
+                NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
+                    decl_subscriber(1, 0, Some("not-this")),
+                ))),
+                NetworkMessage::Declare(Box::new(declare_envelope_decl_queryable(decl_queryable(
+                    2,
+                    0,
+                    Some("yes-this"),
+                )))),
+                NetworkMessage::Declare(Box::new(declare_envelope_undecl_queryable(
+                    undecl_queryable(2),
+                ))),
+            ];
         reg.dispatch_messages(&messages, &HashMap::new());
-        assert_eq!(decl_count.load(Ordering::SeqCst), 1, "only the queryable decl routes here");
+        assert_eq!(
+            decl_count.load(Ordering::SeqCst),
+            1,
+            "only the queryable decl routes here"
+        );
         assert_eq!(undecl_count.load(Ordering::SeqCst), 1);
     }
 }

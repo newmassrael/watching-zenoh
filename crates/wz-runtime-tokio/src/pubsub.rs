@@ -394,11 +394,7 @@ impl SubscriberRegistry {
         keyexpr_pattern: impl Into<String>,
         callback: impl FnMut(&Sample) + Send + 'static,
     ) -> SubscriptionId {
-        self.register_with_locality(
-            keyexpr_pattern,
-            crate::locality::Locality::Any,
-            callback,
-        )
+        self.register_with_locality(keyexpr_pattern, crate::locality::Locality::Any, callback)
     }
 
     /// R223 — variant of [`register`](Self::register) that pins the
@@ -432,8 +428,7 @@ impl SubscriberRegistry {
                 raw
             }
         };
-        let pattern_chunks: Vec<String> =
-            canonical.split('/').map(String::from).collect();
+        let pattern_chunks: Vec<String> = canonical.split('/').map(String::from).collect();
         self.subscribers.push(Subscriber {
             id,
             pattern_chunks,
@@ -845,8 +840,7 @@ impl SubscriberRegistry {
             // DeclToken / UndeclToken are observed by
             // `crate::declare::liveliness::TokenRegistry` for the
             // peer liveliness layer — not a keyexpr-table concern.
-            DeclareVariant::CodecZenohDeclToken(_)
-            | DeclareVariant::CodecZenohUndeclToken(_) => {}
+            DeclareVariant::CodecZenohDeclToken(_) | DeclareVariant::CodecZenohUndeclToken(_) => {}
             // DeclFinal is the terminator marker zenoh emits after
             // an initial declaration burst. No side effects in
             // this registry — the runtime's session glue tracks
@@ -1028,10 +1022,7 @@ mod tests {
             *captured_clone.lock().unwrap() = Some(sample.reliability);
         });
         let push = push_with_keyexpr("topic/a");
-        registry.dispatch(
-            &NetworkMessage::Push(Box::new(push)),
-            Reliability::Reliable,
-        );
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
         assert_eq!(*captured.lock().unwrap(), Some(Reliability::Reliable));
     }
 
@@ -1078,10 +1069,7 @@ mod tests {
 
     #[test]
     fn reliability_from_reliable_bool_matches_canonical_pairing() {
-        assert_eq!(
-            Reliability::from_reliable_bool(true),
-            Reliability::Reliable
-        );
+        assert_eq!(Reliability::from_reliable_bool(true), Reliability::Reliable);
         assert_eq!(
             Reliability::from_reliable_bool(false),
             Reliability::BestEffort
@@ -1126,12 +1114,24 @@ mod tests {
     #[test]
     fn keyexpr_pattern_matches_single_chunk_wildcard() {
         // `*` matches exactly one chunk.
-        assert!(keyexpr_pattern_matches(&["home", "*", "temp"], "home/kitchen/temp"));
-        assert!(keyexpr_pattern_matches(&["home", "*", "temp"], "home/bedroom/temp"));
+        assert!(keyexpr_pattern_matches(
+            &["home", "*", "temp"],
+            "home/kitchen/temp"
+        ));
+        assert!(keyexpr_pattern_matches(
+            &["home", "*", "temp"],
+            "home/bedroom/temp"
+        ));
         // The wildcard does NOT match zero chunks.
-        assert!(!keyexpr_pattern_matches(&["home", "*", "temp"], "home/temp"));
+        assert!(!keyexpr_pattern_matches(
+            &["home", "*", "temp"],
+            "home/temp"
+        ));
         // The wildcard does NOT span chunk boundaries.
-        assert!(!keyexpr_pattern_matches(&["home", "*", "temp"], "home/kitchen/sub/temp"));
+        assert!(!keyexpr_pattern_matches(
+            &["home", "*", "temp"],
+            "home/kitchen/sub/temp"
+        ));
     }
 
     #[test]
@@ -1141,9 +1141,15 @@ mod tests {
         // `**` matches one chunk.
         assert!(keyexpr_pattern_matches(&["home", "**"], "home/temp"));
         // `**` matches many chunks.
-        assert!(keyexpr_pattern_matches(&["home", "**"], "home/kitchen/temp/c"));
+        assert!(keyexpr_pattern_matches(
+            &["home", "**"],
+            "home/kitchen/temp/c"
+        ));
         // `**` at the prefix.
-        assert!(keyexpr_pattern_matches(&["**", "temp"], "home/kitchen/temp"));
+        assert!(keyexpr_pattern_matches(
+            &["**", "temp"],
+            "home/kitchen/temp"
+        ));
         assert!(keyexpr_pattern_matches(&["**", "temp"], "temp"));
         // `**` in the middle.
         assert!(keyexpr_pattern_matches(
@@ -1214,10 +1220,7 @@ mod tests {
         // Multiple `$*` in one chunk anchor sub-parts in order
         // without overlap, mirroring zenoh-pico's
         // _z_chunk_right_contains_all_stardsl_subchunks_of_left.
-        assert!(keyexpr_pattern_matches(
-            &["$*aa$*bb$*"],
-            "xxaaYYbbZZ"
-        ));
+        assert!(keyexpr_pattern_matches(&["$*aa$*bb$*"], "xxaaYYbbZZ"));
         // The order is enforced: "bb" before "aa" must not match.
         assert!(!keyexpr_pattern_matches(&["$*aa$*bb$*"], "xxbbYYaaZZ"));
         // Overlap is rejected: two non-overlapping "foo" needed.
@@ -1252,15 +1255,24 @@ mod tests {
         // `["home", "*", "temp"]`; this test exercises the matcher
         // directly with the pre-canonical shape to document the
         // matcher's own fallback semantics for non-canonical input.
-        assert!(keyexpr_pattern_matches(&["home", "$*", "temp"], "home/kitchen/temp"));
-        assert!(keyexpr_pattern_matches(&["home", "$*", "temp"], "home/x/temp"));
+        assert!(keyexpr_pattern_matches(
+            &["home", "$*", "temp"],
+            "home/kitchen/temp"
+        ));
+        assert!(keyexpr_pattern_matches(
+            &["home", "$*", "temp"],
+            "home/x/temp"
+        ));
         // Still does not span chunk boundaries.
         assert!(!keyexpr_pattern_matches(
             &["home", "$*", "temp"],
             "home/a/b/temp"
         ));
         // Still does not collapse to zero chunks.
-        assert!(!keyexpr_pattern_matches(&["home", "$*", "temp"], "home/temp"));
+        assert!(!keyexpr_pattern_matches(
+            &["home", "$*", "temp"],
+            "home/temp"
+        ));
     }
 
     #[test]
@@ -1440,13 +1452,9 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register_with_locality(
-            "home/temp",
-            Locality::SessionLocal,
-            move |_push| {
-                counter_clone.fetch_add(1, Ordering::SeqCst);
-            },
-        );
+        registry.register_with_locality("home/temp", Locality::SessionLocal, move |_push| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
 
         let push = push_with_keyexpr("home/temp");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -1471,13 +1479,9 @@ mod tests {
         registry.register("home/temp", move |_push| {
             any_clone.fetch_add(1, Ordering::SeqCst);
         });
-        registry.register_with_locality(
-            "home/temp",
-            Locality::SessionLocal,
-            move |_push| {
-                local_clone.fetch_add(1, Ordering::SeqCst);
-            },
-        );
+        registry.register_with_locality("home/temp", Locality::SessionLocal, move |_push| {
+            local_clone.fetch_add(1, Ordering::SeqCst);
+        });
 
         let push = push_with_keyexpr("home/temp");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -1504,13 +1508,9 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register_with_locality(
-            "**",
-            Locality::SessionLocal,
-            move |_push| {
-                counter_clone.fetch_add(1, Ordering::SeqCst);
-            },
-        );
+        registry.register_with_locality("**", Locality::SessionLocal, move |_push| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
 
         let push = push_with_keyexpr("home/kitchen/temp");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -1534,9 +1534,8 @@ mod tests {
 
     fn push_with_del_body(keyexpr: &str) -> Push {
         let mut push = push_with_keyexpr(keyexpr);
-        push.body = wz_codecs::push::PushVariant::CodecZenohMsgDel(
-            wz_codecs::msg_del::MsgDel::default(),
-        );
+        push.body =
+            wz_codecs::push::PushVariant::CodecZenohMsgDel(wz_codecs::msg_del::MsgDel::default());
         push
     }
 
@@ -1577,7 +1576,10 @@ mod tests {
         let observed = captured.lock().unwrap().clone().expect("callback fired");
         assert_eq!(observed.keyexpr, "clear/me");
         assert_eq!(observed.kind, SampleKind::Del);
-        assert!(observed.payload.is_empty(), "Del has no payload on the wire");
+        assert!(
+            observed.payload.is_empty(),
+            "Del has no payload on the wire"
+        );
     }
 
     #[test]
@@ -1720,13 +1722,11 @@ mod tests {
     fn push_with_mapping_id(mapping_id: u64, inline_suffix: Option<&str>) -> Push {
         Push {
             keyexpr: wz_codecs::wireexpr::Wireexpr {
-                body: WireexprVariant::WireexprLocal(
-                    wz_codecs::wireexpr_local::WireexprLocal {
-                        id: mapping_id,
-                        suffix_len: inline_suffix.map(|s| s.len() as u64),
-                        suffix: inline_suffix.map(str::to_string),
-                    },
-                ),
+                body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
+                    id: mapping_id,
+                    suffix_len: inline_suffix.map(|s| s.len() as u64),
+                    suffix: inline_suffix.map(str::to_string),
+                }),
             },
             ..Push::default()
         }
@@ -2010,13 +2010,9 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register_with_locality(
-            "home/temp",
-            Locality::SessionLocal,
-            move |_sample| {
-                counter_clone.fetch_add(1, Ordering::SeqCst);
-            },
-        );
+        registry.register_with_locality("home/temp", Locality::SessionLocal, move |_sample| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
 
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
         let fired = registry.local_publish(&sample);
@@ -2038,13 +2034,9 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register_with_locality(
-            "home/temp",
-            Locality::Remote,
-            move |_sample| {
-                counter_clone.fetch_add(1, Ordering::SeqCst);
-            },
-        );
+        registry.register_with_locality("home/temp", Locality::Remote, move |_sample| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
 
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
         let fired = registry.local_publish(&sample);
@@ -2069,33 +2061,21 @@ mod tests {
         let remote_hits = Arc::new(AtomicUsize::new(0));
         {
             let any_clone = any_hits.clone();
-            registry.register_with_locality(
-                "home/temp",
-                Locality::Any,
-                move |_sample| {
-                    any_clone.fetch_add(1, Ordering::SeqCst);
-                },
-            );
+            registry.register_with_locality("home/temp", Locality::Any, move |_sample| {
+                any_clone.fetch_add(1, Ordering::SeqCst);
+            });
         }
         {
             let local_clone = local_hits.clone();
-            registry.register_with_locality(
-                "home/temp",
-                Locality::SessionLocal,
-                move |_sample| {
-                    local_clone.fetch_add(1, Ordering::SeqCst);
-                },
-            );
+            registry.register_with_locality("home/temp", Locality::SessionLocal, move |_sample| {
+                local_clone.fetch_add(1, Ordering::SeqCst);
+            });
         }
         {
             let remote_clone = remote_hits.clone();
-            registry.register_with_locality(
-                "home/temp",
-                Locality::Remote,
-                move |_sample| {
-                    remote_clone.fetch_add(1, Ordering::SeqCst);
-                },
-            );
+            registry.register_with_locality("home/temp", Locality::Remote, move |_sample| {
+                remote_clone.fetch_add(1, Ordering::SeqCst);
+            });
         }
 
         let sample = Sample::new_put("home/temp", b"22.5".to_vec());
@@ -2291,13 +2271,9 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        registry.register_with_locality(
-            "home/**",
-            Locality::Remote,
-            move |_sample| {
-                counter_clone.fetch_add(1, Ordering::SeqCst);
-            },
-        );
+        registry.register_with_locality("home/**", Locality::Remote, move |_sample| {
+            counter_clone.fetch_add(1, Ordering::SeqCst);
+        });
 
         let sample = Sample::new_put("home/kitchen/temp", b"22.5".to_vec());
         let fired = registry.local_publish(&sample);
@@ -2328,11 +2304,12 @@ mod tests {
         payload.extend_from_slice(source_zid);
         payload.push(0); // VLE eid = 0
         payload.push(0); // VLE sn = 0
-        ext.body =
-            wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
+        ext.body = wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZbuf(
+            wz_codecs::ext_zbuf::ExtZbuf {
                 value_len: payload.len() as u64,
                 value: payload,
-            });
+            },
+        );
         let put = wz_codecs::msg_put::MsgPut {
             extensions: Some(vec![ext]),
             ..wz_codecs::msg_put::MsgPut::default()
@@ -2367,10 +2344,7 @@ mod tests {
         assert!(registry.set_own_zid(own.clone()));
 
         let push = push_put_literal_with_source_info("demo/temp", &own);
-        registry.dispatch(
-            &NetworkMessage::Push(Box::new(push)),
-            Reliability::Reliable,
-        );
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(
             counter.load(Ordering::SeqCst),
@@ -2392,10 +2366,7 @@ mod tests {
         assert!(registry.set_own_zid(vec![0x01, 0x02, 0x03, 0x04]));
 
         let push = push_put_literal_with_source_info("demo/temp", &[0xAA, 0xBB, 0xCC, 0xDD]);
-        registry.dispatch(
-            &NetworkMessage::Push(Box::new(push)),
-            Reliability::Reliable,
-        );
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(
             counter.load(Ordering::SeqCst),
@@ -2435,10 +2406,7 @@ mod tests {
             ),
             ..Push::default()
         };
-        registry.dispatch(
-            &NetworkMessage::Push(Box::new(push)),
-            Reliability::Reliable,
-        );
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(
             counter.load(Ordering::SeqCst),
@@ -2465,10 +2433,7 @@ mod tests {
         );
 
         let push = push_put_literal_with_source_info("demo/temp", &[0x01, 0x02, 0x03, 0x04]);
-        registry.dispatch(
-            &NetworkMessage::Push(Box::new(push)),
-            Reliability::Reliable,
-        );
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(
             counter.load(Ordering::SeqCst),
@@ -2496,10 +2461,7 @@ mod tests {
             "demo/temp",
             &[0x01, 0x02, 0x03, 0x04, 0xAA, 0xBB, 0xCC, 0xDD],
         );
-        registry.dispatch(
-            &NetworkMessage::Push(Box::new(push)),
-            Reliability::Reliable,
-        );
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(
             counter.load(Ordering::SeqCst),
@@ -2530,7 +2492,10 @@ mod tests {
             .with_source_info(crate::sample::SourceInfo::new(&own, 0, 0));
         let fired = registry.local_publish(&sample);
 
-        assert_eq!(fired, 1, "loopback path must fire even when source matches own_zid");
+        assert_eq!(
+            fired, 1,
+            "loopback path must fire even when source matches own_zid"
+        );
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
@@ -2569,10 +2534,7 @@ mod tests {
 
         // First dispatch: self-echo, suppressed.
         let push = push_put_literal_with_source_info("demo/temp", &own);
-        registry.dispatch(
-            &NetworkMessage::Push(Box::new(push)),
-            Reliability::Reliable,
-        );
+        registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
         assert_eq!(counter.load(Ordering::SeqCst), 0);
 
         // clear_own_zid re-disables dedup.

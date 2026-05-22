@@ -332,9 +332,7 @@ mod alloc_error_tests {
     fn runtime_error_panic_payload_downcast_string() {
         // R266 — payload downcast to String round-trips through
         // the alloc-gated join_failed_with_payload constructor.
-        let err = RuntimeError::join_failed_with_payload(Some(Box::new(
-            "boom".to_string(),
-        )));
+        let err = RuntimeError::join_failed_with_payload(Some(Box::new("boom".to_string())));
         let payload = err.panic_payload().expect("payload present");
         let msg: &String = payload
             .downcast_ref::<String>()
@@ -346,9 +344,7 @@ mod alloc_error_tests {
     fn runtime_error_panic_payload_downcast_static_str() {
         // R266 — payload downcast to &'static str (the other
         // common panic type, from `panic!("literal")`).
-        let err = RuntimeError::join_failed_with_payload(Some(Box::new(
-            "literal panic",
-        )));
+        let err = RuntimeError::join_failed_with_payload(Some(Box::new("literal panic")));
         let payload = err.panic_payload().expect("payload present");
         let msg: &&'static str = payload
             .downcast_ref::<&'static str>()
@@ -362,9 +358,7 @@ mod alloc_error_tests {
         // human-readable suffix; the prefix "RuntimeError:
         // spawned task panicked" is preserved for log-grep
         // stability.
-        let err = RuntimeError::join_failed_with_payload(Some(Box::new(
-            "kaboom".to_string(),
-        )));
+        let err = RuntimeError::join_failed_with_payload(Some(Box::new("kaboom".to_string())));
         let formatted = err.to_string();
         assert!(formatted.contains("panicked"));
         assert!(formatted.contains("kaboom"));
@@ -372,9 +366,7 @@ mod alloc_error_tests {
 
     #[test]
     fn runtime_error_display_extracts_static_str_payload() {
-        let err = RuntimeError::join_failed_with_payload(Some(Box::new(
-            "literal kaboom",
-        )));
+        let err = RuntimeError::join_failed_with_payload(Some(Box::new("literal kaboom")));
         let formatted = err.to_string();
         assert!(formatted.contains("panicked"));
         assert!(formatted.contains("literal kaboom"));

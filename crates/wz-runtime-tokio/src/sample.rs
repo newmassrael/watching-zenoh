@@ -778,9 +778,7 @@ mod tests {
         let mut ext = ExtEntry::new();
         ext.set_ext_id(0x01);
         ext.set_enc(0x01);
-        ext.body = ExtEntryVariant::CodecZenohExtZint(wz_codecs::ext_zint::ExtZint {
-            value: 0xBE,
-        });
+        ext.body = ExtEntryVariant::CodecZenohExtZint(wz_codecs::ext_zint::ExtZint { value: 0xBE });
         let qos = extract_qos(&[ext]).unwrap();
         assert_eq!(qos.raw, 0xBE);
     }

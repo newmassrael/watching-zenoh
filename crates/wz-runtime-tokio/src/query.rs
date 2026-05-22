@@ -239,8 +239,7 @@ impl QueryReply {
                 payload,
                 responder,
             } => {
-                let mut builder =
-                    ResponseErrBuilder::new(rid, 0, Some(&keyexpr_literal), &payload);
+                let mut builder = ResponseErrBuilder::new(rid, 0, Some(&keyexpr_literal), &payload);
                 if let Some((id, schema)) = encoding {
                     builder = builder.encoding(id, schema.as_deref());
                 }
@@ -305,12 +304,7 @@ impl<'a> QueryResponder<'a> {
     /// maps onto [`ResponseErrBuilder::encoding`] at frame-emit
     /// time — pass `None` to skip the encoding ext and rely on the
     /// peer's default interpretation of `payload`.
-    pub fn send_err(
-        &mut self,
-        encoding_id: Option<u32>,
-        schema: Option<&str>,
-        payload: &[u8],
-    ) {
+    pub fn send_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]) {
         let encoding = encoding_id.map(|id| (id, schema.map(str::to_string)));
         self.replies.push(QueryReply::Err {
             rid: self.rid,
@@ -436,11 +430,7 @@ impl QueryableRegistry {
         keyexpr_pattern: impl Into<String>,
         callback: impl FnMut(&Query, &mut QueryResponder<'_>) + Send + 'static,
     ) -> QueryableId {
-        self.register_with_locality(
-            keyexpr_pattern,
-            crate::locality::Locality::Any,
-            callback,
-        )
+        self.register_with_locality(keyexpr_pattern, crate::locality::Locality::Any, callback)
     }
 
     /// R223 — variant of [`register`](Self::register) that pins the
@@ -467,8 +457,7 @@ impl QueryableRegistry {
                 raw
             }
         };
-        let pattern_chunks: Vec<String> =
-            canonical.split('/').map(String::from).collect();
+        let pattern_chunks: Vec<String> = canonical.split('/').map(String::from).collect();
         self.queryables.push(Queryable {
             id,
             pattern_chunks,
@@ -616,13 +605,7 @@ impl QueryableRegistry {
         query: &Query,
         replies: &mut Vec<QueryReply>,
     ) {
-        self.fire_matching_queryables(
-            rid,
-            keyexpr,
-            query,
-            replies,
-            /* is_remote = */ false,
-        );
+        self.fire_matching_queryables(rid, keyexpr, query, replies, /* is_remote = */ false);
     }
 
     /// R238 — shared fan-out body for [`Self::dispatch_request`]
@@ -743,7 +726,12 @@ impl QueryableRegistry {
         pending_final_rids: &mut Vec<u64>,
     ) {
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
-            self.dispatch_messages(messages, peer_keyexpr_table, pending_replies, pending_final_rids);
+            self.dispatch_messages(
+                messages,
+                peer_keyexpr_table,
+                pending_replies,
+                pending_final_rids,
+            );
         }
     }
 }
@@ -856,7 +844,10 @@ mod tests {
         let id1 = reg.register("home/temp", |_q, _r| {});
         let id2 = reg.register("home/humid", |_q, _r| {});
         assert!(reg.unregister(id1));
-        assert!(!reg.unregister(id1), "second unregister of same id is a no-op");
+        assert!(
+            !reg.unregister(id1),
+            "second unregister of same id is a no-op"
+        );
         assert_eq!(reg.len(), 1);
         assert!(reg.unregister(id2));
         assert!(reg.is_empty());
@@ -879,7 +870,12 @@ mod tests {
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
         assert_eq!(replies.len(), 1);
         match &replies[0] {
-            QueryReply::Reply { rid, keyexpr_literal, body, .. } => {
+            QueryReply::Reply {
+                rid,
+                keyexpr_literal,
+                body,
+                ..
+            } => {
                 assert_eq!(*rid, 7, "rid echoed from inbound Request");
                 assert_eq!(keyexpr_literal, "home/temp", "resolved literal echoed back");
                 assert_eq!(*body, ReplyBody::Put(b"42.0".to_vec()));
@@ -901,7 +897,11 @@ mod tests {
         // Three different keyexpr literals should all match `home/**`.
         let mut replies = Vec::new();
         for suffix in ["home", "home/temp", "home/zone/1/temp"] {
-            reg.dispatch_request(&request_query(1, 0, Some(suffix)), &HashMap::new(), &mut replies);
+            reg.dispatch_request(
+                &request_query(1, 0, Some(suffix)),
+                &HashMap::new(),
+                &mut replies,
+            );
         }
         assert_eq!(invocations.load(Ordering::SeqCst), 3);
         assert_eq!(replies.len(), 3);
@@ -953,7 +953,11 @@ mod tests {
         let put_req = request_put(1, "home/temp");
         reg.dispatch_request(&put_req, &HashMap::new(), &mut replies);
 
-        assert_eq!(invocations.load(Ordering::SeqCst), 0, "MsgPut body must not invoke queryable callbacks");
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            0,
+            "MsgPut body must not invoke queryable callbacks"
+        );
         assert!(replies.is_empty());
     }
 
@@ -965,13 +969,9 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         let invocations = Arc::new(AtomicUsize::new(0));
         let counter = invocations.clone();
-        reg.register_with_locality(
-            "home/temp",
-            Locality::Remote,
-            move |_q, _r| {
-                counter.fetch_add(1, Ordering::SeqCst);
-            },
-        );
+        reg.register_with_locality("home/temp", Locality::Remote, move |_q, _r| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
 
         let req = request_query(1, 0, Some("home/temp"));
         let mut replies = Vec::new();
@@ -996,13 +996,9 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         let invocations = Arc::new(AtomicUsize::new(0));
         let counter = invocations.clone();
-        reg.register_with_locality(
-            "home/temp",
-            Locality::SessionLocal,
-            move |_q, _r| {
-                counter.fetch_add(1, Ordering::SeqCst);
-            },
-        );
+        reg.register_with_locality("home/temp", Locality::SessionLocal, move |_q, _r| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
 
         let req = request_query(1, 0, Some("home/temp"));
         let mut replies = Vec::new();
@@ -1030,7 +1026,12 @@ mod tests {
 
         assert_eq!(replies.len(), 1);
         match &replies[0] {
-            QueryReply::Reply { rid, keyexpr_literal, body, .. } => {
+            QueryReply::Reply {
+                rid,
+                keyexpr_literal,
+                body,
+                ..
+            } => {
                 assert_eq!(*rid, 99);
                 assert_eq!(keyexpr_literal, "clear/me");
                 assert_eq!(*body, ReplyBody::Del);
@@ -1055,7 +1056,13 @@ mod tests {
 
         assert_eq!(replies.len(), 1);
         match &replies[0] {
-            QueryReply::Err { rid, keyexpr_literal, encoding, payload, .. } => {
+            QueryReply::Err {
+                rid,
+                keyexpr_literal,
+                encoding,
+                payload,
+                ..
+            } => {
                 assert_eq!(*rid, 5);
                 assert_eq!(keyexpr_literal, "error/path");
                 assert_eq!(*encoding, Some((4, Some("schema_v1".to_string()))));
@@ -1081,7 +1088,11 @@ mod tests {
             &mut replies,
         );
 
-        assert_eq!(replies.len(), 3, "queryable may emit many replies per query");
+        assert_eq!(
+            replies.len(),
+            3,
+            "queryable may emit many replies per query"
+        );
         for (i, reply) in replies.iter().enumerate() {
             match reply {
                 QueryReply::Reply { rid, body, .. } => {
@@ -1122,30 +1133,50 @@ mod tests {
         let unstamped_expected: Option<(Vec<u8>, u32)> = None;
         let stamped_expected: Option<(Vec<u8>, u32)> = Some((vec![0xAA; 4], 11));
         match &replies[0] {
-            QueryReply::Reply { body, responder, .. } => {
+            QueryReply::Reply {
+                body, responder, ..
+            } => {
                 assert_eq!(*body, ReplyBody::Put(b"before".to_vec()));
-                assert_eq!(*responder, unstamped_expected, "pre-with_responder push has None");
+                assert_eq!(
+                    *responder, unstamped_expected,
+                    "pre-with_responder push has None"
+                );
             }
             other => panic!("expected Reply::Put, got {other:?}"),
         }
         match &replies[1] {
-            QueryReply::Reply { body, responder, .. } => {
+            QueryReply::Reply {
+                body, responder, ..
+            } => {
                 assert_eq!(*body, ReplyBody::Put(b"stamped-put".to_vec()));
-                assert_eq!(*responder, stamped_expected, "post-with_responder send_reply stamped");
+                assert_eq!(
+                    *responder, stamped_expected,
+                    "post-with_responder send_reply stamped"
+                );
             }
             other => panic!("expected Reply::Put, got {other:?}"),
         }
         match &replies[2] {
-            QueryReply::Reply { body, responder, .. } => {
+            QueryReply::Reply {
+                body, responder, ..
+            } => {
                 assert_eq!(*body, ReplyBody::Del, "send_reply_del flows the same stamp");
-                assert_eq!(*responder, stamped_expected, "send_reply_del stamped identically");
+                assert_eq!(
+                    *responder, stamped_expected,
+                    "send_reply_del stamped identically"
+                );
             }
             other => panic!("expected Reply::Del, got {other:?}"),
         }
         match &replies[3] {
-            QueryReply::Reply { body, responder, .. } => {
+            QueryReply::Reply {
+                body, responder, ..
+            } => {
                 assert_eq!(*body, ReplyBody::Put(b"after-clear".to_vec()));
-                assert_eq!(*responder, unstamped_expected, "clear_responder reverts to None");
+                assert_eq!(
+                    *responder, unstamped_expected,
+                    "clear_responder reverts to None"
+                );
             }
             other => panic!("expected Reply::Put, got {other:?}"),
         }
@@ -1172,7 +1203,12 @@ mod tests {
 
         assert_eq!(replies.len(), 1);
         match &replies[0] {
-            QueryReply::Err { encoding, payload, responder, .. } => {
+            QueryReply::Err {
+                encoding,
+                payload,
+                responder,
+                ..
+            } => {
                 assert_eq!(*encoding, Some((4, Some("schema_v1".to_string()))));
                 assert_eq!(payload, b"oops");
                 assert_eq!(*responder, Some((vec![0xCC; 2], 5_u32)));
@@ -1203,11 +1239,10 @@ mod tests {
 
         assert_eq!(replies.len(), 1);
         let via_chain = replies.pop().unwrap().into_response().encode_to_vec();
-        let via_builder =
-            ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"hello")
-                .responder(&[0xBB; 1], 1)
-                .build()
-                .encode_to_vec();
+        let via_builder = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"hello")
+            .responder(&[0xBB; 1], 1)
+            .build()
+            .encode_to_vec();
         assert_eq!(
             via_chain, via_builder,
             "QueryResponder.with_responder → send_reply → into_response must equal the direct \
@@ -1295,7 +1330,11 @@ mod tests {
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
 
         assert_eq!(replies.len(), 2, "two matched Queries produce two Replies");
-        assert_eq!(finals, vec![10u64, 11u64], "one Final per matched rid, unmatched rid 12 dropped");
+        assert_eq!(
+            finals,
+            vec![10u64, 11u64],
+            "one Final per matched rid, unmatched rid 12 dropped"
+        );
     }
 
     #[test]
@@ -1314,7 +1353,10 @@ mod tests {
         let mut finals = Vec::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
         assert!(replies.is_empty());
-        assert!(finals.is_empty(), "no matched queryable -> no Final to terminate");
+        assert!(
+            finals.is_empty(),
+            "no matched queryable -> no Final to terminate"
+        );
     }
 
     #[test]
@@ -1325,12 +1367,17 @@ mod tests {
         });
 
         // mapping_id=99 not in peer table -> dispatch drops silently.
-        let messages = vec![NetworkMessage::Request(Box::new(request_query(99, 99, None)))];
+        let messages = vec![NetworkMessage::Request(Box::new(request_query(
+            99, 99, None,
+        )))];
         let mut replies = Vec::new();
         let mut finals = Vec::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
         assert!(replies.is_empty());
-        assert!(finals.is_empty(), "un-resolvable mapping id must not enqueue a Final");
+        assert!(
+            finals.is_empty(),
+            "un-resolvable mapping id must not enqueue a Final"
+        );
     }
 
     #[test]
@@ -1345,7 +1392,10 @@ mod tests {
         // A Request with a non-Query body arm (MsgPut) and a
         // hypothetical Push routed through this registry must not
         // invoke the queryable callback or schedule a Final.
-        let messages = vec![NetworkMessage::Request(Box::new(request_put(1, "home/temp")))];
+        let messages = vec![NetworkMessage::Request(Box::new(request_put(
+            1,
+            "home/temp",
+        )))];
         let mut replies = Vec::new();
         let mut finals = Vec::new();
         reg.dispatch_messages(&messages, &HashMap::new(), &mut replies, &mut finals);
@@ -1384,7 +1434,11 @@ mod tests {
             &HashMap::new(),
             &mut replies,
         );
-        assert_eq!(*order.lock().unwrap(), vec![1, 2], "callbacks fire in registration order");
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec![1, 2],
+            "callbacks fire in registration order"
+        );
         assert_eq!(replies.len(), 2);
     }
 
@@ -1412,9 +1466,17 @@ mod tests {
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
         assert_eq!(replies.len(), 1);
         match &replies[0] {
-            QueryReply::Reply { rid, keyexpr_literal, body, .. } => {
+            QueryReply::Reply {
+                rid,
+                keyexpr_literal,
+                body,
+                ..
+            } => {
                 assert_eq!(*rid, 7, "rid echoed from local_query call");
-                assert_eq!(keyexpr_literal, "home/temp", "caller-supplied literal echoed");
+                assert_eq!(
+                    keyexpr_literal, "home/temp",
+                    "caller-supplied literal echoed"
+                );
                 assert_eq!(*body, ReplyBody::Put(b"22.5".to_vec()));
             }
             other => panic!("expected Reply::Put, got {other:?}"),
@@ -1432,14 +1494,10 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         let invocations = Arc::new(AtomicUsize::new(0));
         let counter = invocations.clone();
-        reg.register_with_locality(
-            "home/temp",
-            Locality::SessionLocal,
-            move |_q, responder| {
-                counter.fetch_add(1, Ordering::SeqCst);
-                responder.send_reply(b"22.5");
-            },
-        );
+        reg.register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            responder.send_reply(b"22.5");
+        });
 
         let mut replies = Vec::new();
         let query = Query::default();
@@ -1465,13 +1523,9 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         let invocations = Arc::new(AtomicUsize::new(0));
         let counter = invocations.clone();
-        reg.register_with_locality(
-            "home/temp",
-            Locality::Remote,
-            move |_q, _responder| {
-                counter.fetch_add(1, Ordering::SeqCst);
-            },
-        );
+        reg.register_with_locality("home/temp", Locality::Remote, move |_q, _responder| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
 
         let mut replies = Vec::new();
         let query = Query::default();

@@ -15,8 +15,8 @@
 
 #![cfg(test)]
 
-use super::*;
 use super::test_helpers::*;
+use super::*;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -45,15 +45,21 @@ fn subscriber_and_queryable_registries_share_a_message_stream() {
     });
 
     let messages = vec![
-        NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
-            decl_subscriber(1, 0, Some("a")),
-        ))),
-        NetworkMessage::Declare(Box::new(declare_envelope_decl_queryable(
-            decl_queryable(2, 0, Some("b")),
-        ))),
-        NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
-            decl_subscriber(3, 0, Some("c")),
-        ))),
+        NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(decl_subscriber(
+            1,
+            0,
+            Some("a"),
+        )))),
+        NetworkMessage::Declare(Box::new(declare_envelope_decl_queryable(decl_queryable(
+            2,
+            0,
+            Some("b"),
+        )))),
+        NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(decl_subscriber(
+            3,
+            0,
+            Some("c"),
+        )))),
     ];
     let peer_table = std::collections::HashMap::new();
     sub_reg.dispatch_messages(&messages, &peer_table);
@@ -88,18 +94,26 @@ fn three_registries_share_a_message_stream_independently() {
     });
 
     let messages = vec![
-        NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
-            decl_subscriber(1, 0, Some("a")),
-        ))),
-        NetworkMessage::Declare(Box::new(declare_envelope_decl_queryable(
-            decl_queryable(2, 0, Some("b")),
-        ))),
-        NetworkMessage::Declare(Box::new(declare_envelope_decl_token(
-            decl_token(3, 0, Some("c")),
-        ))),
-        NetworkMessage::Declare(Box::new(declare_envelope_decl_token(
-            decl_token(4, 0, Some("d")),
-        ))),
+        NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(decl_subscriber(
+            1,
+            0,
+            Some("a"),
+        )))),
+        NetworkMessage::Declare(Box::new(declare_envelope_decl_queryable(decl_queryable(
+            2,
+            0,
+            Some("b"),
+        )))),
+        NetworkMessage::Declare(Box::new(declare_envelope_decl_token(decl_token(
+            3,
+            0,
+            Some("c"),
+        )))),
+        NetworkMessage::Declare(Box::new(declare_envelope_decl_token(decl_token(
+            4,
+            0,
+            Some("d"),
+        )))),
     ];
     let peer_table = std::collections::HashMap::new();
     sub_reg.dispatch_messages(&messages, &peer_table);

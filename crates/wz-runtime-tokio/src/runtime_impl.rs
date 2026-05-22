@@ -184,9 +184,7 @@ where
                     // is_panic() == true, so into_panic does not
                     // panic on a non-panic JoinError.
                     let payload = join_error.into_panic();
-                    Poll::Ready(Err(RuntimeError::join_failed_with_payload(Some(
-                        payload,
-                    ))))
+                    Poll::Ready(Err(RuntimeError::join_failed_with_payload(Some(payload))))
                 }
             }
         }
@@ -500,7 +498,10 @@ mod tests {
         // variants — the whole point of the R257 split, preserved
         // by R266's payload-bearing JoinFailed reshape.
         assert!(!matches!(panic_outcome, Err(RuntimeError::JoinCancelled)));
-        assert!(!matches!(cancel_outcome, Err(RuntimeError::JoinFailed { .. })));
+        assert!(!matches!(
+            cancel_outcome,
+            Err(RuntimeError::JoinFailed { .. })
+        ));
     }
 
     #[tokio::test]
@@ -529,7 +530,10 @@ mod tests {
         // "non-decreasing", not strictly increasing).
         tokio::task::yield_now().await;
         let t1 = clock.now_monotonic_ms();
-        assert!(t1 >= t0, "monotonic clock must not run backwards (t0={t0}, t1={t1})");
+        assert!(
+            t1 >= t0,
+            "monotonic clock must not run backwards (t0={t0}, t1={t1})"
+        );
     }
 
     #[tokio::test]

@@ -76,8 +76,9 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
 
     // ── wz acceptor (R121d listener + R121k-5 declare emitter) ─
     let acceptor_stderr = tempfile::tempfile().expect("tempfile for acceptor stderr");
-    let acceptor_stderr_writer =
-        acceptor_stderr.try_clone().expect("dup acceptor stderr handle");
+    let acceptor_stderr_writer = acceptor_stderr
+        .try_clone()
+        .expect("dup acceptor stderr handle");
     let mut acceptor_stderr_reader = acceptor_stderr;
 
     let mut acceptor_child = Command::new(&demo)
@@ -113,8 +114,9 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
 
     // ── wz initiator (R121f dialer + R121k-5 remote-log callbacks) ─
     let initiator_stderr = tempfile::tempfile().expect("tempfile for initiator stderr");
-    let initiator_stderr_writer =
-        initiator_stderr.try_clone().expect("dup initiator stderr handle");
+    let initiator_stderr_writer = initiator_stderr
+        .try_clone()
+        .expect("dup initiator stderr handle");
     let mut initiator_stderr_reader = initiator_stderr;
 
     let mut initiator_child = Command::new(&demo)

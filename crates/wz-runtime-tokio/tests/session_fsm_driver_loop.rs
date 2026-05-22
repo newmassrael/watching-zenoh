@@ -28,8 +28,7 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome, NetworkMessage,
-    SessionLinkActions,
+    poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome, NetworkMessage, SessionLinkActions,
 };
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_runtime_tokio_test_support::{
@@ -70,11 +69,7 @@ impl LinkDriver for QueueDriver {
     async fn open(&mut self) -> io::Result<()> {
         Ok(())
     }
-    async fn send(
-        &mut self,
-        _frame: &TxFrame<'_>,
-        _reliability: Reliability,
-    ) -> io::Result<()> {
+    async fn send(&mut self, _frame: &TxFrame<'_>, _reliability: Reliability) -> io::Result<()> {
         Ok(())
     }
     async fn close(&mut self) -> io::Result<()> {
@@ -100,9 +95,13 @@ fn craft_initack_wire(cookie: &[u8]) -> Vec<u8> {
         parent_flags | T_MID_INIT,
         0x05, // version
         0x31, // cbyte: whatami=Peer, zid_len=4
-        0xA0, 0xA1, 0xA2, 0xA3, // zid (4 bytes)
+        0xA0,
+        0xA1,
+        0xA2,
+        0xA3, // zid (4 bytes)
         0x00, // sn_res
-        0x00, 0x00, // batch_size LE u16
+        0x00,
+        0x00,               // batch_size LE u16
         cookie.len() as u8, // VLE cookie_len < 0x80
     ];
     wire.extend_from_slice(cookie);
@@ -110,8 +109,7 @@ fn craft_initack_wire(cookie: &[u8]) -> Vec<u8> {
 }
 
 fn fresh_setup() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
-    let outbound: Arc<dyn BoxedLinkDriver> =
-        Arc::new(NoopOutboundDriver::default());
+    let outbound: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
     let actions = SessionLinkActions::new(outbound, fixture_session_init_params());
     let lua = install_session_actions_for_test(actions.clone());
     let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
@@ -133,9 +131,7 @@ async fn r76_rx_init_ack_advances_to_got_init_ack() {
 
     let cookie = vec![0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
     let wire = craft_initack_wire(&cookie);
-    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: wire,
-    })]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame { bytes: wire })]);
 
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     assert!(
@@ -318,9 +314,7 @@ async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
                 | NetworkMessage::Interest(_)
                 | NetworkMessage::Response(_)
                 | NetworkMessage::Declare(_) => {
-                    panic!(
-                        "synthetic MID 0x00 must NOT dispatch to any typed decoder"
-                    )
+                    panic!("synthetic MID 0x00 must NOT dispatch to any typed decoder")
                 }
             }
         }
@@ -351,9 +345,7 @@ async fn r90_rx_frame_push_payload_decodes_via_push_codec() {
     // tail = push_bytes.
     let mut frame_wire = vec![0x25, 0x02];
     frame_wire.extend_from_slice(&push_bytes);
-    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
-        bytes: frame_wire,
-    })]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame { bytes: frame_wire })]);
 
     let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
     match outcome {
@@ -365,7 +357,11 @@ async fn r90_rx_frame_push_payload_decodes_via_push_codec() {
         } => {
             assert!(reliable);
             assert_eq!(sn, 2);
-            assert_eq!(messages.len(), 1, "exactly one Push record; got {messages:?}");
+            assert_eq!(
+                messages.len(),
+                1,
+                "exactly one Push record; got {messages:?}"
+            );
             assert!(
                 matches!(messages[0], NetworkMessage::Push(_)),
                 "PUSH MID 0x1D dispatches to wz_codecs::push decoder"

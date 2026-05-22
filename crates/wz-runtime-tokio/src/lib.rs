@@ -18,9 +18,9 @@
 //! and is composed via `session_glue::install_session_actions` for
 //! every native dispatch from `<script>...</script>` action bodies.
 
+use sce_forge_runtime::codec::SceCursor;
 use std::io;
 use std::net::SocketAddr;
-use sce_forge_runtime::codec::SceCursor;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use wz_codecs::stream_envelope::StreamEnvelope;
@@ -339,11 +339,7 @@ impl LinkDriver for TcpDriver {
         }
     }
 
-    async fn send(
-        &mut self,
-        frame: &TxFrame<'_>,
-        _reliability: Reliability,
-    ) -> io::Result<()> {
+    async fn send(&mut self, frame: &TxFrame<'_>, _reliability: Reliability) -> io::Result<()> {
         let stream = self
             .stream
             .as_mut()
@@ -373,9 +369,11 @@ impl LinkDriver for TcpDriver {
     async fn poll_event(&mut self) -> LinkEvent {
         let stream = match self.stream.as_mut() {
             Some(s) => s,
-            None => return LinkEvent::Lost {
-                cause: LostCause::PeerClosed,
-            },
+            None => {
+                return LinkEvent::Lost {
+                    cause: LostCause::PeerClosed,
+                }
+            }
         };
         // R265 — cancel-safe state machine. Each `.await` is a
         // single `.read()` syscall (cancel-safe per tokio
@@ -406,14 +404,10 @@ impl LinkDriver for TcpDriver {
                         Ok(n) => {
                             *offset += n;
                             if *offset == 2 {
-                                let payload_len =
-                                    u16::from_le_bytes(*prefix) as usize;
+                                let payload_len = u16::from_le_bytes(*prefix) as usize;
                                 let mut frame = vec![0u8; 2 + payload_len];
                                 frame[..2].copy_from_slice(prefix);
-                                self.read_state = ReadState::Payload {
-                                    frame,
-                                    offset: 2,
-                                };
+                                self.read_state = ReadState::Payload { frame, offset: 2 };
                             }
                         }
                         Err(_) => {
@@ -433,9 +427,7 @@ impl LinkDriver for TcpDriver {
                         self.read_state = ReadState::Idle;
                         let mut cursor = SceCursor::new(&bytes);
                         return match StreamEnvelope::decode(&mut cursor) {
-                            Ok(env) => LinkEvent::Rx(RxFrame {
-                                bytes: env.payload,
-                            }),
+                            Ok(env) => LinkEvent::Rx(RxFrame { bytes: env.payload }),
                             Err(_) => LinkEvent::Lost {
                                 cause: LostCause::PeerClosed,
                             },
@@ -501,11 +493,7 @@ impl LinkDriver for UdpDriver {
         }
     }
 
-    async fn send(
-        &mut self,
-        frame: &TxFrame<'_>,
-        _reliability: Reliability,
-    ) -> io::Result<()> {
+    async fn send(&mut self, frame: &TxFrame<'_>, _reliability: Reliability) -> io::Result<()> {
         // UDP link layer is best-effort by definition; Reliability
         // hint is the session FSM's concern (it may resend on the
         // RELIABLE channel via a sequence-number window). Here we
@@ -514,9 +502,9 @@ impl LinkDriver for UdpDriver {
             .socket
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no socket"))?;
-        let peer = self.peer.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotConnected, "no peer address")
-        })?;
+        let peer = self
+            .peer
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "no peer address"))?;
         socket.send_to(frame.bytes, peer).await?;
         Ok(())
     }
@@ -533,9 +521,11 @@ impl LinkDriver for UdpDriver {
     async fn poll_event(&mut self) -> LinkEvent {
         let socket = match self.socket.as_ref() {
             Some(s) => s,
-            None => return LinkEvent::Lost {
-                cause: LostCause::PeerClosed,
-            },
+            None => {
+                return LinkEvent::Lost {
+                    cause: LostCause::PeerClosed,
+                }
+            }
         };
         // Single datagram size cap = 65507 bytes (max UDP payload).
         // R51 baseline allocates per-recv; production tuning will

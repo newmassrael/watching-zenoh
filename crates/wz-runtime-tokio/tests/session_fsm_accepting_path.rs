@@ -35,8 +35,7 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome, PeerInitCaps,
-    SessionLinkActions,
+    poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome, PeerInitCaps, SessionLinkActions,
 };
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_runtime_tokio_test_support::{
@@ -78,11 +77,7 @@ impl LinkDriver for QueueDriver {
     async fn open(&mut self) -> io::Result<()> {
         Ok(())
     }
-    async fn send(
-        &mut self,
-        _frame: &TxFrame<'_>,
-        _reliability: Reliability,
-    ) -> io::Result<()> {
+    async fn send(&mut self, _frame: &TxFrame<'_>, _reliability: Reliability) -> io::Result<()> {
         Ok(())
     }
     async fn close(&mut self) -> io::Result<()> {
@@ -116,9 +111,13 @@ fn craft_initsyn_wire() -> Vec<u8> {
         FLAG_T_INIT_S | T_MID_INIT,
         0x05, // version
         0x31, // cbyte: whatami=Peer wire(0x01), zid_len=4 (high nibble = 3)
-        0xB0, 0xB1, 0xB2, 0xB3, // peer zid (4 bytes)
+        0xB0,
+        0xB1,
+        0xB2,
+        0xB3, // peer zid (4 bytes)
         0x00, // sn_res (seq=0, req=0)
-        0x00, 0x00, // batch_size LE u16 = 0
+        0x00,
+        0x00, // batch_size LE u16 = 0
     ]
 }
 
@@ -139,8 +138,8 @@ fn craft_opensyn_wire(cookie: &[u8]) -> Vec<u8> {
     assert!(cookie.len() < 0x80, "fixture: single-byte VLE only");
     let mut wire = vec![
         T_MID_OPEN,
-        0x00, // lease VLE = 0
-        0x00, // initial_sn VLE = 0
+        0x00,               // lease VLE = 0
+        0x00,               // initial_sn VLE = 0
         cookie.len() as u8, // cookie_len VLE
     ];
     wire.extend_from_slice(cookie);
@@ -354,7 +353,9 @@ impl BoxedLinkDriver for RecordingOutboundDriver {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
-    use wz_runtime_tokio::session_glue::{generate_cookie_hmac_sha256, parse_inbound, InboundFrame};
+    use wz_runtime_tokio::session_glue::{
+        generate_cookie_hmac_sha256, parse_inbound, InboundFrame,
+    };
 
     // Setup with a RecordingOutboundDriver so the InitAck wire bytes
     // are captured for cookie inspection.
@@ -396,10 +397,13 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     // layer3_init_body.rs; here we just need the cookie value.
     let frame = parse_inbound(initack_wire).expect("outbound InitAck wire re-parses");
     let cookie = match frame {
-        InboundFrame::Init { is_ack: true, body, .. } => {
-            body.cookie.expect("InitAck carries cookie payload")
-        }
-        other => panic!("expected InitAck variant, got {other:?}", other = std::any::type_name_of_val(&other)),
+        InboundFrame::Init {
+            is_ack: true, body, ..
+        } => body.cookie.expect("InitAck carries cookie payload"),
+        other => panic!(
+            "expected InitAck variant, got {other:?}",
+            other = std::any::type_name_of_val(&other)
+        ),
     };
 
     // The expected cookie is HMAC-SHA256(cookie_signing_key, peer_zid)
