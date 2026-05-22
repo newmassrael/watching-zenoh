@@ -70,14 +70,11 @@ changelog under docs/.atomic/ has the latest per-round delta.
   ext via `QueryResponder::with_responder` (R210). Scouting,
   multicast, reassembly, and fragmentation defer to later
   phases.
-- **Phase W** (lwIP / MCU runtime): scheduled after the first
-  external release. R58 NOP-stub reverted at R63 — no
-  document-around-hack; reintroduction lands once the cargo
-  publish dry-run + tagged release flow ships.
-- **First external release** (v0.1.0-mvp): next milestone. Five
-  sub-rounds cover README polish, deploy.yaml schema cleanup,
-  GitHub Actions release flow, THIRD_PARTY.md ledger, and the
-  cargo publish dry-run + tag.
+- **Phase W** (lwIP / MCU runtime): trait skeleton landed at R251
+  (wz-runtime-core crate). R58 NOP-stub reverted at R63 — no
+  document-around-hack. AP-side TokioRuntime + TokioTime concrete
+  impls land alongside real callers across R252+; full lwIP
+  integration + Cortex-M cross-compile remain ahead.
 
 Round-by-round decisions live in the atomic changelog
 (docs/.atomic/workspace.atomic.json). Currently 210 entries
