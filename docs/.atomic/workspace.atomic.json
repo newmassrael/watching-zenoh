@@ -12784,6 +12784,72 @@
         "R260 lesson: API-breaking generic param addition is a 1-round cost when call sites are concentrated (10 here: 9 tests + 1 demo, all updateable in two files). When the next round considers storage-type migration (Instant -> u64 ms) the fan-out is much wider (~30+ consumer sites) and the same single-round cadence will not fit — that round needs its own audit decomposition (write sites first, read sites second, lease comparator third)."
       ]
     },
+    "Round 261": {
+      "decision_summary": "R261 adds ReplyRegistry::sweep_timed_out + Pending.deadline_ms Option<u64>; production callers pass None (Session::query clock plumbing deferred to R262).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/reply.rs: Pending struct gains deadline_ms: Option<u64> field (absolute monotonic-ms deadline; None = never expire). ReplyRegistry::register signature adds 3rd positional argument deadline_ms: Option<u64> between expected_finals and on_reply.",
+        "crates/wz-runtime-tokio/src/reply.rs: New ReplyRegistry::sweep_timed_out(&mut self, now_ms: u64) -> usize method. Drains pending entries whose deadline_ms <= now_ms, fires on_final per entry, returns swept count. Same drain-then-fire pattern as fire_final_for (partition first, fire after borrow release; panicking on_final leaves no half-swept state).",
+        "Architectural pick R261 (option A confirmed by user): on_final fires with opaque cause. FinalCallback signature unchanged from FnMut(u64). Callers cannot distinguish 'timed out' from a normal Final via the callback signature this round; R261 carry records the FinalCause-enum extension path if a concrete user need arises.",
+        "Boundary semantics: deadline_ms <= now_ms is inclusive (entry at exact deadline tick is swept). None deadline (timeout_ms == 0 path) is skipped from every sweep, indefinitely.",
+        "crates/wz-runtime-tokio/src/session.rs: 2 production register sites (Session::query at line 847 + Session::query_aliased at line 944) pass deadline_ms = None this round. R261 comment block on each site flags R262 as the round that will thread a clock through Session::query to compute deadline_ms from opts.timeout_ms.",
+        "crates/wz-ap-demo/src/main.rs: 1 production register site (line 993) passes deadline_ms = None with R261 comment flagging R263 as the round that wires demo timeout_ms exercise through QueryOptions.",
+        "23 test callers across crates/wz-runtime-tokio/src/reply.rs all pass None (13 single-line via sed + 10 multi-line via Python regex; no test-behaviour change because every existing test predates the timeout contract).",
+        "New unit tests for sweep_timed_out (crates/wz-runtime-tokio/src/reply.rs): 7 tests pin (1) expired+swept+on_final; (2) unexpired kept; (3) None skipped at u64::MAX; (4) mixed batch partitions correctly; (5) inclusive boundary at deadline==now_ms; (6) idempotent across repeated calls + 2nd sweep returns 0; (7) duplicate-rid same-deadline drops both entries independently in registration order."
+      ],
+      "verification_bullets": [
+        "cargo test --manifest-path crates/Cargo.toml -p wz-runtime-tokio --lib reply::: 31/31 pass (24 R239+ baseline + 7 R261 sweep edge cases).",
+        "cargo test --manifest-path crates/Cargo.toml -p wz-runtime-tokio --lib: 484/484 pass (R260 baseline 477 -> 484, +7 sweep tests).",
+        "cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings: clean across 7 crates.",
+        "bash scripts/run-ci.sh: Layer A-E 9/9 pass.",
+        "pre-commit hook validate_workspace clean: T1=0 (ledger=1 R193), RT 12/12, sections=215, GENERATED.md=sync. atomic ledger entries 259 -> 260 (this entry).",
+        "commit 1ffe104 (feat(runtime-tokio): R261 ReplyRegistry timeout sweep API; 3 files +279 / -15). Pre-commit commit-msg gate passed (subject 57 bytes, all body lines <= 72 bytes, 3 bullets)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R262 Session::query / query_aliased API change: thread a clock (either clock: &impl TimeSource or now_ms: u64 caller-precomputed) through both functions so deadline_ms = clock.now_monotonic_ms() + opts.timeout_ms can be computed at register time. The architectural decision (clock vs now_ms) needs sub-decision because Session::query fan-out is ~25 sites (2 production + 23+ test). Recommended approach: clock: &impl TimeSource so caller does not need a pre-call clock sample.",
+        "R262 drive_session_until_terminal sweep hookup: call replies.sweep_timed_out(clock.now_monotonic_ms()) on each iteration top (or per-poll-cycle) so timed-out queries surface as on_final fires from the production loop. The clock used at sweep MUST share monotonic epoch with the clock used at Session::query register time (different TokioTime instances have different epochs because TokioTime::epoch samples Instant::now() per construction; a shared Arc<TokioTime> across query + drive sites is the natural pattern, or both sites take the same clock arg from the caller).",
+        "R263 wz-ap-demo end-to-end timeout exercise: integration test where wz-ap-demo issues a z_get with a short timeout_ms against a peer that never replies, and the on_final callback fires via sweep_timed_out within wall-clock budget. Likely requires reply_log_spec extension + new fixture.",
+        "R261 option B path (FinalCallback gains FinalCause: Normal | TimedOut): hold as a YAGNI-tagged future round; the user explicitly picked option A (opaque cause) this round. If R262/R263 integration testing surfaces a concrete need to distinguish (e.g. wz-ap-demo wants to log 'TIMEOUT' vs 'FINAL' differently), promote at that time.",
+        "R261 lesson: API-breaking changes to a widely-called surface (register has 23 call sites in this codebase) benefit from a 2-phase rollout: (phase 1) add new param with sentinel default (None) at every site so the feature is wired but inert; (phase 2) connect the upstream consumer (Session::query) and the downstream consumer (drive_session sweep) in subsequent rounds. R261-R263 is this 2-phase pattern in practice; the alternative single-round approach would have touched 25+ sites + introduced clock-epoch-sharing decision + new tests + production-caller deadline math all at once.",
+        "R261 sed + Python multi-edit pattern: sed for line-local single-line patterns (low risk), Python re.sub for multi-line indentation-sensitive patterns (the cleanest tool for indent-preserving block insertion). Both were used here for the 23-site test caller update; both passed cargo build clean on first attempt.",
+        "All prior R260 carries remain: Instant -> u64 ms storage migration / Cancellable trait / RuntimeError inner-cause / Session reparam / core::error::Error / Liveliness Token wz-ap-demo migration / Q_B Q_E wire codec / Querier-Publisher get_matching_status / Phase W full lwIP / SCE drift (vendor pin ebf3b3ff vs upstream 5b7f2574, wz call sites = 0 so pin bump still deferred)."
+      ],
+      "publishable_decision_summary": "R261 adds ReplyRegistry::sweep_timed_out + Pending.deadline_ms Option<u64>; production callers pass None (Session::query clock plumbing deferred to R262).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/reply.rs: Pending struct gains deadline_ms: Option<u64> field (absolute monotonic-ms deadline; None = never expire). ReplyRegistry::register signature adds 3rd positional argument deadline_ms: Option<u64> between expected_finals and on_reply.",
+        "crates/wz-runtime-tokio/src/reply.rs: New ReplyRegistry::sweep_timed_out(&mut self, now_ms: u64) -> usize method. Drains pending entries whose deadline_ms <= now_ms, fires on_final per entry, returns swept count. Same drain-then-fire pattern as fire_final_for (partition first, fire after borrow release; panicking on_final leaves no half-swept state).",
+        "Architectural pick R261 (option A confirmed by user): on_final fires with opaque cause. FinalCallback signature unchanged from FnMut(u64). Callers cannot distinguish 'timed out' from a normal Final via the callback signature this round; R261 carry records the FinalCause-enum extension path if a concrete user need arises.",
+        "Boundary semantics: deadline_ms <= now_ms is inclusive (entry at exact deadline tick is swept). None deadline (timeout_ms == 0 path) is skipped from every sweep, indefinitely.",
+        "crates/wz-runtime-tokio/src/session.rs: 2 production register sites (Session::query at line 847 + Session::query_aliased at line 944) pass deadline_ms = None this round. R261 comment block on each site flags R262 as the round that will thread a clock through Session::query to compute deadline_ms from opts.timeout_ms.",
+        "crates/wz-ap-demo/src/main.rs: 1 production register site (line 993) passes deadline_ms = None with R261 comment flagging R263 as the round that wires demo timeout_ms exercise through QueryOptions.",
+        "23 test callers across crates/wz-runtime-tokio/src/reply.rs all pass None (13 single-line via sed + 10 multi-line via Python regex; no test-behaviour change because every existing test predates the timeout contract).",
+        "New unit tests for sweep_timed_out (crates/wz-runtime-tokio/src/reply.rs): 7 tests pin (1) expired+swept+on_final; (2) unexpired kept; (3) None skipped at u64::MAX; (4) mixed batch partitions correctly; (5) inclusive boundary at deadline==now_ms; (6) idempotent across repeated calls + 2nd sweep returns 0; (7) duplicate-rid same-deadline drops both entries independently in registration order."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --manifest-path crates/Cargo.toml -p wz-runtime-tokio --lib reply::: 31/31 pass (24 R239+ baseline + 7 R261 sweep edge cases).",
+        "cargo test --manifest-path crates/Cargo.toml -p wz-runtime-tokio --lib: 484/484 pass (R260 baseline 477 -> 484, +7 sweep tests).",
+        "cargo clippy --manifest-path crates/Cargo.toml --workspace --all-targets -- -D warnings: clean across 7 crates.",
+        "bash scripts/run-ci.sh: Layer A-E 9/9 pass.",
+        "pre-commit hook validate_workspace clean: T1=0 (ledger=1 R193), RT 12/12, sections=215, GENERATED.md=sync. atomic ledger entries 259 -> 260 (this entry).",
+        "commit 1ffe104 (feat(runtime-tokio): R261 ReplyRegistry timeout sweep API; 3 files +279 / -15). Pre-commit commit-msg gate passed (subject 57 bytes, all body lines <= 72 bytes, 3 bullets)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R262 Session::query / query_aliased API change: thread a clock (either clock: &impl TimeSource or now_ms: u64 caller-precomputed) through both functions so deadline_ms = clock.now_monotonic_ms() + opts.timeout_ms can be computed at register time. The architectural decision (clock vs now_ms) needs sub-decision because Session::query fan-out is ~25 sites (2 production + 23+ test). Recommended approach: clock: &impl TimeSource so caller does not need a pre-call clock sample.",
+        "R262 drive_session_until_terminal sweep hookup: call replies.sweep_timed_out(clock.now_monotonic_ms()) on each iteration top (or per-poll-cycle) so timed-out queries surface as on_final fires from the production loop. The clock used at sweep MUST share monotonic epoch with the clock used at Session::query register time (different TokioTime instances have different epochs because TokioTime::epoch samples Instant::now() per construction; a shared Arc<TokioTime> across query + drive sites is the natural pattern, or both sites take the same clock arg from the caller).",
+        "R263 wz-ap-demo end-to-end timeout exercise: integration test where wz-ap-demo issues a z_get with a short timeout_ms against a peer that never replies, and the on_final callback fires via sweep_timed_out within wall-clock budget. Likely requires reply_log_spec extension + new fixture.",
+        "R261 option B path (FinalCallback gains FinalCause: Normal | TimedOut): hold as a YAGNI-tagged future round; the user explicitly picked option A (opaque cause) this round. If R262/R263 integration testing surfaces a concrete need to distinguish (e.g. wz-ap-demo wants to log 'TIMEOUT' vs 'FINAL' differently), promote at that time.",
+        "R261 lesson: API-breaking changes to a widely-called surface (register has 23 call sites in this codebase) benefit from a 2-phase rollout: (phase 1) add new param with sentinel default (None) at every site so the feature is wired but inert; (phase 2) connect the upstream consumer (Session::query) and the downstream consumer (drive_session sweep) in subsequent rounds. R261-R263 is this 2-phase pattern in practice; the alternative single-round approach would have touched 25+ sites + introduced clock-epoch-sharing decision + new tests + production-caller deadline math all at once.",
+        "R261 sed + Python multi-edit pattern: sed for line-local single-line patterns (low risk), Python re.sub for multi-line indentation-sensitive patterns (the cleanest tool for indent-preserving block insertion). Both were used here for the 23-site test caller update; both passed cargo build clean on first attempt.",
+        "All prior R260 carries remain: Instant -> u64 ms storage migration / Cancellable trait / RuntimeError inner-cause / Session reparam / core::error::Error / Liveliness Token wz-ap-demo migration / Q_B Q_E wire codec / Querier-Publisher get_matching_status / Phase W full lwIP / SCE drift (vendor pin ebf3b3ff vs upstream 5b7f2574, wz call sites = 0 so pin bump still deferred)."
+      ]
+    },
     "Round 27": {
       "decision_summary": "Phase E final — README atomic decompose into 8 H2 sections under watching-zenoh root + heading slug stabilization (current-status heading drops round/date suffix); sections 206 → 214, docs 12/12 clean.",
       "changes_bullets": [
