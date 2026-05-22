@@ -885,7 +885,176 @@ impl Session {
 
         handle
     }
+
+    /// R241 — aliased-keyexpr counterpart of [`Session::query`].
+    /// Mirror of [`Session::publish_aliased`] on the z_get side:
+    /// the wire branch encodes the `(mapping_id, inline_suffix)`
+    /// pair so the peer resolves the keyexpr through its inbound
+    /// mapping table (populated by an earlier
+    /// [`SessionLinkActions::send_declare_keyexpr`] from this side),
+    /// while the loopback branch trusts `loopback_keyexpr` to
+    /// already be the literal form the peer would resolve.
+    ///
+    /// `mapping_id = 0` is invalid for this surface — use
+    /// [`Self::query`] for the literal-only path. `inline_suffix =
+    /// None` emits a pure-aliased Query (declared literal is the
+    /// full keyexpr); `inline_suffix = Some(s)` emits a composite
+    /// Query (declared prefix + `s`).
+    ///
+    /// ## Caller precondition
+    ///
+    /// `loopback_keyexpr` MUST equal the literal form the peer would
+    /// resolve `(mapping_id, inline_suffix)` to through its inbound
+    /// mapping table. Use [`Self::query_aliased_auto`] to skip the
+    /// caller assertion when the mapping was declared through this
+    /// session's outbound table.
+    ///
+    /// Routes both branches per `opts.allowed_destination`, allocates
+    /// rid through [`SessionLinkActions::alloc_next_request_id`],
+    /// registers the pending [`crate::reply::ReplyRegistry`] entry
+    /// with `expected_finals = opts.expected_finals()`. Same
+    /// lock-discipline as [`Self::query`]: observer locked during
+    /// register + loopback fan, dropped before the wire dispatch.
+    ///
+    /// Mirrors zenoh-pico's `_z_query` with a
+    /// `_z_declared_keyexpr_t` (`vendor/zenoh-pico/src/net/query.c`)
+    /// carrying both the aliased pair and the resolved literal.
+    pub fn query_aliased(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        loopback_keyexpr: &str,
+        opts: QueryOptions,
+        on_reply: impl FnMut(&InboundReply) + Send + 'static,
+        on_final: impl FnMut(u64) + Send + 'static,
+    ) -> ReplyHandle {
+        let rid = self.actions.alloc_next_request_id();
+        let expected_finals = opts.expected_finals();
+        let allows_remote = opts.allowed_destination.allows_remote();
+        let allows_local = opts.allowed_destination.allows_local();
+
+        let handle = {
+            let mut observer = self
+                .observer
+                .lock()
+                .expect("Session observer mutex poisoned — a reply callback panicked");
+            let handle = observer
+                .replies
+                .register(rid, expected_finals, on_reply, on_final);
+            if allows_local {
+                let mut replies: Vec<QueryReply> = Vec::new();
+                let query = Query::default();
+                observer
+                    .queryables
+                    .local_query(rid, loopback_keyexpr, &query, &mut replies);
+                for reply in replies.drain(..) {
+                    let inbound: InboundReply = reply.into();
+                    observer.replies.deliver_local_reply(&inbound);
+                }
+                observer.replies.deliver_local_final(rid);
+            }
+            handle
+        };
+
+        if allows_remote {
+            let meta = opts.query_metadata();
+            if meta.is_empty() {
+                self.actions
+                    .send_request_query(rid, mapping_id, inline_suffix);
+            } else {
+                self.actions.send_request_query_with_meta(
+                    rid,
+                    mapping_id,
+                    inline_suffix,
+                    &meta,
+                );
+            }
+        }
+
+        handle
+    }
+
+    /// R241 — auto-resolved counterpart of [`Self::query_aliased`].
+    /// Mirror of [`Self::publish_aliased_auto`] on the z_get side:
+    /// looks up `mapping_id` in the outbound keyexpr table populated
+    /// by prior [`SessionLinkActions::send_declare_keyexpr`] calls,
+    /// composes with `inline_suffix` per the same rule as the
+    /// caller-asserted form, then routes both wire and loopback
+    /// branches without the caller restating the resolved literal.
+    ///
+    /// Returns `Err(QueryAliasError::UnknownMapping(id))` when no
+    /// prior `send_declare_keyexpr` registered `mapping_id` OR when
+    /// a subsequent `send_undeclare_kexpr` retracted it. In the
+    /// error case NEITHER branch fires — sending a wire Query with
+    /// an id the peer cannot resolve would also fail there, and
+    /// running the loopback branch on a guess at the literal would
+    /// silently mis-deliver replies into a stale pending entry. The
+    /// caller treats `Err` as a contract violation
+    /// (declare-before-query ordering bug) and either re-declares
+    /// the mapping or falls back to [`Self::query_aliased`] with an
+    /// explicit `loopback_keyexpr`.
+    pub fn query_aliased_auto(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        opts: QueryOptions,
+        on_reply: impl FnMut(&InboundReply) + Send + 'static,
+        on_final: impl FnMut(u64) + Send + 'static,
+    ) -> Result<ReplyHandle, QueryAliasError> {
+        let base = self
+            .actions
+            .resolve_outbound_mapping(mapping_id)
+            .ok_or(QueryAliasError::UnknownMapping(mapping_id))?;
+        let loopback_keyexpr = match inline_suffix {
+            None => base,
+            Some(s) => {
+                let mut composed = base;
+                composed.push_str(s);
+                composed
+            }
+        };
+        Ok(self.query_aliased(
+            mapping_id,
+            inline_suffix,
+            &loopback_keyexpr,
+            opts,
+            on_reply,
+            on_final,
+        ))
+    }
 }
+
+/// R241 — typed error returned by [`Session::query_aliased_auto`]
+/// when the requested mapping id was never declared on this
+/// session's outbound link (or was retracted via
+/// [`SessionLinkActions::send_undeclare_kexpr`]). Mirror of
+/// [`PublishAliasError`] on the z_get side — the caller's contract
+/// is "declare before query"; this enum names the violation
+/// explicitly so a buggy caller does not silently emit wire frames
+/// the peer will reject and run loopback on a guessed literal that
+/// hands replies to a pending entry the application never
+/// registered for the correct keyexpr.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryAliasError {
+    /// No prior `send_declare_keyexpr` registered this id on the
+    /// outbound mapping table (or a later `send_undeclare_kexpr`
+    /// retracted it). The wrapped value is the offending mapping id.
+    UnknownMapping(u64),
+}
+
+impl std::fmt::Display for QueryAliasError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            QueryAliasError::UnknownMapping(id) => write!(
+                f,
+                "QueryAliasError: mapping id {id} not present in outbound table; \
+                 call SessionLinkActions::send_declare_keyexpr({id}, …) first"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for QueryAliasError {}
 
 /// R234 — typed error returned by
 /// [`Session::publish_aliased_auto`] when the requested mapping id
@@ -2736,6 +2905,257 @@ mod tests {
             driver.frame_count(),
             0,
             "SessionLocal must skip the wire branch regardless of metadata"
+        );
+    }
+
+    // ── R241 query_aliased + query_aliased_auto ──
+
+    #[test]
+    fn query_aliased_locality_session_local_fires_loopback_only() {
+        let (session, driver) = build_session();
+        let reply_count = Arc::new(AtomicUsize::new(0));
+        let final_count = Arc::new(AtomicUsize::new(0));
+
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("home/temp", |_q, responder| {
+                responder.send_reply(b"22.5");
+            });
+
+        let r = reply_count.clone();
+        let f = final_count.clone();
+        session.query_aliased(
+            7,
+            None,
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |_reply| { r.fetch_add(1, Ordering::SeqCst); },
+            move |_rid| { f.fetch_add(1, Ordering::SeqCst); },
+        );
+
+        assert_eq!(reply_count.load(Ordering::SeqCst), 1);
+        assert_eq!(final_count.load(Ordering::SeqCst), 1);
+        assert_eq!(driver.frame_count(), 0, "SessionLocal skips wire");
+    }
+
+    #[test]
+    fn query_aliased_locality_remote_fires_wire_with_mapping_id() {
+        let (session, driver) = build_session();
+        session.query_aliased(
+            7,
+            None,
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(driver.frame_count(), 1, "wire frame emitted");
+
+        // Verify the recorded frame is byte-equivalent to a standalone
+        // build_request_query with mapping_id=7.
+        use crate::session_glue::build_request_query;
+        let standalone = build_request_query(0, 7, None);
+        let standalone_bytes = standalone.encode_to_vec();
+        let frame = &driver.frames.lock().unwrap()[0].0;
+        assert!(
+            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            "wire frame must encode the (mapping_id=7, suffix=None) aliased pair"
+        );
+    }
+
+    #[test]
+    fn query_aliased_locality_any_fires_both_branches() {
+        let (session, driver) = build_session();
+        let reply_count = Arc::new(AtomicUsize::new(0));
+        let final_count = Arc::new(AtomicUsize::new(0));
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("home/temp", |_q, responder| {
+                responder.send_reply(b"22.5");
+            });
+
+        let r = reply_count.clone();
+        let f = final_count.clone();
+        session.query_aliased(
+            7,
+            None,
+            "home/temp",
+            QueryOptions::get(), // Any
+            move |_| { r.fetch_add(1, Ordering::SeqCst); },
+            move |_| { f.fetch_add(1, Ordering::SeqCst); },
+        );
+
+        assert_eq!(reply_count.load(Ordering::SeqCst), 1, "loopback fires");
+        assert_eq!(
+            final_count.load(Ordering::SeqCst),
+            0,
+            "Any expects 2 finals; only loopback final has fired so far"
+        );
+        assert_eq!(driver.frame_count(), 1, "wire branch also fires");
+    }
+
+    #[test]
+    fn query_aliased_inline_suffix_passes_through_to_wire_and_loopback() {
+        let (session, driver) = build_session();
+        let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
+        let cap_cb = captured.clone();
+
+        // Local queryable matches the COMPOSITE literal (the
+        // loopback path uses loopback_keyexpr verbatim).
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("home/temp/kitchen", |_q, responder| {
+                responder.send_reply(b"21.0");
+            });
+
+        session.query_aliased(
+            7,
+            Some("/kitchen"),
+            "home/temp/kitchen",
+            QueryOptions::get(),
+            move |reply| { *cap_cb.lock().unwrap() = Some(reply.clone()); },
+            |_| {},
+        );
+
+        let got = captured.lock().unwrap().clone().expect("loopback reply fired");
+        assert_eq!(got.keyexpr_literal, "home/temp/kitchen");
+        assert_eq!(driver.frame_count(), 1, "wire branch sent the composite pair");
+    }
+
+    #[test]
+    fn query_aliased_auto_resolves_loopback_from_outbound_mapping_table() {
+        let (session, driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+
+        let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
+        let cap_cb = captured.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("home/temp", |_q, responder| {
+                responder.send_reply(b"22.5");
+            });
+
+        let handle = session
+            .query_aliased_auto(
+                7,
+                None,
+                QueryOptions::get(),
+                move |reply| { *cap_cb.lock().unwrap() = Some(reply.clone()); },
+                |_| {},
+            )
+            .expect("declared mapping resolves");
+
+        assert_eq!(handle.rid(), 0, "first auto-resolved query gets rid=0");
+        let got = captured.lock().unwrap().clone().expect("loopback reply fired");
+        assert_eq!(got.keyexpr_literal, "home/temp");
+        // 2 wire frames: one DeclKexpr, one Request(Query).
+        assert_eq!(driver.frame_count(), 2);
+    }
+
+    #[test]
+    fn query_aliased_auto_unknown_mapping_returns_err_and_skips_both_branches() {
+        let (session, driver) = build_session();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("home/temp", move |_q, _r| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            });
+
+        let err = session.query_aliased_auto(
+            99,
+            None,
+            QueryOptions::get(),
+            |_| {},
+            |_| {},
+        );
+        assert_eq!(err, Err(QueryAliasError::UnknownMapping(99)));
+        assert_eq!(fired.load(Ordering::SeqCst), 0, "loopback skipped on err");
+        assert_eq!(driver.frame_count(), 0, "wire skipped on err");
+        assert!(
+            session.observer().lock().unwrap().replies.is_empty(),
+            "no pending entry on err"
+        );
+    }
+
+    #[test]
+    fn query_aliased_auto_with_inline_suffix_concatenates_for_loopback() {
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+
+        let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
+        let cap_cb = captured.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .queryables
+            .register("home/temp/kitchen", |_q, responder| {
+                responder.send_reply(b"21.0");
+            });
+
+        session
+            .query_aliased_auto(
+                7,
+                Some("/kitchen"),
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                move |reply| { *cap_cb.lock().unwrap() = Some(reply.clone()); },
+                |_| {},
+            )
+            .expect("declared mapping resolves");
+
+        let got = captured.lock().unwrap().clone().expect("composite literal matched");
+        assert_eq!(got.keyexpr_literal, "home/temp/kitchen");
+    }
+
+    #[test]
+    fn query_aliased_with_meta_threads_attachment_through_wire() {
+        let (session, driver) = build_session();
+        session.query_aliased(
+            7,
+            None,
+            "home/temp",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::Remote)
+                .with_attachment(b"q-att".to_vec()),
+            |_| {},
+            |_| {},
+        );
+
+        use crate::session_glue::build_request_query_with_attachment;
+        let standalone = build_request_query_with_attachment(0, 7, None, b"q-att");
+        let standalone_bytes = standalone.encode_to_vec();
+        let frame = &driver.frames.lock().unwrap()[0].0;
+        assert!(
+            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            "aliased + with-meta routing must thread attachment onto wire"
+        );
+    }
+
+    #[test]
+    fn query_alias_error_display_message_hints_remediation() {
+        let err = QueryAliasError::UnknownMapping(42);
+        let msg = format!("{err}");
+        assert!(msg.contains("42"), "error message includes the offending id");
+        assert!(
+            msg.contains("send_declare_keyexpr"),
+            "error message hints at the remediation API"
         );
     }
 }
