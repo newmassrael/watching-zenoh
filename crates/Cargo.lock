@@ -1234,6 +1234,7 @@ dependencies = [
  "sce-rust-runtime",
  "tokio",
  "wz-codecs",
+ "wz-runtime-core",
  "wz-runtime-tokio",
 ]
 
@@ -1276,6 +1277,7 @@ dependencies = [
  "sha2",
  "tokio",
  "wz-codecs",
+ "wz-runtime-core",
  "wz-runtime-tokio-test-support",
  "zeroize",
 ]

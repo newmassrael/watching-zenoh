@@ -111,6 +111,22 @@ pub mod observer;
 /// Del. Aliased publish + full Sample metadata are R229+ carries.
 pub mod session;
 
+/// R252 — AP-profile concrete impls of the
+/// [`wz_runtime_core::Runtime`] and [`wz_runtime_core::TimeSource`]
+/// trait contracts authored in R251. [`runtime_impl::TokioRuntime`]
+/// spawns tasks via `tokio::task::spawn` and wraps the returned
+/// `tokio::task::JoinHandle` into a [`runtime_impl::TokioJoinHandle`]
+/// that satisfies the trait's `Future<Output = Result<T,
+/// RuntimeError>>` shape by mapping `tokio::task::JoinError` to
+/// [`wz_runtime_core::RuntimeError::JoinFailed`].
+/// [`runtime_impl::TokioTime`] samples a monotonic
+/// `tokio::time::Instant` for `now_monotonic_ms` and yields via
+/// `tokio::time::sleep(Duration)` for the async sleep contract. R252
+/// lands the impl but leaves the 111 std/tokio call sites unchanged;
+/// R253+ migrate them leaf-first, with `Session` last per the
+/// §5.P "leaf crates first" guidance.
+pub mod runtime_impl;
+
 /// Generated SCXML state machine for the unicast session FSM. The
 /// emit comes from `sources/session/session_fsm_unicast.scxml` via
 /// `build.rs`. Public re-export is module-form rather than
