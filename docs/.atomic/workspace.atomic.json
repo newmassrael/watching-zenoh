@@ -10416,6 +10416,58 @@
         "QueryableRegistry self-loopback (R227 follow-up, dedup deferred pre-mesh integration)."
       ]
     },
+    "Round 232": {
+      "decision_summary": "R232a loopback metadata parity: PublishOptions 5 metadata fields + build_loopback_sample helper; wire encoder for parity deferred to R233 (R228 carry partial retire).",
+      "changes_bullets": [
+        "PublishOptions: timestamp/encoding/source_info/attachment/qos fields + 5 with_* builder setters.",
+        "PublishOptions now derives Default; SampleKind::Put marked #[default] for derive chain.",
+        "build_loopback_sample helper deduplicates Sample assembly between publish + publish_aliased.",
+        "Del kind drops encoding even when opts.encoding set (mirrors wire-arrival projection).",
+        "publish + publish_aliased loopback branches route through helper; metadata reaches subscribers."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 307 -> 316 (+9 PublishOptions/loopback tests, all pass).",
+        "cargo test -p wz-integration-tests: 65 unchanged, no regression.",
+        "cargo clippy --workspace --all-targets -D warnings: clean (one doc-list-item fix during round)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R233 wire encoder: send_push_with_meta_* methods threading 5 metadata fields onto Push wire form.",
+        "R233 build_push_*_with_meta helpers: set MsgPut.t/e flags + emit source_info/attachment/qos ext entries.",
+        "R234 wz outbound mapping table (R229 carry, _local_resources mirror, retires caller-asserted loopback_keyexpr).",
+        "R235+ wz-ap-demo Session API migration (R228+R229 carry, 4 publish + 11 observer + 1 dispatch).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwip integration.",
+        "R232 lesson: doc lines starting with `+` token trigger clippy doc_list_item_without_indentation; reflow."
+      ],
+      "publishable_decision_summary": "R232a loopback metadata parity: PublishOptions 5 metadata fields + build_loopback_sample helper; wire encoder for parity deferred to R233 (R228 carry partial retire).",
+      "publishable_changes_bullets": [
+        "PublishOptions: timestamp/encoding/source_info/attachment/qos fields + 5 with_* builder setters.",
+        "PublishOptions now derives Default; SampleKind::Put marked #[default] for derive chain.",
+        "build_loopback_sample helper deduplicates Sample assembly between publish + publish_aliased.",
+        "Del kind drops encoding even when opts.encoding set (mirrors wire-arrival projection).",
+        "publish + publish_aliased loopback branches route through helper; metadata reaches subscribers."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 307 -> 316 (+9 PublishOptions/loopback tests, all pass).",
+        "cargo test -p wz-integration-tests: 65 unchanged, no regression.",
+        "cargo clippy --workspace --all-targets -D warnings: clean (one doc-list-item fix during round)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R233 wire encoder: send_push_with_meta_* methods threading 5 metadata fields onto Push wire form.",
+        "R233 build_push_*_with_meta helpers: set MsgPut.t/e flags + emit source_info/attachment/qos ext entries.",
+        "R234 wz outbound mapping table (R229 carry, _local_resources mirror, retires caller-asserted loopback_keyexpr).",
+        "R235+ wz-ap-demo Session API migration (R228+R229 carry, 4 publish + 11 observer + 1 dispatch).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwip integration.",
+        "R232 lesson: doc lines starting with `+` token trigger clippy doc_list_item_without_indentation; reflow."
+      ]
+    },
     "Round 24": {
       "decision_summary": "Phase E start — README.md 본문 저작 (16 byte stub → 150+ line prose); project overview + Phase A/B+ 상태 + 디렉터리 / 빌드 / Local CI gates / 라이센스 / 외부 참조 / 기여 절차. workspace.docs 재등록 + atomic decompose는 R25+ carry (R7 scope correction 직후 단계 분리).",
       "changes_bullets": [
