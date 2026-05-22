@@ -10522,6 +10522,58 @@
         "R233 lesson: author owns Z chain-continuation; apply_chain_z_bits centralises the rule."
       ]
     },
+    "Round 234": {
+      "decision_summary": "R234 outbound mapping table: SessionLinkActions.outbound_mappings + auto-populate via declare/undeclare + Session::publish_aliased_auto resolves loopback from table (R229 carry retire).",
+      "changes_bullets": [
+        "SessionLinkActions: outbound_mappings: Mutex<HashMap<u64, String>> field + new() init.",
+        "send_declare_keyexpr inserts (mapping_id, suffix); send_undeclare_kexpr removes; idempotent.",
+        "resolve_outbound_mapping(id) -> Option<String> cloned for lock-release safety.",
+        "Session::publish_aliased_auto resolves table base + optional inline_suffix composition.",
+        "PublishAliasError::UnknownMapping(u64) typed failure for declare-before-publish violation.",
+        "Both wire + loopback skipped on UnknownMapping error (no silent partial fire)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 329 -> 339 (+10 mapping table + auto resolve tests).",
+        "cargo test -p wz-integration-tests: 65 unchanged, no regression.",
+        "cargo clippy --workspace --all-targets -D warnings: clean."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R235+ wz-ap-demo Session API migration (R228+R229+R232+R234 carry, 4 publish + 11 obs + 1 disp).",
+        "R236+ auto-wire Session::set_own_zid on FSM open-handshake completion event (R231 carry).",
+        "R237+ inbound peer keyexpr mapping table integration with SubscriberRegistry.peer_keyexpr_table.",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwip integration.",
+        "R234 lesson: zenoh-pico _z_register_resource overwrites on re-declare; outbound table mirrors that."
+      ],
+      "publishable_decision_summary": "R234 outbound mapping table: SessionLinkActions.outbound_mappings + auto-populate via declare/undeclare + Session::publish_aliased_auto resolves loopback from table (R229 carry retire).",
+      "publishable_changes_bullets": [
+        "SessionLinkActions: outbound_mappings: Mutex<HashMap<u64, String>> field + new() init.",
+        "send_declare_keyexpr inserts (mapping_id, suffix); send_undeclare_kexpr removes; idempotent.",
+        "resolve_outbound_mapping(id) -> Option<String> cloned for lock-release safety.",
+        "Session::publish_aliased_auto resolves table base + optional inline_suffix composition.",
+        "PublishAliasError::UnknownMapping(u64) typed failure for declare-before-publish violation.",
+        "Both wire + loopback skipped on UnknownMapping error (no silent partial fire)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib: 329 -> 339 (+10 mapping table + auto resolve tests).",
+        "cargo test -p wz-integration-tests: 65 unchanged, no regression.",
+        "cargo clippy --workspace --all-targets -D warnings: clean."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R235+ wz-ap-demo Session API migration (R228+R229+R232+R234 carry, 4 publish + 11 obs + 1 disp).",
+        "R236+ auto-wire Session::set_own_zid on FSM open-handshake completion event (R231 carry).",
+        "R237+ inbound peer keyexpr mapping table integration with SubscriberRegistry.peer_keyexpr_table.",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwip integration.",
+        "R234 lesson: zenoh-pico _z_register_resource overwrites on re-declare; outbound table mirrors that."
+      ]
+    },
     "Round 24": {
       "decision_summary": "Phase E start — README.md 본문 저작 (16 byte stub → 150+ line prose); project overview + Phase A/B+ 상태 + 디렉터리 / 빌드 / Local CI gates / 라이센스 / 외부 참조 / 기여 절차. workspace.docs 재등록 + atomic decompose는 R25+ carry (R7 scope correction 직후 단계 분리).",
       "changes_bullets": [
