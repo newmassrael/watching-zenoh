@@ -1075,6 +1075,55 @@ impl Session {
             options,
         }
     }
+
+    /// R244 — declare a reusable [`Publisher`] bound to `keyexpr` +
+    /// `options`. Pub-side mirror of [`Self::declare_querier`]: the
+    /// returned handle holds a clone of this session and emits
+    /// subsequent outbound publishes through [`Publisher::put`] /
+    /// [`Publisher::delete`] without restating the keyexpr or
+    /// options on every call.
+    ///
+    /// Same no-wire-emit contract as [`Self::declare_querier`]:
+    /// declaration is a caller-side aggregation only. Mirrors
+    /// zenoh-pico's `z_declare_publisher` minus the wire-emitted
+    /// `DeclarePublisher` record, which zenoh-pico itself elides
+    /// when running without router (peer-only) — wz is router-less
+    /// today so the wire elision is always correct.
+    pub fn declare_publisher(
+        &self,
+        keyexpr: impl Into<String>,
+        options: PublishOptions,
+    ) -> Publisher {
+        Publisher {
+            session: self.clone(),
+            keyexpr: keyexpr.into(),
+            options,
+        }
+    }
+
+    /// R244 — aliased-keyexpr counterpart of [`Self::declare_publisher`].
+    /// Holds `(mapping_id, inline_suffix, options)` so subsequent
+    /// [`PublisherAliased::put`] / [`PublisherAliased::delete`]
+    /// calls route through [`Self::publish_aliased_auto`] without
+    /// restating them.
+    ///
+    /// Same outbound-mapping-table dependency as
+    /// [`Self::declare_querier_aliased`]: the caller is responsible
+    /// for the earlier [`SessionLinkActions::send_declare_keyexpr`]
+    /// that registers `mapping_id`.
+    pub fn declare_publisher_aliased(
+        &self,
+        mapping_id: u64,
+        inline_suffix: Option<&str>,
+        options: PublishOptions,
+    ) -> PublisherAliased {
+        PublisherAliased {
+            session: self.clone(),
+            mapping_id,
+            inline_suffix: inline_suffix.map(str::to_string),
+            options,
+        }
+    }
 }
 
 /// R241 — typed error returned by [`Session::query_aliased_auto`]
@@ -1255,6 +1304,139 @@ impl QuerierAliased {
             self.options.clone(),
             on_reply,
             on_final,
+        )
+    }
+}
+
+/// R244 — reusable publish target with pre-set keyexpr + options.
+/// Pub-side mirror of [`Querier`]. A caller declares the publisher
+/// once ([`Session::declare_publisher`]) and emits repeated
+/// outbound `Push` records through [`Self::put`] / [`Self::delete`]
+/// without restating the keyexpr or options on every call.
+///
+/// `Clone` is cheap (Arc-backed Session + value-clone of
+/// PublishOptions). Background tasks can hold per-task Publisher
+/// clones; all clones share the same observer + actions handle so
+/// loopback dispatches still reach the main drive_session loop.
+///
+/// `#[non_exhaustive]`. Construct only through
+/// [`Session::declare_publisher`].
+///
+/// Mirrors zenoh-pico's `z_publisher_t`
+/// (`vendor/zenoh-pico/include/zenoh-pico/api/types.h`) with
+/// `z_declare_publisher` + `z_publisher_put` + `z_publisher_delete`.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct Publisher {
+    session: Session,
+    keyexpr: String,
+    options: PublishOptions,
+}
+
+impl Publisher {
+    /// Borrow the declared keyexpr.
+    pub fn keyexpr(&self) -> &str {
+        &self.keyexpr
+    }
+
+    /// Borrow the declared options.
+    pub fn options(&self) -> &PublishOptions {
+        &self.options
+    }
+
+    /// Emit one outbound Put through the declared keyexpr + options.
+    /// Returns the loopback fire count (number of matching local
+    /// subscribers that fired), matching [`Session::publish`]'s
+    /// return contract.
+    ///
+    /// Per-call `opts.kind` is overridden to [`SampleKind::Put`] —
+    /// the declared options retain the caller's reliability /
+    /// locality / metadata choices; only the discriminator that
+    /// selects put vs delete is overridden by the call shape.
+    pub fn put(&self, payload: &[u8]) -> usize {
+        let mut opts = self.options.clone();
+        opts.kind = SampleKind::Put;
+        self.session.publish(&self.keyexpr, payload, opts)
+    }
+
+    /// Emit one outbound Del (delete-keyexpr signal) through the
+    /// declared keyexpr + options. Payload is the empty slice (Del
+    /// kind carries none on the wire — `MsgDel` body has no payload
+    /// slot per zenoh-pico `_z_msg_del_t`).
+    ///
+    /// Per-call `opts.kind` is overridden to [`SampleKind::Del`].
+    pub fn delete(&self) -> usize {
+        let mut opts = self.options.clone();
+        opts.kind = SampleKind::Del;
+        self.session.publish(&self.keyexpr, &[], opts)
+    }
+}
+
+/// R244 — aliased-keyexpr counterpart of [`Publisher`]. Holds
+/// `(mapping_id, inline_suffix, options)` so subsequent [`Self::put`]
+/// / [`Self::delete`] calls route through
+/// [`Session::publish_aliased_auto`] which resolves the loopback
+/// literal through the outbound mapping table.
+///
+/// Returns `Err(PublishAliasError::UnknownMapping(id))` from
+/// [`Self::put`] / [`Self::delete`] when the declared mapping id
+/// was never registered (or was retracted via
+/// [`SessionLinkActions::send_undeclare_kexpr`]). Mirror of
+/// [`QuerierAliased`] on the pub side.
+///
+/// `#[non_exhaustive]`. Construct only through
+/// [`Session::declare_publisher_aliased`].
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct PublisherAliased {
+    session: Session,
+    mapping_id: u64,
+    inline_suffix: Option<String>,
+    options: PublishOptions,
+}
+
+impl PublisherAliased {
+    /// The declared mapping id.
+    pub fn mapping_id(&self) -> u64 {
+        self.mapping_id
+    }
+
+    /// The optional inline suffix (composite-aliased keyexpr).
+    pub fn inline_suffix(&self) -> Option<&str> {
+        self.inline_suffix.as_deref()
+    }
+
+    /// Borrow the declared options.
+    pub fn options(&self) -> &PublishOptions {
+        &self.options
+    }
+
+    /// Emit one outbound Put through the aliased mapping. Returns
+    /// `Err(PublishAliasError::UnknownMapping(id))` when the declared
+    /// `mapping_id` is no longer present on the outbound mapping
+    /// table — neither wire nor loopback branch fires.
+    pub fn put(&self, payload: &[u8]) -> Result<usize, PublishAliasError> {
+        let mut opts = self.options.clone();
+        opts.kind = SampleKind::Put;
+        self.session.publish_aliased_auto(
+            self.mapping_id,
+            self.inline_suffix.as_deref(),
+            payload,
+            opts,
+        )
+    }
+
+    /// Emit one outbound Del through the aliased mapping. Returns
+    /// `Err(PublishAliasError::UnknownMapping(id))` on mapping
+    /// absence per [`Self::put`]'s contract.
+    pub fn delete(&self) -> Result<usize, PublishAliasError> {
+        let mut opts = self.options.clone();
+        opts.kind = SampleKind::Del;
+        self.session.publish_aliased_auto(
+            self.mapping_id,
+            self.inline_suffix.as_deref(),
+            &[],
+            opts,
         )
     }
 }
@@ -3622,5 +3804,174 @@ mod tests {
         let h1 = clone.get(|_| {}, |_| {}).unwrap();
         assert_eq!(h0.rid(), 0);
         assert_eq!(h1.rid(), 1, "clones share the same rid allocator");
+    }
+
+    // ── R244 Publisher + PublisherAliased ──
+
+    #[test]
+    fn declare_publisher_returns_handle_with_keyexpr_and_options() {
+        let (session, _driver) = build_session();
+        let opts = PublishOptions::put()
+            .with_locality(Locality::SessionLocal)
+            .with_reliability(Reliability::BestEffort);
+        let pubr = session.declare_publisher("home/temp", opts.clone());
+        assert_eq!(pubr.keyexpr(), "home/temp");
+        assert_eq!(pubr.options().allowed_destination, opts.allowed_destination);
+        assert_eq!(pubr.options().reliability, opts.reliability);
+    }
+
+    #[test]
+    fn declare_publisher_does_not_emit_wire_frame() {
+        let (session, driver) = build_session();
+        let _pubr = session.declare_publisher("home/temp", PublishOptions::put());
+        assert_eq!(driver.frame_count(), 0, "declare_publisher is a no-op on the wire");
+    }
+
+    #[test]
+    fn publisher_put_fires_loopback_subscriber() {
+        let (session, _driver) = build_session();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .register("home/temp", move |_sample| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            });
+
+        let pubr = session.declare_publisher(
+            "home/temp",
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        );
+        let count = pubr.put(b"22.5");
+        assert_eq!(count, 1);
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn publisher_delete_routes_to_del_kind_and_drops_payload() {
+        let (session, _driver) = build_session();
+        let kind_seen: Arc<Mutex<Option<SampleKind>>> = Arc::new(Mutex::new(None));
+        let kind_cb = kind_seen.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .register("clear/me", move |sample| {
+                *kind_cb.lock().unwrap() = Some(sample.kind);
+            });
+
+        let pubr = session.declare_publisher(
+            "clear/me",
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        );
+        pubr.delete();
+        assert_eq!(*kind_seen.lock().unwrap(), Some(SampleKind::Del));
+    }
+
+    #[test]
+    fn publisher_clone_shares_session_and_driver() {
+        let (session, driver) = build_session();
+        let pubr = session.declare_publisher(
+            "home/temp",
+            PublishOptions::put().with_locality(Locality::Remote),
+        );
+        let clone = pubr.clone();
+        assert_eq!(clone.keyexpr(), pubr.keyexpr());
+        pubr.put(b"a");
+        clone.put(b"b");
+        assert_eq!(driver.frame_count(), 2, "both clones share the wire driver");
+    }
+
+    #[test]
+    fn declare_publisher_aliased_returns_handle_with_mapping_id_and_options() {
+        let (session, _driver) = build_session();
+        let opts = PublishOptions::put().with_reliability(Reliability::BestEffort);
+        let pa = session.declare_publisher_aliased(7, Some("/kitchen"), opts.clone());
+        assert_eq!(pa.mapping_id(), 7);
+        assert_eq!(pa.inline_suffix(), Some("/kitchen"));
+        assert_eq!(pa.options().reliability, opts.reliability);
+    }
+
+    #[test]
+    fn declare_publisher_aliased_does_not_emit_wire_frame() {
+        let (session, driver) = build_session();
+        let _pa = session.declare_publisher_aliased(7, None, PublishOptions::put());
+        assert_eq!(driver.frame_count(), 0);
+    }
+
+    #[test]
+    fn publisher_aliased_put_resolves_loopback_through_outbound_table() {
+        let (session, driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "home/temp");
+
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .register("home/temp", move |_sample| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            });
+
+        let pa = session.declare_publisher_aliased(
+            7,
+            None,
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        );
+        let count = pa.put(b"22.5").expect("declared mapping resolves");
+        assert_eq!(count, 1);
+        assert_eq!(fired.load(Ordering::SeqCst), 1);
+        assert_eq!(driver.frame_count(), 1, "DeclKexpr only (SessionLocal skips Push wire)");
+    }
+
+    #[test]
+    fn publisher_aliased_unknown_mapping_returns_err_and_skips_both_branches() {
+        let (session, driver) = build_session();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let fired_cb = fired.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .register("home/temp", move |_| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            });
+
+        let pa = session.declare_publisher_aliased(99, None, PublishOptions::put());
+        let err = pa.put(b"x");
+        assert_eq!(err, Err(PublishAliasError::UnknownMapping(99)));
+        assert_eq!(fired.load(Ordering::SeqCst), 0);
+        assert_eq!(driver.frame_count(), 0);
+    }
+
+    #[test]
+    fn publisher_aliased_delete_routes_to_del_kind() {
+        let (session, _driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "clear/me");
+        let kind_seen: Arc<Mutex<Option<SampleKind>>> = Arc::new(Mutex::new(None));
+        let kind_cb = kind_seen.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .register("clear/me", move |sample| {
+                *kind_cb.lock().unwrap() = Some(sample.kind);
+            });
+
+        let pa = session.declare_publisher_aliased(
+            7,
+            None,
+            PublishOptions::put().with_locality(Locality::SessionLocal),
+        );
+        pa.delete().expect("declared mapping resolves");
+        assert_eq!(*kind_seen.lock().unwrap(), Some(SampleKind::Del));
     }
 }
