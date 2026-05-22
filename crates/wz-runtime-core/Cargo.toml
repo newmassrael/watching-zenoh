@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-runtime-core — Phase W entry (R251).
+#
+# Trait-only crate that defines the OS/runtime service contracts (Runtime
+# + TimeSource + Allocator) so wz upper layers can compile against either
+# the tokio/std AP profile or the lwIP/no_std MCU profile from one code
+# base. This crate is the §5.P (runtime services tier) of the RFC; it is
+# distinct from §5.I (CPU intrinsics tier) which lives in the separate
+# `intrinsics-runtime--symbol-surface` doc.
+#
+# R230 ratified §5.P as spec-only. R251 (this round) lands the trait
+# *skeleton* with no concrete impl wired into wz-runtime-tokio yet — the
+# next rounds (R252+) add TokioRuntime as a concrete impl and start
+# reparameterising the 111 std/tokio call sites that R230's inventory
+# baseline counted. The R63 anti-stub rule applies: no NOP impl ships
+# here; concrete impls land alongside real callers.
+#
+# `no_std` by default + opt-in `alloc` feature so the trait surface
+# compiles for Cortex-M targets where `std` is unavailable. `std` feature
+# layers `std::error::Error` + a couple of std-only conveniences for the
+# tokio/AP profile (still pending; this round leaves the feature flag in
+# place but no std-gated code path yet).
+
+[package]
+name = "wz-runtime-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Phase W runtime-services-tier trait skeleton (Runtime/TimeSource/Allocator) — R230 §5.P."
+
+[features]
+default = []
+# Bring std into scope (needed by the AP/tokio profile for things like
+# std::time + tokio's task model). Disabled by default so MCU builds stay
+# no_std. Currently this feature only flips the no_std attribute on
+# lib.rs; std-only convenience impls land alongside TokioRuntime in R252+.
+std = ["alloc"]
+# Bring `alloc` into scope so trait method bodies can reference Box etc.
+# when needed. MCU profiles that supply a heap will turn this on; bare-
+# metal profiles without a heap leave it off and rely on stack/static
+# allocation only.
+alloc = []
+
+[lints]
+workspace = true

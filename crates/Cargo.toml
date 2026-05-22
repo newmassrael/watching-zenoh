@@ -28,6 +28,7 @@
 resolver = "2"
 members = [
     "wz-codecs",
+    "wz-runtime-core",
     "zenoh-pico-sys",
     "wz-integration-tests",
     "wz-runtime-tokio",
