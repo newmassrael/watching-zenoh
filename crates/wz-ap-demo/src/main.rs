@@ -114,7 +114,9 @@ use tokio::sync::mpsc;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::reply::InboundReplyBody;
 use wz_runtime_tokio::sample::SampleKind;
-use wz_runtime_tokio::session::{PublishAliasError, PublishOptions, Session};
+use wz_runtime_tokio::session::{
+    PublishAliasError, PublishOptions, QueryableOptions, Session, SubscribeOptions,
+};
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastPolicy;
 use wz_runtime_tokio::session_glue::{
     drive_session_until_terminal, install_session_actions, BoxedLinkDriver, IterationEvent,
@@ -928,43 +930,14 @@ async fn run_demo(
     let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
     {
         let mut observer_lock = observer.lock().expect("observer mutex poisoned");
-        if let Some(ref k) = key {
-            let key_for_callback = k.clone();
-            observer_lock.subscribers.register(k.clone(), move |sample| {
-                // R222 — Sample carries the resolved keyexpr literal +
-                // the SampleKind discriminant + payload bytes directly,
-                // so the prior `match push.keyexpr.body` + tagged-union
-                // arm extraction is no longer required at the call site.
-                eprintln!(
-                    "wz-ap-demo: SUBSCRIBER FIRED filter='{}' keyexpr='{}' kind={:?} payload_len={}",
-                    key_for_callback,
-                    sample.keyexpr,
-                    sample.kind,
-                    sample.payload.len(),
-                );
-            });
-        }
 
-        // R121j-5c-e2e-demo — queryable callback. The observer's
-        // dispatch fans inbound Request(Query) records into this
-        // registry automatically; we just install the callback that
-        // emits one Reply per match + logs `QUERYABLE FIRED`.
-        if let Some((pattern, reply_text)) = queryable_spec.as_ref() {
-            let pattern_for_callback = pattern.clone();
-            let reply_text_for_callback = reply_text.clone();
-            observer_lock
-                .queryables
-                .register(pattern.clone(), move |_query, responder| {
-                    responder.send_reply(reply_text_for_callback.as_bytes());
-                    eprintln!(
-                        "wz-ap-demo: QUERYABLE FIRED pattern='{}' rid={} keyexpr='{}' reply='{}'",
-                        pattern_for_callback,
-                        responder.rid(),
-                        responder.keyexpr_literal(),
-                        reply_text_for_callback,
-                    );
-                });
-        }
+        // R249 — subscribers + queryables register sites migrated to
+        // the Session::declare_subscriber / Session::declare_queryable
+        // RAII handle API (R245/R246 surface). The migration happens
+        // AFTER Session::new further down (the handle API needs the
+        // Session bundle); the observer.lock() block here keeps only
+        // the remote_* / replies / liveliness observer-callback
+        // installs that have no session-level handle equivalent.
 
         // R121k-5 — Remote* registry callbacks. Each tracks the peer's
         // outbound Declare(Decl*|Undecl*) records and fires user-installed
@@ -1094,6 +1067,59 @@ async fn run_demo(
     // drive_session loop's `observer.dispatch` is observing inbound
     // wire frames on the same registry.
     let session = Session::new(actions.clone(), observer.clone());
+
+    // R249 — local subscriber + queryable registration via the
+    // Session::declare_subscriber / Session::declare_queryable RAII
+    // handle API (R245 / R246 surface). Handles bind to `_`-prefixed
+    // locals so they live until `run_demo` returns; their `Drop` then
+    // unregisters from the registry. drive_session has not yet started
+    // (Step 5 below), so the registration timing requirement from the
+    // R121c-3 callout above ("register before drive_session starts so
+    // z_put echo during handshake routes through the subscriber") is
+    // preserved.
+    let _subscriber_handle = key.as_ref().map(|k| {
+        let key_for_callback = k.clone();
+        session.declare_subscriber(
+            k.clone(),
+            SubscribeOptions::default(),
+            move |sample| {
+                // R222 — Sample carries the resolved keyexpr literal +
+                // the SampleKind discriminant + payload bytes directly,
+                // so the prior `match push.keyexpr.body` + tagged-union
+                // arm extraction is no longer required at the call site.
+                eprintln!(
+                    "wz-ap-demo: SUBSCRIBER FIRED filter='{}' keyexpr='{}' kind={:?} payload_len={}",
+                    key_for_callback,
+                    sample.keyexpr,
+                    sample.kind,
+                    sample.payload.len(),
+                );
+            },
+        )
+    });
+
+    // R121j-5c-e2e-demo — queryable callback. The observer's dispatch
+    // fans inbound Request(Query) records into this registry
+    // automatically; we just install the callback that emits one Reply
+    // per match + logs `QUERYABLE FIRED`.
+    let _queryable_handle = queryable_spec.as_ref().map(|(pattern, reply_text)| {
+        let pattern_for_callback = pattern.clone();
+        let reply_text_for_callback = reply_text.clone();
+        session.declare_queryable(
+            pattern.clone(),
+            QueryableOptions::default(),
+            move |_query, responder| {
+                responder.send_reply(reply_text_for_callback.as_bytes());
+                eprintln!(
+                    "wz-ap-demo: QUERYABLE FIRED pattern='{}' rid={} keyexpr='{}' reply='{}'",
+                    pattern_for_callback,
+                    responder.rid(),
+                    responder.keyexpr_literal(),
+                    reply_text_for_callback,
+                );
+            },
+        )
+    });
 
     // ── Step 4a (R121e): spawn the publisher task BEFORE the
     //                    drive_session loop so the task can wait on
