@@ -244,6 +244,16 @@ impl PublishOptions {
 ///
 /// See module-level docs for the wire / loopback symmetry contract,
 /// the locking discipline, and the R228 → R229+ carry map.
+///
+/// `Clone` is cheap (both fields are `Arc`) — application code spawns
+/// background tasks (publisher / query / declare emitters) with their
+/// own `Session` clone so the task can call `publish` /
+/// `publish_aliased_auto` without re-deriving the bundle. Every clone
+/// shares the same outbound actions and the same observer mutex, so
+/// loopback dispatches from a background task are observable to the
+/// main `drive_session` loop's `observer.dispatch` calls and vice
+/// versa.
+#[derive(Clone)]
 pub struct Session {
     /// Outbound action handle. Cloned `Arc` — multiple `Session`s
     /// can share the same actions if the application binds several
