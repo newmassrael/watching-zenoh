@@ -14100,6 +14100,58 @@
         "Phase W lwIP, zenoh-cpp router/plugin/SHM/multicast remain long-term destinations"
       ]
     },
+    "Round 282": {
+      "decision_summary": "R282 lands Session::declare_liveliness_subscriber_aliased + LivelinessSubscriberAliasError, mirroring R245 declare_subscriber_aliased + R248 declare_token_aliased; closes R281 carry (a).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs — add Session::declare_liveliness_subscriber_aliased(mapping_id, inline_suffix, options, callback) -> Result<LivelinessSubscriber, LivelinessSubscriberAliasError>; one-shot resolve at declare time, register slot against resolved literal, emit alias-form Interest on wire (mapping_id + inline_suffix passthrough)",
+        "crates/wz-runtime-tokio/src/session.rs — add LivelinessSubscriberAliasError enum + Display + std::error::Error impls; UnknownMapping(u64) variant mirroring SubscribeAliasError / QueryableAliasError / QueryAliasError / PublishAliasError / LivelinessAliasError; remediation hint embeds the offending mapping id + send_declare_keyexpr fix instruction",
+        "crates/wz-runtime-tokio/src/session.rs — update declare_liveliness_subscriber docstring: 'Future-additive surface' block (reserved for a future round) replaced with 'Aliased counterpart' cross-ref pointing to the new method",
+        "crates/wz-runtime-tokio/src/session.rs — add 6 unit tests: resolves_literal_at_declare_time, with_inline_suffix_composes_literal, unknown_mapping_returns_err_without_wire_emit, wire_frame_uses_alias_form, survives_mapping_retract_after_declare, liveliness_subscriber_alias_error_display_message_hints_remediation"
+      ],
+      "verification_bullets": [
+        "cargo clippy --workspace --all-targets --no-deps -- -D warnings clean",
+        "6 new R282 unit tests pass; wz-runtime-tokio lib test count 500 -> 506",
+        "scripts/run-ci.sh all 10 lanes green (Layer 0/A/A2/B/C0/C1/C1b/C2/D/E)",
+        "wire_frame_uses_alias_form asserts the outbound Interest carries the build_interest_liveliness_subscriber(0, false, 7, Some(/sensor)) byte image (alias form, not resolved literal) — bandwidth parity with declare_token_aliased's R248 wire pattern",
+        "survives_mapping_retract_after_declare asserts slot.keyexpr stays 'liveliness/dev7' after send_undeclare_kexpr(7), confirming the R245 one-shot resolution contract carries through to the liveliness subscriber side",
+        "unknown_mapping_returns_err_without_wire_emit asserts driver.frame_count() == 0 and slot_count() == 0 on the early-return path — no orphan slot, no orphan wire emit"
+      ],
+      "carry_forward_bullets": [
+        "R281 commit↔Round-ID misalignment audit note: feat commit dc40282 subject reads 'R282 wz-ap-demo --liveliness-subscribe' but atomic Round 281 holds the corresponding entry; frozen-ledger preserves atomic Round ID as truth source, commit message subject is read-only by git history. Future commit-msg drafting double-checks subject Round ID against atomic last-entry-id + 1 before issuing the commit.",
+        "R281 carry (a) realized — declare_liveliness_subscriber_aliased subscriber-side closed end-to-end at R282",
+        "R281 carry (b) open: Established gate for outbound Interest emit; currently best-effort against pre-Established state, SN-window buffers but explicit gate would tighten the contract",
+        "R283 architectural carry: peer-side non-final Interest inbound (bilateral); wz declares LivelinessToken, peer asks via Interest, wz emits matching DeclTokens as wire response",
+        "R278 follow-up unchanged: post SessionClose to FSM before signal exit",
+        "Open R267-R270 architectural carries unchanged: Querier::get_matching_status, Session<R,T> reparameterisation, Instant -> u64ms storage migration",
+        "wz-ap-demo main.rs decomposition carry (R281 NEW): main.rs 1900+ lines, R282 did not touch main.rs so no incremental growth this round; R230 §5.P inventory pattern application reserved for a future round",
+        "Phase W lwIP, zenoh-cpp router/plugin/SHM/multicast remain long-term destinations"
+      ],
+      "publishable_decision_summary": "R282 lands Session::declare_liveliness_subscriber_aliased + LivelinessSubscriberAliasError, mirroring R245 declare_subscriber_aliased + R248 declare_token_aliased; closes R281 carry (a).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs — add Session::declare_liveliness_subscriber_aliased(mapping_id, inline_suffix, options, callback) -> Result<LivelinessSubscriber, LivelinessSubscriberAliasError>; one-shot resolve at declare time, register slot against resolved literal, emit alias-form Interest on wire (mapping_id + inline_suffix passthrough)",
+        "crates/wz-runtime-tokio/src/session.rs — add LivelinessSubscriberAliasError enum + Display + std::error::Error impls; UnknownMapping(u64) variant mirroring SubscribeAliasError / QueryableAliasError / QueryAliasError / PublishAliasError / LivelinessAliasError; remediation hint embeds the offending mapping id + send_declare_keyexpr fix instruction",
+        "crates/wz-runtime-tokio/src/session.rs — update declare_liveliness_subscriber docstring: 'Future-additive surface' block (reserved for a future round) replaced with 'Aliased counterpart' cross-ref pointing to the new method",
+        "crates/wz-runtime-tokio/src/session.rs — add 6 unit tests: resolves_literal_at_declare_time, with_inline_suffix_composes_literal, unknown_mapping_returns_err_without_wire_emit, wire_frame_uses_alias_form, survives_mapping_retract_after_declare, liveliness_subscriber_alias_error_display_message_hints_remediation"
+      ],
+      "publishable_verification_bullets": [
+        "cargo clippy --workspace --all-targets --no-deps -- -D warnings clean",
+        "6 new R282 unit tests pass; wz-runtime-tokio lib test count 500 -> 506",
+        "scripts/run-ci.sh all 10 lanes green (Layer 0/A/A2/B/C0/C1/C1b/C2/D/E)",
+        "wire_frame_uses_alias_form asserts the outbound Interest carries the build_interest_liveliness_subscriber(0, false, 7, Some(/sensor)) byte image (alias form, not resolved literal) — bandwidth parity with declare_token_aliased's R248 wire pattern",
+        "survives_mapping_retract_after_declare asserts slot.keyexpr stays 'liveliness/dev7' after send_undeclare_kexpr(7), confirming the R245 one-shot resolution contract carries through to the liveliness subscriber side",
+        "unknown_mapping_returns_err_without_wire_emit asserts driver.frame_count() == 0 and slot_count() == 0 on the early-return path — no orphan slot, no orphan wire emit"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R281 commit↔Round-ID misalignment audit note: feat commit dc40282 subject reads 'R282 wz-ap-demo --liveliness-subscribe' but atomic Round 281 holds the corresponding entry; frozen-ledger preserves atomic Round ID as truth source, commit message subject is read-only by git history. Future commit-msg drafting double-checks subject Round ID against atomic last-entry-id + 1 before issuing the commit.",
+        "R281 carry (a) realized — declare_liveliness_subscriber_aliased subscriber-side closed end-to-end at R282",
+        "R281 carry (b) open: Established gate for outbound Interest emit; currently best-effort against pre-Established state, SN-window buffers but explicit gate would tighten the contract",
+        "R283 architectural carry: peer-side non-final Interest inbound (bilateral); wz declares LivelinessToken, peer asks via Interest, wz emits matching DeclTokens as wire response",
+        "R278 follow-up unchanged: post SessionClose to FSM before signal exit",
+        "Open R267-R270 architectural carries unchanged: Querier::get_matching_status, Session<R,T> reparameterisation, Instant -> u64ms storage migration",
+        "wz-ap-demo main.rs decomposition carry (R281 NEW): main.rs 1900+ lines, R282 did not touch main.rs so no incremental growth this round; R230 §5.P inventory pattern application reserved for a future round",
+        "Phase W lwIP, zenoh-cpp router/plugin/SHM/multicast remain long-term destinations"
+      ]
+    },
     "Round 29": {
       "decision_summary": "Phase C8 entry — first statechart-kind SCXML lands. sources/session/session_fsm_unicast.scxml encodes unicast handshake (Init/LinkOpening/Opening/Accepting/Established/Closing/Closed) per docs/session-fsm.md §2.1-§2.7 minus deferred sub-scopes (multicast, scouting state, Established sub-regions, stateless_accept variant).",
       "changes_bullets": [
