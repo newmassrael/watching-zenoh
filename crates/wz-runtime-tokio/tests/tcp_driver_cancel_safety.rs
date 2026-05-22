@@ -149,10 +149,7 @@ async fn r265_partial_length_prefix_survives_cancel() {
     // wire[2] byte as a length prefix, sized the payload wrong,
     // and the StreamEnvelope decode would either fail or return
     // garbage.
-    writer
-        .write_all(&wire[1..])
-        .await
-        .expect("complete write");
+    writer.write_all(&wire[1..]).await.expect("complete write");
     writer.flush().await.expect("flush complete write");
 
     let event = tokio::time::timeout(Duration::from_secs(2), driver.poll_event())
@@ -251,9 +248,7 @@ async fn r265_eof_mid_frame_surfaces_peer_closed() {
         LinkEvent::Lost {
             cause: LostCause::PeerClosed,
         } => {}
-        other => panic!(
-            "expected Lost {{ PeerClosed }} after mid-frame EOF, got {other:?}"
-        ),
+        other => panic!("expected Lost {{ PeerClosed }} after mid-frame EOF, got {other:?}"),
     }
 }
 

@@ -108,8 +108,7 @@ fn wz_publisher_aliased_round_trip_against_zenoh_pico_z_sub() {
     // by default on glibc; see `wz_publisher_to_zsub.rs` for the
     // same gotcha.
     let z_sub_stdout = tempfile::tempfile().expect("tempfile for z_sub stdout");
-    let z_sub_stdout_writer =
-        z_sub_stdout.try_clone().expect("dup z_sub stdout handle");
+    let z_sub_stdout_writer = z_sub_stdout.try_clone().expect("dup z_sub stdout handle");
     let mut z_sub_stdout_reader = z_sub_stdout;
 
     let mut z_sub_child = Command::new("stdbuf")

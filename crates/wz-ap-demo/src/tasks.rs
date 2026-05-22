@@ -193,17 +193,17 @@ pub(crate) async fn declare_task<T>(
         clock.sleep(DECLARE_HANDSHAKE_POLL_INTERVAL_MS).await;
     }
     if let Some(keyexpr) = spec.subscriber_keyexpr.as_deref() {
-        actions.send_declare_subscriber(DECLARE_SUBSCRIBER_ID, /*mapping_id=*/ 0, Some(keyexpr));
-        eprintln!(
-            "wz-ap-demo: DECLARED SUBSCRIBER id={DECLARE_SUBSCRIBER_ID} keyexpr='{keyexpr}'"
+        actions.send_declare_subscriber(
+            DECLARE_SUBSCRIBER_ID,
+            /*mapping_id=*/ 0,
+            Some(keyexpr),
         );
+        eprintln!("wz-ap-demo: DECLARED SUBSCRIBER id={DECLARE_SUBSCRIBER_ID} keyexpr='{keyexpr}'");
         clock.sleep(DECLARE_INTER_EMIT_MS).await;
     }
     if let Some(keyexpr) = spec.queryable_keyexpr.as_deref() {
         actions.send_declare_queryable(DECLARE_QUERYABLE_ID, /*mapping_id=*/ 0, Some(keyexpr));
-        eprintln!(
-            "wz-ap-demo: DECLARED QUERYABLE id={DECLARE_QUERYABLE_ID} keyexpr='{keyexpr}'"
-        );
+        eprintln!("wz-ap-demo: DECLARED QUERYABLE id={DECLARE_QUERYABLE_ID} keyexpr='{keyexpr}'");
         clock.sleep(DECLARE_INTER_EMIT_MS).await;
     }
     if let Some(keyexpr) = spec.token_keyexpr.as_deref() {
@@ -235,11 +235,8 @@ pub(crate) async fn declare_task<T>(
 /// [`TimeSource::sleep`], continuing the R253 leaf-first cadence.
 /// R255 — deadline math also migrated to u64 ms (option (b) from
 /// R254 carry); `std::time::Instant` is no longer referenced here.
-pub(crate) async fn query_task<T>(
-    actions: Arc<SessionLinkActions>,
-    keyexpr: String,
-    clock: T,
-) where
+pub(crate) async fn query_task<T>(actions: Arc<SessionLinkActions>, keyexpr: String, clock: T)
+where
     T: TimeSource + Send + 'static,
 {
     let deadline_ms = clock.now_monotonic_ms() + QUERY_HANDSHAKE_TIMEOUT_MS;
@@ -262,9 +259,7 @@ pub(crate) async fn query_task<T>(
          on keyexpr='{keyexpr}' rid={QUERY_RID}"
     );
     actions.send_request_query(QUERY_RID, /*mapping_id=*/ 0, Some(&keyexpr));
-    eprintln!(
-        "wz-ap-demo: QUERY EMITTED keyexpr='{keyexpr}' rid={QUERY_RID}"
-    );
+    eprintln!("wz-ap-demo: QUERY EMITTED keyexpr='{keyexpr}' rid={QUERY_RID}");
 }
 
 /// R254 — `clock: T` generic + 3 sleep sites migrated to
@@ -354,9 +349,7 @@ pub(crate) async fn publisher_task<T>(
     //           restating it.
     if let Some(mapping_id) = declare_id {
         actions.send_declare_keyexpr(mapping_id, &keyexpr);
-        eprintln!(
-            "wz-ap-demo: PUBLISHER DECLARED keyexpr='{keyexpr}' mapping_id={mapping_id}"
-        );
+        eprintln!("wz-ap-demo: PUBLISHER DECLARED keyexpr='{keyexpr}' mapping_id={mapping_id}");
         // Small drain pause so the DECLARE bytes reach the peer's
         // session-FSM dispatch (and populate the keyexpr table)
         // before the first aliased Push fires on the same channel.

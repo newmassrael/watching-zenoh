@@ -26,9 +26,10 @@
 #       instead of silently racing into phantom gate failures.
 #
 # Delegates to `scripts/run-ci.sh` so CI and pre-push share one
-# source of truth for the lane definitions (Layer 0 actionlint /
-# A mnemosyne / A2 audit / B verify-codegen / C1 cargo test /
-# C2 clippy / D deploy yaml / E ap-demo round-trip).
+# source of truth for the lane definitions (Layer 0 preflight-lints
+# = mandatory cargo fmt --check + optional actionlint / A mnemosyne /
+# A2 audit / B verify-codegen / C0 test-discipline / C1 cargo test /
+# C1b alloc test / C2 clippy / D deploy yaml / E ap-demo round-trip).
 #
 # Time cost (warm cache): ~50s typical; up to ~5min on cold
 # compile. The hook can be bypassed via `git push --no-verify`

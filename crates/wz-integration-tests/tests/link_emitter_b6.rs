@@ -95,12 +95,7 @@ fn r63_sce_b6_link_emitter_emits_expected_c11_shape() {
     let entries: Vec<_> = std::fs::read_dir(out_dir.path())
         .expect("read_dir tempdir")
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .and_then(|s| s.to_str())
-                == Some("h")
-        })
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("h"))
         .collect();
     assert_eq!(entries.len(), 1, "expected exactly one .h emit");
 

@@ -59,7 +59,8 @@ fn zenoh_pico_encode_frame(sn: u64, payload: &[u8]) -> Vec<u8> {
 
         let ret = _z_frame_encode(&mut wbf, 0u8, &msg);
         assert_eq!(
-            ret, 0,
+            ret,
+            0,
             "_z_frame_encode returned non-zero for sn={sn} \
              payload.len={}",
             payload.len()

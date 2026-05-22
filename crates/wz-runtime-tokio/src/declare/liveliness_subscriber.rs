@@ -127,8 +127,7 @@ pub enum LivelinessSampleKind {
 /// matches a subscriber's pattern. `Send + 'static` so the registry
 /// can be shared across tasks under `Arc<Mutex<...>>` (matching the
 /// other application-layer registries' threading contract).
-pub type LivelinessSampleCallback =
-    Box<dyn FnMut(LivelinessSample<'_>) + Send + 'static>;
+pub type LivelinessSampleCallback = Box<dyn FnMut(LivelinessSample<'_>) + Send + 'static>;
 
 /// Per-subscriber slot. Private to this module; consumers interact
 /// through [`LivelinessSubscriberRegistry::register`] /
@@ -215,10 +214,7 @@ impl LivelinessSubscriberRegistry {
         callback: LivelinessSampleCallback,
     ) -> bool {
         let keyexpr_string = keyexpr.into();
-        let pattern_chunks: Vec<String> = keyexpr_string
-            .split('/')
-            .map(str::to_string)
-            .collect();
+        let pattern_chunks: Vec<String> = keyexpr_string.split('/').map(str::to_string).collect();
         let slot = LivelinessSubscriberSlot {
             pattern_chunks,
             keyexpr: keyexpr_string,
@@ -315,22 +311,14 @@ impl LivelinessSubscriberRegistry {
                     None => return,
                 };
                 self.peer_token_table.insert(decl.id, resolved.clone());
-                self.fan_to_matching_slots(
-                    LivelinessSampleKind::Put,
-                    &resolved,
-                    decl.id,
-                );
+                self.fan_to_matching_slots(LivelinessSampleKind::Put, &resolved, decl.id);
             }
             DeclareVariant::CodecZenohUndeclToken(undecl) => {
                 let resolved = match self.peer_token_table.remove(&undecl.id) {
                     Some(s) => s,
                     None => return,
                 };
-                self.fan_to_matching_slots(
-                    LivelinessSampleKind::Delete,
-                    &resolved,
-                    undecl.id,
-                );
+                self.fan_to_matching_slots(LivelinessSampleKind::Delete, &resolved, undecl.id);
             }
             // Other DeclareVariant arms are not the liveliness layer's
             // concern.
@@ -344,18 +332,9 @@ impl LivelinessSubscriberRegistry {
     /// — the per-slot allocation is the same shape
     /// [`crate::pubsub::SubscriberRegistry::dispatch_push`] uses; it
     /// stays out of the inner loop on the matching engine itself.
-    fn fan_to_matching_slots(
-        &mut self,
-        kind: LivelinessSampleKind,
-        resolved: &str,
-        token_id: u64,
-    ) {
+    fn fan_to_matching_slots(&mut self, kind: LivelinessSampleKind, resolved: &str, token_id: u64) {
         for slot in self.slots.values_mut() {
-            let chunks: Vec<&str> = slot
-                .pattern_chunks
-                .iter()
-                .map(String::as_str)
-                .collect();
+            let chunks: Vec<&str> = slot.pattern_chunks.iter().map(String::as_str).collect();
             if keyexpr_pattern_matches(&chunks, resolved) {
                 (slot.callback)(LivelinessSample {
                     kind,
@@ -419,8 +398,8 @@ impl LivelinessSubscriberRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::test_helpers::*;
+    use super::*;
     use crate::session_glue::NetworkMessage;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -434,11 +413,9 @@ mod tests {
         sink: Arc<Mutex<Vec<(LivelinessSampleKind, String, u64)>>>,
     ) -> LivelinessSampleCallback {
         Box::new(move |sample: LivelinessSample<'_>| {
-            sink.lock().unwrap().push((
-                sample.kind,
-                sample.keyexpr.to_string(),
-                sample.token_id,
-            ));
+            sink.lock()
+                .unwrap()
+                .push((sample.kind, sample.keyexpr.to_string(), sample.token_id));
         })
     }
 
@@ -481,9 +458,7 @@ mod tests {
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(1, "liveliness/*", false, make_subscriber(sink.clone()));
 
-        let body = DeclareVariant::CodecZenohDeclToken(decl_token(
-            42, 0, Some("liveliness/dev42"),
-        ));
+        let body = DeclareVariant::CodecZenohDeclToken(decl_token(42, 0, Some("liveliness/dev42")));
         reg.dispatch_declare(&body, &HashMap::new());
 
         let captured = sink.lock().unwrap().clone();
@@ -500,9 +475,8 @@ mod tests {
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()));
 
-        let decl = DeclareVariant::CodecZenohDeclToken(decl_token(
-            7, 0, Some("liveliness/svc/api"),
-        ));
+        let decl =
+            DeclareVariant::CodecZenohDeclToken(decl_token(7, 0, Some("liveliness/svc/api")));
         reg.dispatch_declare(&decl, &HashMap::new());
 
         let undecl = DeclareVariant::CodecZenohUndeclToken(undecl_token(7));
@@ -529,9 +503,7 @@ mod tests {
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(1, "alpha/*", false, make_subscriber(sink.clone()));
 
-        let body = DeclareVariant::CodecZenohDeclToken(decl_token(
-            5, 0, Some("beta/instance"),
-        ));
+        let body = DeclareVariant::CodecZenohDeclToken(decl_token(5, 0, Some("beta/instance")));
         reg.dispatch_declare(&body, &HashMap::new());
 
         assert!(
@@ -598,9 +570,7 @@ mod tests {
         reg.register(1, "**", false, make_subscriber(sink1.clone()));
         reg.register(2, "alpha/*", false, make_subscriber(sink2.clone()));
 
-        let body = DeclareVariant::CodecZenohDeclToken(decl_token(
-            3, 0, Some("alpha/one"),
-        ));
+        let body = DeclareVariant::CodecZenohDeclToken(decl_token(3, 0, Some("alpha/one")));
         reg.dispatch_declare(&body, &HashMap::new());
 
         assert_eq!(sink1.lock().unwrap().len(), 1, "** catches all");
@@ -675,14 +645,17 @@ mod tests {
 
         // DeclSubscriber + DeclQueryable arms must not route into the
         // liveliness-subscriber registry.
-        let messages = vec![
-            NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
-                decl_subscriber(2, 0, Some("anything")),
-            ))),
-            NetworkMessage::Declare(Box::new(declare_envelope_decl_queryable(
-                decl_queryable(3, 0, Some("anything")),
-            ))),
-        ];
+        let messages =
+            vec![
+                NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
+                    decl_subscriber(2, 0, Some("anything")),
+                ))),
+                NetworkMessage::Declare(Box::new(declare_envelope_decl_queryable(decl_queryable(
+                    3,
+                    0,
+                    Some("anything"),
+                )))),
+            ];
         reg.dispatch_messages(&messages, &HashMap::new());
 
         assert!(

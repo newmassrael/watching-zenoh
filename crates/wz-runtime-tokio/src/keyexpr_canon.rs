@@ -100,9 +100,7 @@ impl fmt::Display for KeyexprCanonError {
             Self::StarsInChunk => {
                 f.write_str("keyexpr canon: bare `*` mid-chunk (must be `$*`, `*`, or `**`)")
             }
-            Self::ContainsUnboundDollar => {
-                f.write_str("keyexpr canon: `$` not followed by `*`")
-            }
+            Self::ContainsUnboundDollar => f.write_str("keyexpr canon: `$` not followed by `*`"),
         }
     }
 }
@@ -291,7 +289,10 @@ mod tests {
     #[test]
     fn canon_identity_on_pure_literal() {
         assert_eq!(canonize_keyexpr("home/temp").unwrap(), "home/temp");
-        assert_eq!(canonize_keyexpr("sensors/room1/temp").unwrap(), "sensors/room1/temp");
+        assert_eq!(
+            canonize_keyexpr("sensors/room1/temp").unwrap(),
+            "sensors/room1/temp"
+        );
     }
 
     #[test]
@@ -308,7 +309,10 @@ mod tests {
     #[test]
     fn canon_singleify_collapses_dsl_runs() {
         assert_eq!(canonize_keyexpr("home/$*$*$*foo").unwrap(), "home/$*foo");
-        assert_eq!(canonize_keyexpr("home/foo$*$*bar").unwrap(), "home/foo$*bar");
+        assert_eq!(
+            canonize_keyexpr("home/foo$*$*bar").unwrap(),
+            "home/foo$*bar"
+        );
         assert_eq!(canonize_keyexpr("home/$*$*").unwrap(), "home/*");
     }
 
@@ -342,16 +346,28 @@ mod tests {
     #[test]
     fn canon_combines_singleify_and_chunk_rules() {
         assert_eq!(canonize_keyexpr("**/$*$*/temp").unwrap(), "**/temp");
-        assert_eq!(canonize_keyexpr("home/$*$*/$*/temp").unwrap(), "home/*/*/temp");
+        assert_eq!(
+            canonize_keyexpr("home/$*$*/$*/temp").unwrap(),
+            "home/*/*/temp"
+        );
     }
 
     // ── Error: structural grammar violations ──
 
     #[test]
     fn canon_rejects_empty_chunk() {
-        assert_eq!(canonize_keyexpr("home//temp"), Err(KeyexprCanonError::EmptyChunk));
-        assert_eq!(canonize_keyexpr("/home"), Err(KeyexprCanonError::EmptyChunk));
-        assert_eq!(canonize_keyexpr("home/"), Err(KeyexprCanonError::EmptyChunk));
+        assert_eq!(
+            canonize_keyexpr("home//temp"),
+            Err(KeyexprCanonError::EmptyChunk)
+        );
+        assert_eq!(
+            canonize_keyexpr("/home"),
+            Err(KeyexprCanonError::EmptyChunk)
+        );
+        assert_eq!(
+            canonize_keyexpr("home/"),
+            Err(KeyexprCanonError::EmptyChunk)
+        );
         assert_eq!(canonize_keyexpr(""), Err(KeyexprCanonError::EmptyChunk));
     }
 

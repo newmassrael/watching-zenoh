@@ -179,8 +179,7 @@ fn ext_chain_overflow_rejects_unbounded_continuation() {
     let cbyte = ((WHATAMI_PEER >> 1) & 0x03) as u8;
     wire.extend_from_slice(&[
         0x05, // version
-        cbyte,
-        0xAA, // zid
+        cbyte, 0xAA, // zid
         0x00, // sn_res
         0x00, 0x00, // batch_size LE
         0x00, // VLE cookie_len=0

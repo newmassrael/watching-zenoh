@@ -655,7 +655,12 @@ mod tests {
     use wz_codecs::wireexpr_local::WireexprLocal;
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
-    fn response_reply_put(rid: u64, mapping_id: u64, suffix: Option<&str>, payload: &[u8]) -> Response {
+    fn response_reply_put(
+        rid: u64,
+        mapping_id: u64,
+        suffix: Option<&str>,
+        payload: &[u8],
+    ) -> Response {
         let suffix_owned = suffix.map(str::to_string);
         let suffix_len = suffix.map(|s| s.len() as u64);
         let keyexpr = Wireexpr {
@@ -701,7 +706,13 @@ mod tests {
         }
     }
 
-    fn response_err(rid: u64, suffix: &str, packed_id: u32, schema: Option<&str>, payload: &[u8]) -> Response {
+    fn response_err(
+        rid: u64,
+        suffix: &str,
+        packed_id: u32,
+        schema: Option<&str>,
+        payload: &[u8],
+    ) -> Response {
         let keyexpr = Wireexpr {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
@@ -763,7 +774,10 @@ mod tests {
         reg.register(7, 1, None, |_| {}, |_| {});
         reg.register(8, 1, None, |_| {}, |_| {});
         assert!(reg.unregister(7));
-        assert!(!reg.unregister(7), "second unregister of same rid is a no-op");
+        assert!(
+            !reg.unregister(7),
+            "second unregister of same rid is a no-op"
+        );
         assert_eq!(reg.len(), 1);
         assert!(reg.unregister(8));
         assert!(reg.is_empty());
@@ -833,7 +847,11 @@ mod tests {
         let resp = response_err(5, "error/path", 4, Some("schema_v1"), b"oops");
         reg.dispatch_response(&resp, &HashMap::new());
 
-        let captured = captured.lock().unwrap().clone().expect("on_reply must fire");
+        let captured = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("on_reply must fire");
         assert_eq!(captured.rid, 5);
         assert_eq!(captured.keyexpr_literal, "error/path");
         match &captured.body {
@@ -850,11 +868,23 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let count = Arc::new(AtomicUsize::new(0));
         let count_cb = count.clone();
-        reg.register(7, 1, None, move |_| { count_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
+        reg.register(
+            7,
+            1,
+            None,
+            move |_| {
+                count_cb.fetch_add(1, Ordering::SeqCst);
+            },
+            |_| {},
+        );
 
         let resp = response_reply_put(99, 0, Some("home/temp"), b"x");
         reg.dispatch_response(&resp, &HashMap::new());
-        assert_eq!(count.load(Ordering::SeqCst), 0, "unknown rid must not fire on_reply");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            0,
+            "unknown rid must not fire on_reply"
+        );
         assert_eq!(reg.len(), 1, "pending entry preserved for unmatched rid");
     }
 
@@ -876,19 +906,35 @@ mod tests {
 
         reg.dispatch_response_final(&response_final_for(42));
         assert_eq!(final_count.load(Ordering::SeqCst), 1);
-        assert!(reg.is_empty(), "Final must auto-unregister the pending entry");
+        assert!(
+            reg.is_empty(),
+            "Final must auto-unregister the pending entry"
+        );
 
         // Subsequent Reply for the now-removed rid must drop silently.
-        reg.dispatch_response(&response_reply_put(42, 0, Some("home/temp"), b"x"), &HashMap::new());
+        reg.dispatch_response(
+            &response_reply_put(42, 0, Some("home/temp"), b"x"),
+            &HashMap::new(),
+        );
     }
 
     #[test]
     fn dispatch_response_final_with_unknown_rid_is_silent_noop() {
         let mut reg = ReplyRegistry::new();
-        reg.register(42, 1, None, |_| {}, |_| panic!("on_final must not fire on unknown rid"));
+        reg.register(
+            42,
+            1,
+            None,
+            |_| {},
+            |_| panic!("on_final must not fire on unknown rid"),
+        );
 
         reg.dispatch_response_final(&response_final_for(99));
-        assert_eq!(reg.len(), 1, "unknown-rid Final preserves all pending entries");
+        assert_eq!(
+            reg.len(),
+            1,
+            "unknown-rid Final preserves all pending entries"
+        );
     }
 
     #[test]
@@ -920,7 +966,15 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
-        reg.register(1, 1, None, move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
+        reg.register(
+            1,
+            1,
+            None,
+            move |_| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
+            |_| {},
+        );
 
         // mapping_id=99 not in peer table — dispatch must drop silently
         // before reaching the callback.
@@ -934,16 +988,32 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let count = Arc::new(AtomicUsize::new(0));
         let count_cb = count.clone();
-        reg.register(7, 1, None, move |_| { count_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
+        reg.register(
+            7,
+            1,
+            None,
+            move |_| {
+                count_cb.fetch_add(1, Ordering::SeqCst);
+            },
+            |_| {},
+        );
 
-        for payload in [b"sample-1".as_ref(), b"sample-2".as_ref(), b"sample-3".as_ref()] {
+        for payload in [
+            b"sample-1".as_ref(),
+            b"sample-2".as_ref(),
+            b"sample-3".as_ref(),
+        ] {
             reg.dispatch_response(
                 &response_reply_put(7, 0, Some("series/data"), payload),
                 &HashMap::new(),
             );
         }
         assert_eq!(count.load(Ordering::SeqCst), 3, "many Reply semantics");
-        assert_eq!(reg.len(), 1, "Reply chain does NOT auto-unregister; only Final does");
+        assert_eq!(
+            reg.len(),
+            1,
+            "Reply chain does NOT auto-unregister; only Final does"
+        );
     }
 
     #[test]
@@ -959,7 +1029,11 @@ mod tests {
             &response_reply_put(7, 0, Some("home/temp"), b"21.0"),
             &HashMap::new(),
         );
-        assert_eq!(*order.lock().unwrap(), vec![1, 2], "duplicate-rid pending entries fire in registration order");
+        assert_eq!(
+            *order.lock().unwrap(),
+            vec![1, 2],
+            "duplicate-rid pending entries fire in registration order"
+        );
 
         // Final removes both entries.
         reg.dispatch_response_final(&response_final_for(7));
@@ -977,20 +1051,37 @@ mod tests {
             42,
             1,
             None,
-            move |_| { r.fetch_add(1, Ordering::SeqCst); },
-            move |_| { f.fetch_add(1, Ordering::SeqCst); },
+            move |_| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
+            move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
         );
 
         let messages = vec![
-            NetworkMessage::Response(Box::new(response_reply_put(42, 0, Some("home/temp"), b"21.0"))),
-            NetworkMessage::Response(Box::new(response_reply_put(42, 0, Some("home/temp"), b"21.5"))),
+            NetworkMessage::Response(Box::new(response_reply_put(
+                42,
+                0,
+                Some("home/temp"),
+                b"21.0",
+            ))),
+            NetworkMessage::Response(Box::new(response_reply_put(
+                42,
+                0,
+                Some("home/temp"),
+                b"21.5",
+            ))),
             NetworkMessage::ResponseFinal(response_final_for(42)),
         ];
         reg.dispatch_messages(&messages, &HashMap::new());
 
         assert_eq!(reply_count.load(Ordering::SeqCst), 2);
         assert_eq!(final_count.load(Ordering::SeqCst), 1);
-        assert!(reg.is_empty(), "Final at end of batch removed the pending entry");
+        assert!(
+            reg.is_empty(),
+            "Final at end of batch removed the pending entry"
+        );
     }
 
     #[test]
@@ -998,7 +1089,15 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
-        reg.register(7, 1, None, move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
+        reg.register(
+            7,
+            1,
+            None,
+            move |_| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
+            |_| {},
+        );
 
         // Unknown variant must NOT touch the registry.
         let messages = vec![NetworkMessage::Unknown {
@@ -1007,7 +1106,11 @@ mod tests {
         }];
         reg.dispatch_messages(&messages, &HashMap::new());
         assert_eq!(fired.load(Ordering::SeqCst), 0);
-        assert_eq!(reg.len(), 1, "pending entry preserved across non-Response messages");
+        assert_eq!(
+            reg.len(),
+            1,
+            "pending entry preserved across non-Response messages"
+        );
     }
 
     // ── R239 Self-query loopback + expected_finals semantics ──
@@ -1032,7 +1135,9 @@ mod tests {
         let inbound = InboundReply {
             rid: 7,
             keyexpr_literal: "home/temp".to_string(),
-            body: InboundReplyBody::Put { payload: b"21.0".to_vec() },
+            body: InboundReplyBody::Put {
+                payload: b"21.0".to_vec(),
+            },
         };
         reg.deliver_local_reply(&inbound);
 
@@ -1047,7 +1152,15 @@ mod tests {
         let mut reg = ReplyRegistry::new();
         let count = Arc::new(AtomicUsize::new(0));
         let count_cb = count.clone();
-        reg.register(7, 1, None, move |_| { count_cb.fetch_add(1, Ordering::SeqCst); }, |_| {});
+        reg.register(
+            7,
+            1,
+            None,
+            move |_| {
+                count_cb.fetch_add(1, Ordering::SeqCst);
+            },
+            |_| {},
+        );
 
         let inbound = InboundReply {
             rid: 99,
@@ -1079,7 +1192,10 @@ mod tests {
 
         reg.deliver_local_final(1);
         assert_eq!(final_count.load(Ordering::SeqCst), 1);
-        assert!(reg.is_empty(), "expected_finals=1 closes on the loopback final");
+        assert!(
+            reg.is_empty(),
+            "expected_finals=1 closes on the loopback final"
+        );
     }
 
     #[test]
@@ -1096,7 +1212,9 @@ mod tests {
             2,
             None,
             |_| {},
-            move |_| { final_count_cb.fetch_add(1, Ordering::SeqCst); },
+            move |_| {
+                final_count_cb.fetch_add(1, Ordering::SeqCst);
+            },
         );
 
         reg.deliver_local_final(5);
@@ -1119,10 +1237,20 @@ mod tests {
     #[test]
     fn deliver_local_final_on_unknown_rid_is_silent_noop() {
         let mut reg = ReplyRegistry::new();
-        reg.register(7, 1, None, |_| {}, |_| panic!("on_final must not fire on unknown rid"));
+        reg.register(
+            7,
+            1,
+            None,
+            |_| {},
+            |_| panic!("on_final must not fire on unknown rid"),
+        );
 
         reg.deliver_local_final(99);
-        assert_eq!(reg.len(), 1, "unknown-rid loopback final preserves the entry");
+        assert_eq!(
+            reg.len(),
+            1,
+            "unknown-rid loopback final preserves the entry"
+        );
     }
 
     #[test]
@@ -1138,11 +1266,17 @@ mod tests {
             2,
             None,
             |_| {},
-            move |_| { final_count_cb.fetch_add(1, Ordering::SeqCst); },
+            move |_| {
+                final_count_cb.fetch_add(1, Ordering::SeqCst);
+            },
         );
 
         reg.dispatch_response_final(&response_final_for(9));
-        assert_eq!(final_count.load(Ordering::SeqCst), 0, "first Final must NOT fire");
+        assert_eq!(
+            final_count.load(Ordering::SeqCst),
+            0,
+            "first Final must NOT fire"
+        );
         assert_eq!(reg.len(), 1, "entry preserved after first Final");
 
         reg.deliver_local_final(9);
@@ -1293,21 +1427,47 @@ mod tests {
         let fa = fired_a.clone();
         let fb = fired_b.clone();
         let fc = fired_c.clone();
-        reg.register(1, 1, Some(1000), |_| {}, move |_| {
-            fa.fetch_add(1, Ordering::SeqCst);
-        });
-        reg.register(2, 1, Some(2000), |_| {}, move |_| {
-            fb.fetch_add(1, Ordering::SeqCst);
-        });
-        reg.register(3, 1, None, |_| {}, move |_| {
-            fc.fetch_add(1, Ordering::SeqCst);
-        });
+        reg.register(
+            1,
+            1,
+            Some(1000),
+            |_| {},
+            move |_| {
+                fa.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+        reg.register(
+            2,
+            1,
+            Some(2000),
+            |_| {},
+            move |_| {
+                fb.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+        reg.register(
+            3,
+            1,
+            None,
+            |_| {},
+            move |_| {
+                fc.fetch_add(1, Ordering::SeqCst);
+            },
+        );
 
         let swept = reg.sweep_timed_out(1500);
         assert_eq!(swept, 1, "only entry 1 (deadline=1000) must be swept");
         assert_eq!(fired_a.load(Ordering::SeqCst), 1, "rid=1 on_final fires");
-        assert_eq!(fired_b.load(Ordering::SeqCst), 0, "rid=2 on_final does NOT fire");
-        assert_eq!(fired_c.load(Ordering::SeqCst), 0, "rid=3 on_final does NOT fire");
+        assert_eq!(
+            fired_b.load(Ordering::SeqCst),
+            0,
+            "rid=2 on_final does NOT fire"
+        );
+        assert_eq!(
+            fired_c.load(Ordering::SeqCst),
+            0,
+            "rid=3 on_final does NOT fire"
+        );
         assert_eq!(reg.len(), 2, "rid=2 + rid=3 remain pending");
     }
 
@@ -1354,10 +1514,22 @@ mod tests {
             },
         );
 
-        assert_eq!(reg.sweep_timed_out(1500), 1, "first sweep finds the expired entry");
+        assert_eq!(
+            reg.sweep_timed_out(1500),
+            1,
+            "first sweep finds the expired entry"
+        );
         assert_eq!(reg.sweep_timed_out(1500), 0, "second sweep is a no-op");
-        assert_eq!(reg.sweep_timed_out(u64::MAX), 0, "later sweep is also a no-op");
-        assert_eq!(fired.load(Ordering::SeqCst), 1, "on_final fires exactly once total");
+        assert_eq!(
+            reg.sweep_timed_out(u64::MAX),
+            0,
+            "later sweep is also a no-op"
+        );
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "on_final fires exactly once total"
+        );
     }
 
     #[test]
@@ -1370,8 +1542,20 @@ mod tests {
         let order: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let order_a = order.clone();
         let order_b = order.clone();
-        reg.register(7, 1, Some(1000), |_| {}, move |rid| order_a.lock().unwrap().push(rid));
-        reg.register(7, 1, Some(1000), |_| {}, move |rid| order_b.lock().unwrap().push(rid));
+        reg.register(
+            7,
+            1,
+            Some(1000),
+            |_| {},
+            move |rid| order_a.lock().unwrap().push(rid),
+        );
+        reg.register(
+            7,
+            1,
+            Some(1000),
+            |_| {},
+            move |rid| order_b.lock().unwrap().push(rid),
+        );
 
         let swept = reg.sweep_timed_out(1500);
         assert_eq!(swept, 2, "both duplicate-rid entries must be swept");

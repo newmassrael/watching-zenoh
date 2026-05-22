@@ -220,9 +220,7 @@ fn main() -> ExitCode {
         Some(s) => match s.parse::<u32>() {
             Ok(n) => n,
             Err(_) => {
-                eprintln!(
-                    "wz-ap-demo: --query-timeout-ms must be a u32 (got {s:?})",
-                );
+                eprintln!("wz-ap-demo: --query-timeout-ms must be a u32 (got {s:?})",);
                 return ExitCode::from(2);
             }
         },
@@ -238,16 +236,12 @@ fn main() -> ExitCode {
     let sweep_cadence_ms: u32 = match sweep_cadence_ms_opt {
         Some(s) => match s.parse::<u32>() {
             Ok(0) => {
-                eprintln!(
-                    "wz-ap-demo: --sweep-cadence-ms must be > 0 (0 would busy-loop)",
-                );
+                eprintln!("wz-ap-demo: --sweep-cadence-ms must be > 0 (0 would busy-loop)",);
                 return ExitCode::from(2);
             }
             Ok(n) => n,
             Err(_) => {
-                eprintln!(
-                    "wz-ap-demo: --sweep-cadence-ms must be a u32 (got {s:?})",
-                );
+                eprintln!("wz-ap-demo: --sweep-cadence-ms must be a u32 (got {s:?})",);
                 return ExitCode::from(2);
             }
         },
@@ -342,17 +336,19 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     let declare_id_parsed: Option<u64> = match declare_id_opt {
-        Some(s) => match s.parse::<u64>() {
-            Ok(0) => {
-                eprintln!("wz-ap-demo: --declare-id must be non-zero (0 is the literal-keyexpr sentinel)");
-                return ExitCode::from(2);
+        Some(s) => {
+            match s.parse::<u64>() {
+                Ok(0) => {
+                    eprintln!("wz-ap-demo: --declare-id must be non-zero (0 is the literal-keyexpr sentinel)");
+                    return ExitCode::from(2);
+                }
+                Ok(n) => Some(n),
+                Err(e) => {
+                    eprintln!("wz-ap-demo: --declare-id must be a positive integer ({e})");
+                    return ExitCode::from(2);
+                }
             }
-            Ok(n) => Some(n),
-            Err(e) => {
-                eprintln!("wz-ap-demo: --declare-id must be a positive integer ({e})");
-                return ExitCode::from(2);
-            }
-        },
+        }
         None => None,
     };
     // R219 — publisher_spec carries both Put and Delete modes through
@@ -375,8 +371,7 @@ fn main() -> ExitCode {
     // env_logger reads RUST_LOG (defaults to off). The integration
     // test fixture (R121c) sets RUST_LOG=info to surface subscriber-
     // dispatch / session-FSM transitions in the child stderr capture.
-    env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info"))
-        .init();
+    env_logger::Builder::from_env(env_logger::Env::default().filter_or("RUST_LOG", "info")).init();
 
     eprintln!("{ABOUT}");
     match &role {

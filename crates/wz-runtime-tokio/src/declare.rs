@@ -77,8 +77,7 @@ mod test_helpers;
 
 pub use liveliness::{DeclTokenCallback, LivelinessRegistry, UndeclTokenCallback};
 pub use liveliness_subscriber::{
-    LivelinessSample, LivelinessSampleCallback, LivelinessSampleKind,
-    LivelinessSubscriberRegistry,
+    LivelinessSample, LivelinessSampleCallback, LivelinessSampleKind, LivelinessSubscriberRegistry,
 };
 pub use queryable::{DeclQueryableCallback, RemoteQueryableRegistry, UndeclQueryableCallback};
 pub use subscriber::{DeclSubscriberCallback, RemoteSubscriberRegistry, UndeclSubscriberCallback};

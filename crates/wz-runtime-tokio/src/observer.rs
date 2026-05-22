@@ -178,8 +178,10 @@ impl ApplicationLayerObserver {
             &mut self.pending_replies,
             &mut self.pending_final_rids,
         );
-        self.remote_subscribers.dispatch_iteration_event(event, peer_table);
-        self.remote_queryables.dispatch_iteration_event(event, peer_table);
+        self.remote_subscribers
+            .dispatch_iteration_event(event, peer_table);
+        self.remote_queryables
+            .dispatch_iteration_event(event, peer_table);
         self.liveliness.dispatch_iteration_event(event, peer_table);
         self.liveliness_subscribers
             .dispatch_iteration_event(event, peer_table);
@@ -232,8 +234,8 @@ mod tests {
     use crate::session_glue::{DriverLoopOutcome, NetworkMessage};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-    use wz_codecs::declare::{Declare, DeclareVariant};
     use wz_codecs::decl_subscriber::DeclSubscriber;
+    use wz_codecs::declare::{Declare, DeclareVariant};
     use wz_codecs::push::Push;
     use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
@@ -305,11 +307,9 @@ mod tests {
         let mut observer = ApplicationLayerObserver::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
-        observer
-            .subscribers
-            .register("home/temp", move |_push| {
-                fired_cb.fetch_add(1, Ordering::SeqCst);
-            });
+        observer.subscribers.register("home/temp", move |_push| {
+            fired_cb.fetch_add(1, Ordering::SeqCst);
+        });
 
         let outcome = make_outcome(vec![NetworkMessage::Push(Box::new(push_literal(
             "home/temp",
@@ -352,21 +352,25 @@ mod tests {
         let l_fired = Arc::new(AtomicUsize::new(0));
 
         let s = sub_fired.clone();
-        observer
-            .subscribers
-            .register("a", move |_p| { s.fetch_add(1, Ordering::SeqCst); });
+        observer.subscribers.register("a", move |_p| {
+            s.fetch_add(1, Ordering::SeqCst);
+        });
         let rs = r_sub_fired.clone();
         observer
             .remote_subscribers
-            .on_subscriber_declared(move |_d, _r| { rs.fetch_add(1, Ordering::SeqCst); });
+            .on_subscriber_declared(move |_d, _r| {
+                rs.fetch_add(1, Ordering::SeqCst);
+            });
         let rq = r_q_fired.clone();
         observer
             .remote_queryables
-            .on_queryable_declared(move |_d, _r| { rq.fetch_add(1, Ordering::SeqCst); });
+            .on_queryable_declared(move |_d, _r| {
+                rq.fetch_add(1, Ordering::SeqCst);
+            });
         let l = l_fired.clone();
-        observer
-            .liveliness
-            .on_token_declared(move |_d, _r| { l.fetch_add(1, Ordering::SeqCst); });
+        observer.liveliness.on_token_declared(move |_d, _r| {
+            l.fetch_add(1, Ordering::SeqCst);
+        });
 
         // Frame carrying a Push + 3 different Declare arms.
         let outcome = make_outcome(vec![
@@ -400,13 +404,11 @@ mod tests {
                     }),
                 };
                 Declare {
-                    body: DeclareVariant::CodecZenohDeclToken(
-                        wz_codecs::decl_token::DeclToken {
-                            id: 3,
-                            keyexpr,
-                            ..wz_codecs::decl_token::DeclToken::default()
-                        },
-                    ),
+                    body: DeclareVariant::CodecZenohDeclToken(wz_codecs::decl_token::DeclToken {
+                        id: 3,
+                        keyexpr,
+                        ..wz_codecs::decl_token::DeclToken::default()
+                    }),
                     ..Declare::default()
                 }
             })),
@@ -424,9 +426,9 @@ mod tests {
         let mut observer = ApplicationLayerObserver::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let f = fired.clone();
-        observer
-            .subscribers
-            .register("anything", move |_p| { f.fetch_add(1, Ordering::SeqCst); });
+        observer.subscribers.register("anything", move |_p| {
+            f.fetch_add(1, Ordering::SeqCst);
+        });
 
         let event = IterationEvent::Lease(crate::session_glue::LeaseCheckOutcome::WithinLease);
         observer.dispatch_event(event);
@@ -444,9 +446,11 @@ mod tests {
         // pending_reply_count > 0; we then manually clear and confirm
         // the helper's accessor goes back to 0.
         let mut observer = ApplicationLayerObserver::new();
-        observer.queryables.register("home/temp", |_query, responder| {
-            responder.send_reply(b"21.0");
-        });
+        observer
+            .queryables
+            .register("home/temp", |_query, responder| {
+                responder.send_reply(b"21.0");
+            });
 
         // Synthesize an inbound Query for "home/temp".
         use wz_codecs::query::Query;
@@ -468,8 +472,16 @@ mod tests {
         let outcome = make_outcome(vec![NetworkMessage::Request(Box::new(request))]);
         observer.dispatch_event(IterationEvent::Poll(&outcome));
 
-        assert_eq!(observer.pending_reply_count(), 1, "one matched query staged one Reply");
-        assert_eq!(observer.pending_final_count(), 1, "matched query staged one Final");
+        assert_eq!(
+            observer.pending_reply_count(),
+            1,
+            "one matched query staged one Reply"
+        );
+        assert_eq!(
+            observer.pending_final_count(),
+            1,
+            "matched query staged one Final"
+        );
 
         // Bypass the SessionLinkActions drain (no test stand-in) and
         // simulate the flush by clearing manually. Production code

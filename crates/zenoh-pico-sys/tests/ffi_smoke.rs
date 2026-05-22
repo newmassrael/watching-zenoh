@@ -49,9 +49,7 @@ fn id_len_partial_trailing_zeros() {
 
 #[test]
 fn id_len_all_nonzero() {
-    let id = _z_id_t {
-        id: [0xFF; 16],
-    };
+    let id = _z_id_t { id: [0xFF; 16] };
     let n = unsafe { _z_id_len(id) };
     assert_eq!(n, 16, "all-nonzero id reports full 16-byte length");
 }

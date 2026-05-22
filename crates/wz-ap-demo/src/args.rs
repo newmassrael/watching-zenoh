@@ -103,7 +103,7 @@ pub(crate) fn parse_pair(args: &[String], flag: &str) -> Option<String> {
 // carry) lands.
 pub(crate) fn demo_session_init_params(role: &Role) -> SessionInitParams {
     let whatami_api = match role {
-        Role::Acceptor { .. } => 0x02, // Peer — R121b/c/d/e baseline
+        Role::Acceptor { .. } => 0x02,  // Peer — R121b/c/d/e baseline
         Role::Initiator { .. } => 0x04, // Client — R121f initiator path
     };
     SessionInitParams {

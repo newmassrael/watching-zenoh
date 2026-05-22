@@ -8,8 +8,8 @@
 
 use std::collections::HashMap;
 
-use wz_codecs::declare::DeclareVariant;
 use wz_codecs::decl_subscriber::DeclSubscriber;
+use wz_codecs::declare::DeclareVariant;
 use wz_codecs::undecl_subscriber::UndeclSubscriber;
 
 use super::resolve_wireexpr;
@@ -19,14 +19,12 @@ use crate::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
 /// `Declare(DeclSubscriber)` is decoded and its keyexpr resolves to a
 /// literal. The callback receives the codec record + the resolved
 /// keyexpr literal so consumers don't have to re-resolve.
-pub type DeclSubscriberCallback =
-    Box<dyn FnMut(&DeclSubscriber, &str) + Send + 'static>;
+pub type DeclSubscriberCallback = Box<dyn FnMut(&DeclSubscriber, &str) + Send + 'static>;
 
 /// Boxed callback invoked when an inbound
 /// `Declare(UndeclSubscriber)` is decoded. The undeclare body has no
 /// keyexpr field; the peer identifies the prior subscription by `id`.
-pub type UndeclSubscriberCallback =
-    Box<dyn FnMut(&UndeclSubscriber) + Send + 'static>;
+pub type UndeclSubscriberCallback = Box<dyn FnMut(&UndeclSubscriber) + Send + 'static>;
 
 /// Application-layer registry tracking the peer's outbound
 /// `DeclSubscriber` / `UndeclSubscriber` records. `!Sync` by
@@ -228,15 +226,16 @@ impl RemoteSubscriberRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::test_helpers::*;
+    use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[test]
     fn empty_registry_dispatch_is_noop() {
         let mut reg = RemoteSubscriberRegistry::new();
-        let body = DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(7, 0, Some("home/temp")));
+        let body =
+            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(7, 0, Some("home/temp")));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(reg.on_decl_len(), 0);
         assert_eq!(reg.on_undecl_len(), 0);
@@ -245,8 +244,7 @@ mod tests {
     #[test]
     fn declare_callback_fires_on_literal_keyexpr() {
         let mut reg = RemoteSubscriberRegistry::new();
-        let captured: Arc<Mutex<Vec<(u64, String)>>> =
-            Arc::new(Mutex::new(Vec::new()));
+        let captured: Arc<Mutex<Vec<(u64, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_cb = captured.clone();
         reg.on_subscriber_declared(move |decl, resolved| {
             captured_for_cb
@@ -280,12 +278,14 @@ mod tests {
         let body = DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(1, 11, None));
         reg.dispatch_declare(&body, &peer_table);
         // mapping_id=11, suffix="/extra" -> concat
-        let body =
-            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(2, 11, Some("/extra")));
+        let body = DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(2, 11, Some("/extra")));
         reg.dispatch_declare(&body, &peer_table);
 
         let captured = captured.lock().unwrap();
-        assert_eq!(*captured, vec!["sensors/temp".to_string(), "sensors/temp/extra".to_string()]);
+        assert_eq!(
+            *captured,
+            vec!["sensors/temp".to_string(), "sensors/temp/extra".to_string()]
+        );
     }
 
     #[test]
@@ -333,8 +333,7 @@ mod tests {
         reg.on_subscriber_declared(move |_d, _r| order_b.lock().unwrap().push(2));
         assert_eq!(reg.on_decl_len(), 2);
 
-        let body =
-            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(3, 0, Some("a/b")));
+        let body = DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(3, 0, Some("a/b")));
         reg.dispatch_declare(&body, &HashMap::new());
 
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
@@ -345,7 +344,9 @@ mod tests {
         let mut reg = RemoteSubscriberRegistry::new();
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_cb = captured.clone();
-        reg.on_subscriber_declared(move |_d, r| captured_for_cb.lock().unwrap().push(r.to_string()));
+        reg.on_subscriber_declared(move |_d, r| {
+            captured_for_cb.lock().unwrap().push(r.to_string())
+        });
 
         let body = DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber_nonlocal(
             9,
@@ -371,9 +372,7 @@ mod tests {
         // — it lives in the SubscriberRegistry's path (DeclKexpr /
         // UndeclKexpr) or the future RemoteQueryableRegistry path
         // (DeclQueryable).
-        let body = DeclareVariant::CodecZenohDeclFinal(
-            wz_codecs::decl_final::DeclFinal::default(),
-        );
+        let body = DeclareVariant::CodecZenohDeclFinal(wz_codecs::decl_final::DeclFinal::default());
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(
             fired.load(Ordering::SeqCst),
@@ -391,14 +390,15 @@ mod tests {
             counter_for_cb.fetch_add(1, Ordering::SeqCst);
         });
 
-        let messages = vec![
-            NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
-                decl_subscriber(1, 0, Some("home/a")),
-            ))),
-            NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
-                decl_subscriber(2, 0, Some("home/b")),
-            ))),
-        ];
+        let messages =
+            vec![
+                NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
+                    decl_subscriber(1, 0, Some("home/a")),
+                ))),
+                NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
+                    decl_subscriber(2, 0, Some("home/b")),
+                ))),
+            ];
         reg.dispatch_messages(&messages, &HashMap::new());
         assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
@@ -417,17 +417,18 @@ mod tests {
             u.fetch_add(1, Ordering::SeqCst);
         });
 
-        let messages = vec![
-            NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
-                decl_subscriber(1, 0, Some("a")),
-            ))),
-            NetworkMessage::Declare(Box::new(declare_envelope_undecl_subscriber(
-                undecl_subscriber(1),
-            ))),
-            NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
-                decl_subscriber(2, 0, Some("b")),
-            ))),
-        ];
+        let messages =
+            vec![
+                NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
+                    decl_subscriber(1, 0, Some("a")),
+                ))),
+                NetworkMessage::Declare(Box::new(declare_envelope_undecl_subscriber(
+                    undecl_subscriber(1),
+                ))),
+                NetworkMessage::Declare(Box::new(declare_envelope_decl_subscriber(
+                    decl_subscriber(2, 0, Some("b")),
+                ))),
+            ];
         reg.dispatch_messages(&messages, &HashMap::new());
         assert_eq!(decl_count.load(Ordering::SeqCst), 2);
         assert_eq!(undecl_count.load(Ordering::SeqCst), 1);
@@ -481,8 +482,7 @@ mod tests {
     #[test]
     fn subscriber_has_matching_true_when_peer_pattern_covers_publish_literal() {
         let mut reg = RemoteSubscriberRegistry::new();
-        let body =
-            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(8, 0, Some("home/**")));
+        let body = DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(8, 0, Some("home/**")));
         reg.dispatch_declare(&body, &HashMap::new());
         assert!(reg.has_matching("home/temp"));
         assert!(reg.has_matching("home/door/inner"));

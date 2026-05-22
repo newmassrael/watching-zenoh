@@ -135,11 +135,7 @@ async fn establish_link(role: &Role) -> io::Result<TcpStream> {
 /// peer.
 fn wire_link_pipeline(
     stream: TcpStream,
-) -> (
-    InboundReadDriver,
-    Arc<OutboundWriteDriver>,
-    JoinHandle<()>,
-) {
+) -> (InboundReadDriver, Arc<OutboundWriteDriver>, JoinHandle<()>) {
     let (reader, writer) = stream.into_split();
     let inbound = InboundReadDriver::new(reader);
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -207,14 +203,11 @@ fn install_observer_callbacks(
                 eprintln!("wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={}", undecl.id);
             });
     }
-    if query_spec.is_some()
-        && (reply_log_spec.on_query_reply || reply_log_spec.on_query_final)
-    {
+    if query_spec.is_some() && (reply_log_spec.on_query_reply || reply_log_spec.on_query_final) {
         let on_reply = reply_log_spec.on_query_reply;
         let on_final = reply_log_spec.on_query_final;
-        let deadline_ms = (reply_log_spec.query_timeout_ms > 0).then(|| {
-            session_clock.now_monotonic_ms() + reply_log_spec.query_timeout_ms as u64
-        });
+        let deadline_ms = (reply_log_spec.query_timeout_ms > 0)
+            .then(|| session_clock.now_monotonic_ms() + reply_log_spec.query_timeout_ms as u64);
         observer_lock.replies.register(
             QUERY_RID,
             // R239 — wz-ap-demo issues an outbound Request(Query)
@@ -260,11 +253,9 @@ fn install_observer_callbacks(
                     decl.id, resolved,
                 );
             });
-        observer_lock
-            .liveliness
-            .on_token_undeclared(|undecl| {
-                eprintln!("wz-ap-demo: REMOTE TOKEN UNDECLARED id={}", undecl.id);
-            });
+        observer_lock.liveliness.on_token_undeclared(|undecl| {
+            eprintln!("wz-ap-demo: REMOTE TOKEN UNDECLARED id={}", undecl.id);
+        });
     }
     // observer_lock drops here; subsequent users (drive_session
     // dispatch closure, Session::publish loopback branch) re-lock
@@ -304,23 +295,19 @@ fn install_session_handles(
 ) -> SessionHandles {
     let subscriber = key.map(|filter| {
         let key_for_callback = filter.clone();
-        session.declare_subscriber(
-            filter,
-            SubscribeOptions::default(),
-            move |sample| {
-                // R222 — Sample carries the resolved keyexpr literal +
-                // the SampleKind discriminant + payload bytes directly,
-                // so the prior `match push.keyexpr.body` + tagged-union
-                // arm extraction is no longer required at the call site.
-                eprintln!(
-                    "wz-ap-demo: SUBSCRIBER FIRED filter='{}' keyexpr='{}' kind={:?} payload_len={}",
-                    key_for_callback,
-                    sample.keyexpr,
-                    sample.kind,
-                    sample.payload.len(),
-                );
-            },
-        )
+        session.declare_subscriber(filter, SubscribeOptions::default(), move |sample| {
+            // R222 — Sample carries the resolved keyexpr literal +
+            // the SampleKind discriminant + payload bytes directly,
+            // so the prior `match push.keyexpr.body` + tagged-union
+            // arm extraction is no longer required at the call site.
+            eprintln!(
+                "wz-ap-demo: SUBSCRIBER FIRED filter='{}' keyexpr='{}' kind={:?} payload_len={}",
+                key_for_callback,
+                sample.keyexpr,
+                sample.kind,
+                sample.payload.len(),
+            );
+        })
     });
 
     let liveliness_subscriber = liveliness_subscriber_keyexpr.map(|filter| {

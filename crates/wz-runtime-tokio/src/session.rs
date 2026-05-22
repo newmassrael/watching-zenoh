@@ -66,8 +66,8 @@ use std::sync::{Arc, Mutex};
 use wz_codecs::query::Query;
 use wz_runtime_core::TimeSource;
 
-use crate::locality::Locality;
 use crate::declare::{LivelinessSample, LivelinessSampleCallback};
+use crate::locality::Locality;
 use crate::observer::ApplicationLayerObserver;
 use crate::pubsub::SubscriptionId;
 use crate::query::{QueryReply, QueryResponder, QueryableId};
@@ -626,12 +626,7 @@ impl Session {
     /// under `allows_local()`. Both branches run when
     /// `Locality::Any` (the default) and the publisher's intent is
     /// "fan to every receiver, in-process and remote".
-    pub fn publish(
-        &self,
-        keyexpr: &str,
-        payload: &[u8],
-        opts: PublishOptions,
-    ) -> usize {
+    pub fn publish(&self, keyexpr: &str, payload: &[u8], opts: PublishOptions) -> usize {
         let reliable = opts.reliable_bool();
         if opts.allowed_destination.allows_remote() {
             let meta = opts.push_metadata();
@@ -868,21 +863,18 @@ impl Session {
         // used by `drive_session_until_terminal` so the sweep call
         // shares monotonic epoch with this register-time deadline (see
         // `drive_session_until_terminal`'s clock parameter doc).
-        let deadline_ms = (opts.timeout_ms > 0)
-            .then(|| clock.now_monotonic_ms() + opts.timeout_ms as u64);
+        let deadline_ms =
+            (opts.timeout_ms > 0).then(|| clock.now_monotonic_ms() + opts.timeout_ms as u64);
 
         let handle = {
             let mut observer = self
                 .observer
                 .lock()
                 .expect("Session observer mutex poisoned — a reply callback panicked");
-            let handle = observer.replies.register(
-                rid,
-                expected_finals,
-                deadline_ms,
-                on_reply,
-                on_final,
-            );
+            let handle =
+                observer
+                    .replies
+                    .register(rid, expected_finals, deadline_ms, on_reply, on_final);
             if allows_local {
                 let mut replies: Vec<QueryReply> = Vec::new();
                 let query = Query::default();
@@ -984,21 +976,18 @@ impl Session {
         // R262 — same deadline_ms computation as `Session::query`.
         // The clock must share monotonic epoch with the sweep caller
         // (typically `drive_session_until_terminal`).
-        let deadline_ms = (opts.timeout_ms > 0)
-            .then(|| clock.now_monotonic_ms() + opts.timeout_ms as u64);
+        let deadline_ms =
+            (opts.timeout_ms > 0).then(|| clock.now_monotonic_ms() + opts.timeout_ms as u64);
 
         let handle = {
             let mut observer = self
                 .observer
                 .lock()
                 .expect("Session observer mutex poisoned — a reply callback panicked");
-            let handle = observer.replies.register(
-                rid,
-                expected_finals,
-                deadline_ms,
-                on_reply,
-                on_final,
-            );
+            let handle =
+                observer
+                    .replies
+                    .register(rid, expected_finals, deadline_ms, on_reply, on_final);
             if allows_local {
                 let mut replies: Vec<QueryReply> = Vec::new();
                 let query = Query::default();
@@ -1020,12 +1009,8 @@ impl Session {
                 self.actions
                     .send_request_query(rid, mapping_id, inline_suffix);
             } else {
-                self.actions.send_request_query_with_meta(
-                    rid,
-                    mapping_id,
-                    inline_suffix,
-                    &meta,
-                );
+                self.actions
+                    .send_request_query_with_meta(rid, mapping_id, inline_suffix, &meta);
             }
         }
 
@@ -1101,11 +1086,7 @@ impl Session {
     /// Use [`Querier::get`] to issue each query; the rid allocator
     /// hands a fresh rid per call so concurrent gets through the
     /// same Querier remain independent.
-    pub fn declare_querier(
-        &self,
-        keyexpr: impl Into<String>,
-        options: QueryOptions,
-    ) -> Querier {
+    pub fn declare_querier(&self, keyexpr: impl Into<String>, options: QueryOptions) -> Querier {
         Querier {
             session: self.clone(),
             keyexpr: keyexpr.into(),
@@ -2109,12 +2090,8 @@ impl PublisherAliased {
     pub fn delete(&self) -> Result<usize, PublishAliasError> {
         let mut opts = self.options.clone();
         opts.kind = SampleKind::Del;
-        self.session.publish_aliased_auto(
-            self.mapping_id,
-            self.inline_suffix.as_deref(),
-            &[],
-            opts,
-        )
+        self.session
+            .publish_aliased_auto(self.mapping_id, self.inline_suffix.as_deref(), &[], opts)
     }
 
     /// R290 — aliased-keyexpr counterpart of
@@ -2751,13 +2728,9 @@ impl LivelinessSubscriber {
     /// pattern keeps the intent explicit.
     pub fn undeclare(self) {
         if let Ok(mut observer) = self.session.observer().lock() {
-            observer
-                .liveliness_subscribers
-                .unregister(self.interest_id);
+            observer.liveliness_subscribers.unregister(self.interest_id);
         }
-        self.session
-            .actions()
-            .send_interest_final(self.interest_id);
+        self.session.actions().send_interest_final(self.interest_id);
         std::mem::forget(self);
     }
 }
@@ -2770,13 +2743,9 @@ impl Drop for LivelinessSubscriber {
         // (an earlier callback panicked) is treated as idempotent
         // no-op — `map` over the lock Result rather than panicking.
         if let Ok(mut observer) = self.session.observer.lock() {
-            observer
-                .liveliness_subscribers
-                .unregister(self.interest_id);
+            observer.liveliness_subscribers.unregister(self.interest_id);
         }
-        self.session
-            .actions
-            .send_interest_final(self.interest_id);
+        self.session.actions.send_interest_final(self.interest_id);
     }
 }
 
@@ -3147,8 +3116,7 @@ mod tests {
             .unwrap()
             .subscribers
             .register("home/temp", move |sample| {
-                *captured_clone.lock().unwrap() =
-                    Some((sample.kind, sample.payload.clone()));
+                *captured_clone.lock().unwrap() = Some((sample.kind, sample.payload.clone()));
             });
 
         let opts = PublishOptions::del().with_locality(Locality::SessionLocal);
@@ -3281,13 +3249,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .subscribers
-                .register_with_locality(
-                    "home/temp",
-                    Locality::SessionLocal,
-                    move |_sample| {
-                        clone.fetch_add(1, Ordering::SeqCst);
-                    },
-                );
+                .register_with_locality("home/temp", Locality::SessionLocal, move |_sample| {
+                    clone.fetch_add(1, Ordering::SeqCst);
+                });
         }
         {
             let clone = remote_hits.clone();
@@ -3296,13 +3260,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .subscribers
-                .register_with_locality(
-                    "home/temp",
-                    Locality::Remote,
-                    move |_sample| {
-                        clone.fetch_add(1, Ordering::SeqCst);
-                    },
-                );
+                .register_with_locality("home/temp", Locality::Remote, move |_sample| {
+                    clone.fetch_add(1, Ordering::SeqCst);
+                });
         }
 
         let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
@@ -3341,13 +3301,7 @@ mod tests {
         // "home/temp"); the loopback_keyexpr argument restates that
         // resolved form so loopback fires on "home/temp" even though
         // the wire side carries only mapping_id = 7.
-        let fired = session.publish_aliased(
-            7,
-            None,
-            "home/temp",
-            b"22.5",
-            PublishOptions::put(),
-        );
+        let fired = session.publish_aliased(7, None, "home/temp", b"22.5", PublishOptions::put());
         assert_eq!(fired, 1, "loopback fires on resolved literal");
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -3414,18 +3368,14 @@ mod tests {
             .unwrap()
             .subscribers
             .register("home/temp", move |sample| {
-                *captured_clone.lock().unwrap() = Some((
-                    sample.kind,
-                    sample.payload.clone(),
-                    sample.keyexpr.clone(),
-                ));
+                *captured_clone.lock().unwrap() =
+                    Some((sample.kind, sample.payload.clone(), sample.keyexpr.clone()));
             });
 
         let opts = PublishOptions::del();
         let fired = session.publish_aliased(7, None, "home/temp", b"ignored", opts);
         assert_eq!(fired, 1);
-        let (kind, payload, keyexpr) =
-            captured.lock().unwrap().clone().expect("fired");
+        let (kind, payload, keyexpr) = captured.lock().unwrap().clone().expect("fired");
         assert_eq!(kind, SampleKind::Del);
         assert!(payload.is_empty(), "Del Sample carries no payload");
         assert_eq!(keyexpr, "home/temp", "loopback uses resolved literal");
@@ -3472,14 +3422,12 @@ mod tests {
         let (session, driver) = build_session();
         let captured = Arc::new(Mutex::new(None::<String>));
         let captured_clone = captured.clone();
-        session
-            .observer()
-            .lock()
-            .unwrap()
-            .subscribers
-            .register("home/temp/kitchen", move |sample| {
+        session.observer().lock().unwrap().subscribers.register(
+            "home/temp/kitchen",
+            move |sample| {
                 *captured_clone.lock().unwrap() = Some(sample.keyexpr.clone());
-            });
+            },
+        );
 
         let fired = session.publish_aliased(
             7,
@@ -3501,8 +3449,7 @@ mod tests {
     fn publish_aliased_returns_zero_with_no_loopback_subscriber() {
         let (session, driver) = build_session();
         let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
-        let fired =
-            session.publish_aliased(7, None, "home/temp", b"x", opts);
+        let fired = session.publish_aliased(7, None, "home/temp", b"x", opts);
         assert_eq!(fired, 0, "empty registry yields zero fired callbacks");
         assert_eq!(
             driver.frame_count(),
@@ -3522,14 +3469,12 @@ mod tests {
         let (session, _driver) = build_session();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = counter.clone();
-        session
-            .observer()
-            .lock()
-            .unwrap()
-            .subscribers
-            .register("intentionally_decoupled", move |_sample| {
+        session.observer().lock().unwrap().subscribers.register(
+            "intentionally_decoupled",
+            move |_sample| {
                 counter_clone.fetch_add(1, Ordering::SeqCst);
-            });
+            },
+        );
 
         let fired = session.publish_aliased(
             42,
@@ -3562,13 +3507,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .subscribers
-                .register_with_locality(
-                    "home/temp",
-                    Locality::Any,
-                    move |_s| {
-                        clone.fetch_add(1, Ordering::SeqCst);
-                    },
-                );
+                .register_with_locality("home/temp", Locality::Any, move |_s| {
+                    clone.fetch_add(1, Ordering::SeqCst);
+                });
         }
         {
             let clone = local_hits.clone();
@@ -3577,13 +3518,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .subscribers
-                .register_with_locality(
-                    "home/temp",
-                    Locality::SessionLocal,
-                    move |_s| {
-                        clone.fetch_add(1, Ordering::SeqCst);
-                    },
-                );
+                .register_with_locality("home/temp", Locality::SessionLocal, move |_s| {
+                    clone.fetch_add(1, Ordering::SeqCst);
+                });
         }
         {
             let clone = remote_hits.clone();
@@ -3592,13 +3529,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .subscribers
-                .register_with_locality(
-                    "home/temp",
-                    Locality::Remote,
-                    move |_s| {
-                        clone.fetch_add(1, Ordering::SeqCst);
-                    },
-                );
+                .register_with_locality("home/temp", Locality::Remote, move |_s| {
+                    clone.fetch_add(1, Ordering::SeqCst);
+                });
         }
 
         let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
@@ -3641,12 +3574,7 @@ mod tests {
         let zid = vec![0x01, 0x02, 0x03, 0x04];
         assert!(session.set_own_zid(zid.clone()));
         assert_eq!(
-            session
-                .observer()
-                .lock()
-                .unwrap()
-                .subscribers
-                .own_zid(),
+            session.observer().lock().unwrap().subscribers.own_zid(),
             Some(&zid[..])
         );
     }
@@ -3664,24 +3592,14 @@ mod tests {
 
         assert!(!session.set_own_zid(vec![]));
         assert_eq!(
-            session
-                .observer()
-                .lock()
-                .unwrap()
-                .subscribers
-                .own_zid(),
+            session.observer().lock().unwrap().subscribers.own_zid(),
             Some(&initial[..]),
             "rejected length-0 install must not mutate previously-installed zid"
         );
 
         assert!(!session.set_own_zid(vec![0u8; 17]));
         assert_eq!(
-            session
-                .observer()
-                .lock()
-                .unwrap()
-                .subscribers
-                .own_zid(),
+            session.observer().lock().unwrap().subscribers.own_zid(),
             Some(&initial[..]),
             "rejected length-17 install must not mutate previously-installed zid"
         );
@@ -3691,15 +3609,13 @@ mod tests {
     fn clear_own_zid_forwards_to_subscriber_registry() {
         let (session, _driver) = build_session();
         assert!(session.set_own_zid(vec![0x09, 0x08, 0x07, 0x06]));
-        assert!(
-            session
-                .observer()
-                .lock()
-                .unwrap()
-                .subscribers
-                .own_zid()
-                .is_some()
-        );
+        assert!(session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .own_zid()
+            .is_some());
 
         session.clear_own_zid();
         assert!(
@@ -3728,12 +3644,7 @@ mod tests {
         let (session, _driver) = build_session();
         let fixture_zid: Vec<u8> = vec![0x01, 0x02, 0x03, 0x04];
         assert_eq!(
-            session
-                .observer()
-                .lock()
-                .unwrap()
-                .subscribers
-                .own_zid(),
+            session.observer().lock().unwrap().subscribers.own_zid(),
             Some(&fixture_zid[..]),
             "Session::new auto-wires own_zid from SessionInitParams.zid"
         );
@@ -4094,7 +4005,10 @@ mod tests {
         // diagnosable without reflection.
         let err = PublishAliasError::UnknownMapping(123);
         let s = err.to_string();
-        assert!(s.contains("123"), "error message must contain the mapping id");
+        assert!(
+            s.contains("123"),
+            "error message must contain the mapping id"
+        );
         assert!(
             s.contains("send_declare_keyexpr"),
             "error message hints at the remediation API"
@@ -4211,19 +4125,38 @@ mod tests {
         let f = final_count.clone();
         let _handle = session.query(
             "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),&clock,
-            
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            &clock,
             move |reply| {
                 r.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(reply.keyexpr_literal, "home/temp");
-                assert_eq!(reply.body, InboundReplyBody::Put { payload: b"22.5".to_vec() });
+                assert_eq!(
+                    reply.body,
+                    InboundReplyBody::Put {
+                        payload: b"22.5".to_vec()
+                    }
+                );
             },
-            move |_rid| { f.fetch_add(1, Ordering::SeqCst); },
+            move |_rid| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
         );
 
-        assert_eq!(reply_count.load(Ordering::SeqCst), 1, "loopback reply fires inline");
-        assert_eq!(final_count.load(Ordering::SeqCst), 1, "SessionLocal final completes inline");
-        assert_eq!(driver.frame_count(), 0, "SessionLocal must NOT touch the wire");
+        assert_eq!(
+            reply_count.load(Ordering::SeqCst),
+            1,
+            "loopback reply fires inline"
+        );
+        assert_eq!(
+            final_count.load(Ordering::SeqCst),
+            1,
+            "SessionLocal final completes inline"
+        );
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "SessionLocal must NOT touch the wire"
+        );
         assert!(
             session.observer().lock().unwrap().replies.is_empty(),
             "expected_finals=1 closes the pending entry on the loopback final"
@@ -4253,15 +4186,31 @@ mod tests {
         let f = final_count.clone();
         let _handle = session.query(
             "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::Remote),&clock,
-            
-            move |_reply| { r.fetch_add(1, Ordering::SeqCst); },
-            move |_rid| { f.fetch_add(1, Ordering::SeqCst); },
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+            &clock,
+            move |_reply| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
+            move |_rid| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
         );
 
-        assert_eq!(reply_count.load(Ordering::SeqCst), 0, "Remote suppresses loopback");
-        assert_eq!(final_count.load(Ordering::SeqCst), 0, "wire Final has not arrived yet");
-        assert_eq!(driver.frame_count(), 1, "wire Request(Query) frame on the driver");
+        assert_eq!(
+            reply_count.load(Ordering::SeqCst),
+            0,
+            "Remote suppresses loopback"
+        );
+        assert_eq!(
+            final_count.load(Ordering::SeqCst),
+            0,
+            "wire Final has not arrived yet"
+        );
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "wire Request(Query) frame on the driver"
+        );
         assert_eq!(
             session.observer().lock().unwrap().replies.len(),
             1,
@@ -4289,20 +4238,33 @@ mod tests {
         let f = final_count.clone();
         let _handle = session.query(
             "home/temp",
-            QueryOptions::get(),&clock,
-             // Any (default)
-            move |_reply| { r.fetch_add(1, Ordering::SeqCst); },
-            move |_rid| { f.fetch_add(1, Ordering::SeqCst); },
+            QueryOptions::get(),
+            &clock,
+            // Any (default)
+            move |_reply| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
+            move |_rid| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
         );
 
         // Inline observations:
-        assert_eq!(reply_count.load(Ordering::SeqCst), 1, "loopback reply fires inline");
+        assert_eq!(
+            reply_count.load(Ordering::SeqCst),
+            1,
+            "loopback reply fires inline"
+        );
         assert_eq!(
             final_count.load(Ordering::SeqCst),
             0,
             "Locality::Any on_final must wait for the wire Final too (expected_finals=2)"
         );
-        assert_eq!(driver.frame_count(), 1, "wire branch dispatched one Request(Query)");
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "wire branch dispatched one Request(Query)"
+        );
         assert_eq!(
             session.observer().lock().unwrap().replies.len(),
             1,
@@ -4313,12 +4275,17 @@ mod tests {
         // expected finals — and observe on_final fire then.
         use wz_codecs::response_final::ResponseFinal;
         let mut observer = session.observer().lock().unwrap();
-        observer
-            .replies
-            .dispatch_response_final(&ResponseFinal { request_id: 0, ..ResponseFinal::default() });
+        observer.replies.dispatch_response_final(&ResponseFinal {
+            request_id: 0,
+            ..ResponseFinal::default()
+        });
         drop(observer);
 
-        assert_eq!(final_count.load(Ordering::SeqCst), 1, "second Final closes the chain");
+        assert_eq!(
+            final_count.load(Ordering::SeqCst),
+            1,
+            "second Final closes the chain"
+        );
         assert!(
             session.observer().lock().unwrap().replies.is_empty(),
             "pending entry dropped after the closing Final"
@@ -4331,20 +4298,24 @@ mod tests {
         let (session, _driver) = build_session();
         let h0 = session.query(
             "k",
-            QueryOptions::get().with_allowed_destination(Locality::Remote),&clock,
-            
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+            &clock,
             |_| {},
             |_| {},
         );
         let h1 = session.query(
             "k",
-            QueryOptions::get().with_allowed_destination(Locality::Remote),&clock,
-            
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+            &clock,
             |_| {},
             |_| {},
         );
         assert_eq!(h0.rid(), 0);
-        assert_eq!(h1.rid(), 1, "alloc_next_request_id increments monotonically");
+        assert_eq!(
+            h1.rid(),
+            1,
+            "alloc_next_request_id increments monotonically"
+        );
     }
 
     #[test]
@@ -4365,13 +4336,19 @@ mod tests {
 
         session.query(
             "clear/me",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),&clock,
-            
-            move |reply| { *cap_cb.lock().unwrap() = Some(reply.clone()); },
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            &clock,
+            move |reply| {
+                *cap_cb.lock().unwrap() = Some(reply.clone());
+            },
             |_| {},
         );
 
-        let got = captured.lock().unwrap().clone().expect("on_reply must fire");
+        let got = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("on_reply must fire");
         assert_eq!(got.body, InboundReplyBody::Del);
         assert_eq!(got.keyexpr_literal, "clear/me");
     }
@@ -4394,13 +4371,19 @@ mod tests {
 
         session.query(
             "error/path",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),&clock,
-            
-            move |reply| { *cap_cb.lock().unwrap() = Some(reply.clone()); },
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            &clock,
+            move |reply| {
+                *cap_cb.lock().unwrap() = Some(reply.clone());
+            },
             |_| {},
         );
 
-        let got = captured.lock().unwrap().clone().expect("on_reply must fire");
+        let got = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("on_reply must fire");
         assert_eq!(got.keyexpr_literal, "error/path");
         match &got.body {
             InboundReplyBody::Err { encoding, payload } => {
@@ -4434,10 +4417,14 @@ mod tests {
         let f = final_count.clone();
         session.query(
             "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),&clock,
-            
-            move |_| { r.fetch_add(1, Ordering::SeqCst); },
-            move |_| { f.fetch_add(1, Ordering::SeqCst); },
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            &clock,
+            move |_| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
+            move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
         );
 
         assert_eq!(reply_count.load(Ordering::SeqCst), 0);
@@ -4464,13 +4451,9 @@ mod tests {
             .lock()
             .unwrap()
             .queryables
-            .register_with_locality(
-                "home/temp",
-                Locality::Remote,
-                move |_q, _responder| {
-                    fired_cb.fetch_add(1, Ordering::SeqCst);
-                },
-            );
+            .register_with_locality("home/temp", Locality::Remote, move |_q, _responder| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            });
 
         let reply_count = Arc::new(AtomicUsize::new(0));
         let final_count = Arc::new(AtomicUsize::new(0));
@@ -4478,15 +4461,27 @@ mod tests {
         let f = final_count.clone();
         session.query(
             "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),&clock,
-            
-            move |_| { r.fetch_add(1, Ordering::SeqCst); },
-            move |_| { f.fetch_add(1, Ordering::SeqCst); },
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            &clock,
+            move |_| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
+            move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
         );
 
-        assert_eq!(fired.load(Ordering::SeqCst), 0, "Remote-only queryable must skip loopback");
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "Remote-only queryable must skip loopback"
+        );
         assert_eq!(reply_count.load(Ordering::SeqCst), 0);
-        assert_eq!(final_count.load(Ordering::SeqCst), 1, "loopback Final still fires");
+        assert_eq!(
+            final_count.load(Ordering::SeqCst),
+            1,
+            "loopback Final still fires"
+        );
     }
 
     #[test]
@@ -4503,22 +4498,20 @@ mod tests {
             .lock()
             .unwrap()
             .queryables
-            .register_with_locality(
-                "home/temp",
-                Locality::SessionLocal,
-                move |_q, responder| {
-                    fired_cb.fetch_add(1, Ordering::SeqCst);
-                    responder.send_reply(b"22.5");
-                },
-            );
+            .register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+                responder.send_reply(b"22.5");
+            });
 
         let reply_count = Arc::new(AtomicUsize::new(0));
         let r = reply_count.clone();
         session.query(
             "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),&clock,
-            
-            move |_| { r.fetch_add(1, Ordering::SeqCst); },
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            &clock,
+            move |_| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
             |_| {},
         );
 
@@ -4538,23 +4531,23 @@ mod tests {
         let (session, driver) = build_session();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
-        session
-            .observer()
-            .lock()
-            .unwrap()
-            .queryables
-            .register("home/temp", move |_q, responder| {
+        session.observer().lock().unwrap().queryables.register(
+            "home/temp",
+            move |_q, responder| {
                 fired_cb.fetch_add(1, Ordering::SeqCst);
                 responder.send_reply(b"22.5");
-            });
+            },
+        );
 
         let reply_count = Arc::new(AtomicUsize::new(0));
         let r = reply_count.clone();
         session.query(
             "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::Remote),&clock,
-            
-            move |_| { r.fetch_add(1, Ordering::SeqCst); },
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+            &clock,
+            move |_| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
             |_| {},
         );
 
@@ -4592,7 +4585,10 @@ mod tests {
             .with_attachment(b"q-att".to_vec())
             .with_timeout_ms(5_000)
             .with_payload(b"unused-payload".to_vec())
-            .with_encoding(EncodingHint { packed_id: 1, schema: None });
+            .with_encoding(EncodingHint {
+                packed_id: 1,
+                schema: None,
+            });
         let meta = opts.query_metadata();
         assert_eq!(meta.target, Some(QueryTarget::AllComplete));
         assert_eq!(meta.consolidation, Some(ConsolidationMode::Monotonic));
@@ -4603,7 +4599,10 @@ mod tests {
     #[test]
     fn query_options_default_query_metadata_is_empty() {
         let meta = QueryOptions::default().query_metadata();
-        assert!(meta.is_empty(), "default options produce empty wire metadata");
+        assert!(
+            meta.is_empty(),
+            "default options produce empty wire metadata"
+        );
     }
 
     #[test]
@@ -4617,8 +4616,8 @@ mod tests {
         let (session, driver) = build_session();
         session.query(
             "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::Remote),&clock,
-            
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+            &clock,
             |_| {},
             |_| {},
         );
@@ -4654,8 +4653,8 @@ mod tests {
             "home/temp",
             QueryOptions::get()
                 .with_allowed_destination(Locality::Remote)
-                .with_target(QueryTarget::AllComplete),&clock,
-            
+                .with_target(QueryTarget::AllComplete),
+            &clock,
             |_| {},
             |_| {},
         );
@@ -4669,7 +4668,9 @@ mod tests {
         let standalone_bytes = standalone.encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
-            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            frame
+                .windows(standalone_bytes.len())
+                .any(|w| w == standalone_bytes),
             "Session::query wire frame must contain with-target Request bytes"
         );
     }
@@ -4682,8 +4683,8 @@ mod tests {
             "home/temp",
             QueryOptions::get()
                 .with_allowed_destination(Locality::Remote)
-                .with_attachment(b"q-att".to_vec()),&clock,
-            
+                .with_attachment(b"q-att".to_vec()),
+            &clock,
             |_| {},
             |_| {},
         );
@@ -4693,7 +4694,9 @@ mod tests {
         let standalone_bytes = standalone.encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
-            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            frame
+                .windows(standalone_bytes.len())
+                .any(|w| w == standalone_bytes),
             "wire frame must contain with-attachment Request bytes"
         );
     }
@@ -4706,19 +4709,25 @@ mod tests {
             "home/temp",
             QueryOptions::get()
                 .with_allowed_destination(Locality::Remote)
-                .with_consolidation(ConsolidationMode::Latest),&clock,
-            
+                .with_consolidation(ConsolidationMode::Latest),
+            &clock,
             |_| {},
             |_| {},
         );
 
         use crate::session_glue::build_request_query_with_consolidation;
-        let standalone =
-            build_request_query_with_consolidation(0, 0, Some("home/temp"), ConsolidationMode::Latest);
+        let standalone = build_request_query_with_consolidation(
+            0,
+            0,
+            Some("home/temp"),
+            ConsolidationMode::Latest,
+        );
         let standalone_bytes = standalone.encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
-            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            frame
+                .windows(standalone_bytes.len())
+                .any(|w| w == standalone_bytes),
             "wire frame must contain with-consolidation Request bytes"
         );
     }
@@ -4737,8 +4746,8 @@ mod tests {
                 .with_allowed_destination(Locality::SessionLocal)
                 .with_target(QueryTarget::All)
                 .with_attachment(b"q-att".to_vec())
-                .with_timeout_ms(1_000),&clock,
-            
+                .with_timeout_ms(1_000),
+            &clock,
             |_| {},
             |_| {},
         );
@@ -4773,10 +4782,14 @@ mod tests {
             7,
             None,
             "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),&clock,
-            
-            move |_reply| { r.fetch_add(1, Ordering::SeqCst); },
-            move |_rid| { f.fetch_add(1, Ordering::SeqCst); },
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            &clock,
+            move |_reply| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
+            move |_rid| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
         );
 
         assert_eq!(reply_count.load(Ordering::SeqCst), 1);
@@ -4792,8 +4805,8 @@ mod tests {
             7,
             None,
             "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::Remote),&clock,
-            
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+            &clock,
             |_| {},
             |_| {},
         );
@@ -4806,7 +4819,9 @@ mod tests {
         let standalone_bytes = standalone.encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
-            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            frame
+                .windows(standalone_bytes.len())
+                .any(|w| w == standalone_bytes),
             "wire frame must encode the (mapping_id=7, suffix=None) aliased pair"
         );
     }
@@ -4832,10 +4847,15 @@ mod tests {
             7,
             None,
             "home/temp",
-            QueryOptions::get(),&clock,
-             // Any
-            move |_| { r.fetch_add(1, Ordering::SeqCst); },
-            move |_| { f.fetch_add(1, Ordering::SeqCst); },
+            QueryOptions::get(),
+            &clock,
+            // Any
+            move |_| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
+            move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
         );
 
         assert_eq!(reply_count.load(Ordering::SeqCst), 1, "loopback fires");
@@ -4856,28 +4876,36 @@ mod tests {
 
         // Local queryable matches the COMPOSITE literal (the
         // loopback path uses loopback_keyexpr verbatim).
-        session
-            .observer()
-            .lock()
-            .unwrap()
-            .queryables
-            .register("home/temp/kitchen", |_q, responder| {
+        session.observer().lock().unwrap().queryables.register(
+            "home/temp/kitchen",
+            |_q, responder| {
                 responder.send_reply(b"21.0");
-            });
+            },
+        );
 
         session.query_aliased(
             7,
             Some("/kitchen"),
             "home/temp/kitchen",
-            QueryOptions::get(),&clock,
-            
-            move |reply| { *cap_cb.lock().unwrap() = Some(reply.clone()); },
+            QueryOptions::get(),
+            &clock,
+            move |reply| {
+                *cap_cb.lock().unwrap() = Some(reply.clone());
+            },
             |_| {},
         );
 
-        let got = captured.lock().unwrap().clone().expect("loopback reply fired");
+        let got = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("loopback reply fired");
         assert_eq!(got.keyexpr_literal, "home/temp/kitchen");
-        assert_eq!(driver.frame_count(), 1, "wire branch sent the composite pair");
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "wire branch sent the composite pair"
+        );
     }
 
     #[test]
@@ -4903,13 +4931,19 @@ mod tests {
                 None,
                 QueryOptions::get(),
                 &clock,
-                move |reply| { *cap_cb.lock().unwrap() = Some(reply.clone()); },
+                move |reply| {
+                    *cap_cb.lock().unwrap() = Some(reply.clone());
+                },
                 |_| {},
             )
             .expect("declared mapping resolves");
 
         assert_eq!(handle.rid(), 0, "first auto-resolved query gets rid=0");
-        let got = captured.lock().unwrap().clone().expect("loopback reply fired");
+        let got = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("loopback reply fired");
         assert_eq!(got.keyexpr_literal, "home/temp");
         // 2 wire frames: one DeclKexpr, one Request(Query).
         assert_eq!(driver.frame_count(), 2);
@@ -4930,14 +4964,7 @@ mod tests {
                 fired_cb.fetch_add(1, Ordering::SeqCst);
             });
 
-        let err = session.query_aliased_auto(
-            99,
-            None,
-            QueryOptions::get(),&clock,
-            
-            |_| {},
-            |_| {},
-        );
+        let err = session.query_aliased_auto(99, None, QueryOptions::get(), &clock, |_| {}, |_| {});
         assert_eq!(err, Err(QueryAliasError::UnknownMapping(99)));
         assert_eq!(fired.load(Ordering::SeqCst), 0, "loopback skipped on err");
         assert_eq!(driver.frame_count(), 0, "wire skipped on err");
@@ -4955,14 +4982,12 @@ mod tests {
 
         let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
         let cap_cb = captured.clone();
-        session
-            .observer()
-            .lock()
-            .unwrap()
-            .queryables
-            .register("home/temp/kitchen", |_q, responder| {
+        session.observer().lock().unwrap().queryables.register(
+            "home/temp/kitchen",
+            |_q, responder| {
                 responder.send_reply(b"21.0");
-            });
+            },
+        );
 
         session
             .query_aliased_auto(
@@ -4970,12 +4995,18 @@ mod tests {
                 Some("/kitchen"),
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
                 &clock,
-                move |reply| { *cap_cb.lock().unwrap() = Some(reply.clone()); },
+                move |reply| {
+                    *cap_cb.lock().unwrap() = Some(reply.clone());
+                },
                 |_| {},
             )
             .expect("declared mapping resolves");
 
-        let got = captured.lock().unwrap().clone().expect("composite literal matched");
+        let got = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("composite literal matched");
         assert_eq!(got.keyexpr_literal, "home/temp/kitchen");
     }
 
@@ -4989,8 +5020,8 @@ mod tests {
             "home/temp",
             QueryOptions::get()
                 .with_allowed_destination(Locality::Remote)
-                .with_attachment(b"q-att".to_vec()),&clock,
-            
+                .with_attachment(b"q-att".to_vec()),
+            &clock,
             |_| {},
             |_| {},
         );
@@ -5000,7 +5031,9 @@ mod tests {
         let standalone_bytes = standalone.encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
-            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            frame
+                .windows(standalone_bytes.len())
+                .any(|w| w == standalone_bytes),
             "aliased + with-meta routing must thread attachment onto wire"
         );
     }
@@ -5009,7 +5042,10 @@ mod tests {
     fn query_alias_error_display_message_hints_remediation() {
         let err = QueryAliasError::UnknownMapping(42);
         let msg = format!("{err}");
-        assert!(msg.contains("42"), "error message includes the offending id");
+        assert!(
+            msg.contains("42"),
+            "error message includes the offending id"
+        );
         assert!(
             msg.contains("send_declare_keyexpr"),
             "error message hints at the remediation API"
@@ -5039,7 +5075,11 @@ mod tests {
         // register (unlike DeclareSubscriber / DeclareQueryable).
         let (session, driver) = build_session();
         let _querier = session.declare_querier("home/temp", QueryOptions::get());
-        assert_eq!(driver.frame_count(), 0, "declare_querier is a no-op on the wire");
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "declare_querier is a no-op on the wire"
+        );
     }
 
     #[test]
@@ -5066,8 +5106,12 @@ mod tests {
         let f = final_count.clone();
         querier.get(
             &clock,
-            move |_| { r.fetch_add(1, Ordering::SeqCst); },
-            move |_| { f.fetch_add(1, Ordering::SeqCst); },
+            move |_| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
+            move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
         );
 
         assert_eq!(reply_count.load(Ordering::SeqCst), 1);
@@ -5086,7 +5130,11 @@ mod tests {
         let h0 = querier.get(&clock, |_| {}, |_| {});
         let h1 = querier.get(&clock, |_| {}, |_| {});
         assert_eq!(h0.rid(), 0);
-        assert_eq!(h1.rid(), 1, "successive querier.get() calls get monotonic rids");
+        assert_eq!(
+            h1.rid(),
+            1,
+            "successive querier.get() calls get monotonic rids"
+        );
         assert_eq!(
             session.observer().lock().unwrap().replies.len(),
             2,
@@ -5114,12 +5162,13 @@ mod tests {
         querier.get(&clock, |_| {}, |_| {});
 
         use crate::session_glue::build_request_query_with_target;
-        let standalone =
-            build_request_query_with_target(0, 0, Some("home/temp"), QueryTarget::All);
+        let standalone = build_request_query_with_target(0, 0, Some("home/temp"), QueryTarget::All);
         let standalone_bytes = standalone.encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
-            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            frame
+                .windows(standalone_bytes.len())
+                .any(|w| w == standalone_bytes),
             "Querier::get must thread declare-time target option into the wire frame"
         );
     }
@@ -5137,9 +5186,7 @@ mod tests {
         );
         // Both clones can issue independent gets — verify by emitting
         // through both and checking the pending count.
-        let q1 = querier
-            .clone()
-            .get(&clock, |_| {}, |_| {});
+        let q1 = querier.clone().get(&clock, |_| {}, |_| {});
         let q2 = clone.get(&clock, |_| {}, |_| {});
         assert_eq!(q1.rid(), 0);
         assert_eq!(q2.rid(), 1, "clones share the same rid allocator");
@@ -5154,10 +5201,7 @@ mod tests {
     /// `pub(super)`-scoped to the declare module so we cannot import
     /// them here; the constructors are intentionally small so
     /// inlining is cheaper than relaxing the helper visibility.
-    fn make_decl_queryable(
-        id: u64,
-        keyexpr_literal: &str,
-    ) -> wz_codecs::declare::DeclareVariant {
+    fn make_decl_queryable(id: u64, keyexpr_literal: &str) -> wz_codecs::declare::DeclareVariant {
         use wz_codecs::decl_queryable::DeclQueryable;
         use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
         use wz_codecs::wireexpr_local::WireexprLocal;
@@ -5177,9 +5221,7 @@ mod tests {
         })
     }
 
-    fn make_undecl_queryable(
-        id: u64,
-    ) -> wz_codecs::declare::DeclareVariant {
+    fn make_undecl_queryable(id: u64) -> wz_codecs::declare::DeclareVariant {
         use wz_codecs::undecl_queryable::UndeclQueryable;
         wz_codecs::declare::DeclareVariant::CodecZenohUndeclQueryable(UndeclQueryable {
             id,
@@ -5266,7 +5308,10 @@ mod tests {
             .unwrap()
             .remote_queryables
             .dispatch_declare(&make_decl_queryable(45, "home/temp"), &HashMap::new());
-        assert_eq!(querier.get_matching_status(), MatchingStatus { matching: true });
+        assert_eq!(
+            querier.get_matching_status(),
+            MatchingStatus { matching: true }
+        );
         // Peer retracts the queryable.
         session
             .observer()
@@ -5326,8 +5371,14 @@ mod tests {
         let (session, _driver) = build_session();
         let querier = session.declare_querier("home/temp", QueryOptions::get());
         let querier_clone = querier.clone();
-        assert_eq!(querier.get_matching_status(), MatchingStatus { matching: false });
-        assert_eq!(querier_clone.get_matching_status(), MatchingStatus { matching: false });
+        assert_eq!(
+            querier.get_matching_status(),
+            MatchingStatus { matching: false }
+        );
+        assert_eq!(
+            querier_clone.get_matching_status(),
+            MatchingStatus { matching: false }
+        );
         session
             .observer()
             .lock()
@@ -5335,8 +5386,14 @@ mod tests {
             .remote_queryables
             .dispatch_declare(&make_decl_queryable(60, "home/temp"), &HashMap::new());
         // Both clones observe the same registry membership change.
-        assert_eq!(querier.get_matching_status(), MatchingStatus { matching: true });
-        assert_eq!(querier_clone.get_matching_status(), MatchingStatus { matching: true });
+        assert_eq!(
+            querier.get_matching_status(),
+            MatchingStatus { matching: true }
+        );
+        assert_eq!(
+            querier_clone.get_matching_status(),
+            MatchingStatus { matching: true }
+        );
     }
 
     // ── R243 QuerierAliased ──
@@ -5355,7 +5412,11 @@ mod tests {
     fn declare_querier_aliased_does_not_emit_wire_frame() {
         let (session, driver) = build_session();
         let _qa = session.declare_querier_aliased(7, None, QueryOptions::get());
-        assert_eq!(driver.frame_count(), 0, "declare_querier_aliased is a no-op on the wire");
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "declare_querier_aliased is a no-op on the wire"
+        );
     }
 
     #[test]
@@ -5383,7 +5444,9 @@ mod tests {
         let handle = qa
             .get(
                 &clock,
-                move |reply| { *cap_cb.lock().unwrap() = Some(reply.clone()); },
+                move |reply| {
+                    *cap_cb.lock().unwrap() = Some(reply.clone());
+                },
                 |_| {},
             )
             .expect("declared mapping resolves");
@@ -5391,7 +5454,11 @@ mod tests {
         assert_eq!(handle.rid(), 0);
         let got = captured.lock().unwrap().clone().expect("loopback fired");
         assert_eq!(got.keyexpr_literal, "home/temp");
-        assert_eq!(driver.frame_count(), 1, "DeclKexpr frame only (SessionLocal skips Query wire)");
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "DeclKexpr frame only (SessionLocal skips Query wire)"
+        );
     }
 
     #[test]
@@ -5424,14 +5491,12 @@ mod tests {
 
         let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
         let cap_cb = captured.clone();
-        session
-            .observer()
-            .lock()
-            .unwrap()
-            .queryables
-            .register("home/temp/kitchen", |_q, responder| {
+        session.observer().lock().unwrap().queryables.register(
+            "home/temp/kitchen",
+            |_q, responder| {
                 responder.send_reply(b"21.0");
-            });
+            },
+        );
 
         let qa = session.declare_querier_aliased(
             7,
@@ -5440,12 +5505,18 @@ mod tests {
         );
         qa.get(
             &clock,
-            move |reply| { *cap_cb.lock().unwrap() = Some(reply.clone()); },
+            move |reply| {
+                *cap_cb.lock().unwrap() = Some(reply.clone());
+            },
             |_| {},
         )
         .expect("declared mapping resolves");
 
-        let got = captured.lock().unwrap().clone().expect("composite literal matched");
+        let got = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("composite literal matched");
         assert_eq!(got.keyexpr_literal, "home/temp/kitchen");
     }
 
@@ -5588,7 +5659,10 @@ mod tests {
             .unwrap()
             .remote_queryables
             .dispatch_declare(&make_decl_queryable(73, "home/temp"), &HashMap::new());
-        assert_eq!(qa.get_matching_status(), Ok(MatchingStatus { matching: true }));
+        assert_eq!(
+            qa.get_matching_status(),
+            Ok(MatchingStatus { matching: true })
+        );
         // Local-side retracts the keyexpr mapping — subsequent
         // get_matching_status surfaces UnknownMapping just like
         // QuerierAliased::get does.
@@ -5618,7 +5692,11 @@ mod tests {
     fn declare_publisher_does_not_emit_wire_frame() {
         let (session, driver) = build_session();
         let _pubr = session.declare_publisher("home/temp", PublishOptions::put());
-        assert_eq!(driver.frame_count(), 0, "declare_publisher is a no-op on the wire");
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "declare_publisher is a no-op on the wire"
+        );
     }
 
     #[test]
@@ -5721,7 +5799,11 @@ mod tests {
         let count = pa.put(b"22.5").expect("declared mapping resolves");
         assert_eq!(count, 1);
         assert_eq!(fired.load(Ordering::SeqCst), 1);
-        assert_eq!(driver.frame_count(), 1, "DeclKexpr only (SessionLocal skips Push wire)");
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "DeclKexpr only (SessionLocal skips Push wire)"
+        );
     }
 
     #[test]
@@ -5776,10 +5858,7 @@ mod tests {
     /// make_undecl_queryable helpers; the
     /// crate::declare::test_helpers versions are pub(super)-scoped
     /// to the declare module and not visible here.
-    fn make_decl_subscriber(
-        id: u64,
-        keyexpr_literal: &str,
-    ) -> wz_codecs::declare::DeclareVariant {
+    fn make_decl_subscriber(id: u64, keyexpr_literal: &str) -> wz_codecs::declare::DeclareVariant {
         use wz_codecs::decl_subscriber::DeclSubscriber;
         use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
         use wz_codecs::wireexpr_local::WireexprLocal;
@@ -5865,7 +5944,10 @@ mod tests {
             .unwrap()
             .remote_subscribers
             .dispatch_declare(&make_decl_subscriber(45, "home/temp"), &HashMap::new());
-        assert_eq!(publisher.get_matching_status(), MatchingStatus { matching: true });
+        assert_eq!(
+            publisher.get_matching_status(),
+            MatchingStatus { matching: true }
+        );
         session
             .observer()
             .lock()
@@ -5938,7 +6020,10 @@ mod tests {
             .unwrap()
             .remote_subscribers
             .dispatch_declare(&make_decl_subscriber(73, "home/temp"), &HashMap::new());
-        assert_eq!(pa.get_matching_status(), Ok(MatchingStatus { matching: true }));
+        assert_eq!(
+            pa.get_matching_status(),
+            Ok(MatchingStatus { matching: true })
+        );
         session.actions().send_undeclare_kexpr(7);
         assert_eq!(
             pa.get_matching_status(),
@@ -5976,12 +6061,12 @@ mod tests {
     #[test]
     fn declare_subscriber_does_not_emit_wire_frame() {
         let (session, driver) = build_session();
-        let _sub = session.declare_subscriber(
-            "home/temp",
-            SubscribeOptions::default(),
-            |_| {},
+        let _sub = session.declare_subscriber("home/temp", SubscribeOptions::default(), |_| {});
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "declare_subscriber is a no-op on the wire"
         );
-        assert_eq!(driver.frame_count(), 0, "declare_subscriber is a no-op on the wire");
     }
 
     #[test]
@@ -5989,11 +6074,10 @@ mod tests {
         let (session, _driver) = build_session();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
-        let _sub = session.declare_subscriber(
-            "home/temp",
-            SubscribeOptions::default(),
-            move |_sample| { fired_cb.fetch_add(1, Ordering::SeqCst); },
-        );
+        let _sub =
+            session.declare_subscriber("home/temp", SubscribeOptions::default(), move |_sample| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            });
 
         session.publish(
             "home/temp",
@@ -6009,11 +6093,10 @@ mod tests {
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
         {
-            let _sub = session.declare_subscriber(
-                "home/temp",
-                SubscribeOptions::default(),
-                move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); },
-            );
+            let _sub =
+                session.declare_subscriber("home/temp", SubscribeOptions::default(), move |_| {
+                    fired_cb.fetch_add(1, Ordering::SeqCst);
+                });
             // First publish fires.
             session.publish(
                 "home/temp",
@@ -6022,23 +6105,23 @@ mod tests {
             );
             assert_eq!(fired.load(Ordering::SeqCst), 1);
         } // Subscriber drops here -> auto-unregister
-        // Second publish must NOT fire — the callback is gone.
+          // Second publish must NOT fire — the callback is gone.
         session.publish(
             "home/temp",
             b"22.0",
             PublishOptions::put().with_locality(Locality::SessionLocal),
         );
-        assert_eq!(fired.load(Ordering::SeqCst), 1, "Drop auto-unregistered the callback");
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "Drop auto-unregistered the callback"
+        );
     }
 
     #[test]
     fn subscriber_undeclare_returns_true_and_skips_drop() {
         let (session, _driver) = build_session();
-        let sub = session.declare_subscriber(
-            "home/temp",
-            SubscribeOptions::default(),
-            |_| {},
-        );
+        let sub = session.declare_subscriber("home/temp", SubscribeOptions::default(), |_| {});
         let removed = sub.undeclare();
         assert!(removed, "first undeclare returns true");
         // Empty registry: subsequent publish fires no callback (no panic).
@@ -6057,7 +6140,9 @@ mod tests {
         let _sub = session.declare_subscriber(
             "home/temp",
             SubscribeOptions::new().with_allowed_origin(Locality::Remote),
-            move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); },
+            move |_| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
         );
 
         session.publish(
@@ -6080,14 +6165,15 @@ mod tests {
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
         let sub = session
-            .declare_subscriber_aliased(
-                7,
-                None,
-                SubscribeOptions::default(),
-                move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); },
-            )
+            .declare_subscriber_aliased(7, None, SubscribeOptions::default(), move |_| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            })
             .expect("declared mapping resolves");
-        assert_eq!(sub.keyexpr(), "home/temp", "resolved literal stored on handle");
+        assert_eq!(
+            sub.keyexpr(),
+            "home/temp",
+            "resolved literal stored on handle"
+        );
 
         session.publish(
             "home/temp",
@@ -6102,12 +6188,7 @@ mod tests {
         let (session, _driver) = build_session();
         session.actions().send_declare_keyexpr(7, "home/temp");
         let sub = session
-            .declare_subscriber_aliased(
-                7,
-                Some("/kitchen"),
-                SubscribeOptions::default(),
-                |_| {},
-            )
+            .declare_subscriber_aliased(7, Some("/kitchen"), SubscribeOptions::default(), |_| {})
             .expect("declared mapping resolves");
         assert_eq!(sub.keyexpr(), "home/temp/kitchen");
     }
@@ -6115,12 +6196,7 @@ mod tests {
     #[test]
     fn declare_subscriber_aliased_unknown_mapping_returns_err() {
         let (session, _driver) = build_session();
-        let err = session.declare_subscriber_aliased(
-            99,
-            None,
-            SubscribeOptions::default(),
-            |_| {},
-        );
+        let err = session.declare_subscriber_aliased(99, None, SubscribeOptions::default(), |_| {});
         assert!(
             matches!(err, Err(SubscribeAliasError::UnknownMapping(99))),
             "expected Err(UnknownMapping(99))"
@@ -6143,12 +6219,9 @@ mod tests {
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
         let _sub = session
-            .declare_subscriber_aliased(
-                7,
-                None,
-                SubscribeOptions::default(),
-                move |_| { fired_cb.fetch_add(1, Ordering::SeqCst); },
-            )
+            .declare_subscriber_aliased(7, None, SubscribeOptions::default(), move |_| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            })
             .expect("declared mapping resolves");
 
         // Retract the mapping.
@@ -6201,11 +6274,7 @@ mod tests {
     #[test]
     fn declare_queryable_does_not_emit_wire_frame() {
         let (session, driver) = build_session();
-        let _q = session.declare_queryable(
-            "home/temp",
-            QueryableOptions::default(),
-            |_q, _r| {},
-        );
+        let _q = session.declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {});
         assert_eq!(driver.frame_count(), 0);
     }
 
@@ -6228,9 +6297,11 @@ mod tests {
         let r = replies.clone();
         session.query(
             "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),&clock,
-            
-            move |_reply| { r.fetch_add(1, Ordering::SeqCst); },
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            &clock,
+            move |_reply| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
             |_| {},
         );
 
@@ -6255,8 +6326,8 @@ mod tests {
             );
             session.query(
                 "home/temp",
-                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),&clock,
-            
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                &clock,
                 |_| {},
                 |_| {},
             );
@@ -6266,22 +6337,22 @@ mod tests {
         // Second query: no queryable matches.
         session.query(
             "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),&clock,
-            
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            &clock,
             |_| {},
             |_| {},
         );
-        assert_eq!(fired.load(Ordering::SeqCst), 1, "Drop auto-unregistered the queryable");
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "Drop auto-unregistered the queryable"
+        );
     }
 
     #[test]
     fn queryable_undeclare_returns_true_and_skips_drop() {
         let (session, _driver) = build_session();
-        let q = session.declare_queryable(
-            "home/temp",
-            QueryableOptions::default(),
-            |_q, _r| {},
-        );
+        let q = session.declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {});
         assert!(q.undeclare(), "first undeclare returns true");
     }
 
@@ -6294,13 +6365,15 @@ mod tests {
         let _q = session.declare_queryable(
             "home/temp",
             QueryableOptions::new().with_allowed_origin(Locality::Remote),
-            move |_q, _r| { fired_cb.fetch_add(1, Ordering::SeqCst); },
+            move |_q, _r| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
+            },
         );
 
         session.query(
             "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),&clock,
-            
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            &clock,
             |_| {},
             |_| {},
         );
@@ -6333,8 +6406,8 @@ mod tests {
 
         session.query(
             "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),&clock,
-            
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            &clock,
             |_| {},
             |_| {},
         );
@@ -6359,12 +6432,8 @@ mod tests {
     #[test]
     fn declare_queryable_aliased_unknown_mapping_returns_err() {
         let (session, _driver) = build_session();
-        let err = session.declare_queryable_aliased(
-            99,
-            None,
-            QueryableOptions::default(),
-            |_q, _r| {},
-        );
+        let err =
+            session.declare_queryable_aliased(99, None, QueryableOptions::default(), |_q, _r| {});
         assert!(matches!(err, Err(QueryableAliasError::UnknownMapping(99))));
         assert_eq!(
             session.observer().lock().unwrap().queryables.len(),
@@ -6401,7 +6470,11 @@ mod tests {
     fn declare_token_returns_handle_with_keyexpr_and_id_zero() {
         let (session, _driver) = build_session();
         let token = session.declare_token("liveliness/devA", LivelinessOptions::default());
-        assert_eq!(token.id(), 0, "first allocation returns id=0 per zenoh-pico convention");
+        assert_eq!(
+            token.id(),
+            0,
+            "first allocation returns id=0 per zenoh-pico convention"
+        );
         assert_eq!(token.keyexpr(), "liveliness/devA");
         // Options accessor — empty struct just confirms the borrow shape.
         let _: &LivelinessOptions = token.options();
@@ -6411,7 +6484,11 @@ mod tests {
     fn declare_token_emits_exactly_one_reliable_wire_frame() {
         let (session, driver) = build_session();
         let _token = session.declare_token("liveliness/devA", LivelinessOptions::default());
-        assert_eq!(driver.frame_count(), 1, "declare emits one outbound Declare(DeclToken)");
+        assert_eq!(
+            driver.frame_count(),
+            1,
+            "declare emits one outbound Declare(DeclToken)"
+        );
         assert_eq!(
             driver.frame_reliability(0),
             Reliability::Reliable,
@@ -6490,7 +6567,11 @@ mod tests {
         let token = session.declare_token("liveliness/devA", LivelinessOptions::default());
         assert_eq!(driver.frame_count(), 1);
         token.undeclare();
-        assert_eq!(driver.frame_count(), 2, "explicit undeclare emits the retraction");
+        assert_eq!(
+            driver.frame_count(),
+            2,
+            "explicit undeclare emits the retraction"
+        );
         // After undeclare(self), the handle is forgotten via
         // std::mem::forget, so Drop does NOT run — frame_count stays
         // at 2 even after the scope ends.
@@ -6566,9 +6647,12 @@ mod tests {
             baseline_frames + 1,
             "aliased declare emits exactly one Declare(DeclToken) frame",
         );
-        let expected =
-            build_declare_token(/*token_id=*/ 0, /*mapping_id=*/ 7, Some("/sensor"))
-                .encode_to_vec();
+        let expected = build_declare_token(
+            /*token_id=*/ 0,
+            /*mapping_id=*/ 7,
+            Some("/sensor"),
+        )
+        .encode_to_vec();
         let token_frame = &driver.frames.lock().unwrap()[baseline_frames].0;
         assert!(
             token_frame.windows(expected.len()).any(|w| w == expected),
@@ -6715,7 +6799,9 @@ mod tests {
         .encode_to_vec();
         let interest_frame = &driver.frames.lock().unwrap()[baseline_frames].0;
         assert!(
-            interest_frame.windows(expected.len()).any(|w| w == expected),
+            interest_frame
+                .windows(expected.len())
+                .any(|w| w == expected),
             "wire frame must carry alias-form Interest bytes (mapping_id=7, suffix=/sensor)",
         );
     }
@@ -6799,7 +6885,8 @@ mod tests {
     }
 
     #[test]
-    fn declare_liveliness_subscriber_aliased_unknown_mapping_takes_precedence_over_not_established() {
+    fn declare_liveliness_subscriber_aliased_unknown_mapping_takes_precedence_over_not_established()
+    {
         // Pin the variant ordering: when the session is pre-Established
         // AND the mapping is unknown, the caller sees UnknownMapping
         // (the bug-class error) — not NotEstablished (the transient
@@ -6880,7 +6967,11 @@ mod tests {
         assert_eq!((r0, r1, r2), (0, 1, 2));
         // Token allocation still starts from 0.
         let t = session.declare_token("liveliness/x", LivelinessOptions::default());
-        assert_eq!(t.id(), 0, "token id counter independent from request id counter");
+        assert_eq!(
+            t.id(),
+            0,
+            "token id counter independent from request id counter"
+        );
         std::mem::forget(t);
     }
 }

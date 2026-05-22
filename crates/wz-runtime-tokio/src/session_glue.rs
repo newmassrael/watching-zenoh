@@ -70,15 +70,11 @@ use wz_codecs::decl_queryable::DeclQueryable;
 use wz_codecs::decl_subscriber::DeclSubscriber;
 use wz_codecs::decl_token::DeclToken;
 use wz_codecs::declare::{Declare, DeclareVariant};
-use wz_codecs::undecl_kexpr::UndeclKexpr;
-use wz_codecs::undecl_queryable::UndeclQueryable;
-use wz_codecs::undecl_subscriber::UndeclSubscriber;
-use wz_codecs::undecl_token::UndeclToken;
-use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::encoding::Encoding;
+use wz_codecs::err::Err;
+use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::ext_zbuf::ExtZbuf;
 use wz_codecs::ext_zint::ExtZint;
-use wz_codecs::err::Err;
 use wz_codecs::init_body::InitBody;
 use wz_codecs::interest::Interest;
 use wz_codecs::interest_body::InterestBody;
@@ -89,11 +85,15 @@ use wz_codecs::oam::Oam;
 use wz_codecs::open_body::OpenBody;
 use wz_codecs::push::{Push, PushVariant};
 use wz_codecs::query::Query;
-use wz_codecs::timestamp::Timestamp;
 use wz_codecs::reply::{Reply, ReplyVariant};
 use wz_codecs::request::{Request, RequestVariant};
 use wz_codecs::response::{Response, ResponseVariant};
 use wz_codecs::response_final::ResponseFinal;
+use wz_codecs::timestamp::Timestamp;
+use wz_codecs::undecl_kexpr::UndeclKexpr;
+use wz_codecs::undecl_queryable::UndeclQueryable;
+use wz_codecs::undecl_subscriber::UndeclSubscriber;
+use wz_codecs::undecl_token::UndeclToken;
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
 use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
@@ -212,10 +212,7 @@ impl SigningKey {
 /// constructed via `SigningKey::new(bytes)`; length validation +
 /// drop-time zeroize happen at the newtype layer so this function
 /// is panic-free given a non-null key.
-pub fn generate_cookie_hmac_sha256(
-    cookie_signing_key: &SigningKey,
-    peer_zid: &[u8],
-) -> Vec<u8> {
+pub fn generate_cookie_hmac_sha256(cookie_signing_key: &SigningKey, peer_zid: &[u8]) -> Vec<u8> {
     let full = compute_hmac_sha256_full(cookie_signing_key.as_slice(), peer_zid);
     full[..16].to_vec()
 }
@@ -951,12 +948,18 @@ impl SessionLinkActions {
     pub fn handle_inbound(&self, bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
         let frame = parse_inbound(bytes)?;
         match &frame {
-            InboundFrame::Init { is_ack: true, body, .. } => {
+            InboundFrame::Init {
+                is_ack: true, body, ..
+            } => {
                 if let Some(cookie) = &body.cookie {
                     *self.inbound_cookie.lock().unwrap() = Some(cookie.clone());
                 }
             }
-            InboundFrame::Init { is_ack: false, body, .. } => {
+            InboundFrame::Init {
+                is_ack: false,
+                body,
+                ..
+            } => {
                 // R86 — Accepting-side InitSyn arrival: capture the
                 // peer's claimed zid so the next send_init_ack_with_cookie
                 // can HMAC-bind the outbound cookie to it per RFC §5.M.
@@ -969,7 +972,11 @@ impl SessionLinkActions {
                 *self.inbound_peer_init_caps.lock().unwrap() =
                     Some(PeerInitCaps::from_init_syn(body.sn_res, body.batch_size));
             }
-            InboundFrame::Open { is_ack: false, body, .. } => {
+            InboundFrame::Open {
+                is_ack: false,
+                body,
+                ..
+            } => {
                 // R89 — Accepting-side OpenSyn arrival: capture the
                 // echoed cookie so the `cookie_valid()` guard can
                 // re-HMAC peer_zid and compare against this slot.
@@ -1051,8 +1058,7 @@ impl SessionLinkActions {
     /// returns `0` matching the post-increment-from-zero convention.
     /// `Relaxed` ordering — uniqueness is the only invariant.
     pub fn alloc_next_token_id(&self) -> u64 {
-        self.next_outbound_token_id
-            .fetch_add(1, Ordering::Relaxed)
+        self.next_outbound_token_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// R279 — outbound liveliness-subscriber `interest_id` generator.
@@ -1230,12 +1236,7 @@ impl SessionLinkActions {
     /// a Declare for `mapping_id` earlier on the same session so
     /// the receive-side resolver can map it back to a literal
     /// keyexpr before firing the subscriber callback.
-    pub fn send_push_del_aliased(
-        &self,
-        mapping_id: u64,
-        suffix: Option<&str>,
-        reliable: bool,
-    ) {
+    pub fn send_push_del_aliased(&self, mapping_id: u64, suffix: Option<&str>, reliable: bool) {
         let push = build_push_del_aliased(mapping_id, suffix);
         let sn = self.next_outbound_frame_sn();
         let wire = encode_frame_with_push(sn, push, reliable);
@@ -1932,12 +1933,8 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
         // (defensive — a well-formed handshake always populates the
         // slot before this script fires, since `Accepting.onentry`
         // is gated on `InitSynReceived`).
-        let cookie_hmac: Option<Vec<u8>> = a
-            .inbound_peer_zid
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map(|peer_zid| {
+        let cookie_hmac: Option<Vec<u8>> =
+            a.inbound_peer_zid.lock().unwrap().as_ref().map(|peer_zid| {
                 generate_cookie_hmac_sha256(&a.params.cookie_signing_key, peer_zid)
             });
         let bytes = a.encode_init_with_role(
@@ -2001,9 +1998,24 @@ pub fn register_state_internal_fns(lua: &dyn IScriptEngine, actions: &Arc<Sessio
     bind_unit(lua, "free_pool_slots", actions, |a| {
         a.trace.lock().unwrap().free_pool_slots += 1;
     });
-    bind_close_reason(lua, "set_close_reason_generic", actions, CloseReason::Generic);
-    bind_close_reason(lua, "set_close_reason_invalid", actions, CloseReason::Invalid);
-    bind_close_reason(lua, "set_close_reason_expired", actions, CloseReason::Expired);
+    bind_close_reason(
+        lua,
+        "set_close_reason_generic",
+        actions,
+        CloseReason::Generic,
+    );
+    bind_close_reason(
+        lua,
+        "set_close_reason_invalid",
+        actions,
+        CloseReason::Invalid,
+    );
+    bind_close_reason(
+        lua,
+        "set_close_reason_expired",
+        actions,
+        CloseReason::Expired,
+    );
     bind_close_reason(
         lua,
         "set_close_reason_unresponsive",
@@ -2089,7 +2101,11 @@ fn encode_init(
     // InitSyn because the wire-spec forbids the field there.
     let cbyte = init_cbyte(params.whatami, params.zid.len());
     let cookie_bytes: Option<Vec<u8>> = if is_ack {
-        Some(cookie_override.map(|c| c.to_vec()).unwrap_or_else(|| params.cookie.clone()))
+        Some(
+            cookie_override
+                .map(|c| c.to_vec())
+                .unwrap_or_else(|| params.cookie.clone()),
+        )
     } else {
         None
     };
@@ -2104,9 +2120,7 @@ fn encode_init(
     };
 
     let ext_bytes = encode_ext_chain(extensions);
-    let mut wire = Vec::with_capacity(
-        1 + InitBody::MAX_ENCODED_BYTES + ext_bytes.len(),
-    );
+    let mut wire = Vec::with_capacity(1 + InitBody::MAX_ENCODED_BYTES + ext_bytes.len());
     wire.push(parent_flags | wire_const::T_MID_INIT);
     let s = (parent_flags >> 6) & 1;
     let a = (parent_flags >> 5) & 1;
@@ -2159,13 +2173,15 @@ fn encode_open(
         } else {
             None
         },
-        cookie: if !is_ack { Some(cookie_bytes.to_vec()) } else { None },
+        cookie: if !is_ack {
+            Some(cookie_bytes.to_vec())
+        } else {
+            None
+        },
     };
 
     let ext_bytes = encode_ext_chain(extensions);
-    let mut wire = Vec::with_capacity(
-        1 + OpenBody::MAX_ENCODED_BYTES + ext_bytes.len(),
-    );
+    let mut wire = Vec::with_capacity(1 + OpenBody::MAX_ENCODED_BYTES + ext_bytes.len());
     wire.push(parent_flags | wire_const::T_MID_OPEN);
     let a = (parent_flags >> 5) & 1;
     {
@@ -3804,9 +3820,7 @@ impl RequestQueryBuilder {
         congestion: CongestionControl,
         express: bool,
     ) -> Self {
-        let packed = ((express as u8) << 4)
-            | (congestion.wire_bit() << 3)
-            | priority.wire_byte();
+        let packed = ((express as u8) << 4) | (congestion.wire_bit() << 3) | priority.wire_byte();
         self.request_qos(packed)
     }
 
@@ -4036,7 +4050,9 @@ impl RequestQueryBuilder {
                 // pattern at network.c:144-149. Position between
                 // target and timeout per the same source.
                 header: 0x20 | 0x05,
-                body: ExtEntryVariant::CodecZenohExtZint(ExtZint { value: budget as u64 }),
+                body: ExtEntryVariant::CodecZenohExtZint(ExtZint {
+                    value: budget as u64,
+                }),
             });
         }
         if let Some(timeout_ms) = self.request_timeout_ms {
@@ -4050,8 +4066,8 @@ impl RequestQueryBuilder {
 
         if !request_exts.is_empty() {
             request.header |= 0x80; // N_Z (Request-level exts present)
-            // Z chain-continuation: set 0x80 on every entry except
-            // the last so the decoder loop consumes the whole chain.
+                                    // Z chain-continuation: set 0x80 on every entry except
+                                    // the last so the decoder loop consumes the whole chain.
             let last_idx = request_exts.len() - 1;
             for (i, ext) in request_exts.iter_mut().enumerate() {
                 if i < last_idx {
@@ -5597,9 +5613,7 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
         wire_const::T_MID_FRAME => {
             // sn first (VLE), then optional ext chain (Z-gated),
             // then tail payload to end of cursor.
-            let sn = cursor
-                .read_vle_u64()
-                .map_err(InboundParseError::Codec)?;
+            let sn = cursor.read_vle_u64().map_err(InboundParseError::Codec)?;
             let extensions = if has_ext {
                 decode_ext_chain(&mut cursor)?
             } else {
@@ -5632,7 +5646,10 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
             } else {
                 Vec::new()
             };
-            Ok(InboundFrame::KeepAlive { has_ext, extensions })
+            Ok(InboundFrame::KeepAlive {
+                has_ext,
+                extensions,
+            })
         }
         other => Ok(InboundFrame::Unknown { mid: other }),
     }
@@ -5741,11 +5758,9 @@ impl std::fmt::Debug for NetworkMessage {
             Self::Interest(_) => f.write_str("Interest(..)"),
             Self::Response(_) => f.write_str("Response(..)"),
             Self::Declare(_) => f.write_str("Declare(..)"),
-            Self::Unknown { mid, body } => write!(
-                f,
-                "Unknown {{ mid: {mid:#04x}, body_len: {} }}",
-                body.len()
-            ),
+            Self::Unknown { mid, body } => {
+                write!(f, "Unknown {{ mid: {mid:#04x}, body_len: {} }}", body.len())
+            }
         }
     }
 }
@@ -6004,9 +6019,7 @@ pub async fn poll_and_dispatch_one<D: LinkDriver>(
                         // inbound_to_fsm_event projects these to Some(event),
                         // so the outer Some arm handled them — this branch
                         // is unreachable.
-                        unreachable!(
-                            "inbound_to_fsm_event None branch is Frame/KeepAlive only"
-                        )
+                        unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
                     }
                 },
             },
@@ -6385,9 +6398,8 @@ fn bind_close_reason(
 }
 
 fn bind_bool(lua: &dyn IScriptEngine, name: &str, value: bool) {
-    let cb: NativeMethod = Box::new(move |_args: &[ScriptValue]| -> ScriptValue {
-        ScriptValue::Bool(value)
-    });
+    let cb: NativeMethod =
+        Box::new(move |_args: &[ScriptValue]| -> ScriptValue { ScriptValue::Bool(value) });
     let ok = lua.register_global_function(name, cb);
     assert!(ok, "register_global_function failed for {name}");
 }
@@ -6533,10 +6545,9 @@ mod tests {
         let data = b"Hi There";
         let mac = compute_hmac_sha256_full(&key, data);
         let expected: [u8; 32] = [
-            0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53,
-            0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b, 0xf1, 0x2b,
-            0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7,
-            0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32, 0xcf, 0xf7,
+            0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53, 0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b,
+            0xf1, 0x2b, 0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7, 0x26, 0xe9, 0x37, 0x6c,
+            0x2e, 0x32, 0xcf, 0xf7,
         ];
         assert_eq!(mac, expected, "RFC 4231 TC1 byte mismatch");
     }
@@ -6554,10 +6565,9 @@ mod tests {
         let data = b"what do ya want for nothing?";
         let mac = compute_hmac_sha256_full(key, data);
         let expected: [u8; 32] = [
-            0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e,
-            0x6a, 0x04, 0x24, 0x26, 0x08, 0x95, 0x75, 0xc7,
-            0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83,
-            0x9d, 0xec, 0x58, 0xb9, 0x64, 0xec, 0x38, 0x43,
+            0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e, 0x6a, 0x04, 0x24, 0x26, 0x08, 0x95,
+            0x75, 0xc7, 0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83, 0x9d, 0xec, 0x58, 0xb9,
+            0x64, 0xec, 0x38, 0x43,
         ];
         assert_eq!(mac, expected, "RFC 4231 TC2 byte mismatch");
     }
@@ -6576,10 +6586,9 @@ mod tests {
         let data = vec![0xdd; 50];
         let mac = compute_hmac_sha256_full(&key, &data);
         let expected: [u8; 32] = [
-            0x77, 0x3e, 0xa9, 0x1e, 0x36, 0x80, 0x0e, 0x46,
-            0x85, 0x4d, 0xb8, 0xeb, 0xd0, 0x91, 0x81, 0xa7,
-            0x29, 0x59, 0x09, 0x8b, 0x3e, 0xf8, 0xc1, 0x22,
-            0xd9, 0x63, 0x55, 0x14, 0xce, 0xd5, 0x65, 0xfe,
+            0x77, 0x3e, 0xa9, 0x1e, 0x36, 0x80, 0x0e, 0x46, 0x85, 0x4d, 0xb8, 0xeb, 0xd0, 0x91,
+            0x81, 0xa7, 0x29, 0x59, 0x09, 0x8b, 0x3e, 0xf8, 0xc1, 0x22, 0xd9, 0x63, 0x55, 0x14,
+            0xce, 0xd5, 0x65, 0xfe,
         ];
         assert_eq!(mac, expected, "RFC 4231 TC3 byte mismatch");
     }
@@ -6598,10 +6607,9 @@ mod tests {
         let data = vec![0xcd; 50];
         let mac = compute_hmac_sha256_full(&key, &data);
         let expected: [u8; 32] = [
-            0x82, 0x55, 0x8a, 0x38, 0x9a, 0x44, 0x3c, 0x0e,
-            0xa4, 0xcc, 0x81, 0x98, 0x99, 0xf2, 0x08, 0x3a,
-            0x85, 0xf0, 0xfa, 0xa3, 0xe5, 0x78, 0xf8, 0x07,
-            0x7a, 0x2e, 0x3f, 0xf4, 0x67, 0x29, 0x66, 0x5b,
+            0x82, 0x55, 0x8a, 0x38, 0x9a, 0x44, 0x3c, 0x0e, 0xa4, 0xcc, 0x81, 0x98, 0x99, 0xf2,
+            0x08, 0x3a, 0x85, 0xf0, 0xfa, 0xa3, 0xe5, 0x78, 0xf8, 0x07, 0x7a, 0x2e, 0x3f, 0xf4,
+            0x67, 0x29, 0x66, 0x5b,
         ];
         assert_eq!(mac, expected, "RFC 4231 TC4 byte mismatch");
     }
@@ -6624,10 +6632,9 @@ mod tests {
         let data = b"Test With Truncation";
         let full = compute_hmac_sha256_full(&key, data);
         let expected_full: [u8; 32] = [
-            0xa3, 0xb6, 0x16, 0x74, 0x73, 0x10, 0x0e, 0xe0,
-            0x6e, 0x0c, 0x79, 0x6c, 0x29, 0x55, 0x55, 0x2b,
-            0xfa, 0x6f, 0x7c, 0x0a, 0x6a, 0x8a, 0xef, 0x8b,
-            0x93, 0xf8, 0x60, 0xaa, 0xb0, 0xcd, 0x20, 0xc5,
+            0xa3, 0xb6, 0x16, 0x74, 0x73, 0x10, 0x0e, 0xe0, 0x6e, 0x0c, 0x79, 0x6c, 0x29, 0x55,
+            0x55, 0x2b, 0xfa, 0x6f, 0x7c, 0x0a, 0x6a, 0x8a, 0xef, 0x8b, 0x93, 0xf8, 0x60, 0xaa,
+            0xb0, 0xcd, 0x20, 0xc5,
         ];
         assert_eq!(full, expected_full, "RFC 4231 TC5 full MAC");
         // First 16 bytes — the cookie wire-shape truncation
@@ -6635,10 +6642,14 @@ mod tests {
         // that generate_cookie_hmac_sha256's slice [..16] yields
         // exactly the RFC truncated form.
         let expected_truncated: [u8; 16] = [
-            0xa3, 0xb6, 0x16, 0x74, 0x73, 0x10, 0x0e, 0xe0,
-            0x6e, 0x0c, 0x79, 0x6c, 0x29, 0x55, 0x55, 0x2b,
+            0xa3, 0xb6, 0x16, 0x74, 0x73, 0x10, 0x0e, 0xe0, 0x6e, 0x0c, 0x79, 0x6c, 0x29, 0x55,
+            0x55, 0x2b,
         ];
-        assert_eq!(&full[..16], expected_truncated.as_slice(), "RFC 4231 TC5 truncated");
+        assert_eq!(
+            &full[..16],
+            expected_truncated.as_slice(),
+            "RFC 4231 TC5 truncated"
+        );
     }
 
     /// RFC 4231 Test Case 6 — block-size+ key triggers the
@@ -6655,10 +6666,9 @@ mod tests {
         let data = b"Test Using Larger Than Block-Size Key - Hash Key First";
         let mac = compute_hmac_sha256_full(&key, data);
         let expected: [u8; 32] = [
-            0x60, 0xe4, 0x31, 0x59, 0x1e, 0xe0, 0xb6, 0x7f,
-            0x0d, 0x8a, 0x26, 0xaa, 0xcb, 0xf5, 0xb7, 0x7f,
-            0x8e, 0x0b, 0xc6, 0x21, 0x37, 0x28, 0xc5, 0x14,
-            0x05, 0x46, 0x04, 0x0f, 0x0e, 0xe3, 0x7f, 0x54,
+            0x60, 0xe4, 0x31, 0x59, 0x1e, 0xe0, 0xb6, 0x7f, 0x0d, 0x8a, 0x26, 0xaa, 0xcb, 0xf5,
+            0xb7, 0x7f, 0x8e, 0x0b, 0xc6, 0x21, 0x37, 0x28, 0xc5, 0x14, 0x05, 0x46, 0x04, 0x0f,
+            0x0e, 0xe3, 0x7f, 0x54,
         ];
         assert_eq!(mac, expected, "RFC 4231 TC6 byte mismatch");
     }
@@ -6678,10 +6688,9 @@ mod tests {
         let data = b"This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.";
         let mac = compute_hmac_sha256_full(&key, data);
         let expected: [u8; 32] = [
-            0x9b, 0x09, 0xff, 0xa7, 0x1b, 0x94, 0x2f, 0xcb,
-            0x27, 0x63, 0x5f, 0xbc, 0xd5, 0xb0, 0xe9, 0x44,
-            0xbf, 0xdc, 0x63, 0x64, 0x4f, 0x07, 0x13, 0x93,
-            0x8a, 0x7f, 0x51, 0x53, 0x5c, 0x3a, 0x35, 0xe2,
+            0x9b, 0x09, 0xff, 0xa7, 0x1b, 0x94, 0x2f, 0xcb, 0x27, 0x63, 0x5f, 0xbc, 0xd5, 0xb0,
+            0xe9, 0x44, 0xbf, 0xdc, 0x63, 0x64, 0x4f, 0x07, 0x13, 0x93, 0x8a, 0x7f, 0x51, 0x53,
+            0x5c, 0x3a, 0x35, 0xe2,
         ];
         assert_eq!(mac, expected, "RFC 4231 TC7 byte mismatch");
     }
@@ -6758,15 +6767,24 @@ mod tests {
                 );
                 assert!(put.timestamp.is_none(), "no timestamp flag on the MVP path");
                 assert!(put.encoding.is_none(), "no encoding flag on the MVP path");
-                assert!(put.extensions.is_none(), "no MsgPut-level extensions on the MVP path");
+                assert!(
+                    put.extensions.is_none(),
+                    "no MsgPut-level extensions on the MVP path"
+                );
             }
-            other => panic!("MVP build_push_literal must emit MsgPut body, got {:?}", match other {
-                PushVariant::CodecZenohMsgDel(_) => "MsgDel",
-                PushVariant::Default { .. } => "Default",
-                PushVariant::CodecZenohMsgPut(_) => unreachable!(),
-            }),
+            other => panic!(
+                "MVP build_push_literal must emit MsgPut body, got {:?}",
+                match other {
+                    PushVariant::CodecZenohMsgDel(_) => "MsgDel",
+                    PushVariant::Default { .. } => "Default",
+                    PushVariant::CodecZenohMsgPut(_) => unreachable!(),
+                }
+            ),
         }
-        assert!(push.extensions.is_none(), "no Push-level extensions on the MVP path");
+        assert!(
+            push.extensions.is_none(),
+            "no Push-level extensions on the MVP path"
+        );
     }
 
     /// `encode_frame_with_push` composes the transport-envelope
@@ -6822,9 +6840,16 @@ mod tests {
             // byte decode AND the Frame.sn VLE decode.
             let parsed = parse_inbound(&wire).expect("parse_inbound on round-tripped Frame");
             match parsed {
-                InboundFrame::Frame { sn: parsed_sn, reliable, .. } => {
+                InboundFrame::Frame {
+                    sn: parsed_sn,
+                    reliable,
+                    ..
+                } => {
                     assert_eq!(parsed_sn, sn, "sn must round-trip through encode+parse");
-                    assert!(reliable, "reliable=true → FLAG_T_FRAME_R → InboundFrame.reliable=true");
+                    assert!(
+                        reliable,
+                        "reliable=true → FLAG_T_FRAME_R → InboundFrame.reliable=true"
+                    );
                 }
                 // InboundFrame intentionally omits Debug derive
                 // (sce-codegen wz-codecs structs only derive
@@ -6931,13 +6956,19 @@ mod tests {
                     "MVP Del path emits no MsgDel-level extensions"
                 );
             }
-            other => panic!("build_push_del_literal must emit MsgDel body, got {:?}", match other {
-                PushVariant::CodecZenohMsgPut(_) => "MsgPut",
-                PushVariant::Default { .. } => "Default",
-                PushVariant::CodecZenohMsgDel(_) => unreachable!(),
-            }),
+            other => panic!(
+                "build_push_del_literal must emit MsgDel body, got {:?}",
+                match other {
+                    PushVariant::CodecZenohMsgPut(_) => "MsgPut",
+                    PushVariant::Default { .. } => "Default",
+                    PushVariant::CodecZenohMsgDel(_) => unreachable!(),
+                }
+            ),
         }
-        assert!(push.extensions.is_none(), "no Push-level extensions on the MVP path");
+        assert!(
+            push.extensions.is_none(),
+            "no Push-level extensions on the MVP path"
+        );
     }
 
     /// R219 — `build_push_del_aliased` produces a DECLARE-aliased
@@ -7061,8 +7092,14 @@ mod tests {
             wire_const::N_MID_DECLARE,
             "Declare header must carry N_MID_DECLARE with no flag bits set",
         );
-        assert!(declare.interest_id.is_none(), "MVP DECLARE has no interest_id");
-        assert!(declare.extensions.is_none(), "MVP DECLARE has no extensions");
+        assert!(
+            declare.interest_id.is_none(),
+            "MVP DECLARE has no interest_id"
+        );
+        assert!(
+            declare.extensions.is_none(),
+            "MVP DECLARE has no extensions"
+        );
         match &declare.body {
             DeclareVariant::CodecZenohDeclKexpr(dk) => {
                 assert_eq!(dk.id, 7, "DeclKexpr.id must equal mapping_id argument");
@@ -7072,7 +7109,10 @@ mod tests {
                 );
                 match &dk.keyexpr.body {
                     WireexprVariant::WireexprLocal(w) => {
-                        assert_eq!(w.id, 0, "inner Wireexpr.id is the literal-keyexpr sentinel 0");
+                        assert_eq!(
+                            w.id, 0,
+                            "inner Wireexpr.id is the literal-keyexpr sentinel 0"
+                        );
                         assert_eq!(w.suffix.as_deref(), Some("demo/test"));
                         assert_eq!(w.suffix_len, Some(9));
                     }
@@ -7156,7 +7196,8 @@ mod tests {
             "Frame body tail must be Declare.encode_to_vec() bytes verbatim",
         );
 
-        let wire_best_effort = encode_frame_with_declare(0, build_declare_kexpr(7, "demo/test"), false);
+        let wire_best_effort =
+            encode_frame_with_declare(0, build_declare_kexpr(7, "demo/test"), false);
         assert_eq!(
             wire_best_effort[0],
             wire_const::T_MID_FRAME,
@@ -7202,7 +7243,10 @@ mod tests {
         let composite = build_declare_subscriber(5, 7, Some("tail"));
         match &composite.body {
             DeclareVariant::CodecZenohDeclSubscriber(d) => {
-                assert_eq!(d.header, 0x22, "header MID 0x02 | N(0x20) when suffix present");
+                assert_eq!(
+                    d.header, 0x22,
+                    "header MID 0x02 | N(0x20) when suffix present"
+                );
                 match &d.keyexpr.body {
                     WireexprVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 7);
@@ -7261,9 +7305,9 @@ mod tests {
         let alias_wire = alias.encode_to_vec();
         let alias_expected = vec![
             wire_const::N_MID_DECLARE, // 0x1E
-            0x42,                       // MID(0x02) | M(0x40)
-            0x05,                       // VLE(subscriber_id=5)
-            0x07,                       // wireexpr.id VLE(7)
+            0x42,                      // MID(0x02) | M(0x40)
+            0x05,                      // VLE(subscriber_id=5)
+            0x07,                      // wireexpr.id VLE(7)
         ];
         assert_eq!(
             alias_wire, alias_expected,
@@ -7299,13 +7343,7 @@ mod tests {
         //   suffix bytes = "demo/test"
         let literal = build_declare_subscriber(5, 0, Some("demo/test"));
         let literal_wire = literal.encode_to_vec();
-        let mut literal_expected = vec![
-            wire_const::N_MID_DECLARE,
-            0x62,
-            0x05,
-            0x00,
-            0x09,
-        ];
+        let mut literal_expected = vec![wire_const::N_MID_DECLARE, 0x62, 0x05, 0x00, 0x09];
         literal_expected.extend_from_slice(b"demo/test");
         assert_eq!(
             literal_wire, literal_expected,
@@ -7350,7 +7388,10 @@ mod tests {
         let composite = build_declare_queryable(9, 7, Some("tail"));
         match &composite.body {
             DeclareVariant::CodecZenohDeclQueryable(d) => {
-                assert_eq!(d.header, 0x24, "header MID 0x04 | N(0x20) when suffix present");
+                assert_eq!(
+                    d.header, 0x24,
+                    "header MID 0x04 | N(0x20) when suffix present"
+                );
                 match &d.keyexpr.body {
                     WireexprVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 7);
@@ -7403,9 +7444,9 @@ mod tests {
         let alias_wire = alias.encode_to_vec();
         let alias_expected = vec![
             wire_const::N_MID_DECLARE, // 0x1E
-            0x44,                       // MID(0x04) | M(0x40)
-            0x09,                       // VLE(queryable_id=9)
-            0x07,                       // wireexpr.id VLE(7)
+            0x44,                      // MID(0x04) | M(0x40)
+            0x09,                      // VLE(queryable_id=9)
+            0x07,                      // wireexpr.id VLE(7)
         ];
         assert_eq!(
             alias_wire, alias_expected,
@@ -7441,13 +7482,7 @@ mod tests {
         //   suffix bytes = "demo/test"
         let literal = build_declare_queryable(9, 0, Some("demo/test"));
         let literal_wire = literal.encode_to_vec();
-        let mut literal_expected = vec![
-            wire_const::N_MID_DECLARE,
-            0x64,
-            0x09,
-            0x00,
-            0x09,
-        ];
+        let mut literal_expected = vec![wire_const::N_MID_DECLARE, 0x64, 0x09, 0x00, 0x09];
         literal_expected.extend_from_slice(b"demo/test");
         assert_eq!(
             literal_wire, literal_expected,
@@ -7529,9 +7564,9 @@ mod tests {
         let alias_wire = alias.encode_to_vec();
         let alias_expected = vec![
             wire_const::N_MID_DECLARE, // 0x1E
-            0x46,                       // MID(0x06) | M(0x40)
-            0x0B,                       // VLE(token_id=11)
-            0x07,                       // wireexpr.id VLE(7)
+            0x46,                      // MID(0x06) | M(0x40)
+            0x0B,                      // VLE(token_id=11)
+            0x07,                      // wireexpr.id VLE(7)
         ];
         assert_eq!(
             alias_wire, alias_expected,
@@ -7557,13 +7592,7 @@ mod tests {
         // Case 3 — literal (id=0 + suffix "demo/test").
         let literal = build_declare_token(11, 0, Some("demo/test"));
         let literal_wire = literal.encode_to_vec();
-        let mut literal_expected = vec![
-            wire_const::N_MID_DECLARE,
-            0x66,
-            0x0B,
-            0x00,
-            0x09,
-        ];
+        let mut literal_expected = vec![wire_const::N_MID_DECLARE, 0x66, 0x0B, 0x00, 0x09];
         literal_expected.extend_from_slice(b"demo/test");
         assert_eq!(
             literal_wire, literal_expected,
@@ -7591,9 +7620,9 @@ mod tests {
             alias.encode_to_vec(),
             vec![
                 wire_const::N_MID_DECLARE, // 0x1E outer
-                0x02,                       // MID only, no N, no M
-                0x05,                       // VLE(subscriber_id=5)
-                0x07,                       // wireexpr.id VLE(7)
+                0x02,                      // MID only, no N, no M
+                0x05,                      // VLE(subscriber_id=5)
+                0x07,                      // wireexpr.id VLE(7)
             ],
             "DeclSubscriber Nonlocal alias-case wire bytes must match \
              zenoh-pico reference (M bit clear)",
@@ -7637,18 +7666,16 @@ mod tests {
 
         // Inner-arm sanity check — must be Nonlocal, not Local.
         match &alias.body {
-            DeclareVariant::CodecZenohDeclSubscriber(d) => {
-                match &d.keyexpr.body {
-                    WireexprVariant::WireexprNonlocal(w) => {
-                        assert_eq!(w.id, 7);
-                        assert!(w.suffix.is_none());
-                    }
-                    _ => panic!(
-                        "build_declare_subscriber_nonlocal must produce a \
-                         WireexprNonlocal arm"
-                    ),
+            DeclareVariant::CodecZenohDeclSubscriber(d) => match &d.keyexpr.body {
+                WireexprVariant::WireexprNonlocal(w) => {
+                    assert_eq!(w.id, 7);
+                    assert!(w.suffix.is_none());
                 }
-            }
+                _ => panic!(
+                    "build_declare_subscriber_nonlocal must produce a \
+                         WireexprNonlocal arm"
+                ),
+            },
             _ => panic!("expected CodecZenohDeclSubscriber"),
         }
     }
@@ -7703,30 +7730,22 @@ mod tests {
         let large = build_declare_queryable_nonlocal(9, 200, None);
         assert_eq!(
             large.encode_to_vec(),
-            vec![
-                wire_const::N_MID_DECLARE,
-                0x04,
-                0x09,
-                0xC8,
-                0x01,
-            ],
+            vec![wire_const::N_MID_DECLARE, 0x04, 0x09, 0xC8, 0x01,],
             "DeclQueryable Nonlocal multi-byte VLE id wire bytes must \
              match zenoh-pico reference",
         );
 
         match &alias.body {
-            DeclareVariant::CodecZenohDeclQueryable(d) => {
-                match &d.keyexpr.body {
-                    WireexprVariant::WireexprNonlocal(w) => {
-                        assert_eq!(w.id, 7);
-                        assert!(w.suffix.is_none());
-                    }
-                    _ => panic!(
-                        "build_declare_queryable_nonlocal must produce a \
-                         WireexprNonlocal arm"
-                    ),
+            DeclareVariant::CodecZenohDeclQueryable(d) => match &d.keyexpr.body {
+                WireexprVariant::WireexprNonlocal(w) => {
+                    assert_eq!(w.id, 7);
+                    assert!(w.suffix.is_none());
                 }
-            }
+                _ => panic!(
+                    "build_declare_queryable_nonlocal must produce a \
+                         WireexprNonlocal arm"
+                ),
+            },
             _ => panic!("expected CodecZenohDeclQueryable"),
         }
     }
@@ -7776,30 +7795,22 @@ mod tests {
         let large = build_declare_token_nonlocal(11, 200, None);
         assert_eq!(
             large.encode_to_vec(),
-            vec![
-                wire_const::N_MID_DECLARE,
-                0x06,
-                0x0B,
-                0xC8,
-                0x01,
-            ],
+            vec![wire_const::N_MID_DECLARE, 0x06, 0x0B, 0xC8, 0x01,],
             "DeclToken Nonlocal multi-byte VLE id wire bytes must match \
              zenoh-pico reference",
         );
 
         match &alias.body {
-            DeclareVariant::CodecZenohDeclToken(d) => {
-                match &d.keyexpr.body {
-                    WireexprVariant::WireexprNonlocal(w) => {
-                        assert_eq!(w.id, 7);
-                        assert!(w.suffix.is_none());
-                    }
-                    _ => panic!(
-                        "build_declare_token_nonlocal must produce a \
-                         WireexprNonlocal arm"
-                    ),
+            DeclareVariant::CodecZenohDeclToken(d) => match &d.keyexpr.body {
+                WireexprVariant::WireexprNonlocal(w) => {
+                    assert_eq!(w.id, 7);
+                    assert!(w.suffix.is_none());
                 }
-            }
+                _ => panic!(
+                    "build_declare_token_nonlocal must produce a \
+                         WireexprNonlocal arm"
+                ),
+            },
             _ => panic!("expected CodecZenohDeclToken"),
         }
     }
@@ -7825,8 +7836,8 @@ mod tests {
         let small_wire = small.encode_to_vec();
         let small_expected = vec![
             wire_const::N_MID_DECLARE, // 0x1E outer
-            0x01,                       // _Z_UNDECL_KEXPR_MID
-            0x2A,                       // VLE(42) single byte
+            0x01,                      // _Z_UNDECL_KEXPR_MID
+            0x2A,                      // VLE(42) single byte
         ];
         assert_eq!(
             small_wire, small_expected,
@@ -7884,12 +7895,7 @@ mod tests {
         let large_wire = large.encode_to_vec();
         assert_eq!(
             large_wire,
-            vec![
-                wire_const::N_MID_DECLARE,
-                0x03,
-                0xC8,
-                0x01,
-            ],
+            vec![wire_const::N_MID_DECLARE, 0x03, 0xC8, 0x01,],
             "UndeclSubscriber multi-byte VLE id wire bytes must match zenoh-pico reference",
         );
 
@@ -7922,12 +7928,7 @@ mod tests {
         let large = build_undeclare_queryable(200);
         assert_eq!(
             large.encode_to_vec(),
-            vec![
-                wire_const::N_MID_DECLARE,
-                0x05,
-                0xC8,
-                0x01,
-            ],
+            vec![wire_const::N_MID_DECLARE, 0x05, 0xC8, 0x01,],
             "UndeclQueryable multi-byte VLE id wire bytes must match zenoh-pico reference",
         );
 
@@ -7960,12 +7961,7 @@ mod tests {
         let large = build_undeclare_token(200);
         assert_eq!(
             large.encode_to_vec(),
-            vec![
-                wire_const::N_MID_DECLARE,
-                0x07,
-                0xC8,
-                0x01,
-            ],
+            vec![wire_const::N_MID_DECLARE, 0x07, 0xC8, 0x01,],
             "UndeclToken multi-byte VLE id wire bytes must match zenoh-pico reference",
         );
 
@@ -7992,14 +7988,17 @@ mod tests {
             wire,
             vec![
                 wire_const::N_MID_DECLARE, // 0x1E outer
-                0x1A,                       // _Z_DECL_FINAL_MID inner
+                0x1A,                      // _Z_DECL_FINAL_MID inner
             ],
             "DeclFinal wire must equal [N_MID_DECLARE, _Z_DECL_FINAL_MID]",
         );
 
         match &declare.body {
             DeclareVariant::CodecZenohDeclFinal(d) => {
-                assert_eq!(d.header, 0x1A, "DeclFinal.header must equal _Z_DECL_FINAL_MID");
+                assert_eq!(
+                    d.header, 0x1A,
+                    "DeclFinal.header must equal _Z_DECL_FINAL_MID"
+                );
             }
             _ => panic!("build_declare_final must produce CodecZenohDeclFinal"),
         }
@@ -8076,10 +8075,7 @@ mod tests {
         //   body header = KE | TO | R | M (no N) = 0x59
         //   wireexpr.id VLE(11) = 0x0B  (no suffix bytes)
         let alias = build_interest_liveliness_subscriber(
-            5,
-            /*history=*/ false,
-            /*mapping_id=*/ 11,
-            None,
+            5, /*history=*/ false, /*mapping_id=*/ 11, None,
         );
         let alias_wire = alias.encode_to_vec();
         assert_eq!(
@@ -8098,9 +8094,7 @@ mod tests {
             Some("/tail"),
         );
         let composite_wire = composite.encode_to_vec();
-        let mut composite_expected = vec![
-            0x59u8, 0x05, 0x79, 0x0B, 0x05,
-        ];
+        let mut composite_expected = vec![0x59u8, 0x05, 0x79, 0x0B, 0x05];
         composite_expected.extend_from_slice(b"/tail");
         assert_eq!(
             composite_wire, composite_expected,
@@ -8182,8 +8176,7 @@ mod tests {
         // Case 1 — pure alias.
         let alias = build_request_query(42, 7, None);
         assert_eq!(
-            alias.header,
-            0x1C,
+            alias.header, 0x1C,
             "Request header carries MID 0x1C only (no N since no suffix); \
              M is codegen-derived from the Local wireexpr arm at encode",
         );
@@ -8195,7 +8188,10 @@ mod tests {
             }
             _ => panic!("Request.keyexpr must use WireexprLocal arm"),
         }
-        assert!(alias.extensions.is_none(), "minimal shape: no Request-level exts");
+        assert!(
+            alias.extensions.is_none(),
+            "minimal shape: no Request-level exts"
+        );
         match &alias.body {
             RequestVariant::CodecZenohQuery(q) => {
                 assert_eq!(
@@ -8227,7 +8223,10 @@ mod tests {
 
         // Case 3 — literal (id=0 sentinel + suffix carries the keyexpr).
         let literal = build_request_query(42, 0, Some("demo/test"));
-        assert_eq!(literal.header, 0x3C, "literal case still sets N (suffix present)");
+        assert_eq!(
+            literal.header, 0x3C,
+            "literal case still sets N (suffix present)"
+        );
         match &literal.keyexpr.body {
             WireexprVariant::WireexprLocal(w) => {
                 assert_eq!(w.id, 0, "literal sentinel id=0");
@@ -8284,9 +8283,7 @@ mod tests {
         let composite_wire = composite.encode_to_vec();
         let mut composite_expected = vec![
             0x7C, // MID | N | M
-            0x2A,
-            0x07,
-            0x03,
+            0x2A, 0x07, 0x03,
         ];
         composite_expected.extend_from_slice(b"abc");
         composite_expected.push(0x03); // Query MID
@@ -8304,12 +8301,7 @@ mod tests {
         //   Query.header = 0x03
         let literal = build_request_query(42, 0, Some("demo/test"));
         let literal_wire = literal.encode_to_vec();
-        let mut literal_expected = vec![
-            0x7C,
-            0x2A,
-            0x00,
-            0x09,
-        ];
+        let mut literal_expected = vec![0x7C, 0x2A, 0x00, 0x09];
         literal_expected.extend_from_slice(b"demo/test");
         literal_expected.push(0x03); // Query MID
         assert_eq!(
@@ -8357,12 +8349,7 @@ mod tests {
         // Inner-arm sanity: Query.header carries Q_C set + consolidation
         // is Some(wire_byte) — matches the Optional-field shape that
         // the codegen produces from query.scxml's `sce:present-if`.
-        let r = build_request_query_with_consolidation(
-            42,
-            7,
-            None,
-            ConsolidationMode::Monotonic,
-        );
+        let r = build_request_query_with_consolidation(42, 7, None, ConsolidationMode::Monotonic);
         match &r.body {
             RequestVariant::CodecZenohQuery(q) => {
                 assert_eq!(
@@ -8371,9 +8358,7 @@ mod tests {
                 );
                 assert_eq!(q.consolidation, Some(0x01));
                 assert!(
-                    q.parameters_len.is_none()
-                        && q.parameters.is_none()
-                        && q.extensions.is_none(),
+                    q.parameters_len.is_none() && q.parameters.is_none() && q.extensions.is_none(),
                     "consolidation-only layered helper must not set \
                      params or exts (those are separate helpers)",
                 );
@@ -8434,11 +8419,7 @@ mod tests {
         let mid = build_request_query_with_parameters(42, 7, None, &mid_params);
         let mid_wire = mid.encode_to_vec();
         let mut mid_expected = vec![
-            0x5C,
-            0x2A,
-            0x07,
-            0x43,
-            0x80, // VLE(128) low 7 + cont bit
+            0x5C, 0x2A, 0x07, 0x43, 0x80, // VLE(128) low 7 + cont bit
             0x01, // VLE(128) high byte
         ];
         mid_expected.extend_from_slice(&mid_params);
@@ -8452,9 +8433,7 @@ mod tests {
         let max_params: Vec<u8> = (0..256).map(|i| (i % 251) as u8).collect();
         let max = build_request_query_with_parameters(42, 7, None, &max_params);
         let max_wire = max.encode_to_vec();
-        let mut max_expected = vec![
-            0x5C, 0x2A, 0x07, 0x43, 0x80, 0x02,
-        ];
+        let mut max_expected = vec![0x5C, 0x2A, 0x07, 0x43, 0x80, 0x02];
         max_expected.extend_from_slice(&max_params);
         assert_eq!(
             max_wire, max_expected,
@@ -8478,9 +8457,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "RequestQueryBuilder::parameters requires a non-empty params slice"
-    )]
+    #[should_panic(expected = "RequestQueryBuilder::parameters requires a non-empty params slice")]
     fn build_request_query_with_parameters_rejects_empty_slice() {
         let _ = build_request_query_with_parameters(42, 7, None, b"");
     }
@@ -8532,8 +8509,7 @@ mod tests {
         let max = build_request_query_with_attachment(42, 7, None, &max_attach);
         let max_wire = max.encode_to_vec();
         let mut max_expected = vec![
-            0x5C, 0x2A, 0x07,
-            0x83, // Query header with Q_Z
+            0x5C, 0x2A, 0x07, 0x83, // Query header with Q_Z
             0x45, // ExtEntry header
             0x20, // VLE(32) single byte
         ];
@@ -8549,7 +8525,10 @@ mod tests {
         match &small.body {
             RequestVariant::CodecZenohQuery(q) => {
                 assert_eq!(q.header, 0x83, "Query.header MID(0x03) | Q_Z(0x80)");
-                let exts = q.extensions.as_ref().expect("Q_Z set → extensions vec must be Some");
+                let exts = q
+                    .extensions
+                    .as_ref()
+                    .expect("Q_Z set → extensions vec must be Some");
                 assert_eq!(exts.len(), 1, "single attachment ext only");
                 assert_eq!(
                     exts[0].header, 0x45,
@@ -8629,11 +8608,7 @@ mod tests {
         assert_eq!(
             mid_wire,
             vec![
-                0xDC,
-                0x2A,
-                0x07,
-                0x26,
-                0xE8, // VLE(1000) low 7 + cont
+                0xDC, 0x2A, 0x07, 0x26, 0xE8, // VLE(1000) low 7 + cont
                 0x07, // VLE(1000) high
                 0x03,
             ],
@@ -8648,11 +8623,7 @@ mod tests {
         assert_eq!(
             large_wire,
             vec![
-                0xDC,
-                0x2A,
-                0x07,
-                0x26,
-                0x80, 0x80, 0x80, 0x80, 0x10, // VLE(2^32)
+                0xDC, 0x2A, 0x07, 0x26, 0x80, 0x80, 0x80, 0x80, 0x10, // VLE(2^32)
                 0x03,
             ],
             "Request(timeout=2^32 ms,Query) wire bytes must match \
@@ -8710,22 +8681,20 @@ mod tests {
         // (1 byte) since target ∈ {1, 2} both fit in single-byte VLE.
         //   Request.header = MID(0x1C) | M(0x40) | N_Z(0x80) = 0xDC
         //   ExtEntry.header = ENC_ZINT(0x20) | M(0x10) | id_target(0x04) = 0x34
-        let cases: [(QueryTarget, u8); 2] = [
-            (QueryTarget::All, 0x01),
-            (QueryTarget::AllComplete, 0x02),
-        ];
+        let cases: [(QueryTarget, u8); 2] =
+            [(QueryTarget::All, 0x01), (QueryTarget::AllComplete, 0x02)];
         for (target, target_byte) in cases {
             let request = build_request_query_with_target(42, 7, None, target);
             let wire = request.encode_to_vec();
             assert_eq!(
                 wire,
                 vec![
-                    0xDC, // Request: MID | M | N_Z
-                    0x2A, // VLE(rid=42)
-                    0x07, // wireexpr.id VLE(7)
-                    0x34, // ExtEntry: ENC_ZINT | M | id_target
+                    0xDC,        // Request: MID | M | N_Z
+                    0x2A,        // VLE(rid=42)
+                    0x07,        // wireexpr.id VLE(7)
+                    0x34,        // ExtEntry: ENC_ZINT | M | id_target
                     target_byte, // VLE(target_enum_value)
-                    0x03, // Query.header (minimal)
+                    0x03,        // Query.header (minimal)
                 ],
                 "Request(target={target:?},Query) wire bytes must match \
                  zenoh-pico reference (network.c:138-143)",
@@ -8906,7 +8875,10 @@ mod tests {
         );
         match &req_exts[0].body {
             ExtEntryVariant::CodecZenohExtZint(zint) => {
-                assert_eq!(zint.value, 0x05, "qos packed byte 0x05 lifts into ZINT VLE value verbatim");
+                assert_eq!(
+                    zint.value, 0x05,
+                    "qos packed byte 0x05 lifts into ZINT VLE value verbatim"
+                );
             }
             _ => panic!("qos ext body must be CodecZenohExtZint"),
         }
@@ -8934,14 +8906,23 @@ mod tests {
             .expect("3 Request-level exts set → extensions must be Some");
         assert_eq!(req_exts.len(), 3, "qos + target + timeout");
         // qos first: ENC_ZINT | id_qos(1), Z continuation set
-        assert_eq!(req_exts[0].header, 0x80 | 0x20 | 0x01,
-            "qos ext at index 0 must carry Z continuation (more follows)");
+        assert_eq!(
+            req_exts[0].header,
+            0x80 | 0x20 | 0x01,
+            "qos ext at index 0 must carry Z continuation (more follows)"
+        );
         // target second: ENC_ZINT | M | id_target(4), Z continuation set
-        assert_eq!(req_exts[1].header, 0x80 | 0x20 | 0x10 | 0x04,
-            "target ext at index 1 must carry M(0x10) + Z continuation");
+        assert_eq!(
+            req_exts[1].header,
+            0x80 | 0x20 | 0x10 | 0x04,
+            "target ext at index 1 must carry M(0x10) + Z continuation"
+        );
         // timeout last: ENC_ZINT | id_timeout(6), no Z
-        assert_eq!(req_exts[2].header, 0x20 | 0x06,
-            "timeout ext at index 2 (last) must NOT carry Z");
+        assert_eq!(
+            req_exts[2].header,
+            0x20 | 0x06,
+            "timeout ext at index 2 (last) must NOT carry Z"
+        );
     }
 
     /// R121j-1g — RequestQueryBuilder.request_budget emits a single
@@ -8955,7 +8936,10 @@ mod tests {
         let request = RequestQueryBuilder::new(42, 7, None)
             .request_budget(0x1234_5678)
             .build();
-        let req_exts = request.extensions.as_ref().expect("budget setter must populate exts");
+        let req_exts = request
+            .extensions
+            .as_ref()
+            .expect("budget setter must populate exts");
         assert_eq!(req_exts.len(), 1, "only budget ext was set");
         assert_eq!(
             req_exts[0].header,
@@ -8964,7 +8948,10 @@ mod tests {
         );
         match &req_exts[0].body {
             ExtEntryVariant::CodecZenohExtZint(zint) => {
-                assert_eq!(zint.value, 0x1234_5678, "budget u32 widens into u64 ZINT value verbatim");
+                assert_eq!(
+                    zint.value, 0x1234_5678,
+                    "budget u32 widens into u64 ZINT value verbatim"
+                );
             }
             _ => panic!("budget ext body must be CodecZenohExtZint"),
         }
@@ -8983,10 +8970,26 @@ mod tests {
         assert_eq!(req_exts.len(), 4, "qos + target + budget + timeout");
         assert_eq!(req_exts[0].header & 0x07, 0x01, "index 0: qos id");
         assert_eq!(req_exts[1].header & 0x07, 0x04, "index 1: target id");
-        assert_eq!(req_exts[2].header & 0x07, 0x05, "index 2: budget id (between target and timeout)");
-        assert_eq!(req_exts[3].header & 0x07, 0x06, "index 3: timeout id (last)");
-        assert_eq!(req_exts[3].header & 0x80, 0x00, "timeout last → Z must be clear");
-        assert_eq!(req_exts[2].header & 0x80, 0x80, "budget at index 2 → Z must be set (timeout follows)");
+        assert_eq!(
+            req_exts[2].header & 0x07,
+            0x05,
+            "index 2: budget id (between target and timeout)"
+        );
+        assert_eq!(
+            req_exts[3].header & 0x07,
+            0x06,
+            "index 3: timeout id (last)"
+        );
+        assert_eq!(
+            req_exts[3].header & 0x80,
+            0x00,
+            "timeout last → Z must be clear"
+        );
+        assert_eq!(
+            req_exts[2].header & 0x80,
+            0x80,
+            "budget at index 2 → Z must be set (timeout follows)"
+        );
     }
 
     /// R121j-1g — request_budget rejects zero (mirrors zenoh-pico's
@@ -9026,7 +9029,10 @@ mod tests {
         );
         match &req_exts[0].body {
             ExtEntryVariant::CodecZenohExtZbuf(zbuf) => {
-                assert_eq!(zbuf.value_len, 4, "Timestamp encode = VLE(42)+VLE(2)+zid[2] = 4 bytes");
+                assert_eq!(
+                    zbuf.value_len, 4,
+                    "Timestamp encode = VLE(42)+VLE(2)+zid[2] = 4 bytes"
+                );
                 assert_eq!(
                     zbuf.value,
                     vec![0x2a, 0x02, 0xab, 0xcd],
@@ -9057,7 +9063,11 @@ mod tests {
             .request_timeout_ms(1000)
             .build();
         let req_exts = request.extensions.as_ref().expect("5 exts set");
-        assert_eq!(req_exts.len(), 5, "qos + tstamp + target + budget + timeout");
+        assert_eq!(
+            req_exts.len(),
+            5,
+            "qos + tstamp + target + budget + timeout"
+        );
         assert_eq!(req_exts[0].header & 0x07, 0x01, "index 0: qos id");
         assert_eq!(req_exts[1].header & 0x07, 0x02, "index 1: tstamp id");
         assert_eq!(req_exts[2].header & 0x07, 0x04, "index 2: target id");
@@ -9072,7 +9082,11 @@ mod tests {
         // M flag (bit 4): set on target only (M=1 per zenoh-pico),
         // clear on qos / tstamp / budget / timeout.
         assert_eq!(req_exts[0].header & 0x10, 0x00, "qos: M clear");
-        assert_eq!(req_exts[1].header & 0x10, 0x00, "tstamp: M clear (non-mandatory per zenoh-pico)");
+        assert_eq!(
+            req_exts[1].header & 0x10,
+            0x00,
+            "tstamp: M clear (non-mandatory per zenoh-pico)"
+        );
         assert_eq!(req_exts[2].header & 0x10, 0x10, "target: M set");
         assert_eq!(req_exts[3].header & 0x10, 0x00, "budget: M clear");
         assert_eq!(req_exts[4].header & 0x10, 0x00, "timeout: M clear");
@@ -9138,7 +9152,10 @@ mod tests {
         let req_exts = request.extensions.as_ref().expect("qos ext present");
         match &req_exts[0].body {
             ExtEntryVariant::CodecZenohExtZint(zint) => {
-                assert_eq!(zint.value, 0x19, "RealTime(1) + Block + express = 0x10|0x08|0x01");
+                assert_eq!(
+                    zint.value, 0x19,
+                    "RealTime(1) + Block + express = 0x10|0x08|0x01"
+                );
             }
             _ => panic!("qos body must be ExtZint"),
         }
@@ -9253,8 +9270,7 @@ mod tests {
         assert_eq!(
             large_wire,
             vec![
-                0x1A,
-                0xC8, // (200 & 0x7F) | 0x80
+                0x1A, 0xC8, // (200 & 0x7F) | 0x80
                 0x01, // 200 >> 7
             ],
             "ResponseFinal multi-byte VLE rid wire bytes must match zenoh-pico reference",
@@ -9345,13 +9361,11 @@ mod tests {
         let large = build_response_reply_literal(200, "k", b"v");
         let large_wire = large.encode_to_vec();
         let large_expected = vec![
-            0x7B,
-            0xC8, // VLE(200) low + cont
+            0x7B, 0xC8, // VLE(200) low + cont
             0x01, // VLE(200) high
             0x00, // wireexpr id=0 literal
             0x01, // suffix_len(1)
-            b'k',
-            0x04, // Reply.header
+            b'k', 0x04, // Reply.header
             0x01, // MsgPut.header
             0x01, // payload_len(1)
             b'v',
@@ -9407,8 +9421,7 @@ mod tests {
             alias_wire,
             vec![
                 0x5B, // Response: MID | M (no N)
-                0x2A,
-                0x07, // wireexpr.id VLE(7)
+                0x2A, 0x07, // wireexpr.id VLE(7)
                 0x04, // Reply.header
                 0x01, // MsgPut.header
                 0x01, // payload_len(1)
@@ -9425,9 +9438,7 @@ mod tests {
         let composite = build_response_reply_aliased(42, 7, Some("tail"), b"data");
         let composite_wire = composite.encode_to_vec();
         let mut composite_expected = vec![
-            0x7B,
-            0x2A,
-            0x07, // wireexpr.id
+            0x7B, 0x2A, 0x07, // wireexpr.id
             0x04, // suffix_len(4)
         ];
         composite_expected.extend_from_slice(b"tail");
@@ -9447,8 +9458,7 @@ mod tests {
         assert_eq!(
             large_wire,
             vec![
-                0x5B, 0x2A,
-                0xC8, 0x01, // wireexpr.id VLE(200)
+                0x5B, 0x2A, 0xC8, 0x01, // wireexpr.id VLE(200)
                 0x04, 0x01, 0x01, b'x',
             ],
             "Response(Reply) multi-byte VLE alias wire bytes must match \
@@ -9481,12 +9491,9 @@ mod tests {
         let small = build_response_err_literal(42, "k", b"fail");
         let small_wire = small.encode_to_vec();
         let mut small_expected = vec![
-            0x7B,
-            0x2A,
-            0x00, // wireexpr id=0
+            0x7B, 0x2A, 0x00, // wireexpr id=0
             0x01, // suffix_len(1)
-            b'k',
-            0x05, // Err.header (no MsgPut layer above this!)
+            b'k', 0x05, // Err.header (no MsgPut layer above this!)
             0x04, // payload_len(4)
         ];
         small_expected.extend_from_slice(b"fail");
@@ -9502,12 +9509,10 @@ mod tests {
         assert_eq!(
             large_wire,
             vec![
-                0x7B,
-                0xC8, 0x01, // VLE(rid=200)
+                0x7B, 0xC8, 0x01, // VLE(rid=200)
                 0x00, // wireexpr id=0 literal
                 0x01, // suffix_len(1)
-                b'x',
-                0x05, // Err.header
+                b'x', 0x05, // Err.header
                 0x01, // payload_len(1)
                 b'e',
             ],
@@ -9561,9 +9566,7 @@ mod tests {
         let composite_wire = composite.encode_to_vec();
         let mut composite_expected = vec![
             0x7B, // Response: MID | N | M
-            0x2A,
-            0x07,
-            0x04, // suffix_len(4)
+            0x2A, 0x07, 0x04, // suffix_len(4)
         ];
         composite_expected.extend_from_slice(b"tail");
         composite_expected.push(0x05); // Err.header
@@ -9591,11 +9594,8 @@ mod tests {
         let response = build_response_reply_literal(42, "k", b"v");
         let response_bytes = response.encode_to_vec();
 
-        let wire_reliable = encode_frame_with_response(
-            0,
-            build_response_reply_literal(42, "k", b"v"),
-            true,
-        );
+        let wire_reliable =
+            encode_frame_with_response(0, build_response_reply_literal(42, "k", b"v"), true);
         assert_eq!(
             wire_reliable[0],
             wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME,
@@ -9608,11 +9608,8 @@ mod tests {
             "Frame body tail must be Response.encode_to_vec() bytes verbatim",
         );
 
-        let wire_best_effort = encode_frame_with_response(
-            0,
-            build_response_reply_literal(42, "k", b"v"),
-            false,
-        );
+        let wire_best_effort =
+            encode_frame_with_response(0, build_response_reply_literal(42, "k", b"v"), false);
         assert_eq!(
             wire_best_effort[0],
             wire_const::T_MID_FRAME,
@@ -9638,7 +9635,8 @@ mod tests {
             "Frame body tail must be Request.encode_to_vec() bytes verbatim",
         );
 
-        let wire_best_effort = encode_frame_with_request(0, build_request_query(42, 7, None), false);
+        let wire_best_effort =
+            encode_frame_with_request(0, build_request_query(42, 7, None), false);
         assert_eq!(
             wire_best_effort[0],
             wire_const::T_MID_FRAME,
@@ -9694,7 +9692,11 @@ mod tests {
         actions.send_response(response);
 
         let frames = driver.frames.lock().unwrap();
-        assert_eq!(frames.len(), 1, "exactly one send_blocking call per send_response");
+        assert_eq!(
+            frames.len(),
+            1,
+            "exactly one send_blocking call per send_response"
+        );
         assert_eq!(
             frames[0].0, expected_wire,
             "wire bytes must match encode_frame_with_response output byte-for-byte"
@@ -9842,9 +9844,7 @@ mod tests {
         };
         let actions = SessionLinkActions::new(driver.clone(), params);
 
-        actions.send_response(
-            ResponseReplyBuilder::new(99, 0, Some("k"), b"v").build(),
-        );
+        actions.send_response(ResponseReplyBuilder::new(99, 0, Some("k"), b"v").build());
         actions.send_response_final(99);
 
         let frames = driver.frames.lock().unwrap();
@@ -9887,8 +9887,16 @@ mod tests {
                 .expect("32-byte demo key satisfies the >=32 invariant"),
         };
         let actions = SessionLinkActions::new(Arc::new(NullDriver), params);
-        assert_eq!(actions.next_outbound_frame_sn(), 42, "first SN must equal params.initial_sn");
-        assert_eq!(actions.next_outbound_frame_sn(), 43, "subsequent SNs must increment by 1");
+        assert_eq!(
+            actions.next_outbound_frame_sn(),
+            42,
+            "first SN must equal params.initial_sn"
+        );
+        assert_eq!(
+            actions.next_outbound_frame_sn(),
+            43,
+            "subsequent SNs must increment by 1"
+        );
         assert_eq!(actions.next_outbound_frame_sn(), 44);
     }
 
@@ -9899,8 +9907,13 @@ mod tests {
     #[test]
     fn response_reply_builder_no_setters_matches_aliased_baseline() {
         let direct = build_response_reply_aliased(42, 7, None, b"hello").encode_to_vec();
-        let built = ResponseReplyBuilder::new(42, 7, None, b"hello").build().encode_to_vec();
-        assert_eq!(direct, built, "ReplyBuilder.new+build must match build_response_reply_aliased byte-for-byte");
+        let built = ResponseReplyBuilder::new(42, 7, None, b"hello")
+            .build()
+            .encode_to_vec();
+        assert_eq!(
+            direct, built,
+            "ReplyBuilder.new+build must match build_response_reply_aliased byte-for-byte"
+        );
     }
 
     /// R121j-2b — ResponseReplyBuilder.consolidation sets the
@@ -9917,7 +9930,10 @@ mod tests {
         // The C-bit-set wire differs from baseline only in the Reply.header
         // byte (R_C bit) and a freshly inserted consolidation byte (0x02 =
         // Latest) directly after it.
-        assert_ne!(baseline, with_c, "consolidation setter must alter the wire bytes");
+        assert_ne!(
+            baseline, with_c,
+            "consolidation setter must alter the wire bytes"
+        );
         // Locate Reply.header in the encoded Response. The encoded layout
         // up through Reply.header is:
         //   Response.header(1) + VLE(rid) + wireexpr + Reply.header(1)
@@ -9925,10 +9941,21 @@ mod tests {
         // we can pin the locations explicitly: Response.header at offset
         // 0, VLE(42)=1 byte at offset 1, wireexpr(id=7,no suffix)=1 byte
         // VLE(7) at offset 2, Reply.header at offset 3.
-        assert_eq!(baseline[3] & 0x20, 0, "baseline Reply.header must have R_C clear");
-        assert_eq!(with_c[3] & 0x20, 0x20, "consolidation builder must set R_C(0x20) on Reply.header");
-        assert_eq!(with_c[4], ConsolidationMode::Latest.wire_byte(),
-            "consolidation byte must follow Reply.header carrying the wire-byte mapping");
+        assert_eq!(
+            baseline[3] & 0x20,
+            0,
+            "baseline Reply.header must have R_C clear"
+        );
+        assert_eq!(
+            with_c[3] & 0x20,
+            0x20,
+            "consolidation builder must set R_C(0x20) on Reply.header"
+        );
+        assert_eq!(
+            with_c[4],
+            ConsolidationMode::Latest.wire_byte(),
+            "consolidation byte must follow Reply.header carrying the wire-byte mapping"
+        );
     }
 
     /// R121j-2b — ResponseErrBuilder with no setters must emit the
@@ -9936,8 +9963,13 @@ mod tests {
     #[test]
     fn response_err_builder_no_setters_matches_aliased_baseline() {
         let direct = build_response_err_aliased(42, 7, None, b"oops").encode_to_vec();
-        let built = ResponseErrBuilder::new(42, 7, None, b"oops").build().encode_to_vec();
-        assert_eq!(direct, built, "ErrBuilder.new+build must match build_response_err_aliased byte-for-byte");
+        let built = ResponseErrBuilder::new(42, 7, None, b"oops")
+            .build()
+            .encode_to_vec();
+        assert_eq!(
+            direct, built,
+            "ErrBuilder.new+build must match build_response_err_aliased byte-for-byte"
+        );
     }
 
     /// R121j-2b — ResponseErrBuilder.encoding without schema sets the
@@ -9951,10 +9983,17 @@ mod tests {
             .encode_to_vec();
         // Layout up through Err.header:
         //   Response.header(1) + VLE(42)(1) + VLE(7)(1) + Err.header(1) at offset 3
-        assert_eq!(with_enc[3] & 0x40, 0x40, "encoding builder must set E(0x40) on Err.header");
+        assert_eq!(
+            with_enc[3] & 0x40,
+            0x40,
+            "encoding builder must set E(0x40) on Err.header"
+        );
         // Next byte is VLE(packed_id) where packed_id = 4<<1 = 8.
         // VLE(8) = single byte 0x08.
-        assert_eq!(with_enc[4], 0x08, "no-schema packed_id = (id << 1) | 0; for id=4 this is 0x08");
+        assert_eq!(
+            with_enc[4], 0x08,
+            "no-schema packed_id = (id << 1) | 0; for id=4 this is 0x08"
+        );
     }
 
     /// R121j-2b — ResponseErrBuilder.encoding with schema sets E,
@@ -9965,12 +10004,26 @@ mod tests {
             .encoding(4, Some("schema_v1"))
             .build()
             .encode_to_vec();
-        assert_eq!(with_enc[3] & 0x40, 0x40, "schema-bearing encoding still sets E on Err.header");
+        assert_eq!(
+            with_enc[3] & 0x40,
+            0x40,
+            "schema-bearing encoding still sets E on Err.header"
+        );
         // packed_id = (4 << 1) | 1 = 9 → VLE single byte 0x09
-        assert_eq!(with_enc[4], 0x09, "with-schema packed_id = (id << 1) | 1; for id=4 this is 0x09");
+        assert_eq!(
+            with_enc[4], 0x09,
+            "with-schema packed_id = (id << 1) | 1; for id=4 this is 0x09"
+        );
         // VLE(schema_len = 9) = single byte 0x09, then "schema_v1" bytes
-        assert_eq!(with_enc[5], 0x09, "schema_len VLE follows packed_id; 'schema_v1' length = 9");
-        assert_eq!(&with_enc[6..6 + 9], b"schema_v1", "schema bytes follow schema_len");
+        assert_eq!(
+            with_enc[5], 0x09,
+            "schema_len VLE follows packed_id; 'schema_v1' length = 9"
+        );
+        assert_eq!(
+            &with_enc[6..6 + 9],
+            b"schema_v1",
+            "schema bytes follow schema_len"
+        );
     }
 
     /// R121j-2b — ResponseReplyBuilder literal path requires a
@@ -10033,16 +10086,27 @@ mod tests {
             "ExtZbuf value_len = 1 leading + 4 zid + 1 VLE(eid) + 1 VLE(sn) = 7"
         );
         // value[0] = (4-1) << 4 = 0x30 at offset 6.
-        assert_eq!(wire[6], 0x30, "leading byte = (zid_len-1) << 4 = 0x30 for zid_len=4");
+        assert_eq!(
+            wire[6], 0x30,
+            "leading byte = (zid_len-1) << 4 = 0x30 for zid_len=4"
+        );
         // value[1..5] = zid bytes [0xAA; 4] at offsets 7..11.
-        assert_eq!(&wire[7..11], &[0xAA; 4], "zid bytes follow the leading byte");
+        assert_eq!(
+            &wire[7..11],
+            &[0xAA; 4],
+            "zid bytes follow the leading byte"
+        );
         // value[5] = VLE(eid=11) at offset 11.
         assert_eq!(wire[11], 0x0B, "VLE(eid=11) = single byte 0x0B");
         // value[6] = VLE(sn=17) at offset 12.
         assert_eq!(wire[12], 0x11, "VLE(sn=17) = single byte 0x11");
         // Payload tail: VLE(payload_len=4) at offset 13, then "oops".
         assert_eq!(wire[13], 0x04, "VLE(payload_len=4) follows the ext chain");
-        assert_eq!(&wire[14..18], b"oops", "payload bytes follow the length prefix");
+        assert_eq!(
+            &wire[14..18],
+            b"oops",
+            "payload bytes follow the length prefix"
+        );
     }
 
     /// R121j-4b — `source_info` and `encoding` compose: both Err.header
@@ -10064,11 +10128,20 @@ mod tests {
         );
         // Encoding at offset 4: packed_id = (4<<1)|0 = 8 → VLE 0x08.
         // (Schema absent so no schema_len / schema bytes follow.)
-        assert_eq!(wire[4], 0x08, "encoding packed_id = (id << 1) | 0; for id=4 this is 0x08");
+        assert_eq!(
+            wire[4], 0x08,
+            "encoding packed_id = (id << 1) | 0; for id=4 this is 0x08"
+        );
         // ExtEntry.header at offset 5: 0x41.
-        assert_eq!(wire[5], 0x41, "ext header follows encoding when both are set");
+        assert_eq!(
+            wire[5], 0x41,
+            "ext header follows encoding when both are set"
+        );
         // VLE(value_len=4) at offset 6 (1 leading + 1 zid + 1 VLE(eid) + 1 VLE(sn)).
-        assert_eq!(wire[6], 0x04, "value_len = 1 + 1 + 1 + 1 = 4 for 1-byte zid");
+        assert_eq!(
+            wire[6], 0x04,
+            "value_len = 1 + 1 + 1 + 1 = 4 for 1-byte zid"
+        );
         // value[0] = (1-1)<<4 = 0x00 at offset 7.
         assert_eq!(wire[7], 0x00, "leading byte = 0x00 for zid_len=1");
         assert_eq!(wire[8], 0xBB, "zid byte");
@@ -10082,18 +10155,14 @@ mod tests {
     /// R121j-4b — source_info rejects zid lengths outside the
     /// zenoh-pico ZenohId wire constraint (1..=16, transport.h:31-37).
     #[test]
-    #[should_panic(
-        expected = "ResponseErrBuilder::source_info requires zid length 1..=16"
-    )]
+    #[should_panic(expected = "ResponseErrBuilder::source_info requires zid length 1..=16")]
     fn response_err_builder_source_info_rejects_zid_too_long() {
         let _ = ResponseErrBuilder::new(42, 7, None, b"oops").source_info(&[0; 17], 0, 0);
     }
 
     /// R121j-4b — empty zid is also rejected (lower bound of 1..=16).
     #[test]
-    #[should_panic(
-        expected = "ResponseErrBuilder::source_info requires zid length 1..=16"
-    )]
+    #[should_panic(expected = "ResponseErrBuilder::source_info requires zid length 1..=16")]
     fn response_err_builder_source_info_rejects_empty_zid() {
         let _ = ResponseErrBuilder::new(42, 7, None, b"oops").source_info(&[], 0, 0);
     }
@@ -10161,11 +10230,18 @@ mod tests {
             .build()
             .encode_to_vec();
         // Envelope Z set on Response.header at offset 0.
-        assert_eq!(wire[0] & 0x80, 0x80, "envelope-level Z(0x80) on Response.header");
+        assert_eq!(
+            wire[0] & 0x80,
+            0x80,
+            "envelope-level Z(0x80) on Response.header"
+        );
         // Envelope ext: header(0x43) + VLE(value_len = 1+1+1 = 3) + body(3)
         // at offsets 3..8. Body = [0x00, 0xBB, 0x01].
         assert_eq!(wire[3], 0x43);
-        assert_eq!(wire[4], 0x03, "value_len = 1 leading + 1 zid + 1 VLE(eid) = 3");
+        assert_eq!(
+            wire[4], 0x03,
+            "value_len = 1 leading + 1 zid + 1 VLE(eid) = 3"
+        );
         assert_eq!(wire[5], 0x00, "leading byte = 0x00 for zid_len=1");
         assert_eq!(wire[6], 0xBB);
         assert_eq!(wire[7], 0x01, "VLE(eid=1)");
@@ -10202,8 +10278,14 @@ mod tests {
             baseline[0] | 0x80,
             "responder must set Z(0x80) on Response.header for Err path too"
         );
-        assert_eq!(wire[3], 0x43, "same envelope ext header for both Reply and Err paths");
-        assert_eq!(wire[4], 0x04, "value_len = 1 leading + 2 zid + 1 VLE(eid) = 4");
+        assert_eq!(
+            wire[3], 0x43,
+            "same envelope ext header for both Reply and Err paths"
+        );
+        assert_eq!(
+            wire[4], 0x04,
+            "value_len = 1 leading + 2 zid + 1 VLE(eid) = 4"
+        );
         assert_eq!(wire[5], 0x10, "leading byte = (2-1) << 4 for zid_len=2");
         assert_eq!(&wire[6..8], &[0xCC, 0xCC]);
         assert_eq!(wire[8], 0x05, "VLE(eid=5)");
@@ -10227,7 +10309,11 @@ mod tests {
             .build()
             .encode_to_vec();
         // Envelope Z on Response.header.
-        assert_eq!(wire[0] & 0x80, 0x80, "envelope Z(0x80) on Response.header for responder");
+        assert_eq!(
+            wire[0] & 0x80,
+            0x80,
+            "envelope Z(0x80) on Response.header for responder"
+        );
         // Envelope ext: 0x43 + VLE(3) + [0x00, 0xDD, 0x09] at offsets 3..8.
         assert_eq!(wire[3], 0x43);
         assert_eq!(wire[4], 0x03, "envelope responder value_len = 3");
@@ -10239,7 +10325,11 @@ mod tests {
             0x80,
             "Err.header.Z(0x80) set by source_info; orthogonal to envelope Z"
         );
-        assert_eq!(wire[8] & 0x40, 0x00, "Err.header.E(0x40) clear (no encoding)");
+        assert_eq!(
+            wire[8] & 0x40,
+            0x00,
+            "Err.header.E(0x40) clear (no encoding)"
+        );
         // Err body ext: 0x41 + VLE(value_len = 1+1+1+1 = 4) + body(4)
         // at offsets 9..14.
         assert_eq!(wire[9], 0x41, "Err body ext header = source_info (0x41)");
@@ -10251,9 +10341,7 @@ mod tests {
     /// both Reply and Err builders (zenoh-pico ZenohId wire constraint,
     /// transport.h:31-37).
     #[test]
-    #[should_panic(
-        expected = "ResponseReplyBuilder::responder requires zid length 1..=16"
-    )]
+    #[should_panic(expected = "ResponseReplyBuilder::responder requires zid length 1..=16")]
     fn response_reply_builder_responder_rejects_zid_too_long() {
         let _ = ResponseReplyBuilder::new(42, 7, None, b"hello").responder(&[0; 17], 0);
     }
@@ -10261,9 +10349,7 @@ mod tests {
     /// R121j-3c — ResponseErrBuilder.responder shares the same wire
     /// constraint.
     #[test]
-    #[should_panic(
-        expected = "ResponseErrBuilder::responder requires zid length 1..=16"
-    )]
+    #[should_panic(expected = "ResponseErrBuilder::responder requires zid length 1..=16")]
     fn response_err_builder_responder_rejects_empty_zid() {
         let _ = ResponseErrBuilder::new(42, 7, None, b"oops").responder(&[], 0);
     }
@@ -10275,10 +10361,21 @@ mod tests {
     fn encode_responder_ext_body_matches_zenoh_pico_layout() {
         // zid_len=3 → leading byte = (3-1)<<4 = 0x20
         let bytes = encode_responder_ext_body(&[0xCA, 0xFE, 0xBA], 0x4000);
-        assert_eq!(bytes[0], 0x20, "leading byte packs zid_len-1 in high nibble");
-        assert_eq!(&bytes[1..4], &[0xCA, 0xFE, 0xBA], "raw zid follows the leading byte");
+        assert_eq!(
+            bytes[0], 0x20,
+            "leading byte packs zid_len-1 in high nibble"
+        );
+        assert_eq!(
+            &bytes[1..4],
+            &[0xCA, 0xFE, 0xBA],
+            "raw zid follows the leading byte"
+        );
         // VLE(16384) = 0x80 0x80 0x01
-        assert_eq!(&bytes[4..7], &[0x80, 0x80, 0x01], "VLE(eid=16384) = 0x80 0x80 0x01");
+        assert_eq!(
+            &bytes[4..7],
+            &[0x80, 0x80, 0x01],
+            "VLE(eid=16384) = 0x80 0x80 0x01"
+        );
         assert_eq!(bytes.len(), 7, "total = 1 leading + 3 zid + 3 VLE(eid) = 7");
     }
 
@@ -10293,13 +10390,32 @@ mod tests {
         // Expected: [0x10, 0xDE, 0xAD, VLE(0x80)..., VLE(0x4000)...]
         // VLE(0x80): 0x80 needs 2 bytes (first 0x80|0x00=0x80, second 0x01)
         // VLE(0x4000): 0x4000 needs 3 bytes (0x80, 0x80, 0x01)
-        assert_eq!(bytes[0], 0x10, "leading byte packs zid_len-1 in high nibble");
-        assert_eq!(&bytes[1..3], &[0xDE, 0xAD], "raw zid follows the leading byte");
+        assert_eq!(
+            bytes[0], 0x10,
+            "leading byte packs zid_len-1 in high nibble"
+        );
+        assert_eq!(
+            &bytes[1..3],
+            &[0xDE, 0xAD],
+            "raw zid follows the leading byte"
+        );
         // VLE(128) = 0x80, 0x01 (continuation bit on first byte, value 1 in second)
-        assert_eq!(&bytes[3..5], &[0x80, 0x01], "VLE(eid=128) = 0x80 0x01 (2 bytes)");
+        assert_eq!(
+            &bytes[3..5],
+            &[0x80, 0x01],
+            "VLE(eid=128) = 0x80 0x01 (2 bytes)"
+        );
         // VLE(16384) = 0x80, 0x80, 0x01
-        assert_eq!(&bytes[5..8], &[0x80, 0x80, 0x01], "VLE(sn=16384) = 0x80 0x80 0x01 (3 bytes)");
-        assert_eq!(bytes.len(), 8, "total = 1 leading + 2 zid + 2 VLE(eid) + 3 VLE(sn) = 8");
+        assert_eq!(
+            &bytes[5..8],
+            &[0x80, 0x80, 0x01],
+            "VLE(sn=16384) = 0x80 0x80 0x01 (3 bytes)"
+        );
+        assert_eq!(
+            bytes.len(),
+            8,
+            "total = 1 leading + 2 zid + 2 VLE(eid) + 3 VLE(sn) = 8"
+        );
     }
 
     /// R121j-3d — ResponseReplyBuilder.reply_del() swaps the inner
@@ -10309,8 +10425,13 @@ mod tests {
     /// dropped (MsgDel has no payload).
     #[test]
     fn response_reply_builder_reply_del_swaps_inner_arm_to_msgdel() {
-        let put_wire = ResponseReplyBuilder::new(42, 7, None, b"hello").build().encode_to_vec();
-        let del_wire = ResponseReplyBuilder::new(42, 7, None, b"hello").reply_del().build().encode_to_vec();
+        let put_wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+            .build()
+            .encode_to_vec();
+        let del_wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
+            .reply_del()
+            .build()
+            .encode_to_vec();
         // Layout up through Reply.header: Response.header(1) + VLE(42)(1) +
         // VLE(7)(1) + Reply.header(1) at offset 3. Inner MID at offset 4.
         assert_eq!(put_wire[4], 0x01, "Put path inner MID = _Z_MID_Z_PUT(0x01)");
@@ -10344,9 +10465,17 @@ mod tests {
             .build()
             .encode_to_vec();
         // Reply.header at offset 3 must carry R_C(0x20).
-        assert_eq!(wire[3] & 0x20, 0x20, "consolidation must set R_C(0x20) on Reply.header even on Del path");
+        assert_eq!(
+            wire[3] & 0x20,
+            0x20,
+            "consolidation must set R_C(0x20) on Reply.header even on Del path"
+        );
         // Consolidation byte at offset 4 (between Reply.header and MsgDel).
-        assert_eq!(wire[4], ConsolidationMode::Latest.wire_byte(), "consolidation byte follows Reply.header");
+        assert_eq!(
+            wire[4],
+            ConsolidationMode::Latest.wire_byte(),
+            "consolidation byte follows Reply.header"
+        );
         // MsgDel inner MID at offset 5.
         assert_eq!(wire[5], 0x02, "MsgDel inner MID follows consolidation byte");
     }
@@ -10407,7 +10536,10 @@ mod tests {
             Some("application/json".len() as u64)
         );
         assert!(put.e(), "E flag must be set when encoding is attached");
-        assert!(!put.t(), "T flag must remain clear when timestamp is absent");
+        assert!(
+            !put.t(),
+            "T flag must remain clear when timestamp is absent"
+        );
     }
 
     #[test]
@@ -10419,7 +10551,10 @@ mod tests {
         // source_info ext: ENC_ZBUF(0x40) | ext_id(0x01) — M and Z bits
         // are NOT pre-set; Z bit application happens at codec emit time.
         assert_eq!(exts[0].header & 0x4F, 0x41);
-        assert!(put.z(), "Z flag must be set when body extensions are present");
+        assert!(
+            put.z(),
+            "Z flag must be set when body extensions are present"
+        );
         if let ExtEntryVariant::CodecZenohExtZbuf(z) = &exts[0].body {
             // First byte of source_info payload is `(zidlen - 1) << 4`.
             assert_eq!(z.value[0], (4 - 1) << 4);
@@ -10435,13 +10570,8 @@ mod tests {
         // _z_push_body_encode_extensions emits source_info before
         // attachment so the chain position must mirror that ordering.
         let si = SourceInfo::new(&[0xDE, 0xAD], 7, 0);
-        let put = build_msg_put_with_meta(
-            b"payload",
-            None,
-            None,
-            Some(&si),
-            Some(b"attach-payload"),
-        );
+        let put =
+            build_msg_put_with_meta(b"payload", None, None, Some(&si), Some(b"attach-payload"));
         let exts = put.extensions.as_deref().expect("body ext chain populated");
         assert_eq!(exts.len(), 2, "source_info + attachment = 2 entries");
         assert_eq!(exts[0].header & 0x4F, 0x41, "source_info first");
@@ -10647,7 +10777,10 @@ mod tests {
         let standalone_push = build_push_literal_with_meta("home/temp", b"data", &meta);
         let standalone_bytes = standalone_push.encode_to_vec();
         assert!(
-            frames[0].0.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            frames[0]
+                .0
+                .windows(standalone_bytes.len())
+                .any(|w| w == standalone_bytes),
             "recorded frame must contain the with-meta Push bytes verbatim"
         );
     }
@@ -10696,7 +10829,10 @@ mod tests {
     fn send_declare_keyexpr_populates_outbound_mapping_table() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
         let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
-        assert!(actions.resolve_outbound_mapping(7).is_none(), "fresh table empty");
+        assert!(
+            actions.resolve_outbound_mapping(7).is_none(),
+            "fresh table empty"
+        );
 
         actions.send_declare_keyexpr(7, "home/temp");
         assert_eq!(
@@ -10706,7 +10842,10 @@ mod tests {
         );
         // Multiple declarations on different ids accumulate.
         actions.send_declare_keyexpr(8, "home/humidity");
-        assert_eq!(actions.resolve_outbound_mapping(7).as_deref(), Some("home/temp"));
+        assert_eq!(
+            actions.resolve_outbound_mapping(7).as_deref(),
+            Some("home/temp")
+        );
         assert_eq!(
             actions.resolve_outbound_mapping(8).as_deref(),
             Some("home/humidity")
@@ -10823,12 +10962,7 @@ mod tests {
         // threaded through Session::query.
         let driver_a = std::sync::Arc::new(CaptureDriver::new());
         let actions_a = SessionLinkActions::new(driver_a.clone(), publish_meta_fixture_params());
-        actions_a.send_request_query_with_meta(
-            42,
-            0,
-            Some("home/temp"),
-            &QueryMetadata::default(),
-        );
+        actions_a.send_request_query_with_meta(42, 0, Some("home/temp"), &QueryMetadata::default());
         let with_meta = driver_a.frames.lock().unwrap()[0].0.clone();
 
         let driver_b = std::sync::Arc::new(CaptureDriver::new());
@@ -10857,11 +10991,14 @@ mod tests {
         };
         actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
 
-        let standalone = build_request_query_with_target(42, 0, Some("home/temp"), QueryTarget::All);
+        let standalone =
+            build_request_query_with_target(42, 0, Some("home/temp"), QueryTarget::All);
         let standalone_bytes = standalone.encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
-            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            frame
+                .windows(standalone_bytes.len())
+                .any(|w| w == standalone_bytes),
             "frame must contain the with-target Request bytes verbatim"
         );
     }
@@ -10876,12 +11013,18 @@ mod tests {
         };
         actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
 
-        let standalone =
-            build_request_query_with_consolidation(42, 0, Some("home/temp"), ConsolidationMode::Latest);
+        let standalone = build_request_query_with_consolidation(
+            42,
+            0,
+            Some("home/temp"),
+            ConsolidationMode::Latest,
+        );
         let standalone_bytes = standalone.encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
-            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            frame
+                .windows(standalone_bytes.len())
+                .any(|w| w == standalone_bytes),
             "frame must contain the with-consolidation Request bytes verbatim"
         );
     }
@@ -10896,12 +11039,13 @@ mod tests {
         };
         actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
 
-        let standalone =
-            build_request_query_with_attachment(42, 0, Some("home/temp"), b"q-att");
+        let standalone = build_request_query_with_attachment(42, 0, Some("home/temp"), b"q-att");
         let standalone_bytes = standalone.encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
-            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            frame
+                .windows(standalone_bytes.len())
+                .any(|w| w == standalone_bytes),
             "frame must contain the with-attachment Request bytes verbatim"
         );
     }
@@ -10930,7 +11074,9 @@ mod tests {
         let baseline_bytes = baseline.encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
-            frame.windows(baseline_bytes.len()).any(|w| w == baseline_bytes),
+            frame
+                .windows(baseline_bytes.len())
+                .any(|w| w == baseline_bytes),
             "empty-inner attachment must not change the wire bytes"
         );
     }
@@ -10945,12 +11091,13 @@ mod tests {
         };
         actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
 
-        let standalone =
-            build_request_query_with_timeout_ms(42, 0, Some("home/temp"), 5_000);
+        let standalone = build_request_query_with_timeout_ms(42, 0, Some("home/temp"), 5_000);
         let standalone_bytes = standalone.encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
-            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            frame
+                .windows(standalone_bytes.len())
+                .any(|w| w == standalone_bytes),
             "frame must contain the with-timeout Request bytes verbatim"
         );
     }

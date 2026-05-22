@@ -30,8 +30,7 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    check_lease_deadline, BoxedLinkDriver, CloseReason,
-    LeaseCheckOutcome, SessionLinkActions,
+    check_lease_deadline, BoxedLinkDriver, CloseReason, LeaseCheckOutcome, SessionLinkActions,
 };
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{

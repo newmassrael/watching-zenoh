@@ -72,8 +72,14 @@ impl InboundReadDriver {
 enum InboundReadState {
     #[default]
     Idle,
-    Length { prefix: [u8; 2], offset: usize },
-    Payload { frame: Vec<u8>, offset: usize },
+    Length {
+        prefix: [u8; 2],
+        offset: usize,
+    },
+    Payload {
+        frame: Vec<u8>,
+        offset: usize,
+    },
 }
 
 impl LinkDriver for InboundReadDriver {
@@ -85,11 +91,7 @@ impl LinkDriver for InboundReadDriver {
         Ok(())
     }
 
-    async fn send(
-        &mut self,
-        _frame: &TxFrame<'_>,
-        _reliability: Reliability,
-    ) -> io::Result<()> {
+    async fn send(&mut self, _frame: &TxFrame<'_>, _reliability: Reliability) -> io::Result<()> {
         // Inbound driver never sends — the FSM's script-actions
         // dispatch outbound via the OutboundWriteDriver Arc captured
         // by SessionLinkActions. Surface as NotConnected so any
@@ -132,8 +134,7 @@ impl LinkDriver for InboundReadDriver {
                         Ok(n) => {
                             *offset += n;
                             if *offset == 2 {
-                                let payload_len =
-                                    u16::from_le_bytes(*prefix) as usize;
+                                let payload_len = u16::from_le_bytes(*prefix) as usize;
                                 self.read_state = InboundReadState::Payload {
                                     frame: vec![0u8; payload_len],
                                     offset: 0,

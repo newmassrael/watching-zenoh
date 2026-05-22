@@ -29,9 +29,7 @@ use sce_rust_runtime::Engine;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
 };
-use wz_runtime_tokio::session_glue::{
-    inbound_to_fsm_event, BoxedLinkDriver, SessionLinkActions,
-};
+use wz_runtime_tokio::session_glue::{inbound_to_fsm_event, BoxedLinkDriver, SessionLinkActions};
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{
     fixture_session_init_params, install_session_actions_for_test,
@@ -66,9 +64,13 @@ fn craft_initack_wire(cookie: &[u8]) -> Vec<u8> {
         parent_flags | T_MID_INIT,
         0x05, // version
         0x31, // cbyte: whatami=Peer, zid_len=4
-        0xA0, 0xA1, 0xA2, 0xA3, // zid (4 bytes)
+        0xA0,
+        0xA1,
+        0xA2,
+        0xA3, // zid (4 bytes)
         0x00, // sn_res (seq=0, req=0)
-        0x00, 0x00, // batch_size = 0 (LE u16)
+        0x00,
+        0x00,               // batch_size = 0 (LE u16)
         cookie.len() as u8, // VLE cookie_len (< 0x80 so single byte)
     ];
     wire.extend_from_slice(cookie);
@@ -286,7 +288,10 @@ fn parse_inbound_decodes_keep_alive_frame() {
     let wire = [0x04u8];
     let frame = parse_inbound(&wire).expect("parse_inbound on KeepAlive wire");
     match frame {
-        InboundFrame::KeepAlive { has_ext, extensions } => {
+        InboundFrame::KeepAlive {
+            has_ext,
+            extensions,
+        } => {
             assert!(!has_ext);
             assert!(extensions.is_empty());
         }
@@ -684,17 +689,18 @@ fn parse_frame_payload_dispatches_non_final_interest_with_body_byte() {
         3,
         "non-final Interest: header(1) + interest_id VLE(1) + body_flags(1) = 3 bytes; got {bytes:?}"
     );
-    assert_eq!(
-        bytes[0], 0x39,
-        "header carries MID 0x19 | C bit 0x20"
-    );
+    assert_eq!(bytes[0], 0x39, "header carries MID 0x19 | C bit 0x20");
     assert_eq!(
         bytes[2], 0x00,
         "body header byte default = 0 (no R, no keyexpr)"
     );
 
     let parsed = parse_frame_payload(&bytes).expect("non-final Interest parses");
-    assert_eq!(parsed.len(), 1, "exactly one Interest record; got {parsed:?}");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "exactly one Interest record; got {parsed:?}"
+    );
     match &parsed[0] {
         NetworkMessage::Interest(interest) => {
             assert!(interest.c(), "C flag survived round-trip");
@@ -741,11 +747,15 @@ fn r86_handle_inbound_initsyn_captures_peer_zid() {
     // wire across the dispatch layers.
     let wire = vec![
         0x40 | 0x01, // FLAG_T_INIT_S | T_MID_INIT
-        0x05, // version
-        0x31, // cbyte: whatami=Peer wire(0x01), zid_len=4 (high nibble = 3)
-        0xB0, 0xB1, 0xB2, 0xB3, // zid (4 bytes)
+        0x05,        // version
+        0x31,        // cbyte: whatami=Peer wire(0x01), zid_len=4 (high nibble = 3)
+        0xB0,
+        0xB1,
+        0xB2,
+        0xB3, // zid (4 bytes)
         0x00, // sn_res
-        0x00, 0x00, // batch_size LE u16
+        0x00,
+        0x00, // batch_size LE u16
     ];
 
     let frame = actions.handle_inbound(&wire).expect("InitSyn parses");
@@ -783,11 +793,20 @@ fn r86_handle_inbound_init_ack_does_not_overwrite_peer_zid() {
     // FLAG_T_INIT_S (0x40) and FLAG_T_INIT_A (0x20) parent flags.
     let wire = vec![
         0x40 | 0x20 | 0x01, // FLAG_T_INIT_S | FLAG_T_INIT_A | T_MID_INIT
-        0x05, 0x31,
-        0xC0, 0xC1, 0xC2, 0xC3, // different zid (would be the responder's)
-        0x00, 0x00, 0x00,
+        0x05,
+        0x31,
+        0xC0,
+        0xC1,
+        0xC2,
+        0xC3, // different zid (would be the responder's)
+        0x00,
+        0x00,
+        0x00,
         0x04, // cookie_len VLE = 4
-        0xDE, 0xAD, 0xBE, 0xEF, // cookie
+        0xDE,
+        0xAD,
+        0xBE,
+        0xEF, // cookie
     ];
 
     let frame = actions.handle_inbound(&wire).expect("InitAck parses");

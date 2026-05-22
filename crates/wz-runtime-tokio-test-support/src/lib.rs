@@ -104,10 +104,7 @@ pub fn install_session_actions_for_test(
 /// R79 — `script_engine` is now an explicit parameter (was implicit
 /// via the retired `lua_engine_singleton`). Callers pass the same
 /// engine they handed to `install_session_actions_for_test`.
-pub fn dispatch_script(
-    script_engine: &dyn IScriptEngine,
-    name: &str,
-) -> ScriptResult<ScriptValue> {
+pub fn dispatch_script(script_engine: &dyn IScriptEngine, name: &str) -> ScriptResult<ScriptValue> {
     debug_assert!(
         REGISTERED_SCRIPT_NAMES.contains(&name),
         "dispatch_script: '{name}' is not a registered script-action name; \

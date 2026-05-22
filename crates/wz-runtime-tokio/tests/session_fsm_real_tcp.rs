@@ -26,9 +26,7 @@ use tokio::net::{TcpListener, TcpStream};
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
 };
-use wz_runtime_tokio::session_glue::{
-    SessionLinkActions, TokioLinkDriverAdapter,
-};
+use wz_runtime_tokio::session_glue::{SessionLinkActions, TokioLinkDriverAdapter};
 use wz_runtime_tokio::TcpDriver;
 use wz_runtime_tokio_test_support::{
     fixture_session_init_params, install_session_actions_for_test,
@@ -94,7 +92,9 @@ async fn r60_fsm_drives_real_tcp_loopback() {
     // header) to confirm it carries FLAG_T_INIT_S | T_MID_INIT =
     // 0x41.
     let mut len_buf = [0u8; 2];
-    peer.read_exact(&mut len_buf).await.expect("read length prefix");
+    peer.read_exact(&mut len_buf)
+        .await
+        .expect("read length prefix");
     let len = u16::from_le_bytes(len_buf) as usize;
     assert!(len > 0, "init_syn payload must be non-empty");
     let mut payload = vec![0u8; len];

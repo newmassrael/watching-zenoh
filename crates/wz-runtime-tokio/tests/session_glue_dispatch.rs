@@ -89,8 +89,7 @@ fn fixture_params() -> SessionInitParams {
         lease_in_seconds: true,
         initial_sn: 0x42,
         cookie: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x77],
-        cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-            .expect("32-byte test key valid"),
+        cookie_signing_key: SigningKey::new(vec![0xAB; 32]).expect("32-byte test key valid"),
     }
 }
 
@@ -199,14 +198,18 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     // cookie_len VLE + cookie); we assert the first byte (header) and that
     // the body ends with the cookie payload, which is fixed.
     assert!(
-        open_syn.windows(params.cookie.len())
+        open_syn
+            .windows(params.cookie.len())
             .any(|w| w == params.cookie.as_slice()),
         "OpenSyn body must contain the cookie payload"
     );
 
     // Close — graceful session close, reason=Generic (0).
     let close_flags = 0x20u8; // FLAG_T_CLOSE_S
-    let expected_close = vec![close_flags | 0x03 /* T_MID_CLOSE */, 0x00 /* reason */];
+    let expected_close = vec![
+        close_flags | 0x03, /* T_MID_CLOSE */
+        0x00,               /* reason */
+    ];
     assert_eq!(snap.sends[2].0, expected_close, "Close wire bytes drift");
 
     // InitAck — flags=S|A|Z, includes cookie (R121f1 default ext
@@ -216,7 +219,8 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     let init_ack = &snap.sends[3].0;
     assert_eq!(init_ack[0], init_ack_flags | 0x01 /* T_MID_INIT */);
     assert!(
-        init_ack.windows(params.cookie.len())
+        init_ack
+            .windows(params.cookie.len())
             .any(|w| w == params.cookie.as_slice()),
         "InitAck body must contain the cookie payload"
     );

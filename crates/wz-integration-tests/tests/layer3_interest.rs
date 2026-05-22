@@ -53,5 +53,9 @@ fn layer3_interest_default_byte_equivalent() {
         "default INTEREST must match zenoh-pico byte-for-byte; \
          wz={wz:02x?} pico={pico:02x?}"
     );
-    assert_eq!(wz, &[0x19, 0x00], "default is_final wire form: [MID, id VLE 0]");
+    assert_eq!(
+        wz,
+        &[0x19, 0x00],
+        "default is_final wire form: [MID, id VLE 0]"
+    );
 }

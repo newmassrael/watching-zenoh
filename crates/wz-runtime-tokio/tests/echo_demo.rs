@@ -114,7 +114,8 @@ async fn echo_demo_msg_put_round_trip() {
     assert_eq!(received.payload_len, original.payload_len, "payload_len");
     assert_eq!(received.payload, original.payload, "payload bytes");
     assert!(
-        received.timestamp.is_none() && received.encoding.is_none()
+        received.timestamp.is_none()
+            && received.encoding.is_none()
             && received.extensions.is_none(),
         "no flags decoded"
     );
