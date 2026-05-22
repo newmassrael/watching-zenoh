@@ -14602,6 +14602,58 @@
         "Open R267-R270 architectural carries unchanged: Session<R,T> reparam, Instant -> u64ms migration."
       ]
     },
+    "Round 291": {
+      "decision_summary": "R291 — workspace cargo fmt --all cleanup of R285-R287 drift + Layer 0 lane promoted to mandatory cargo fmt --check (R64.1 single-source-of-truth invariant extended to rustfmt).",
+      "changes_bullets": [
+        "crates/**/*.rs — `cargo fmt --all` applied across 58 source files. 60-file diff (+2240 / -1766) is mechanical rustfmt normalisation; behaviour-neutral. The drift accumulated since R285-R287 wz-ap-demo decomposition because no lane invoked `cargo fmt --check` before this round.",
+        "scripts/run-ci.sh — `layer_0_actionlint` renamed to `layer_0_preflight_lints`. New composite shape: `cargo fmt --all -- --check` (mandatory; fails fast with copy-pastable `(cd crates && cargo fmt --all)` fix instruction) followed by the legacy `actionlint .github/workflows/*.yml` step (still optional; SKIPs gracefully when actionlint is not installed). Header comment + Time-cost table updated to advertise Layer 0 budget (<2s warm).",
+        ".githooks/pre-push — header lane-list comment updated to advertise the new Layer 0 composite shape and to list the C0 test-discipline + C1b alloc-test lanes (previously omitted). The hook still delegates to `scripts/run-ci.sh` via the R250 `git show HEAD:` re-source path so no logic change in the gate dispatch itself; only the documenting comment is touched.",
+        "Brief's `test_helpers visibility 중복` carry (R290 closure recommendation) retired as misdiagnosis: session.rs `make_decl_queryable` / `make_decl_subscriber` return `DeclareVariant` envelope variants, while `crate::declare::test_helpers::decl_*` return raw codec records (DeclQueryable / DeclSubscriber). The signatures and return types differ; R288 (665b32d) and R290 (e8a6568) doc-comments at session.rs:5152-5156 + 5774-5778 explicitly chose inlining over visibility promotion (\"inlining is cheaper than relaxing the helper visibility\"). To genuinely consolidate would require adding new convenience helpers (`literal-suffix → DeclareVariant`) in test_helpers, which is more work than the carry framed."
+      ],
+      "verification_bullets": [
+        "`cargo fmt --all --manifest-path crates/Cargo.toml -- --check` exit=0 post-cleanup (vs ~374KB diff pre-cleanup), confirming workspace fmt-clean.",
+        "`(cd crates && cargo test --workspace --quiet)` passes — workspace test suite (wz-runtime-tokio lib 544 + integration / cross-crate suites) all green. `(cd crates && cargo clippy --workspace --all-targets --no-deps --quiet -- -D warnings)` clean across all 7 crates.",
+        "`scripts/run-ci.sh --layer 0` — Layer 0 pass independently (fmt --check OK + actionlint SKIP per actionlint-not-installed branch).",
+        "`scripts/run-ci.sh --skip-codegen` — Layer 0 / A / A2 / C0 / C1 / C1b / C2 / D / E all green (Layer B skipped per flag, Layer E exercises the pre-built wz-ap-demo + zenoh-pico CLI binary set on this dev box and reports `Layer E pass`).",
+        "pre-commit (`mnemosyne-cli validate-workspace`) fired green during the feat commit `6a9c669` — entries=289 / sections=215 / T1=0 (ledger=1 R193 known-stale) / RT 12/12 / GENERATED.md=sync, unchanged from R290 closure baseline."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "R290 R291-carry still open — honest two-pattern keyexpr intersection algorithm for `has_matching` on `RemoteQueryableRegistry` + `RemoteSubscriberRegistry`. Replaces the R288 bidirectional asymmetric pattern-match approximation now shipping in three sites (Querier + QuerierAliased + Publisher + PublisherAliased = 4 handles). Spec-touching: RFC §5.A v1 amend (currently locks intersect to exact uint32 ID equality) + numerical_reference fixture addition + 6-backend codegen drift gate via Phase A + 3-site has_matching reimplementation. Multi-round design lock recommended; user gate.",
+        "R284 carry from R283 still open — uniform `Established` gate across the 4 non-aliased `declare_*` methods (declare_token / declare_subscriber / declare_queryable / declare_liveliness_subscriber). The aliased-path closure at R284 stays untouched. 3-5R, signature break + caller fan-out on runner.rs install_session_handles + e2e harnesses.",
+        "R283 architectural carry still open — peer-side non-final Interest inbound (bilateral). The wz Liveliness 100% bilateral path is gated on this piece. 2-3R + design.",
+        "R287 follow-up — `teardown_with_invariants` sub-fn or typestate sequence wrapper to compile-time-enforce the R284 graceful-Close ordering invariant currently doc-only in `crates/wz-ap-demo/src/runner.rs`. R287's run_demo body decomposed into 6 sub-fns but the 7-step teardown was kept inline to preserve the R284 ordering invariant; doc-only enforcement is the residual gap. 1-2R, bounded.",
+        "Open R267-R270 architectural carries unchanged: Session<R,T> reparameterisation (3-7R + design), Instant -> u64 ms storage migration (3-5R, ~30+ consumer sites).",
+        "Closed R291 carry — workspace fmt drift + Layer 0 fmt-lane gap. Mandatory `cargo fmt --check` now fires in both `scripts/run-ci.sh --layer 0` and the `.githooks/pre-push` re-source path; any future fmt-dirty commit is rejected pre-push, same R64.1 mechanism that the Layer A mnemosyne gate uses."
+      ],
+      "publishable_decision_summary": "R291 — workspace cargo fmt --all cleanup of R285-R287 drift + Layer 0 lane promoted to mandatory cargo fmt --check (R64.1 single-source-of-truth invariant extended to rustfmt).",
+      "publishable_changes_bullets": [
+        "crates/**/*.rs — `cargo fmt --all` applied across 58 source files. 60-file diff (+2240 / -1766) is mechanical rustfmt normalisation; behaviour-neutral. The drift accumulated since R285-R287 wz-ap-demo decomposition because no lane invoked `cargo fmt --check` before this round.",
+        "scripts/run-ci.sh — `layer_0_actionlint` renamed to `layer_0_preflight_lints`. New composite shape: `cargo fmt --all -- --check` (mandatory; fails fast with copy-pastable `(cd crates && cargo fmt --all)` fix instruction) followed by the legacy `actionlint .github/workflows/*.yml` step (still optional; SKIPs gracefully when actionlint is not installed). Header comment + Time-cost table updated to advertise Layer 0 budget (<2s warm).",
+        ".githooks/pre-push — header lane-list comment updated to advertise the new Layer 0 composite shape and to list the C0 test-discipline + C1b alloc-test lanes (previously omitted). The hook still delegates to `scripts/run-ci.sh` via the R250 `git show HEAD:` re-source path so no logic change in the gate dispatch itself; only the documenting comment is touched.",
+        "Brief's `test_helpers visibility 중복` carry (R290 closure recommendation) retired as misdiagnosis: session.rs `make_decl_queryable` / `make_decl_subscriber` return `DeclareVariant` envelope variants, while `crate::declare::test_helpers::decl_*` return raw codec records (DeclQueryable / DeclSubscriber). The signatures and return types differ; R288 (665b32d) and R290 (e8a6568) doc-comments at session.rs:5152-5156 + 5774-5778 explicitly chose inlining over visibility promotion (\"inlining is cheaper than relaxing the helper visibility\"). To genuinely consolidate would require adding new convenience helpers (`literal-suffix → DeclareVariant`) in test_helpers, which is more work than the carry framed."
+      ],
+      "publishable_verification_bullets": [
+        "`cargo fmt --all --manifest-path crates/Cargo.toml -- --check` exit=0 post-cleanup (vs ~374KB diff pre-cleanup), confirming workspace fmt-clean.",
+        "`(cd crates && cargo test --workspace --quiet)` passes — workspace test suite (wz-runtime-tokio lib 544 + integration / cross-crate suites) all green. `(cd crates && cargo clippy --workspace --all-targets --no-deps --quiet -- -D warnings)` clean across all 7 crates.",
+        "`scripts/run-ci.sh --layer 0` — Layer 0 pass independently (fmt --check OK + actionlint SKIP per actionlint-not-installed branch).",
+        "`scripts/run-ci.sh --skip-codegen` — Layer 0 / A / A2 / C0 / C1 / C1b / C2 / D / E all green (Layer B skipped per flag, Layer E exercises the pre-built wz-ap-demo + zenoh-pico CLI binary set on this dev box and reports `Layer E pass`).",
+        "pre-commit (`mnemosyne-cli validate-workspace`) fired green during the feat commit `6a9c669` — entries=289 / sections=215 / T1=0 (ledger=1 R193 known-stale) / RT 12/12 / GENERATED.md=sync, unchanged from R290 closure baseline."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R290 R291-carry still open — honest two-pattern keyexpr intersection algorithm for `has_matching` on `RemoteQueryableRegistry` + `RemoteSubscriberRegistry`. Replaces the R288 bidirectional asymmetric pattern-match approximation now shipping in three sites (Querier + QuerierAliased + Publisher + PublisherAliased = 4 handles). Spec-touching: RFC §5.A v1 amend (currently locks intersect to exact uint32 ID equality) + numerical_reference fixture addition + 6-backend codegen drift gate via Phase A + 3-site has_matching reimplementation. Multi-round design lock recommended; user gate.",
+        "R284 carry from R283 still open — uniform `Established` gate across the 4 non-aliased `declare_*` methods (declare_token / declare_subscriber / declare_queryable / declare_liveliness_subscriber). The aliased-path closure at R284 stays untouched. 3-5R, signature break + caller fan-out on runner.rs install_session_handles + e2e harnesses.",
+        "R283 architectural carry still open — peer-side non-final Interest inbound (bilateral). The wz Liveliness 100% bilateral path is gated on this piece. 2-3R + design.",
+        "R287 follow-up — `teardown_with_invariants` sub-fn or typestate sequence wrapper to compile-time-enforce the R284 graceful-Close ordering invariant currently doc-only in `crates/wz-ap-demo/src/runner.rs`. R287's run_demo body decomposed into 6 sub-fns but the 7-step teardown was kept inline to preserve the R284 ordering invariant; doc-only enforcement is the residual gap. 1-2R, bounded.",
+        "Open R267-R270 architectural carries unchanged: Session<R,T> reparameterisation (3-7R + design), Instant -> u64 ms storage migration (3-5R, ~30+ consumer sites).",
+        "Closed R291 carry — workspace fmt drift + Layer 0 fmt-lane gap. Mandatory `cargo fmt --check` now fires in both `scripts/run-ci.sh --layer 0` and the `.githooks/pre-push` re-source path; any future fmt-dirty commit is rejected pre-push, same R64.1 mechanism that the Layer A mnemosyne gate uses."
+      ]
+    },
     "Round 3": {
       "decision_summary": "Phase B complete — RFC §5 thirteen kind sub-sections atomic decomposition (5.A-5.F, 5.I-5.O); Phase 2 deferred 5.G/5.H skipped.",
       "changes_bullets": [
