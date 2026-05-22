@@ -161,21 +161,20 @@ fn wz_initiator_round_trip_against_wz_acceptor() {
         ),
     };
 
-    // Belt-and-suspenders assertions on the keyexpr literal and
-    // wireexpr id. The publisher's literal-keyexpr Push carries
-    // wireexpr id=0 + suffix='demo/test'; the SUBSCRIBER FIRED
-    // line logged by wz-ap-demo carries both fields so a
-    // wire-shape regression on either side localises here.
+    // R247 — R222 simplified the SubscriberRegistry callback API to
+    // take `&Sample` carrying the *resolved* keyexpr literal; the
+    // wireexpr id is no longer surfaced at the callback layer (the
+    // dispatch path consumes the id during resolution and only the
+    // literal reaches `wz-ap-demo`'s log line). The prior
+    // `wireexpr_id=0` assertion was a stale R222 follow-up that
+    // R235-hotfix masked with `#[ignore]` rather than fixed; this
+    // round retires the stale token and keeps the keyexpr literal
+    // assertion which still pins the dispatch wire-shape: a
+    // DECLARE-aliased regression would resolve to a different
+    // literal or `None`, landing visibly in the keyexpr check.
     assert!(
         fired_text.contains(publish_key),
         "wz acceptor SUBSCRIBER FIRED line lacks the publish keyexpr '{publish_key}'.\n\
-         --- acceptor stderr ---\n{fired_text}"
-    );
-    assert!(
-        fired_text.contains("wireexpr_id=0"),
-        "wz acceptor SUBSCRIBER FIRED line lacks 'wireexpr_id=0' \
-         (literal-keyexpr Push sets id=0; non-zero would mean a DECLARE-aliased \
-         path regression).\n\
          --- acceptor stderr ---\n{fired_text}"
     );
 }

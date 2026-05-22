@@ -190,9 +190,19 @@ fn wz_publisher_aliased_round_trip_against_zenoh_pico_z_sub() {
         "wz-ap-demo did not log 'PUBLISHER DECLARED' — `--declare-id` opt-in regressed.\n\
          --- captured demo stderr ---\n{demo_captured}"
     );
+    // R247 — R235 wz-ap-demo Session API migration restructured the
+    // PUBLISHER EMITTED log line into a key=value form that names the
+    // dispatch mode explicitly (`mode=aliased` vs `mode=literal`).
+    // The prior `PUBLISHER EMITTED ALIASED` token assertion was a
+    // pre-R235 literal that R235-hotfix masked with `#[ignore]`
+    // rather than fixed; this round retires the stale token in
+    // favour of the structured `mode=aliased` form which still pins
+    // the aliased-dispatch invariant (a regression into the literal
+    // mode would emit `mode=literal` and visibly fail this check).
     assert!(
-        demo_captured.contains("PUBLISHER EMITTED ALIASED"),
-        "wz-ap-demo did not log 'PUBLISHER EMITTED ALIASED' — aliased Push burst regressed.\n\
+        demo_captured.contains("mode=aliased"),
+        "wz-ap-demo did not log 'mode=aliased' on PUBLISHER EMITTED — aliased Push \
+         burst regressed or fell back to literal mode.\n\
          --- captured demo stderr ---\n{demo_captured}"
     );
 }
