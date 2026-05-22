@@ -14038,6 +14038,68 @@
         "Open R267-R270 architectural carries unchanged: Querier matching, Session reparam, Instant->u64ms"
       ]
     },
+    "Round 281": {
+      "decision_summary": "R281 lands the wz-ap-demo --liveliness-subscribe CLI surface + wz_liveliness_subscriber_round_trip e2e integration test; LivelinessSubscriberRegistry PUT/DELETE samples verified end-to-end across a wz-acceptor LivelinessToken declare + SIGTERM graceful retraction.",
+      "changes_bullets": [
+        "wz-ap-demo CLI: new --liveliness-subscribe <keyexpr> flag wired through DeclareEmitSpec.liveliness_subscriber_keyexpr",
+        "session.declare_liveliness_subscriber call at run_demo scope returns RAII handle held until function exit",
+        "PUT/DELETE callback logs 'LIVELINESS SAMPLE PUT|DELETE filter=... keyexpr=... token_id=...'",
+        "Multi-mode validation accepts --liveliness-subscribe alone as a valid argv form",
+        "Usage block + per-flag help + log::info echo all updated",
+        "wz-runtime-tokio::declare re-export LivelinessSample + LivelinessSampleKind into wz-ap-demo deps",
+        "wz_liveliness_subscriber_round_trip.rs (270 lines): acceptor declares token demo/token, initiator subscribes demo/** wildcard",
+        "Test asserts PUT line shape + DECLARED TOKEN id=0 acceptor side + DELETE line shape after SIGTERM-driven UndeclToken",
+        "Same graceful_terminate helper as R278; duplicated locally per integration-test self-containment convention"
+      ],
+      "verification_bullets": [
+        "cargo test --workspace --lib: 500/500 pass",
+        "cargo clippy --workspace --all-targets: clean",
+        "wz_liveliness_subscriber_round_trip --ignored: 1/1 pass; PUT then DELETE samples observed in order with matching token_id=0",
+        "Wildcard pattern demo/** correctly matches literal demo/token via keyexpr_pattern_matches reuse",
+        "Manual test of wz-ap-demo --connect --liveliness-subscribe parses flag + emits CLI banner; multi-mode validation accepts solo form",
+        "Pre-mutation validate: entries=279 / sections=215 / T1=0 / RT 12/12 / sync (R280 close)",
+        "Post-mutation validate target: entries=280 / sections=215 / T1=0 / RT 12/12 / sync (this audit)"
+      ],
+      "carry_forward_bullets": [
+        "zenoh-pico parity declare_liveliness_subscriber subscriber-side closed end-to-end as of R281",
+        "R283 architectural carry: peer-side non-final Interest inbound (bilateral); wz declares LivelinessToken, peer asks via Interest, wz emits matching DeclTokens",
+        "declare_liveliness_subscriber_aliased: reserved for future round mirroring declare_token_aliased",
+        "Established gate for outbound Interest emit: currently best-effort against pre-Established state; SN-window orders the buffered emit but explicit gate would tighten the contract",
+        "R278 follow-up unchanged: post SessionClose to FSM before signal exit",
+        "Open R267-R270 architectural carries unchanged: Querier matching, Session reparam, Instant->u64ms",
+        "Phase W lwIP, zenoh-cpp router/plugin/SHM/multicast remain long-term destinations"
+      ],
+      "publishable_decision_summary": "R281 lands the wz-ap-demo --liveliness-subscribe CLI surface + wz_liveliness_subscriber_round_trip e2e integration test; LivelinessSubscriberRegistry PUT/DELETE samples verified end-to-end across a wz-acceptor LivelinessToken declare + SIGTERM graceful retraction.",
+      "publishable_changes_bullets": [
+        "wz-ap-demo CLI: new --liveliness-subscribe <keyexpr> flag wired through DeclareEmitSpec.liveliness_subscriber_keyexpr",
+        "session.declare_liveliness_subscriber call at run_demo scope returns RAII handle held until function exit",
+        "PUT/DELETE callback logs 'LIVELINESS SAMPLE PUT|DELETE filter=... keyexpr=... token_id=...'",
+        "Multi-mode validation accepts --liveliness-subscribe alone as a valid argv form",
+        "Usage block + per-flag help + log::info echo all updated",
+        "wz-runtime-tokio::declare re-export LivelinessSample + LivelinessSampleKind into wz-ap-demo deps",
+        "wz_liveliness_subscriber_round_trip.rs (270 lines): acceptor declares token demo/token, initiator subscribes demo/** wildcard",
+        "Test asserts PUT line shape + DECLARED TOKEN id=0 acceptor side + DELETE line shape after SIGTERM-driven UndeclToken",
+        "Same graceful_terminate helper as R278; duplicated locally per integration-test self-containment convention"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test --workspace --lib: 500/500 pass",
+        "cargo clippy --workspace --all-targets: clean",
+        "wz_liveliness_subscriber_round_trip --ignored: 1/1 pass; PUT then DELETE samples observed in order with matching token_id=0",
+        "Wildcard pattern demo/** correctly matches literal demo/token via keyexpr_pattern_matches reuse",
+        "Manual test of wz-ap-demo --connect --liveliness-subscribe parses flag + emits CLI banner; multi-mode validation accepts solo form",
+        "Pre-mutation validate: entries=279 / sections=215 / T1=0 / RT 12/12 / sync (R280 close)",
+        "Post-mutation validate target: entries=280 / sections=215 / T1=0 / RT 12/12 / sync (this audit)"
+      ],
+      "publishable_carry_forward_bullets": [
+        "zenoh-pico parity declare_liveliness_subscriber subscriber-side closed end-to-end as of R281",
+        "R283 architectural carry: peer-side non-final Interest inbound (bilateral); wz declares LivelinessToken, peer asks via Interest, wz emits matching DeclTokens",
+        "declare_liveliness_subscriber_aliased: reserved for future round mirroring declare_token_aliased",
+        "Established gate for outbound Interest emit: currently best-effort against pre-Established state; SN-window orders the buffered emit but explicit gate would tighten the contract",
+        "R278 follow-up unchanged: post SessionClose to FSM before signal exit",
+        "Open R267-R270 architectural carries unchanged: Querier matching, Session reparam, Instant->u64ms",
+        "Phase W lwIP, zenoh-cpp router/plugin/SHM/multicast remain long-term destinations"
+      ]
+    },
     "Round 29": {
       "decision_summary": "Phase C8 entry — first statechart-kind SCXML lands. sources/session/session_fsm_unicast.scxml encodes unicast handshake (Init/LinkOpening/Opening/Accepting/Established/Closing/Closed) per docs/session-fsm.md §2.1-§2.7 minus deferred sub-scopes (multicast, scouting state, Established sub-regions, stateless_accept variant).",
       "changes_bullets": [
