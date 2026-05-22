@@ -1393,13 +1393,13 @@ const DECLARE_INTER_EMIT_MS: u64 = 100;
 /// at the `tokio::spawn(declare_task(.., TokioTime::new()))` call
 /// site in `run_demo`.
 ///
-/// The deadline check still uses `std::time::Instant::now()` directly
-/// — that's a separate wall-clock / monotonic-instant API surface
-/// that the R251 trait skeleton explicitly scoped out (`TimeSource`
-/// is monotonic-ms-only, not Instant-arithmetic). A future round
-/// either extends the trait with an Instant-shaped surface or wraps
-/// `now_monotonic_ms` arithmetic to replace the `std::time::Instant`
-/// comparison; carry note on the audit ledger.
+/// R255 — deadline math is now u64-ms based (option (b) from the
+/// R254 carry): `deadline_ms = clock.now_monotonic_ms() +
+/// TIMEOUT_MS`; each loop iteration compares the current monotonic
+/// reading against the deadline. MCU-friendlier than the prior
+/// `std::time::Instant::now() + Duration::from_millis(MS)` pattern
+/// because no_std targets have no `Instant` type. The trait surface
+/// stays unchanged — same `now_monotonic_ms()` everyone already had.
 async fn declare_task<T>(
     actions: Arc<wz_runtime_tokio::session_glue::SessionLinkActions>,
     spec: DeclareEmitSpec,
@@ -1407,13 +1407,12 @@ async fn declare_task<T>(
 ) where
     T: TimeSource + Send + 'static,
 {
-    let deadline = std::time::Instant::now()
-        + Duration::from_millis(DECLARE_HANDSHAKE_TIMEOUT_MS);
+    let deadline_ms = clock.now_monotonic_ms() + DECLARE_HANDSHAKE_TIMEOUT_MS;
     loop {
         if actions.trace_snapshot().record_established_at > 0 {
             break;
         }
-        if std::time::Instant::now() >= deadline {
+        if clock.now_monotonic_ms() >= deadline_ms {
             log::warn!(
                 "wz-ap-demo: declare_task gave up waiting for Established \
                  after {DECLARE_HANDSHAKE_TIMEOUT_MS}ms (record_established_at \
@@ -1447,8 +1446,8 @@ async fn declare_task<T>(
 
 /// R254 — `clock: T` generic + 1 sleep site migrated to
 /// [`TimeSource::sleep`], continuing the R253 leaf-first cadence.
-/// std::time::Instant deadline math stays verbatim pending the
-/// R254+ Instant-arithmetic trait gap resolution (carry).
+/// R255 — deadline math also migrated to u64 ms (option (b) from
+/// R254 carry); `std::time::Instant` is no longer referenced here.
 async fn query_task<T>(
     actions: Arc<wz_runtime_tokio::session_glue::SessionLinkActions>,
     keyexpr: String,
@@ -1456,13 +1455,12 @@ async fn query_task<T>(
 ) where
     T: TimeSource + Send + 'static,
 {
-    let deadline = std::time::Instant::now()
-        + Duration::from_millis(QUERY_HANDSHAKE_TIMEOUT_MS);
+    let deadline_ms = clock.now_monotonic_ms() + QUERY_HANDSHAKE_TIMEOUT_MS;
     loop {
         if actions.trace_snapshot().record_established_at > 0 {
             break;
         }
-        if std::time::Instant::now() >= deadline {
+        if clock.now_monotonic_ms() >= deadline_ms {
             log::warn!(
                 "wz-ap-demo: query_task gave up waiting for Established \
                  after {QUERY_HANDSHAKE_TIMEOUT_MS}ms (record_established_at \
@@ -1484,9 +1482,10 @@ async fn query_task<T>(
 
 /// R254 — `clock: T` generic + 3 sleep sites migrated to
 /// [`TimeSource::sleep`] (handshake-poll, post-DECLARE drain, burst
-/// cadence). Continues R253 leaf-first migration; std::time::Instant
-/// deadline math stays verbatim per the R254+ Instant-arithmetic
-/// trait gap carry.
+/// cadence). Continues R253 leaf-first migration.
+/// R255 — deadline math also migrated to u64 ms (option (b) from
+/// R254 carry); `std::time::Instant` is no longer referenced in this
+/// function.
 async fn publisher_task<T>(
     session: Session,
     keyexpr: String,
@@ -1524,13 +1523,12 @@ async fn publisher_task<T>(
     //           no opportunity to emit; the drive_session loop
     //           is responsible for the failure mode (lease
     //           expiry, framing error, etc.).
-    let deadline = std::time::Instant::now()
-        + Duration::from_millis(PUBLISHER_HANDSHAKE_TIMEOUT_MS);
+    let deadline_ms = clock.now_monotonic_ms() + PUBLISHER_HANDSHAKE_TIMEOUT_MS;
     loop {
         if actions.trace_snapshot().record_established_at > 0 {
             break;
         }
-        if std::time::Instant::now() >= deadline {
+        if clock.now_monotonic_ms() >= deadline_ms {
             log::warn!(
                 "wz-ap-demo: publisher_task gave up waiting for Established \
                  after {PUBLISHER_HANDSHAKE_TIMEOUT_MS}ms (record_established_at \
