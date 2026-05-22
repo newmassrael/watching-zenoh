@@ -234,6 +234,50 @@ impl TimeSource for TokioTime {
 }
 
 #[cfg(test)]
+mod compile_time_assertions {
+    use super::*;
+
+    // R258 — public Phase W contract trait-bound fixity. Same
+    // pattern as wz_runtime_core::error::compile_time_assertions:
+    // never-called functions whose body is the bound-check; a
+    // regression on Send / Sync / Copy / Default fails the build.
+    fn _assert_send<T: Send>() {}
+    fn _assert_sync<T: Sync>() {}
+    fn _assert_send_sync<T: Send + Sync>() {}
+
+    #[allow(dead_code)]
+    fn tokio_runtime_trait_bounds_compile() {
+        _assert_send_sync::<TokioRuntime>();
+        _assert_send_sync::<TokioTime>();
+        // TokioJoinHandle is Send (matches tokio's JoinHandle)
+        // but NOT Sync — single-consumer join semantic; mirror
+        // tokio::task::JoinHandle which is Send + !Sync.
+        _assert_send::<TokioJoinHandle<()>>();
+        _assert_send::<TokioJoinHandle<String>>();
+    }
+
+    // R258 — generic composition smoke test. Validates that the
+    // R: Runtime + T: TimeSource trait pair is actually usable
+    // from production-shaped generic code (the trajectory toward
+    // Session<R, T> reparameterisation per the §5.P leaf-first
+    // guidance). This function never executes; its body just
+    // exercises every public trait method against generic R + T.
+    #[allow(dead_code)]
+    fn runtime_and_time_compose_in_generic_code<R, T>(rt: &R, clock: &T)
+    where
+        R: Runtime,
+        T: TimeSource + Clone + Send + 'static,
+    {
+        let clock_for_task = clock.clone();
+        let _handle: R::JoinHandle<u64> = rt.spawn(async move {
+            clock_for_task.sleep(1).await;
+            clock_for_task.now_monotonic_ms()
+        });
+        let _ts: u64 = clock.now_monotonic_ms();
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
