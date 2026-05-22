@@ -282,6 +282,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tokio_runtime_join_handle_composes_into_a_vec() {
+        // R256 — pins the design claim documented on the R251
+        // Runtime trait: GATs (over the alternative `impl Future`
+        // return position) let callers store handles in a Vec
+        // because the GAT names the concrete handle type. Without
+        // GATs every spawn() return would be an anonymous opaque
+        // `impl Future` type that cannot share a slot. This test
+        // exercises that batch-spawn pattern end-to-end: spawn N
+        // tasks, store handles in a Vec, await each, accumulate
+        // outputs. Pattern fundamental for Session's per-subscriber
+        // dispatch task fan-out (the textbook payoff cited in the
+        // R251 doc-comment).
+        let rt = TokioRuntime;
+        let mut handles: Vec<<TokioRuntime as Runtime>::JoinHandle<u32>> = Vec::new();
+        for i in 0..5_u32 {
+            handles.push(rt.spawn(async move { i * 2 }));
+        }
+        let mut outputs: Vec<u32> = Vec::with_capacity(5);
+        for h in handles {
+            outputs.push(h.await.expect("spawn must resolve to Ok"));
+        }
+        assert_eq!(outputs, vec![0, 2, 4, 6, 8]);
+    }
+
+    #[tokio::test]
     async fn tokio_runtime_and_time_are_independent_zero_state_handles() {
         // Two independent constructions of TokioRuntime + TokioTime
         // produce values that can be cloned and used concurrently
