@@ -11664,6 +11664,86 @@
         "R247 lesson: when a 'fix' commit silences a regression with #[ignore] instead of fixing the underlying mismatch, the carry must be named explicitly in the audit entry so a future round retires it. 5eba424 omitted this naming; this round audits the omission and closes the carry."
       ]
     },
+    "Round 248": {
+      "decision_summary": "R248 LivelinessToken + LivelinessOptions + declare_token{,_aliased}: z_liveliness_token_t mirror; Drop emits Declare(UndeclToken) wire; 7-handle surface closure.",
+      "changes_bullets": [
+        "session.rs LivelinessOptions empty non_exhaustive + Default + new() (z_liveliness_token_options_t mirror, future-additive placeholder).",
+        "session.rs LivelinessToken { session, id: u64, keyexpr: String, options } non_exhaustive + !Clone + id() + keyexpr() + options() + undeclare(self) consumes + std::mem::forget.",
+        "session.rs LivelinessToken Drop impl emits send_undeclare_token wire (differs from Subscriber/Queryable Drop which only unregister local registry; zenoh-pico _z_undeclare_liveliness_token mirror — retraction MUST notify peer's liveliness subscribers).",
+        "session.rs Session::declare_token(keyexpr, options) -> LivelinessToken: allocates token_id via alloc_next_token_id, emits send_declare_token(id, 0, Some(literal)) literal-form wire.",
+        "session.rs Session::declare_token_aliased(mapping_id, suffix, options) -> Result<LivelinessToken, LivelinessAliasError>: resolves literal at declare time for handle introspection, emits alias-form wire send_declare_token(id, mapping_id, suffix).",
+        "session.rs LivelinessAliasError::UnknownMapping(u64) + Display + std::error::Error (mirror of Subscribe/Queryable/Query/PublishAliasError on the token side).",
+        "session_glue.rs SessionLinkActions::next_outbound_token_id AtomicU64 init 0 + alloc_next_token_id() Relaxed fetch_add (zenoh-pico _z_get_entity_id mirror, independent counter from request_id/subscriber_id/queryable_id spaces — distinct intmaps on peer receiver).",
+        "14 new lib tests: options default, handle keyexpr+id=0, wire-frame-count=1 reliable, decl_token byte match, monotonic ids 0/1/2, drop emits second wire, undecl_token byte match, undeclare consumes (no double-emit via Drop), aliased resolves literal, aliased suffix compose, aliased unknown_mapping err + no wire, aliased alias-form wire byte match, alias error display, counter independence from request_id.",
+        "Handle surface closure: 7 structs {Publisher, PublisherAliased, Subscriber, Querier, QuerierAliased, Queryable, LivelinessToken} mirror zenoh-pico {z_publisher_t, z_subscriber_t, z_querier_t, z_queryable_t, z_liveliness_token_t} family completely."
+      ],
+      "verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 450 -> 464 (+14 R248 cases).",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A-E; Layer E 9/9 binary-dep e2e).",
+        "pre-commit hook validate_workspace at commit time: T1=0, RT 12/12, GENERATED.md=sync preserved.",
+        "commit 44d64eb (feat(runtime): R248 LivelinessToken + LivelinessOptions + declare_token; +540 lines / 0 deletions across session.rs + session_glue.rs)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "carry_forward_bullets": [
+        "R249+ wz-ap-demo migration to handle API (Subscriber / Publisher / Queryable / Querier / LivelinessToken) — retire raw observer.subscribers.register / send_declare_token sites; RAII Drop simplifies caller code.",
+        "R250+ pre-push hook chicken-and-egg defence (carried from R247): when a commit modifies run-ci.sh itself, hook should re-source run-ci.sh from staged commit content rather than working-tree state.",
+        "ReplyRegistry timeout sweep: cancel pending entry + synthesise Final when QueryOptions.timeout_ms passes; needs Hal time abstraction (wz-runtime-core).",
+        "Q_B / Q_E wire codec slots (Query body payload + encoding) require SCE-side codec extension.",
+        "LivelinessToken local_tokens table for history fan-out — defer until Liveliness Subscriber history lands; R248 simplification skips _local_tokens because AtomicU64-from-0 makes wrap-around-collision practically impossible at any reasonable session lifetime.",
+        "LivelinessToken Drop catch_unwind defensive wrap — defer until a driver path panic surfaces; R248 trusts send_undeclare_token panic-freedom under normal AP MVP operation (no wz-level Mutex::lock on the encode/dispatch chain that could poison).",
+        "Querier::get_matching_status / Publisher::get_matching_status (RemoteQueryableRegistry coverage check).",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff; pin bump deferred (wz call sites = 0; re-evaluate at next kickoff).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP (dual-target / MCU SKU core).",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R248 lesson: handle surface 7-piece closure reached via R244+R245+R246+R248 quartet; LivelinessToken is the structural outlier (Drop-emits-wire) because retraction MUST notify peer's liveliness subscribers (PUT/DELETE sample fan-out) — contrast with Subscriber/Queryable Drop which only unregister local registry under peer-only (router-less) wz operation."
+      ],
+      "publishable_decision_summary": "R248 LivelinessToken + LivelinessOptions + declare_token{,_aliased}: z_liveliness_token_t mirror; Drop emits Declare(UndeclToken) wire; 7-handle surface closure.",
+      "publishable_changes_bullets": [
+        "session.rs LivelinessOptions empty non_exhaustive + Default + new() (z_liveliness_token_options_t mirror, future-additive placeholder).",
+        "session.rs LivelinessToken { session, id: u64, keyexpr: String, options } non_exhaustive + !Clone + id() + keyexpr() + options() + undeclare(self) consumes + std::mem::forget.",
+        "session.rs LivelinessToken Drop impl emits send_undeclare_token wire (differs from Subscriber/Queryable Drop which only unregister local registry; zenoh-pico _z_undeclare_liveliness_token mirror — retraction MUST notify peer's liveliness subscribers).",
+        "session.rs Session::declare_token(keyexpr, options) -> LivelinessToken: allocates token_id via alloc_next_token_id, emits send_declare_token(id, 0, Some(literal)) literal-form wire.",
+        "session.rs Session::declare_token_aliased(mapping_id, suffix, options) -> Result<LivelinessToken, LivelinessAliasError>: resolves literal at declare time for handle introspection, emits alias-form wire send_declare_token(id, mapping_id, suffix).",
+        "session.rs LivelinessAliasError::UnknownMapping(u64) + Display + std::error::Error (mirror of Subscribe/Queryable/Query/PublishAliasError on the token side).",
+        "session_glue.rs SessionLinkActions::next_outbound_token_id AtomicU64 init 0 + alloc_next_token_id() Relaxed fetch_add (zenoh-pico _z_get_entity_id mirror, independent counter from request_id/subscriber_id/queryable_id spaces — distinct intmaps on peer receiver).",
+        "14 new lib tests: options default, handle keyexpr+id=0, wire-frame-count=1 reliable, decl_token byte match, monotonic ids 0/1/2, drop emits second wire, undecl_token byte match, undeclare consumes (no double-emit via Drop), aliased resolves literal, aliased suffix compose, aliased unknown_mapping err + no wire, aliased alias-form wire byte match, alias error display, counter independence from request_id.",
+        "Handle surface closure: 7 structs {Publisher, PublisherAliased, Subscriber, Querier, QuerierAliased, Queryable, LivelinessToken} mirror zenoh-pico {z_publisher_t, z_subscriber_t, z_querier_t, z_queryable_t, z_liveliness_token_t} family completely."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 450 -> 464 (+14 R248 cases).",
+        "bash scripts/run-ci.sh: all required layers pass (Layer A-E; Layer E 9/9 binary-dep e2e).",
+        "pre-commit hook validate_workspace at commit time: T1=0, RT 12/12, GENERATED.md=sync preserved.",
+        "commit 44d64eb (feat(runtime): R248 LivelinessToken + LivelinessOptions + declare_token; +540 lines / 0 deletions across session.rs + session_glue.rs)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R249+ wz-ap-demo migration to handle API (Subscriber / Publisher / Queryable / Querier / LivelinessToken) — retire raw observer.subscribers.register / send_declare_token sites; RAII Drop simplifies caller code.",
+        "R250+ pre-push hook chicken-and-egg defence (carried from R247): when a commit modifies run-ci.sh itself, hook should re-source run-ci.sh from staged commit content rather than working-tree state.",
+        "ReplyRegistry timeout sweep: cancel pending entry + synthesise Final when QueryOptions.timeout_ms passes; needs Hal time abstraction (wz-runtime-core).",
+        "Q_B / Q_E wire codec slots (Query body payload + encoding) require SCE-side codec extension.",
+        "LivelinessToken local_tokens table for history fan-out — defer until Liveliness Subscriber history lands; R248 simplification skips _local_tokens because AtomicU64-from-0 makes wrap-around-collision practically impossible at any reasonable session lifetime.",
+        "LivelinessToken Drop catch_unwind defensive wrap — defer until a driver path panic surfaces; R248 trusts send_undeclare_token panic-freedom under normal AP MVP operation (no wz-level Mutex::lock on the encode/dispatch chain that could poison).",
+        "Querier::get_matching_status / Publisher::get_matching_status (RemoteQueryableRegistry coverage check).",
+        "SCE drift = 78+ commits since vendor pin ebf3b3ff; pin bump deferred (wz call sites = 0; re-evaluate at next kickoff).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP (dual-target / MCU SKU core).",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R248 lesson: handle surface 7-piece closure reached via R244+R245+R246+R248 quartet; LivelinessToken is the structural outlier (Drop-emits-wire) because retraction MUST notify peer's liveliness subscribers (PUT/DELETE sample fan-out) — contrast with Subscriber/Queryable Drop which only unregister local registry under peer-only (router-less) wz operation."
+      ]
+    },
     "Round 25": {
       "decision_summary": "Phase E register — README.md workspace.docs 재등록 land; R24 한국어 본문을 영문 primary로 재작성 + README.ko.md satellite로 분리 (사용자 정정 'README는 영문 primary, KO 번역은 별도 링크'); 첫 시도 11 parser orphan (URL 링크 + plain §N) → 파서-친화 form 으로 해결 후 12/12 docs clean.",
       "changes_bullets": [
