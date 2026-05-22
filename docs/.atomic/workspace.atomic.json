@@ -10992,6 +10992,92 @@
         "vendor/sce pin 갱신 정책 — R14 carry, 갱신 시 audit entry 의무"
       ]
     },
+    "Round 240": {
+      "decision_summary": "R240 wire-side QueryOptions propagation via QueryMetadata + send_request_query_with_meta; R233 PushMetadata pattern mirror; payload/encoding stay on QueryOptions as R241+ codec carry.",
+      "changes_bullets": [
+        "session_glue.rs QueryMetadata struct (target / consolidation / attachment / timeout_ms) + is_empty() helper; mirrors PushMetadata.",
+        "session_glue.rs SessionLinkActions::send_request_query_with_meta threads meta through RequestQueryBuilder (request_target / consolidation / query_attachment / request_timeout_ms).",
+        "session.rs QueryOptions::query_metadata() extracts the wire-propagatable subset; payload / encoding intentionally not surfaced (R241+ codec carry).",
+        "session.rs Session::query wire branch fast-paths meta.is_empty() to no-meta send_request_query for byte-stable parity.",
+        "session_glue.rs send_request_query_with_meta guards empty-inner attachment Vec against RequestQueryBuilder::query_attachment panic.",
+        "lib test (session_glue.rs) query_metadata_default_is_empty + with_target_is_not_empty + with_consolidation_is_not_empty + with_attachment_is_not_empty + with_timeout_ms_nonzero_is_not_empty.",
+        "lib test (session_glue.rs) send_request_query_with_meta_empty_emits_same_bytes_as_no_meta (byte parity short-circuit).",
+        "lib test (session_glue.rs) send_request_query_with_meta_target_emits_request_with_target_ext.",
+        "lib test (session_glue.rs) send_request_query_with_meta_consolidation_emits_query_with_q_c_flag.",
+        "lib test (session_glue.rs) send_request_query_with_meta_attachment_emits_query_with_attachment_ext.",
+        "lib test (session_glue.rs) send_request_query_with_meta_empty_attachment_slice_skips_ext_without_panic.",
+        "lib test (session_glue.rs) send_request_query_with_meta_timeout_ms_emits_request_with_timeout_ext.",
+        "lib test (session.rs) query_options_query_metadata_extracts_wire_fields + default_query_metadata_is_empty.",
+        "lib test (session.rs) query_wire_branch_with_empty_meta_emits_no_meta_fast_path_frame.",
+        "lib test (session.rs) query_wire_branch_with_target / attachment / consolidation_threads_through_with_meta.",
+        "lib test (session.rs) query_session_local_with_any_metadata_skips_wire_branch_entirely."
+      ],
+      "verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 375 -> 393 (+18 R240 cases; session_glue +11, session +7).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R239 65 no-regression)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R241+ Q_B (Query body payload) + Q_E (Query encoding) wire codec slots — wz codec has no inline slot; SCE-side codec extension needed.",
+        "R241+ Session::query timeout enforcement: ReplyRegistry timeout sweep cancels pending entry + synthesises Final when QueryOptions.timeout_ms passes.",
+        "R241+ Session::query_aliased mirror of publish_aliased_auto (mapping_id + inline_suffix + auto-resolved literal for loopback).",
+        "R241+ Querier struct (zenoh-pico z_querier_t mirror; reusable Session::query target with pre-set options).",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R240 lesson: R233 PushMetadata pattern mirrors directly to QueryMetadata when the wire encoder already exposes layered builder (RequestQueryBuilder.{target,consolidation,attachment,timeout_ms}); the wz codec gap (payload/encoding) splits cleanly into R241+."
+      ],
+      "publishable_decision_summary": "R240 wire-side QueryOptions propagation via QueryMetadata + send_request_query_with_meta; R233 PushMetadata pattern mirror; payload/encoding stay on QueryOptions as R241+ codec carry.",
+      "publishable_changes_bullets": [
+        "session_glue.rs QueryMetadata struct (target / consolidation / attachment / timeout_ms) + is_empty() helper; mirrors PushMetadata.",
+        "session_glue.rs SessionLinkActions::send_request_query_with_meta threads meta through RequestQueryBuilder (request_target / consolidation / query_attachment / request_timeout_ms).",
+        "session.rs QueryOptions::query_metadata() extracts the wire-propagatable subset; payload / encoding intentionally not surfaced (R241+ codec carry).",
+        "session.rs Session::query wire branch fast-paths meta.is_empty() to no-meta send_request_query for byte-stable parity.",
+        "session_glue.rs send_request_query_with_meta guards empty-inner attachment Vec against RequestQueryBuilder::query_attachment panic.",
+        "lib test (session_glue.rs) query_metadata_default_is_empty + with_target_is_not_empty + with_consolidation_is_not_empty + with_attachment_is_not_empty + with_timeout_ms_nonzero_is_not_empty.",
+        "lib test (session_glue.rs) send_request_query_with_meta_empty_emits_same_bytes_as_no_meta (byte parity short-circuit).",
+        "lib test (session_glue.rs) send_request_query_with_meta_target_emits_request_with_target_ext.",
+        "lib test (session_glue.rs) send_request_query_with_meta_consolidation_emits_query_with_q_c_flag.",
+        "lib test (session_glue.rs) send_request_query_with_meta_attachment_emits_query_with_attachment_ext.",
+        "lib test (session_glue.rs) send_request_query_with_meta_empty_attachment_slice_skips_ext_without_panic.",
+        "lib test (session_glue.rs) send_request_query_with_meta_timeout_ms_emits_request_with_timeout_ext.",
+        "lib test (session.rs) query_options_query_metadata_extracts_wire_fields + default_query_metadata_is_empty.",
+        "lib test (session.rs) query_wire_branch_with_empty_meta_emits_no_meta_fast_path_frame.",
+        "lib test (session.rs) query_wire_branch_with_target / attachment / consolidation_threads_through_with_meta.",
+        "lib test (session.rs) query_session_local_with_any_metadata_skips_wire_branch_entirely."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clippy --workspace --all-targets -D warnings: clean across 6 crates.",
+        "wz-runtime-tokio lib tests: 375 -> 393 (+18 R240 cases; session_glue +11, session +7).",
+        "wz-integration-tests: 56 passed + 9 ignored binary-dep e2e (R239 65 no-regression)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R241+ Q_B (Query body payload) + Q_E (Query encoding) wire codec slots — wz codec has no inline slot; SCE-side codec extension needed.",
+        "R241+ Session::query timeout enforcement: ReplyRegistry timeout sweep cancels pending entry + synthesises Final when QueryOptions.timeout_ms passes.",
+        "R241+ Session::query_aliased mirror of publish_aliased_auto (mapping_id + inline_suffix + auto-resolved literal for loopback).",
+        "R241+ Querier struct (zenoh-pico z_querier_t mirror; reusable Session::query target with pre-set options).",
+        "SCE drift = 78 commits since vendor pin ebf3b3ff; pin bump deferred (no wz call sites).",
+        "Phase W wz-runtime-core crate + Runtime/Allocator/TimeSource impl alongside lwIP.",
+        "Interest 70% remaining (zenoh-pico _z_interest_t parity).",
+        "QoS / Reassembly / Fragmentation 75-90% remaining.",
+        "Multicast + Scouting 90% remaining.",
+        "5 transports (UDP/Serial/WS/BLE/TLS) + RawEth 85-100% remaining.",
+        "W3C-style conformance test wiring 100% remaining.",
+        "R240 lesson: R233 PushMetadata pattern mirrors directly to QueryMetadata when the wire encoder already exposes layered builder (RequestQueryBuilder.{target,consolidation,attachment,timeout_ms}); the wz codec gap (payload/encoding) splits cleanly into R241+."
+      ]
+    },
     "Round 25": {
       "decision_summary": "Phase E register — README.md workspace.docs 재등록 land; R24 한국어 본문을 영문 primary로 재작성 + README.ko.md satellite로 분리 (사용자 정정 'README는 영문 primary, KO 번역은 별도 링크'); 첫 시도 11 parser orphan (URL 링크 + plain §N) → 파서-친화 form 으로 해결 후 12/12 docs clean.",
       "changes_bullets": [
