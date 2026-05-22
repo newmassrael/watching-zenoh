@@ -14450,6 +14450,54 @@
         "Open R267-R270 architectural carries unchanged: Querier::get_matching_status CLOSED for the literal-keyexpr Querier handle (this round); Session<R,T> reparam, Instant -> u64ms migration still open."
       ]
     },
+    "Round 289": {
+      "decision_summary": "R289 lands QuerierAliased::get_matching_status — aliased-keyexpr counterpart to R288's literal-keyexpr Querier::get_matching_status; resolves the declared mapping_id through the outbound keyexpr table, composes the optional inline_suffix to the effective keyexpr, and consults RemoteQueryableRegistry::has_matching.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs — new pub QuerierAliased::get_matching_status -> Result<MatchingStatus, QueryAliasError> method. Resolves mapping_id via Session::actions().resolve_outbound_mapping; UnknownMapping arm returns Err matching the existing QuerierAliased::get error contract. On success, composes inline_suffix with base literal and routes the consult through the same RemoteQueryableRegistry::has_matching backbone landed in R288.",
+        "crates/wz-runtime-tokio/src/session.rs (tests) — 5 new unit tests under '── R289 QuerierAliased::get_matching_status ──': returns_err_on_unknown_mapping, false_after_declare_with_no_peer, true_when_peer_decl_matches_base_literal, threads_inline_suffix_into_consult (verifies the composed keyexpr matches peer pattern home/**, then negates against peer pattern home/door/**), false_after_undeclared_mapping_drop (verifies post-send_undeclare_kexpr surfaces UnknownMapping with the same shape as R288's literal-side carry)."
+      ],
+      "verification_bullets": [
+        "cargo check --manifest-path crates/Cargo.toml -p wz-runtime-tokio clean.",
+        "cargo clippy --workspace --all-targets --no-deps -- -D warnings clean across 7 crates after R289 additions.",
+        "cargo test wz-runtime-tokio --lib --filter querier_aliased_get_matching_status passes 5/5; cumulative wz-runtime-tokio lib test count 525 -> 530 (+5 R289 tests).",
+        "scripts/run-ci.sh all 10 lanes green: Layer 0 / A / A2 / B / C0 / C1 / C1b / C2 / D / E. Behavioural impact on Layer E e2e is none (no existing test exercised QuerierAliased::get_matching_status; the new method is purely additive). The R288 RemoteQueryableRegistry membership extension underpins both Querier and QuerierAliased consults; no new registry state added in this round.",
+        "Approximation boundary unchanged from R288: the bidirectional pattern-match approximation catches peer-pattern + effective-literal, effective-pattern + peer-literal, and both-literal cases; honest two-pattern wildcard intersection remains the R291 carry. The inline_suffix composition is the only QuerierAliased-specific transform; the consult itself routes through the same has_matching code path."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R290 carry — Publisher / PublisherAliased get_matching_status against RemoteSubscriberRegistry (z_publisher_get_matching_status mirror). RemoteSubscriberRegistry gains the same `declared: HashMap<u64, String>` membership + has_matching surface that R288 added to RemoteQueryableRegistry. Pub-side analogue of the R288 + R289 query-side closure.",
+        "R291 carry — honest two-pattern keyexpr intersection algorithm. wz keyexpr v1 spec currently locks intersect to exact uint32 ID equality for MVP (RFC §5.A line 311); promoting to wildcard-vs-wildcard intersection is spec-touching (RFC body amend + 6-backend codegen drift gate via Phase A). Out of scope for current production-pattern matching needs.",
+        "Closed: R289 carry from R288 — QuerierAliased::get_matching_status realised; the Querier API surface is fully matched against zenoh-pico's z_querier_get_matching_status across literal-keyexpr (Querier, R288) and aliased-keyexpr (QuerierAliased, R289) variants.",
+        "R284 carry from R283 still open: uniform Established gate across the 4 non-aliased declare_* methods.",
+        "R283 architectural carry still open: peer-side non-final Interest inbound (bilateral).",
+        "Open R267-R270 architectural carries unchanged: Session<R,T> reparam, Instant -> u64ms migration."
+      ],
+      "publishable_decision_summary": "R289 lands QuerierAliased::get_matching_status — aliased-keyexpr counterpart to R288's literal-keyexpr Querier::get_matching_status; resolves the declared mapping_id through the outbound keyexpr table, composes the optional inline_suffix to the effective keyexpr, and consults RemoteQueryableRegistry::has_matching.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs — new pub QuerierAliased::get_matching_status -> Result<MatchingStatus, QueryAliasError> method. Resolves mapping_id via Session::actions().resolve_outbound_mapping; UnknownMapping arm returns Err matching the existing QuerierAliased::get error contract. On success, composes inline_suffix with base literal and routes the consult through the same RemoteQueryableRegistry::has_matching backbone landed in R288.",
+        "crates/wz-runtime-tokio/src/session.rs (tests) — 5 new unit tests under '── R289 QuerierAliased::get_matching_status ──': returns_err_on_unknown_mapping, false_after_declare_with_no_peer, true_when_peer_decl_matches_base_literal, threads_inline_suffix_into_consult (verifies the composed keyexpr matches peer pattern home/**, then negates against peer pattern home/door/**), false_after_undeclared_mapping_drop (verifies post-send_undeclare_kexpr surfaces UnknownMapping with the same shape as R288's literal-side carry)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --manifest-path crates/Cargo.toml -p wz-runtime-tokio clean.",
+        "cargo clippy --workspace --all-targets --no-deps -- -D warnings clean across 7 crates after R289 additions.",
+        "cargo test wz-runtime-tokio --lib --filter querier_aliased_get_matching_status passes 5/5; cumulative wz-runtime-tokio lib test count 525 -> 530 (+5 R289 tests).",
+        "scripts/run-ci.sh all 10 lanes green: Layer 0 / A / A2 / B / C0 / C1 / C1b / C2 / D / E. Behavioural impact on Layer E e2e is none (no existing test exercised QuerierAliased::get_matching_status; the new method is purely additive). The R288 RemoteQueryableRegistry membership extension underpins both Querier and QuerierAliased consults; no new registry state added in this round.",
+        "Approximation boundary unchanged from R288: the bidirectional pattern-match approximation catches peer-pattern + effective-literal, effective-pattern + peer-literal, and both-literal cases; honest two-pattern wildcard intersection remains the R291 carry. The inline_suffix composition is the only QuerierAliased-specific transform; the consult itself routes through the same has_matching code path."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R290 carry — Publisher / PublisherAliased get_matching_status against RemoteSubscriberRegistry (z_publisher_get_matching_status mirror). RemoteSubscriberRegistry gains the same `declared: HashMap<u64, String>` membership + has_matching surface that R288 added to RemoteQueryableRegistry. Pub-side analogue of the R288 + R289 query-side closure.",
+        "R291 carry — honest two-pattern keyexpr intersection algorithm. wz keyexpr v1 spec currently locks intersect to exact uint32 ID equality for MVP (RFC §5.A line 311); promoting to wildcard-vs-wildcard intersection is spec-touching (RFC body amend + 6-backend codegen drift gate via Phase A). Out of scope for current production-pattern matching needs.",
+        "Closed: R289 carry from R288 — QuerierAliased::get_matching_status realised; the Querier API surface is fully matched against zenoh-pico's z_querier_get_matching_status across literal-keyexpr (Querier, R288) and aliased-keyexpr (QuerierAliased, R289) variants.",
+        "R284 carry from R283 still open: uniform Established gate across the 4 non-aliased declare_* methods.",
+        "R283 architectural carry still open: peer-side non-final Interest inbound (bilateral).",
+        "Open R267-R270 architectural carries unchanged: Session<R,T> reparam, Instant -> u64ms migration."
+      ]
+    },
     "Round 29": {
       "decision_summary": "Phase C8 entry — first statechart-kind SCXML lands. sources/session/session_fsm_unicast.scxml encodes unicast handshake (Init/LinkOpening/Opening/Accepting/Established/Closing/Closed) per docs/session-fsm.md §2.1-§2.7 minus deferred sub-scopes (multicast, scouting state, Established sub-regions, stateless_accept variant).",
       "changes_bullets": [
