@@ -37,7 +37,7 @@ lifecycle); the operating rules are in CLAUDE.md.
 
 ## Current status
 
-Snapshot last refreshed at Round 210 (2026-05-21). The atomic
+Snapshot last refreshed at Round 271 (2026-05-22). The atomic
 changelog under docs/.atomic/ has the latest per-round delta.
 
 - **Phase A** (author-side SCXML primitives — algorithms): CLOSED.
@@ -77,11 +77,11 @@ changelog under docs/.atomic/ has the latest per-round delta.
   integration + Cortex-M cross-compile remain ahead.
 
 Round-by-round decisions live in the atomic changelog
-(docs/.atomic/workspace.atomic.json). Currently 210 entries
-across 214 atomic sections; ~333 workspace tests pass (185 in
-wz-runtime-tokio lib alone); the local 8-lane CI (Layer 0 / A /
-A2 / B / C1 / C2 / D / E in scripts/run-ci.sh) mirrors the
-GitHub Actions workflow.
+(docs/.atomic/workspace.atomic.json). Currently 270 entries
+across 215 atomic sections; the workspace test suites + Layer E
+binary-dep e2e fixtures pass via the local 10-lane CI (Layer 0 /
+A / A2 / B / C0 / C1 / C1b / C2 / D / E in scripts/run-ci.sh),
+mirrored by the GitHub Actions workflow.
 
 ## Directory layout
 

@@ -34,7 +34,7 @@ Mnemosyne 가 관리 (atomic-store + GENERATED.md lifecycle); 운영
 
 ## 현재 상태
 
-스냅샷은 Round 210 (2026-05-21) 시점 갱신. 라운드별 델타는
+스냅샷은 Round 271 (2026-05-22) 시점 갱신. 라운드별 델타는
 docs/.atomic/ 의 atomic changelog 가 최신본.
 
 - **Phase A** (author-side SCXML primitive — algorithm): CLOSED.
@@ -73,10 +73,10 @@ docs/.atomic/ 의 atomic changelog 가 최신본.
   lwIP integration + Cortex-M cross-compile 은 후속.
 
 라운드별 결정은 atomic changelog (docs/.atomic/workspace.atomic.json).
-현재 210 entry / 214 atomic section; workspace test ~333 통과
-(wz-runtime-tokio lib 단독 185); 로컬 8-lane CI
-(scripts/run-ci.sh 의 Layer 0 / A / A2 / B / C1 / C2 / D / E)
-가 GitHub Actions workflow 와 동기.
+현재 270 entry / 215 atomic section; workspace test suite + Layer
+E binary-dep e2e fixture 가 로컬 10-lane CI (scripts/run-ci.sh
+의 Layer 0 / A / A2 / B / C0 / C1 / C1b / C2 / D / E) 를 통해
+통과; GitHub Actions workflow 와 동기.
 
 ## 디렉터리
 
