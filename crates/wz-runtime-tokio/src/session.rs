@@ -513,6 +513,27 @@ impl Session {
         &self.observer
     }
 
+    /// R283 — `true` once the session-FSM has entered `Established`.
+    /// Thin proxy over
+    /// [`crate::session_glue::SessionLinkActions::is_established`];
+    /// see that method's doc-comment for the underlying mechanism
+    /// (the `record_established_at` Lua action wired to
+    /// `Established.onentry` in `session_fsm_unicast.scxml`).
+    ///
+    /// Callers that emit Interest / declare wire frames pre-Established
+    /// risk silent peer-side discard: the peer's `remote-interests`
+    /// table is empty until handshake completes, so a pre-Established
+    /// Interest never lands. The R283 gate on
+    /// [`Self::declare_liveliness_subscriber_aliased`] enforces this
+    /// invariant at the declare API boundary; callers wanting to time
+    /// their declares against the FSM directly can poll this
+    /// predicate. The non-aliased
+    /// [`Self::declare_liveliness_subscriber`] remains best-effort —
+    /// see its doc-comment for the asymmetric-gate carry.
+    pub fn is_established(&self) -> bool {
+        self.actions.is_established()
+    }
+
     /// R231 — forward this session's own zid (1..=16 bytes) to the
     /// inbound subscriber registry so wire-arrived self-echoes (a
     /// `Locality::Any` publish that the network routes back to its
@@ -1463,6 +1484,32 @@ impl Session {
     /// bandwidth-efficient alias-form `Interest` emit. The literal
     /// form on this method stays the entry point when the caller has
     /// no prior `send_declare_keyexpr` mapping for the pattern.
+    ///
+    /// ## Established gate — asymmetric with the aliased counterpart
+    ///
+    /// R283 added a session-FSM `Established` gate to
+    /// [`Self::declare_liveliness_subscriber_aliased`] (the aliased
+    /// version already returned `Result`, so adding a `NotEstablished`
+    /// variant was non-breaking). This non-aliased version
+    /// **does NOT yet enforce the gate** — it remains best-effort
+    /// against pre-Established state, relying on the driver-side
+    /// buffer + SN-window ordering to land the Interest once
+    /// handshake completes. The peer may discard a pre-Established
+    /// Interest (`remote-interests` table empty) and the local slot
+    /// then waits without ever firing a callback.
+    ///
+    /// Callers that want the explicit-gate contract can either:
+    /// - poll [`Self::is_established`] before calling this method, or
+    /// - call [`Self::declare_liveliness_subscriber_aliased`] with a
+    ///   prior `send_declare_keyexpr` of the literal pattern.
+    ///
+    /// Uniform extension of the `NotEstablished` gate to this method
+    /// (and to the sibling `declare_token` /
+    /// `declare_subscriber` / `declare_queryable` non-aliased surface)
+    /// is a future-round carry — the breaking signature change of
+    /// switching this method to `Result<LivelinessSubscriber, _>` is
+    /// large enough to warrant a dedicated round across the whole
+    /// declare_* surface for uniformity.
     pub fn declare_liveliness_subscriber(
         &self,
         keyexpr: impl Into<String>,
@@ -1540,12 +1587,26 @@ impl Session {
     ///
     /// ## Errors
     ///
-    /// Returns `Err(LivelinessSubscriberAliasError::UnknownMapping(id))`
-    /// only when the mapping is absent at declare time — no
-    /// caller-facing error on every callback fire. Mirror of
-    /// [`SubscribeAliasError`] / [`QueryableAliasError`] /
-    /// [`QueryAliasError`] / [`PublishAliasError`] /
-    /// [`LivelinessAliasError`] on the liveliness subscriber side.
+    /// - `Err(LivelinessSubscriberAliasError::UnknownMapping(id))`
+    ///   (R282) when the mapping is absent at declare time. Mirror of
+    ///   [`SubscribeAliasError`] / [`QueryableAliasError`] /
+    ///   [`QueryAliasError`] / [`PublishAliasError`] /
+    ///   [`LivelinessAliasError`] on the liveliness subscriber side.
+    /// - `Err(LivelinessSubscriberAliasError::NotEstablished)` (R283)
+    ///   when the session-FSM has not yet entered `Established`. A
+    ///   pre-Established Interest is silently dropped by the peer (no
+    ///   `remote-interests` table entry yet); rejecting at the API
+    ///   boundary surfaces the bug to the caller. Poll
+    ///   [`Self::is_established`] (or wire a session-layer
+    ///   Established signal at the higher tier) before retrying.
+    ///
+    /// Variant ordering: `UnknownMapping` first (mapping resolution is
+    /// FSM-state-independent and cheaper), then `NotEstablished`. A
+    /// pre-Established call with an unknown mapping returns
+    /// `UnknownMapping`, surfacing the bug-class error before the
+    /// session-state-dependent retry loop. No slot register, no
+    /// interest-id allocation, no wire emit on either early-return
+    /// path.
     pub fn declare_liveliness_subscriber_aliased(
         &self,
         mapping_id: u64,
@@ -1553,10 +1614,20 @@ impl Session {
         options: LivelinessSubscriberOptions,
         callback: impl FnMut(LivelinessSample<'_>) + Send + 'static,
     ) -> Result<LivelinessSubscriber, LivelinessSubscriberAliasError> {
+        // Mapping check first — FSM-state-independent, surfaces a
+        // bug-class error (caller forgot send_declare_keyexpr) before
+        // the state-dependent retry loop. R282 + R283 ordering rule.
         let base = self
             .actions
             .resolve_outbound_mapping(mapping_id)
             .ok_or(LivelinessSubscriberAliasError::UnknownMapping(mapping_id))?;
+        // R283 Established gate. Done after mapping resolution so a
+        // pre-Established call with a bad mapping surfaces the bad
+        // mapping (the bug) rather than the transient state. No
+        // interest-id is burned on the early-return path.
+        if !self.actions.is_established() {
+            return Err(LivelinessSubscriberAliasError::NotEstablished);
+        }
         let resolved = match inline_suffix {
             None => base,
             Some(s) => {
@@ -2550,21 +2621,51 @@ impl Drop for LivelinessSubscriber {
     }
 }
 
-/// R282 — typed error returned by
-/// [`Session::declare_liveliness_subscriber_aliased`] when the
-/// requested mapping id was never declared on the outbound mapping
-/// table (or was retracted before the
-/// `declare_liveliness_subscriber_aliased` call). Mirror of
-/// [`SubscribeAliasError`] / [`QueryableAliasError`] /
+/// R282 / R283 — typed error returned by
+/// [`Session::declare_liveliness_subscriber_aliased`]. Two variants
+/// cover the two declare-time pre-conditions:
+///
+/// - [`Self::UnknownMapping`] (R282) — the aliased mapping id is not
+///   present in the outbound mapping table; resolution would emit a
+///   wire frame the peer cannot decode.
+/// - [`Self::NotEstablished`] (R283) — the session-FSM has not yet
+///   entered `Established`; an outbound `Interest` emit before
+///   handshake completion is silently discarded by the peer
+///   (no `remote-interests` table entry yet).
+///
+/// Variant ordering at the call site is: `UnknownMapping` checked
+/// first (mapping resolution is FSM-state-independent and cheaper),
+/// then `NotEstablished`. So a pre-Established call with an unknown
+/// mapping returns `UnknownMapping`, not `NotEstablished` — the
+/// caller fixes the bug-class error before retrying the
+/// session-state-dependent retry loop.
+///
+/// Mirror of [`SubscribeAliasError`] / [`QueryableAliasError`] /
 /// [`QueryAliasError`] / [`PublishAliasError`] /
-/// [`LivelinessAliasError`] on the liveliness subscriber side.
+/// [`LivelinessAliasError`] on the liveliness subscriber side, plus
+/// the R283 `NotEstablished` extension. The sibling errors do not yet
+/// carry the `NotEstablished` variant — uniform extension to the rest
+/// of the declare_* surface is a future-round carry (see
+/// [`Session::declare_liveliness_subscriber`] doc-comment on the
+/// asymmetric gate).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LivelinessSubscriberAliasError {
-    /// No prior `send_declare_keyexpr` registered this id on the
-    /// outbound mapping table (or a later `send_undeclare_kexpr`
+    /// R282 — no prior `send_declare_keyexpr` registered this id on
+    /// the outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it before the declare_liveliness_subscriber_aliased
     /// call).
     UnknownMapping(u64),
+    /// R283 — the session-FSM has not yet entered `Established`. The
+    /// outbound `Interest` frame would be emitted into a session that
+    /// is mid-handshake (InitSyn / InitAck / OpenSyn / OpenAck) and
+    /// the peer would discard it (no `remote-interests` table entry
+    /// yet). Caller should wait for
+    /// [`crate::Session::is_established`] (or the equivalent
+    /// session-level signal in higher-tier wrappers) to flip to
+    /// `true` before retrying the declare. Mirrors zenoh-pico's
+    /// implicit "declare AFTER z_open returns Z_OK" sequencing
+    /// contract.
+    NotEstablished,
 }
 
 impl std::fmt::Display for LivelinessSubscriberAliasError {
@@ -2574,6 +2675,12 @@ impl std::fmt::Display for LivelinessSubscriberAliasError {
                 f,
                 "LivelinessSubscriberAliasError: mapping id {id} not present in outbound table; \
                  call SessionLinkActions::send_declare_keyexpr({id}, …) first"
+            ),
+            LivelinessSubscriberAliasError::NotEstablished => write!(
+                f,
+                "LivelinessSubscriberAliasError: session-FSM not yet Established; \
+                 wait for Session::is_established() to flip to true (or for the \
+                 session-layer Established signal) before retrying the declare"
             ),
         }
     }
@@ -2658,6 +2765,24 @@ mod tests {
     use crate::runtime_impl::TokioTime;
     use crate::session_glue::{BoxedLinkDriver, SessionInitParams, SigningKey};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    /// R283 test helper — force the session-FSM `Established` stamp
+    /// without driving the full handshake. The production path
+    /// populates `established_at` via the `record_established_at` Lua
+    /// action wired to `Established.onentry` in
+    /// `session_fsm_unicast.scxml`; pure-Rust unit tests skip the
+    /// SCXML driver and stamp the field directly. Mirror of any
+    /// other test fixture that needs to bypass FSM driving (e.g. the
+    /// keyexpr mapping is populated via `send_declare_keyexpr` rather
+    /// than driving the peer's `DeclKexpr` inbound).
+    fn mark_session_established(session: &Session) {
+        *session
+            .actions()
+            .established_at
+            .lock()
+            .expect("established_at poisoned in test fixture") = Some(Instant::now());
+    }
 
     /// Captures every outbound wire send so tests can assert wire
     /// branch fires only when `allows_remote()` holds. Mirrors the
@@ -5822,6 +5947,7 @@ mod tests {
     fn declare_liveliness_subscriber_aliased_resolves_literal_at_declare_time() {
         let (session, _driver) = build_session();
         session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        mark_session_established(&session);
         let sub = session
             .declare_liveliness_subscriber_aliased(
                 7,
@@ -5853,6 +5979,7 @@ mod tests {
     fn declare_liveliness_subscriber_aliased_with_inline_suffix_composes_literal() {
         let (session, _driver) = build_session();
         session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        mark_session_established(&session);
         let sub = session
             .declare_liveliness_subscriber_aliased(
                 7,
@@ -5915,6 +6042,7 @@ mod tests {
         // Install the keyexpr mapping (7 -> "liveliness/dev7"); first
         // wire frame is this Declare(DeclKexpr).
         session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        mark_session_established(&session);
         let baseline_frames = driver.frame_count();
 
         let _sub = session
@@ -5953,6 +6081,7 @@ mod tests {
         // literal, matching is unaffected.
         let (session, _driver) = build_session();
         session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        mark_session_established(&session);
         let sub = session
             .declare_liveliness_subscriber_aliased(
                 7,
@@ -5979,12 +6108,113 @@ mod tests {
         );
     }
 
+    // ── R283 Established gate — pre-Established declines, ordering
+    // rule (UnknownMapping precedes NotEstablished), and predicate
+    // behavior. ────────────────────────────────────────────────────
+
+    #[test]
+    fn declare_liveliness_subscriber_aliased_pre_established_returns_err_without_wire_emit() {
+        // Session-FSM has not yet entered Established. The Interest
+        // would be emitted into a mid-handshake session; the peer's
+        // remote-interests table is empty so the frame would be
+        // silently discarded. R283 surfaces the bug at the API
+        // boundary instead.
+        let (session, driver) = build_session();
+        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        let baseline_frames = driver.frame_count();
+        // NOTE: NO mark_session_established(&session) — that's the
+        // condition under test.
+        let err = session.declare_liveliness_subscriber_aliased(
+            7,
+            None,
+            LivelinessSubscriberOptions::default(),
+            |_| {},
+        );
+        assert!(
+            matches!(err, Err(LivelinessSubscriberAliasError::NotEstablished)),
+            "expected Err(NotEstablished) when session is mid-handshake",
+        );
+        assert_eq!(
+            driver.frame_count(),
+            baseline_frames,
+            "no wire emit on pre-Established early-return path",
+        );
+        assert_eq!(
+            session
+                .observer()
+                .lock()
+                .unwrap()
+                .liveliness_subscribers
+                .slot_count(),
+            0,
+            "no slot registered when the Established gate refuses the declare",
+        );
+    }
+
+    #[test]
+    fn declare_liveliness_subscriber_aliased_unknown_mapping_takes_precedence_over_not_established() {
+        // Pin the variant ordering: when the session is pre-Established
+        // AND the mapping is unknown, the caller sees UnknownMapping
+        // (the bug-class error) — not NotEstablished (the transient
+        // state). Retrying post-Established with the same bad mapping
+        // would still fail; surfacing UnknownMapping first short-
+        // circuits the futile retry loop.
+        let (session, driver) = build_session();
+        // No send_declare_keyexpr — mapping 99 is genuinely unknown.
+        // No mark_session_established — Established is also false.
+        let err = session.declare_liveliness_subscriber_aliased(
+            99,
+            None,
+            LivelinessSubscriberOptions::default(),
+            |_| {},
+        );
+        assert!(
+            matches!(err, Err(LivelinessSubscriberAliasError::UnknownMapping(99))),
+            "unknown mapping must precede the NotEstablished gate",
+        );
+        assert_eq!(driver.frame_count(), 0, "no wire emit");
+    }
+
+    #[test]
+    fn is_established_predicate_flips_after_record_established_at() {
+        // The Session::is_established proxy reads the same field the
+        // record_established_at Lua action sets at Established.onentry.
+        // A freshly-built session is mid-handshake (established_at =
+        // None); the test fixture flips the field to verify the
+        // predicate tracks it.
+        let (session, _driver) = build_session();
+        assert!(
+            !session.is_established(),
+            "freshly-built session is pre-Established (no record_established_at fired)",
+        );
+        assert!(
+            !session.actions().is_established(),
+            "Session::is_established proxy reads the same source",
+        );
+        mark_session_established(&session);
+        assert!(
+            session.is_established(),
+            "post record_established_at, is_established() is true",
+        );
+        assert!(
+            session.actions().is_established(),
+            "actions-layer predicate flips in lockstep",
+        );
+    }
+
     #[test]
     fn liveliness_subscriber_alias_error_display_message_hints_remediation() {
+        // R282 UnknownMapping variant.
         let err = LivelinessSubscriberAliasError::UnknownMapping(42);
         let msg = format!("{err}");
         assert!(msg.contains("42"));
         assert!(msg.contains("send_declare_keyexpr"));
+
+        // R283 NotEstablished variant.
+        let err = LivelinessSubscriberAliasError::NotEstablished;
+        let msg = format!("{err}");
+        assert!(msg.contains("not yet Established"));
+        assert!(msg.contains("is_established"));
     }
 
     #[test]

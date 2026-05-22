@@ -1473,6 +1473,35 @@ impl SessionLinkActions {
             .cloned()
     }
 
+    /// R283 — `true` once the session-FSM has entered the `Established`
+    /// state (the `record_established_at` Lua action wired to
+    /// `Established.onentry` in `session_fsm_unicast.scxml` has
+    /// populated `established_at`). Cheap predicate: a single
+    /// `Mutex<Option<Instant>>::is_some()` lookup; no clock read,
+    /// no FSM traversal.
+    ///
+    /// Surfaces the session-fsm §2.5 Established invariant to the
+    /// declare-side primitives so they can refuse an outbound wire
+    /// emit before the handshake completes. zenoh-pico's
+    /// `z_liveliness_declare_subscriber` enforces the same invariant
+    /// implicitly: the application sequences declares AFTER `z_open`
+    /// returns Z_OK (`vendor/zenoh-pico/include/zenoh-pico/api/primitives.h`
+    /// API contract), so a peer that emits an Interest pre-Established
+    /// is a protocol bug, not a runtime condition the peer can
+    /// recover from.
+    ///
+    /// A poisoned `established_at` mutex (an earlier panicked Lua
+    /// action) is treated as `false` — refusing emit on a corrupted
+    /// FSM is the conservative + textbook response, matching the
+    /// poison-recover idiom used elsewhere (see
+    /// `crate::pubsub::Subscriber::drop`).
+    pub fn is_established(&self) -> bool {
+        self.established_at
+            .lock()
+            .map(|stamp| stamp.is_some())
+            .unwrap_or(false)
+    }
+
     /// R121i-c — encode + dispatch a `Declare(UndeclSubscriber)` on
     /// the outbound link, retracting a previously declared
     /// subscription (id) on the peer. The peer drops the

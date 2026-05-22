@@ -1303,14 +1303,19 @@ async fn run_demo(
     // outbound link and unregisters the slot. Same registration
     // timing rationale as the `_subscriber_handle` above: drive_session
     // has not started yet, so the slot is in place before any inbound
-    // DeclToken can arrive. The outbound Interest emit during
+    // DeclToken can arrive.
+    //
+    // R283 — the outbound Interest emit during
     // `declare_liveliness_subscriber` is best-effort against the
     // pre-Established state; the wz session FSM holds the wire emit
     // until Established for the same SN-window reason as
     // `send_declare_*`, so a buffered Interest can race the Establish
-    // transition without dropping. R283+ formalises the Established
-    // gate for outbound Interest if integration testing surfaces a
-    // race.
+    // transition without dropping. The R283 Established gate landed
+    // on `declare_liveliness_subscriber_aliased` only (its Result
+    // return signature accommodated the new NotEstablished variant
+    // non-breakingly); the non-aliased entry point used here remains
+    // best-effort. Uniform extension of the gate across the
+    // non-aliased declare_* surface is a future-round carry.
     let _liveliness_subscriber_handle: Option<LivelinessSubscriber> = declare_spec
         .liveliness_subscriber_keyexpr
         .as_ref()
