@@ -66,14 +66,11 @@ docs/.atomic/ 의 atomic changelog 가 최신본.
   Response 레벨 responder ext (R210
   `QueryResponder::with_responder` 경유) 포함. Scouting,
   multicast, reassembly, fragmentation 은 후속 phase.
-- **Phase W** (lwIP / MCU runtime): first external release 이후
-  착수. R58 NOP-stub 은 R63 에 revert (document-around-hack
-  금지); 재진입은 cargo publish dry-run + tagged release flow
-  안착 이후.
-- **First external release** (v0.1.0-mvp): 다음 milestone. 5
-  sub-round 으로 README 정돈, deploy.yaml schema 정리, GitHub
-  Actions release flow, THIRD_PARTY.md 원장, cargo publish
-  dry-run + tag 까지 커버한다.
+- **Phase W** (lwIP / MCU runtime): trait skeleton R251 에서
+  landed (wz-runtime-core crate). R58 NOP-stub 은 R63 에 revert
+  (document-around-hack 금지). AP 측 TokioRuntime + TokioTime
+  concrete impl 은 R252+ 에서 실제 caller 와 함께 land; full
+  lwIP integration + Cortex-M cross-compile 은 후속.
 
 라운드별 결정은 atomic changelog (docs/.atomic/workspace.atomic.json).
 현재 210 entry / 214 atomic section; workspace test ~333 통과
