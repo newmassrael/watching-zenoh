@@ -1461,6 +1461,64 @@ impl SessionLinkActions {
         self.driver.send_blocking(&wire, Reliability::Reliable);
     }
 
+    /// R240 — metadata-bearing counterpart of [`Self::send_request_query`].
+    /// Threads the caller-supplied [`QueryMetadata`] bundle through
+    /// the layered [`RequestQueryBuilder`] so the outbound
+    /// `Request(Query)` carries (when set):
+    ///
+    /// * `meta.target` → Q_T flag + request_target ext entry
+    ///   (`vendor/zenoh-pico/src/protocol/codec/network.c:140`)
+    /// * `meta.consolidation` → Q_C flag + consolidation wire byte
+    ///   (`vendor/zenoh-pico/src/protocol/codec/message.c:402-412`)
+    /// * `meta.attachment` → Query-level attachment ext (id=0x03 ZBUF)
+    /// * `meta.timeout_ms` → Request-level timeout ext (gated by the
+    ///   `_z_n_msg_request_needed_exts._ext_timeout_ms != 0`
+    ///   predicate at `network.c`).
+    ///
+    /// Empty slots elide the corresponding wire byte / ext so a
+    /// `meta = QueryMetadata::default()` call produces the same wire
+    /// frame as [`Self::send_request_query`]. Mirrors R233's
+    /// [`Self::send_push_with_meta_literal`] pattern on the publish
+    /// side — the queryable / z_get split now has matching
+    /// metadata-bearing surfaces.
+    ///
+    /// Same reliability contract as the no-metadata form: hard-coded
+    /// `reliable=true` per zenoh-pico's reliable-channel guarantee
+    /// for the Query / Reply / Final correlation chain.
+    pub fn send_request_query_with_meta(
+        &self,
+        rid: u64,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+        meta: &QueryMetadata,
+    ) {
+        let mut builder = RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix);
+        if let Some(target) = meta.target {
+            builder = builder.request_target(target);
+        }
+        if let Some(consolidation) = meta.consolidation {
+            builder = builder.consolidation(consolidation);
+        }
+        if let Some(attachment) = meta.attachment.as_deref() {
+            // RequestQueryBuilder::query_attachment panics on empty
+            // input (zenoh-pico's `_z_n_msg_query_needed_exts`
+            // clears the ext on len=0). The QueryMetadata caller's
+            // contract is "attachment = Some(empty) means clear the
+            // ext"; honour that here without panicking by skipping
+            // the attach call when the inner slice is empty.
+            if !attachment.is_empty() {
+                builder = builder.query_attachment(attachment);
+            }
+        }
+        if meta.timeout_ms != 0 {
+            builder = builder.request_timeout_ms(meta.timeout_ms as u64);
+        }
+        let request = builder.build();
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_request(sn, request, /*reliable=*/ true);
+        self.driver.send_blocking(&wire, Reliability::Reliable);
+    }
+
     /// R121j-2 — encode + dispatch a `ResponseFinal(request_id)` on
     /// the outbound link, signaling that no more `Response(Reply)`
     /// messages will follow for `request_id`. The peer that issued
@@ -2186,6 +2244,64 @@ impl PushMetadata {
             && self.source_info.is_none()
             && self.attachment.is_none()
             && self.qos.is_none()
+    }
+}
+
+/// R240 — Query-side counterpart of [`PushMetadata`]. Bundles the
+/// caller-set [`crate::session::QueryOptions`] fields that route
+/// through the layered [`RequestQueryBuilder`] so a
+/// [`crate::session::Session::query`] call can hand them to
+/// [`SessionLinkActions::send_request_query_with_meta`] without the
+/// glue layer learning about `QueryOptions` directly.
+///
+/// Field coverage at R240 is *partial vs* [`crate::session::QueryOptions`]:
+///
+/// | QueryOptions field | Wire propagation slot |
+/// |--------------------|-----------------------|
+/// | `target`           | [`RequestQueryBuilder::request_target`] |
+/// | `consolidation`    | [`RequestQueryBuilder::consolidation`] |
+/// | `attachment`       | [`RequestQueryBuilder::query_attachment`] |
+/// | `timeout_ms`       | [`RequestQueryBuilder::request_timeout_ms`] |
+/// | `payload`          | R241+ carry — wz codec has no Q_B body slot yet |
+/// | `encoding`         | R241+ carry — wz codec has no Q_E inline slot yet |
+///
+/// `payload` / `encoding` stay on
+/// [`crate::session::QueryOptions`] as future-additive slots so a
+/// later round that lands the Q_B / Q_E codec extensions surfaces
+/// the propagation without an API break.
+///
+/// `#[derive(Default)]` makes the empty bundle trivially constructable
+/// for the no-metadata fast path; [`Self::is_empty`] mirrors
+/// [`PushMetadata::is_empty`] so callers can short-circuit the
+/// builder allocation.
+#[derive(Debug, Clone, Default)]
+pub struct QueryMetadata {
+    /// Reply target hint (`Q_T` flag on the outbound Query). `None`
+    /// elides the target byte → peer decodes
+    /// `Z_QUERY_TARGET_DEFAULT` = `BEST_MATCHING`.
+    pub target: Option<QueryTarget>,
+    /// Reply consolidation hint (`Q_C` flag + consolidation byte).
+    /// `None` elides → peer decodes `Z_CONSOLIDATION_MODE_AUTO`.
+    pub consolidation: Option<ConsolidationMode>,
+    /// Query-level attachment blob (ext_id=0x03 ZBUF on the Query
+    /// ext chain). `None` elides the ext.
+    pub attachment: Option<Vec<u8>>,
+    /// Request-level timeout in milliseconds. `0` elides the ext
+    /// per zenoh-pico's `_z_n_msg_request_needed_exts` predicate
+    /// (`msg->_ext_timeout_ms != 0`).
+    pub timeout_ms: u32,
+}
+
+impl QueryMetadata {
+    /// `true` when every wire-propagatable slot is empty — callers
+    /// can use this to short-circuit
+    /// [`SessionLinkActions::send_request_query`]'s no-metadata fast
+    /// path. Symmetric to [`PushMetadata::is_empty`].
+    pub fn is_empty(&self) -> bool {
+        self.target.is_none()
+            && self.consolidation.is_none()
+            && self.attachment.is_none()
+            && self.timeout_ms == 0
     }
 }
 
@@ -9966,5 +10082,190 @@ mod tests {
         actions.send_undeclare_kexpr(7);
         assert_eq!(resolved, "home/temp", "owned clone survives table mutation");
         assert!(actions.resolve_outbound_mapping(7).is_none());
+    }
+
+    // ── R240 wire-side QueryOptions propagation ──
+
+    #[test]
+    fn query_metadata_default_is_empty() {
+        let meta = QueryMetadata::default();
+        assert!(meta.is_empty());
+    }
+
+    #[test]
+    fn query_metadata_with_target_is_not_empty() {
+        let meta = QueryMetadata {
+            target: Some(QueryTarget::All),
+            ..Default::default()
+        };
+        assert!(!meta.is_empty());
+    }
+
+    #[test]
+    fn query_metadata_with_consolidation_is_not_empty() {
+        let meta = QueryMetadata {
+            consolidation: Some(ConsolidationMode::Latest),
+            ..Default::default()
+        };
+        assert!(!meta.is_empty());
+    }
+
+    #[test]
+    fn query_metadata_with_attachment_is_not_empty() {
+        let meta = QueryMetadata {
+            attachment: Some(b"q-att".to_vec()),
+            ..Default::default()
+        };
+        assert!(!meta.is_empty());
+    }
+
+    #[test]
+    fn query_metadata_with_timeout_ms_nonzero_is_not_empty() {
+        let meta = QueryMetadata {
+            timeout_ms: 5_000,
+            ..Default::default()
+        };
+        assert!(!meta.is_empty());
+    }
+
+    #[test]
+    fn send_request_query_with_meta_empty_emits_same_bytes_as_no_meta() {
+        // R240 short-circuit invariant: empty QueryMetadata MUST
+        // produce the same wire frame as the no-metadata
+        // send_request_query path so byte-stable callers (CI / fuzz
+        // baselines) stay unchanged when QueryOptions::default() is
+        // threaded through Session::query.
+        let driver_a = std::sync::Arc::new(CaptureDriver::new());
+        let actions_a = SessionLinkActions::new(driver_a.clone(), publish_meta_fixture_params());
+        actions_a.send_request_query_with_meta(
+            42,
+            0,
+            Some("home/temp"),
+            &QueryMetadata::default(),
+        );
+        let with_meta = driver_a.frames.lock().unwrap()[0].0.clone();
+
+        let driver_b = std::sync::Arc::new(CaptureDriver::new());
+        let actions_b = SessionLinkActions::new(driver_b.clone(), publish_meta_fixture_params());
+        actions_b.send_request_query(42, 0, Some("home/temp"));
+        let no_meta = driver_b.frames.lock().unwrap()[0].0.clone();
+
+        assert_eq!(
+            with_meta, no_meta,
+            "empty QueryMetadata must produce byte-stable parity with the no-meta path"
+        );
+    }
+
+    #[test]
+    fn send_request_query_with_meta_target_emits_request_with_target_ext() {
+        // build_request_query_with_target standalone re-encode
+        // produces the same wire shape the action surface threads
+        // when meta.target = Some(target). Pins the
+        // QueryMetadata::target → RequestQueryBuilder::request_target
+        // wiring.
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let meta = QueryMetadata {
+            target: Some(QueryTarget::All),
+            ..Default::default()
+        };
+        actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
+
+        let standalone = build_request_query_with_target(42, 0, Some("home/temp"), QueryTarget::All);
+        let standalone_bytes = standalone.encode_to_vec();
+        let frame = &driver.frames.lock().unwrap()[0].0;
+        assert!(
+            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            "frame must contain the with-target Request bytes verbatim"
+        );
+    }
+
+    #[test]
+    fn send_request_query_with_meta_consolidation_emits_query_with_q_c_flag() {
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let meta = QueryMetadata {
+            consolidation: Some(ConsolidationMode::Latest),
+            ..Default::default()
+        };
+        actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
+
+        let standalone =
+            build_request_query_with_consolidation(42, 0, Some("home/temp"), ConsolidationMode::Latest);
+        let standalone_bytes = standalone.encode_to_vec();
+        let frame = &driver.frames.lock().unwrap()[0].0;
+        assert!(
+            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            "frame must contain the with-consolidation Request bytes verbatim"
+        );
+    }
+
+    #[test]
+    fn send_request_query_with_meta_attachment_emits_query_with_attachment_ext() {
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let meta = QueryMetadata {
+            attachment: Some(b"q-att".to_vec()),
+            ..Default::default()
+        };
+        actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
+
+        let standalone =
+            build_request_query_with_attachment(42, 0, Some("home/temp"), b"q-att");
+        let standalone_bytes = standalone.encode_to_vec();
+        let frame = &driver.frames.lock().unwrap()[0].0;
+        assert!(
+            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            "frame must contain the with-attachment Request bytes verbatim"
+        );
+    }
+
+    #[test]
+    fn send_request_query_with_meta_empty_attachment_slice_skips_ext_without_panic() {
+        // QueryOptions::with_attachment(empty Vec) → meta.attachment
+        // = Some(empty) — RequestQueryBuilder::query_attachment
+        // asserts non-empty, but the meta-threading path must guard
+        // against the panic by skipping the attach call on an empty
+        // inner slice. Wire frame ends up matching the
+        // no-attachment shape.
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let meta = QueryMetadata {
+            attachment: Some(Vec::new()),
+            ..Default::default()
+        };
+        actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
+
+        // No panic; frame ends up matching the no-meta baseline (meta
+        // is not empty for is_empty() because attachment.is_some(),
+        // but the wire emission elides the ext because the inner
+        // slice is empty).
+        let baseline = build_request_query(42, 0, Some("home/temp"));
+        let baseline_bytes = baseline.encode_to_vec();
+        let frame = &driver.frames.lock().unwrap()[0].0;
+        assert!(
+            frame.windows(baseline_bytes.len()).any(|w| w == baseline_bytes),
+            "empty-inner attachment must not change the wire bytes"
+        );
+    }
+
+    #[test]
+    fn send_request_query_with_meta_timeout_ms_emits_request_with_timeout_ext() {
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let meta = QueryMetadata {
+            timeout_ms: 5_000,
+            ..Default::default()
+        };
+        actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
+
+        let standalone =
+            build_request_query_with_timeout_ms(42, 0, Some("home/temp"), 5_000);
+        let standalone_bytes = standalone.encode_to_vec();
+        let frame = &driver.frames.lock().unwrap()[0].0;
+        assert!(
+            frame.windows(standalone_bytes.len()).any(|w| w == standalone_bytes),
+            "frame must contain the with-timeout Request bytes verbatim"
+        );
     }
 }
