@@ -116,9 +116,10 @@ use wz_runtime_tokio::reply::InboundReplyBody;
 use wz_runtime_tokio::sample::SampleKind;
 use wz_runtime_core::TimeSource;
 use wz_runtime_tokio::runtime_impl::TokioTime;
+use wz_runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
 use wz_runtime_tokio::session::{
-    LivelinessOptions, LivelinessToken, PublishAliasError, PublishOptions, QueryableOptions,
-    Session, SubscribeOptions,
+    LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
+    PublishAliasError, PublishOptions, QueryableOptions, Session, SubscribeOptions,
 };
 use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastPolicy;
 use wz_runtime_tokio::session_glue::{
@@ -172,6 +173,7 @@ fn print_usage() {
     eprintln!("               [--declare-subscriber <keyexpr>]");
     eprintln!("               [--declare-queryable <keyexpr>]");
     eprintln!("               [--declare-token <keyexpr>]");
+    eprintln!("               [--liveliness-subscribe <keyexpr>]");
     eprintln!("               [--on-remote-subscriber-log]");
     eprintln!("               [--on-remote-queryable-log]");
     eprintln!("               [--on-remote-liveliness-log]");
@@ -204,6 +206,11 @@ fn print_usage() {
     eprintln!("    --declare-token <keyexpr>");
     eprintln!("                             send a single Declare(DeclToken) on this keyexpr");
     eprintln!("                             literal once the session reaches Established");
+    eprintln!("    --liveliness-subscribe <keyexpr>");
+    eprintln!("                             declare a liveliness subscriber on <keyexpr> (R280);");
+    eprintln!("                             emits one Interest(KE|TO|R|F) on Established and");
+    eprintln!("                             logs 'LIVELINESS SAMPLE PUT/DELETE' on every matching");
+    eprintln!("                             peer DeclToken / UndeclToken arrival");
     eprintln!("    --on-remote-subscriber-log");
     eprintln!("                             install a RemoteSubscriberRegistry callback that");
     eprintln!("                             logs 'REMOTE SUBSCRIBER DECLARED' on inbound");
@@ -639,6 +646,11 @@ fn main() -> ExitCode {
     let declare_subscriber_opt = parse_pair(rest, "--declare-subscriber");
     let declare_queryable_opt = parse_pair(rest, "--declare-queryable");
     let declare_token_opt = parse_pair(rest, "--declare-token");
+    // R280 — optional `--liveliness-subscribe <keyexpr>` registers a
+    // liveliness subscriber on the literal keyexpr pattern. Emits one
+    // outbound Interest once Established and logs every matching peer
+    // DeclToken / UndeclToken sample to stderr.
+    let liveliness_subscribe_opt = parse_pair(rest, "--liveliness-subscribe");
     let on_remote_sub_log = rest.iter().any(|a| a == "--on-remote-subscriber-log");
     let on_remote_q_log = rest.iter().any(|a| a == "--on-remote-queryable-log");
     let on_remote_l_log = rest.iter().any(|a| a == "--on-remote-liveliness-log");
@@ -700,13 +712,14 @@ fn main() -> ExitCode {
         && declare_subscriber_opt.is_none()
         && declare_queryable_opt.is_none()
         && declare_token_opt.is_none()
+        && liveliness_subscribe_opt.is_none()
         && !on_remote_sub_log
         && !on_remote_q_log
         && !on_remote_l_log
     {
         eprintln!(
             "wz-ap-demo: at least one of --key / --publish / --delete / --queryable / --query / \
-             --declare-* / --on-remote-* must be supplied",
+             --declare-* / --liveliness-subscribe / --on-remote-* must be supplied",
         );
         eprintln!();
         print_usage();
@@ -854,6 +867,9 @@ fn main() -> ExitCode {
     if let Some(d) = &declare_token_opt {
         log::info!("declare-token = {d}");
     }
+    if let Some(d) = &liveliness_subscribe_opt {
+        log::info!("liveliness-subscribe = {d}");
+    }
     if on_remote_sub_log {
         log::info!("on-remote-subscriber-log = true");
     }
@@ -891,6 +907,7 @@ fn main() -> ExitCode {
         subscriber_keyexpr: declare_subscriber_opt,
         queryable_keyexpr: declare_queryable_opt,
         token_keyexpr: declare_token_opt,
+        liveliness_subscriber_keyexpr: liveliness_subscribe_opt,
     };
     let remote_log_spec = RemoteLogSpec {
         on_remote_subscriber: on_remote_sub_log,
@@ -939,6 +956,16 @@ struct DeclareEmitSpec {
     subscriber_keyexpr: Option<String>,
     queryable_keyexpr: Option<String>,
     token_keyexpr: Option<String>,
+    /// R280 — optional `--liveliness-subscribe <keyexpr>` payload.
+    /// When `Some`, the demo calls
+    /// [`Session::declare_liveliness_subscriber`] once before the
+    /// drive_session loop starts; the returned RAII handle lives at
+    /// `run_demo` scope so `Drop` emits `Interest(Final)` when the
+    /// demo terminates. Separate from `token_keyexpr` (which declares
+    /// a [`LivelinessToken`] on the peer-facing side) because a
+    /// single demo instance can act as token publisher + token
+    /// subscriber simultaneously on a wz↔wz round-trip.
+    liveliness_subscriber_keyexpr: Option<String>,
 }
 
 /// R121k-5 — bool flag bundle for the three Remote* registry log
@@ -1268,6 +1295,45 @@ async fn run_demo(
             },
         )
     });
+
+    // R280 — local liveliness subscriber registration via the
+    // Session::declare_liveliness_subscriber RAII handle. The handle
+    // binds to a `_`-prefixed local so it lives until `run_demo`
+    // returns; its `Drop` then emits `Interest(Final)` on the
+    // outbound link and unregisters the slot. Same registration
+    // timing rationale as the `_subscriber_handle` above: drive_session
+    // has not started yet, so the slot is in place before any inbound
+    // DeclToken can arrive. The outbound Interest emit during
+    // `declare_liveliness_subscriber` is best-effort against the
+    // pre-Established state; the wz session FSM holds the wire emit
+    // until Established for the same SN-window reason as
+    // `send_declare_*`, so a buffered Interest can race the Establish
+    // transition without dropping. R283+ formalises the Established
+    // gate for outbound Interest if integration testing surfaces a
+    // race.
+    let _liveliness_subscriber_handle: Option<LivelinessSubscriber> = declare_spec
+        .liveliness_subscriber_keyexpr
+        .as_ref()
+        .map(|k| {
+            let key_for_callback = k.clone();
+            session.declare_liveliness_subscriber(
+                k.clone(),
+                LivelinessSubscriberOptions::default(),
+                move |sample: LivelinessSample<'_>| {
+                    let kind_str = match sample.kind {
+                        LivelinessSampleKind::Put => "PUT",
+                        LivelinessSampleKind::Delete => "DELETE",
+                    };
+                    eprintln!(
+                        "wz-ap-demo: LIVELINESS SAMPLE {} filter='{}' keyexpr='{}' token_id={}",
+                        kind_str,
+                        key_for_callback,
+                        sample.keyexpr,
+                        sample.token_id,
+                    );
+                },
+            )
+        });
 
     // R121j-5c-e2e-demo — queryable callback. The observer's dispatch
     // fans inbound Request(Query) records into this registry
