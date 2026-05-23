@@ -83,10 +83,11 @@
 //! TCP loopback). Production code calls the combined
 //! [`Self::dispatch`] form.
 
-use crate::declare::{
-    LivelinessRegistry, LivelinessSubscriberRegistry, RemoteQueryableRegistry,
-    RemoteSubscriberRegistry,
-};
+#[cfg(feature = "liveliness-token")]
+use crate::declare::LivelinessRegistry;
+#[cfg(feature = "liveliness-subscriber")]
+use crate::declare::LivelinessSubscriberRegistry;
+use crate::declare::{RemoteQueryableRegistry, RemoteSubscriberRegistry};
 use crate::pubsub::SubscriberRegistry;
 use crate::query::{QueryReply, QueryableRegistry};
 use crate::reply::ReplyRegistry;
@@ -110,6 +111,7 @@ pub struct ApplicationLayerObserver {
     pub remote_queryables: RemoteQueryableRegistry,
     /// Peer's outbound `DeclToken` / `UndeclToken` records — the
     /// liveliness signal layer.
+    #[cfg(feature = "liveliness-token")]
     pub liveliness: LivelinessRegistry,
     /// R280 — local liveliness subscribers declared by
     /// [`crate::session::Session::declare_liveliness_subscriber`]. A
@@ -119,6 +121,7 @@ pub struct ApplicationLayerObserver {
     /// whose resolved keyexpr matches a subscriber slot's pattern.
     /// Both registries receive the same `IterationEvent` from
     /// [`Self::dispatch_event`]; they are independent fan-out paths.
+    #[cfg(feature = "liveliness-subscriber")]
     pub liveliness_subscribers: LivelinessSubscriberRegistry,
     /// Initiator-side `Response(Reply|Err)` + `ResponseFinal`
     /// callbacks (`z_get` consumer). Pending entries auto-unregister
@@ -145,7 +148,9 @@ impl ApplicationLayerObserver {
             queryables: QueryableRegistry::new(),
             remote_subscribers: RemoteSubscriberRegistry::new(),
             remote_queryables: RemoteQueryableRegistry::new(),
+            #[cfg(feature = "liveliness-token")]
             liveliness: LivelinessRegistry::new(),
+            #[cfg(feature = "liveliness-subscriber")]
             liveliness_subscribers: LivelinessSubscriberRegistry::new(),
             replies: ReplyRegistry::new(),
             pending_replies: Vec::new(),
@@ -182,7 +187,9 @@ impl ApplicationLayerObserver {
             .dispatch_iteration_event(event, peer_table);
         self.remote_queryables
             .dispatch_iteration_event(event, peer_table);
+        #[cfg(feature = "liveliness-token")]
         self.liveliness.dispatch_iteration_event(event, peer_table);
+        #[cfg(feature = "liveliness-subscriber")]
         self.liveliness_subscribers
             .dispatch_iteration_event(event, peer_table);
         self.replies.dispatch_iteration_event(event, peer_table);

@@ -15,10 +15,12 @@
 
 use wz_codecs::decl_queryable::DeclQueryable;
 use wz_codecs::decl_subscriber::DeclSubscriber;
+#[cfg(any(feature = "liveliness-token", feature = "liveliness-subscriber"))]
 use wz_codecs::decl_token::DeclToken;
 use wz_codecs::declare::{Declare, DeclareVariant};
 use wz_codecs::undecl_queryable::UndeclQueryable;
 use wz_codecs::undecl_subscriber::UndeclSubscriber;
+#[cfg(any(feature = "liveliness-token", feature = "liveliness-subscriber"))]
 use wz_codecs::undecl_token::UndeclToken;
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
@@ -93,6 +95,7 @@ pub(super) fn undecl_queryable(id: u64) -> UndeclQueryable {
     }
 }
 
+#[cfg(any(feature = "liveliness-token", feature = "liveliness-subscriber"))]
 pub(super) fn decl_token(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclToken {
     let suffix_owned = suffix.map(str::to_string);
     let suffix_len = suffix.map(|s| s.len() as u64);
@@ -110,6 +113,7 @@ pub(super) fn decl_token(id: u64, mapping_id: u64, suffix: Option<&str>) -> Decl
     }
 }
 
+#[cfg(any(feature = "liveliness-token", feature = "liveliness-subscriber"))]
 pub(super) fn undecl_token(id: u64) -> UndeclToken {
     UndeclToken {
         id,
@@ -145,6 +149,7 @@ pub(super) fn declare_envelope_undecl_queryable(u: UndeclQueryable) -> Declare {
     }
 }
 
+#[cfg(any(feature = "liveliness-token", feature = "liveliness-subscriber"))]
 pub(super) fn declare_envelope_decl_token(d: DeclToken) -> Declare {
     Declare {
         body: DeclareVariant::CodecZenohDeclToken(d),
@@ -152,6 +157,7 @@ pub(super) fn declare_envelope_decl_token(d: DeclToken) -> Declare {
     }
 }
 
+#[cfg(any(feature = "liveliness-token", feature = "liveliness-subscriber"))]
 pub(super) fn declare_envelope_undecl_token(u: UndeclToken) -> Declare {
     Declare {
         body: DeclareVariant::CodecZenohUndeclToken(u),

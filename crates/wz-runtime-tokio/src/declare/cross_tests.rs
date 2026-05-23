@@ -69,6 +69,7 @@ fn subscriber_and_queryable_registries_share_a_message_stream() {
     assert_eq!(q_count.load(Ordering::SeqCst), 1);
 }
 
+#[cfg(feature = "liveliness-token")]
 #[test]
 fn three_registries_share_a_message_stream_independently() {
     // The full R121k surface: subscriber + queryable + liveliness
