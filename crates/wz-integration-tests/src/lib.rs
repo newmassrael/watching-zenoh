@@ -261,6 +261,44 @@ pub mod common {
             let _ = self.child.wait();
         }
     }
+
+    /// Send `SIGTERM` to `child` via `kill -TERM <pid>`, then poll
+    /// `try_wait()` every 50 ms until either the process exits or
+    /// `timeout` elapses, in which case `Child::kill` (SIGKILL on
+    /// Linux) is the fallback.
+    ///
+    /// Used by integration tests that want to exercise the
+    /// graceful-shutdown path of `wz-ap-demo` — `LivelinessToken`'s
+    /// RAII Drop emits `Declare(UndeclToken)` on the wire only when
+    /// the binary receives SIGTERM through `shutdown_signal()` and
+    /// runs its tokio drop ordering. SIGKILL bypasses Rust Drop
+    /// entirely, so a raw `Child::kill` skips the Drop emit; this
+    /// helper exists to make the SIGTERM-first contract explicit.
+    ///
+    /// R305 lifts the helper from per-test duplicates
+    /// (`wz_remote_declare_round_trip` + `wz_liveliness_subscriber_
+    /// round_trip` carried verbatim copies) into the shared common
+    /// module so a future signature change (e.g. accepting `&mut
+    /// ChildGuard` instead of `&mut Child`) lands in one place.
+    pub fn graceful_terminate(child: &mut Child, timeout: Duration) {
+        let pid = child.id().to_string();
+        let _ = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(&pid)
+            .status();
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            match child.try_wait() {
+                Ok(Some(_status)) => return,
+                Ok(None) => thread::sleep(Duration::from_millis(50)),
+                Err(_) => break,
+            }
+        }
+        // SIGTERM did not produce a graceful exit within the budget —
+        // fall back to SIGKILL so the test does not hang.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 #[cfg(test)]
