@@ -197,30 +197,26 @@ pub(crate) async fn declare_task<T>(
         // pico-SIGABRT-prone keyexprs pre-emit. The demo treats
         // a rejected user-supplied keyexpr as a CLI input error:
         // log + bail this task, do not panic.
-        if let Err(e) =
-            actions.send_declare_subscriber(DECLARE_SUBSCRIBER_ID, /*mapping_id=*/ 0, Some(keyexpr))
-        {
-            log::warn!(
-                "wz-ap-demo: SUBSCRIBER DECLARE rejected for keyexpr='{keyexpr}': {e}"
-            );
-            eprintln!(
-                "wz-ap-demo: SUBSCRIBER DECLARE rejected for keyexpr='{keyexpr}': {e}"
-            );
+        if let Err(e) = actions.send_declare_subscriber(
+            DECLARE_SUBSCRIBER_ID,
+            /*mapping_id=*/ 0,
+            Some(keyexpr),
+        ) {
+            log::warn!("wz-ap-demo: SUBSCRIBER DECLARE rejected for keyexpr='{keyexpr}': {e}");
+            eprintln!("wz-ap-demo: SUBSCRIBER DECLARE rejected for keyexpr='{keyexpr}': {e}");
             return;
         }
         eprintln!("wz-ap-demo: DECLARED SUBSCRIBER id={DECLARE_SUBSCRIBER_ID} keyexpr='{keyexpr}'");
         clock.sleep(DECLARE_INTER_EMIT_MS).await;
     }
     if let Some(keyexpr) = spec.queryable_keyexpr.as_deref() {
-        if let Err(e) =
-            actions.send_declare_queryable(DECLARE_QUERYABLE_ID, /*mapping_id=*/ 0, Some(keyexpr))
-        {
-            log::warn!(
-                "wz-ap-demo: QUERYABLE DECLARE rejected for keyexpr='{keyexpr}': {e}"
-            );
-            eprintln!(
-                "wz-ap-demo: QUERYABLE DECLARE rejected for keyexpr='{keyexpr}': {e}"
-            );
+        if let Err(e) = actions.send_declare_queryable(
+            DECLARE_QUERYABLE_ID,
+            /*mapping_id=*/ 0,
+            Some(keyexpr),
+        ) {
+            log::warn!("wz-ap-demo: QUERYABLE DECLARE rejected for keyexpr='{keyexpr}': {e}");
+            eprintln!("wz-ap-demo: QUERYABLE DECLARE rejected for keyexpr='{keyexpr}': {e}");
             return;
         }
         eprintln!("wz-ap-demo: DECLARED QUERYABLE id={DECLARE_QUERYABLE_ID} keyexpr='{keyexpr}'");
@@ -230,12 +226,8 @@ pub(crate) async fn declare_task<T>(
         let token = match session.declare_token(keyexpr.to_string(), LivelinessOptions::default()) {
             Ok(t) => t,
             Err(e) => {
-                log::warn!(
-                    "wz-ap-demo: TOKEN DECLARE rejected for keyexpr='{keyexpr}': {e}"
-                );
-                eprintln!(
-                    "wz-ap-demo: TOKEN DECLARE rejected for keyexpr='{keyexpr}': {e}"
-                );
+                log::warn!("wz-ap-demo: TOKEN DECLARE rejected for keyexpr='{keyexpr}': {e}");
+                eprintln!("wz-ap-demo: TOKEN DECLARE rejected for keyexpr='{keyexpr}': {e}");
                 return;
             }
         };

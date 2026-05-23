@@ -11162,10 +11162,12 @@ mod tests {
             .send_declare_keyexpr(7, "**/c/*")
             .expect_err("R299 bug #3 pattern must reject");
         match err {
-            SendDeclareError::Keyexpr(crate::keyexpr_canon::OutboundKeyexprError::PicoBugThreeFamily {
-                keyexpr,
-                offending_chunk,
-            }) => {
+            SendDeclareError::Keyexpr(
+                crate::keyexpr_canon::OutboundKeyexprError::PicoBugThreeFamily {
+                    keyexpr,
+                    offending_chunk,
+                },
+            ) => {
                 assert_eq!(keyexpr, "**/c/*");
                 assert_eq!(offending_chunk, "*");
             }
@@ -11189,9 +11191,11 @@ mod tests {
         assert!(
             matches!(
                 err,
-                SendDeclareError::Keyexpr(crate::keyexpr_canon::OutboundKeyexprError::NotCanonical(
-                    crate::keyexpr_canon::KeyexprCanonError::EmptyChunk,
-                )),
+                SendDeclareError::Keyexpr(
+                    crate::keyexpr_canon::OutboundKeyexprError::NotCanonical(
+                        crate::keyexpr_canon::KeyexprCanonError::EmptyChunk,
+                    )
+                ),
             ),
             "got {err:?}"
         );
@@ -11253,10 +11257,9 @@ mod tests {
             .send_declare_subscriber(1, /*mapping_id=*/ 7, Some("/c/*"))
             .expect_err("reconstructed `**/c/*` must trigger bug #3 reject");
         match err {
-            SendDeclareError::Keyexpr(crate::keyexpr_canon::OutboundKeyexprError::PicoBugThreeFamily {
-                keyexpr,
-                ..
-            }) => {
+            SendDeclareError::Keyexpr(
+                crate::keyexpr_canon::OutboundKeyexprError::PicoBugThreeFamily { keyexpr, .. },
+            ) => {
                 assert_eq!(
                     keyexpr, "**/c/*",
                     "the gate must report the RECONSTRUCTED full keyexpr"
@@ -11308,7 +11311,9 @@ mod tests {
             .expect_err("queryable inherits the same gate");
         assert!(matches!(
             err,
-            SendDeclareError::Keyexpr(crate::keyexpr_canon::OutboundKeyexprError::PicoBugThreeFamily { .. })
+            SendDeclareError::Keyexpr(
+                crate::keyexpr_canon::OutboundKeyexprError::PicoBugThreeFamily { .. }
+            )
         ));
         assert!(driver.frames.lock().unwrap().is_empty());
     }
@@ -11326,7 +11331,9 @@ mod tests {
             .expect_err("token inherits the same gate");
         assert!(matches!(
             err,
-            SendDeclareError::Keyexpr(crate::keyexpr_canon::OutboundKeyexprError::PicoBugThreeFamily { .. })
+            SendDeclareError::Keyexpr(
+                crate::keyexpr_canon::OutboundKeyexprError::PicoBugThreeFamily { .. }
+            )
         ));
         assert!(driver.frames.lock().unwrap().is_empty());
     }
