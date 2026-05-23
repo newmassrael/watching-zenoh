@@ -146,13 +146,28 @@ pub mod common {
     }
 
     /// Rewind the file to the start and slurp the entire current
-    /// contents into a string. Used to inspect a child process's
-    /// stderr/stdout that was captured to a tempfile.
+    /// contents into a UTF-8 string, replacing any non-UTF-8 byte
+    /// sequence with the U+FFFD replacement character. Used to
+    /// inspect a child process's stderr/stdout that was captured to a
+    /// tempfile.
+    ///
+    /// Non-UTF-8 bytes do appear in practice on this surface — e.g. a
+    /// child panic backtrace under tokio's worker-thread pool can
+    /// interleave with a libc-side `abort(3)` message at byte
+    /// granularity, producing a mid-codepoint truncation. The R215
+    /// pre-rewrite of this helper used `read_to_string + .expect` and
+    /// panicked on the first invalid byte, masking the captured
+    /// content from the caller and surfacing as a sporadic Layer E
+    /// flake (`stream did not contain valid UTF-8`). R304 retires
+    /// the strict decode so the panic path now surfaces the byte
+    /// content (lossy-decoded with U+FFFD markers at the offending
+    /// position) — diagnostic, not blocking. Caught at the R302b
+    /// pre-push gate, fixed in this round before retry.
     pub fn read_captured(file: &mut File) -> String {
         file.seek(SeekFrom::Start(0)).expect("seek to start");
-        let mut s = String::new();
-        file.read_to_string(&mut s).expect("read captured output");
-        s
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).expect("read captured bytes");
+        String::from_utf8_lossy(&bytes).into_owned()
     }
 
     /// Poll the captured tempfile every 50 ms until either `needle`
