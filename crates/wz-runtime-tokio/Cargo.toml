@@ -62,6 +62,17 @@ path = "src/lib.rs"
 # pending entry against `crate::reply::ReplyRegistry`. The defaults
 # below mirror R302b: every existing in-workspace consumer compiles
 # unchanged because the default features turn every R307 gate ON.
+#
+# R309 — declare domain joins the source-gated set (7 new entries).
+# Each `send_declare_*` / `send_undeclare_*` / `send_interest_*` method
+# in `session_glue.rs` carries the matching gate; the
+# Application-layer `Session::declare_*` call sites remain on their
+# existing semantic gate (`liveliness-token`, `query-queryable`,
+# etc.) and pull the wire-emit transitively via the implication chain
+# below. `liveliness-token` now implies `declare-token` +
+# `declare-undeclare` so the existing R277 `LivelinessToken::Drop`
+# emit continues to compile; `liveliness-subscriber` implies
+# `declare-interest` + `declare-final` (R280 send_interest_*).
 [features]
 default = [
     "liveliness-token",
@@ -72,9 +83,23 @@ default = [
     "query-target",
     "query-timeout",
     "query-consolidation",
+    "declare-final",
+    "declare-interest",
+    "declare-keyexpr",
+    "declare-queryable",
+    "declare-subscriber",
+    "declare-token",
+    "declare-undeclare",
 ]
-liveliness-token = []
-liveliness-subscriber = []
+liveliness-token = ["declare-token", "declare-undeclare"]
+liveliness-subscriber = ["declare-interest", "declare-final"]
+declare-final = []
+declare-interest = []
+declare-keyexpr = []
+declare-queryable = []
+declare-subscriber = []
+declare-token = []
+declare-undeclare = []
 # `query-get` implies BOTH `query-reply` (the get-side ReplyRegistry
 # tracks pending entries) AND `query-queryable` (the loopback path
 # inside `Session::query` fans into the in-process QueryableRegistry
