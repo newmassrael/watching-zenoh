@@ -301,4 +301,3 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
          --- initiator stderr ---\n{undecl_text}"
     );
 }
-
