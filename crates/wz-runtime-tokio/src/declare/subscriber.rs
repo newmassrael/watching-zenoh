@@ -122,20 +122,24 @@ impl RemoteSubscriberRegistry {
         self.declared.iter().map(|(id, ke)| (*id, ke.as_str()))
     }
 
-    /// R290 — backbone for `Publisher::get_matching_status`. Pub-
-    /// side mirror of
-    /// [`crate::declare::RemoteQueryableRegistry::has_matching`]:
+    /// Backbone for `Publisher::get_matching_status` (R290 surfaced
+    /// the API; R293 lifted the underlying matcher to honest
+    /// wildcard-vs-wildcard intersection). Pub-side mirror of
+    /// [`crate::declare::RemoteQueryableRegistry::has_matching`];
     /// returns `true` iff at least one currently-declared peer
-    /// subscriber's keyexpr matches `publish_keyexpr` under the
-    /// bidirectional asymmetric pattern-match approximation. The
-    /// approximation boundary documented on the Q-side has_matching
-    /// applies symmetrically here.
+    /// subscriber's keyexpr intersects `publish_keyexpr` under
+    /// [`crate::pubsub::keyexpr_intersect_patterns`] — i.e. there
+    /// exists at least one literal `/`-separated keyexpr that both
+    /// sides match. The Q-side has_matching doc-comment carries the
+    /// per-case textbook expansion (literal-literal byte-equal,
+    /// one-side wildcard, two-side wildcard overlap); the semantic
+    /// is symmetric across Pub-side and Q-side because the matcher
+    /// itself is symmetric.
     pub fn has_matching(&self, publish_keyexpr: &str) -> bool {
         let publish_chunks: Vec<&str> = publish_keyexpr.split('/').collect();
         self.declared.values().any(|peer_keyexpr| {
             let peer_chunks: Vec<&str> = peer_keyexpr.split('/').collect();
-            crate::pubsub::keyexpr_pattern_matches(&peer_chunks, publish_keyexpr)
-                || crate::pubsub::keyexpr_pattern_matches(&publish_chunks, peer_keyexpr)
+            crate::pubsub::keyexpr_intersect_patterns(&peer_chunks, &publish_chunks)
         })
     }
 
@@ -510,5 +514,43 @@ mod tests {
         let undecl = DeclareVariant::CodecZenohUndeclSubscriber(undecl_subscriber(12));
         reg.dispatch_declare(&undecl, &HashMap::new());
         assert!(!reg.has_matching("home/temp"));
+    }
+
+    // ── R293 — honest two-pattern overlap (Pub-side mirror) ──
+
+    #[test]
+    fn subscriber_has_matching_true_when_two_patterns_share_literal_via_mid_star() {
+        // Pub-side mirror of the Q-side test
+        // `queryable_has_matching_true_when_two_patterns_share_literal_via_mid_star`.
+        // `home/*/temp` peer subscriber + `*/sensor/temp` publish
+        // keyexpr share `home/sensor/temp` — pre-R293 the matcher
+        // missed this; R293 honest intersection fires.
+        let mut reg = RemoteSubscriberRegistry::new();
+        let d =
+            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(30, 0, Some("home/*/temp")));
+        reg.dispatch_declare(&d, &HashMap::new());
+        assert!(reg.has_matching("*/sensor/temp"));
+        assert!(reg.has_matching("*/*/temp"));
+    }
+
+    #[test]
+    fn subscriber_has_matching_false_when_two_patterns_have_disjoint_anchors() {
+        // Pub-side mirror of the Q-side disjoint-anchor negative test.
+        let mut reg = RemoteSubscriberRegistry::new();
+        let d =
+            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(31, 0, Some("home/**/temp")));
+        reg.dispatch_declare(&d, &HashMap::new());
+        assert!(!reg.has_matching("kitchen/**/temp"));
+    }
+
+    #[test]
+    fn subscriber_has_matching_true_when_double_star_intersects_either_direction() {
+        // Pub-side mirror — `home/** ∩ **/temp` shares `home/temp`
+        // and any `home/<x>.../temp`. Backtracking on both sides.
+        let mut reg = RemoteSubscriberRegistry::new();
+        let d = DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(32, 0, Some("home/**")));
+        reg.dispatch_declare(&d, &HashMap::new());
+        assert!(reg.has_matching("**/temp"));
+        assert!(reg.has_matching("**"));
     }
 }

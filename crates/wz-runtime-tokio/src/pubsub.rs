@@ -263,6 +263,134 @@ fn chunk_matches_with_dsl(pattern: &str, target: &str) -> bool {
     }
 }
 
+/// R293 — honest two-pattern keyexpr intersection. Returns `true`
+/// iff there exists at least one literal `/`-separated keyexpr `t`
+/// covered by *both* `a_chunks` and `b_chunks` under zenoh
+/// wildcard semantics. Both inputs are pre-split chunk slices
+/// (the contract matches [`keyexpr_pattern_matches`]'s pattern
+/// argument); pass `&['/'.split() of the string]`.
+///
+/// Wildcard chunk types handled symmetrically on either side:
+///
+/// * `**` — zero or more literal chunks (the standard zenoh
+///   `match_anywhere` glob).
+/// * `*` — exactly one literal chunk (any content).
+/// * `pre$*mid$*post` — intra-chunk DSL: leading anchor, ordered
+///   middle substrings, trailing anchor. The `$*` token consumes
+///   zero-or-more bytes within the chunk (R220 intra-chunk
+///   semantics).
+/// * any other chunk — must compare byte-for-byte against the
+///   other side's corresponding chunk (or be reachable through
+///   the other side's `*` / `**`).
+///
+/// Approximation boundary for `$*` on BOTH sides: when both
+/// chunks contain `$*`, the result is an over-approximation — we
+/// return `true` if either side's DSL chunk covers the other
+/// side's `$*`-stripped literal-skeleton. The exact two-`$*`-side
+/// intersection (zenoh-pico's
+/// `_z_chunk_intersect_left_with_right_substar_substar`) requires
+/// a full sub-part order-matching DP; layered Phase A bring-up
+/// (R293 carry forward) lifts this to the exact form. The
+/// over-approximation is sound for `has_matching` callers
+/// (a `true` return drives a wire emit that the peer then accepts
+/// or drops via its own matcher; a `false` return is rare because
+/// `$*` on both sides is uncommon in production patterns).
+///
+/// The matcher is implemented as a recursive descent with
+/// `**`-backtracking on either side. Worst-case complexity is
+/// `O(|a| * |b|)` when at most one `**` is present per side; with
+/// multiple `**` on both sides the algorithm degrades on
+/// pathological inputs (productive zenoh patterns like
+/// `home/*/temp` vs `*/sensor/temp` stay linear).
+///
+/// Symmetry: `keyexpr_intersect_patterns(a, b) ==
+/// keyexpr_intersect_patterns(b, a)` for every pair (the
+/// recursive cases are written symmetrically; `$*`-both-sides
+/// over-approx tests both order combinations).
+pub fn keyexpr_intersect_patterns(a_chunks: &[&str], b_chunks: &[&str]) -> bool {
+    intersect_chunks(a_chunks, b_chunks)
+}
+
+fn intersect_chunks(a: &[&str], b: &[&str]) -> bool {
+    match (a.first(), b.first()) {
+        (None, None) => true,
+        (Some(&"**"), _) => {
+            // ** on a-side consumes 0+ chunks from b-side. Try 0
+            // consumed (advance a past **) first, then 1+ (advance
+            // b by one, keep a's ** for further consumption).
+            if intersect_chunks(&a[1..], b) {
+                return true;
+            }
+            if b.is_empty() {
+                return false;
+            }
+            intersect_chunks(a, &b[1..])
+        }
+        (_, Some(&"**")) => intersect_chunks(b, a),
+        (None, _) | (_, None) => {
+            // One side exhausted while the other still has chunks
+            // (none of which can be `**` — that case is handled
+            // above). Mismatch.
+            false
+        }
+        (Some(ap), Some(bp)) => {
+            if !chunk_intersects(ap, bp) {
+                return false;
+            }
+            intersect_chunks(&a[1..], &b[1..])
+        }
+    }
+}
+
+/// Two-side chunk intersection. Routes between the literal /
+/// `*` / `$*`-DSL cases on each side. Used by
+/// [`intersect_chunks`] to decide whether two single chunks can
+/// share at least one literal value.
+fn chunk_intersects(a: &str, b: &str) -> bool {
+    // `*` on either side matches any single chunk; both-sides `*`
+    // trivially intersect.
+    if a == "*" || b == "*" {
+        return true;
+    }
+    let a_has_dsl = a.contains("$*");
+    let b_has_dsl = b.contains("$*");
+    match (a_has_dsl, b_has_dsl) {
+        (false, false) => a == b,
+        (true, false) => chunk_matches_with_dsl(a, b),
+        (false, true) => chunk_matches_with_dsl(b, a),
+        (true, true) => {
+            // R293 over-approximation for two-side `$*`. Splits
+            // each chunk on `$*` into a leading anchor + middle
+            // sub-parts + trailing anchor; the two chunks share at
+            // least one literal iff their leading anchors are
+            // prefix-compatible (one is a prefix of the other —
+            // empty is a prefix of anything) AND their trailing
+            // anchors are suffix-compatible. Middle sub-parts can
+            // always be interleaved in the shared chunk (each side
+            // independently `$*`-floats them), so the leading +
+            // trailing anchor compatibility check is the textbook
+            // sufficient condition. The exact two-side matcher
+            // (every middle sub-part must fit in some shared linear
+            // order without overlap) is the R293-carry refinement;
+            // every input pair that the over-approx accepts and a
+            // hypothetical exact matcher would reject still
+            // satisfies the `has_matching` caller contract because
+            // the false-positive drives at most a redundant wire
+            // emit that the peer accepts or drops via its own
+            // matcher.
+            let a_parts: Vec<&str> = a.split("$*").collect();
+            let b_parts: Vec<&str> = b.split("$*").collect();
+            let a_lead = a_parts[0];
+            let a_trail = a_parts[a_parts.len() - 1];
+            let b_lead = b_parts[0];
+            let b_trail = b_parts[b_parts.len() - 1];
+            let lead_compat = a_lead.starts_with(b_lead) || b_lead.starts_with(a_lead);
+            let trail_compat = a_trail.ends_with(b_trail) || b_trail.ends_with(a_trail);
+            lead_compat && trail_compat
+        }
+    }
+}
+
 /// Subscriber table backing the FramePayload → callback dispatch.
 ///
 /// See module-level docs for scope (Push + DECLARE resolver, R121d).
@@ -1293,6 +1421,191 @@ mod tests {
             &["sensors", "**", "id_$*"],
             "sensors/room1/value_42"
         ));
+    }
+
+    // ── R293 keyexpr_intersect_patterns — honest 2-pattern matcher ──
+    //
+    // `keyexpr_intersect_patterns(a_chunks, b_chunks)` returns true
+    // iff at least one literal keyexpr exists that both `a` and `b`
+    // would match. The function backs `has_matching` on the
+    // RemoteQueryableRegistry and RemoteSubscriberRegistry; the
+    // pre-R293 implementation used a bidirectional asymmetric
+    // pattern-match approximation (peer-pattern over literal-query
+    // OR query-pattern over literal-peer) that missed two-pattern
+    // overlap cases such as `home/*/temp ∩ */sensor/temp`.
+
+    fn split(s: &str) -> Vec<&str> {
+        s.split('/').collect()
+    }
+
+    #[test]
+    fn intersect_literals_equal() {
+        let a = split("home/temp");
+        let b = split("home/temp");
+        assert!(keyexpr_intersect_patterns(&a, &b));
+    }
+
+    #[test]
+    fn intersect_literals_differ() {
+        let a = split("home/temp");
+        let b = split("home/door");
+        assert!(!keyexpr_intersect_patterns(&a, &b));
+        let c = split("kitchen/temp");
+        assert!(!keyexpr_intersect_patterns(&a, &c));
+    }
+
+    #[test]
+    fn intersect_pattern_covers_literal_either_side() {
+        // The pre-R293 asymmetric form caught these; the new matcher
+        // must keep them green.
+        let pat = split("home/**");
+        let lit = split("home/temp");
+        assert!(keyexpr_intersect_patterns(&pat, &lit));
+        assert!(keyexpr_intersect_patterns(&lit, &pat));
+
+        let mid_star = split("sensors/*/temp");
+        let exact = split("sensors/room1/temp");
+        assert!(keyexpr_intersect_patterns(&mid_star, &exact));
+        assert!(keyexpr_intersect_patterns(&exact, &mid_star));
+    }
+
+    #[test]
+    fn intersect_two_patterns_share_literal_via_mid_star() {
+        // `home/*/temp ∩ */sensor/temp` shares `home/sensor/temp`
+        // (and any `<x>/sensor/temp` for `<x> == home`). This is
+        // the textbook two-pattern overlap case the pre-R293
+        // approximation missed.
+        let a = split("home/*/temp");
+        let b = split("*/sensor/temp");
+        assert!(keyexpr_intersect_patterns(&a, &b));
+        assert!(keyexpr_intersect_patterns(&b, &a));
+    }
+
+    #[test]
+    fn intersect_two_patterns_no_shared_literal() {
+        // `home/* ∩ kitchen/*` share no literal: first chunk
+        // disagrees on the literal anchor.
+        let a = split("home/*");
+        let b = split("kitchen/*");
+        assert!(!keyexpr_intersect_patterns(&a, &b));
+    }
+
+    #[test]
+    fn intersect_double_star_consumes_zero() {
+        // `home/** ∩ home/temp` — `**` consumes zero on the empty
+        // tail; `home/temp` exhausts after two chunks, `home/**`
+        // consumes one chunk then `**` swallows the trailing
+        // `temp` (or zero, depending on the recursion arm).
+        let a = split("home/**");
+        let b = split("home/temp");
+        assert!(keyexpr_intersect_patterns(&a, &b));
+        let c = split("home");
+        assert!(keyexpr_intersect_patterns(&a, &c));
+        let d = split("home/**");
+        assert!(keyexpr_intersect_patterns(&a, &d));
+    }
+
+    #[test]
+    fn intersect_double_star_both_sides_overlap_mid() {
+        // `**/temp ∩ home/**` shares `home/temp` (and any
+        // `home/<x>.../temp`).
+        let a = split("**/temp");
+        let b = split("home/**");
+        assert!(keyexpr_intersect_patterns(&a, &b));
+        assert!(keyexpr_intersect_patterns(&b, &a));
+    }
+
+    #[test]
+    fn intersect_double_star_disjoint_anchors() {
+        // `home/**/temp ∩ kitchen/**/temp` — literal anchors on
+        // both sides disagree at position 0, no `**` shape can
+        // bridge them.
+        let a = split("home/**/temp");
+        let b = split("kitchen/**/temp");
+        assert!(!keyexpr_intersect_patterns(&a, &b));
+    }
+
+    #[test]
+    fn intersect_double_star_match_anywhere() {
+        // `**` alone is the zenoh match-everything pattern; it
+        // intersects with every chunk shape.
+        let star_star = split("**");
+        for ke in [
+            "home/temp",
+            "**",
+            "*",
+            "a/b/c/d/e",
+            "sensors/$*",
+            "home/*/door",
+        ] {
+            let other = split(ke);
+            assert!(
+                keyexpr_intersect_patterns(&star_star, &other),
+                "** should intersect with {ke}"
+            );
+            assert!(
+                keyexpr_intersect_patterns(&other, &star_star),
+                "{ke} should intersect with ** (symmetric)"
+            );
+        }
+    }
+
+    #[test]
+    fn intersect_dsl_one_side_matches_other_literal_chunk() {
+        // `pre$*post ∩ prefix_post` — single-side $*; the DSL chunk
+        // covers the literal chunk on the other side.
+        let a = split("a/pre$*post/b");
+        let b = split("a/prefix_post/b");
+        assert!(keyexpr_intersect_patterns(&a, &b));
+        assert!(keyexpr_intersect_patterns(&b, &a));
+        // And a negative case: literal does not satisfy DSL anchors.
+        let c = split("a/wrongprefix_post/b");
+        // `pre$*post` requires `pre` prefix and `post` suffix.
+        assert!(!keyexpr_intersect_patterns(&a, &c));
+    }
+
+    #[test]
+    fn intersect_dsl_both_sides_over_approx_documented() {
+        // R293 known approximation: when BOTH chunks contain `$*`,
+        // the matcher over-approximates. `pre$*` ∩ `$*post` both
+        // contain $* and share the literal `prepost` (and many
+        // others), so the truthful answer is true and the
+        // over-approximation also returns true. The tests below
+        // pin the documented behaviour; an exact two-side DSL
+        // matcher is the R293-carry refinement.
+        let a = split("pre$*");
+        let b = split("$*post");
+        assert!(keyexpr_intersect_patterns(&a, &b));
+
+        // Trivially-equal DSL chunks: must intersect.
+        let c = split("a$*b");
+        let d = split("a$*b");
+        assert!(keyexpr_intersect_patterns(&c, &d));
+    }
+
+    #[test]
+    fn intersect_symmetry_under_swap() {
+        // Spot-check symmetry: every honest input pair should give
+        // the same answer regardless of arg order.
+        let cases: &[(&str, &str)] = &[
+            ("home/temp", "home/temp"),
+            ("home/*", "home/temp"),
+            ("home/*/temp", "*/sensor/temp"),
+            ("home/**", "home/temp"),
+            ("**/temp", "home/**"),
+            ("home/**/temp", "kitchen/**/temp"),
+            ("**", "anything/at/all"),
+            ("a/$*/b", "a/literal/b"),
+        ];
+        for (lhs, rhs) in cases {
+            let a = split(lhs);
+            let b = split(rhs);
+            assert_eq!(
+                keyexpr_intersect_patterns(&a, &b),
+                keyexpr_intersect_patterns(&b, &a),
+                "symmetry must hold for {lhs} vs {rhs}",
+            );
+        }
     }
 
     // ── R221 canonicalization-on-register behaviour ──
