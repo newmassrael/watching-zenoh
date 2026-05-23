@@ -134,42 +134,40 @@ impl RemoteQueryableRegistry {
         self.declared.iter().map(|(id, ke)| (*id, ke.as_str()))
     }
 
-    /// R288 — backbone for `Querier::get_matching_status`. Returns
-    /// `true` iff at least one currently-declared peer queryable's
-    /// keyexpr matches `query_keyexpr` under the bidirectional
-    /// asymmetric pattern-match approximation:
+    /// Backbone for `Querier::get_matching_status` (R288 surfaced
+    /// the API; R293 lifted the underlying matcher to honest
+    /// wildcard-vs-wildcard intersection). Returns `true` iff at
+    /// least one currently-declared peer queryable's keyexpr
+    /// intersects `query_keyexpr` under
+    /// [`crate::pubsub::keyexpr_intersect_patterns`] — i.e. there
+    /// exists at least one literal `/`-separated keyexpr that both
+    /// sides match.
     ///
-    /// * `peer_keyexpr` as pattern covering the literal
-    ///   `query_keyexpr`, OR
-    /// * `query_keyexpr` as pattern covering the literal
-    ///   `peer_keyexpr`.
+    /// The semantic covers every textbook case:
     ///
-    /// Catches the common cases:
-    /// * both literals (the two arms reduce to byte-equality),
-    /// * one-side pattern covering the other-side literal (either
-    ///   asymmetric form fires),
-    /// * one pattern fully containing the other (the containing
-    ///   pattern covers any literal under it, so the
-    ///   covered-pattern's keyexpr passes the pattern-match arm).
+    /// * both literals — intersect iff byte-equal,
+    /// * one-side pattern covering the other-side literal (any
+    ///   `**` / `*` / `$*` shape) — intersect via the asymmetric
+    ///   pattern-vs-literal walk inside `keyexpr_intersect_patterns`,
+    /// * two-pattern overlap where neither contains the other
+    ///   (e.g. `home/*/temp` vs `*/sensor/temp` share
+    ///   `home/sensor/temp`) — intersect via the two-side
+    ///   `**`-backtracking recursion. This case was the R288
+    ///   bidirectional-asymmetric approximation's gap; R293 closed
+    ///   it.
     ///
-    /// Approximation boundary — two patterns with partial overlap
-    /// where neither contains the other (e.g. `home/*/temp` vs
-    /// `*/sensor/temp`) are NOT caught by either arm. Honest
-    /// keyexpr intersection across two patterns is a future-round
-    /// carry; the wz keyexpr v1 spec (RFC §5.A line 311) currently
-    /// locks intersect to exact uint32 ID equality for MVP, which
-    /// would be even narrower than this approximation. The
-    /// bidirectional pattern-match shape used here strictly extends
-    /// MVP intersect for the practical declare-then-match
-    /// production patterns (`home/temp` literal + `home/**` peer
-    /// pattern, etc.) without introducing the wildcard-vs-wildcard
-    /// intersect algorithm.
+    /// `peer-declared` keyexprs arrive over the wire as runtime
+    /// strings (resolved by `resolve_wireexpr` against the peer
+    /// keyexpr alias table); the wz spec's "compile-time fixed
+    /// KeyExpr set + O(1) table lookup" promise (Appendix C of the
+    /// SCE-forge RFC) governs wz's *own* declared keyexprs, not the
+    /// peer-side. The matcher here is therefore the production
+    /// answer for the peer-declared domain.
     pub fn has_matching(&self, query_keyexpr: &str) -> bool {
         let query_chunks: Vec<&str> = query_keyexpr.split('/').collect();
         self.declared.values().any(|peer_keyexpr| {
             let peer_chunks: Vec<&str> = peer_keyexpr.split('/').collect();
-            crate::pubsub::keyexpr_pattern_matches(&peer_chunks, query_keyexpr)
-                || crate::pubsub::keyexpr_pattern_matches(&query_chunks, peer_keyexpr)
+            crate::pubsub::keyexpr_intersect_patterns(&peer_chunks, &query_chunks)
         })
     }
 
@@ -402,6 +400,50 @@ mod tests {
         assert!(reg.has_matching("a/**"));
         // No match on either side.
         assert!(!reg.has_matching("nothing/here"));
+    }
+
+    // ── R293 — honest two-pattern overlap (was a false-negative under
+    // the pre-R293 bidirectional asymmetric pattern-match approx) ──
+
+    #[test]
+    fn queryable_has_matching_true_when_two_patterns_share_literal_via_mid_star() {
+        // The textbook two-pattern overlap case: `home/*/temp` (peer)
+        // and `*/sensor/temp` (querier) share `home/sensor/temp` (and
+        // any `home/<x>/temp` where `<x> == sensor` literally). Pre-
+        // R293 the matcher only walked pattern-vs-literal on each
+        // direction; neither arm fired for two patterns-without-
+        // containment, so this case returned false. R293 honest
+        // intersection returns true.
+        let mut reg = RemoteQueryableRegistry::new();
+        let d = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(30, 0, Some("home/*/temp")));
+        reg.dispatch_declare(&d, &HashMap::new());
+        assert!(reg.has_matching("*/sensor/temp"));
+        assert!(reg.has_matching("*/*/temp"));
+    }
+
+    #[test]
+    fn queryable_has_matching_false_when_two_patterns_have_disjoint_anchors() {
+        // `home/**/temp ∩ kitchen/**/temp` — literal anchor at chunk
+        // 0 disagrees on both sides and no `**` shape can bridge the
+        // anchor disagreement. Negative-side coverage for the same
+        // two-pattern domain as the test above.
+        let mut reg = RemoteQueryableRegistry::new();
+        let d =
+            DeclareVariant::CodecZenohDeclQueryable(decl_queryable(31, 0, Some("home/**/temp")));
+        reg.dispatch_declare(&d, &HashMap::new());
+        assert!(!reg.has_matching("kitchen/**/temp"));
+    }
+
+    #[test]
+    fn queryable_has_matching_true_when_double_star_intersects_either_direction() {
+        // `home/** ∩ **/temp` shares `home/temp` and any
+        // `home/<x>/.../temp`. Both sides are unrestricted-tail / -head
+        // patterns; the matcher must walk both **-backtracks.
+        let mut reg = RemoteQueryableRegistry::new();
+        let d = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(32, 0, Some("home/**")));
+        reg.dispatch_declare(&d, &HashMap::new());
+        assert!(reg.has_matching("**/temp"));
+        assert!(reg.has_matching("**"));
     }
 
     #[test]
