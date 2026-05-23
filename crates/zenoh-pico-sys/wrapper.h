@@ -82,4 +82,25 @@ z_result_t _z_hello_encode(_z_wbuf_t *wbf, uint8_t header, const _z_s_msg_hello_
 #include <stdbool.h>
 bool _z_keyexpr_forward_intersects(const char *lbegin, const char *lend, const char *rbegin, const char *rend, bool can_have_verbatim);
 
+/* R299 — keyexpr canonicalization mirror.
+ *
+ * `_z_keyexpr_canonize(char *start, size_t *len)` mutates `start`
+ * in place into its canonical form (collapsing `$*$*` runs, lifting
+ * lone `$*` to `*`, dropping `*` / `**` after `**`, validating per-
+ * char grammar). The new length is written back through `*len`; the
+ * return is `zp_keyexpr_canon_status_t` (0 = SUCCESS, negative =
+ * grammar violation, with the variant enumerating which rule was
+ * tripped).
+ *
+ * The symbol is `extern` in libzenohpico.a (declared in
+ * `vendor/zenoh-pico/include/zenoh-pico/session/keyexpr.h:69`); the
+ * status enum lives in `zenoh-pico/api/constants.h`. Both are
+ * already pulled by the umbrella `zenoh-pico.h` so no extra include
+ * directive is needed here — the wrapper just keeps the forward
+ * decl visible to bindgen at the same site as the R297 intersect
+ * worker so the keyexpr-domain FFI surface stays one place.
+ */
+#include <stddef.h>
+#include "zenoh-pico/session/keyexpr.h"
+
 #endif /* WZ_ZENOH_PICO_SYS_WRAPPER_H */
