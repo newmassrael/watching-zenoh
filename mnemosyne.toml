@@ -22,6 +22,7 @@
 docs = [
     "ARCHITECTURE.md",
     "README.md",
+    "docs/feature_inventory.md",
     "docs/intrinsics-runtime-symbols.md",
     "docs/oq-w15-ratification-summary.md",
     "docs/reassembly-fsm.md",
