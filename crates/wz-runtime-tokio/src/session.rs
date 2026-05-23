@@ -75,8 +75,10 @@ use crate::reply::{InboundReply, ReplyHandle};
 use crate::sample::{
     EncodingHint, QosLevel, Reliability, Sample, SampleKind, SourceInfo, TimestampHint,
 };
+use crate::keyexpr_canon::OutboundKeyexprError;
 use crate::session_glue::{
-    ConsolidationMode, PushMetadata, QueryMetadata, QueryTarget, SessionLinkActions,
+    ConsolidationMode, PushMetadata, QueryMetadata, QueryTarget, SendDeclareError,
+    SessionLinkActions,
 };
 
 /// Options bundle for [`Session::publish`]. Carries the locality
@@ -1347,21 +1349,43 @@ impl Session {
     /// `Declare(UndeclToken)` (RAII), retracting the token from the
     /// peer. The token stays alive on the peer for as long as this
     /// handle is alive on the local session.
+    ///
+    /// Returns `Err(OutboundKeyexprError)` (R300) when `keyexpr`
+    /// fails the outbound pico-safety gate — either non-canonical
+    /// per the zenoh keyexpr grammar or matching the R299 bug #3
+    /// SIGABRT pattern family. The gate rejects pre-emit, so the
+    /// wire bytes never leave and the token id allocator state is
+    /// unchanged (the id is *consumed* but with no token-id
+    /// bookkeeping leak: `alloc_next_token_id` is a pure counter
+    /// `fetch_add`, and a skipped id has no protocol meaning on
+    /// either side per zenoh-pico's entity-id contract).
     pub fn declare_token(
         &self,
         keyexpr: impl Into<String>,
         options: LivelinessOptions,
-    ) -> LivelinessToken {
+    ) -> Result<LivelinessToken, OutboundKeyexprError> {
         let keyexpr_string = keyexpr.into();
         let token_id = self.actions.alloc_next_token_id();
         self.actions
-            .send_declare_token(token_id, /*mapping_id=*/ 0, Some(&keyexpr_string));
-        LivelinessToken {
+            .send_declare_token(token_id, /*mapping_id=*/ 0, Some(&keyexpr_string))
+            .map_err(|e| match e {
+                SendDeclareError::Keyexpr(inner) => inner,
+                // declare_token always calls send_declare_token in
+                // literal mode (mapping_id = 0, suffix = Some(_)),
+                // so the protocol-invariant variants cannot fire.
+                // The unreachable!() guards future refactors that
+                // change the call shape.
+                other => unreachable!(
+                    "declare_token literal-mode send_declare_token returned \
+                     {other:?} unexpectedly"
+                ),
+            })?;
+        Ok(LivelinessToken {
             session: self.clone(),
             id: token_id,
             keyexpr: keyexpr_string,
             options,
-        }
+        })
     }
 
     /// R248 — aliased-keyexpr counterpart of
@@ -1382,8 +1406,11 @@ impl Session {
     /// session and the peer resolved + stored the literal at
     /// receive time. Same R245/R246 one-shot-resolution contract.
     ///
-    /// Returns `Err(LivelinessAliasError::UnknownMapping(id))` only
-    /// when the mapping is absent at declare time. Mirror of
+    /// Returns `Err(LivelinessAliasError::UnknownMapping(id))` when
+    /// the mapping is absent at declare time, or
+    /// `Err(LivelinessAliasError::InvalidKeyexpr(_))` (R300) when
+    /// the reconstructed keyexpr (`prefix || inline_suffix`) fails
+    /// the outbound pico-safety gate. Mirror of
     /// [`SubscribeAliasError`] / [`QueryableAliasError`] /
     /// [`QueryAliasError`] / [`PublishAliasError`] on the token
     /// side.
@@ -1407,7 +1434,23 @@ impl Session {
         };
         let token_id = self.actions.alloc_next_token_id();
         self.actions
-            .send_declare_token(token_id, mapping_id, inline_suffix);
+            .send_declare_token(token_id, mapping_id, inline_suffix)
+            .map_err(|e| match e {
+                SendDeclareError::Keyexpr(inner) => {
+                    LivelinessAliasError::InvalidKeyexpr(inner)
+                }
+                SendDeclareError::UnknownMappingId(id) => {
+                    // Race against a concurrent send_undeclare_kexpr
+                    // between the pre-check resolve_outbound_mapping
+                    // above and this send_declare_token call.
+                    LivelinessAliasError::UnknownMapping(id)
+                }
+                SendDeclareError::ReservedMappingIdZero
+                | SendDeclareError::MissingKeyexpr => unreachable!(
+                    "declare_token_aliased aliased-mode send_declare_token \
+                     returned {e:?} unexpectedly"
+                ),
+            })?;
         Ok(LivelinessToken {
             session: self.clone(),
             id: token_id,
@@ -2573,6 +2616,14 @@ pub enum LivelinessAliasError {
     /// outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it before the declare_token_aliased call).
     UnknownMapping(u64),
+    /// R300 — the reconstructed keyexpr (`outbound_mapping[id]`
+    /// prefix concatenated with the caller's `inline_suffix`)
+    /// failed the outbound pico-safety gate
+    /// ([`OutboundKeyexprError`]). Either non-canonical per the
+    /// zenoh keyexpr grammar OR matching the R299 bug #3 SIGABRT
+    /// pattern family (`**` chunk + non-`*` chunk + `*`-shape
+    /// chunk). The wire emit was suppressed pre-send.
+    InvalidKeyexpr(OutboundKeyexprError),
 }
 
 impl std::fmt::Display for LivelinessAliasError {
@@ -2583,11 +2634,23 @@ impl std::fmt::Display for LivelinessAliasError {
                 "LivelinessAliasError: mapping id {id} not present in outbound table; \
                  call SessionLinkActions::send_declare_keyexpr({id}, …) first"
             ),
+            LivelinessAliasError::InvalidKeyexpr(inner) => write!(
+                f,
+                "LivelinessAliasError: reconstructed keyexpr failed outbound \
+                 gate — {inner}"
+            ),
         }
     }
 }
 
-impl std::error::Error for LivelinessAliasError {}
+impl std::error::Error for LivelinessAliasError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LivelinessAliasError::InvalidKeyexpr(inner) => Some(inner),
+            LivelinessAliasError::UnknownMapping(_) => None,
+        }
+    }
+}
 
 /// R280 — options bundle for
 /// [`Session::declare_liveliness_subscriber`]. Mirrors zenoh-pico's
@@ -3919,7 +3982,10 @@ mod tests {
 
         // Declare 7 → "home/temp", then publish_aliased_auto without
         // restating the literal — the table lookup feeds loopback.
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         let fired = session
             .publish_aliased_auto(7, None, b"22.5", PublishOptions::put())
             .expect("declared mapping resolves cleanly");
@@ -3944,7 +4010,10 @@ mod tests {
         let (session, _driver) = build_session();
         let captured = record_loopback_samples(&session, "home/**");
 
-        session.actions().send_declare_keyexpr(7, "home");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home")
+            .expect("hardcoded canonical literal keyexpr");
         let fired = session
             .publish_aliased_auto(7, Some("/temp/kitchen"), b"22.5", PublishOptions::put())
             .expect("declared mapping resolves");
@@ -3984,7 +4053,10 @@ mod tests {
         // "table lookup returned None" failure mode.
         let (session, _driver) = build_session();
 
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         // First publish OK.
         session
             .publish_aliased_auto(7, None, b"a", PublishOptions::put())
@@ -4913,7 +4985,10 @@ mod tests {
     fn query_aliased_auto_resolves_loopback_from_outbound_mapping_table() {
         let clock = TokioTime::new();
         let (session, driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
 
         let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
         let cap_cb = captured.clone();
@@ -4979,7 +5054,10 @@ mod tests {
     fn query_aliased_auto_with_inline_suffix_concatenates_for_loopback() {
         let clock = TokioTime::new();
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
 
         let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
         let cap_cb = captured.clone();
@@ -5424,7 +5502,10 @@ mod tests {
     fn querier_aliased_get_resolves_loopback_through_outbound_mapping_table() {
         let clock = TokioTime::new();
         let (session, driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
 
         let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
         let cap_cb = captured.clone();
@@ -5488,7 +5569,10 @@ mod tests {
     fn querier_aliased_get_threads_inline_suffix_into_composite_literal() {
         let clock = TokioTime::new();
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
 
         let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
         let cap_cb = captured.clone();
@@ -5525,7 +5609,10 @@ mod tests {
     fn querier_aliased_get_twice_allocates_independent_rids() {
         let clock = TokioTime::new();
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         let qa = session.declare_querier_aliased(
             7,
             None,
@@ -5541,7 +5628,10 @@ mod tests {
     fn querier_aliased_clone_shares_session_and_options() {
         let clock = TokioTime::new();
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         let qa = session.declare_querier_aliased(
             7,
             None,
@@ -5573,7 +5663,10 @@ mod tests {
     #[test]
     fn querier_aliased_get_matching_status_false_after_declare_with_no_peer() {
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         let qa = session.declare_querier_aliased(7, None, QueryOptions::get());
         assert_eq!(
             qa.get_matching_status(),
@@ -5586,7 +5679,10 @@ mod tests {
     fn querier_aliased_get_matching_status_true_when_peer_decl_matches_base_literal() {
         use std::collections::HashMap;
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         let qa = session.declare_querier_aliased(7, None, QueryOptions::get());
         session
             .observer()
@@ -5605,7 +5701,10 @@ mod tests {
     fn querier_aliased_get_matching_status_threads_inline_suffix_into_consult() {
         use std::collections::HashMap;
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         // QuerierAliased with inline_suffix produces effective
         // keyexpr "home/temp/kitchen"; peer DeclQueryable on
         // "home/**" should match via the peer-pattern asymmetric
@@ -5652,7 +5751,10 @@ mod tests {
     fn querier_aliased_get_matching_status_false_after_undeclared_mapping_drop() {
         use std::collections::HashMap;
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         let qa = session.declare_querier_aliased(7, None, QueryOptions::get());
         session
             .observer()
@@ -5779,7 +5881,10 @@ mod tests {
     #[test]
     fn publisher_aliased_put_resolves_loopback_through_outbound_table() {
         let (session, driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
 
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
@@ -5831,7 +5936,10 @@ mod tests {
     #[test]
     fn publisher_aliased_delete_routes_to_del_kind() {
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "clear/me");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "clear/me")
+            .expect("hardcoded canonical literal keyexpr");
         let kind_seen: Arc<Mutex<Option<SampleKind>>> = Arc::new(Mutex::new(None));
         let kind_cb = kind_seen.clone();
         session
@@ -5994,7 +6102,10 @@ mod tests {
     fn publisher_aliased_get_matching_status_threads_inline_suffix_into_consult() {
         use std::collections::HashMap;
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         let pa = session.declare_publisher_aliased(7, Some("/kitchen"), PublishOptions::put());
         session
             .observer()
@@ -6013,7 +6124,10 @@ mod tests {
     fn publisher_aliased_get_matching_status_false_after_undeclared_mapping_drop() {
         use std::collections::HashMap;
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         let pa = session.declare_publisher_aliased(7, None, PublishOptions::put());
         session
             .observer()
@@ -6161,7 +6275,10 @@ mod tests {
     #[test]
     fn declare_subscriber_aliased_resolves_literal_at_declare_time() {
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
 
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
@@ -6187,7 +6304,10 @@ mod tests {
     #[test]
     fn declare_subscriber_aliased_with_inline_suffix_composes_literal() {
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         let sub = session
             .declare_subscriber_aliased(7, Some("/kitchen"), SubscribeOptions::default(), |_| {})
             .expect("declared mapping resolves");
@@ -6216,7 +6336,10 @@ mod tests {
         // must not affect the already-registered subscriber (zenoh-pico
         // _z_register_subscription mirror: resolution happens once).
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
         let _sub = session
@@ -6389,7 +6512,10 @@ mod tests {
     fn declare_queryable_aliased_resolves_literal_at_declare_time() {
         let clock = TokioTime::new();
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
         let q = session
@@ -6418,7 +6544,10 @@ mod tests {
     #[test]
     fn declare_queryable_aliased_with_inline_suffix_composes_literal() {
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "home/temp");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         let q = session
             .declare_queryable_aliased(
                 7,
@@ -6470,7 +6599,9 @@ mod tests {
     #[test]
     fn declare_token_returns_handle_with_keyexpr_and_id_zero() {
         let (session, _driver) = build_session();
-        let token = session.declare_token("liveliness/devA", LivelinessOptions::default());
+        let token = session
+            .declare_token("liveliness/devA", LivelinessOptions::default())
+            .expect("hardcoded canonical literal keyexpr");
         assert_eq!(
             token.id(),
             0,
@@ -6484,7 +6615,9 @@ mod tests {
     #[test]
     fn declare_token_emits_exactly_one_reliable_wire_frame() {
         let (session, driver) = build_session();
-        let _token = session.declare_token("liveliness/devA", LivelinessOptions::default());
+        let _token = session
+            .declare_token("liveliness/devA", LivelinessOptions::default())
+            .expect("hardcoded canonical literal keyexpr");
         assert_eq!(
             driver.frame_count(),
             1,
@@ -6504,7 +6637,9 @@ mod tests {
     fn declare_token_wire_frame_contains_decl_token_bytes() {
         use crate::session_glue::build_declare_token;
         let (session, driver) = build_session();
-        let _token = session.declare_token("liveliness/devA", LivelinessOptions::default());
+        let _token = session
+            .declare_token("liveliness/devA", LivelinessOptions::default())
+            .expect("hardcoded canonical literal keyexpr");
 
         let expected =
             build_declare_token(0, /*mapping_id=*/ 0, Some("liveliness/devA")).encode_to_vec();
@@ -6521,9 +6656,15 @@ mod tests {
     #[test]
     fn declare_token_assigns_monotonic_ids_per_session() {
         let (session, _driver) = build_session();
-        let t0 = session.declare_token("liveliness/x", LivelinessOptions::default());
-        let t1 = session.declare_token("liveliness/y", LivelinessOptions::default());
-        let t2 = session.declare_token("liveliness/z", LivelinessOptions::default());
+        let t0 = session
+            .declare_token("liveliness/x", LivelinessOptions::default())
+            .expect("hardcoded canonical literal keyexpr");
+        let t1 = session
+            .declare_token("liveliness/y", LivelinessOptions::default())
+            .expect("hardcoded canonical literal keyexpr");
+        let t2 = session
+            .declare_token("liveliness/z", LivelinessOptions::default())
+            .expect("hardcoded canonical literal keyexpr");
         assert_eq!((t0.id(), t1.id(), t2.id()), (0, 1, 2));
         // Avoid drop wire emits in this counter-only test.
         std::mem::forget(t0);
@@ -6535,7 +6676,9 @@ mod tests {
     fn liveliness_token_drop_emits_undeclare_wire_frame() {
         let (session, driver) = build_session();
         {
-            let _token = session.declare_token("liveliness/devA", LivelinessOptions::default());
+            let _token = session
+            .declare_token("liveliness/devA", LivelinessOptions::default())
+            .expect("hardcoded canonical literal keyexpr");
             assert_eq!(driver.frame_count(), 1, "declare emit before scope end");
         }
         assert_eq!(
@@ -6551,7 +6694,9 @@ mod tests {
         use crate::session_glue::build_undeclare_token;
         let (session, driver) = build_session();
         {
-            let _token = session.declare_token("liveliness/devA", LivelinessOptions::default());
+            let _token = session
+            .declare_token("liveliness/devA", LivelinessOptions::default())
+            .expect("hardcoded canonical literal keyexpr");
             // Token id 0 was just allocated; drop will retract it.
         }
         let expected = build_undeclare_token(0).encode_to_vec();
@@ -6565,7 +6710,9 @@ mod tests {
     #[test]
     fn liveliness_token_undeclare_consumes_handle_and_does_not_double_emit() {
         let (session, driver) = build_session();
-        let token = session.declare_token("liveliness/devA", LivelinessOptions::default());
+        let token = session
+            .declare_token("liveliness/devA", LivelinessOptions::default())
+            .expect("hardcoded canonical literal keyexpr");
         assert_eq!(driver.frame_count(), 1);
         token.undeclare();
         assert_eq!(
@@ -6586,7 +6733,10 @@ mod tests {
     #[test]
     fn declare_token_aliased_resolves_literal_at_declare_time() {
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "liveliness/dev7")
+            .expect("hardcoded canonical literal keyexpr");
         let token = session
             .declare_token_aliased(7, None, LivelinessOptions::default())
             .expect("declared mapping resolves");
@@ -6601,7 +6751,10 @@ mod tests {
     #[test]
     fn declare_token_aliased_with_inline_suffix_composes_literal() {
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "liveliness/dev7")
+            .expect("hardcoded canonical literal keyexpr");
         let token = session
             .declare_token_aliased(7, Some("/sensor"), LivelinessOptions::default())
             .expect("declared mapping resolves");
@@ -6636,7 +6789,10 @@ mod tests {
         let (session, driver) = build_session();
         // Send the keyexpr declare so the mapping table holds (7 ->
         // "liveliness/dev7"); first wire frame is this Declare(DeclKexpr).
-        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "liveliness/dev7")
+            .expect("hardcoded canonical literal keyexpr");
         let baseline_frames = driver.frame_count();
 
         let _token = session
@@ -6678,7 +6834,10 @@ mod tests {
     #[test]
     fn declare_liveliness_subscriber_aliased_resolves_literal_at_declare_time() {
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "liveliness/dev7")
+            .expect("hardcoded canonical literal keyexpr");
         mark_session_established(&session);
         let sub = session
             .declare_liveliness_subscriber_aliased(
@@ -6710,7 +6869,10 @@ mod tests {
     #[test]
     fn declare_liveliness_subscriber_aliased_with_inline_suffix_composes_literal() {
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "liveliness/dev7")
+            .expect("hardcoded canonical literal keyexpr");
         mark_session_established(&session);
         let sub = session
             .declare_liveliness_subscriber_aliased(
@@ -6773,7 +6935,10 @@ mod tests {
         let (session, driver) = build_session();
         // Install the keyexpr mapping (7 -> "liveliness/dev7"); first
         // wire frame is this Declare(DeclKexpr).
-        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "liveliness/dev7")
+            .expect("hardcoded canonical literal keyexpr");
         mark_session_established(&session);
         let baseline_frames = driver.frame_count();
 
@@ -6814,7 +6979,10 @@ mod tests {
         // resolution contract). The slot still holds the resolved
         // literal, matching is unaffected.
         let (session, _driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "liveliness/dev7")
+            .expect("hardcoded canonical literal keyexpr");
         mark_session_established(&session);
         let sub = session
             .declare_liveliness_subscriber_aliased(
@@ -6854,7 +7022,10 @@ mod tests {
         // silently discarded. R283 surfaces the bug at the API
         // boundary instead.
         let (session, driver) = build_session();
-        session.actions().send_declare_keyexpr(7, "liveliness/dev7");
+        session
+            .actions()
+            .send_declare_keyexpr(7, "liveliness/dev7")
+            .expect("hardcoded canonical literal keyexpr");
         let baseline_frames = driver.frame_count();
         // NOTE: NO mark_session_established(&session) — that's the
         // condition under test.
@@ -6967,7 +7138,9 @@ mod tests {
         let r2 = session.actions().alloc_next_request_id();
         assert_eq!((r0, r1, r2), (0, 1, 2));
         // Token allocation still starts from 0.
-        let t = session.declare_token("liveliness/x", LivelinessOptions::default());
+        let t = session
+            .declare_token("liveliness/x", LivelinessOptions::default())
+            .expect("hardcoded canonical literal keyexpr");
         assert_eq!(
             t.id(),
             0,

@@ -100,6 +100,8 @@ use wz_runtime_core::TimeSource;
 
 use crate::runtime_impl::TokioTime;
 
+use crate::keyexpr_canon::{check_outbound_keyexpr_pico_safe, OutboundKeyexprError};
+
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
 /// Cryptographic key for the anti-amplification cookie MAC.
@@ -511,6 +513,88 @@ pub enum ExtChainRole {
     InitAck,
     OpenSyn,
     OpenAck,
+}
+
+/// R300 — typed reject from the outbound DECLARE-side gate that
+/// guards against (a) malformed keyexprs (structural canon
+/// violations) and (b) zenoh-pico bug #3 SIGABRT patterns (R299
+/// fixture). Returned by [`SessionLinkActions::send_declare_keyexpr`]
+/// / `send_declare_subscriber` / `send_declare_queryable` /
+/// `send_declare_token` instead of letting the failing emit reach
+/// the wire (where pico would crash) or panic at
+/// [`build_declare_kexpr`]'s `mapping_id != 0` assertion.
+///
+/// The gate runs BEFORE any wire bytes are produced or any
+/// outbound-mapping-table side effect — every variant is a
+/// no-emit reject (the session-link state is unchanged on Err).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendDeclareError {
+    /// The reconstructed keyexpr (resolved from `(mapping_id,
+    /// suffix)` via the outbound mapping table) failed the
+    /// pico-safety check. Inner [`OutboundKeyexprError`] separates
+    /// structural canon violations from R299 bug #3 patterns.
+    Keyexpr(OutboundKeyexprError),
+    /// `send_declare_keyexpr(mapping_id = 0, ..)` — the keyexpr
+    /// mapping id space reserves `0` for "literal" indication on
+    /// the subscriber / queryable / token side, so registering a
+    /// new mapping AT id 0 has no wire interpretation. Mirrors
+    /// [`build_declare_kexpr`]'s `mapping_id != 0` assertion; the
+    /// gate elevates the developer-visible failure mode from
+    /// panic-at-builder to typed error-at-action.
+    ReservedMappingIdZero,
+    /// `send_declare_subscriber` / `_queryable` / `_token` was
+    /// called with a `mapping_id != 0` that has no entry in
+    /// [`SessionLinkActions::outbound_mappings`]. Either no prior
+    /// [`SessionLinkActions::send_declare_keyexpr`] established
+    /// the mapping, or a
+    /// [`SessionLinkActions::send_undeclare_kexpr`] retracted it
+    /// before this call. Sending the wire frame anyway would
+    /// reach the peer as an "unknown wireexpr id" error.
+    UnknownMappingId(u64),
+    /// `send_declare_subscriber` / `_queryable` / `_token` was
+    /// called with `mapping_id == 0` AND `keyexpr_suffix == None`
+    /// — no keyexpr at all. The peer cannot resolve a missing
+    /// keyexpr; the gate surfaces this as a typed protocol error
+    /// instead of letting it reach the wire as a malformed
+    /// DECLARE.
+    MissingKeyexpr,
+}
+
+impl std::fmt::Display for SendDeclareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Keyexpr(e) => write!(f, "send_declare: {e}"),
+            Self::ReservedMappingIdZero => f.write_str(
+                "send_declare_keyexpr: mapping_id 0 is reserved \
+                 (cannot register a new keyexpr mapping at id 0)",
+            ),
+            Self::UnknownMappingId(id) => write!(
+                f,
+                "send_declare: mapping_id {id} has no outbound entry \
+                 (no preceding send_declare_keyexpr for this id, \
+                 or it was undeclared before this call)"
+            ),
+            Self::MissingKeyexpr => f.write_str(
+                "send_declare: mapping_id 0 requires a literal keyexpr \
+                 suffix (received None)",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SendDeclareError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Keyexpr(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<OutboundKeyexprError> for SendDeclareError {
+    fn from(e: OutboundKeyexprError) -> Self {
+        Self::Keyexpr(e)
+    }
 }
 
 /// Bundle of state shared across the 17 native script functions.
@@ -1191,7 +1275,18 @@ impl SessionLinkActions {
     /// must have reached `Established`; the driver must be
     /// non-blocking or the channel-decoupling pattern must be in
     /// place to avoid `block_on`-in-runtime panic).
-    pub fn send_declare_keyexpr(&self, mapping_id: u64, suffix: &str) {
+    pub fn send_declare_keyexpr(
+        &self,
+        mapping_id: u64,
+        suffix: &str,
+    ) -> Result<(), SendDeclareError> {
+        // R300 — pre-emit gate. Both checks run BEFORE any wire
+        // bytes leave or any mapping-table side effect; on Err
+        // the session-link state is unchanged.
+        if mapping_id == 0 {
+            return Err(SendDeclareError::ReservedMappingIdZero);
+        }
+        check_outbound_keyexpr_pico_safe(suffix)?;
         let declare = build_declare_kexpr(mapping_id, suffix);
         let sn = self.next_outbound_frame_sn();
         let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
@@ -1207,6 +1302,7 @@ impl SessionLinkActions {
             .lock()
             .expect("outbound_mappings poisoned by an earlier panicked publish")
             .insert(mapping_id, suffix.to_string());
+        Ok(())
     }
 
     /// R121g — encode + dispatch a DECLARE-aliased `Push` (id != 0).
@@ -1392,11 +1488,19 @@ impl SessionLinkActions {
         subscriber_id: u64,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
-    ) {
+    ) -> Result<(), SendDeclareError> {
+        // R300 — reconstruct the full keyexpr from `(mapping_id,
+        // suffix)` and gate-check it BEFORE wire emit so a
+        // cross-boundary bug #3 shape (prefix=`"**"` +
+        // suffix=`"/c/*"`) cannot slip past a suffix-only check.
+        let reconstructed =
+            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+        check_outbound_keyexpr_pico_safe(&reconstructed)?;
         let declare = build_declare_subscriber(subscriber_id, keyexpr_mapping_id, keyexpr_suffix);
         let sn = self.next_outbound_frame_sn();
         let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
         self.driver.send_blocking(&wire, Reliability::Reliable);
+        Ok(())
     }
 
     /// R121i-b — encode + dispatch a `Declare(DeclQueryable)` on the
@@ -1423,11 +1527,16 @@ impl SessionLinkActions {
         queryable_id: u64,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
-    ) {
+    ) -> Result<(), SendDeclareError> {
+        // R300 — same gate shape as `send_declare_subscriber`.
+        let reconstructed =
+            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+        check_outbound_keyexpr_pico_safe(&reconstructed)?;
         let declare = build_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix);
         let sn = self.next_outbound_frame_sn();
         let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
         self.driver.send_blocking(&wire, Reliability::Reliable);
+        Ok(())
     }
 
     /// R121i-b — encode + dispatch a `Declare(DeclToken)` on the
@@ -1450,11 +1559,16 @@ impl SessionLinkActions {
         token_id: u64,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
-    ) {
+    ) -> Result<(), SendDeclareError> {
+        // R300 — same gate shape as `send_declare_subscriber`.
+        let reconstructed =
+            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+        check_outbound_keyexpr_pico_safe(&reconstructed)?;
         let declare = build_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix);
         let sn = self.next_outbound_frame_sn();
         let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
         self.driver.send_blocking(&wire, Reliability::Reliable);
+        Ok(())
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclKexpr)` on the
@@ -1532,6 +1646,52 @@ impl SessionLinkActions {
             .lock()
             .map(|stamp| stamp.is_some())
             .unwrap_or(false)
+    }
+
+    /// R300 — reconstruct the full literal keyexpr that the peer
+    /// will canonize on the receive side from the wire's
+    /// `(mapping_id, suffix)` carrier shape. The reconstruction
+    /// feeds [`check_outbound_keyexpr_pico_safe`]: the SIGABRT-
+    /// prone shape (`**` + literal + `*`-shape) can straddle the
+    /// prefix / suffix boundary (e.g. prefix=`"**"` registered via
+    /// an earlier [`Self::send_declare_keyexpr`], suffix=`"/c/*"`
+    /// passed to [`Self::send_declare_subscriber`]), so a suffix-
+    /// only check would miss it.
+    ///
+    /// Shape map (mirrors the four wire forms enumerated in
+    /// `send_declare_subscriber` doc):
+    ///
+    /// | `mapping_id` | `suffix`         | Reconstructed             |
+    /// |--------------|------------------|---------------------------|
+    /// | `0`          | `None`           | `Err(MissingKeyexpr)`     |
+    /// | `0`          | `Some(s)`        | `Ok(s.to_string())`       |
+    /// | `id != 0`    | `None`           | `Ok(prefix.clone())` or `Err(UnknownMappingId(id))` |
+    /// | `id != 0`    | `Some(tail)`     | `Ok(prefix || tail)` or `Err(UnknownMappingId(id))` |
+    ///
+    /// The composite-mode concatenation is a plain `String::push_str`
+    /// (no `/` separator inserted) because the wire spec embeds the
+    /// `/` in either prefix-trailing or suffix-leading position per
+    /// the caller's intent — wz mirrors zenoh-pico's
+    /// `_z_keyexpr_to_string` which never injects its own separator.
+    fn reconstruct_outbound_keyexpr(
+        &self,
+        mapping_id: u64,
+        suffix: Option<&str>,
+    ) -> Result<String, SendDeclareError> {
+        match (mapping_id, suffix) {
+            (0, None) => Err(SendDeclareError::MissingKeyexpr),
+            (0, Some(s)) => Ok(s.to_string()),
+            (id, None) => self
+                .resolve_outbound_mapping(id)
+                .ok_or(SendDeclareError::UnknownMappingId(id)),
+            (id, Some(tail)) => self
+                .resolve_outbound_mapping(id)
+                .map(|mut prefix| {
+                    prefix.push_str(tail);
+                    prefix
+                })
+                .ok_or(SendDeclareError::UnknownMappingId(id)),
+        }
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclSubscriber)` on
@@ -10884,14 +11044,18 @@ mod tests {
             "fresh table empty"
         );
 
-        actions.send_declare_keyexpr(7, "home/temp");
+        actions
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         assert_eq!(
             actions.resolve_outbound_mapping(7).as_deref(),
             Some("home/temp"),
             "send_declare_keyexpr must record the (id, suffix) pair"
         );
         // Multiple declarations on different ids accumulate.
-        actions.send_declare_keyexpr(8, "home/humidity");
+        actions
+            .send_declare_keyexpr(8, "home/humidity")
+            .expect("hardcoded canonical literal keyexpr");
         assert_eq!(
             actions.resolve_outbound_mapping(7).as_deref(),
             Some("home/temp")
@@ -10915,8 +11079,12 @@ mod tests {
             publish_meta_fixture_params(),
             TokioTime::new(),
         );
-        actions.send_declare_keyexpr(7, "home/v1");
-        actions.send_declare_keyexpr(7, "home/v2");
+        actions
+            .send_declare_keyexpr(7, "home/v1")
+            .expect("hardcoded canonical literal keyexpr");
+        actions
+            .send_declare_keyexpr(7, "home/v2")
+            .expect("hardcoded canonical literal keyexpr");
         assert_eq!(
             actions.resolve_outbound_mapping(7).as_deref(),
             Some("home/v2"),
@@ -10932,7 +11100,9 @@ mod tests {
             publish_meta_fixture_params(),
             TokioTime::new(),
         );
-        actions.send_declare_keyexpr(7, "home/temp");
+        actions
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         assert!(actions.resolve_outbound_mapping(7).is_some());
 
         actions.send_undeclare_kexpr(7);
@@ -10956,6 +11126,255 @@ mod tests {
         assert!(actions.resolve_outbound_mapping(42).is_none());
     }
 
+    // ── R300 — outbound DECLARE-side gate ─────────────────────
+
+    #[test]
+    fn send_declare_keyexpr_rejects_reserved_mapping_id_zero() {
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
+        let err = actions
+            .send_declare_keyexpr(0, "home/temp")
+            .expect_err("mapping_id 0 is reserved");
+        assert_eq!(err, SendDeclareError::ReservedMappingIdZero);
+        assert!(
+            driver.frames.lock().unwrap().is_empty(),
+            "gate must reject pre-emit — no wire frame leaves on Err"
+        );
+        assert!(
+            actions.resolve_outbound_mapping(0).is_none(),
+            "gate must reject pre-side-effect — mapping table untouched on Err"
+        );
+    }
+
+    #[test]
+    fn send_declare_keyexpr_rejects_pico_bug_three_pattern() {
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
+        let err = actions
+            .send_declare_keyexpr(7, "**/c/*")
+            .expect_err("R299 bug #3 pattern must reject");
+        match err {
+            SendDeclareError::Keyexpr(crate::keyexpr_canon::OutboundKeyexprError::PicoBugThreeFamily {
+                keyexpr,
+                offending_chunk,
+            }) => {
+                assert_eq!(keyexpr, "**/c/*");
+                assert_eq!(offending_chunk, "*");
+            }
+            other => panic!("expected Keyexpr(PicoBugThreeFamily), got {other:?}"),
+        }
+        assert!(driver.frames.lock().unwrap().is_empty());
+        assert!(actions.resolve_outbound_mapping(7).is_none());
+    }
+
+    #[test]
+    fn send_declare_keyexpr_rejects_structurally_invalid() {
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
+        let err = actions
+            .send_declare_keyexpr(7, "home//temp")
+            .expect_err("empty chunk must reject");
+        assert!(
+            matches!(
+                err,
+                SendDeclareError::Keyexpr(crate::keyexpr_canon::OutboundKeyexprError::NotCanonical(
+                    crate::keyexpr_canon::KeyexprCanonError::EmptyChunk,
+                )),
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn send_declare_subscriber_rejects_missing_keyexpr() {
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
+        // mapping_id = 0 + suffix = None → no keyexpr at all.
+        let err = actions
+            .send_declare_subscriber(1, 0, None)
+            .expect_err("MissingKeyexpr");
+        assert_eq!(err, SendDeclareError::MissingKeyexpr);
+        assert!(driver.frames.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn send_declare_subscriber_rejects_unknown_mapping_id() {
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
+        // mapping_id != 0 but no prior send_declare_keyexpr.
+        let err = actions
+            .send_declare_subscriber(1, 99, Some("/tail"))
+            .expect_err("UnknownMappingId(99)");
+        assert_eq!(err, SendDeclareError::UnknownMappingId(99));
+        assert!(driver.frames.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn send_declare_subscriber_rejects_cross_boundary_bug_three() {
+        // This is the gate's raison d'etre: prefix=`**` registered
+        // via send_declare_keyexpr, suffix=`/c/*` passed to
+        // send_declare_subscriber — neither alone triggers bug #3,
+        // but the reconstructed full keyexpr `**/c/*` does. A
+        // suffix-only check would miss this.
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
+        actions
+            .send_declare_keyexpr(7, "**")
+            .expect("prefix `**` is canonical + pico-safe in isolation");
+        // 1 frame from the keyexpr declare; clear the count.
+        let frames_before = driver.frames.lock().unwrap().len();
+        assert_eq!(frames_before, 1);
+
+        let err = actions
+            .send_declare_subscriber(1, /*mapping_id=*/ 7, Some("/c/*"))
+            .expect_err("reconstructed `**/c/*` must trigger bug #3 reject");
+        match err {
+            SendDeclareError::Keyexpr(crate::keyexpr_canon::OutboundKeyexprError::PicoBugThreeFamily {
+                keyexpr,
+                ..
+            }) => {
+                assert_eq!(
+                    keyexpr, "**/c/*",
+                    "the gate must report the RECONSTRUCTED full keyexpr"
+                );
+            }
+            other => panic!("expected cross-boundary PicoBugThreeFamily, got {other:?}"),
+        }
+        // No additional wire frame leaked — only the prior keyexpr
+        // declare's frame is present.
+        assert_eq!(driver.frames.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn send_declare_subscriber_accepts_safe_alias_form() {
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
+        actions
+            .send_declare_keyexpr(7, "home")
+            .expect("safe prefix");
+        // Pure alias mode: mapping_id=7 + suffix=None → "home"
+        actions
+            .send_declare_subscriber(1, 7, None)
+            .expect("alias to safe prefix");
+        // Composite mode: mapping_id=7 + suffix=`/sensor` → "home/sensor"
+        actions
+            .send_declare_subscriber(2, 7, Some("/sensor"))
+            .expect("composite to safe full keyexpr");
+        // Literal mode: mapping_id=0 + suffix=Some("home/temp")
+        actions
+            .send_declare_subscriber(3, 0, Some("home/temp"))
+            .expect("literal-mode safe keyexpr");
+    }
+
+    #[test]
+    fn send_declare_queryable_inherits_gate() {
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
+        // Direct literal bug-three pattern.
+        let err = actions
+            .send_declare_queryable(1, 0, Some("**/foo/*"))
+            .expect_err("queryable inherits the same gate");
+        assert!(matches!(
+            err,
+            SendDeclareError::Keyexpr(crate::keyexpr_canon::OutboundKeyexprError::PicoBugThreeFamily { .. })
+        ));
+        assert!(driver.frames.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn send_declare_token_inherits_gate() {
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
+        let err = actions
+            .send_declare_token(1, 0, Some("**/abc/*/def"))
+            .expect_err("token inherits the same gate");
+        assert!(matches!(
+            err,
+            SendDeclareError::Keyexpr(crate::keyexpr_canon::OutboundKeyexprError::PicoBugThreeFamily { .. })
+        ));
+        assert!(driver.frames.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reconstruct_outbound_keyexpr_shape_table() {
+        let driver = std::sync::Arc::new(CaptureDriver::new());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
+        actions
+            .send_declare_keyexpr(7, "home")
+            .expect("safe prefix registration");
+
+        // (0, None) — protocol error
+        assert_eq!(
+            actions.reconstruct_outbound_keyexpr(0, None),
+            Err(SendDeclareError::MissingKeyexpr),
+        );
+        // (0, Some(s)) — literal mode
+        assert_eq!(
+            actions.reconstruct_outbound_keyexpr(0, Some("a/b")),
+            Ok("a/b".to_string()),
+        );
+        // (id, None) registered — pure alias
+        assert_eq!(
+            actions.reconstruct_outbound_keyexpr(7, None),
+            Ok("home".to_string()),
+        );
+        // (id, Some(tail)) registered — composite (no separator inj.)
+        assert_eq!(
+            actions.reconstruct_outbound_keyexpr(7, Some("/sensor")),
+            Ok("home/sensor".to_string()),
+        );
+        // (id, None) unregistered
+        assert_eq!(
+            actions.reconstruct_outbound_keyexpr(99, None),
+            Err(SendDeclareError::UnknownMappingId(99)),
+        );
+        // (id, Some(tail)) unregistered
+        assert_eq!(
+            actions.reconstruct_outbound_keyexpr(99, Some("/tail")),
+            Err(SendDeclareError::UnknownMappingId(99)),
+        );
+    }
+
     #[test]
     fn resolve_outbound_mapping_returns_owned_string_independent_of_table() {
         // The returned String must be a clone — a caller holding it
@@ -10968,7 +11387,9 @@ mod tests {
             publish_meta_fixture_params(),
             TokioTime::new(),
         );
-        actions.send_declare_keyexpr(7, "home/temp");
+        actions
+            .send_declare_keyexpr(7, "home/temp")
+            .expect("hardcoded canonical literal keyexpr");
         let resolved = actions.resolve_outbound_mapping(7).unwrap();
         actions.send_undeclare_kexpr(7);
         assert_eq!(resolved, "home/temp", "owned clone survives table mutation");
