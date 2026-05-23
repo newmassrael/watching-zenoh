@@ -15398,6 +15398,88 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest inbound bilateral, R267 Session<R,T> reparam (composability direct prerequisite — now Cargo features land, R267 is the source-level shape for the same composability axis), Querier::get_matching_status, Q_B/Q_E codec slots, Phase W full lwIP."
       ]
     },
+    "Round 303": {
+      "decision_summary": "R302b first source-level #[cfg(feature)] gates: 17 gate points in wz-runtime-tokio liveliness paths + wz facade forwarding via `wz-runtime-tokio?/feature` syntax.",
+      "changes_bullets": [
+        "wz-runtime-tokio/Cargo.toml [features] section added: default=[\"liveliness-token\", \"liveliness-subscriber\"], liveliness-token=[], liveliness-subscriber=[]. Backward-compat: existing in-workspace consumers (wz-ap-demo, integration tests, session_fsm tests) build unchanged because defaults stay on.",
+        "src/declare.rs: gate `mod liveliness` + `mod liveliness_subscriber` declarations + their `pub use` re-exports on respective features. Queryable + subscriber sub-modules stay unconditional.",
+        "src/observer.rs: gate `ApplicationLayerObserver::liveliness` field on `liveliness-token`, `::liveliness_subscribers` field on `liveliness-subscriber`. Same gates on the `new()` initializers and the `dispatch_iteration_event()` calls. Import statements split — `use crate::declare::LivelinessRegistry` now `#[cfg(feature = \"liveliness-token\")]`, same shape for the subscriber registry.",
+        "src/session.rs 17 gate points: 4 methods (declare_token, declare_token_aliased, declare_liveliness_subscriber, declare_liveliness_subscriber_aliased) + 4 structs (LivelinessOptions, LivelinessToken, LivelinessSubscriberOptions, LivelinessSubscriber) + 4 impl/Drop blocks (impl LivelinessToken, Drop for LivelinessToken, impl LivelinessSubscriber, Drop for LivelinessSubscriber) + 5 enum/Display/Error pairs (LivelinessAliasError enum + Display + Error, LivelinessSubscriberAliasError enum + Display + Error). Use statements split so OutboundKeyexprError/SendDeclareError/LivelinessSample/LivelinessSampleCallback become conditional.",
+        "src/declare/cross_tests.rs: gate the `three_registries_share_a_message_stream_independently` test on liveliness-token. The two-registry test (subscriber + queryable) stays unconditional. Test count diff: feature-off mode loses the 3-registry test, keeps the 2-registry test.",
+        "src/declare/test_helpers.rs: gate `decl_token` / `undecl_token` / `declare_envelope_decl_token` / `declare_envelope_undecl_token` helpers + their underlying `use wz_codecs::decl_token::DeclToken` / `use wz_codecs::undecl_token::UndeclToken` imports on `any(feature = \"liveliness-token\", feature = \"liveliness-subscriber\")` — either feature needs the helpers (liveliness.rs uses them with -token; liveliness_subscriber.rs uses them with -subscriber). Imports + helpers stay symmetric so no half-active state.",
+        "wz/Cargo.toml: [dependencies] wz-runtime-tokio = { path = \"../wz-runtime-tokio\", optional = true, default-features = false }. Forwarding: runtime-tokio = [\"dep:wz-runtime-tokio\"]. liveliness-token = [\"wz-runtime-tokio?/liveliness-token\"]. liveliness-subscriber = [\"wz-runtime-tokio?/liveliness-subscriber\"]. Cargo `?` syntax means liveliness-* enabled WITHOUT runtime-tokio stays a label (no crate pull); WITH runtime-tokio it forwards the sub-feature into wz-runtime-tokio."
+      ],
+      "verification_bullets": [
+        "cargo check -p wz-runtime-tokio (default features) → pass 1.04s. Existing consumer path unchanged.",
+        "cargo check -p wz-runtime-tokio --no-default-features → pass 1.89s after fixing 3 use-statement errors (OutboundKeyexprError, SendDeclareError, LivelinessSample{Callback}). All liveliness symbols correctly removed from the build.",
+        "cargo check -p wz-runtime-tokio --no-default-features --features liveliness-token → pass 0.79s. Token-only path: LivelinessSubscriber surface absent.",
+        "cargo check -p wz-runtime-tokio --no-default-features --features liveliness-subscriber → pass 0.67s. Subscriber-only path: LivelinessToken surface absent.",
+        "cargo check -p wz --no-default-features → pass. wz-runtime-tokio not pulled.",
+        "cargo check -p wz --features runtime-tokio (bare) → pass. wz-runtime-tokio pulled with --no-default-features (liveliness OFF).",
+        "cargo check -p wz --features liveliness-token (no runtime-tokio) → pass. Label-only — `?` syntax skips forwarding because optional dep not active.",
+        "cargo check -p wz --features runtime-tokio,liveliness-token → pass. wz-runtime-tokio pulled with liveliness-token only.",
+        "cargo check -p wz --features preset-ap-client → wz-runtime-tokio rebuilds with both liveliness features active (preset includes runtime-tokio + liveliness-token + liveliness-subscriber).",
+        "cargo check -p wz --features preset-mcu-minimal → wz-runtime-tokio NOT pulled (preset selects runtime-no-std, not runtime-tokio). 0.05s cache-hit.",
+        "cargo check --workspace → pass 1.98s. All 8 workspace members build cleanly.",
+        "cargo test -p wz-runtime-tokio --lib → 589 passed; 0 failed. Liveliness inline unit tests (6 in liveliness.rs + 12 in liveliness_subscriber.rs) run as part of default-features build.",
+        "cargo test --workspace --no-run → all test binaries compile. Integration tests (echo_demo, session_fsm_*, ap_demo_round_trip, layer3_*, wz_liveliness_subscriber_round_trip, etc.) link successfully.",
+        "cargo test -p wz-integration-tests --test wz_liveliness_subscriber_round_trip → 1 test marked `ignored, binary-dep e2e (wz-ap-demo bin); Layer E runs via --ignored`. Compile passes; Layer E e2e behavior is pre-R302b state preserved.",
+        "validate_workspace: docs=13/13, entries=301 unchanged, sections=215 unchanged, T1 orphan=0, round-trip mandatory=13/13, T3 warn 862 / T4 info 429 unchanged, GENERATED.md=sync. R302b source-only mutation; mnemosyne doc surface untouched."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "cargo test --no-default-features cargo gotcha — wz-runtime-tokio-test-support's Cargo.toml line 47 has `wz-runtime-tokio = { path = \"../wz-runtime-tokio\" }` WITHOUT `default-features = false`. Cargo feature-unification then forces wz-runtime-tokio defaults (both liveliness ON) during `cargo test` even with --no-default-features. Production `cargo check --no-default-features` works correctly (verified). Fix: future round mark test-support's wz-runtime-tokio dep as default-features=false + explicit feature pulling. Not blocking R302b.",
+        "R302c next domain: query (10 features, 6 active). Candidates query-get / query-queryable / query-reply / query-target / query-timeout / query-consolidation. Larger blast radius than liveliness: touches src/query.rs entire module, src/reply.rs partial, src/session.rs Session::get + declare_queryable + 4 aliased variants, plus pubsub-encoding co-dependency (Reply payload uses Encoding).",
+        "R302c+ sequence reaffirmed: liveliness DONE (R302b) → query → declare → pubsub → codec → keyexpr → transport → session → routing → scouting → platform → runtime → encoding → link → locator → storage → time → attachment → access. 18 more domain-cfg rounds.",
+        "R302d wz facade re-export plumbing — wz/src/lib.rs still empty. Once 3+ domains gated (R302b liveliness done, R302c query, R302d declare), start authoring `pub mod liveliness; #[cfg(feature = \"runtime-tokio\")] pub use wz_runtime_tokio::session::{LivelinessToken, ...};` re-exports in wz facade. Establishes the `use wz::liveliness::LivelinessToken` user-facing import path.",
+        "Test-time helper symmetry — decl_token + declare_envelope_decl_token gated on `any(token, subscriber)` is correct but slightly redundant — if catalog later adds `declare-token` codec feature (already in inventory as `declare-token`), the gate might need refactor to gate on `declare-token` instead. R302c+ codec/declare track will revisit.",
+        "R302a carries unchanged: cargo wz-config inspect tool, wz crate-name decision, no_std code verification, preset member count, R301 §8 SCE <sce:requires>, R303+ atomic Section decompose for feature_inventory, R303+ Footprint empirical, R299 carry #2-#3, R300 narrow/argv UX.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest inbound bilateral, R267 Session<R,T> reparam, Querier::get_matching_status, Q_B/Q_E codec slots, Phase W full lwIP."
+      ],
+      "publishable_decision_summary": "R302b first source-level #[cfg(feature)] gates: 17 gate points in wz-runtime-tokio liveliness paths + wz facade forwarding via `wz-runtime-tokio?/feature` syntax.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/Cargo.toml [features] section added: default=[\"liveliness-token\", \"liveliness-subscriber\"], liveliness-token=[], liveliness-subscriber=[]. Backward-compat: existing in-workspace consumers (wz-ap-demo, integration tests, session_fsm tests) build unchanged because defaults stay on.",
+        "src/declare.rs: gate `mod liveliness` + `mod liveliness_subscriber` declarations + their `pub use` re-exports on respective features. Queryable + subscriber sub-modules stay unconditional.",
+        "src/observer.rs: gate `ApplicationLayerObserver::liveliness` field on `liveliness-token`, `::liveliness_subscribers` field on `liveliness-subscriber`. Same gates on the `new()` initializers and the `dispatch_iteration_event()` calls. Import statements split — `use crate::declare::LivelinessRegistry` now `#[cfg(feature = \"liveliness-token\")]`, same shape for the subscriber registry.",
+        "src/session.rs 17 gate points: 4 methods (declare_token, declare_token_aliased, declare_liveliness_subscriber, declare_liveliness_subscriber_aliased) + 4 structs (LivelinessOptions, LivelinessToken, LivelinessSubscriberOptions, LivelinessSubscriber) + 4 impl/Drop blocks (impl LivelinessToken, Drop for LivelinessToken, impl LivelinessSubscriber, Drop for LivelinessSubscriber) + 5 enum/Display/Error pairs (LivelinessAliasError enum + Display + Error, LivelinessSubscriberAliasError enum + Display + Error). Use statements split so OutboundKeyexprError/SendDeclareError/LivelinessSample/LivelinessSampleCallback become conditional.",
+        "src/declare/cross_tests.rs: gate the `three_registries_share_a_message_stream_independently` test on liveliness-token. The two-registry test (subscriber + queryable) stays unconditional. Test count diff: feature-off mode loses the 3-registry test, keeps the 2-registry test.",
+        "src/declare/test_helpers.rs: gate `decl_token` / `undecl_token` / `declare_envelope_decl_token` / `declare_envelope_undecl_token` helpers + their underlying `use wz_codecs::decl_token::DeclToken` / `use wz_codecs::undecl_token::UndeclToken` imports on `any(feature = \"liveliness-token\", feature = \"liveliness-subscriber\")` — either feature needs the helpers (liveliness.rs uses them with -token; liveliness_subscriber.rs uses them with -subscriber). Imports + helpers stay symmetric so no half-active state.",
+        "wz/Cargo.toml: [dependencies] wz-runtime-tokio = { path = \"../wz-runtime-tokio\", optional = true, default-features = false }. Forwarding: runtime-tokio = [\"dep:wz-runtime-tokio\"]. liveliness-token = [\"wz-runtime-tokio?/liveliness-token\"]. liveliness-subscriber = [\"wz-runtime-tokio?/liveliness-subscriber\"]. Cargo `?` syntax means liveliness-* enabled WITHOUT runtime-tokio stays a label (no crate pull); WITH runtime-tokio it forwards the sub-feature into wz-runtime-tokio."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check -p wz-runtime-tokio (default features) → pass 1.04s. Existing consumer path unchanged.",
+        "cargo check -p wz-runtime-tokio --no-default-features → pass 1.89s after fixing 3 use-statement errors (OutboundKeyexprError, SendDeclareError, LivelinessSample{Callback}). All liveliness symbols correctly removed from the build.",
+        "cargo check -p wz-runtime-tokio --no-default-features --features liveliness-token → pass 0.79s. Token-only path: LivelinessSubscriber surface absent.",
+        "cargo check -p wz-runtime-tokio --no-default-features --features liveliness-subscriber → pass 0.67s. Subscriber-only path: LivelinessToken surface absent.",
+        "cargo check -p wz --no-default-features → pass. wz-runtime-tokio not pulled.",
+        "cargo check -p wz --features runtime-tokio (bare) → pass. wz-runtime-tokio pulled with --no-default-features (liveliness OFF).",
+        "cargo check -p wz --features liveliness-token (no runtime-tokio) → pass. Label-only — `?` syntax skips forwarding because optional dep not active.",
+        "cargo check -p wz --features runtime-tokio,liveliness-token → pass. wz-runtime-tokio pulled with liveliness-token only.",
+        "cargo check -p wz --features preset-ap-client → wz-runtime-tokio rebuilds with both liveliness features active (preset includes runtime-tokio + liveliness-token + liveliness-subscriber).",
+        "cargo check -p wz --features preset-mcu-minimal → wz-runtime-tokio NOT pulled (preset selects runtime-no-std, not runtime-tokio). 0.05s cache-hit.",
+        "cargo check --workspace → pass 1.98s. All 8 workspace members build cleanly.",
+        "cargo test -p wz-runtime-tokio --lib → 589 passed; 0 failed. Liveliness inline unit tests (6 in liveliness.rs + 12 in liveliness_subscriber.rs) run as part of default-features build.",
+        "cargo test --workspace --no-run → all test binaries compile. Integration tests (echo_demo, session_fsm_*, ap_demo_round_trip, layer3_*, wz_liveliness_subscriber_round_trip, etc.) link successfully.",
+        "cargo test -p wz-integration-tests --test wz_liveliness_subscriber_round_trip → 1 test marked `ignored, binary-dep e2e (wz-ap-demo bin); Layer E runs via --ignored`. Compile passes; Layer E e2e behavior is pre-R302b state preserved.",
+        "validate_workspace: docs=13/13, entries=301 unchanged, sections=215 unchanged, T1 orphan=0, round-trip mandatory=13/13, T3 warn 862 / T4 info 429 unchanged, GENERATED.md=sync. R302b source-only mutation; mnemosyne doc surface untouched."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "cargo test --no-default-features cargo gotcha — wz-runtime-tokio-test-support's Cargo.toml line 47 has `wz-runtime-tokio = { path = \"../wz-runtime-tokio\" }` WITHOUT `default-features = false`. Cargo feature-unification then forces wz-runtime-tokio defaults (both liveliness ON) during `cargo test` even with --no-default-features. Production `cargo check --no-default-features` works correctly (verified). Fix: future round mark test-support's wz-runtime-tokio dep as default-features=false + explicit feature pulling. Not blocking R302b.",
+        "R302c next domain: query (10 features, 6 active). Candidates query-get / query-queryable / query-reply / query-target / query-timeout / query-consolidation. Larger blast radius than liveliness: touches src/query.rs entire module, src/reply.rs partial, src/session.rs Session::get + declare_queryable + 4 aliased variants, plus pubsub-encoding co-dependency (Reply payload uses Encoding).",
+        "R302c+ sequence reaffirmed: liveliness DONE (R302b) → query → declare → pubsub → codec → keyexpr → transport → session → routing → scouting → platform → runtime → encoding → link → locator → storage → time → attachment → access. 18 more domain-cfg rounds.",
+        "R302d wz facade re-export plumbing — wz/src/lib.rs still empty. Once 3+ domains gated (R302b liveliness done, R302c query, R302d declare), start authoring `pub mod liveliness; #[cfg(feature = \"runtime-tokio\")] pub use wz_runtime_tokio::session::{LivelinessToken, ...};` re-exports in wz facade. Establishes the `use wz::liveliness::LivelinessToken` user-facing import path.",
+        "Test-time helper symmetry — decl_token + declare_envelope_decl_token gated on `any(token, subscriber)` is correct but slightly redundant — if catalog later adds `declare-token` codec feature (already in inventory as `declare-token`), the gate might need refactor to gate on `declare-token` instead. R302c+ codec/declare track will revisit.",
+        "R302a carries unchanged: cargo wz-config inspect tool, wz crate-name decision, no_std code verification, preset member count, R301 §8 SCE <sce:requires>, R303+ atomic Section decompose for feature_inventory, R303+ Footprint empirical, R299 carry #2-#3, R300 narrow/argv UX.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest inbound bilateral, R267 Session<R,T> reparam, Querier::get_matching_status, Q_B/Q_E codec slots, Phase W full lwIP."
+      ]
+    },
     "Round 31": {
       "decision_summary": "Phase B5 entry — first codec-kind SCXMLs land. sources/codecs/keep_alive.scxml (empty body, transport-layer KeepAlive frame) + sources/codecs/close.scxml (1-byte reason code, session-close variant arm) authored against vendor pin 11f1032d. Opens the ~30-codec wire-message track.",
       "changes_bullets": [
