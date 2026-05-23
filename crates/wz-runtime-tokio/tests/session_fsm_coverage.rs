@@ -36,6 +36,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use sce_rust_runtime::Engine;
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
@@ -68,7 +69,7 @@ impl BoxedLinkDriver for RecordingDriver {
 /// concurrent test scenarios cannot contend on shared state.
 fn fresh_engine() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(RecordingDriver::default());
-    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
     let lua = install_session_actions_for_test(actions.clone());
     let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
     engine.initialize();

@@ -53,7 +53,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -98,6 +97,8 @@ use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
 use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 use wz_runtime_core::TimeSource;
+
+use crate::runtime_impl::TokioTime;
 
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
@@ -522,21 +523,25 @@ pub struct SessionLinkActions {
     /// `params.cookie` on the OpenSyn outbound, implementing the
     /// RFC §5.M echo contract on the Initiator side.
     pub inbound_cookie: Mutex<Option<Vec<u8>>>,
-    /// R72b — monotonic `Instant` of the most recently observed
-    /// inbound KeepAlive frame. Populated by `handle_inbound` for
-    /// `InboundFrame::KeepAlive`. Consumers compare this against
-    /// `params.lease` to compute the lease deadline; an absent
-    /// timestamp falls back to session-start time (lease counts
-    /// from Established entry per session-fsm §2.5 keepalive
-    /// semantics).
+    /// R72b — monotonic timestamp in milliseconds of the most
+    /// recently observed inbound KeepAlive frame. Populated by
+    /// `handle_inbound` for `InboundFrame::KeepAlive`. Consumers
+    /// compare this against `params.lease` to compute the lease
+    /// deadline; an absent timestamp falls back to session-start
+    /// time (lease counts from Established entry per session-fsm
+    /// §2.5 keepalive semantics).
     ///
-    /// Resolution is `std::time::Instant`'s monotonic-since-process
-    /// clock; the lease comparator is `now.duration_since(stamp) <
-    /// lease`. No drift correction needed because both `now` and
-    /// `stamp` read the same monotonic source.
-    pub last_inbound_keepalive_at: Mutex<Option<Instant>>,
-    /// R84 — monotonic `Instant` captured when the session FSM
-    /// enters the `Established` state. Populated by the
+    /// Storage is `u64` milliseconds since the
+    /// [`SessionLinkActions::clock`] epoch (R294: migrated from
+    /// `std::time::Instant`). The lease comparator becomes a pure
+    /// `u64` subtract `now_ms.saturating_sub(stamp_ms) >= lease_ms`;
+    /// no `Duration` arithmetic, MCU-friendly (16-byte Duration
+    /// halved to 8-byte u64), and the storage form matches the
+    /// [`TimeSource::now_monotonic_ms`] contract that wz callers
+    /// will use across AP + Phase W targets.
+    pub last_inbound_keepalive_at: Mutex<Option<u64>>,
+    /// R84 — monotonic timestamp in milliseconds captured when the
+    /// session FSM enters the `Established` state. Populated by the
     /// `record_established_at()` Lua action wired to the
     /// `Established.onentry` block in `session_fsm_unicast.scxml`.
     /// Consumers (specifically `check_lease_deadline`) fall back to
@@ -546,11 +551,24 @@ pub struct SessionLinkActions {
     /// ("lease counts from Established entry"); the prior R77
     /// behaviour was `NoBaseline` indefinitely in that case.
     ///
-    /// Resolution and clock semantics match
-    /// `last_inbound_keepalive_at` — both use `std::time::Instant`
-    /// so the lease comparator subtracts them with a single
-    /// monotonic source.
-    pub established_at: Mutex<Option<Instant>>,
+    /// Storage form and clock semantics match
+    /// `last_inbound_keepalive_at` — both are `u64` ms since the
+    /// shared [`SessionLinkActions::clock`] epoch (R294 migration
+    /// from `std::time::Instant`); the lease comparator subtracts
+    /// them as pure `u64` arithmetic.
+    pub established_at: Mutex<Option<u64>>,
+    /// R294 — monotonic clock shared with the surrounding
+    /// drive_session loop. `TokioTime` is `Copy + Clone` (R263), so
+    /// every field that needs a `now_monotonic_ms()` read holds a
+    /// value-copy; the epoch is shared because the runner.rs
+    /// constructs one `TokioTime` and passes it to both
+    /// [`SessionLinkActions::new`] and
+    /// [`drive_session_until_terminal`]'s `clock` parameter (R263
+    /// shared-epoch invariant). Tests that do not exercise the
+    /// keepalive-or-lease comparator path may pass any fresh
+    /// `TokioTime::new()`; the per-test isolated epoch is fine
+    /// because there is no cross-test stamp comparison.
+    pub clock: TokioTime,
     /// R86 — `zid` field captured from the most recent inbound
     /// `InitSyn` frame (`InboundFrame::Init { is_ack: false, .. }`).
     /// The Accepting side reads this slot inside
@@ -803,8 +821,17 @@ impl SessionLinkActions {
     /// Construct a session action bundle for one logical FSM instance.
     /// The `params` are captured by value; production callers
     /// supplying per-deploy values stage them once at session
-    /// construction.
-    pub fn new(driver: Arc<dyn BoxedLinkDriver>, params: SessionInitParams) -> Arc<Self> {
+    /// construction. `clock` is the shared monotonic clock (R263 +
+    /// R294) consumed by [`Self::handle_inbound`] and the
+    /// `record_established_at` Lua action; production callers pass
+    /// the same `TokioTime` that [`drive_session_until_terminal`]
+    /// receives so the lease comparator's `now_ms` and the recorded
+    /// `keepalive_ms` / `established_ms` share an epoch.
+    pub fn new(
+        driver: Arc<dyn BoxedLinkDriver>,
+        params: SessionInitParams,
+        clock: TokioTime,
+    ) -> Arc<Self> {
         // R121e — seed the outbound Frame SN with `params.initial_sn`
         // so the first emitted Frame matches the value announced in
         // the OpenSyn/OpenAck body. The peer enforces this start
@@ -818,6 +845,7 @@ impl SessionLinkActions {
             inbound_cookie: Mutex::new(None),
             last_inbound_keepalive_at: Mutex::new(None),
             established_at: Mutex::new(None),
+            clock,
             inbound_peer_zid: Mutex::new(None),
             inbound_opensyn_cookie: Mutex::new(None),
             // R121f1 — default ext chains seed both Init roles with the
@@ -989,10 +1017,13 @@ impl SessionLinkActions {
             }
             InboundFrame::KeepAlive { .. } => {
                 // R72b — record receive time so the lease deadline
-                // comparator (now - stamp < lease) advances. Reading
-                // Instant::now() inside the lock keeps the captured
-                // stamp synchronous with the wire-arrival moment.
-                *self.last_inbound_keepalive_at.lock().unwrap() = Some(Instant::now());
+                // comparator (now_ms - stamp_ms < lease_ms) advances.
+                // R294 — read `self.clock.now_monotonic_ms()` (shared
+                // epoch with drive_session_until_terminal's clock
+                // param) so the lease comparator's later `now_ms`
+                // read is on the same monotonic scale.
+                *self.last_inbound_keepalive_at.lock().unwrap() =
+                    Some(self.clock.now_monotonic_ms());
             }
             _ => {}
         }
@@ -1981,7 +2012,11 @@ pub fn register_state_internal_fns(lua: &dyn IScriptEngine, actions: &Arc<Sessio
     });
     bind_unit(lua, "record_established_at", actions, |a| {
         a.trace.lock().unwrap().record_established_at += 1;
-        *a.established_at.lock().unwrap() = Some(Instant::now());
+        // R294 — `a.clock.now_monotonic_ms()` reads the shared
+        // monotonic clock (same epoch as
+        // last_inbound_keepalive_at + drive_session_until_terminal)
+        // so the lease comparator's u64 subtract stays on one scale.
+        *a.established_at.lock().unwrap() = Some(a.clock.now_monotonic_ms());
     });
     bind_unit(lua, "start_lease_monitor", actions, |a| {
         a.trace.lock().unwrap().start_lease_monitor += 1;
@@ -6077,26 +6112,28 @@ pub enum LeaseCheckOutcome {
 /// slot foreshadowed by `inbound_to_fsm_event`'s `KeepAlive -> None`
 /// branch (lease-timer side effect orthogonal to the state graph).
 ///
-/// `now` is parameterised for test determinism. Production callers
-/// pass `Instant::now()`; tests stage a stamp via
-/// `last_inbound_keepalive_at` and pass `stamp + offset` as `now`
-/// so `duration_since` is deterministic without depending on
-/// wall-clock progression during the test.
+/// `now_ms` is parameterised for test determinism. Production
+/// callers pass `clock.now_monotonic_ms()` (the same clock used by
+/// [`SessionLinkActions::clock`]); tests stage a stamp via
+/// `last_inbound_keepalive_at` and pass `stamp_ms + offset_ms` as
+/// `now_ms` so the comparator is deterministic without depending
+/// on wall-clock progression during the test.
 ///
 /// `params.lease_in_seconds` picks the integer unit per the
-/// `_Z_FLAG_T_OPEN_T` wire semantics; the comparator converts the
-/// integer through the matching `Duration` constructor before the
-/// `>=` check.
+/// `_Z_FLAG_T_OPEN_T` wire semantics; the comparator multiplies
+/// the seconds reading by 1000 before the `>=` check so the lease
+/// arithmetic stays on the same `u64` ms scale as the stamp / now
+/// inputs (R294 migration from `Duration::from_secs/from_millis`).
 pub fn check_lease_deadline(
     actions: &Arc<SessionLinkActions>,
     engine: &mut Engine<crate::session_fsm_unicast::SessionFsmUnicastPolicy>,
-    now: Instant,
+    now_ms: u64,
 ) -> LeaseCheckOutcome {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-    let lease = if actions.params.lease_in_seconds {
-        Duration::from_secs(actions.params.lease)
+    let lease_ms = if actions.params.lease_in_seconds {
+        actions.params.lease.saturating_mul(1000)
     } else {
-        Duration::from_millis(actions.params.lease)
+        actions.params.lease
     };
     // R84 — baseline is the most recent of established_at and
     // last_inbound_keepalive_at. The KeepAlive stamp resets the lease
@@ -6115,7 +6152,7 @@ pub fn check_lease_deadline(
     };
     match baseline {
         None => LeaseCheckOutcome::NoBaseline,
-        Some(stamp) if now.duration_since(stamp) >= lease => {
+        Some(stamp_ms) if now_ms.saturating_sub(stamp_ms) >= lease_ms => {
             engine.process_event(E::LeaseExpired);
             LeaseCheckOutcome::Expired
         }
@@ -6250,17 +6287,22 @@ pub enum DriverOutcome {
 /// discard the outcomes silently. Test callers that do not care
 /// about per-iteration events pass `|_| {}` as a no-op closure.
 ///
-/// R260 — `clock: &T` (`T: TimeSource`) is the trait-mediated sleep
-/// source used to race the lease deadline. The lease comparator
-/// itself still reads `std::time::Instant` (the stamp / deadline
-/// storage types in [`SessionLinkActions`] are unchanged this round
-/// — full `Instant -> u64 ms` storage migration is a separate
-/// future round); only the `tokio::select!` sleep branch routes
-/// through `TimeSource::sleep` so wz-runtime-tokio's last internal
-/// `tokio::time::sleep` site disappears. Production AP callers pass
-/// `&TokioTime::new()` (or any owned `TokioTime` reference); MCU
-/// callers will pass an embassy / FreeRTOS impl once Phase W lwIP
-/// integration arrives.
+/// R260 + R294 — `clock: &T` (`T: TimeSource`) is the trait-mediated
+/// clock used to race the lease deadline AND to read `now_ms` for
+/// the lease comparator. The R260 round routed only the
+/// `tokio::select!` sleep branch through `TimeSource::sleep`; R294
+/// finished the migration by lifting the storage / comparator path
+/// from `std::time::Instant` + `Duration::from_secs/from_millis`
+/// to pure `u64` ms arithmetic. The lease deadline computation,
+/// the remaining-window subtraction, and the
+/// [`check_lease_deadline`] call now read `clock.now_monotonic_ms()`
+/// directly; the [`SessionLinkActions::clock`] field carries a
+/// value-copy of the same epoch so
+/// [`SessionLinkActions::handle_inbound`] + the
+/// `record_established_at` Lua action record `u64` ms stamps on
+/// the same scale. Production AP callers pass `&TokioTime::new()`
+/// (or any owned `TokioTime` reference); MCU callers will pass an
+/// embassy / FreeRTOS impl once Phase W lwIP integration arrives.
 ///
 /// R268 — the prior `on_tick: G` per-iteration tick parameter
 /// (R262) was removed after R264 relocated the sole production
@@ -6286,10 +6328,10 @@ where
     F: FnMut(IterationEvent<'_>),
     T: TimeSource,
 {
-    let lease = if actions.params.lease_in_seconds {
-        Duration::from_secs(actions.params.lease)
+    let lease_ms = if actions.params.lease_in_seconds {
+        actions.params.lease.saturating_mul(1000)
     } else {
-        Duration::from_millis(actions.params.lease)
+        actions.params.lease
     };
     let mut iter: usize = 0;
     loop {
@@ -6302,21 +6344,21 @@ where
             }
             iter += 1;
         }
-        let lease_deadline = {
-            let stamp = *actions.last_inbound_keepalive_at.lock().unwrap();
-            stamp.map(|s| s + lease)
+        let lease_deadline_ms = {
+            let stamp_ms = *actions.last_inbound_keepalive_at.lock().unwrap();
+            stamp_ms.map(|s| s.saturating_add(lease_ms))
         };
-        match lease_deadline {
-            Some(deadline) => {
-                let now = Instant::now();
-                let remaining_ms = deadline.saturating_duration_since(now).as_millis() as u64;
+        match lease_deadline_ms {
+            Some(deadline_ms) => {
+                let now_ms = clock.now_monotonic_ms();
+                let remaining_ms = deadline_ms.saturating_sub(now_ms);
                 tokio::select! {
                     outcome = poll_and_dispatch_one(driver, actions, engine) => {
                         on_event(IterationEvent::Poll(&outcome));
                     }
                     _ = clock.sleep(remaining_ms) => {
                         let lease_outcome =
-                            check_lease_deadline(actions, engine, Instant::now());
+                            check_lease_deadline(actions, engine, clock.now_monotonic_ms());
                         on_event(IterationEvent::Lease(lease_outcome));
                     }
                 }
@@ -9681,7 +9723,7 @@ mod tests {
             cookie_signing_key: SigningKey::new(vec![0xAB; 32])
                 .expect("32-byte demo key satisfies the >=32 invariant"),
         };
-        let actions = SessionLinkActions::new(driver.clone(), params);
+        let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
 
         let response = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"21.0").build();
         let expected_wire = encode_frame_with_response(
@@ -9763,7 +9805,7 @@ mod tests {
                 cookie_signing_key: SigningKey::new(vec![0xAB; 32])
                     .expect("32-byte demo key satisfies the >=32 invariant"),
             };
-            let actions = SessionLinkActions::new(driver.clone(), params);
+            let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
             assert_eq!(
                 actions.trace_snapshot().send_close_frame_with_reason,
                 0,
@@ -9842,7 +9884,7 @@ mod tests {
             cookie_signing_key: SigningKey::new(vec![0xAB; 32])
                 .expect("32-byte demo key satisfies the >=32 invariant"),
         };
-        let actions = SessionLinkActions::new(driver.clone(), params);
+        let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
 
         actions.send_response(ResponseReplyBuilder::new(99, 0, Some("k"), b"v").build());
         actions.send_response_final(99);
@@ -9886,7 +9928,7 @@ mod tests {
             cookie_signing_key: SigningKey::new(vec![0xAB; 32])
                 .expect("32-byte demo key satisfies the >=32 invariant"),
         };
-        let actions = SessionLinkActions::new(Arc::new(NullDriver), params);
+        let actions = SessionLinkActions::new(Arc::new(NullDriver), params, TokioTime::new());
         assert_eq!(
             actions.next_outbound_frame_sn(),
             42,
@@ -10759,7 +10801,11 @@ mod tests {
         // PushMetadata, build_push_literal_with_meta, and
         // encode_frame_with_push.
         let driver = std::sync::Arc::new(crate::session_glue::tests::CaptureDriver::new());
-        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
         let meta = PushMetadata {
             source_info: Some(SourceInfo::new(&[0xCA, 0xFE], 5, 7)),
             qos: Some(QosLevel::from_raw(0x10)),
@@ -10828,7 +10874,11 @@ mod tests {
     #[test]
     fn send_declare_keyexpr_populates_outbound_mapping_table() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
         assert!(
             actions.resolve_outbound_mapping(7).is_none(),
             "fresh table empty"
@@ -10860,7 +10910,11 @@ mod tests {
         // that semantic so a caller re-declaring a mapping doesn't
         // see stale resolution for later publishes.
         let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
         actions.send_declare_keyexpr(7, "home/v1");
         actions.send_declare_keyexpr(7, "home/v2");
         assert_eq!(
@@ -10873,7 +10927,11 @@ mod tests {
     #[test]
     fn send_undeclare_kexpr_removes_mapping_from_table() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
         actions.send_declare_keyexpr(7, "home/temp");
         assert!(actions.resolve_outbound_mapping(7).is_some());
 
@@ -10887,7 +10945,11 @@ mod tests {
     #[test]
     fn send_undeclare_kexpr_idempotent_on_unknown_id() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
         // Calling undeclare on an id that was never declared must not
         // panic — the HashMap::remove on absent key is a no-op.
         actions.send_undeclare_kexpr(42);
@@ -10901,7 +10963,11 @@ mod tests {
         // value they originally fetched. This pins the contract
         // that callers don't accidentally borrow the table slot.
         let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
         actions.send_declare_keyexpr(7, "home/temp");
         let resolved = actions.resolve_outbound_mapping(7).unwrap();
         actions.send_undeclare_kexpr(7);
@@ -10961,12 +11027,20 @@ mod tests {
         // baselines) stay unchanged when QueryOptions::default() is
         // threaded through Session::query.
         let driver_a = std::sync::Arc::new(CaptureDriver::new());
-        let actions_a = SessionLinkActions::new(driver_a.clone(), publish_meta_fixture_params());
+        let actions_a = SessionLinkActions::new(
+            driver_a.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
         actions_a.send_request_query_with_meta(42, 0, Some("home/temp"), &QueryMetadata::default());
         let with_meta = driver_a.frames.lock().unwrap()[0].0.clone();
 
         let driver_b = std::sync::Arc::new(CaptureDriver::new());
-        let actions_b = SessionLinkActions::new(driver_b.clone(), publish_meta_fixture_params());
+        let actions_b = SessionLinkActions::new(
+            driver_b.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
         actions_b.send_request_query(42, 0, Some("home/temp"));
         let no_meta = driver_b.frames.lock().unwrap()[0].0.clone();
 
@@ -10984,7 +11058,11 @@ mod tests {
         // QueryMetadata::target → RequestQueryBuilder::request_target
         // wiring.
         let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
         let meta = QueryMetadata {
             target: Some(QueryTarget::All),
             ..Default::default()
@@ -11006,7 +11084,11 @@ mod tests {
     #[test]
     fn send_request_query_with_meta_consolidation_emits_query_with_q_c_flag() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
         let meta = QueryMetadata {
             consolidation: Some(ConsolidationMode::Latest),
             ..Default::default()
@@ -11032,7 +11114,11 @@ mod tests {
     #[test]
     fn send_request_query_with_meta_attachment_emits_query_with_attachment_ext() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
         let meta = QueryMetadata {
             attachment: Some(b"q-att".to_vec()),
             ..Default::default()
@@ -11059,7 +11145,11 @@ mod tests {
         // inner slice. Wire frame ends up matching the
         // no-attachment shape.
         let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
         let meta = QueryMetadata {
             attachment: Some(Vec::new()),
             ..Default::default()
@@ -11084,7 +11174,11 @@ mod tests {
     #[test]
     fn send_request_query_with_meta_timeout_ms_emits_request_with_timeout_ext() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(driver.clone(), publish_meta_fixture_params());
+        let actions = SessionLinkActions::new(
+            driver.clone(),
+            publish_meta_fixture_params(),
+            TokioTime::new(),
+        );
         let meta = QueryMetadata {
             timeout_ms: 5_000,
             ..Default::default()

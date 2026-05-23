@@ -44,6 +44,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use sce_rust_runtime::Engine;
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
 };
@@ -84,7 +85,11 @@ impl BoxedLinkDriver for RecordingDriver {
 #[test]
 fn r59_engine_drives_full_outbound_initiator_happy_path() {
     let driver = Arc::new(RecordingDriver::default());
-    let actions = SessionLinkActions::new(driver.clone(), fixture_session_init_params());
+    let actions = SessionLinkActions::new(
+        driver.clone(),
+        fixture_session_init_params(),
+        TokioTime::new(),
+    );
     let lua = install_session_actions_for_test(actions.clone());
 
     let mut engine: Engine<SessionFsmUnicastPolicy> =

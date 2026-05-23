@@ -25,6 +25,7 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
     BoxedLinkDriver, CloseReason, SessionInitParams, SessionLinkActions, SigningKey,
 };
@@ -96,7 +97,7 @@ fn fixture_params() -> SessionInitParams {
 #[test]
 fn r57_session_script_actions_produce_real_wire_bytes() {
     let driver = Arc::new(RecordingDriver::default());
-    let actions = SessionLinkActions::new(driver.clone(), fixture_params());
+    let actions = SessionLinkActions::new(driver.clone(), fixture_params(), TokioTime::new());
     let lua = install_session_actions_for_test(actions.clone());
 
     // ─── Step 1: initiator handshake path ───────────────────────
@@ -256,6 +257,7 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     let second_actions = SessionLinkActions::new(
         second_driver.clone() as Arc<dyn BoxedLinkDriver>,
         fixture_session_init_params(),
+        TokioTime::new(),
     );
     let second_lua = install_session_actions_for_test(second_actions.clone());
     dispatch_script(&*second_lua, "link_driver_open")

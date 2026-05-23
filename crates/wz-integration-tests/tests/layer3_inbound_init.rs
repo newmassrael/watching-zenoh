@@ -26,6 +26,7 @@
 
 use std::sync::Arc;
 
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
     parse_inbound, BoxedLinkDriver, InboundFrame, InboundParseError, SessionLinkActions,
 };
@@ -177,7 +178,7 @@ fn handle_inbound_populates_cookie_slot_from_initack() {
     );
 
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
-    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
 
     let pre = actions.inbound_cookie.lock().unwrap().clone();
     assert!(pre.is_none(), "cookie slot starts empty");
