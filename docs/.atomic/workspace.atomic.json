@@ -15530,6 +15530,58 @@
         "R302a/R302b carries unchanged."
       ]
     },
+    "Round 305": {
+      "decision_summary": "R305 introduces ChildGuard RAII wrapper across 9 Layer E tests + 2 unit-test mechanical proofs, eliminating the orphan-subprocess class that caused the R302b push-time .git/run-ci.lock outage.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs::common: new `ChildGuard` struct wrapping `std::process::Child`. `wrap(label, child)` constructs from an already-spawned Child; `child_mut()` returns `&mut Child` for the existing `.kill() / .wait()` call shape; `label()` exposes the spawn-time label for diagnostics. `impl Drop` runs `kill + wait` idempotently — explicit cleanup in the test body still works, and the guard's Drop is the safety net for any panic-unwind path.",
+        "9 Layer E tests refactored to wrap every `Command::spawn().expect(...)` in `ChildGuard::wrap(label, ...)` and change `child.kill() / .wait()` to `child.child_mut().kill() / .wait()`: ap_demo_round_trip.rs, wz_initiator_to_zsub.rs, wz_initiator_to_wz_acceptor.rs, wz_remote_declare_round_trip.rs, wz_publisher_to_zsub.rs, wz_liveliness_subscriber_round_trip.rs, wz_publisher_del_to_zsub.rs, wz_query_reply_round_trip.rs, wz_queryable_round_trip.rs. Each wrapped Child uses a short human label (e.g. `\"wz-ap-demo acceptor (--listen --declare-token)\"`) for forensic logs.",
+        "wz_remote_declare_round_trip.rs + wz_liveliness_subscriber_round_trip.rs: `graceful_terminate(&mut child, ...)` call sites updated to `graceful_terminate(child.child_mut(), ...)`. The helper signature stays `&mut std::process::Child`, so passing through the guard's `child_mut()` keeps SIGTERM-based graceful shutdown working alongside the panic safety net.",
+        "2 unit tests in src/lib.rs added: `child_guard_drop_kills_running_child_on_normal_exit` spawns `sleep 60`, wraps in ChildGuard, exits the inner scope, then verifies the PID is gone via `kill -0 <pid>` (exits non-zero on ESRCH). `child_guard_drop_kills_running_child_on_panic_unwind` spawns sleep 60, publishes its PID through `Arc<Mutex<Option<u32>>>`, wraps in ChildGuard inside a `std::panic::catch_unwind` closure, panics, then asserts the captured PID is dead post-unwind. Mechanical proof that the Drop runs on both exit shapes."
+      ],
+      "verification_bullets": [
+        "cargo check -p wz-integration-tests --tests → pass 1.41s. All 9 refactored Layer E tests + the rest of the integration suite compile clean.",
+        "cargo test -p wz-integration-tests --lib → pass. Both new unit tests succeed: `kill: (PID): 그런 프로세스가 없음` (the `kill -0` ESRCH stderr from the post-Drop liveness check) appears in the test stdout, confirming the child was reaped after both the normal-exit and panic-unwind paths.",
+        "10 iterations of `cargo test -p wz-integration-tests --release --tests -- --ignored --test-threads=1` → pass=10 fail=0 across all 9 Layer E tests = 90 total e2e runs. Sequential `--test-threads=1` keeps PortReservation deterministic; no ChildGuard-related regression observable.",
+        "fuser .git/run-ci.lock during measurement → no PID held. No orphan wz-ap-demo / z_sub / stdbuf processes accumulated in `ps -p`.",
+        "validate_workspace: docs=13/13, entries=303 unchanged, sections=215 unchanged, T1=0, RT=13/13, GENERATED.md=sync. Pure test-infrastructure mutation; mnemosyne doc surface untouched."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "Test harness PanicGuard pattern is now retroactively idiomatic for any future Layer E (or any subprocess-spawning) test. Memory feedback_no_flaky_ever.md should reference R305's ChildGuard as the canonical fix-shape for orphan-leak symptoms.",
+        "R304 carry (wz-ap-demo stderr non-UTF-8 byte source pinning) still open. Lossy decode + ChildGuard cleanup together mask the symptom; the underlying byte source (likely a tokio worker-pool panic backtrace interleaving with libc abort) is not pinned. Strace 1000x run remains a low-priority follow-up.",
+        "Future cleanup carry: `graceful_terminate` helper in wz_remote_declare_round_trip.rs + wz_liveliness_subscriber_round_trip.rs is duplicated. Lift to common::graceful_terminate(child_mut, timeout) for DRY. Not blocking; R305 keeps the duplication for the minimal-diff refactor.",
+        "Process-lifecycle property: ChildGuard's Drop runs at SIGKILL (`Child::kill` is SIGKILL on Linux per std docs). The R278 graceful-shutdown path that relies on SIGTERM still works because that pathway uses `Command::new(\"kill\").arg(\"-TERM\")` explicitly before the guard's scope exit; the guard only fires if explicit graceful shutdown was skipped or failed.",
+        "R302a / R302b / R303 / R304 carries unchanged.",
+        "Next mechanical track: R306 query domain #[cfg(feature)] gates (R302c sequence). 6 active features (query-get, query-queryable, query-reply, query-target, query-timeout, query-consolidation). Touches src/query.rs entire module + src/reply.rs partial + src/session.rs Session::get + declare_queryable + 4 aliased variants."
+      ],
+      "publishable_decision_summary": "R305 introduces ChildGuard RAII wrapper across 9 Layer E tests + 2 unit-test mechanical proofs, eliminating the orphan-subprocess class that caused the R302b push-time .git/run-ci.lock outage.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs::common: new `ChildGuard` struct wrapping `std::process::Child`. `wrap(label, child)` constructs from an already-spawned Child; `child_mut()` returns `&mut Child` for the existing `.kill() / .wait()` call shape; `label()` exposes the spawn-time label for diagnostics. `impl Drop` runs `kill + wait` idempotently — explicit cleanup in the test body still works, and the guard's Drop is the safety net for any panic-unwind path.",
+        "9 Layer E tests refactored to wrap every `Command::spawn().expect(...)` in `ChildGuard::wrap(label, ...)` and change `child.kill() / .wait()` to `child.child_mut().kill() / .wait()`: ap_demo_round_trip.rs, wz_initiator_to_zsub.rs, wz_initiator_to_wz_acceptor.rs, wz_remote_declare_round_trip.rs, wz_publisher_to_zsub.rs, wz_liveliness_subscriber_round_trip.rs, wz_publisher_del_to_zsub.rs, wz_query_reply_round_trip.rs, wz_queryable_round_trip.rs. Each wrapped Child uses a short human label (e.g. `\"wz-ap-demo acceptor (--listen --declare-token)\"`) for forensic logs.",
+        "wz_remote_declare_round_trip.rs + wz_liveliness_subscriber_round_trip.rs: `graceful_terminate(&mut child, ...)` call sites updated to `graceful_terminate(child.child_mut(), ...)`. The helper signature stays `&mut std::process::Child`, so passing through the guard's `child_mut()` keeps SIGTERM-based graceful shutdown working alongside the panic safety net.",
+        "2 unit tests in src/lib.rs added: `child_guard_drop_kills_running_child_on_normal_exit` spawns `sleep 60`, wraps in ChildGuard, exits the inner scope, then verifies the PID is gone via `kill -0 <pid>` (exits non-zero on ESRCH). `child_guard_drop_kills_running_child_on_panic_unwind` spawns sleep 60, publishes its PID through `Arc<Mutex<Option<u32>>>`, wraps in ChildGuard inside a `std::panic::catch_unwind` closure, panics, then asserts the captured PID is dead post-unwind. Mechanical proof that the Drop runs on both exit shapes."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check -p wz-integration-tests --tests → pass 1.41s. All 9 refactored Layer E tests + the rest of the integration suite compile clean.",
+        "cargo test -p wz-integration-tests --lib → pass. Both new unit tests succeed: `kill: (PID): 그런 프로세스가 없음` (the `kill -0` ESRCH stderr from the post-Drop liveness check) appears in the test stdout, confirming the child was reaped after both the normal-exit and panic-unwind paths.",
+        "10 iterations of `cargo test -p wz-integration-tests --release --tests -- --ignored --test-threads=1` → pass=10 fail=0 across all 9 Layer E tests = 90 total e2e runs. Sequential `--test-threads=1` keeps PortReservation deterministic; no ChildGuard-related regression observable.",
+        "fuser .git/run-ci.lock during measurement → no PID held. No orphan wz-ap-demo / z_sub / stdbuf processes accumulated in `ps -p`.",
+        "validate_workspace: docs=13/13, entries=303 unchanged, sections=215 unchanged, T1=0, RT=13/13, GENERATED.md=sync. Pure test-infrastructure mutation; mnemosyne doc surface untouched."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Test harness PanicGuard pattern is now retroactively idiomatic for any future Layer E (or any subprocess-spawning) test. Memory feedback_no_flaky_ever.md should reference R305's ChildGuard as the canonical fix-shape for orphan-leak symptoms.",
+        "R304 carry (wz-ap-demo stderr non-UTF-8 byte source pinning) still open. Lossy decode + ChildGuard cleanup together mask the symptom; the underlying byte source (likely a tokio worker-pool panic backtrace interleaving with libc abort) is not pinned. Strace 1000x run remains a low-priority follow-up.",
+        "Future cleanup carry: `graceful_terminate` helper in wz_remote_declare_round_trip.rs + wz_liveliness_subscriber_round_trip.rs is duplicated. Lift to common::graceful_terminate(child_mut, timeout) for DRY. Not blocking; R305 keeps the duplication for the minimal-diff refactor.",
+        "Process-lifecycle property: ChildGuard's Drop runs at SIGKILL (`Child::kill` is SIGKILL on Linux per std docs). The R278 graceful-shutdown path that relies on SIGTERM still works because that pathway uses `Command::new(\"kill\").arg(\"-TERM\")` explicitly before the guard's scope exit; the guard only fires if explicit graceful shutdown was skipped or failed.",
+        "R302a / R302b / R303 / R304 carries unchanged.",
+        "Next mechanical track: R306 query domain #[cfg(feature)] gates (R302c sequence). 6 active features (query-get, query-queryable, query-reply, query-target, query-timeout, query-consolidation). Touches src/query.rs entire module + src/reply.rs partial + src/session.rs Session::get + declare_queryable + 4 aliased variants."
+      ]
+    },
     "Round 31": {
       "decision_summary": "Phase B5 entry — first codec-kind SCXMLs land. sources/codecs/keep_alive.scxml (empty body, transport-layer KeepAlive frame) + sources/codecs/close.scxml (1-byte reason code, session-close variant arm) authored against vendor pin 11f1032d. Opens the ~30-codec wire-message track.",
       "changes_bullets": [
