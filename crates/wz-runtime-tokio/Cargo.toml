@@ -42,6 +42,18 @@ description = "Tokio + mio epoll runtime for watching-zenoh AP linux target (Pha
 name = "wz_runtime_tokio"
 path = "src/lib.rs"
 
+# R302b — first source-level Cargo features. `default = [...]` keeps
+# existing in-workspace consumers (wz-ap-demo, integration tests,
+# session_fsm tests) building unchanged; opt-out via
+# `cargo check --no-default-features` exercises the feature-off path.
+# Downstream of the `wz` facade these features are forwarded via
+# `wz-runtime-tokio?/liveliness-token` etc. so a wz consumer enabling
+# `preset-mcu-minimal` (no liveliness) gets the slim build.
+[features]
+default = ["liveliness-token", "liveliness-subscriber"]
+liveliness-token = []
+liveliness-subscriber = []
+
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }
 

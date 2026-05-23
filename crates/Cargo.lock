@@ -1365,6 +1365,9 @@ dependencies = [
 [[package]]
 name = "wz"
 version = "0.1.0"
+dependencies = [
+ "wz-runtime-tokio",
+]
 
 [[package]]
 name = "wz-ap-demo"

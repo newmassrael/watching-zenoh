@@ -65,7 +65,9 @@ use std::collections::HashMap;
 
 use wz_codecs::wireexpr::WireexprVariant;
 
+#[cfg(feature = "liveliness-token")]
 mod liveliness;
+#[cfg(feature = "liveliness-subscriber")]
 mod liveliness_subscriber;
 mod queryable;
 mod subscriber;
@@ -75,7 +77,9 @@ mod cross_tests;
 #[cfg(test)]
 mod test_helpers;
 
+#[cfg(feature = "liveliness-token")]
 pub use liveliness::{DeclTokenCallback, LivelinessRegistry, UndeclTokenCallback};
+#[cfg(feature = "liveliness-subscriber")]
 pub use liveliness_subscriber::{
     LivelinessSample, LivelinessSampleCallback, LivelinessSampleKind, LivelinessSubscriberRegistry,
 };

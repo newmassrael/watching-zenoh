@@ -66,7 +66,9 @@ use std::sync::{Arc, Mutex};
 use wz_codecs::query::Query;
 use wz_runtime_core::TimeSource;
 
+#[cfg(feature = "liveliness-subscriber")]
 use crate::declare::{LivelinessSample, LivelinessSampleCallback};
+#[cfg(feature = "liveliness-token")]
 use crate::keyexpr_canon::OutboundKeyexprError;
 use crate::locality::Locality;
 use crate::observer::ApplicationLayerObserver;
@@ -76,9 +78,10 @@ use crate::reply::{InboundReply, ReplyHandle};
 use crate::sample::{
     EncodingHint, QosLevel, Reliability, Sample, SampleKind, SourceInfo, TimestampHint,
 };
+#[cfg(feature = "liveliness-token")]
+use crate::session_glue::SendDeclareError;
 use crate::session_glue::{
-    ConsolidationMode, PushMetadata, QueryMetadata, QueryTarget, SendDeclareError,
-    SessionLinkActions,
+    ConsolidationMode, PushMetadata, QueryMetadata, QueryTarget, SessionLinkActions,
 };
 
 /// Options bundle for [`Session::publish`]. Carries the locality
@@ -1359,6 +1362,7 @@ impl Session {
     /// bookkeeping leak: `alloc_next_token_id` is a pure counter
     /// `fetch_add`, and a skipped id has no protocol meaning on
     /// either side per zenoh-pico's entity-id contract).
+    #[cfg(feature = "liveliness-token")]
     pub fn declare_token(
         &self,
         keyexpr: impl Into<String>,
@@ -1414,6 +1418,7 @@ impl Session {
     /// [`SubscribeAliasError`] / [`QueryableAliasError`] /
     /// [`QueryAliasError`] / [`PublishAliasError`] on the token
     /// side.
+    #[cfg(feature = "liveliness-token")]
     pub fn declare_token_aliased(
         &self,
         mapping_id: u64,
@@ -1533,6 +1538,7 @@ impl Session {
     /// switching this method to `Result<LivelinessSubscriber, _>` is
     /// large enough to warrant a dedicated round across the whole
     /// declare_* surface for uniformity.
+    #[cfg(feature = "liveliness-subscriber")]
     pub fn declare_liveliness_subscriber(
         &self,
         keyexpr: impl Into<String>,
@@ -1630,6 +1636,7 @@ impl Session {
     /// session-state-dependent retry loop. No slot register, no
     /// interest-id allocation, no wire emit on either early-return
     /// path.
+    #[cfg(feature = "liveliness-subscriber")]
     pub fn declare_liveliness_subscriber_aliased(
         &self,
         mapping_id: u64,
@@ -2478,10 +2485,12 @@ impl std::error::Error for QueryableAliasError {}
 /// fields (e.g. completeness flag, expiry hint, attachment) without
 /// breaking external callers. Construct via [`Self::default`] /
 /// [`Self::new`].
+#[cfg(feature = "liveliness-token")]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct LivelinessOptions {}
 
+#[cfg(feature = "liveliness-token")]
 impl LivelinessOptions {
     /// Default options — currently empty, mirroring zenoh-pico's
     /// `z_liveliness_token_options_default` which zeroes out the
@@ -2535,6 +2544,7 @@ impl LivelinessOptions {
 ///
 /// `#[non_exhaustive]`. Construct only through
 /// [`Session::declare_token`] / [`Session::declare_token_aliased`].
+#[cfg(feature = "liveliness-token")]
 #[non_exhaustive]
 pub struct LivelinessToken {
     session: Session,
@@ -2543,6 +2553,7 @@ pub struct LivelinessToken {
     options: LivelinessOptions,
 }
 
+#[cfg(feature = "liveliness-token")]
 impl LivelinessToken {
     /// The stable token id allocated at declare time by
     /// [`SessionLinkActions::alloc_next_token_id`]. Exposed for
@@ -2590,6 +2601,7 @@ impl LivelinessToken {
     }
 }
 
+#[cfg(feature = "liveliness-token")]
 impl Drop for LivelinessToken {
     fn drop(&mut self) {
         // R248 RAII — emit Declare(UndeclToken) so the peer's
@@ -2609,6 +2621,7 @@ impl Drop for LivelinessToken {
 /// [`SubscribeAliasError`] / [`QueryableAliasError`] /
 /// [`QueryAliasError`] / [`PublishAliasError`] on the liveliness
 /// token side.
+#[cfg(feature = "liveliness-token")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LivelinessAliasError {
     /// No prior `send_declare_keyexpr` registered this id on the
@@ -2625,6 +2638,7 @@ pub enum LivelinessAliasError {
     InvalidKeyexpr(OutboundKeyexprError),
 }
 
+#[cfg(feature = "liveliness-token")]
 impl std::fmt::Display for LivelinessAliasError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2642,6 +2656,7 @@ impl std::fmt::Display for LivelinessAliasError {
     }
 }
 
+#[cfg(feature = "liveliness-token")]
 impl std::error::Error for LivelinessAliasError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -2664,6 +2679,7 @@ impl std::error::Error for LivelinessAliasError {
 /// (`_Z_INTEREST_FLAG_CURRENT`) on the outbound Interest header per
 /// `vendor/zenoh-pico/src/net/liveliness.c:198`. `history = false`
 /// (default) only subscribes for future events.
+#[cfg(feature = "liveliness-subscriber")]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct LivelinessSubscriberOptions {
@@ -2672,6 +2688,7 @@ pub struct LivelinessSubscriberOptions {
     pub history: bool,
 }
 
+#[cfg(feature = "liveliness-subscriber")]
 impl LivelinessSubscriberOptions {
     /// Default options — `history = false`. Mirrors zenoh-pico's
     /// `z_liveliness_subscriber_options_default`.
@@ -2727,6 +2744,7 @@ impl LivelinessSubscriberOptions {
 ///
 /// `#[non_exhaustive]`. Construct only through
 /// [`Session::declare_liveliness_subscriber`].
+#[cfg(feature = "liveliness-subscriber")]
 #[non_exhaustive]
 pub struct LivelinessSubscriber {
     session: Session,
@@ -2735,6 +2753,7 @@ pub struct LivelinessSubscriber {
     options: LivelinessSubscriberOptions,
 }
 
+#[cfg(feature = "liveliness-subscriber")]
 impl LivelinessSubscriber {
     /// The stable interest id allocated at declare time by
     /// [`crate::session_glue::SessionLinkActions::alloc_next_interest_id`].
@@ -2797,6 +2816,7 @@ impl LivelinessSubscriber {
     }
 }
 
+#[cfg(feature = "liveliness-subscriber")]
 impl Drop for LivelinessSubscriber {
     fn drop(&mut self) {
         // R280 RAII — unregister the local slot first so any racing
@@ -2838,6 +2858,7 @@ impl Drop for LivelinessSubscriber {
 /// of the declare_* surface is a future-round carry (see
 /// [`Session::declare_liveliness_subscriber`] doc-comment on the
 /// asymmetric gate).
+#[cfg(feature = "liveliness-subscriber")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LivelinessSubscriberAliasError {
     /// R282 — no prior `send_declare_keyexpr` registered this id on
@@ -2858,6 +2879,7 @@ pub enum LivelinessSubscriberAliasError {
     NotEstablished,
 }
 
+#[cfg(feature = "liveliness-subscriber")]
 impl std::fmt::Display for LivelinessSubscriberAliasError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2876,6 +2898,7 @@ impl std::fmt::Display for LivelinessSubscriberAliasError {
     }
 }
 
+#[cfg(feature = "liveliness-subscriber")]
 impl std::error::Error for LivelinessSubscriberAliasError {}
 
 /// R234 — typed error returned by

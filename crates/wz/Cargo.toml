@@ -48,6 +48,19 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+# R302b — wz-runtime-tokio enters the facade as an OPTIONAL dependency
+# with default-features = false. The forwarding rules below decide
+# which wz-runtime-tokio features get enabled based on which wz
+# features the consumer selects. Consumers who enable `runtime-tokio`
+# pull the crate at all; consumers who additionally enable
+# `liveliness-token` / `liveliness-subscriber` get the gated symbols
+# inside wz-runtime-tokio. Other facade features stay no-op labels
+# until their owning sub-crate enters the workspace in future R302c+
+# rounds.
+
+[dependencies]
+wz-runtime-tokio = { path = "../wz-runtime-tokio", optional = true, default-features = false }
+
 # ============================================================
 # [features] — 169 entries per R301 catalog
 # ============================================================
@@ -124,8 +137,11 @@ link-tx-cache = []
 liveliness-get = ["query-get"]
 liveliness-historical-samples = ["liveliness-history"]
 liveliness-history = []
-liveliness-subscriber = []
-liveliness-token = []
+# R302b — first source-gated atomic features. Forward into
+# wz-runtime-tokio iff the runtime-tokio feature is also enabled
+# (cargo's `?` syntax: forward only if the optional crate is active).
+liveliness-subscriber = ["wz-runtime-tokio?/liveliness-subscriber"]
+liveliness-token = ["wz-runtime-tokio?/liveliness-token"]
 
 # ----- domain: locator (9 atomic, 3 active / 6 reserved) -----
 locator-iface = []
@@ -184,7 +200,11 @@ routing-static-routes = ["routing-router"]
 runtime-async-std = []
 runtime-lwip = []
 runtime-no-std = []
-runtime-tokio = []
+# R302b — runtime-tokio pulls the wz-runtime-tokio crate into the
+# build via `dep:` syntax. Bare `runtime-tokio` with no sub-feature
+# forwards (no liveliness-* etc.) leaves wz-runtime-tokio compiled
+# with --no-default-features.
+runtime-tokio = ["dep:wz-runtime-tokio"]
 runtime-tokio-uring = ["runtime-tokio"]
 runtime-zero-copy = []
 
