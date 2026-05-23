@@ -81,6 +81,15 @@ use wz_codecs::response::{Response, ResponseVariant};
 use wz_codecs::response_final::ResponseFinal;
 use wz_codecs::wireexpr::WireexprVariant;
 
+// R307 — `query-queryable` gates the producer-side `QueryReply` enum
+// because it lives in `crate::query`, which is gated on the same
+// feature. The wire-receive path inside this module does not need
+// these types — only the loopback bridge (`impl From<QueryReply> for
+// InboundReply`) and the `deliver_local_*` helpers below do. A
+// `query-reply` consumer that wires no in-process queryable still
+// gets the wire-side `Response` dispatch path with the loopback
+// bridge elided.
+#[cfg(feature = "query-queryable")]
 use crate::query::{QueryReply, ReplyBody};
 use crate::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
 
@@ -159,6 +168,7 @@ pub struct InboundReply {
 /// the wire-emit side — every `QueryReply` carries enough state to
 /// be projected to *either* a wire `Response` (outbound) *or* an
 /// in-process `InboundReply` (loopback).
+#[cfg(feature = "query-queryable")]
 impl From<QueryReply> for InboundReply {
     fn from(reply: QueryReply) -> Self {
         match reply {
@@ -1284,6 +1294,7 @@ mod tests {
         assert!(reg.is_empty());
     }
 
+    #[cfg(feature = "query-queryable")]
     #[test]
     fn from_query_reply_put_projects_to_inbound_put() {
         use crate::query::{QueryReply, ReplyBody};
@@ -1302,6 +1313,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "query-queryable")]
     #[test]
     fn from_query_reply_del_projects_to_inbound_del() {
         use crate::query::{QueryReply, ReplyBody};
@@ -1320,6 +1332,7 @@ mod tests {
         // consumer InboundReply surface does not expose responder).
     }
 
+    #[cfg(feature = "query-queryable")]
     #[test]
     fn from_query_reply_err_projects_to_inbound_err() {
         use crate::query::QueryReply;

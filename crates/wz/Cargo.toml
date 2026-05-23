@@ -177,16 +177,26 @@ pubsub-source-info = []
 pubsub-timestamp = []
 
 # ----- domain: query (10 atomic, 6 active / 4 reserved) -----
+# R307 — six atomic features in the query domain forward into
+# `wz-runtime-tokio` (cargo `?` syntax: only when runtime-tokio is
+# also active). Internal implication edges live in
+# `wz-runtime-tokio/Cargo.toml::[features]` (e.g. `query-get =
+# ["query-reply"]`); the facade does not re-declare them so a future
+# alternative runtime can implement its own dependency shape without
+# the facade pre-committing to tokio-side semantics. `query-reply-err`
+# / `query-selector-parameters` / `query-source-info` /
+# `query-attachment` stay reserved (no source-level gate yet); they
+# remain pure feature-labels until their runtime impls land.
 query-attachment = ["attachment-bytes"]
-query-consolidation = []
-query-get = []
-query-queryable = []
-query-reply = []
+query-consolidation = ["wz-runtime-tokio?/query-consolidation"]
+query-get = ["wz-runtime-tokio?/query-get"]
+query-queryable = ["wz-runtime-tokio?/query-queryable"]
+query-reply = ["wz-runtime-tokio?/query-reply"]
 query-reply-err = []
 query-selector-parameters = []
 query-source-info = []
-query-target = []
-query-timeout = []
+query-target = ["wz-runtime-tokio?/query-target"]
+query-timeout = ["wz-runtime-tokio?/query-timeout"]
 
 # ----- domain: routing (6 atomic, 1 active / 5 reserved) -----
 routing-client = []

@@ -63,7 +63,18 @@
 
 use std::sync::{Arc, Mutex};
 
+// R307 — `wz_codecs::query::Query` is referenced bare only by the
+// loopback fan inside `Session::query` (`Query::default()`); the
+// `declare_queryable` callback signature uses the fully-qualified
+// path so it does not consume this `use`. The import therefore
+// follows the `query-get` gate, matching its sole bare-name call
+// site.
+#[cfg(feature = "query-get")]
 use wz_codecs::query::Query;
+// R307 — `TimeSource` is the generic-parameter bound on `Session::query`
+// and its aliased variants; it has no other use site in this file so
+// the import follows the same gate as those methods.
+#[cfg(feature = "query-get")]
 use wz_runtime_core::TimeSource;
 
 #[cfg(feature = "liveliness-subscriber")]
@@ -73,16 +84,39 @@ use crate::keyexpr_canon::OutboundKeyexprError;
 use crate::locality::Locality;
 use crate::observer::ApplicationLayerObserver;
 use crate::pubsub::SubscriptionId;
-use crate::query::{QueryReply, QueryResponder, QueryableId};
+// R307 — `crate::query` is gated on `feature = "query-queryable"`; the
+// re-imports here split by their narrower use site.
+// `QueryResponder` is the declare_queryable callback's second
+// argument; `QueryableId` is the `Queryable` handle's inner id —
+// both gate on `query-queryable`. `QueryReply` is only referenced
+// from `Session::query`'s loopback fan (Vec<QueryReply>); it gates
+// on `query-get` to match that sole call site.
+#[cfg(feature = "query-get")]
+use crate::query::QueryReply;
+#[cfg(feature = "query-queryable")]
+use crate::query::{QueryResponder, QueryableId};
+// R307 — `crate::reply` is gated on `feature = "query-reply"`;
+// `InboundReply` flows into the z_get caller's callback and
+// `ReplyHandle` is the return value of `Session::query`. The bare-
+// name use sites all live behind the `query-get` gate (Session::query
+// signature, Querier::get signature, QuerierAliased::get signature),
+// so the import follows that narrower gate. `query-get` implies
+// `query-reply` per `Cargo.toml::[features]`, so the underlying
+// module is always available where this import is needed.
+#[cfg(feature = "query-get")]
 use crate::reply::{InboundReply, ReplyHandle};
 use crate::sample::{
     EncodingHint, QosLevel, Reliability, Sample, SampleKind, SourceInfo, TimestampHint,
 };
 #[cfg(feature = "liveliness-token")]
 use crate::session_glue::SendDeclareError;
-use crate::session_glue::{
-    ConsolidationMode, PushMetadata, QueryMetadata, QueryTarget, SessionLinkActions,
-};
+use crate::session_glue::{PushMetadata, SessionLinkActions};
+// R307 — query-side wire-metadata types live in `session_glue` and
+// are only referenced from `QueryOptions` / `Session::query`. The
+// import gates on `query-get` so the symbol-elision matches the
+// `pub struct QueryOptions` + `pub fn query` gates below.
+#[cfg(feature = "query-get")]
+use crate::session_glue::{ConsolidationMode, QueryMetadata, QueryTarget};
 
 /// Options bundle for [`Session::publish`]. Carries the locality
 /// routing predicate (`allowed_destination`), the reliability hint
@@ -273,6 +307,13 @@ impl PublishOptions {
 /// `#[non_exhaustive]` so future rounds add fields without breaking
 /// callers. Construct via [`QueryOptions::get`] (or `default`) plus
 /// optional `with_*` setters — never struct-literal externally.
+///
+/// R307 — `#[cfg(feature = "query-get")]`. The struct + impl + every
+/// setter elide when `query-get` is off; `with_target` /
+/// `with_consolidation` / `with_timeout_ms` carry their own narrower
+/// gates so an `--features query-get` (no extras) build still
+/// compiles QueryOptions without those setters.
+#[cfg(feature = "query-get")]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct QueryOptions {
@@ -320,6 +361,7 @@ pub struct QueryOptions {
     pub timeout_ms: u32,
 }
 
+#[cfg(feature = "query-get")]
 impl QueryOptions {
     /// Default `Locality::Any` options — fans both wire and loopback
     /// branches. Mirror of zenoh-pico's `z_get_options_default`
@@ -336,6 +378,11 @@ impl QueryOptions {
 
     /// Pin the reply target hint. `Some(target)` flips the Q_T flag
     /// on the outbound Query so the peer respects the selection.
+    ///
+    /// R307 — gated on `feature = "query-target"`. The feature implies
+    /// `query-get` (see `Cargo.toml::[features]`), so this setter is
+    /// only visible in a build where `QueryOptions` itself compiles.
+    #[cfg(feature = "query-target")]
     pub fn with_target(mut self, target: QueryTarget) -> Self {
         self.target = Some(target);
         self
@@ -343,6 +390,10 @@ impl QueryOptions {
 
     /// Pin the reply consolidation hint. `Some(mode)` flips the Q_C
     /// flag on the outbound Query so the peer applies the mode.
+    ///
+    /// R307 — gated on `feature = "query-consolidation"` (implies
+    /// `query-get`).
+    #[cfg(feature = "query-consolidation")]
     pub fn with_consolidation(mut self, consolidation: ConsolidationMode) -> Self {
         self.consolidation = Some(consolidation);
         self
@@ -375,6 +426,14 @@ impl QueryOptions {
     /// default in place. Wire-side enforcement lands with the R240+
     /// ReplyRegistry timeout sweep; loopback ignores the value
     /// (synchronous round-trip).
+    ///
+    /// R307 — gated on `feature = "query-timeout"` (implies
+    /// `query-get`). The `deadline_ms` register-time computation in
+    /// `Session::query` stays unconditional under `query-get`; this
+    /// setter is the only user surface that can flip `timeout_ms`
+    /// above zero, so disabling the feature pins the field to the
+    /// zero/"never-expire" sentinel.
+    #[cfg(feature = "query-timeout")]
     pub fn with_timeout_ms(mut self, timeout_ms: u32) -> Self {
         self.timeout_ms = timeout_ms;
         self
@@ -848,6 +907,13 @@ impl Session {
     /// `_z_unsafe_register_pending_query` inside the session mutex,
     /// `_z_send_n_msg` outside, `_z_session_deliver_query_locally`
     /// reads the local queryable table under the session mutex.
+    ///
+    /// R307 — gated on `feature = "query-get"`. The implication chain
+    /// (`query-get` → `query-reply` + `query-queryable`) guarantees
+    /// both the `ReplyRegistry` pending-entry registration and the
+    /// loopback `QueryableRegistry::local_query` fan are available;
+    /// the body holds no further per-feature cfg.
+    #[cfg(feature = "query-get")]
     pub fn query<T: TimeSource>(
         &self,
         keyexpr: &str,
@@ -963,6 +1029,11 @@ impl Session {
     /// loopback_keyexpr are the wire-aliased triple, opts is the
     /// metadata bundle, clock is the R262 deadline source, and the
     /// two closures are the on_reply / on_final consumer callbacks.
+    ///
+    /// R307 — gated on `feature = "query-get"`. Same rationale as
+    /// [`Self::query`]; the aliased variant shares the same wire +
+    /// loopback dispatch contract.
+    #[cfg(feature = "query-get")]
     #[allow(clippy::too_many_arguments)]
     pub fn query_aliased<T: TimeSource>(
         &self,
@@ -1041,6 +1112,10 @@ impl Session {
     /// (declare-before-query ordering bug) and either re-declares
     /// the mapping or falls back to [`Self::query_aliased`] with an
     /// explicit `loopback_keyexpr`.
+    ///
+    /// R307 — gated on `feature = "query-get"`. Same rationale as
+    /// [`Self::query`].
+    #[cfg(feature = "query-get")]
     pub fn query_aliased_auto<T: TimeSource>(
         &self,
         mapping_id: u64,
@@ -1091,6 +1166,12 @@ impl Session {
     /// Use [`Querier::get`] to issue each query; the rid allocator
     /// hands a fresh rid per call so concurrent gets through the
     /// same Querier remain independent.
+    ///
+    /// R307 — gated on `feature = "query-get"`. The returned
+    /// [`Querier`] type itself carries the same gate; declaring a
+    /// querier without the feature would yield an unconstructible
+    /// handle.
+    #[cfg(feature = "query-get")]
     pub fn declare_querier(&self, keyexpr: impl Into<String>, options: QueryOptions) -> Querier {
         Querier {
             session: self.clone(),
@@ -1108,6 +1189,9 @@ impl Session {
     /// outbound `send_declare_keyexpr` that registers `mapping_id`
     /// on the peer is the caller's earlier responsibility; this
     /// constructor only aggregates state on the caller side.
+    ///
+    /// R307 — gated on `feature = "query-get"`.
+    #[cfg(feature = "query-get")]
     pub fn declare_querier_aliased(
         &self,
         mapping_id: u64,
@@ -1266,6 +1350,13 @@ impl Session {
     /// [`crate::query::QueryableRegistry::local_query`] (loopback,
     /// R238+). No wire frame is emitted at declare time — router-mode
     /// `DeclareQueryable` is elided in peer-only operation.
+    ///
+    /// R307 — gated on `feature = "query-queryable"`. The callback's
+    /// second-argument type [`QueryResponder`] and the returned
+    /// [`Queryable`] handle both live in the gated `crate::query`
+    /// module; an `query-queryable`-disabled build elides the symbol
+    /// pair.
+    #[cfg(feature = "query-queryable")]
     pub fn declare_queryable(
         &self,
         keyexpr: impl Into<String>,
@@ -1293,6 +1384,9 @@ impl Session {
     /// mapping table at declare time. Same one-shot-resolution
     /// contract as [`Self::declare_subscriber_aliased`]: subsequent
     /// `send_undeclare_kexpr` does NOT affect the Queryable handle.
+    ///
+    /// R307 — gated on `feature = "query-queryable"`.
+    #[cfg(feature = "query-queryable")]
     pub fn declare_queryable_aliased(
         &self,
         mapping_id: u64,
@@ -1712,6 +1806,11 @@ impl Session {
 /// the peer will reject and run loopback on a guessed literal that
 /// hands replies to a pending entry the application never
 /// registered for the correct keyexpr.
+///
+/// R307 — gated on `feature = "query-get"`. Returned by
+/// [`Session::query_aliased_auto`] / [`QuerierAliased::get`] which
+/// both compile under the same feature.
+#[cfg(feature = "query-get")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryAliasError {
     /// No prior `send_declare_keyexpr` registered this id on the
@@ -1720,6 +1819,7 @@ pub enum QueryAliasError {
     UnknownMapping(u64),
 }
 
+#[cfg(feature = "query-get")]
 impl std::fmt::Display for QueryAliasError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1732,6 +1832,7 @@ impl std::fmt::Display for QueryAliasError {
     }
 }
 
+#[cfg(feature = "query-get")]
 impl std::error::Error for QueryAliasError {}
 
 /// R242 — reusable query target with pre-set keyexpr + options.
@@ -1757,6 +1858,10 @@ impl std::error::Error for QueryAliasError {}
 /// `#[non_exhaustive]` so future rounds add fields (e.g. a
 /// declare-time matching_status callback hook) without breaking
 /// callers. Construct only through [`Session::declare_querier`].
+///
+/// R307 — gated on `feature = "query-get"`. The struct embeds a
+/// [`QueryOptions`] field which itself carries the same gate.
+#[cfg(feature = "query-get")]
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct Querier {
@@ -1765,6 +1870,7 @@ pub struct Querier {
     options: QueryOptions,
 }
 
+#[cfg(feature = "query-get")]
 impl Querier {
     /// Borrow the declared keyexpr. The literal form supplied to
     /// [`Session::declare_querier`]; identical to what each
@@ -1886,6 +1992,10 @@ pub struct MatchingStatus {
 ///
 /// `#[non_exhaustive]`. Construct only through
 /// [`Session::declare_querier_aliased`].
+///
+/// R307 — gated on `feature = "query-get"`. The embedded
+/// [`QueryOptions`] field carries the same gate.
+#[cfg(feature = "query-get")]
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct QuerierAliased {
@@ -1895,6 +2005,7 @@ pub struct QuerierAliased {
     options: QueryOptions,
 }
 
+#[cfg(feature = "query-get")]
 impl QuerierAliased {
     /// The declared mapping id. Must have been previously registered
     /// via [`SessionLinkActions::send_declare_keyexpr`] for
@@ -2345,6 +2456,12 @@ impl std::error::Error for SubscribeAliasError {}
 /// Mirrors zenoh-pico's `z_queryable_options_t` minus the
 /// `complete` flag (which lands as a follow-up when the
 /// queryable-side completeness signal is wired). `#[non_exhaustive]`.
+///
+/// R307 — gated on `feature = "query-queryable"`. The struct only
+/// has meaning as the input to [`Session::declare_queryable`] /
+/// [`Session::declare_queryable_aliased`], both of which carry the
+/// same gate.
+#[cfg(feature = "query-queryable")]
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct QueryableOptions {
@@ -2356,6 +2473,7 @@ pub struct QueryableOptions {
     pub allowed_origin: Locality,
 }
 
+#[cfg(feature = "query-queryable")]
 impl QueryableOptions {
     /// Default options — `allowed_origin = Locality::Any`.
     pub fn new() -> Self {
@@ -2382,6 +2500,11 @@ impl QueryableOptions {
 ///
 /// `#[non_exhaustive]`. Construct only through
 /// [`Session::declare_queryable`] / [`Session::declare_queryable_aliased`].
+///
+/// R307 — gated on `feature = "query-queryable"`. The handle's
+/// embedded [`QueryableId`] and [`QueryableOptions`] both share the
+/// same feature.
+#[cfg(feature = "query-queryable")]
 #[non_exhaustive]
 pub struct Queryable {
     session: Session,
@@ -2390,6 +2513,7 @@ pub struct Queryable {
     options: QueryableOptions,
 }
 
+#[cfg(feature = "query-queryable")]
 impl Queryable {
     /// The stable id assigned by
     /// [`crate::query::QueryableRegistry::register_with_locality`].
@@ -2425,6 +2549,7 @@ impl Queryable {
     }
 }
 
+#[cfg(feature = "query-queryable")]
 impl Drop for Queryable {
     fn drop(&mut self) {
         // RAII unregister with poison-recover, mirroring Subscriber.
@@ -2450,6 +2575,9 @@ impl Drop for Queryable {
 /// (or was retracted before declare time). Mirror of
 /// [`SubscribeAliasError`] / [`PublishAliasError`] /
 /// [`QueryAliasError`] on the queryable side.
+///
+/// R307 — gated on `feature = "query-queryable"`.
+#[cfg(feature = "query-queryable")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryableAliasError {
     /// No prior `send_declare_keyexpr` registered this id on the
@@ -2458,6 +2586,7 @@ pub enum QueryableAliasError {
     UnknownMapping(u64),
 }
 
+#[cfg(feature = "query-queryable")]
 impl std::fmt::Display for QueryableAliasError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2470,6 +2599,7 @@ impl std::fmt::Display for QueryableAliasError {
     }
 }
 
+#[cfg(feature = "query-queryable")]
 impl std::error::Error for QueryableAliasError {}
 
 /// R248 — options bundle for [`Session::declare_token`] /

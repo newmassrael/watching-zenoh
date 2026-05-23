@@ -89,7 +89,15 @@ use crate::declare::LivelinessRegistry;
 use crate::declare::LivelinessSubscriberRegistry;
 use crate::declare::{RemoteQueryableRegistry, RemoteSubscriberRegistry};
 use crate::pubsub::SubscriberRegistry;
+// R307 — `crate::query` is gated on `feature = "query-queryable"`; the
+// QueryableRegistry field + the pending_replies `Vec<QueryReply>`
+// staging buffer share the same gate. `QueryReply` is also used by
+// `flush_pending`'s `reply.into_response()` call.
+#[cfg(feature = "query-queryable")]
 use crate::query::{QueryReply, QueryableRegistry};
+// R307 — `crate::reply` is gated on `feature = "query-reply"`; the
+// ReplyRegistry field + its dispatch arm share the gate.
+#[cfg(feature = "query-reply")]
 use crate::reply::ReplyRegistry;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
 
@@ -104,6 +112,11 @@ pub struct ApplicationLayerObserver {
     /// queryable side). The `pending_replies` / `pending_final_rids`
     /// buffers below stage outbound records this registry emits
     /// during fan-out.
+    ///
+    /// R307 — gated on `feature = "query-queryable"`. The matching
+    /// `pending_replies` / `pending_final_rids` staging buffers carry
+    /// the same gate so dispatch + flush stay self-consistent.
+    #[cfg(feature = "query-queryable")]
     pub queryables: QueryableRegistry,
     /// Peer's outbound `DeclSubscriber` / `UndeclSubscriber` records.
     pub remote_subscribers: RemoteSubscriberRegistry,
@@ -126,8 +139,15 @@ pub struct ApplicationLayerObserver {
     /// Initiator-side `Response(Reply|Err)` + `ResponseFinal`
     /// callbacks (`z_get` consumer). Pending entries auto-unregister
     /// when their matching `ResponseFinal` arrives.
+    ///
+    /// R307 — gated on `feature = "query-reply"`. `query-get` implies
+    /// this feature, so any get-capable build still carries the
+    /// ReplyRegistry slot.
+    #[cfg(feature = "query-reply")]
     pub replies: ReplyRegistry,
+    #[cfg(feature = "query-queryable")]
     pending_replies: Vec<QueryReply>,
+    #[cfg(feature = "query-queryable")]
     pending_final_rids: Vec<u64>,
 }
 
@@ -145,6 +165,7 @@ impl ApplicationLayerObserver {
     pub fn new() -> Self {
         Self {
             subscribers: SubscriberRegistry::new(),
+            #[cfg(feature = "query-queryable")]
             queryables: QueryableRegistry::new(),
             remote_subscribers: RemoteSubscriberRegistry::new(),
             remote_queryables: RemoteQueryableRegistry::new(),
@@ -152,8 +173,11 @@ impl ApplicationLayerObserver {
             liveliness: LivelinessRegistry::new(),
             #[cfg(feature = "liveliness-subscriber")]
             liveliness_subscribers: LivelinessSubscriberRegistry::new(),
+            #[cfg(feature = "query-reply")]
             replies: ReplyRegistry::new(),
+            #[cfg(feature = "query-queryable")]
             pending_replies: Vec::new(),
+            #[cfg(feature = "query-queryable")]
             pending_final_rids: Vec::new(),
         }
     }
@@ -177,6 +201,7 @@ impl ApplicationLayerObserver {
         // the subscribers registry just updated. The queryable side
         // also stages outbound replies/finals into our pending bufs
         // so the drain phase can flush them through the action layer.
+        #[cfg(feature = "query-queryable")]
         self.queryables.dispatch_iteration_event(
             event,
             peer_table,
@@ -192,6 +217,7 @@ impl ApplicationLayerObserver {
         #[cfg(feature = "liveliness-subscriber")]
         self.liveliness_subscribers
             .dispatch_iteration_event(event, peer_table);
+        #[cfg(feature = "query-reply")]
         self.replies.dispatch_iteration_event(event, peer_table);
     }
 
@@ -201,12 +227,21 @@ impl ApplicationLayerObserver {
     /// channel, so the wire order mirrors enqueue order: every
     /// Reply for rid R precedes the matching ResponseFinal for R.
     pub fn flush_pending(&mut self, actions: &SessionLinkActions) {
-        for reply in self.pending_replies.drain(..) {
-            actions.send_response(reply.into_response());
+        #[cfg(feature = "query-queryable")]
+        {
+            for reply in self.pending_replies.drain(..) {
+                actions.send_response(reply.into_response());
+            }
+            for rid in self.pending_final_rids.drain(..) {
+                actions.send_response_final(rid);
+            }
         }
-        for rid in self.pending_final_rids.drain(..) {
-            actions.send_response_final(rid);
-        }
+        // R307 — without `query-queryable` the staging buffers do not
+        // exist; `actions` is then unused in this branch but the
+        // method signature stays stable so callers (`Self::dispatch`)
+        // can wire it unconditionally.
+        #[cfg(not(feature = "query-queryable"))]
+        let _ = actions;
     }
 
     /// Combined fan + drain — the production single-call form used
@@ -223,6 +258,10 @@ impl ApplicationLayerObserver {
     /// expected to drive production logic (the production drain
     /// path runs every iteration so this is normally zero between
     /// dispatches).
+    ///
+    /// R307 — gated on `feature = "query-queryable"` because the
+    /// underlying `pending_replies` buffer carries the same gate.
+    #[cfg(feature = "query-queryable")]
     pub fn pending_reply_count(&self) -> usize {
         self.pending_replies.len()
     }
@@ -230,6 +269,9 @@ impl ApplicationLayerObserver {
     /// Number of `ResponseFinal` rids currently staged for the next
     /// `flush_pending` call. Same diagnostic / test-only role as
     /// [`Self::pending_reply_count`].
+    ///
+    /// R307 — gated on `feature = "query-queryable"`.
+    #[cfg(feature = "query-queryable")]
     pub fn pending_final_count(&self) -> usize {
         self.pending_final_rids.len()
     }
@@ -296,16 +338,25 @@ mod tests {
         }
     }
 
+    // R307 — assertions over the query/liveliness slots gate on their
+    // owning feature; the subscriber + remote_* assertions stay
+    // unconditional so a `--no-default-features` build still exercises
+    // the always-on portion of the constructor.
     #[test]
     fn new_observer_starts_empty() {
         let observer = ApplicationLayerObserver::new();
         assert_eq!(observer.subscribers.len(), 0);
+        #[cfg(feature = "query-queryable")]
         assert_eq!(observer.queryables.len(), 0);
         assert_eq!(observer.remote_subscribers.on_decl_len(), 0);
         assert_eq!(observer.remote_queryables.on_decl_len(), 0);
+        #[cfg(feature = "liveliness-token")]
         assert_eq!(observer.liveliness.on_decl_len(), 0);
+        #[cfg(feature = "query-reply")]
         assert_eq!(observer.replies.len(), 0);
+        #[cfg(feature = "query-queryable")]
         assert_eq!(observer.pending_reply_count(), 0);
+        #[cfg(feature = "query-queryable")]
         assert_eq!(observer.pending_final_count(), 0);
     }
 
@@ -346,6 +397,10 @@ mod tests {
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 
+    // R307 — relies on liveliness-token (for the `liveliness`
+    // registry assertion). Without it the closure cannot register and
+    // the test would not exercise its load-bearing arm.
+    #[cfg(feature = "liveliness-token")]
     #[test]
     fn dispatch_event_routes_event_into_all_consumer_registries_without_cross_talk() {
         // Each registry sees only the arm it is wired for; the
@@ -442,6 +497,7 @@ mod tests {
         assert_eq!(fired.load(Ordering::SeqCst), 0);
     }
 
+    #[cfg(feature = "query-queryable")]
     #[test]
     fn flush_pending_clears_queryable_staged_buffers() {
         // Register a queryable that emits one Reply on match; absent

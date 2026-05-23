@@ -68,6 +68,14 @@ pub mod pubsub;
 /// turns the accumulated `Vec<QueryReply>` into outbound Response
 /// frames lands in R121j-5c. See `query` module doc comment for the
 /// scope, threading, and Responder lifetime contract.
+///
+/// R307 — module-level gate on `feature = "query-queryable"`. Wz
+/// consumers selecting `preset-mcu-minimal` (no query domain) or
+/// hand-picking `runtime-tokio` without `query-queryable` get a
+/// build with this module elided entirely; the `Session::declare_-
+/// queryable` API surface in `session.rs` is gated on the same
+/// feature so the symbol set is self-consistent.
+#[cfg(feature = "query-queryable")]
 pub mod query;
 
 /// R121k-2 — application-layer remote-declaration registries. Route
@@ -88,6 +96,14 @@ pub mod declare;
 /// unregister on `ResponseFinal` (zenoh-pico "exactly one Final
 /// terminates the chain" semantics). See `reply` module doc comment
 /// for scope, callback shape, and threading.
+///
+/// R307 — module-level gate on `feature = "query-reply"`. The
+/// `query-get` feature pulls this transitively because
+/// `Session::get` registers a pending entry against
+/// [`reply::ReplyRegistry`]; consumers that only declare queryables
+/// (no `Session::get`) can disable both `query-get` and
+/// `query-reply` and have the module elided entirely.
+#[cfg(feature = "query-reply")]
 pub mod reply;
 
 /// R121k-7 — application-layer observer bundle. Combines the six
