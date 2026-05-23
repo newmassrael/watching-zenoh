@@ -198,3 +198,140 @@ fn keyexpr_intersect_depth_edge_cases() {
     assert_agree("**/a", "a"); // leading ** absorbs zero
     assert_agree("a/**", "a/b/c/d/e");
 }
+
+// ── R297b property fuzz layer ───────────────────────────────────
+//
+// Random canonical-keyexpr generator + property assertion that
+// wz/zenoh-pico agree on every shrunken case. Extends R297's
+// handcrafted ~63-case corpus with bounded random coverage; the
+// generator is constructive (only produces canonical forms) so
+// proptest does not need to filter, and shrinking lands on a
+// minimal counter-example string pair if a divergence ever
+// surfaces.
+//
+// Bounds chosen to maximise chunk-pattern collision probability
+// while keeping the corpus interesting:
+//   * alphabet = [a, b, c]               → high literal-overlap
+//   * depth    = 1..=4 chunks            → spans R297's depth range
+//   * per chunk: literal / `*` / `**` /
+//     `$*`-DSL (1..=2 `$*` runs)         → covers every chunk
+//                                           class the R296 matcher
+//                                           routes through
+
+use proptest::prelude::*;
+
+/// Single character drawn from the bounded `[a, b, c]` alphabet.
+/// The narrow alphabet maximises the chance that two random
+/// keyexprs share a candidate literal, so the random corpus
+/// exercises real intersect-true branches (not just trivial
+/// "all-distinct" rejects).
+fn alpha_char_strategy() -> impl Strategy<Value = char> {
+    prop::sample::select(vec!['a', 'b', 'c'])
+}
+
+/// Bounded-length literal string `[a-c]{min..=max}`.
+fn lit_strategy(min: usize, max: usize) -> impl Strategy<Value = String> {
+    prop::collection::vec(alpha_char_strategy(), min..=max)
+        .prop_map(|chars| chars.into_iter().collect())
+}
+
+/// `$*`-DSL chunk. Either a single `$*` run (lead `$*` trail —
+/// lead / trail each 0..=2 chars) or two `$*` runs separated by a
+/// mandatory non-empty middle (lead `$*` mid `$*` trail — mid
+/// must be ≥1 char to keep `$*$*` non-canonical runs out of the
+/// corpus). Caps the per-chunk `$*` count at 2 to keep the matcher
+/// in its productive regime (the R296 analysis covers 1 and 2 `$*`
+/// runs; deeper runs reduce to the same lead/trail anchor check
+/// but blow up the alternating-interleaving proof state).
+fn dsl_chunk_strategy() -> impl Strategy<Value = String> {
+    prop_oneof![
+        // n=1: lead $* trail
+        (lit_strategy(0, 2), lit_strategy(0, 2))
+            .prop_map(|(lead, trail)| format!("{}$*{}", lead, trail)),
+        // n=2: lead $* mid $* trail (mid ≥1 char enforces canonical
+        // form — adjacent `$*$*` is non-canonical and not in scope)
+        (lit_strategy(0, 2), lit_strategy(1, 2), lit_strategy(0, 2))
+            .prop_map(|(lead, mid, trail)| format!("{}$*{}$*{}", lead, mid, trail)),
+    ]
+}
+
+/// One chunk of a keyexpr. Weights balance literal/wildcard mix
+/// so each property iteration is likely to exercise at least one
+/// non-trivial chunk class (literal weight 3 ≈ 3/8, `*` 1/8,
+/// `**` 1/8, DSL 3/8).
+fn chunk_strategy() -> impl Strategy<Value = String> {
+    prop_oneof![
+        3 => lit_strategy(1, 3),
+        1 => Just("*".to_string()),
+        1 => Just("**".to_string()),
+        3 => dsl_chunk_strategy(),
+    ]
+}
+
+/// Full canonical keyexpr. Joins 1..=4 chunks with `/`, then
+/// dedupes consecutive `**` chunks (canonical form per zenoh-pico
+/// — `**/**` reduces to `**`). The dedup is in-generator rather
+/// than via `prop_filter` so shrinking always lands on a canonical
+/// string instead of a rejected sample.
+fn keyexpr_strategy() -> impl Strategy<Value = String> {
+    prop::collection::vec(chunk_strategy(), 1..=4).prop_map(|chunks| {
+        let mut canonical: Vec<String> = Vec::with_capacity(chunks.len());
+        for c in chunks {
+            if canonical
+                .last()
+                .is_some_and(|last| last == "**" && c == "**")
+            {
+                continue;
+            }
+            canonical.push(c);
+        }
+        canonical.join("/")
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 512,
+        ..ProptestConfig::default()
+    })]
+
+    /// wz/zenoh-pico cross-validation under random canonical input.
+    /// Asserts: forward agreement, reverse agreement, wz symmetry,
+    /// pico symmetry. A shrunken counter-example would be a minimal
+    /// `(a, b)` pair where the two implementations diverge — the
+    /// R296 algorithm analysis predicts no such pair exists in the
+    /// canonical input space, and R297 confirmed that for a
+    /// handcrafted ~63-case corpus; this property closes the
+    /// remaining gap by random fuzz over the canonical chunk-pattern
+    /// generator.
+    #[test]
+    fn keyexpr_intersect_wz_pico_property(
+        a in keyexpr_strategy(),
+        b in keyexpr_strategy(),
+    ) {
+        let wz_ab = wz_intersects(&a, &b);
+        let pico_ab = zenoh_pico_intersects(&a, &b);
+        prop_assert_eq!(
+            wz_ab, pico_ab,
+            "wz/pico mismatch (forward): `{}` ∩ `{}` → wz={}, pico={}",
+            &a, &b, wz_ab, pico_ab,
+        );
+        let wz_ba = wz_intersects(&b, &a);
+        let pico_ba = zenoh_pico_intersects(&b, &a);
+        prop_assert_eq!(
+            wz_ba, pico_ba,
+            "wz/pico mismatch (reverse): `{}` ∩ `{}` → wz={}, pico={}",
+            &b, &a, wz_ba, pico_ba,
+        );
+        prop_assert_eq!(
+            wz_ab, wz_ba,
+            "wz asymmetry: `{}` ∩ `{}` = {} but `{}` ∩ `{}` = {}",
+            &a, &b, wz_ab, &b, &a, wz_ba,
+        );
+        prop_assert_eq!(
+            pico_ab, pico_ba,
+            "pico asymmetry: `{}` ∩ `{}` = {} but `{}` ∩ `{}` = {}",
+            &a, &b, pico_ab, &b, &a, pico_ba,
+        );
+    }
+}

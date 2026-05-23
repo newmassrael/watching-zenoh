@@ -60,6 +60,13 @@ wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
 # output in a clean directory per test run (no pollution of $OUT_DIR
 # or vendor/sce/target).
 tempfile = "3"
+# R297b — property-based fuzz layer on top of R297's handcrafted
+# Layer 3 keyexpr-intersect fixture. The generator constructs
+# canonical zenoh keyexprs over a bounded alphabet [a,b,c] with
+# 1..=4 chunks, each chunk one of literal / `*` / `**` / `$*`-DSL
+# (1..=2 `$*` runs); the property asserts wz/zenoh-pico byte-equal
+# on forward + reverse + symmetry for every shrunken case.
+proptest = "1"
 
 [lints]
 workspace = true
