@@ -102,6 +102,8 @@
 use std::env;
 use std::process::ExitCode;
 
+use wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe;
+
 mod args;
 mod link_driver;
 mod runner;
@@ -447,6 +449,32 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+
+    // R300 — eager argv-level validation of the three DECLARE-side
+    // keyexprs that flow through SessionLinkActions::send_declare_*.
+    // The same gate fires later at send-time (so library API users
+    // are equally protected), but argv-level eager-fail gives the
+    // CLI user a faster + more locatable error than waiting for the
+    // Established gate to fire 5s later. Receive-side keyexprs
+    // (--key, --queryable, --query, --liveliness-subscribe) are NOT
+    // gated here: they register local pattern slots that match
+    // INBOUND peer keyexprs and are never emitted on the outbound
+    // wire by wz, so the R300 gate scope does not apply.
+    for (flag, keyexpr_opt) in [
+        ("--declare-subscriber", declare_subscriber_opt.as_deref()),
+        ("--declare-queryable", declare_queryable_opt.as_deref()),
+        ("--declare-token", declare_token_opt.as_deref()),
+    ] {
+        if let Some(keyexpr) = keyexpr_opt {
+            if let Err(e) = check_outbound_keyexpr_pico_safe(keyexpr) {
+                eprintln!(
+                    "wz-ap-demo: {flag}={keyexpr:?} rejected by R300 outbound \
+                     DECLARE gate: {e}"
+                );
+                return ExitCode::from(2);
+            }
+        }
+    }
 
     let declare_spec = DeclareEmitSpec {
         subscriber_keyexpr: declare_subscriber_opt,

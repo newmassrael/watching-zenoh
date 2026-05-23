@@ -280,6 +280,203 @@ fn analyze_chunk(chunk: &str) -> Result<ChunkShape, KeyexprCanonError> {
     Ok(ChunkShape::Mixed)
 }
 
+// ──────────────────────────────────────────────────────────────────
+// R300 — outbound-side gate guarding zenoh-pico bug #3 (SIGABRT)
+// ──────────────────────────────────────────────────────────────────
+
+/// Errors returned by [`check_outbound_keyexpr_pico_safe`] when an
+/// outbound DECLARE-side keyexpr (after mapping-table reconstruction)
+/// would either fail the structural canon or trip a known buggy
+/// zenoh-pico canon path on the receive side.
+///
+/// ## Scope
+///
+/// This error type sits one layer above [`KeyexprCanonError`]:
+///
+/// * [`KeyexprCanonError`] is the faithful mirror of zenoh-pico's
+///   `zp_keyexpr_canon_status_t` — "what does pico's canon reject".
+/// * [`OutboundKeyexprError`] adds a wz-side defensive variant
+///   ([`OutboundKeyexprError::PicoBugThreeFamily`]) that detects
+///   keyexpr shapes pico's canon ACCEPTS structurally but then
+///   CRASHES on at canonical rewrite time (R299 fixture documented
+///   bug #3 — `vendor/zenoh-pico/src/session/keyexpr.c:340`
+///   `assert(false)` SIGABRT).
+///
+/// The gate is NARROW (R300 scope): only the SIGABRT-prone shape
+/// (`** chunk` + literal chunk(s) + `*`-shape chunk) is rejected.
+/// The wire-interop-drift shapes (R299 bug #1 / bug #2 — wrong
+/// output but no crash) remain allowed; rejecting those is the
+/// architectural carry [R299 #3] that requires a separate decision
+/// round.
+///
+/// ## Where the SIGABRT comes from
+///
+/// pico's `__zp_canon_prefix` case-1 branch (single-byte chunk that
+/// is NOT `*` while `in_big_wild = true`) takes the
+/// `else { advance; continue; }` path which SKIPS the post-walk
+/// `in_big_wild = false` reset. A subsequent `*`-shape chunk then
+/// re-enters case-1 with stale `in_big_wild` and returns
+/// `SINGLE_STAR_AFTER_DOUBLE_STAR` with `*len` pointing at the `/`
+/// between the literal and the `*`. Main canonize then fails the
+/// `chunk_end - reader == 2` precondition and triggers
+/// `assert(false)`, aborting the receiving process via SIGABRT.
+///
+/// Empirically (R299 fixture
+/// `canon_known_pico_anomaly_double_star_literal_star_aborts`) the
+/// trigger fires on multi-char literals as well (`**/foo/*`,
+/// `**/abc/*/def`), not only the documented single-char case. The
+/// gate consequently treats ANY non-`*`-shape chunk after `**` as a
+/// bug-window opener.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutboundKeyexprError {
+    /// Input failed the structural keyexpr grammar (empty chunk,
+    /// reserved character, unbound `$`, bare `*` mid-chunk, …). The
+    /// inner [`KeyexprCanonError`] carries the specific
+    /// pico-`zp_keyexpr_canon_status_t` mirror code.
+    NotCanonical(KeyexprCanonError),
+    /// Input would crash zenoh-pico's `_z_keyexpr_canonize` on the
+    /// receive side via SIGABRT (R299 bug #3 family). The shape is
+    /// `** chunk` followed by at least one non-`*`-shape chunk
+    /// followed by a `*`-shape chunk (single `*`, `**`, or any
+    /// `$*`-only run that canonizes to `*`).
+    PicoBugThreeFamily {
+        /// The full input keyexpr (post mapping-table
+        /// reconstruction), preserved verbatim for diagnostics.
+        keyexpr: String,
+        /// The trailing `*`-shape chunk that closed the bug window.
+        offending_chunk: String,
+    },
+}
+
+impl fmt::Display for OutboundKeyexprError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotCanonical(inner) => {
+                write!(f, "outbound keyexpr non-canonical: {inner}")
+            }
+            Self::PicoBugThreeFamily {
+                keyexpr,
+                offending_chunk,
+            } => write!(
+                f,
+                "outbound keyexpr `{keyexpr}` would crash zenoh-pico via \
+                 SIGABRT (R299 bug #3 — `**` chunk followed by literal \
+                 then `*`-shape chunk `{offending_chunk}`)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OutboundKeyexprError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NotCanonical(inner) => Some(inner),
+            Self::PicoBugThreeFamily { .. } => None,
+        }
+    }
+}
+
+/// Check whether an outbound DECLARE-side keyexpr is safe to send to
+/// a zenoh-pico peer.
+///
+/// Returns `Ok(())` when the input is both structurally canonical
+/// (per [`canonize_keyexpr`]) and outside the R299-documented
+/// SIGABRT pattern family. Returns
+/// [`OutboundKeyexprError::NotCanonical`] when the input violates
+/// the keyexpr grammar, and
+/// [`OutboundKeyexprError::PicoBugThreeFamily`] when the input would
+/// trigger the receive-side `assert(false)` at
+/// `vendor/zenoh-pico/src/session/keyexpr.c:340`.
+///
+/// The input is expected to be the FULL reconstructed keyexpr — the
+/// caller (e.g. `crate::session_glue::SessionLinkActions` outbound
+/// DECLARE paths) must resolve `(mapping_id, suffix)` to a literal
+/// before invoking this check; otherwise a cross-boundary bug #3
+/// pattern (prefix=`"**"` + suffix=`"/c/*"`) slips through.
+///
+/// # Examples
+///
+/// ```
+/// use wz_runtime_tokio::keyexpr_canon::{
+///     check_outbound_keyexpr_pico_safe, OutboundKeyexprError,
+/// };
+///
+/// // Safe — no `**` chunk.
+/// assert!(check_outbound_keyexpr_pico_safe("home/temp").is_ok());
+///
+/// // Safe — `**` directly followed by `*` (R299 bug #1, no crash;
+/// // wire-interop drift deferred to architectural carry R299 #3).
+/// assert!(check_outbound_keyexpr_pico_safe("**/*").is_ok());
+///
+/// // Reject — `**` + literal + `*` (R299 bug #3, SIGABRT on pico).
+/// assert!(matches!(
+///     check_outbound_keyexpr_pico_safe("**/c/*"),
+///     Err(OutboundKeyexprError::PicoBugThreeFamily { .. }),
+/// ));
+/// ```
+pub fn check_outbound_keyexpr_pico_safe(input: &str) -> Result<(), OutboundKeyexprError> {
+    // Structural canon (empty chunks, reserved chars, unbound `$`,
+    // bare `*` mid-chunk, …). We discard the canonized output and
+    // only consume its pass/fail signal: the wire emit path uses the
+    // raw suffix verbatim (R300 NARROW scope; pre-emit canonization
+    // is the R299 carry #3 architectural decision).
+    canonize_keyexpr(input).map_err(OutboundKeyexprError::NotCanonical)?;
+
+    // Bug #3 family walk. State machine:
+    // * seen_double_star — set true after any `**` chunk has been
+    //   observed.
+    // * seen_literal_after_double_star — set true after a non-`**`,
+    //   non-`*`-shape chunk has been observed since the most recent
+    //   `**` chunk. Reset on every fresh `**` chunk.
+    // Reject fires when both flags are set and the current chunk is
+    // `*`-shape. This is exactly the R299 bug #3 trigger condition
+    // (`__zp_canon_prefix` case-1 stale `in_big_wild`).
+    let mut seen_double_star = false;
+    let mut seen_literal_after_double_star = false;
+    for chunk in input.split('/') {
+        let is_star_shape = chunk_canonizes_to_star_shape(chunk);
+        if seen_double_star && seen_literal_after_double_star && is_star_shape {
+            return Err(OutboundKeyexprError::PicoBugThreeFamily {
+                keyexpr: input.to_string(),
+                offending_chunk: chunk.to_string(),
+            });
+        }
+        if chunk == "**" {
+            seen_double_star = true;
+            seen_literal_after_double_star = false;
+        } else if seen_double_star && !is_star_shape {
+            seen_literal_after_double_star = true;
+        }
+    }
+    Ok(())
+}
+
+/// True iff the raw chunk's canonical form is `*` — i.e. an exact
+/// `*` / `**` chunk, or a `$*`-run-only chunk that the singleify +
+/// lone-`$*` lift in [`canonize_keyexpr`] collapses to `*`.
+/// Mixed chunks (literal + `$*` + literal) canonize verbatim and do
+/// not trigger pico's case-1 `in_big_wild` confusion, so they are
+/// excluded.
+///
+/// Distinct from [`analyze_chunk`]'s `ChunkShape::LoneDollarStar`
+/// because this helper walks the RAW (pre-singleify) chunk — the
+/// caller of [`check_outbound_keyexpr_pico_safe`] does not run
+/// `collapse_dsl_runs` first; doing so would have to handle chunk
+/// boundary effects (`$*$*` straddling `/` is not a single chunk).
+fn chunk_canonizes_to_star_shape(chunk: &str) -> bool {
+    if chunk == "*" || chunk == "**" {
+        return true;
+    }
+    if chunk.is_empty() {
+        return false;
+    }
+    let mut rest = chunk;
+    while let Some(after) = rest.strip_prefix("$*") {
+        rest = after;
+    }
+    rest.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,5 +639,168 @@ mod tests {
         assert_eq!(collapse_dsl_runs(canonical), canonical);
         let twice = collapse_dsl_runs(&collapse_dsl_runs(canonical));
         assert_eq!(twice, canonical);
+    }
+
+    // ── R300 — check_outbound_keyexpr_pico_safe ────────────────
+
+    #[test]
+    fn outbound_safe_for_canonical_literal_keyexpr() {
+        assert!(check_outbound_keyexpr_pico_safe("home/temp").is_ok());
+        assert!(check_outbound_keyexpr_pico_safe("a/b/c").is_ok());
+        assert!(check_outbound_keyexpr_pico_safe("liveliness/devA").is_ok());
+    }
+
+    #[test]
+    fn outbound_safe_for_canonical_wildcard_keyexpr() {
+        assert!(check_outbound_keyexpr_pico_safe("home/*/temp").is_ok());
+        assert!(check_outbound_keyexpr_pico_safe("**/temp").is_ok());
+        assert!(check_outbound_keyexpr_pico_safe("home/**").is_ok());
+        assert!(check_outbound_keyexpr_pico_safe("home/**/temp").is_ok());
+    }
+
+    #[test]
+    fn outbound_safe_for_bug_one_family_immediate_star_after_double_star() {
+        // R299 bug #1 patterns — pico canon produces wrong output
+        // (`*/**` etc.) but does NOT SIGABRT. R300 NARROW scope
+        // allows these; wire-interop drift is the R299 carry #3
+        // architectural decision.
+        assert!(check_outbound_keyexpr_pico_safe("**/*").is_ok());
+        assert!(check_outbound_keyexpr_pico_safe("home/**/*/temp").is_ok());
+        assert!(check_outbound_keyexpr_pico_safe("**/$*/temp").is_ok());
+        assert!(check_outbound_keyexpr_pico_safe("**/$*").is_ok());
+        assert!(check_outbound_keyexpr_pico_safe("**/**").is_ok());
+    }
+
+    #[test]
+    fn outbound_rejects_bug_three_family_double_star_literal_star() {
+        // R299 bug #3 — `**` + literal chunk + `*`-shape chunk. Pico
+        // SIGABRTs on receive canonize; R300 reject pre-emit.
+        let cases = [
+            ("**/c/*", "*"),
+            ("**/foo/*", "*"),
+            ("**/abc/*/def", "*"),
+            ("**/a/b/*", "*"),
+        ];
+        for (input, expected_offending) in cases {
+            match check_outbound_keyexpr_pico_safe(input) {
+                Err(OutboundKeyexprError::PicoBugThreeFamily {
+                    keyexpr,
+                    offending_chunk,
+                }) => {
+                    assert_eq!(keyexpr, input, "keyexpr field mismatch for `{}`", input);
+                    assert_eq!(
+                        offending_chunk, expected_offending,
+                        "offending_chunk mismatch for `{}`",
+                        input,
+                    );
+                }
+                other => panic!(
+                    "expected PicoBugThreeFamily for `{}`, got {:?}",
+                    input, other
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn outbound_rejects_bug_three_family_with_dsl_or_double_star_trailing() {
+        // Bug #3 also fires when the trailing star-shape chunk is
+        // `**` or a `$*`-only chunk (canonizes to `*`). Same case-1
+        // trigger on pico's side.
+        assert!(matches!(
+            check_outbound_keyexpr_pico_safe("**/c/**"),
+            Err(OutboundKeyexprError::PicoBugThreeFamily { .. }),
+        ));
+        assert!(matches!(
+            check_outbound_keyexpr_pico_safe("**/c/$*"),
+            Err(OutboundKeyexprError::PicoBugThreeFamily { .. }),
+        ));
+        assert!(matches!(
+            check_outbound_keyexpr_pico_safe("**/c/$*$*"),
+            Err(OutboundKeyexprError::PicoBugThreeFamily { .. }),
+        ));
+    }
+
+    #[test]
+    fn outbound_rejects_structurally_invalid_keyexpr() {
+        // Grammar violations pass through to NotCanonical. The
+        // inner KeyexprCanonError variant mirrors pico's
+        // zp_keyexpr_canon_status_t.
+        assert_eq!(
+            check_outbound_keyexpr_pico_safe("home//temp"),
+            Err(OutboundKeyexprError::NotCanonical(
+                KeyexprCanonError::EmptyChunk,
+            )),
+        );
+        assert_eq!(
+            check_outbound_keyexpr_pico_safe("home/foo?bar"),
+            Err(OutboundKeyexprError::NotCanonical(
+                KeyexprCanonError::ContainsSharpOrQmark,
+            )),
+        );
+        assert_eq!(
+            check_outbound_keyexpr_pico_safe("home/foo$"),
+            Err(OutboundKeyexprError::NotCanonical(
+                KeyexprCanonError::ContainsUnboundDollar,
+            )),
+        );
+    }
+
+    #[test]
+    fn outbound_mixed_chunk_after_double_star_opens_bug_window() {
+        // A Mixed chunk (literal + `$*` + literal) is NOT star-shape
+        // so it functions as a literal in the bug #3 walk — it CAN
+        // open the literal-after-`**` window but does not itself
+        // trigger reject. Reject only fires on a SUBSEQUENT
+        // star-shape chunk.
+        assert!(check_outbound_keyexpr_pico_safe("**/foo$*bar").is_ok());
+        assert!(check_outbound_keyexpr_pico_safe("**/foo$*bar/temp").is_ok());
+        assert!(matches!(
+            check_outbound_keyexpr_pico_safe("**/foo$*bar/*"),
+            Err(OutboundKeyexprError::PicoBugThreeFamily { .. }),
+        ));
+    }
+
+    #[test]
+    fn outbound_conservatively_rejects_double_star_after_literal_segment() {
+        // R300 NARROW gate is CONSERVATIVE on the trailing star-
+        // shape: any *-shape chunk (single `*`, `**`, or `$*`-only)
+        // appearing after a `**` segment with at least one non-`*`-
+        // shape chunk between, is rejected. R299 fixture empirically
+        // pins SIGABRT only for trailing single `*` (trailing `**`
+        // / `$*` cannot be cross-validated against pico without
+        // SIGABRT-aborting the test binary), but the underlying
+        // `in_big_wild` stale-state mechanism does not distinguish
+        // the closer's exact star-shape. Conservative reject keeps
+        // wz unconditionally safe on send; narrowing this false-
+        // positive zone (semantically `**/a/**`-style inputs ARE
+        // valid zenoh-keyexpr — "a appears somewhere") is a future
+        // round, pending an empirical fork-based pico abort probe.
+        assert!(matches!(
+            check_outbound_keyexpr_pico_safe("**/a/**"),
+            Err(OutboundKeyexprError::PicoBugThreeFamily { .. }),
+        ));
+        assert!(matches!(
+            check_outbound_keyexpr_pico_safe("**/a/**/b"),
+            Err(OutboundKeyexprError::PicoBugThreeFamily { .. }),
+        ));
+        assert!(matches!(
+            check_outbound_keyexpr_pico_safe("**/a/**/b/*"),
+            Err(OutboundKeyexprError::PicoBugThreeFamily { .. }),
+        ));
+    }
+
+    #[test]
+    fn chunk_canonizes_to_star_shape_classification() {
+        assert!(chunk_canonizes_to_star_shape("*"));
+        assert!(chunk_canonizes_to_star_shape("**"));
+        assert!(chunk_canonizes_to_star_shape("$*"));
+        assert!(chunk_canonizes_to_star_shape("$*$*"));
+        assert!(chunk_canonizes_to_star_shape("$*$*$*"));
+        assert!(!chunk_canonizes_to_star_shape("foo"));
+        assert!(!chunk_canonizes_to_star_shape("$*foo"));
+        assert!(!chunk_canonizes_to_star_shape("foo$*"));
+        assert!(!chunk_canonizes_to_star_shape("foo$*bar"));
+        assert!(!chunk_canonizes_to_star_shape(""));
     }
 }

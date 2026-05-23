@@ -193,21 +193,52 @@ pub(crate) async fn declare_task<T>(
         clock.sleep(DECLARE_HANDSHAKE_POLL_INTERVAL_MS).await;
     }
     if let Some(keyexpr) = spec.subscriber_keyexpr.as_deref() {
-        actions.send_declare_subscriber(
-            DECLARE_SUBSCRIBER_ID,
-            /*mapping_id=*/ 0,
-            Some(keyexpr),
-        );
+        // R300 — the outbound DECLARE gate rejects malformed or
+        // pico-SIGABRT-prone keyexprs pre-emit. The demo treats
+        // a rejected user-supplied keyexpr as a CLI input error:
+        // log + bail this task, do not panic.
+        if let Err(e) =
+            actions.send_declare_subscriber(DECLARE_SUBSCRIBER_ID, /*mapping_id=*/ 0, Some(keyexpr))
+        {
+            log::warn!(
+                "wz-ap-demo: SUBSCRIBER DECLARE rejected for keyexpr='{keyexpr}': {e}"
+            );
+            eprintln!(
+                "wz-ap-demo: SUBSCRIBER DECLARE rejected for keyexpr='{keyexpr}': {e}"
+            );
+            return;
+        }
         eprintln!("wz-ap-demo: DECLARED SUBSCRIBER id={DECLARE_SUBSCRIBER_ID} keyexpr='{keyexpr}'");
         clock.sleep(DECLARE_INTER_EMIT_MS).await;
     }
     if let Some(keyexpr) = spec.queryable_keyexpr.as_deref() {
-        actions.send_declare_queryable(DECLARE_QUERYABLE_ID, /*mapping_id=*/ 0, Some(keyexpr));
+        if let Err(e) =
+            actions.send_declare_queryable(DECLARE_QUERYABLE_ID, /*mapping_id=*/ 0, Some(keyexpr))
+        {
+            log::warn!(
+                "wz-ap-demo: QUERYABLE DECLARE rejected for keyexpr='{keyexpr}': {e}"
+            );
+            eprintln!(
+                "wz-ap-demo: QUERYABLE DECLARE rejected for keyexpr='{keyexpr}': {e}"
+            );
+            return;
+        }
         eprintln!("wz-ap-demo: DECLARED QUERYABLE id={DECLARE_QUERYABLE_ID} keyexpr='{keyexpr}'");
         clock.sleep(DECLARE_INTER_EMIT_MS).await;
     }
     if let Some(keyexpr) = spec.token_keyexpr.as_deref() {
-        let token = session.declare_token(keyexpr.to_string(), LivelinessOptions::default());
+        let token = match session.declare_token(keyexpr.to_string(), LivelinessOptions::default()) {
+            Ok(t) => t,
+            Err(e) => {
+                log::warn!(
+                    "wz-ap-demo: TOKEN DECLARE rejected for keyexpr='{keyexpr}': {e}"
+                );
+                eprintln!(
+                    "wz-ap-demo: TOKEN DECLARE rejected for keyexpr='{keyexpr}': {e}"
+                );
+                return;
+            }
+        };
         eprintln!(
             "wz-ap-demo: DECLARED TOKEN id={id} keyexpr='{keyexpr}'",
             id = token.id()
@@ -348,7 +379,18 @@ pub(crate) async fn publisher_task<T>(
     //           resolves the loopback literal without the caller
     //           restating it.
     if let Some(mapping_id) = declare_id {
-        actions.send_declare_keyexpr(mapping_id, &keyexpr);
+        // R300 — see declare_task above for the gate rationale.
+        if let Err(e) = actions.send_declare_keyexpr(mapping_id, &keyexpr) {
+            log::warn!(
+                "wz-ap-demo: PUBLISHER DECLARE rejected for keyexpr='{keyexpr}' \
+                 mapping_id={mapping_id}: {e}"
+            );
+            eprintln!(
+                "wz-ap-demo: PUBLISHER DECLARE rejected for keyexpr='{keyexpr}' \
+                 mapping_id={mapping_id}: {e}"
+            );
+            return;
+        }
         eprintln!("wz-ap-demo: PUBLISHER DECLARED keyexpr='{keyexpr}' mapping_id={mapping_id}");
         // Small drain pause so the DECLARE bytes reach the peer's
         // session-FSM dispatch (and populate the keyexpr table)
