@@ -283,18 +283,24 @@ fn chunk_matches_with_dsl(pattern: &str, target: &str) -> bool {
 ///   other side's corresponding chunk (or be reachable through
 ///   the other side's `*` / `**`).
 ///
-/// Approximation boundary for `$*` on BOTH sides: when both
-/// chunks contain `$*`, the result is an over-approximation — we
-/// return `true` if either side's DSL chunk covers the other
-/// side's `$*`-stripped literal-skeleton. The exact two-`$*`-side
-/// intersection (zenoh-pico's
-/// `_z_chunk_intersect_left_with_right_substar_substar`) requires
-/// a full sub-part order-matching DP; layered Phase A bring-up
-/// (R293 carry forward) lifts this to the exact form. The
-/// over-approximation is sound for `has_matching` callers
-/// (a `true` return drives a wire emit that the peer then accepts
-/// or drops via its own matcher; a `false` return is rare because
-/// `$*` on both sides is uncommon in production patterns).
+/// Two-side `$*` semantics: when both chunks contain `$*`,
+/// [`chunk_intersects`] returns the conjunction of two
+/// char-by-char anchor checks — leading-prefix compatibility plus
+/// trailing-suffix compatibility — which is mechanically
+/// equivalent (under canonical wire input) to zenoh-pico's
+/// `intersects`-mode chunk matcher (`_z_chunk_forward_intersects`
+/// → `_z_chunk_forward_backward_intersects` →
+/// `_z_chunk_special_intersects`). R296 closure: middle
+/// `$*`-separated sub-parts on both sides always admit a common
+/// literal because any two ordered sub-part sequences can be
+/// realised in a single shared chunk literal via alternating
+/// interleaving (each side independently floats its sub-parts
+/// through its own `$*` runs), so the lead/trail anchor pair is
+/// also the sufficient condition. zenoh-pico's chunk_special
+/// `intersects` path takes the same over-approximation branch
+/// (line 156 of `keyexpr_match_template.h`: right contains `$*`
+/// ⇒ YES) for every two-sided `$*` input — both implementations
+/// agree on the answer in this branch.
 ///
 /// The matcher is implemented as a recursive descent with
 /// `**`-backtracking on either side. Worst-case complexity is
@@ -359,25 +365,35 @@ fn chunk_intersects(a: &str, b: &str) -> bool {
         (true, false) => chunk_matches_with_dsl(a, b),
         (false, true) => chunk_matches_with_dsl(b, a),
         (true, true) => {
-            // R293 over-approximation for two-side `$*`. Splits
-            // each chunk on `$*` into a leading anchor + middle
-            // sub-parts + trailing anchor; the two chunks share at
-            // least one literal iff their leading anchors are
-            // prefix-compatible (one is a prefix of the other —
-            // empty is a prefix of anything) AND their trailing
-            // anchors are suffix-compatible. Middle sub-parts can
-            // always be interleaved in the shared chunk (each side
-            // independently `$*`-floats them), so the leading +
-            // trailing anchor compatibility check is the textbook
-            // sufficient condition. The exact two-side matcher
-            // (every middle sub-part must fit in some shared linear
-            // order without overlap) is the R293-carry refinement;
-            // every input pair that the over-approx accepts and a
-            // hypothetical exact matcher would reject still
-            // satisfies the `has_matching` caller contract because
-            // the false-positive drives at most a redundant wire
-            // emit that the peer accepts or drops via its own
-            // matcher.
+            // Two-side `$*`. Equivalent to zenoh-pico's
+            // intersects-mode chunk matcher
+            // (`_z_chunk_forward_intersects` → `forward_backward` →
+            // `chunk_special_intersects`) for canonical inputs.
+            //
+            // The algorithm: each chunk decomposes on `$*` into a
+            // leading anchor + ordered middle sub-parts + trailing
+            // anchor. Two chunk patterns share at least one literal
+            // iff their leading anchors are prefix-compatible (one
+            // is a prefix of the other — the empty string is a
+            // prefix of any string) AND their trailing anchors are
+            // suffix-compatible.
+            //
+            // Middle sub-parts are unconstrained: any two ordered
+            // sub-part sequences `[A1, A2, …, AN]` and `[B1, B2,
+            // …, BM]` always admit a shared chunk literal where
+            // both occur sequentially — e.g. the alternating
+            // concatenation `A1 B1 A2 B2 …` (each side independently
+            // floats its sub-parts through its own `$*` runs).
+            // zenoh-pico's `chunk_special_intersects` confirms this
+            // via the `right contains $*` over-approximation on
+            // line 156 of `keyexpr_match_template.h`: every (true,
+            // true) input lands in that branch and zenoh-pico
+            // returns YES. So the lead/trail anchor pair is also a
+            // necessary condition (failing it rejects both
+            // matchers) and the sufficient condition (passing it
+            // accepts both matchers). R293 originally labelled this
+            // "over-approximation"; R296 closure: the algorithm is
+            // exact for intersects mode in the two-side `$*` case.
             let a_parts: Vec<&str> = a.split("$*").collect();
             let b_parts: Vec<&str> = b.split("$*").collect();
             let a_lead = a_parts[0];
@@ -1565,22 +1581,114 @@ mod tests {
     }
 
     #[test]
-    fn intersect_dsl_both_sides_over_approx_documented() {
-        // R293 known approximation: when BOTH chunks contain `$*`,
-        // the matcher over-approximates. `pre$*` ∩ `$*post` both
-        // contain $* and share the literal `prepost` (and many
-        // others), so the truthful answer is true and the
-        // over-approximation also returns true. The tests below
-        // pin the documented behaviour; an exact two-side DSL
-        // matcher is the R293-carry refinement.
+    fn intersect_dsl_both_sides_lead_trail_anchor() {
+        // R296 closure: two-side `$*` is exact (not an
+        // over-approximation) — equivalent to zenoh-pico's
+        // intersects-mode chunk matcher. The lead/trail anchor
+        // pair is both necessary and sufficient because middle
+        // `$*`-separated sub-parts always interleave in a single
+        // shared chunk literal.
+
+        // `pre$*` ∩ `$*post` — shared literal `prepost` exists.
         let a = split("pre$*");
         let b = split("$*post");
         assert!(keyexpr_intersect_patterns(&a, &b));
 
-        // Trivially-equal DSL chunks: must intersect.
+        // Identical DSL chunks: trivially intersect.
         let c = split("a$*b");
         let d = split("a$*b");
         assert!(keyexpr_intersect_patterns(&c, &d));
+    }
+
+    #[test]
+    fn intersect_dsl_both_sides_lead_anchor_mismatch_rejects() {
+        // Lead anchors `A` vs `B` are byte-distinct (neither is a
+        // prefix of the other) — no shared chunk literal possible.
+        let a = split("A$*Z");
+        let b = split("B$*Z");
+        assert!(!keyexpr_intersect_patterns(&a, &b));
+        assert!(!keyexpr_intersect_patterns(&b, &a));
+    }
+
+    #[test]
+    fn intersect_dsl_both_sides_trail_anchor_mismatch_rejects() {
+        // Trail anchors `A` vs `B` are byte-distinct — no shared
+        // chunk literal.
+        let a = split("X$*A");
+        let b = split("X$*B");
+        assert!(!keyexpr_intersect_patterns(&a, &b));
+        assert!(!keyexpr_intersect_patterns(&b, &a));
+    }
+
+    #[test]
+    fn intersect_dsl_both_sides_lead_prefix_compatible_accepts() {
+        // Lead anchor `AB` extends `A` — the shorter is a prefix
+        // of the longer. Shared literal exists (`AB...` family
+        // covers both patterns when trails align).
+        let a = split("A$*Z");
+        let b = split("AB$*Z");
+        assert!(keyexpr_intersect_patterns(&a, &b));
+        assert!(keyexpr_intersect_patterns(&b, &a));
+    }
+
+    #[test]
+    fn intersect_dsl_both_sides_trail_suffix_compatible_accepts() {
+        // Trail anchor `BC` extends `C` — the shorter is a suffix
+        // of the longer. Shared literal exists in the `...BC`
+        // family (lead empties trivially align).
+        let a = split("$*C");
+        let b = split("$*BC");
+        assert!(keyexpr_intersect_patterns(&a, &b));
+        assert!(keyexpr_intersect_patterns(&b, &a));
+    }
+
+    #[test]
+    fn intersect_dsl_both_sides_middle_sub_parts_always_fit() {
+        // Middle sub-parts in arbitrary order on either side fit
+        // in a shared chunk literal via alternating interleaving.
+        // a = "$*A$*B$*"   — middles [A, B] in order
+        // b = "$*B$*A$*"   — middles [B, A] in opposite order
+        // Lead/trail both empty → compatible. Shared literal e.g.
+        // "BABA" satisfies both pattern orderings.
+        let a = split("$*A$*B$*");
+        let b = split("$*B$*A$*");
+        assert!(keyexpr_intersect_patterns(&a, &b));
+        assert!(keyexpr_intersect_patterns(&b, &a));
+    }
+
+    #[test]
+    fn intersect_dsl_both_sides_distinct_middles_accept() {
+        // Distinct middle sub-parts on both sides ("ABC" vs
+        // "XYZ") — shared chunk literal `ABCXYZ` (or any
+        // concatenation) satisfies both. zenoh-pico matches the
+        // outcome via the `right has $*` over-approximation
+        // branch (line 156 of keyexpr_match_template.h).
+        let a = split("$*ABC$*");
+        let b = split("$*XYZ$*");
+        assert!(keyexpr_intersect_patterns(&a, &b));
+        assert!(keyexpr_intersect_patterns(&b, &a));
+    }
+
+    #[test]
+    fn intersect_dsl_both_sides_lead_prefix_with_trail_suffix_overlap() {
+        // Lead "AB" extends "A", trail "BA" extends "A" — both
+        // anchor checks pass. Shared literal example: "ABA"
+        // (a pattern: "AB" + "" + "A"; b pattern: "A" + "B" + "A").
+        let a = split("AB$*A");
+        let b = split("A$*BA");
+        assert!(keyexpr_intersect_patterns(&a, &b));
+        assert!(keyexpr_intersect_patterns(&b, &a));
+    }
+
+    #[test]
+    fn intersect_dsl_both_sides_byte_overlap_lead_rejects() {
+        // Lead "AB" and "AX" share the first byte 'A' but diverge
+        // at the second byte. Neither is a prefix of the other —
+        // no shared literal with both `AB` and `AX` prefixes.
+        let a = split("AB$*Z");
+        let b = split("AX$*Z");
+        assert!(!keyexpr_intersect_patterns(&a, &b));
+        assert!(!keyexpr_intersect_patterns(&b, &a));
     }
 
     #[test]
