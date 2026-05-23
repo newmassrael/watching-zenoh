@@ -177,34 +177,53 @@ fn install_observer_callbacks(
 ) {
     let mut observer_lock = observer.lock().expect("observer mutex poisoned");
 
+    // R307.5 — every observer-callback log line below routes through
+    // `log::info!` (env_logger) rather than `eprintln!` so that all
+    // stderr writes flow through a SINGLE writer + lock discipline.
+    // Pre-R307.5, the wz-ap-demo binary mixed `eprintln!` (direct
+    // stderr) with `log::info!` (env_logger) writes; an empirically
+    // observed ~5% Layer E flake (e.g. R307 30-trial measurement at
+    // trial 19) traced to a stderr-interleave between the
+    // LIVELINESS-SAMPLE callback's `eprintln!` and a concurrent
+    // env_logger record, producing a line like
+    // `wz-ap-demo: LIVELINESS SAMPLE wz-ap-demo: LIVELINESS SAMPLE DELETE ...`
+    // that defeated the integration tests' substring search. Routing
+    // every callback log line through `log::info!` collapses both
+    // writers onto the same env_logger Mutex<BufferWriter> + the
+    // env_logger record format `[<ts> INFO <module>] <message>` is a
+    // strict superset of the prior bare line — integration test
+    // substring searches still match because the original text appears
+    // verbatim after the env_logger prefix.
     if remote_log_spec.on_remote_subscriber {
         observer_lock
             .remote_subscribers
             .on_subscriber_declared(|decl, resolved| {
-                eprintln!(
+                log::info!(
                     "wz-ap-demo: REMOTE SUBSCRIBER DECLARED id={} keyexpr='{}'",
-                    decl.id, resolved,
+                    decl.id,
+                    resolved,
                 );
             });
         observer_lock
             .remote_subscribers
             .on_subscriber_undeclared(|undecl| {
-                eprintln!("wz-ap-demo: REMOTE SUBSCRIBER UNDECLARED id={}", undecl.id);
+                log::info!("wz-ap-demo: REMOTE SUBSCRIBER UNDECLARED id={}", undecl.id);
             });
     }
     if remote_log_spec.on_remote_queryable {
         observer_lock
             .remote_queryables
             .on_queryable_declared(|decl, resolved| {
-                eprintln!(
+                log::info!(
                     "wz-ap-demo: REMOTE QUERYABLE DECLARED id={} keyexpr='{}'",
-                    decl.id, resolved,
+                    decl.id,
+                    resolved,
                 );
             });
         observer_lock
             .remote_queryables
             .on_queryable_undeclared(|undecl| {
-                eprintln!("wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={}", undecl.id);
+                log::info!("wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={}", undecl.id);
             });
     }
     if query_spec.is_some() && (reply_log_spec.on_query_reply || reply_log_spec.on_query_final) {
@@ -235,16 +254,18 @@ fn install_observer_callbacks(
                         String::from_utf8_lossy(payload),
                     ),
                 };
-                eprintln!(
+                log::info!(
                     "wz-ap-demo: REPLY RECEIVED rid={} keyexpr='{}' body={}",
-                    reply.rid, reply.keyexpr_literal, body_text,
+                    reply.rid,
+                    reply.keyexpr_literal,
+                    body_text,
                 );
             },
             move |rid| {
                 if !on_final {
                     return;
                 }
-                eprintln!("wz-ap-demo: FINAL RECEIVED rid={rid}");
+                log::info!("wz-ap-demo: FINAL RECEIVED rid={rid}");
             },
         );
     }
@@ -252,13 +273,14 @@ fn install_observer_callbacks(
         observer_lock
             .liveliness
             .on_token_declared(|decl, resolved| {
-                eprintln!(
+                log::info!(
                     "wz-ap-demo: REMOTE TOKEN DECLARED id={} keyexpr='{}'",
-                    decl.id, resolved,
+                    decl.id,
+                    resolved,
                 );
             });
         observer_lock.liveliness.on_token_undeclared(|undecl| {
-            eprintln!("wz-ap-demo: REMOTE TOKEN UNDECLARED id={}", undecl.id);
+            log::info!("wz-ap-demo: REMOTE TOKEN UNDECLARED id={}", undecl.id);
         });
     }
     // observer_lock drops here; subsequent users (drive_session
@@ -304,7 +326,7 @@ fn install_session_handles(
             // the SampleKind discriminant + payload bytes directly,
             // so the prior `match push.keyexpr.body` + tagged-union
             // arm extraction is no longer required at the call site.
-            eprintln!(
+            log::info!(
                 "wz-ap-demo: SUBSCRIBER FIRED filter='{}' keyexpr='{}' kind={:?} payload_len={}",
                 key_for_callback,
                 sample.keyexpr,
@@ -325,9 +347,12 @@ fn install_session_handles(
                     LivelinessSampleKind::Put => "PUT",
                     LivelinessSampleKind::Delete => "DELETE",
                 };
-                eprintln!(
+                log::info!(
                     "wz-ap-demo: LIVELINESS SAMPLE {} filter='{}' keyexpr='{}' token_id={}",
-                    kind_str, key_for_callback, sample.keyexpr, sample.token_id,
+                    kind_str,
+                    key_for_callback,
+                    sample.keyexpr,
+                    sample.token_id,
                 );
             },
         )
@@ -341,7 +366,7 @@ fn install_session_handles(
             QueryableOptions::default(),
             move |_query, responder| {
                 responder.send_reply(reply_text_for_callback.as_bytes());
-                eprintln!(
+                log::info!(
                     "wz-ap-demo: QUERYABLE FIRED pattern='{}' rid={} keyexpr='{}' reply='{}'",
                     pattern_for_callback,
                     responder.rid(),
