@@ -100,7 +100,20 @@ use wz_runtime_core::TimeSource;
 
 use crate::runtime_impl::TokioTime;
 
-use crate::keyexpr_canon::{check_outbound_keyexpr_pico_safe, OutboundKeyexprError};
+// R309 — `check_outbound_keyexpr_pico_safe` is consumed only by
+// `send_declare_keyexpr` / `send_declare_subscriber` /
+// `send_declare_queryable` / `send_declare_token`, each of which
+// gates on its own declare-* feature. Gate the import on the union
+// so a no-default-features build (or any subset that disables all
+// four) does not surface as an unused-imports lint error.
+#[cfg(any(
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+))]
+use crate::keyexpr_canon::check_outbound_keyexpr_pico_safe;
+use crate::keyexpr_canon::OutboundKeyexprError;
 
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
@@ -1275,6 +1288,7 @@ impl SessionLinkActions {
     /// must have reached `Established`; the driver must be
     /// non-blocking or the channel-decoupling pattern must be in
     /// place to avoid `block_on`-in-runtime panic).
+    #[cfg(feature = "declare-keyexpr")]
     pub fn send_declare_keyexpr(
         &self,
         mapping_id: u64,
@@ -1483,6 +1497,7 @@ impl SessionLinkActions {
     /// [`send_declare_keyexpr`]: the SN-window ordering guarantees
     /// the peer's subscriber table is populated before any matching
     /// Push arrives.
+    #[cfg(feature = "declare-subscriber")]
     pub fn send_declare_subscriber(
         &self,
         subscriber_id: u64,
@@ -1522,6 +1537,7 @@ impl SessionLinkActions {
     /// [`send_declare_keyexpr`]: the SN-window ordering guarantees
     /// the peer's queryable table is populated before any matching
     /// `Request(Query)` arrives.
+    #[cfg(feature = "declare-queryable")]
     pub fn send_declare_queryable(
         &self,
         queryable_id: u64,
@@ -1554,6 +1570,7 @@ impl SessionLinkActions {
     ///
     /// Same reliable-channel preconditions as
     /// [`send_declare_keyexpr`] / [`send_declare_subscriber`].
+    #[cfg(feature = "declare-token")]
     pub fn send_declare_token(
         &self,
         token_id: u64,
@@ -1583,6 +1600,7 @@ impl SessionLinkActions {
     /// DECLARE path: the peer must observe the retraction before any
     /// later Push that still aliases the id, otherwise the peer would
     /// dispatch the Push to the now-stale keyexpr.
+    #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
     pub fn send_undeclare_kexpr(&self, mapping_id: u64) {
         let declare = build_undeclare_kexpr(mapping_id);
         let sn = self.next_outbound_frame_sn();
@@ -1673,6 +1691,20 @@ impl SessionLinkActions {
     /// `/` in either prefix-trailing or suffix-leading position per
     /// the caller's intent — wz mirrors zenoh-pico's
     /// `_z_keyexpr_to_string` which never injects its own separator.
+    // R309 — only `send_declare_subscriber` / `send_declare_queryable`
+    // / `send_declare_token` reach for this helper (they take a
+    // `(mapping_id, suffix)` pair and need the reconstructed literal
+    // to feed the keyexpr-safety gate). Gate on the union plus the
+    // `#[cfg(test)]` companion below so the `reconstruct_outbound_-
+    // keyexpr_shape_table` test still compiles under
+    // `cargo test --no-default-features --features
+    // declare-subscriber`.
+    #[cfg(any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        test,
+    ))]
     fn reconstruct_outbound_keyexpr(
         &self,
         mapping_id: u64,
@@ -1701,6 +1733,7 @@ impl SessionLinkActions {
     /// subsequent matching Pushes will no longer route to this
     /// subscriber (the peer's other subscribers on the same keyexpr
     /// continue to receive).
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
     pub fn send_undeclare_subscriber(&self, subscriber_id: u64) {
         let declare = build_undeclare_subscriber(subscriber_id);
         let sn = self.next_outbound_frame_sn();
@@ -1711,6 +1744,7 @@ impl SessionLinkActions {
     /// R121i-c — encode + dispatch a `Declare(UndeclQueryable)` on
     /// the outbound link, retracting a previously declared queryable
     /// (id) on the peer.
+    #[cfg(all(feature = "declare-queryable", feature = "declare-undeclare"))]
     pub fn send_undeclare_queryable(&self, queryable_id: u64) {
         let declare = build_undeclare_queryable(queryable_id);
         let sn = self.next_outbound_frame_sn();
@@ -1721,6 +1755,7 @@ impl SessionLinkActions {
     /// R121i-c — encode + dispatch a `Declare(UndeclToken)` on the
     /// outbound link, retracting a previously declared liveliness
     /// token (id) on the peer.
+    #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
     pub fn send_undeclare_token(&self, token_id: u64) {
         let declare = build_undeclare_token(token_id);
         let sn = self.next_outbound_frame_sn();
@@ -1735,6 +1770,7 @@ impl SessionLinkActions {
     /// does not emit DeclFinal, but the action is provided so the
     /// state machine has the dispatch shape ready when Interest
     /// replies need to close a multi-DECLARE reply batch.
+    #[cfg(feature = "declare-final")]
     pub fn send_declare_final(&self) {
         let declare = build_declare_final();
         let sn = self.next_outbound_frame_sn();
@@ -1788,6 +1824,7 @@ impl SessionLinkActions {
     /// matching DeclToken / UndeclToken arrives, otherwise the peer's
     /// `_z_interest_process_*` resolves to no-match and the
     /// declaration silently drops.
+    #[cfg(feature = "declare-interest")]
     pub fn send_interest_liveliness_subscriber(
         &self,
         interest_id: u64,
@@ -1825,6 +1862,7 @@ impl SessionLinkActions {
     /// matching entry from its `_z_session_t._remote_interests` table.
     /// An unreliable Final would race against in-flight DeclToken
     /// replays and risk leaving a stale interest on the peer side.
+    #[cfg(feature = "declare-interest")]
     pub fn send_interest_final(&self, interest_id: u64) {
         let interest = build_interest_final(interest_id);
         let sn = self.next_outbound_frame_sn();

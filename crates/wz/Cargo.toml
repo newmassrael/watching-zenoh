@@ -99,13 +99,19 @@ codec-response-final = []
 codec-scout = []
 
 # ----- domain: declare (7 atomic, all active) -----
-declare-final = []
-declare-interest = []
-declare-keyexpr = ["keyexpr-mapping"]
-declare-queryable = []
-declare-subscriber = []
-declare-token = []
-declare-undeclare = []
+# R309 — 7 declare-domain features forwarded into wz-runtime-tokio via
+# cargo `?` syntax (forward only when runtime-tokio is active). Each
+# gates the matching `SessionLinkActions::send_*` wire-emit method in
+# session_glue.rs. `declare-keyexpr = ["keyexpr-mapping", …]` keeps
+# the pre-R309 facade-internal implication so the keyexpr aliasing
+# subsystem stays coherent (mapping_id -> suffix table membership).
+declare-final = ["wz-runtime-tokio?/declare-final"]
+declare-interest = ["wz-runtime-tokio?/declare-interest"]
+declare-keyexpr = ["keyexpr-mapping", "wz-runtime-tokio?/declare-keyexpr"]
+declare-queryable = ["wz-runtime-tokio?/declare-queryable"]
+declare-subscriber = ["wz-runtime-tokio?/declare-subscriber"]
+declare-token = ["wz-runtime-tokio?/declare-token"]
+declare-undeclare = ["wz-runtime-tokio?/declare-undeclare"]
 
 # ----- domain: encoding (7 atomic, 3 active / 4 reserved) -----
 encoding-bytes = []
