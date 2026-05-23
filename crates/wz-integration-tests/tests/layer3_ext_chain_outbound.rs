@@ -23,6 +23,7 @@ use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::ext_unit::ExtUnit;
 use wz_codecs::ext_zbuf::ExtZbuf;
 use wz_codecs::ext_zint::ExtZint;
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{BoxedLinkDriver, ExtChainRole, SessionLinkActions};
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
@@ -178,7 +179,7 @@ fn encode_init_with_ext_chain_byte_equiv_to_pico() {
     expected.extend_from_slice(&pico_oracle_ext_chain());
 
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
-    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
     actions.set_ext_chain(ExtChainRole::InitAck, wz_oracle_chain());
 
     let actual = actions.encode_init_with_role(
@@ -200,7 +201,7 @@ fn encode_init_with_explicit_empty_chain_omits_z_flag_and_trailing_bytes() {
     expected.extend_from_slice(&pico_init_body(parent_flags));
 
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
-    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
     // R121f1 — `SessionLinkActions::new` now seeds the Init ext chains
     // with the wire-spec-mandatory patch entry; this test re-asserts
     // the encoder's "empty chain → no Z flag + no trailing bytes"
@@ -225,7 +226,7 @@ fn ext_chain_role_isolation() {
     // R121f1 — clear both default Init ext chains first so the
     // post-set state isolates exactly one role's override.
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
-    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
     actions.set_ext_chain(ExtChainRole::InitSyn, Vec::new());
     actions.set_ext_chain(ExtChainRole::InitAck, Vec::new());
     actions.set_ext_chain(ExtChainRole::InitSyn, wz_oracle_chain());
@@ -253,7 +254,7 @@ fn ext_chain_role_isolation() {
     );
 }
 
-/// R121f1 — `SessionLinkActions::new()` seeds the Init ext chains
+/// R121f1 — `SessionLinkActions::new(, TokioTime::new())` seeds the Init ext chains
 /// with the wire-spec-mandatory patch extension entry
 /// (`_Z_MSG_EXT_ID_INIT_PATCH = 0x07 | _Z_MSG_EXT_ENC_ZINT = 0x27`,
 /// `body = VLE(_Z_CURRENT_PATCH = 1) = 0x01`). Without this seed,
@@ -266,7 +267,7 @@ fn ext_chain_role_isolation() {
 #[test]
 fn default_session_actions_seed_init_chains_with_patch_extension() {
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
-    let actions = SessionLinkActions::new(driver, fixture_session_init_params());
+    let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
 
     let init_syn = actions.encode_init_with_role(
         /*is_ack=*/ false,

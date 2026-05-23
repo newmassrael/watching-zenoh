@@ -2893,7 +2893,7 @@ mod tests {
     use crate::runtime_impl::TokioTime;
     use crate::session_glue::{BoxedLinkDriver, SessionInitParams, SigningKey};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Instant;
+    use wz_runtime_core::TimeSource;
 
     /// R283 test helper — force the session-FSM `Established` stamp
     /// without driving the full handshake. The production path
@@ -2909,7 +2909,8 @@ mod tests {
             .actions()
             .established_at
             .lock()
-            .expect("established_at poisoned in test fixture") = Some(Instant::now());
+            .expect("established_at poisoned in test fixture") =
+            Some(session.actions().clock.now_monotonic_ms());
     }
 
     /// Captures every outbound wire send so tests can assert wire
@@ -2966,7 +2967,7 @@ mod tests {
     /// (via the observer borrowed off the session).
     fn build_session() -> (Session, Arc<RecordingDriver>) {
         let driver = Arc::new(RecordingDriver::new());
-        let actions = SessionLinkActions::new(driver.clone(), fixture_params());
+        let actions = SessionLinkActions::new(driver.clone(), fixture_params(), TokioTime::new());
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
         (Session::new(actions, observer), driver)
     }
@@ -3662,7 +3663,7 @@ mod tests {
         let driver = Arc::new(RecordingDriver::new());
         let mut params = fixture_params();
         params.zid = Vec::new();
-        let actions = SessionLinkActions::new(driver.clone(), params);
+        let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
         let session = Session::new(actions, observer);
         assert!(
@@ -3690,7 +3691,7 @@ mod tests {
         let driver = Arc::new(RecordingDriver::new());
         let mut params = fixture_params();
         params.zid = vec![0u8; 17];
-        let actions = SessionLinkActions::new(driver.clone(), params);
+        let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
         let session = Session::new(actions, observer);
         assert!(
@@ -4563,7 +4564,7 @@ mod tests {
     #[test]
     fn alloc_next_request_id_increments_and_starts_at_zero() {
         let driver = Arc::new(RecordingDriver::new());
-        let actions = SessionLinkActions::new(driver, fixture_params());
+        let actions = SessionLinkActions::new(driver, fixture_params(), TokioTime::new());
         assert_eq!(actions.alloc_next_request_id(), 0);
         assert_eq!(actions.alloc_next_request_id(), 1);
         assert_eq!(actions.alloc_next_request_id(), 2);
@@ -4630,7 +4631,7 @@ mod tests {
         // alloc_next_request_id counter also starts at 0 so the
         // request_id matches.
         let driver2 = Arc::new(RecordingDriver::new());
-        let actions2 = SessionLinkActions::new(driver2.clone(), fixture_params());
+        let actions2 = SessionLinkActions::new(driver2.clone(), fixture_params(), TokioTime::new());
         let rid = actions2.alloc_next_request_id();
         actions2.send_request_query(rid, 0, Some("home/temp"));
         let baseline = driver2.frames.lock().unwrap()[0].0.clone();

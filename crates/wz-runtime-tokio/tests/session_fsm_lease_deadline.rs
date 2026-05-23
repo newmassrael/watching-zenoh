@@ -23,9 +23,11 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+// R294: lease deadline arithmetic migrated to u64 ms
 
 use sce_rust_runtime::Engine;
+use wz_runtime_core::TimeSource;
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
@@ -55,7 +57,8 @@ impl BoxedLinkDriver for NoopOutboundDriver {
 
 fn fresh_setup() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
     let outbound: Arc<dyn BoxedLinkDriver> = Arc::new(NoopOutboundDriver::default());
-    let actions = SessionLinkActions::new(outbound, fixture_session_init_params());
+    let actions =
+        SessionLinkActions::new(outbound, fixture_session_init_params(), TokioTime::new());
     let lua = install_session_actions_for_test(actions.clone());
     let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
     engine.initialize();
@@ -90,7 +93,7 @@ fn r77_no_baseline_when_both_slots_empty_pre_established() {
     );
     let pre_state = engine.get_current_state();
 
-    let outcome = check_lease_deadline(&actions, &mut engine, Instant::now());
+    let outcome = check_lease_deadline(&actions, &mut engine, actions.clock.now_monotonic_ms());
     assert_eq!(
         outcome,
         LeaseCheckOutcome::NoBaseline,
@@ -122,7 +125,7 @@ fn r84_within_lease_via_established_baseline_alone() {
         .expect("Established.onentry populated established_at via R84 hook");
 
     // 1ms after Established entry, well within 10s lease.
-    let now = established + Duration::from_millis(1);
+    let now = established + 1;
     let outcome = check_lease_deadline(&actions, &mut engine, now);
     assert_eq!(
         outcome,
@@ -142,7 +145,7 @@ fn r84_expired_via_established_baseline_alone() {
     let established = actions.established_at.lock().unwrap().unwrap();
 
     // 20s after Established entry, past the 10s fixture lease.
-    let now = established + Duration::from_secs(20);
+    let now = established + 20 * 1000;
     let outcome = check_lease_deadline(&actions, &mut engine, now);
     assert_eq!(
         outcome,
@@ -187,9 +190,9 @@ fn r84_keepalive_wins_over_stale_established_via_max() {
     // Counted from established (stale): 12s >= 10s ⇒ Expired.
     // Counted from keepalive (recent): 1s < 10s ⇒ WithinLease.
     // max() picks keepalive ⇒ WithinLease (correct R84 semantics).
-    let keepalive = established + Duration::from_secs(11);
+    let keepalive = established + 11 * 1000;
     *actions.last_inbound_keepalive_at.lock().unwrap() = Some(keepalive);
-    let now = established + Duration::from_secs(12);
+    let now = established + 12 * 1000;
 
     let outcome = check_lease_deadline(&actions, &mut engine, now);
     assert_eq!(
@@ -208,11 +211,11 @@ fn r77_within_lease_when_stamp_recent() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
     // Fixture lease = 10_000 (ms, lease_in_seconds=false) ⇒ 10s window.
-    let stamp = Instant::now();
+    let stamp = actions.clock.now_monotonic_ms();
     *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
     let pre_state = engine.get_current_state();
 
-    let now = stamp + Duration::from_millis(1);
+    let now = stamp + 1;
     let outcome = check_lease_deadline(&actions, &mut engine, now);
     assert_eq!(
         outcome,
@@ -234,10 +237,10 @@ fn r77_within_lease_when_stamp_recent() {
 fn r77_expired_drives_established_to_closing() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
-    let stamp = Instant::now();
+    let stamp = actions.clock.now_monotonic_ms();
     *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
 
-    let now = stamp + Duration::from_secs(20);
+    let now = stamp + 20 * 1000;
     let outcome = check_lease_deadline(&actions, &mut engine, now);
     assert_eq!(
         outcome,
@@ -276,10 +279,10 @@ fn r77_expired_drives_established_to_closing() {
 fn r77_expired_at_exact_lease_boundary() {
     let (actions, mut engine) = fresh_setup();
     drive_to_established(&mut engine);
-    let stamp = Instant::now();
+    let stamp = actions.clock.now_monotonic_ms();
     *actions.last_inbound_keepalive_at.lock().unwrap() = Some(stamp);
 
-    let now = stamp + Duration::from_millis(10_000);
+    let now = stamp + 10_000;
     let outcome = check_lease_deadline(&actions, &mut engine, now);
     assert_eq!(
         outcome,

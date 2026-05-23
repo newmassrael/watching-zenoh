@@ -23,6 +23,7 @@ use std::sync::Arc;
 use sce_rust_runtime::Engine;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
 };
@@ -52,7 +53,7 @@ async fn r60_fsm_drives_real_tcp_loopback() {
     let adapter: Arc<TokioLinkDriverAdapter<TcpDriver>> =
         Arc::new(TokioLinkDriverAdapter::new(driver, handle));
 
-    let actions = SessionLinkActions::new(adapter, fixture_session_init_params());
+    let actions = SessionLinkActions::new(adapter, fixture_session_init_params(), TokioTime::new());
     let lua = install_session_actions_for_test(actions.clone());
 
     // ─── drive Init -> LinkOpening -> SentInitSyn ──────────────

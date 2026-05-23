@@ -23,9 +23,10 @@
 use std::collections::VecDeque;
 use std::io;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+// R294 — lease deadline arithmetic migrated to u64 ms via TokioTime
 
 use sce_rust_runtime::Engine;
+use wz_runtime_core::TimeSource;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
@@ -119,7 +120,7 @@ fn fresh_setup_with_lease_ms(
     let mut params = fixture_session_init_params();
     params.lease = lease_ms;
     params.lease_in_seconds = false;
-    let actions = SessionLinkActions::new(outbound, params);
+    let actions = SessionLinkActions::new(outbound, params, TokioTime::new());
     let lua = install_session_actions_for_test(actions.clone());
     let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));
     engine.initialize();
@@ -225,7 +226,7 @@ async fn r76b_link_lost_event_drives_loop_to_terminated() {
 async fn r76b_lease_branch_fires_with_silent_peer() {
     let (actions, mut engine) = fresh_setup_with_lease_ms(20);
     drive_to_established(&mut engine);
-    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(Instant::now());
+    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(actions.clock.now_monotonic_ms());
 
     let mut driver = HangingDriver;
     let clock = TokioTime::new();
@@ -501,7 +502,7 @@ async fn r99_subscriber_registry_routes_framepayload_push_to_callback() {
 async fn r83_observer_fires_on_lease_branch() {
     let (actions, mut engine) = fresh_setup_with_lease_ms(20);
     drive_to_established(&mut engine);
-    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(Instant::now());
+    *actions.last_inbound_keepalive_at.lock().unwrap() = Some(actions.clock.now_monotonic_ms());
 
     let mut driver = HangingDriver;
     let lease_outcomes: Arc<Mutex<Vec<LeaseCheckOutcome>>> = Arc::new(Mutex::new(Vec::new()));

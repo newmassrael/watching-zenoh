@@ -540,7 +540,12 @@ pub(crate) async fn run_demo(
     //          deploy.yaml; the demo uses fixed MVP values per the
     //          `demo_session_init_params()` constant block.
     let params = demo_session_init_params(&role);
-    let actions = SessionLinkActions::new(outbound, params);
+    // R294 — pass `session_clock` so SessionLinkActions records its
+    // keepalive / established timestamps on the same monotonic epoch
+    // that drive_session_until_terminal's lease comparator uses (the
+    // same `session_clock` value is threaded into drive_session +
+    // sweep_task + the background spawn helpers by SpawnedTasks).
+    let actions = SessionLinkActions::new(outbound, params, session_clock);
     let script_engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
     install_session_actions(actions.clone(), &script_engine);
 
