@@ -15252,6 +15252,70 @@
         "wz-ap-demo eager argv gate is DECLARE-side only. R301 could evaluate whether --key / --queryable / --query / --liveliness-subscribe (receive-side keyexprs) should also be argv-validated for grammar correctness (not pico-safety — they never leave wz) so CLI users get the same UX as DECLARE flags. Likely a low-effort UX tweak, not a correctness concern."
       ]
     },
+    "Round 301": {
+      "decision_summary": "R301 first-pass composable-framework feature catalog: docs/feature_inventory.md 13th workspace doc + 144 atomic features (19 domains) + 6 semver preset contracts.",
+      "changes_bullets": [
+        "docs/feature_inventory.md NEW — H1 + 9 H2 (§1 Purpose / §2 Naming convention / §3 Three-test definitions / §4 Conflict policy / §5 Atomic feature catalog / §6 Presets / §7 Cargo feature emission mechanism / §8 SCE feature gate mechanism / §9 Change log) + 28 H3 sub-sections (§2.1-2.2 + §3.1-3.3 + §5.1-5.19 + §6.1-6.6). ~600 lines of prose authored with Status/Scope/Inputs/Outputs/Non-outputs front-matter. Cross-feature consistency anchor is zenoh-cpp public API shape (R267 north star).",
+        "mnemosyne.toml::workspace.docs extended 12→13 — new entry `docs/feature_inventory.md` inserted in alpha order between README.md and docs/intrinsics-runtime-symbols.md. default_doc unchanged (ARCHITECTURE.md). No other config changes.",
+        "144 add_inventory_entry calls landed atomic features across 19 domains. Counts per domain: transport=16, locator=9, scouting=6, session=9, link=5, keyexpr=8, declare=7, pubsub=11, query=10, liveliness=5, storage=4, codec=16, runtime=6, platform=7, routing=6, access=6, attachment=2, time=4, encoding=7. Naming convention `<domain>-<capability>` strict kebab-case ASCII, max 3 segments.",
+        "6 add_inventory_entry calls landed preset semver-named contracts at v0.1.0: preset-mcu-minimal (35 atomic feat smallest viable MCU client) / preset-mcu-extended (~57 atomic feat adds query+liveliness+wildcards) / preset-ap-client (~65 atomic feat Linux client) / preset-ap-router (~78 atomic feat adds router mode+gossip+multicast) / preset-ap-full (~123 atomic feat kitchen sink) / preset-zenoh-cpp (preset-ap-full minus MCU subset, cross-feature consistency anchor).",
+        "Status labels per inventory entry: ~62 active (wz R300 implementation snapshot with citation pointing at wz source file) / ~88 reserved (zenoh / zenoh-pico / zenoh-cpp roadmap with citation pointing at upstream module). All entries carry source + reason field — reason summarizes Footprint/Plausibility/Coherence 3-test verdict in F=...; P=...; C=... triple.",
+        "§7 Cargo feature emission mechanism (R302+ open carry) — Cargo.toml [features] table layout + default feature set + feature-implication edges + #[cfg] gate placement deferred. Reference points cited: Linux kconfig, Zephyr west config, Buildroot, NixOS USE flags.",
+        "§8 SCE feature gate mechanism (R302+ open carry) — SCXML `<sce:requires feature=...>` / `<sce:requires preset=...>` attribute design pending SCE codegen ratify. First cross-repo deliverable on composable-framework track."
+      ],
+      "verification_bullets": [
+        "validate_workspace post-doc-register: docs=12→13, T1 orphan=0 (no new orphans), round-trip mandatory=13/13 (new doc parses+emits clean), T3 warn 855→862 (+7 style flags from new doc prose, expected), T4 info 427→429 (+2), atomic ledger entries=299 unchanged, sections=215 unchanged, GENERATED.md=sync.",
+        "validate_workspace post-inventory (150 add_inventory_entry calls): docs=13/13, T1=0, RT=13/13, GENERATED.md=sync. sidecar grew 2.63 MB → 2.66 MB (~30 KB across 150 entries). Each call cascaded GENERATED.md atomically; no manual edits to .atomic.json or GENERATED.md.",
+        "SSOT contract honored per CLAUDE.md — all 150 inventory mutations routed through `add_inventory_entry` primitive. mnemosyne.toml workspace.docs edit was the only direct file mutation; this is the textbook scope-extension path (workspace.docs grows monotonically; no orphan-silencing intent).",
+        "Atomic feature naming consistency check — all 144 atomic ids match `<domain>-<capability>` or `<domain>-<capability>-<modifier>` kebab-case pattern; all 6 preset ids match `preset-<target>-<level>`. No duplicates (add_inventory_entry rejects on duplicate inventory_id).",
+        "wz R300 implementation snapshot grounding — active labels cite concrete wz source paths: crates/wz-runtime-tokio/src/{session,session_glue,keyexpr_canon,pubsub,query,reply,sample}.rs + sources/{algorithms,codecs,session}/ SCXMLs. Reserved labels cite zenoh / zenoh-pico / zenoh-cpp module names per the inventory.source field."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog"
+      ],
+      "carry_forward_bullets": [
+        "R302+ Cargo feature emission mechanism — design `Cargo.toml::[features]` layout, default-feature set, implication edges, #[cfg(feature)] gate placement. Reference points: kconfig / west / Buildroot / NixOS. This is the WHAT-cargo-does layer of the composable framework.",
+        "R302+ SCE feature gate mechanism — ratify SCXML `<sce:requires feature=\"X\"/>` / `<sce:requires preset=\"Y\"/>` attribute with SCE codegen. First cross-repo deliverable on the composable framework track; requires vendor/sce write-side coordination.",
+        "R303+ atomic Section decompose for feature_inventory.md — §5.1-5.19 + §6.1-6.6 currently parser-detected only (sections=215 unchanged); typed intent/rationale/inputs/outputs population deferred per R25 register-only precedent. Once decomposed, back-fill section_ref on all 150 inventory entries.",
+        "R303+ Footprint empirical re-evaluation — ~62 active entries marked F=measured against wz R300 source but no actual LOC/binary-byte/RAM-byte numbers captured. A measurement round would produce the first quantitative Footprint baseline; reserved entries get estimates from upstream code size.",
+        "R299 carry #2 (wz/pico equivalence inventory) — still open. R301 catalog adjacent but does not address per-module mirror claim audit; recommend separate grep+verify round.",
+        "R299 carry #3 (wz↔pico canon divergence handling, bug #1 wire-interop drift) — still open; user input needed among (a) wz traces pico bug / (b) wz inbound normalization shim / (c) zenoh-pico upstream patch.",
+        "R300 conservative-reject narrow (false-positive zone in DECLARE-side keyexpr gate) — still open low-priority; fork/wait pico subprocess probe deferred.",
+        "R300 receive-side argv UX (wz-ap-demo --key/--queryable/--query/--liveliness-subscribe argv-level grammar validation) — still open low-priority UX tweak.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest inbound bilateral, R267 Session<R,T> reparam (composability direct prerequisite), Querier::get_matching_status, Q_B/Q_E codec slots, Phase W full lwIP."
+      ],
+      "publishable_decision_summary": "R301 first-pass composable-framework feature catalog: docs/feature_inventory.md 13th workspace doc + 144 atomic features (19 domains) + 6 semver preset contracts.",
+      "publishable_changes_bullets": [
+        "docs/feature_inventory.md NEW — H1 + 9 H2 (§1 Purpose / §2 Naming convention / §3 Three-test definitions / §4 Conflict policy / §5 Atomic feature catalog / §6 Presets / §7 Cargo feature emission mechanism / §8 SCE feature gate mechanism / §9 Change log) + 28 H3 sub-sections (§2.1-2.2 + §3.1-3.3 + §5.1-5.19 + §6.1-6.6). ~600 lines of prose authored with Status/Scope/Inputs/Outputs/Non-outputs front-matter. Cross-feature consistency anchor is zenoh-cpp public API shape (R267 north star).",
+        "mnemosyne.toml::workspace.docs extended 12→13 — new entry `docs/feature_inventory.md` inserted in alpha order between README.md and docs/intrinsics-runtime-symbols.md. default_doc unchanged (ARCHITECTURE.md). No other config changes.",
+        "144 add_inventory_entry calls landed atomic features across 19 domains. Counts per domain: transport=16, locator=9, scouting=6, session=9, link=5, keyexpr=8, declare=7, pubsub=11, query=10, liveliness=5, storage=4, codec=16, runtime=6, platform=7, routing=6, access=6, attachment=2, time=4, encoding=7. Naming convention `<domain>-<capability>` strict kebab-case ASCII, max 3 segments.",
+        "6 add_inventory_entry calls landed preset semver-named contracts at v0.1.0: preset-mcu-minimal (35 atomic feat smallest viable MCU client) / preset-mcu-extended (~57 atomic feat adds query+liveliness+wildcards) / preset-ap-client (~65 atomic feat Linux client) / preset-ap-router (~78 atomic feat adds router mode+gossip+multicast) / preset-ap-full (~123 atomic feat kitchen sink) / preset-zenoh-cpp (preset-ap-full minus MCU subset, cross-feature consistency anchor).",
+        "Status labels per inventory entry: ~62 active (wz R300 implementation snapshot with citation pointing at wz source file) / ~88 reserved (zenoh / zenoh-pico / zenoh-cpp roadmap with citation pointing at upstream module). All entries carry source + reason field — reason summarizes Footprint/Plausibility/Coherence 3-test verdict in F=...; P=...; C=... triple.",
+        "§7 Cargo feature emission mechanism (R302+ open carry) — Cargo.toml [features] table layout + default feature set + feature-implication edges + #[cfg] gate placement deferred. Reference points cited: Linux kconfig, Zephyr west config, Buildroot, NixOS USE flags.",
+        "§8 SCE feature gate mechanism (R302+ open carry) — SCXML `<sce:requires feature=...>` / `<sce:requires preset=...>` attribute design pending SCE codegen ratify. First cross-repo deliverable on composable-framework track."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace post-doc-register: docs=12→13, T1 orphan=0 (no new orphans), round-trip mandatory=13/13 (new doc parses+emits clean), T3 warn 855→862 (+7 style flags from new doc prose, expected), T4 info 427→429 (+2), atomic ledger entries=299 unchanged, sections=215 unchanged, GENERATED.md=sync.",
+        "validate_workspace post-inventory (150 add_inventory_entry calls): docs=13/13, T1=0, RT=13/13, GENERATED.md=sync. sidecar grew 2.63 MB → 2.66 MB (~30 KB across 150 entries). Each call cascaded GENERATED.md atomically; no manual edits to .atomic.json or GENERATED.md.",
+        "SSOT contract honored per CLAUDE.md — all 150 inventory mutations routed through `add_inventory_entry` primitive. mnemosyne.toml workspace.docs edit was the only direct file mutation; this is the textbook scope-extension path (workspace.docs grows monotonically; no orphan-silencing intent).",
+        "Atomic feature naming consistency check — all 144 atomic ids match `<domain>-<capability>` or `<domain>-<capability>-<modifier>` kebab-case pattern; all 6 preset ids match `preset-<target>-<level>`. No duplicates (add_inventory_entry rejects on duplicate inventory_id).",
+        "wz R300 implementation snapshot grounding — active labels cite concrete wz source paths: crates/wz-runtime-tokio/src/{session,session_glue,keyexpr_canon,pubsub,query,reply,sample}.rs + sources/{algorithms,codecs,session}/ SCXMLs. Reserved labels cite zenoh / zenoh-pico / zenoh-cpp module names per the inventory.source field."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R302+ Cargo feature emission mechanism — design `Cargo.toml::[features]` layout, default-feature set, implication edges, #[cfg(feature)] gate placement. Reference points: kconfig / west / Buildroot / NixOS. This is the WHAT-cargo-does layer of the composable framework.",
+        "R302+ SCE feature gate mechanism — ratify SCXML `<sce:requires feature=\"X\"/>` / `<sce:requires preset=\"Y\"/>` attribute with SCE codegen. First cross-repo deliverable on the composable framework track; requires vendor/sce write-side coordination.",
+        "R303+ atomic Section decompose for feature_inventory.md — §5.1-5.19 + §6.1-6.6 currently parser-detected only (sections=215 unchanged); typed intent/rationale/inputs/outputs population deferred per R25 register-only precedent. Once decomposed, back-fill section_ref on all 150 inventory entries.",
+        "R303+ Footprint empirical re-evaluation — ~62 active entries marked F=measured against wz R300 source but no actual LOC/binary-byte/RAM-byte numbers captured. A measurement round would produce the first quantitative Footprint baseline; reserved entries get estimates from upstream code size.",
+        "R299 carry #2 (wz/pico equivalence inventory) — still open. R301 catalog adjacent but does not address per-module mirror claim audit; recommend separate grep+verify round.",
+        "R299 carry #3 (wz↔pico canon divergence handling, bug #1 wire-interop drift) — still open; user input needed among (a) wz traces pico bug / (b) wz inbound normalization shim / (c) zenoh-pico upstream patch.",
+        "R300 conservative-reject narrow (false-positive zone in DECLARE-side keyexpr gate) — still open low-priority; fork/wait pico subprocess probe deferred.",
+        "R300 receive-side argv UX (wz-ap-demo --key/--queryable/--query/--liveliness-subscribe argv-level grammar validation) — still open low-priority UX tweak.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest inbound bilateral, R267 Session<R,T> reparam (composability direct prerequisite), Querier::get_matching_status, Q_B/Q_E codec slots, Phase W full lwIP."
+      ]
+    },
     "Round 31": {
       "decision_summary": "Phase B5 entry — first codec-kind SCXMLs land. sources/codecs/keep_alive.scxml (empty body, transport-layer KeepAlive frame) + sources/codecs/close.scxml (1-byte reason code, session-close variant arm) authored against vendor pin 11f1032d. Opens the ~30-codec wire-message track.",
       "changes_bullets": [
@@ -20100,6 +20164,757 @@
       ]
     }
   },
-  "inventory_entries": {},
+  "inventory_entries": {
+    "access-acl": {
+      "status": "reserved",
+      "source": "zenoh-acl plugin",
+      "reason": "F=ACL filter pipeline; P=zenoh-acl; C=opt-in policy plugin"
+    },
+    "access-downsampling": {
+      "status": "reserved",
+      "source": "zenoh downsampling plugin",
+      "reason": "F=rate-limit filter; P=zenoh downsampling; C=opt-in QoS policy"
+    },
+    "access-extauth-jwt": {
+      "status": "reserved",
+      "source": "zenoh JWT auth method",
+      "reason": "F=JWT verify; P=zenoh; C=requires session-extauth, alternative method"
+    },
+    "access-extauth-pubkey": {
+      "status": "reserved",
+      "source": "zenoh pubkey auth method",
+      "reason": "F=RSA verify; P=zenoh; C=requires session-extauth, alternative method"
+    },
+    "access-extauth-usrpwd": {
+      "status": "reserved",
+      "source": "zenoh usrpwd auth method",
+      "reason": "F=usrpwd verify; P=zenoh; C=requires session-extauth, alternative method"
+    },
+    "access-quota": {
+      "status": "reserved",
+      "source": "zenoh per-key quota",
+      "reason": "F=quota accounting; P=zenoh; C=opt-in policy"
+    },
+    "attachment-bytes": {
+      "status": "reserved",
+      "source": "zenoh sample/query attachment opaque bytes",
+      "reason": "F=attachment field codec; P=zenoh attachment; C=opt-in metadata, enables pubsub-attachment + query-attachment"
+    },
+    "attachment-encoding-aware": {
+      "status": "reserved",
+      "source": "zenoh encoding-tagged attachment",
+      "reason": "F=tag-typed attachment view; P=zenoh; C=builds on attachment-bytes"
+    },
+    "codec-close": {
+      "status": "active",
+      "source": "sources/codecs/close.scxml",
+      "reason": "F=CLOSE codec; P=zenoh-pico codec_variant_session_close; C=session lifecycle terminator"
+    },
+    "codec-declare": {
+      "status": "active",
+      "source": "sources/codecs/declare.scxml",
+      "reason": "F=DECLARE outer codec; P=zenoh DECLARE; C=carrier for all declare-* kinds"
+    },
+    "codec-fragment": {
+      "status": "active",
+      "source": "sources/codecs/fragment.scxml",
+      "reason": "F=Fragment codec; P=zenoh transport Fragment; C=requires transport-fragmentation"
+    },
+    "codec-frame": {
+      "status": "active",
+      "source": "sources/codecs/frame.scxml",
+      "reason": "F=Frame codec; P=zenoh transport Frame; C=primary data carrier"
+    },
+    "codec-hello": {
+      "status": "active",
+      "source": "sources/codecs/hello.scxml",
+      "reason": "F=HELLO codec; P=zenoh-pico codec_zenoh_hello; C=companion to codec-scout"
+    },
+    "codec-init-ack": {
+      "status": "active",
+      "source": "sources/codecs/init_body.scxml (ack arm)",
+      "reason": "F=INIT-ACK body; P=zenoh-pico InitAck; C=session handshake second leg"
+    },
+    "codec-init-syn": {
+      "status": "active",
+      "source": "sources/codecs/init_body.scxml (syn arm)",
+      "reason": "F=INIT-SYN body; P=zenoh-pico InitSyn; C=session handshake first leg"
+    },
+    "codec-join": {
+      "status": "active",
+      "source": "sources/codecs/join.scxml",
+      "reason": "F=JOIN codec; P=zenoh-pico Join; C=requires session-multicast"
+    },
+    "codec-keep-alive": {
+      "status": "active",
+      "source": "sources/codecs/keep_alive.scxml",
+      "reason": "F=KeepAlive codec; P=zenoh-pico codec_zenoh_keep_alive; C=independent"
+    },
+    "codec-open-ack": {
+      "status": "active",
+      "source": "sources/codecs/open_body.scxml (ack arm)",
+      "reason": "F=OPEN-ACK body; P=zenoh-pico OpenAck; C=handshake fourth leg"
+    },
+    "codec-open-syn": {
+      "status": "active",
+      "source": "sources/codecs/open_body.scxml (syn arm)",
+      "reason": "F=OPEN-SYN body; P=zenoh-pico OpenSyn; C=handshake third leg"
+    },
+    "codec-push": {
+      "status": "active",
+      "source": "sources/codecs/push.scxml",
+      "reason": "F=PUSH codec; P=zenoh PUSH; C=pubsub carrier (put/delete)"
+    },
+    "codec-request": {
+      "status": "active",
+      "source": "sources/codecs/request.scxml",
+      "reason": "F=REQUEST codec; P=zenoh REQUEST; C=query carrier"
+    },
+    "codec-response": {
+      "status": "active",
+      "source": "sources/codecs/response.scxml",
+      "reason": "F=RESPONSE codec; P=zenoh RESPONSE; C=reply carrier"
+    },
+    "codec-response-final": {
+      "status": "active",
+      "source": "sources/codecs/response_final.scxml",
+      "reason": "F=RESPONSE-FINAL codec; P=zenoh RESPONSE_FINAL; C=query completion signal"
+    },
+    "codec-scout": {
+      "status": "active",
+      "source": "sources/codecs/scout.scxml",
+      "reason": "F=SCOUT codec; P=zenoh-pico codec_zenoh_scout; C=requires scouting-active or -multicast"
+    },
+    "declare-final": {
+      "status": "active",
+      "source": "sources/codecs/decl_final.scxml",
+      "reason": "F=DECLARE-FINAL push; P=zenoh DECLARE final; C=opt-in subscription complete signal"
+    },
+    "declare-interest": {
+      "status": "active",
+      "source": "sources/codecs/interest.scxml + interest_body.scxml",
+      "reason": "F=Z_INTEREST extension; P=zenoh interest; C=opt-in, OQ-W3 carry"
+    },
+    "declare-keyexpr": {
+      "status": "active",
+      "source": "sources/codecs/decl_kexpr.scxml",
+      "reason": "F=DECLARE-KEXPR codec; P=zenoh DECLARE alias; C=requires keyexpr-mapping"
+    },
+    "declare-queryable": {
+      "status": "active",
+      "source": "sources/codecs/decl_queryable.scxml",
+      "reason": "F=DECLARE-QUERYABLE codec; P=zenoh DECLARE queryable; C=indep declare kind"
+    },
+    "declare-subscriber": {
+      "status": "active",
+      "source": "sources/codecs/decl_subscriber.scxml",
+      "reason": "F=DECLARE-SUBSCRIBER codec; P=zenoh DECLARE subscriber; C=indep declare kind"
+    },
+    "declare-token": {
+      "status": "active",
+      "source": "sources/codecs/decl_token.scxml",
+      "reason": "F=DECLARE-TOKEN codec; P=zenoh DECLARE liveliness token; C=indep declare kind"
+    },
+    "declare-undeclare": {
+      "status": "active",
+      "source": "sources/codecs/undecl_*.scxml (4 files)",
+      "reason": "F=UNDECLARE codec pair per declare kind; P=zenoh UNDECLARE; C=lifecycle pair of DECLARE"
+    },
+    "encoding-bytes": {
+      "status": "active",
+      "source": "sources/codecs/encoding.scxml octet-stream arm",
+      "reason": "F=application/octet-stream tag; P=zenoh; C=indep encoding tag"
+    },
+    "encoding-cbor": {
+      "status": "reserved",
+      "source": "zenoh application/cbor encoding",
+      "reason": "F=CBOR encoding tag; P=zenoh; C=indep encoding tag"
+    },
+    "encoding-empty": {
+      "status": "active",
+      "source": "sources/codecs/encoding.scxml empty arm",
+      "reason": "F=empty encoding tag; P=zenoh encoding empty; C=baseline tag value"
+    },
+    "encoding-json": {
+      "status": "reserved",
+      "source": "zenoh application/json encoding",
+      "reason": "F=JSON encoding tag; P=zenoh; C=indep, payload still bytes"
+    },
+    "encoding-mime": {
+      "status": "reserved",
+      "source": "zenoh RFC 6838 full MIME registry",
+      "reason": "F=full MIME tag table; P=zenoh RFC 6838; C=superset of bespoke encoding-* tags"
+    },
+    "encoding-protobuf": {
+      "status": "reserved",
+      "source": "zenoh application/protobuf encoding",
+      "reason": "F=Protobuf encoding tag; P=zenoh; C=indep encoding tag"
+    },
+    "encoding-utf8": {
+      "status": "active",
+      "source": "sources/codecs/encoding.scxml text/plain arm",
+      "reason": "F=text/plain UTF-8 tag; P=zenoh; C=indep encoding tag"
+    },
+    "keyexpr-canon": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs at R221",
+      "reason": "F=canonize fn; P=zenoh-pico _z_keyexpr_canonize; C=mandatory for outbound wire safety"
+    },
+    "keyexpr-dollar-star": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs $*",
+      "reason": "F=non-greedy single-seg wildcard; P=zenoh $*; C=opt-in extension over wildcard-single"
+    },
+    "keyexpr-includes": {
+      "status": "active",
+      "source": "sources/algorithms/keyexpr_includes.scxml at R299",
+      "reason": "F=includes algorithm; P=zenoh _z_keyexpr_includes; C=required for declare-keyexpr alias check"
+    },
+    "keyexpr-intersect": {
+      "status": "active",
+      "source": "sources/algorithms/keyexpr_intersect.scxml at R297",
+      "reason": "F=intersect algorithm; P=zenoh _z_keyexpr_intersect; C=required for subscriber matching"
+    },
+    "keyexpr-literal": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs",
+      "reason": "F=baseline parse; P=zenoh keyexpr literal; C=indep, foundation for all wildcard variants"
+    },
+    "keyexpr-mapping": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/session_glue.rs KexprMappingTable",
+      "reason": "F=alias table; P=zenoh kexpr resolver; C=required when declare-keyexpr enabled"
+    },
+    "keyexpr-wildcard-double": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs",
+      "reason": "F=double-star chunk + canon rules; P=zenoh keyexpr **; C=R299 documented divergence pins"
+    },
+    "keyexpr-wildcard-single": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs",
+      "reason": "F=star chunk handling; P=zenoh keyexpr *; C=opt-in pattern, indep of double-wildcard"
+    },
+    "link-batching": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/session_glue.rs tx batch",
+      "reason": "F=multi-msg pack; P=zenoh batch; C=opt-in throughput"
+    },
+    "link-flow-control": {
+      "status": "reserved",
+      "source": "zenoh transport flow control",
+      "reason": "F=backpressure signal; P=zenoh; C=indep, can fail-fast without"
+    },
+    "link-fragment": {
+      "status": "active",
+      "source": "sources/codecs/fragment.scxml",
+      "reason": "F=Fragment codec; P=zenoh transport Fragment; C=requires transport-fragmentation"
+    },
+    "link-frame": {
+      "status": "active",
+      "source": "sources/codecs/frame.scxml",
+      "reason": "F=Frame envelope codec; P=zenoh transport Frame; C=indep of fragment path"
+    },
+    "link-tx-cache": {
+      "status": "reserved",
+      "source": "zenoh transport tx cache",
+      "reason": "F=retransmit buffer; P=zenoh; C=opt-in reliability layer"
+    },
+    "liveliness-get": {
+      "status": "reserved",
+      "source": "zenoh liveliness.get",
+      "reason": "F=Querier on liveliness; P=zenoh; C=opt-in snapshot query"
+    },
+    "liveliness-historical-samples": {
+      "status": "reserved",
+      "source": "zenoh liveliness historical samples",
+      "reason": "F=replay current tokens; P=zenoh; C=requires liveliness-history"
+    },
+    "liveliness-history": {
+      "status": "reserved",
+      "source": "zenoh Z_EXT_HISTORY on liveliness",
+      "reason": "F=history extension; P=zenoh; C=opt-in for liveliness subscribers"
+    },
+    "liveliness-subscriber": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/session.rs declare_liveliness_subscriber",
+      "reason": "F=Subscriber on liveliness; P=zenoh liveliness sub; C=indep receiver side"
+    },
+    "liveliness-token": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/session.rs declare_token",
+      "reason": "F=LivelinessToken handle; P=zenoh liveliness token; C=indep presence assertion"
+    },
+    "locator-iface": {
+      "status": "reserved",
+      "source": "zenoh locator ?iface= query parameter",
+      "reason": "F=qparam parse; P=zenoh locator iface scope; C=multi-NIC qualifier, orthogonal"
+    },
+    "locator-quic": {
+      "status": "reserved",
+      "source": "zenoh locator quic prefix",
+      "reason": "F=quic prefix dispatch; P=zenoh; C=requires transport-link-quic"
+    },
+    "locator-serial": {
+      "status": "reserved",
+      "source": "zenoh-pico locator serial prefix",
+      "reason": "F=serial prefix; P=zenoh-pico; C=requires transport-link-serial"
+    },
+    "locator-tcp": {
+      "status": "active",
+      "source": "crates/wz-ap-demo/src/args.rs",
+      "reason": "F=parser branch; P=zenoh-pico locator tcp prefix; C=indep"
+    },
+    "locator-tls": {
+      "status": "reserved",
+      "source": "zenoh locator tls prefix",
+      "reason": "F=tls prefix dispatch; P=zenoh; C=requires transport-link-tls"
+    },
+    "locator-udp": {
+      "status": "active",
+      "source": "crates/wz-ap-demo/src/args.rs",
+      "reason": "F=parser branch; P=zenoh-pico locator udp prefix; C=indep prefix dispatch"
+    },
+    "locator-unixsock": {
+      "status": "reserved",
+      "source": "zenoh locator unixsock-stream prefix",
+      "reason": "F=unixsock prefix; P=zenoh; C=requires transport-link-unixsock"
+    },
+    "locator-vsock": {
+      "status": "reserved",
+      "source": "zenoh locator vsock prefix",
+      "reason": "F=vsock prefix; P=zenoh; C=requires transport-link-vsock"
+    },
+    "locator-ws": {
+      "status": "reserved",
+      "source": "zenoh locator ws prefix",
+      "reason": "F=ws prefix; P=zenoh; C=requires transport-link-ws"
+    },
+    "platform-bare-metal": {
+      "status": "reserved",
+      "source": "RFC §5.J.4 MCU class",
+      "reason": "F=bare-metal C11; P=RFC §5.J.4; C=MCU target, mutually exclusive with OS-bearing platforms"
+    },
+    "platform-freertos": {
+      "status": "reserved",
+      "source": "zenoh-pico FreeRTOS port",
+      "reason": "F=FreeRTOS task primitives; P=zenoh-pico; C=alternative MCU OS"
+    },
+    "platform-linux": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src target",
+      "reason": "F=Linux syscalls; P=zenoh tokio default; C=baseline platform"
+    },
+    "platform-macos": {
+      "status": "reserved",
+      "source": "zenoh macOS backend",
+      "reason": "F=Darwin syscalls; P=zenoh; C=alternative to platform-linux"
+    },
+    "platform-qnx": {
+      "status": "reserved",
+      "source": "OQ-W20 QNX-native runtime",
+      "reason": "F=QNX dispatch primitives; P=OQ-W20; C=alternative to platform-linux"
+    },
+    "platform-windows": {
+      "status": "reserved",
+      "source": "zenoh windows backend",
+      "reason": "F=Win32 syscalls; P=zenoh; C=alternative to platform-linux"
+    },
+    "platform-zephyr": {
+      "status": "reserved",
+      "source": "zenoh-pico Zephyr port",
+      "reason": "F=Zephyr API; P=zenoh-pico; C=alternative MCU OS"
+    },
+    "preset-ap-client": {
+      "status": "active",
+      "source": "docs/feature_inventory.md §6.3",
+      "reason": "v0.1.0; Linux client AP; full pubsub + query + liveliness + TCP/UDP; ~65 atomic features"
+    },
+    "preset-ap-full": {
+      "status": "active",
+      "source": "docs/feature_inventory.md §6.5",
+      "reason": "v0.1.0; kitchen-sink Linux deploy; all transport link kinds + auth + attachments + advanced encodings; ~123 atomic features"
+    },
+    "preset-ap-router": {
+      "status": "active",
+      "source": "docs/feature_inventory.md §6.4",
+      "reason": "v0.1.0; preset-ap-client plus router mode + gossip + multicast; ~78 atomic features"
+    },
+    "preset-mcu-extended": {
+      "status": "active",
+      "source": "docs/feature_inventory.md §6.2",
+      "reason": "v0.1.0; preset-mcu-minimal plus query + liveliness + wildcards; ~57 atomic features"
+    },
+    "preset-mcu-minimal": {
+      "status": "active",
+      "source": "docs/feature_inventory.md §6.1",
+      "reason": "v0.1.0; smallest viable MCU client; bare-metal + lwIP + UDP + minimal pubsub; 35 atomic features"
+    },
+    "preset-zenoh-cpp": {
+      "status": "active",
+      "source": "docs/feature_inventory.md §6.6",
+      "reason": "v0.1.0; cross-feature consistency anchor matching zenoh-cpp public API; preset-ap-full minus MCU subset"
+    },
+    "pubsub-allow-loop": {
+      "status": "reserved",
+      "source": "zenoh allowed_destination enum",
+      "reason": "F=local-loop dispatch; P=zenoh; C=opt-in same-process delivery"
+    },
+    "pubsub-attachment": {
+      "status": "reserved",
+      "source": "zenoh sample attachment field",
+      "reason": "F=attachment bytes; P=zenoh; C=opt-in metadata, requires attachment-bytes"
+    },
+    "pubsub-congestion-control": {
+      "status": "reserved",
+      "source": "zenoh CongestionControl enum",
+      "reason": "F=Block/Drop policy; P=zenoh; C=opt-in publisher option"
+    },
+    "pubsub-delete": {
+      "status": "active",
+      "source": "sources/codecs/msg_del.scxml",
+      "reason": "F=Delete sample; P=zenoh delete; C=opt-in lifecycle op alongside put"
+    },
+    "pubsub-encoding": {
+      "status": "active",
+      "source": "sources/codecs/encoding.scxml",
+      "reason": "F=Encoding field codec; P=zenoh Encoding; C=opt-in payload tag"
+    },
+    "pubsub-express": {
+      "status": "reserved",
+      "source": "zenoh express bit",
+      "reason": "F=express bit; P=zenoh; C=opt-in fast-path bypass batching"
+    },
+    "pubsub-priority": {
+      "status": "reserved",
+      "source": "zenoh Priority 8-level enum",
+      "reason": "F=priority field; P=zenoh; C=requires session-extqos"
+    },
+    "pubsub-put": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/pubsub.rs",
+      "reason": "F=Put emit path; P=zenoh put; C=indep operation"
+    },
+    "pubsub-sample": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/sample.rs",
+      "reason": "F=Sample receive surface; P=zenoh Sample; C=indep receive-side"
+    },
+    "pubsub-source-info": {
+      "status": "reserved",
+      "source": "zenoh SourceInfo extension",
+      "reason": "F=source-info ext codec; P=zenoh; C=opt-in sample provenance"
+    },
+    "pubsub-timestamp": {
+      "status": "active",
+      "source": "sources/codecs/timestamp.scxml",
+      "reason": "F=Timestamp field codec; P=zenoh Timestamp; C=opt-in sample metadata"
+    },
+    "query-attachment": {
+      "status": "reserved",
+      "source": "zenoh query attachment field",
+      "reason": "F=attachment in query; P=zenoh; C=opt-in metadata, requires attachment-bytes"
+    },
+    "query-consolidation": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/query.rs ConsolidationMode",
+      "reason": "F=None/Monotonic/Latest/Auto enum; P=zenoh ConsolidationMode; C=indep reply dedup"
+    },
+    "query-get": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/query.rs Session::get",
+      "reason": "F=get initiator; P=zenoh get; C=indep request-response op"
+    },
+    "query-queryable": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/query.rs Queryable",
+      "reason": "F=Queryable surface; P=zenoh Queryable; C=indep responder-side"
+    },
+    "query-reply": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/reply.rs",
+      "reason": "F=Reply emit path; P=zenoh Query::reply; C=companion to query-queryable"
+    },
+    "query-reply-err": {
+      "status": "reserved",
+      "source": "sources/codecs/err.scxml",
+      "reason": "F=ReplyErr variant; P=zenoh Query::reply_err; C=opt-in error reporting"
+    },
+    "query-selector-parameters": {
+      "status": "reserved",
+      "source": "zenoh Selector ?k=v parameters",
+      "reason": "F=selector param parse; P=zenoh; C=opt-in query refinement"
+    },
+    "query-source-info": {
+      "status": "reserved",
+      "source": "zenoh query SourceInfo",
+      "reason": "F=source-info on query; P=zenoh; C=symmetric to pubsub-source-info"
+    },
+    "query-target": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/query.rs QueryTarget",
+      "reason": "F=Best/All/AllComplete enum; P=zenoh QueryTarget; C=indep query routing knob"
+    },
+    "query-timeout": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/query.rs timeout option",
+      "reason": "F=per-query deadline; P=zenoh GetOptions::timeout; C=indep client-side"
+    },
+    "routing-client": {
+      "status": "active",
+      "source": "crates/wz-ap-demo/src/main.rs client mode",
+      "reason": "F=client-only routing; P=zenoh client; C=indep mode, smallest topology footprint"
+    },
+    "routing-failover": {
+      "status": "reserved",
+      "source": "zenoh failover brokering",
+      "reason": "F=failover policy; P=zenoh; C=requires routing-router"
+    },
+    "routing-peer": {
+      "status": "reserved",
+      "source": "zenoh peer mode",
+      "reason": "F=peer-to-peer routing; P=zenoh peer; C=alternative to routing-client"
+    },
+    "routing-router": {
+      "status": "reserved",
+      "source": "zenoh router mode",
+      "reason": "F=router topology; P=zenoh router; C=enables routing-routes/failover/static"
+    },
+    "routing-routes": {
+      "status": "reserved",
+      "source": "zenoh router routing tables",
+      "reason": "F=routing tables; P=zenoh; C=requires routing-router"
+    },
+    "routing-static-routes": {
+      "status": "reserved",
+      "source": "zenoh static route config",
+      "reason": "F=config static routes; P=zenoh; C=requires routing-router"
+    },
+    "runtime-async-std": {
+      "status": "reserved",
+      "source": "zenoh async-std backend",
+      "reason": "F=async-std executor; P=zenoh; C=alternative to runtime-tokio"
+    },
+    "runtime-lwip": {
+      "status": "reserved",
+      "source": "crates/wz-runtime-lwip/ Phase W skeleton",
+      "reason": "F=lwIP MCU adapter; P=docs/runtime-crate-lwip.md; C=alternative runtime, mutually exclusive with runtime-tokio"
+    },
+    "runtime-no-std": {
+      "status": "reserved",
+      "source": "zenoh-pico #![no_std] core",
+      "reason": "F=no-std core lib; P=zenoh-pico; C=mutually exclusive with std-bearing runtimes"
+    },
+    "runtime-tokio": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/runtime_impl.rs",
+      "reason": "F=tokio executor binding; P=zenoh tokio backend; C=indep async runtime adapter"
+    },
+    "runtime-tokio-uring": {
+      "status": "reserved",
+      "source": "docs/runtime-crate-tokio.md §4 io_uring opt-in",
+      "reason": "F=io_uring fixed-buf adapter; P=ARCHITECTURE §9.5 row 3; C=alternative reactor under runtime-tokio"
+    },
+    "runtime-zero-copy": {
+      "status": "reserved",
+      "source": "RFC §5.E buffer pool",
+      "reason": "F=pool-slot Sample lifetime; P=RFC §5.E; C=opt-in performance, requires runtime-tokio-uring or runtime-lwip"
+    },
+    "scouting-active": {
+      "status": "active",
+      "source": "sources/codecs/scout.scxml + hello.scxml",
+      "reason": "F=SCOUT+HELLO codec pair; P=zenoh-pico scouting active; C=indep of passive/static modes"
+    },
+    "scouting-autoconnect": {
+      "status": "reserved",
+      "source": "zenoh autoconnect on HELLO",
+      "reason": "F=auto-connect logic; P=zenoh; C=opt-in policy on top of discovery"
+    },
+    "scouting-gossip": {
+      "status": "reserved",
+      "source": "zenoh router gossip protocol",
+      "reason": "F=peer-to-peer gossip; P=zenoh router; C=router-side only, requires routing-router"
+    },
+    "scouting-multicast": {
+      "status": "reserved",
+      "source": "zenoh-pico scouting multicast UDP",
+      "reason": "F=multicast group join; P=zenoh-pico; C=requires transport-link-udp + multicast OS support"
+    },
+    "scouting-passive": {
+      "status": "reserved",
+      "source": "OQ-W23 ratify pending",
+      "reason": "F=listen-only path; P=OQ-W23 passive scouting mode; C=alternative to scouting-active"
+    },
+    "scouting-static": {
+      "status": "reserved",
+      "source": "zenoh config static peer list",
+      "reason": "F=config-file static peer; P=zenoh static endpoints; C=alternative to dynamic discovery"
+    },
+    "session-extauth": {
+      "status": "reserved",
+      "source": "zenoh Z_EXT_AUTH",
+      "reason": "F=auth extension dispatch; P=zenoh; C=opt-in handshake extension, OQ-W2 carry"
+    },
+    "session-extcompression": {
+      "status": "reserved",
+      "source": "zenoh Z_EXT_COMPRESSION",
+      "reason": "F=compression handshake; P=zenoh; C=requires transport-compression"
+    },
+    "session-extqos": {
+      "status": "reserved",
+      "source": "zenoh Z_EXT_QOS",
+      "reason": "F=qos extension; P=zenoh ext qos priority; C=opt-in extension"
+    },
+    "session-extshm": {
+      "status": "reserved",
+      "source": "zenoh Z_EXT_SHM",
+      "reason": "F=shm handshake; P=zenoh; C=requires transport-shm"
+    },
+    "session-multicast": {
+      "status": "reserved",
+      "source": "zenoh-pico multicast session FSM",
+      "reason": "F=multicast FSM; P=zenoh-pico; C=indep of unicast, OQ-W9"
+    },
+    "session-resumable": {
+      "status": "reserved",
+      "source": "OQ-Q14 resumable session",
+      "reason": "F=cookie state; P=OQ-Q14 ratify pending; C=opt-in on top of unicast"
+    },
+    "session-stateless-accept": {
+      "status": "reserved",
+      "source": "OQ-W15 stateless accept ratify",
+      "reason": "F=cookie HMAC SHA256; P=OQ-W15 ratify; C=required on untrusted_source listeners"
+    },
+    "session-unicast-accept": {
+      "status": "active",
+      "source": "sources/session/session_fsm_unicast.scxml",
+      "reason": "F=acceptor FSM partial; P=zenoh session accept; C=indep of open role, OQ-W15/W22 carries"
+    },
+    "session-unicast-open": {
+      "status": "active",
+      "source": "sources/session/session_fsm_unicast.scxml",
+      "reason": "F=initiator FSM; P=zenoh-pico session open; C=indep of acceptor role"
+    },
+    "storage-aligner": {
+      "status": "reserved",
+      "source": "zenoh storage aligner protocol",
+      "reason": "F=aligner protocol; P=zenoh; C=opt-in storage convergence"
+    },
+    "storage-backend": {
+      "status": "reserved",
+      "source": "zenoh-backend-traits crate",
+      "reason": "F=plugin trait; P=zenoh-backend-traits; C=opt-in plugin surface"
+    },
+    "storage-history": {
+      "status": "reserved",
+      "source": "zenoh Z_EXT_HISTORY emit",
+      "reason": "F=history ext emit; P=zenoh; C=opt-in for storage backends"
+    },
+    "storage-replication": {
+      "status": "reserved",
+      "source": "zenoh storage replication protocol",
+      "reason": "F=replication FSM; P=zenoh storage-replication; C=opt-in on top of storage-backend"
+    },
+    "time-hlc": {
+      "status": "reserved",
+      "source": "zenoh-uhlc crate",
+      "reason": "F=HLC clock state; P=zenoh-uhlc; C=opt-in alternative to wall-clock"
+    },
+    "time-ntp64": {
+      "status": "active",
+      "source": "sources/codecs/timestamp.scxml",
+      "reason": "F=NTP64 timestamp codec; P=zenoh NTP64 timestamp; C=baseline timestamp shape"
+    },
+    "time-system-clock": {
+      "status": "active",
+      "source": "crates/wz-runtime-core/src/time.rs",
+      "reason": "F=wall-clock source; P=zenoh SystemTime; C=baseline time source, mutually exclusive with HLC"
+    },
+    "time-timestamp-source": {
+      "status": "reserved",
+      "source": "zenoh pluggable timestamp source",
+      "reason": "F=pluggable source trait; P=zenoh; C=opt-in abstraction over time-ntp64/hlc/system-clock"
+    },
+    "transport-batching": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/session_glue.rs",
+      "reason": "F=measured wz tx batch buffer; P=zenoh batching; C=opt-in throughput optimization"
+    },
+    "transport-compression": {
+      "status": "reserved",
+      "source": "zenoh Z_EXT_COMPRESSION",
+      "reason": "F=est lz4/zstd wrap; P=zenoh ext compression; C=opt-in per-message, OQ-W4 carry"
+    },
+    "transport-fragmentation": {
+      "status": "active",
+      "source": "sources/codecs/frame.scxml + fragment.scxml",
+      "reason": "F=measured wz codec pair; P=zenoh fragment/reassembly; C=can disable for transport-lowlatency"
+    },
+    "transport-keepalive": {
+      "status": "active",
+      "source": "sources/codecs/keep_alive.scxml",
+      "reason": "F=tiny empty-body codec; P=zenoh-pico keep_alive; C=independent liveness signal"
+    },
+    "transport-link-quic": {
+      "status": "reserved",
+      "source": "zenoh-link-quic crate",
+      "reason": "F=est quinn crate; P=zenoh-link-quic; C=standalone link kind"
+    },
+    "transport-link-serial": {
+      "status": "reserved",
+      "source": "zenoh-pico serial link",
+      "reason": "F=est UART driver; P=zenoh-pico serial transport; C=independent MCU link kind"
+    },
+    "transport-link-tcp": {
+      "status": "active",
+      "source": "crates/wz-ap-demo/src/link_driver.rs",
+      "reason": "F=measured wz TcpStream adapter; P=zenoh-pico transport_link_tcp.c; C=independent"
+    },
+    "transport-link-tls": {
+      "status": "reserved",
+      "source": "zenoh-link-tls crate",
+      "reason": "F=est rustls wrap over tcp; P=zenoh-link-tls; C=wraps transport-link-tcp, can disable"
+    },
+    "transport-link-udp": {
+      "status": "active",
+      "source": "crates/wz-ap-demo/src/link_driver.rs",
+      "reason": "F=measured wz UdpSocket adapter; P=zenoh-pico transport_link_udp.c; C=independent of TCP/TLS/QUIC link kinds"
+    },
+    "transport-link-unixsock": {
+      "status": "reserved",
+      "source": "zenoh-link-unixsock crate",
+      "reason": "F=est unix domain socket; P=zenoh-link-unixsock; C=independent local link kind"
+    },
+    "transport-link-vsock": {
+      "status": "reserved",
+      "source": "zenoh-link-vsock crate",
+      "reason": "F=est vsock crate; P=zenoh-link-vsock; C=independent VM host link"
+    },
+    "transport-link-ws": {
+      "status": "reserved",
+      "source": "zenoh-link-ws crate",
+      "reason": "F=est tungstenite wrap; P=zenoh-link-ws; C=independent"
+    },
+    "transport-lowlatency": {
+      "status": "reserved",
+      "source": "zenoh src/net/protocol/lowlatency",
+      "reason": "F=small no-fragmentation path; P=zenoh lowlatency mode; C=alternative to transport-fragmentation"
+    },
+    "transport-multicast": {
+      "status": "reserved",
+      "source": "zenoh-pico src/transport/multicast/",
+      "reason": "F=~2KLOC est from zenoh-pico; P=zenoh-pico multicast surface; C=independent of unicast; OQ-W9 carry"
+    },
+    "transport-shm": {
+      "status": "reserved",
+      "source": "zenoh-shm crate",
+      "reason": "F=est shared-memory ring; P=zenoh-shm Z_EXT_SHM; C=zero-copy opt-in, requires runtime-zero-copy"
+    },
+    "transport-unicast": {
+      "status": "active",
+      "source": "crates/wz-runtime-tokio/src/session.rs",
+      "reason": "F=~3KLOC wz session module; P=zenoh transport/unicast module; C=standalone session shape, multicast independent"
+    }
+  },
   "schema_version": 4
 }
