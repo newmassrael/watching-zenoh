@@ -15316,6 +15316,88 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest inbound bilateral, R267 Session<R,T> reparam (composability direct prerequisite), Querier::get_matching_status, Q_B/Q_E codec slots, Phase W full lwIP."
       ]
     },
+    "Round 302": {
+      "decision_summary": "R302a wz facade crate hosts R301 catalog as 144 atomic + 19 domain-aggregate + 6 preset Cargo features (169 total) with default=[] and explicit per-preset atomic lists.",
+      "changes_bullets": [
+        "crates/wz/ new top-level facade crate. Cargo.toml ~600 lines with [features] table holding 144 atomic + 19 domain-aggregate + 6 preset = 169 entries (plus default=[]). lib.rs minimal facade with #![cfg_attr(not(test), no_std)] so preset-mcu-* (no_std) flows through. No [dependencies] yet — features compile to no-op labels at R302a; downstream gating lands R302b+ as modules move into the facade.",
+        "144 atomic features named <domain>-<capability> kebab-case per R301 inventory. Identical id set, zero renames. Source of truth = inventory entries; Cargo.toml is the mechanical projection.",
+        "19 domain-aggregate features `domain-<name>` = union of each domain's atomic set. Granularity layer between hand-picking atomic and pick-a-preset. Used as `cargo add wz --features domain-pubsub` for whole-domain opt-in.",
+        "6 preset features as EXPLICIT per-preset atomic lists; no preset-extends-preset. Rationale: v0.1.0 is a frozen semver contract — atomic catalog growth cannot silently shift preset membership. Counts: preset-mcu-minimal=36 / preset-mcu-extended=59 / preset-ap-client=67 / preset-ap-router=80 / preset-ap-full=131 / preset-zenoh-cpp=118.",
+        "Implication edges encoded only where inventory reason field says 'requires X' / 'builds on X': attachment-encoding-aware→attachment-bytes; declare-keyexpr→keyexpr-mapping; pubsub-attachment→attachment-bytes; pubsub-priority→session-extqos; query-attachment→attachment-bytes; liveliness-get→query-get; liveliness-historical-samples→liveliness-history; codec-fragment→transport-fragmentation; codec-join→session-multicast; link-fragment→transport-fragmentation; locator-{quic,serial,tls,unixsock,vsock,ws}→transport-link-{same}; runtime-tokio-uring→runtime-tokio; scouting-gossip→routing-router; scouting-multicast→transport-link-udp; transport-link-tls→transport-link-tcp; access-extauth-{jwt,pubkey,usrpwd}→session-extauth; session-extcompression→transport-compression; session-extshm→transport-shm; routing-{failover,routes,static-routes}→routing-router; storage-{history,replication}→storage-backend.",
+        "default=[] (no-default). Composable-framework contract: user explicitly opts into a preset or hand-rolls atomic combos. Differs from batteries-included crates like tokio. Matches kconfig / NixOS USE / Buildroot semantics where the user authors the config.",
+        "Mutually-exclusive groups (platform-{bare-metal,linux,macos,windows,qnx,freertos,zephyr} / runtime-{tokio,lwip,no-std,async-std} / transport-fragmentation vs transport-lowlatency) NOT encoded as Cargo edges — Cargo features are monotone-additive. Policy check deferred to a future `cargo wz-config inspect` tool (R303+ candidate); informational only.",
+        "crates/Cargo.toml workspace.members extended +1 (`wz` inserted alpha-first before `wz-codecs`). Inline comment block extended to document the R302a rollout."
+      ],
+      "verification_bullets": [
+        "cargo check -p wz --no-default-features → pass 0.09s. Baseline (no features) compiles cleanly.",
+        "cargo check -p wz --no-default-features --features preset-mcu-minimal → pass 0.09s. Smallest preset.",
+        "cargo check -p wz --no-default-features --features preset-ap-client → pass 0.08s. Linux client preset (the suggested default for downstream consumers despite repo-level default=[]).",
+        "cargo check -p wz --no-default-features --features preset-ap-full → pass 0.08s. Largest preset.",
+        "cargo check -p wz --no-default-features --features preset-zenoh-cpp → pass 0.08s. zenoh-cpp consistency-anchor preset.",
+        "cargo check -p wz --no-default-features --features domain-pubsub → pass. Domain-aggregate path verified.",
+        "cargo check -p wz --no-default-features --features attachment-encoding-aware,declare-keyexpr,liveliness-historical-samples,scouting-gossip → pass. Implication-edge stress combo — each feature pulls 1+ dependency feature; cargo resolver accepts the transitive closure.",
+        "cargo check --workspace → pass 2.40s end-to-end. Adding `wz` to workspace.members did not perturb other crates' feature resolution. zenoh-pico-sys / wz-codecs / wz-runtime-tokio / wz-runtime-tokio-test-support / wz-ap-demo all build cleanly.",
+        "Feature count audit: awk scan of [features] section reports 170 line entries = `default` + 144 atomic + 19 domain-aggregate + 6 preset. Matches R301 catalog ids 1:1.",
+        "validate_workspace post-source-mutation: docs=13/13, entries=300 unchanged, sections=215 unchanged, T1 orphan=0, round-trip mandatory=13/13, GENERATED.md=sync. R302a Cargo.toml + lib.rs changes are outside the mnemosyne-tracked doc surface — no atomic-store drift."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog"
+      ],
+      "carry_forward_bullets": [
+        "R302b: first source-level #[cfg(feature)] gate inside wz-runtime-tokio. Candidate first domain: liveliness (5 features, 2 active → smaller blast radius than pubsub/query). Gate declare_token / declare_liveliness_subscriber paths on liveliness-token + liveliness-subscriber.",
+        "R302c+: continue per-domain #[cfg] gate rollout. Recommended sequence by blast-radius minimization: liveliness → query → declare → pubsub → codec → keyexpr → transport → session → routing / scouting / platform / runtime / encoding / link / locator / storage / time / attachment / access. Each domain = its own round.",
+        "R302d+: wz facade re-export plumbing. lib.rs currently empty. As R302b+ moves modules into the facade gated by `runtime-tokio`, wz becomes the user's only `cargo add` target instead of hand-importing wz-runtime-tokio plus undocumented siblings.",
+        "R303+ cargo wz-config inspect tool — policy-check selected feature set against mutex zones (platform / runtime / transport-fragmentation-vs-lowlatency). Emits informational warnings without rejecting. Cargo cannot do this so it's a separate cli binary.",
+        "Preset member counts diverge from R301 catalog approximations: minimal 36 (catalog ~35), extended 59 (~57), ap-client 67 (~65), ap-router 80 (~78), ap-full 131 (~123), zenoh-cpp 118 (described as preset-ap-full minus MCU subset). Ratify as: explicit Cargo.toml lists are v0.1.0 source of truth; markdown 'approximate' counts stand as descriptive only. No frozen-ledger violation because R301 prose said `~N` not `N exactly`.",
+        "R301 §7 (Cargo feature emission mechanism) and §8 (SCE `<sce:requires>` cross-repo) carries: §7 partially satisfied by R302a (atomic+aggregate+preset layout shipped, source #[cfg] gates pending R302b+). §8 still open; cross-repo coordination required.",
+        "R301 R303+ atomic Section decompose for feature_inventory.md — feature_inventory.md §5.1-5.19 + §6.1-6.6 currently parser-detected only. Once decomposed, back-fill section_ref on all 150 inventory entries.",
+        "R301 R303+ Footprint empirical re-evaluation — ~62 active entries marked F=measured against wz R300 source but no actual LOC/binary-byte/RAM-byte numbers captured.",
+        "R299 carry #2 (wz/pico equivalence inventory) still open. Adjacent to R302 catalog but separate analysis-only round.",
+        "R299 carry #3 (wz↔pico canon divergence handling, bug #1) still open; user input needed.",
+        "R300 conservative-reject narrow / argv UX still open low-priority.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest inbound bilateral, R267 Session<R,T> reparam (composability direct prerequisite — now Cargo features land, R267 is the source-level shape for the same composability axis), Querier::get_matching_status, Q_B/Q_E codec slots, Phase W full lwIP."
+      ],
+      "publishable_decision_summary": "R302a wz facade crate hosts R301 catalog as 144 atomic + 19 domain-aggregate + 6 preset Cargo features (169 total) with default=[] and explicit per-preset atomic lists.",
+      "publishable_changes_bullets": [
+        "crates/wz/ new top-level facade crate. Cargo.toml ~600 lines with [features] table holding 144 atomic + 19 domain-aggregate + 6 preset = 169 entries (plus default=[]). lib.rs minimal facade with #![cfg_attr(not(test), no_std)] so preset-mcu-* (no_std) flows through. No [dependencies] yet — features compile to no-op labels at R302a; downstream gating lands R302b+ as modules move into the facade.",
+        "144 atomic features named <domain>-<capability> kebab-case per R301 inventory. Identical id set, zero renames. Source of truth = inventory entries; Cargo.toml is the mechanical projection.",
+        "19 domain-aggregate features `domain-<name>` = union of each domain's atomic set. Granularity layer between hand-picking atomic and pick-a-preset. Used as `cargo add wz --features domain-pubsub` for whole-domain opt-in.",
+        "6 preset features as EXPLICIT per-preset atomic lists; no preset-extends-preset. Rationale: v0.1.0 is a frozen semver contract — atomic catalog growth cannot silently shift preset membership. Counts: preset-mcu-minimal=36 / preset-mcu-extended=59 / preset-ap-client=67 / preset-ap-router=80 / preset-ap-full=131 / preset-zenoh-cpp=118.",
+        "Implication edges encoded only where inventory reason field says 'requires X' / 'builds on X': attachment-encoding-aware→attachment-bytes; declare-keyexpr→keyexpr-mapping; pubsub-attachment→attachment-bytes; pubsub-priority→session-extqos; query-attachment→attachment-bytes; liveliness-get→query-get; liveliness-historical-samples→liveliness-history; codec-fragment→transport-fragmentation; codec-join→session-multicast; link-fragment→transport-fragmentation; locator-{quic,serial,tls,unixsock,vsock,ws}→transport-link-{same}; runtime-tokio-uring→runtime-tokio; scouting-gossip→routing-router; scouting-multicast→transport-link-udp; transport-link-tls→transport-link-tcp; access-extauth-{jwt,pubkey,usrpwd}→session-extauth; session-extcompression→transport-compression; session-extshm→transport-shm; routing-{failover,routes,static-routes}→routing-router; storage-{history,replication}→storage-backend.",
+        "default=[] (no-default). Composable-framework contract: user explicitly opts into a preset or hand-rolls atomic combos. Differs from batteries-included crates like tokio. Matches kconfig / NixOS USE / Buildroot semantics where the user authors the config.",
+        "Mutually-exclusive groups (platform-{bare-metal,linux,macos,windows,qnx,freertos,zephyr} / runtime-{tokio,lwip,no-std,async-std} / transport-fragmentation vs transport-lowlatency) NOT encoded as Cargo edges — Cargo features are monotone-additive. Policy check deferred to a future `cargo wz-config inspect` tool (R303+ candidate); informational only.",
+        "crates/Cargo.toml workspace.members extended +1 (`wz` inserted alpha-first before `wz-codecs`). Inline comment block extended to document the R302a rollout."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check -p wz --no-default-features → pass 0.09s. Baseline (no features) compiles cleanly.",
+        "cargo check -p wz --no-default-features --features preset-mcu-minimal → pass 0.09s. Smallest preset.",
+        "cargo check -p wz --no-default-features --features preset-ap-client → pass 0.08s. Linux client preset (the suggested default for downstream consumers despite repo-level default=[]).",
+        "cargo check -p wz --no-default-features --features preset-ap-full → pass 0.08s. Largest preset.",
+        "cargo check -p wz --no-default-features --features preset-zenoh-cpp → pass 0.08s. zenoh-cpp consistency-anchor preset.",
+        "cargo check -p wz --no-default-features --features domain-pubsub → pass. Domain-aggregate path verified.",
+        "cargo check -p wz --no-default-features --features attachment-encoding-aware,declare-keyexpr,liveliness-historical-samples,scouting-gossip → pass. Implication-edge stress combo — each feature pulls 1+ dependency feature; cargo resolver accepts the transitive closure.",
+        "cargo check --workspace → pass 2.40s end-to-end. Adding `wz` to workspace.members did not perturb other crates' feature resolution. zenoh-pico-sys / wz-codecs / wz-runtime-tokio / wz-runtime-tokio-test-support / wz-ap-demo all build cleanly.",
+        "Feature count audit: awk scan of [features] section reports 170 line entries = `default` + 144 atomic + 19 domain-aggregate + 6 preset. Matches R301 catalog ids 1:1.",
+        "validate_workspace post-source-mutation: docs=13/13, entries=300 unchanged, sections=215 unchanged, T1 orphan=0, round-trip mandatory=13/13, GENERATED.md=sync. R302a Cargo.toml + lib.rs changes are outside the mnemosyne-tracked doc surface — no atomic-store drift."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R302b: first source-level #[cfg(feature)] gate inside wz-runtime-tokio. Candidate first domain: liveliness (5 features, 2 active → smaller blast radius than pubsub/query). Gate declare_token / declare_liveliness_subscriber paths on liveliness-token + liveliness-subscriber.",
+        "R302c+: continue per-domain #[cfg] gate rollout. Recommended sequence by blast-radius minimization: liveliness → query → declare → pubsub → codec → keyexpr → transport → session → routing / scouting / platform / runtime / encoding / link / locator / storage / time / attachment / access. Each domain = its own round.",
+        "R302d+: wz facade re-export plumbing. lib.rs currently empty. As R302b+ moves modules into the facade gated by `runtime-tokio`, wz becomes the user's only `cargo add` target instead of hand-importing wz-runtime-tokio plus undocumented siblings.",
+        "R303+ cargo wz-config inspect tool — policy-check selected feature set against mutex zones (platform / runtime / transport-fragmentation-vs-lowlatency). Emits informational warnings without rejecting. Cargo cannot do this so it's a separate cli binary.",
+        "Preset member counts diverge from R301 catalog approximations: minimal 36 (catalog ~35), extended 59 (~57), ap-client 67 (~65), ap-router 80 (~78), ap-full 131 (~123), zenoh-cpp 118 (described as preset-ap-full minus MCU subset). Ratify as: explicit Cargo.toml lists are v0.1.0 source of truth; markdown 'approximate' counts stand as descriptive only. No frozen-ledger violation because R301 prose said `~N` not `N exactly`.",
+        "R301 §7 (Cargo feature emission mechanism) and §8 (SCE `<sce:requires>` cross-repo) carries: §7 partially satisfied by R302a (atomic+aggregate+preset layout shipped, source #[cfg] gates pending R302b+). §8 still open; cross-repo coordination required.",
+        "R301 R303+ atomic Section decompose for feature_inventory.md — feature_inventory.md §5.1-5.19 + §6.1-6.6 currently parser-detected only. Once decomposed, back-fill section_ref on all 150 inventory entries.",
+        "R301 R303+ Footprint empirical re-evaluation — ~62 active entries marked F=measured against wz R300 source but no actual LOC/binary-byte/RAM-byte numbers captured.",
+        "R299 carry #2 (wz/pico equivalence inventory) still open. Adjacent to R302 catalog but separate analysis-only round.",
+        "R299 carry #3 (wz↔pico canon divergence handling, bug #1) still open; user input needed.",
+        "R300 conservative-reject narrow / argv UX still open low-priority.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest inbound bilateral, R267 Session<R,T> reparam (composability direct prerequisite — now Cargo features land, R267 is the source-level shape for the same composability axis), Querier::get_matching_status, Q_B/Q_E codec slots, Phase W full lwIP."
+      ]
+    },
     "Round 31": {
       "decision_summary": "Phase B5 entry — first codec-kind SCXMLs land. sources/codecs/keep_alive.scxml (empty body, transport-layer KeepAlive frame) + sources/codecs/close.scxml (1-byte reason code, session-close variant arm) authored against vendor pin 11f1032d. Opens the ~30-codec wire-message track.",
       "changes_bullets": [
