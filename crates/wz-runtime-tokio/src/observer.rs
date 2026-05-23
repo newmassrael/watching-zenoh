@@ -87,7 +87,16 @@
 use crate::declare::LivelinessRegistry;
 #[cfg(feature = "liveliness-subscriber")]
 use crate::declare::LivelinessSubscriberRegistry;
-use crate::declare::{RemoteQueryableRegistry, RemoteSubscriberRegistry};
+// R310 — peer-side declare observer registries gate on the matching
+// application-layer declare-* feature. Without the feature the
+// observer slot for that wire arm is elided entirely; inbound
+// Decl/Undecl frames still decode at the codec layer but the fan-out
+// to user callbacks is absent (the application can't have registered
+// callbacks against a type that does not exist in its build).
+#[cfg(feature = "declare-queryable")]
+use crate::declare::RemoteQueryableRegistry;
+#[cfg(feature = "declare-subscriber")]
+use crate::declare::RemoteSubscriberRegistry;
 use crate::pubsub::SubscriberRegistry;
 // R307 — `crate::query` is gated on `feature = "query-queryable"`; the
 // QueryableRegistry field + the pending_replies `Vec<QueryReply>`
@@ -119,8 +128,14 @@ pub struct ApplicationLayerObserver {
     #[cfg(feature = "query-queryable")]
     pub queryables: QueryableRegistry,
     /// Peer's outbound `DeclSubscriber` / `UndeclSubscriber` records.
+    ///
+    /// R310 — gated on `feature = "declare-subscriber"`.
+    #[cfg(feature = "declare-subscriber")]
     pub remote_subscribers: RemoteSubscriberRegistry,
     /// Peer's outbound `DeclQueryable` / `UndeclQueryable` records.
+    ///
+    /// R310 — gated on `feature = "declare-queryable"`.
+    #[cfg(feature = "declare-queryable")]
     pub remote_queryables: RemoteQueryableRegistry,
     /// Peer's outbound `DeclToken` / `UndeclToken` records — the
     /// liveliness signal layer.
@@ -167,7 +182,9 @@ impl ApplicationLayerObserver {
             subscribers: SubscriberRegistry::new(),
             #[cfg(feature = "query-queryable")]
             queryables: QueryableRegistry::new(),
+            #[cfg(feature = "declare-subscriber")]
             remote_subscribers: RemoteSubscriberRegistry::new(),
+            #[cfg(feature = "declare-queryable")]
             remote_queryables: RemoteQueryableRegistry::new(),
             #[cfg(feature = "liveliness-token")]
             liveliness: LivelinessRegistry::new(),
@@ -194,8 +211,32 @@ impl ApplicationLayerObserver {
         // Subscribers FIRST — absorb DeclKexpr / UndeclKexpr into the
         // peer_keyexpr_table so downstream consumers see a fresh
         // mapping snapshot on the same iteration.
+        //
+        // R310 — `peer_table` is consumed by every gated consumer arm
+        // below. When all six declare-* / liveliness-* / query-reply
+        // features are off (rare, e.g. preset-mcu-minimal), no arm
+        // dispatches and `peer_table` becomes unused; suppress the
+        // -D warnings lint with `_peer_table` rebinding so the
+        // configuration stays valid.
         self.subscribers.dispatch_iteration_event(event);
+        #[cfg(any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token",
+            feature = "liveliness-subscriber",
+            feature = "query-queryable",
+            feature = "query-reply",
+        ))]
         let peer_table = self.subscribers.peer_keyexpr_table();
+        #[cfg(not(any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token",
+            feature = "liveliness-subscriber",
+            feature = "query-queryable",
+            feature = "query-reply",
+        )))]
+        let _peer_table = self.subscribers.peer_keyexpr_table();
 
         // Consumer registries — all read the shared peer_table that
         // the subscribers registry just updated. The queryable side
@@ -208,8 +249,10 @@ impl ApplicationLayerObserver {
             &mut self.pending_replies,
             &mut self.pending_final_rids,
         );
+        #[cfg(feature = "declare-subscriber")]
         self.remote_subscribers
             .dispatch_iteration_event(event, peer_table);
+        #[cfg(feature = "declare-queryable")]
         self.remote_queryables
             .dispatch_iteration_event(event, peer_table);
         #[cfg(feature = "liveliness-token")]

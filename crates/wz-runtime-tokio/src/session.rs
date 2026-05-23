@@ -1937,6 +1937,11 @@ impl Querier {
     /// Honest two-pattern wildcard intersection is a future-round
     /// carry; the wz keyexpr v1 spec currently locks intersect to
     /// exact uint32 ID equality for MVP (RFC §5.A line 311).
+    ///
+    /// R310 — gated on `feature = "declare-queryable"` because the
+    /// underlying `RemoteQueryableRegistry` observer field is
+    /// elided when peer-declared queryables are not tracked.
+    #[cfg(feature = "declare-queryable")]
     pub fn get_matching_status(&self) -> MatchingStatus {
         let observer = self.session.observer();
         let obs = match observer.lock() {
@@ -2070,6 +2075,10 @@ impl QuerierAliased {
     /// observer mutex is held only across the resolve + has_matching
     /// arms (no wire emit, no allocation beyond the small
     /// `effective_keyexpr` composition).
+    ///
+    /// R310 — gated on `feature = "declare-queryable"` for the same
+    /// reason as [`Querier::get_matching_status`].
+    #[cfg(feature = "declare-queryable")]
     pub fn get_matching_status(&self) -> Result<MatchingStatus, QueryAliasError> {
         let base = self
             .session
@@ -2178,6 +2187,11 @@ impl Publisher {
     /// match approximation used by [`Querier::get_matching_status`]
     /// — see that doc-comment for the boundary description and the
     /// R291 honest-intersection carry.
+    ///
+    /// R310 — gated on `feature = "declare-subscriber"` because the
+    /// underlying `RemoteSubscriberRegistry` observer field is
+    /// elided when peer-declared subscribers are not tracked.
+    #[cfg(feature = "declare-subscriber")]
     pub fn get_matching_status(&self) -> MatchingStatus {
         let observer = self.session.observer();
         let obs = match observer.lock() {
@@ -2266,6 +2280,10 @@ impl PublisherAliased {
     /// mapping table — same contract as [`Self::put`] /
     /// [`Self::delete`], mirroring the declare-before-publish
     /// invariant for the matching-status consult path.
+    ///
+    /// R310 — gated on `feature = "declare-subscriber"`, mirroring
+    /// [`Publisher::get_matching_status`].
+    #[cfg(feature = "declare-subscriber")]
     pub fn get_matching_status(&self) -> Result<MatchingStatus, PublishAliasError> {
         let base = self
             .session
