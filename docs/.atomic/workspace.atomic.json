@@ -14968,6 +14968,50 @@
         "Upstream mnemosyne PR 1f81f51 (fix(validator): make section-range scanners code-fence-aware) — already landed during R295; this carry is retained as a memory marker that the parser/mutate symmetry surface is now monitored (R252-R286+ Mnemosyne extensions memory + R295 fence-detection symmetry)."
       ]
     },
+    "Round 298": {
+      "decision_summary": "R298 closes R297 optional carry — proptest property layer (512 cases) over canonical keyexpr generator; wz/zenoh-pico agree on every shrunken pair, zero divergence found.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/Cargo.toml dev-dependencies — add `proptest = \"1\"` (resolved to 1.11.0). The note records the generator scope: bounded alphabet [a,b,c], 1..=4 chunks, per-chunk literal / `*` / `**` / `$*`-DSL (1..=2 `$*` runs).",
+        "crates/wz-integration-tests/tests/layer3_keyexpr_intersect.rs — append R297b property-fuzz block after the seven R297 handcrafted test fns. Adds `alpha_char_strategy` / `lit_strategy(min,max)` / `dsl_chunk_strategy` (n=1: `lead$*trail`, n=2: `lead$*mid$*trail` with mid ≥1 char to keep `$*$*` non-canonical runs out of the corpus) / `chunk_strategy` (weights 3/1/1/3 across literal/`*`/`**`/DSL) / `keyexpr_strategy` (1..=4 chunks joined by `/`, consecutive `**` chunks deduped in-generator so shrinking always lands on a canonical string). The property `keyexpr_intersect_wz_pico_property` runs `ProptestConfig { cases: 512, .. }` and asserts wz/pico byte-equal on forward + reverse + wz symmetry + pico symmetry per random `(a, b)` keyexpr pair.",
+        "R297b extension closes the R297 optional carry without altering wz's R293/R296 matcher — the algorithm and its handcrafted corpus are unchanged; only the fuzz coverage layer is added. The property is constructive (no `prop_filter` rejects) so proptest's shrinking always converges on a minimal counter-example if a divergence ever surfaces."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_keyexpr_intersect — 8 pass / 0 fail / 0 ignored (seven R297 handcrafted fns + the new R297b property). The property fn ran 512 cases × 4 boolean comparisons each (forward/reverse + wz/pico symmetry) in 30 ms total; zero shrinks recorded — wz and pico return byte-equal on every random canonical input the generator produced.",
+        "cargo clippy --workspace --all-targets --no-deps -- -D warnings — clean across the full workspace post-R298. No new lint surface from the proptest macro expansion or the strategy helpers; the workspace `warnings = \"deny\"` policy holds.",
+        "scripts/run-ci.sh --skip-codegen — Layer 0 / A / A2 / C0 / C1 / C1b / C2 / D / E all green; `run-ci: all required layers pass`. Layer 0 cargo fmt --check initially flagged a 4-space-vs-tab residue in the new prop_map closure; fixed via `cargo fmt -p wz-integration-tests` and re-run was clean."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "carry_forward_bullets": [
+        "Closed R298 carry from R297 — (b) optional property-based test extension. proptest = 1.11.0 + 512-case property fn lands; wz/pico zero divergence on the random canonical corpus. The R297 carry note said this should defer 'until a regression suggests the corpus is insufficient'; R298 chose to land it preemptively to harden the R293/R296 algorithm-equivalence claim with an empirical fuzz layer.",
+        "R284 architectural carry from R283 — uniform Established gate across declare_token / declare_subscriber / declare_queryable / declare_liveliness_subscriber non-aliased declare_* methods. 3-5R, signature break + caller fan-out on runner.rs::install_session_handles + e2e harnesses. R288 spec-first lesson applies; user confirmation needed.",
+        "R283 architectural carry — peer-side non-final Interest inbound (bilateral). wz Liveliness 100% bilateral path remains gated on this. 2-3R + design. User confirmation needed.",
+        "R267 architectural carry — Session<R,T> reparameterisation. Mutex/RwLock contract precondition; 3-7R + design. R260-R263 + R294 single-shared-epoch invariant is a precondition for the Phase W lwIP/embassy/FreeRTOS port — TimeSource is the seam. User confirmation needed.",
+        "Upstream mnemosyne PR 1f81f51 (fix(validator): make section-range scanners code-fence-aware) — already landed during R295; carry retained as a memory marker that the parser/mutate symmetry surface is monitored."
+      ],
+      "publishable_decision_summary": "R298 closes R297 optional carry — proptest property layer (512 cases) over canonical keyexpr generator; wz/zenoh-pico agree on every shrunken pair, zero divergence found.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/Cargo.toml dev-dependencies — add `proptest = \"1\"` (resolved to 1.11.0). The note records the generator scope: bounded alphabet [a,b,c], 1..=4 chunks, per-chunk literal / `*` / `**` / `$*`-DSL (1..=2 `$*` runs).",
+        "crates/wz-integration-tests/tests/layer3_keyexpr_intersect.rs — append R297b property-fuzz block after the seven R297 handcrafted test fns. Adds `alpha_char_strategy` / `lit_strategy(min,max)` / `dsl_chunk_strategy` (n=1: `lead$*trail`, n=2: `lead$*mid$*trail` with mid ≥1 char to keep `$*$*` non-canonical runs out of the corpus) / `chunk_strategy` (weights 3/1/1/3 across literal/`*`/`**`/DSL) / `keyexpr_strategy` (1..=4 chunks joined by `/`, consecutive `**` chunks deduped in-generator so shrinking always lands on a canonical string). The property `keyexpr_intersect_wz_pico_property` runs `ProptestConfig { cases: 512, .. }` and asserts wz/pico byte-equal on forward + reverse + wz symmetry + pico symmetry per random `(a, b)` keyexpr pair.",
+        "R297b extension closes the R297 optional carry without altering wz's R293/R296 matcher — the algorithm and its handcrafted corpus are unchanged; only the fuzz coverage layer is added. The property is constructive (no `prop_filter` rejects) so proptest's shrinking always converges on a minimal counter-example if a divergence ever surfaces."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-integration-tests --test layer3_keyexpr_intersect — 8 pass / 0 fail / 0 ignored (seven R297 handcrafted fns + the new R297b property). The property fn ran 512 cases × 4 boolean comparisons each (forward/reverse + wz/pico symmetry) in 30 ms total; zero shrinks recorded — wz and pico return byte-equal on every random canonical input the generator produced.",
+        "cargo clippy --workspace --all-targets --no-deps -- -D warnings — clean across the full workspace post-R298. No new lint surface from the proptest macro expansion or the strategy helpers; the workspace `warnings = \"deny\"` policy holds.",
+        "scripts/run-ci.sh --skip-codegen — Layer 0 / A / A2 / C0 / C1 / C1b / C2 / D / E all green; `run-ci: all required layers pass`. Layer 0 cargo fmt --check initially flagged a 4-space-vs-tab residue in the new prop_map closure; fixed via `cargo fmt -p wz-integration-tests` and re-run was clean."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio/2-trait-surface"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Closed R298 carry from R297 — (b) optional property-based test extension. proptest = 1.11.0 + 512-case property fn lands; wz/pico zero divergence on the random canonical corpus. The R297 carry note said this should defer 'until a regression suggests the corpus is insufficient'; R298 chose to land it preemptively to harden the R293/R296 algorithm-equivalence claim with an empirical fuzz layer.",
+        "R284 architectural carry from R283 — uniform Established gate across declare_token / declare_subscriber / declare_queryable / declare_liveliness_subscriber non-aliased declare_* methods. 3-5R, signature break + caller fan-out on runner.rs::install_session_handles + e2e harnesses. R288 spec-first lesson applies; user confirmation needed.",
+        "R283 architectural carry — peer-side non-final Interest inbound (bilateral). wz Liveliness 100% bilateral path remains gated on this. 2-3R + design. User confirmation needed.",
+        "R267 architectural carry — Session<R,T> reparameterisation. Mutex/RwLock contract precondition; 3-7R + design. R260-R263 + R294 single-shared-epoch invariant is a precondition for the Phase W lwIP/embassy/FreeRTOS port — TimeSource is the seam. User confirmation needed.",
+        "Upstream mnemosyne PR 1f81f51 (fix(validator): make section-range scanners code-fence-aware) — already landed during R295; carry retained as a memory marker that the parser/mutate symmetry surface is monitored."
+      ]
+    },
     "Round 3": {
       "decision_summary": "Phase B complete — RFC §5 thirteen kind sub-sections atomic decomposition (5.A-5.F, 5.I-5.O); Phase 2 deferred 5.G/5.H skipped.",
       "changes_bullets": [
