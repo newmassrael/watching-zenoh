@@ -67,6 +67,7 @@ use wz_codecs::query::Query;
 use wz_runtime_core::TimeSource;
 
 use crate::declare::{LivelinessSample, LivelinessSampleCallback};
+use crate::keyexpr_canon::OutboundKeyexprError;
 use crate::locality::Locality;
 use crate::observer::ApplicationLayerObserver;
 use crate::pubsub::SubscriptionId;
@@ -75,7 +76,6 @@ use crate::reply::{InboundReply, ReplyHandle};
 use crate::sample::{
     EncodingHint, QosLevel, Reliability, Sample, SampleKind, SourceInfo, TimestampHint,
 };
-use crate::keyexpr_canon::OutboundKeyexprError;
 use crate::session_glue::{
     ConsolidationMode, PushMetadata, QueryMetadata, QueryTarget, SendDeclareError,
     SessionLinkActions,
@@ -1436,20 +1436,19 @@ impl Session {
         self.actions
             .send_declare_token(token_id, mapping_id, inline_suffix)
             .map_err(|e| match e {
-                SendDeclareError::Keyexpr(inner) => {
-                    LivelinessAliasError::InvalidKeyexpr(inner)
-                }
+                SendDeclareError::Keyexpr(inner) => LivelinessAliasError::InvalidKeyexpr(inner),
                 SendDeclareError::UnknownMappingId(id) => {
                     // Race against a concurrent send_undeclare_kexpr
                     // between the pre-check resolve_outbound_mapping
                     // above and this send_declare_token call.
                     LivelinessAliasError::UnknownMapping(id)
                 }
-                SendDeclareError::ReservedMappingIdZero
-                | SendDeclareError::MissingKeyexpr => unreachable!(
-                    "declare_token_aliased aliased-mode send_declare_token \
+                SendDeclareError::ReservedMappingIdZero | SendDeclareError::MissingKeyexpr => {
+                    unreachable!(
+                        "declare_token_aliased aliased-mode send_declare_token \
                      returned {e:?} unexpectedly"
-                ),
+                    )
+                }
             })?;
         Ok(LivelinessToken {
             session: self.clone(),
@@ -6677,8 +6676,8 @@ mod tests {
         let (session, driver) = build_session();
         {
             let _token = session
-            .declare_token("liveliness/devA", LivelinessOptions::default())
-            .expect("hardcoded canonical literal keyexpr");
+                .declare_token("liveliness/devA", LivelinessOptions::default())
+                .expect("hardcoded canonical literal keyexpr");
             assert_eq!(driver.frame_count(), 1, "declare emit before scope end");
         }
         assert_eq!(
@@ -6695,8 +6694,8 @@ mod tests {
         let (session, driver) = build_session();
         {
             let _token = session
-            .declare_token("liveliness/devA", LivelinessOptions::default())
-            .expect("hardcoded canonical literal keyexpr");
+                .declare_token("liveliness/devA", LivelinessOptions::default())
+                .expect("hardcoded canonical literal keyexpr");
             // Token id 0 was just allocated; drop will retract it.
         }
         let expected = build_undeclare_token(0).encode_to_vec();
