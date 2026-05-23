@@ -306,6 +306,14 @@ fn main() {
         .allowlist_function("_z_msg_ext_make_zbuf")
         .allowlist_function("_z_msg_ext_encode")
         .allowlist_function("_z_msg_ext_clear")
+        // R297 — keyexpr intersection matcher (chunk-level forward
+        // scan). Cross-validates wz-runtime-tokio's
+        // `keyexpr_intersect_patterns` (R293 + R296 closure) against
+        // zenoh-pico's intersects-mode chunk matcher. The forward
+        // worker takes raw `(ptr, len)` slices and avoids needing
+        // the `_z_keyexpr_t` / `_z_string_t` composite types in the
+        // bindgen allowlist.
+        .allowlist_function("_z_keyexpr_forward_intersects")
         // bindgen layout-test surface: pin to `Debug` derivation to
         // unblock test-side equality checks against zenoh-pico's
         // typed shape.
