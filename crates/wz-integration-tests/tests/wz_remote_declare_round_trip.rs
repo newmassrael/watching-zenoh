@@ -60,7 +60,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard, PortReservation,
+    graceful_terminate, read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard,
+    PortReservation,
 };
 
 #[test]
@@ -301,33 +302,3 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
     );
 }
 
-/// R278 — send SIGTERM to `child` and poll its exit status until
-/// either (a) it exits cleanly or (b) `timeout` elapses, in which
-/// case SIGKILL is sent as a fallback. Used to drive wz-ap-demo's
-/// graceful-shutdown path from integration tests so the R277
-/// `LivelinessToken::Drop` actually fires (SIGKILL bypasses Rust
-/// `Drop` entirely).
-///
-/// Implementation uses the system `kill` command rather than the
-/// `nix` crate to avoid pulling another dep into the test harness;
-/// `kill -TERM <pid>` is portable across all the Unix targets
-/// wz-ap-demo currently builds for (Linux, macOS, BSD, QNX).
-fn graceful_terminate(child: &mut std::process::Child, timeout: Duration) {
-    let pid = child.id().to_string();
-    let _ = std::process::Command::new("kill")
-        .arg("-TERM")
-        .arg(&pid)
-        .status();
-    let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
-        match child.try_wait() {
-            Ok(Some(_status)) => return,
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(_) => break,
-        }
-    }
-    // SIGTERM did not produce a graceful exit within the budget —
-    // fall back to SIGKILL so the test does not hang.
-    let _ = child.kill();
-    let _ = child.wait();
-}

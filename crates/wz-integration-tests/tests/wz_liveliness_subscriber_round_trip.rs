@@ -69,7 +69,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard, PortReservation,
+    graceful_terminate, read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard,
+    PortReservation,
 };
 
 #[test]
@@ -254,26 +255,3 @@ fn wz_liveliness_subscriber_round_trip_against_wz_acceptor() {
     );
 }
 
-/// SIGTERM the child, poll until exit or `timeout`, then SIGKILL as
-/// fallback. Same shape as the helper in
-/// `wz_remote_declare_round_trip.rs` — duplicated locally to keep the
-/// integration tests self-contained (each test file owns its own
-/// process-management helpers; a shared `common::` helper is the
-/// future-round refactor target).
-fn graceful_terminate(child: &mut std::process::Child, timeout: Duration) {
-    let pid = child.id().to_string();
-    let _ = std::process::Command::new("kill")
-        .arg("-TERM")
-        .arg(&pid)
-        .status();
-    let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
-        match child.try_wait() {
-            Ok(Some(_status)) => return,
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(_) => break,
-        }
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
