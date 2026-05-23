@@ -23,10 +23,14 @@
 #   - wz-runtime-lwip        (R42+, sce_link_runtime_lwip C11 sibling)
 #   - zenoh-pico-sys         (R41, FFI bindings to vendored zenoh-pico)
 #   - wz-integration-tests   (R41+, Layer 3 wire-interop test harness)
+#   - wz                     (R302a, top-level facade crate hosting the
+#                              169-feature catalog from R301; no source
+#                              gates wired yet, pure feature labels).
 
 [workspace]
 resolver = "2"
 members = [
+    "wz",
     "wz-codecs",
     "wz-runtime-core",
     "zenoh-pico-sys",

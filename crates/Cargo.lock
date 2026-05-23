@@ -1363,6 +1363,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz"
+version = "0.1.0"
+
+[[package]]
 name = "wz-ap-demo"
 version = "0.1.0"
 dependencies = [

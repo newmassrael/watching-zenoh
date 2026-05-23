@@ -1,0 +1,966 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz — top-level facade crate for the watching-zenoh composable
+# framework. Single user-facing anchor that exposes the full feature
+# catalog defined in docs/feature_inventory.md (R301 catalog ratify).
+#
+# Layout per R302 design fork:
+#   - 144 atomic features (19 domains, kebab-case <domain>-<capability>)
+#   - 19 domain-aggregate features (union of each domain's atomic set)
+#   - 6 preset features (v0.1.0 semver-named contracts, each = explicit
+#     atomic list; no preset-extends-preset so a frozen v0.1.0 contract
+#     stays stable under future catalog growth)
+#
+# Implication edges encode only "requires X" / "builds on X" pulled
+# from the inventory reason field. Cargo features are monotone-
+# additive — "mutually exclusive" relationships (platform-bare-metal vs
+# platform-linux, runtime-no-std vs runtime-tokio) are policy checks
+# deferred to a future `cargo wz-config inspect` tool, not encoded as
+# rejects in Cargo.toml.
+#
+# default = [] (no-default). Composable-framework contract: the user
+# explicitly opts into a preset (or hand-rolls atomic features). This
+# differs from batteries-included crates like `tokio` that ship a
+# default feature set, and matches kconfig / NixOS USE / Buildroot
+# semantics where the user authors the config.
+#
+# R302a scope: facade Cargo.toml + empty lib.rs. No #[cfg(feature)]
+# gates inserted anywhere yet — all features compile to no-ops. R302b+
+# will start wiring real `#[cfg]` gates inside wz-runtime-tokio
+# sources and exposing forwarded modules from wz/src/lib.rs.
+
+[package]
+name = "wz"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "watching-zenoh top-level facade — composable Zenoh feature catalog with v0.1.0 preset contracts."
+
+[lib]
+name = "wz"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+# ============================================================
+# [features] — 169 entries per R301 catalog
+# ============================================================
+
+[features]
+default = []
+
+# ----- domain: access (6 atomic, all reserved) -----
+access-acl = []
+access-downsampling = []
+access-extauth-jwt = ["session-extauth"]
+access-extauth-pubkey = ["session-extauth"]
+access-extauth-usrpwd = ["session-extauth"]
+access-quota = []
+
+# ----- domain: attachment (2 atomic, all reserved) -----
+attachment-bytes = []
+attachment-encoding-aware = ["attachment-bytes"]
+
+# ----- domain: codec (16 atomic, all active) -----
+codec-close = []
+codec-declare = []
+codec-fragment = ["transport-fragmentation"]
+codec-frame = []
+codec-hello = []
+codec-init-ack = []
+codec-init-syn = []
+codec-join = ["session-multicast"]
+codec-keep-alive = []
+codec-open-ack = []
+codec-open-syn = []
+codec-push = []
+codec-request = []
+codec-response = []
+codec-response-final = []
+codec-scout = []
+
+# ----- domain: declare (7 atomic, all active) -----
+declare-final = []
+declare-interest = []
+declare-keyexpr = ["keyexpr-mapping"]
+declare-queryable = []
+declare-subscriber = []
+declare-token = []
+declare-undeclare = []
+
+# ----- domain: encoding (7 atomic, 3 active / 4 reserved) -----
+encoding-bytes = []
+encoding-cbor = []
+encoding-empty = []
+encoding-json = []
+encoding-mime = []
+encoding-protobuf = []
+encoding-utf8 = []
+
+# ----- domain: keyexpr (8 atomic, all active) -----
+keyexpr-canon = []
+keyexpr-dollar-star = []
+keyexpr-includes = []
+keyexpr-intersect = []
+keyexpr-literal = []
+keyexpr-mapping = []
+keyexpr-wildcard-double = []
+keyexpr-wildcard-single = []
+
+# ----- domain: link (5 atomic, 3 active / 2 reserved) -----
+link-batching = []
+link-flow-control = []
+link-fragment = ["transport-fragmentation"]
+link-frame = []
+link-tx-cache = []
+
+# ----- domain: liveliness (5 atomic, 2 active / 3 reserved) -----
+liveliness-get = ["query-get"]
+liveliness-historical-samples = ["liveliness-history"]
+liveliness-history = []
+liveliness-subscriber = []
+liveliness-token = []
+
+# ----- domain: locator (9 atomic, 3 active / 6 reserved) -----
+locator-iface = []
+locator-quic = ["transport-link-quic"]
+locator-serial = ["transport-link-serial"]
+locator-tcp = []
+locator-tls = ["transport-link-tls"]
+locator-udp = []
+locator-unixsock = ["transport-link-unixsock"]
+locator-vsock = ["transport-link-vsock"]
+locator-ws = ["transport-link-ws"]
+
+# ----- domain: platform (7 atomic, 1 active / 6 reserved) -----
+platform-bare-metal = []
+platform-freertos = []
+platform-linux = []
+platform-macos = []
+platform-qnx = []
+platform-windows = []
+platform-zephyr = []
+
+# ----- domain: pubsub (11 atomic, 5 active / 6 reserved) -----
+pubsub-allow-loop = []
+pubsub-attachment = ["attachment-bytes"]
+pubsub-congestion-control = []
+pubsub-delete = []
+pubsub-encoding = []
+pubsub-express = []
+pubsub-priority = ["session-extqos"]
+pubsub-put = []
+pubsub-sample = []
+pubsub-source-info = []
+pubsub-timestamp = []
+
+# ----- domain: query (10 atomic, 6 active / 4 reserved) -----
+query-attachment = ["attachment-bytes"]
+query-consolidation = []
+query-get = []
+query-queryable = []
+query-reply = []
+query-reply-err = []
+query-selector-parameters = []
+query-source-info = []
+query-target = []
+query-timeout = []
+
+# ----- domain: routing (6 atomic, 1 active / 5 reserved) -----
+routing-client = []
+routing-failover = ["routing-router"]
+routing-peer = []
+routing-router = []
+routing-routes = ["routing-router"]
+routing-static-routes = ["routing-router"]
+
+# ----- domain: runtime (6 atomic, 1 active / 5 reserved) -----
+runtime-async-std = []
+runtime-lwip = []
+runtime-no-std = []
+runtime-tokio = []
+runtime-tokio-uring = ["runtime-tokio"]
+runtime-zero-copy = []
+
+# ----- domain: scouting (6 atomic, 1 active / 5 reserved) -----
+scouting-active = []
+scouting-autoconnect = []
+scouting-gossip = ["routing-router"]
+scouting-multicast = ["transport-link-udp"]
+scouting-passive = []
+scouting-static = []
+
+# ----- domain: session (9 atomic, 2 active / 7 reserved) -----
+session-extauth = []
+session-extcompression = ["transport-compression"]
+session-extqos = []
+session-extshm = ["transport-shm"]
+session-multicast = []
+session-resumable = []
+session-stateless-accept = []
+session-unicast-accept = []
+session-unicast-open = []
+
+# ----- domain: storage (4 atomic, all reserved) -----
+storage-aligner = []
+storage-backend = []
+storage-history = ["storage-backend"]
+storage-replication = ["storage-backend"]
+
+# ----- domain: time (4 atomic, 2 active / 2 reserved) -----
+time-hlc = []
+time-ntp64 = []
+time-system-clock = []
+time-timestamp-source = []
+
+# ----- domain: transport (16 atomic, 5 active / 11 reserved) -----
+transport-batching = []
+transport-compression = []
+transport-fragmentation = []
+transport-keepalive = []
+transport-link-quic = []
+transport-link-serial = []
+transport-link-tcp = []
+transport-link-tls = ["transport-link-tcp"]
+transport-link-udp = []
+transport-link-unixsock = []
+transport-link-vsock = []
+transport-link-ws = []
+transport-lowlatency = []
+transport-multicast = []
+transport-shm = []
+transport-unicast = []
+
+# ============================================================
+# Domain aggregates (19 entries, each = union of domain's atomic set)
+#
+# Use a domain-aggregate when you want every capability in a domain
+# without enumerating each atomic. Granular control: hand-pick atomic
+# features. Curated combos: pick a preset.
+# ============================================================
+
+domain-access = [
+    "access-acl",
+    "access-downsampling",
+    "access-extauth-jwt",
+    "access-extauth-pubkey",
+    "access-extauth-usrpwd",
+    "access-quota",
+]
+domain-attachment = ["attachment-bytes", "attachment-encoding-aware"]
+domain-codec = [
+    "codec-close",
+    "codec-declare",
+    "codec-fragment",
+    "codec-frame",
+    "codec-hello",
+    "codec-init-ack",
+    "codec-init-syn",
+    "codec-join",
+    "codec-keep-alive",
+    "codec-open-ack",
+    "codec-open-syn",
+    "codec-push",
+    "codec-request",
+    "codec-response",
+    "codec-response-final",
+    "codec-scout",
+]
+domain-declare = [
+    "declare-final",
+    "declare-interest",
+    "declare-keyexpr",
+    "declare-queryable",
+    "declare-subscriber",
+    "declare-token",
+    "declare-undeclare",
+]
+domain-encoding = [
+    "encoding-bytes",
+    "encoding-cbor",
+    "encoding-empty",
+    "encoding-json",
+    "encoding-mime",
+    "encoding-protobuf",
+    "encoding-utf8",
+]
+domain-keyexpr = [
+    "keyexpr-canon",
+    "keyexpr-dollar-star",
+    "keyexpr-includes",
+    "keyexpr-intersect",
+    "keyexpr-literal",
+    "keyexpr-mapping",
+    "keyexpr-wildcard-double",
+    "keyexpr-wildcard-single",
+]
+domain-link = [
+    "link-batching",
+    "link-flow-control",
+    "link-fragment",
+    "link-frame",
+    "link-tx-cache",
+]
+domain-liveliness = [
+    "liveliness-get",
+    "liveliness-historical-samples",
+    "liveliness-history",
+    "liveliness-subscriber",
+    "liveliness-token",
+]
+domain-locator = [
+    "locator-iface",
+    "locator-quic",
+    "locator-serial",
+    "locator-tcp",
+    "locator-tls",
+    "locator-udp",
+    "locator-unixsock",
+    "locator-vsock",
+    "locator-ws",
+]
+domain-platform = [
+    "platform-bare-metal",
+    "platform-freertos",
+    "platform-linux",
+    "platform-macos",
+    "platform-qnx",
+    "platform-windows",
+    "platform-zephyr",
+]
+domain-pubsub = [
+    "pubsub-allow-loop",
+    "pubsub-attachment",
+    "pubsub-congestion-control",
+    "pubsub-delete",
+    "pubsub-encoding",
+    "pubsub-express",
+    "pubsub-priority",
+    "pubsub-put",
+    "pubsub-sample",
+    "pubsub-source-info",
+    "pubsub-timestamp",
+]
+domain-query = [
+    "query-attachment",
+    "query-consolidation",
+    "query-get",
+    "query-queryable",
+    "query-reply",
+    "query-reply-err",
+    "query-selector-parameters",
+    "query-source-info",
+    "query-target",
+    "query-timeout",
+]
+domain-routing = [
+    "routing-client",
+    "routing-failover",
+    "routing-peer",
+    "routing-router",
+    "routing-routes",
+    "routing-static-routes",
+]
+domain-runtime = [
+    "runtime-async-std",
+    "runtime-lwip",
+    "runtime-no-std",
+    "runtime-tokio",
+    "runtime-tokio-uring",
+    "runtime-zero-copy",
+]
+domain-scouting = [
+    "scouting-active",
+    "scouting-autoconnect",
+    "scouting-gossip",
+    "scouting-multicast",
+    "scouting-passive",
+    "scouting-static",
+]
+domain-session = [
+    "session-extauth",
+    "session-extcompression",
+    "session-extqos",
+    "session-extshm",
+    "session-multicast",
+    "session-resumable",
+    "session-stateless-accept",
+    "session-unicast-accept",
+    "session-unicast-open",
+]
+domain-storage = [
+    "storage-aligner",
+    "storage-backend",
+    "storage-history",
+    "storage-replication",
+]
+domain-time = [
+    "time-hlc",
+    "time-ntp64",
+    "time-system-clock",
+    "time-timestamp-source",
+]
+domain-transport = [
+    "transport-batching",
+    "transport-compression",
+    "transport-fragmentation",
+    "transport-keepalive",
+    "transport-link-quic",
+    "transport-link-serial",
+    "transport-link-tcp",
+    "transport-link-tls",
+    "transport-link-udp",
+    "transport-link-unixsock",
+    "transport-link-vsock",
+    "transport-link-ws",
+    "transport-lowlatency",
+    "transport-multicast",
+    "transport-shm",
+    "transport-unicast",
+]
+
+# ============================================================
+# Presets — v0.1.0 semver-named contracts
+#
+# Each preset is an EXPLICIT atomic-feature list. Presets do NOT
+# extend other presets — a v0.1.0 contract stays frozen even if the
+# atomic catalog grows. v0.2.0 of a preset may change its membership.
+# ============================================================
+
+# preset-mcu-minimal — smallest viable MCU client (≈35 atomic features).
+# Bare-metal + no_std + UDP unicast + minimal pubsub + literal keyexpr.
+# No discovery (scouting-static config-file only), no query, no
+# liveliness, no wildcards.
+preset-mcu-minimal = [
+    "platform-bare-metal",
+    "runtime-no-std",
+    "transport-link-udp",
+    "transport-unicast",
+    "transport-keepalive",
+    "transport-batching",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-init-syn",
+    "codec-init-ack",
+    "codec-open-syn",
+    "codec-open-ack",
+    "codec-close",
+    "codec-push",
+    "codec-declare",
+    "declare-subscriber",
+    "declare-undeclare",
+    "pubsub-put",
+    "pubsub-delete",
+    "pubsub-sample",
+    "pubsub-encoding",
+    "pubsub-timestamp",
+    "encoding-bytes",
+    "encoding-empty",
+    "encoding-utf8",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "keyexpr-includes",
+    "keyexpr-intersect",
+    "locator-udp",
+    "routing-client",
+    "scouting-static",
+    "time-system-clock",
+    "time-ntp64",
+]
+
+# preset-mcu-extended — preset-mcu-minimal scope + query + liveliness
+# + wildcards + active scouting (≈57 atomic features).
+preset-mcu-extended = [
+    "platform-bare-metal",
+    "runtime-no-std",
+    "transport-link-udp",
+    "transport-unicast",
+    "transport-keepalive",
+    "transport-batching",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-init-syn",
+    "codec-init-ack",
+    "codec-open-syn",
+    "codec-open-ack",
+    "codec-close",
+    "codec-push",
+    "codec-declare",
+    "codec-request",
+    "codec-response",
+    "codec-response-final",
+    "codec-scout",
+    "codec-hello",
+    "declare-subscriber",
+    "declare-undeclare",
+    "declare-queryable",
+    "declare-keyexpr",
+    "declare-token",
+    "declare-final",
+    "declare-interest",
+    "pubsub-put",
+    "pubsub-delete",
+    "pubsub-sample",
+    "pubsub-encoding",
+    "pubsub-timestamp",
+    "encoding-bytes",
+    "encoding-empty",
+    "encoding-utf8",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "keyexpr-includes",
+    "keyexpr-intersect",
+    "keyexpr-mapping",
+    "keyexpr-wildcard-single",
+    "keyexpr-wildcard-double",
+    "keyexpr-dollar-star",
+    "query-get",
+    "query-queryable",
+    "query-reply",
+    "query-target",
+    "query-timeout",
+    "query-consolidation",
+    "liveliness-token",
+    "liveliness-subscriber",
+    "locator-udp",
+    "routing-client",
+    "scouting-static",
+    "scouting-active",
+    "time-system-clock",
+    "time-ntp64",
+]
+
+# preset-ap-client — Linux client AP (≈65 atomic features). tokio
+# runtime + TCP/UDP + full pubsub/query/liveliness + wildcards.
+preset-ap-client = [
+    "platform-linux",
+    "runtime-tokio",
+    "transport-link-tcp",
+    "transport-link-udp",
+    "transport-unicast",
+    "transport-keepalive",
+    "transport-batching",
+    "transport-fragmentation",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "link-batching",
+    "link-frame",
+    "link-fragment",
+    "codec-frame",
+    "codec-fragment",
+    "codec-keep-alive",
+    "codec-init-syn",
+    "codec-init-ack",
+    "codec-open-syn",
+    "codec-open-ack",
+    "codec-close",
+    "codec-push",
+    "codec-declare",
+    "codec-request",
+    "codec-response",
+    "codec-response-final",
+    "codec-scout",
+    "codec-hello",
+    "declare-subscriber",
+    "declare-undeclare",
+    "declare-queryable",
+    "declare-keyexpr",
+    "declare-token",
+    "declare-final",
+    "declare-interest",
+    "pubsub-put",
+    "pubsub-delete",
+    "pubsub-sample",
+    "pubsub-encoding",
+    "pubsub-timestamp",
+    "encoding-bytes",
+    "encoding-empty",
+    "encoding-utf8",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "keyexpr-includes",
+    "keyexpr-intersect",
+    "keyexpr-mapping",
+    "keyexpr-wildcard-single",
+    "keyexpr-wildcard-double",
+    "keyexpr-dollar-star",
+    "query-get",
+    "query-queryable",
+    "query-reply",
+    "query-target",
+    "query-timeout",
+    "query-consolidation",
+    "liveliness-token",
+    "liveliness-subscriber",
+    "locator-tcp",
+    "locator-udp",
+    "routing-client",
+    "scouting-static",
+    "scouting-active",
+    "time-system-clock",
+    "time-ntp64",
+    "time-timestamp-source",
+]
+
+# preset-ap-router — preset-ap-client scope + router topology + gossip
+# + multicast (≈78 atomic features).
+preset-ap-router = [
+    "platform-linux",
+    "runtime-tokio",
+    "transport-link-tcp",
+    "transport-link-udp",
+    "transport-unicast",
+    "transport-multicast",
+    "transport-keepalive",
+    "transport-batching",
+    "transport-fragmentation",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "session-multicast",
+    "link-batching",
+    "link-frame",
+    "link-fragment",
+    "codec-frame",
+    "codec-fragment",
+    "codec-keep-alive",
+    "codec-init-syn",
+    "codec-init-ack",
+    "codec-open-syn",
+    "codec-open-ack",
+    "codec-close",
+    "codec-push",
+    "codec-declare",
+    "codec-request",
+    "codec-response",
+    "codec-response-final",
+    "codec-scout",
+    "codec-hello",
+    "codec-join",
+    "declare-subscriber",
+    "declare-undeclare",
+    "declare-queryable",
+    "declare-keyexpr",
+    "declare-token",
+    "declare-final",
+    "declare-interest",
+    "pubsub-put",
+    "pubsub-delete",
+    "pubsub-sample",
+    "pubsub-encoding",
+    "pubsub-timestamp",
+    "encoding-bytes",
+    "encoding-empty",
+    "encoding-utf8",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "keyexpr-includes",
+    "keyexpr-intersect",
+    "keyexpr-mapping",
+    "keyexpr-wildcard-single",
+    "keyexpr-wildcard-double",
+    "keyexpr-dollar-star",
+    "query-get",
+    "query-queryable",
+    "query-reply",
+    "query-target",
+    "query-timeout",
+    "query-consolidation",
+    "liveliness-token",
+    "liveliness-subscriber",
+    "liveliness-history",
+    "locator-tcp",
+    "locator-udp",
+    "locator-iface",
+    "routing-client",
+    "routing-peer",
+    "routing-router",
+    "routing-routes",
+    "routing-static-routes",
+    "routing-failover",
+    "scouting-static",
+    "scouting-active",
+    "scouting-multicast",
+    "scouting-gossip",
+    "scouting-autoconnect",
+    "time-system-clock",
+    "time-ntp64",
+    "time-timestamp-source",
+]
+
+# preset-ap-full — kitchen-sink Linux deploy (≈123 atomic features).
+# Every active + reserved feature reasonable for an AP host: all
+# transport link kinds, all auth methods, all encodings, all storage,
+# all session extensions, attachment, advanced QoS.
+preset-ap-full = [
+    "platform-linux",
+    "runtime-tokio",
+    "runtime-tokio-uring",
+    "runtime-zero-copy",
+    "transport-link-tcp",
+    "transport-link-tls",
+    "transport-link-udp",
+    "transport-link-quic",
+    "transport-link-unixsock",
+    "transport-link-vsock",
+    "transport-link-ws",
+    "transport-unicast",
+    "transport-multicast",
+    "transport-keepalive",
+    "transport-batching",
+    "transport-fragmentation",
+    "transport-lowlatency",
+    "transport-compression",
+    "transport-shm",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "session-multicast",
+    "session-resumable",
+    "session-stateless-accept",
+    "session-extauth",
+    "session-extqos",
+    "session-extshm",
+    "session-extcompression",
+    "link-batching",
+    "link-frame",
+    "link-fragment",
+    "link-flow-control",
+    "link-tx-cache",
+    "codec-frame",
+    "codec-fragment",
+    "codec-keep-alive",
+    "codec-init-syn",
+    "codec-init-ack",
+    "codec-open-syn",
+    "codec-open-ack",
+    "codec-close",
+    "codec-push",
+    "codec-declare",
+    "codec-request",
+    "codec-response",
+    "codec-response-final",
+    "codec-scout",
+    "codec-hello",
+    "codec-join",
+    "declare-subscriber",
+    "declare-undeclare",
+    "declare-queryable",
+    "declare-keyexpr",
+    "declare-token",
+    "declare-final",
+    "declare-interest",
+    "pubsub-put",
+    "pubsub-delete",
+    "pubsub-sample",
+    "pubsub-encoding",
+    "pubsub-timestamp",
+    "pubsub-attachment",
+    "pubsub-congestion-control",
+    "pubsub-express",
+    "pubsub-priority",
+    "pubsub-source-info",
+    "pubsub-allow-loop",
+    "query-get",
+    "query-queryable",
+    "query-reply",
+    "query-reply-err",
+    "query-target",
+    "query-timeout",
+    "query-consolidation",
+    "query-attachment",
+    "query-selector-parameters",
+    "query-source-info",
+    "attachment-bytes",
+    "attachment-encoding-aware",
+    "encoding-bytes",
+    "encoding-empty",
+    "encoding-utf8",
+    "encoding-cbor",
+    "encoding-json",
+    "encoding-protobuf",
+    "encoding-mime",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "keyexpr-includes",
+    "keyexpr-intersect",
+    "keyexpr-mapping",
+    "keyexpr-wildcard-single",
+    "keyexpr-wildcard-double",
+    "keyexpr-dollar-star",
+    "liveliness-token",
+    "liveliness-subscriber",
+    "liveliness-get",
+    "liveliness-history",
+    "liveliness-historical-samples",
+    "locator-tcp",
+    "locator-tls",
+    "locator-udp",
+    "locator-quic",
+    "locator-unixsock",
+    "locator-vsock",
+    "locator-ws",
+    "locator-iface",
+    "routing-client",
+    "routing-peer",
+    "routing-router",
+    "routing-routes",
+    "routing-static-routes",
+    "routing-failover",
+    "scouting-static",
+    "scouting-active",
+    "scouting-multicast",
+    "scouting-gossip",
+    "scouting-autoconnect",
+    "scouting-passive",
+    "storage-backend",
+    "storage-aligner",
+    "storage-history",
+    "storage-replication",
+    "access-acl",
+    "access-downsampling",
+    "access-quota",
+    "access-extauth-jwt",
+    "access-extauth-pubkey",
+    "access-extauth-usrpwd",
+    "time-system-clock",
+    "time-ntp64",
+    "time-timestamp-source",
+    "time-hlc",
+]
+
+# preset-zenoh-cpp — cross-feature consistency anchor matching
+# zenoh-cpp public API. Functionally equivalent to preset-ap-full at
+# v0.1.0; reserved as a distinct preset so future API drift between
+# wz and zenoh-cpp can be tracked without changing preset-ap-full.
+preset-zenoh-cpp = [
+    "platform-linux",
+    "runtime-tokio",
+    "runtime-zero-copy",
+    "transport-link-tcp",
+    "transport-link-tls",
+    "transport-link-udp",
+    "transport-link-quic",
+    "transport-link-unixsock",
+    "transport-link-ws",
+    "transport-unicast",
+    "transport-multicast",
+    "transport-keepalive",
+    "transport-batching",
+    "transport-fragmentation",
+    "transport-lowlatency",
+    "transport-compression",
+    "transport-shm",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "session-multicast",
+    "session-extauth",
+    "session-extqos",
+    "session-extshm",
+    "session-extcompression",
+    "link-batching",
+    "link-frame",
+    "link-fragment",
+    "link-flow-control",
+    "link-tx-cache",
+    "codec-frame",
+    "codec-fragment",
+    "codec-keep-alive",
+    "codec-init-syn",
+    "codec-init-ack",
+    "codec-open-syn",
+    "codec-open-ack",
+    "codec-close",
+    "codec-push",
+    "codec-declare",
+    "codec-request",
+    "codec-response",
+    "codec-response-final",
+    "codec-scout",
+    "codec-hello",
+    "codec-join",
+    "declare-subscriber",
+    "declare-undeclare",
+    "declare-queryable",
+    "declare-keyexpr",
+    "declare-token",
+    "declare-final",
+    "declare-interest",
+    "pubsub-put",
+    "pubsub-delete",
+    "pubsub-sample",
+    "pubsub-encoding",
+    "pubsub-timestamp",
+    "pubsub-attachment",
+    "pubsub-congestion-control",
+    "pubsub-express",
+    "pubsub-priority",
+    "pubsub-source-info",
+    "query-get",
+    "query-queryable",
+    "query-reply",
+    "query-reply-err",
+    "query-target",
+    "query-timeout",
+    "query-consolidation",
+    "query-attachment",
+    "query-selector-parameters",
+    "query-source-info",
+    "attachment-bytes",
+    "attachment-encoding-aware",
+    "encoding-bytes",
+    "encoding-empty",
+    "encoding-utf8",
+    "encoding-cbor",
+    "encoding-json",
+    "encoding-protobuf",
+    "encoding-mime",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "keyexpr-includes",
+    "keyexpr-intersect",
+    "keyexpr-mapping",
+    "keyexpr-wildcard-single",
+    "keyexpr-wildcard-double",
+    "keyexpr-dollar-star",
+    "liveliness-token",
+    "liveliness-subscriber",
+    "liveliness-get",
+    "liveliness-history",
+    "liveliness-historical-samples",
+    "locator-tcp",
+    "locator-tls",
+    "locator-udp",
+    "locator-quic",
+    "locator-unixsock",
+    "locator-ws",
+    "locator-iface",
+    "routing-client",
+    "routing-peer",
+    "routing-router",
+    "routing-routes",
+    "routing-static-routes",
+    "routing-failover",
+    "scouting-static",
+    "scouting-active",
+    "scouting-multicast",
+    "scouting-gossip",
+    "scouting-autoconnect",
+    "scouting-passive",
+    "storage-backend",
+    "storage-aligner",
+    "storage-history",
+    "storage-replication",
+    "time-system-clock",
+    "time-ntp64",
+    "time-timestamp-source",
+    "time-hlc",
+]
