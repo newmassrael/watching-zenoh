@@ -254,4 +254,3 @@ fn wz_liveliness_subscriber_round_trip_against_wz_acceptor() {
          --- initiator stderr ---\n{delete_text}"
     );
 }
-
