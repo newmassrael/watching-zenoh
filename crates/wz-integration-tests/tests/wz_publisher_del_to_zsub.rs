@@ -49,7 +49,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, PortReservation,
+    read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
+    PortReservation,
 };
 
 #[test]
@@ -73,16 +74,19 @@ fn wz_publisher_del_round_trip_against_zenoh_pico_z_sub() {
     let demo_stderr_writer = demo_stderr.try_clone().expect("dup demo stderr handle");
     let mut demo_stderr_reader = demo_stderr;
 
-    let mut demo_child = Command::new(&demo)
-        .arg("--listen")
-        .arg(&listen_addr)
-        .arg("--delete")
-        .arg(publish_key)
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(demo_stderr_writer))
-        .spawn()
-        .expect("spawn wz-ap-demo");
+    let mut demo_child = ChildGuard::wrap(
+        "wz-ap-demo (--listen --delete)",
+        Command::new(&demo)
+            .arg("--listen")
+            .arg(&listen_addr)
+            .arg("--delete")
+            .arg(publish_key)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(demo_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo"),
+    );
 
     let bound = wait_for_substring(
         &mut demo_stderr_reader,
@@ -90,8 +94,8 @@ fn wz_publisher_del_round_trip_against_zenoh_pico_z_sub() {
         Duration::from_secs(5),
     );
     if let Err(captured) = &bound {
-        let _ = demo_child.kill();
-        let _ = demo_child.wait();
+        let _ = demo_child.child_mut().kill();
+        let _ = demo_child.child_mut().wait();
         panic!(
             "wz-ap-demo did not log 'listening on' within 5s\n\
              --- captured demo stderr ---\n{captured}"
@@ -104,14 +108,17 @@ fn wz_publisher_del_round_trip_against_zenoh_pico_z_sub() {
     let z_sub_stdout_writer = z_sub_stdout.try_clone().expect("dup z_sub stdout handle");
     let mut z_sub_stdout_reader = z_sub_stdout;
 
-    let mut z_sub_child = Command::new("stdbuf")
-        .args(["-oL", "-eL"])
-        .arg(&z_sub)
-        .args(["-k", sub_key, "-e", &endpoint, "-m", "client"])
-        .stdout(Stdio::from(z_sub_stdout_writer))
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn z_sub via stdbuf");
+    let mut z_sub_child = ChildGuard::wrap(
+        "z_sub client (zenoh-pico)",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_sub)
+            .args(["-k", sub_key, "-e", &endpoint, "-m", "client"])
+            .stdout(Stdio::from(z_sub_stdout_writer))
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn z_sub via stdbuf"),
+    );
 
     let session_opening = wait_for_substring(
         &mut z_sub_stdout_reader,
@@ -125,10 +132,10 @@ fn wz_publisher_del_round_trip_against_zenoh_pico_z_sub() {
         Duration::from_secs(10),
     );
 
-    let _ = z_sub_child.kill();
-    let _ = z_sub_child.wait();
-    let _ = demo_child.kill();
-    let _ = demo_child.wait();
+    let _ = z_sub_child.child_mut().kill();
+    let _ = z_sub_child.child_mut().wait();
+    let _ = demo_child.child_mut().kill();
+    let _ = demo_child.child_mut().wait();
 
     let demo_captured = read_captured(&mut demo_stderr_reader);
     let z_sub_captured = read_captured(&mut z_sub_stdout_reader);

@@ -69,7 +69,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, PortReservation,
+    read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
+    PortReservation,
 };
 
 #[test]
@@ -102,14 +103,17 @@ fn wz_initiator_round_trip_against_zenoh_pico_z_sub_peer_listen() {
     let z_sub_stdout_writer = z_sub_stdout.try_clone().expect("dup z_sub stdout handle");
     let mut z_sub_stdout_reader = z_sub_stdout;
 
-    let mut z_sub_child = Command::new("stdbuf")
-        .args(["-oL", "-eL"])
-        .arg(&z_sub)
-        .args(["-m", "peer", "-l", &endpoint, "-k", sub_key])
-        .stdout(Stdio::from(z_sub_stdout_writer))
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn z_sub via stdbuf");
+    let mut z_sub_child = ChildGuard::wrap(
+        "z_sub peer-listen (zenoh-pico)",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&z_sub)
+            .args(["-m", "peer", "-l", &endpoint, "-k", sub_key])
+            .stdout(Stdio::from(z_sub_stdout_writer))
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("spawn z_sub via stdbuf"),
+    );
 
     // Wait for the peer-listen banner that proves z_sub is past
     // bind+listen+admin_space and parked waiting for connections.
@@ -122,8 +126,8 @@ fn wz_initiator_round_trip_against_zenoh_pico_z_sub_peer_listen() {
         Duration::from_secs(5),
     );
     if let Err(captured) = &listening {
-        let _ = z_sub_child.kill();
-        let _ = z_sub_child.wait();
+        let _ = z_sub_child.child_mut().kill();
+        let _ = z_sub_child.child_mut().wait();
         panic!(
             "z_sub did not park accepting connections within 5s — \
              peer-listen bind on {endpoint} failed.\n\
@@ -138,18 +142,21 @@ fn wz_initiator_round_trip_against_zenoh_pico_z_sub_peer_listen() {
     let wz_stderr_writer = wz_stderr.try_clone().expect("dup wz stderr handle");
     let mut wz_stderr_reader = wz_stderr;
 
-    let mut wz_child = Command::new(&demo)
-        .arg("--connect")
-        .arg(&listen_addr)
-        .arg("--publish")
-        .arg(publish_key)
-        .arg("--value")
-        .arg(publish_value)
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(wz_stderr_writer))
-        .spawn()
-        .expect("spawn wz-ap-demo --connect");
+    let mut wz_child = ChildGuard::wrap(
+        "wz-ap-demo (--connect)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(&listen_addr)
+            .arg("--publish")
+            .arg(publish_key)
+            .arg("--value")
+            .arg(publish_value)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(wz_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect"),
+    );
 
     // Two-stage wait. First the dial confirmation, then the
     // subscriber-received witness.
@@ -165,10 +172,10 @@ fn wz_initiator_round_trip_against_zenoh_pico_z_sub_peer_listen() {
         Duration::from_secs(10),
     );
 
-    let _ = wz_child.kill();
-    let _ = wz_child.wait();
-    let _ = z_sub_child.kill();
-    let _ = z_sub_child.wait();
+    let _ = wz_child.child_mut().kill();
+    let _ = wz_child.child_mut().wait();
+    let _ = z_sub_child.child_mut().kill();
+    let _ = z_sub_child.child_mut().wait();
 
     let wz_captured = read_captured(&mut wz_stderr_reader);
     let z_sub_captured = read_captured(&mut z_sub_stdout_reader);

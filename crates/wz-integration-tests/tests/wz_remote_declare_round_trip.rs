@@ -60,7 +60,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, PortReservation,
+    read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard, PortReservation,
 };
 
 #[test]
@@ -81,20 +81,23 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
         .expect("dup acceptor stderr handle");
     let mut acceptor_stderr_reader = acceptor_stderr;
 
-    let mut acceptor_child = Command::new(&demo)
-        .arg("--listen")
-        .arg(&addr)
-        .arg("--declare-subscriber")
-        .arg(sub_keyexpr)
-        .arg("--declare-queryable")
-        .arg(q_keyexpr)
-        .arg("--declare-token")
-        .arg(token_keyexpr)
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(acceptor_stderr_writer))
-        .spawn()
-        .expect("spawn wz-ap-demo --listen --declare-*");
+    let mut acceptor_child = ChildGuard::wrap(
+        "wz-ap-demo acceptor (--listen --declare-*)",
+        Command::new(&demo)
+            .arg("--listen")
+            .arg(&addr)
+            .arg("--declare-subscriber")
+            .arg(sub_keyexpr)
+            .arg("--declare-queryable")
+            .arg(q_keyexpr)
+            .arg("--declare-token")
+            .arg(token_keyexpr)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(acceptor_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --listen --declare-*"),
+    );
 
     let bound = wait_for_substring(
         &mut acceptor_stderr_reader,
@@ -102,8 +105,8 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
         Duration::from_secs(5),
     );
     if let Err(captured) = &bound {
-        let _ = acceptor_child.kill();
-        let _ = acceptor_child.wait();
+        let _ = acceptor_child.child_mut().kill();
+        let _ = acceptor_child.child_mut().wait();
         panic!(
             "wz-ap-demo --listen --declare-* did not log 'listening on' within 5s\n\
              --- captured acceptor stderr ---\n{captured}"
@@ -119,17 +122,20 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
         .expect("dup initiator stderr handle");
     let mut initiator_stderr_reader = initiator_stderr;
 
-    let mut initiator_child = Command::new(&demo)
-        .arg("--connect")
-        .arg(&addr)
-        .arg("--on-remote-subscriber-log")
-        .arg("--on-remote-queryable-log")
-        .arg("--on-remote-liveliness-log")
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(initiator_stderr_writer))
-        .spawn()
-        .expect("spawn wz-ap-demo --connect --on-remote-*-log");
+    let mut initiator_child = ChildGuard::wrap(
+        "wz-ap-demo initiator (--connect --on-remote-*-log)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(&addr)
+            .arg("--on-remote-subscriber-log")
+            .arg("--on-remote-queryable-log")
+            .arg("--on-remote-liveliness-log")
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(initiator_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect --on-remote-*-log"),
+    );
 
     let dialed = wait_for_substring(
         &mut initiator_stderr_reader,
@@ -158,7 +164,7 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
     // it and logs `REMOTE TOKEN UNDECLARED id=0`. Hard SIGKILL
     // fallback caps the wait at 2 s so a wedged graceful path does
     // not block the test indefinitely.
-    graceful_terminate(&mut acceptor_child, Duration::from_secs(2));
+    graceful_terminate(acceptor_child.child_mut(), Duration::from_secs(2));
 
     // Once the acceptor has exited gracefully (UndeclToken on the
     // wire), give the initiator a window to drain its inbound queue
@@ -173,8 +179,8 @@ fn wz_remote_declare_round_trip_against_wz_initiator() {
         Duration::from_secs(5),
     );
 
-    let _ = initiator_child.kill();
-    let _ = initiator_child.wait();
+    let _ = initiator_child.child_mut().kill();
+    let _ = initiator_child.child_mut().wait();
 
     let acceptor_captured = read_captured(&mut acceptor_stderr_reader);
     let initiator_captured = read_captured(&mut initiator_stderr_reader);

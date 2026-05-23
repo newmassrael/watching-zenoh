@@ -69,7 +69,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, PortReservation,
+    read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard, PortReservation,
 };
 
 #[test]
@@ -92,16 +92,19 @@ fn wz_liveliness_subscriber_round_trip_against_wz_acceptor() {
         .expect("dup acceptor stderr handle");
     let mut acceptor_stderr_reader = acceptor_stderr;
 
-    let mut acceptor_child = Command::new(&demo)
-        .arg("--listen")
-        .arg(&addr)
-        .arg("--declare-token")
-        .arg(token_keyexpr)
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(acceptor_stderr_writer))
-        .spawn()
-        .expect("spawn wz-ap-demo --listen --declare-token");
+    let mut acceptor_child = ChildGuard::wrap(
+        "wz-ap-demo acceptor (--listen --declare-token)",
+        Command::new(&demo)
+            .arg("--listen")
+            .arg(&addr)
+            .arg("--declare-token")
+            .arg(token_keyexpr)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(acceptor_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --listen --declare-token"),
+    );
 
     let bound = wait_for_substring(
         &mut acceptor_stderr_reader,
@@ -109,8 +112,8 @@ fn wz_liveliness_subscriber_round_trip_against_wz_acceptor() {
         Duration::from_secs(5),
     );
     if let Err(captured) = &bound {
-        let _ = acceptor_child.kill();
-        let _ = acceptor_child.wait();
+        let _ = acceptor_child.child_mut().kill();
+        let _ = acceptor_child.child_mut().wait();
         panic!(
             "wz-ap-demo --listen --declare-token did not log 'listening on' within 5s\n\
              --- captured acceptor stderr ---\n{captured}"
@@ -129,16 +132,19 @@ fn wz_liveliness_subscriber_round_trip_against_wz_acceptor() {
         .expect("dup initiator stderr handle");
     let mut initiator_stderr_reader = initiator_stderr;
 
-    let mut initiator_child = Command::new(&demo)
-        .arg("--connect")
-        .arg(&addr)
-        .arg("--liveliness-subscribe")
-        .arg(subscribe_pattern)
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(initiator_stderr_writer))
-        .spawn()
-        .expect("spawn wz-ap-demo --connect --liveliness-subscribe");
+    let mut initiator_child = ChildGuard::wrap(
+        "wz-ap-demo initiator (--connect --liveliness-subscribe)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(&addr)
+            .arg("--liveliness-subscribe")
+            .arg(subscribe_pattern)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(initiator_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect --liveliness-subscribe"),
+    );
 
     let dialed = wait_for_substring(
         &mut initiator_stderr_reader,
@@ -161,7 +167,7 @@ fn wz_liveliness_subscriber_round_trip_against_wz_acceptor() {
     // LivelinessToken's Drop emits Declare(UndeclToken{id=0}). The
     // initiator's LivelinessSubscriberRegistry::dispatch_declare
     // looks up `peer_token_table[0]` and fans the DELETE sample.
-    graceful_terminate(&mut acceptor_child, Duration::from_secs(2));
+    graceful_terminate(acceptor_child.child_mut(), Duration::from_secs(2));
 
     let delete_substr = "LIVELINESS SAMPLE DELETE";
     let delete_captured = wait_for_substring(
@@ -170,8 +176,8 @@ fn wz_liveliness_subscriber_round_trip_against_wz_acceptor() {
         Duration::from_secs(5),
     );
 
-    let _ = initiator_child.kill();
-    let _ = initiator_child.wait();
+    let _ = initiator_child.child_mut().kill();
+    let _ = initiator_child.child_mut().wait();
 
     let acceptor_captured = read_captured(&mut acceptor_stderr_reader);
     let initiator_captured = read_captured(&mut initiator_stderr_reader);

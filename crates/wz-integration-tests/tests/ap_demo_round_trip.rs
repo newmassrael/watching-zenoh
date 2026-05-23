@@ -44,7 +44,8 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, PortReservation,
+    read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
+    PortReservation,
 };
 
 #[test]
@@ -62,16 +63,19 @@ fn ap_demo_round_trip_against_zenoh_pico_z_put() {
     let stderr_capture_writer = stderr_capture.try_clone().expect("dup stderr handle");
     let mut stderr_capture_reader = stderr_capture;
 
-    let mut child = Command::new(&demo)
-        .arg("--listen")
-        .arg(&listen_addr)
-        .arg("--key")
-        .arg(key)
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr_capture_writer))
-        .spawn()
-        .expect("spawn wz-ap-demo");
+    let mut child = ChildGuard::wrap(
+        "wz-ap-demo (--listen)",
+        Command::new(&demo)
+            .arg("--listen")
+            .arg(&listen_addr)
+            .arg("--key")
+            .arg(key)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr_capture_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo"),
+    );
 
     // Wait for the binding-confirmed line; this prevents the z_put
     // spawn from racing against an unbound port.
@@ -81,8 +85,8 @@ fn ap_demo_round_trip_against_zenoh_pico_z_put() {
         Duration::from_secs(5),
     );
     if let Err(captured) = &bound {
-        let _ = child.kill();
-        let _ = child.wait();
+        let _ = child.child_mut().kill();
+        let _ = child.child_mut().wait();
         panic!(
             "wz-ap-demo did not log 'listening on' within 5s\n--- captured stderr ---\n{captured}"
         );
@@ -129,8 +133,9 @@ fn ap_demo_round_trip_against_zenoh_pico_z_put() {
 
     // Tear down the demo. SIGTERM via kill(); on Unix this is SIGKILL
     // through std::process::Child — sufficient for test cleanup.
-    let _ = child.kill();
-    let _ = child.wait();
+    // ChildGuard's Drop is the panic-path safety net (R305).
+    let _ = child.child_mut().kill();
+    let _ = child.child_mut().wait();
 
     // Surface the full captured stderr on any failed assertion so a
     // session-FSM log line (codec error, lease expiry, etc.) is
