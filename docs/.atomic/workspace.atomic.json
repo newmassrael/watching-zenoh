@@ -15846,6 +15846,58 @@
         "crates/ runtime stub code still empty — link driver + intrinsics binding deferred to a later runtime-track round once enough codec + FSM files exist to pin the actual binding surface."
       ]
     },
+    "Round 310": {
+      "decision_summary": "R310 extends declare-subscriber / declare-queryable gating into the application layer (declare.rs sub-modules + observer.rs remote_* fields + Publisher/Querier::get_matching_status methods), closing the R309 carry.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/declare.rs: mod queryable + RemoteQueryableRegistry re-exports gate on declare-queryable; mod subscriber + RemoteSubscriberRegistry re-exports gate on declare-subscriber. `resolve_wireexpr` helper + its HashMap / WireexprVariant imports gate on any(declare-queryable, declare-subscriber, liveliness-token, liveliness-subscriber, test) so no-default-features build elides them cleanly.",
+        "crates/wz-runtime-tokio/src/observer.rs: `use crate::declare::RemoteQueryableRegistry` gates on declare-queryable; `use crate::declare::RemoteSubscriberRegistry` gates on declare-subscriber. ApplicationLayerObserver::remote_subscribers / remote_queryables fields + their `new()` init + `dispatch_event()` arms gate on the matching feature. `peer_table` rebinding in dispatch_event gates so the variable is `_peer_table` when every consumer arm is off (rare; preset-mcu-minimal-class).",
+        "crates/wz-runtime-tokio/src/session.rs: Publisher::get_matching_status + PublisherAliased::get_matching_status gate on declare-subscriber (RemoteSubscriberRegistry is the data source). Querier::get_matching_status + QuerierAliased::get_matching_status gate on declare-queryable (RemoteQueryableRegistry is the data source). The four methods are inherent-impl gates; the parent Publisher / Querier / etc. structs stay on their existing feature gate (no-feature for Publisher; query-get for Querier).",
+        "Session::declare_subscriber + SubscribeOptions + Subscriber + SubscribeAliasError stay unconditional in R310 — they wrap the LOCAL pubsub::SubscriberRegistry (inbound Push routing to user callbacks), not the peer-observation RemoteSubscriberRegistry that declare-subscriber gates. The pubsub-side gating belongs to a future pubsub-domain round (R311+ candidate)."
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio 13-path cargo check matrix: no-default-features / default / 7 single declare-* / 3 query-* / 2 liveliness-* / --all-features. Plus workspace --all-features. Every path Finished without error.",
+        "cargo test -p wz-runtime-tokio --lib --all-features: 589 passed; 0 failed; 0 ignored.",
+        "cargo fmt --all -- --check clean. scripts/run-ci.sh --layer A baseline post-R310 pre-append: entries=308 / sections=215 / T1=0 / RT=13/13 / GENERATED.md=sync / T3 warn=862 / T4 info=429.",
+        "Layer E flake-0 measurement: R310 = 30/30 pass. Matches R308 baseline (30/30 post-eprintln → log fix). R309 was 59/60 (1 fail on external z_sub init race, R309-unrelated); R310's 30/30 confirms no new wz-side flake introduced by the application-layer gating."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog"
+      ],
+      "carry_forward_bullets": [
+        "R311 next mechanical track: codec domain #[cfg(feature)] gates (16 features). Blast radius likely 2-3x R309 because codec gates touch every wz-codecs build.rs SCXML emit + every wire-encode/decode call site. Estimated 5-8R as textbook split.",
+        "Pubsub domain gating (11 atomic features). Session::declare_subscriber + SubscribeOptions + Subscriber + the entire pubsub::SubscriberRegistry path gate on pubsub-* features. Estimated 3-4R.",
+        "zenoh-pico z_sub CLI startup race (R309 carry) untouched — environmental, mechanical fix is extending the test-harness init timeout. Estimated 0.5-1R.",
+        "pre-existing keyexpr_canon proptest flake — Layer C1 random input occasionally trips zenoh-pico assert (SIGABRT). Estimated 1R analysis.",
+        "R307 + R308 + R309 carries unchanged.",
+        "Pre-existing architectural carries unchanged: R284 uniform Established gate (3-5R), R283 peer-side Interest inbound bilateral (2-3R), R267 Session<R,T> reparam (3-7R, composability blocker), R301 §8 SCE cross-repo (3-7R), Querier::get_matching_status (cross-cut now gated by R310), Q_B/Q_E codec slots (5-10R), Phase W full lwIP (20-50R), R299 carry #2 / #3, R300 conservative-reject narrow (1R), R303+ feature_inventory.md atomic Section decompose (1-2R), R301 §7 cargo wz-config inspect tool (3-5R), R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis)."
+      ],
+      "publishable_decision_summary": "R310 extends declare-subscriber / declare-queryable gating into the application layer (declare.rs sub-modules + observer.rs remote_* fields + Publisher/Querier::get_matching_status methods), closing the R309 carry.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/declare.rs: mod queryable + RemoteQueryableRegistry re-exports gate on declare-queryable; mod subscriber + RemoteSubscriberRegistry re-exports gate on declare-subscriber. `resolve_wireexpr` helper + its HashMap / WireexprVariant imports gate on any(declare-queryable, declare-subscriber, liveliness-token, liveliness-subscriber, test) so no-default-features build elides them cleanly.",
+        "crates/wz-runtime-tokio/src/observer.rs: `use crate::declare::RemoteQueryableRegistry` gates on declare-queryable; `use crate::declare::RemoteSubscriberRegistry` gates on declare-subscriber. ApplicationLayerObserver::remote_subscribers / remote_queryables fields + their `new()` init + `dispatch_event()` arms gate on the matching feature. `peer_table` rebinding in dispatch_event gates so the variable is `_peer_table` when every consumer arm is off (rare; preset-mcu-minimal-class).",
+        "crates/wz-runtime-tokio/src/session.rs: Publisher::get_matching_status + PublisherAliased::get_matching_status gate on declare-subscriber (RemoteSubscriberRegistry is the data source). Querier::get_matching_status + QuerierAliased::get_matching_status gate on declare-queryable (RemoteQueryableRegistry is the data source). The four methods are inherent-impl gates; the parent Publisher / Querier / etc. structs stay on their existing feature gate (no-feature for Publisher; query-get for Querier).",
+        "Session::declare_subscriber + SubscribeOptions + Subscriber + SubscribeAliasError stay unconditional in R310 — they wrap the LOCAL pubsub::SubscriberRegistry (inbound Push routing to user callbacks), not the peer-observation RemoteSubscriberRegistry that declare-subscriber gates. The pubsub-side gating belongs to a future pubsub-domain round (R311+ candidate)."
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-tokio 13-path cargo check matrix: no-default-features / default / 7 single declare-* / 3 query-* / 2 liveliness-* / --all-features. Plus workspace --all-features. Every path Finished without error.",
+        "cargo test -p wz-runtime-tokio --lib --all-features: 589 passed; 0 failed; 0 ignored.",
+        "cargo fmt --all -- --check clean. scripts/run-ci.sh --layer A baseline post-R310 pre-append: entries=308 / sections=215 / T1=0 / RT=13/13 / GENERATED.md=sync / T3 warn=862 / T4 info=429.",
+        "Layer E flake-0 measurement: R310 = 30/30 pass. Matches R308 baseline (30/30 post-eprintln → log fix). R309 was 59/60 (1 fail on external z_sub init race, R309-unrelated); R310's 30/30 confirms no new wz-side flake introduced by the application-layer gating."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311 next mechanical track: codec domain #[cfg(feature)] gates (16 features). Blast radius likely 2-3x R309 because codec gates touch every wz-codecs build.rs SCXML emit + every wire-encode/decode call site. Estimated 5-8R as textbook split.",
+        "Pubsub domain gating (11 atomic features). Session::declare_subscriber + SubscribeOptions + Subscriber + the entire pubsub::SubscriberRegistry path gate on pubsub-* features. Estimated 3-4R.",
+        "zenoh-pico z_sub CLI startup race (R309 carry) untouched — environmental, mechanical fix is extending the test-harness init timeout. Estimated 0.5-1R.",
+        "pre-existing keyexpr_canon proptest flake — Layer C1 random input occasionally trips zenoh-pico assert (SIGABRT). Estimated 1R analysis.",
+        "R307 + R308 + R309 carries unchanged.",
+        "Pre-existing architectural carries unchanged: R284 uniform Established gate (3-5R), R283 peer-side Interest inbound bilateral (2-3R), R267 Session<R,T> reparam (3-7R, composability blocker), R301 §8 SCE cross-repo (3-7R), Querier::get_matching_status (cross-cut now gated by R310), Q_B/Q_E codec slots (5-10R), Phase W full lwIP (20-50R), R299 carry #2 / #3, R300 conservative-reject narrow (1R), R303+ feature_inventory.md atomic Section decompose (1-2R), R301 §7 cargo wz-config inspect tool (3-5R), R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis)."
+      ]
+    },
     "Round 32": {
       "decision_summary": "B5 codec track continues — sources/codecs/frame.scxml + fragment.scxml authored. First VLE + tail primitive composition (B1-α + tail) plus first inline test-vector land (B5-θ 4-case set). Both share identical body shape per zenoh-pico (sn:VLE + payload:tail, no extensions); differ only in enclosing MID (0x05 Frame / 0x06 Fragment).",
       "changes_bullets": [
