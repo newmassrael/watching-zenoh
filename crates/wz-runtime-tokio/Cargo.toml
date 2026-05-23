@@ -49,10 +49,46 @@ path = "src/lib.rs"
 # Downstream of the `wz` facade these features are forwarded via
 # `wz-runtime-tokio?/liveliness-token` etc. so a wz consumer enabling
 # `preset-mcu-minimal` (no liveliness) gets the slim build.
+#
+# R307 — query domain joins the source-gated set (6 new entries).
+# `query-get` gates `Session::get` / `Session::get_aliased`;
+# `query-queryable` gates `Session::declare_queryable` /
+# `declare_queryable_aliased` + the entire `crate::query` module;
+# `query-reply` gates the entire `crate::reply` module (the get-side
+# ReplyRegistry). Per-option setters on `QueryOptions` gate behind
+# `query-target` / `query-timeout` / `query-consolidation` — each
+# implies `query-get` since they only refine the get call path.
+# `query-get` implies `query-reply` because `Session::get` registers a
+# pending entry against `crate::reply::ReplyRegistry`. The defaults
+# below mirror R302b: every existing in-workspace consumer compiles
+# unchanged because the default features turn every R307 gate ON.
 [features]
-default = ["liveliness-token", "liveliness-subscriber"]
+default = [
+    "liveliness-token",
+    "liveliness-subscriber",
+    "query-get",
+    "query-queryable",
+    "query-reply",
+    "query-target",
+    "query-timeout",
+    "query-consolidation",
+]
 liveliness-token = []
 liveliness-subscriber = []
+# `query-get` implies BOTH `query-reply` (the get-side ReplyRegistry
+# tracks pending entries) AND `query-queryable` (the loopback path
+# inside `Session::query` fans into the in-process QueryableRegistry
+# and converts emitted `QueryReply` to `InboundReply` via the
+# `From` adapter that lives in `reply.rs`). A pure wire-only get
+# without the loopback path is a future-round refinement; the R307
+# baseline keeps the loopback path universally available so the AP
+# MVP integration tests + ap-demo continue to exercise both branches.
+query-get = ["query-reply", "query-queryable"]
+query-queryable = []
+query-reply = []
+query-target = ["query-get"]
+query-timeout = ["query-get"]
+query-consolidation = ["query-get"]
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }
