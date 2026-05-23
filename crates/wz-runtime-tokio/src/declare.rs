@@ -61,15 +61,43 @@
 //! keyexpr), so no resolution is needed — the peer identifies the
 //! prior declaration by the same id it used in its earlier `Decl*`.
 
+// R310 — the only call site of these imports is `resolve_wireexpr`
+// below, which itself gates on any(declare-queryable, declare-
+// subscriber, liveliness-token, liveliness-subscriber, test). Mirror
+// the gate on the imports so a no-default-features build does not
+// surface them as -D unused-imports lint errors.
+#[cfg(any(
+    feature = "declare-queryable",
+    feature = "declare-subscriber",
+    feature = "liveliness-token",
+    feature = "liveliness-subscriber",
+    test,
+))]
 use std::collections::HashMap;
 
+#[cfg(any(
+    feature = "declare-queryable",
+    feature = "declare-subscriber",
+    feature = "liveliness-token",
+    feature = "liveliness-subscriber",
+    test,
+))]
 use wz_codecs::wireexpr::WireexprVariant;
 
+// R310 — each registry sub-module gates on its corresponding
+// application-layer feature (the wire-emit counterpart was gated at
+// R309 inside session_glue). The liveliness pair was already gated at
+// R302b; R310 extends the same mechanical shape to subscriber +
+// queryable so a `--no-default-features --features declare-subscriber`
+// build carries only the RemoteSubscriberRegistry path and elides the
+// peer-queryable observer entirely.
 #[cfg(feature = "liveliness-token")]
 mod liveliness;
 #[cfg(feature = "liveliness-subscriber")]
 mod liveliness_subscriber;
+#[cfg(feature = "declare-queryable")]
 mod queryable;
+#[cfg(feature = "declare-subscriber")]
 mod subscriber;
 
 #[cfg(test)]
@@ -83,7 +111,9 @@ pub use liveliness::{DeclTokenCallback, LivelinessRegistry, UndeclTokenCallback}
 pub use liveliness_subscriber::{
     LivelinessSample, LivelinessSampleCallback, LivelinessSampleKind, LivelinessSubscriberRegistry,
 };
+#[cfg(feature = "declare-queryable")]
 pub use queryable::{DeclQueryableCallback, RemoteQueryableRegistry, UndeclQueryableCallback};
+#[cfg(feature = "declare-subscriber")]
 pub use subscriber::{DeclSubscriberCallback, RemoteSubscriberRegistry, UndeclSubscriberCallback};
 
 /// Resolve a `Wireexpr` to its literal keyexpr string using a peer
@@ -94,6 +124,19 @@ pub use subscriber::{DeclSubscriberCallback, RemoteSubscriberRegistry, UndeclSub
 /// `pub(super)` so the sub-module files can import via
 /// `super::resolve_wireexpr` without exposing the resolver to
 /// downstream crates.
+///
+/// R310 — gated on any(declare-queryable, declare-subscriber,
+/// liveliness-token, liveliness-subscriber) to elide dead-code under
+/// configurations that disable every consumer sub-module. The test
+/// clause keeps the helper visible for the parent `cross_tests` /
+/// `test_helpers` mods.
+#[cfg(any(
+    feature = "declare-queryable",
+    feature = "declare-subscriber",
+    feature = "liveliness-token",
+    feature = "liveliness-subscriber",
+    test,
+))]
 pub(super) fn resolve_wireexpr(
     body: &WireexprVariant,
     table: &HashMap<u64, String>,
