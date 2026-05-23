@@ -15582,6 +15582,48 @@
         "Next mechanical track: R306 query domain #[cfg(feature)] gates (R302c sequence). 6 active features (query-get, query-queryable, query-reply, query-target, query-timeout, query-consolidation). Touches src/query.rs entire module + src/reply.rs partial + src/session.rs Session::get + declare_queryable + 4 aliased variants."
       ]
     },
+    "Round 306": {
+      "decision_summary": "R306 closes the R305 DRY carry: graceful_terminate lifted from two test-file duplicates into common::graceful_terminate; consumer tests import the shared symbol.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs::common: new `pub fn graceful_terminate(child: &mut Child, timeout: Duration)`. Same SIGTERM → poll try_wait → SIGKILL-fallback shape as the two retired copies; doc-comment expanded to record the R305 lift rationale and the SIGTERM-first contract (LivelinessToken's Drop emit needs graceful shutdown, SIGKILL bypasses Rust Drop entirely).",
+        "crates/wz-integration-tests/tests/wz_remote_declare_round_trip.rs: removed the local `fn graceful_terminate(...)` definition. Added `graceful_terminate` to the `use wz_integration_tests::common::{...}` import. Call site unchanged (already passing `child.child_mut()` per R305).",
+        "crates/wz-integration-tests/tests/wz_liveliness_subscriber_round_trip.rs: same removal + import shape as the sibling test. The two test files now share one source of truth for graceful-shutdown driving."
+      ],
+      "verification_bullets": [
+        "cargo check -p wz-integration-tests --tests → pass 1.72s. Both consumer tests resolve the new symbol via the common import; no dangling references.",
+        "Net diff: -30 lines per test file (~ -60 lines duplicate removal) + 21 lines added in common (helper body + extended doc). Workspace LOC drops ~ 40 lines.",
+        "validate_workspace: docs=13/13, entries=304 unchanged (this entry will be #305 after append), sections=215 unchanged, T1=0, RT=13/13, GENERATED.md=sync. Pure test-infrastructure refactor."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "graceful_terminate(child: &mut Child, ...) signature still takes a raw `&mut Child` rather than `&mut ChildGuard`. Both consumer tests pass `child.child_mut()` to bridge. A future round can change the signature to accept `&mut ChildGuard` directly so the call sites lose the `.child_mut()` step — lowest-priority cosmetic, not blocking. Tracked in R305 carry list.",
+        "R305 carry list otherwise unchanged.",
+        "R304 wz-ap-demo stderr non-UTF-8 byte source still open.",
+        "Next mechanical track: R307 query domain #[cfg(feature)] gates (R302c sequence, originally tracked as R306 in R305's carry). Now bumped to R307 since R306 absorbed the DRY cleanup."
+      ],
+      "publishable_decision_summary": "R306 closes the R305 DRY carry: graceful_terminate lifted from two test-file duplicates into common::graceful_terminate; consumer tests import the shared symbol.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs::common: new `pub fn graceful_terminate(child: &mut Child, timeout: Duration)`. Same SIGTERM → poll try_wait → SIGKILL-fallback shape as the two retired copies; doc-comment expanded to record the R305 lift rationale and the SIGTERM-first contract (LivelinessToken's Drop emit needs graceful shutdown, SIGKILL bypasses Rust Drop entirely).",
+        "crates/wz-integration-tests/tests/wz_remote_declare_round_trip.rs: removed the local `fn graceful_terminate(...)` definition. Added `graceful_terminate` to the `use wz_integration_tests::common::{...}` import. Call site unchanged (already passing `child.child_mut()` per R305).",
+        "crates/wz-integration-tests/tests/wz_liveliness_subscriber_round_trip.rs: same removal + import shape as the sibling test. The two test files now share one source of truth for graceful-shutdown driving."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check -p wz-integration-tests --tests → pass 1.72s. Both consumer tests resolve the new symbol via the common import; no dangling references.",
+        "Net diff: -30 lines per test file (~ -60 lines duplicate removal) + 21 lines added in common (helper body + extended doc). Workspace LOC drops ~ 40 lines.",
+        "validate_workspace: docs=13/13, entries=304 unchanged (this entry will be #305 after append), sections=215 unchanged, T1=0, RT=13/13, GENERATED.md=sync. Pure test-infrastructure refactor."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "graceful_terminate(child: &mut Child, ...) signature still takes a raw `&mut Child` rather than `&mut ChildGuard`. Both consumer tests pass `child.child_mut()` to bridge. A future round can change the signature to accept `&mut ChildGuard` directly so the call sites lose the `.child_mut()` step — lowest-priority cosmetic, not blocking. Tracked in R305 carry list.",
+        "R305 carry list otherwise unchanged.",
+        "R304 wz-ap-demo stderr non-UTF-8 byte source still open.",
+        "Next mechanical track: R307 query domain #[cfg(feature)] gates (R302c sequence, originally tracked as R306 in R305's carry). Now bumped to R307 since R306 absorbed the DRY cleanup."
+      ]
+    },
     "Round 31": {
       "decision_summary": "Phase B5 entry — first codec-kind SCXMLs land. sources/codecs/keep_alive.scxml (empty body, transport-layer KeepAlive frame) + sources/codecs/close.scxml (1-byte reason code, session-close variant arm) authored against vendor pin 11f1032d. Opens the ~30-codec wire-message track.",
       "changes_bullets": [
