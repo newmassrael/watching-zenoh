@@ -197,16 +197,25 @@ pub(crate) async fn declare_task<T>(
         // pico-SIGABRT-prone keyexprs pre-emit. The demo treats
         // a rejected user-supplied keyexpr as a CLI input error:
         // log + bail this task, do not panic.
+        // R307.5 — drop the duplicate `eprintln!` on the error path
+        // (already covered by `log::warn!` above) and route the
+        // success line through `log::info!` so all writes share the
+        // env_logger lock and never byte-interleave with another
+        // concurrent log record. The integration tests' substring
+        // search continues to match because env_logger renders the
+        // record as `[<ts> WARN/INFO <module>] <message>` and
+        // `<message>` carries the exact pre-R307.5 line verbatim.
         if let Err(e) = actions.send_declare_subscriber(
             DECLARE_SUBSCRIBER_ID,
             /*mapping_id=*/ 0,
             Some(keyexpr),
         ) {
             log::warn!("wz-ap-demo: SUBSCRIBER DECLARE rejected for keyexpr='{keyexpr}': {e}");
-            eprintln!("wz-ap-demo: SUBSCRIBER DECLARE rejected for keyexpr='{keyexpr}': {e}");
             return;
         }
-        eprintln!("wz-ap-demo: DECLARED SUBSCRIBER id={DECLARE_SUBSCRIBER_ID} keyexpr='{keyexpr}'");
+        log::info!(
+            "wz-ap-demo: DECLARED SUBSCRIBER id={DECLARE_SUBSCRIBER_ID} keyexpr='{keyexpr}'"
+        );
         clock.sleep(DECLARE_INTER_EMIT_MS).await;
     }
     if let Some(keyexpr) = spec.queryable_keyexpr.as_deref() {
@@ -216,10 +225,9 @@ pub(crate) async fn declare_task<T>(
             Some(keyexpr),
         ) {
             log::warn!("wz-ap-demo: QUERYABLE DECLARE rejected for keyexpr='{keyexpr}': {e}");
-            eprintln!("wz-ap-demo: QUERYABLE DECLARE rejected for keyexpr='{keyexpr}': {e}");
             return;
         }
-        eprintln!("wz-ap-demo: DECLARED QUERYABLE id={DECLARE_QUERYABLE_ID} keyexpr='{keyexpr}'");
+        log::info!("wz-ap-demo: DECLARED QUERYABLE id={DECLARE_QUERYABLE_ID} keyexpr='{keyexpr}'");
         clock.sleep(DECLARE_INTER_EMIT_MS).await;
     }
     if let Some(keyexpr) = spec.token_keyexpr.as_deref() {
@@ -227,11 +235,10 @@ pub(crate) async fn declare_task<T>(
             Ok(t) => t,
             Err(e) => {
                 log::warn!("wz-ap-demo: TOKEN DECLARE rejected for keyexpr='{keyexpr}': {e}");
-                eprintln!("wz-ap-demo: TOKEN DECLARE rejected for keyexpr='{keyexpr}': {e}");
                 return;
             }
         };
-        eprintln!(
+        log::info!(
             "wz-ap-demo: DECLARED TOKEN id={id} keyexpr='{keyexpr}'",
             id = token.id()
         );
@@ -282,7 +289,7 @@ where
          on keyexpr='{keyexpr}' rid={QUERY_RID}"
     );
     actions.send_request_query(QUERY_RID, /*mapping_id=*/ 0, Some(&keyexpr));
-    eprintln!("wz-ap-demo: QUERY EMITTED keyexpr='{keyexpr}' rid={QUERY_RID}");
+    log::info!("wz-ap-demo: QUERY EMITTED keyexpr='{keyexpr}' rid={QUERY_RID}");
 }
 
 /// R254 — `clock: T` generic + 3 sleep sites migrated to
@@ -372,18 +379,18 @@ pub(crate) async fn publisher_task<T>(
     //           restating it.
     if let Some(mapping_id) = declare_id {
         // R300 — see declare_task above for the gate rationale.
+        // R307.5 — drop the duplicate `eprintln!` on the error path
+        // (already covered by `log::warn!`) and route the success
+        // line through `log::info!` so all stderr writes share the
+        // env_logger lock.
         if let Err(e) = actions.send_declare_keyexpr(mapping_id, &keyexpr) {
             log::warn!(
                 "wz-ap-demo: PUBLISHER DECLARE rejected for keyexpr='{keyexpr}' \
                  mapping_id={mapping_id}: {e}"
             );
-            eprintln!(
-                "wz-ap-demo: PUBLISHER DECLARE rejected for keyexpr='{keyexpr}' \
-                 mapping_id={mapping_id}: {e}"
-            );
             return;
         }
-        eprintln!("wz-ap-demo: PUBLISHER DECLARED keyexpr='{keyexpr}' mapping_id={mapping_id}");
+        log::info!("wz-ap-demo: PUBLISHER DECLARED keyexpr='{keyexpr}' mapping_id={mapping_id}");
         // Small drain pause so the DECLARE bytes reach the peer's
         // session-FSM dispatch (and populate the keyexpr table)
         // before the first aliased Push fires on the same channel.
@@ -435,7 +442,7 @@ pub(crate) async fn publisher_task<T>(
         };
         match dispatch_outcome {
             Ok((loopback_fired, mode)) => {
-                eprintln!(
+                log::info!(
                     "wz-ap-demo: PUBLISHER EMITTED kind={kind_tag} mode={mode} \
                      keyexpr='{keyexpr}' declare_id={declare_id:?} payload_len={payload_len} \
                      idx={i} loopback_fired={loopback_fired}",
