@@ -3989,6 +3989,11 @@ these boundaries plainly in their own READMEs.
   `static const` struct (MCU).
 - Zero-copy for: TX encode path; RX of single-frame, bounded-size
   payloads; control-plane messages.
+- Honest peer-declared KeyExpr intersection at runtime — incoming
+  `DeclSubscriber` / `DeclQueryable` / `Interest` wire frames carry
+  arbitrary zenoh-style chunked patterns (literal / `*` / `**` / `$*`
+  DSL mixes), matched against the local wz-owned KE registry via a
+  dedicated chunk-intersect algorithm.
 
 ### What `watching-zenoh` will NOT deliver:
 
@@ -3998,9 +4003,12 @@ these boundaries plainly in their own READMEs.
   declared pool slot (those paths stage-copy through a dedicated
   buffer and are marked as such in diagnostics and logs).
 - Auth / crypto extensions — deferred; not in the MVP wire subset.
-- Full KeyExpr wildcard at runtime — KeyExpr set is compile-time
-  fixed; runtime matching is an O(1) table lookup built at build
-  time (§5.F const-fold).
+- Full KeyExpr wildcard *authoring* for `watching-zenoh`-owned
+  keyexprs — the wz-own KE set is compile-time fixed; the runtime
+  `declare_*` API accepts only literal keyexprs registered at build
+  time (§5.F const-fold). Peer-declared keyexpr wildcards arrive as
+  wire-runtime strings and are matched via the runtime intersection
+  algorithm (see *What `watching-zenoh` WILL deliver*).
 - Drop-in ABI compatibility with `zenoh-c` or `zenoh-pico` APIs;
   compatibility is at the **wire** level, not the API level.
 
