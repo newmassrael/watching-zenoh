@@ -53,7 +53,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use wz_integration_tests::common::{
-    read_captured, wait_for_substring, wz_ap_demo_binary, PortReservation,
+    read_captured, wait_for_substring, wz_ap_demo_binary, ChildGuard, PortReservation,
 };
 
 #[test]
@@ -74,18 +74,21 @@ fn wz_initiator_consumes_reply_chain_from_wz_queryable() {
         .expect("dup acceptor stderr handle");
     let mut acceptor_stderr_reader = acceptor_stderr;
 
-    let mut acceptor_child = Command::new(&demo)
-        .arg("--listen")
-        .arg(&addr)
-        .arg("--queryable")
-        .arg(queryable_pattern)
-        .arg("--reply")
-        .arg(reply_text)
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(acceptor_stderr_writer))
-        .spawn()
-        .expect("spawn wz-ap-demo --listen --queryable");
+    let mut acceptor_child = ChildGuard::wrap(
+        "wz-ap-demo acceptor (--listen --queryable)",
+        Command::new(&demo)
+            .arg("--listen")
+            .arg(&addr)
+            .arg("--queryable")
+            .arg(queryable_pattern)
+            .arg("--reply")
+            .arg(reply_text)
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(acceptor_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --listen --queryable"),
+    );
 
     let bound = wait_for_substring(
         &mut acceptor_stderr_reader,
@@ -93,8 +96,8 @@ fn wz_initiator_consumes_reply_chain_from_wz_queryable() {
         Duration::from_secs(5),
     );
     if let Err(captured) = &bound {
-        let _ = acceptor_child.kill();
-        let _ = acceptor_child.wait();
+        let _ = acceptor_child.child_mut().kill();
+        let _ = acceptor_child.child_mut().wait();
         panic!(
             "wz-ap-demo --listen --queryable did not log 'listening on' within 5s\n\
              --- captured acceptor stderr ---\n{captured}"
@@ -110,18 +113,21 @@ fn wz_initiator_consumes_reply_chain_from_wz_queryable() {
         .expect("dup initiator stderr handle");
     let mut initiator_stderr_reader = initiator_stderr;
 
-    let mut initiator_child = Command::new(&demo)
-        .arg("--connect")
-        .arg(&addr)
-        .arg("--query")
-        .arg(query_keyexpr)
-        .arg("--on-query-reply-log")
-        .arg("--on-query-final-log")
-        .env("RUST_LOG", "info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::from(initiator_stderr_writer))
-        .spawn()
-        .expect("spawn wz-ap-demo --connect --query --on-query-*-log");
+    let mut initiator_child = ChildGuard::wrap(
+        "wz-ap-demo initiator (--connect --query --on-query-*-log)",
+        Command::new(&demo)
+            .arg("--connect")
+            .arg(&addr)
+            .arg("--query")
+            .arg(query_keyexpr)
+            .arg("--on-query-reply-log")
+            .arg("--on-query-final-log")
+            .env("RUST_LOG", "info")
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(initiator_stderr_writer))
+            .spawn()
+            .expect("spawn wz-ap-demo --connect --query --on-query-*-log"),
+    );
 
     let dialed = wait_for_substring(
         &mut initiator_stderr_reader,
@@ -139,10 +145,10 @@ fn wz_initiator_consumes_reply_chain_from_wz_queryable() {
         Duration::from_secs(10),
     );
 
-    let _ = initiator_child.kill();
-    let _ = initiator_child.wait();
-    let _ = acceptor_child.kill();
-    let _ = acceptor_child.wait();
+    let _ = initiator_child.child_mut().kill();
+    let _ = initiator_child.child_mut().wait();
+    let _ = acceptor_child.child_mut().kill();
+    let _ = acceptor_child.child_mut().wait();
 
     let acceptor_captured = read_captured(&mut acceptor_stderr_reader);
     let initiator_captured = read_captured(&mut initiator_stderr_reader);

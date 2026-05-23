@@ -22,6 +22,7 @@ pub mod common {
     use std::io::{Read, Seek, SeekFrom};
     use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::process::Child;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -190,5 +191,160 @@ pub mod common {
             }
             thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// RAII guard for a spawned `std::process::Child` that guarantees
+    /// the process is killed + reaped even if the calling test panics
+    /// between `spawn()` and the explicit cleanup line. R305 retires
+    /// the orphan-leak pattern surfaced at the R302b pre-push gate:
+    /// a `read_captured` panic in `wz_initiator_to_wz_acceptor` left
+    /// two `wz-ap-demo` children alive for 23 minutes (verified via
+    /// `fuser`), inheriting the parent shell's `.git/run-ci.lock` fd
+    /// 200 and blocking every subsequent `git push` with
+    /// `another run-ci already running` until manual `kill(1)`.
+    ///
+    /// The Drop impl is idempotent. Explicit `child_mut().kill()` /
+    /// `.wait()` calls before the guard scope exits do the textbook
+    /// graceful shutdown; the guard's Drop then runs `kill` (returns
+    /// `ESRCH` on the already-reaped child — `let _ = ...`-ignored)
+    /// and `wait` (returns the cached `ExitStatus`). Tests that
+    /// previously held a raw `Child` keep the same call shape via
+    /// `guard.child_mut().kill()`.
+    pub struct ChildGuard {
+        child: Child,
+        label: String,
+    }
+
+    impl ChildGuard {
+        /// Wrap an already-spawned `Child` in the panic-safe guard.
+        /// Pass a short human label (e.g. `"wz-ap-demo acceptor"`)
+        /// for forensic logs; the label is exposed via `label()` but
+        /// otherwise opaque.
+        pub fn wrap(label: impl Into<String>, child: Child) -> Self {
+            Self {
+                child,
+                label: label.into(),
+            }
+        }
+
+        /// Mutable access to the wrapped `Child` for direct
+        /// `.kill()` / `.wait()` / `.id()` usage. Tests that want
+        /// graceful shutdown call `guard.child_mut().kill()` followed
+        /// by `guard.child_mut().wait()`; the Drop impl is the safety
+        /// net for the panic path.
+        pub fn child_mut(&mut self) -> &mut Child {
+            &mut self.child
+        }
+
+        /// Human-readable label captured at `wrap()` time. Surfaced
+        /// only via tests' own panic messages; not part of any
+        /// behavioural contract.
+        pub fn label(&self) -> &str {
+            &self.label
+        }
+    }
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            // Best-effort kill + reap. Both calls tolerate prior
+            // explicit `.kill()` / `.wait()` from the test body:
+            // - `Child::kill` returns `ESRCH` when the process has
+            //   already exited; the `let _` discards the result.
+            // - `Child::wait` caches the `ExitStatus` after the first
+            //   successful call and returns the cached value on
+            //   subsequent calls, so a second `.wait()` is cheap.
+            // The ordering matters when the test body panicked
+            // BEFORE any explicit cleanup: kill first sends SIGKILL,
+            // wait then reaps the zombie. Without `wait` the child
+            // would persist as a zombie until the test runner exit.
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::common::ChildGuard;
+    use std::process::Command;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    /// `kill -0 <pid>` portable liveness probe. Returns `true` when
+    /// the kernel still tracks the PID (process exists, possibly
+    /// zombie), `false` on `ESRCH` (process reaped / never existed).
+    /// Pure shell command so the test stays std-only without pulling
+    /// `nix` / `libc` into wz-integration-tests's dev-deps.
+    fn pid_alive(pid: u32) -> bool {
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .expect("spawn kill -0")
+            .success()
+    }
+
+    #[test]
+    fn child_guard_drop_kills_running_child_on_normal_exit() {
+        let child = Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .expect("spawn sleep 60");
+        let pid = child.id();
+        assert!(pid_alive(pid), "sleep PID {pid} not alive after spawn");
+        {
+            let _guard = ChildGuard::wrap("sleep-60 normal-exit probe", child);
+            // Guard goes out of scope at the end of this block → Drop
+            // runs → kill + wait. No explicit cleanup; this exercises
+            // the safety-net path that the panic-unwind case also
+            // walks.
+        }
+        // SIGKILL + waitpid reap is synchronous in `Child::kill` +
+        // `Child::wait`, so the process should be gone by the time
+        // control returns from the inner scope. A 100 ms safety
+        // window absorbs scheduler jitter on a loaded CI host.
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            !pid_alive(pid),
+            "ChildGuard::drop did not reap PID {pid} after scope exit"
+        );
+    }
+
+    #[test]
+    fn child_guard_drop_kills_running_child_on_panic_unwind() {
+        // Mechanical proof that the panic-unwind path through
+        // ChildGuard's Drop is the same as the normal-exit path —
+        // the orphan-leak that caused the R302b push-time
+        // `.git/run-ci.lock` outage is now mechanically prevented.
+        //
+        // The Arc<Mutex<Option<u32>>> carries the child's PID out of
+        // the catch_unwind scope so the assertion can verify the
+        // process actually died (a normal `let pid` would be lost on
+        // unwind).
+        let pid_holder: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(None));
+        let holder_for_closure = pid_holder.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let child = Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("spawn sleep 60");
+            *holder_for_closure.lock().expect("pid holder mutex") = Some(child.id());
+            let _guard = ChildGuard::wrap("sleep-60 panic-unwind probe", child);
+            panic!("simulated test panic — ChildGuard's Drop should still reap");
+        }));
+        assert!(
+            result.is_err(),
+            "catch_unwind did not observe the simulated panic"
+        );
+        let pid = pid_holder
+            .lock()
+            .expect("pid holder mutex post-catch")
+            .expect("ChildGuard never published its PID");
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            !pid_alive(pid),
+            "ChildGuard::drop did not reap PID {pid} after panic-unwind"
+        );
     }
 }
