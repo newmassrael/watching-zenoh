@@ -168,14 +168,17 @@ pub mod interest {
     include!(concat!(env!("OUT_DIR"), "/interest.rs"));
 }
 
+#[cfg(feature = "codec-response")]
 pub mod reply {
     include!(concat!(env!("OUT_DIR"), "/reply.rs"));
 }
 
+#[cfg(feature = "codec-response")]
 pub mod err {
     include!(concat!(env!("OUT_DIR"), "/err.rs"));
 }
 
+#[cfg(feature = "codec-response")]
 pub mod response {
     include!(concat!(env!("OUT_DIR"), "/response.rs"));
 }

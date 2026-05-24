@@ -100,6 +100,8 @@ fn is_codec_enabled(stem: &str) -> bool {
         | "undecl_token" => std::env::var_os("CARGO_FEATURE_CODEC_DECLARE").is_some(),
         // R311j — request envelope + Query inner body share codec-request.
         "request" | "query" => std::env::var_os("CARGO_FEATURE_CODEC_REQUEST").is_some(),
+        // R311k — response envelope + reply + err inner bodies share codec-response.
+        "response" | "reply" | "err" => std::env::var_os("CARGO_FEATURE_CODEC_RESPONSE").is_some(),
         _ => true,
     }
 }
@@ -130,6 +132,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_PUSH");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_DECLARE");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_REQUEST");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_RESPONSE");
 
     let options = ForgeCompileOptions::default();
 

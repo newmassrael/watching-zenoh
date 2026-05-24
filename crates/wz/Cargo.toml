@@ -143,7 +143,10 @@ codec-open-body = ["wz-runtime-tokio?/codec-open-body"]
 codec-push = ["wz-runtime-tokio?/codec-push"]
 # R311j — codec-request forwards wz-runtime-tokio.
 codec-request = ["wz-runtime-tokio?/codec-request"]
-codec-response = []
+# R311k — codec-response forwards wz-runtime-tokio. After R311k all 4
+# body codecs imply codec-frame so codec-frame OFF requires every body
+# codec OFF (handshake-only deploy: Init / Open / Close + KeepAlive).
+codec-response = ["wz-runtime-tokio?/codec-response"]
 codec-response-final = ["wz-runtime-tokio?/codec-response-final"]
 codec-scout = ["wz-runtime-tokio?/codec-scout"]
 

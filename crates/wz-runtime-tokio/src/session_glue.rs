@@ -92,9 +92,16 @@ use wz_codecs::decl_subscriber::DeclSubscriber;
 use wz_codecs::decl_token::DeclToken;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::{Declare, DeclareVariant};
+#[cfg(any(feature = "codec-push", feature = "codec-response"))]
 use wz_codecs::encoding::Encoding;
+#[cfg(feature = "codec-response")]
 use wz_codecs::err::Err;
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-request"
+))]
 use wz_codecs::ext_zbuf::ExtZbuf;
 use wz_codecs::ext_zint::ExtZint;
 #[cfg(feature = "codec-init-body")]
@@ -103,7 +110,9 @@ use wz_codecs::interest::Interest;
 use wz_codecs::interest_body::InterestBody;
 #[cfg(feature = "codec-keep-alive")]
 use wz_codecs::keep_alive::KeepAlive;
+#[cfg(any(feature = "codec-push", feature = "codec-response"))]
 use wz_codecs::msg_del::MsgDel;
+#[cfg(any(feature = "codec-push", feature = "codec-response"))]
 use wz_codecs::msg_put::MsgPut;
 use wz_codecs::oam::Oam;
 #[cfg(feature = "codec-open-body")]
@@ -112,9 +121,11 @@ use wz_codecs::open_body::OpenBody;
 use wz_codecs::push::{Push, PushVariant};
 #[cfg(feature = "codec-request")]
 use wz_codecs::query::Query;
+#[cfg(feature = "codec-response")]
 use wz_codecs::reply::{Reply, ReplyVariant};
 #[cfg(feature = "codec-request")]
 use wz_codecs::request::{Request, RequestVariant};
+#[cfg(feature = "codec-response")]
 use wz_codecs::response::{Response, ResponseVariant};
 #[cfg(feature = "codec-response-final")]
 use wz_codecs::response_final::ResponseFinal;
@@ -405,10 +416,11 @@ mod wire_const {
     /// embed + Z-gated ext-chain + peek-byte body variant on the
     /// inner MID bit-range.
     ///
-    /// R311g — currently consumed only by [`parse_frame_payload`]
-    /// (codec-frame-gated). Moves to a broader gate when R311k
-    /// codec-response lands its encoder.
-    #[cfg(feature = "codec-frame")]
+    /// R311k — gate broadened from `codec-frame` to `codec-response`:
+    /// the response envelope is its own atomic body codec with
+    /// `codec-response = ["codec-frame"]` imply edge, closing the
+    /// fourth body-codec-implies-envelope edge.
+    #[cfg(feature = "codec-response")]
     pub const N_MID_RESPONSE: u8 = 0x1B;
     /// R110/R115 — Declare envelope MID (network.h:34). Declarations
     /// envelope wrapping one of the nine sub-MID bodies (DECL_KEXPR
@@ -2270,6 +2282,13 @@ impl SessionLinkActions {
     /// for reply in pending_replies.drain(..) { actions.send_response(reply.into_response()); }
     /// for rid   in pending_final_rids.drain(..) { actions.send_response_final(rid); }
     /// ```
+    ///
+    /// R311k — gated on `codec-response` (principled exemption from
+    /// signature-stability sweep per `feedback_signature_stability`:
+    /// arg type `Response` is itself feature-gated, so signature
+    /// cannot stay stable without un-gating the type — deferred to
+    /// R267 Session<R,T> reparam-adjacent architectural cascade).
+    #[cfg(feature = "codec-response")]
     pub fn send_response(&self, response: Response) {
         let sn = self.next_outbound_frame_sn();
         let wire = encode_frame_with_response(sn, response, /*reliable=*/ true);
@@ -5128,6 +5147,7 @@ pub fn build_response_final(request_id: u64) -> ResponseFinal {
 /// and emits the Responder ext (ext_id=0x03 ZBUF, zid+eid encoding
 /// per network.c:281-291); `_with_reply_del(...)` swaps the MsgPut
 /// arm for a MsgDel arm (delete instead of put as the reply payload).
+#[cfg(feature = "codec-response")]
 pub fn build_response_reply_literal(
     request_id: u64,
     keyexpr_suffix: &str,
@@ -5185,6 +5205,7 @@ pub fn build_response_reply_literal(
 ///
 /// Panics on `mapping_id == 0` — id=0 is the literal-keyexpr sentinel;
 /// for literal replies use [`build_response_reply_literal`].
+#[cfg(feature = "codec-response")]
 pub fn build_response_reply_aliased(
     request_id: u64,
     mapping_id: u64,
@@ -5259,6 +5280,7 @@ pub fn build_response_reply_aliased(
 /// (source_info / attachment), then always-present payload_len + bytes.
 /// The minimal helper here emits only the always-present pair — no
 /// encoding hint, no source-info, no attachment.
+#[cfg(feature = "codec-response")]
 pub fn build_response_err_literal(
     request_id: u64,
     keyexpr_suffix: &str,
@@ -5298,6 +5320,7 @@ pub fn build_response_err_literal(
 /// for the aliased case — same convention as the other DECLARE /
 /// Request / Reply aliased builders ((N,None) pure alias /
 /// (N,Some) compound). Panics on mapping_id=0.
+#[cfg(feature = "codec-response")]
 pub fn build_response_err_aliased(
     request_id: u64,
     mapping_id: u64,
@@ -5350,6 +5373,7 @@ pub fn build_response_err_aliased(
 /// is wire-absent per zenoh-pico `_z_reply_encode` at
 /// `src/protocol/codec/message.c:507-519` (no extensions chain on the
 /// Reply body); the carry was retracted in Round 121j-4-retract.
+#[cfg(feature = "codec-response")]
 pub struct ResponseReplyBuilder {
     request_id: u64,
     keyexpr_mapping_id: u64,
@@ -5372,6 +5396,7 @@ pub struct ResponseReplyBuilder {
     responder: Option<(Vec<u8>, u32)>,
 }
 
+#[cfg(feature = "codec-response")]
 impl ResponseReplyBuilder {
     /// Begin a builder rooted in the same baseline contract as
     /// [`build_response_reply_literal`] / [`build_response_reply_aliased`]:
@@ -5536,6 +5561,7 @@ impl ResponseReplyBuilder {
 /// `src/protocol/codec/message.c:545-573` (only `encoding` flag-driven
 /// inline encode + source_info ext are emitted); the carry was
 /// retracted in Round 121j-4-retract.
+#[cfg(feature = "codec-response")]
 pub struct ResponseErrBuilder {
     request_id: u64,
     keyexpr_mapping_id: u64,
@@ -5557,6 +5583,7 @@ pub struct ResponseErrBuilder {
     responder: Option<(Vec<u8>, u32)>,
 }
 
+#[cfg(feature = "codec-response")]
 impl ResponseErrBuilder {
     /// Begin a builder rooted in the same baseline contract as
     /// [`build_response_err_literal`] / [`build_response_err_aliased`]:
@@ -5734,6 +5761,7 @@ impl ResponseErrBuilder {
 ///
 /// Panics if `zid.len()` is outside `1..=16` (the caller's setter
 /// guards this; the inner assertion is defence-in-depth).
+#[cfg(feature = "codec-response")]
 fn encode_source_info_ext_body(zid: &[u8], eid: u32, sn: u32) -> Vec<u8> {
     assert!(
         (1..=16).contains(&zid.len()),
@@ -5755,6 +5783,7 @@ fn encode_source_info_ext_body(zid: &[u8], eid: u32, sn: u32) -> Vec<u8> {
 /// because source_info ext-body construction happens before any
 /// `SceSink` is in scope — the ext body lives inside `ExtZbuf.value`
 /// and the surrounding codec sink only sees the already-built `Vec`.
+#[cfg(feature = "codec-response")]
 fn encode_vle_u64_into(out: &mut Vec<u8>, mut v: u64) {
     while v >= 0x80 {
         out.push((v as u8 & 0x7F) | 0x80);
@@ -5782,6 +5811,7 @@ fn encode_vle_u64_into(out: &mut Vec<u8>, mut v: u64) {
 ///
 /// Panics if `zid.len()` is outside `1..=16` (the caller's setter
 /// guards this; the inner assertion is defence-in-depth).
+#[cfg(feature = "codec-response")]
 fn encode_responder_ext_body(zid: &[u8], eid: u32) -> Vec<u8> {
     assert!(
         (1..=16).contains(&zid.len()),
@@ -5845,6 +5875,7 @@ where
 /// its perspective the reply was sent). The default `reliable=true`
 /// is the production-safe choice; callers passing `false` accept
 /// the consequence.
+#[cfg(feature = "codec-response")]
 pub fn encode_frame_with_response(sn: u64, response: Response, reliable: bool) -> Vec<u8> {
     let parent_flags = if reliable {
         wire_const::FLAG_T_FRAME_R
@@ -6350,6 +6381,7 @@ pub enum NetworkMessage {
     /// Reply / Err structs, making the inline form larger than
     /// the `Unknown` variant (mirrors the Request sizing
     /// rationale).
+    #[cfg(feature = "codec-response")]
     Response(Box<Response>),
     /// R110/R115 — Network MID `_Z_MID_N_DECLARE` (0x1E). Declarations
     /// envelope wrapping one of the nine sub-MID inner bodies
@@ -6389,6 +6421,7 @@ impl std::fmt::Debug for NetworkMessage {
             Self::ResponseFinal(_) => f.write_str("ResponseFinal(..)"),
             Self::Oam(_) => f.write_str("Oam(..)"),
             Self::Interest(_) => f.write_str("Interest(..)"),
+            #[cfg(feature = "codec-response")]
             Self::Response(_) => f.write_str("Response(..)"),
             #[cfg(feature = "codec-declare")]
             Self::Declare(_) => f.write_str("Declare(..)"),
@@ -6461,6 +6494,7 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
                 let interest = Interest::decode(&mut cursor)?;
                 messages.push(NetworkMessage::Interest(interest));
             }
+            #[cfg(feature = "codec-response")]
             wire_const::N_MID_RESPONSE => {
                 let resp = Response::decode(&mut cursor)?;
                 messages.push(NetworkMessage::Response(Box::new(resp)));
