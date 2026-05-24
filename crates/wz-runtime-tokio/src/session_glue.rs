@@ -61,7 +61,23 @@ use zeroize::Zeroizing;
 use sce_rust_runtime::scripting::{IScriptEngine, NativeMethod, ScriptValue};
 use sce_rust_runtime::Engine;
 
-use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink, VecSink};
+// R311g1 — CodecError / VecSink / SceSink are still needed in the
+// minus-all-codecs lane because outbound `encode_frame_envelope` +
+// `From<CodecError> for InboundParseError` reach them unconditionally
+// (R311h..R311k cascade will gate the outbound encode_frame_* family
+// at which point these can fold under the same cfg(any(...))).
+use sce_forge_runtime::codec::{CodecError, SceSink, VecSink};
+// SceCursor is consumed only by parse_inbound / parse_frame_payload /
+// decode_ext_chain — every caller sits behind a codec feature gate
+// so the import folds under the same union predicate.
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-keep-alive",
+    feature = "codec-frame"
+))]
+use sce_forge_runtime::codec::SceCursor;
 #[cfg(feature = "codec-close")]
 use wz_codecs::close::Close;
 use wz_codecs::decl_final::DeclFinal;
@@ -298,6 +314,18 @@ mod wire_const {
     /// When set the parent header signals that one or more
     /// `ExtEntry` records follow the body bytes, terminated by an
     /// entry whose own `Z` bit is clear.
+    ///
+    /// R311g1 — gated on the same predicate as the
+    /// [`crate::session_glue::parse_inbound`] `has_ext` extraction:
+    /// the constant is only referenced from codec-feature-gated
+    /// dispatch arms, so the minus-all-codecs lane drops it cleanly.
+    #[cfg(any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive",
+        feature = "codec-frame"
+    ))]
     pub const FLAG_T_Z: u8 = 0x80;
 
     /// Network-message MID for `Frame.payload` batch entries that
@@ -608,6 +636,22 @@ pub enum SendDeclareError {
     /// instead of letting it reach the wire as a malformed
     /// DECLARE.
     MissingKeyexpr,
+    /// R311g1 — the matching `declare-*` Cargo feature is OFF in
+    /// this build, so the wire emit path is elided. The
+    /// `SessionLinkActions` method signature stays stable
+    /// regardless of feature configuration (per
+    /// `feedback_signature_stability` — consumer-side cfg burden
+    /// is absorbed by wz-runtime-tokio); the caller observes the
+    /// build-time choice as an honest runtime reject rather than
+    /// a silent `Ok(())` (which would falsely promise a wire
+    /// emit) or a compile error (which would re-introduce the
+    /// `#[cfg(feature)] pub fn` anti-pattern this round retires).
+    ///
+    /// Variant ordering: appended at end so existing match arms
+    /// in downstream crates surface a non-exhaustive-match
+    /// warning (when applicable) rather than silently rebind a
+    /// prior variant.
+    FeatureDisabled,
 }
 
 impl std::fmt::Display for SendDeclareError {
@@ -627,6 +671,12 @@ impl std::fmt::Display for SendDeclareError {
             Self::MissingKeyexpr => f.write_str(
                 "send_declare: mapping_id 0 requires a literal keyexpr \
                  suffix (received None)",
+            ),
+            Self::FeatureDisabled => f.write_str(
+                "send_declare: matching declare-* Cargo feature is OFF \
+                 in this build; wire emit elided (signature-stability \
+                 contract — caller observes build-time choice as \
+                 runtime reject)",
             ),
         }
     }
@@ -1331,35 +1381,53 @@ impl SessionLinkActions {
     /// must have reached `Established`; the driver must be
     /// non-blocking or the channel-decoupling pattern must be in
     /// place to avoid `block_on`-in-runtime panic).
-    #[cfg(feature = "declare-keyexpr")]
+    ///
+    /// R311g1 signature-stability retrofit — method signature stays
+    /// `pub fn send_declare_keyexpr(...) -> Result<(), SendDeclareError>`
+    /// across feature states; only the body branches on `declare-keyexpr`.
+    /// When the feature is off, the method returns
+    /// `Err(SendDeclareError::FeatureDisabled)` (fail-fast typed reject)
+    /// rather than `Ok(())` (which would falsely promise a wire emit)
+    /// or compiler-error-via-missing-symbol (which would re-introduce
+    /// the `#[cfg(feature)] pub fn` anti-pattern). See
+    /// `feedback_signature_stability` MEMORY note + R311g
+    /// `send_close_with_reason` precedent.
     pub fn send_declare_keyexpr(
         &self,
         mapping_id: u64,
         suffix: &str,
     ) -> Result<(), SendDeclareError> {
-        // R300 — pre-emit gate. Both checks run BEFORE any wire
-        // bytes leave or any mapping-table side effect; on Err
-        // the session-link state is unchanged.
-        if mapping_id == 0 {
-            return Err(SendDeclareError::ReservedMappingIdZero);
+        #[cfg(feature = "declare-keyexpr")]
+        {
+            // R300 — pre-emit gate. Both checks run BEFORE any wire
+            // bytes leave or any mapping-table side effect; on Err
+            // the session-link state is unchanged.
+            if mapping_id == 0 {
+                return Err(SendDeclareError::ReservedMappingIdZero);
+            }
+            check_outbound_keyexpr_pico_safe(suffix)?;
+            let declare = build_declare_kexpr(mapping_id, suffix);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+            self.driver.send_blocking(&wire, Reliability::Reliable);
+            // R234 — record the (mapping_id, suffix) pair in the
+            // outbound table so later `publish_aliased_auto` calls
+            // can resolve the literal without caller assertion.
+            // Insertion happens AFTER the wire send so a driver-side
+            // panic does not leave a table entry that the peer never
+            // saw. Mirrors zenoh-pico's `_z_register_resource` which
+            // executes on the local-side declaration emit path.
+            self.outbound_mappings
+                .lock()
+                .expect("outbound_mappings poisoned by an earlier panicked publish")
+                .insert(mapping_id, suffix.to_string());
+            Ok(())
         }
-        check_outbound_keyexpr_pico_safe(suffix)?;
-        let declare = build_declare_kexpr(mapping_id, suffix);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
-        // R234 — record the (mapping_id, suffix) pair in the outbound
-        // table so later `publish_aliased_auto` calls can resolve the
-        // literal without caller assertion. Insertion happens AFTER
-        // the wire send so a driver-side panic does not leave a
-        // table entry that the peer never saw. Mirrors zenoh-pico's
-        // `_z_register_resource` which executes on the local-side
-        // declaration emit path.
-        self.outbound_mappings
-            .lock()
-            .expect("outbound_mappings poisoned by an earlier panicked publish")
-            .insert(mapping_id, suffix.to_string());
-        Ok(())
+        #[cfg(not(feature = "declare-keyexpr"))]
+        {
+            let _ = (mapping_id, suffix);
+            Err(SendDeclareError::FeatureDisabled)
+        }
     }
 
     /// R121g — encode + dispatch a DECLARE-aliased `Push` (id != 0).
@@ -1540,25 +1608,36 @@ impl SessionLinkActions {
     /// [`send_declare_keyexpr`]: the SN-window ordering guarantees
     /// the peer's subscriber table is populated before any matching
     /// Push arrives.
-    #[cfg(feature = "declare-subscriber")]
+    ///
+    /// R311g1 — signature-stability: body cfg, signature stable.
+    /// `Err(FeatureDisabled)` when `declare-subscriber` off.
     pub fn send_declare_subscriber(
         &self,
         subscriber_id: u64,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendDeclareError> {
-        // R300 — reconstruct the full keyexpr from `(mapping_id,
-        // suffix)` and gate-check it BEFORE wire emit so a
-        // cross-boundary bug #3 shape (prefix=`"**"` +
-        // suffix=`"/c/*"`) cannot slip past a suffix-only check.
-        let reconstructed =
-            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-        check_outbound_keyexpr_pico_safe(&reconstructed)?;
-        let declare = build_declare_subscriber(subscriber_id, keyexpr_mapping_id, keyexpr_suffix);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
-        Ok(())
+        #[cfg(feature = "declare-subscriber")]
+        {
+            // R300 — reconstruct the full keyexpr from `(mapping_id,
+            // suffix)` and gate-check it BEFORE wire emit so a
+            // cross-boundary bug #3 shape (prefix=`"**"` +
+            // suffix=`"/c/*"`) cannot slip past a suffix-only check.
+            let reconstructed =
+                self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(&reconstructed)?;
+            let declare =
+                build_declare_subscriber(subscriber_id, keyexpr_mapping_id, keyexpr_suffix);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+            self.driver.send_blocking(&wire, Reliability::Reliable);
+            Ok(())
+        }
+        #[cfg(not(feature = "declare-subscriber"))]
+        {
+            let _ = (subscriber_id, keyexpr_mapping_id, keyexpr_suffix);
+            Err(SendDeclareError::FeatureDisabled)
+        }
     }
 
     /// R121i-b — encode + dispatch a `Declare(DeclQueryable)` on the
@@ -1580,22 +1659,32 @@ impl SessionLinkActions {
     /// [`send_declare_keyexpr`]: the SN-window ordering guarantees
     /// the peer's queryable table is populated before any matching
     /// `Request(Query)` arrives.
-    #[cfg(feature = "declare-queryable")]
+    ///
+    /// R311g1 — signature-stability: body cfg, signature stable.
+    /// `Err(FeatureDisabled)` when `declare-queryable` off.
     pub fn send_declare_queryable(
         &self,
         queryable_id: u64,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendDeclareError> {
-        // R300 — same gate shape as `send_declare_subscriber`.
-        let reconstructed =
-            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-        check_outbound_keyexpr_pico_safe(&reconstructed)?;
-        let declare = build_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
-        Ok(())
+        #[cfg(feature = "declare-queryable")]
+        {
+            // R300 — same gate shape as `send_declare_subscriber`.
+            let reconstructed =
+                self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(&reconstructed)?;
+            let declare = build_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+            self.driver.send_blocking(&wire, Reliability::Reliable);
+            Ok(())
+        }
+        #[cfg(not(feature = "declare-queryable"))]
+        {
+            let _ = (queryable_id, keyexpr_mapping_id, keyexpr_suffix);
+            Err(SendDeclareError::FeatureDisabled)
+        }
     }
 
     /// R121i-b — encode + dispatch a `Declare(DeclToken)` on the
@@ -1613,22 +1702,32 @@ impl SessionLinkActions {
     ///
     /// Same reliable-channel preconditions as
     /// [`send_declare_keyexpr`] / [`send_declare_subscriber`].
-    #[cfg(feature = "declare-token")]
+    ///
+    /// R311g1 — signature-stability: body cfg, signature stable.
+    /// `Err(FeatureDisabled)` when `declare-token` off.
     pub fn send_declare_token(
         &self,
         token_id: u64,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendDeclareError> {
-        // R300 — same gate shape as `send_declare_subscriber`.
-        let reconstructed =
-            self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
-        check_outbound_keyexpr_pico_safe(&reconstructed)?;
-        let declare = build_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
-        Ok(())
+        #[cfg(feature = "declare-token")]
+        {
+            // R300 — same gate shape as `send_declare_subscriber`.
+            let reconstructed =
+                self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            check_outbound_keyexpr_pico_safe(&reconstructed)?;
+            let declare = build_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+            self.driver.send_blocking(&wire, Reliability::Reliable);
+            Ok(())
+        }
+        #[cfg(not(feature = "declare-token"))]
+        {
+            let _ = (token_id, keyexpr_mapping_id, keyexpr_suffix);
+            Err(SendDeclareError::FeatureDisabled)
+        }
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclKexpr)` on the
@@ -1810,12 +1909,20 @@ impl SessionLinkActions {
     /// does not emit DeclFinal, but the action is provided so the
     /// state machine has the dispatch shape ready when Interest
     /// replies need to close a multi-DECLARE reply batch.
-    #[cfg(feature = "declare-final")]
+    ///
+    /// R311g1 — signature-stability: body cfg, signature stable.
+    /// Silent no-op when `declare-final` off (() return — no error
+    /// channel; the peer observes a missing DeclFinal which is
+    /// already the legal terminal-suppressed shape per the AP MVP
+    /// contract, so no observable wire-protocol regression).
     pub fn send_declare_final(&self) {
-        let declare = build_declare_final();
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
+        #[cfg(feature = "declare-final")]
+        {
+            let declare = build_declare_final();
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+            self.driver.send_blocking(&wire, Reliability::Reliable);
+        }
     }
 
     /// R279 — encode + dispatch an `Interest` network-message
@@ -1864,7 +1971,13 @@ impl SessionLinkActions {
     /// matching DeclToken / UndeclToken arrives, otherwise the peer's
     /// `_z_interest_process_*` resolves to no-match and the
     /// declaration silently drops.
-    #[cfg(feature = "declare-interest")]
+    ///
+    /// R311g1 — signature-stability: body cfg, signature stable.
+    /// Silent no-op when `declare-interest` off; the peer never
+    /// observes the Interest emit, which means the liveliness
+    /// subscription is silently inactive on this build — caller is
+    /// expected to feature-detect before relying on liveliness
+    /// notifications. () return — no error channel.
     pub fn send_interest_liveliness_subscriber(
         &self,
         interest_id: u64,
@@ -1872,15 +1985,20 @@ impl SessionLinkActions {
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
     ) {
-        let interest = build_interest_liveliness_subscriber(
-            interest_id,
-            history,
-            keyexpr_mapping_id,
-            keyexpr_suffix,
-        );
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
+        #[cfg(feature = "declare-interest")]
+        {
+            let interest = build_interest_liveliness_subscriber(
+                interest_id,
+                history,
+                keyexpr_mapping_id,
+                keyexpr_suffix,
+            );
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
+            self.driver.send_blocking(&wire, Reliability::Reliable);
+        }
+        #[cfg(not(feature = "declare-interest"))]
+        let _ = (interest_id, history, keyexpr_mapping_id, keyexpr_suffix);
     }
 
     /// R279 — encode + dispatch an `Interest(Final)` (no C, no F)
@@ -1902,12 +2020,19 @@ impl SessionLinkActions {
     /// matching entry from its `_z_session_t._remote_interests` table.
     /// An unreliable Final would race against in-flight DeclToken
     /// replays and risk leaving a stale interest on the peer side.
-    #[cfg(feature = "declare-interest")]
+    ///
+    /// R311g1 — signature-stability: body cfg, signature stable.
+    /// Silent no-op when `declare-interest` off.
     pub fn send_interest_final(&self, interest_id: u64) {
-        let interest = build_interest_final(interest_id);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
+        #[cfg(feature = "declare-interest")]
+        {
+            let interest = build_interest_final(interest_id);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
+            self.driver.send_blocking(&wire, Reliability::Reliable);
+        }
+        #[cfg(not(feature = "declare-interest"))]
+        let _ = interest_id;
     }
 
     /// R121j-1 — encode + dispatch a `Request(Query)` on the outbound
@@ -2013,12 +2138,27 @@ impl SessionLinkActions {
     /// at the action layer; the helper builder accepts a flag for
     /// the fuzz / negative-test path but the production action does
     /// not expose it.
-    #[cfg(feature = "codec-response-final")]
+    ///
+    /// R311g1 — signature-stability: body cfg, signature stable.
+    /// Silent no-op when `codec-response-final` off; the matching
+    /// peer's `z_get` future hangs until its timeout fires, which
+    /// is the documented minus-codec-response-final contract — the
+    /// build that disables this codec accepts the hang behaviour
+    /// in exchange for binary-size elision. () return — no error
+    /// channel; this no-op cannot be elevated to a typed Err
+    /// without growing a public error enum for an action that
+    /// has historically been a fire-and-forget primitive.
     pub fn send_response_final(&self, request_id: u64) {
-        let response_final = build_response_final(request_id);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_response_final(sn, response_final, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
+        #[cfg(feature = "codec-response-final")]
+        {
+            let response_final = build_response_final(request_id);
+            let sn = self.next_outbound_frame_sn();
+            let wire =
+                encode_frame_with_response_final(sn, response_final, /*reliable=*/ true);
+            self.driver.send_blocking(&wire, Reliability::Reliable);
+        }
+        #[cfg(not(feature = "codec-response-final"))]
+        let _ = request_id;
     }
 
     /// R121j-5c-e2e — encode + dispatch an already-constructed
@@ -5877,22 +6017,47 @@ impl From<CodecError> for InboundParseError {
 /// `has_ext`; the ext-chain bytes themselves are left in the
 /// trailing portion of `bytes` for R68c to consume.
 ///
-/// R311g — `has_ext` / `cursor` carry `#[allow(unused_*)]` because
-/// the dispatch arms below are each cfg-gated by their codec feature
-/// (`codec-init-body` / `codec-open-body` / `codec-close` /
-/// `codec-keep-alive` / `codec-frame`); a build with every codec
-/// feature off (e.g. `scripts/measure-codec-footprint.sh`'s
-/// `minus-all-codecs` lane) leaves only the Unknown fall-through arm
-/// and both locals become legitimately unused. The annotations make
-/// the function honest under that cfg matrix instead of breaking the
-/// catalog-truthfulness measurement.
+/// R311g1 — `has_ext` / `cursor` are conditionally bound via
+/// `#[cfg(any(feature = "codec-init-body", ..))]` matching the union
+/// of feature predicates of the dispatch arms below. A build with
+/// every codec feature off (e.g. `scripts/measure-codec-footprint.sh`
+/// `minus-all-codecs` lane) elides both bindings entirely, leaving
+/// only the Unknown fall-through arm. R311g previously suppressed the
+/// minus-all-codecs warning via `#[allow(unused_variables, unused_mut)]`;
+/// the explicit `cfg(any(...))` predicate is the textbook replacement
+/// per `feedback_signature_stability` MEMORY note's "annotation = last
+/// resort" rule. Adding a new body codec feature (R311h..R311l) extends
+/// this predicate.
 pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
     let header = *bytes.first().ok_or(InboundParseError::Empty)?;
     let mid = header & 0x1F;
+    // R311g1 — `flags` extraction is gated on the same predicate as
+    // the dispatch arms that consume it; when every codec-* is off
+    // (minus-all-codecs lane) only the Unknown fall-through arm
+    // remains and `flags` would otherwise be unused.
+    #[cfg(any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive",
+        feature = "codec-frame"
+    ))]
     let flags = header & 0xE0;
-    #[allow(unused_variables)]
+    #[cfg(any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive",
+        feature = "codec-frame"
+    ))]
     let has_ext = (flags & wire_const::FLAG_T_Z) != 0;
-    #[allow(unused_variables, unused_mut)]
+    #[cfg(any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive",
+        feature = "codec-frame"
+    ))]
     let mut cursor = SceCursor::new(&bytes[1..]);
     match mid {
         #[cfg(feature = "codec-init-body")]
@@ -6707,14 +6872,21 @@ where
 /// cursor's `peek_slice` raises `NeedMoreBytes` when the wire
 /// truncates mid-entry, which propagates up as `Codec(NeedMoreBytes)`.
 ///
-/// R311g — `#[allow(dead_code)]` because every caller is a
-/// codec-feature-gated arm inside [`parse_inbound`] (Init / Open /
-/// Close / KeepAlive / Frame). The `minus-all-codecs` measurement
-/// lane in `scripts/measure-codec-footprint.sh` elides every gate
-/// at once and leaves the function unreachable; the annotation keeps
-/// the catalog-truthfulness build honest without adding a sprawling
-/// `cfg(any(...))` predicate to the function definition.
-#[allow(dead_code)]
+/// R311g1 — function definition is conditional on the union of all
+/// codec features whose `parse_inbound` arms call into it. The
+/// `minus-all-codecs` lane (all codec-* off) elides every caller and
+/// — under this `cfg(any(...))` predicate — the function definition
+/// itself, removing the previous `#[allow(dead_code)]` annotation.
+/// Adding a new body codec feature (R311h..R311l) extends the
+/// predicate. Per `feedback_signature_stability` MEMORY note's
+/// "annotation = last resort" rule: prefer explicit cfg over allow.
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-keep-alive",
+    feature = "codec-frame"
+))]
 fn decode_ext_chain(cursor: &mut SceCursor<'_>) -> Result<Vec<ExtEntry>, InboundParseError> {
     let mut entries = Vec::new();
     for _ in 0..MAX_EXT_CHAIN_DEPTH {
