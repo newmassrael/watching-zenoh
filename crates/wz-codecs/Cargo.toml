@@ -47,7 +47,7 @@ path = "src/lib.rs"
 # pair (R311a4 wz facade exposes the forwards; R311a2/3 gate the
 # session_glue use sites; until then `--no-default-features` at
 # wz-runtime-tokio level breaks compile, which is intended).
-default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join"]
+default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join", "codec-response-final"]
 alloc = ["sce-forge-runtime/alloc"]
 codec-init-body = []
 codec-open-body = []
@@ -76,6 +76,14 @@ codec-close = []
 codec-scout = []
 codec-hello = []
 codec-join = []
+# R311e — codec-response-final gates the SCXML codegen + `pub mod
+# response_final` and the session_glue.rs send_response_final +
+# build_response_final + encode_frame_with_response_final + the
+# `NetworkMessage::ResponseFinal` variant + `parse_frame_payload`
+# `N_MID_RESPONSE_FINAL` arm. Feature-off means the queryable side
+# loses the terminating-marker emit; downstream z_get futures hang
+# until their per-call timeout fires. Honest semantics.
+codec-response-final = []
 # R311b — `codec-keep-alive` gates both the build.rs SCXML compile pass
 # for keep_alive.scxml and the `pub mod keep_alive` include in lib.rs.
 # Feature-off elides the empty-body KeepAlive codec entirely; the

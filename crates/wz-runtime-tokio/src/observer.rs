@@ -270,9 +270,12 @@ impl ApplicationLayerObserver {
             for reply in self.pending_replies.drain(..) {
                 actions.send_response(reply.into_response());
             }
+            #[cfg(feature = "codec-response-final")]
             for rid in self.pending_final_rids.drain(..) {
                 actions.send_response_final(rid);
             }
+            #[cfg(not(feature = "codec-response-final"))]
+            self.pending_final_rids.clear();
         }
         // R307 — without `query-queryable` the staging buffers do not
         // exist; `actions` is then unused in this branch but the

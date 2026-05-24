@@ -78,6 +78,7 @@ use std::collections::HashMap;
 
 use wz_codecs::reply::ReplyVariant;
 use wz_codecs::response::{Response, ResponseVariant};
+#[cfg(feature = "codec-response-final")]
 use wz_codecs::response_final::ResponseFinal;
 use wz_codecs::wireexpr::WireexprVariant;
 
@@ -431,6 +432,7 @@ impl ReplyRegistry {
     /// from the table. Duplicate-rid registrations all fire (in
     /// registration order) and all are removed in the same dispatch.
     /// Unknown rids drop silently.
+    #[cfg(feature = "codec-response-final")]
     pub fn dispatch_response_final(&mut self, response_final: &ResponseFinal) {
         self.fire_final_for(response_final.request_id);
     }
@@ -594,6 +596,7 @@ impl ReplyRegistry {
                 NetworkMessage::Response(resp) => {
                     self.dispatch_response(resp, peer_keyexpr_table);
                 }
+                #[cfg(feature = "codec-response-final")]
                 NetworkMessage::ResponseFinal(rf) => {
                     self.dispatch_response_final(rf);
                 }

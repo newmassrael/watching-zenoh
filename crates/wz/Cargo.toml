@@ -118,7 +118,7 @@ codec-open-body = ["wz-runtime-tokio?/codec-open-body"]
 codec-push = []
 codec-request = []
 codec-response = []
-codec-response-final = []
+codec-response-final = ["wz-runtime-tokio?/codec-response-final"]
 codec-scout = ["wz-runtime-tokio?/codec-scout"]
 
 # ----- domain: declare (7 atomic, all active) -----

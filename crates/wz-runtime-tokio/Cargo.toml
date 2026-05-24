@@ -107,6 +107,7 @@ default = [
     "codec-scout",
     "codec-hello",
     "codec-join",
+    "codec-response-final",
 ]
 liveliness-token = ["declare-token", "declare-undeclare"]
 liveliness-subscriber = ["declare-interest", "declare-final"]
@@ -154,6 +155,11 @@ codec-close = ["wz-codecs/codec-close"]
 codec-scout = ["wz-codecs/codec-scout"]
 codec-hello = ["wz-codecs/codec-hello"]
 codec-join = ["wz-codecs/codec-join"]
+# R311e — codec-response-final forwards wz-codecs + gates the
+# session_glue.rs send/build/encode_frame_with/NetworkMessage variant/
+# parse arm cluster. Feature-off: queryable can't emit the terminator;
+# requesting peer's z_get hangs until per-call timeout fires.
+codec-response-final = ["wz-codecs/codec-response-final"]
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }
