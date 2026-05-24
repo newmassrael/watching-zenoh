@@ -1820,22 +1820,33 @@ impl SessionLinkActions {
     /// DECLARE path: the peer must observe the retraction before any
     /// later Push that still aliases the id, otherwise the peer would
     /// dispatch the Push to the now-stale keyexpr.
-    #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
+    ///
+    /// R311p — signature-stability per `feedback_signature_stability`
+    /// MEMORY anchor (same sweep as R311o send_undeclare_token). Body
+    /// cfg-gated on `all(declare-keyexpr, declare-undeclare)`; silent
+    /// no-op when either feature is off (() return — no error channel,
+    /// the outbound_mappings table prune is also gated so a feature-off
+    /// build never populated the table to begin with).
     pub fn send_undeclare_kexpr(&self, mapping_id: u64) {
-        let declare = build_undeclare_kexpr(mapping_id);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
-        // R234 — drop the (mapping_id, suffix) pair so subsequent
-        // `publish_aliased_auto` calls return `None` on this id and
-        // the caller knows the alias is stale. Idempotent: removing
-        // an absent id is a no-op. Mirrors zenoh-pico's
-        // `_z_unregister_resource` invoked on the local-side
-        // undeclare emit path.
-        self.outbound_mappings
-            .lock()
-            .expect("outbound_mappings poisoned by an earlier panicked publish")
-            .remove(&mapping_id);
+        #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
+        {
+            let declare = build_undeclare_kexpr(mapping_id);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+            self.driver.send_blocking(&wire, Reliability::Reliable);
+            // R234 — drop the (mapping_id, suffix) pair so subsequent
+            // `publish_aliased_auto` calls return `None` on this id and
+            // the caller knows the alias is stale. Idempotent: removing
+            // an absent id is a no-op. Mirrors zenoh-pico's
+            // `_z_unregister_resource` invoked on the local-side
+            // undeclare emit path.
+            self.outbound_mappings
+                .lock()
+                .expect("outbound_mappings poisoned by an earlier panicked publish")
+                .remove(&mapping_id);
+        }
+        #[cfg(not(all(feature = "declare-keyexpr", feature = "declare-undeclare")))]
+        let _ = mapping_id;
     }
 
     /// R234 — look up the literal keyexpr a previously-emitted
@@ -1950,23 +1961,43 @@ impl SessionLinkActions {
     /// subsequent matching Pushes will no longer route to this
     /// subscriber (the peer's other subscribers on the same keyexpr
     /// continue to receive).
-    #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+    ///
+    /// R311p — signature-stability per `feedback_signature_stability`
+    /// MEMORY anchor. Body cfg-gated on
+    /// `all(declare-subscriber, declare-undeclare)`; silent no-op when
+    /// either feature is off. Couples with a future-round Subscriber
+    /// Drop type-ungating that calls this unconditionally.
     pub fn send_undeclare_subscriber(&self, subscriber_id: u64) {
-        let declare = build_undeclare_subscriber(subscriber_id);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
+        #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
+        {
+            let declare = build_undeclare_subscriber(subscriber_id);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+            self.driver.send_blocking(&wire, Reliability::Reliable);
+        }
+        #[cfg(not(all(feature = "declare-subscriber", feature = "declare-undeclare")))]
+        let _ = subscriber_id;
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclQueryable)` on
     /// the outbound link, retracting a previously declared queryable
     /// (id) on the peer.
-    #[cfg(all(feature = "declare-queryable", feature = "declare-undeclare"))]
+    ///
+    /// R311p — signature-stability per `feedback_signature_stability`
+    /// MEMORY anchor. Body cfg-gated on
+    /// `all(declare-queryable, declare-undeclare)`; silent no-op when
+    /// either feature is off. Couples with a future-round Queryable
+    /// Drop type-ungating that calls this unconditionally.
     pub fn send_undeclare_queryable(&self, queryable_id: u64) {
-        let declare = build_undeclare_queryable(queryable_id);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
+        #[cfg(all(feature = "declare-queryable", feature = "declare-undeclare"))]
+        {
+            let declare = build_undeclare_queryable(queryable_id);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+            self.driver.send_blocking(&wire, Reliability::Reliable);
+        }
+        #[cfg(not(all(feature = "declare-queryable", feature = "declare-undeclare")))]
+        let _ = queryable_id;
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclToken)` on the
