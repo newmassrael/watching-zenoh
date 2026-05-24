@@ -17744,6 +17744,52 @@
         "Layer E 30-trial flake-0 not run this round; type-ungating is runtime-semantics-neutral so existing 761 cargo tests carry the no-regression signal."
       ]
     },
+    "Round 311p": {
+      "decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
+      "changes_bullets": [
+        "session_glue.rs: send_undeclare_kexpr signature-stabilized. `#[cfg(all(declare-keyexpr, declare-undeclare))]` on the entire fn replaced by inner body cfg-gate + silent no-op (`let _ = mapping_id`) when either feature is off. The outbound_mappings table prune (R234) stays inside the cfg-gated branch since a feature-off build never populated the table to begin with.",
+        "session_glue.rs: send_undeclare_subscriber signature-stabilized. Same R311g1 pattern as above (`all(declare-subscriber, declare-undeclare)` body-cfg + silent no-op). Couples with a future-round Subscriber::Drop type-ungating that will call this unconditionally.",
+        "session_glue.rs: send_undeclare_queryable signature-stabilized. Same R311g1 pattern as above (`all(declare-queryable, declare-undeclare)` body-cfg + silent no-op). Couples with a future-round Queryable::Drop type-ungating that will call this unconditionally.",
+        "Net effect: every send_(un)declare_* fn in session_glue.rs now follows the R311g1 signature-stability anchor uniformly (send_declare_* already signature-stable per prior rounds; send_undeclare_token landed R311o; send_undeclare_kexpr/subscriber/queryable land here). principled-exemption carry in the signature-stability MEMORY anchor narrows further."
+      ],
+      "verification_bullets": [
+        "cargo check default + no-default-features + 5 wz presets (mcu-minimal/extended/ap-client/router/full): all pass.",
+        "cargo test --workspace: 761 passed / 0 failed / 17 ignored (no regression from R311o baseline).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --all --check: clean.",
+        "Mnemosyne validate-workspace post-R311o: T1=0 ledger=1 RT 13/13 sync entries=332 sections=255 (post R311p append: entries=333 expected)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow"
+      ],
+      "carry_forward_bullets": [
+        "LivelinessSubscriber/Queryable/Querier handle type-ungating still deferred (same observer-cascade roadblock as R311o-A/-B/-C/-D defer notes).",
+        "Layer E 30-trial flake-0 not run; R311p is purely a session_glue signature retrofit with no runtime semantics change."
+      ],
+      "publishable_decision_summary": "R311p signature-stability sweep — send_undeclare_kexpr/subscriber/queryable converted from entire-fn cfg-gate to body cfg-gate + silent no-op per R311g1 anchor (mirror R311o send_undeclare_token pattern).",
+      "publishable_changes_bullets": [
+        "session_glue.rs: send_undeclare_kexpr signature-stabilized. `#[cfg(all(declare-keyexpr, declare-undeclare))]` on the entire fn replaced by inner body cfg-gate + silent no-op (`let _ = mapping_id`) when either feature is off. The outbound_mappings table prune (R234) stays inside the cfg-gated branch since a feature-off build never populated the table to begin with.",
+        "session_glue.rs: send_undeclare_subscriber signature-stabilized. Same R311g1 pattern as above (`all(declare-subscriber, declare-undeclare)` body-cfg + silent no-op). Couples with a future-round Subscriber::Drop type-ungating that will call this unconditionally.",
+        "session_glue.rs: send_undeclare_queryable signature-stabilized. Same R311g1 pattern as above (`all(declare-queryable, declare-undeclare)` body-cfg + silent no-op). Couples with a future-round Queryable::Drop type-ungating that will call this unconditionally.",
+        "Net effect: every send_(un)declare_* fn in session_glue.rs now follows the R311g1 signature-stability anchor uniformly (send_declare_* already signature-stable per prior rounds; send_undeclare_token landed R311o; send_undeclare_kexpr/subscriber/queryable land here). principled-exemption carry in the signature-stability MEMORY anchor narrows further."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check default + no-default-features + 5 wz presets (mcu-minimal/extended/ap-client/router/full): all pass.",
+        "cargo test --workspace: 761 passed / 0 failed / 17 ignored (no regression from R311o baseline).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --all --check: clean.",
+        "Mnemosyne validate-workspace post-R311o: T1=0 ledger=1 RT 13/13 sync entries=332 sections=255 (post R311p append: entries=333 expected)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow"
+      ],
+      "publishable_carry_forward_bullets": [
+        "LivelinessSubscriber/Queryable/Querier handle type-ungating still deferred (same observer-cascade roadblock as R311o-A/-B/-C/-D defer notes).",
+        "Layer E 30-trial flake-0 not run; R311p is purely a session_glue signature retrofit with no runtime semantics change."
+      ]
+    },
     "Round 32": {
       "decision_summary": "B5 codec track continues — sources/codecs/frame.scxml + fragment.scxml authored. First VLE + tail primitive composition (B1-α + tail) plus first inline test-vector land (B5-θ 4-case set). Both share identical body shape per zenoh-pico (sn:VLE + payload:tail, no extensions); differ only in enclosing MID (0x05 Frame / 0x06 Fragment).",
       "changes_bullets": [
