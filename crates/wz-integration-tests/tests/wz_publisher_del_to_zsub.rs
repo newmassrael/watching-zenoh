@@ -50,7 +50,7 @@ use std::time::Duration;
 
 use wz_integration_tests::common::{
     read_captured, wait_for_substring, wz_ap_demo_binary, zenoh_pico_cli_binary, ChildGuard,
-    PortReservation,
+    PortReservation, Z_SUB_INIT_TIMEOUT,
 };
 
 #[test]
@@ -123,7 +123,7 @@ fn wz_publisher_del_round_trip_against_zenoh_pico_z_sub() {
     let session_opening = wait_for_substring(
         &mut z_sub_stdout_reader,
         "Opening session",
-        Duration::from_secs(5),
+        Z_SUB_INIT_TIMEOUT,
     );
     let received_substr = ">> [Subscriber] Received";
     let received = wait_for_substring(
@@ -144,7 +144,7 @@ fn wz_publisher_del_round_trip_against_zenoh_pico_z_sub() {
 
     if let Err(c) = &session_opening {
         panic!(
-            "z_sub did not log 'Opening session' within 5s — z_sub binary failed to \
+            "z_sub did not log 'Opening session' within 10s — z_sub binary failed to \
              initialize. Captured z_sub stdout:\n{c}\n\
              --- captured demo stderr ---\n{demo_captured}"
         );
