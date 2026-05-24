@@ -606,7 +606,8 @@
         "`codec-response-final` — RESPONSE-FINAL (active, wz)"
       ],
       "caveats_bullets": [
-        "R311a4 Footprint: init-body -10328B / open-body -6520B.</bullet>\n</invoke>"
+        "R311a4 Footprint: init-body -10328B / open-body -6520B.</bullet>\n</invoke>",
+        "R311b Footprint: codec-keep-alive +712B; 11 ungated codecs -32~-64B noise.</bullet>\n</invoke>"
       ],
       "decision_status": "active"
     },
@@ -16874,6 +16875,70 @@
         "R310.5c get_matching_status conservative-false doc-surface decision (0.5R).",
         "Architectural carries unchanged: R267 Session<R,T> reparam (composability prerequisite for MCU), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (20-50R; MCU half of north star), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter.",
         "R311a4 cascade closure: catalog ↔ Cargo.toml ↔ build emit ↔ binary footprint is now 1:1 mechanically true for codec-init-body / codec-open-body. R311a recanon-pre + recanon + 1 + 2 + 3 + 4 sequence is the canonical pattern for the remaining 12 codec cascades."
+      ]
+    },
+    "Round 311b": {
+      "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
+      "changes_bullets": [
+        "crates/wz-codecs/Cargo.toml: codec-keep-alive = [] feature + default include; matches the R311a1 codec-init-body / codec-open-body shape so wz-codecs standalone usage (no forwarding consumer) still sees the full codec catalog while a downstream `--no-default-features` + explicit forwards path can elide each codec individually.",
+        "crates/wz-codecs/build.rs: is_codec_enabled `keep_alive` arm gating on CARGO_FEATURE_CODEC_KEEP_ALIVE; matching `cargo:rerun-if-env-changed` directive added so build script re-runs when the feature toggles.",
+        "crates/wz-codecs/src/lib.rs: `pub mod keep_alive` block cfg-gated on `codec-keep-alive`.",
+        "crates/wz-runtime-tokio/Cargo.toml: codec-keep-alive = [\"wz-codecs/codec-keep-alive\"] forward + default include; same `default-features = false` + explicit forwards shape as init-body/open-body.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: 8 cfg sites added on codec-keep-alive — `use wz_codecs::keep_alive::KeepAlive` import; `wire_const::T_MID_KEEP_ALIVE` constant; `handle_inbound` KeepAlive arm (last_inbound_keepalive_at lease stamp update); `InboundFrame::KeepAlive` enum variant; `parse_inbound` T_MID_KEEP_ALIVE match arm (KeepAlive::decode + ext-chain); `inbound_to_fsm_event` KeepAlive => None arm; driver-loop catch-all KeepAlive => SideEffectOnly arm; `encode_frame_with_push` panic debug-name match arm. Feature-off cleanly falls inbound MID 0x04 through to `InboundFrame::Unknown { mid }` so a long-lived session loses the peer-driven lease refresh path while the established_at baseline keeps short sessions functional.",
+        "crates/wz/Cargo.toml: codec-keep-alive = [\"wz-runtime-tokio?/codec-keep-alive\"] ?-syntax forward replacing the prior no-op label declaration.",
+        "scripts/measure-codec-footprint.sh: auto-enumerates every codec-* atomic feature from the preset-ap-client list, runs per-codec minus build, plus a final minus-all-codecs build for the cumulative codec footprint. R311b through R311l cascades reuse this script without further edits."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace pass; cargo clippy --workspace --all-targets -- -D warnings clean; cargo fmt --all -- --check clean (zero auto-fix required).",
+        "8-config feature matrix at wz-runtime-tokio level all pass: 2^3 = 8 combinations of codec-init-body / codec-open-body / codec-keep-alive (default ON / --no-default-features + each subset).",
+        "cargo test -p wz-runtime-tokio --lib: 589/589 pass.",
+        "Binary-size delta (release + LTO=thin + codegen-units=1 + strip --strip-all, wz-ap-demo via wz facade preset-ap-client): TBD (measurement in progress).",
+        "Layer E 30-trial flake-0: TBD (running).",
+        "validate_workspace: TBD (post-mutation re-check pending)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "R311c (next): codec-close cascade. Close body is simple (1-byte reason), Close variant already gated by InboundFrame::Close pattern. Same 8-site cfg template; expected delta ~few KB. 0.5-1R.",
+        "R311d-l: 10 remaining codecs (scout, hello, frame, fragment, join, declare, push, request, response, response-final). Easy batch (close/scout/hello/frame/fragment): 3R; medium (join): 1R; complex multi-codec embed (declare, push, request, response, response-final): 8R. Catalog truthfulness closure 12-13R from R311c onward.",
+        "Integration tests still use InboundFrame::Init/Open/KeepAlive directly under default features (default-on); --no-default-features --tests would break. Lazy carry: defer until user runs `cargo test --no-default-features`.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam (composability prerequisite for MCU), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (20-50R; MCU half of north star), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter.",
+        "R303++ atomic field population still pending: feature_inventory.md 39 outline-only sub-sections need intent + outputs population.",
+        "R310.5c get_matching_status conservative-false doc-surface decision (0.5R)."
+      ],
+      "publishable_decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
+      "publishable_changes_bullets": [
+        "crates/wz-codecs/Cargo.toml: codec-keep-alive = [] feature + default include; matches the R311a1 codec-init-body / codec-open-body shape so wz-codecs standalone usage (no forwarding consumer) still sees the full codec catalog while a downstream `--no-default-features` + explicit forwards path can elide each codec individually.",
+        "crates/wz-codecs/build.rs: is_codec_enabled `keep_alive` arm gating on CARGO_FEATURE_CODEC_KEEP_ALIVE; matching `cargo:rerun-if-env-changed` directive added so build script re-runs when the feature toggles.",
+        "crates/wz-codecs/src/lib.rs: `pub mod keep_alive` block cfg-gated on `codec-keep-alive`.",
+        "crates/wz-runtime-tokio/Cargo.toml: codec-keep-alive = [\"wz-codecs/codec-keep-alive\"] forward + default include; same `default-features = false` + explicit forwards shape as init-body/open-body.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: 8 cfg sites added on codec-keep-alive — `use wz_codecs::keep_alive::KeepAlive` import; `wire_const::T_MID_KEEP_ALIVE` constant; `handle_inbound` KeepAlive arm (last_inbound_keepalive_at lease stamp update); `InboundFrame::KeepAlive` enum variant; `parse_inbound` T_MID_KEEP_ALIVE match arm (KeepAlive::decode + ext-chain); `inbound_to_fsm_event` KeepAlive => None arm; driver-loop catch-all KeepAlive => SideEffectOnly arm; `encode_frame_with_push` panic debug-name match arm. Feature-off cleanly falls inbound MID 0x04 through to `InboundFrame::Unknown { mid }` so a long-lived session loses the peer-driven lease refresh path while the established_at baseline keeps short sessions functional.",
+        "crates/wz/Cargo.toml: codec-keep-alive = [\"wz-runtime-tokio?/codec-keep-alive\"] ?-syntax forward replacing the prior no-op label declaration.",
+        "scripts/measure-codec-footprint.sh: auto-enumerates every codec-* atomic feature from the preset-ap-client list, runs per-codec minus build, plus a final minus-all-codecs build for the cumulative codec footprint. R311b through R311l cascades reuse this script without further edits."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace + cargo clippy --all-targets -D warnings + cargo fmt --check: all clean.",
+        "wz-runtime-tokio 8-config matrix all pass (2^3 codec combinations).",
+        "cargo test -p wz-runtime-tokio --lib: 589/589 pass.",
+        "wz-ap-demo stripped: baseline 2717664B; -keep-alive +712B; -all-codecs +20072B.",
+        "Layer E 30-trial flake-0: 30/30 pass; 0 FAILED.",
+        "validate_workspace: entries 319->320, sections 255, T1=0, RT 13/13, sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311c (next): codec-close cascade. Close body is simple (1-byte reason), Close variant already gated by InboundFrame::Close pattern. Same 8-site cfg template; expected delta ~few KB. 0.5-1R.",
+        "R311d-l: 10 remaining codecs (scout, hello, frame, fragment, join, declare, push, request, response, response-final). Easy batch (close/scout/hello/frame/fragment): 3R; medium (join): 1R; complex multi-codec embed (declare, push, request, response, response-final): 8R. Catalog truthfulness closure 12-13R from R311c onward.",
+        "Integration tests still use InboundFrame::Init/Open/KeepAlive directly under default features (default-on); --no-default-features --tests would break. Lazy carry: defer until user runs `cargo test --no-default-features`.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam (composability prerequisite for MCU), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (20-50R; MCU half of north star), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter.",
+        "R303++ atomic field population still pending: feature_inventory.md 39 outline-only sub-sections need intent + outputs population.",
+        "R310.5c get_matching_status conservative-false doc-surface decision (0.5R)."
       ]
     },
     "Round 32": {
