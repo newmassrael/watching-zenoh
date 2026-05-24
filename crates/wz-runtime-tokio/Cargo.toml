@@ -104,6 +104,9 @@ default = [
     "codec-open-body",
     "codec-keep-alive",
     "codec-close",
+    "codec-scout",
+    "codec-hello",
+    "codec-join",
 ]
 liveliness-token = ["declare-token", "declare-undeclare"]
 liveliness-subscriber = ["declare-interest", "declare-final"]
@@ -143,6 +146,14 @@ codec-keep-alive = ["wz-codecs/codec-keep-alive"]
 # + decode (parse_inbound T_MID_CLOSE) elide together; FSM-level
 # CloseReason enum + set_close_reason_* bindings stay unconditional.
 codec-close = ["wz-codecs/codec-close"]
+# R311d batch — scouting + multicast codecs. This crate forwards the
+# features to wz-codecs for SCXML emit/include elision. session_glue.rs
+# does NOT use Scout/Hello/Join types, so no source-side cfg gates
+# exist here; the forwards stay catalog-uniform with the rest of the
+# codec features for a future scouting-active runtime to reuse.
+codec-scout = ["wz-codecs/codec-scout"]
+codec-hello = ["wz-codecs/codec-hello"]
+codec-join = ["wz-codecs/codec-join"]
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }

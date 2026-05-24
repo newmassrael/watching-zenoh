@@ -87,6 +87,9 @@ fn is_codec_enabled(stem: &str) -> bool {
         "open_body" => std::env::var_os("CARGO_FEATURE_CODEC_OPEN_BODY").is_some(),
         "keep_alive" => std::env::var_os("CARGO_FEATURE_CODEC_KEEP_ALIVE").is_some(),
         "close" => std::env::var_os("CARGO_FEATURE_CODEC_CLOSE").is_some(),
+        "scout" => std::env::var_os("CARGO_FEATURE_CODEC_SCOUT").is_some(),
+        "hello" => std::env::var_os("CARGO_FEATURE_CODEC_HELLO").is_some(),
+        "join" => std::env::var_os("CARGO_FEATURE_CODEC_JOIN").is_some(),
         _ => true,
     }
 }
@@ -108,6 +111,9 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_OPEN_BODY");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_KEEP_ALIVE");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_CLOSE");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_SCOUT");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_HELLO");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_JOIN");
 
     let options = ForgeCompileOptions::default();
 

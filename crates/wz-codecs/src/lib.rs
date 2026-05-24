@@ -72,6 +72,7 @@ pub mod fragment {
     include!(concat!(env!("OUT_DIR"), "/fragment.rs"));
 }
 
+#[cfg(feature = "codec-scout")]
 pub mod scout {
     include!(concat!(env!("OUT_DIR"), "/scout.rs"));
 }
@@ -86,6 +87,7 @@ pub mod open_body {
     include!(concat!(env!("OUT_DIR"), "/open_body.rs"));
 }
 
+#[cfg(feature = "codec-join")]
 pub mod join {
     include!(concat!(env!("OUT_DIR"), "/join.rs"));
 }
@@ -94,6 +96,7 @@ pub mod locator {
     include!(concat!(env!("OUT_DIR"), "/locator.rs"));
 }
 
+#[cfg(feature = "codec-hello")]
 pub mod hello {
     include!(concat!(env!("OUT_DIR"), "/hello.rs"));
 }

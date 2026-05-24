@@ -47,7 +47,7 @@ path = "src/lib.rs"
 # pair (R311a4 wz facade exposes the forwards; R311a2/3 gate the
 # session_glue use sites; until then `--no-default-features` at
 # wz-runtime-tokio level breaks compile, which is intended).
-default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close"]
+default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join"]
 alloc = ["sce-forge-runtime/alloc"]
 codec-init-body = []
 codec-open-body = []
@@ -61,6 +61,21 @@ codec-open-body = []
 # link-layer drops instead of MID 0x03 + reason byte. honest semantics
 # documented in §5.12 codec atomic caveat.
 codec-close = []
+# R311d batch — scouting + multicast codecs. wz-runtime-tokio does not
+# import or reference Scout/Hello/Join types in session_glue.rs; cfg
+# gates live exclusively at this crate's `pub mod` blocks + build.rs
+# SCXML codegen skip. wz-runtime-tokio still forwards these features
+# for facade-level uniformity (a future runtime crate, e.g. a
+# scouting-active wz-runtime-scout sibling, could re-use the gates).
+# Footprint delta at the wz-ap-demo binary level is ~0 because the
+# generated codec code lives behind `pub mod` blocks the binary never
+# touches; LTO already discards it. The atomic features remain
+# catalog-truthful as wire-spec coverage labels: enabling them surfaces
+# the codec types for a downstream consumer that wants Scout/Hello/Join
+# wire support.
+codec-scout = []
+codec-hello = []
+codec-join = []
 # R311b — `codec-keep-alive` gates both the build.rs SCXML compile pass
 # for keep_alive.scxml and the `pub mod keep_alive` include in lib.rs.
 # Feature-off elides the empty-body KeepAlive codec entirely; the
