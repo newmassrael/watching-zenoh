@@ -80,11 +80,17 @@ use sce_forge_runtime::codec::{CodecError, SceSink, VecSink};
 use sce_forge_runtime::codec::SceCursor;
 #[cfg(feature = "codec-close")]
 use wz_codecs::close::Close;
+#[cfg(feature = "codec-declare")]
 use wz_codecs::decl_final::DeclFinal;
+#[cfg(feature = "codec-declare")]
 use wz_codecs::decl_kexpr::DeclKexpr;
+#[cfg(feature = "codec-declare")]
 use wz_codecs::decl_queryable::DeclQueryable;
+#[cfg(feature = "codec-declare")]
 use wz_codecs::decl_subscriber::DeclSubscriber;
+#[cfg(feature = "codec-declare")]
 use wz_codecs::decl_token::DeclToken;
+#[cfg(feature = "codec-declare")]
 use wz_codecs::declare::{Declare, DeclareVariant};
 use wz_codecs::encoding::Encoding;
 use wz_codecs::err::Err;
@@ -111,12 +117,17 @@ use wz_codecs::response::{Response, ResponseVariant};
 #[cfg(feature = "codec-response-final")]
 use wz_codecs::response_final::ResponseFinal;
 use wz_codecs::timestamp::Timestamp;
+#[cfg(feature = "codec-declare")]
 use wz_codecs::undecl_kexpr::UndeclKexpr;
+#[cfg(feature = "codec-declare")]
 use wz_codecs::undecl_queryable::UndeclQueryable;
+#[cfg(feature = "codec-declare")]
 use wz_codecs::undecl_subscriber::UndeclSubscriber;
+#[cfg(feature = "codec-declare")]
 use wz_codecs::undecl_token::UndeclToken;
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
+#[cfg(feature = "codec-declare")]
 use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 use wz_runtime_core::TimeSource;
 
@@ -405,6 +416,9 @@ mod wire_const {
     /// Layer 3 wire-interop vs `_z_declare_encode`. R115 wires the
     /// inbound dispatch on this const so [`parse_frame_payload`]
     /// surfaces DECLARE records to the application layer.
+    ///
+    /// R311i — gated on `codec-declare`.
+    #[cfg(feature = "codec-declare")]
     pub const N_MID_DECLARE: u8 = 0x1E;
 }
 
@@ -3394,6 +3408,7 @@ pub fn build_push_del_aliased_with_meta(
 /// Panics if `mapping_id == 0` — id zero is reserved as the
 /// literal-keyexpr sentinel and a DECLARE with id=0 has no
 /// table-population semantics in zenoh-pico.
+#[cfg(feature = "codec-declare")]
 pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> Declare {
     assert!(
         mapping_id != 0,
@@ -3491,6 +3506,7 @@ pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> Declare {
 ///     subscribed keyexpr is the peer's mapping for `N`.
 ///   - `keyexpr_mapping_id == N, suffix = Some(s)`: compound — the
 ///     subscribed keyexpr is mapping `N`'s prefix + `s`.
+#[cfg(feature = "codec-declare")]
 pub fn build_declare_subscriber(
     subscriber_id: u64,
     keyexpr_mapping_id: u64,
@@ -3568,6 +3584,7 @@ pub fn build_declare_subscriber(
 ///   - `(N, None)`: alias — the queried keyexpr is the peer's
 ///     mapping for `N`.
 ///   - `(N, Some(s))`: compound — alias `N`'s prefix + `s`.
+#[cfg(feature = "codec-declare")]
 pub fn build_declare_queryable(
     queryable_id: u64,
     keyexpr_mapping_id: u64,
@@ -3633,6 +3650,7 @@ pub fn build_declare_queryable(
 ///
 /// `keyexpr_mapping_id` / `keyexpr_suffix` convention matches the
 /// other DECLARE builders (literal / alias / compound).
+#[cfg(feature = "codec-declare")]
 pub fn build_declare_token(
     token_id: u64,
     keyexpr_mapping_id: u64,
@@ -3737,6 +3755,7 @@ pub fn build_declare_token(
 ///   VLE(subscriber_id)
 ///   wireexpr.encode  (id VLE + optional suffix_len VLE + suffix bytes)
 /// ```
+#[cfg(feature = "codec-declare")]
 pub fn build_declare_subscriber_nonlocal(
     subscriber_id: u64,
     keyexpr_mapping_id: u64,
@@ -3781,6 +3800,7 @@ pub fn build_declare_subscriber_nonlocal(
 /// (default-state `_z_queryable_infos_t`); a future round adding
 /// `complete` / `distance` will introduce a separate
 /// `build_declare_queryable_nonlocal_with_info` helper.
+#[cfg(feature = "codec-declare")]
 pub fn build_declare_queryable_nonlocal(
     queryable_id: u64,
     keyexpr_mapping_id: u64,
@@ -3821,6 +3841,7 @@ pub fn build_declare_queryable_nonlocal(
 /// [`build_declare_token`] for the Nonlocal case. Same id=0 rejection
 /// rule as the other `_nonlocal` builders. DeclToken has no extension
 /// surface at all, so the no-ext byte-stability contract is preserved.
+#[cfg(feature = "codec-declare")]
 pub fn build_declare_token_nonlocal(
     token_id: u64,
     keyexpr_mapping_id: u64,
@@ -3874,6 +3895,7 @@ pub fn build_declare_token_nonlocal(
 /// from a prior `Declare(DeclKexpr)`. The Z bit is bit-7 of the
 /// header and is left clear by every conformant zenoh-pico
 /// emit — wz mirrors that contract.
+#[cfg(feature = "codec-declare")]
 pub fn build_undeclare_kexpr(mapping_id: u64) -> Declare {
     Declare {
         header: wire_const::N_MID_DECLARE,
@@ -3908,6 +3930,7 @@ pub fn build_undeclare_kexpr(mapping_id: u64) -> Declare {
 ///   [UndeclSubscriber.header = _Z_UNDECL_SUBSCRIBER_MID (0x03)]
 ///   VLE(subscriber_id)
 /// ```
+#[cfg(feature = "codec-declare")]
 pub fn build_undeclare_subscriber(subscriber_id: u64) -> Declare {
     Declare {
         header: wire_const::N_MID_DECLARE,
@@ -3933,6 +3956,7 @@ pub fn build_undeclare_subscriber(subscriber_id: u64) -> Declare {
 ///   [UndeclQueryable.header = _Z_UNDECL_QUERYABLE_MID (0x05)]
 ///   VLE(queryable_id)
 /// ```
+#[cfg(feature = "codec-declare")]
 pub fn build_undeclare_queryable(queryable_id: u64) -> Declare {
     Declare {
         header: wire_const::N_MID_DECLARE,
@@ -3958,6 +3982,7 @@ pub fn build_undeclare_queryable(queryable_id: u64) -> Declare {
 ///   [UndeclToken.header = _Z_UNDECL_TOKEN_MID (0x07)]
 ///   VLE(token_id)
 /// ```
+#[cfg(feature = "codec-declare")]
 pub fn build_undeclare_token(token_id: u64) -> Declare {
     Declare {
         header: wire_const::N_MID_DECLARE,
@@ -3985,6 +4010,7 @@ pub fn build_undeclare_token(token_id: u64) -> Declare {
 /// reply sequence.
 ///
 /// Wire shape: `[N_MID_DECLARE, 0x1A]` — exactly two bytes.
+#[cfg(feature = "codec-declare")]
 pub fn build_declare_final() -> Declare {
     Declare {
         header: wire_const::N_MID_DECLARE,
@@ -5862,6 +5888,7 @@ pub fn encode_frame_with_request(sn: u64, request: Request, reliable: bool) -> V
 /// passing `reliable=false` accept that the DECLARE may arrive
 /// after a referencing Push and the peer's resolver will reject
 /// the unknown id — useful only for fuzz / negative tests.
+#[cfg(feature = "codec-declare")]
 pub fn encode_frame_with_declare(sn: u64, declare: Declare, reliable: bool) -> Vec<u8> {
     let parent_flags = if reliable {
         wire_const::FLAG_T_FRAME_R
@@ -6303,6 +6330,9 @@ pub enum NetworkMessage {
     /// carries an optional interest_id + ext vec + the inner
     /// `DeclareVariant` whose arms hold the nine sub-body structs,
     /// making the inline form much larger than `Unknown`.
+    ///
+    /// R311i — gated on `codec-declare`.
+    #[cfg(feature = "codec-declare")]
     Declare(Box<Declare>),
     /// Header byte's MID falls outside the
     /// {REQUEST, PUSH, RESPONSE_FINAL, OAM, INTEREST, RESPONSE, DECLARE}
@@ -6325,6 +6355,7 @@ impl std::fmt::Debug for NetworkMessage {
             Self::Oam(_) => f.write_str("Oam(..)"),
             Self::Interest(_) => f.write_str("Interest(..)"),
             Self::Response(_) => f.write_str("Response(..)"),
+            #[cfg(feature = "codec-declare")]
             Self::Declare(_) => f.write_str("Declare(..)"),
             Self::Unknown { mid, body } => {
                 write!(f, "Unknown {{ mid: {mid:#04x}, body_len: {} }}", body.len())
@@ -6398,6 +6429,7 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
                 let resp = Response::decode(&mut cursor)?;
                 messages.push(NetworkMessage::Response(Box::new(resp)));
             }
+            #[cfg(feature = "codec-declare")]
             wire_const::N_MID_DECLARE => {
                 let decl = Declare::decode(&mut cursor)?;
                 messages.push(NetworkMessage::Declare(Box::new(decl)));
