@@ -111,10 +111,11 @@ use crate::query::QueryableId;
 // signatures compile in any consumer-feature subset.
 use crate::query_event::{QueryEvent, ReplyEmitter};
 // R311s — `crate::reply` is type-ungated; `InboundReply` flows into
-// the z_get caller's callback and `ReplyHandle` is the return value
-// of `Session::query`. Both signatures are now type-ungated (the
-// query body falls through to `ReplyHandle::sentinel()` when
-// `query-get` is OFF) so the imports stay unconditional.
+// the z_get caller's callback and `ReplyHandle` is the inner success
+// value of [`Session::query`]'s `Result<ReplyHandle, QueryAliasError>`
+// (R311t Result-form transition replaced the R311s stub-form
+// fall-through). Both signatures stay type-ungated so the imports
+// remain unconditional.
 use crate::reply::{InboundReply, ReplyHandle};
 use crate::sample::{
     EncodingHint, QosLevel, Reliability, Sample, SampleKind, SourceInfo, TimestampHint,
@@ -972,16 +973,19 @@ impl Session {
     /// loopback `QueryableRegistry::local_query` fan are available;
     /// the body holds no further per-feature cfg when query-get is ON.
     ///
-    /// R311s — signature is type-ungated. When `query-get` is OFF the
-    /// body falls through to a sentinel `ReplyHandle(0)` (no wire
-    /// frame, no callback registration, no allocations); this stub
-    /// form matches the R311p send_undeclare_* silent-no-op shape
-    /// and avoids the ~22-callsite Result-form churn that a strict
-    /// FeatureDisabled return would impose. A future round may
-    /// promote the surface to `Result<ReplyHandle, QueryAliasError>`
-    /// once the test callsites are ready for the migration (the
-    /// `QueryAliasError::FeatureDisabled` variant is already in
-    /// place at R311s for the transition).
+    /// R311t — signature is type-ungated and Result-form. When
+    /// `query-get` is OFF the body returns
+    /// `Err(QueryAliasError::FeatureDisabled)` without touching the
+    /// observer or emitting any wire frame; callers branch uniformly
+    /// across consumer-feature subsets on the same enum that the
+    /// aliased variants ([`Self::query_aliased`],
+    /// [`Self::query_aliased_auto`]) already surface. Promoted from
+    /// the R311s stub-form fall-through (sentinel `ReplyHandle(0)`)
+    /// because the silent-no-op path was an honest-signal anti-pattern
+    /// — callers that did not check the rid would silently misfile
+    /// replies into a non-registration. The R311t transition costs
+    /// ~22 internal-test callsites a `.expect()` chaining, which is
+    /// the textbook price for the honest-signal property.
     pub fn query<T: TimeSource>(
         &self,
         keyexpr: &str,
@@ -989,11 +993,11 @@ impl Session {
         clock: &T,
         on_reply: impl FnMut(&InboundReply) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
-    ) -> ReplyHandle {
+    ) -> Result<ReplyHandle, QueryAliasError> {
         #[cfg(not(feature = "query-get"))]
         {
             let _ = (keyexpr, opts, clock, on_reply, on_final);
-            return ReplyHandle::sentinel();
+            return Err(QueryAliasError::FeatureDisabled);
         }
         #[cfg(feature = "query-get")]
         {
@@ -1063,7 +1067,7 @@ impl Session {
                 }
             }
 
-            handle
+            Ok(handle)
         }
     }
 
@@ -1109,9 +1113,12 @@ impl Session {
     /// metadata bundle, clock is the R262 deadline source, and the
     /// two closures are the on_reply / on_final consumer callbacks.
     ///
-    /// R311s — signature type-ungated alongside [`Self::query`]; same
-    /// stub fall-through to `ReplyHandle::sentinel()` when `query-get`
-    /// is OFF (no wire frame, no callback registration).
+    /// R311t — signature type-ungated and Result-form alongside
+    /// [`Self::query`]. When `query-get` is OFF the body returns
+    /// `Err(QueryAliasError::FeatureDisabled)`; the aliased variant
+    /// already carried `Result<_, QueryAliasError>` for the
+    /// `UnknownMapping` signal, so the FeatureDisabled variant
+    /// (introduced at R311s) is now the active OFF arm here too.
     #[allow(clippy::too_many_arguments)]
     pub fn query_aliased<T: TimeSource>(
         &self,
@@ -1122,7 +1129,7 @@ impl Session {
         clock: &T,
         on_reply: impl FnMut(&InboundReply) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
-    ) -> ReplyHandle {
+    ) -> Result<ReplyHandle, QueryAliasError> {
         #[cfg(not(feature = "query-get"))]
         {
             let _ = (
@@ -1134,7 +1141,7 @@ impl Session {
                 on_reply,
                 on_final,
             );
-            return ReplyHandle::sentinel();
+            return Err(QueryAliasError::FeatureDisabled);
         }
         #[cfg(feature = "query-get")]
         {
@@ -1190,7 +1197,7 @@ impl Session {
                 }
             }
 
-            handle
+            Ok(handle)
         }
     }
 
@@ -1214,16 +1221,13 @@ impl Session {
     /// the mapping or falls back to [`Self::query_aliased`] with an
     /// explicit `loopback_keyexpr`.
     ///
-    /// R311s — signature type-ungated alongside the Querier surface.
-    /// The body cfg-gates on `query-get`; the feature-OFF path
-    /// returns `Err(QueryAliasError::FeatureDisabled)` so callers
-    /// can branch uniformly across builds. This is the Result-form
-    /// counterpart to `Session::query`'s stub-form fall-through —
-    /// the aliased variant already returned Result (for
-    /// UnknownMapping signaling), so adding the FeatureDisabled
-    /// variant here is non-breaking for existing callers that match
-    /// the Result exhaustively (the enum was #[non_exhaustive]-like
-    /// in practice; the new variant just expands the match scope).
+    /// R311t — signature type-ungated and Result-form (unchanged
+    /// from R311s in this method; the surface already carried
+    /// `Result<_, QueryAliasError>` for `UnknownMapping` signaling).
+    /// At R311t [`Self::query`] and [`Self::query_aliased`] also
+    /// adopted Result-form, so the inner delegate call propagates
+    /// the inner Result with `?` rather than re-wrapping an inner
+    /// `ReplyHandle` in `Ok(...)`.
     pub fn query_aliased_auto<T: TimeSource>(
         &self,
         mapping_id: u64,
@@ -1252,7 +1256,7 @@ impl Session {
                     composed
                 }
             };
-            Ok(self.query_aliased(
+            self.query_aliased(
                 mapping_id,
                 inline_suffix,
                 &loopback_keyexpr,
@@ -1260,7 +1264,7 @@ impl Session {
                 clock,
                 on_reply,
                 on_final,
-            ))
+            )
         }
     }
 
@@ -1287,9 +1291,9 @@ impl Session {
     /// observer access, no wire emit) so the constructor compiles
     /// regardless of `query-get` feature state. Calling
     /// [`Querier::get`] on the returned handle without `query-get`
-    /// hits the stub-form fall-through inside
-    /// [`Session::query`] which returns a sentinel
-    /// `ReplyHandle(0)` (no wire frame, no callback registration).
+    /// returns `Err(QueryAliasError::FeatureDisabled)` (R311t
+    /// Result-form transition — no wire frame, no callback
+    /// registration).
     pub fn declare_querier(&self, keyexpr: impl Into<String>, options: QueryOptions) -> Querier {
         Querier {
             session: self.clone(),
@@ -1310,8 +1314,10 @@ impl Session {
     ///
     /// R311s — type-ungated alongside [`Self::declare_querier`]; body
     /// is aggregator-only with no observer / wire dependency. The
-    /// aliased querier's `.get` path stub-falls-through the same
-    /// `Session::query_aliased` stub when `query-get` is OFF.
+    /// aliased querier's `.get` path returns
+    /// `Err(QueryAliasError::FeatureDisabled)` via
+    /// [`Session::query_aliased_auto`] when `query-get` is OFF
+    /// (R311t Result-form transition).
     pub fn declare_querier_aliased(
         &self,
         mapping_id: u64,
@@ -2024,12 +2030,16 @@ impl Session {
 /// R311s — type-ungated alongside the Querier surface; gains a
 /// `FeatureDisabled` variant for surface consistency with the
 /// LivelinessSubscriberAliasError + QueryableAliasError families
-/// (R311q/R311r). Currently unused by the type-ungated declare /
-/// query paths (those use the stub-form fall-through to a sentinel
-/// `ReplyHandle(0)` rather than returning `Err(FeatureDisabled)`);
-/// the variant exists for the future round that may switch
-/// `Session::query` and `Querier::get` to Result-form for callsite
-/// stability across the 48 internal call sites.
+/// (R311q/R311r).
+///
+/// R311t — Result-form transition activates the `FeatureDisabled`
+/// variant across [`Session::query`], [`Session::query_aliased`],
+/// [`Session::query_aliased_auto`], [`Querier::get`], and
+/// [`QuerierAliased::get`]. Callers branch uniformly on the same
+/// enum across all five entry points and across all
+/// consumer-feature subsets. The R311s stub-form fall-through
+/// (sentinel `ReplyHandle(0)`) was retired because silent no-op was
+/// an honest-signal anti-pattern.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryAliasError {
     /// No prior `send_declare_keyexpr` registered this id on the
@@ -2089,11 +2099,11 @@ impl std::error::Error for QueryAliasError {}
 ///
 /// R311s — type-ungated. The struct + impl are always defined so
 /// callers can hold a `Querier` value across builds; the `.get()`
-/// method internally calls [`Session::query`] whose body falls
-/// through to a sentinel `ReplyHandle(0)` when `query-get` is OFF
-/// (no wire frame, no callback registration). The aggregator-only
-/// body of [`Session::declare_querier`] means no observer access
-/// happens at construction, so the type stays usable across all
+/// method internally calls [`Session::query`] whose Result-form OFF
+/// arm returns `Err(QueryAliasError::FeatureDisabled)` (R311t — no
+/// wire frame, no callback registration). The aggregator-only body
+/// of [`Session::declare_querier`] means no observer access happens
+/// at construction, so the type stays usable across all
 /// consumer-feature subsets.
 #[derive(Clone)]
 #[non_exhaustive]
@@ -2120,8 +2130,8 @@ impl Querier {
     }
 
     /// Emit one outbound query through the declared keyexpr +
-    /// options. Returns the [`ReplyHandle`] from the underlying
-    /// [`Session::query`] call so the caller can
+    /// options. Returns the [`ReplyHandle`] inside `Ok(...)` from the
+    /// underlying [`Session::query`] call so the caller can
     /// [`crate::reply::ReplyRegistry::unregister`] before the Final
     /// arrives if the application cancels the pending z_get.
     ///
@@ -2129,6 +2139,11 @@ impl Querier {
     /// [`SessionLinkActions::alloc_next_request_id`]) so successive
     /// calls are independent pending entries — concurrent gets on
     /// the same Querier do not collide on the rid keyspace.
+    ///
+    /// Returns `Err(QueryAliasError::FeatureDisabled)` when the
+    /// `query-get` feature is OFF (R311t — propagated verbatim from
+    /// [`Session::query`]'s Result-form OFF arm). No wire frame, no
+    /// callback registration on the feature-disabled path.
     ///
     /// Mirrors zenoh-pico's `z_querier_get`
     /// (`vendor/zenoh-pico/src/api/api.c:1902` —
@@ -2138,7 +2153,7 @@ impl Querier {
         clock: &T,
         on_reply: impl FnMut(&InboundReply) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
-    ) -> ReplyHandle {
+    ) -> Result<ReplyHandle, QueryAliasError> {
         self.session.query(
             &self.keyexpr,
             self.options.clone(),
@@ -4916,20 +4931,24 @@ mod tests {
     fn query_handle_carries_rid_zero_for_first_call_then_monotonic() {
         let clock = TokioTime::new();
         let (session, _driver) = build_session();
-        let h0 = session.query(
-            "k",
-            QueryOptions::get().with_allowed_destination(Locality::Remote),
-            &clock,
-            |_| {},
-            |_| {},
-        );
-        let h1 = session.query(
-            "k",
-            QueryOptions::get().with_allowed_destination(Locality::Remote),
-            &clock,
-            |_| {},
-            |_| {},
-        );
+        let h0 = session
+            .query(
+                "k",
+                QueryOptions::get().with_allowed_destination(Locality::Remote),
+                &clock,
+                |_| {},
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
+        let h1 = session
+            .query(
+                "k",
+                QueryOptions::get().with_allowed_destination(Locality::Remote),
+                &clock,
+                |_| {},
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
         assert_eq!(h0.rid(), 0);
         assert_eq!(
             h1.rid(),
@@ -4954,15 +4973,17 @@ mod tests {
                 responder.reply_del();
             });
 
-        session.query(
-            "clear/me",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-            &clock,
-            move |reply| {
-                *cap_cb.lock().unwrap() = Some(reply.clone());
-            },
-            |_| {},
-        );
+        session
+            .query(
+                "clear/me",
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                &clock,
+                move |reply| {
+                    *cap_cb.lock().unwrap() = Some(reply.clone());
+                },
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
 
         let got = captured
             .lock()
@@ -4989,15 +5010,17 @@ mod tests {
                 responder.reply_err(Some(4), Some("schema_v1"), b"oops");
             });
 
-        session.query(
-            "error/path",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-            &clock,
-            move |reply| {
-                *cap_cb.lock().unwrap() = Some(reply.clone());
-            },
-            |_| {},
-        );
+        session
+            .query(
+                "error/path",
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                &clock,
+                move |reply| {
+                    *cap_cb.lock().unwrap() = Some(reply.clone());
+                },
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
 
         let got = captured
             .lock()
@@ -5035,17 +5058,19 @@ mod tests {
 
         let r = reply_count.clone();
         let f = final_count.clone();
-        session.query(
-            "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-            &clock,
-            move |_| {
-                r.fetch_add(1, Ordering::SeqCst);
-            },
-            move |_| {
-                f.fetch_add(1, Ordering::SeqCst);
-            },
-        );
+        session
+            .query(
+                "home/temp",
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                &clock,
+                move |_| {
+                    r.fetch_add(1, Ordering::SeqCst);
+                },
+                move |_| {
+                    f.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .expect("query-get feature is ON in this test build");
 
         assert_eq!(reply_count.load(Ordering::SeqCst), 0);
         assert_eq!(
@@ -5079,17 +5104,19 @@ mod tests {
         let final_count = Arc::new(AtomicUsize::new(0));
         let r = reply_count.clone();
         let f = final_count.clone();
-        session.query(
-            "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-            &clock,
-            move |_| {
-                r.fetch_add(1, Ordering::SeqCst);
-            },
-            move |_| {
-                f.fetch_add(1, Ordering::SeqCst);
-            },
-        );
+        session
+            .query(
+                "home/temp",
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                &clock,
+                move |_| {
+                    r.fetch_add(1, Ordering::SeqCst);
+                },
+                move |_| {
+                    f.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .expect("query-get feature is ON in this test build");
 
         assert_eq!(
             fired.load(Ordering::SeqCst),
@@ -5125,15 +5152,17 @@ mod tests {
 
         let reply_count = Arc::new(AtomicUsize::new(0));
         let r = reply_count.clone();
-        session.query(
-            "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-            &clock,
-            move |_| {
-                r.fetch_add(1, Ordering::SeqCst);
-            },
-            |_| {},
-        );
+        session
+            .query(
+                "home/temp",
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                &clock,
+                move |_| {
+                    r.fetch_add(1, Ordering::SeqCst);
+                },
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
 
         assert_eq!(fired.load(Ordering::SeqCst), 1);
         assert_eq!(reply_count.load(Ordering::SeqCst), 1);
@@ -5161,15 +5190,17 @@ mod tests {
 
         let reply_count = Arc::new(AtomicUsize::new(0));
         let r = reply_count.clone();
-        session.query(
-            "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::Remote),
-            &clock,
-            move |_| {
-                r.fetch_add(1, Ordering::SeqCst);
-            },
-            |_| {},
-        );
+        session
+            .query(
+                "home/temp",
+                QueryOptions::get().with_allowed_destination(Locality::Remote),
+                &clock,
+                move |_| {
+                    r.fetch_add(1, Ordering::SeqCst);
+                },
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
 
         assert_eq!(
             fired.load(Ordering::SeqCst),
@@ -5234,13 +5265,15 @@ mod tests {
         // Pins the R240 short-circuit invariant at the Session
         // level.
         let (session, driver) = build_session();
-        session.query(
-            "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::Remote),
-            &clock,
-            |_| {},
-            |_| {},
-        );
+        session
+            .query(
+                "home/temp",
+                QueryOptions::get().with_allowed_destination(Locality::Remote),
+                &clock,
+                |_| {},
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
         let session_frame = driver.frames.lock().unwrap()[0].0.clone();
 
         // Mirror the call against an independent recording driver +
@@ -5269,15 +5302,17 @@ mod tests {
         // between QueryOptions.target → QueryMetadata.target →
         // RequestQueryBuilder::request_target.
         let (session, driver) = build_session();
-        session.query(
-            "home/temp",
-            QueryOptions::get()
-                .with_allowed_destination(Locality::Remote)
-                .with_target(QueryTarget::AllComplete),
-            &clock,
-            |_| {},
-            |_| {},
-        );
+        session
+            .query(
+                "home/temp",
+                QueryOptions::get()
+                    .with_allowed_destination(Locality::Remote)
+                    .with_target(QueryTarget::AllComplete),
+                &clock,
+                |_| {},
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
 
         // Re-encode an equivalent standalone Request with target=All
         // and assert the wire bytes appear verbatim in the recorded
@@ -5299,15 +5334,17 @@ mod tests {
     fn query_wire_branch_with_attachment_threads_attachment_through_with_meta() {
         let clock = TokioTime::new();
         let (session, driver) = build_session();
-        session.query(
-            "home/temp",
-            QueryOptions::get()
-                .with_allowed_destination(Locality::Remote)
-                .with_attachment(b"q-att".to_vec()),
-            &clock,
-            |_| {},
-            |_| {},
-        );
+        session
+            .query(
+                "home/temp",
+                QueryOptions::get()
+                    .with_allowed_destination(Locality::Remote)
+                    .with_attachment(b"q-att".to_vec()),
+                &clock,
+                |_| {},
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
 
         use crate::session_glue::build_request_query_with_attachment;
         let standalone = build_request_query_with_attachment(0, 0, Some("home/temp"), b"q-att");
@@ -5325,15 +5362,17 @@ mod tests {
     fn query_wire_branch_with_consolidation_threads_consolidation_through_with_meta() {
         let clock = TokioTime::new();
         let (session, driver) = build_session();
-        session.query(
-            "home/temp",
-            QueryOptions::get()
-                .with_allowed_destination(Locality::Remote)
-                .with_consolidation(ConsolidationMode::Latest),
-            &clock,
-            |_| {},
-            |_| {},
-        );
+        session
+            .query(
+                "home/temp",
+                QueryOptions::get()
+                    .with_allowed_destination(Locality::Remote)
+                    .with_consolidation(ConsolidationMode::Latest),
+                &clock,
+                |_| {},
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
 
         use crate::session_glue::build_request_query_with_consolidation;
         let standalone = build_request_query_with_consolidation(
@@ -5360,17 +5399,19 @@ mod tests {
         // meta extraction happens regardless but the actions surface
         // is never invoked.
         let (session, driver) = build_session();
-        session.query(
-            "home/temp",
-            QueryOptions::get()
-                .with_allowed_destination(Locality::SessionLocal)
-                .with_target(QueryTarget::All)
-                .with_attachment(b"q-att".to_vec())
-                .with_timeout_ms(1_000),
-            &clock,
-            |_| {},
-            |_| {},
-        );
+        session
+            .query(
+                "home/temp",
+                QueryOptions::get()
+                    .with_allowed_destination(Locality::SessionLocal)
+                    .with_target(QueryTarget::All)
+                    .with_attachment(b"q-att".to_vec())
+                    .with_timeout_ms(1_000),
+                &clock,
+                |_| {},
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
         assert_eq!(
             driver.frame_count(),
             0,
@@ -5398,19 +5439,21 @@ mod tests {
 
         let r = reply_count.clone();
         let f = final_count.clone();
-        session.query_aliased(
-            7,
-            None,
-            "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-            &clock,
-            move |_reply| {
-                r.fetch_add(1, Ordering::SeqCst);
-            },
-            move |_rid| {
-                f.fetch_add(1, Ordering::SeqCst);
-            },
-        );
+        session
+            .query_aliased(
+                7,
+                None,
+                "home/temp",
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                &clock,
+                move |_reply| {
+                    r.fetch_add(1, Ordering::SeqCst);
+                },
+                move |_rid| {
+                    f.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .expect("query-get feature is ON in this test build");
 
         assert_eq!(reply_count.load(Ordering::SeqCst), 1);
         assert_eq!(final_count.load(Ordering::SeqCst), 1);
@@ -5421,15 +5464,17 @@ mod tests {
     fn query_aliased_locality_remote_fires_wire_with_mapping_id() {
         let clock = TokioTime::new();
         let (session, driver) = build_session();
-        session.query_aliased(
-            7,
-            None,
-            "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::Remote),
-            &clock,
-            |_| {},
-            |_| {},
-        );
+        session
+            .query_aliased(
+                7,
+                None,
+                "home/temp",
+                QueryOptions::get().with_allowed_destination(Locality::Remote),
+                &clock,
+                |_| {},
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
         assert_eq!(driver.frame_count(), 1, "wire frame emitted");
 
         // Verify the recorded frame is byte-equivalent to a standalone
@@ -5463,20 +5508,22 @@ mod tests {
 
         let r = reply_count.clone();
         let f = final_count.clone();
-        session.query_aliased(
-            7,
-            None,
-            "home/temp",
-            QueryOptions::get(),
-            &clock,
-            // Any
-            move |_| {
-                r.fetch_add(1, Ordering::SeqCst);
-            },
-            move |_| {
-                f.fetch_add(1, Ordering::SeqCst);
-            },
-        );
+        session
+            .query_aliased(
+                7,
+                None,
+                "home/temp",
+                QueryOptions::get(),
+                &clock,
+                // Any
+                move |_| {
+                    r.fetch_add(1, Ordering::SeqCst);
+                },
+                move |_| {
+                    f.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .expect("query-get feature is ON in this test build");
 
         assert_eq!(reply_count.load(Ordering::SeqCst), 1, "loopback fires");
         assert_eq!(
@@ -5503,17 +5550,19 @@ mod tests {
             },
         );
 
-        session.query_aliased(
-            7,
-            Some("/kitchen"),
-            "home/temp/kitchen",
-            QueryOptions::get(),
-            &clock,
-            move |reply| {
-                *cap_cb.lock().unwrap() = Some(reply.clone());
-            },
-            |_| {},
-        );
+        session
+            .query_aliased(
+                7,
+                Some("/kitchen"),
+                "home/temp/kitchen",
+                QueryOptions::get(),
+                &clock,
+                move |reply| {
+                    *cap_cb.lock().unwrap() = Some(reply.clone());
+                },
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
 
         let got = captured
             .lock()
@@ -5640,17 +5689,19 @@ mod tests {
     fn query_aliased_with_meta_threads_attachment_through_wire() {
         let clock = TokioTime::new();
         let (session, driver) = build_session();
-        session.query_aliased(
-            7,
-            None,
-            "home/temp",
-            QueryOptions::get()
-                .with_allowed_destination(Locality::Remote)
-                .with_attachment(b"q-att".to_vec()),
-            &clock,
-            |_| {},
-            |_| {},
-        );
+        session
+            .query_aliased(
+                7,
+                None,
+                "home/temp",
+                QueryOptions::get()
+                    .with_allowed_destination(Locality::Remote)
+                    .with_attachment(b"q-att".to_vec()),
+                &clock,
+                |_| {},
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
 
         use crate::session_glue::build_request_query_with_attachment;
         let standalone = build_request_query_with_attachment(0, 7, None, b"q-att");
@@ -5730,15 +5781,17 @@ mod tests {
         );
         let r = reply_count.clone();
         let f = final_count.clone();
-        querier.get(
-            &clock,
-            move |_| {
-                r.fetch_add(1, Ordering::SeqCst);
-            },
-            move |_| {
-                f.fetch_add(1, Ordering::SeqCst);
-            },
-        );
+        querier
+            .get(
+                &clock,
+                move |_| {
+                    r.fetch_add(1, Ordering::SeqCst);
+                },
+                move |_| {
+                    f.fetch_add(1, Ordering::SeqCst);
+                },
+            )
+            .expect("query-get feature is ON in this test build");
 
         assert_eq!(reply_count.load(Ordering::SeqCst), 1);
         assert_eq!(final_count.load(Ordering::SeqCst), 1);
@@ -5753,8 +5806,12 @@ mod tests {
             "home/temp",
             QueryOptions::get().with_allowed_destination(Locality::Remote),
         );
-        let h0 = querier.get(&clock, |_| {}, |_| {});
-        let h1 = querier.get(&clock, |_| {}, |_| {});
+        let h0 = querier
+            .get(&clock, |_| {}, |_| {})
+            .expect("query-get feature is ON in this test build");
+        let h1 = querier
+            .get(&clock, |_| {}, |_| {})
+            .expect("query-get feature is ON in this test build");
         assert_eq!(h0.rid(), 0);
         assert_eq!(
             h1.rid(),
@@ -5785,7 +5842,9 @@ mod tests {
                 .with_allowed_destination(Locality::Remote)
                 .with_target(QueryTarget::All),
         );
-        querier.get(&clock, |_| {}, |_| {});
+        querier
+            .get(&clock, |_| {}, |_| {})
+            .expect("query-get feature is ON in this test build");
 
         use crate::session_glue::build_request_query_with_target;
         let standalone = build_request_query_with_target(0, 0, Some("home/temp"), QueryTarget::All);
@@ -5812,8 +5871,13 @@ mod tests {
         );
         // Both clones can issue independent gets — verify by emitting
         // through both and checking the pending count.
-        let q1 = querier.clone().get(&clock, |_| {}, |_| {});
-        let q2 = clone.get(&clock, |_| {}, |_| {});
+        let q1 = querier
+            .clone()
+            .get(&clock, |_| {}, |_| {})
+            .expect("query-get feature is ON in this test build");
+        let q2 = clone
+            .get(&clock, |_| {}, |_| {})
+            .expect("query-get feature is ON in this test build");
         assert_eq!(q1.rid(), 0);
         assert_eq!(q2.rid(), 1, "clones share the same rid allocator");
     }
@@ -6968,15 +7032,17 @@ mod tests {
 
         let replies = Arc::new(AtomicUsize::new(0));
         let r = replies.clone();
-        session.query(
-            "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-            &clock,
-            move |_reply| {
-                r.fetch_add(1, Ordering::SeqCst);
-            },
-            |_| {},
-        );
+        session
+            .query(
+                "home/temp",
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                &clock,
+                move |_reply| {
+                    r.fetch_add(1, Ordering::SeqCst);
+                },
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
 
         assert_eq!(fired.load(Ordering::SeqCst), 1);
         assert_eq!(replies.load(Ordering::SeqCst), 1);
@@ -6997,24 +7063,28 @@ mod tests {
                     responder.reply(b"22.5");
                 },
             );
-            session.query(
+            session
+                .query(
+                    "home/temp",
+                    QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                    &clock,
+                    |_| {},
+                    |_| {},
+                )
+                .expect("query-get feature is ON in this test build");
+            assert_eq!(fired.load(Ordering::SeqCst), 1, "first query fires");
+        } // Drop unregisters
+
+        // Second query: no queryable matches.
+        session
+            .query(
                 "home/temp",
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
                 &clock,
                 |_| {},
                 |_| {},
-            );
-            assert_eq!(fired.load(Ordering::SeqCst), 1, "first query fires");
-        } // Drop unregisters
-
-        // Second query: no queryable matches.
-        session.query(
-            "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-            &clock,
-            |_| {},
-            |_| {},
-        );
+            )
+            .expect("query-get feature is ON in this test build");
         assert_eq!(
             fired.load(Ordering::SeqCst),
             1,
@@ -7045,13 +7115,15 @@ mod tests {
             },
         );
 
-        session.query(
-            "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-            &clock,
-            |_| {},
-            |_| {},
-        );
+        session
+            .query(
+                "home/temp",
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                &clock,
+                |_| {},
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
         assert_eq!(
             fired.load(Ordering::SeqCst),
             0,
@@ -7082,13 +7154,15 @@ mod tests {
             .expect("declared mapping resolves");
         assert_eq!(q.keyexpr(), "home/temp");
 
-        session.query(
-            "home/temp",
-            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-            &clock,
-            |_| {},
-            |_| {},
-        );
+        session
+            .query(
+                "home/temp",
+                QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+                &clock,
+                |_| {},
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 
