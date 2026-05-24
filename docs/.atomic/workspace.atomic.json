@@ -17902,6 +17902,56 @@
         "R311u+ — QueryEvent.attachment extraction from Query.extensions chain (currently always None as carried-forward parity with pre-R311r QueryResponder)."
       ]
     },
+    "Round 311s": {
+      "decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs: `pub mod reply` ungated (drop `#[cfg(feature = \"query-reply\")]`). Module doc-comment updated to explain the type-ungating shape — wire-dispatch / wire-emit terminal steps stay cfg-gated on the corresponding codec features (codec-response / codec-response-final) so feature-OFF builds elide them naturally.",
+        "crates/wz-runtime-tokio/src/reply.rs: `dispatch_messages` body's `NetworkMessage::Response(resp)` match arm cfg-gated on `codec-response`; `NetworkMessage::ResponseFinal(rf)` arm stays gated on `codec-response-final` as before. Unused `peer_keyexpr_table` silenced via `let _ = peer_keyexpr_table;` in the OFF arm (signature-stability per R311g1). `ReplyHandle::sentinel()` constructor added (cfg-gated on `not(feature = \"query-get\")`) so `Session::query`'s OFF fall-through has a stable sentinel return.",
+        "crates/wz-runtime-tokio/src/observer.rs: `pub replies: ReplyRegistry` field + `use crate::reply::ReplyRegistry` import + the `ApplicationLayerObserver::new()` `replies` init all ungated. Dispatch fan-out at `dispatch_event` and the bounded `query-reply` gate path stay in place where wire-emit + register paths are exercised; the field is always allocated empty so callers can hold a stable observer slot across feature subsets.",
+        "crates/wz-runtime-tokio/src/session.rs: 7 `#[cfg(feature = \"query-get\")]` gates dropped — `use wz_codecs::query::Query` (already conditional on its own narrower gate); `use wz_runtime_core::TimeSource` (ungated for the type-ungated generic bound); `use crate::query::QueryReply` (stays gated; only inside cfg-gated query body); `use crate::reply::{InboundReply, ReplyHandle}` (ungated for type-ungated Session::query signature); `use crate::session_glue::QueryMetadata` (stays gated; only inside cfg-gated query body). `Session::query` signature type-ungated; body wrapped in `#[cfg(feature = \"query-get\")] { ... }` block with `#[cfg(not(feature = \"query-get\"))] return ReplyHandle::sentinel();` fall-through. `Session::query_aliased` same shape. `Session::query_aliased_auto` body cfg-wrapped with `Err(QueryAliasError::FeatureDisabled)` fall-through (the existing Result return type means no callsite churn for the FeatureDisabled addition). `Session::declare_querier` + `declare_querier_aliased` ungated (bodies are aggregator-only with no observer access). `pub struct Querier` + `pub struct QuerierAliased` + their impls all ungated. `pub enum QueryAliasError` ungated + gains `FeatureDisabled` variant + Display arm.",
+        "crates/wz-runtime-tokio/src/reply.rs: ReplyHandle::sentinel constructor doc-comment explains the rid=0 out-of-band signal + crate-private rationale + the cfg-gate that prevents dead-code lint when query-get is ON. Future Result-form transition is documented in the QueryAliasError::FeatureDisabled doc-comment so callers know the variant exists but is currently only reachable through query_aliased_auto's OFF branch."
+      ],
+      "verification_bullets": [
+        "cargo check workspace --all-targets default features OK; no-default-features OK; preset-mcu-minimal + preset-ap-full presets OK.",
+        "cargo test --workspace: 761 passed / 0 failed (baseline preserved across the reply module + Querier cascade).",
+        "cargo clippy --workspace --all-targets: clean after one doc_lazy_continuation lint reword on the QuerierAliased struct doc-comment.",
+        "cargo fmt --all --check: clean after one minor reformatting pass (the cfg-wrap nested braces in Session::query / query_aliased / query_aliased_auto bodies).",
+        "Layer E 30-trial flake-0: wz_publisher_to_zsub 30/30, wz_liveliness_subscriber_round_trip 30/30, wz_queryable_round_trip 30/30."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "carry_forward_bullets": [
+        "R311t — wz-ap-demo cfg sweep + R311n measurement script 재실행 (SKIP→pass lane promote 정량 확인).",
+        "R311u+ — Session::query Result-form transition (결정 시 22-callsite churn + Querier::get / QuerierAliased::get Result wrap). Currently stub-form per R311s scope minimisation; QueryAliasError::FeatureDisabled variant pre-positioned for the transition.",
+        "R311u+ — QueryEvent.attachment extraction from Query.extensions chain (carry from R311r)."
+      ],
+      "publishable_decision_summary": "R311s reply module + Querier cascade type-ungate. Querier/QuerierAliased + AliasError + FeatureDisabled ungated; Session::query stub-form fall-through; query_aliased_auto Result with FeatureDisabled.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs: `pub mod reply` ungated (drop `#[cfg(feature = \"query-reply\")]`). Module doc-comment updated to explain the type-ungating shape — wire-dispatch / wire-emit terminal steps stay cfg-gated on the corresponding codec features (codec-response / codec-response-final) so feature-OFF builds elide them naturally.",
+        "crates/wz-runtime-tokio/src/reply.rs: `dispatch_messages` body's `NetworkMessage::Response(resp)` match arm cfg-gated on `codec-response`; `NetworkMessage::ResponseFinal(rf)` arm stays gated on `codec-response-final` as before. Unused `peer_keyexpr_table` silenced via `let _ = peer_keyexpr_table;` in the OFF arm (signature-stability per R311g1). `ReplyHandle::sentinel()` constructor added (cfg-gated on `not(feature = \"query-get\")`) so `Session::query`'s OFF fall-through has a stable sentinel return.",
+        "crates/wz-runtime-tokio/src/observer.rs: `pub replies: ReplyRegistry` field + `use crate::reply::ReplyRegistry` import + the `ApplicationLayerObserver::new()` `replies` init all ungated. Dispatch fan-out at `dispatch_event` and the bounded `query-reply` gate path stay in place where wire-emit + register paths are exercised; the field is always allocated empty so callers can hold a stable observer slot across feature subsets.",
+        "crates/wz-runtime-tokio/src/session.rs: 7 `#[cfg(feature = \"query-get\")]` gates dropped — `use wz_codecs::query::Query` (already conditional on its own narrower gate); `use wz_runtime_core::TimeSource` (ungated for the type-ungated generic bound); `use crate::query::QueryReply` (stays gated; only inside cfg-gated query body); `use crate::reply::{InboundReply, ReplyHandle}` (ungated for type-ungated Session::query signature); `use crate::session_glue::QueryMetadata` (stays gated; only inside cfg-gated query body). `Session::query` signature type-ungated; body wrapped in `#[cfg(feature = \"query-get\")] { ... }` block with `#[cfg(not(feature = \"query-get\"))] return ReplyHandle::sentinel();` fall-through. `Session::query_aliased` same shape. `Session::query_aliased_auto` body cfg-wrapped with `Err(QueryAliasError::FeatureDisabled)` fall-through (the existing Result return type means no callsite churn for the FeatureDisabled addition). `Session::declare_querier` + `declare_querier_aliased` ungated (bodies are aggregator-only with no observer access). `pub struct Querier` + `pub struct QuerierAliased` + their impls all ungated. `pub enum QueryAliasError` ungated + gains `FeatureDisabled` variant + Display arm.",
+        "crates/wz-runtime-tokio/src/reply.rs: ReplyHandle::sentinel constructor doc-comment explains the rid=0 out-of-band signal + crate-private rationale + the cfg-gate that prevents dead-code lint when query-get is ON. Future Result-form transition is documented in the QueryAliasError::FeatureDisabled doc-comment so callers know the variant exists but is currently only reachable through query_aliased_auto's OFF branch."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check workspace --all-targets default features OK; no-default-features OK; preset-mcu-minimal + preset-ap-full presets OK.",
+        "cargo test --workspace: 761 passed / 0 failed (baseline preserved across the reply module + Querier cascade).",
+        "cargo clippy --workspace --all-targets: clean after one doc_lazy_continuation lint reword on the QuerierAliased struct doc-comment.",
+        "cargo fmt --all --check: clean after one minor reformatting pass (the cfg-wrap nested braces in Session::query / query_aliased / query_aliased_auto bodies).",
+        "Layer E 30-trial flake-0: wz_publisher_to_zsub 30/30, wz_liveliness_subscriber_round_trip 30/30, wz_queryable_round_trip 30/30."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311t — wz-ap-demo cfg sweep + R311n measurement script 재실행 (SKIP→pass lane promote 정량 확인).",
+        "R311u+ — Session::query Result-form transition (결정 시 22-callsite churn + Querier::get / QuerierAliased::get Result wrap). Currently stub-form per R311s scope minimisation; QueryAliasError::FeatureDisabled variant pre-positioned for the transition.",
+        "R311u+ — QueryEvent.attachment extraction from Query.extensions chain (carry from R311r)."
+      ]
+    },
     "Round 32": {
       "decision_summary": "B5 codec track continues — sources/codecs/frame.scxml + fragment.scxml authored. First VLE + tail primitive composition (B1-α + tail) plus first inline test-vector land (B5-θ 4-case set). Both share identical body shape per zenoh-pico (sn:VLE + payload:tail, no extensions); differ only in enclosing MID (0x05 Frame / 0x06 Fragment).",
       "changes_bullets": [
