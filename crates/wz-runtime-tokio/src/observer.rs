@@ -112,9 +112,13 @@ use crate::pubsub::SubscriberRegistry;
 // unconditionally so the observer struct shape is stable across
 // consumer-feature subsets.
 use crate::query::{QueryReply, QueryableRegistry};
-// R307 — `crate::reply` is gated on `feature = "query-reply"`; the
-// ReplyRegistry field + its dispatch arm share the gate.
-#[cfg(feature = "query-reply")]
+// R311s — `crate::reply` is type-ungated; the ReplyRegistry field is
+// always present so the type-ungated `Session::query` / `Querier`
+// surface can hold a stable observer-side registration target. The
+// dispatch fan-out and wire-emit drain stay cfg-gated on
+// `query-reply` (the only consumers of the ReplyRegistry's dispatch
+// path are the z_get callbacks, which only exist when the get-side
+// codec features are in).
 use crate::reply::ReplyRegistry;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
 
@@ -175,10 +179,11 @@ pub struct ApplicationLayerObserver {
     /// callbacks (`z_get` consumer). Pending entries auto-unregister
     /// when their matching `ResponseFinal` arrives.
     ///
-    /// R307 — gated on `feature = "query-reply"`. `query-get` implies
-    /// this feature, so any get-capable build still carries the
-    /// ReplyRegistry slot.
-    #[cfg(feature = "query-reply")]
+    /// R311s — type-ungated. The struct is always present so the
+    /// type-ungated `Session::query` / `Querier` surface can register
+    /// pending entries regardless of `query-reply` feature state; the
+    /// feature-OFF build never enters the registration path (Session::query's
+    /// body is gated on `query-get` which implies `query-reply`).
     pub replies: ReplyRegistry,
     /// R311r — staging buffers are unconditional so the observer
     /// struct shape is stable across consumer-feature subsets. The
@@ -219,7 +224,10 @@ impl ApplicationLayerObserver {
             // Drop) compile unconditionally even though feature-OFF
             // never reaches the construction path.
             liveliness_subscribers: LivelinessSubscriberRegistry::new(),
-            #[cfg(feature = "query-reply")]
+            // R311s — replies field is type-ungated; the registry is
+            // always constructed (empty) so the type-ungated query
+            // surface can register pending entries even though
+            // feature-OFF never reaches the registration path.
             replies: ReplyRegistry::new(),
             // R311r — staging buffers always allocated; drain path in
             // flush_pending stays cfg-gated on codec-response.

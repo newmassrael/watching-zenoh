@@ -71,10 +71,9 @@ use std::sync::{Arc, Mutex};
 // site.
 #[cfg(feature = "query-get")]
 use wz_codecs::query::Query;
-// R307 — `TimeSource` is the generic-parameter bound on `Session::query`
-// and its aliased variants; it has no other use site in this file so
-// the import follows the same gate as those methods.
-#[cfg(feature = "query-get")]
+// R311s — `TimeSource` is the generic-parameter bound on the
+// type-ungated `Session::query` + `Querier::get` + `QuerierAliased::get`
+// surfaces; the import stays unconditional alongside those methods.
 use wz_runtime_core::TimeSource;
 
 // R311q — `LivelinessSample` is type-ungated because the unconditional
@@ -111,15 +110,11 @@ use crate::query::QueryableId;
 // the type-ungated `Session::declare_queryable{_aliased}` Result-form
 // signatures compile in any consumer-feature subset.
 use crate::query_event::{QueryEvent, ReplyEmitter};
-// R307 — `crate::reply` is gated on `feature = "query-reply"`;
-// `InboundReply` flows into the z_get caller's callback and
-// `ReplyHandle` is the return value of `Session::query`. The bare-
-// name use sites all live behind the `query-get` gate (Session::query
-// signature, Querier::get signature, QuerierAliased::get signature),
-// so the import follows that narrower gate. `query-get` implies
-// `query-reply` per `Cargo.toml::[features]`, so the underlying
-// module is always available where this import is needed.
-#[cfg(feature = "query-get")]
+// R311s — `crate::reply` is type-ungated; `InboundReply` flows into
+// the z_get caller's callback and `ReplyHandle` is the return value
+// of `Session::query`. Both signatures are now type-ungated (the
+// query body falls through to `ReplyHandle::sentinel()` when
+// `query-get` is OFF) so the imports stay unconditional.
 use crate::reply::{InboundReply, ReplyHandle};
 use crate::sample::{
     EncodingHint, QosLevel, Reliability, Sample, SampleKind, SourceInfo, TimestampHint,
@@ -975,8 +970,18 @@ impl Session {
     /// (`query-get` → `query-reply` + `query-queryable`) guarantees
     /// both the `ReplyRegistry` pending-entry registration and the
     /// loopback `QueryableRegistry::local_query` fan are available;
-    /// the body holds no further per-feature cfg.
-    #[cfg(feature = "query-get")]
+    /// the body holds no further per-feature cfg when query-get is ON.
+    ///
+    /// R311s — signature is type-ungated. When `query-get` is OFF the
+    /// body falls through to a sentinel `ReplyHandle(0)` (no wire
+    /// frame, no callback registration, no allocations); this stub
+    /// form matches the R311p send_undeclare_* silent-no-op shape
+    /// and avoids the ~22-callsite Result-form churn that a strict
+    /// FeatureDisabled return would impose. A future round may
+    /// promote the surface to `Result<ReplyHandle, QueryAliasError>`
+    /// once the test callsites are ready for the migration (the
+    /// `QueryAliasError::FeatureDisabled` variant is already in
+    /// place at R311s for the transition).
     pub fn query<T: TimeSource>(
         &self,
         keyexpr: &str,
@@ -985,70 +990,81 @@ impl Session {
         on_reply: impl FnMut(&InboundReply) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> ReplyHandle {
-        let rid = self.actions.alloc_next_request_id();
-        let expected_finals = opts.expected_finals();
-        let allows_remote = opts.allowed_destination.allows_remote();
-        let allows_local = opts.allowed_destination.allows_local();
-        // R262 — compute the absolute monotonic-ms deadline from
-        // `clock.now_monotonic_ms()` + `opts.timeout_ms`. timeout_ms == 0
-        // is the "no timeout" sentinel; the pending entry is registered
-        // with deadline_ms = None and survives every sweep until a
-        // wire/loopback Final arrives. The same clock instance MUST be
-        // used by `drive_session_until_terminal` so the sweep call
-        // shares monotonic epoch with this register-time deadline (see
-        // `drive_session_until_terminal`'s clock parameter doc).
-        let deadline_ms =
-            (opts.timeout_ms > 0).then(|| clock.now_monotonic_ms() + opts.timeout_ms as u64);
-
-        let handle = {
-            let mut observer = self
-                .observer
-                .lock()
-                .expect("Session observer mutex poisoned — a reply callback panicked");
-            let handle =
-                observer
-                    .replies
-                    .register(rid, expected_finals, deadline_ms, on_reply, on_final);
-            if allows_local {
-                let mut replies: Vec<QueryReply> = Vec::new();
-                let query = Query::default();
-                observer
-                    .queryables
-                    .local_query(rid, keyexpr, &query, &mut replies);
-                for reply in replies.drain(..) {
-                    let inbound: InboundReply = reply.into();
-                    observer.replies.deliver_local_reply(&inbound);
-                }
-                // Synthetic Final closes the loopback half of the
-                // pending entry's `remaining_finals` counter so a
-                // SessionLocal-only z_get finalises immediately and a
-                // Locality::Any z_get still needs the peer Final to
-                // finalise (matching zenoh-pico
-                // `_z_session_deliver_query_locally`'s emit-final
-                // step at the tail of the local deliver path).
-                observer.replies.deliver_local_final(rid);
-            }
-            handle
-        };
-
-        if allows_remote {
-            // R240 — thread QueryOptions metadata (target /
-            // consolidation / attachment / timeout_ms) through the
-            // wire branch. The R233 PushMetadata pattern is mirrored
-            // here: empty bundle short-circuits to the no-metadata
-            // builder so the byte-stable
-            // `send_request_query` wire shape stays unchanged for
-            // callers that pass `QueryOptions::default()`.
-            let meta = opts.query_metadata();
-            if meta.is_empty() {
-                self.actions.send_request_query(rid, 0, Some(keyexpr));
-            } else {
-                self.actions
-                    .send_request_query_with_meta(rid, 0, Some(keyexpr), &meta);
-            }
+        #[cfg(not(feature = "query-get"))]
+        {
+            let _ = (keyexpr, opts, clock, on_reply, on_final);
+            return ReplyHandle::sentinel();
         }
+        #[cfg(feature = "query-get")]
+        {
+            let rid = self.actions.alloc_next_request_id();
+            let expected_finals = opts.expected_finals();
+            let allows_remote = opts.allowed_destination.allows_remote();
+            let allows_local = opts.allowed_destination.allows_local();
+            // R262 — compute the absolute monotonic-ms deadline from
+            // `clock.now_monotonic_ms()` + `opts.timeout_ms`. timeout_ms == 0
+            // is the "no timeout" sentinel; the pending entry is registered
+            // with deadline_ms = None and survives every sweep until a
+            // wire/loopback Final arrives. The same clock instance MUST be
+            // used by `drive_session_until_terminal` so the sweep call
+            // shares monotonic epoch with this register-time deadline (see
+            // `drive_session_until_terminal`'s clock parameter doc).
+            let deadline_ms =
+                (opts.timeout_ms > 0).then(|| clock.now_monotonic_ms() + opts.timeout_ms as u64);
 
-        handle
+            let handle = {
+                let mut observer = self
+                    .observer
+                    .lock()
+                    .expect("Session observer mutex poisoned — a reply callback panicked");
+                let handle = observer.replies.register(
+                    rid,
+                    expected_finals,
+                    deadline_ms,
+                    on_reply,
+                    on_final,
+                );
+                if allows_local {
+                    let mut replies: Vec<QueryReply> = Vec::new();
+                    let query = Query::default();
+                    observer
+                        .queryables
+                        .local_query(rid, keyexpr, &query, &mut replies);
+                    for reply in replies.drain(..) {
+                        let inbound: InboundReply = reply.into();
+                        observer.replies.deliver_local_reply(&inbound);
+                    }
+                    // Synthetic Final closes the loopback half of the
+                    // pending entry's `remaining_finals` counter so a
+                    // SessionLocal-only z_get finalises immediately and a
+                    // Locality::Any z_get still needs the peer Final to
+                    // finalise (matching zenoh-pico
+                    // `_z_session_deliver_query_locally`'s emit-final
+                    // step at the tail of the local deliver path).
+                    observer.replies.deliver_local_final(rid);
+                }
+                handle
+            };
+
+            if allows_remote {
+                // R240 — thread QueryOptions metadata (target /
+                // consolidation / attachment / timeout_ms) through the
+                // wire branch. The R233 PushMetadata pattern is mirrored
+                // here: empty bundle short-circuits to the no-metadata
+                // builder so the byte-stable
+                // `send_request_query` wire shape stays unchanged for
+                // callers that pass `QueryOptions::default()`.
+                let meta = opts.query_metadata();
+                if meta.is_empty() {
+                    self.actions.send_request_query(rid, 0, Some(keyexpr));
+                } else {
+                    self.actions
+                        .send_request_query_with_meta(rid, 0, Some(keyexpr), &meta);
+                }
+            }
+
+            handle
+        }
     }
 
     /// R241 — aliased-keyexpr counterpart of [`Session::query`].
@@ -1093,10 +1109,9 @@ impl Session {
     /// metadata bundle, clock is the R262 deadline source, and the
     /// two closures are the on_reply / on_final consumer callbacks.
     ///
-    /// R307 — gated on `feature = "query-get"`. Same rationale as
-    /// [`Self::query`]; the aliased variant shares the same wire +
-    /// loopback dispatch contract.
-    #[cfg(feature = "query-get")]
+    /// R311s — signature type-ungated alongside [`Self::query`]; same
+    /// stub fall-through to `ReplyHandle::sentinel()` when `query-get`
+    /// is OFF (no wire frame, no callback registration).
     #[allow(clippy::too_many_arguments)]
     pub fn query_aliased<T: TimeSource>(
         &self,
@@ -1108,52 +1123,75 @@ impl Session {
         on_reply: impl FnMut(&InboundReply) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> ReplyHandle {
-        let rid = self.actions.alloc_next_request_id();
-        let expected_finals = opts.expected_finals();
-        let allows_remote = opts.allowed_destination.allows_remote();
-        let allows_local = opts.allowed_destination.allows_local();
-        // R262 — same deadline_ms computation as `Session::query`.
-        // The clock must share monotonic epoch with the sweep caller
-        // (typically `drive_session_until_terminal`).
-        let deadline_ms =
-            (opts.timeout_ms > 0).then(|| clock.now_monotonic_ms() + opts.timeout_ms as u64);
-
-        let handle = {
-            let mut observer = self
-                .observer
-                .lock()
-                .expect("Session observer mutex poisoned — a reply callback panicked");
-            let handle =
-                observer
-                    .replies
-                    .register(rid, expected_finals, deadline_ms, on_reply, on_final);
-            if allows_local {
-                let mut replies: Vec<QueryReply> = Vec::new();
-                let query = Query::default();
-                observer
-                    .queryables
-                    .local_query(rid, loopback_keyexpr, &query, &mut replies);
-                for reply in replies.drain(..) {
-                    let inbound: InboundReply = reply.into();
-                    observer.replies.deliver_local_reply(&inbound);
-                }
-                observer.replies.deliver_local_final(rid);
-            }
-            handle
-        };
-
-        if allows_remote {
-            let meta = opts.query_metadata();
-            if meta.is_empty() {
-                self.actions
-                    .send_request_query(rid, mapping_id, inline_suffix);
-            } else {
-                self.actions
-                    .send_request_query_with_meta(rid, mapping_id, inline_suffix, &meta);
-            }
+        #[cfg(not(feature = "query-get"))]
+        {
+            let _ = (
+                mapping_id,
+                inline_suffix,
+                loopback_keyexpr,
+                opts,
+                clock,
+                on_reply,
+                on_final,
+            );
+            return ReplyHandle::sentinel();
         }
+        #[cfg(feature = "query-get")]
+        {
+            let rid = self.actions.alloc_next_request_id();
+            let expected_finals = opts.expected_finals();
+            let allows_remote = opts.allowed_destination.allows_remote();
+            let allows_local = opts.allowed_destination.allows_local();
+            // R262 — same deadline_ms computation as `Session::query`.
+            // The clock must share monotonic epoch with the sweep caller
+            // (typically `drive_session_until_terminal`).
+            let deadline_ms =
+                (opts.timeout_ms > 0).then(|| clock.now_monotonic_ms() + opts.timeout_ms as u64);
 
-        handle
+            let handle = {
+                let mut observer = self
+                    .observer
+                    .lock()
+                    .expect("Session observer mutex poisoned — a reply callback panicked");
+                let handle = observer.replies.register(
+                    rid,
+                    expected_finals,
+                    deadline_ms,
+                    on_reply,
+                    on_final,
+                );
+                if allows_local {
+                    let mut replies: Vec<QueryReply> = Vec::new();
+                    let query = Query::default();
+                    observer
+                        .queryables
+                        .local_query(rid, loopback_keyexpr, &query, &mut replies);
+                    for reply in replies.drain(..) {
+                        let inbound: InboundReply = reply.into();
+                        observer.replies.deliver_local_reply(&inbound);
+                    }
+                    observer.replies.deliver_local_final(rid);
+                }
+                handle
+            };
+
+            if allows_remote {
+                let meta = opts.query_metadata();
+                if meta.is_empty() {
+                    self.actions
+                        .send_request_query(rid, mapping_id, inline_suffix);
+                } else {
+                    self.actions.send_request_query_with_meta(
+                        rid,
+                        mapping_id,
+                        inline_suffix,
+                        &meta,
+                    );
+                }
+            }
+
+            handle
+        }
     }
 
     /// R241 — auto-resolved counterpart of [`Self::query_aliased`].
@@ -1176,9 +1214,16 @@ impl Session {
     /// the mapping or falls back to [`Self::query_aliased`] with an
     /// explicit `loopback_keyexpr`.
     ///
-    /// R307 — gated on `feature = "query-get"`. Same rationale as
-    /// [`Self::query`].
-    #[cfg(feature = "query-get")]
+    /// R311s — signature type-ungated alongside the Querier surface.
+    /// The body cfg-gates on `query-get`; the feature-OFF path
+    /// returns `Err(QueryAliasError::FeatureDisabled)` so callers
+    /// can branch uniformly across builds. This is the Result-form
+    /// counterpart to `Session::query`'s stub-form fall-through —
+    /// the aliased variant already returned Result (for
+    /// UnknownMapping signaling), so adding the FeatureDisabled
+    /// variant here is non-breaking for existing callers that match
+    /// the Result exhaustively (the enum was #[non_exhaustive]-like
+    /// in practice; the new variant just expands the match scope).
     pub fn query_aliased_auto<T: TimeSource>(
         &self,
         mapping_id: u64,
@@ -1188,27 +1233,35 @@ impl Session {
         on_reply: impl FnMut(&InboundReply) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
-        let base = self
-            .actions
-            .resolve_outbound_mapping(mapping_id)
-            .ok_or(QueryAliasError::UnknownMapping(mapping_id))?;
-        let loopback_keyexpr = match inline_suffix {
-            None => base,
-            Some(s) => {
-                let mut composed = base;
-                composed.push_str(s);
-                composed
-            }
-        };
-        Ok(self.query_aliased(
-            mapping_id,
-            inline_suffix,
-            &loopback_keyexpr,
-            opts,
-            clock,
-            on_reply,
-            on_final,
-        ))
+        #[cfg(not(feature = "query-get"))]
+        {
+            let _ = (mapping_id, inline_suffix, opts, clock, on_reply, on_final);
+            return Err(QueryAliasError::FeatureDisabled);
+        }
+        #[cfg(feature = "query-get")]
+        {
+            let base = self
+                .actions
+                .resolve_outbound_mapping(mapping_id)
+                .ok_or(QueryAliasError::UnknownMapping(mapping_id))?;
+            let loopback_keyexpr = match inline_suffix {
+                None => base,
+                Some(s) => {
+                    let mut composed = base;
+                    composed.push_str(s);
+                    composed
+                }
+            };
+            Ok(self.query_aliased(
+                mapping_id,
+                inline_suffix,
+                &loopback_keyexpr,
+                opts,
+                clock,
+                on_reply,
+                on_final,
+            ))
+        }
     }
 
     /// R242 — declare a reusable [`Querier`] bound to `keyexpr` +
@@ -1230,11 +1283,13 @@ impl Session {
     /// hands a fresh rid per call so concurrent gets through the
     /// same Querier remain independent.
     ///
-    /// R307 — gated on `feature = "query-get"`. The returned
-    /// [`Querier`] type itself carries the same gate; declaring a
-    /// querier without the feature would yield an unconstructible
-    /// handle.
-    #[cfg(feature = "query-get")]
+    /// R311s — type-ungated. The body is a pure aggregator (no
+    /// observer access, no wire emit) so the constructor compiles
+    /// regardless of `query-get` feature state. Calling
+    /// [`Querier::get`] on the returned handle without `query-get`
+    /// hits the stub-form fall-through inside
+    /// [`Session::query`] which returns a sentinel
+    /// `ReplyHandle(0)` (no wire frame, no callback registration).
     pub fn declare_querier(&self, keyexpr: impl Into<String>, options: QueryOptions) -> Querier {
         Querier {
             session: self.clone(),
@@ -1253,8 +1308,10 @@ impl Session {
     /// on the peer is the caller's earlier responsibility; this
     /// constructor only aggregates state on the caller side.
     ///
-    /// R307 — gated on `feature = "query-get"`.
-    #[cfg(feature = "query-get")]
+    /// R311s — type-ungated alongside [`Self::declare_querier`]; body
+    /// is aggregator-only with no observer / wire dependency. The
+    /// aliased querier's `.get` path stub-falls-through the same
+    /// `Session::query_aliased` stub when `query-get` is OFF.
     pub fn declare_querier_aliased(
         &self,
         mapping_id: u64,
@@ -1964,19 +2021,29 @@ impl Session {
 /// hands replies to a pending entry the application never
 /// registered for the correct keyexpr.
 ///
-/// R307 — gated on `feature = "query-get"`. Returned by
-/// [`Session::query_aliased_auto`] / [`QuerierAliased::get`] which
-/// both compile under the same feature.
-#[cfg(feature = "query-get")]
+/// R311s — type-ungated alongside the Querier surface; gains a
+/// `FeatureDisabled` variant for surface consistency with the
+/// LivelinessSubscriberAliasError + QueryableAliasError families
+/// (R311q/R311r). Currently unused by the type-ungated declare /
+/// query paths (those use the stub-form fall-through to a sentinel
+/// `ReplyHandle(0)` rather than returning `Err(FeatureDisabled)`);
+/// the variant exists for the future round that may switch
+/// `Session::query` and `Querier::get` to Result-form for callsite
+/// stability across the 48 internal call sites.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryAliasError {
     /// No prior `send_declare_keyexpr` registered this id on the
     /// outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it). The wrapped value is the offending mapping id.
     UnknownMapping(u64),
+    /// R311s — the `query-get` feature is OFF at compile time.
+    /// Reserved for a future Result-form transition (R311s minimal
+    /// scope keeps the stub-form fall-through to a sentinel handle
+    /// for callsite stability; this variant lets callers branch on
+    /// FeatureDisabled uniformly once the transition lands).
+    FeatureDisabled,
 }
 
-#[cfg(feature = "query-get")]
 impl std::fmt::Display for QueryAliasError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1985,11 +2052,15 @@ impl std::fmt::Display for QueryAliasError {
                 "QueryAliasError: mapping id {id} not present in outbound table; \
                  call SessionLinkActions::send_declare_keyexpr({id}, …) first"
             ),
+            QueryAliasError::FeatureDisabled => write!(
+                f,
+                "QueryAliasError: query-get feature is OFF at compile time; the \
+                 outbound query / reply-registry paths are elided on this build"
+            ),
         }
     }
 }
 
-#[cfg(feature = "query-get")]
 impl std::error::Error for QueryAliasError {}
 
 /// R242 — reusable query target with pre-set keyexpr + options.
@@ -2016,9 +2087,14 @@ impl std::error::Error for QueryAliasError {}
 /// declare-time matching_status callback hook) without breaking
 /// callers. Construct only through [`Session::declare_querier`].
 ///
-/// R307 — gated on `feature = "query-get"`. The struct embeds a
-/// [`QueryOptions`] field which itself carries the same gate.
-#[cfg(feature = "query-get")]
+/// R311s — type-ungated. The struct + impl are always defined so
+/// callers can hold a `Querier` value across builds; the `.get()`
+/// method internally calls [`Session::query`] whose body falls
+/// through to a sentinel `ReplyHandle(0)` when `query-get` is OFF
+/// (no wire frame, no callback registration). The aggregator-only
+/// body of [`Session::declare_querier`] means no observer access
+/// happens at construction, so the type stays usable across all
+/// consumer-feature subsets.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct Querier {
@@ -2027,7 +2103,6 @@ pub struct Querier {
     options: QueryOptions,
 }
 
-#[cfg(feature = "query-get")]
 impl Querier {
     /// Borrow the declared keyexpr. The literal form supplied to
     /// [`Session::declare_querier`]; identical to what each
@@ -2165,9 +2240,10 @@ pub struct MatchingStatus {
 /// `#[non_exhaustive]`. Construct only through
 /// [`Session::declare_querier_aliased`].
 ///
-/// R307 — gated on `feature = "query-get"`. The embedded
-/// [`QueryOptions`] field carries the same gate.
-#[cfg(feature = "query-get")]
+/// R311s — type-ungated. Same shape as [`Querier`] with mapping id
+/// alongside inline suffix added; aggregator-only construction means
+/// the struct is always usable regardless of `query-get` feature
+/// state.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct QuerierAliased {
@@ -2177,7 +2253,6 @@ pub struct QuerierAliased {
     options: QueryOptions,
 }
 
-#[cfg(feature = "query-get")]
 impl QuerierAliased {
     /// The declared mapping id. Must have been previously registered
     /// via [`SessionLinkActions::send_declare_keyexpr`] for

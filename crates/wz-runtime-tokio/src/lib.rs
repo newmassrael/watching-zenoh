@@ -122,13 +122,13 @@ pub mod declare;
 /// terminates the chain" semantics). See `reply` module doc comment
 /// for scope, callback shape, and threading.
 ///
-/// R307 — module-level gate on `feature = "query-reply"`. The
-/// `query-get` feature pulls this transitively because
-/// `Session::get` registers a pending entry against
-/// [`reply::ReplyRegistry`]; consumers that only declare queryables
-/// (no `Session::get`) can disable both `query-get` and
-/// `query-reply` and have the module elided entirely.
-#[cfg(feature = "query-reply")]
+/// R311s — module is type-ungated. The `ReplyRegistry` struct, the
+/// `InboundReply` projection, the `ReplyHandle` opaque, and the
+/// supporting types are always defined so the type-ungated
+/// `Session::query` / `Querier` surface compiles unconditionally; the
+/// wire-dispatch / wire-emit terminal steps inside reply.rs stay
+/// cfg-gated on the corresponding codec features (codec-response /
+/// codec-response-final) so feature-OFF builds elide them naturally.
 pub mod reply;
 
 /// R121k-7 — application-layer observer bundle. Combines the six
