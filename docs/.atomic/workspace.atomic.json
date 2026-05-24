@@ -16672,6 +16672,64 @@
         "Architectural carries unchanged: R284 uniform Established gate (3-5R), R283 peer Interest bilateral (2-3R), R267 Session<R,T> reparam (3-7R), R301 §8 SCE cross-repo (3-7R), Q_B/Q_E codec slots (5-10R), Phase W full lwIP (20-50R), R299 #2/#3, R300 narrow (1R), R301 §7 cargo wz-config tool (3-5R), R304 wz-ap-demo stderr non-UTF-8 (1R), keyexpr_canon proptest filter hole (1R)."
       ]
     },
+    "Round 311a2": {
+      "decision_summary": "R311a2 cfg-gates session_glue.rs init_body / open_body use sites (2 imports + 2 pub encode_*_with_role + 2 fn encode_*); --no-default-features failure now localized to R311a3 parse/match arm territory.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs:77 — `#[cfg(feature = \"codec-init-body\")]` on `use wz_codecs::init_body::InitBody;`.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:84 — `#[cfg(feature = \"codec-open-body\")]` on `use wz_codecs::open_body::OpenBody;`.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1020 — `#[cfg(feature = \"codec-init-body\")]` on `pub fn encode_init_with_role` (SessionLinkActions method).",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1041 — `#[cfg(feature = \"codec-open-body\")]` on `pub fn encode_open_with_role`.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:2316 — `#[cfg(feature = \"codec-init-body\")]` on free `fn encode_init` helper.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:2380 — `#[cfg(feature = \"codec-open-body\")]` on free `fn encode_open` helper."
+      ],
+      "verification_bullets": [
+        "`cargo check -p wz-runtime-tokio` default: pass.",
+        "`cargo check -p wz-runtime-tokio --features codec-init-body` / `--features codec-open-body` (each alone, default-features=true): pass.",
+        "`cargo test -p wz-runtime-tokio --lib`: 589/589 pass.",
+        "`cargo check --workspace`: pass.",
+        "`cargo fmt --all -- --check` clean. `cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings` clean.",
+        "`cargo check -p wz-runtime-tokio --no-default-features`: still FAILS (intended). Failure scope now localized to R311a3 territory: `parse_inbound` `InitBody`/`OpenBody` direct type refs, `InboundFrame::Init { body, .. }` match arms, callers of `encode_*_with_role` (send_init_syn / send_init_ack_with_cookie etc.). R311a1 + R311a2 alone are NOT a valid intermediate release point — R311a3 is the closure round.",
+        "validate_workspace: T1=0, RT 13/13, entries 316 → 317, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311a3 (next): cfg-gate `InboundFrame::Init { is_ack: bool, body: init_body::InitBody, .. }` enum variant on `codec-init-body` (body field carries init_body type). `parse_inbound` Init arm. `handle_inbound::InboundFrame::Init` match arms. FSM event derivation `InitSynReceived` / `InitAckReceived`. debug-name match. Callers of `encode_init_with_role` / `encode_open_with_role` (send_init_syn / send_init_ack_with_cookie / send_open_syn / send_open_ack_with_cookie). 1-2R. Verification: --no-default-features pass / Layer E 30-trial flake-0 mandatory.",
+        "R311a4 (deferred): wz facade Cargo.toml `?-syntax` forward + Footprint binary-size delta measurement.",
+        "R303++ carry: feature_inventory 39 outline-only sub-sections atomic-field population.",
+        "R310.5c carry: get_matching_status conservative-false doc-surface decision (0.5R).",
+        "Architectural carries unchanged: R284, R283, R267, R301 §8, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311a2 cfg-gates session_glue.rs init_body / open_body use sites (2 imports + 2 pub encode_*_with_role + 2 fn encode_*); --no-default-features failure now localized to R311a3 parse/match arm territory.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs:77 — `#[cfg(feature = \"codec-init-body\")]` on `use wz_codecs::init_body::InitBody;`.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:84 — `#[cfg(feature = \"codec-open-body\")]` on `use wz_codecs::open_body::OpenBody;`.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1020 — `#[cfg(feature = \"codec-init-body\")]` on `pub fn encode_init_with_role` (SessionLinkActions method).",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1041 — `#[cfg(feature = \"codec-open-body\")]` on `pub fn encode_open_with_role`.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:2316 — `#[cfg(feature = \"codec-init-body\")]` on free `fn encode_init` helper.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:2380 — `#[cfg(feature = \"codec-open-body\")]` on free `fn encode_open` helper."
+      ],
+      "publishable_verification_bullets": [
+        "`cargo check -p wz-runtime-tokio` default: pass.",
+        "`cargo check -p wz-runtime-tokio --features codec-init-body` / `--features codec-open-body` (each alone, default-features=true): pass.",
+        "`cargo test -p wz-runtime-tokio --lib`: 589/589 pass.",
+        "`cargo check --workspace`: pass.",
+        "`cargo fmt --all -- --check` clean. `cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings` clean.",
+        "`cargo check -p wz-runtime-tokio --no-default-features`: still FAILS (intended). Failure scope now localized to R311a3 territory: `parse_inbound` `InitBody`/`OpenBody` direct type refs, `InboundFrame::Init { body, .. }` match arms, callers of `encode_*_with_role` (send_init_syn / send_init_ack_with_cookie etc.). R311a1 + R311a2 alone are NOT a valid intermediate release point — R311a3 is the closure round.",
+        "validate_workspace: T1=0, RT 13/13, entries 316 → 317, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311a3 (next): cfg-gate `InboundFrame::Init { is_ack: bool, body: init_body::InitBody, .. }` enum variant on `codec-init-body` (body field carries init_body type). `parse_inbound` Init arm. `handle_inbound::InboundFrame::Init` match arms. FSM event derivation `InitSynReceived` / `InitAckReceived`. debug-name match. Callers of `encode_init_with_role` / `encode_open_with_role` (send_init_syn / send_init_ack_with_cookie / send_open_syn / send_open_ack_with_cookie). 1-2R. Verification: --no-default-features pass / Layer E 30-trial flake-0 mandatory.",
+        "R311a4 (deferred): wz facade Cargo.toml `?-syntax` forward + Footprint binary-size delta measurement.",
+        "R303++ carry: feature_inventory 39 outline-only sub-sections atomic-field population.",
+        "R310.5c carry: get_matching_status conservative-false doc-surface decision (0.5R).",
+        "Architectural carries unchanged: R284, R283, R267, R301 §8, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 32": {
       "decision_summary": "B5 codec track continues — sources/codecs/frame.scxml + fragment.scxml authored. First VLE + tail primitive composition (B1-α + tail) plus first inline test-vector land (B5-θ 4-case set). Both share identical body shape per zenoh-pico (sn:VLE + payload:tail, no extensions); differ only in enclosing MID (0x05 Frame / 0x06 Fragment).",
       "changes_bullets": [
