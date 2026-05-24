@@ -74,6 +74,21 @@ const CODECS: &[&str] = &[
     "declare", // §5 Z_DECLARE envelope — header + I-gated id + Z ext + sub-MID variant — R110a
 ];
 
+// R311a1 — per-codec feature gate. `codec-init-body` / `codec-open-body`
+// elide both the build.rs SCXML compile pass and the lib.rs mod include.
+// CARGO_FEATURE_<NAME> env vars are set by cargo when the feature is
+// active in the resolved build graph for this crate; missing env var
+// means the feature is off and the corresponding SCXML must NOT be
+// compiled (Footprint honesty: feature-off = zero OUT_DIR artifact +
+// zero binary contribution).
+fn is_codec_enabled(stem: &str) -> bool {
+    match stem {
+        "init_body" => std::env::var_os("CARGO_FEATURE_CODEC_INIT_BODY").is_some(),
+        "open_body" => std::env::var_os("CARGO_FEATURE_CODEC_OPEN_BODY").is_some(),
+        _ => true,
+    }
+}
+
 fn main() {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set by cargo");
     let manifest_dir =
@@ -87,10 +102,15 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", resource_dir.display());
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_INIT_BODY");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_OPEN_BODY");
 
     let options = ForgeCompileOptions::default();
 
     for stem in CODECS {
+        if !is_codec_enabled(stem) {
+            continue;
+        }
         let scxml_path = resource_dir.join(format!("{stem}.scxml"));
         let content = std::fs::read_to_string(&scxml_path)
             .unwrap_or_else(|e| panic!("read {}: {e}", scxml_path.display()));

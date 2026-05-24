@@ -36,8 +36,21 @@ name = "wz_codecs"
 path = "src/lib.rs"
 
 [features]
-default = ["alloc"]
+# R311a1 — first per-codec feature gates. `codec-init-body` and
+# `codec-open-body` gate both build.rs SCXML compilation (CARGO_FEATURE_*
+# env var check) and the `pub mod` declaration in lib.rs. Default
+# includes both for backward compat: wz-codecs standalone usage (no
+# forwarding consumer) sees the full codec catalog as before.
+# Downstream wz-runtime-tokio dep declaration switches to
+# `default-features = false` + explicit forwards so a facade-level
+# `--no-default-features` can actually elide the codec emit/include
+# pair (R311a4 wz facade exposes the forwards; R311a2/3 gate the
+# session_glue use sites; until then `--no-default-features` at
+# wz-runtime-tokio level breaks compile, which is intended).
+default = ["alloc", "codec-init-body", "codec-open-body"]
 alloc = ["sce-forge-runtime/alloc"]
+codec-init-body = []
+codec-open-body = []
 
 [dependencies]
 # sce-forge-runtime supplies CodecError + SceCursor + per-language

@@ -75,10 +75,12 @@ pub mod scout {
     include!(concat!(env!("OUT_DIR"), "/scout.rs"));
 }
 
+#[cfg(feature = "codec-init-body")]
 pub mod init_body {
     include!(concat!(env!("OUT_DIR"), "/init_body.rs"));
 }
 
+#[cfg(feature = "codec-open-body")]
 pub mod open_body {
     include!(concat!(env!("OUT_DIR"), "/open_body.rs"));
 }
