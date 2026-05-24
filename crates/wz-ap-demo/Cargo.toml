@@ -100,20 +100,22 @@ env_logger = "0.11"
 # auto-derives the atomic list from `crates/wz/Cargo.toml`'s preset
 # definition so the measurement bench stays in sync with future preset
 # evolution without duplication in this manifest.
+#
+# R311g — the consumer-side `codec-close` feature mirror retired with
+# the signature-stability retrofit of `send_close_with_reason` in
+# wz-runtime-tokio. teardown.rs now calls `send_close_with_reason`
+# unconditionally; the wz-runtime-tokio body-cfg silently no-ops when
+# the wz facade is built without `codec-close`. This collapses
+# ap-demo's feature surface to a single `preset-ap-client` forward and
+# removes the measurement-script special case (codec-close minus build
+# no longer needs an ap-demo-local feature toggle to keep the call
+# site valid). Future R311h..R311l cascades follow the same pattern:
+# each `send_*` method on `SessionLinkActions` stays signature-stable,
+# its body branches on the matching `codec-*` feature, and consumers
+# never need their own mirror.
 [features]
 default = ["preset-ap-client"]
-# preset-ap-client forwards every wz facade atomic plus this crate's
-# own codec-close feature (R311c). The own codec-close gate is needed
-# because wz-ap-demo's teardown.rs calls send_close_with_reason
-# directly; cfg(feature = "codec-close") on the call site only
-# resolves against this crate's own feature graph, not the wz facade
-# feature graph reachable through the dep alias. measurement script
-# only enables wz/<feature> forwards so this crate's codec-close
-# stays off during minus-codec-close builds; the call falls out and
-# the binary teardown becomes abrupt-link-drop instead of graceful
-# Close MID emit.
-preset-ap-client = ["wz/preset-ap-client", "codec-close"]
-codec-close = ["wz/codec-close"]
+preset-ap-client = ["wz/preset-ap-client"]
 
 [lints]
 workspace = true

@@ -64,6 +64,7 @@ pub mod close {
     include!(concat!(env!("OUT_DIR"), "/close.rs"));
 }
 
+#[cfg(feature = "codec-frame")]
 pub mod frame {
     include!(concat!(env!("OUT_DIR"), "/frame.rs"));
 }

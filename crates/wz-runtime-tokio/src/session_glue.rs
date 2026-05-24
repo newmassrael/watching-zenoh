@@ -303,6 +303,12 @@ mod wire_const {
     /// Network-message MID for `Frame.payload` batch entries that
     /// wrap a query / put / del (network.h:36). First R74-decoded
     /// network MID.
+    ///
+    /// R311g — only callsite is the [`parse_frame_payload`] inbound
+    /// dispatcher, itself gated on `codec-frame`. Future R311i
+    /// codec-request cascade may surface additional encoder-side
+    /// uses; the gate moves to a broader scope at that time.
+    #[cfg(feature = "codec-frame")]
     pub const N_MID_REQUEST: u8 = 0x1C;
     /// R90 — Push envelope MID (network.h:35). Pub/sub data
     /// carrier wrapping a put / del inner body; sibling to
@@ -313,7 +319,13 @@ mod wire_const {
     /// correlation marker closing a Request's reply stream per
     /// zenoh-pico `_z_response_final_encode`: 1-byte header +
     /// request_id VLE + optional ext-chain, no body.
-    #[cfg(feature = "codec-response-final")]
+    ///
+    /// R311g — additionally gated on `codec-frame` because the only
+    /// current call site is the `parse_frame_payload` dispatcher
+    /// (Frame envelope → NetworkMessage::ResponseFinal). Both
+    /// features must be on for the constant to have any live use;
+    /// when either is off the constant elides cleanly.
+    #[cfg(all(feature = "codec-response-final", feature = "codec-frame"))]
     pub const N_MID_RESPONSE_FINAL: u8 = 0x1A;
     /// R92 — OAM (Operations & Maintenance) MID (network.h:33).
     /// Diagnostic / control-plane envelope per zenoh-pico
@@ -321,6 +333,11 @@ mod wire_const {
     /// id, optional ext-chain, and a body variant dispatched on
     /// `header.enc` (UNIT / ZINT / ZBUF re-using ext_* inner
     /// codecs).
+    ///
+    /// R311g — currently consumed only by [`parse_frame_payload`]
+    /// (codec-frame-gated). Moves to a broader gate when a future
+    /// round adds an OAM encoder.
+    #[cfg(feature = "codec-frame")]
     pub const N_MID_OAM: u8 = 0x1F;
     /// R93/R94 — Interest envelope MID (network.h:39). Declarations
     /// discovery / liveliness subscriber registration carrier per
@@ -336,6 +353,11 @@ mod wire_const {
     /// `N_MID_REQUEST`: header(N@5,M@6,Z@7) + rid VLE + wireexpr
     /// embed + Z-gated ext-chain + peek-byte body variant on the
     /// inner MID bit-range.
+    ///
+    /// R311g — currently consumed only by [`parse_frame_payload`]
+    /// (codec-frame-gated). Moves to a broader gate when R311k
+    /// codec-response lands its encoder.
+    #[cfg(feature = "codec-frame")]
     pub const N_MID_RESPONSE: u8 = 0x1B;
     /// R110/R115 — Declare envelope MID (network.h:34). Declarations
     /// envelope wrapping one of the nine sub-MID bodies (DECL_KEXPR
@@ -2057,14 +2079,32 @@ impl SessionLinkActions {
     /// emits regardless of [`Self::is_established`]. A caller wanting
     /// state-conditional emit (e.g. only after Established) should
     /// gate at its own layer.
-    #[cfg(feature = "codec-close")]
+    ///
+    /// R311g signature-stability retrofit — method signature stays
+    /// `pub fn send_close_with_reason(&self, reason: CloseReason)`
+    /// across feature states; only the body branches on `codec-close`.
+    /// Consumers (e.g. `wz-ap-demo`'s typestate teardown) call this
+    /// unconditionally without mirroring a `codec-close` feature in
+    /// their own manifest. When the feature is off the body silently
+    /// no-ops; the peer observes an abrupt link drop (TCP RST / EOF)
+    /// instead of the MID 0x03 + reason byte, which is the documented
+    /// minus-codec-close contract. This pattern is the textbook fix for
+    /// the R311c regression that deleted the method signature behind
+    /// `#[cfg(feature = "codec-close")]` and forced ap-demo to carry a
+    /// consumer-side cfg mirror; future codec gates (R311h..R311l)
+    /// follow the same body-cfg + stable-signature shape.
     pub fn send_close_with_reason(&self, reason: CloseReason) {
-        self.trace
-            .lock()
-            .expect("trace poisoned by an earlier panicked Lua action")
-            .send_close_frame_with_reason += 1;
-        let bytes = encode_close(reason as u8);
-        self.driver.send_blocking(&bytes, Reliability::Reliable);
+        #[cfg(feature = "codec-close")]
+        {
+            self.trace
+                .lock()
+                .expect("trace poisoned by an earlier panicked Lua action")
+                .send_close_frame_with_reason += 1;
+            let bytes = encode_close(reason as u8);
+            self.driver.send_blocking(&bytes, Reliability::Reliable);
+        }
+        #[cfg(not(feature = "codec-close"))]
+        let _ = reason;
     }
 }
 
@@ -5761,6 +5801,13 @@ pub enum InboundFrame {
     /// chain decoded into `extensions` between `sn` and `payload`
     /// to mirror zenoh-pico's `_z_msg_ext_skip_non_mandatories`
     /// path (transport.c::_z_frame_decode L388).
+    ///
+    /// R311g — variant gated on `codec-frame`. When the feature is
+    /// off the `T_MID_FRAME` arm in `parse_inbound` falls through to
+    /// `InboundFrame::Unknown { mid: 0x05 }`, which the FSM dispatch
+    /// in `inbound_to_fsm_event` maps to `FramingError` (graceful
+    /// session teardown rather than silent data loss).
+    #[cfg(feature = "codec-frame")]
     Frame {
         reliable: bool,
         sn: u64,
@@ -5829,11 +5876,23 @@ impl From<CodecError> for InboundParseError {
 /// the body via the wz codec set and reports the Z flag via
 /// `has_ext`; the ext-chain bytes themselves are left in the
 /// trailing portion of `bytes` for R68c to consume.
+///
+/// R311g — `has_ext` / `cursor` carry `#[allow(unused_*)]` because
+/// the dispatch arms below are each cfg-gated by their codec feature
+/// (`codec-init-body` / `codec-open-body` / `codec-close` /
+/// `codec-keep-alive` / `codec-frame`); a build with every codec
+/// feature off (e.g. `scripts/measure-codec-footprint.sh`'s
+/// `minus-all-codecs` lane) leaves only the Unknown fall-through arm
+/// and both locals become legitimately unused. The annotations make
+/// the function honest under that cfg matrix instead of breaking the
+/// catalog-truthfulness measurement.
 pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
     let header = *bytes.first().ok_or(InboundParseError::Empty)?;
     let mid = header & 0x1F;
     let flags = header & 0xE0;
+    #[allow(unused_variables)]
     let has_ext = (flags & wire_const::FLAG_T_Z) != 0;
+    #[allow(unused_variables, unused_mut)]
     let mut cursor = SceCursor::new(&bytes[1..]);
     match mid {
         #[cfg(feature = "codec-init-body")]
@@ -5881,6 +5940,7 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
                 extensions,
             })
         }
+        #[cfg(feature = "codec-frame")]
         wire_const::T_MID_FRAME => {
             // sn first (VLE), then optional ext chain (Z-gated),
             // then tail payload to end of cursor.
@@ -6060,6 +6120,17 @@ impl std::fmt::Debug for NetworkMessage {
 /// transport envelope already parsed but the application-layer batch
 /// is malformed) or to log and continue with the partially-decoded
 /// batch.
+///
+/// R311g — gated on `codec-frame`. The only caller is the
+/// `InboundFrame::Frame` arm in [`poll_and_dispatch_one`] (also
+/// codec-frame-gated), so a codec-frame-OFF build never reaches a
+/// caller; cfg-gating the definition itself elides ~80 lines of
+/// dispatch + the `NetworkMessage` decoders for every body codec
+/// without leaving an orphan public symbol. When R311h..R311k land
+/// the body-codec cascades, individual match arms inside this
+/// function will gain their own per-body cfg (e.g. `N_MID_PUSH`
+/// under `codec-push`).
+#[cfg(feature = "codec-frame")]
 pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecError> {
     let mut messages = Vec::new();
     let mut cursor = SceCursor::new(bytes);
@@ -6153,6 +6224,7 @@ pub fn inbound_to_fsm_event(
         InboundFrame::Close { .. } => Some(E::PeerClose),
         #[cfg(feature = "codec-keep-alive")]
         InboundFrame::KeepAlive { .. } => None,
+        #[cfg(feature = "codec-frame")]
         InboundFrame::Frame { .. } => None,
         InboundFrame::Unknown { .. } => Some(E::FramingError),
     }
@@ -6273,6 +6345,7 @@ pub async fn poll_and_dispatch_one<D: LinkDriver>(
                     DriverLoopOutcome::AdvancedFsm
                 }
                 None => match frame {
+                    #[cfg(feature = "codec-frame")]
                     InboundFrame::Frame {
                         reliable,
                         sn,
@@ -6633,6 +6706,15 @@ where
 /// peer cannot pin the decoder into an unbounded loop). The
 /// cursor's `peek_slice` raises `NeedMoreBytes` when the wire
 /// truncates mid-entry, which propagates up as `Codec(NeedMoreBytes)`.
+///
+/// R311g — `#[allow(dead_code)]` because every caller is a
+/// codec-feature-gated arm inside [`parse_inbound`] (Init / Open /
+/// Close / KeepAlive / Frame). The `minus-all-codecs` measurement
+/// lane in `scripts/measure-codec-footprint.sh` elides every gate
+/// at once and leaves the function unreachable; the annotation keeps
+/// the catalog-truthfulness build honest without adding a sprawling
+/// `cfg(any(...))` predicate to the function definition.
+#[allow(dead_code)]
 fn decode_ext_chain(cursor: &mut SceCursor<'_>) -> Result<Vec<ExtEntry>, InboundParseError> {
     let mut entries = Vec::new();
     for _ in 0..MAX_EXT_CHAIN_DEPTH {

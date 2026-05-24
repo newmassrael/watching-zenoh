@@ -106,7 +106,19 @@ attachment-encoding-aware = ["attachment-bytes"]
 codec-close = ["wz-runtime-tokio?/codec-close"]
 codec-declare = []
 codec-fragment = ["transport-fragmentation", "wz-runtime-tokio?/codec-fragment"]
-codec-frame = []
+# R311g — codec-frame forwards into wz-runtime-tokio gating the Frame
+# envelope inbound decode path (`InboundFrame::Frame` variant +
+# `parse_inbound` `T_MID_FRAME` arm + `parse_frame_payload` +
+# downstream Frame match arms). Outbound `encode_frame_with_<body>`
+# helpers stay always-on at R311g; R311h..R311k body-codec cascades
+# (codec-push / codec-declare / codec-request / codec-response) will
+# gate the outbound side AND add `codec-<body> = ["codec-frame"]`
+# implications so codec-frame OFF becomes a coherent handshake-only
+# deploy (Init / Open / Close + KeepAlive) once those land. Honest
+# semantics for the R311g interim state and the eventual closure are
+# spelled out in the wz-runtime-tokio + wz-codecs codec-frame comment
+# blocks and the §5.12 codec atomic caveat.
+codec-frame = ["wz-runtime-tokio?/codec-frame"]
 codec-hello = ["wz-runtime-tokio?/codec-hello"]
 codec-init-body = ["wz-runtime-tokio?/codec-init-body"]
 codec-join = ["session-multicast", "wz-runtime-tokio?/codec-join"]

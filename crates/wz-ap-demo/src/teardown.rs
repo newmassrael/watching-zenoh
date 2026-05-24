@@ -140,19 +140,15 @@ pub(crate) struct TokenDropped {
 impl TokenDropped {
     pub(crate) fn emit_close_if_cancelled(self) -> CloseEmitted {
         if self.was_cancelled {
-            // R311c — graceful close emit gated on codec-close. When
-            // the feature is off the binary skips the wire emit; the
-            // subsequent CloseEmitted -> WriterAwaited handoff still
-            // tears down the link via close_blocking() so the peer
-            // observes an abrupt connection drop instead of the MID
-            // 0x03 + reason byte. The `_ = &CloseReason::Generic`
-            // pattern keeps the unconditional import live across
-            // both feature states without triggering an unused-
-            // import warning under -D warnings.
-            #[cfg(feature = "codec-close")]
+            // R311g — `send_close_with_reason` is signature-stable
+            // across feature states (body cfg-gated on `codec-close`
+            // inside wz-runtime-tokio). When the wz facade is built
+            // without `codec-close` the body silently no-ops and the
+            // peer observes an abrupt link drop instead of the MID
+            // 0x03 + reason byte; ap-demo no longer needs a
+            // consumer-side `cfg` mirror or its own `codec-close`
+            // feature declaration to keep this call site valid.
             self.actions.send_close_with_reason(CloseReason::Generic);
-            #[cfg(not(feature = "codec-close"))]
-            let _ = &CloseReason::Generic;
         }
         CloseEmitted {
             actions: self.actions,
