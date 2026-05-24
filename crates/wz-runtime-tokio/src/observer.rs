@@ -104,11 +104,13 @@ use crate::declare::RemoteQueryableRegistry;
 #[cfg(feature = "declare-subscriber")]
 use crate::declare::RemoteSubscriberRegistry;
 use crate::pubsub::SubscriberRegistry;
-// R307 — `crate::query` is gated on `feature = "query-queryable"`; the
-// QueryableRegistry field + the pending_replies `Vec<QueryReply>`
-// staging buffer share the same gate. `QueryReply` is also used by
-// `flush_pending`'s `reply.into_response()` call.
-#[cfg(feature = "query-queryable")]
+// R311r — `crate::query` is type-ungated; QueryableRegistry +
+// QueryReply imports follow. The `pending_replies` staging buffer +
+// `flush_pending`'s `reply.into_response()` call still gate on the
+// `codec-response` feature (the wire-emit terminal step), but the
+// staging side (Vec accumulation, observer field allocation) compiles
+// unconditionally so the observer struct shape is stable across
+// consumer-feature subsets.
 use crate::query::{QueryReply, QueryableRegistry};
 // R307 — `crate::reply` is gated on `feature = "query-reply"`; the
 // ReplyRegistry field + its dispatch arm share the gate.
@@ -128,10 +130,14 @@ pub struct ApplicationLayerObserver {
     /// buffers below stage outbound records this registry emits
     /// during fan-out.
     ///
-    /// R307 — gated on `feature = "query-queryable"`. The matching
-    /// `pending_replies` / `pending_final_rids` staging buffers carry
-    /// the same gate so dispatch + flush stay self-consistent.
-    #[cfg(feature = "query-queryable")]
+    /// R311r — type-ungated. The struct is always present so the
+    /// `Session::declare_queryable{_aliased}` Result-form surface
+    /// compiles regardless of the `query-queryable` feature; the
+    /// feature-OFF branch returns `Err(FeatureDisabled)` without
+    /// touching this field. The dispatch fan-out in
+    /// [`Self::dispatch_event`] and the wire-emit drain in
+    /// [`Self::flush_pending`] stay cfg-gated so a feature-OFF
+    /// build elides the dispatch + drain paths entirely.
     pub queryables: QueryableRegistry,
     /// Peer's outbound `DeclSubscriber` / `UndeclSubscriber` records.
     ///
@@ -174,9 +180,11 @@ pub struct ApplicationLayerObserver {
     /// ReplyRegistry slot.
     #[cfg(feature = "query-reply")]
     pub replies: ReplyRegistry,
-    #[cfg(feature = "query-queryable")]
+    /// R311r — staging buffers are unconditional so the observer
+    /// struct shape is stable across consumer-feature subsets. The
+    /// drain side in [`Self::flush_pending`] stays cfg-gated on
+    /// `codec-response` so wire-emit only runs when the codec is in.
     pending_replies: Vec<QueryReply>,
-    #[cfg(feature = "query-queryable")]
     pending_final_rids: Vec<u64>,
 }
 
@@ -194,7 +202,10 @@ impl ApplicationLayerObserver {
     pub fn new() -> Self {
         Self {
             subscribers: SubscriberRegistry::new(),
-            #[cfg(feature = "query-queryable")]
+            // R311r — field is type-ungated; the registry is always
+            // constructed so the Queryable RAII handle's observer-side
+            // unregister-on-Drop compiles unconditionally even though
+            // feature-OFF never reaches the construction path.
             queryables: QueryableRegistry::new(),
             #[cfg(feature = "declare-subscriber")]
             remote_subscribers: RemoteSubscriberRegistry::new(),
@@ -210,9 +221,9 @@ impl ApplicationLayerObserver {
             liveliness_subscribers: LivelinessSubscriberRegistry::new(),
             #[cfg(feature = "query-reply")]
             replies: ReplyRegistry::new(),
-            #[cfg(feature = "query-queryable")]
+            // R311r — staging buffers always allocated; drain path in
+            // flush_pending stays cfg-gated on codec-response.
             pending_replies: Vec::new(),
-            #[cfg(feature = "query-queryable")]
             pending_final_rids: Vec::new(),
         }
     }
@@ -318,9 +329,7 @@ impl ApplicationLayerObserver {
     /// path runs every iteration so this is normally zero between
     /// dispatches).
     ///
-    /// R307 — gated on `feature = "query-queryable"` because the
-    /// underlying `pending_replies` buffer carries the same gate.
-    #[cfg(feature = "query-queryable")]
+    /// R311r — type-ungated alongside the underlying buffer.
     pub fn pending_reply_count(&self) -> usize {
         self.pending_replies.len()
     }
@@ -329,8 +338,7 @@ impl ApplicationLayerObserver {
     /// `flush_pending` call. Same diagnostic / test-only role as
     /// [`Self::pending_reply_count`].
     ///
-    /// R307 — gated on `feature = "query-queryable"`.
-    #[cfg(feature = "query-queryable")]
+    /// R311r — type-ungated alongside the underlying buffer.
     pub fn pending_final_count(&self) -> usize {
         self.pending_final_rids.len()
     }
@@ -571,7 +579,7 @@ mod tests {
         observer
             .queryables
             .register("home/temp", |_query, responder| {
-                responder.send_reply(b"21.0");
+                responder.reply(b"21.0");
             });
 
         // Synthesize an inbound Query for "home/temp".

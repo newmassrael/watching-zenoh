@@ -372,20 +372,27 @@ fn install_session_handles(
     let queryable = queryable_spec.map(|(pattern, reply_text)| {
         let pattern_for_callback = pattern.clone();
         let reply_text_for_callback = reply_text.clone();
-        session.declare_queryable(
-            pattern,
-            QueryableOptions::default(),
-            move |_query, responder| {
-                responder.send_reply(reply_text_for_callback.as_bytes());
-                log::info!(
-                    "wz-ap-demo: QUERYABLE FIRED pattern='{}' rid={} keyexpr='{}' reply='{}'",
-                    pattern_for_callback,
-                    responder.rid(),
-                    responder.keyexpr_literal(),
-                    reply_text_for_callback,
-                );
-            },
-        )
+        // R311r — declare_queryable now returns Result + callback
+        // signature uses (&QueryEvent, &mut ReplyEmitter). wz-ap-demo
+        // builds with default features so the only Err here is
+        // FeatureDisabled (impossible on this build); .expect is the
+        // textbook shape per the R311 signature-stability principle.
+        session
+            .declare_queryable(
+                pattern,
+                QueryableOptions::default(),
+                move |_event, responder| {
+                    responder.reply(reply_text_for_callback.as_bytes());
+                    log::info!(
+                        "wz-ap-demo: QUERYABLE FIRED pattern='{}' rid={} keyexpr='{}' reply='{}'",
+                        pattern_for_callback,
+                        responder.rid(),
+                        responder.keyexpr_literal(),
+                        reply_text_for_callback,
+                    );
+                },
+            )
+            .expect("query-queryable feature is ON in wz-ap-demo default build")
     });
 
     SessionHandles {
