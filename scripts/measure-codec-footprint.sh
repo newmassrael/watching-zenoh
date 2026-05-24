@@ -90,19 +90,33 @@ measure() {
 
 mkdir -p "$TARGET_DIR_BASE"
 
-measure "baseline"               "$(build_feature_list '')"
-measure "minus-codec-init-body"  "$(build_feature_list 'codec-init-body')"
-measure "minus-codec-open-body"  "$(build_feature_list 'codec-open-body')"
-measure "minus-both"             "$(build_feature_list 'codec-init-body,codec-open-body')"
+# Auto-enumerate every codec-* atomic feature in preset-ap-client so
+# new cascades (R311b codec-keep-alive, R311c codec-close, ...) get
+# their footprint measurement without touching this script. baseline
+# is one build; each codec gets its own minus-$codec build; finally a
+# minus-all-codecs build surfaces the cumulative codec footprint when
+# every gated atomic is elided together.
+CODEC_FEATURES=()
+while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    [[ "$f" == codec-* ]] && CODEC_FEATURES+=("$f")
+done <<< "$PRESET_FEATURES"
+
+measure "baseline" "$(build_feature_list '')"
+for codec in "${CODEC_FEATURES[@]}"; do
+    measure "minus-$codec" "$(build_feature_list "$codec")"
+done
+ALL_CODECS_CSV=$(IFS=','; echo "${CODEC_FEATURES[*]}")
+measure "minus-all-codecs" "$(build_feature_list "$ALL_CODECS_CSV")"
 
 baseline=$(cat "$TARGET_DIR_BASE/.baseline.size")
-minus_init=$(cat "$TARGET_DIR_BASE/.minus-codec-init-body.size")
-minus_open=$(cat "$TARGET_DIR_BASE/.minus-codec-open-body.size")
-minus_both=$(cat "$TARGET_DIR_BASE/.minus-both.size")
+minus_all=$(cat "$TARGET_DIR_BASE/.minus-all-codecs.size")
 
 echo ""
 echo "=== Footprint deltas (baseline minus configuration) ==="
 printf "  baseline:                     %10s bytes\n" "$baseline"
-printf "  minus codec-init-body delta:  %+10d bytes\n" "$((baseline - minus_init))"
-printf "  minus codec-open-body delta:  %+10d bytes\n" "$((baseline - minus_open))"
-printf "  minus both delta:             %+10d bytes\n" "$((baseline - minus_both))"
+for codec in "${CODEC_FEATURES[@]}"; do
+    size=$(cat "$TARGET_DIR_BASE/.minus-$codec.size")
+    printf "  minus %-24s %+10d bytes\n" "$codec:" "$((baseline - size))"
+done
+printf "  minus-all-codecs delta:       %+10d bytes\n" "$((baseline - minus_all))"

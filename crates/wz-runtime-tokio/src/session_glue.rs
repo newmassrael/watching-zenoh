@@ -78,6 +78,7 @@ use wz_codecs::ext_zint::ExtZint;
 use wz_codecs::init_body::InitBody;
 use wz_codecs::interest::Interest;
 use wz_codecs::interest_body::InterestBody;
+#[cfg(feature = "codec-keep-alive")]
 use wz_codecs::keep_alive::KeepAlive;
 use wz_codecs::msg_del::MsgDel;
 use wz_codecs::msg_put::MsgPut;
@@ -260,6 +261,7 @@ mod wire_const {
     pub const T_MID_CLOSE: u8 = 0x03;
     /// Per-session liveness ping — zero-byte body; lease-timer
     /// reset on receive (transport.h:24 commentary, MID 0x04).
+    #[cfg(feature = "codec-keep-alive")]
     pub const T_MID_KEEP_ALIVE: u8 = 0x04;
     /// Established-session payload carrier (transport.h:79 MID 0x05).
     /// Body = VLE sn + tail payload; optional ext chain between sn
@@ -1125,6 +1127,7 @@ impl SessionLinkActions {
                     *self.inbound_opensyn_cookie.lock().unwrap() = Some(cookie.clone());
                 }
             }
+            #[cfg(feature = "codec-keep-alive")]
             InboundFrame::KeepAlive { .. } => {
                 // R72b — record receive time so the lease deadline
                 // comparator (now_ms - stamp_ms < lease_ms) advances.
@@ -5733,6 +5736,7 @@ pub enum InboundFrame {
     /// only payload is the optional ext chain (Z flag-gated). The
     /// FSM uses receipt to reset the lease timer per
     /// session-fsm §2.5 keepalive_interval semantics.
+    #[cfg(feature = "codec-keep-alive")]
     KeepAlive {
         has_ext: bool,
         extensions: Vec<ExtEntry>,
@@ -5889,6 +5893,7 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
                 extensions,
             })
         }
+        #[cfg(feature = "codec-keep-alive")]
         wire_const::T_MID_KEEP_ALIVE => {
             // KeepAlive body is empty (zero-byte payload); the
             // decode call is a no-op but kept for symmetry with the
@@ -6129,6 +6134,7 @@ pub fn inbound_to_fsm_event(
         #[cfg(feature = "codec-open-body")]
         InboundFrame::Open { is_ack: true, .. } => Some(E::OpenAckReceived),
         InboundFrame::Close { .. } => Some(E::PeerClose),
+        #[cfg(feature = "codec-keep-alive")]
         InboundFrame::KeepAlive { .. } => None,
         InboundFrame::Frame { .. } => None,
         InboundFrame::Unknown { .. } => Some(E::FramingError),
@@ -6269,6 +6275,7 @@ pub async fn poll_and_dispatch_one<D: LinkDriver>(
                             DriverLoopOutcome::ParseError(InboundParseError::Codec(codec_err))
                         }
                     },
+                    #[cfg(feature = "codec-keep-alive")]
                     InboundFrame::KeepAlive { .. } => DriverLoopOutcome::SideEffectOnly,
                     #[cfg(feature = "codec-init-body")]
                     InboundFrame::Init { .. } => {
@@ -7138,6 +7145,7 @@ mod tests {
                         #[cfg(feature = "codec-open-body")]
                         InboundFrame::Open { .. } => "Open",
                         InboundFrame::Close { .. } => "Close",
+                        #[cfg(feature = "codec-keep-alive")]
                         InboundFrame::KeepAlive { .. } => "KeepAlive",
                         InboundFrame::Unknown { .. } => "Unknown",
                         InboundFrame::Frame { .. } => unreachable!(),

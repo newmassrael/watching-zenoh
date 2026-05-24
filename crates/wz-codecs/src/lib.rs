@@ -113,6 +113,7 @@ pub mod msg_del {
     include!(concat!(env!("OUT_DIR"), "/msg_del.rs"));
 }
 
+#[cfg(feature = "codec-keep-alive")]
 pub mod keep_alive {
     include!(concat!(env!("OUT_DIR"), "/keep_alive.rs"));
 }
