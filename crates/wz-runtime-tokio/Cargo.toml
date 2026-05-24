@@ -103,6 +103,7 @@ default = [
     "codec-init-body",
     "codec-open-body",
     "codec-keep-alive",
+    "codec-close",
 ]
 liveliness-token = ["declare-token", "declare-undeclare"]
 liveliness-subscriber = ["declare-interest", "declare-final"]
@@ -137,6 +138,11 @@ codec-open-body = ["wz-codecs/codec-open-body"]
 # can be decoded into a stamp update; the existing established_at
 # baseline remains so short sessions still complete normally.
 codec-keep-alive = ["wz-codecs/codec-keep-alive"]
+# R311c — codec-close forwards wz-codecs. Wire encode (encode_close +
+# send_close_with_reason + bind_unit "send_close_frame_with_reason")
+# + decode (parse_inbound T_MID_CLOSE) elide together; FSM-level
+# CloseReason enum + set_close_reason_* bindings stay unconditional.
+codec-close = ["wz-codecs/codec-close"]
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }

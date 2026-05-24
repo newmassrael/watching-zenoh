@@ -59,6 +59,7 @@ pub mod stream_envelope {
     include!(concat!(env!("OUT_DIR"), "/stream_envelope.rs"));
 }
 
+#[cfg(feature = "codec-close")]
 pub mod close {
     include!(concat!(env!("OUT_DIR"), "/close.rs"));
 }

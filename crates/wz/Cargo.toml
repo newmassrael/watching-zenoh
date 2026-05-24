@@ -103,7 +103,7 @@ attachment-encoding-aware = ["attachment-bytes"]
 # Each gate elides the matching SCXML codegen + InboundFrame variant +
 # session_glue parse/handle path; quantitative footprint delta is
 # measured against the wz-ap-demo binary in the R311a4 audit entry.
-codec-close = []
+codec-close = ["wz-runtime-tokio?/codec-close"]
 codec-declare = []
 codec-fragment = ["transport-fragmentation"]
 codec-frame = []
