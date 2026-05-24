@@ -215,6 +215,15 @@ applied_in = "Round 311e"
 content_hash_before = "c2d62aa53f0ea4eb606f276fa7a5e385af01aeb3368f95fb3552f505d53935f8"
 content_hash_after = "a8e2313478acae717ff2048b0123e2c04cc178a9d7a9bb6086bc65fffee3609d"
 
+[[publishable_override_ledger]]
+kind = "length_compression"
+target_id = "Round 311f"
+fields = ["publishable_verification_bullets"]
+reason = "R311f publishable_verification length compression: audit half carries full numeric proofs and rationale (wz-runtime-tokio doesn't import Fragment types yet, fragment-reassembly state machine deferred); publishable half trimmed to ≤100B per bullet for user-facing surface while audit half stays frozen with the full detail."
+applied_in = "Round 311f"
+content_hash_before = "46637f376859553b59be0b9d809f9a2289a3dbc57bfd9699f89552944d689b45"
+content_hash_after = "30d19d78baf52a9bb1f42ee58893460f59b407927d230b4bb0a6ed88fb5608dc"
+
 # Round 193 atomic-internal orphan absorb — R121j-5c-e2e-action surfaced
 # SessionLinkActions.send_response (tokio runtime trait surface change);
 # the impact_refs citation should have pointed at the
