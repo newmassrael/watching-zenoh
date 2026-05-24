@@ -108,6 +108,7 @@ default = [
     "codec-hello",
     "codec-join",
     "codec-response-final",
+    "codec-fragment",
 ]
 liveliness-token = ["declare-token", "declare-undeclare"]
 liveliness-subscriber = ["declare-interest", "declare-final"]
@@ -160,6 +161,9 @@ codec-join = ["wz-codecs/codec-join"]
 # parse arm cluster. Feature-off: queryable can't emit the terminator;
 # requesting peer's z_get hangs until per-call timeout fires.
 codec-response-final = ["wz-codecs/codec-response-final"]
+# R311f — codec-fragment forwards wz-codecs. session_glue.rs doesn't
+# import Fragment types; gate stays at wz-codecs level only.
+codec-fragment = ["wz-codecs/codec-fragment"]
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }

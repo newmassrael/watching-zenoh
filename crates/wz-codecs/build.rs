@@ -91,6 +91,7 @@ fn is_codec_enabled(stem: &str) -> bool {
         "hello" => std::env::var_os("CARGO_FEATURE_CODEC_HELLO").is_some(),
         "join" => std::env::var_os("CARGO_FEATURE_CODEC_JOIN").is_some(),
         "response_final" => std::env::var_os("CARGO_FEATURE_CODEC_RESPONSE_FINAL").is_some(),
+        "fragment" => std::env::var_os("CARGO_FEATURE_CODEC_FRAGMENT").is_some(),
         _ => true,
     }
 }
@@ -116,6 +117,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_HELLO");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_JOIN");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_RESPONSE_FINAL");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_FRAGMENT");
 
     let options = ForgeCompileOptions::default();
 

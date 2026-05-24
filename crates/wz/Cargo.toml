@@ -105,7 +105,7 @@ attachment-encoding-aware = ["attachment-bytes"]
 # measured against the wz-ap-demo binary in the R311a4 audit entry.
 codec-close = ["wz-runtime-tokio?/codec-close"]
 codec-declare = []
-codec-fragment = ["transport-fragmentation"]
+codec-fragment = ["transport-fragmentation", "wz-runtime-tokio?/codec-fragment"]
 codec-frame = []
 codec-hello = ["wz-runtime-tokio?/codec-hello"]
 codec-init-body = ["wz-runtime-tokio?/codec-init-body"]
