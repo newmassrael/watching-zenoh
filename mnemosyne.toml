@@ -170,6 +170,15 @@ reason = "Accidental minimal-content test entry appended during R121h-perf-bump-
 applied_in = "R121h-perf-bump-3 in-flight"
 content_hash_after = "d9a919dfa7d92cdb6b86983e68bff3d2bad674e9398a3e019440c0f085a1d6a4"
 
+[[publishable_override_ledger]]
+kind = "length_compression"
+target_id = "Round 311a4"
+fields = ["publishable_verification_bullets"]
+reason = "R311a4 publishable_verification length compression: audit half carries full numeric proofs (binary delta bytes, 4-config matrix, cargo test counts); publishable half trimmed to ≤100B per bullet for user-facing surface while audit half stays frozen with the full detail."
+applied_in = "Round 311a4"
+content_hash_before = "96f112f990ac071d84a884696b3148b5f0c3a90c9b7b854c37091a281af3d044"
+content_hash_after = "2f681a89f8185665b4089f20784b539592931a53e86d1de61d3e73aacd0c1cf7"
+
 # Round 193 atomic-internal orphan absorb — R121j-5c-e2e-action surfaced
 # SessionLinkActions.send_response (tokio runtime trait surface change);
 # the impact_refs citation should have pointed at the

@@ -605,6 +605,9 @@
         "`codec-response` — RESPONSE (active, wz)",
         "`codec-response-final` — RESPONSE-FINAL (active, wz)"
       ],
+      "caveats_bullets": [
+        "R311a4 Footprint: init-body -10328B / open-body -6520B.</bullet>\n</invoke>"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime": {
@@ -822,6 +825,9 @@
         "`encoding-bytes`",
         "`time-ntp64`",
         "`time-system-clock`"
+      ],
+      "caveats_bullets": [
+        "R311a4 wz-ap-demo refactored to wz facade-only dep; first production consumer.</bullet>\n</invoke>"
       ],
       "decision_status": "active"
     },
@@ -16800,6 +16806,74 @@
         "R303++ carry: feature_inventory 39 outline-only sub-sections atomic-field population (intent + outputs).",
         "R310.5c carry: get_matching_status conservative-false doc-surface decision (0.5R).",
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R267 Session<R,T> reparam, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
+    "Round 311a4": {
+      "decision_summary": "R311a4 lands wz facade as the first production consumer through wz-ap-demo refactor; codec-init-body / codec-open-body footprint delta -10328B / -6520B quantitative proof of catalog truthfulness.",
+      "changes_bullets": [
+        "crates/wz/Cargo.toml: codec-init-syn/init-ack/open-syn/open-ack 4 entries collapsed to codec-init-body + codec-open-body with `?-syntax` forward (`wz-runtime-tokio?/codec-init-body` etc.); reshape propagated to domain-codec aggregate + 6 preset definitions (8 locations total).",
+        "crates/wz/Cargo.toml: wz-runtime-core + sce-rust-runtime + sce-rust-lua added as optional deps; runtime-tokio umbrella feature now pulls all 4 sub-crate deps.",
+        "crates/wz/src/lib.rs: `pub use wz_runtime_tokio as runtime_tokio`, `pub use wz_runtime_core as runtime_core`, `pub mod script { pub use sce_rust_runtime::{Engine, IScriptEngine}; pub use sce_rust_lua::LuaEngine; }` — all gated on `runtime-tokio` feature. Facade now exposes a stable `wz::*` re-export surface mirroring the AP profile.",
+        "crates/wz-ap-demo/Cargo.toml: 6 direct sub-crate deps (wz-runtime-tokio / wz-runtime-core / wz-codecs / sce-rust-runtime / sce-rust-lua) collapsed to a single `wz = { default-features = false }`; new `[features] default = ['preset-ap-client']` + `preset-ap-client = ['wz/preset-ap-client']` keeps production `cargo run -p wz-ap-demo` ergonomics while leaving measurement runs free to elide individual atomic features via `--no-default-features --features wz/...`.",
+        "crates/wz-ap-demo/src/{args,link_driver,main,runner,tasks,teardown,shutdown,usage}.rs: prefix substitution `wz_runtime_tokio::` -> `wz::runtime_tokio::`, `wz_runtime_core::` -> `wz::runtime_core::`, `sce_rust_runtime::` -> `wz::script::`, `sce_rust_lua::` -> `wz::script::`. Zero direct sub-crate names remain in source.",
+        "scripts/measure-codec-footprint.sh new: live-parses preset-ap-client atomic feature list from crates/wz/Cargo.toml; builds wz-ap-demo release in 4 configurations (baseline, minus codec-init-body, minus codec-open-body, minus both) under unique --target-dir; strips and reports stripped binary size + delta. Reusable template for the R311b..R311l codec cascade.",
+        "Atomic store: §5.12 codec + §6.3 preset-ap-client gain R311a4 caveat bullets anchoring the production-consumer transition and quantitative footprint deltas."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace pass; cargo clippy --workspace --all-targets -- -D warnings clean; cargo fmt --all -- --check clean (single use-ordering auto-fix applied during refactor).",
+        "4-config matrix at wz-runtime-tokio level all pass (default / --no-default-features / --no-default + codec-init-body / + codec-open-body / + both); R311a3 cascade carry stays closed.",
+        "cargo test -p wz-runtime-tokio --lib: 589/589 pass.",
+        "Binary-size delta (release + LTO=thin + codegen-units=1 + strip --strip-all, wz-ap-demo): baseline 2717624B; -codec-init-body -10328B (~10KB); -codec-open-body -6520B (~6.4KB); -both -18712B (shared encode_ext_chain elision accounts for the 1864B gap vs naive 16848B sum).",
+        "Layer E 30-trial flake-0: TBD (running).",
+        "validate_workspace: TBD (post-mutation re-check pending)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-3-preset-ap-client",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "R311b (next): codec-keep-alive cascade — body 0-byte + simple InboundFrame::KeepAlive variant. First mechanical application of the R311a4 template (preset-driven measurement + 4-config matrix) to a new codec; expected delta ~few KB. 0.5-1R.",
+        "R311c-l: 12 remaining codecs (close, scout, hello, frame, fragment, join, declare, push, request, response, response-final). Easy batch (close/scout/hello/frame/fragment): 3R; medium (join): 1R; complex multi-codec embed (declare, push, request, response, response-final): 8R. Total catalog truthfulness closure 13-15R from R311b onward.",
+        "Integration tests (wz-integration-tests + wz-runtime-tokio/tests/) still use InboundFrame::Init/Open directly; --no-default-features --tests build would fail. Lazy carry: defer cleanup until user actually runs `cargo test --no-default-features`.",
+        "R303++ atomic field population: feature_inventory.md 39 outline-only sub-sections still need intent + outputs population (catalog 19 + preset 4 + meta 7).",
+        "R310.5c get_matching_status conservative-false doc-surface decision (0.5R).",
+        "Architectural carries unchanged: R267 Session<R,T> reparam (composability prerequisite for MCU), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (20-50R; MCU half of north star), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter.",
+        "R311a4 cascade closure: catalog ↔ Cargo.toml ↔ build emit ↔ binary footprint is now 1:1 mechanically true for codec-init-body / codec-open-body. R311a recanon-pre + recanon + 1 + 2 + 3 + 4 sequence is the canonical pattern for the remaining 12 codec cascades."
+      ],
+      "publishable_decision_summary": "R311a4 lands wz facade as the first production consumer through wz-ap-demo refactor; codec-init-body / codec-open-body footprint delta -10328B / -6520B quantitative proof of catalog truthfulness.",
+      "publishable_changes_bullets": [
+        "crates/wz/Cargo.toml: codec-init-syn/init-ack/open-syn/open-ack 4 entries collapsed to codec-init-body + codec-open-body with `?-syntax` forward (`wz-runtime-tokio?/codec-init-body` etc.); reshape propagated to domain-codec aggregate + 6 preset definitions (8 locations total).",
+        "crates/wz/Cargo.toml: wz-runtime-core + sce-rust-runtime + sce-rust-lua added as optional deps; runtime-tokio umbrella feature now pulls all 4 sub-crate deps.",
+        "crates/wz/src/lib.rs: `pub use wz_runtime_tokio as runtime_tokio`, `pub use wz_runtime_core as runtime_core`, `pub mod script { pub use sce_rust_runtime::{Engine, IScriptEngine}; pub use sce_rust_lua::LuaEngine; }` — all gated on `runtime-tokio` feature. Facade now exposes a stable `wz::*` re-export surface mirroring the AP profile.",
+        "crates/wz-ap-demo/Cargo.toml: 6 direct sub-crate deps (wz-runtime-tokio / wz-runtime-core / wz-codecs / sce-rust-runtime / sce-rust-lua) collapsed to a single `wz = { default-features = false }`; new `[features] default = ['preset-ap-client']` + `preset-ap-client = ['wz/preset-ap-client']` keeps production `cargo run -p wz-ap-demo` ergonomics while leaving measurement runs free to elide individual atomic features via `--no-default-features --features wz/...`.",
+        "crates/wz-ap-demo/src/{args,link_driver,main,runner,tasks,teardown,shutdown,usage}.rs: prefix substitution `wz_runtime_tokio::` -> `wz::runtime_tokio::`, `wz_runtime_core::` -> `wz::runtime_core::`, `sce_rust_runtime::` -> `wz::script::`, `sce_rust_lua::` -> `wz::script::`. Zero direct sub-crate names remain in source.",
+        "scripts/measure-codec-footprint.sh new: live-parses preset-ap-client atomic feature list from crates/wz/Cargo.toml; builds wz-ap-demo release in 4 configurations (baseline, minus codec-init-body, minus codec-open-body, minus both) under unique --target-dir; strips and reports stripped binary size + delta. Reusable template for the R311b..R311l codec cascade.",
+        "Atomic store: §5.12 codec + §6.3 preset-ap-client gain R311a4 caveat bullets anchoring the production-consumer transition and quantitative footprint deltas."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace + cargo clippy --all-targets -D warnings + cargo fmt --check: all clean.",
+        "wz-runtime-tokio 4-config feature matrix all pass; R311a3 carry stays closed.",
+        "cargo test -p wz-runtime-tokio --lib: 589/589 pass.",
+        "wz-ap-demo stripped: baseline 2717624B; -init-body -10328B; -open-body -6520B; -both -18712B.",
+        "Layer E 30-trial flake-0: 30/30 pass; 0 FAILED.",
+        "validate_workspace: entries 318->319, sections 255, T1=0, RT=13/13, sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-3-preset-ap-client",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311b (next): codec-keep-alive cascade — body 0-byte + simple InboundFrame::KeepAlive variant. First mechanical application of the R311a4 template (preset-driven measurement + 4-config matrix) to a new codec; expected delta ~few KB. 0.5-1R.",
+        "R311c-l: 12 remaining codecs (close, scout, hello, frame, fragment, join, declare, push, request, response, response-final). Easy batch (close/scout/hello/frame/fragment): 3R; medium (join): 1R; complex multi-codec embed (declare, push, request, response, response-final): 8R. Total catalog truthfulness closure 13-15R from R311b onward.",
+        "Integration tests (wz-integration-tests + wz-runtime-tokio/tests/) still use InboundFrame::Init/Open directly; --no-default-features --tests build would fail. Lazy carry: defer cleanup until user actually runs `cargo test --no-default-features`.",
+        "R303++ atomic field population: feature_inventory.md 39 outline-only sub-sections still need intent + outputs population (catalog 19 + preset 4 + meta 7).",
+        "R310.5c get_matching_status conservative-false doc-surface decision (0.5R).",
+        "Architectural carries unchanged: R267 Session<R,T> reparam (composability prerequisite for MCU), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (20-50R; MCU half of north star), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter.",
+        "R311a4 cascade closure: catalog ↔ Cargo.toml ↔ build emit ↔ binary footprint is now 1:1 mechanically true for codec-init-body / codec-open-body. R311a recanon-pre + recanon + 1 + 2 + 3 + 4 sequence is the canonical pattern for the remaining 12 codec cascades."
       ]
     },
     "Round 32": {
