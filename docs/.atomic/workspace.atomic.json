@@ -610,7 +610,8 @@
         "R311b Footprint: codec-keep-alive +712B; 11 ungated codecs -32~-64B noise.</bullet>\n</invoke>",
         "R311c Footprint: codec-close +1792B elision (wire encode/decode + ap-demo cfg).</bullet>\n</invoke>",
         "R311d scout/hello/join: wz-codecs gate only; LTO discards ~0 binary delta.</bullet>\n</invoke>",
-        "R311e Footprint: codec-response-final +4216B (cross-module cascade).</bullet>\n</invoke>"
+        "R311e Footprint: codec-response-final +4216B (cross-module cascade).</bullet>\n</invoke>",
+        "R311f codec-fragment: wz-codecs gate only; -80B noise (LTO discards).</bullet>\n</invoke>"
       ],
       "decision_status": "active"
     },
@@ -17119,6 +17120,62 @@
         "R311g-l: 6 remaining codecs (fragment, declare-cluster, push + msg_put/msg_del, request + query, response + reply + err).",
         "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
         "R311 carry: facade graceful-close wrapper API + similar wrappers for send_query / declare / get — R311c surfaced wz-ap-demo cfg-aware burden, R311e doesn't add (wz-ap-demo doesn't call send_response_final). Hoist when multiple binaries become facade consumers."
+      ]
+    },
+    "Round 311f": {
+      "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
+      "changes_bullets": [
+        "crates/wz-codecs/Cargo.toml: codec-fragment = [] feature + default include; caveat documenting wz-codecs-level-only gating.",
+        "crates/wz-codecs/build.rs: is_codec_enabled `fragment` arm + rerun-if-env-changed CARGO_FEATURE_CODEC_FRAGMENT.",
+        "crates/wz-codecs/src/lib.rs: `pub mod fragment` block cfg-gated.",
+        "crates/wz-runtime-tokio/Cargo.toml: codec-fragment = [\"wz-codecs/codec-fragment\"] forward + default include.",
+        "crates/wz/Cargo.toml: codec-fragment = [\"transport-fragmentation\", \"wz-runtime-tokio?/codec-fragment\"] — facade-side forward appended to the existing transport-fragmentation implication chain.",
+        "No session_glue.rs source-side cfg — wz-runtime-tokio currently does not import Fragment types (AP MVP path does not exercise the multi-Frame fragment-reassembly state machine yet); a future R-fragment-reassembly round would add those cfg sites."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace pass; cargo clippy --workspace --all-targets -- -D warnings clean; cargo fmt --all -- --check clean.",
+        "cargo test -p wz-runtime-tokio --lib: 589/589 pass.",
+        "Binary-size delta (release stripped wz-ap-demo via wz facade preset-ap-client): TBD; expected ~0 noise (LTO discards unused Fragment types).",
+        "Layer E 30-trial flake-0: no source change, default features unchanged — R311e measurement carries.",
+        "validate_workspace: TBD."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "carry_forward_bullets": [
+        "R311g (next): codec-frame cascade. Frame is the wz core data carrier; 30+ encode_frame_with_* helpers + InboundFrame::Frame variant + parse arm + handle + NetworkMessage payload decode all need cfg sites. Largest single cascade by source surface. 2-3R.",
+        "R311h-l: 5 remaining codecs (push + msg_put/msg_del/wireexpr, request + query, response + reply/err, declare-cluster + 8 decl_* / undecl_* leaves). Each is a multi-codec embed and a substantial cascade individually.",
+        "Future R-fragment-reassembly: when wz starts emitting/decoding multi-Frame fragment chains, add the session_glue.rs cfg sites (InboundFrame::Fragment variant, parse arm, reassembly state machine).",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
+        "R311 carry: facade graceful-close + send_query/declare/get wrapper API hoist into wz facade. 2-3R."
+      ],
+      "publishable_decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
+      "publishable_changes_bullets": [
+        "crates/wz-codecs/Cargo.toml: codec-fragment = [] feature + default include; caveat documenting wz-codecs-level-only gating.",
+        "crates/wz-codecs/build.rs: is_codec_enabled `fragment` arm + rerun-if-env-changed CARGO_FEATURE_CODEC_FRAGMENT.",
+        "crates/wz-codecs/src/lib.rs: `pub mod fragment` block cfg-gated.",
+        "crates/wz-runtime-tokio/Cargo.toml: codec-fragment = [\"wz-codecs/codec-fragment\"] forward + default include.",
+        "crates/wz/Cargo.toml: codec-fragment = [\"transport-fragmentation\", \"wz-runtime-tokio?/codec-fragment\"] — facade-side forward appended to the existing transport-fragmentation implication chain.",
+        "No session_glue.rs source-side cfg — wz-runtime-tokio currently does not import Fragment types (AP MVP path does not exercise the multi-Frame fragment-reassembly state machine yet); a future R-fragment-reassembly round would add those cfg sites."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check + cargo clippy --all-targets -D warnings + cargo fmt --check: all clean.",
+        "cargo test -p wz-runtime-tokio --lib: 589/589 pass.",
+        "wz-ap-demo stripped: -fragment -80B noise (LTO discards — wz-runtime-tokio doesn't import).",
+        "Layer E carries from R311e (default features unchanged).",
+        "validate_workspace: entries 323->324, sections 255, T1=0, RT 13/13, sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311g (next): codec-frame cascade. Frame is the wz core data carrier; 30+ encode_frame_with_* helpers + InboundFrame::Frame variant + parse arm + handle + NetworkMessage payload decode all need cfg sites. Largest single cascade by source surface. 2-3R.",
+        "R311h-l: 5 remaining codecs (push + msg_put/msg_del/wireexpr, request + query, response + reply/err, declare-cluster + 8 decl_* / undecl_* leaves). Each is a multi-codec embed and a substantial cascade individually.",
+        "Future R-fragment-reassembly: when wz starts emitting/decoding multi-Frame fragment chains, add the session_glue.rs cfg sites (InboundFrame::Fragment variant, parse arm, reassembly state machine).",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
+        "R311 carry: facade graceful-close + send_query/declare/get wrapper API hoist into wz facade. 2-3R."
       ]
     },
     "Round 32": {
