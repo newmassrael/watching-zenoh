@@ -74,6 +74,7 @@ use wz_codecs::err::Err;
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 use wz_codecs::ext_zbuf::ExtZbuf;
 use wz_codecs::ext_zint::ExtZint;
+#[cfg(feature = "codec-init-body")]
 use wz_codecs::init_body::InitBody;
 use wz_codecs::interest::Interest;
 use wz_codecs::interest_body::InterestBody;
@@ -81,6 +82,7 @@ use wz_codecs::keep_alive::KeepAlive;
 use wz_codecs::msg_del::MsgDel;
 use wz_codecs::msg_put::MsgPut;
 use wz_codecs::oam::Oam;
+#[cfg(feature = "codec-open-body")]
 use wz_codecs::open_body::OpenBody;
 use wz_codecs::push::{Push, PushVariant};
 use wz_codecs::query::Query;
@@ -1015,6 +1017,7 @@ impl SessionLinkActions {
     /// bypassing the `dispatch_script` singleton race that bites
     /// when multiple tests in one binary share the
     /// `INSTALLED`/Lua-engine globals.
+    #[cfg(feature = "codec-init-body")]
     pub fn encode_init_with_role(
         &self,
         is_ack: bool,
@@ -1036,6 +1039,7 @@ impl SessionLinkActions {
         }
     }
 
+    #[cfg(feature = "codec-open-body")]
     pub fn encode_open_with_role(
         &self,
         is_ack: bool,
@@ -2309,6 +2313,7 @@ pub fn register_guard_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLinkActi
 /// verified byte-identical to zenoh-pico's `_z_init_encode` by
 /// `crates/wz-integration-tests/tests/layer3_init_body.rs`. The
 /// transport-message header is one byte: `(flags) | T_MID_INIT`.
+#[cfg(feature = "codec-init-body")]
 fn encode_init(
     params: &SessionInitParams,
     is_ack: bool,
@@ -2373,6 +2378,7 @@ fn encode_init(
 /// drive OpenSyn directly without an inbound parse cycle. The
 /// argument is ignored when `is_ack=true` (OpenAck carries no
 /// cookie field per transport.c:300-302).
+#[cfg(feature = "codec-open-body")]
 fn encode_open(
     params: &SessionInitParams,
     is_ack: bool,
