@@ -608,7 +608,8 @@
       "caveats_bullets": [
         "R311a4 Footprint: init-body -10328B / open-body -6520B.</bullet>\n</invoke>",
         "R311b Footprint: codec-keep-alive +712B; 11 ungated codecs -32~-64B noise.</bullet>\n</invoke>",
-        "R311c Footprint: codec-close +1792B elision (wire encode/decode + ap-demo cfg).</bullet>\n</invoke>"
+        "R311c Footprint: codec-close +1792B elision (wire encode/decode + ap-demo cfg).</bullet>\n</invoke>",
+        "R311d scout/hello/join: wz-codecs gate only; LTO discards ~0 binary delta.</bullet>\n</invoke>"
       ],
       "decision_status": "active"
     },
@@ -17002,6 +17003,64 @@
         "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
         "R303++ atomic field population still pending: 39 outline-only sub-sections.",
         "R310.5c get_matching_status conservative-false doc-surface (0.5R)."
+      ]
+    },
+    "Round 311d": {
+      "decision_summary": "R311d batches codec-scout / codec-hello / codec-join cascade — wz-codecs level only (wz-runtime-tokio does not import these types); forwards stay catalog-uniform for future runtime reuse.",
+      "changes_bullets": [
+        "crates/wz-codecs/Cargo.toml: codec-scout = [] + codec-hello = [] + codec-join = [] feature definitions + default include for all three.",
+        "crates/wz-codecs/build.rs: is_codec_enabled arms for `scout` / `hello` / `join` gating on CARGO_FEATURE_CODEC_{SCOUT,HELLO,JOIN}; matching `cargo:rerun-if-env-changed` directives.",
+        "crates/wz-codecs/src/lib.rs: `pub mod scout` / `pub mod hello` / `pub mod join` blocks cfg-gated.",
+        "crates/wz-runtime-tokio/Cargo.toml: codec-scout / codec-hello / codec-join = [\"wz-codecs/<feature>\"] forwards + default include; no session_glue.rs source-side cfg because wz-runtime-tokio does not import Scout/Hello/Join types (scouting subsystem + multicast Join are out of the AP-MVP path).",
+        "crates/wz/Cargo.toml: codec-scout / codec-hello = [\"wz-runtime-tokio?/...\"] ?-syntax forwards replacing prior no-op labels; codec-join already had [\"session-multicast\"] gets the forward appended.",
+        "Atomic store: §5.12 codec gets a new R311d caveat anchoring 'wz-runtime-tokio doesn't use scout/hello/join; cfg gate at wz-codecs level only, ~0 binary footprint delta via LTO'."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace pass; cargo clippy --workspace --all-targets -- -D warnings clean; cargo fmt --all -- --check clean.",
+        "wz-codecs --no-default-features + alloc (without scout/hello/join) pass; same with all three enabled pass.",
+        "cargo test -p wz-runtime-tokio --lib: 589/589 pass.",
+        "Binary-size delta (release stripped wz-ap-demo via wz facade preset-ap-client): TBD; expected ~0 noise because LTO already discards unused codec types regardless of feature gate (wz-runtime-tokio never imports them).",
+        "Layer E 30-trial flake-0: TBD (running).",
+        "validate_workspace: TBD."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "carry_forward_bullets": [
+        "R311e (next): codec-fragment cascade. Fragment shares the Frame envelope shape (sn + tail payload) at MID 0x06; cfg sites mirror Frame (parse arm, InboundFrame variant, handle, debug name). Same medium-surface complexity as codec-frame.",
+        "R311f-l: 7 remaining codecs (frame, declare-cluster, push + msg_put/msg_del, request + query, response + reply + err, response-final). Frame + declare-cluster + push/request/response are the data-path heavy cascades; each is 1-3R individually.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
+        "R311 carry: facade graceful-close wrapper API (R311c surfaced wz-ap-demo cfg-aware burden). If multiple binaries become wz facade consumers, hoist cfg-aware send_close + future cfg-aware send_query/declare into wz facade so consumers never reach into wz::runtime_tokio:: directly. 2-3R refactor.",
+        "R303++ atomic field population still pending."
+      ],
+      "publishable_decision_summary": "R311d batches codec-scout / codec-hello / codec-join cascade — wz-codecs level only (wz-runtime-tokio does not import these types); forwards stay catalog-uniform for future runtime reuse.",
+      "publishable_changes_bullets": [
+        "crates/wz-codecs/Cargo.toml: codec-scout = [] + codec-hello = [] + codec-join = [] feature definitions + default include for all three.",
+        "crates/wz-codecs/build.rs: is_codec_enabled arms for `scout` / `hello` / `join` gating on CARGO_FEATURE_CODEC_{SCOUT,HELLO,JOIN}; matching `cargo:rerun-if-env-changed` directives.",
+        "crates/wz-codecs/src/lib.rs: `pub mod scout` / `pub mod hello` / `pub mod join` blocks cfg-gated.",
+        "crates/wz-runtime-tokio/Cargo.toml: codec-scout / codec-hello / codec-join = [\"wz-codecs/<feature>\"] forwards + default include; no session_glue.rs source-side cfg because wz-runtime-tokio does not import Scout/Hello/Join types (scouting subsystem + multicast Join are out of the AP-MVP path).",
+        "crates/wz/Cargo.toml: codec-scout / codec-hello = [\"wz-runtime-tokio?/...\"] ?-syntax forwards replacing prior no-op labels; codec-join already had [\"session-multicast\"] gets the forward appended.",
+        "Atomic store: §5.12 codec gets a new R311d caveat anchoring 'wz-runtime-tokio doesn't use scout/hello/join; cfg gate at wz-codecs level only, ~0 binary footprint delta via LTO'."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check + cargo clippy --all-targets -D warnings + cargo fmt --check: all clean.",
+        "wz-codecs --no-default+alloc and +alloc+scout+hello+join both pass.",
+        "cargo test -p wz-runtime-tokio --lib: 589/589 pass.",
+        "wz-ap-demo stripped: scout -24B; hello -32B (noise — wz-runtime-tokio doesn't use these codecs).",
+        "Layer E 30-trial flake-0: 30/30 pass; 0 FAILED (no source-side change).",
+        "validate_workspace: entries 321->322, sections 255, T1=0, RT 13/13, sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311e (next): codec-fragment cascade. Fragment shares the Frame envelope shape (sn + tail payload) at MID 0x06; cfg sites mirror Frame (parse arm, InboundFrame variant, handle, debug name). Same medium-surface complexity as codec-frame.",
+        "R311f-l: 7 remaining codecs (frame, declare-cluster, push + msg_put/msg_del, request + query, response + reply + err, response-final). Frame + declare-cluster + push/request/response are the data-path heavy cascades; each is 1-3R individually.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
+        "R311 carry: facade graceful-close wrapper API (R311c surfaced wz-ap-demo cfg-aware burden). If multiple binaries become wz facade consumers, hoist cfg-aware send_close + future cfg-aware send_query/declare into wz facade so consumers never reach into wz::runtime_tokio:: directly. 2-3R refactor.",
+        "R303++ atomic field population still pending."
       ]
     },
     "Round 32": {
