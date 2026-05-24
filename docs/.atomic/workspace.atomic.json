@@ -17678,6 +17678,72 @@
         "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer-side Interest inbound bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 carry #2 / #3, R300 narrow, R301 §7 cargo wz-config tool, R304 stderr non-UTF-8 source, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311o": {
+      "decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
+      "changes_bullets": [
+        "session_glue.rs: send_undeclare_token signature-stabilized per R311g1 `feedback_signature_stability` MEMORY anchor. `#[cfg(all(declare-token, declare-undeclare))]` on the entire fn replaced by inner body cfg-gate + silent no-op (`let _ = token_id`) when either feature is off. Enables LivelinessToken::Drop to call this unconditionally without a matching cfg-gate at the call site (R311o type-ungating cascade prerequisite).",
+        "session.rs: LivelinessOptions struct + impl ungated. The cfg(liveliness-token) attribute removed from both blocks; the struct is now always defined regardless of the feature, with the wire-emit dependency gated inside Session::declare_token via the FeatureDisabled error variant rather than the type signature.",
+        "session.rs: LivelinessToken struct + impl + Drop ungated. Struct definition unconditional (fields are all unconditional types: Session/u64/String/LivelinessOptions). Drop body call to send_undeclare_token is now unconditional (the underlying fn is signature-stable). The historical cfg(liveliness-token) on impl Drop dropped.",
+        "session.rs: LivelinessAliasError enum ungated and extended with a `FeatureDisabled` variant covering the case where the `liveliness-token` feature is OFF at the crate level. Display message hints at preset rebuild remediation; std::error::Error::source returns None for the new variant (no inner cause to chain).",
+        "session.rs: Session::declare_token return type unified from Result<_, OutboundKeyexprError> to Result<_, LivelinessAliasError> — InvalidKeyexpr variant absorbs the keyexpr-gate reject so the two declare_token{,_aliased} surfaces now share one error type. The pico-gate reject path translates SendDeclareError::Keyexpr into LivelinessAliasError::InvalidKeyexpr instead of returning OutboundKeyexprError directly.",
+        "session.rs: Session::declare_token{_aliased} ungated. Method signatures stay available on a `--no-default-features` build; body cfg-gated on `liveliness-token`; the feature-off branch returns `Err(LivelinessAliasError::FeatureDisabled)` with the call args dropped via `let _ = (...)` so callers do not need to mirror the cfg-gate at their call site (signature stability).",
+        "session.rs: LivelinessSubscriberOptions / QueryableOptions / QueryOptions structs + impls ungated (Options-only cascade). The cfg(liveliness-subscriber) / cfg(query-queryable) / cfg(query-get) attributes removed from struct + impl blocks. Caller-side option construction now compiles unconditionally; the handle types (LivelinessSubscriber/Queryable/Querier) remain cfg-gated and deferred to a follow-up round when the observer field + module gates can be lifted.",
+        "session.rs: QueryOptions::with_target / with_consolidation / with_timeout_ms signature-stabilized per R311g1 anchor. The per-feature cfg attribute on the method removed; body cfg-gated on the matching `query-target` / `query-consolidation` / `query-timeout` feature; feature-off branch silently no-ops (`let _ = arg`); `mut self` warning suppressed via `#[cfg_attr(not(feature = \"...\"), allow(unused_mut))]` per the anchor's `#[allow] is last resort` carve-out for keyword-position constraints (cfg-gate cannot wrap a `mut` keyword directly).",
+        "session.rs: ConsolidationMode / QueryTarget imports ungated (the types are referenced from the now-unconditional QueryOptions struct fields + builder bodies). QueryMetadata import + expected_finals / query_metadata private helpers stay cfg-gated on `query-get` to match their sole caller `Session::query`, which keeps the unconditional `impl QueryOptions` block free of `dead_code` warnings under `--no-default-features`.",
+        "session.rs: OutboundKeyexprError import ungated. The type is wrapped by LivelinessAliasError::InvalidKeyexpr which is itself unconditional after the R311o cascade, so the import must follow the unconditional path."
+      ],
+      "verification_bullets": [
+        "cargo check default + no-default-features + features=query-get (no extras) + 5 wz presets (mcu-minimal/extended/ap-client/router/full): all pass.",
+        "cargo test --workspace: 761 passed / 0 failed / 17 ignored. No regression from R311n baseline.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --all --check: clean.",
+        "Layer A mnemosyne validate-workspace pre-mutation: T1=0 ledger=1 RT 13/13 sync entries=331 sections=255 (post-mutation entries=332 expected)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "carry_forward_bullets": [
+        "LivelinessSubscriber struct+impl+Drop type-ungating deferred — needs observer.liveliness_subscribers field + declare::liveliness_subscriber module ungate (LivelinessSample/Kind/Callback/Registry).",
+        "Queryable struct+impl+Drop+AliasError type-ungating deferred — needs crate::query module (QueryableId/QueryableRegistry/QueryReply) + observer.queryables field ungate.",
+        "Querier/QuerierAliased type-ungating deferred — needs observer.replies + crate::reply + crate::query modules unconditional. Largest cascade of the 4 families.",
+        "send_undeclare_subscriber/queryable/kexpr still cfg-gated entirely; R311g1 silent no-op retrofit pending. Couples with deferred handle Drop bodies.",
+        "Layer E 30-trial flake-0 not run this round; type-ungating is runtime-semantics-neutral so existing 761 cargo tests carry the no-regression signal."
+      ],
+      "publishable_decision_summary": "R311o type-ungating cascade — LivelinessToken family + 3 Options structs (LivelinessSubscriber/Queryable/Query) ungated; declare_token unified to LivelinessAliasError +FeatureDisabled variant.",
+      "publishable_changes_bullets": [
+        "session_glue.rs: send_undeclare_token signature-stabilized per R311g1 `feedback_signature_stability` MEMORY anchor. `#[cfg(all(declare-token, declare-undeclare))]` on the entire fn replaced by inner body cfg-gate + silent no-op (`let _ = token_id`) when either feature is off. Enables LivelinessToken::Drop to call this unconditionally without a matching cfg-gate at the call site (R311o type-ungating cascade prerequisite).",
+        "session.rs: LivelinessOptions struct + impl ungated. The cfg(liveliness-token) attribute removed from both blocks; the struct is now always defined regardless of the feature, with the wire-emit dependency gated inside Session::declare_token via the FeatureDisabled error variant rather than the type signature.",
+        "session.rs: LivelinessToken struct + impl + Drop ungated. Struct definition unconditional (fields are all unconditional types: Session/u64/String/LivelinessOptions). Drop body call to send_undeclare_token is now unconditional (the underlying fn is signature-stable). The historical cfg(liveliness-token) on impl Drop dropped.",
+        "session.rs: LivelinessAliasError enum ungated and extended with a `FeatureDisabled` variant covering the case where the `liveliness-token` feature is OFF at the crate level. Display message hints at preset rebuild remediation; std::error::Error::source returns None for the new variant (no inner cause to chain).",
+        "session.rs: Session::declare_token return type unified from Result<_, OutboundKeyexprError> to Result<_, LivelinessAliasError> — InvalidKeyexpr variant absorbs the keyexpr-gate reject so the two declare_token{,_aliased} surfaces now share one error type. The pico-gate reject path translates SendDeclareError::Keyexpr into LivelinessAliasError::InvalidKeyexpr instead of returning OutboundKeyexprError directly.",
+        "session.rs: Session::declare_token{_aliased} ungated. Method signatures stay available on a `--no-default-features` build; body cfg-gated on `liveliness-token`; the feature-off branch returns `Err(LivelinessAliasError::FeatureDisabled)` with the call args dropped via `let _ = (...)` so callers do not need to mirror the cfg-gate at their call site (signature stability).",
+        "session.rs: LivelinessSubscriberOptions / QueryableOptions / QueryOptions structs + impls ungated (Options-only cascade). The cfg(liveliness-subscriber) / cfg(query-queryable) / cfg(query-get) attributes removed from struct + impl blocks. Caller-side option construction now compiles unconditionally; the handle types (LivelinessSubscriber/Queryable/Querier) remain cfg-gated and deferred to a follow-up round when the observer field + module gates can be lifted.",
+        "session.rs: QueryOptions::with_target / with_consolidation / with_timeout_ms signature-stabilized per R311g1 anchor. The per-feature cfg attribute on the method removed; body cfg-gated on the matching `query-target` / `query-consolidation` / `query-timeout` feature; feature-off branch silently no-ops (`let _ = arg`); `mut self` warning suppressed via `#[cfg_attr(not(feature = \"...\"), allow(unused_mut))]` per the anchor's `#[allow] is last resort` carve-out for keyword-position constraints (cfg-gate cannot wrap a `mut` keyword directly).",
+        "session.rs: ConsolidationMode / QueryTarget imports ungated (the types are referenced from the now-unconditional QueryOptions struct fields + builder bodies). QueryMetadata import + expected_finals / query_metadata private helpers stay cfg-gated on `query-get` to match their sole caller `Session::query`, which keeps the unconditional `impl QueryOptions` block free of `dead_code` warnings under `--no-default-features`.",
+        "session.rs: OutboundKeyexprError import ungated. The type is wrapped by LivelinessAliasError::InvalidKeyexpr which is itself unconditional after the R311o cascade, so the import must follow the unconditional path."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check default + no-default-features + features=query-get (no extras) + 5 wz presets (mcu-minimal/extended/ap-client/router/full): all pass.",
+        "cargo test --workspace: 761 passed / 0 failed / 17 ignored. No regression from R311n baseline.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --all --check: clean.",
+        "Layer A mnemosyne validate-workspace pre-mutation: T1=0 ledger=1 RT 13/13 sync entries=331 sections=255 (post-mutation entries=332 expected)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "publishable_carry_forward_bullets": [
+        "LivelinessSubscriber struct+impl+Drop type-ungating deferred — needs observer.liveliness_subscribers field + declare::liveliness_subscriber module ungate (LivelinessSample/Kind/Callback/Registry).",
+        "Queryable struct+impl+Drop+AliasError type-ungating deferred — needs crate::query module (QueryableId/QueryableRegistry/QueryReply) + observer.queryables field ungate.",
+        "Querier/QuerierAliased type-ungating deferred — needs observer.replies + crate::reply + crate::query modules unconditional. Largest cascade of the 4 families.",
+        "send_undeclare_subscriber/queryable/kexpr still cfg-gated entirely; R311g1 silent no-op retrofit pending. Couples with deferred handle Drop bodies.",
+        "Layer E 30-trial flake-0 not run this round; type-ungating is runtime-semantics-neutral so existing 761 cargo tests carry the no-regression signal."
+      ]
+    },
     "Round 32": {
       "decision_summary": "B5 codec track continues — sources/codecs/frame.scxml + fragment.scxml authored. First VLE + tail primitive composition (B1-α + tail) plus first inline test-vector land (B5-θ 4-case set). Both share identical body shape per zenoh-pico (sn:VLE + payload:tail, no extensions); differ only in enclosing MID (0x05 Frame / 0x06 Fragment).",
       "changes_bullets": [
