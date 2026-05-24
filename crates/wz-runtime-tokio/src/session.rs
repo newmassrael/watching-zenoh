@@ -95,17 +95,22 @@ use crate::keyexpr_canon::OutboundKeyexprError;
 use crate::locality::Locality;
 use crate::observer::ApplicationLayerObserver;
 use crate::pubsub::SubscriptionId;
-// R307 — `crate::query` is gated on `feature = "query-queryable"`; the
-// re-imports here split by their narrower use site.
-// `QueryResponder` is the declare_queryable callback's second
-// argument; `QueryableId` is the `Queryable` handle's inner id —
-// both gate on `query-queryable`. `QueryReply` is only referenced
-// from `Session::query`'s loopback fan (Vec<QueryReply>); it gates
-// on `query-get` to match that sole call site.
+// R311r — `crate::query` is type-ungated; `QueryableId` follows the
+// same shape (always available). `QueryResponder` is the legacy
+// internal type that the R311r ReplyEmitter wraps; it stays imported
+// here for the body of `Session::query`'s loopback fan (R246).
+// `QueryReply` is only referenced from `Session::query`'s loopback
+// fan; it stays gated on `query-get` to match that sole call site.
 #[cfg(feature = "query-get")]
 use crate::query::QueryReply;
-#[cfg(feature = "query-queryable")]
-use crate::query::{QueryResponder, QueryableId};
+use crate::query::QueryableId;
+// R311r — consumer-facing wrappers introduced to decouple the
+// queryable callback signature from wz-codecs wire types. The
+// signature uses [`QueryEvent`] + [`ReplyEmitter`] regardless of
+// `query-queryable` feature state; both types are unconditional so
+// the type-ungated `Session::declare_queryable{_aliased}` Result-form
+// signatures compile in any consumer-feature subset.
+use crate::query_event::{QueryEvent, ReplyEmitter};
 // R307 — `crate::reply` is gated on `feature = "query-reply"`;
 // `InboundReply` flows into the z_get caller's callback and
 // `ReplyHandle` is the return value of `Session::query`. The bare-
@@ -1409,30 +1414,43 @@ impl Session {
     /// R238+). No wire frame is emitted at declare time — router-mode
     /// `DeclareQueryable` is elided in peer-only operation.
     ///
-    /// R307 — gated on `feature = "query-queryable"`. The callback's
-    /// second-argument type [`QueryResponder`] and the returned
-    /// [`Queryable`] handle both live in the gated `crate::query`
-    /// module; an `query-queryable`-disabled build elides the symbol
-    /// pair.
-    #[cfg(feature = "query-queryable")]
+    /// R311r — signature switched to
+    /// `Result<Queryable, QueryableAliasError>` for surface parity
+    /// with [`Self::declare_queryable_aliased`]; callback signature
+    /// switched to `FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>)`
+    /// (R311r wrapper types) so the application callback no longer
+    /// directly references the wz-codecs wire types. The new Err
+    /// variant a caller sees on this method (over the prior `->
+    /// Queryable` form) is `QueryableAliasError::FeatureDisabled`
+    /// when the build elides `query-queryable`; default-feature
+    /// builds always observe `Ok(...)`. Body cfg-wrap follows the
+    /// R311g1 signature-stability principle.
     pub fn declare_queryable(
         &self,
         keyexpr: impl Into<String>,
         options: QueryableOptions,
-        callback: impl FnMut(&wz_codecs::query::Query, &mut QueryResponder<'_>) + Send + 'static,
-    ) -> Queryable {
-        let keyexpr_string = keyexpr.into();
-        let id = self
-            .observer
-            .lock()
-            .expect("Session observer mutex poisoned — a queryable callback panicked")
-            .queryables
-            .register_with_locality(keyexpr_string.clone(), options.allowed_origin, callback);
-        Queryable {
-            session: self.clone(),
-            id,
-            keyexpr: keyexpr_string,
-            options,
+        callback: impl FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>) + Send + 'static,
+    ) -> Result<Queryable, QueryableAliasError> {
+        #[cfg(feature = "query-queryable")]
+        {
+            let keyexpr_string = keyexpr.into();
+            let id = self
+                .observer
+                .lock()
+                .expect("Session observer mutex poisoned — a queryable callback panicked")
+                .queryables
+                .register_with_locality(keyexpr_string.clone(), options.allowed_origin, callback);
+            Ok(Queryable {
+                session: self.clone(),
+                id,
+                keyexpr: keyexpr_string,
+                options,
+            })
+        }
+        #[cfg(not(feature = "query-queryable"))]
+        {
+            let _ = (keyexpr, options, callback);
+            Err(QueryableAliasError::FeatureDisabled)
         }
     }
 
@@ -1443,28 +1461,45 @@ impl Session {
     /// contract as [`Self::declare_subscriber_aliased`]: subsequent
     /// `send_undeclare_kexpr` does NOT affect the Queryable handle.
     ///
-    /// R307 — gated on `feature = "query-queryable"`.
-    #[cfg(feature = "query-queryable")]
+    /// R311r — body cfg-gated on `query-queryable`; signature stays
+    /// stable so the caller's `Result` branch on
+    /// `QueryableAliasError::FeatureDisabled` handles the feature-OFF
+    /// build uniformly. FeatureDisabled is checked FIRST in the OFF
+    /// arm so the early-return preserves zero-side-effect semantics
+    /// across all error variants.
     pub fn declare_queryable_aliased(
         &self,
         mapping_id: u64,
         inline_suffix: Option<&str>,
         options: QueryableOptions,
-        callback: impl FnMut(&wz_codecs::query::Query, &mut QueryResponder<'_>) + Send + 'static,
+        callback: impl FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>) + Send + 'static,
     ) -> Result<Queryable, QueryableAliasError> {
-        let base = self
-            .actions
-            .resolve_outbound_mapping(mapping_id)
-            .ok_or(QueryableAliasError::UnknownMapping(mapping_id))?;
-        let resolved = match inline_suffix {
-            None => base,
-            Some(s) => {
-                let mut composed = base;
-                composed.push_str(s);
-                composed
-            }
-        };
-        Ok(self.declare_queryable(resolved, options, callback))
+        #[cfg(feature = "query-queryable")]
+        {
+            let base = self
+                .actions
+                .resolve_outbound_mapping(mapping_id)
+                .ok_or(QueryableAliasError::UnknownMapping(mapping_id))?;
+            let resolved = match inline_suffix {
+                None => base,
+                Some(s) => {
+                    let mut composed = base;
+                    composed.push_str(s);
+                    composed
+                }
+            };
+            // R311r — delegate to the type-ungated declare_queryable
+            // entry. The unwrap is safe inside the cfg-ON branch
+            // because the feature-OFF return path is unreachable here
+            // (the surrounding cfg block already gates on the same
+            // feature).
+            self.declare_queryable(resolved, options, callback)
+        }
+        #[cfg(not(feature = "query-queryable"))]
+        {
+            let _ = (mapping_id, inline_suffix, options, callback);
+            Err(QueryableAliasError::FeatureDisabled)
+        }
     }
 
     /// R248 — declare a [`LivelinessToken`] on `keyexpr` + `options`,
@@ -2640,11 +2675,17 @@ impl std::error::Error for SubscribeAliasError {}
 /// R311o — type-ungated per `feedback_signature_stability` MEMORY
 /// anchor. Struct + builder always defined regardless of the
 /// `query-queryable` feature so caller-side option construction
-/// compiles unconditionally; the wire / registry dependency stays
-/// gated at the [`Queryable`] handle and
-/// [`Session::declare_queryable`] surface (deferred to a future round
-/// when the observer.queryables field + `crate::query` module become
-/// unconditional).
+/// compiles unconditionally.
+///
+/// R311r closure — the prior carry ("deferred to a future round when
+/// the observer.queryables field + `crate::query` module become
+/// unconditional") is now closed: the [`Queryable`] handle, the
+/// [`Session::declare_queryable{_aliased}`] surface (Result form with
+/// `FeatureDisabled` variant), the `observer.queryables` field, and
+/// the `crate::query` module are all type-ungated. The only remaining
+/// feature gates are the BODY of the two declare entry points, the
+/// dispatch fan-out in `ApplicationLayerObserver`, and the wire-emit
+/// drain in `flush_pending` (where `QueryReply::into_response` lives).
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct QueryableOptions {
@@ -2683,10 +2724,12 @@ impl QueryableOptions {
 /// `#[non_exhaustive]`. Construct only through
 /// [`Session::declare_queryable`] / [`Session::declare_queryable_aliased`].
 ///
-/// R307 — gated on `feature = "query-queryable"`. The handle's
-/// embedded [`QueryableId`] and [`QueryableOptions`] both share the
-/// same feature.
-#[cfg(feature = "query-queryable")]
+/// R311r — type-ungated. The struct, impl, and Drop are always defined
+/// so the [`Session::declare_queryable{_aliased}`] Result-form signature
+/// compiles regardless of feature state; a feature-OFF call returns
+/// `Err(QueryableAliasError::FeatureDisabled)` without ever
+/// constructing this handle. Drop calls `observer.queryables.unregister`
+/// — unconditionally available after R311r observer field ungate.
 #[non_exhaustive]
 pub struct Queryable {
     session: Session,
@@ -2695,7 +2738,6 @@ pub struct Queryable {
     options: QueryableOptions,
 }
 
-#[cfg(feature = "query-queryable")]
 impl Queryable {
     /// The stable id assigned by
     /// [`crate::query::QueryableRegistry::register_with_locality`].
@@ -2731,7 +2773,6 @@ impl Queryable {
     }
 }
 
-#[cfg(feature = "query-queryable")]
 impl Drop for Queryable {
     fn drop(&mut self) {
         // RAII unregister with poison-recover, mirroring Subscriber.
@@ -2758,17 +2799,30 @@ impl Drop for Queryable {
 /// [`SubscribeAliasError`] / [`PublishAliasError`] /
 /// [`QueryAliasError`] on the queryable side.
 ///
-/// R307 — gated on `feature = "query-queryable"`.
-#[cfg(feature = "query-queryable")]
+/// R311r — type-ungated + [`Self::FeatureDisabled`] variant added.
+/// The enum is always defined so the
+/// [`Session::declare_queryable{_aliased}`] Result-form signature
+/// compiles regardless of feature state; a feature-OFF call returns
+/// `Err(FeatureDisabled)` so caller code can branch on it uniformly.
+/// Mirrors the `FeatureDisabled` variant pattern already established
+/// on the LivelinessSubscriberAliasError family at R311q.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryableAliasError {
     /// No prior `send_declare_keyexpr` registered this id on the
     /// outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it before the declare_queryable_aliased call).
     UnknownMapping(u64),
+    /// R311r — the `query-queryable` feature is OFF at compile time.
+    /// Returned by both [`Session::declare_queryable`] and
+    /// [`Session::declare_queryable_aliased`] when the build elides
+    /// the queryable wire-emit + dispatch path. Caller must
+    /// feature-detect at the consumer-crate level before relying on
+    /// queryable callbacks; no callback would ever fire even if a
+    /// stub handle were constructed because the registry-side
+    /// dispatch is gated on the same feature.
+    FeatureDisabled,
 }
 
-#[cfg(feature = "query-queryable")]
 impl std::fmt::Display for QueryableAliasError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2777,11 +2831,16 @@ impl std::fmt::Display for QueryableAliasError {
                 "QueryableAliasError: mapping id {id} not present in outbound table; \
                  call SessionLinkActions::send_declare_keyexpr({id}, …) first"
             ),
+            QueryableAliasError::FeatureDisabled => write!(
+                f,
+                "QueryableAliasError: query-queryable feature is OFF at compile time; \
+                 the queryable dispatch + reply emit paths are elided, so no \
+                 callback can be installed on this build"
+            ),
         }
     }
 }
 
-#[cfg(feature = "query-queryable")]
 impl std::error::Error for QueryableAliasError {}
 
 /// R248 — options bundle for [`Session::declare_token`] /
@@ -4604,7 +4663,7 @@ mod tests {
             .unwrap()
             .queryables
             .register("home/temp", |_query, responder| {
-                responder.send_reply(b"22.5");
+                responder.reply(b"22.5");
             });
 
         let r = reply_count.clone();
@@ -4665,7 +4724,7 @@ mod tests {
             .unwrap()
             .queryables
             .register("home/temp", |_q, responder| {
-                responder.send_reply(b"loopback-should-not-fire");
+                responder.reply(b"loopback-should-not-fire");
             });
 
         let r = reply_count.clone();
@@ -4717,7 +4776,7 @@ mod tests {
             .unwrap()
             .queryables
             .register("home/temp", |_q, responder| {
-                responder.send_reply(b"22.5");
+                responder.reply(b"22.5");
             });
 
         let r = reply_count.clone();
@@ -4817,7 +4876,7 @@ mod tests {
             .unwrap()
             .queryables
             .register("clear/me", |_q, responder| {
-                responder.send_reply_del();
+                responder.reply_del();
             });
 
         session.query(
@@ -4852,7 +4911,7 @@ mod tests {
             .unwrap()
             .queryables
             .register("error/path", |_q, responder| {
-                responder.send_err(Some(4), Some("schema_v1"), b"oops");
+                responder.reply_err(Some(4), Some("schema_v1"), b"oops");
             });
 
         session.query(
@@ -4896,7 +4955,7 @@ mod tests {
             .unwrap()
             .queryables
             .register("home/humidity", |_q, responder| {
-                responder.send_reply(b"99");
+                responder.reply(b"99");
             });
 
         let r = reply_count.clone();
@@ -4986,7 +5045,7 @@ mod tests {
             .queryables
             .register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
                 fired_cb.fetch_add(1, Ordering::SeqCst);
-                responder.send_reply(b"22.5");
+                responder.reply(b"22.5");
             });
 
         let reply_count = Arc::new(AtomicUsize::new(0));
@@ -5021,7 +5080,7 @@ mod tests {
             "home/temp",
             move |_q, responder| {
                 fired_cb.fetch_add(1, Ordering::SeqCst);
-                responder.send_reply(b"22.5");
+                responder.reply(b"22.5");
             },
         );
 
@@ -5259,7 +5318,7 @@ mod tests {
             .unwrap()
             .queryables
             .register("home/temp", |_q, responder| {
-                responder.send_reply(b"22.5");
+                responder.reply(b"22.5");
             });
 
         let r = reply_count.clone();
@@ -5324,7 +5383,7 @@ mod tests {
             .unwrap()
             .queryables
             .register("home/temp", |_q, responder| {
-                responder.send_reply(b"22.5");
+                responder.reply(b"22.5");
             });
 
         let r = reply_count.clone();
@@ -5365,7 +5424,7 @@ mod tests {
         session.observer().lock().unwrap().queryables.register(
             "home/temp/kitchen",
             |_q, responder| {
-                responder.send_reply(b"21.0");
+                responder.reply(b"21.0");
             },
         );
 
@@ -5411,7 +5470,7 @@ mod tests {
             .unwrap()
             .queryables
             .register("home/temp", |_q, responder| {
-                responder.send_reply(b"22.5");
+                responder.reply(b"22.5");
             });
 
         let handle = session
@@ -5477,7 +5536,7 @@ mod tests {
         session.observer().lock().unwrap().queryables.register(
             "home/temp/kitchen",
             |_q, responder| {
-                responder.send_reply(b"21.0");
+                responder.reply(b"21.0");
             },
         );
 
@@ -5587,7 +5646,7 @@ mod tests {
             .unwrap()
             .queryables
             .register("home/temp", |_q, responder| {
-                responder.send_reply(b"22.5");
+                responder.reply(b"22.5");
             });
 
         let querier = session.declare_querier(
@@ -5928,7 +5987,7 @@ mod tests {
             .unwrap()
             .queryables
             .register("home/temp", |_q, responder| {
-                responder.send_reply(b"22.5");
+                responder.reply(b"22.5");
             });
 
         let qa = session.declare_querier_aliased(
@@ -5992,7 +6051,7 @@ mod tests {
         session.observer().lock().unwrap().queryables.register(
             "home/temp/kitchen",
             |_q, responder| {
-                responder.send_reply(b"21.0");
+                responder.reply(b"21.0");
             },
         );
 
@@ -6799,11 +6858,13 @@ mod tests {
     #[test]
     fn declare_queryable_returns_handle_with_keyexpr_and_options() {
         let (session, _driver) = build_session();
-        let q = session.declare_queryable(
-            "home/temp",
-            QueryableOptions::new().with_allowed_origin(Locality::SessionLocal),
-            |_query, _responder| {},
-        );
+        let q = session
+            .declare_queryable(
+                "home/temp",
+                QueryableOptions::new().with_allowed_origin(Locality::SessionLocal),
+                |_query, _responder| {},
+            )
+            .expect("query-queryable feature is ON in this test build");
         assert_eq!(q.keyexpr(), "home/temp");
         assert_eq!(q.options().allowed_origin, Locality::SessionLocal);
     }
@@ -6826,7 +6887,7 @@ mod tests {
             QueryableOptions::default(),
             move |_query, responder| {
                 fired_cb.fetch_add(1, Ordering::SeqCst);
-                responder.send_reply(b"22.5");
+                responder.reply(b"22.5");
             },
         );
 
@@ -6858,7 +6919,7 @@ mod tests {
                 QueryableOptions::default(),
                 move |_q, responder| {
                     fired_cb.fetch_add(1, Ordering::SeqCst);
-                    responder.send_reply(b"22.5");
+                    responder.reply(b"22.5");
                 },
             );
             session.query(
@@ -6889,7 +6950,9 @@ mod tests {
     #[test]
     fn queryable_undeclare_returns_true_and_skips_drop() {
         let (session, _driver) = build_session();
-        let q = session.declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {});
+        let q = session
+            .declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {})
+            .expect("query-queryable feature is ON in this test build");
         assert!(q.undeclare(), "first undeclare returns true");
     }
 
@@ -6938,7 +7001,7 @@ mod tests {
                 QueryableOptions::default(),
                 move |_q, responder| {
                     fired_cb.fetch_add(1, Ordering::SeqCst);
-                    responder.send_reply(b"22.5");
+                    responder.reply(b"22.5");
                 },
             )
             .expect("declared mapping resolves");

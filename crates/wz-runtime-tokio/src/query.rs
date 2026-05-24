@@ -75,6 +75,14 @@ use std::collections::HashMap;
 
 use wz_codecs::query::Query;
 use wz_codecs::request::{Request, RequestVariant};
+// R311r — `Response` + the `ResponseReplyBuilder` / `ResponseErrBuilder`
+// pair (from session_glue) gate on `codec-response`. `QueryReply::into_response`
+// is the only use site for these symbols inside this module, so the
+// imports follow that method's gate (see the method's `#[cfg]` below).
+// The dispatch / loopback / registration paths only stage entries into
+// `Vec<QueryReply>` and do not need codec-response, so the module body
+// otherwise compiles unconditionally once `lib.rs` ungates `pub mod query`.
+#[cfg(feature = "codec-response")]
 use wz_codecs::response::Response;
 use wz_codecs::wireexpr::WireexprVariant;
 
@@ -82,17 +90,29 @@ use wz_codecs::wireexpr::WireexprVariant;
 use wz_codecs::response_final::ResponseFinal;
 
 use crate::pubsub::keyexpr_pattern_matches;
-use crate::session_glue::{
-    DriverLoopOutcome, IterationEvent, NetworkMessage, ResponseErrBuilder, ResponseReplyBuilder,
-};
+use crate::query_event::{QueryEvent, ReplyEmitter};
+use crate::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
+#[cfg(feature = "codec-response")]
+use crate::session_glue::{ResponseErrBuilder, ResponseReplyBuilder};
 
 /// Boxed callback invoked when an inbound `Request(Query)`'s
-/// keyexpr matches a registered queryable. The callback receives
-/// the decoded [`Query`] by reference (the body of the inbound
-/// Request) and a `&mut QueryResponder` it uses to emit zero or
-/// more Replies / Errs. See module-level docs for the lifetime
-/// contract.
-pub type QueryableCallback = Box<dyn FnMut(&Query, &mut QueryResponder<'_>) + Send + 'static>;
+/// keyexpr matches a registered queryable. The callback receives a
+/// [`QueryEvent`] projection of the inbound query (resolved keyexpr +
+/// raw parameters + attachment + rid) and a [`ReplyEmitter`] for
+/// emitting zero or more Replies / Errs.
+///
+/// R311r — signature switched from
+/// `FnMut(&wz_codecs::query::Query, &mut QueryResponder<'_>)` to
+/// `FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>)` so the application
+/// callback no longer directly references the wz-codecs wire types.
+/// The wrappers are unconditional even in `query-queryable`-OFF
+/// builds (the signature lives on a type-ungated
+/// `Session::declare_queryable` whose OFF branch returns
+/// `Err(QueryableAliasError::FeatureDisabled)` before any callback is
+/// reached); see [`crate::query_event`] for the wrapper design
+/// rationale and the no-op fall-through on the OFF build.
+pub type QueryableCallback =
+    Box<dyn FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>) + Send + 'static>;
 
 /// Stable handle returned by [`QueryableRegistry::register`] so the
 /// caller can later unregister the queryable without re-keying on
@@ -207,6 +227,15 @@ impl QueryReply {
     /// zenoh-pico parity choice for queryables that have not yet
     /// declared a peer-side alias (which is the AP MVP shape — alias
     /// declaration on the responder side is a Phase D+ optimisation).
+    ///
+    /// R311r — gated on `codec-response`. The Reply staging side
+    /// (callback emit + Vec accumulation) compiles unconditionally so
+    /// `QueryableRegistry` stays type-ungated; only the wire-emit
+    /// terminal step lives behind the codec gate. Callers that hold a
+    /// `Vec<QueryReply>` without codec-response cannot convert to
+    /// `Response`, which is the textbook honest shape: no codec ⇒ no
+    /// wire frame to compose.
+    #[cfg(feature = "codec-response")]
     pub fn into_response(self) -> Response {
         match self {
             QueryReply::Reply {
@@ -429,7 +458,7 @@ impl QueryableRegistry {
     pub fn register(
         &mut self,
         keyexpr_pattern: impl Into<String>,
-        callback: impl FnMut(&Query, &mut QueryResponder<'_>) + Send + 'static,
+        callback: impl FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>) + Send + 'static,
     ) -> QueryableId {
         self.register_with_locality(keyexpr_pattern, crate::locality::Locality::Any, callback)
     }
@@ -443,7 +472,7 @@ impl QueryableRegistry {
         &mut self,
         keyexpr_pattern: impl Into<String>,
         allowed_origin: crate::locality::Locality,
-        callback: impl FnMut(&Query, &mut QueryResponder<'_>) + Send + 'static,
+        callback: impl FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>) + Send + 'static,
     ) -> QueryableId {
         let id = QueryableId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
@@ -630,6 +659,16 @@ impl QueryableRegistry {
         replies: &mut Vec<QueryReply>,
         is_remote: bool,
     ) {
+        // R311r — build the consumer-facing [`QueryEvent`] projection
+        // ONCE per matched queryable (the parameters byte slice and
+        // attachment view are stable across all matched callbacks for
+        // a single inbound query). The keyexpr field re-borrows the
+        // dispatcher's `keyexpr` argument; the parameters field
+        // borrows directly from `Query.parameters`; attachment
+        // extraction from the extensions chain is a future round (the
+        // pre-R311r QueryResponder did not expose attachment either,
+        // so the wrapper preserves that behaviour as `None`).
+        let parameters_view = query.parameters.as_deref();
         for queryable in &mut self.queryables {
             let allowed = if is_remote {
                 queryable.allowed_origin.allows_remote()
@@ -651,7 +690,22 @@ impl QueryableRegistry {
                     replies,
                     responder: None,
                 };
-                (queryable.callback)(query, &mut responder);
+                // R311r — wrap the internal QueryResponder in the
+                // consumer-facing ReplyEmitter so the callback sees
+                // the wrapper-level API surface. The wrapper holds a
+                // mutable borrow of `responder` for the duration of
+                // the callback call; the borrow ends when the
+                // emitter is dropped at the end of this scope.
+                let event = QueryEvent {
+                    keyexpr,
+                    parameters: parameters_view,
+                    attachment: None,
+                    rid,
+                };
+                {
+                    let mut emitter = ReplyEmitter::from_responder(&mut responder);
+                    (queryable.callback)(&event, &mut emitter);
+                }
                 // Responder dropped here; the borrow of `replies`
                 // ends so the loop can re-borrow for the next match.
             }
@@ -693,21 +747,34 @@ impl QueryableRegistry {
         pending_replies: &mut Vec<QueryReply>,
         pending_final_rids: &mut Vec<u64>,
     ) {
+        // R311r — `NetworkMessage::Request` is cfg-gated on
+        // `codec-request`; gate the inner-codec dispatch arm to match
+        // so a `codec-request`-OFF build elides the Request path and
+        // the function body compiles to a no-op loop. The unused
+        // parameters in the OFF arm are silenced via `let _ = ...`
+        // so the signature stays stable (signature-stability per
+        // R311g1 principle).
+        #[cfg(not(feature = "codec-request"))]
+        let _ = (peer_keyexpr_table, pending_replies, pending_final_rids);
         for message in messages {
-            if let NetworkMessage::Request(req) = message {
-                // Only Query bodies are queryable-visible; only
-                // resolvable keyexprs schedule a Final. We detect
-                // both by snapshotting the replies length before/
-                // after dispatch_request — a delta of zero means
-                // either non-Query body, un-resolvable keyexpr, or
-                // no queryable matched. In all three cases we owe
-                // no Final (the requester sees no Reply chain at
-                // all from this peer for this rid).
-                let before = pending_replies.len();
-                self.dispatch_request(req, peer_keyexpr_table, pending_replies);
-                if pending_replies.len() > before {
-                    pending_final_rids.push(req.rid);
+            match message {
+                #[cfg(feature = "codec-request")]
+                NetworkMessage::Request(req) => {
+                    // Only Query bodies are queryable-visible; only
+                    // resolvable keyexprs schedule a Final. We detect
+                    // both by snapshotting the replies length before/
+                    // after dispatch_request — a delta of zero means
+                    // either non-Query body, un-resolvable keyexpr, or
+                    // no queryable matched. In all three cases we owe
+                    // no Final (the requester sees no Reply chain at
+                    // all from this peer for this rid).
+                    let before = pending_replies.len();
+                    self.dispatch_request(req, peer_keyexpr_table, pending_replies);
+                    if pending_replies.len() > before {
+                        pending_final_rids.push(req.rid);
+                    }
                 }
+                _ => {}
             }
         }
     }
@@ -862,7 +929,7 @@ mod tests {
         let counter = invocations.clone();
         reg.register("home/temp", move |_query, responder| {
             counter.fetch_add(1, Ordering::SeqCst);
-            responder.send_reply(b"42.0");
+            responder.reply(b"42.0");
         });
 
         let req = request_query(7, 0, Some("home/temp"));
@@ -893,7 +960,7 @@ mod tests {
         let counter = invocations.clone();
         reg.register("home/**", move |_q, responder| {
             counter.fetch_add(1, Ordering::SeqCst);
-            responder.send_reply(b"ok");
+            responder.reply(b"ok");
         });
 
         // Three different keyexpr literals should all match `home/**`.
@@ -1016,7 +1083,7 @@ mod tests {
     fn responder_send_reply_del_emits_del_arm() {
         let mut reg = QueryableRegistry::new();
         reg.register("clear/me", |_q, responder| {
-            responder.send_reply_del();
+            responder.reply_del();
         });
 
         let mut replies = Vec::new();
@@ -1046,7 +1113,7 @@ mod tests {
     fn responder_send_err_emits_err_with_encoding_tuple() {
         let mut reg = QueryableRegistry::new();
         reg.register("error/path", |_q, responder| {
-            responder.send_err(Some(4), Some("schema_v1"), b"oops");
+            responder.reply_err(Some(4), Some("schema_v1"), b"oops");
         });
 
         let mut replies = Vec::new();
@@ -1078,9 +1145,9 @@ mod tests {
     fn responder_supports_multiple_replies_per_query() {
         let mut reg = QueryableRegistry::new();
         reg.register("series/data", |_q, responder| {
-            responder.send_reply(b"sample-1");
-            responder.send_reply(b"sample-2");
-            responder.send_reply(b"sample-3");
+            responder.reply(b"sample-1");
+            responder.reply(b"sample-2");
+            responder.reply(b"sample-3");
         });
 
         let mut replies = Vec::new();
@@ -1116,12 +1183,12 @@ mod tests {
     fn query_responder_with_responder_stamps_subsequent_replies() {
         let mut reg = QueryableRegistry::new();
         reg.register("home/temp", |_q, responder| {
-            responder.send_reply(b"before");
+            responder.reply(b"before");
             responder.with_responder(&[0xAA; 4], 11);
-            responder.send_reply(b"stamped-put");
-            responder.send_reply_del();
+            responder.reply(b"stamped-put");
+            responder.reply_del();
             responder.clear_responder();
-            responder.send_reply(b"after-clear");
+            responder.reply(b"after-clear");
         });
 
         let mut replies = Vec::new();
@@ -1193,7 +1260,7 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         reg.register("error/path", |_q, responder| {
             responder.with_responder(&[0xCC; 2], 5);
-            responder.send_err(Some(4), Some("schema_v1"), b"oops");
+            responder.reply_err(Some(4), Some("schema_v1"), b"oops");
         });
 
         let mut replies = Vec::new();
@@ -1229,7 +1296,7 @@ mod tests {
         let mut reg = QueryableRegistry::new();
         reg.register("home/temp", |_q, responder| {
             responder.with_responder(&[0xBB; 1], 1);
-            responder.send_reply(b"hello");
+            responder.reply(b"hello");
         });
 
         let mut replies = Vec::new();
@@ -1318,7 +1385,7 @@ mod tests {
     fn dispatch_messages_emits_final_for_each_matched_request() {
         let mut reg = QueryableRegistry::new();
         reg.register("home/temp", |_q, responder| {
-            responder.send_reply(b"21.0");
+            responder.reply(b"21.0");
         });
 
         // Two Query requests on the matched keyexpr + one unmatched.
@@ -1343,7 +1410,7 @@ mod tests {
     fn dispatch_messages_skips_final_when_no_queryable_matched() {
         let mut reg = QueryableRegistry::new();
         reg.register("home/temp", |_q, responder| {
-            responder.send_reply(b"21.0");
+            responder.reply(b"21.0");
         });
 
         let messages = vec![NetworkMessage::Request(Box::new(request_query(
@@ -1365,7 +1432,7 @@ mod tests {
     fn dispatch_messages_skips_final_when_keyexpr_unresolvable() {
         let mut reg = QueryableRegistry::new();
         reg.register("sensors/temp", |_q, responder| {
-            responder.send_reply(b"21.0");
+            responder.reply(b"21.0");
         });
 
         // mapping_id=99 not in peer table -> dispatch drops silently.
@@ -1422,12 +1489,12 @@ mod tests {
         let order_a = order.clone();
         let id_a = reg.register("metrics/cpu", move |_q, responder| {
             order_a.lock().unwrap().push(1);
-            responder.send_reply(b"first");
+            responder.reply(b"first");
         });
         let order_b = order.clone();
         let id_b = reg.register("metrics/cpu", move |_q, responder| {
             order_b.lock().unwrap().push(2);
-            responder.send_reply(b"second");
+            responder.reply(b"second");
         });
         assert_ne!(id_a, id_b);
 
@@ -1459,7 +1526,7 @@ mod tests {
         let counter = invocations.clone();
         reg.register("home/temp", move |_q, responder| {
             counter.fetch_add(1, Ordering::SeqCst);
-            responder.send_reply(b"22.5");
+            responder.reply(b"22.5");
         });
 
         let mut replies = Vec::new();
@@ -1499,7 +1566,7 @@ mod tests {
         let counter = invocations.clone();
         reg.register_with_locality("home/temp", Locality::SessionLocal, move |_q, responder| {
             counter.fetch_add(1, Ordering::SeqCst);
-            responder.send_reply(b"22.5");
+            responder.reply(b"22.5");
         });
 
         let mut replies = Vec::new();
