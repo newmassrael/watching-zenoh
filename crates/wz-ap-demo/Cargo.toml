@@ -102,7 +102,18 @@ env_logger = "0.11"
 # evolution without duplication in this manifest.
 [features]
 default = ["preset-ap-client"]
-preset-ap-client = ["wz/preset-ap-client"]
+# preset-ap-client forwards every wz facade atomic plus this crate's
+# own codec-close feature (R311c). The own codec-close gate is needed
+# because wz-ap-demo's teardown.rs calls send_close_with_reason
+# directly; cfg(feature = "codec-close") on the call site only
+# resolves against this crate's own feature graph, not the wz facade
+# feature graph reachable through the dep alias. measurement script
+# only enables wz/<feature> forwards so this crate's codec-close
+# stays off during minus-codec-close builds; the call falls out and
+# the binary teardown becomes abrupt-link-drop instead of graceful
+# Close MID emit.
+preset-ap-client = ["wz/preset-ap-client", "codec-close"]
+codec-close = ["wz/codec-close"]
 
 [lints]
 workspace = true

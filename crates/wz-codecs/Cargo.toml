@@ -47,10 +47,20 @@ path = "src/lib.rs"
 # pair (R311a4 wz facade exposes the forwards; R311a2/3 gate the
 # session_glue use sites; until then `--no-default-features` at
 # wz-runtime-tokio level breaks compile, which is intended).
-default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive"]
+default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close"]
 alloc = ["sce-forge-runtime/alloc"]
 codec-init-body = []
 codec-open-body = []
+# R311c — `codec-close` gates the SCXML codegen + `pub mod close` and
+# the session_glue.rs wire encode/decode + send_close_with_reason +
+# bind_unit("send_close_frame_with_reason") on the wz-runtime-tokio
+# side. CloseReason enum + set_close_reason_* FSM bindings stay
+# unconditional so the FSM script-action surface keeps the same shape;
+# only the wire transmit/receive disappears. Feature-off consequence:
+# the session has no graceful Close path; peer disconnects trip via
+# link-layer drops instead of MID 0x03 + reason byte. honest semantics
+# documented in §5.12 codec atomic caveat.
+codec-close = []
 # R311b — `codec-keep-alive` gates both the build.rs SCXML compile pass
 # for keep_alive.scxml and the `pub mod keep_alive` include in lib.rs.
 # Feature-off elides the empty-body KeepAlive codec entirely; the
@@ -63,6 +73,7 @@ codec-open-body = []
 # eventually hit `lease.expired -> Closing(Expired)`. This is the
 # honest semantics of `feature off = capability removed`.
 codec-keep-alive = []
+
 
 [dependencies]
 # sce-forge-runtime supplies CodecError + SceCursor + per-language

@@ -62,6 +62,7 @@ use sce_rust_runtime::scripting::{IScriptEngine, NativeMethod, ScriptValue};
 use sce_rust_runtime::Engine;
 
 use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink, VecSink};
+#[cfg(feature = "codec-close")]
 use wz_codecs::close::Close;
 use wz_codecs::decl_final::DeclFinal;
 use wz_codecs::decl_kexpr::DeclKexpr;
@@ -258,6 +259,7 @@ mod wire_const {
     pub const T_MID_INIT: u8 = 0x01;
     #[cfg(feature = "codec-open-body")]
     pub const T_MID_OPEN: u8 = 0x02;
+    #[cfg(feature = "codec-close")]
     pub const T_MID_CLOSE: u8 = 0x03;
     /// Per-session liveness ping — zero-byte body; lease-timer
     /// reset on receive (transport.h:24 commentary, MID 0x04).
@@ -287,6 +289,7 @@ mod wire_const {
     pub const FLAG_T_OPEN_T: u8 = 0x40;
 
     /// Session-close vs link-only close.
+    #[cfg(feature = "codec-close")]
     pub const FLAG_T_CLOSE_S: u8 = 0x20;
 
     /// Transport-message ext-chain presence bit shared across every
@@ -2051,6 +2054,7 @@ impl SessionLinkActions {
     /// emits regardless of [`Self::is_established`]. A caller wanting
     /// state-conditional emit (e.g. only after Established) should
     /// gate at its own layer.
+    #[cfg(feature = "codec-close")]
     pub fn send_close_with_reason(&self, reason: CloseReason) {
         self.trace
             .lock()
@@ -2205,6 +2209,7 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
+    #[cfg(feature = "codec-close")]
     bind_unit(lua, "send_close_frame_with_reason", actions, |a| {
         let reason = a.trace.lock().unwrap().close_reason as u8;
         a.trace.lock().unwrap().send_close_frame_with_reason += 1;
@@ -2484,6 +2489,7 @@ fn encode_ext_chain(entries: &[ExtEntry]) -> Vec<u8> {
 /// `_Z_FLAG_T_CLOSE_S` flag selects graceful session close (we
 /// always set it — link-only close is a transport-layer concern
 /// that the link driver handles directly).
+#[cfg(feature = "codec-close")]
 fn encode_close(reason: u8) -> Vec<u8> {
     let parent_flags = wire_const::FLAG_T_CLOSE_S;
     let mut wire = Vec::with_capacity(1 + Close::MAX_ENCODED_BYTES);
@@ -5727,6 +5733,7 @@ pub enum InboundFrame {
         extensions: Vec<ExtEntry>,
     },
     /// `_Z_MID_T_CLOSE` (0x03). `reason` is the single body byte.
+    #[cfg(feature = "codec-close")]
     Close {
         reason: u8,
         has_ext: bool,
@@ -5855,6 +5862,7 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
                 extensions,
             })
         }
+        #[cfg(feature = "codec-close")]
         wire_const::T_MID_CLOSE => {
             let body = Close::decode(&mut cursor)?;
             let extensions = if has_ext {
@@ -6133,6 +6141,7 @@ pub fn inbound_to_fsm_event(
         InboundFrame::Open { is_ack: false, .. } => Some(E::OpenSynReceived),
         #[cfg(feature = "codec-open-body")]
         InboundFrame::Open { is_ack: true, .. } => Some(E::OpenAckReceived),
+        #[cfg(feature = "codec-close")]
         InboundFrame::Close { .. } => Some(E::PeerClose),
         #[cfg(feature = "codec-keep-alive")]
         InboundFrame::KeepAlive { .. } => None,
@@ -6285,7 +6294,11 @@ pub async fn poll_and_dispatch_one<D: LinkDriver>(
                     InboundFrame::Open { .. } => {
                         unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
                     }
-                    InboundFrame::Close { .. } | InboundFrame::Unknown { .. } => {
+                    #[cfg(feature = "codec-close")]
+                    InboundFrame::Close { .. } => {
+                        unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
+                    }
+                    InboundFrame::Unknown { .. } => {
                         // inbound_to_fsm_event projects these to Some(event),
                         // so the outer Some arm handled them — this branch
                         // is unreachable.
@@ -7144,6 +7157,7 @@ mod tests {
                         InboundFrame::Init { .. } => "Init",
                         #[cfg(feature = "codec-open-body")]
                         InboundFrame::Open { .. } => "Open",
+                        #[cfg(feature = "codec-close")]
                         InboundFrame::Close { .. } => "Close",
                         #[cfg(feature = "codec-keep-alive")]
                         InboundFrame::KeepAlive { .. } => "KeepAlive",
@@ -10009,6 +10023,7 @@ mod tests {
     /// The trace counter for Close emits bumps once per call so a
     /// downstream test counting Close emits across the script + Rust
     /// paths sees the unified count.
+    #[cfg(feature = "codec-close")]
     #[test]
     fn send_close_with_reason_emits_zenoh_pico_compatible_wire_bytes() {
         use std::sync::Mutex;
