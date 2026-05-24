@@ -141,7 +141,8 @@ codec-open-body = ["wz-runtime-tokio?/codec-open-body"]
 # the Push type directly). Honest semantics: feature-off = no pub/sub
 # data carrier on the wire AND no in-process pubsub registry.
 codec-push = ["wz-runtime-tokio?/codec-push"]
-codec-request = []
+# R311j — codec-request forwards wz-runtime-tokio.
+codec-request = ["wz-runtime-tokio?/codec-request"]
 codec-response = []
 codec-response-final = ["wz-runtime-tokio?/codec-response-final"]
 codec-scout = ["wz-runtime-tokio?/codec-scout"]

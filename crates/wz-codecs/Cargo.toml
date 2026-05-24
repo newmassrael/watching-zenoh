@@ -47,7 +47,7 @@ path = "src/lib.rs"
 # pair (R311a4 wz facade exposes the forwards; R311a2/3 gate the
 # session_glue use sites; until then `--no-default-features` at
 # wz-runtime-tokio level breaks compile, which is intended).
-default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join", "codec-response-final", "codec-fragment", "codec-frame", "codec-push", "codec-declare"]
+default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join", "codec-response-final", "codec-fragment", "codec-frame", "codec-push", "codec-declare", "codec-request"]
 alloc = ["sce-forge-runtime/alloc"]
 codec-init-body = []
 codec-open-body = []
@@ -149,6 +149,14 @@ codec-push = []
 # features automatically pull codec-declare. codec-declare =
 # ["codec-frame"] closes the body-codec-implies-envelope edge.
 codec-declare = []
+# R311j — `codec-request` gates the SCXML codegen for the request
+# envelope + the inner Query body and the matching `pub mod` blocks.
+# wz-runtime-tokio session_glue.rs Request/RequestVariant imports,
+# N_MID_REQUEST const, build_request_query + build_request_query_with_meta
+# + encode_frame_with_request + NetworkMessage::Request variant +
+# parse arm carry the matching gate. codec-request = ["codec-frame"]
+# closes the third body-codec-implies-envelope edge.
+codec-request = []
 
 
 [dependencies]

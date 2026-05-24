@@ -136,10 +136,12 @@ pub mod wireexpr {
     include!(concat!(env!("OUT_DIR"), "/wireexpr.rs"));
 }
 
+#[cfg(feature = "codec-request")]
 pub mod query {
     include!(concat!(env!("OUT_DIR"), "/query.rs"));
 }
 
+#[cfg(feature = "codec-request")]
 pub mod request {
     include!(concat!(env!("OUT_DIR"), "/request.rs"));
 }

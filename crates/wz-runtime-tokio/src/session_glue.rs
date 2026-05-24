@@ -110,12 +110,15 @@ use wz_codecs::oam::Oam;
 use wz_codecs::open_body::OpenBody;
 #[cfg(feature = "codec-push")]
 use wz_codecs::push::{Push, PushVariant};
+#[cfg(feature = "codec-request")]
 use wz_codecs::query::Query;
 use wz_codecs::reply::{Reply, ReplyVariant};
+#[cfg(feature = "codec-request")]
 use wz_codecs::request::{Request, RequestVariant};
 use wz_codecs::response::{Response, ResponseVariant};
 #[cfg(feature = "codec-response-final")]
 use wz_codecs::response_final::ResponseFinal;
+#[cfg(any(feature = "codec-request", feature = "codec-push"))]
 use wz_codecs::timestamp::Timestamp;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::undecl_kexpr::UndeclKexpr;
@@ -345,10 +348,13 @@ mod wire_const {
     /// network MID.
     ///
     /// R311g — only callsite is the [`parse_frame_payload`] inbound
-    /// dispatcher, itself gated on `codec-frame`. Future R311i
-    /// codec-request cascade may surface additional encoder-side
-    /// uses; the gate moves to a broader scope at that time.
-    #[cfg(feature = "codec-frame")]
+    /// dispatcher (itself gated on `codec-frame`) + the outbound
+    /// `encode_frame_with_request` (gated on `codec-request`).
+    ///
+    /// R311j — gate broadened from `codec-frame` to `codec-request`:
+    /// the request envelope is now its own atomic body codec with
+    /// `codec-request = ["codec-frame"]` imply edge.
+    #[cfg(feature = "codec-request")]
     pub const N_MID_REQUEST: u8 = 0x1C;
     /// R90 — Push envelope MID (network.h:35). Pub/sub data
     /// carrier wrapping a put / del inner body; sibling to
@@ -2115,16 +2121,26 @@ impl SessionLinkActions {
     /// Request itself. SN-window ordering on the reliable channel
     /// gives this guarantee; an unreliable Query could silently drop
     /// and leave the local z_get future hung indefinitely.
+    /// R311j signature-stability retrofit per `feedback_signature_stability`
+    /// MEMORY note — body cfg-gated on `codec-request`; silent no-op
+    /// when the feature is off. The matching peer's z_get future hangs
+    /// until its per-call timeout fires (documented minus-codec-request
+    /// contract).
     pub fn send_request_query(
         &self,
         rid: u64,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
     ) {
-        let request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_request(sn, request, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
+        #[cfg(feature = "codec-request")]
+        {
+            let request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_request(sn, request, /*reliable=*/ true);
+            self.driver.send_blocking(&wire, Reliability::Reliable);
+        }
+        #[cfg(not(feature = "codec-request"))]
+        let _ = (rid, keyexpr_mapping_id, keyexpr_suffix);
     }
 
     /// R240 — metadata-bearing counterpart of [`Self::send_request_query`].
@@ -2151,6 +2167,8 @@ impl SessionLinkActions {
     /// Same reliability contract as the no-metadata form: hard-coded
     /// `reliable=true` per zenoh-pico's reliable-channel guarantee
     /// for the Query / Reply / Final correlation chain.
+    /// R311j signature-stability retrofit — body cfg, signature stable.
+    /// Silent no-op when `codec-request` off.
     pub fn send_request_query_with_meta(
         &self,
         rid: u64,
@@ -2158,31 +2176,37 @@ impl SessionLinkActions {
         keyexpr_suffix: Option<&str>,
         meta: &QueryMetadata,
     ) {
-        let mut builder = RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix);
-        if let Some(target) = meta.target {
-            builder = builder.request_target(target);
-        }
-        if let Some(consolidation) = meta.consolidation {
-            builder = builder.consolidation(consolidation);
-        }
-        if let Some(attachment) = meta.attachment.as_deref() {
-            // RequestQueryBuilder::query_attachment panics on empty
-            // input (zenoh-pico's `_z_n_msg_query_needed_exts`
-            // clears the ext on len=0). The QueryMetadata caller's
-            // contract is "attachment = Some(empty) means clear the
-            // ext"; honour that here without panicking by skipping
-            // the attach call when the inner slice is empty.
-            if !attachment.is_empty() {
-                builder = builder.query_attachment(attachment);
+        #[cfg(feature = "codec-request")]
+        {
+            let mut builder = RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix);
+            if let Some(target) = meta.target {
+                builder = builder.request_target(target);
             }
+            if let Some(consolidation) = meta.consolidation {
+                builder = builder.consolidation(consolidation);
+            }
+            if let Some(attachment) = meta.attachment.as_deref() {
+                // RequestQueryBuilder::query_attachment panics on
+                // empty input (zenoh-pico's
+                // `_z_n_msg_query_needed_exts` clears the ext on
+                // len=0). The QueryMetadata caller's contract is
+                // "attachment = Some(empty) means clear the ext";
+                // honour that here without panicking by skipping
+                // the attach call when the inner slice is empty.
+                if !attachment.is_empty() {
+                    builder = builder.query_attachment(attachment);
+                }
+            }
+            if meta.timeout_ms != 0 {
+                builder = builder.request_timeout_ms(meta.timeout_ms as u64);
+            }
+            let request = builder.build();
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_request(sn, request, /*reliable=*/ true);
+            self.driver.send_blocking(&wire, Reliability::Reliable);
         }
-        if meta.timeout_ms != 0 {
-            builder = builder.request_timeout_ms(meta.timeout_ms as u64);
-        }
-        let request = builder.build();
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_request(sn, request, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
+        #[cfg(not(feature = "codec-request"))]
+        let _ = (rid, keyexpr_mapping_id, keyexpr_suffix, meta);
     }
 
     /// R121j-2 — encode + dispatch a `ResponseFinal(request_id)` on
@@ -4197,6 +4221,7 @@ pub fn build_interest_final(interest_id: u64) -> Interest {
 ///   - `(N, None)`: alias — the queried keyexpr is the peer's
 ///     mapping for `N`.
 ///   - `(N, Some(s))`: compound — alias `N`'s prefix + `s`.
+#[cfg(feature = "codec-request")]
 pub fn build_request_query(
     rid: u64,
     keyexpr_mapping_id: u64,
@@ -4265,6 +4290,7 @@ pub fn build_request_query(
 /// (Only target + timeout are implemented as setters today; qos /
 /// tstamp / budget sub-setters layer in once their codec wiring lands
 /// — see the audit-traced carry in the Round 121j-1d /1e entries.)
+#[cfg(feature = "codec-request")]
 pub struct RequestQueryBuilder {
     rid: u64,
     keyexpr_mapping_id: u64,
@@ -4281,6 +4307,7 @@ pub struct RequestQueryBuilder {
     request_timeout_ms: Option<u64>,
 }
 
+#[cfg(feature = "codec-request")]
 impl RequestQueryBuilder {
     /// Begin a builder rooted in the same baseline contract as
     /// [`build_request_query`]: minimal Request(Query) envelope with
@@ -4738,6 +4765,7 @@ impl ConsolidationMode {
 /// `keyexpr_mapping_id` / `keyexpr_suffix` follow the same convention
 /// as [`build_request_query`] (literal id=0 / alias / compound). No
 /// params, no exts — those are separate layered helpers.
+#[cfg(feature = "codec-request")]
 pub fn build_request_query_with_consolidation(
     rid: u64,
     keyexpr_mapping_id: u64,
@@ -4791,6 +4819,7 @@ pub const REQUEST_QUERY_PARAMETERS_MAX_LEN: usize = 256;
 /// `z_get` does not set it. A future helper
 /// (`build_request_query_with_parameters_and_anyke`) can layer the
 /// anyke-prepend on top.
+#[cfg(feature = "codec-request")]
 pub fn build_request_query_with_parameters(
     rid: u64,
     keyexpr_mapping_id: u64,
@@ -4868,6 +4897,7 @@ pub const QUERY_EXT_ZBUF_MAX_LEN: usize = 32;
 /// the Value codec encoding+payload pair). Future
 /// `build_request_query_with_source_info` /
 /// `_with_body_value` / `_with_full_exts` helpers layer those.
+#[cfg(feature = "codec-request")]
 pub fn build_request_query_with_attachment(
     rid: u64,
     keyexpr_mapping_id: u64,
@@ -4925,6 +4955,7 @@ pub fn build_request_query_with_attachment(
 /// the appropriate ext_id and enc shape (qos/budget/timeout use
 /// ZINT; tstamp uses ZBUF; target uses ZINT + M=1 since target is
 /// mandatory for cross-router queries per network.c:140).
+#[cfg(feature = "codec-request")]
 pub fn build_request_query_with_timeout_ms(
     rid: u64,
     keyexpr_mapping_id: u64,
@@ -5009,6 +5040,7 @@ impl QueryTarget {
 /// the ext on that value; the peer infers BEST_MATCHING from
 /// ext-absence. Callers wanting BEST_MATCHING use plain
 /// [`build_request_query`] and let the peer fall back to default.
+#[cfg(feature = "codec-request")]
 pub fn build_request_query_with_target(
     rid: u64,
     keyexpr_mapping_id: u64,
@@ -5862,6 +5894,7 @@ pub fn encode_frame_with_response_final(
 /// unreliable Query could silently drop and leave the local
 /// `z_get` future hung without a Response or ResponseFinal. Callers
 /// that pass `reliable=false` accept that risk explicitly.
+#[cfg(feature = "codec-request")]
 pub fn encode_frame_with_request(sn: u64, request: Request, reliable: bool) -> Vec<u8> {
     let parent_flags = if reliable {
         wire_const::FLAG_T_FRAME_R
@@ -6274,6 +6307,7 @@ pub enum NetworkMessage {
     /// `Wireexpr` + a `RequestVariant` whose arms hold MsgPut / MsgDel
     /// / Query structs, making the inline form much larger than the
     /// `Unknown` variant.
+    #[cfg(feature = "codec-request")]
     Request(Box<Request>),
     /// R90 — Network MID `_Z_MID_N_PUSH` (0x1D). Pub/sub data
     /// carrier wrapping a put / del inner body — same envelope
@@ -6347,6 +6381,7 @@ pub enum NetworkMessage {
 impl std::fmt::Debug for NetworkMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(feature = "codec-request")]
             Self::Request(_) => f.write_str("Request(..)"),
             #[cfg(feature = "codec-push")]
             Self::Push(_) => f.write_str("Push(..)"),
@@ -6403,6 +6438,7 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
         let header = cursor.peek_slice(1)?[0];
         let mid = header & 0x1F;
         match mid {
+            #[cfg(feature = "codec-request")]
             wire_const::N_MID_REQUEST => {
                 let req = Request::decode(&mut cursor)?;
                 messages.push(NetworkMessage::Request(Box::new(req)));

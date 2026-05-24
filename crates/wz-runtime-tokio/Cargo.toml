@@ -112,6 +112,7 @@ default = [
     "codec-frame",
     "codec-push",
     "codec-declare",
+    "codec-request",
 ]
 liveliness-token = ["declare-token", "declare-undeclare"]
 liveliness-subscriber = ["declare-interest", "declare-final"]
@@ -133,9 +134,12 @@ declare-undeclare = ["codec-declare"]
 # without the loopback path is a future-round refinement; the R307
 # baseline keeps the loopback path universally available so the AP
 # MVP integration tests + ap-demo continue to exercise both branches.
-query-get = ["query-reply", "query-queryable"]
-query-queryable = []
-query-reply = []
+# R311j — query-* features imply codec-request because the wire-emit
+# path (send_request_query) builds on Request/Query types gated by
+# codec-request.
+query-get = ["query-reply", "query-queryable", "codec-request"]
+query-queryable = ["codec-request"]
+query-reply = ["codec-request"]
 query-target = ["query-get"]
 query-timeout = ["query-get"]
 query-consolidation = ["query-get"]
@@ -212,6 +216,15 @@ codec-push = ["codec-frame"]
 # + pubsub.rs absorb_declare stay always-on at this round per the
 # R311m architectural deferral.
 codec-declare = ["codec-frame"]
+# R311j — codec-request gates the wz-runtime-tokio Request wire surface
+# in session_glue.rs: Request/RequestVariant/Query imports, N_MID_REQUEST
+# const, build_request_query + build_request_query_with_meta +
+# encode_frame_with_request + NetworkMessage::Request variant + parse arm.
+# codec-request = ["codec-frame"] closes the third
+# body-codec-implies-envelope edge. query-get / query-queryable imply
+# codec-request so the wire path is mechanically available whenever
+# the high-level query surface is on.
+codec-request = ["codec-frame"]
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }
@@ -225,7 +238,7 @@ tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macro
 # wz-codecs's own default list, making the forwards a no-op and
 # preventing facade-level `--no-default-features` from elide-ing the
 # pair.
-wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc", "codec-push", "codec-declare"] }
+wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc", "codec-push", "codec-declare", "codec-request"] }
 # R252 — Runtime / TimeSource / Allocator trait surface. The AP profile
 # (this crate) bridges tokio + std into the trait contract authored in
 # R251; the MCU profile (future wz-runtime-lwip) will provide the same
