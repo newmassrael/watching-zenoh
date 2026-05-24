@@ -38,6 +38,19 @@
 #              before R291 caught it; the gate here prevents that
 #              recurrence by failing pre-push if rustfmt would
 #              reformat any tracked file.
+#   Layer F  — codec-footprint catalog truthfulness gate (R311n).
+#              Opt-in via `--layer F` or `WZ_RUN_LAYER_F=1`. Runs
+#              scripts/measure-codec-footprint.sh and exits non-zero
+#              if any codec-* atomic feature's minus-<codec> lane
+#              measures a near-zero elision delta (default threshold
+#              1 KB). Catches the catalog-truthfulness regression
+#              shape where a new high-level consumer feature is
+#              added without listing it in the implies graph and
+#              cargo's resolver silently re-enables the codec the
+#              lane was trying to elide. The bench is expensive
+#              (~5-10 min cold; multiple wz-ap-demo release builds)
+#              so it stays off the default dispatch path; run it
+#              explicitly when authoring a codec cascade.
 #
 # Exit codes:
 #   0  every required layer passed
@@ -462,6 +475,34 @@ layer_e_ap_demo_round_trip() {
     (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored)
 }
 
+# ─── Layer F — codec-footprint catalog truthfulness gate (R311n) ───
+#
+# Opt-in. The bench rebuilds wz-ap-demo under every codec-* atomic
+# feature's transitive-puller-aware exclusion lane, so a single run
+# is several minutes on cold cargo cache. Skipped on the default
+# dispatch path; invoked explicitly via:
+#
+#   scripts/run-ci.sh --layer F               # only Layer F
+#   WZ_RUN_LAYER_F=1 scripts/run-ci.sh        # full CI + Layer F
+#
+# Catalog-truthfulness rationale (R311n): for every codec-X atomic
+# feature, turning X off at the wz facade level must mechanically
+# remove bytes from a real binary. Without an implies-aware lane the
+# minus-codec-X measurement re-enables the codec via consumer
+# features (e.g. declare-subscriber implies codec-declare); R311n
+# parses the implies graph from `cargo metadata` and excludes the
+# full puller set so the lane is honest. The threshold gate exits
+# non-zero when any lane drops below the minimum elision delta —
+# typically a sign that a new high-level consumer feature was added
+# without being listed against the codec it pulls.
+layer_f_codec_footprint() {
+    if [[ "$ONLY_LAYER" != "F" && "${WZ_RUN_LAYER_F:-0}" -ne 1 ]]; then
+        echo "Layer F SKIP (opt-in: --layer F or WZ_RUN_LAYER_F=1)"
+        return 0
+    fi
+    bash scripts/measure-codec-footprint.sh
+}
+
 # ─── dispatch ──────────────────────────────────────────────────────
 overall=0
 run_layer 0 layer_0_preflight_lints || overall=1
@@ -474,6 +515,7 @@ run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer D layer_d_validate_deploy || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
+run_layer F layer_f_codec_footprint || overall=1
 
 if [[ $overall -eq 0 ]]; then
     echo ""
