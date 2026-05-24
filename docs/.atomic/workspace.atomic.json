@@ -15898,6 +15898,58 @@
         "Pre-existing architectural carries unchanged: R284 uniform Established gate (3-5R), R283 peer-side Interest inbound bilateral (2-3R), R267 Session<R,T> reparam (3-7R, composability blocker), R301 §8 SCE cross-repo (3-7R), Querier::get_matching_status (cross-cut now gated by R310), Q_B/Q_E codec slots (5-10R), Phase W full lwIP (20-50R), R299 carry #2 / #3, R300 conservative-reject narrow (1R), R303+ feature_inventory.md atomic Section decompose (1-2R), R301 §7 cargo wz-config inspect tool (3-5R), R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis)."
       ]
     },
+    "Round 310.5a": {
+      "decision_summary": "R310.5a strips cfg(any(..., test)) from 4 declare/session_glue sites (resolve_wireexpr, reconstruct_outbound_keyexpr, 2 imports); uses #[allow(dead_code)] for prod/test parity.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/declare.rs: `use std::collections::HashMap` and `use wz_codecs::wireexpr::WireexprVariant` lose their `#[cfg(any(declare-queryable, declare-subscriber, liveliness-token, liveliness-subscriber, test))]` gate. Both are consumed by `resolve_wireexpr`, which is now always compiled, so the imports are always used; the explanatory comment above them is removed (imports do not need narrative).",
+        "crates/wz-runtime-tokio/src/declare.rs: `pub(super) fn resolve_wireexpr` loses the same `cfg(any(..., test))` gate and gains `#[allow(dead_code)]`. The rustdoc now records the R310.5a textbook revision rationale — the prior `cfg(any(..., test))` produced *different* surfaces between `cargo build --no-default-features` (helper elided) and `cargo test --no-default-features` (helper visible), which is a silent-drift hazard for future refactors. Release-mode DCE strips the unused symbol when no sub-module imports it.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: `fn reconstruct_outbound_keyexpr` (line 1702) loses the same `cfg(any(declare-subscriber, declare-queryable, declare-token, test))` gate and gains `#[allow(dead_code)]`. The preceding comment is rewritten to record the R310.5a parity-not-elision rationale and to drop the `test` clause reference.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:109 (`use crate::keyexpr_canon::check_outbound_keyexpr_pico_safe`) was already textbook (`cfg(any(declare-keyexpr, declare-subscriber, declare-queryable, declare-token))` with no `test` clause) — left unchanged."
+      ],
+      "verification_bullets": [
+        "wz-runtime-tokio 15-config cargo check matrix: --no-default-features / default / 11 single-feature paths (declare-keyexpr/-subscriber/-queryable/-token/-undeclare/-interest/-final, query-get/-reply/-queryable, liveliness-token/-subscriber) / --all-features. Every path Finished without error.",
+        "cargo test -p wz-runtime-tokio --lib --no-default-features: 589 passed / 0 failed / 0 ignored. Confirms the always-compiled helpers do not break the no-feature lib-test surface.",
+        "cargo test -p wz-runtime-tokio --lib --all-features: 589 passed / 0 failed / 0 ignored. Includes `reconstruct_outbound_keyexpr_shape_table` and the four declare sub-module tests that consume `resolve_wireexpr` — all green.",
+        "scripts/run-ci.sh --skip-codegen: every required layer (Layer 0 fmt / A validate-workspace / A2 envelope-mid audit / C0 #[ignore] discipline / C1 workspace test / C1b wz-runtime-core alloc test / C2 clippy / D deploy schema / E binary-dep e2e) passes.",
+        "Layer E flake-0 measurement: cargo test -p wz-integration-tests -- --ignored repeated 30 times = 30/30 pass. Matches R310 baseline (30/30 post-application-layer-gating); no flake introduced by R310.5a."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R310.5b next: replace `_peer_table` rebinding hack in `observer.rs:dispatch_event` with per-arm inline-binding cfg so the variable name stays `peer_table` in both surfaces (textbook prefers no rebinding-to-underscore for shape parity).",
+        "R310.5c next: restore Publisher/Querier::get_matching_status API shape — remove the cfg gate from the four method signatures, gate only the body so the methods always exist and return `MatchingStatus{matching:false}` when the consumer feature (declare-subscriber/declare-queryable) is off. Add rustdoc explaining the zenoh-cpp parity (always-callable surface) and the gate-off semantic (no runtime tracking → conservatively false).",
+        "R311 next mechanical track (codec domain #[cfg(feature)] gates, 16 features, 5-8R split). Blast radius ~2-3× R309 because codec gates touch every wz-codecs build.rs SCXML emit + every wire-encode/decode call site. Cross-crate dependency: wz facade Cargo.toml will need an optional `wz-codecs` forward.",
+        "Pubsub domain gating (11 atomic features, 3-4R estimate) — Session::declare_subscriber + SubscribeOptions + Subscriber + pubsub::SubscriberRegistry path gate on pubsub-* features. R311 codec track candidate predecessor.",
+        "zenoh-pico z_sub CLI startup race (R309 carry) untouched — environmental; extend test-harness init timeout 5s→10s or add readiness probe. 0.5-1R.",
+        "Pre-existing carries unchanged: R284 uniform Established gate (3-5R signature break), R283 peer-side Interest inbound bilateral (2-3R), R267 Session<R,T> reparam (3-7R composability blocker), R301 §8 SCE cross-repo (3-7R), Querier::get_matching_status (R310.5c will close), Q_B/Q_E codec slots (5-10R SCE schema), Phase W full lwIP (20-50R), R299 carry #2/#3, R300 conservative-reject narrow (1R), R303+ feature_inventory.md atomic Section decompose (1-2R), R301 §7 cargo wz-config inspect tool (3-5R), R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis), keyexpr_canon proptest filter hole (1R analysis)."
+      ],
+      "publishable_decision_summary": "R310.5a strips cfg(any(..., test)) from 4 declare/session_glue sites (resolve_wireexpr, reconstruct_outbound_keyexpr, 2 imports); uses #[allow(dead_code)] for prod/test parity.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/declare.rs: `use std::collections::HashMap` and `use wz_codecs::wireexpr::WireexprVariant` lose their `#[cfg(any(declare-queryable, declare-subscriber, liveliness-token, liveliness-subscriber, test))]` gate. Both are consumed by `resolve_wireexpr`, which is now always compiled, so the imports are always used; the explanatory comment above them is removed (imports do not need narrative).",
+        "crates/wz-runtime-tokio/src/declare.rs: `pub(super) fn resolve_wireexpr` loses the same `cfg(any(..., test))` gate and gains `#[allow(dead_code)]`. The rustdoc now records the R310.5a textbook revision rationale — the prior `cfg(any(..., test))` produced *different* surfaces between `cargo build --no-default-features` (helper elided) and `cargo test --no-default-features` (helper visible), which is a silent-drift hazard for future refactors. Release-mode DCE strips the unused symbol when no sub-module imports it.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: `fn reconstruct_outbound_keyexpr` (line 1702) loses the same `cfg(any(declare-subscriber, declare-queryable, declare-token, test))` gate and gains `#[allow(dead_code)]`. The preceding comment is rewritten to record the R310.5a parity-not-elision rationale and to drop the `test` clause reference.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:109 (`use crate::keyexpr_canon::check_outbound_keyexpr_pico_safe`) was already textbook (`cfg(any(declare-keyexpr, declare-subscriber, declare-queryable, declare-token))` with no `test` clause) — left unchanged."
+      ],
+      "publishable_verification_bullets": [
+        "wz-runtime-tokio 15-config cargo check matrix: --no-default-features / default / 11 single-feature paths (declare-keyexpr/-subscriber/-queryable/-token/-undeclare/-interest/-final, query-get/-reply/-queryable, liveliness-token/-subscriber) / --all-features. Every path Finished without error.",
+        "cargo test -p wz-runtime-tokio --lib --no-default-features: 589 passed / 0 failed / 0 ignored. Confirms the always-compiled helpers do not break the no-feature lib-test surface.",
+        "cargo test -p wz-runtime-tokio --lib --all-features: 589 passed / 0 failed / 0 ignored. Includes `reconstruct_outbound_keyexpr_shape_table` and the four declare sub-module tests that consume `resolve_wireexpr` — all green.",
+        "scripts/run-ci.sh --skip-codegen: every required layer (Layer 0 fmt / A validate-workspace / A2 envelope-mid audit / C0 #[ignore] discipline / C1 workspace test / C1b wz-runtime-core alloc test / C2 clippy / D deploy schema / E binary-dep e2e) passes.",
+        "Layer E flake-0 measurement: cargo test -p wz-integration-tests -- --ignored repeated 30 times = 30/30 pass. Matches R310 baseline (30/30 post-application-layer-gating); no flake introduced by R310.5a."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R310.5b next: replace `_peer_table` rebinding hack in `observer.rs:dispatch_event` with per-arm inline-binding cfg so the variable name stays `peer_table` in both surfaces (textbook prefers no rebinding-to-underscore for shape parity).",
+        "R310.5c next: restore Publisher/Querier::get_matching_status API shape — remove the cfg gate from the four method signatures, gate only the body so the methods always exist and return `MatchingStatus{matching:false}` when the consumer feature (declare-subscriber/declare-queryable) is off. Add rustdoc explaining the zenoh-cpp parity (always-callable surface) and the gate-off semantic (no runtime tracking → conservatively false).",
+        "R311 next mechanical track (codec domain #[cfg(feature)] gates, 16 features, 5-8R split). Blast radius ~2-3× R309 because codec gates touch every wz-codecs build.rs SCXML emit + every wire-encode/decode call site. Cross-crate dependency: wz facade Cargo.toml will need an optional `wz-codecs` forward.",
+        "Pubsub domain gating (11 atomic features, 3-4R estimate) — Session::declare_subscriber + SubscribeOptions + Subscriber + pubsub::SubscriberRegistry path gate on pubsub-* features. R311 codec track candidate predecessor.",
+        "zenoh-pico z_sub CLI startup race (R309 carry) untouched — environmental; extend test-harness init timeout 5s→10s or add readiness probe. 0.5-1R.",
+        "Pre-existing carries unchanged: R284 uniform Established gate (3-5R signature break), R283 peer-side Interest inbound bilateral (2-3R), R267 Session<R,T> reparam (3-7R composability blocker), R301 §8 SCE cross-repo (3-7R), Querier::get_matching_status (R310.5c will close), Q_B/Q_E codec slots (5-10R SCE schema), Phase W full lwIP (20-50R), R299 carry #2/#3, R300 conservative-reject narrow (1R), R303+ feature_inventory.md atomic Section decompose (1-2R), R301 §7 cargo wz-config inspect tool (3-5R), R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis), keyexpr_canon proptest filter hole (1R analysis)."
+      ]
+    },
     "Round 32": {
       "decision_summary": "B5 codec track continues — sources/codecs/frame.scxml + fragment.scxml authored. First VLE + tail primitive composition (B1-α + tail) plus first inline test-vector land (B5-θ 4-case set). Both share identical body shape per zenoh-pico (sn:VLE + payload:tail, no extensions); differ only in enclosing MID (0x05 Frame / 0x06 Fragment).",
       "changes_bullets": [
