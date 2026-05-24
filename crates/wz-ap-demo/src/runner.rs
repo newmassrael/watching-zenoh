@@ -339,23 +339,34 @@ fn install_session_handles(
     let liveliness_subscriber = liveliness_subscriber_keyexpr.map(|filter| {
         let owned_filter = filter.to_string();
         let key_for_callback = owned_filter.clone();
-        session.declare_liveliness_subscriber(
-            owned_filter,
-            LivelinessSubscriberOptions::default(),
-            move |sample: LivelinessSample<'_>| {
-                let kind_str = match sample.kind {
-                    LivelinessSampleKind::Put => "PUT",
-                    LivelinessSampleKind::Delete => "DELETE",
-                };
-                log::info!(
-                    "wz-ap-demo: LIVELINESS SAMPLE {} filter='{}' keyexpr='{}' token_id={}",
-                    kind_str,
-                    key_for_callback,
-                    sample.keyexpr,
-                    sample.token_id,
-                );
-            },
-        )
+        // R311q — declare_liveliness_subscriber now returns
+        // `Result<LivelinessSubscriber, LivelinessSubscriberAliasError>`
+        // for surface parity with the aliased entry point. wz-ap-demo
+        // builds with default features (liveliness-subscriber ON), so
+        // the only Err variant the caller can hit here is
+        // `FeatureDisabled` — impossible on this build. `.expect` is
+        // the textbook shape because a panic at this site would
+        // indicate a default-features misconfiguration, which is a
+        // build-system bug rather than a runtime condition.
+        session
+            .declare_liveliness_subscriber(
+                owned_filter,
+                LivelinessSubscriberOptions::default(),
+                move |sample: LivelinessSample<'_>| {
+                    let kind_str = match sample.kind {
+                        LivelinessSampleKind::Put => "PUT",
+                        LivelinessSampleKind::Delete => "DELETE",
+                    };
+                    log::info!(
+                        "wz-ap-demo: LIVELINESS SAMPLE {} filter='{}' keyexpr='{}' token_id={}",
+                        kind_str,
+                        key_for_callback,
+                        sample.keyexpr,
+                        sample.token_id,
+                    );
+                },
+            )
+            .expect("liveliness-subscriber feature is ON in wz-ap-demo default build")
     });
 
     let queryable = queryable_spec.map(|(pattern, reply_text)| {
