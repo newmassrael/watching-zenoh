@@ -1548,6 +1548,19 @@ impl Session {
                      returned {e:?} unexpectedly"
                     )
                 }
+                // R311g1 — `liveliness-token = ["declare-token", ...]`
+                // Cargo implication: this caller is `#[cfg(feature =
+                // "liveliness-token")]`, which forces `declare-token`
+                // ON via the implication chain. The signature-stability
+                // contract requires the variant exist in the enum and
+                // be matched explicitly, but the implication chain
+                // guarantees the runtime arm is unreachable.
+                SendDeclareError::FeatureDisabled => unreachable!(
+                    "declare-token feature must be ON whenever \
+                     liveliness-token is ON (Cargo implication chain); \
+                     send_declare_token returned FeatureDisabled despite \
+                     liveliness-token-gated caller"
+                ),
             })?;
         Ok(LivelinessToken {
             session: self.clone(),
