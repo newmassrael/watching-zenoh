@@ -17612,6 +17612,72 @@
         "Codec catalog body-cascade closure status — R311h codec-push + R311i codec-declare + R311j codec-request + R311k codec-response: 4/4 body codecs gated with codec-frame imply. All 14 codec catalog features have mechanical implementation. The composable framework north star's wire-layer codec elision is mechanically true at the wz-runtime-tokio level; consumer-module elision (R311m) and type-ungating (R267) remain as the next architectural layers."
       ]
     },
+    "Round 311n": {
+      "decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
+      "changes_bullets": [
+        "scripts/lib/feature_implies.py NEW — wz facade → wz-runtime-tokio implies-graph resolver. Reads `cargo metadata --format-version=1 --no-deps` JSON from stdin, computes wz-runtime-tokio transitive closure + wz facade activation map + invert to PULLERS-by-codec, emits shell-sourceable `PULLERS_codec_X=\"...\"` assignments for every `codec-*` rt feature. Standalone module instead of inline heredoc because `cargo metadata | python3 - <<EOF` is ambiguous in bash (heredoc + pipe both target stdin).",
+        "scripts/measure-codec-footprint.sh — each minus-<codec> lane excludes the codec + its full transitive puller set (declare-* / query-* / liveliness-* / domain-* / presets). Pre-R311n the exclusion was the codec name only; cargo resolver silently re-enabled the codec via `declare-subscriber = [codec-declare]` etc. and the lane measured a fake near-zero delta. The puller-aware exclusion makes the lane honest.",
+        "scripts/measure-codec-footprint.sh — `measure()` gracefully SKIPs lanes whose binary fails to compile under the puller-aware exclusion. Writes `SKIP` to the size cache; the report prints `SKIP` instead of a numeric delta. Honest semantics for `this binary unconditionally references the consumer features and cannot be elided down to handshake-only`.",
+        "scripts/measure-codec-footprint.sh — handshake-only lane added. Start from preset-ap-client; exclude every consumer feature; only `Init` / `Open` / `Close` + `KeepAlive` + transport / runtime plumbing remain. Skips for wz-ap-demo today; the lane shape is the contract a future minimal handshake binary would satisfy.",
+        "scripts/measure-codec-footprint.sh — threshold-based regression gate (`WZ_FOOTPRINT_THRESHOLD_BYTES` default 1024). Codec lanes below threshold fail the script. wz-codecs-only codecs (scout/hello/join/fragment) soft-skip; compile-fail SKIPs are excluded from the gate. Opt-out via `WZ_FOOTPRINT_NO_THRESHOLD=1`.",
+        "scripts/run-ci.sh — Layer F added. Opt-in via `--layer F` or `WZ_RUN_LAYER_F=1`. Runs `measure-codec-footprint.sh` as a catalog-truthfulness regression gate. Stays off the default dispatch path because the bench is expensive (~5-10 min cold; multiple wz-ap-demo release builds)."
+      ],
+      "verification_bullets": [
+        "feature_implies.py standalone: 14 codec-* PULLERS lines emit clean from cargo metadata",
+        "Baseline wz-ap-demo 2717920B (preset-ap-client, lto=thin, codegen-units=1, strip)",
+        "Measurable elision: codec-push 14688B, codec-init-body 10368B, codec-open-body 6592B",
+        "codec-response-final 4256B, codec-close 2792B, codec-keep-alive 712B (total ~39KB)",
+        "wz-codecs-only near-zero: scout/hello/join/fragment (honest; no session_glue surface)",
+        "SKIP lanes: codec-frame, codec-declare, codec-request, codec-response, minus-all-codecs, handshake-only",
+        "Compile-fail: wz-ap-demo refs LivelinessToken/Queryable/declare_token/replies unconditional",
+        "Script syntax: bash -n + python3 ast.parse clean; cargo fmt unaffected (no Rust changes)",
+        "Layer A mnemosyne validate-workspace pre-mutation: T1=0 ledger=0 RT 13/13 sync"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "carry_forward_bullets": [
+        "wz-ap-demo cfg-gate refactor or smaller handshake-only test binary required to measure codec-frame/declare/request/response/minus-all/handshake-only lanes; SKIP today is honest.",
+        "R311m consumer-module cascade carries forward — once wz-ap-demo's LivelinessToken/Queryable/declare_token/observer.replies/remote_subscribers/remote_queryables/liveliness usages are cfg-gated, the currently-SKIPped lanes will promote to measurable; expected codec-frame -50-80KB / codec-declare -25-40KB / codec-request -15-25KB / codec-response -20-30KB based on body-codec wire surface sizes.",
+        "Threshold gate (R311n) at conservative 1024B floor today. Future tuning per-codec when more measurable lanes land; e.g. codec-push could lift to 8KB threshold based on current 14688B baseline.",
+        "R311o type-ungating cascade still carries (send_response / build_response_final / encode_frame_with_response_final / declare_querier / declare_queryable / declare_token / declare_liveliness_subscriber return types) — independent of R311n measurement.",
+        "R311p atomic-fields fill (39 outline sub-sections in feature_inventory) still carries.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer-side Interest inbound bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 carry #2 / #3, R300 narrow, R301 §7 cargo wz-config tool, R304 stderr non-UTF-8 source, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311n measurement automation — scripts/measure-codec-footprint.sh + lib/feature_implies.py compute wz-facade implies-graph from cargo metadata; honest SKIP on compile-fail lanes.",
+      "publishable_changes_bullets": [
+        "scripts/lib/feature_implies.py NEW — wz facade → wz-runtime-tokio implies-graph resolver. Reads `cargo metadata --format-version=1 --no-deps` JSON from stdin, computes wz-runtime-tokio transitive closure + wz facade activation map + invert to PULLERS-by-codec, emits shell-sourceable `PULLERS_codec_X=\"...\"` assignments for every `codec-*` rt feature. Standalone module instead of inline heredoc because `cargo metadata | python3 - <<EOF` is ambiguous in bash (heredoc + pipe both target stdin).",
+        "scripts/measure-codec-footprint.sh — each minus-<codec> lane excludes the codec + its full transitive puller set (declare-* / query-* / liveliness-* / domain-* / presets). Pre-R311n the exclusion was the codec name only; cargo resolver silently re-enabled the codec via `declare-subscriber = [codec-declare]` etc. and the lane measured a fake near-zero delta. The puller-aware exclusion makes the lane honest.",
+        "scripts/measure-codec-footprint.sh — `measure()` gracefully SKIPs lanes whose binary fails to compile under the puller-aware exclusion. Writes `SKIP` to the size cache; the report prints `SKIP` instead of a numeric delta. Honest semantics for `this binary unconditionally references the consumer features and cannot be elided down to handshake-only`.",
+        "scripts/measure-codec-footprint.sh — handshake-only lane added. Start from preset-ap-client; exclude every consumer feature; only `Init` / `Open` / `Close` + `KeepAlive` + transport / runtime plumbing remain. Skips for wz-ap-demo today; the lane shape is the contract a future minimal handshake binary would satisfy.",
+        "scripts/measure-codec-footprint.sh — threshold-based regression gate (`WZ_FOOTPRINT_THRESHOLD_BYTES` default 1024). Codec lanes below threshold fail the script. wz-codecs-only codecs (scout/hello/join/fragment) soft-skip; compile-fail SKIPs are excluded from the gate. Opt-out via `WZ_FOOTPRINT_NO_THRESHOLD=1`.",
+        "scripts/run-ci.sh — Layer F added. Opt-in via `--layer F` or `WZ_RUN_LAYER_F=1`. Runs `measure-codec-footprint.sh` as a catalog-truthfulness regression gate. Stays off the default dispatch path because the bench is expensive (~5-10 min cold; multiple wz-ap-demo release builds)."
+      ],
+      "publishable_verification_bullets": [
+        "feature_implies.py standalone: 14 codec-* PULLERS lines emit clean from cargo metadata",
+        "Baseline wz-ap-demo 2717920B (preset-ap-client, lto=thin, codegen-units=1, strip)",
+        "Measurable elision: codec-push 14688B, codec-init-body 10368B, codec-open-body 6592B",
+        "codec-response-final 4256B, codec-close 2792B, codec-keep-alive 712B (total ~39KB)",
+        "wz-codecs-only near-zero: scout/hello/join/fragment (honest; no session_glue surface)",
+        "SKIP lanes: codec-frame, codec-declare, codec-request, codec-response, minus-all-codecs, handshake-only",
+        "Compile-fail: wz-ap-demo refs LivelinessToken/Queryable/declare_token/replies unconditional",
+        "Script syntax: bash -n + python3 ast.parse clean; cargo fmt unaffected (no Rust changes)",
+        "Layer A mnemosyne validate-workspace pre-mutation: T1=0 ledger=0 RT 13/13 sync"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "publishable_carry_forward_bullets": [
+        "wz-ap-demo cfg-gate refactor or smaller handshake-only test binary required to measure codec-frame/declare/request/response/minus-all/handshake-only lanes; SKIP today is honest.",
+        "R311m consumer-module cascade carries forward — once wz-ap-demo's LivelinessToken/Queryable/declare_token/observer.replies/remote_subscribers/remote_queryables/liveliness usages are cfg-gated, the currently-SKIPped lanes will promote to measurable; expected codec-frame -50-80KB / codec-declare -25-40KB / codec-request -15-25KB / codec-response -20-30KB based on body-codec wire surface sizes.",
+        "Threshold gate (R311n) at conservative 1024B floor today. Future tuning per-codec when more measurable lanes land; e.g. codec-push could lift to 8KB threshold based on current 14688B baseline.",
+        "R311o type-ungating cascade still carries (send_response / build_response_final / encode_frame_with_response_final / declare_querier / declare_queryable / declare_token / declare_liveliness_subscriber return types) — independent of R311n measurement.",
+        "R311p atomic-fields fill (39 outline sub-sections in feature_inventory) still carries.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer-side Interest inbound bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 carry #2 / #3, R300 narrow, R301 §7 cargo wz-config tool, R304 stderr non-UTF-8 source, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 32": {
       "decision_summary": "B5 codec track continues — sources/codecs/frame.scxml + fragment.scxml authored. First VLE + tail primitive composition (B1-α + tail) plus first inline test-vector land (B5-θ 4-case set). Both share identical body shape per zenoh-pico (sn:VLE + payload:tail, no extensions); differ only in enclosing MID (0x05 Frame / 0x06 Fragment).",
       "changes_bullets": [
