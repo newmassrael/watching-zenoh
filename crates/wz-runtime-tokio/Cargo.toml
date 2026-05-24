@@ -74,6 +74,16 @@ path = "src/lib.rs"
 # emit continues to compile; `liveliness-subscriber` implies
 # `declare-interest` + `declare-final` (R280 send_interest_*).
 [features]
+# R311a1 — codec-init-body / codec-open-body forwards to the matching
+# wz-codecs feature. Forward-only (no force-ON): the wz-codecs dep
+# below switches to `default-features = false` so the codec emit/
+# include is governed purely by these forwards, which makes a future
+# facade-level `--no-default-features` (R311a4) actually able to elide
+# the init_body / open_body codec pair. R311a2 cfg-gates the
+# `use wz_codecs::init_body::InitBody` import sites in session_glue.rs;
+# R311a3 cfg-gates the `InboundFrame::Init { body, .. }` enum variant
+# and parse/match arms. Until R311a3 lands, `--no-default-features` at
+# wz-runtime-tokio level breaks compile (intended cascade chain).
 default = [
     "liveliness-token",
     "liveliness-subscriber",
@@ -90,6 +100,8 @@ default = [
     "declare-subscriber",
     "declare-token",
     "declare-undeclare",
+    "codec-init-body",
+    "codec-open-body",
 ]
 liveliness-token = ["declare-token", "declare-undeclare"]
 liveliness-subscriber = ["declare-interest", "declare-final"]
@@ -114,13 +126,22 @@ query-reply = []
 query-target = ["query-get"]
 query-timeout = ["query-get"]
 query-consolidation = ["query-get"]
+codec-init-body = ["wz-codecs/codec-init-body"]
+codec-open-body = ["wz-codecs/codec-open-body"]
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }
 
 [dependencies]
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
-wz-codecs = { path = "../wz-codecs" }
+# R311a1 — `default-features = false` + explicit `alloc` so the codec
+# emit/include of `init_body` / `open_body` is governed strictly by the
+# `codec-init-body` / `codec-open-body` forwards above. Without
+# disabling defaults the codec features would always activate via
+# wz-codecs's own default list, making the forwards a no-op and
+# preventing facade-level `--no-default-features` from elide-ing the
+# pair.
+wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc"] }
 # R252 — Runtime / TimeSource / Allocator trait surface. The AP profile
 # (this crate) bridges tokio + std into the trait contract authored in
 # R251; the MCU profile (future wz-runtime-lwip) will provide the same
