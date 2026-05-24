@@ -77,8 +77,16 @@ use wz_codecs::query::Query;
 #[cfg(feature = "query-get")]
 use wz_runtime_core::TimeSource;
 
+// R311q — `LivelinessSample` is type-ungated because the unconditional
+// `Session::declare_liveliness_subscriber{_aliased}` Result-form
+// signatures bind it as the callback parameter type. The
+// `LivelinessSampleCallback` boxed-trait alias is only referenced
+// inside the cfg-gated body of those methods (the `Box::new(...) as
+// LivelinessSampleCallback` cast), so it follows the body gate; the
+// split prevents an `unused import` lint on the feature-OFF build.
+use crate::declare::LivelinessSample;
 #[cfg(feature = "liveliness-subscriber")]
-use crate::declare::{LivelinessSample, LivelinessSampleCallback};
+use crate::declare::LivelinessSampleCallback;
 // R311o — `OutboundKeyexprError` is wrapped by
 // `LivelinessAliasError::InvalidKeyexpr` which is itself unconditional
 // after the R311o type-ungating cascade; the import must therefore be
@@ -1711,49 +1719,62 @@ impl Session {
     /// - call [`Self::declare_liveliness_subscriber_aliased`] with a
     ///   prior `send_declare_keyexpr` of the literal pattern.
     ///
-    /// Uniform extension of the `NotEstablished` gate to this method
-    /// (and to the sibling `declare_token` /
-    /// `declare_subscriber` / `declare_queryable` non-aliased surface)
-    /// is a future-round carry — the breaking signature change of
-    /// switching this method to `Result<LivelinessSubscriber, _>` is
-    /// large enough to warrant a dedicated round across the whole
-    /// declare_* surface for uniformity.
-    #[cfg(feature = "liveliness-subscriber")]
+    /// R311q — signature switched to
+    /// `Result<LivelinessSubscriber, LivelinessSubscriberAliasError>`
+    /// for surface parity with [`Self::declare_subscriber_aliased`]
+    /// and the sibling aliased entry point. The Result form lets a
+    /// feature-OFF build return
+    /// `Err(LivelinessSubscriberAliasError::FeatureDisabled)` without
+    /// breaking the call signature (signature-stability principle per
+    /// `feedback_signature_stability`). The legacy non-aliased path
+    /// did NOT enforce the R283 `NotEstablished` gate; that asymmetry
+    /// is preserved — pre-Established Interests stay best-effort here
+    /// and only the aliased surface returns `NotEstablished` — so the
+    /// only NEW Result variant a caller hits on this method is
+    /// `FeatureDisabled` (default-build paths still observe `Ok(...)`).
     pub fn declare_liveliness_subscriber(
         &self,
         keyexpr: impl Into<String>,
         options: LivelinessSubscriberOptions,
         callback: impl FnMut(LivelinessSample<'_>) + Send + 'static,
-    ) -> LivelinessSubscriber {
-        let keyexpr_string = keyexpr.into();
-        let interest_id = self.actions.alloc_next_interest_id();
-        // Register first, emit Interest second — the order matters for
-        // races against an inbound DeclToken whose Interest reached
-        // the peer earlier (e.g. a re-declared subscriber after a
-        // session-layer Reconnect, R267+ topology). The wire-emit
-        // panic-free invariant from `send_declare_token` applies
-        // equally to `send_interest_liveliness_subscriber`.
-        self.observer
-            .lock()
-            .expect("observer mutex poisoned by an earlier panicked callback")
-            .liveliness_subscribers
-            .register(
+    ) -> Result<LivelinessSubscriber, LivelinessSubscriberAliasError> {
+        #[cfg(feature = "liveliness-subscriber")]
+        {
+            let keyexpr_string = keyexpr.into();
+            let interest_id = self.actions.alloc_next_interest_id();
+            // Register first, emit Interest second — the order matters for
+            // races against an inbound DeclToken whose Interest reached
+            // the peer earlier (e.g. a re-declared subscriber after a
+            // session-layer Reconnect, R267+ topology). The wire-emit
+            // panic-free invariant from `send_declare_token` applies
+            // equally to `send_interest_liveliness_subscriber`.
+            self.observer
+                .lock()
+                .expect("observer mutex poisoned by an earlier panicked callback")
+                .liveliness_subscribers
+                .register(
+                    interest_id,
+                    keyexpr_string.clone(),
+                    options.history,
+                    Box::new(callback) as LivelinessSampleCallback,
+                );
+            self.actions.send_interest_liveliness_subscriber(
                 interest_id,
-                keyexpr_string.clone(),
                 options.history,
-                Box::new(callback) as LivelinessSampleCallback,
+                /*keyexpr_mapping_id=*/ 0,
+                Some(&keyexpr_string),
             );
-        self.actions.send_interest_liveliness_subscriber(
-            interest_id,
-            options.history,
-            /*keyexpr_mapping_id=*/ 0,
-            Some(&keyexpr_string),
-        );
-        LivelinessSubscriber {
-            session: self.clone(),
-            interest_id,
-            keyexpr: keyexpr_string,
-            options,
+            Ok(LivelinessSubscriber {
+                session: self.clone(),
+                interest_id,
+                keyexpr: keyexpr_string,
+                options,
+            })
+        }
+        #[cfg(not(feature = "liveliness-subscriber"))]
+        {
+            let _ = (keyexpr, options, callback);
+            Err(LivelinessSubscriberAliasError::FeatureDisabled)
         }
     }
 
@@ -1816,7 +1837,14 @@ impl Session {
     /// session-state-dependent retry loop. No slot register, no
     /// interest-id allocation, no wire emit on either early-return
     /// path.
-    #[cfg(feature = "liveliness-subscriber")]
+    ///
+    /// R311q — body cfg-gated under the `liveliness-subscriber`
+    /// feature; the signature stays stable so the caller's `Result`
+    /// branch on `LivelinessSubscriberAliasError::FeatureDisabled`
+    /// handles the feature-OFF build uniformly (R311 signature-
+    /// stability principle). FeatureDisabled is checked FIRST in the
+    /// feature-OFF arm so the early-return preserves zero-side-effect
+    /// semantics across all error variants.
     pub fn declare_liveliness_subscriber_aliased(
         &self,
         mapping_id: u64,
@@ -1824,61 +1852,69 @@ impl Session {
         options: LivelinessSubscriberOptions,
         callback: impl FnMut(LivelinessSample<'_>) + Send + 'static,
     ) -> Result<LivelinessSubscriber, LivelinessSubscriberAliasError> {
-        // Mapping check first — FSM-state-independent, surfaces a
-        // bug-class error (caller forgot send_declare_keyexpr) before
-        // the state-dependent retry loop. R282 + R283 ordering rule.
-        let base = self
-            .actions
-            .resolve_outbound_mapping(mapping_id)
-            .ok_or(LivelinessSubscriberAliasError::UnknownMapping(mapping_id))?;
-        // R283 Established gate. Done after mapping resolution so a
-        // pre-Established call with a bad mapping surfaces the bad
-        // mapping (the bug) rather than the transient state. No
-        // interest-id is burned on the early-return path.
-        if !self.actions.is_established() {
-            return Err(LivelinessSubscriberAliasError::NotEstablished);
-        }
-        let resolved = match inline_suffix {
-            None => base,
-            Some(s) => {
-                let mut composed = base;
-                composed.push_str(s);
-                composed
+        #[cfg(feature = "liveliness-subscriber")]
+        {
+            // Mapping check first — FSM-state-independent, surfaces a
+            // bug-class error (caller forgot send_declare_keyexpr) before
+            // the state-dependent retry loop. R282 + R283 ordering rule.
+            let base = self
+                .actions
+                .resolve_outbound_mapping(mapping_id)
+                .ok_or(LivelinessSubscriberAliasError::UnknownMapping(mapping_id))?;
+            // R283 Established gate. Done after mapping resolution so a
+            // pre-Established call with a bad mapping surfaces the bad
+            // mapping (the bug) rather than the transient state. No
+            // interest-id is burned on the early-return path.
+            if !self.actions.is_established() {
+                return Err(LivelinessSubscriberAliasError::NotEstablished);
             }
-        };
-        let interest_id = self.actions.alloc_next_interest_id();
-        // Register first against the resolved literal so any racing
-        // inbound dispatch (peer responding to an earlier
-        // session-arming Interest, an out-of-order DeclToken that
-        // arrives before our Interest is processed by the peer) finds
-        // the slot ready and fires the callback. Same ordering rule
-        // as `declare_liveliness_subscriber`.
-        self.observer
-            .lock()
-            .expect("observer mutex poisoned by an earlier panicked callback")
-            .liveliness_subscribers
-            .register(
+            let resolved = match inline_suffix {
+                None => base,
+                Some(s) => {
+                    let mut composed = base;
+                    composed.push_str(s);
+                    composed
+                }
+            };
+            let interest_id = self.actions.alloc_next_interest_id();
+            // Register first against the resolved literal so any racing
+            // inbound dispatch (peer responding to an earlier
+            // session-arming Interest, an out-of-order DeclToken that
+            // arrives before our Interest is processed by the peer) finds
+            // the slot ready and fires the callback. Same ordering rule
+            // as `declare_liveliness_subscriber`.
+            self.observer
+                .lock()
+                .expect("observer mutex poisoned by an earlier panicked callback")
+                .liveliness_subscribers
+                .register(
+                    interest_id,
+                    resolved.clone(),
+                    options.history,
+                    Box::new(callback) as LivelinessSampleCallback,
+                );
+            // Wire emit carries the alias form so the peer pays the
+            // mapping_id + optional inline_suffix cost rather than the
+            // full literal each time — bandwidth parity with
+            // `declare_token_aliased`'s aliased wire emit.
+            self.actions.send_interest_liveliness_subscriber(
                 interest_id,
-                resolved.clone(),
                 options.history,
-                Box::new(callback) as LivelinessSampleCallback,
+                mapping_id,
+                inline_suffix,
             );
-        // Wire emit carries the alias form so the peer pays the
-        // mapping_id + optional inline_suffix cost rather than the
-        // full literal each time — bandwidth parity with
-        // `declare_token_aliased`'s aliased wire emit.
-        self.actions.send_interest_liveliness_subscriber(
-            interest_id,
-            options.history,
-            mapping_id,
-            inline_suffix,
-        );
-        Ok(LivelinessSubscriber {
-            session: self.clone(),
-            interest_id,
-            keyexpr: resolved,
-            options,
-        })
+            Ok(LivelinessSubscriber {
+                session: self.clone(),
+                interest_id,
+                keyexpr: resolved,
+                options,
+            })
+        }
+        #[cfg(not(feature = "liveliness-subscriber"))]
+        {
+            let _ = (mapping_id, inline_suffix, options, callback);
+            Err(LivelinessSubscriberAliasError::FeatureDisabled)
+        }
     }
 }
 
@@ -2994,11 +3030,18 @@ impl std::error::Error for LivelinessAliasError {
 /// R311o — type-ungated per `feedback_signature_stability` MEMORY
 /// anchor. The struct + builder are always defined regardless of the
 /// `liveliness-subscriber` feature so caller-side option construction
-/// compiles unconditionally; the wire-emit + observer-registry
-/// dependency stays gated at the [`LivelinessSubscriber`] handle and
-/// [`Session::declare_liveliness_subscriber`] surface (deferred to a
-/// future round when the observer.liveliness_subscribers field +
-/// `declare::liveliness_subscriber` module become unconditional).
+/// compiles unconditionally.
+///
+/// R311q closure — the prior carry ("deferred to a future round when
+/// the observer.liveliness_subscribers field + declare::liveliness_subscriber
+/// module become unconditional") is now closed: the
+/// [`LivelinessSubscriber`] handle, the
+/// [`Session::declare_liveliness_subscriber{_aliased}`] surface
+/// (Result form with `FeatureDisabled` variant), the
+/// `observer.liveliness_subscribers` field, and the
+/// `declare::liveliness_subscriber` module are all type-ungated. The
+/// only remaining feature gate is the BODY of the two declare entry
+/// points + the dispatch fan-out in `ApplicationLayerObserver`.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct LivelinessSubscriberOptions {
@@ -3062,7 +3105,16 @@ impl LivelinessSubscriberOptions {
 ///
 /// `#[non_exhaustive]`. Construct only through
 /// [`Session::declare_liveliness_subscriber`].
-#[cfg(feature = "liveliness-subscriber")]
+///
+/// R311q — type-ungated. The struct, impl, and Drop are always defined
+/// so the [`Session::declare_liveliness_subscriber{_aliased}`]
+/// Result-form signature compiles regardless of feature state; a
+/// feature-OFF call returns `Err(LivelinessSubscriberAliasError::FeatureDisabled)`
+/// without ever constructing this handle (so the Drop-path wire emit
+/// never fires from a stub). The Drop body calls `send_interest_final`
+/// alongside `observer.liveliness_subscribers.unregister`, both of
+/// which are unconditionally available after the R311g1 signature-
+/// stability sweep + the R311q observer field ungate.
 #[non_exhaustive]
 pub struct LivelinessSubscriber {
     session: Session,
@@ -3071,7 +3123,6 @@ pub struct LivelinessSubscriber {
     options: LivelinessSubscriberOptions,
 }
 
-#[cfg(feature = "liveliness-subscriber")]
 impl LivelinessSubscriber {
     /// The stable interest id allocated at declare time by
     /// [`crate::session_glue::SessionLinkActions::alloc_next_interest_id`].
@@ -3134,7 +3185,6 @@ impl LivelinessSubscriber {
     }
 }
 
-#[cfg(feature = "liveliness-subscriber")]
 impl Drop for LivelinessSubscriber {
     fn drop(&mut self) {
         // R280 RAII — unregister the local slot first so any racing
@@ -3176,7 +3226,15 @@ impl Drop for LivelinessSubscriber {
 /// of the declare_* surface is a future-round carry (see
 /// [`Session::declare_liveliness_subscriber`] doc-comment on the
 /// asymmetric gate).
-#[cfg(feature = "liveliness-subscriber")]
+///
+/// R311q — type-ungated + [`Self::FeatureDisabled`] variant added.
+/// The enum is always defined so the
+/// [`Session::declare_liveliness_subscriber{_aliased}`] Result-form
+/// signature compiles regardless of feature state; a feature-OFF call
+/// returns `Err(FeatureDisabled)` so caller code can branch on it
+/// uniformly. Mirrors the `FeatureDisabled` variant pattern already
+/// established on other declare_* AliasError families during the
+/// R311 signature-stability sweep.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LivelinessSubscriberAliasError {
     /// R282 — no prior `send_declare_keyexpr` registered this id on
@@ -3195,9 +3253,19 @@ pub enum LivelinessSubscriberAliasError {
     /// implicit "declare AFTER z_open returns Z_OK" sequencing
     /// contract.
     NotEstablished,
+    /// R311q — the `liveliness-subscriber` feature is OFF at compile
+    /// time. Returned by both
+    /// [`Session::declare_liveliness_subscriber`] and
+    /// [`Session::declare_liveliness_subscriber_aliased`] when the
+    /// build elides the wire-emit + observer-dispatch path. Caller
+    /// must feature-detect at the consumer-crate level (e.g. via a
+    /// `#[cfg]` branch on the same feature) before relying on a
+    /// liveliness subscription; the registry-side dispatch is also
+    /// disabled so no callback would ever fire even if a stub handle
+    /// were constructed.
+    FeatureDisabled,
 }
 
-#[cfg(feature = "liveliness-subscriber")]
 impl std::fmt::Display for LivelinessSubscriberAliasError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -3212,11 +3280,16 @@ impl std::fmt::Display for LivelinessSubscriberAliasError {
                  wait for Session::is_established() to flip to true (or for the \
                  session-layer Established signal) before retrying the declare"
             ),
+            LivelinessSubscriberAliasError::FeatureDisabled => write!(
+                f,
+                "LivelinessSubscriberAliasError: liveliness-subscriber feature is OFF at \
+                 compile time; the wire-emit and observer-dispatch paths are elided, \
+                 so no subscription can be established on this build"
+            ),
         }
     }
 }
 
-#[cfg(feature = "liveliness-subscriber")]
 impl std::error::Error for LivelinessSubscriberAliasError {}
 
 /// R234 — typed error returned by

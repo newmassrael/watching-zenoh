@@ -357,8 +357,27 @@ impl LivelinessSubscriberRegistry {
         messages: &[NetworkMessage],
         peer_keyexpr_table: &HashMap<u64, String>,
     ) {
+        // R311q — `peer_keyexpr_table` is only consumed inside the
+        // cfg-gated `NetworkMessage::Declare` arm below; the
+        // explicit `let _ = ...` on the codec-declare-OFF build
+        // silences the unused-variable lint without changing the
+        // signature (signature-stability principle: dispatch_messages
+        // keeps the same shape across builds so caller-side glue
+        // need not feature-detect).
+        #[cfg(not(feature = "codec-declare"))]
+        let _ = peer_keyexpr_table;
         for message in messages {
             match message {
+                // R311q — `NetworkMessage::Declare` is cfg-gated on
+                // `codec-declare` (the variant disappears entirely when
+                // the feature is off); the inner-codec dispatch arm
+                // here gates on the same feature so a feature-OFF
+                // build elides the Declare path while still handling
+                // `Interest` for history-complete marking. When
+                // codec-declare is OFF no peer-side declarations can
+                // be decoded into NetworkMessage::Declare, so dropping
+                // the arm matches the wire reality.
+                #[cfg(feature = "codec-declare")]
                 NetworkMessage::Declare(decl) => {
                     self.dispatch_declare(&decl.body, peer_keyexpr_table);
                 }
@@ -396,7 +415,14 @@ impl LivelinessSubscriberRegistry {
     }
 }
 
-#[cfg(test)]
+// R311q — tests are gated on `liveliness-subscriber` (the feature the
+// dispatch behaviour exists for) AND on `codec-declare` (the feature
+// that materialises `NetworkMessage::Declare` + the `decl_token` /
+// `undecl_token` fixtures). The feature chain
+// `liveliness-subscriber → declare-interest → codec-declare` makes
+// these two conditions equivalent in practice; both are spelled out
+// here for self-documentation.
+#[cfg(all(test, feature = "liveliness-subscriber", feature = "codec-declare"))]
 mod tests {
     use super::super::test_helpers::*;
     use super::*;

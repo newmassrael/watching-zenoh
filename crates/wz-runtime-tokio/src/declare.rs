@@ -74,7 +74,16 @@ use wz_codecs::wireexpr::WireexprVariant;
 // peer-queryable observer entirely.
 #[cfg(feature = "liveliness-token")]
 mod liveliness;
-#[cfg(feature = "liveliness-subscriber")]
+// R311q — `liveliness_subscriber` module is type-ungated: the
+// LivelinessSubscriberRegistry struct + LivelinessSample +
+// LivelinessSampleKind + LivelinessSampleCallback types are always
+// defined so `observer.liveliness_subscribers` and the
+// `Session::declare_liveliness_subscriber{_aliased}` Result-form
+// signatures compile unconditionally. The wire-codec dispatch body
+// inside the module uses `wz_codecs::declare::DeclareVariant`, which
+// is always available because the wz-codecs dep hardcodes
+// `codec-declare` (Cargo.toml dep features), independent of the
+// wz-runtime-tokio `codec-declare` consumer-side gate.
 mod liveliness_subscriber;
 #[cfg(feature = "declare-queryable")]
 mod queryable;
@@ -88,7 +97,6 @@ mod test_helpers;
 
 #[cfg(feature = "liveliness-token")]
 pub use liveliness::{DeclTokenCallback, LivelinessRegistry, UndeclTokenCallback};
-#[cfg(feature = "liveliness-subscriber")]
 pub use liveliness_subscriber::{
     LivelinessSample, LivelinessSampleCallback, LivelinessSampleKind, LivelinessSubscriberRegistry,
 };
