@@ -609,7 +609,8 @@
         "R311a4 Footprint: init-body -10328B / open-body -6520B.</bullet>\n</invoke>",
         "R311b Footprint: codec-keep-alive +712B; 11 ungated codecs -32~-64B noise.</bullet>\n</invoke>",
         "R311c Footprint: codec-close +1792B elision (wire encode/decode + ap-demo cfg).</bullet>\n</invoke>",
-        "R311d scout/hello/join: wz-codecs gate only; LTO discards ~0 binary delta.</bullet>\n</invoke>"
+        "R311d scout/hello/join: wz-codecs gate only; LTO discards ~0 binary delta.</bullet>\n</invoke>",
+        "R311e Footprint: codec-response-final +4216B (cross-module cascade).</bullet>\n</invoke>"
       ],
       "decision_status": "active"
     },
@@ -17061,6 +17062,63 @@
         "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
         "R311 carry: facade graceful-close wrapper API (R311c surfaced wz-ap-demo cfg-aware burden). If multiple binaries become wz facade consumers, hoist cfg-aware send_close + future cfg-aware send_query/declare into wz facade so consumers never reach into wz::runtime_tokio:: directly. 2-3R refactor.",
         "R303++ atomic field population still pending."
+      ]
+    },
+    "Round 311e": {
+      "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
+      "changes_bullets": [
+        "crates/wz-codecs/Cargo.toml: codec-response-final = [] feature + default include.",
+        "crates/wz-codecs/build.rs: is_codec_enabled `response_final` arm + rerun-if-env-changed.",
+        "crates/wz-codecs/src/lib.rs: `pub mod response_final` block cfg-gated.",
+        "crates/wz-runtime-tokio/Cargo.toml: codec-response-final = [\"wz-codecs/codec-response-final\"] forward + default include.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: 9 cfg sites — `use wz_codecs::response_final::ResponseFinal` import; `wire_const::N_MID_RESPONSE_FINAL` network-MID; `send_response_final` method; `build_response_final` function; `encode_frame_with_response_final` function; `NetworkMessage::ResponseFinal(ResponseFinal)` enum variant; NetworkMessage Debug arm; `parse_frame_payload` `N_MID_RESPONSE_FINAL` match arm; two regression tests (`build_response_final_emits_zenoh_pico_compatible_wire_bytes` + `encode_frame_with_response_final_wraps_in_frame_envelope`). Feature-off: parse_frame_payload's N_MID_RESPONSE_FINAL arm falls through to `NetworkMessage::Unknown { mid, body }`; queryable side cannot emit the marker so requesting peer's z_get hangs until its per-call timeout fires.",
+        "crates/wz/Cargo.toml: codec-response-final = [\"wz-runtime-tokio?/codec-response-final\"] ?-syntax forward replacing prior no-op label."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace pass; cargo check -p wz-runtime-tokio --no-default-features pass; cargo clippy --workspace --all-targets -- -D warnings clean; cargo fmt --all -- --check clean.",
+        "cargo test -p wz-runtime-tokio --lib: 589/589 pass.",
+        "Binary-size delta (release stripped wz-ap-demo via wz facade preset-ap-client): TBD (measurement in progress).",
+        "Layer E 30-trial flake-0: TBD (running).",
+        "validate_workspace: TBD."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "R311f (next): codec-frame cascade. Frame is the data-path Established envelope; cfg sites cover the InboundFrame::Frame variant + parse arm + handle + 7+ encode_frame_with_* helpers (frame/declare/interest/request/response/response_final/push) + NetworkMessage payload decode loop. Largest single cascade by source surface. 1-2R.",
+        "R311g-l: 6 remaining codecs (fragment, declare-cluster, push + msg_put/msg_del, request + query, response + reply + err).",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
+        "R311 carry: facade graceful-close wrapper API + similar wrappers for send_query / declare / get — R311c surfaced wz-ap-demo cfg-aware burden, R311e doesn't add (wz-ap-demo doesn't call send_response_final). Hoist when multiple binaries become facade consumers."
+      ],
+      "publishable_decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
+      "publishable_changes_bullets": [
+        "crates/wz-codecs/Cargo.toml: codec-response-final = [] feature + default include.",
+        "crates/wz-codecs/build.rs: is_codec_enabled `response_final` arm + rerun-if-env-changed.",
+        "crates/wz-codecs/src/lib.rs: `pub mod response_final` block cfg-gated.",
+        "crates/wz-runtime-tokio/Cargo.toml: codec-response-final = [\"wz-codecs/codec-response-final\"] forward + default include.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: 9 cfg sites — `use wz_codecs::response_final::ResponseFinal` import; `wire_const::N_MID_RESPONSE_FINAL` network-MID; `send_response_final` method; `build_response_final` function; `encode_frame_with_response_final` function; `NetworkMessage::ResponseFinal(ResponseFinal)` enum variant; NetworkMessage Debug arm; `parse_frame_payload` `N_MID_RESPONSE_FINAL` match arm; two regression tests (`build_response_final_emits_zenoh_pico_compatible_wire_bytes` + `encode_frame_with_response_final_wraps_in_frame_envelope`). Feature-off: parse_frame_payload's N_MID_RESPONSE_FINAL arm falls through to `NetworkMessage::Unknown { mid, body }`; queryable side cannot emit the marker so requesting peer's z_get hangs until its per-call timeout fires.",
+        "crates/wz/Cargo.toml: codec-response-final = [\"wz-runtime-tokio?/codec-response-final\"] ?-syntax forward replacing prior no-op label."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check + cargo clippy --all-targets -D warnings + cargo fmt --check: all clean.",
+        "cargo check -p wz-runtime-tokio --no-default-features pass.",
+        "cargo test -p wz-runtime-tokio --lib: 589/589 pass.",
+        "wz-ap-demo stripped: baseline 2716664B; -response-final +4216B; -all-codecs +26648B.",
+        "Layer E 30-trial flake-0: 30/30 pass; 0 FAILED.",
+        "validate_workspace: entries 322->323, sections 255, T1=0, RT 13/13, sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311f (next): codec-frame cascade. Frame is the data-path Established envelope; cfg sites cover the InboundFrame::Frame variant + parse arm + handle + 7+ encode_frame_with_* helpers (frame/declare/interest/request/response/response_final/push) + NetworkMessage payload decode loop. Largest single cascade by source surface. 1-2R.",
+        "R311g-l: 6 remaining codecs (fragment, declare-cluster, push + msg_put/msg_del, request + query, response + reply + err).",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
+        "R311 carry: facade graceful-close wrapper API + similar wrappers for send_query / declare / get — R311c surfaced wz-ap-demo cfg-aware burden, R311e doesn't add (wz-ap-demo doesn't call send_response_final). Hoist when multiple binaries become facade consumers."
       ]
     },
     "Round 32": {
