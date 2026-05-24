@@ -1,6 +1,6 @@
 # Feature inventory — composable framework atomic + preset catalog
 
-**Status.** R301 entry. First-pass catalog of ~142 atomic features
+**Status.** R301 entry. First-pass catalog of ~140 atomic features
 across 19 domains plus 6 initial semver-named presets. Materializes
 the composable-framework north star (R267 ratify, R299+ refined) by
 naming the contract every future SCXML / Rust crate must conform to
@@ -20,7 +20,7 @@ consistency anchor; current wz-runtime-tokio / wz-codecs /
 wz-runtime-core / sources/{algorithms,codecs,session,links}
 implementation snapshot at HEAD `5f2b3cc` (R300 close).
 
-**Outputs.** ~142 atomic feature names following the
+**Outputs.** ~140 atomic feature names following the
 `<domain>-<capability>` convention, with each entry labelled
 *active* (implemented in wz at R300) or *reserved* (roadmap, not
 yet implemented but plausibility-confirmed against upstream). 6
@@ -53,7 +53,7 @@ time. This document establishes that contract.
 Two layers of abstraction (R299+ refined):
 
 1. **Atomic features** — the smallest unit that can be turned on or
-   off. ~142 of them. Naming `<domain>-<capability>`. Each must
+   off. ~140 of them. Naming `<domain>-<capability>`. Each must
    pass the Footprint + Plausibility + Coherence three-test.
 2. **Presets** — semver-versioned named contracts that bundle atomic
    features. Naming `preset-<target>-<level>`. The initial six
@@ -357,17 +357,27 @@ aligner protocol. 4 entries.
 
 ### §5.12 Codec
 
-Wire-message codec atomic features — one per top-level message
-that the wire emits. 16 entries. Each maps to a
-`sources/codecs/<name>.scxml` (active when SCXML lands at the
-current vendor pin).
+Wire-message codec atomic features — one per single-SCXML codec
+emit unit. 14 entries. Each maps to a `sources/codecs/<name>.scxml`
+(active when SCXML lands at the current vendor pin).
+
+R311a-recanon: the previous 4-entry split codec-init-syn / -ack /
+codec-open-syn / -ack collapsed to 2 codec-init-body /
+codec-open-body. The SCE upstream `init_body.scxml` and
+`open_body.scxml` are single emit units that handle both SYN and
+ACK via runtime `parent.S` / `parent.A` flag dispatch; gating the
+4-way at the cargo feature level would have failed the Footprint
+test (toggling codec-init-syn off while codec-init-ack stays on
+yields zero binary delta because both arms share one emitted
+module). The runtime is_ack flag picks the SYN vs ACK arm at
+encode time, not the build-time feature flag.
 
 - `codec-scout` — SCOUT (active, wz)
 - `codec-hello` — HELLO (active, wz)
-- `codec-init-syn` — INIT-SYN (active, wz via init_body)
-- `codec-init-ack` — INIT-ACK (active, wz via init_body)
-- `codec-open-syn` — OPEN-SYN (active, wz via open_body)
-- `codec-open-ack` — OPEN-ACK (active, wz via open_body)
+- `codec-init-body` — Init body (InitSyn + InitAck via parent.S/A
+  flags) (active, wz)
+- `codec-open-body` — Open body (OpenSyn + OpenAck via parent.A
+  negation) (active, wz)
 - `codec-close` — CLOSE (active, wz)
 - `codec-keep-alive` — KEEP_ALIVE (active, wz)
 - `codec-join` — JOIN (active, wz)
@@ -486,9 +496,8 @@ Includes: `platform-bare-metal`, `runtime-lwip`, `runtime-no-std`,
 `keyexpr-canon`, `declare-keyexpr`, `declare-subscriber`,
 `declare-undeclare`, `pubsub-put`, `pubsub-sample`,
 `encoding-empty`, `encoding-utf8`, `encoding-bytes`,
-`codec-scout`, `codec-hello`, `codec-init-syn`, `codec-init-ack`,
-`codec-open-syn`, `codec-open-ack`, `codec-close`,
-`codec-keep-alive`, `codec-frame`, `codec-fragment`,
+`codec-scout`, `codec-hello`, `codec-init-body`, `codec-open-body`,
+`codec-close`, `codec-keep-alive`, `codec-frame`, `codec-fragment`,
 `codec-declare`, `codec-push`, `routing-client`, `time-ntp64`.
 
 ### §6.2 preset-mcu-extended v0.1.0
@@ -530,8 +539,8 @@ Includes: `platform-linux`, `runtime-tokio`, `routing-client`,
 `query-get`, `query-queryable`, `query-reply`, `query-target`,
 `query-consolidation`, `query-timeout`, `liveliness-token`,
 `liveliness-subscriber`, `codec-scout`, `codec-hello`,
-`codec-init-syn`, `codec-init-ack`, `codec-open-syn`,
-`codec-open-ack`, `codec-close`, `codec-keep-alive`, `codec-join`,
+`codec-init-body`, `codec-open-body`,
+`codec-close`, `codec-keep-alive`, `codec-join`,
 `codec-frame`, `codec-fragment`, `codec-declare`, `codec-push`,
 `codec-request`, `codec-response`, `codec-response-final`,
 `encoding-empty`, `encoding-utf8`, `encoding-bytes`, `time-ntp64`,
