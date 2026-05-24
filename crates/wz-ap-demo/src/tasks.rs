@@ -20,7 +20,7 @@
 //
 // All three are generic over `T: TimeSource + Send + 'static` (the
 // R253-R255 leaf-first migration); the demo monomorphises with
-// [`wz_runtime_tokio::runtime_impl::TokioTime`] at the
+// [`wz::runtime_tokio::runtime_impl::TokioTime`] at the
 // `tokio::spawn` call site in `run_demo`. The timing constants are
 // per-task and kept module-private — `run_demo` does not configure
 // them at runtime.
@@ -29,13 +29,13 @@ use std::sync::Arc;
 
 use tokio::sync::oneshot;
 
-use wz_runtime_core::TimeSource;
-use wz_runtime_tokio::sample::SampleKind;
-use wz_runtime_tokio::session::{
+use wz::runtime_core::TimeSource;
+use wz::runtime_tokio::sample::SampleKind;
+use wz::runtime_tokio::session::{
     LivelinessOptions, LivelinessToken, PublishAliasError, PublishOptions, Session,
 };
-use wz_runtime_tokio::session_glue::SessionLinkActions;
-use wz_runtime_tokio::Reliability;
+use wz::runtime_tokio::session_glue::SessionLinkActions;
+use wz::runtime_tokio::Reliability;
 
 use crate::args::{DeclareEmitSpec, PushOperation};
 
@@ -130,7 +130,7 @@ const DECLARE_INTER_EMIT_MS: u64 = 100;
 /// reached for `tokio::time::sleep` directly; the three sleep sites
 /// now go through the [`TimeSource`] trait (concrete impl supplied
 /// by the caller, currently
-/// [`wz_runtime_tokio::runtime_impl::TokioTime`] but swappable for
+/// [`wz::runtime_tokio::runtime_impl::TokioTime`] but swappable for
 /// an MCU profile's TimeSource without touching this function body).
 /// The `T: TimeSource + Send + 'static` generic parameter is
 /// monomorphised at the `tokio::spawn(declare_task(.., TokioTime::new()))`

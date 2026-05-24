@@ -40,24 +40,24 @@
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use sce_rust_lua::LuaEngine;
-use sce_rust_runtime::{Engine, IScriptEngine};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use wz_runtime_core::TimeSource;
-use wz_runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
-use wz_runtime_tokio::observer::ApplicationLayerObserver;
-use wz_runtime_tokio::reply::InboundReplyBody;
-use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::session::{
+use wz::runtime_core::TimeSource;
+use wz::runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
+use wz::runtime_tokio::observer::ApplicationLayerObserver;
+use wz::runtime_tokio::reply::InboundReplyBody;
+use wz::runtime_tokio::runtime_impl::TokioTime;
+use wz::runtime_tokio::session::{
     LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken, Queryable,
     QueryableOptions, Session, SubscribeOptions, Subscriber,
 };
-use wz_runtime_tokio::session_fsm_unicast::{SessionFsmUnicastEvent, SessionFsmUnicastPolicy};
-use wz_runtime_tokio::session_glue::{
+use wz::runtime_tokio::session_fsm_unicast::{SessionFsmUnicastEvent, SessionFsmUnicastPolicy};
+use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, install_session_actions, IterationEvent, SessionLinkActions,
 };
+use wz::script::LuaEngine;
+use wz::script::{Engine, IScriptEngine};
 
 use crate::args::{
     demo_session_init_params, DeclareEmitSpec, PushOperation, QueryRoleSpec, RemoteLogSpec,

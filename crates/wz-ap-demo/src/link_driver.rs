@@ -30,8 +30,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
 
-use wz_runtime_tokio::session_glue::BoxedLinkDriver;
-use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
+use wz::runtime_tokio::session_glue::BoxedLinkDriver;
+use wz::runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 
 /// Inbound half of the bidirectional split — owns the read half of
 /// the accepted TcpStream and implements [`LinkDriver`] with
@@ -47,8 +47,8 @@ use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, T
 /// R265 — `read_state` carries partial-read bytes across
 /// `tokio::select!` cancellations of `poll_event` so a future that
 /// loses a select race does not drop in-flight wire bytes. Mirrors
-/// the same state machine on `wz_runtime_tokio::TcpDriver`; see the
-/// `wz_runtime_tokio::ReadState` doc-comment for the cancel-safety
+/// the same state machine on `wz::runtime_tokio::TcpDriver`; see the
+/// `wz::runtime_tokio::ReadState` doc-comment for the cancel-safety
 /// rationale.
 pub(crate) struct InboundReadDriver {
     reader: OwnedReadHalf,
@@ -65,7 +65,7 @@ impl InboundReadDriver {
 }
 
 /// R265 — cancel-safe partial-read state for
-/// [`InboundReadDriver::poll_event`]. Mirrors `wz_runtime_tokio::
+/// [`InboundReadDriver::poll_event`]. Mirrors `wz::runtime_tokio::
 /// ReadState` (kept locally so the binary does not depend on a
 /// library-internal type). See that doc-comment for the rationale.
 #[derive(Default)]
@@ -114,7 +114,7 @@ impl LinkDriver for InboundReadDriver {
         // single `.read()` syscall, partial-read bytes survive
         // a `tokio::select!` drop in `self.read_state`. See
         // `InboundReadState` for the state graph and
-        // `wz_runtime_tokio::ReadState` for the full rationale.
+        // `wz::runtime_tokio::ReadState` for the full rationale.
         loop {
             match &mut self.read_state {
                 InboundReadState::Idle => {

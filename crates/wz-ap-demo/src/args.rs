@@ -18,7 +18,7 @@
 //     state from `main` into `run_demo` without inflating the
 //     latter's argument list past clippy::too_many_arguments.
 
-use wz_runtime_tokio::session_glue::{SessionInitParams, SigningKey};
+use wz::runtime_tokio::session_glue::{SessionInitParams, SigningKey};
 
 /// R121f — session role select. `--listen` lands here as
 /// `Acceptor`; `--connect` lands as `Initiator`. The two roles
@@ -139,12 +139,12 @@ pub(crate) struct DeclareEmitSpec {
     pub(crate) token_keyexpr: Option<String>,
     /// R280 — optional `--liveliness-subscribe <keyexpr>` payload.
     /// When `Some`, the demo calls
-    /// [`wz_runtime_tokio::session::Session::declare_liveliness_subscriber`]
+    /// [`wz::runtime_tokio::session::Session::declare_liveliness_subscriber`]
     /// once before the drive_session loop starts; the returned RAII
     /// handle lives at `run_demo` scope so `Drop` emits
     /// `Interest(Final)` when the demo terminates. Separate from
     /// `token_keyexpr` (which declares a
-    /// [`wz_runtime_tokio::session::LivelinessToken`] on the
+    /// [`wz::runtime_tokio::session::LivelinessToken`] on the
     /// peer-facing side) because a single demo instance can act as
     /// token publisher + token subscriber simultaneously on a wz↔wz
     /// round-trip.

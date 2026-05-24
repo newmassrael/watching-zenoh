@@ -46,34 +46,63 @@ description = "AP MVP demo binary — exercises wz-runtime-tokio + wz-codecs aga
 name = "wz-ap-demo"
 path = "src/main.rs"
 
-# R121b dependency policy: real session FSM + codec stack wired below.
-# Each dep has a first call site in src/main.rs; workspace.lints.rust=
-# deny would surface any unused-dep regression.
+# R311a4 — wz-ap-demo collapses 6 direct sub-crate deps to a single
+# `wz` facade dep with `preset-ap-client` features. This makes the
+# facade the first user-visible composable-framework boundary backed
+# by a real Linux + tokio binary: when `cargo build -p wz-ap-demo`
+# succeeds, the wz facade's preset-ap-client contract is mechanically
+# proven to cover every symbol path this binary requires.
+#
+# `preset-ap-client` (defined in wz facade Cargo.toml line 581+) pulls
+# in: platform-linux + runtime-tokio + transport-link-{tcp,udp} +
+# unicast session machinery + 12 codec features (init-body, open-body,
+# frame, fragment, keep-alive, scout, hello, close, push, declare,
+# request, response, response-final) + 7 declare features +
+# 6 query features + liveliness-{token,subscriber} + 8 keyexpr + ...
+#
+# The `runtime-tokio` umbrella feature in turn pulls 4 facade-level
+# optional deps (wz-runtime-tokio + wz-runtime-core + sce-rust-runtime
+# + sce-rust-lua) so wz-ap-demo's source code reaches every needed
+# symbol via stable `wz::runtime_tokio::*`, `wz::runtime_core::*`, and
+# `wz::script::*` paths — no direct wz-runtime-tokio / wz-codecs /
+# vendor/sce dep mentions remain in this manifest.
+#
+# `tokio` + `log` + `env_logger` stay as direct deps because the demo
+# binary's main entry (#[tokio::main]) and stderr logger pipeline are
+# binary-shaped concerns, not part of the wz framework re-export
+# surface. The wz facade does not re-export tokio's runtime macros or
+# env_logger by design.
 [dependencies]
-# wz session FSM glue + tokio adapter + pubsub subscriber registry.
-wz-runtime-tokio = { path = "../wz-runtime-tokio" }
-# R253 — TimeSource trait surface (used by declare_task generic
-# parameter so wz-ap-demo no longer reaches for tokio::time::sleep
-# directly; the AP-profile concrete impl `TokioTime` is re-exported
-# from wz-runtime-tokio and supplied at the spawn call site). The
-# `alloc` feature pulls in the R266 panic-payload-capable JoinFailed
-# variant (this binary is AP and links std at the linker level anyway).
-wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
-# Generated codec types for inbound Push decode + outbound handshake.
-wz-codecs = { path = "../wz-codecs" }
-# SCE Rust runtime — Engine + IScriptEngine trait surface for the
-# session FSM script-action engine.
-sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
-# Lua-backed IScriptEngine implementation that drives the 17 session
-# FSM script-actions (link_driver_open / send_init_syn / ...).
-sce-rust-lua = { path = "../../vendor/sce/sce-rust-lua" }
+# `default-features = false` here gives the R311a4 binary-size delta
+# measurement script (scripts/measure-codec-footprint.sh) a clean
+# `--no-default-features --features wz/foo,wz/bar,...` invocation that
+# can elide any individual atomic feature without the wz facade's
+# preset-ap-client default forcibly turning it back on. Production
+# `cargo run -p wz-ap-demo` still gets the full preset because this
+# crate's own `default = ["preset-ap-client"]` below re-enables it.
+wz = { path = "../wz", default-features = false }
 # Tokio multi-thread runtime — required by TokioLinkDriverAdapter's
-# block_on contract per session_glue.rs:445.
+# block_on contract per session_glue.rs:445; the #[tokio::main] entry
+# attribute and `tokio::signal::ctrl_c` are binary-shaped uses outside
+# the wz framework boundary so this dep stays explicit.
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal"] }
 # Logging plumbing — env_logger reads RUST_LOG / WZ_DEMO_LOG to
 # surface session FSM transitions + subscriber dispatch events.
 log = "0.4"
 env_logger = "0.11"
+
+# R311a4 — production default forwards wz facade's preset-ap-client
+# contract (Linux + tokio + 12 codec features + 7 declare + 6 query +
+# liveliness + 8 keyexpr + ...). Measurement runs use
+# `--no-default-features --features wz/<explicit-atomic-list>` so each
+# preset-ap-client atomic feature can be individually elided to verify
+# the catalog truthfulness claim — `scripts/measure-codec-footprint.sh`
+# auto-derives the atomic list from `crates/wz/Cargo.toml`'s preset
+# definition so the measurement bench stays in sync with future preset
+# evolution without duplication in this manifest.
+[features]
+default = ["preset-ap-client"]
+preset-ap-client = ["wz/preset-ap-client"]
 
 [lints]
 workspace = true

@@ -12,7 +12,7 @@
 // addition to the R121b/c/d subscriber-side reception that
 // already round-trips against `z_put`). The publisher path
 // composes the existing wz-codecs `Push` + `Frame` envelopes via
-// `wz_runtime_tokio::session_glue::{build_push_literal,
+// `wz::runtime_tokio::session_glue::{build_push_literal,
 // encode_frame_with_push}` and dispatches through the same
 // `OutboundWriteDriver` mpsc channel that the FSM script-actions
 // use for the handshake outbound — no nested `block_on` (R121d
@@ -102,7 +102,7 @@
 use std::env;
 use std::process::ExitCode;
 
-use wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe;
+use wz::runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe;
 
 mod args;
 mod link_driver;
