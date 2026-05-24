@@ -253,7 +253,9 @@ fn compute_hmac_sha256_full(key: &[u8], data: &[u8]) -> [u8; 32] {
 /// MCU builds — wz-runtime-tokio is the AP/linux runtime, but the
 /// constants themselves are wire-spec-frozen across both runtimes.
 mod wire_const {
+    #[cfg(feature = "codec-init-body")]
     pub const T_MID_INIT: u8 = 0x01;
+    #[cfg(feature = "codec-open-body")]
     pub const T_MID_OPEN: u8 = 0x02;
     pub const T_MID_CLOSE: u8 = 0x03;
     /// Per-session liveness ping — zero-byte body; lease-timer
@@ -269,13 +271,17 @@ mod wire_const {
     pub const FLAG_T_FRAME_R: u8 = 0x20;
 
     /// InitAck discriminator (0 = InitSyn, 1 = InitAck).
+    #[cfg(feature = "codec-init-body")]
     pub const FLAG_T_INIT_A: u8 = 0x20;
     /// Size parameters carrier (sn_res + batch_size present).
+    #[cfg(feature = "codec-init-body")]
     pub const FLAG_T_INIT_S: u8 = 0x40;
 
     /// OpenAck discriminator (0 = OpenSyn, 1 = OpenAck).
+    #[cfg(feature = "codec-open-body")]
     pub const FLAG_T_OPEN_A: u8 = 0x20;
     /// Lease in seconds (1) vs milliseconds (0).
+    #[cfg(feature = "codec-open-body")]
     pub const FLAG_T_OPEN_T: u8 = 0x40;
 
     /// Session-close vs link-only close.
@@ -1077,6 +1083,7 @@ impl SessionLinkActions {
     pub fn handle_inbound(&self, bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
         let frame = parse_inbound(bytes)?;
         match &frame {
+            #[cfg(feature = "codec-init-body")]
             InboundFrame::Init {
                 is_ack: true, body, ..
             } => {
@@ -1084,6 +1091,7 @@ impl SessionLinkActions {
                     *self.inbound_cookie.lock().unwrap() = Some(cookie.clone());
                 }
             }
+            #[cfg(feature = "codec-init-body")]
             InboundFrame::Init {
                 is_ack: false,
                 body,
@@ -1101,6 +1109,7 @@ impl SessionLinkActions {
                 *self.inbound_peer_init_caps.lock().unwrap() =
                     Some(PeerInitCaps::from_init_syn(body.sn_res, body.batch_size));
             }
+            #[cfg(feature = "codec-open-body")]
             InboundFrame::Open {
                 is_ack: false,
                 body,
@@ -2126,6 +2135,7 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
         a.driver.open_blocking();
     });
 
+    #[cfg(feature = "codec-init-body")]
     bind_unit(lua, "send_init_syn", actions, |a| {
         a.trace.lock().unwrap().send_init_syn += 1;
         let bytes = a.encode_init_with_role(
@@ -2136,6 +2146,7 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
+    #[cfg(feature = "codec-open-body")]
     bind_unit(lua, "send_open_syn", actions, |a| {
         a.trace.lock().unwrap().send_open_syn += 1;
         // RFC §5.M echo contract: prefer the cookie captured from a
@@ -2150,6 +2161,7 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
+    #[cfg(feature = "codec-init-body")]
     bind_unit(lua, "send_init_ack_with_cookie", actions, |a| {
         a.trace.lock().unwrap().send_init_ack_with_cookie += 1;
         // R86 — Accepting-side cookie binding per RFC §5.M
@@ -2175,6 +2187,7 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
+    #[cfg(feature = "codec-open-body")]
     bind_unit(lua, "send_open_ack", actions, |a| {
         a.trace.lock().unwrap().send_open_ack += 1;
         // Accepting side OpenAck: cookie is consumed by the time we
@@ -2440,6 +2453,7 @@ fn encode_open(
 /// "this is the last entry of an N-entry chain" (also Z=0). The
 /// non-Z bits (`ext_id`, `M`, `enc`) stay author-set; the helper
 /// preserves them via a byte-level patch on the first byte.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 fn encode_ext_chain(entries: &[ExtEntry]) -> Vec<u8> {
     if entries.is_empty() {
         return Vec::new();
@@ -5692,6 +5706,7 @@ pub enum InboundFrame {
     /// `_Z_FLAG_T_INIT_A` discriminator; `has_ext` mirrors the
     /// transport-header Z flag and corresponds to
     /// `!extensions.is_empty()` when R68c decode succeeds.
+    #[cfg(feature = "codec-init-body")]
     Init {
         is_ack: bool,
         has_ext: bool,
@@ -5700,6 +5715,7 @@ pub enum InboundFrame {
     },
     /// `_Z_MID_T_OPEN` (0x02). `is_ack` mirrors `_Z_FLAG_T_OPEN_A`;
     /// `lease_in_seconds` mirrors `_Z_FLAG_T_OPEN_T`.
+    #[cfg(feature = "codec-open-body")]
     Open {
         is_ack: bool,
         lease_in_seconds: bool,
@@ -5804,6 +5820,7 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
     let has_ext = (flags & wire_const::FLAG_T_Z) != 0;
     let mut cursor = SceCursor::new(&bytes[1..]);
     match mid {
+        #[cfg(feature = "codec-init-body")]
         wire_const::T_MID_INIT => {
             let body = InitBody::decode(&mut cursor, (flags >> 6) & 1, (flags >> 5) & 1)?;
             let extensions = if has_ext {
@@ -5818,6 +5835,7 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
                 extensions,
             })
         }
+        #[cfg(feature = "codec-open-body")]
         wire_const::T_MID_OPEN => {
             let body = OpenBody::decode(&mut cursor, (flags >> 5) & 1)?;
             let extensions = if has_ext {
@@ -6102,9 +6120,13 @@ pub fn inbound_to_fsm_event(
 ) -> Option<crate::session_fsm_unicast::SessionFsmUnicastEvent> {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     match frame {
+        #[cfg(feature = "codec-init-body")]
         InboundFrame::Init { is_ack: false, .. } => Some(E::InitSynReceived),
+        #[cfg(feature = "codec-init-body")]
         InboundFrame::Init { is_ack: true, .. } => Some(E::InitAckReceived),
+        #[cfg(feature = "codec-open-body")]
         InboundFrame::Open { is_ack: false, .. } => Some(E::OpenSynReceived),
+        #[cfg(feature = "codec-open-body")]
         InboundFrame::Open { is_ack: true, .. } => Some(E::OpenAckReceived),
         InboundFrame::Close { .. } => Some(E::PeerClose),
         InboundFrame::KeepAlive { .. } => None,
@@ -6248,10 +6270,15 @@ pub async fn poll_and_dispatch_one<D: LinkDriver>(
                         }
                     },
                     InboundFrame::KeepAlive { .. } => DriverLoopOutcome::SideEffectOnly,
-                    InboundFrame::Init { .. }
-                    | InboundFrame::Open { .. }
-                    | InboundFrame::Close { .. }
-                    | InboundFrame::Unknown { .. } => {
+                    #[cfg(feature = "codec-init-body")]
+                    InboundFrame::Init { .. } => {
+                        unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
+                    }
+                    #[cfg(feature = "codec-open-body")]
+                    InboundFrame::Open { .. } => {
+                        unreachable!("inbound_to_fsm_event None branch is Frame/KeepAlive only")
+                    }
+                    InboundFrame::Close { .. } | InboundFrame::Unknown { .. } => {
                         // inbound_to_fsm_event projects these to Some(event),
                         // so the outer Some arm handled them — this branch
                         // is unreachable.
@@ -6593,6 +6620,7 @@ fn decode_ext_chain(cursor: &mut SceCursor<'_>) -> Result<Vec<ExtEntry>, Inbound
 
 /// Pack the `cbyte` field per zenoh-pico's `_z_whatami_to_uint8`
 /// (transport.c:31-37) + `(zid_len - 1) << 4` (transport.c:189-192).
+#[cfg(feature = "codec-init-body")]
 fn init_cbyte(api_whatami: u8, zid_len: usize) -> u8 {
     debug_assert!(
         (1..=16).contains(&zid_len),
@@ -6604,6 +6632,7 @@ fn init_cbyte(api_whatami: u8, zid_len: usize) -> u8 {
 
 /// Pack `sn_res` per transport.c:196-197:
 /// `(seq_num_res & 0x03) | ((req_id_res & 0x03) << 2)`.
+#[cfg(feature = "codec-init-body")]
 fn pack_sn_res(seq_num_res: u8, req_id_res: u8) -> u8 {
     (seq_num_res & 0x03) | ((req_id_res & 0x03) << 2)
 }
@@ -6940,6 +6969,7 @@ mod tests {
 
     /// init_cbyte must match zenoh-pico's transport.c:189-192
     /// packing exactly — Layer 3 byte-equiv depends on this.
+    #[cfg(feature = "codec-init-body")]
     #[test]
     fn init_cbyte_packs_whatami_and_zid_len() {
         // whatami=Peer(0x02), zid_len=4 → wire whatami = (0x02>>1)&3 = 0x01
@@ -6954,6 +6984,7 @@ mod tests {
     }
 
     /// pack_sn_res must match transport.c:196-197 packing exactly.
+    #[cfg(feature = "codec-init-body")]
     #[test]
     fn pack_sn_res_layout_matches_transport_h() {
         assert_eq!(pack_sn_res(0, 0), 0x00);
@@ -7102,7 +7133,9 @@ mod tests {
                 other => panic!(
                     "encode_frame_with_push must produce an InboundFrame::Frame; got {}",
                     match other {
+                        #[cfg(feature = "codec-init-body")]
                         InboundFrame::Init { .. } => "Init",
+                        #[cfg(feature = "codec-open-body")]
                         InboundFrame::Open { .. } => "Open",
                         InboundFrame::Close { .. } => "Close",
                         InboundFrame::KeepAlive { .. } => "KeepAlive",
