@@ -107,9 +107,9 @@ codec-close = ["wz-runtime-tokio?/codec-close"]
 codec-declare = []
 codec-fragment = ["transport-fragmentation"]
 codec-frame = []
-codec-hello = []
+codec-hello = ["wz-runtime-tokio?/codec-hello"]
 codec-init-body = ["wz-runtime-tokio?/codec-init-body"]
-codec-join = ["session-multicast"]
+codec-join = ["session-multicast", "wz-runtime-tokio?/codec-join"]
 # R311b — codec-keep-alive forwards to wz-runtime-tokio (and through
 # it to wz-codecs); elision drops the peer-driven lease refresh path
 # along with the wire-mid 0x04 decoder. See §5.12 codec atomic caveat.
@@ -119,7 +119,7 @@ codec-push = []
 codec-request = []
 codec-response = []
 codec-response-final = []
-codec-scout = []
+codec-scout = ["wz-runtime-tokio?/codec-scout"]
 
 # ----- domain: declare (7 atomic, all active) -----
 # R309 — 7 declare-domain features forwarded into wz-runtime-tokio via
