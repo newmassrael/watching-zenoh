@@ -212,12 +212,16 @@ impl ApplicationLayerObserver {
         // peer_keyexpr_table so downstream consumers see a fresh
         // mapping snapshot on the same iteration.
         //
-        // R310 — `peer_table` is consumed by every gated consumer arm
-        // below. When all six declare-* / liveliness-* / query-reply
-        // features are off (rare, e.g. preset-mcu-minimal), no arm
-        // dispatches and `peer_table` becomes unused; suppress the
-        // -D warnings lint with `_peer_table` rebinding so the
-        // configuration stays valid.
+        // R310.5b — the `peer_table` binding (and the
+        // `peer_keyexpr_table()` getter call) is itself gated on the
+        // consumer-features union. When no consumer arm is active
+        // (rare, e.g. preset-mcu-minimal-class with all declare-* /
+        // liveliness-* / query-queryable / query-reply off), the
+        // getter is not called and no `_peer_table` rebinding is
+        // needed. The prior `cfg(not(...)) let _peer_table = ...;`
+        // companion was a textbook miss — calling a getter only to
+        // discard its result and silence a lint is uglier than
+        // simply not calling it.
         self.subscribers.dispatch_iteration_event(event);
         #[cfg(any(
             feature = "declare-subscriber",
@@ -228,15 +232,6 @@ impl ApplicationLayerObserver {
             feature = "query-reply",
         ))]
         let peer_table = self.subscribers.peer_keyexpr_table();
-        #[cfg(not(any(
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "liveliness-token",
-            feature = "liveliness-subscriber",
-            feature = "query-queryable",
-            feature = "query-reply",
-        )))]
-        let _peer_table = self.subscribers.peer_keyexpr_table();
 
         // Consumer registries — all read the shared peer_table that
         // the subscribers registry just updated. The queryable side
