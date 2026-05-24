@@ -47,7 +47,7 @@ path = "src/lib.rs"
 # pair (R311a4 wz facade exposes the forwards; R311a2/3 gate the
 # session_glue use sites; until then `--no-default-features` at
 # wz-runtime-tokio level breaks compile, which is intended).
-default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join", "codec-response-final"]
+default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join", "codec-response-final", "codec-fragment"]
 alloc = ["sce-forge-runtime/alloc"]
 codec-init-body = []
 codec-open-body = []
@@ -84,6 +84,13 @@ codec-join = []
 # loses the terminating-marker emit; downstream z_get futures hang
 # until their per-call timeout fires. Honest semantics.
 codec-response-final = []
+# R311f — codec-fragment gates the SCXML codegen + `pub mod fragment`.
+# wz-runtime-tokio does not import Fragment types in session_glue.rs
+# (the AP MVP path does not exercise the multi-Frame fragment-
+# reassembly state machine yet), so the gate stays at the wz-codecs
+# level only — same shape as R311d scout/hello/join. Footprint delta
+# at the wz-ap-demo binary is ~0 (LTO already discards Fragment types).
+codec-fragment = []
 # R311b — `codec-keep-alive` gates both the build.rs SCXML compile pass
 # for keep_alive.scxml and the `pub mod keep_alive` include in lib.rs.
 # Feature-off elides the empty-body KeepAlive codec entirely; the

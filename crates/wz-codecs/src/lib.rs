@@ -68,6 +68,7 @@ pub mod frame {
     include!(concat!(env!("OUT_DIR"), "/frame.rs"));
 }
 
+#[cfg(feature = "codec-fragment")]
 pub mod fragment {
     include!(concat!(env!("OUT_DIR"), "/fragment.rs"));
 }
