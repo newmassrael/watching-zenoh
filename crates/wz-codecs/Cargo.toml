@@ -47,7 +47,7 @@ path = "src/lib.rs"
 # pair (R311a4 wz facade exposes the forwards; R311a2/3 gate the
 # session_glue use sites; until then `--no-default-features` at
 # wz-runtime-tokio level breaks compile, which is intended).
-default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join", "codec-response-final", "codec-fragment", "codec-frame", "codec-push", "codec-declare", "codec-request"]
+default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join", "codec-response-final", "codec-fragment", "codec-frame", "codec-push", "codec-declare", "codec-request", "codec-response"]
 alloc = ["sce-forge-runtime/alloc"]
 codec-init-body = []
 codec-open-body = []
@@ -157,6 +157,18 @@ codec-declare = []
 # parse arm carry the matching gate. codec-request = ["codec-frame"]
 # closes the third body-codec-implies-envelope edge.
 codec-request = []
+# R311k — `codec-response` gates the SCXML codegen for the response
+# envelope + Reply + Err inner bodies and the matching `pub mod`
+# blocks. wz-runtime-tokio session_glue.rs Response/ResponseVariant/
+# Reply/ReplyVariant/Err imports, N_MID_RESPONSE const, 4
+# build_response_* builders, encode_frame_with_response,
+# NetworkMessage::Response variant + parse arm carry the matching
+# gate. codec-response = ["codec-frame"] closes the fourth and final
+# body-codec-implies-envelope edge: after R311k, codec-frame OFF
+# requires every body codec (push / declare / request / response)
+# OFF, materialising the handshake-only deploy contract
+# (Init / Open / Close + KeepAlive only).
+codec-response = []
 
 
 [dependencies]

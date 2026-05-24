@@ -113,6 +113,7 @@ default = [
     "codec-push",
     "codec-declare",
     "codec-request",
+    "codec-response",
 ]
 liveliness-token = ["declare-token", "declare-undeclare"]
 liveliness-subscriber = ["declare-interest", "declare-final"]
@@ -138,8 +139,12 @@ declare-undeclare = ["codec-declare"]
 # path (send_request_query) builds on Request/Query types gated by
 # codec-request.
 query-get = ["query-reply", "query-queryable", "codec-request"]
-query-queryable = ["codec-request"]
-query-reply = ["codec-request"]
+# R311k — query-queryable (queryable-side reply emit) + query-reply
+# (z_get-side reply consume) both imply codec-response so the wire
+# Response surface compiles whenever the high-level query reply
+# capability is on.
+query-queryable = ["codec-request", "codec-response"]
+query-reply = ["codec-request", "codec-response"]
 query-target = ["query-get"]
 query-timeout = ["query-get"]
 query-consolidation = ["query-get"]
@@ -225,6 +230,17 @@ codec-declare = ["codec-frame"]
 # codec-request so the wire path is mechanically available whenever
 # the high-level query surface is on.
 codec-request = ["codec-frame"]
+# R311k — codec-response gates the wz-runtime-tokio Response wire
+# surface in session_glue.rs: Response/ResponseVariant/Reply/Err
+# imports, N_MID_RESPONSE const, 4 build_response_* builders,
+# encode_frame_with_response, NetworkMessage::Response variant + parse
+# arm. codec-response = ["codec-frame"] closes the FOURTH and final
+# body-codec-implies-envelope edge: after R311k, codec-frame OFF
+# requires every body codec OFF, materialising the handshake-only
+# deploy contract (Init / Open / Close + KeepAlive only). query-reply
+# and query-queryable imply codec-response (the reply emit path on
+# the queryable side).
+codec-response = ["codec-frame"]
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }
@@ -238,7 +254,7 @@ tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macro
 # wz-codecs's own default list, making the forwards a no-op and
 # preventing facade-level `--no-default-features` from elide-ing the
 # pair.
-wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc", "codec-push", "codec-declare", "codec-request"] }
+wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc", "codec-push", "codec-declare", "codec-request", "codec-response"] }
 # R252 — Runtime / TimeSource / Allocator trait surface. The AP profile
 # (this crate) bridges tokio + std into the trait contract authored in
 # R251; the MCU profile (future wz-runtime-lwip) will provide the same
