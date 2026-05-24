@@ -16730,6 +16730,78 @@
         "Architectural carries unchanged: R284, R283, R267, R301 §8, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311a3": {
+      "decision_summary": "R311a3 closes the codec-init-body / codec-open-body cascade: InboundFrame enum variant + parse + handle + FSM event + catch-all + debug name + bind_unit callbacks + wire_const + helper fns cfg-gated; cargo check --no-default-features now passes.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: `#[cfg(feature = \"codec-init-body\")]` on `InboundFrame::Init { ... }` enum variant (body: InitBody field carries the type).",
+        "Same cfg pattern on `InboundFrame::Open { ... }` variant with `codec-open-body`.",
+        "`parse_inbound`: `wire_const::T_MID_INIT =>` and `wire_const::T_MID_OPEN =>` match arms cfg-gated; unknown MIDs fall through to `InboundFrame::Unknown { mid }` when feature off.",
+        "`handle_inbound`: 3 Init/Open match arms cfg-gated (InitAck cookie capture, InitSyn peer-zid + caps capture, OpenSyn cookie echo capture).",
+        "`inbound_to_fsm_event`: 4 `InboundFrame::Init/Open` match arms cfg-gated; FSM event projection deactivates cleanly.",
+        "Catch-all match in poll_and_dispatch_one driver loop: previous `Init | Open | Close | Unknown` multi-pattern split into 4 distinct arms so each Init/Open arm can carry its feature cfg.",
+        "Debug-name match in encode_frame_with_push assertion: `Init` / `Open` arms cfg-gated.",
+        "`register_outbound_link_fns`: 4 bind_unit callback registrations cfg-gated (send_init_syn / send_init_ack_with_cookie on codec-init-body; send_open_syn / send_open_ack on codec-open-body).",
+        "`mod wire_const`: T_MID_INIT / FLAG_T_INIT_A / FLAG_T_INIT_S cfg-gated on codec-init-body; T_MID_OPEN / FLAG_T_OPEN_A / FLAG_T_OPEN_T on codec-open-body. Each constant has exactly one feature-gated use site so dead-code lint stays clean across all 4 feature combinations.",
+        "Helper fns: `encode_ext_chain` (cfg `any(feature = \"codec-init-body\", feature = \"codec-open-body\")` because both encode paths share it), `init_cbyte` + `pack_sn_res` (cfg `feature = \"codec-init-body\"`).",
+        "Test fns `init_cbyte_packs_whatami_and_zid_len` + `pack_sn_res_layout_matches_transport_h` cfg-gated on `codec-init-body` so --no-default-features --tests doesn't drag in a dangling test (deliberate per R310.5a memory: avoid `#[cfg(any(..., test))]` pattern; gate the test directly instead)."
+      ],
+      "verification_bullets": [
+        "4-config feature matrix all pass: default / --no-default-features / --no-default --features codec-init-body / --no-default --features codec-open-body / --no-default --features \"codec-init-body codec-open-body\".",
+        "`cargo check -p wz-runtime-tokio --no-default-features`: PASS (R311a1+R311a2 carry FAIL closed at R311a3).",
+        "`cargo test -p wz-runtime-tokio --lib`: 589/589 pass.",
+        "`cargo check --workspace`: pass (wz-integration-tests + wz-ap-demo backward compat).",
+        "`cargo fmt --all -- --check` clean; `cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings` clean.",
+        "Layer E 30-trial flake-0: 30/30 trials pass; 0 FAILED across 1230 \"test result: ok\" lines (15 ignored binary-dep e2e tests × 30 trials × ~2.7 wz-integration-tests sub-binaries per trial in cargo test --quiet output).",
+        "validate_workspace: T1=0, RT 13/13, entries 317 → 318, GENERATED.md=sync.",
+        "R311a1 + R311a2 + R311a3 cascade now a valid release point: facade-level / wz-runtime-tokio-level / wz-codecs-level all 3 layers support --no-default-features elision of the init_body / open_body codec emit + include + wire-handling path uniformly."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "carry_forward_bullets": [
+        "R311a4 (next): wz facade Cargo.toml `codec-init-body` / `codec-open-body` ?-syntax forward (so `cargo build -p wz --no-default-features --features default-minus-codec-init-body` works at facade level). Footprint binary-size delta measurement (default vs default-minus-X) mandatory — quantitative proof of catalog truthfulness. 0.5-1R. After R311a4 the R311a recanon-pre+recanon+1+2+3+4 sequence is closed; codec catalog §5.12's two new entries are mechanically truthful end-to-end.",
+        "Integration tests (wz-integration-tests + wz-runtime-tokio/tests/) currently use InboundFrame::Init / Open directly; under --no-default-features --tests build they would fail. R311a4-aside cleanup carry: cfg-gate integration tests on codec-init-body / codec-open-body OR keep test files implicitly gated on default features (acceptable since `cargo test` always uses default features by convention). Recommend lazy: defer until a user actually runs `cargo test --no-default-features`.",
+        "R303++ carry: feature_inventory 39 outline-only sub-sections atomic-field population (intent + outputs).",
+        "R310.5c carry: get_matching_status conservative-false doc-surface decision (0.5R).",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R267 Session<R,T> reparam, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311a3 closes the codec-init-body / codec-open-body cascade: InboundFrame enum variant + parse + handle + FSM event + catch-all + debug name + bind_unit callbacks + wire_const + helper fns cfg-gated; cargo check --no-default-features now passes.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: `#[cfg(feature = \"codec-init-body\")]` on `InboundFrame::Init { ... }` enum variant (body: InitBody field carries the type).",
+        "Same cfg pattern on `InboundFrame::Open { ... }` variant with `codec-open-body`.",
+        "`parse_inbound`: `wire_const::T_MID_INIT =>` and `wire_const::T_MID_OPEN =>` match arms cfg-gated; unknown MIDs fall through to `InboundFrame::Unknown { mid }` when feature off.",
+        "`handle_inbound`: 3 Init/Open match arms cfg-gated (InitAck cookie capture, InitSyn peer-zid + caps capture, OpenSyn cookie echo capture).",
+        "`inbound_to_fsm_event`: 4 `InboundFrame::Init/Open` match arms cfg-gated; FSM event projection deactivates cleanly.",
+        "Catch-all match in poll_and_dispatch_one driver loop: previous `Init | Open | Close | Unknown` multi-pattern split into 4 distinct arms so each Init/Open arm can carry its feature cfg.",
+        "Debug-name match in encode_frame_with_push assertion: `Init` / `Open` arms cfg-gated.",
+        "`register_outbound_link_fns`: 4 bind_unit callback registrations cfg-gated (send_init_syn / send_init_ack_with_cookie on codec-init-body; send_open_syn / send_open_ack on codec-open-body).",
+        "`mod wire_const`: T_MID_INIT / FLAG_T_INIT_A / FLAG_T_INIT_S cfg-gated on codec-init-body; T_MID_OPEN / FLAG_T_OPEN_A / FLAG_T_OPEN_T on codec-open-body. Each constant has exactly one feature-gated use site so dead-code lint stays clean across all 4 feature combinations.",
+        "Helper fns: `encode_ext_chain` (cfg `any(feature = \"codec-init-body\", feature = \"codec-open-body\")` because both encode paths share it), `init_cbyte` + `pack_sn_res` (cfg `feature = \"codec-init-body\"`).",
+        "Test fns `init_cbyte_packs_whatami_and_zid_len` + `pack_sn_res_layout_matches_transport_h` cfg-gated on `codec-init-body` so --no-default-features --tests doesn't drag in a dangling test (deliberate per R310.5a memory: avoid `#[cfg(any(..., test))]` pattern; gate the test directly instead)."
+      ],
+      "publishable_verification_bullets": [
+        "4-config feature matrix all pass: default / --no-default-features / --no-default --features codec-init-body / --no-default --features codec-open-body / --no-default --features \"codec-init-body codec-open-body\".",
+        "`cargo check -p wz-runtime-tokio --no-default-features`: PASS (R311a1+R311a2 carry FAIL closed at R311a3).",
+        "`cargo test -p wz-runtime-tokio --lib`: 589/589 pass.",
+        "`cargo check --workspace`: pass (wz-integration-tests + wz-ap-demo backward compat).",
+        "`cargo fmt --all -- --check` clean; `cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings` clean.",
+        "Layer E 30-trial flake-0: 30/30 trials pass; 0 FAILED across 1230 \"test result: ok\" lines (15 ignored binary-dep e2e tests × 30 trials × ~2.7 wz-integration-tests sub-binaries per trial in cargo test --quiet output).",
+        "validate_workspace: T1=0, RT 13/13, entries 317 → 318, GENERATED.md=sync.",
+        "R311a1 + R311a2 + R311a3 cascade now a valid release point: facade-level / wz-runtime-tokio-level / wz-codecs-level all 3 layers support --no-default-features elision of the init_body / open_body codec emit + include + wire-handling path uniformly."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311a4 (next): wz facade Cargo.toml `codec-init-body` / `codec-open-body` ?-syntax forward (so `cargo build -p wz --no-default-features --features default-minus-codec-init-body` works at facade level). Footprint binary-size delta measurement (default vs default-minus-X) mandatory — quantitative proof of catalog truthfulness. 0.5-1R. After R311a4 the R311a recanon-pre+recanon+1+2+3+4 sequence is closed; codec catalog §5.12's two new entries are mechanically truthful end-to-end.",
+        "Integration tests (wz-integration-tests + wz-runtime-tokio/tests/) currently use InboundFrame::Init / Open directly; under --no-default-features --tests build they would fail. R311a4-aside cleanup carry: cfg-gate integration tests on codec-init-body / codec-open-body OR keep test files implicitly gated on default features (acceptable since `cargo test` always uses default features by convention). Recommend lazy: defer until a user actually runs `cargo test --no-default-features`.",
+        "R303++ carry: feature_inventory 39 outline-only sub-sections atomic-field population (intent + outputs).",
+        "R310.5c carry: get_matching_status conservative-false doc-surface decision (0.5R).",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R267 Session<R,T> reparam, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 32": {
       "decision_summary": "B5 codec track continues — sources/codecs/frame.scxml + fragment.scxml authored. First VLE + tail primitive composition (B1-α + tail) plus first inline test-vector land (B5-θ 4-case set). Both share identical body shape per zenoh-pico (sn:VLE + payload:tail, no extensions); differ only in enclosing MID (0x05 Frame / 0x06 Fragment).",
       "changes_bullets": [
