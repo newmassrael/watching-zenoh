@@ -171,6 +171,24 @@ pub mod common {
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
+    /// Deadline for the zenoh-pico `z_sub` CLI's "Opening session"
+    /// init witness. The 50 ms `wait_for_substring` polling cadence
+    /// is unchanged; this constant is the worst-case envelope under
+    /// which the child must reach session-open. R311a-pre raises the
+    /// previous 5 s figure to 10 s because R309 recorded one Layer E
+    /// trial out of 60 in which `z_sub` legitimately took longer
+    /// than 5 s to print "Opening session" (verified non-wz-side
+    /// cause via R310 30/30 + R310.5a/b/c 90/90 wz-side flake-0
+    /// rerun); the actual fast-path observation is well under 500 ms
+    /// on a quiescent localhost, so 10 s is a ~20× safety margin
+    /// without slowing the Layer E lane on the common path.
+    ///
+    /// Shared across the three `z_sub`-consuming integration tests
+    /// (`wz_publisher_to_zsub`, `wz_publisher_aliased_to_zsub`,
+    /// `wz_publisher_del_to_zsub`) so a future raise touches one
+    /// constant instead of three call sites.
+    pub const Z_SUB_INIT_TIMEOUT: Duration = Duration::from_secs(10);
+
     /// Poll the captured tempfile every 50 ms until either `needle`
     /// appears in the contents or `timeout` elapses. Returns the
     /// matching snapshot on success or the final captured snapshot
