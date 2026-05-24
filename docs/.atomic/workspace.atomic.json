@@ -475,6 +475,271 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis"
       ]
     },
+    "feature-inventory--composable-framework-atomic--preset-catalog": {
+      "title": "Feature inventory — composable framework atomic + preset catalog",
+      "parent_doc": "docs/feature_inventory.md",
+      "intent": "First-pass composable-framework feature catalog: 19 domains, ~140 atomic features, 6 semver presets. Naming + 3-test verdicts; emission mechanism deferred to R302+.",
+      "rationale_bullets": [
+        "Names + 3-test verdicts for atomic features; named contracts for presets; mechanism R302+ defer.",
+        "Materializes the R267 north star: arbitrary user-selected subset of zenoh's full feature catalog.",
+        "Cross-feature consistency anchor is zenoh-cpp public API shape; the first-milestone parity target.",
+        "Linux kconfig / Zephyr / Buildroot / NixOS USE flag — same composable pattern in adjacent ecos."
+      ],
+      "inputs_bullets": [
+        "zenoh upstream 1.5.0 vendored at ~/.cargo/git/checkouts/zenoh-*/49c8a53/",
+        "zenoh-pico upstream (~/zenoh-pico/)",
+        "zenoh-cpp public API shape — cross-feature consistency anchor",
+        "wz-runtime-tokio / wz-codecs / wz-runtime-core / sources/{algos,codecs,session,links} R300 snap"
+      ],
+      "outputs_bullets": [
+        "~140 atomic feature names following `<domain>-<capability>`; each labelled active or reserved",
+        "6 preset names following `preset-<target>-<level>` convention at v0.1.0",
+        "3-test definitions: Footprint / Plausibility / Coherence — passes constitute atomicity",
+        "Conflict policy: silently ALLOW (cargo monotone-additive semantics)"
+      ],
+      "caveats_bullets": [
+        "Cargo feature edges, SCXML feature-gate grammar, build-time eval flow — R302+ deferred.",
+        "inspect-tool (`cargo wz-config inspect`) design — R302+ deferred.",
+        "Naming contract, not mechanism contract.",
+        "R311a-recanon: codec-init-syn/-ack/-open-syn/-ack collapsed to codec-init-body+codec-open-body.",
+        "Reason: single-SCXML emit per body; runtime is_ack flag chooses arm (Footprint test fail at 4-way)."
+      ],
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/1-purpose": {
+      "title": "§1 Purpose",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/2-naming-convention": {
+      "title": "§2 Naming convention",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/2-naming-convention/2-1-atomic-features": {
+      "title": "§2.1 Atomic features",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/2-naming-convention",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/2-naming-convention/2-2-presets": {
+      "title": "§2.2 Presets",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/2-naming-convention",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions": {
+      "title": "§3 Three-test definitions",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint": {
+      "title": "§3.1 Footprint",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-2-plausibility": {
+      "title": "§3.2 Plausibility",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-3-coherence": {
+      "title": "§3.3 Coherence",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/4-conflict-policy": {
+      "title": "§4 Conflict policy",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog": {
+      "title": "§5 Atomic feature catalog",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport": {
+      "title": "§5.1 Transport",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness": {
+      "title": "§5.10 Liveliness",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage": {
+      "title": "§5.11 Storage",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec": {
+      "title": "§5.12 Codec",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime": {
+      "title": "§5.13 Runtime",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform": {
+      "title": "§5.14 Platform",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing": {
+      "title": "§5.15 Routing",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control": {
+      "title": "§5.16 Access control",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-17-attachment": {
+      "title": "§5.17 Attachment",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time": {
+      "title": "§5.18 Time",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding": {
+      "title": "§5.19 Encoding",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator": {
+      "title": "§5.2 Locator",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting": {
+      "title": "§5.3 Scouting",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session": {
+      "title": "§5.4 Session",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link": {
+      "title": "§5.5 Link",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr": {
+      "title": "§5.6 Keyexpr",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow": {
+      "title": "§5.7 Declare flow",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub": {
+      "title": "§5.8 Pubsub",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query": {
+      "title": "§5.9 Query",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/6-presets": {
+      "title": "§6 Presets",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal": {
+      "title": "§6.1 preset-mcu-minimal v0.1.0",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-2-preset-mcu-extended": {
+      "title": "§6.2 preset-mcu-extended v0.1.0",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-3-preset-ap-client": {
+      "title": "§6.3 preset-ap-client v0.1.0",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-4-preset-ap-router": {
+      "title": "§6.4 preset-ap-router v0.1.0",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full": {
+      "title": "§6.5 preset-ap-full v0.1.0",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-6-preset-zenoh-cpp": {
+      "title": "§6.6 preset-zenoh-cpp v0.1.0",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism": {
+      "title": "§7 Cargo feature emission mechanism",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/8-sce-feature-gate-mechanism": {
+      "title": "§8 SCE feature gate mechanism",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "decision_status": "active"
+    },
+    "feature-inventory--composable-framework-atomic--preset-catalog/9-change-log": {
+      "title": "§9 Change log",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog",
+      "decision_status": "active"
+    },
     "intrinsics-runtime--symbol-surface": {
       "intent": "Defines sce_intrinsics_runtime symbol surface (C11/Rust variants) for atomics/fences/cache/IRQ/RNG/HMAC/HW-sem.",
       "inputs_bullets": [
@@ -16102,6 +16367,68 @@
         "Pubsub domain gating (11 atomic features, 3-4R estimate). Session::declare_subscriber + SubscribeOptions + Subscriber + the entire pubsub::SubscriberRegistry path gate on pubsub-* features.",
         "Documentation surface for the conservative-false get_matching_status default (R310.5c carry): future atomic Section on the runtime crate to record \"when declare-queryable/declare-subscriber are off, get_matching_status always returns matching:false\" as a public contract note. 0.5R.",
         "Pre-existing carries unchanged: R284 uniform Established gate (3-5R), R283 peer-side Interest inbound bilateral (2-3R), R267 Session<R,T> reparam (3-7R), R301 §8 SCE cross-repo (3-7R), Q_B/Q_E codec slots (5-10R), Phase W full lwIP (20-50R), R299 carry #2/#3, R300 conservative-reject narrow (1R), R303+ feature_inventory.md atomic Section decompose (1-2R), R301 §7 cargo wz-config inspect tool (3-5R), R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis), keyexpr_canon proptest filter hole (1R analysis)."
+      ]
+    },
+    "Round 311a-recanon-pre": {
+      "decision_summary": "R311a-recanon-pre atomic-decomposes feature_inventory.md from R301 single-section raw body to 40 typed Sections (1 top + 9 H2 + 30 H3); resolves R303+ structural half.",
+      "changes_bullets": [
+        "Top section feature-inventory--composable-framework-atomic--preset-catalog promoted from impact-only ref to typed Section row in the atomic store sidecar.",
+        "Top intent + rationale (4) + inputs (4) + outputs (4) + caveats (5) populated from existing Status / Scope / Inputs / Outputs / Non-outputs prose preamble.",
+        "9 H2 sub-sections added as typed outline rows: §1 Purpose, §2 Naming, §3 Three-test, §4 Conflict, §5 Catalog, §6 Presets, §7 Cargo, §8 SCE, §9 Change log.",
+        "30 H3 sub-sections added as typed outline rows: §2.1-2.2, §3.1-3.3, §5.1-5.19, §6.1-6.6. Slugs follow `<N-M>-<kebab-title>` convention.",
+        "Top section's last caveat flags upcoming R311a-recanon collapse: codec-init-syn/-ack/-open-syn/-ack → codec-init-body + codec-open-body (Footprint test 4-way fail).",
+        "Atomic field population for 39 outline-only sub-sections deferred to a R303++ carry (intent/outputs per section); the structural half of the original R303+ carry is closed by this round."
+      ],
+      "verification_bullets": [
+        "validate_workspace post-decompose: docs=13/13, T1 orphan=0 (no new orphans), round-trip mandatory=13/13, GENERATED.md=sync.",
+        "Atomic ledger sections 215 → 255 (+40: 1 top promotion + 9 H2 + 30 H3 outline additions). Entries 313 unchanged (this is a section-ops round).",
+        "T3 warn 862 → 861 (-1, parser-detected ghost resolved by top section promotion). T4 info 429 unchanged.",
+        "Trial add_section + remove_section dry-run on runtime-crate doc + feature-inventory top confirmed the impact-only-ref → typed Section promotion mechanic; rolled back before the production decompose.",
+        "Bullet length cap (≤ 100 chars) hit on first attempt at top section rationale/inputs/outputs/caveats; subsequent batch trimmed each to fit (this is a recurring R161 §41 threshold reminder)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog"
+      ],
+      "carry_forward_bullets": [
+        "R311a-recanon next: set_section_outputs §5.12 with 14-codec list (was 16) collapsing codec-init-syn/-ack/-open-syn/-ack → codec-init-body + codec-open-body.",
+        "R311a-recanon: set_section_outputs §6.1/§6.3 with corrected preset lists (drop 4 syn/ack entries, add 2 body entries).",
+        "R311a-recanon: set_section_intent / set_section_outputs top with ~140 count (was ~142, after -4 +2 net = -2).",
+        "R311a-recanon: Edit feature_inventory.md prose to align catalog + preset listings + intro count.",
+        "R303++ (new carry, refined from R303+): populate atomic fields (intent + outputs as appropriate) for 39 outline-only sub-sections of feature_inventory.md.",
+        "R311a (after R311a-recanon): codec handshake-active 2 features cfg-gate (codec-init-body + codec-open-body) across wz facade / wz-runtime-tokio / wz-codecs. 2-3R.",
+        "R310.5c carry: doc-surface for get_matching_status conservative-false default (zenoh-cpp parity note). 0.5R.",
+        "R311a-pre carry (R309-origin z_sub init race): closed at R311a-pre. No further action.",
+        "Pre-existing architectural carries unchanged: R284 uniform Established gate (3-5R), R283 peer-side Interest inbound bilateral (2-3R), R267 Session<R,T> reparam (3-7R, composability blocker), R301 §8 SCE cross-repo (3-7R), Q_B/Q_E codec slots (5-10R), Phase W full lwIP (20-50R), R299 carry #2/#3, R300 conservative-reject narrow (1R), R301 §7 cargo wz-config inspect tool (3-5R), R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis), keyexpr_canon proptest filter hole (1R analysis)."
+      ],
+      "publishable_decision_summary": "R311a-recanon-pre atomic-decomposes feature_inventory.md from R301 single-section raw body to 40 typed Sections (1 top + 9 H2 + 30 H3); resolves R303+ structural half.",
+      "publishable_changes_bullets": [
+        "Top section feature-inventory--composable-framework-atomic--preset-catalog promoted from impact-only ref to typed Section row in the atomic store sidecar.",
+        "Top intent + rationale (4) + inputs (4) + outputs (4) + caveats (5) populated from existing Status / Scope / Inputs / Outputs / Non-outputs prose preamble.",
+        "9 H2 sub-sections added as typed outline rows: §1 Purpose, §2 Naming, §3 Three-test, §4 Conflict, §5 Catalog, §6 Presets, §7 Cargo, §8 SCE, §9 Change log.",
+        "30 H3 sub-sections added as typed outline rows: §2.1-2.2, §3.1-3.3, §5.1-5.19, §6.1-6.6. Slugs follow `<N-M>-<kebab-title>` convention.",
+        "Top section's last caveat flags upcoming R311a-recanon collapse: codec-init-syn/-ack/-open-syn/-ack → codec-init-body + codec-open-body (Footprint test 4-way fail).",
+        "Atomic field population for 39 outline-only sub-sections deferred to a R303++ carry (intent/outputs per section); the structural half of the original R303+ carry is closed by this round."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace post-decompose: docs=13/13, T1 orphan=0 (no new orphans), round-trip mandatory=13/13, GENERATED.md=sync.",
+        "Atomic ledger sections 215 → 255 (+40: 1 top promotion + 9 H2 + 30 H3 outline additions). Entries 313 unchanged (this is a section-ops round).",
+        "T3 warn 862 → 861 (-1, parser-detected ghost resolved by top section promotion). T4 info 429 unchanged.",
+        "Trial add_section + remove_section dry-run on runtime-crate doc + feature-inventory top confirmed the impact-only-ref → typed Section promotion mechanic; rolled back before the production decompose.",
+        "Bullet length cap (≤ 100 chars) hit on first attempt at top section rationale/inputs/outputs/caveats; subsequent batch trimmed each to fit (this is a recurring R161 §41 threshold reminder)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311a-recanon next: set_section_outputs §5.12 with 14-codec list (was 16) collapsing codec-init-syn/-ack/-open-syn/-ack → codec-init-body + codec-open-body.",
+        "R311a-recanon: set_section_outputs §6.1/§6.3 with corrected preset lists (drop 4 syn/ack entries, add 2 body entries).",
+        "R311a-recanon: set_section_intent / set_section_outputs top with ~140 count (was ~142, after -4 +2 net = -2).",
+        "R311a-recanon: Edit feature_inventory.md prose to align catalog + preset listings + intro count.",
+        "R303++ (new carry, refined from R303+): populate atomic fields (intent + outputs as appropriate) for 39 outline-only sub-sections of feature_inventory.md.",
+        "R311a (after R311a-recanon): codec handshake-active 2 features cfg-gate (codec-init-body + codec-open-body) across wz facade / wz-runtime-tokio / wz-codecs. 2-3R.",
+        "R310.5c carry: doc-surface for get_matching_status conservative-false default (zenoh-cpp parity note). 0.5R.",
+        "R311a-pre carry (R309-origin z_sub init race): closed at R311a-pre. No further action.",
+        "Pre-existing architectural carries unchanged: R284 uniform Established gate (3-5R), R283 peer-side Interest inbound bilateral (2-3R), R267 Session<R,T> reparam (3-7R, composability blocker), R301 §8 SCE cross-repo (3-7R), Q_B/Q_E codec slots (5-10R), Phase W full lwIP (20-50R), R299 carry #2/#3, R300 conservative-reject narrow (1R), R301 §7 cargo wz-config inspect tool (3-5R), R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis), keyexpr_canon proptest filter hole (1R analysis)."
       ]
     },
     "Round 32": {
