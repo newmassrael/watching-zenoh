@@ -61,27 +61,8 @@
 //! keyexpr), so no resolution is needed — the peer identifies the
 //! prior declaration by the same id it used in its earlier `Decl*`.
 
-// R310 — the only call site of these imports is `resolve_wireexpr`
-// below, which itself gates on any(declare-queryable, declare-
-// subscriber, liveliness-token, liveliness-subscriber, test). Mirror
-// the gate on the imports so a no-default-features build does not
-// surface them as -D unused-imports lint errors.
-#[cfg(any(
-    feature = "declare-queryable",
-    feature = "declare-subscriber",
-    feature = "liveliness-token",
-    feature = "liveliness-subscriber",
-    test,
-))]
 use std::collections::HashMap;
 
-#[cfg(any(
-    feature = "declare-queryable",
-    feature = "declare-subscriber",
-    feature = "liveliness-token",
-    feature = "liveliness-subscriber",
-    test,
-))]
 use wz_codecs::wireexpr::WireexprVariant;
 
 // R310 — each registry sub-module gates on its corresponding
@@ -125,18 +106,14 @@ pub use subscriber::{DeclSubscriberCallback, RemoteSubscriberRegistry, UndeclSub
 /// `super::resolve_wireexpr` without exposing the resolver to
 /// downstream crates.
 ///
-/// R310 — gated on any(declare-queryable, declare-subscriber,
-/// liveliness-token, liveliness-subscriber) to elide dead-code under
-/// configurations that disable every consumer sub-module. The test
-/// clause keeps the helper visible for the parent `cross_tests` /
-/// `test_helpers` mods.
-#[cfg(any(
-    feature = "declare-queryable",
-    feature = "declare-subscriber",
-    feature = "liveliness-token",
-    feature = "liveliness-subscriber",
-    test,
-))]
+/// R310.5a — always compiled regardless of consumer-feature subset to
+/// keep prod and test surfaces identical (the prior `cfg(any(...,
+/// test))` gated the helper differently between `cargo build
+/// --no-default-features` and `cargo test --no-default-features`,
+/// which is a silent-drift hazard for future refactors). Release-mode
+/// dead-code elimination strips the unused symbol when no sub-module
+/// imports it.
+#[allow(dead_code)]
 pub(super) fn resolve_wireexpr(
     body: &WireexprVariant,
     table: &HashMap<u64, String>,
