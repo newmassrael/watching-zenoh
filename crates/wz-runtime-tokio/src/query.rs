@@ -78,6 +78,7 @@ use wz_codecs::request::{Request, RequestVariant};
 use wz_codecs::response::Response;
 use wz_codecs::wireexpr::WireexprVariant;
 
+#[cfg(feature = "codec-response-final")]
 use wz_codecs::response_final::ResponseFinal;
 
 use crate::pubsub::keyexpr_pattern_matches;
@@ -748,6 +749,7 @@ impl QueryableRegistry {
 /// per-rid VLE. Future qos / responder envelope exts on ResponseFinal
 /// will land via a separate setter (none exist on the wire today —
 /// zenoh-pico's `_z_response_final_encode` emits only header + rid).
+#[cfg(feature = "codec-response-final")]
 pub fn response_final_for(rid: u64) -> ResponseFinal {
     ResponseFinal {
         request_id: rid,
@@ -1404,6 +1406,7 @@ mod tests {
         assert!(finals.is_empty());
     }
 
+    #[cfg(feature = "codec-response-final")]
     #[test]
     fn response_final_for_uses_default_header_and_explicit_rid() {
         let final_msg = response_final_for(123);

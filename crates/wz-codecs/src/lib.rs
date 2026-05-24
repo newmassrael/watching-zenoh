@@ -146,6 +146,7 @@ pub mod push {
     include!(concat!(env!("OUT_DIR"), "/push.rs"));
 }
 
+#[cfg(feature = "codec-response-final")]
 pub mod response_final {
     include!(concat!(env!("OUT_DIR"), "/response_final.rs"));
 }

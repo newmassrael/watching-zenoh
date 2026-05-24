@@ -91,6 +91,7 @@ use wz_codecs::query::Query;
 use wz_codecs::reply::{Reply, ReplyVariant};
 use wz_codecs::request::{Request, RequestVariant};
 use wz_codecs::response::{Response, ResponseVariant};
+#[cfg(feature = "codec-response-final")]
 use wz_codecs::response_final::ResponseFinal;
 use wz_codecs::timestamp::Timestamp;
 use wz_codecs::undecl_kexpr::UndeclKexpr;
@@ -312,6 +313,7 @@ mod wire_const {
     /// correlation marker closing a Request's reply stream per
     /// zenoh-pico `_z_response_final_encode`: 1-byte header +
     /// request_id VLE + optional ext-chain, no body.
+    #[cfg(feature = "codec-response-final")]
     pub const N_MID_RESPONSE_FINAL: u8 = 0x1A;
     /// R92 — OAM (Operations & Maintenance) MID (network.h:33).
     /// Diagnostic / control-plane envelope per zenoh-pico
@@ -1989,6 +1991,7 @@ impl SessionLinkActions {
     /// at the action layer; the helper builder accepts a flag for
     /// the fuzz / negative-test path but the production action does
     /// not expose it.
+    #[cfg(feature = "codec-response-final")]
     pub fn send_response_final(&self, request_id: u64) {
         let response_final = build_response_final(request_id);
         let sn = self.next_outbound_frame_sn();
@@ -4773,6 +4776,7 @@ pub fn build_request_query_with_target(
 ///
 /// `request_id` MUST equal the `rid` from the matching
 /// [`build_request_query`] that opened the Query/Reply session.
+#[cfg(feature = "codec-response-final")]
 pub fn build_response_final(request_id: u64) -> ResponseFinal {
     ResponseFinal {
         // MID 0x1A (_Z_MID_N_RESPONSE_FINAL). Z bit-7 stays clear:
@@ -5562,6 +5566,7 @@ pub fn encode_frame_with_response(sn: u64, response: Response, reliable: bool) -
 /// `reliable=true` is the production-safe choice; callers passing
 /// `false` accept the consequence (typically only fuzz / negative
 /// tests).
+#[cfg(feature = "codec-response-final")]
 pub fn encode_frame_with_response_final(
     sn: u64,
     response_final: ResponseFinal,
@@ -5965,6 +5970,7 @@ pub enum NetworkMessage {
     /// inner body). Inlined (no `Box`) because the struct is
     /// small — just three integer fields plus an optional ext
     /// vec.
+    #[cfg(feature = "codec-response-final")]
     ResponseFinal(ResponseFinal),
     /// R92 — Network MID `_Z_MID_N_OAM` (0x1F). Diagnostic /
     /// control-plane envelope; header (mid+enc+Z) + VLE id +
@@ -6020,6 +6026,7 @@ impl std::fmt::Debug for NetworkMessage {
         match self {
             Self::Request(_) => f.write_str("Request(..)"),
             Self::Push(_) => f.write_str("Push(..)"),
+            #[cfg(feature = "codec-response-final")]
             Self::ResponseFinal(_) => f.write_str("ResponseFinal(..)"),
             Self::Oam(_) => f.write_str("Oam(..)"),
             Self::Interest(_) => f.write_str("Interest(..)"),
@@ -6068,6 +6075,7 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
                 let push = Push::decode(&mut cursor)?;
                 messages.push(NetworkMessage::Push(Box::new(push)));
             }
+            #[cfg(feature = "codec-response-final")]
             wire_const::N_MID_RESPONSE_FINAL => {
                 let rf = ResponseFinal::decode(&mut cursor)?;
                 messages.push(NetworkMessage::ResponseFinal(rf));
@@ -9548,6 +9556,7 @@ mod tests {
     /// VLE rid and the multi-byte VLE boundary (rid=200) — the same
     /// boundary R121i-c uses to protect against codegen drift on
     /// the VLE writer's continuation-bit logic.
+    #[cfg(feature = "codec-response-final")]
     #[test]
     fn build_response_final_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — single-byte VLE rid (rid=42).
@@ -9592,6 +9601,7 @@ mod tests {
     /// other three helpers; the production action layer hard-codes
     /// reliable=true but the helper accepts the flag for fuzz /
     /// negative-test paths.
+    #[cfg(feature = "codec-response-final")]
     #[test]
     fn encode_frame_with_response_final_wraps_in_frame_envelope() {
         let rf = build_response_final(42);
