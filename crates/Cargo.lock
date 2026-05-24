@@ -1366,6 +1366,9 @@ dependencies = [
 name = "wz"
 version = "0.1.0"
 dependencies = [
+ "sce-rust-lua",
+ "sce-rust-runtime",
+ "wz-runtime-core",
  "wz-runtime-tokio",
 ]
 
@@ -1375,12 +1378,8 @@ version = "0.1.0"
 dependencies = [
  "env_logger",
  "log",
- "sce-rust-lua",
- "sce-rust-runtime",
  "tokio",
- "wz-codecs",
- "wz-runtime-core",
- "wz-runtime-tokio",
+ "wz",
 ]
 
 [[package]]

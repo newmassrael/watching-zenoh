@@ -36,8 +36,8 @@ use std::time::Duration;
 
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use wz_runtime_tokio::session::LivelinessToken;
-use wz_runtime_tokio::session_glue::{CloseReason, SessionLinkActions};
+use wz::runtime_tokio::session::LivelinessToken;
+use wz::runtime_tokio::session_glue::{CloseReason, SessionLinkActions};
 
 /// Initial state. Every teardown input is owned by this struct;
 /// no step has run yet. `was_cancelled` distinguishes the

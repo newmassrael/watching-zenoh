@@ -57,9 +57,19 @@ workspace = true
 # inside wz-runtime-tokio. Other facade features stay no-op labels
 # until their owning sub-crate enters the workspace in future R302c+
 # rounds.
+#
+# R311a4 — facade gains wz-runtime-core + sce-rust-runtime + sce-rust-lua
+# as optional deps so the `runtime-tokio` feature pulls every sub-crate
+# wz-ap-demo previously named directly. The companion wz-ap-demo
+# refactor collapses 6 direct deps to a single `wz = { features = …
+# preset-ap-client … }`, making the facade the first user-visible
+# composable-framework boundary backed by a real Linux + tokio binary.
 
 [dependencies]
 wz-runtime-tokio = { path = "../wz-runtime-tokio", optional = true, default-features = false }
+wz-runtime-core = { path = "../wz-runtime-core", optional = true, default-features = false, features = ["alloc"] }
+sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime", optional = true }
+sce-rust-lua = { path = "../../vendor/sce/sce-rust-lua", optional = true }
 
 # ============================================================
 # [features] — 169 entries per R301 catalog
@@ -80,18 +90,28 @@ access-quota = []
 attachment-bytes = []
 attachment-encoding-aware = ["attachment-bytes"]
 
-# ----- domain: codec (16 atomic, all active) -----
+# ----- domain: codec (14 atomic, all active) -----
+# R311a-recanon collapsed codec-{init,open}-{syn,ack} 4 entries into 2
+# codec-{init,open}-body entries (single SCXML emit unit per body,
+# Footprint test honour). R311a4 propagated the reshape from
+# docs/feature_inventory.md to this Cargo.toml + the 6 preset
+# definitions + domain-codec aggregate below.
+#
+# R311a4 — codec-init-body / codec-open-body forward into wz-runtime-
+# tokio via cargo `?` syntax (forward only when runtime-tokio is also
+# active). Same pattern as R307/R309 query + declare domain forwards.
+# Each gate elides the matching SCXML codegen + InboundFrame variant +
+# session_glue parse/handle path; quantitative footprint delta is
+# measured against the wz-ap-demo binary in the R311a4 audit entry.
 codec-close = []
 codec-declare = []
 codec-fragment = ["transport-fragmentation"]
 codec-frame = []
 codec-hello = []
-codec-init-ack = []
-codec-init-syn = []
+codec-init-body = ["wz-runtime-tokio?/codec-init-body"]
 codec-join = ["session-multicast"]
 codec-keep-alive = []
-codec-open-ack = []
-codec-open-syn = []
+codec-open-body = ["wz-runtime-tokio?/codec-open-body"]
 codec-push = []
 codec-request = []
 codec-response = []
@@ -220,7 +240,21 @@ runtime-no-std = []
 # build via `dep:` syntax. Bare `runtime-tokio` with no sub-feature
 # forwards (no liveliness-* etc.) leaves wz-runtime-tokio compiled
 # with --no-default-features.
-runtime-tokio = ["dep:wz-runtime-tokio"]
+#
+# R311a4 — runtime-tokio now also pulls wz-runtime-core (TimeSource +
+# Allocator + RuntimeError trait surface, alloc-on by default since
+# tokio implies std at the linker level) and the sce-rust-runtime +
+# sce-rust-lua script engine pair (re-exported as `wz::script` for AP
+# consumers). This collapses wz-ap-demo's 6 direct sub-crate deps to a
+# single `wz = { features = preset-ap-client }`, making the facade the
+# first user-visible composable-framework boundary backed by a real
+# Linux + tokio binary.
+runtime-tokio = [
+    "dep:wz-runtime-tokio",
+    "dep:wz-runtime-core",
+    "dep:sce-rust-runtime",
+    "dep:sce-rust-lua",
+]
 runtime-tokio-uring = ["runtime-tokio"]
 runtime-zero-copy = []
 
@@ -296,12 +330,10 @@ domain-codec = [
     "codec-fragment",
     "codec-frame",
     "codec-hello",
-    "codec-init-ack",
-    "codec-init-syn",
+    "codec-init-body",
     "codec-join",
     "codec-keep-alive",
-    "codec-open-ack",
-    "codec-open-syn",
+    "codec-open-body",
     "codec-push",
     "codec-request",
     "codec-response",
@@ -484,10 +516,8 @@ preset-mcu-minimal = [
     "session-unicast-accept",
     "codec-frame",
     "codec-keep-alive",
-    "codec-init-syn",
-    "codec-init-ack",
-    "codec-open-syn",
-    "codec-open-ack",
+    "codec-init-body",
+    "codec-open-body",
     "codec-close",
     "codec-push",
     "codec-declare",
@@ -525,10 +555,8 @@ preset-mcu-extended = [
     "session-unicast-accept",
     "codec-frame",
     "codec-keep-alive",
-    "codec-init-syn",
-    "codec-init-ack",
-    "codec-open-syn",
-    "codec-open-ack",
+    "codec-init-body",
+    "codec-open-body",
     "codec-close",
     "codec-push",
     "codec-declare",
@@ -595,10 +623,8 @@ preset-ap-client = [
     "codec-frame",
     "codec-fragment",
     "codec-keep-alive",
-    "codec-init-syn",
-    "codec-init-ack",
-    "codec-open-syn",
-    "codec-open-ack",
+    "codec-init-body",
+    "codec-open-body",
     "codec-close",
     "codec-push",
     "codec-declare",
@@ -669,10 +695,8 @@ preset-ap-router = [
     "codec-frame",
     "codec-fragment",
     "codec-keep-alive",
-    "codec-init-syn",
-    "codec-init-ack",
-    "codec-open-syn",
-    "codec-open-ack",
+    "codec-init-body",
+    "codec-open-body",
     "codec-close",
     "codec-push",
     "codec-declare",
@@ -774,10 +798,8 @@ preset-ap-full = [
     "codec-frame",
     "codec-fragment",
     "codec-keep-alive",
-    "codec-init-syn",
-    "codec-init-ack",
-    "codec-open-syn",
-    "codec-open-ack",
+    "codec-init-body",
+    "codec-open-body",
     "codec-close",
     "codec-push",
     "codec-declare",
@@ -910,10 +932,8 @@ preset-zenoh-cpp = [
     "codec-frame",
     "codec-fragment",
     "codec-keep-alive",
-    "codec-init-syn",
-    "codec-init-ack",
-    "codec-open-syn",
-    "codec-open-ack",
+    "codec-init-body",
+    "codec-open-body",
     "codec-close",
     "codec-push",
     "codec-declare",
