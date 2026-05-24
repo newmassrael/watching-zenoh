@@ -47,7 +47,7 @@ path = "src/lib.rs"
 # pair (R311a4 wz facade exposes the forwards; R311a2/3 gate the
 # session_glue use sites; until then `--no-default-features` at
 # wz-runtime-tokio level breaks compile, which is intended).
-default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join", "codec-response-final", "codec-fragment"]
+default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join", "codec-response-final", "codec-fragment", "codec-frame"]
 alloc = ["sce-forge-runtime/alloc"]
 codec-init-body = []
 codec-open-body = []
@@ -103,6 +103,27 @@ codec-fragment = []
 # eventually hit `lease.expired -> Closing(Expired)`. This is the
 # honest semantics of `feature off = capability removed`.
 codec-keep-alive = []
+# R311g — `codec-frame` gates the Frame envelope INBOUND decode path:
+# the SCXML codegen + `pub mod frame` at this crate, plus the
+# session_glue.rs `InboundFrame::Frame` variant + `parse_inbound`
+# `T_MID_FRAME` arm + `parse_frame_payload` + `inbound_to_fsm_event` /
+# `poll_and_dispatch_one` Frame match arms on the wz-runtime-tokio
+# side. Catalog truthfulness: Frame (MID 0x05) is the transport
+# envelope wrapping every NetworkMessage (Push / Request / Response /
+# Declare / Interest); a wz session cannot exchange any of those
+# bodies without Frame decode. R311g gates only the inbound side
+# because the outbound `encode_frame_with_<body>` helpers are
+# logically owned by the body codecs themselves — each upcoming
+# R311h..R311k body-codec cascade (codec-push / codec-declare /
+# codec-request / codec-response) will gate its own outbound helper
+# AND declare an implication edge `codec-<body> = ["codec-frame"]`
+# so that any body-codec-on build automatically pulls codec-frame on.
+# In the R311g interim state codec-frame OFF removes inbound Frame
+# decode while outbound emit still produces Frame envelopes; the
+# semantically meaningful elision (handshake-only deploy: Init / Open
+# / Close + KeepAlive, no NetworkMessage exchange) emerges once the
+# body cascades land. Documented in the §5.12 codec atomic caveat.
+codec-frame = []
 
 
 [dependencies]

@@ -109,6 +109,7 @@ default = [
     "codec-join",
     "codec-response-final",
     "codec-fragment",
+    "codec-frame",
 ]
 liveliness-token = ["declare-token", "declare-undeclare"]
 liveliness-subscriber = ["declare-interest", "declare-final"]
@@ -164,6 +165,24 @@ codec-response-final = ["wz-codecs/codec-response-final"]
 # R311f — codec-fragment forwards wz-codecs. session_glue.rs doesn't
 # import Fragment types; gate stays at wz-codecs level only.
 codec-fragment = ["wz-codecs/codec-fragment"]
+# R311g — codec-frame gates the Frame envelope INBOUND decode path:
+# wz-codecs `pub mod frame` + session_glue.rs `InboundFrame::Frame`
+# variant + `parse_inbound` `T_MID_FRAME` arm + `parse_frame_payload` +
+# the `inbound_to_fsm_event` / `poll_and_dispatch_one` Frame match
+# arms. R311g leaves the outbound `encode_frame_with_<body>` helpers
+# unguarded by codec-frame because they are logically owned by their
+# body codecs — R311h..R311k will gate them under codec-push /
+# codec-declare / codec-request / codec-response respectively AND add
+# `codec-<body> = ["codec-frame"]` implications so codec-frame OFF
+# becomes meaningful only when every body codec is also off
+# (handshake-only deploy: Init / Open / Close + KeepAlive). In the
+# R311g interim state codec-frame OFF removes inbound Frame decode
+# while outbound emit still produces Frame envelopes; the inbound
+# fall-through is `InboundFrame::Unknown { mid: 0x05 }` which the FSM
+# treats as FramingError. Honest semantics: a codec-frame-OFF
+# wz-runtime-tokio cannot terminate a peer's data exchange and is
+# only sensible as a future handshake-only build.
+codec-frame = ["wz-codecs/codec-frame"]
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }
