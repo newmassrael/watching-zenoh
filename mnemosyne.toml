@@ -188,6 +188,15 @@ applied_in = "Round 311b"
 content_hash_before = "44fe405fa85dafa7a35ae7a227cf6659aae5393bfdc265be13b4c5b89eb57b5c"
 content_hash_after = "88496f1f1cf0691c6651616e2061619e28616698877315dc805c8bdaf5aae24b"
 
+[[publishable_override_ledger]]
+kind = "length_compression"
+target_id = "Round 311c"
+fields = ["publishable_verification_bullets"]
+reason = "R311c publishable_verification length compression: audit half carries full numeric proofs (4-config matrix coverage, footprint baseline + close delta, cargo test counts); publishable half trimmed to ≤100B per bullet for user-facing surface while audit half stays frozen with the full detail."
+applied_in = "Round 311c"
+content_hash_before = "7d7675ecd2524de76560d43691ee5eaa2acfaa8b954847ac4b448618886fdf68"
+content_hash_after = "5e33c1a6c8a4e10ac8ffc8d6ae6b14c2cf8fef76a57d4a2833363c79a4ed70e2"
+
 # Round 193 atomic-internal orphan absorb — R121j-5c-e2e-action surfaced
 # SessionLinkActions.send_response (tokio runtime trait surface change);
 # the impact_refs citation should have pointed at the

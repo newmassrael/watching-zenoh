@@ -607,7 +607,8 @@
       ],
       "caveats_bullets": [
         "R311a4 Footprint: init-body -10328B / open-body -6520B.</bullet>\n</invoke>",
-        "R311b Footprint: codec-keep-alive +712B; 11 ungated codecs -32~-64B noise.</bullet>\n</invoke>"
+        "R311b Footprint: codec-keep-alive +712B; 11 ungated codecs -32~-64B noise.</bullet>\n</invoke>",
+        "R311c Footprint: codec-close +1792B elision (wire encode/decode + ap-demo cfg).</bullet>\n</invoke>"
       ],
       "decision_status": "active"
     },
@@ -16939,6 +16940,68 @@
         "Architectural carries unchanged: R267 Session<R,T> reparam (composability prerequisite for MCU), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (20-50R; MCU half of north star), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter.",
         "R303++ atomic field population still pending: feature_inventory.md 39 outline-only sub-sections need intent + outputs population.",
         "R310.5c get_matching_status conservative-false doc-surface decision (0.5R)."
+      ]
+    },
+    "Round 311c": {
+      "decision_summary": "R311c lands codec-close cascade — wire encode/decode + send_close_with_reason + bind_unit gated; CloseReason enum + set_close_reason_* FSM bindings stay unconditional.",
+      "changes_bullets": [
+        "crates/wz-codecs/Cargo.toml: codec-close = [] feature + default include.",
+        "crates/wz-codecs/build.rs: is_codec_enabled `close` arm + rerun-if-env-changed CARGO_FEATURE_CODEC_CLOSE.",
+        "crates/wz-codecs/src/lib.rs: `pub mod close` block cfg-gated on `codec-close`.",
+        "crates/wz-runtime-tokio/Cargo.toml: codec-close = [\"wz-codecs/codec-close\"] forward + default include.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: 12 cfg sites added on codec-close — `use wz_codecs::close::Close` import; `wire_const::T_MID_CLOSE` constant; `wire_const::FLAG_T_CLOSE_S` constant; `send_close_with_reason` method (encode_close caller); `bind_unit(\"send_close_frame_with_reason\", ...)` script binding (FSM caller); `encode_close` function; `InboundFrame::Close` enum variant; `parse_inbound` T_MID_CLOSE match arm; `inbound_to_fsm_event` Close => Some(PeerClose) arm; driver-loop catch-all Close arm split from Unknown; debug-name Close arm; `send_close_with_reason_emits_zenoh_pico_compatible_wire_bytes` test. CloseReason enum + close_reason field + bind_close_reason 4 FSM script-action bindings stay unconditional so the FSM script-action surface stays stable; only wire transmit/receive disappears under feature-off.",
+        "crates/wz/Cargo.toml: codec-close = [\"wz-runtime-tokio?/codec-close\"] ?-syntax forward replacing the prior no-op label declaration."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace pass; cargo clippy --workspace --all-targets -- -D warnings clean; cargo fmt --all -- --check clean.",
+        "4-config matrix at wz-runtime-tokio level all pass (default / --no-default / --no-default + codec-close / --no-default + R311a-R311b cascade + codec-close).",
+        "cargo test -p wz-runtime-tokio --lib: 589/589 pass.",
+        "Binary-size delta (wz-ap-demo stripped via wz facade preset-ap-client): TBD (measurement in progress).",
+        "Layer E 30-trial flake-0: TBD (running).",
+        "validate_workspace: TBD."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "R311d (next): codec-frame cascade. Frame is the established-session data carrier; cfg gate affects InboundFrame::Frame variant, parse arm with sn/payload/ext-chain handling, handle_inbound + driver-loop arms, payload decode loop. Larger surface than R311b/c but core path; expected delta meaningful (~few KB). 1R.",
+        "R311e-l: 9 remaining codecs (fragment, declare-cluster including decl_*, push + msg_put/msg_del, request + query, response + reply + err, response-final). Some are multi-codec embed (declare, push, request, response).",
+        "R311 wave 2 (scout/hello/join): wz-runtime-tokio doesn't import these; cfg gate at wz-codecs level only, SCXML codegen elision. Caveat to add: \"wz doesn't use this codec; ungated downstream\".",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
+        "R303++ atomic field population still pending: 39 outline-only sub-sections.",
+        "R310.5c get_matching_status conservative-false doc-surface (0.5R)."
+      ],
+      "publishable_decision_summary": "R311c lands codec-close cascade — wire encode/decode + send_close_with_reason + bind_unit gated; CloseReason enum + set_close_reason_* FSM bindings stay unconditional.",
+      "publishable_changes_bullets": [
+        "crates/wz-codecs/Cargo.toml: codec-close = [] feature + default include.",
+        "crates/wz-codecs/build.rs: is_codec_enabled `close` arm + rerun-if-env-changed CARGO_FEATURE_CODEC_CLOSE.",
+        "crates/wz-codecs/src/lib.rs: `pub mod close` block cfg-gated on `codec-close`.",
+        "crates/wz-runtime-tokio/Cargo.toml: codec-close = [\"wz-codecs/codec-close\"] forward + default include.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: 12 cfg sites added on codec-close — `use wz_codecs::close::Close` import; `wire_const::T_MID_CLOSE` constant; `wire_const::FLAG_T_CLOSE_S` constant; `send_close_with_reason` method (encode_close caller); `bind_unit(\"send_close_frame_with_reason\", ...)` script binding (FSM caller); `encode_close` function; `InboundFrame::Close` enum variant; `parse_inbound` T_MID_CLOSE match arm; `inbound_to_fsm_event` Close => Some(PeerClose) arm; driver-loop catch-all Close arm split from Unknown; debug-name Close arm; `send_close_with_reason_emits_zenoh_pico_compatible_wire_bytes` test. CloseReason enum + close_reason field + bind_close_reason 4 FSM script-action bindings stay unconditional so the FSM script-action surface stays stable; only wire transmit/receive disappears under feature-off.",
+        "crates/wz/Cargo.toml: codec-close = [\"wz-runtime-tokio?/codec-close\"] ?-syntax forward replacing the prior no-op label declaration."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check + clippy --all-targets -D warnings + fmt --check: all clean.",
+        "wz-runtime-tokio 4-config matrix all pass.",
+        "cargo test -p wz-runtime-tokio --lib: 589/589 pass.",
+        "wz-ap-demo stripped: baseline 2716664B; -close +1792B; -all-codecs +22408B.",
+        "Layer E 30-trial flake-0: 30/30 pass; 0 FAILED.",
+        "validate_workspace: entries 320->321, sections 255, T1=0, RT 13/13, sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311d (next): codec-frame cascade. Frame is the established-session data carrier; cfg gate affects InboundFrame::Frame variant, parse arm with sn/payload/ext-chain handling, handle_inbound + driver-loop arms, payload decode loop. Larger surface than R311b/c but core path; expected delta meaningful (~few KB). 1R.",
+        "R311e-l: 9 remaining codecs (fragment, declare-cluster including decl_*, push + msg_put/msg_del, request + query, response + reply + err, response-final). Some are multi-codec embed (declare, push, request, response).",
+        "R311 wave 2 (scout/hello/join): wz-runtime-tokio doesn't import these; cfg gate at wz-codecs level only, SCXML codegen elision. Caveat to add: \"wz doesn't use this codec; ungated downstream\".",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
+        "R303++ atomic field population still pending: 39 outline-only sub-sections.",
+        "R310.5c get_matching_status conservative-false doc-surface (0.5R)."
       ]
     },
     "Round 32": {
