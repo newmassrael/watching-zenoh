@@ -588,6 +588,23 @@
       "title": "§5.12 Codec",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Wire-message codec atomic features — one per single-SCXML codec emit unit (14 entries; init-syn/ack share init_body, open-syn/ack share open_body).",
+      "outputs_bullets": [
+        "`codec-scout` — SCOUT (active, wz)",
+        "`codec-hello` — HELLO (active, wz)",
+        "`codec-init-body` — Init body (InitSyn + InitAck via parent.S/A flags; active, wz)",
+        "`codec-open-body` — Open body (OpenSyn + OpenAck via parent.A negation; active, wz)",
+        "`codec-close` — CLOSE (active, wz)",
+        "`codec-keep-alive` — KEEP_ALIVE (active, wz)",
+        "`codec-join` — JOIN (active, wz)",
+        "`codec-frame` — FRAME (active, wz)",
+        "`codec-fragment` — FRAGMENT (active, wz)",
+        "`codec-declare` — DECLARE outer (active, wz)",
+        "`codec-push` — PUSH (active, wz)",
+        "`codec-request` — REQUEST (active, wz)",
+        "`codec-response` — RESPONSE (active, wz)",
+        "`codec-response-final` — RESPONSE-FINAL (active, wz)"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime": {
@@ -690,6 +707,43 @@
       "title": "§6.1 preset-mcu-minimal v0.1.0",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "intent": "Smallest viable MCU deployment — zenoh-pico client-mode parity at minimum footprint (bare-metal + lwIP + UDP + minimal pubsub). 34 atomic features.",
+      "outputs_bullets": [
+        "`platform-bare-metal`",
+        "`runtime-lwip`",
+        "`runtime-no-std`",
+        "`transport-unicast`",
+        "`transport-link-udp`",
+        "`transport-keepalive`",
+        "`locator-udp`",
+        "`scouting-active`",
+        "`session-unicast-open`",
+        "`link-frame`",
+        "`link-fragment`",
+        "`link-batching`",
+        "`keyexpr-literal`",
+        "`keyexpr-canon`",
+        "`declare-keyexpr`",
+        "`declare-subscriber`",
+        "`declare-undeclare`",
+        "`pubsub-put`",
+        "`pubsub-sample`",
+        "`encoding-empty`",
+        "`encoding-utf8`",
+        "`encoding-bytes`",
+        "`codec-scout`",
+        "`codec-hello`",
+        "`codec-init-body`",
+        "`codec-open-body`",
+        "`codec-close`",
+        "`codec-keep-alive`",
+        "`codec-frame`",
+        "`codec-fragment`",
+        "`codec-declare`",
+        "`codec-push`",
+        "`routing-client`",
+        "`time-ntp64`"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-2-preset-mcu-extended": {
@@ -702,6 +756,73 @@
       "title": "§6.3 preset-ap-client v0.1.0",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "intent": "Linux AP deploying in client mode. Tokio executor, full pubsub + query + liveliness, TCP + UDP transports, no router-side features. 64 atomic features.",
+      "outputs_bullets": [
+        "`platform-linux`",
+        "`runtime-tokio`",
+        "`routing-client`",
+        "`transport-unicast`",
+        "`transport-link-udp`",
+        "`transport-link-tcp`",
+        "`transport-fragmentation`",
+        "`transport-batching`",
+        "`transport-keepalive`",
+        "`locator-udp`",
+        "`locator-tcp`",
+        "`scouting-active`",
+        "`session-unicast-open`",
+        "`session-unicast-accept`",
+        "`link-frame`",
+        "`link-fragment`",
+        "`link-batching`",
+        "`keyexpr-literal`",
+        "`keyexpr-wildcard-single`",
+        "`keyexpr-wildcard-double`",
+        "`keyexpr-canon`",
+        "`keyexpr-intersect`",
+        "`keyexpr-includes`",
+        "`keyexpr-mapping`",
+        "`keyexpr-dollar-star`",
+        "`declare-keyexpr`",
+        "`declare-subscriber`",
+        "`declare-queryable`",
+        "`declare-token`",
+        "`declare-final`",
+        "`declare-interest`",
+        "`declare-undeclare`",
+        "`pubsub-put`",
+        "`pubsub-delete`",
+        "`pubsub-sample`",
+        "`pubsub-encoding`",
+        "`pubsub-timestamp`",
+        "`query-get`",
+        "`query-queryable`",
+        "`query-reply`",
+        "`query-target`",
+        "`query-consolidation`",
+        "`query-timeout`",
+        "`liveliness-token`",
+        "`liveliness-subscriber`",
+        "`codec-scout`",
+        "`codec-hello`",
+        "`codec-init-body`",
+        "`codec-open-body`",
+        "`codec-close`",
+        "`codec-keep-alive`",
+        "`codec-join`",
+        "`codec-frame`",
+        "`codec-fragment`",
+        "`codec-declare`",
+        "`codec-push`",
+        "`codec-request`",
+        "`codec-response`",
+        "`codec-response-final`",
+        "`encoding-empty`",
+        "`encoding-utf8`",
+        "`encoding-bytes`",
+        "`time-ntp64`",
+        "`time-system-clock`"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-4-preset-ap-router": {
@@ -16369,6 +16490,64 @@
         "Pre-existing carries unchanged: R284 uniform Established gate (3-5R), R283 peer-side Interest inbound bilateral (2-3R), R267 Session<R,T> reparam (3-7R), R301 §8 SCE cross-repo (3-7R), Q_B/Q_E codec slots (5-10R), Phase W full lwIP (20-50R), R299 carry #2/#3, R300 conservative-reject narrow (1R), R303+ feature_inventory.md atomic Section decompose (1-2R), R301 §7 cargo wz-config inspect tool (3-5R), R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis), keyexpr_canon proptest filter hole (1R analysis)."
       ]
     },
+    "Round 311a-recanon": {
+      "decision_summary": "R311a-recanon collapses 4 codec syn/ack atomic features into 2 codec-*-body entries — single-SCXML emit unit per body honours Footprint test. Catalog 142→140; inventory 150→148.",
+      "changes_bullets": [
+        "docs/feature_inventory.md §5.12: codec list `set_section_outputs` reset from 16 entries to 14 (codec-init-syn / -ack / -open-syn / -ack → codec-init-body + codec-open-body); intent updated to record the new structural rationale.",
+        "docs/feature_inventory.md §6.1 preset-mcu-minimal: `set_section_outputs` reset to 34 features (was 36; 4 codec syn/ack → 2 codec body); intent updated with new count.",
+        "docs/feature_inventory.md §6.3 preset-ap-client: `set_section_outputs` reset to 64 features (was 66; same 4→2 codec collapse); intent updated.",
+        "Inventory: remove_inventory_entry on codec-init-syn / codec-init-ack / codec-open-syn / codec-open-ack with mandatory reason (Footprint test fail, init/open_body.scxml single emit unit).",
+        "Inventory: add_inventory_entry on codec-init-body + codec-open-body (status=active, source pointing at sources/codecs/{init,open}_body.scxml).",
+        "Markdown prose alignment edits on docs/feature_inventory.md: intro \"~142\" → \"~140\" (line 3 + line 23 + line 56 \"~142 of them\"); §5.12 \"16 entries\" → \"14 entries\" + new R311a-recanon explanatory paragraph documenting the collapse rationale; §6.1 + §6.3 preset Includes lists updated to match the new outputs."
+      ],
+      "verification_bullets": [
+        "validate_workspace: docs=13/13, T1 orphan=0, round-trip mandatory=13/13, GENERATED.md=sync. Entries 314 unchanged before audit; will be 315 after this append.",
+        "Atomic ledger sections 255 unchanged; inventory_entries 150 → 148 (−4 +2). 4 remove_inventory_entry calls + 2 add_inventory_entry calls cascade-scanned for stale cite-sites (none found in code; the citations were section_id-form, not cite-form).",
+        "T3 warn 861 → 862 (+1 from the new R311a-recanon explanatory paragraph in §5.12). T4 info 429 unchanged.",
+        "Catalog footprint check: codec-init-body and codec-open-body now correctly map 1:1 to sources/codecs/init_body.scxml and open_body.scxml respectively (1 SCXML = 1 atomic feature). Toggling codec-init-body off elides both InitSyn and InitAck encode paths uniformly — honest Footprint behavior."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-3-preset-ap-client",
+        "feature-inventory--composable-framework-atomic--preset-catalog"
+      ],
+      "carry_forward_bullets": [
+        "R311a (next): wz facade Cargo.toml + wz-runtime-tokio Cargo.toml + wz-codecs Cargo.toml each declare `codec-init-body` and `codec-open-body` features. wz-codecs build.rs CODECS list gates init_body / open_body emit; wz-codecs lib.rs gates include!. wz-runtime-tokio session_glue.rs gates encode_init_with_role + encode_open_with_role + handle_inbound Init arms on respective features. 2-3R. 15-config check matrix + Layer E 30-trial flake-0.",
+        "R303++ carry: populate atomic fields (intent + outputs as appropriate) for 39 outline-only sub-sections of feature_inventory.md. Smaller deferred carry from R311a-recanon-pre.",
+        "R310.5c carry: doc-surface for get_matching_status conservative-false default. 0.5R.",
+        "R311a-pre (R309 z_sub init race) closed at R311a-pre.",
+        "Pre-existing architectural carries unchanged: R284 uniform Established gate (3-5R), R283 peer-side Interest inbound bilateral (2-3R), R267 Session<R,T> reparam (3-7R, composability blocker), R301 §8 SCE cross-repo (3-7R), Q_B/Q_E codec slots (5-10R), Phase W full lwIP (20-50R), R299 carry #2/#3, R300 conservative-reject narrow (1R), R301 §7 cargo wz-config inspect tool (3-5R), R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis), keyexpr_canon proptest filter hole (1R analysis)."
+      ],
+      "publishable_decision_summary": "R311a-recanon collapses 4 codec syn/ack atomic features into 2 codec-*-body entries — single-SCXML emit unit per body honours Footprint test. Catalog 142→140; inventory 150→148.",
+      "publishable_changes_bullets": [
+        "docs/feature_inventory.md §5.12: codec list `set_section_outputs` reset from 16 entries to 14 (codec-init-syn / -ack / -open-syn / -ack → codec-init-body + codec-open-body); intent updated to record the new structural rationale.",
+        "docs/feature_inventory.md §6.1 preset-mcu-minimal: `set_section_outputs` reset to 34 features (was 36; 4 codec syn/ack → 2 codec body); intent updated with new count.",
+        "docs/feature_inventory.md §6.3 preset-ap-client: `set_section_outputs` reset to 64 features (was 66; same 4→2 codec collapse); intent updated.",
+        "Inventory: remove_inventory_entry on codec-init-syn / codec-init-ack / codec-open-syn / codec-open-ack with mandatory reason (Footprint test fail, init/open_body.scxml single emit unit).",
+        "Inventory: add_inventory_entry on codec-init-body + codec-open-body (status=active, source pointing at sources/codecs/{init,open}_body.scxml).",
+        "Markdown prose alignment edits on docs/feature_inventory.md: intro \"~142\" → \"~140\" (line 3 + line 23 + line 56 \"~142 of them\"); §5.12 \"16 entries\" → \"14 entries\" + new R311a-recanon explanatory paragraph documenting the collapse rationale; §6.1 + §6.3 preset Includes lists updated to match the new outputs."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: docs=13/13, T1 orphan=0, round-trip mandatory=13/13, GENERATED.md=sync. Entries 314 unchanged before audit; will be 315 after this append.",
+        "Atomic ledger sections 255 unchanged; inventory_entries 150 → 148 (−4 +2). 4 remove_inventory_entry calls + 2 add_inventory_entry calls cascade-scanned for stale cite-sites (none found in code; the citations were section_id-form, not cite-form).",
+        "T3 warn 861 → 862 (+1 from the new R311a-recanon explanatory paragraph in §5.12). T4 info 429 unchanged.",
+        "Catalog footprint check: codec-init-body and codec-open-body now correctly map 1:1 to sources/codecs/init_body.scxml and open_body.scxml respectively (1 SCXML = 1 atomic feature). Toggling codec-init-body off elides both InitSyn and InitAck encode paths uniformly — honest Footprint behavior."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-3-preset-ap-client",
+        "feature-inventory--composable-framework-atomic--preset-catalog"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311a (next): wz facade Cargo.toml + wz-runtime-tokio Cargo.toml + wz-codecs Cargo.toml each declare `codec-init-body` and `codec-open-body` features. wz-codecs build.rs CODECS list gates init_body / open_body emit; wz-codecs lib.rs gates include!. wz-runtime-tokio session_glue.rs gates encode_init_with_role + encode_open_with_role + handle_inbound Init arms on respective features. 2-3R. 15-config check matrix + Layer E 30-trial flake-0.",
+        "R303++ carry: populate atomic fields (intent + outputs as appropriate) for 39 outline-only sub-sections of feature_inventory.md. Smaller deferred carry from R311a-recanon-pre.",
+        "R310.5c carry: doc-surface for get_matching_status conservative-false default. 0.5R.",
+        "R311a-pre (R309 z_sub init race) closed at R311a-pre.",
+        "Pre-existing architectural carries unchanged: R284 uniform Established gate (3-5R), R283 peer-side Interest inbound bilateral (2-3R), R267 Session<R,T> reparam (3-7R, composability blocker), R301 §8 SCE cross-repo (3-7R), Q_B/Q_E codec slots (5-10R), Phase W full lwIP (20-50R), R299 carry #2/#3, R300 conservative-reject narrow (1R), R301 §7 cargo wz-config inspect tool (3-5R), R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis), keyexpr_canon proptest filter hole (1R analysis)."
+      ]
+    },
     "Round 311a-recanon-pre": {
       "decision_summary": "R311a-recanon-pre atomic-decomposes feature_inventory.md from R301 single-section raw body to 40 typed Sections (1 top + 9 H2 + 30 H3); resolves R303+ structural half.",
       "changes_bullets": [
@@ -21297,15 +21476,10 @@
       "source": "sources/codecs/hello.scxml",
       "reason": "F=HELLO codec; P=zenoh-pico codec_zenoh_hello; C=companion to codec-scout"
     },
-    "codec-init-ack": {
+    "codec-init-body": {
       "status": "active",
-      "source": "sources/codecs/init_body.scxml (ack arm)",
-      "reason": "F=INIT-ACK body; P=zenoh-pico InitAck; C=session handshake second leg"
-    },
-    "codec-init-syn": {
-      "status": "active",
-      "source": "sources/codecs/init_body.scxml (syn arm)",
-      "reason": "F=INIT-SYN body; P=zenoh-pico InitSyn; C=session handshake first leg"
+      "source": "sources/codecs/init_body.scxml",
+      "reason": "F=Init body (InitSyn + InitAck via parent.S/A flag dispatch); P=zenoh-pico init_body codec; C=session handshake first + second leg single emit unit"
     },
     "codec-join": {
       "status": "active",
@@ -21317,15 +21491,10 @@
       "source": "sources/codecs/keep_alive.scxml",
       "reason": "F=KeepAlive codec; P=zenoh-pico codec_zenoh_keep_alive; C=independent"
     },
-    "codec-open-ack": {
+    "codec-open-body": {
       "status": "active",
-      "source": "sources/codecs/open_body.scxml (ack arm)",
-      "reason": "F=OPEN-ACK body; P=zenoh-pico OpenAck; C=handshake fourth leg"
-    },
-    "codec-open-syn": {
-      "status": "active",
-      "source": "sources/codecs/open_body.scxml (syn arm)",
-      "reason": "F=OPEN-SYN body; P=zenoh-pico OpenSyn; C=handshake third leg"
+      "source": "sources/codecs/open_body.scxml",
+      "reason": "F=Open body (OpenSyn + OpenAck via parent.A negation); P=zenoh-pico open_body codec; C=session establish third + fourth leg single emit unit"
     },
     "codec-push": {
       "status": "active",
