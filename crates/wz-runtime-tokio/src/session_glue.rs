@@ -1972,12 +1972,23 @@ impl SessionLinkActions {
     /// R121i-c — encode + dispatch a `Declare(UndeclToken)` on the
     /// outbound link, retracting a previously declared liveliness
     /// token (id) on the peer.
-    #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
+    ///
+    /// R311o — signature-stability per `feedback_signature_stability`
+    /// MEMORY anchor. Body cfg-gated on
+    /// `all(declare-token, declare-undeclare)`; silent no-op when
+    /// either feature is off. Enables [`crate::session::LivelinessToken`]
+    /// `Drop` to call this unconditionally without a matching cfg-gate
+    /// at the call site (R311o type-ungating cascade prerequisite).
     pub fn send_undeclare_token(&self, token_id: u64) {
-        let declare = build_undeclare_token(token_id);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
-        self.driver.send_blocking(&wire, Reliability::Reliable);
+        #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
+        {
+            let declare = build_undeclare_token(token_id);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+            self.driver.send_blocking(&wire, Reliability::Reliable);
+        }
+        #[cfg(not(all(feature = "declare-token", feature = "declare-undeclare")))]
+        let _ = token_id;
     }
 
     /// R121i-c — encode + dispatch a `Declare(DeclFinal)` marker on
