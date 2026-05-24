@@ -1938,19 +1938,29 @@ impl Querier {
     /// carry; the wz keyexpr v1 spec currently locks intersect to
     /// exact uint32 ID equality for MVP (RFC §5.A line 311).
     ///
-    /// R310 — gated on `feature = "declare-queryable"` because the
-    /// underlying `RemoteQueryableRegistry` observer field is
-    /// elided when peer-declared queryables are not tracked.
-    #[cfg(feature = "declare-queryable")]
+    /// R310.5c — the method signature is always visible whenever
+    /// `Querier` exists (i.e. whenever `feature = "query-get"` is
+    /// enabled), preserving the zenoh-cpp API parity. The body
+    /// branches on `feature = "declare-queryable"`: when the
+    /// `RemoteQueryableRegistry` observer field is elided (the
+    /// feature is off), the method conservatively returns
+    /// `MatchingStatus { matching: false }` rather than disappearing
+    /// from the surface. R310 previously gated the entire signature
+    /// on `declare-queryable`, which broke the zenoh-cpp parity
+    /// (consumers had to themselves cfg-gate every call site).
     pub fn get_matching_status(&self) -> MatchingStatus {
-        let observer = self.session.observer();
-        let obs = match observer.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
+        #[cfg(feature = "declare-queryable")]
+        let matching = {
+            let observer = self.session.observer();
+            let obs = match observer.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            obs.remote_queryables.has_matching(&self.keyexpr)
         };
-        MatchingStatus {
-            matching: obs.remote_queryables.has_matching(&self.keyexpr),
-        }
+        #[cfg(not(feature = "declare-queryable"))]
+        let matching = false;
+        MatchingStatus { matching }
     }
 }
 
@@ -2076,16 +2086,21 @@ impl QuerierAliased {
     /// arms (no wire emit, no allocation beyond the small
     /// `effective_keyexpr` composition).
     ///
-    /// R310 — gated on `feature = "declare-queryable"` for the same
-    /// reason as [`Querier::get_matching_status`].
-    #[cfg(feature = "declare-queryable")]
+    /// R310.5c — same shape pattern as
+    /// [`Querier::get_matching_status`]: the method signature is
+    /// always visible whenever `QuerierAliased` exists, body branches
+    /// on `feature = "declare-queryable"`. The
+    /// `UnknownMapping(id)` validation always fires (so callers still
+    /// see the declare-before-query invariant); only the actual
+    /// registry consult is skipped when the feature is off, yielding
+    /// `Ok(MatchingStatus { matching: false })` on the success path.
     pub fn get_matching_status(&self) -> Result<MatchingStatus, QueryAliasError> {
         let base = self
             .session
             .actions()
             .resolve_outbound_mapping(self.mapping_id)
             .ok_or(QueryAliasError::UnknownMapping(self.mapping_id))?;
-        let effective_keyexpr = match self.inline_suffix.as_deref() {
+        let _effective_keyexpr = match self.inline_suffix.as_deref() {
             None => base,
             Some(s) => {
                 let mut composed = base;
@@ -2093,14 +2108,18 @@ impl QuerierAliased {
                 composed
             }
         };
-        let observer = self.session.observer();
-        let obs = match observer.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
+        #[cfg(feature = "declare-queryable")]
+        let matching = {
+            let observer = self.session.observer();
+            let obs = match observer.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            obs.remote_queryables.has_matching(&_effective_keyexpr)
         };
-        Ok(MatchingStatus {
-            matching: obs.remote_queryables.has_matching(&effective_keyexpr),
-        })
+        #[cfg(not(feature = "declare-queryable"))]
+        let matching = false;
+        Ok(MatchingStatus { matching })
     }
 }
 
@@ -2188,19 +2207,29 @@ impl Publisher {
     /// — see that doc-comment for the boundary description and the
     /// R291 honest-intersection carry.
     ///
-    /// R310 — gated on `feature = "declare-subscriber"` because the
-    /// underlying `RemoteSubscriberRegistry` observer field is
-    /// elided when peer-declared subscribers are not tracked.
-    #[cfg(feature = "declare-subscriber")]
+    /// R310.5c — the method signature is always visible whenever
+    /// `Publisher` exists (always, since `Publisher` has no cfg
+    /// gate), preserving zenoh-cpp API parity. The body branches on
+    /// `feature = "declare-subscriber"`: when the
+    /// `RemoteSubscriberRegistry` observer field is elided (the
+    /// feature is off), the method conservatively returns
+    /// `MatchingStatus { matching: false }` rather than disappearing
+    /// from the surface. R310 previously gated the entire signature
+    /// on `declare-subscriber`, which broke the zenoh-cpp parity
+    /// (consumers had to themselves cfg-gate every call site).
     pub fn get_matching_status(&self) -> MatchingStatus {
-        let observer = self.session.observer();
-        let obs = match observer.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
+        #[cfg(feature = "declare-subscriber")]
+        let matching = {
+            let observer = self.session.observer();
+            let obs = match observer.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            obs.remote_subscribers.has_matching(&self.keyexpr)
         };
-        MatchingStatus {
-            matching: obs.remote_subscribers.has_matching(&self.keyexpr),
-        }
+        #[cfg(not(feature = "declare-subscriber"))]
+        let matching = false;
+        MatchingStatus { matching }
     }
 }
 
@@ -2281,16 +2310,22 @@ impl PublisherAliased {
     /// [`Self::delete`], mirroring the declare-before-publish
     /// invariant for the matching-status consult path.
     ///
-    /// R310 — gated on `feature = "declare-subscriber"`, mirroring
-    /// [`Publisher::get_matching_status`].
-    #[cfg(feature = "declare-subscriber")]
+    /// R310.5c — same shape pattern as
+    /// [`Publisher::get_matching_status`] /
+    /// [`QuerierAliased::get_matching_status`]: signature always
+    /// visible, body branches on `feature = "declare-subscriber"`.
+    /// The `UnknownMapping(id)` validation always fires (callers
+    /// still see the declare-before-publish invariant); only the
+    /// actual registry consult is skipped when the feature is off,
+    /// yielding `Ok(MatchingStatus { matching: false })` on the
+    /// success path.
     pub fn get_matching_status(&self) -> Result<MatchingStatus, PublishAliasError> {
         let base = self
             .session
             .actions()
             .resolve_outbound_mapping(self.mapping_id)
             .ok_or(PublishAliasError::UnknownMapping(self.mapping_id))?;
-        let effective_keyexpr = match self.inline_suffix.as_deref() {
+        let _effective_keyexpr = match self.inline_suffix.as_deref() {
             None => base,
             Some(s) => {
                 let mut composed = base;
@@ -2298,14 +2333,18 @@ impl PublisherAliased {
                 composed
             }
         };
-        let observer = self.session.observer();
-        let obs = match observer.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
+        #[cfg(feature = "declare-subscriber")]
+        let matching = {
+            let observer = self.session.observer();
+            let obs = match observer.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            obs.remote_subscribers.has_matching(&_effective_keyexpr)
         };
-        Ok(MatchingStatus {
-            matching: obs.remote_subscribers.has_matching(&effective_keyexpr),
-        })
+        #[cfg(not(feature = "declare-subscriber"))]
+        let matching = false;
+        Ok(MatchingStatus { matching })
     }
 }
 
