@@ -47,7 +47,7 @@ path = "src/lib.rs"
 # pair (R311a4 wz facade exposes the forwards; R311a2/3 gate the
 # session_glue use sites; until then `--no-default-features` at
 # wz-runtime-tokio level breaks compile, which is intended).
-default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join", "codec-response-final", "codec-fragment", "codec-frame"]
+default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join", "codec-response-final", "codec-fragment", "codec-frame", "codec-push"]
 alloc = ["sce-forge-runtime/alloc"]
 codec-init-body = []
 codec-open-body = []
@@ -124,6 +124,19 @@ codec-keep-alive = []
 # / Close + KeepAlive, no NetworkMessage exchange) emerges once the
 # body cascades land. Documented in the §5.12 codec atomic caveat.
 codec-frame = []
+# R311h — `codec-push` gates the SCXML codegen + `pub mod push` and
+# the session_glue.rs Push/PushVariant imports + N_MID_PUSH const +
+# 8 build_push_* helpers + encode_frame_with_push +
+# `NetworkMessage::Push` variant + `parse_frame_payload` `N_MID_PUSH`
+# arm + 6 send_push_* methods on SessionLinkActions. Catalog
+# truthfulness: Push (MID 0x1D) is the pub/sub data carrier; without
+# it the wz pubsub module (pubsub-put / pubsub-delete /
+# pubsub-sample) has no wire emit path. wz-runtime-tokio Cargo
+# implication edge `codec-push = ["codec-frame", "wz-codecs/codec-push"]`
+# guarantees that any codec-push-on build carries the Frame envelope
+# too; the reverse (codec-frame OFF + codec-push ON) is rejected at
+# the Cargo features layer rather than producing an inert build.
+codec-push = []
 
 
 [dependencies]

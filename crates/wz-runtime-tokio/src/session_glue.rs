@@ -102,6 +102,7 @@ use wz_codecs::msg_put::MsgPut;
 use wz_codecs::oam::Oam;
 #[cfg(feature = "codec-open-body")]
 use wz_codecs::open_body::OpenBody;
+#[cfg(feature = "codec-push")]
 use wz_codecs::push::{Push, PushVariant};
 use wz_codecs::query::Query;
 use wz_codecs::reply::{Reply, ReplyVariant};
@@ -342,6 +343,11 @@ mod wire_const {
     /// carrier wrapping a put / del inner body; sibling to
     /// `N_MID_REQUEST` minus the rid field per zenoh-pico
     /// `_z_push_encode`.
+    ///
+    /// R311h — gated on `codec-push`. Sole consumer is the
+    /// `parse_frame_payload` `N_MID_PUSH` arm and the outbound
+    /// `encode_frame_with_push` helper, both behind the same gate.
+    #[cfg(feature = "codec-push")]
     pub const N_MID_PUSH: u8 = 0x1D;
     /// R91 — Response-final marker MID (network.h:38). Pure
     /// correlation marker closing a Request's reply stream per
@@ -1350,15 +1356,20 @@ impl SessionLinkActions {
     ///     mpsc-channel `OutboundWriteDriver` precisely to avoid
     ///     this trap (see wz-ap-demo `OutboundWriteDriver` doc).
     pub fn send_push_literal(&self, keyexpr_suffix: &str, value: &[u8], reliable: bool) {
-        let push = build_push_literal(keyexpr_suffix, value);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_push(sn, push, reliable);
-        let reliability = if reliable {
-            Reliability::Reliable
-        } else {
-            Reliability::BestEffort
-        };
-        self.driver.send_blocking(&wire, reliability);
+        #[cfg(feature = "codec-push")]
+        {
+            let push = build_push_literal(keyexpr_suffix, value);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_push(sn, push, reliable);
+            let reliability = if reliable {
+                Reliability::Reliable
+            } else {
+                Reliability::BestEffort
+            };
+            self.driver.send_blocking(&wire, reliability);
+        }
+        #[cfg(not(feature = "codec-push"))]
+        let _ = (keyexpr_suffix, value, reliable);
     }
 
     /// R121g — encode + dispatch a `Declare(DeclKexpr)` on the
@@ -1450,15 +1461,20 @@ impl SessionLinkActions {
         value: &[u8],
         reliable: bool,
     ) {
-        let push = build_push_aliased(mapping_id, suffix, value);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_push(sn, push, reliable);
-        let reliability = if reliable {
-            Reliability::Reliable
-        } else {
-            Reliability::BestEffort
-        };
-        self.driver.send_blocking(&wire, reliability);
+        #[cfg(feature = "codec-push")]
+        {
+            let push = build_push_aliased(mapping_id, suffix, value);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_push(sn, push, reliable);
+            let reliability = if reliable {
+                Reliability::Reliable
+            } else {
+                Reliability::BestEffort
+            };
+            self.driver.send_blocking(&wire, reliability);
+        }
+        #[cfg(not(feature = "codec-push"))]
+        let _ = (mapping_id, suffix, value, reliable);
     }
 
     /// R219 — encode + dispatch a literal-keyexpr `Push(MsgDel)` on
@@ -1470,15 +1486,20 @@ impl SessionLinkActions {
     /// keyexpr suffix. Reliability gating + Established-state
     /// preconditions match [`Self::send_push_literal`].
     pub fn send_push_del_literal(&self, keyexpr_suffix: &str, reliable: bool) {
-        let push = build_push_del_literal(keyexpr_suffix);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_push(sn, push, reliable);
-        let reliability = if reliable {
-            Reliability::Reliable
-        } else {
-            Reliability::BestEffort
-        };
-        self.driver.send_blocking(&wire, reliability);
+        #[cfg(feature = "codec-push")]
+        {
+            let push = build_push_del_literal(keyexpr_suffix);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_push(sn, push, reliable);
+            let reliability = if reliable {
+                Reliability::Reliable
+            } else {
+                Reliability::BestEffort
+            };
+            self.driver.send_blocking(&wire, reliability);
+        }
+        #[cfg(not(feature = "codec-push"))]
+        let _ = (keyexpr_suffix, reliable);
     }
 
     /// R219 — encode + dispatch a DECLARE-aliased `Push(MsgDel)`
@@ -1489,15 +1510,20 @@ impl SessionLinkActions {
     /// the receive-side resolver can map it back to a literal
     /// keyexpr before firing the subscriber callback.
     pub fn send_push_del_aliased(&self, mapping_id: u64, suffix: Option<&str>, reliable: bool) {
-        let push = build_push_del_aliased(mapping_id, suffix);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_push(sn, push, reliable);
-        let reliability = if reliable {
-            Reliability::Reliable
-        } else {
-            Reliability::BestEffort
-        };
-        self.driver.send_blocking(&wire, reliability);
+        #[cfg(feature = "codec-push")]
+        {
+            let push = build_push_del_aliased(mapping_id, suffix);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_push(sn, push, reliable);
+            let reliability = if reliable {
+                Reliability::Reliable
+            } else {
+                Reliability::BestEffort
+            };
+            self.driver.send_blocking(&wire, reliability);
+        }
+        #[cfg(not(feature = "codec-push"))]
+        let _ = (mapping_id, suffix, reliable);
     }
 
     /// R233 — metadata-bearing counterpart of [`send_push_literal`].
@@ -1514,15 +1540,20 @@ impl SessionLinkActions {
         reliable: bool,
         meta: &PushMetadata,
     ) {
-        let push = build_push_literal_with_meta(keyexpr_suffix, value, meta);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_push(sn, push, reliable);
-        let reliability = if reliable {
-            Reliability::Reliable
-        } else {
-            Reliability::BestEffort
-        };
-        self.driver.send_blocking(&wire, reliability);
+        #[cfg(feature = "codec-push")]
+        {
+            let push = build_push_literal_with_meta(keyexpr_suffix, value, meta);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_push(sn, push, reliable);
+            let reliability = if reliable {
+                Reliability::Reliable
+            } else {
+                Reliability::BestEffort
+            };
+            self.driver.send_blocking(&wire, reliability);
+        }
+        #[cfg(not(feature = "codec-push"))]
+        let _ = (keyexpr_suffix, value, reliable, meta);
     }
 
     /// R233 — metadata-bearing counterpart of [`send_push_aliased`].
@@ -1534,15 +1565,20 @@ impl SessionLinkActions {
         reliable: bool,
         meta: &PushMetadata,
     ) {
-        let push = build_push_aliased_with_meta(mapping_id, suffix, value, meta);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_push(sn, push, reliable);
-        let reliability = if reliable {
-            Reliability::Reliable
-        } else {
-            Reliability::BestEffort
-        };
-        self.driver.send_blocking(&wire, reliability);
+        #[cfg(feature = "codec-push")]
+        {
+            let push = build_push_aliased_with_meta(mapping_id, suffix, value, meta);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_push(sn, push, reliable);
+            let reliability = if reliable {
+                Reliability::Reliable
+            } else {
+                Reliability::BestEffort
+            };
+            self.driver.send_blocking(&wire, reliability);
+        }
+        #[cfg(not(feature = "codec-push"))]
+        let _ = (mapping_id, suffix, value, reliable, meta);
     }
 
     /// R233 — metadata-bearing counterpart of
@@ -1556,15 +1592,20 @@ impl SessionLinkActions {
         reliable: bool,
         meta: &PushMetadata,
     ) {
-        let push = build_push_del_literal_with_meta(keyexpr_suffix, meta);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_push(sn, push, reliable);
-        let reliability = if reliable {
-            Reliability::Reliable
-        } else {
-            Reliability::BestEffort
-        };
-        self.driver.send_blocking(&wire, reliability);
+        #[cfg(feature = "codec-push")]
+        {
+            let push = build_push_del_literal_with_meta(keyexpr_suffix, meta);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_push(sn, push, reliable);
+            let reliability = if reliable {
+                Reliability::Reliable
+            } else {
+                Reliability::BestEffort
+            };
+            self.driver.send_blocking(&wire, reliability);
+        }
+        #[cfg(not(feature = "codec-push"))]
+        let _ = (keyexpr_suffix, reliable, meta);
     }
 
     /// R233 — metadata-bearing counterpart of
@@ -1576,15 +1617,20 @@ impl SessionLinkActions {
         reliable: bool,
         meta: &PushMetadata,
     ) {
-        let push = build_push_del_aliased_with_meta(mapping_id, suffix, meta);
-        let sn = self.next_outbound_frame_sn();
-        let wire = encode_frame_with_push(sn, push, reliable);
-        let reliability = if reliable {
-            Reliability::Reliable
-        } else {
-            Reliability::BestEffort
-        };
-        self.driver.send_blocking(&wire, reliability);
+        #[cfg(feature = "codec-push")]
+        {
+            let push = build_push_del_aliased_with_meta(mapping_id, suffix, meta);
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_push(sn, push, reliable);
+            let reliability = if reliable {
+                Reliability::Reliable
+            } else {
+                Reliability::BestEffort
+            };
+            self.driver.send_blocking(&wire, reliability);
+        }
+        #[cfg(not(feature = "codec-push"))]
+        let _ = (mapping_id, suffix, reliable, meta);
     }
 
     /// R121i — encode + dispatch a `Declare(DeclSubscriber)` on the
@@ -2720,6 +2766,11 @@ fn encode_close(reason: u8) -> Vec<u8> {
 ///
 /// Pure builder — no I/O, no FSM state coupling. Mirrors the
 /// shape of [`encode_init`] / [`encode_open`] / [`encode_close`].
+///
+/// R311h — gated on `codec-push` (return type is the gated
+/// `wz_codecs::push::Push`; principled exemption from the
+/// signature-stability sweep per `feedback_signature_stability`).
+#[cfg(feature = "codec-push")]
 pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> Push {
     let suffix_string = keyexpr_suffix.to_string();
     let suffix_len = suffix_string.len() as u64;
@@ -2776,6 +2827,7 @@ pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> Push {
 /// sentinel (`build_push_literal`'s arm). The split keeps the two
 /// shapes apart at the API surface so a caller cannot silently
 /// invert them.
+#[cfg(feature = "codec-push")]
 pub fn build_push_aliased(mapping_id: u64, suffix: Option<&str>, value: &[u8]) -> Push {
     assert!(
         mapping_id != 0,
@@ -2840,6 +2892,7 @@ pub fn build_push_aliased(mapping_id: u64, suffix: Option<&str>, value: &[u8]) -
 /// `z_sub` sees the Del as a `Received` line with an empty value
 /// substring — distinguishable from a Put-with-empty-value only by
 /// the wz-side codec round-trip witness.
+#[cfg(feature = "codec-push")]
 pub fn build_push_del_literal(keyexpr_suffix: &str) -> Push {
     let suffix_string = keyexpr_suffix.to_string();
     let suffix_len = suffix_string.len() as u64;
@@ -2876,6 +2929,7 @@ pub fn build_push_del_literal(keyexpr_suffix: &str) -> Push {
 /// sentinel ([`build_push_del_literal`]'s arm). The split keeps
 /// the two shapes apart at the API surface so a caller cannot
 /// silently invert them.
+#[cfg(feature = "codec-push")]
 pub fn build_push_del_aliased(mapping_id: u64, suffix: Option<&str>) -> Push {
     assert!(
         mapping_id != 0,
@@ -3019,6 +3073,7 @@ impl QueryMetadata {
 /// `MsgPut::encode` / `MsgDel::encode` iterate the chain and the
 /// surrounding wire serializer applies the Z bit at the right
 /// position via the per-entry codec emit.
+#[cfg(feature = "codec-push")]
 fn build_body_extensions(
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
@@ -3072,6 +3127,7 @@ fn build_body_extensions(
 /// the explicit flip pattern in [`encode_ext_chain`] (used for
 /// transport-message chains) so body / outer Push chains share the
 /// same invariant. Single-entry chains keep Z=0 (terminator).
+#[cfg(feature = "codec-push")]
 fn apply_chain_z_bits(entries: &mut [ExtEntry]) {
     if entries.is_empty() {
         return;
@@ -3092,6 +3148,7 @@ fn apply_chain_z_bits(entries: &mut [ExtEntry]) {
 /// bit. zenoh-pico mirror: `_z_n_msg_encode_push` outer-ext switch
 /// at network.c — qos lands on the outer chain, source_info /
 /// attachment on the body chain (`_z_push_body_encode_extensions`).
+#[cfg(feature = "codec-push")]
 fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<Vec<ExtEntry>> {
     let mut exts: Vec<ExtEntry> = Vec::new();
     if let Some(q) = qos {
@@ -3120,6 +3177,7 @@ fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<V
 /// [`build_body_extensions`]; the SCE-emitted `MsgPut::encode`
 /// surfaces them per zenoh-pico's
 /// `_z_push_body_encode_extensions` order.
+#[cfg(feature = "codec-push")]
 fn build_msg_put_with_meta(
     payload: &[u8],
     timestamp: Option<&crate::sample::TimestampHint>,
@@ -3158,6 +3216,7 @@ fn build_msg_put_with_meta(
 /// wire path drops it here, keeping wire-vs-loopback parity. Sets
 /// the `_Z_FLAG_Z_D_T` (0x20) header bit when a timestamp is
 /// attached.
+#[cfg(feature = "codec-push")]
 fn build_msg_del_with_meta(
     timestamp: Option<&crate::sample::TimestampHint>,
     source_info: Option<&crate::sample::SourceInfo>,
@@ -3183,6 +3242,7 @@ fn build_msg_del_with_meta(
 /// source_info / attachment into the body extension chain, and qos
 /// into the outer Push extension chain. The Push-header Z bit (0x80)
 /// is OR'd when an outer extension is present.
+#[cfg(feature = "codec-push")]
 pub fn build_push_literal_with_meta(
     keyexpr_suffix: &str,
     value: &[u8],
@@ -3211,6 +3271,7 @@ pub fn build_push_literal_with_meta(
 }
 
 /// R233 — metadata-bearing counterpart of [`build_push_aliased`].
+#[cfg(feature = "codec-push")]
 pub fn build_push_aliased_with_meta(
     mapping_id: u64,
     suffix: Option<&str>,
@@ -3251,6 +3312,7 @@ pub fn build_push_aliased_with_meta(
 /// `encoding` is dropped silently because `_z_msg_del_t` carries no
 /// encoding slot — the loopback path enforces the same projection
 /// in `crate::session::build_loopback_sample`.
+#[cfg(feature = "codec-push")]
 pub fn build_push_del_literal_with_meta(keyexpr_suffix: &str, meta: &PushMetadata) -> Push {
     let outer_exts = build_push_outer_extensions(meta.qos);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
@@ -3273,6 +3335,7 @@ pub fn build_push_del_literal_with_meta(keyexpr_suffix: &str, meta: &PushMetadat
 }
 
 /// R233 — metadata-bearing counterpart of [`build_push_del_aliased`].
+#[cfg(feature = "codec-push")]
 pub fn build_push_del_aliased_with_meta(
     mapping_id: u64,
     suffix: Option<&str>,
@@ -5865,6 +5928,7 @@ pub fn encode_frame_with_interest(sn: u64, interest: Interest, reliable: bool) -
 /// `crates/wz-integration-tests/tests/layer3_frame.rs`. This
 /// helper composes only the one transport header byte that
 /// `Frame::encode` does not emit.
+#[cfg(feature = "codec-push")]
 pub fn encode_frame_with_push(sn: u64, push: Push, reliable: bool) -> Vec<u8> {
     let parent_flags = if reliable {
         wire_const::FLAG_T_FRAME_R
@@ -6188,6 +6252,10 @@ pub enum NetworkMessage {
     /// carrier wrapping a put / del inner body — same envelope
     /// shape as `Request` minus the rid field. The `Box` mirrors
     /// the `Request` variant's size-balancing rationale.
+    ///
+    /// R311h — gated on `codec-push` (the `Push` type itself
+    /// disappears when the feature is off).
+    #[cfg(feature = "codec-push")]
     Push(Box<Push>),
     /// R91 — Network MID `_Z_MID_N_RESPONSE_FINAL` (0x1A). Pure
     /// correlation marker that closes a Request's reply stream;
@@ -6250,6 +6318,7 @@ impl std::fmt::Debug for NetworkMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Request(_) => f.write_str("Request(..)"),
+            #[cfg(feature = "codec-push")]
             Self::Push(_) => f.write_str("Push(..)"),
             #[cfg(feature = "codec-response-final")]
             Self::ResponseFinal(_) => f.write_str("ResponseFinal(..)"),
@@ -6307,6 +6376,7 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
                 let req = Request::decode(&mut cursor)?;
                 messages.push(NetworkMessage::Request(Box::new(req)));
             }
+            #[cfg(feature = "codec-push")]
             wire_const::N_MID_PUSH => {
                 let push = Push::decode(&mut cursor)?;
                 messages.push(NetworkMessage::Push(Box::new(push)));

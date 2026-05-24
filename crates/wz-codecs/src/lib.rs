@@ -144,6 +144,7 @@ pub mod request {
     include!(concat!(env!("OUT_DIR"), "/request.rs"));
 }
 
+#[cfg(feature = "codec-push")]
 pub mod push {
     include!(concat!(env!("OUT_DIR"), "/push.rs"));
 }

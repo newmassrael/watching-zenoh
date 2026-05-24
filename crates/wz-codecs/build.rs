@@ -93,6 +93,7 @@ fn is_codec_enabled(stem: &str) -> bool {
         "response_final" => std::env::var_os("CARGO_FEATURE_CODEC_RESPONSE_FINAL").is_some(),
         "fragment" => std::env::var_os("CARGO_FEATURE_CODEC_FRAGMENT").is_some(),
         "frame" => std::env::var_os("CARGO_FEATURE_CODEC_FRAME").is_some(),
+        "push" => std::env::var_os("CARGO_FEATURE_CODEC_PUSH").is_some(),
         _ => true,
     }
 }
@@ -120,6 +121,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_RESPONSE_FINAL");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_FRAGMENT");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_FRAME");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_PUSH");
 
     let options = ForgeCompileOptions::default();
 

@@ -74,13 +74,15 @@
 use std::collections::HashMap;
 
 use wz_codecs::declare::DeclareVariant;
+#[cfg(feature = "codec-push")]
 use wz_codecs::push::{Push, PushVariant};
 use wz_codecs::wireexpr::WireexprVariant;
 
+#[cfg(feature = "codec-push")]
 use crate::sample::{
-    extract_attachment, extract_qos, extract_source_info, EncodingHint, Reliability, Sample,
-    SampleKind, TimestampHint,
+    extract_attachment, extract_qos, extract_source_info, EncodingHint, SampleKind, TimestampHint,
 };
+use crate::sample::{Reliability, Sample};
 use crate::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
 
 /// Boxed callback invoked when a Push message's keyexpr matches a
@@ -683,7 +685,9 @@ impl SubscriberRegistry {
     /// `FramePayload.reliable`). Declare-arm dispatch ignores
     /// `reliability` because the peer-mapping absorb is reliability-
     /// agnostic (declarations always travel on the reliable channel).
-    pub fn dispatch(&mut self, message: &NetworkMessage, reliability: Reliability) {
+    pub fn dispatch(&mut self, message: &NetworkMessage, _reliability: Reliability) {
+        #[cfg(feature = "codec-push")]
+        let reliability = _reliability;
         match message {
             // R227 — wire-arrived Push carries `is_remote = true` so
             // the locality filter selects `allows_remote()`. The
@@ -691,6 +695,14 @@ impl SubscriberRegistry {
             // [`local_publish`](Self::local_publish)) enters
             // [`fire_to_subscribers`](Self::fire_to_subscribers)
             // directly with `is_remote = false`.
+            //
+            // R311h — wz-runtime-tokio `codec-push` feature gates the
+            // wire arm; when the feature is off the
+            // `NetworkMessage::Push` variant is elided and the match
+            // arm with it. The loopback path
+            // ([`local_publish`](Self::local_publish)) stays unguarded
+            // — it does not depend on the wire codec gate.
+            #[cfg(feature = "codec-push")]
             NetworkMessage::Push(push) => self.dispatch_push(push, reliability, true),
             NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body),
             _ => {}
@@ -713,6 +725,7 @@ impl SubscriberRegistry {
     /// (`vendor/zenoh-pico/src/session/loopback.c` 70-100 calls
     /// `_z_handle_network_message` with a wz-equivalent
     /// `is_remote = false` semantic).
+    #[cfg(feature = "codec-push")]
     fn dispatch_push(&mut self, push: &Push, reliability: Reliability, is_remote: bool) {
         // R125c2: keyexpr is now a tagged-union (B5-ν parent-tag
         // variant dispatch on parent.M); extract id + suffix from
