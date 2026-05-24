@@ -16054,6 +16054,56 @@
         "Pre-existing carries unchanged: R284 uniform Established gate (3-5R), R283 peer-side Interest inbound bilateral (2-3R), R267 Session<R,T> reparam (3-7R), R301 §8 SCE cross-repo (3-7R), Q_B/Q_E codec slots (5-10R), Phase W full lwIP (20-50R), R299 carry #2/#3, R300 conservative-reject narrow (1R), R303+ feature_inventory.md atomic Section decompose (1-2R), R301 §7 cargo wz-config inspect tool (3-5R), R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis), keyexpr_canon proptest filter hole (1R analysis)."
       ]
     },
+    "Round 311a-pre": {
+      "decision_summary": "R311a-pre raises z_sub init wait from 5s to 10s via shared Z_SUB_INIT_TIMEOUT constant in wz-integration-tests common module, closing the R309 environmental flake carry.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs (`common` module): new `pub const Z_SUB_INIT_TIMEOUT: Duration = Duration::from_secs(10);` placed alongside `wait_for_substring`. The doc-comment records the R311a-pre rationale (R309's single 1/60 trial in which z_sub legitimately exceeded the 5s envelope; R310/R310.5 confirmed wz-side flake-0 over 90 trials so the cause is non-wz; 10s is ~20× safety margin over the observed sub-500ms fast-path) and the three consumer test files so a future raise touches one constant rather than three sites.",
+        "crates/wz-integration-tests/tests/wz_publisher_to_zsub.rs: import `Z_SUB_INIT_TIMEOUT` from `wz_integration_tests::common`; replace the open-coded `Duration::from_secs(5)` in the `wait_for_substring(\"Opening session\", ...)` call with the shared constant; the panic message's `\"within 5s\"` literal becomes `\"within 10s\"`.",
+        "crates/wz-integration-tests/tests/wz_publisher_aliased_to_zsub.rs: same three edits as `wz_publisher_to_zsub.rs` (import / call-site / panic-message).",
+        "crates/wz-integration-tests/tests/wz_publisher_del_to_zsub.rs: same three edits. The remaining `Duration::from_secs(5)` (wz-ap-demo `\"listening on\"` wait — wz-side init, not z_sub-side) and `Duration::from_secs(10)` (received-substr round-trip deadline) stay unchanged; only the z_sub init witness raises."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-integration-tests --tests: clean compile. Three test binaries pick up the new `Z_SUB_INIT_TIMEOUT` import; `Duration` import is retained because the other timeouts (listening-on, received-substr) are unchanged.",
+        "cargo fmt --all -- --check: clean. The added const + three import-list extensions preserve the workspace fmt shape.",
+        "scripts/run-ci.sh --skip-codegen: every required layer passes (Layer 0 fmt / A validate-workspace / A2 envelope-mid audit / C0 #[ignore] discipline / C1 workspace test / C1b alloc test / C2 clippy / D deploy schema / E binary-dep e2e).",
+        "Layer E flake-0 measurement: cargo test -p wz-integration-tests -- --ignored repeated 30 times = 30/30 pass. Cumulative R310/R310.5/R311a-pre wz-side baseline: 120/120 trials, no z_sub init timeout observed at either 5s or 10s on this quiescent localhost; the change is preventive (R309's 1/60 happened on a CI-loaded host where the 5s envelope was borderline)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311a next: codec domain #[cfg(feature)] gates handshake-active subset (codec-init-syn / -ack / -open-syn / -ack). Blast radius medium (4 features, wz-codecs build.rs SCXML emit + wire-encode/decode call sites in session FSM critical path). Estimated 2-3R. wz facade Cargo.toml will need an optional `wz-codecs` forward.",
+        "R311b next: codec handshake-aux (codec-close / -keep-alive / -scout / -hello). Same shape as R311a, slightly larger blast (different code paths beyond the session FSM critical path).",
+        "R311c/d next: codec declare-path (codec-declare / -request / -response / -final / -fragment / -frame / -push / -join). Split 4+4 to keep each round under 3R blast.",
+        "Pubsub domain gating (11 atomic features, 3-4R estimate). Session::declare_subscriber + SubscribeOptions + Subscriber + the entire pubsub::SubscriberRegistry path gate on pubsub-* features.",
+        "Documentation surface for the conservative-false get_matching_status default (R310.5c carry): future atomic Section on the runtime crate to record \"when declare-queryable/declare-subscriber are off, get_matching_status always returns matching:false\" as a public contract note. 0.5R.",
+        "Pre-existing carries unchanged: R284 uniform Established gate (3-5R), R283 peer-side Interest inbound bilateral (2-3R), R267 Session<R,T> reparam (3-7R), R301 §8 SCE cross-repo (3-7R), Q_B/Q_E codec slots (5-10R), Phase W full lwIP (20-50R), R299 carry #2/#3, R300 conservative-reject narrow (1R), R303+ feature_inventory.md atomic Section decompose (1-2R), R301 §7 cargo wz-config inspect tool (3-5R), R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis), keyexpr_canon proptest filter hole (1R analysis)."
+      ],
+      "publishable_decision_summary": "R311a-pre raises z_sub init wait from 5s to 10s via shared Z_SUB_INIT_TIMEOUT constant in wz-integration-tests common module, closing the R309 environmental flake carry.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/src/lib.rs (`common` module): new `pub const Z_SUB_INIT_TIMEOUT: Duration = Duration::from_secs(10);` placed alongside `wait_for_substring`. The doc-comment records the R311a-pre rationale (R309's single 1/60 trial in which z_sub legitimately exceeded the 5s envelope; R310/R310.5 confirmed wz-side flake-0 over 90 trials so the cause is non-wz; 10s is ~20× safety margin over the observed sub-500ms fast-path) and the three consumer test files so a future raise touches one constant rather than three sites.",
+        "crates/wz-integration-tests/tests/wz_publisher_to_zsub.rs: import `Z_SUB_INIT_TIMEOUT` from `wz_integration_tests::common`; replace the open-coded `Duration::from_secs(5)` in the `wait_for_substring(\"Opening session\", ...)` call with the shared constant; the panic message's `\"within 5s\"` literal becomes `\"within 10s\"`.",
+        "crates/wz-integration-tests/tests/wz_publisher_aliased_to_zsub.rs: same three edits as `wz_publisher_to_zsub.rs` (import / call-site / panic-message).",
+        "crates/wz-integration-tests/tests/wz_publisher_del_to_zsub.rs: same three edits. The remaining `Duration::from_secs(5)` (wz-ap-demo `\"listening on\"` wait — wz-side init, not z_sub-side) and `Duration::from_secs(10)` (received-substr round-trip deadline) stay unchanged; only the z_sub init witness raises."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-integration-tests --tests: clean compile. Three test binaries pick up the new `Z_SUB_INIT_TIMEOUT` import; `Duration` import is retained because the other timeouts (listening-on, received-substr) are unchanged.",
+        "cargo fmt --all -- --check: clean. The added const + three import-list extensions preserve the workspace fmt shape.",
+        "scripts/run-ci.sh --skip-codegen: every required layer passes (Layer 0 fmt / A validate-workspace / A2 envelope-mid audit / C0 #[ignore] discipline / C1 workspace test / C1b alloc test / C2 clippy / D deploy schema / E binary-dep e2e).",
+        "Layer E flake-0 measurement: cargo test -p wz-integration-tests -- --ignored repeated 30 times = 30/30 pass. Cumulative R310/R310.5/R311a-pre wz-side baseline: 120/120 trials, no z_sub init timeout observed at either 5s or 10s on this quiescent localhost; the change is preventive (R309's 1/60 happened on a CI-loaded host where the 5s envelope was borderline)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311a next: codec domain #[cfg(feature)] gates handshake-active subset (codec-init-syn / -ack / -open-syn / -ack). Blast radius medium (4 features, wz-codecs build.rs SCXML emit + wire-encode/decode call sites in session FSM critical path). Estimated 2-3R. wz facade Cargo.toml will need an optional `wz-codecs` forward.",
+        "R311b next: codec handshake-aux (codec-close / -keep-alive / -scout / -hello). Same shape as R311a, slightly larger blast (different code paths beyond the session FSM critical path).",
+        "R311c/d next: codec declare-path (codec-declare / -request / -response / -final / -fragment / -frame / -push / -join). Split 4+4 to keep each round under 3R blast.",
+        "Pubsub domain gating (11 atomic features, 3-4R estimate). Session::declare_subscriber + SubscribeOptions + Subscriber + the entire pubsub::SubscriberRegistry path gate on pubsub-* features.",
+        "Documentation surface for the conservative-false get_matching_status default (R310.5c carry): future atomic Section on the runtime crate to record \"when declare-queryable/declare-subscriber are off, get_matching_status always returns matching:false\" as a public contract note. 0.5R.",
+        "Pre-existing carries unchanged: R284 uniform Established gate (3-5R), R283 peer-side Interest inbound bilateral (2-3R), R267 Session<R,T> reparam (3-7R), R301 §8 SCE cross-repo (3-7R), Q_B/Q_E codec slots (5-10R), Phase W full lwIP (20-50R), R299 carry #2/#3, R300 conservative-reject narrow (1R), R303+ feature_inventory.md atomic Section decompose (1-2R), R301 §7 cargo wz-config inspect tool (3-5R), R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis), keyexpr_canon proptest filter hole (1R analysis)."
+      ]
+    },
     "Round 32": {
       "decision_summary": "B5 codec track continues — sources/codecs/frame.scxml + fragment.scxml authored. First VLE + tail primitive composition (B1-α + tail) plus first inline test-vector land (B5-θ 4-case set). Both share identical body shape per zenoh-pico (sn:VLE + payload:tail, no extensions); differ only in enclosing MID (0x05 Frame / 0x06 Fragment).",
       "changes_bullets": [
