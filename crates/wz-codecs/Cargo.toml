@@ -47,7 +47,7 @@ path = "src/lib.rs"
 # pair (R311a4 wz facade exposes the forwards; R311a2/3 gate the
 # session_glue use sites; until then `--no-default-features` at
 # wz-runtime-tokio level breaks compile, which is intended).
-default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join", "codec-response-final", "codec-fragment", "codec-frame", "codec-push"]
+default = ["alloc", "codec-init-body", "codec-open-body", "codec-keep-alive", "codec-close", "codec-scout", "codec-hello", "codec-join", "codec-response-final", "codec-fragment", "codec-frame", "codec-push", "codec-declare"]
 alloc = ["sce-forge-runtime/alloc"]
 codec-init-body = []
 codec-open-body = []
@@ -137,6 +137,18 @@ codec-frame = []
 # too; the reverse (codec-frame OFF + codec-push ON) is rejected at
 # the Cargo features layer rather than producing an inert build.
 codec-push = []
+# R311i — `codec-declare` gates the SCXML codegen for the 9 declare
+# sub-codecs (declare envelope + 4 decl_* + 4 undecl_* + decl_final)
+# and the matching `pub mod` blocks at lib.rs. The wz-runtime-tokio
+# session_glue.rs `Declare` / `DeclareVariant` imports, N_MID_DECLARE
+# const, 8 build_declare_* + 4 build_undeclare_* helpers,
+# encode_frame_with_declare, `NetworkMessage::Declare` variant, and
+# parse arm all carry the matching gate. wz-runtime-tokio Cargo
+# implication edges: declare-keyexpr/subscriber/queryable/token
+# /final/interest = ["codec-declare"] so the high-level declare
+# features automatically pull codec-declare. codec-declare =
+# ["codec-frame"] closes the body-codec-implies-envelope edge.
+codec-declare = []
 
 
 [dependencies]

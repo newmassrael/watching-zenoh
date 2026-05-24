@@ -178,42 +178,52 @@ pub mod response {
     include!(concat!(env!("OUT_DIR"), "/response.rs"));
 }
 
+#[cfg(feature = "codec-declare")]
 pub mod decl_final {
     include!(concat!(env!("OUT_DIR"), "/decl_final.rs"));
 }
 
+#[cfg(feature = "codec-declare")]
 pub mod decl_kexpr {
     include!(concat!(env!("OUT_DIR"), "/decl_kexpr.rs"));
 }
 
+#[cfg(feature = "codec-declare")]
 pub mod undecl_kexpr {
     include!(concat!(env!("OUT_DIR"), "/undecl_kexpr.rs"));
 }
 
+#[cfg(feature = "codec-declare")]
 pub mod decl_subscriber {
     include!(concat!(env!("OUT_DIR"), "/decl_subscriber.rs"));
 }
 
+#[cfg(feature = "codec-declare")]
 pub mod decl_queryable {
     include!(concat!(env!("OUT_DIR"), "/decl_queryable.rs"));
 }
 
+#[cfg(feature = "codec-declare")]
 pub mod decl_token {
     include!(concat!(env!("OUT_DIR"), "/decl_token.rs"));
 }
 
+#[cfg(feature = "codec-declare")]
 pub mod undecl_subscriber {
     include!(concat!(env!("OUT_DIR"), "/undecl_subscriber.rs"));
 }
 
+#[cfg(feature = "codec-declare")]
 pub mod undecl_queryable {
     include!(concat!(env!("OUT_DIR"), "/undecl_queryable.rs"));
 }
 
+#[cfg(feature = "codec-declare")]
 pub mod undecl_token {
     include!(concat!(env!("OUT_DIR"), "/undecl_token.rs"));
 }
 
+#[cfg(feature = "codec-declare")]
 pub mod declare {
     include!(concat!(env!("OUT_DIR"), "/declare.rs"));
 }

@@ -73,9 +73,11 @@
 
 use std::collections::HashMap;
 
+#[cfg(feature = "codec-declare")]
 use wz_codecs::declare::DeclareVariant;
 #[cfg(feature = "codec-push")]
 use wz_codecs::push::{Push, PushVariant};
+#[cfg(feature = "codec-declare")]
 use wz_codecs::wireexpr::WireexprVariant;
 
 #[cfg(feature = "codec-push")]
@@ -704,6 +706,7 @@ impl SubscriberRegistry {
             // — it does not depend on the wire codec gate.
             #[cfg(feature = "codec-push")]
             NetworkMessage::Push(push) => self.dispatch_push(push, reliability, true),
+            #[cfg(feature = "codec-declare")]
             NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body),
             _ => {}
         }
@@ -966,6 +969,7 @@ impl SubscriberRegistry {
     /// surfaces as a compile error here rather than a silent
     /// miss. The intentional no-op arms cite the dedicated
     /// registry that owns each Declare sub-type.
+    #[cfg(feature = "codec-declare")]
     fn absorb_declare(&mut self, body: &DeclareVariant) {
         match body {
             DeclareVariant::CodecZenohDeclKexpr(d) => {
@@ -1018,6 +1022,7 @@ impl SubscriberRegistry {
     /// expression references a mapping id that has not been
     /// declared yet (or when it is the empty `(id=0, suffix=None)`
     /// form, which carries no resolution).
+    #[cfg(feature = "codec-declare")]
     fn resolve_wireexpr(&self, body: &WireexprVariant) -> Option<String> {
         let (id, suffix_opt) = match body {
             WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),

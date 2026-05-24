@@ -94,6 +94,10 @@ fn is_codec_enabled(stem: &str) -> bool {
         "fragment" => std::env::var_os("CARGO_FEATURE_CODEC_FRAGMENT").is_some(),
         "frame" => std::env::var_os("CARGO_FEATURE_CODEC_FRAME").is_some(),
         "push" => std::env::var_os("CARGO_FEATURE_CODEC_PUSH").is_some(),
+        // R311i — 9 declare-family stems gated on codec-declare.
+        "declare" | "decl_kexpr" | "decl_subscriber" | "decl_queryable" | "decl_token"
+        | "decl_final" | "undecl_kexpr" | "undecl_subscriber" | "undecl_queryable"
+        | "undecl_token" => std::env::var_os("CARGO_FEATURE_CODEC_DECLARE").is_some(),
         _ => true,
     }
 }
@@ -122,6 +126,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_FRAGMENT");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_FRAME");
     println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_PUSH");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CODEC_DECLARE");
 
     let options = ForgeCompileOptions::default();
 

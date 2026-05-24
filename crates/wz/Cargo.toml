@@ -104,7 +104,13 @@ attachment-encoding-aware = ["attachment-bytes"]
 # session_glue parse/handle path; quantitative footprint delta is
 # measured against the wz-ap-demo binary in the R311a4 audit entry.
 codec-close = ["wz-runtime-tokio?/codec-close"]
-codec-declare = []
+# R311i — codec-declare forwards wz-runtime-tokio (pulls
+# wz-codecs/codec-declare + codec-frame imply). Feature-off elides
+# the wz-runtime-tokio Declare wire surface + the 9 declare-family
+# wz-codecs modules. Consumer module (declare/, pubsub.rs
+# absorb_declare) stays compiled — R311m cascade for the consumer
+# side.
+codec-declare = ["wz-runtime-tokio?/codec-declare"]
 codec-fragment = ["transport-fragmentation", "wz-runtime-tokio?/codec-fragment"]
 # R311g — codec-frame forwards into wz-runtime-tokio gating the Frame
 # envelope inbound decode path (`InboundFrame::Frame` variant +

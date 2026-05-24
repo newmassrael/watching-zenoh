@@ -111,16 +111,20 @@ default = [
     "codec-fragment",
     "codec-frame",
     "codec-push",
+    "codec-declare",
 ]
 liveliness-token = ["declare-token", "declare-undeclare"]
 liveliness-subscriber = ["declare-interest", "declare-final"]
-declare-final = []
-declare-interest = []
-declare-keyexpr = []
-declare-queryable = []
-declare-subscriber = []
-declare-token = []
-declare-undeclare = []
+# R311i — every declare-* feature implies codec-declare so the wire
+# emit path (`send_declare_*` body-cfg branch) is mechanically
+# available whenever the high-level declare surface is on.
+declare-final = ["codec-declare"]
+declare-interest = ["codec-declare"]
+declare-keyexpr = ["codec-declare"]
+declare-queryable = ["codec-declare"]
+declare-subscriber = ["codec-declare"]
+declare-token = ["codec-declare"]
+declare-undeclare = ["codec-declare"]
 # `query-get` implies BOTH `query-reply` (the get-side ReplyRegistry
 # tracks pending entries) AND `query-queryable` (the loopback path
 # inside `Session::query` fans into the in-process QueryableRegistry
@@ -196,6 +200,18 @@ codec-frame = ["wz-codecs/codec-frame"]
 # (codec-frame OFF now requires codec-push OFF; R311i/j/k will extend
 # the same imply to declare/request/response).
 codec-push = ["codec-frame"]
+# R311i — codec-declare gates wz-runtime-tokio's Declare wire surface
+# in session_glue.rs: Declare/DeclareVariant/Decl*/Undecl* imports,
+# N_MID_DECLARE const, 8 build_declare_* + 4 build_undeclare_* +
+# encode_frame_with_declare + NetworkMessage::Declare variant + the
+# parse_frame_payload N_MID_DECLARE arm. codec-declare = ["codec-frame"]
+# closes the second body-codec-implies-envelope edge (handshake-only
+# deploy: codec-frame OFF requires every body codec OFF; codec-push +
+# codec-declare are the first two edges). The consumer-side declare/
+# subscriber/queryable/liveliness/liveliness_subscriber modules
+# + pubsub.rs absorb_declare stay always-on at this round per the
+# R311m architectural deferral.
+codec-declare = ["codec-frame"]
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }
@@ -209,7 +225,7 @@ tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macro
 # wz-codecs's own default list, making the forwards a no-op and
 # preventing facade-level `--no-default-features` from elide-ing the
 # pair.
-wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc", "codec-push"] }
+wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc", "codec-push", "codec-declare"] }
 # R252 — Runtime / TimeSource / Allocator trait surface. The AP profile
 # (this crate) bridges tokio + std into the trait contract authored in
 # R251; the MCU profile (future wz-runtime-lwip) will provide the same
