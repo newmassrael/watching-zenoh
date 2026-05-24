@@ -17790,6 +17790,62 @@
         "Layer E 30-trial flake-0 not run; R311p is purely a session_glue signature retrofit with no runtime semantics change."
       ]
     },
+    "Round 311q": {
+      "decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/declare.rs: drop `#[cfg(feature = \"liveliness-subscriber\")]` on `mod liveliness_subscriber` and on `pub use liveliness_subscriber::{LivelinessSample, LivelinessSampleCallback, LivelinessSampleKind, LivelinessSubscriberRegistry}` so the registry types are unconditional re-exports. Architectural carve-out comment added documenting that wz-codecs hardcodes `codec-declare` in the dep table so `wz_codecs::declare::DeclareVariant` is always available regardless of the wz-runtime-tokio consumer-side `codec-declare` gate.",
+        "crates/wz-runtime-tokio/src/declare/liveliness_subscriber.rs: `NetworkMessage::Declare(decl)` match arm inside `dispatch_messages` cfg-gated on `feature = \"codec-declare\"` (the variant itself is gated at session_glue.rs); `dispatch_messages` adds an `#[cfg(not(feature = \"codec-declare\"))] let _ = peer_keyexpr_table;` lint-silencer so the signature stays stable across builds. `#[cfg(test)] mod tests` gated on `all(test, feature = \"liveliness-subscriber\", feature = \"codec-declare\")` so the test fixtures that consume `decl_token` / `undecl_token` / `NetworkMessage::Declare` only build when both features materialize their dependencies.",
+        "crates/wz-runtime-tokio/src/observer.rs: `pub liveliness_subscribers: LivelinessSubscriberRegistry` field ungated; `ApplicationLayerObserver::new()` initializes the registry unconditionally; `use crate::declare::LivelinessSubscriberRegistry` import ungated. The dispatch fan-out call at `ApplicationLayerObserver::dispatch_event` stays cfg-gated on `feature = \"liveliness-subscriber\"` so a feature-OFF build still elides the dispatch path (the registry is constructed empty and never receives events).",
+        "crates/wz-runtime-tokio/src/session.rs: `pub struct LivelinessSubscriber` + `impl LivelinessSubscriber` + `impl Drop for LivelinessSubscriber` all ungated; `pub enum LivelinessSubscriberAliasError` ungated and gains a `FeatureDisabled` variant; `impl std::fmt::Display` + `impl std::error::Error` ungated, Display gains the FeatureDisabled arm; `pub fn declare_liveliness_subscriber` signature switched from `-> LivelinessSubscriber` to `-> Result<LivelinessSubscriber, LivelinessSubscriberAliasError>` (closes the long-standing R283 carry on uniform Result-form across the declare_* surface); both `declare_liveliness_subscriber{_aliased}` bodies wrapped in `#[cfg(feature = \"liveliness-subscriber\")]` with `#[cfg(not(...))]` arms returning `Err(FeatureDisabled)`; the `use crate::declare::LivelinessSample` import becomes unconditional (callback parameter type on the unconditional signatures) while `use crate::declare::LivelinessSampleCallback` stays gated on `liveliness-subscriber` (only consumed inside the cfg-wrapped body `Box::new(...) as LivelinessSampleCallback` cast); the `LivelinessSubscriberOptions` R311o doc-comment closes the prior \"deferred to a future round\" carry.",
+        "crates/wz-ap-demo/src/runner.rs:342: the single `session.declare_liveliness_subscriber(...)` callsite gains `.expect(\"liveliness-subscriber feature is ON in wz-ap-demo default build\")` for the new Result return. wz-ap-demo always builds with default features so the only possible Err variant on this site is `FeatureDisabled`, which would indicate a build-system misconfiguration rather than a runtime condition — `.expect` is the textbook shape per the R311 signature-stability principle."
+      ],
+      "verification_bullets": [
+        "cargo check workspace default features OK (wz + wz-runtime-tokio + wz-ap-demo + wz-integration-tests + wz-codecs all clean).",
+        "cargo check -p wz-runtime-tokio --no-default-features OK + 4 single-feature lanes (liveliness-token / liveliness-subscriber / query-get / declare-subscriber) all clean.",
+        "cargo check -p wz --no-default-features --features {preset-mcu-minimal, preset-mcu-extended, preset-ap-client, preset-ap-full}: 4 presets all clean.",
+        "cargo test --workspace: 761 passed / 0 failed (baseline preserved across the cascade).",
+        "cargo clippy --workspace --all-targets: clean after fixing one doc_lazy_continuation lint on the LivelinessSubscriber struct doc-comment.",
+        "cargo fmt --all --check: clean.",
+        "Layer E 30-trial flake-0: wz_publisher_to_zsub 30/30, wz_liveliness_subscriber_round_trip 30/30, wz_queryable_round_trip 30/30."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "carry_forward_bullets": [
+        "R311r — Query / QueryResponder wrapper 도입 + Queryable family Layer 3 type-ungating cascade.",
+        "R311s — Querier + ReplyHandle cascade + observer.replies field ungate.",
+        "R311t — wz-ap-demo cfg sweep + R311n measurement script 재실행으로 SKIP→pass lane promote 정량 확인.",
+        "R311o-A 측 carry 추가 청산: LivelinessAliasError 가족과 LivelinessSubscriberAliasError 가족 surface 일관성 확인 (FeatureDisabled variant 정합)."
+      ],
+      "publishable_decision_summary": "R311q LivelinessSubscriber type-ungate cascade — module / handle / observer field / AliasError ungated; declare_liveliness_subscriber{_aliased} Result form + FeatureDisabled variant.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/declare.rs: drop `#[cfg(feature = \"liveliness-subscriber\")]` on `mod liveliness_subscriber` and on `pub use liveliness_subscriber::{LivelinessSample, LivelinessSampleCallback, LivelinessSampleKind, LivelinessSubscriberRegistry}` so the registry types are unconditional re-exports. Architectural carve-out comment added documenting that wz-codecs hardcodes `codec-declare` in the dep table so `wz_codecs::declare::DeclareVariant` is always available regardless of the wz-runtime-tokio consumer-side `codec-declare` gate.",
+        "crates/wz-runtime-tokio/src/declare/liveliness_subscriber.rs: `NetworkMessage::Declare(decl)` match arm inside `dispatch_messages` cfg-gated on `feature = \"codec-declare\"` (the variant itself is gated at session_glue.rs); `dispatch_messages` adds an `#[cfg(not(feature = \"codec-declare\"))] let _ = peer_keyexpr_table;` lint-silencer so the signature stays stable across builds. `#[cfg(test)] mod tests` gated on `all(test, feature = \"liveliness-subscriber\", feature = \"codec-declare\")` so the test fixtures that consume `decl_token` / `undecl_token` / `NetworkMessage::Declare` only build when both features materialize their dependencies.",
+        "crates/wz-runtime-tokio/src/observer.rs: `pub liveliness_subscribers: LivelinessSubscriberRegistry` field ungated; `ApplicationLayerObserver::new()` initializes the registry unconditionally; `use crate::declare::LivelinessSubscriberRegistry` import ungated. The dispatch fan-out call at `ApplicationLayerObserver::dispatch_event` stays cfg-gated on `feature = \"liveliness-subscriber\"` so a feature-OFF build still elides the dispatch path (the registry is constructed empty and never receives events).",
+        "crates/wz-runtime-tokio/src/session.rs: `pub struct LivelinessSubscriber` + `impl LivelinessSubscriber` + `impl Drop for LivelinessSubscriber` all ungated; `pub enum LivelinessSubscriberAliasError` ungated and gains a `FeatureDisabled` variant; `impl std::fmt::Display` + `impl std::error::Error` ungated, Display gains the FeatureDisabled arm; `pub fn declare_liveliness_subscriber` signature switched from `-> LivelinessSubscriber` to `-> Result<LivelinessSubscriber, LivelinessSubscriberAliasError>` (closes the long-standing R283 carry on uniform Result-form across the declare_* surface); both `declare_liveliness_subscriber{_aliased}` bodies wrapped in `#[cfg(feature = \"liveliness-subscriber\")]` with `#[cfg(not(...))]` arms returning `Err(FeatureDisabled)`; the `use crate::declare::LivelinessSample` import becomes unconditional (callback parameter type on the unconditional signatures) while `use crate::declare::LivelinessSampleCallback` stays gated on `liveliness-subscriber` (only consumed inside the cfg-wrapped body `Box::new(...) as LivelinessSampleCallback` cast); the `LivelinessSubscriberOptions` R311o doc-comment closes the prior \"deferred to a future round\" carry.",
+        "crates/wz-ap-demo/src/runner.rs:342: the single `session.declare_liveliness_subscriber(...)` callsite gains `.expect(\"liveliness-subscriber feature is ON in wz-ap-demo default build\")` for the new Result return. wz-ap-demo always builds with default features so the only possible Err variant on this site is `FeatureDisabled`, which would indicate a build-system misconfiguration rather than a runtime condition — `.expect` is the textbook shape per the R311 signature-stability principle."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check workspace default features OK (wz + wz-runtime-tokio + wz-ap-demo + wz-integration-tests + wz-codecs all clean).",
+        "cargo check -p wz-runtime-tokio --no-default-features OK + 4 single-feature lanes (liveliness-token / liveliness-subscriber / query-get / declare-subscriber) all clean.",
+        "cargo check -p wz --no-default-features --features {preset-mcu-minimal, preset-mcu-extended, preset-ap-client, preset-ap-full}: 4 presets all clean.",
+        "cargo test --workspace: 761 passed / 0 failed (baseline preserved across the cascade).",
+        "cargo clippy --workspace --all-targets: clean after fixing one doc_lazy_continuation lint on the LivelinessSubscriber struct doc-comment.",
+        "cargo fmt --all --check: clean.",
+        "Layer E 30-trial flake-0: wz_publisher_to_zsub 30/30, wz_liveliness_subscriber_round_trip 30/30, wz_queryable_round_trip 30/30."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311r — Query / QueryResponder wrapper 도입 + Queryable family Layer 3 type-ungating cascade.",
+        "R311s — Querier + ReplyHandle cascade + observer.replies field ungate.",
+        "R311t — wz-ap-demo cfg sweep + R311n measurement script 재실행으로 SKIP→pass lane promote 정량 확인.",
+        "R311o-A 측 carry 추가 청산: LivelinessAliasError 가족과 LivelinessSubscriberAliasError 가족 surface 일관성 확인 (FeatureDisabled variant 정합)."
+      ]
+    },
     "Round 32": {
       "decision_summary": "B5 codec track continues — sources/codecs/frame.scxml + fragment.scxml authored. First VLE + tail primitive composition (B1-α + tail) plus first inline test-vector land (B5-θ 4-case set). Both share identical body shape per zenoh-pico (sn:VLE + payload:tail, no extensions); differ only in enclosing MID (0x05 Frame / 0x06 Fragment).",
       "changes_bullets": [
