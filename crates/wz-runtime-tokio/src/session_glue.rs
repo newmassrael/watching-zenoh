@@ -1692,19 +1692,16 @@ impl SessionLinkActions {
     /// the caller's intent — wz mirrors zenoh-pico's
     /// `_z_keyexpr_to_string` which never injects its own separator.
     // R309 — only `send_declare_subscriber` / `send_declare_queryable`
-    // / `send_declare_token` reach for this helper (they take a
-    // `(mapping_id, suffix)` pair and need the reconstructed literal
-    // to feed the keyexpr-safety gate). Gate on the union plus the
-    // `#[cfg(test)]` companion below so the `reconstruct_outbound_-
-    // keyexpr_shape_table` test still compiles under
-    // `cargo test --no-default-features --features
-    // declare-subscriber`.
-    #[cfg(any(
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        test,
-    ))]
+    // R310.5a — always compiled regardless of declare-* feature
+    // subset to keep prod and test surfaces identical. The prior
+    // `cfg(any(..., test))` shape silently diverged between `cargo
+    // build --no-default-features` (helper elided) and `cargo test
+    // --no-default-features` (helper visible), which is a refactor
+    // hazard. `#[allow(dead_code)]` suppresses the unused-method
+    // warning when every caller (`send_declare_subscriber` /
+    // `_queryable` / `_token`) is feature-gated off; release-mode
+    // dead-code elimination strips the symbol.
+    #[allow(dead_code)]
     fn reconstruct_outbound_keyexpr(
         &self,
         mapping_id: u64,
