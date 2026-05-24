@@ -58,6 +58,18 @@ pub mod sample;
 /// `NetworkMessage::Push` records to user-registered callbacks
 /// filtered by literal keyexpr. See `pubsub::SubscriberRegistry`
 /// doc comment for the scope and threading contract.
+///
+/// R311h — pubsub module stays always-on at the wz-runtime-tokio
+/// level (wire-side `codec-push` gating elides session_glue.rs's
+/// Push surface; pubsub.rs requires the `wz_codecs::push::Push`
+/// type unconditionally because dispatch_push / SampleKind
+/// projection / Subscriber RAII reference it directly). The
+/// `wz-codecs/codec-push` Cargo dep stays in the wz-runtime-tokio
+/// base feature set so the Push module is always compiled.
+/// Consumer-module gating cascade (Subscriber / declare_subscriber*
+/// / publish* on codec-push) is deferred to R311m for atomic
+/// per-cascade footprint per `feedback_signature_stability`
+/// MEMORY anchor's architectural deferral carve-out.
 pub mod pubsub;
 
 /// R121j-5b — application-layer queryable registry. Q-side mirror of

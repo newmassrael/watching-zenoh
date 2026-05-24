@@ -110,6 +110,7 @@ default = [
     "codec-response-final",
     "codec-fragment",
     "codec-frame",
+    "codec-push",
 ]
 liveliness-token = ["declare-token", "declare-undeclare"]
 liveliness-subscriber = ["declare-interest", "declare-final"]
@@ -183,6 +184,18 @@ codec-fragment = ["wz-codecs/codec-fragment"]
 # wz-runtime-tokio cannot terminate a peer's data exchange and is
 # only sensible as a future handshake-only build.
 codec-frame = ["wz-codecs/codec-frame"]
+# R311h — codec-push forwards wz-codecs and pulls codec-frame as a
+# hard imply (Frame envelope is the wire carrier for every Push). When
+# the feature is off the wz-runtime-tokio Push import + N_MID_PUSH +
+# 8 build_push_* + encode_frame_with_push + send_push_* + NetworkMessage::Push +
+# parse_frame_payload N_MID_PUSH arm all elide; the pubsub.rs module
+# also disappears (gated at lib.rs because dispatch_push references
+# Push directly). Honest semantics: feature-off = no pub/sub data
+# carrier on the wire. The codec-push = ["codec-frame", ...] imply
+# closes the first body-codec handshake-only-deploy contract slot
+# (codec-frame OFF now requires codec-push OFF; R311i/j/k will extend
+# the same imply to declare/request/response).
+codec-push = ["codec-frame"]
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }
@@ -196,7 +209,7 @@ tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macro
 # wz-codecs's own default list, making the forwards a no-op and
 # preventing facade-level `--no-default-features` from elide-ing the
 # pair.
-wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc"] }
+wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc", "codec-push"] }
 # R252 — Runtime / TimeSource / Allocator trait surface. The AP profile
 # (this crate) bridges tokio + std into the trait contract authored in
 # R251; the MCU profile (future wz-runtime-lwip) will provide the same
