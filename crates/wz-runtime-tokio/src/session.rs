@@ -79,7 +79,10 @@ use wz_runtime_core::TimeSource;
 
 #[cfg(feature = "liveliness-subscriber")]
 use crate::declare::{LivelinessSample, LivelinessSampleCallback};
-#[cfg(feature = "liveliness-token")]
+// R311o — `OutboundKeyexprError` is wrapped by
+// `LivelinessAliasError::InvalidKeyexpr` which is itself unconditional
+// after the R311o type-ungating cascade; the import must therefore be
+// unconditional too.
 use crate::keyexpr_canon::OutboundKeyexprError;
 use crate::locality::Locality;
 use crate::observer::ApplicationLayerObserver;
@@ -111,12 +114,15 @@ use crate::sample::{
 #[cfg(feature = "liveliness-token")]
 use crate::session_glue::SendDeclareError;
 use crate::session_glue::{PushMetadata, SessionLinkActions};
-// R307 — query-side wire-metadata types live in `session_glue` and
-// are only referenced from `QueryOptions` / `Session::query`. The
-// import gates on `query-get` so the symbol-elision matches the
-// `pub struct QueryOptions` + `pub fn query` gates below.
+// R311o — `QueryTarget` / `ConsolidationMode` are referenced from
+// the now-unconditional `QueryOptions` struct fields + builder
+// bodies, so they import unconditionally. `QueryMetadata` is only
+// returned by the private `query_metadata` helper which stays gated
+// on `query-get` (the helper is dead-code under the lower gate), so
+// its import follows the same gate.
 #[cfg(feature = "query-get")]
-use crate::session_glue::{ConsolidationMode, QueryMetadata, QueryTarget};
+use crate::session_glue::QueryMetadata;
+use crate::session_glue::{ConsolidationMode, QueryTarget};
 
 /// Options bundle for [`Session::publish`]. Carries the locality
 /// routing predicate (`allowed_destination`), the reliability hint
@@ -313,7 +319,14 @@ impl PublishOptions {
 /// `with_consolidation` / `with_timeout_ms` carry their own narrower
 /// gates so an `--features query-get` (no extras) build still
 /// compiles QueryOptions without those setters.
-#[cfg(feature = "query-get")]
+///
+/// R311o — type-ungated per `feedback_signature_stability` MEMORY
+/// anchor. Struct + builders always defined regardless of the
+/// `query-get` family; the per-feature setters (`with_target`,
+/// `with_consolidation`, `with_timeout_ms`) keep their signature
+/// stable across builds via body cfg-gates that silently no-op when
+/// the underlying feature is off (the field stays at its `None` /
+/// zero sentinel which is the equivalent wire-elision shape).
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct QueryOptions {
@@ -361,7 +374,6 @@ pub struct QueryOptions {
     pub timeout_ms: u32,
 }
 
-#[cfg(feature = "query-get")]
 impl QueryOptions {
     /// Default `Locality::Any` options — fans both wire and loopback
     /// branches. Mirror of zenoh-pico's `z_get_options_default`
@@ -379,23 +391,43 @@ impl QueryOptions {
     /// Pin the reply target hint. `Some(target)` flips the Q_T flag
     /// on the outbound Query so the peer respects the selection.
     ///
-    /// R307 — gated on `feature = "query-target"`. The feature implies
-    /// `query-get` (see `Cargo.toml::[features]`), so this setter is
-    /// only visible in a build where `QueryOptions` itself compiles.
-    #[cfg(feature = "query-target")]
+    /// R311o — signature-stable per `feedback_signature_stability`
+    /// MEMORY anchor: body cfg-gated on `feature = "query-target"`;
+    /// silent no-op when the feature is off (the field stays at its
+    /// `None` sentinel which elides the Q_T flag on the wire — same
+    /// shape as the default-constructed QueryOptions, so callers can
+    /// chain this builder unconditionally without per-feature cfg at
+    /// the call site).
+    #[cfg_attr(not(feature = "query-target"), allow(unused_mut))]
     pub fn with_target(mut self, target: QueryTarget) -> Self {
-        self.target = Some(target);
+        #[cfg(feature = "query-target")]
+        {
+            self.target = Some(target);
+        }
+        #[cfg(not(feature = "query-target"))]
+        {
+            let _ = target;
+        }
         self
     }
 
     /// Pin the reply consolidation hint. `Some(mode)` flips the Q_C
     /// flag on the outbound Query so the peer applies the mode.
     ///
-    /// R307 — gated on `feature = "query-consolidation"` (implies
-    /// `query-get`).
-    #[cfg(feature = "query-consolidation")]
+    /// R311o — signature-stable; body cfg-gated on
+    /// `feature = "query-consolidation"`; silent no-op when off (field
+    /// stays at `None`, Q_C elided — same wire shape as
+    /// default-constructed).
+    #[cfg_attr(not(feature = "query-consolidation"), allow(unused_mut))]
     pub fn with_consolidation(mut self, consolidation: ConsolidationMode) -> Self {
-        self.consolidation = Some(consolidation);
+        #[cfg(feature = "query-consolidation")]
+        {
+            self.consolidation = Some(consolidation);
+        }
+        #[cfg(not(feature = "query-consolidation"))]
+        {
+            let _ = consolidation;
+        }
         self
     }
 
@@ -427,15 +459,24 @@ impl QueryOptions {
     /// ReplyRegistry timeout sweep; loopback ignores the value
     /// (synchronous round-trip).
     ///
-    /// R307 — gated on `feature = "query-timeout"` (implies
-    /// `query-get`). The `deadline_ms` register-time computation in
-    /// `Session::query` stays unconditional under `query-get`; this
-    /// setter is the only user surface that can flip `timeout_ms`
-    /// above zero, so disabling the feature pins the field to the
-    /// zero/"never-expire" sentinel.
-    #[cfg(feature = "query-timeout")]
+    /// R311o — signature-stable; body cfg-gated on
+    /// `feature = "query-timeout"`; silent no-op when off (field
+    /// stays at the `0` "never-expire" sentinel). The `deadline_ms`
+    /// register-time computation in `Session::query` stays
+    /// unconditional under `query-get`; this setter is the only user
+    /// surface that can flip `timeout_ms` above zero, so disabling
+    /// the feature pins the field to the sentinel without breaking
+    /// the builder chain.
+    #[cfg_attr(not(feature = "query-timeout"), allow(unused_mut))]
     pub fn with_timeout_ms(mut self, timeout_ms: u32) -> Self {
-        self.timeout_ms = timeout_ms;
+        #[cfg(feature = "query-timeout")]
+        {
+            self.timeout_ms = timeout_ms;
+        }
+        #[cfg(not(feature = "query-timeout"))]
+        {
+            let _ = timeout_ms;
+        }
         self
     }
 
@@ -449,6 +490,12 @@ impl QueryOptions {
     /// * `Locality::Remote` → 1 (peer Final only).
     /// * `Locality::SessionLocal` → 1 (loopback Final only).
     /// * `Locality::Any` → 2 (loopback Final + peer Final).
+    ///
+    /// R311o — private helper, cfg-gated to its sole caller
+    /// [`Session::query`] which already gates on `query-get`. Keeps
+    /// the unconditional `impl QueryOptions` block free of dead-code
+    /// warnings on `--no-default-features` builds.
+    #[cfg(feature = "query-get")]
     fn expected_finals(&self) -> u32 {
         let mut n = 0u32;
         if self.allowed_destination.allows_remote() {
@@ -476,6 +523,9 @@ impl QueryOptions {
     /// allocation cost is amortised against the wire frame's existing
     /// copies. Mirrors R233's
     /// [`PublishOptions::push_metadata`] pattern verbatim.
+    ///
+    /// R311o — private helper, cfg-gated like [`Self::expected_finals`].
+    #[cfg(feature = "query-get")]
     fn query_metadata(&self) -> QueryMetadata {
         QueryMetadata {
             target: self.target,
@@ -1447,43 +1497,58 @@ impl Session {
     /// peer. The token stays alive on the peer for as long as this
     /// handle is alive on the local session.
     ///
-    /// Returns `Err(OutboundKeyexprError)` (R300) when `keyexpr`
-    /// fails the outbound pico-safety gate — either non-canonical
-    /// per the zenoh keyexpr grammar or matching the R299 bug #3
-    /// SIGABRT pattern family. The gate rejects pre-emit, so the
-    /// wire bytes never leave and the token id allocator state is
-    /// unchanged (the id is *consumed* but with no token-id
+    /// Returns `Err(LivelinessAliasError::InvalidKeyexpr(_))` (R300)
+    /// when `keyexpr` fails the outbound pico-safety gate — either
+    /// non-canonical per the zenoh keyexpr grammar or matching the
+    /// R299 bug #3 SIGABRT pattern family. The gate rejects pre-emit,
+    /// so the wire bytes never leave and the token id allocator state
+    /// is unchanged (the id is *consumed* but with no token-id
     /// bookkeeping leak: `alloc_next_token_id` is a pure counter
     /// `fetch_add`, and a skipped id has no protocol meaning on
     /// either side per zenoh-pico's entity-id contract).
-    #[cfg(feature = "liveliness-token")]
+    ///
+    /// Returns `Err(LivelinessAliasError::FeatureDisabled)` (R311o)
+    /// when the `liveliness-token` feature is disabled on this
+    /// `wz-runtime-tokio` build. The method signature stays available
+    /// regardless of the feature gate (R311o type-ungating cascade);
+    /// the body cfg-gates the wire-emit path and returns the
+    /// `FeatureDisabled` variant on a feature-off build so callers do
+    /// not need to mirror the cfg-gate at their call site.
     pub fn declare_token(
         &self,
         keyexpr: impl Into<String>,
         options: LivelinessOptions,
-    ) -> Result<LivelinessToken, OutboundKeyexprError> {
-        let keyexpr_string = keyexpr.into();
-        let token_id = self.actions.alloc_next_token_id();
-        self.actions
-            .send_declare_token(token_id, /*mapping_id=*/ 0, Some(&keyexpr_string))
-            .map_err(|e| match e {
-                SendDeclareError::Keyexpr(inner) => inner,
-                // declare_token always calls send_declare_token in
-                // literal mode (mapping_id = 0, suffix = Some(_)),
-                // so the protocol-invariant variants cannot fire.
-                // The unreachable!() guards future refactors that
-                // change the call shape.
-                other => unreachable!(
-                    "declare_token literal-mode send_declare_token returned \
-                     {other:?} unexpectedly"
-                ),
-            })?;
-        Ok(LivelinessToken {
-            session: self.clone(),
-            id: token_id,
-            keyexpr: keyexpr_string,
-            options,
-        })
+    ) -> Result<LivelinessToken, LivelinessAliasError> {
+        #[cfg(feature = "liveliness-token")]
+        {
+            let keyexpr_string = keyexpr.into();
+            let token_id = self.actions.alloc_next_token_id();
+            self.actions
+                .send_declare_token(token_id, /*mapping_id=*/ 0, Some(&keyexpr_string))
+                .map_err(|e| match e {
+                    SendDeclareError::Keyexpr(inner) => LivelinessAliasError::InvalidKeyexpr(inner),
+                    // declare_token always calls send_declare_token in
+                    // literal mode (mapping_id = 0, suffix = Some(_)),
+                    // so the protocol-invariant variants cannot fire.
+                    // The unreachable!() guards future refactors that
+                    // change the call shape.
+                    other => unreachable!(
+                        "declare_token literal-mode send_declare_token returned \
+                         {other:?} unexpectedly"
+                    ),
+                })?;
+            Ok(LivelinessToken {
+                session: self.clone(),
+                id: token_id,
+                keyexpr: keyexpr_string,
+                options,
+            })
+        }
+        #[cfg(not(feature = "liveliness-token"))]
+        {
+            let _ = (keyexpr, options);
+            Err(LivelinessAliasError::FeatureDisabled)
+        }
     }
 
     /// R248 — aliased-keyexpr counterpart of
@@ -1512,62 +1577,70 @@ impl Session {
     /// [`SubscribeAliasError`] / [`QueryableAliasError`] /
     /// [`QueryAliasError`] / [`PublishAliasError`] on the token
     /// side.
-    #[cfg(feature = "liveliness-token")]
     pub fn declare_token_aliased(
         &self,
         mapping_id: u64,
         inline_suffix: Option<&str>,
         options: LivelinessOptions,
     ) -> Result<LivelinessToken, LivelinessAliasError> {
-        let base = self
-            .actions
-            .resolve_outbound_mapping(mapping_id)
-            .ok_or(LivelinessAliasError::UnknownMapping(mapping_id))?;
-        let resolved = match inline_suffix {
-            None => base,
-            Some(s) => {
-                let mut composed = base;
-                composed.push_str(s);
-                composed
-            }
-        };
-        let token_id = self.actions.alloc_next_token_id();
-        self.actions
-            .send_declare_token(token_id, mapping_id, inline_suffix)
-            .map_err(|e| match e {
-                SendDeclareError::Keyexpr(inner) => LivelinessAliasError::InvalidKeyexpr(inner),
-                SendDeclareError::UnknownMappingId(id) => {
-                    // Race against a concurrent send_undeclare_kexpr
-                    // between the pre-check resolve_outbound_mapping
-                    // above and this send_declare_token call.
-                    LivelinessAliasError::UnknownMapping(id)
+        #[cfg(feature = "liveliness-token")]
+        {
+            let base = self
+                .actions
+                .resolve_outbound_mapping(mapping_id)
+                .ok_or(LivelinessAliasError::UnknownMapping(mapping_id))?;
+            let resolved = match inline_suffix {
+                None => base,
+                Some(s) => {
+                    let mut composed = base;
+                    composed.push_str(s);
+                    composed
                 }
-                SendDeclareError::ReservedMappingIdZero | SendDeclareError::MissingKeyexpr => {
-                    unreachable!(
-                        "declare_token_aliased aliased-mode send_declare_token \
-                     returned {e:?} unexpectedly"
-                    )
-                }
-                // R311g1 — `liveliness-token = ["declare-token", ...]`
-                // Cargo implication: this caller is `#[cfg(feature =
-                // "liveliness-token")]`, which forces `declare-token`
-                // ON via the implication chain. The signature-stability
-                // contract requires the variant exist in the enum and
-                // be matched explicitly, but the implication chain
-                // guarantees the runtime arm is unreachable.
-                SendDeclareError::FeatureDisabled => unreachable!(
-                    "declare-token feature must be ON whenever \
-                     liveliness-token is ON (Cargo implication chain); \
-                     send_declare_token returned FeatureDisabled despite \
-                     liveliness-token-gated caller"
-                ),
-            })?;
-        Ok(LivelinessToken {
-            session: self.clone(),
-            id: token_id,
-            keyexpr: resolved,
-            options,
-        })
+            };
+            let token_id = self.actions.alloc_next_token_id();
+            self.actions
+                .send_declare_token(token_id, mapping_id, inline_suffix)
+                .map_err(|e| match e {
+                    SendDeclareError::Keyexpr(inner) => LivelinessAliasError::InvalidKeyexpr(inner),
+                    SendDeclareError::UnknownMappingId(id) => {
+                        // Race against a concurrent send_undeclare_kexpr
+                        // between the pre-check resolve_outbound_mapping
+                        // above and this send_declare_token call.
+                        LivelinessAliasError::UnknownMapping(id)
+                    }
+                    SendDeclareError::ReservedMappingIdZero | SendDeclareError::MissingKeyexpr => {
+                        unreachable!(
+                            "declare_token_aliased aliased-mode send_declare_token \
+                         returned {e:?} unexpectedly"
+                        )
+                    }
+                    // R311g1 — `liveliness-token = ["declare-token", ...]`
+                    // Cargo implication: this branch is reachable only
+                    // when `liveliness-token` is ON, which forces
+                    // `declare-token` ON via the implication chain. The
+                    // signature-stability contract requires the variant
+                    // exist in the enum and be matched explicitly, but
+                    // the implication chain guarantees the runtime arm
+                    // is unreachable.
+                    SendDeclareError::FeatureDisabled => unreachable!(
+                        "declare-token feature must be ON whenever \
+                         liveliness-token is ON (Cargo implication chain); \
+                         send_declare_token returned FeatureDisabled despite \
+                         liveliness-token-gated caller"
+                    ),
+                })?;
+            Ok(LivelinessToken {
+                session: self.clone(),
+                id: token_id,
+                keyexpr: resolved,
+                options,
+            })
+        }
+        #[cfg(not(feature = "liveliness-token"))]
+        {
+            let _ = (mapping_id, inline_suffix, options);
+            Err(LivelinessAliasError::FeatureDisabled)
+        }
     }
 
     /// R280 — declare a liveliness subscriber on a literal `keyexpr`
@@ -2527,11 +2600,15 @@ impl std::error::Error for SubscribeAliasError {}
 /// `complete` flag (which lands as a follow-up when the
 /// queryable-side completeness signal is wired). `#[non_exhaustive]`.
 ///
-/// R307 — gated on `feature = "query-queryable"`. The struct only
-/// has meaning as the input to [`Session::declare_queryable`] /
-/// [`Session::declare_queryable_aliased`], both of which carry the
-/// same gate.
-#[cfg(feature = "query-queryable")]
+///
+/// R311o — type-ungated per `feedback_signature_stability` MEMORY
+/// anchor. Struct + builder always defined regardless of the
+/// `query-queryable` feature so caller-side option construction
+/// compiles unconditionally; the wire / registry dependency stays
+/// gated at the [`Queryable`] handle and
+/// [`Session::declare_queryable`] surface (deferred to a future round
+/// when the observer.queryables field + `crate::query` module become
+/// unconditional).
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct QueryableOptions {
@@ -2543,7 +2620,6 @@ pub struct QueryableOptions {
     pub allowed_origin: Locality,
 }
 
-#[cfg(feature = "query-queryable")]
 impl QueryableOptions {
     /// Default options — `allowed_origin = Locality::Any`.
     pub fn new() -> Self {
@@ -2685,12 +2761,17 @@ impl std::error::Error for QueryableAliasError {}
 /// fields (e.g. completeness flag, expiry hint, attachment) without
 /// breaking external callers. Construct via [`Self::default`] /
 /// [`Self::new`].
-#[cfg(feature = "liveliness-token")]
+///
+/// R311o — type-ungated per `feedback_signature_stability` MEMORY
+/// anchor. Always defined regardless of the `liveliness-token`
+/// feature so consumer-side declare_token call-sites can compile
+/// unconditionally; the wire-emit path is gated inside
+/// [`Session::declare_token`] which returns
+/// `Err(LivelinessAliasError::FeatureDisabled)` when off.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct LivelinessOptions {}
 
-#[cfg(feature = "liveliness-token")]
 impl LivelinessOptions {
     /// Default options — currently empty, mirroring zenoh-pico's
     /// `z_liveliness_token_options_default` which zeroes out the
@@ -2744,7 +2825,16 @@ impl LivelinessOptions {
 ///
 /// `#[non_exhaustive]`. Construct only through
 /// [`Session::declare_token`] / [`Session::declare_token_aliased`].
-#[cfg(feature = "liveliness-token")]
+///
+/// R311o — type-ungated per `feedback_signature_stability` MEMORY
+/// anchor. Struct + impl + Drop always defined; the wire-emit at
+/// declare time is gated inside [`Session::declare_token`] (returns
+/// `Err(LivelinessAliasError::FeatureDisabled)` when
+/// `liveliness-token` is off so no handle ever exists in that build),
+/// and the [`Drop`] wire-emit calls into
+/// [`crate::session_glue::SessionLinkActions::send_undeclare_token`]
+/// which is itself signature-stable (silent no-op when the underlying
+/// declare-* gate is off).
 #[non_exhaustive]
 pub struct LivelinessToken {
     session: Session,
@@ -2753,7 +2843,6 @@ pub struct LivelinessToken {
     options: LivelinessOptions,
 }
 
-#[cfg(feature = "liveliness-token")]
 impl LivelinessToken {
     /// The stable token id allocated at declare time by
     /// [`SessionLinkActions::alloc_next_token_id`]. Exposed for
@@ -2801,7 +2890,6 @@ impl LivelinessToken {
     }
 }
 
-#[cfg(feature = "liveliness-token")]
 impl Drop for LivelinessToken {
     fn drop(&mut self) {
         // R248 RAII — emit Declare(UndeclToken) so the peer's
@@ -2810,35 +2898,54 @@ impl Drop for LivelinessToken {
         // wire path is panic-free under normal operation so no
         // catch_unwind wrapping; a poisoned driver path is a
         // future-round carry.
+        //
+        // R311o — call is unconditional; send_undeclare_token is
+        // signature-stable (silent no-op when declare-* off). When
+        // `liveliness-token` is off, Session::declare_token returns
+        // Err(FeatureDisabled) so no LivelinessToken instance can
+        // exist on this build, and this Drop never runs.
         self.session.actions.send_undeclare_token(self.id);
     }
 }
 
-/// R248 — typed error returned by
-/// [`Session::declare_token_aliased`] when the requested mapping
-/// id was never declared on the outbound mapping table (or was
-/// retracted before the `declare_token_aliased` call). Mirror of
+/// R248 — typed error returned by [`Session::declare_token`] /
+/// [`Session::declare_token_aliased`]. Mirror of
 /// [`SubscribeAliasError`] / [`QueryableAliasError`] /
 /// [`QueryAliasError`] / [`PublishAliasError`] on the liveliness
 /// token side.
-#[cfg(feature = "liveliness-token")]
+///
+/// R311o — unified error for both literal and aliased declare paths.
+/// Previously `declare_token` returned `Result<_, OutboundKeyexprError>`
+/// directly; the aliased form already returned this enum. The
+/// non-aliased form now wraps its keyexpr-gate rejection in
+/// [`Self::InvalidKeyexpr`] for symmetry with the aliased form and so
+/// the [`Self::FeatureDisabled`] variant (R311o type-ungating cascade)
+/// covers both call sites uniformly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LivelinessAliasError {
     /// No prior `send_declare_keyexpr` registered this id on the
     /// outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it before the declare_token_aliased call).
     UnknownMapping(u64),
-    /// R300 — the reconstructed keyexpr (`outbound_mapping[id]`
-    /// prefix concatenated with the caller's `inline_suffix`)
-    /// failed the outbound pico-safety gate
-    /// ([`OutboundKeyexprError`]). Either non-canonical per the
-    /// zenoh keyexpr grammar OR matching the R299 bug #3 SIGABRT
-    /// pattern family (`**` chunk + non-`*` chunk + `*`-shape
-    /// chunk). The wire emit was suppressed pre-send.
+    /// R300 — the keyexpr (literal for [`Session::declare_token`], or
+    /// reconstructed `outbound_mapping[id] || inline_suffix` for
+    /// [`Session::declare_token_aliased`]) failed the outbound
+    /// pico-safety gate ([`OutboundKeyexprError`]). Either non-canonical
+    /// per the zenoh keyexpr grammar OR matching the R299 bug #3 SIGABRT
+    /// pattern family (`**` chunk + non-`*` chunk + `*`-shape chunk).
+    /// The wire emit was suppressed pre-send.
     InvalidKeyexpr(OutboundKeyexprError),
+    /// R311o — the `liveliness-token` feature was disabled at the
+    /// `wz-runtime-tokio` crate level so no LivelinessToken instance
+    /// can be constructed. Signature-stability per
+    /// `feedback_signature_stability` MEMORY anchor: the declare_token
+    /// surface stays callable from consumer code (no cfg cascade) but
+    /// returns this variant instead of attempting a wire emit on a
+    /// build whose declare-token / declare-undeclare runtime path is
+    /// absent.
+    FeatureDisabled,
 }
 
-#[cfg(feature = "liveliness-token")]
 impl std::fmt::Display for LivelinessAliasError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2849,19 +2956,23 @@ impl std::fmt::Display for LivelinessAliasError {
             ),
             LivelinessAliasError::InvalidKeyexpr(inner) => write!(
                 f,
-                "LivelinessAliasError: reconstructed keyexpr failed outbound \
-                 gate — {inner}"
+                "LivelinessAliasError: keyexpr failed outbound gate — {inner}"
+            ),
+            LivelinessAliasError::FeatureDisabled => write!(
+                f,
+                "LivelinessAliasError: `liveliness-token` feature is disabled \
+                 on this wz-runtime-tokio build; rebuild with the feature \
+                 enabled (or its preset) to obtain a LivelinessToken handle"
             ),
         }
     }
 }
 
-#[cfg(feature = "liveliness-token")]
 impl std::error::Error for LivelinessAliasError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             LivelinessAliasError::InvalidKeyexpr(inner) => Some(inner),
-            LivelinessAliasError::UnknownMapping(_) => None,
+            LivelinessAliasError::UnknownMapping(_) | LivelinessAliasError::FeatureDisabled => None,
         }
     }
 }
@@ -2879,7 +2990,15 @@ impl std::error::Error for LivelinessAliasError {
 /// (`_Z_INTEREST_FLAG_CURRENT`) on the outbound Interest header per
 /// `vendor/zenoh-pico/src/net/liveliness.c:198`. `history = false`
 /// (default) only subscribes for future events.
-#[cfg(feature = "liveliness-subscriber")]
+///
+/// R311o — type-ungated per `feedback_signature_stability` MEMORY
+/// anchor. The struct + builder are always defined regardless of the
+/// `liveliness-subscriber` feature so caller-side option construction
+/// compiles unconditionally; the wire-emit + observer-registry
+/// dependency stays gated at the [`LivelinessSubscriber`] handle and
+/// [`Session::declare_liveliness_subscriber`] surface (deferred to a
+/// future round when the observer.liveliness_subscribers field +
+/// `declare::liveliness_subscriber` module become unconditional).
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct LivelinessSubscriberOptions {
@@ -2888,7 +3007,6 @@ pub struct LivelinessSubscriberOptions {
     pub history: bool,
 }
 
-#[cfg(feature = "liveliness-subscriber")]
 impl LivelinessSubscriberOptions {
     /// Default options — `history = false`. Mirrors zenoh-pico's
     /// `z_liveliness_subscriber_options_default`.
