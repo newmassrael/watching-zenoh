@@ -235,21 +235,6 @@ impl ReplyHandle {
     pub fn rid(self) -> u64 {
         self.0
     }
-
-    /// R311s — sentinel handle returned by the type-ungated
-    /// [`crate::session::Session::query`] fall-through when the
-    /// `query-get` feature is OFF. Carries rid=0 (no real registration
-    /// happened); callers polling [`Self::rid`] receive 0 as the
-    /// out-of-band signal that the call was a no-op. Crate-private
-    /// because consumers should not synthesize sentinels directly —
-    /// the only legitimate source is the feature-OFF stub path. Gated
-    /// on `not(query-get)` because the only caller (Session::query's
-    /// OFF arm) only exists in the same configuration; including it
-    /// in the ON build would trigger dead-code lint.
-    #[cfg(not(feature = "query-get"))]
-    pub(crate) fn sentinel() -> Self {
-        ReplyHandle(0)
-    }
 }
 
 struct Pending {
