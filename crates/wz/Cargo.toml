@@ -110,7 +110,10 @@ codec-frame = []
 codec-hello = []
 codec-init-body = ["wz-runtime-tokio?/codec-init-body"]
 codec-join = ["session-multicast"]
-codec-keep-alive = []
+# R311b — codec-keep-alive forwards to wz-runtime-tokio (and through
+# it to wz-codecs); elision drops the peer-driven lease refresh path
+# along with the wire-mid 0x04 decoder. See §5.12 codec atomic caveat.
+codec-keep-alive = ["wz-runtime-tokio?/codec-keep-alive"]
 codec-open-body = ["wz-runtime-tokio?/codec-open-body"]
 codec-push = []
 codec-request = []
