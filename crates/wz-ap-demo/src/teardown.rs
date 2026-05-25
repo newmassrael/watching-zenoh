@@ -43,8 +43,8 @@ use tokio::sync::oneshot;
 // `Result<(), tokio::task::JoinError>`; the timeout-join sites in
 // step 3 + step 7 already discard the result via `let _`, so the
 // error-type shift is consumer-invisible.
-use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioTime};
 use wz::runtime_core::TimeSource;
+use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioTime};
 use wz::runtime_tokio::session::LivelinessToken;
 use wz::runtime_tokio::session_glue::{CloseReason, SessionLinkActions};
 

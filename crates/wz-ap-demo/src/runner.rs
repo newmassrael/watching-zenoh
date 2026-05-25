@@ -56,12 +56,12 @@ use tokio::sync::{mpsc, oneshot};
 // pays zero runtime cost. teardown.rs migrates the same field types
 // in lockstep so the typestate handoff stays type-uniform.
 use wz::runtime_core::Runtime;
-use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use wz::runtime_core::TimeSource;
 use wz::runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
 use wz::runtime_tokio::observer::ApplicationLayerObserver;
 use wz::runtime_tokio::reply::InboundReplyBody;
 use wz::runtime_tokio::runtime_impl::TokioTime;
+use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use wz::runtime_tokio::session::{
     LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken, Queryable,
     QueryableOptions, Session, SubscribeOptions, Subscriber,
@@ -154,7 +154,11 @@ async fn establish_link(role: &Role) -> io::Result<TcpStream> {
 /// peer.
 fn wire_link_pipeline(
     stream: TcpStream,
-) -> (InboundReadDriver, Arc<OutboundWriteDriver>, TokioJoinHandle<()>) {
+) -> (
+    InboundReadDriver,
+    Arc<OutboundWriteDriver>,
+    TokioJoinHandle<()>,
+) {
     let (reader, writer) = stream.into_split();
     let inbound = InboundReadDriver::new(reader);
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
