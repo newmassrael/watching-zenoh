@@ -2156,7 +2156,11 @@
         "R311x inventory delta: wz-runtime-tokio production leaf=0 (R230 baseline 71→0 via R252-R267).",
         "R311x ap-demo 27→16, it 11→0, ts 2→0; only Session<observer> + ap-demo binary remain on §5.P.",
         "R311ak/al/am Layer G mech-gate: G.1 wz-runtime-core + G.2 wz facade no_std cfg_attr opt-in lane.",
-        "LinkBackend trait stays Phase W carry — link kind is SCE B6 emitter territory, not §5.P scope."
+        "LinkBackend trait stays Phase W carry — link kind is SCE B6 emitter territory, not §5.P scope.",
+        "R311au-prep: ap-demo §5.P sites 16→4 (Mutex+oneshot+mpsc+select! remain; spawn 5→0, JoinHandle 5→0).",
+        "R311au-prep: R311at trait surface proof (TokioRuntime.spawn + TokioJoinHandle); lwip mechanical add.",
+        "R311au-prep: LwipRuntime binds own Mutex/RwLock (critical_section or embassy_sync) + own JoinHandle.",
+        "R311au-prep: remaining 4 sites are channel/select not on Runtime trait; extend trait when needed."
       ],
       "alternatives_rejected": [
         {
@@ -18123,6 +18127,54 @@
         "Future round (Runtime trait channel/select 확장): wz-runtime-tokio + lwip가 동일 surface mpsc/oneshot/Notify/select! 매크로 제공하면 ap-demo의 나머지 직접 호출도 소진. R311ax 또는 더 후속 라운드.",
         "Architectural carries unchanged: R267 Session<R,T> reparam (R311at에서 reference binary 면 활성; Session struct 자체 generic은 후속), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (R311au), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
         "Honest claim: R311at는 binary layer reference site 마이그레이션 — underlying tokio runtime 사용 변화 0 (TokioRuntime은 tokio::task::spawn wrapper, TokioJoinHandle는 tokio::task::JoinHandle wrapper). 의미는 architectural — reference binary가 이제 per-profile swap shape 시범, wz-runtime-lwip가 같은 패턴으로 lands 가능."
+      ]
+    },
+    "Round 311au-prep": {
+      "decision_summary": "R311au-prep §5.P caveat refresh — R311at inventory delta (ap-demo 16→4) + LwipRuntime contract sketch (own Mutex/RwLock/JoinHandle bind) + channel/select carry note.",
+      "changes_bullets": [
+        "docs atomic store §5.P (rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier) caveats +4 새 bullet append (frozen-ledger 존중: 기존 caveat 수정 X): (1) ap-demo §5.P 사이트 쟁여 16→4 인벤토리 갱신 (Mutex+oneshot+mpsc+select! 쟁존, spawn 5→0 + JoinHandle 5→0 R311at 상환), (2) R311at trait surface proof 명시 (TokioRuntime.spawn + TokioJoinHandle reference binary), (3) LwipRuntime contract sketch (own Mutex/RwLock binding: critical_section選擇 / embassy_sync選擇 + own JoinHandle), (4) 쟁여 4 사이트는 channel/select Runtime trait 밖 surface이며 필요 시점 trait 확장.",
+        "frozen-ledger 이유: existing caveats lines R311w(3) + R311x(2) + R311ak/al/am Layer G + B1-B4 alternatives 모두 보존; 새 caveat는 append-only 로 남은 4 bullet append. Mnemosyne MAX_BULLET_CHAR=100 한도 근접: 입증 후 각 bullet ≤100B 재작성 (임시 초과본 6 건 재작 적용).",
+        "wz-runtime-lwip prereq 도대 수준 완성 — 트레이트 shape (R311ar) + Session 알리아스 (R311as) + reference binary trait 매개 (R311at) 세 스턽 통과; R311au는 LwipRuntime impl 1건 + Layer G default lane 승격만 남음 (gcc-arm install 권한 회답 후)."
+      ],
+      "verification_bullets": [
+        "validate_workspace: caveat append 4차례 모두 success; entries 365 유지 (caveat append는 entries 변화 0 — entries는 ChangelogEntry 카운트); 본 ledger entry append 직후 365→366 기대.",
+        "T1=0, RT 13/13, sync, T3 warn=862 (변화 없음, R138 mobility 한도 내); style violations 증가 0.",
+        "100자 리미트 절 철저 준수 — 870→ 4 individual bullets 최대 99B; 서술 압축 내용 손실 0 (carry 풍부하게 carry forward 로 이원).",
+        "code mutation 0 — 이번 라운드는 ledger-only (§5.P caveat 프레임 갱신); cargo build/test/Layer G 재실행 불필요 (R311at PASS 이후 변화 없음)."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311au (gcc-arm install 권한 요청 후): wz-runtime-lwip + LwipRuntime impl. R311ar+as+at 세 라운드 prereq 완료 상태. 있는 caveat sketch 따라 LwipRuntime이 own Mutex/RwLock/JoinHandle binding 채움. Layer G default lane 승격 + --layer G opt-in 제거.",
+        "R311av+ (cross-repo): SCE-upstream codegen consistency carry (R311aq carry promotion) — sce-codegen Rust backend template String/ToString 자동 emit. wz codec_alloc_prelude! 매크로 제거 가능해지. SCE session 별도.",
+        "R311aw+: 추가 cross-compile target audit (R311ap carry) — aarch64-unknown-none / wasm32-wasi / riscv64gc. use case 명확화 후.",
+        "Runtime trait channel/select 확장 (R311ax 후보): wz-runtime-tokio + lwip 동일 surface mpsc/oneshot/Notify/select! 트레이트 추상 도입. 제2 프로파일 (lwip) 이 실제 필요 시점에 lands. 현재 는 carry.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam (R311at에서 reference binary 면 활성; Session struct generic은 후속), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (R311au), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Honest claim: R311au-prep는 ledger-only — code mutation 0; §5.P inventory delta + LwipRuntime contract sketch 서론 장치. 다음 세션이 R311au 진입할 때 sketch를 이정표로 사용 가능."
+      ],
+      "publishable_decision_summary": "R311au-prep §5.P caveat refresh — R311at inventory delta (ap-demo 16→4) + LwipRuntime contract sketch (own Mutex/RwLock/JoinHandle bind) + channel/select carry note.",
+      "publishable_changes_bullets": [
+        "docs atomic store §5.P (rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier) caveats +4 새 bullet append (frozen-ledger 존중: 기존 caveat 수정 X): (1) ap-demo §5.P 사이트 쟁여 16→4 인벤토리 갱신 (Mutex+oneshot+mpsc+select! 쟁존, spawn 5→0 + JoinHandle 5→0 R311at 상환), (2) R311at trait surface proof 명시 (TokioRuntime.spawn + TokioJoinHandle reference binary), (3) LwipRuntime contract sketch (own Mutex/RwLock binding: critical_section選擇 / embassy_sync選擇 + own JoinHandle), (4) 쟁여 4 사이트는 channel/select Runtime trait 밖 surface이며 필요 시점 trait 확장.",
+        "frozen-ledger 이유: existing caveats lines R311w(3) + R311x(2) + R311ak/al/am Layer G + B1-B4 alternatives 모두 보존; 새 caveat는 append-only 로 남은 4 bullet append. Mnemosyne MAX_BULLET_CHAR=100 한도 근접: 입증 후 각 bullet ≤100B 재작성 (임시 초과본 6 건 재작 적용).",
+        "wz-runtime-lwip prereq 도대 수준 완성 — 트레이트 shape (R311ar) + Session 알리아스 (R311as) + reference binary trait 매개 (R311at) 세 스턽 통과; R311au는 LwipRuntime impl 1건 + Layer G default lane 승격만 남음 (gcc-arm install 권한 회답 후)."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: caveat append 4차례 모두 success; entries 365 유지 (caveat append는 entries 변화 0 — entries는 ChangelogEntry 카운트); 본 ledger entry append 직후 365→366 기대.",
+        "T1=0, RT 13/13, sync, T3 warn=862 (변화 없음, R138 mobility 한도 내); style violations 증가 0.",
+        "100자 리미트 절 철저 준수 — 870→ 4 individual bullets 최대 99B; 서술 압축 내용 손실 0 (carry 풍부하게 carry forward 로 이원).",
+        "code mutation 0 — 이번 라운드는 ledger-only (§5.P caveat 프레임 갱신); cargo build/test/Layer G 재실행 불필요 (R311at PASS 이후 변화 없음)."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311au (gcc-arm install 권한 요청 후): wz-runtime-lwip + LwipRuntime impl. R311ar+as+at 세 라운드 prereq 완료 상태. 있는 caveat sketch 따라 LwipRuntime이 own Mutex/RwLock/JoinHandle binding 채움. Layer G default lane 승격 + --layer G opt-in 제거.",
+        "R311av+ (cross-repo): SCE-upstream codegen consistency carry (R311aq carry promotion) — sce-codegen Rust backend template String/ToString 자동 emit. wz codec_alloc_prelude! 매크로 제거 가능해지. SCE session 별도.",
+        "R311aw+: 추가 cross-compile target audit (R311ap carry) — aarch64-unknown-none / wasm32-wasi / riscv64gc. use case 명확화 후.",
+        "Runtime trait channel/select 확장 (R311ax 후보): wz-runtime-tokio + lwip 동일 surface mpsc/oneshot/Notify/select! 트레이트 추상 도입. 제2 프로파일 (lwip) 이 실제 필요 시점에 lands. 현재 는 carry.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam (R311at에서 reference binary 면 활성; Session struct generic은 후속), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (R311au), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Honest claim: R311au-prep는 ledger-only — code mutation 0; §5.P inventory delta + LwipRuntime contract sketch 서론 장치. 다음 세션이 R311au 진입할 때 sketch를 이정표로 사용 가능."
       ]
     },
     "Round 311b": {
