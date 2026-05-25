@@ -18577,6 +18577,62 @@
         "Architectural carries unchanged: R267 R283 R284 R299 R300 R301 §8 R304 keyexpr_canon R310.5c"
       ]
     },
+    "Round 311ax": {
+      "decision_summary": "R311ax wz facade runtime-lwip feature lands: pulls wz-runtime-lwip + alloc; mutual exclusion compile_error with runtime-tokio; Layer G.5 lane added",
+      "changes_bullets": [
+        "crates/wz/Cargo.toml: wz-runtime-lwip optional dep + runtime-lwip feature wires dep:wz-runtime-lwip + alloc",
+        "crates/wz/src/lib.rs: #[cfg(feature=runtime-lwip)] pub use wz_runtime_lwip as runtime_lwip",
+        "lib.rs: compile_error! cfg(all(runtime-tokio, runtime-lwip)) mutual exclusion gate at facade boundary",
+        "lib.rs: runtime_core re-export gated cfg(any(runtime-tokio, runtime-lwip)) so both profiles reach trait surface",
+        "scripts/run-ci.sh: Layer G.5 lane - wz facade --features runtime-lwip cross-compile; thumbv6m SKIP per M0+ gap"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz --features runtime-tokio: OK",
+        "cargo build -p wz --features runtime-lwip --no-default-features --target thumbv7em-none-eabihf: OK",
+        "cargo build -p wz --features 'runtime-tokio runtime-lwip': compile_error fires with directive message",
+        "Layer G full: 40 PASS + 2 SKIP (G.1-G.4 x 7 + G.4-alloc x 6 + G.5 x 6; thumbv6m G.4-alloc+G.5 SKIP)",
+        "scripts/run-ci.sh 5 lanes PASS overall; cargo fmt clean; clippy --workspace --all-targets clean"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "R311ay next: first MCU preset cortex-m4-default add_section feature-inventory 6-7 or update 6-2",
+        "R311az+ unchanged carries: LwipJoinHandle abort; real timer queue; portable-atomic M0+ polyfill",
+        "R311az+ optional: embedded-time ecosystem adapter; wz-link-lwip lwIP-sys FFI link tier §5.C",
+        "Architectural carries unchanged: R267 R283 R284 R299 R300 R301 §8 R304 keyexpr_canon R310.5c"
+      ],
+      "publishable_decision_summary": "R311ax wz facade runtime-lwip feature lands: pulls wz-runtime-lwip + alloc; mutual exclusion compile_error with runtime-tokio; Layer G.5 lane added",
+      "publishable_changes_bullets": [
+        "crates/wz/Cargo.toml: wz-runtime-lwip optional dep + runtime-lwip feature wires dep:wz-runtime-lwip + alloc",
+        "crates/wz/src/lib.rs: #[cfg(feature=runtime-lwip)] pub use wz_runtime_lwip as runtime_lwip",
+        "lib.rs: compile_error! cfg(all(runtime-tokio, runtime-lwip)) mutual exclusion gate at facade boundary",
+        "lib.rs: runtime_core re-export gated cfg(any(runtime-tokio, runtime-lwip)) so both profiles reach trait surface",
+        "scripts/run-ci.sh: Layer G.5 lane - wz facade --features runtime-lwip cross-compile; thumbv6m SKIP per M0+ gap"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz --features runtime-tokio: OK",
+        "cargo build -p wz --features runtime-lwip --no-default-features --target thumbv7em-none-eabihf: OK",
+        "cargo build -p wz --features 'runtime-tokio runtime-lwip': compile_error fires with directive message",
+        "Layer G full: 40 PASS + 2 SKIP (G.1-G.4 x 7 + G.4-alloc x 6 + G.5 x 6; thumbv6m G.4-alloc+G.5 SKIP)",
+        "scripts/run-ci.sh 5 lanes PASS overall; cargo fmt clean; clippy --workspace --all-targets clean"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ay next: first MCU preset cortex-m4-default add_section feature-inventory 6-7 or update 6-2",
+        "R311az+ unchanged carries: LwipJoinHandle abort; real timer queue; portable-atomic M0+ polyfill",
+        "R311az+ optional: embedded-time ecosystem adapter; wz-link-lwip lwIP-sys FFI link tier §5.C",
+        "Architectural carries unchanged: R267 R283 R284 R299 R300 R301 §8 R304 keyexpr_canon R310.5c"
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
