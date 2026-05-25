@@ -36,17 +36,25 @@ use crate::error::RuntimeError;
 ///    return type carries auto-traits implicitly which surfaces as
 ///    cryptic "doesn't implement Send" errors deep in user code.
 ///
-/// ## Why no `Mutex` / `RwLock` here
+/// ## R311ar — `Mutex` / `RwLock` land
 ///
-/// §5.P lists `Mutex + RwLock` on the runtime contract. They were
-/// intentionally deferred from R251 — the generic-over-T shape (a
-/// `Mutex<T>` is parameterised on the protected value) does not
-/// compose with a single GAT, and the choice between a
-/// `MutexFamily`-style trait, per-runtime type alias, or
-/// straight-conditional-compilation is a R252+ design decision tied
-/// to actual MCU call-site shape (Embassy uses `embassy_sync::
-/// Mutex<RawMutex, T>` which carries an extra raw-mutex parameter).
-/// See lib.rs module doc-comment for the carry note.
+/// §5.P lists `Mutex + RwLock` on the runtime contract. R311w decision
+/// lock (per §5.P caveat) selected option **(a)** — per-runtime type
+/// alias — over option (b) a `MutexFamily` GAT (HKT ergonomics) and
+/// option (c) AP/MCU source-tree fork (single-source-tree violation).
+/// The trait therefore exposes [`Mutex<T>`](Self::Mutex) and
+/// [`RwLock<T>`](Self::RwLock) as GAT associated types; the tokio
+/// profile binds them to `std::sync::Mutex<T>` /
+/// `std::sync::RwLock<T>` via the `wz_runtime_tokio::sync` module, and
+/// future MCU profiles (`wz-runtime-lwip` / `wz-runtime-embassy`) will
+/// bind their own per-profile aliases (`embassy_sync::Mutex<RawMutex,
+/// T>` or `critical_section::Mutex<T>` per ISR-interleave shape) when
+/// they land.
+///
+/// The associated-type form keeps `Session<R: Runtime, T: TimeSource>`
+/// (R267 reparam target) single-parameter — `Arc<R::Mutex<...>>` does
+/// not introduce an extra `M: MutexFamily` generic, sidestepping the
+/// HKT-ergonomics objection that pinned the R251 deferral.
 pub trait Runtime: Send + Sync + 'static {
     /// Handle type returned by [`Self::spawn`]. Must itself be a
     /// `Future` so callers can `.await` the spawned task's output.
@@ -55,6 +63,47 @@ pub trait Runtime: Send + Sync + 'static {
     type JoinHandle<T>: Future<Output = Result<T, RuntimeError>> + Send + 'static
     where
         T: Send + 'static;
+
+    /// Per-runtime mutual-exclusion lock alias (R311ar lands; R311w
+    /// option (a) — per-runtime type alias). Tokio profile binds to
+    /// `std::sync::Mutex<T>` through `wz_runtime_tokio::sync::Mutex`;
+    /// MCU profile will bind to `embassy_sync::Mutex<RawMutex, T>` or
+    /// `critical_section::Mutex<T>` per ISR-interleave shape when
+    /// `wz-runtime-lwip` / `wz-runtime-embassy` land.
+    ///
+    /// The `Send + Sync + 'static` bound is the minimum cross-runtime
+    /// contract: AP `std::sync::Mutex<T>` satisfies it automatically
+    /// for `T: Send`; MCU `critical_section::Mutex<T>` satisfies it
+    /// because its lock acquisition is interrupt-disabling rather than
+    /// blocking. Generic call sites (`Arc<R::Mutex<...>>` in
+    /// `Session::observer`, etc.) compose against this bound without
+    /// per-profile cfg.
+    type Mutex<T>: Send + Sync + 'static
+    where
+        T: Send + 'static;
+
+    /// Per-runtime reader-writer lock alias (R311ar lands; R311w
+    /// option (a)). Same per-profile binding discipline as
+    /// [`Self::Mutex`]: tokio binds to `std::sync::RwLock<T>` through
+    /// `wz_runtime_tokio::sync::RwLock`; MCU profile will bind to
+    /// whichever rwlock shape the executor surfaces (embassy_sync
+    /// exposes `RwLock<RawMutex, T>`; lwIP single-task model can elide
+    /// to `Mutex` if no real rwlock is available — that mapping is a
+    /// per-MCU-profile decision when the profile lands).
+    ///
+    /// `T: Send + Sync + 'static` is one bound tighter than
+    /// [`Self::Mutex`] (which only requires `T: Send`). Reason:
+    /// `std::sync::RwLock<T>: Sync` requires `T: Send + Sync`
+    /// (shared-read access lets `&T` cross threads, so `T` itself must
+    /// be `Sync`), whereas `std::sync::Mutex<T>: Sync` only requires
+    /// `T: Send` (exclusive-access lock yields `&mut T`, never `&T`,
+    /// across threads). The trait bound matches the AP profile's
+    /// concrete impl so the alias binding compiles directly; MCU
+    /// profiles with the same shared-read semantic will inherit the
+    /// same `T: Send + Sync` requirement automatically.
+    type RwLock<T>: Send + Sync + 'static
+    where
+        T: Send + Sync + 'static;
 
     /// Spawn `fut` on the runtime, returning a handle that resolves
     /// when the task completes. The future is detached on spawn — the

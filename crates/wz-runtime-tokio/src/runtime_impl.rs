@@ -27,12 +27,17 @@
 //!
 //! ## What stays in wz-runtime-tokio (not promoted to a trait yet)
 //!
-//! - **Mutex / RwLock**: the §5.P spec lists these alongside spawn but
-//!   the generic-over-T shape (`Mutex<T>`) does not compose with a
-//!   single GAT cleanly. The R251 trait skeleton explicitly deferred
-//!   this; R252 also does not introduce a TokioMutex wrapper because
-//!   the design choice (type alias vs MutexFamily GAT vs cfg-cond)
-//!   should wait for the first MCU call-site shape to constrain it.
+//! - **Mutex / RwLock**: R311ar lands the trait shape — Runtime now
+//!   exposes `type Mutex<T>` + `type RwLock<T>` GAT associated types
+//!   per the R311w decision (option (a) per-runtime type alias). The
+//!   tokio impl binds both through the [`crate::sync`] module
+//!   (R311y `pub type Mutex<T> = std::sync::Mutex<T>;` /
+//!   `pub type RwLock<T> = std::sync::RwLock<T>;`). Existing
+//!   direct `std::sync::Mutex<T>` references inside wz-runtime-tokio
+//!   stay in place this round; the R311as+ leaf-first migration
+//!   replaces them with `wz_runtime_tokio::sync::Mutex` and then
+//!   `R::Mutex<...>` once `Session<R, T>` reparam reaches each call
+//!   site.
 //! - **Allocator concrete impl**: the AP profile keeps using `Box` /
 //!   `Vec` directly via the std global allocator. The trait-based
 //!   surface lands when MCU buffer-pool work needs it.
@@ -74,6 +79,22 @@ impl Runtime for TokioRuntime {
         = TokioJoinHandle<T>
     where
         T: Send + 'static;
+
+    // R311ar — Runtime trait Mutex/RwLock GAT lands; tokio profile
+    // binds through the per-runtime alias module `crate::sync` (R311y
+    // R311w option (a) mechanical realisation). Direct
+    // `std::sync::Mutex<T>` references inside wz-runtime-tokio
+    // continue to live behind the `crate::sync` re-export so the
+    // R311as+ leaf-first migration to `R::Mutex<...>` at call sites
+    // does not need a parallel binding here.
+    type Mutex<T>
+        = crate::sync::Mutex<T>
+    where
+        T: Send + 'static;
+    type RwLock<T>
+        = crate::sync::RwLock<T>
+    where
+        T: Send + Sync + 'static;
 
     fn spawn<F>(&self, fut: F) -> Self::JoinHandle<F::Output>
     where
@@ -304,6 +325,21 @@ mod compile_time_assertions {
         _assert_send::<TokioJoinHandle<String>>();
     }
 
+    // R311ar — Runtime trait Mutex/RwLock GAT bound fixity. Pins the
+    // contract that `<TokioRuntime as Runtime>::Mutex<T>` and
+    // `<TokioRuntime as Runtime>::RwLock<T>` satisfy `Send + Sync +
+    // 'static` for representative T (u32 trivially-Send, String
+    // alloc-Send). A regression that re-binds the alias to a
+    // non-Sync wrapper (e.g. tokio::sync::Mutex without an
+    // appropriate guard layer) fails this assertion at compile time.
+    #[allow(dead_code)]
+    fn tokio_runtime_mutex_rwlock_bounds_compile() {
+        _assert_send_sync::<<TokioRuntime as Runtime>::Mutex<u32>>();
+        _assert_send_sync::<<TokioRuntime as Runtime>::Mutex<String>>();
+        _assert_send_sync::<<TokioRuntime as Runtime>::RwLock<u32>>();
+        _assert_send_sync::<<TokioRuntime as Runtime>::RwLock<String>>();
+    }
+
     // R258 — generic composition smoke test. Validates that the
     // R: Runtime + T: TimeSource trait pair is actually usable
     // from production-shaped generic code (the trajectory toward
@@ -335,6 +371,40 @@ mod compile_time_assertions {
                 .timeout(100, inner.eventually_ready())
                 .await
         });
+        // R311ar — exercise R::Mutex<T> / R::RwLock<T> GAT in generic
+        // code so the future Session<R, T> reparam round can compose
+        // `Arc<R::Mutex<...>>` (Session::observer migration target)
+        // and `Arc<R::RwLock<...>>` without surfacing a missing-type
+        // or wrong-bound error at the first concrete-impl swap. The
+        // trait-level `Send + Sync + 'static where T: Send + 'static`
+        // bound is what makes the cross-thread `Arc<R::Mutex<...>>`
+        // pattern viable; the assert_send_sync calls below pin the
+        // contract from the generic side mirror of the concrete
+        // assertions in `tokio_runtime_mutex_rwlock_bounds_compile`.
+        fn _generic_mutex_bound_holds<R, T>()
+        where
+            R: Runtime,
+            T: Send + 'static,
+        {
+            fn assert_send_sync_static<X: Send + Sync + 'static>() {}
+            assert_send_sync_static::<R::Mutex<T>>();
+        }
+        // RwLock requires T: Send + Sync (shared-read semantic; see
+        // Runtime::RwLock doc-comment). Split helper preserves the
+        // generic bound difference so a future relaxation regression
+        // on either side surfaces precisely.
+        fn _generic_rwlock_bound_holds<R, T>()
+        where
+            R: Runtime,
+            T: Send + Sync + 'static,
+        {
+            fn assert_send_sync_static<X: Send + Sync + 'static>() {}
+            assert_send_sync_static::<R::RwLock<T>>();
+        }
+        _generic_mutex_bound_holds::<R, u32>();
+        _generic_mutex_bound_holds::<R, String>();
+        _generic_rwlock_bound_holds::<R, u32>();
+        _generic_rwlock_bound_holds::<R, String>();
     }
 
     // Inline helper module so the generic-composition smoke fn above
