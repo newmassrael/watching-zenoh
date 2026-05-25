@@ -17309,6 +17309,60 @@
         "tcp_session SCXML 추가 (deploy yaml 에서 commented Phase B+) 는 Phase W 외 — lwip_tcp driver + session-fsm TCP variant authoring 시점 이제."
       ]
     },
+    "Round 311ai": {
+      "decision_summary": "R311ai sce-codegen multi-input mesh audit — `build` subcommand 부재 (Phase Y R50 carry, SCE upstream work); deploy↔SCXML naming rule unclear; Phase W next mechanical step (wz-runtime-lwip) gcc-arm install user permission gate.",
+      "changes_bullets": [
+        "Audit round only — 코드 변경 0; cross-repo carry 명확화 명시.",
+        "scripts/validate-deploy.sh 점검 (105 lines): 현재 platform.class + platform.os 만 lightweight schema check; links 섹션 mesh 검증 없음. 'NOTE: full sce-codegen build pipeline pending SCE upstream build subcommand implementation (R50 carry).' 명시.",
+        "wz-runtime-tokio/build.rs + wz-codecs/build.rs 점검: sce-codegen `generate` subcommand 단일 SCXML → C11/Rust emit 호출만 존재 (single-input). deploy yaml + SCXML multi-input mesh 호출 path 부재.",
+        "deploy yaml ↔ SCXML naming convention 분석: deploy/mcu_target.yaml::links.udp_session.driver=lwip_udp + key=udp_session → sources/links/lwip_udp_session.scxml 결합 룰 명확 spec 부재 (driver prefix + dedup 추측만 가능). RFC §5.C 에도 mesh 룰 명시 없음.",
+        "Phase W next mechanical step (R311aj wz-runtime-lwip crate 재도입) blocked — R63 lesson 준수 (NOP-stub 안 만듦) 때문에 real impl 필요, real impl은 lwIP C source build 필요, build는 arm-none-eabi-gcc 설치 필요 (sudo apt install gcc-arm-none-eabi). 자동 진행 이 step에서 user permission gate 도달."
+      ],
+      "verification_bullets": [
+        "scripts/validate-deploy.sh fullstack: deploy/ap_mcu_pair.yaml / ap_standalone.yaml / mcu_target.yaml 모두 'OK' — platform.class + os schema check pass.",
+        "grep `sce-codegen build`: /home/coin/watching-zenoh 내 호출 없음 (주석에 'pending SCE upstream' 명시); generate / orchestrate / manifest / verify subcommand 만 wz 에서 사용.",
+        "wz-runtime-tokio/build.rs::245-258 sce_codegen.arg('generate').arg(...).arg(scxml_path) single-input 호출 패턴 확인; deploy yaml input 세계 없음.",
+        "atomic store 점검: runtime-crate--sce_link_runtime_lwip-c11-header-shape 에 mesh rule 또는 build subcommand 종속 명시 없음 — RFC §5.C body 'deploy.yaml binding' 항목도 driver / bind / mtu 등 schema field 나열 수준.",
+        "validate_workspace baseline R311ah 유지: T1=0 (ledger=1 R193 §66 known-stale), RT 13/13, sync; entries 350 → 351, sections 255 변동 0 (예상)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link"
+      ],
+      "carry_forward_bullets": [
+        "SCE upstream cross-repo carry (R50 historical): sce-codegen `build deploy/<x>.yaml` subcommand 구현 필요 — deploy yaml + SCXML multi-input mesh + listener-pair sibling 자동 합성 + per-link wrapper emit + trust_class 기반 hardening codegen 획득 수단. SCE side ratify 시점에 wz validate-deploy.sh upgrade.",
+        "deploy yaml ↔ SCXML naming convention ratify carry: driver prefix + dedup 룰 (driver=lwip_udp + key=udp_session → lwip_udp_session) 목시되지 않은 관례 수준; RFC §5.C 또는 별도 spec section 으로 lock 필요. (우선순위: SCE upstream build subcommand carry 와 mesh 하므로 함께 이동 가능)",
+        "R311aj user-permission gate: arm-none-eabi-gcc install (sudo apt install gcc-arm-none-eabi) — wz-runtime-lwip crate real impl scaffolding prereq. 자동 진행 불가, 사용자 승인 필요. 우회 경로: 다른 carry 로 pivot 후 install 후 R311ak+ 재개.",
+        "Pivot 후보 (자동 진행 계속): (a) R311m pubsub.rs consumer cascade (R311h deferred carry, codec catalog truthfulness 강화, 북극성 직결), (b) R303++ atomic field population (39 outline-only sub-sections, catalog 문서화 closure), (c) R310.5c get_matching_status doc decision (0.5R).",
+        "Phase W 후반 (20-50R, user permission 해제 후): wz-runtime-lwip crate 재도입 + lwIP C source 통합 + cross-compile build + scouting/session FSM link 호출 path 통합 + real driver code."
+      ],
+      "publishable_decision_summary": "R311ai sce-codegen multi-input mesh audit — `build` subcommand 부재 (Phase Y R50 carry, SCE upstream work); deploy↔SCXML naming rule unclear; Phase W next mechanical step (wz-runtime-lwip) gcc-arm install user permission gate.",
+      "publishable_changes_bullets": [
+        "Audit round only — 코드 변경 0; cross-repo carry 명확화 명시.",
+        "scripts/validate-deploy.sh 점검 (105 lines): 현재 platform.class + platform.os 만 lightweight schema check; links 섹션 mesh 검증 없음. 'NOTE: full sce-codegen build pipeline pending SCE upstream build subcommand implementation (R50 carry).' 명시.",
+        "wz-runtime-tokio/build.rs + wz-codecs/build.rs 점검: sce-codegen `generate` subcommand 단일 SCXML → C11/Rust emit 호출만 존재 (single-input). deploy yaml + SCXML multi-input mesh 호출 path 부재.",
+        "deploy yaml ↔ SCXML naming convention 분석: deploy/mcu_target.yaml::links.udp_session.driver=lwip_udp + key=udp_session → sources/links/lwip_udp_session.scxml 결합 룰 명확 spec 부재 (driver prefix + dedup 추측만 가능). RFC §5.C 에도 mesh 룰 명시 없음.",
+        "Phase W next mechanical step (R311aj wz-runtime-lwip crate 재도입) blocked — R63 lesson 준수 (NOP-stub 안 만듦) 때문에 real impl 필요, real impl은 lwIP C source build 필요, build는 arm-none-eabi-gcc 설치 필요 (sudo apt install gcc-arm-none-eabi). 자동 진행 이 step에서 user permission gate 도달."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/validate-deploy.sh fullstack: deploy/ap_mcu_pair.yaml / ap_standalone.yaml / mcu_target.yaml 모두 'OK' — platform.class + os schema check pass.",
+        "grep `sce-codegen build`: /home/coin/watching-zenoh 내 호출 없음 (주석에 'pending SCE upstream' 명시); generate / orchestrate / manifest / verify subcommand 만 wz 에서 사용.",
+        "wz-runtime-tokio/build.rs::245-258 sce_codegen.arg('generate').arg(...).arg(scxml_path) single-input 호출 패턴 확인; deploy yaml input 세계 없음.",
+        "atomic store 점검: runtime-crate--sce_link_runtime_lwip-c11-header-shape 에 mesh rule 또는 build subcommand 종속 명시 없음 — RFC §5.C body 'deploy.yaml binding' 항목도 driver / bind / mtu 등 schema field 나열 수준.",
+        "validate_workspace baseline R311ah 유지: T1=0 (ledger=1 R193 §66 known-stale), RT 13/13, sync; entries 350 → 351, sections 255 변동 0 (예상)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "SCE upstream cross-repo carry (R50 historical): sce-codegen `build deploy/<x>.yaml` subcommand 구현 필요 — deploy yaml + SCXML multi-input mesh + listener-pair sibling 자동 합성 + per-link wrapper emit + trust_class 기반 hardening codegen 획득 수단. SCE side ratify 시점에 wz validate-deploy.sh upgrade.",
+        "deploy yaml ↔ SCXML naming convention ratify carry: driver prefix + dedup 룰 (driver=lwip_udp + key=udp_session → lwip_udp_session) 목시되지 않은 관례 수준; RFC §5.C 또는 별도 spec section 으로 lock 필요. (우선순위: SCE upstream build subcommand carry 와 mesh 하므로 함께 이동 가능)",
+        "R311aj user-permission gate: arm-none-eabi-gcc install (sudo apt install gcc-arm-none-eabi) — wz-runtime-lwip crate real impl scaffolding prereq. 자동 진행 불가, 사용자 승인 필요. 우회 경로: 다른 carry 로 pivot 후 install 후 R311ak+ 재개.",
+        "Pivot 후보 (자동 진행 계속): (a) R311m pubsub.rs consumer cascade (R311h deferred carry, codec catalog truthfulness 강화, 북극성 직결), (b) R303++ atomic field population (39 outline-only sub-sections, catalog 문서화 closure), (c) R310.5c get_matching_status doc decision (0.5R).",
+        "Phase W 후반 (20-50R, user permission 해제 후): wz-runtime-lwip crate 재도입 + lwIP C source 통합 + cross-compile build + scouting/session FSM link 호출 path 통합 + real driver code."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
