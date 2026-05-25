@@ -29,10 +29,42 @@
 
 #![cfg_attr(not(any(test, feature = "runtime-tokio")), no_std)]
 
+// R311ax — runtime-tokio and runtime-lwip are mutually exclusive
+// per-deploy. Cargo features are monotone-additive (unification
+// across the dep graph cannot encode XOR), so the catalog policy
+// is enforced at compile time here: a build that turns both
+// features on fails with a clear directive rather than silently
+// linking two incompatible runtime profiles.
+//
+// The check pattern is `#[cfg(all(feature = "A", feature = "B"))]`
+// + `compile_error!`. Per-deploy this is the right gate: a real
+// binary picks AP (tokio) or MCU (lwip), never both. A test build
+// that wants to exercise both code paths must split into two
+// build invocations.
+#[cfg(all(feature = "runtime-tokio", feature = "runtime-lwip"))]
+compile_error!(
+    "wz: `runtime-tokio` and `runtime-lwip` are mutually exclusive — \
+     enable exactly one per deploy. The AP profile uses runtime-tokio \
+     (std + tokio); the MCU profile uses runtime-lwip (no_std + alloc \
+     + critical_section + cooperative task pool)."
+);
+
 #[cfg(feature = "runtime-tokio")]
 pub use wz_runtime_tokio as runtime_tokio;
 
-#[cfg(feature = "runtime-tokio")]
+// R311ax — runtime-lwip namespace lands. Symmetric shape with the
+// AP-side `runtime_tokio` re-export so a generic consumer reading
+// `wz::runtime_tokio::TokioRuntime` and `wz::runtime_lwip::LwipRuntime`
+// sees the same surface depth regardless of profile.
+#[cfg(feature = "runtime-lwip")]
+pub use wz_runtime_lwip as runtime_lwip;
+
+// `runtime_core` re-export is needed by BOTH profiles (the trait
+// crate authoring §5.P Runtime / TimeSource / Allocator). The
+// cfg(any(..)) merges the two opt-in paths so consumers always
+// reach the trait surface through `wz::runtime_core::*` no matter
+// which concrete profile they picked.
+#[cfg(any(feature = "runtime-tokio", feature = "runtime-lwip"))]
 pub use wz_runtime_core as runtime_core;
 
 #[cfg(feature = "runtime-tokio")]
