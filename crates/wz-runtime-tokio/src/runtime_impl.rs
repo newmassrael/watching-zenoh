@@ -46,7 +46,7 @@ use core::pin::Pin;
 use core::task::{Context, Poll};
 use core::time::Duration;
 
-use wz_runtime_core::{Runtime, RuntimeError, TimeSource};
+use wz_runtime_core::{Runtime, RuntimeError, TimeSource, TimeoutElapsed};
 
 /// AP-profile [`Runtime`] impl: every spawn routes through
 /// `tokio::task::spawn`, every join goes through tokio's
@@ -255,6 +255,30 @@ impl TimeSource for TokioTime {
         // free-standing.
         tokio::time::sleep(Duration::from_millis(ms))
     }
+
+    async fn timeout<F>(&self, ms: u64, fut: F) -> Result<F::Output, TimeoutElapsed>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send,
+    {
+        // `tokio::time::timeout` is itself a `select!` over the inner
+        // future and a `sleep`. Its `Err` variant is
+        // `tokio::time::error::Elapsed`, an opaque unit-ish marker —
+        // we collapse it to the runtime-neutral [`TimeoutElapsed`]
+        // contract type so embassy / lwIP impls do not have to
+        // pretend they produce a tokio-shaped error.
+        //
+        // The `async fn` shape (instead of `-> impl Future` + an
+        // explicit `async move { … }` body) is preferred per
+        // clippy::manual_async_fn; the desugared return type
+        // matches the trait's `-> impl Future<Output = Result<…>>
+        // + Send + '_` contract because tokio's runtime guarantees
+        // the auto-generated state machine is `Send` whenever the
+        // captured `fut` is `Send`.
+        tokio::time::timeout(Duration::from_millis(ms), fut)
+            .await
+            .map_err(|_elapsed| TimeoutElapsed)
+    }
 }
 
 #[cfg(test)]
@@ -298,6 +322,46 @@ mod compile_time_assertions {
             clock_for_task.now_monotonic_ms()
         });
         let _ts: u64 = clock.now_monotonic_ms();
+        // R311ac — exercise TimeSource::timeout in generic code so
+        // a future Session<R, T> reparam round can compose
+        // `clock.timeout(ms, fut)` over a generic clock without
+        // surfacing a missing-method or wrong-bound error at the
+        // first concrete-impl swap.
+        let clock_for_timeout = clock.clone();
+        let _timeout_handle: R::JoinHandle<Result<u64, TimeoutElapsed>> = rt.spawn(async move {
+            let inner: async_inner::AsyncInner =
+                async_inner::AsyncInner::with_clock_ms(clock_for_timeout.now_monotonic_ms());
+            clock_for_timeout
+                .timeout(100, inner.eventually_ready())
+                .await
+        });
+    }
+
+    // Inline helper module so the generic-composition smoke fn above
+    // has a real owned `Future + Send + 'static` to thread through
+    // `T::timeout` — `async { … }` blocks borrow `clock` and break
+    // the `'static` bound. The helper resolves to `u64` (the same
+    // shape `now_monotonic_ms` returns) so the `R::JoinHandle<…>`
+    // type ascription on the timeout spawn carries `Result<u64,
+    // TimeoutElapsed>` as the outer Future's Output.
+    mod async_inner {
+        pub(super) struct AsyncInner {
+            pub(super) anchor_ms: u64,
+        }
+
+        impl AsyncInner {
+            pub(super) fn with_clock_ms(anchor_ms: u64) -> Self {
+                Self { anchor_ms }
+            }
+
+            pub(super) async fn eventually_ready(self) -> u64 {
+                // Returns immediately — the generic-composition test
+                // only exercises trait method shapes, not real
+                // timing. Body is a single arithmetic op so the
+                // compiler cannot fold the async block away.
+                self.anchor_ms.wrapping_add(1)
+            }
+        }
     }
 }
 
@@ -604,5 +668,42 @@ mod tests {
         // outer clock's epoch — same TokioTime epoch is being
         // sampled from both.
         assert!(ts >= clock.now_monotonic_ms().saturating_sub(1));
+    }
+
+    #[tokio::test]
+    async fn tokio_time_timeout_completes_within_budget_returns_ok() {
+        // R311ac — fast inner future under the budget resolves to
+        // Ok(output). The 50ms inner vs 500ms budget gap is wide
+        // enough to absorb scheduler jitter on a loaded CI host
+        // without flaking; the assertion only pins the success arm,
+        // not the elapsed timing.
+        let clock = TokioTime::new();
+        let result = clock
+            .timeout(500, async {
+                tokio::time::sleep(TokioDuration::from_millis(50)).await;
+                123_u32
+            })
+            .await;
+        assert_eq!(
+            result.expect("inner future completes well under the budget"),
+            123
+        );
+    }
+
+    #[tokio::test]
+    async fn tokio_time_timeout_budget_elapsed_returns_timeout_elapsed() {
+        // R311ac — slow inner future past the budget resolves to
+        // Err(TimeoutElapsed). The 500ms inner vs 50ms budget gap
+        // is the inverse of the success test so the same scheduler
+        // jitter that masks a success-arm regression also masks an
+        // error-arm regression here.
+        let clock = TokioTime::new();
+        let result: Result<u32, TimeoutElapsed> = clock
+            .timeout(50, async {
+                tokio::time::sleep(TokioDuration::from_millis(500)).await;
+                123_u32
+            })
+            .await;
+        assert_eq!(result, Err(TimeoutElapsed));
     }
 }
