@@ -31,14 +31,19 @@
 //!
 //! ## What is NOT here (Phase W carry)
 //!
-//! - **Mutex / RwLock**: §5.P lists these alongside spawn but the
-//!   generic-over-T shape is awkward without higher-kinded types.
-//!   R252+ will pick between (a) a per-runtime `Mutex<T>` type alias
-//!   re-exported from the runtime crate, (b) a `MutexFamily` GAT
-//!   trait, or (c) leaving the existing `std::sync::Mutex` direct
-//!   call sites on the AP-only path and providing a parallel
-//!   `embassy_sync::Mutex` direct call site on the MCU path. Choice
-//!   waits on actual MCU work shape.
+//! - **Mutex / RwLock** *(R311ar lands)*: §5.P R311w decision lock
+//!   selected option (a) per-runtime type alias over (b) `MutexFamily`
+//!   GAT and (c) AP/MCU source-tree fork. The [`Runtime`] trait now
+//!   exposes `type Mutex<T>` + `type RwLock<T>` GAT associated types
+//!   with `Send + Sync + 'static where T: Send + 'static` bounds.
+//!   wz-runtime-tokio binds both through its `sync` module
+//!   (`std::sync::Mutex<T>` / `std::sync::RwLock<T>`); future
+//!   wz-runtime-lwip / wz-runtime-embassy crates will bind their own
+//!   per-profile aliases (`embassy_sync::Mutex<RawMutex, T>` /
+//!   `critical_section::Mutex<T>` per ISR-interleave shape) when they
+//!   land. The trait shape lands *before* MCU callers arrive so the
+//!   R311au+ lwIP runtime can mechanically add its impl rather than
+//!   re-litigate the trait surface.
 //! - **TokioRuntime impl**: lives in `wz-runtime-tokio` from R252+.
 //! - **LwipRuntime / EmbassyRuntime impl**: lives in `wz-runtime-lwip`
 //!   (re-introduced when Phase W gets to lwIP integration work, see
