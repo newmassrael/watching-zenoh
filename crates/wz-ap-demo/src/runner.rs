@@ -738,6 +738,7 @@ pub(crate) async fn run_demo(
         actions,
         writer_handle,
         was_cancelled: outcome.is_none(),
+        clock: session_clock,
     }
     .abort_sweep_join_tasks()
     .await
