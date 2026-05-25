@@ -38,7 +38,7 @@
 // (`wz_liveliness_subscriber_round_trip_against_wz_acceptor`).
 
 use std::io;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
@@ -56,6 +56,7 @@ use wz::runtime_tokio::session_fsm_unicast::{SessionFsmUnicastEvent, SessionFsmU
 use wz::runtime_tokio::session_glue::{
     drive_session_until_terminal, install_session_actions, IterationEvent, SessionLinkActions,
 };
+use wz::runtime_tokio::sync::Mutex;
 use wz::script::LuaEngine;
 use wz::script::{Engine, IScriptEngine};
 
