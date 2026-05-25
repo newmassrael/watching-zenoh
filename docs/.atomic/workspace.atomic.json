@@ -18013,6 +18013,60 @@
         "Honest claim 재명시: R311ar는 trait surface 확장 + TokioRuntime alias binding만; 기존 std::sync::Mutex 호출 사이트 마이그레이션 0 (R311as+ 충제). 진정한 trait-mediated dispatch (`R::Mutex<...>`)은 R311as부터 소진 시작."
       ]
     },
+    "Round 311as": {
+      "decision_summary": "R311as Session<observer> migration — `use std::sync::{Arc, Mutex}` → `use std::sync::Arc; use crate::sync::Mutex`. §5.P Session-last gate close (alias resolves identically on AP).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs line 64: `use std::sync::{Arc, Mutex};` → `use std::sync::Arc;` + `use crate::sync::Mutex;` (R311y 알리아스 동일 underlying type `std::sync::Mutex<T>`; 호환성 100%). 새 import에 R311as 이유 설명 단락 주석 첨부 — R311ar trait shape lock + 미래 wz-runtime-lwip/embassy MCU 프로파일이 자체 sync lock으로 알리아스 re-bind 가능한 구조, 최종 `Session<R: Runtime, T: TimeSource>` reparam은 R311at+에서 `Arc<R::Mutex<...>>` mechanical 리프트 명시.",
+        "crates/wz-runtime-tokio/src/session.rs lines 38-50 ## Locking discipline doc-comment 교체: 기존 `std::sync::Mutex (not tokio::sync::Mutex)` 설명을 alias 관점으로 재프레이밍. AP 프로파일 해석 (`std::sync::Mutex`) 유지 명시 + MCU 프로파일 미래 바인딩 예시 (`critical_section::Mutex<T>` single-core, `embassy_sync::Mutex<RawMutex, T>` multi-priority embassy) 명시 + sync vs async lock semantic 이유 (loopback subscriber callback synchronous = zenoh-pico `_z_session_deliver_push_locally` mirror) 보존. 그 다음 R311as migration 반영 + R311at+ Session reparam 흐름 명시 마지막 몇 줄 추가.",
+        "다른 Mutex 사용 사이트 (Session struct field line 573, Session::new param line 609, Session::observer() return type line 635, test code 3545+) 은 변경 불필요 — bare `Mutex` resolution이 새 import (`crate::sync::Mutex`)로 자동 전환되고 underlying type 동일. External callers (ap-demo `wz::runtime_tokio::sync::Mutex` 채택 환경) 도 추가 변경 없음 — 둘 다 같은 underlying `std::sync::Mutex` resolve.",
+        "§5.P R311x \"Session-last gate\" close — R311x 조사에서 \"only Session<observer> + ap-demo binary remain on §5.P\" 중 Session<observer> 레근 머니셔너이션 완료. ap-demo 잔여 sites는 R311at 차례."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-runtime-tokio: PASS (alias resolution underlying type 동일, 회귀 0).",
+        "cargo test -p wz-runtime-tokio: PASS — 회귀 0 (`test result: ok` 전체 lib unit + integration tests, doc-tests 2 pass/1 ignore 기존 베이스라인 유지).",
+        "bash scripts/run-ci.sh --layer G: 21/21 PASS — trait 처리는 R311ar에서 lands, 본 라운드는 import 아이디어마트만이라 #![no_std] 빌드 영향 0.",
+        "bash scripts/run-ci.sh (fullstack): PASS — Layer A-E 전부 통과, 회귀 0.",
+        "validate_workspace: 이번 append 직후 entries 363→364, sections 255 유지, T1=0, RT 13/13, sync 기대."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311at (next): ap-demo 16 sites 소진 시작 — runner.rs `tokio::spawn` 5 sites / `tokio::time::*` 1 site / `tokio::sync::Mutex` 1 site / `tokio::task::JoinHandle` 1 import + main.rs 3 sites 총 11+ 사이트 대상. binary entry layer는 R 선택 주체라 trait 매개 대신 알리아스 채택이 적절 경우 (`wz::runtime_tokio::*`) 구분 필요.",
+        "R311au: gcc-arm install 후 wz-runtime-lwip + LwipRuntime impl lands. R311ar trait shape + R311as Session alias 머니셔너이션이 prereq — 본 라운드 통과로 LwipRuntime이 own Mutex/RwLock (`embassy_sync::Mutex` or `critical_section::Mutex`) 가져올 자리 mechanical 준비 완료. Layer G default lane 승격 주체가 됩.",
+        "R311av+: SCE-upstream codegen consistency carry (R311aq carry promotion). cross-repo (SCE session 별도).",
+        "R311aw+: 추가 cross-compile target audit (R311ap carry).",
+        "Architectural carries unchanged: R267 Session<R,T> reparam (R311at+ cascade 진행 중), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (R311au), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter.",
+        "Honest claim: R311as는 1개 import alias 교체 — underlying type 변화 0, 행위 변화 0. 의미는 architectural unlock (Session<R,T> reparam prereq + MCU 프로파일 lock rebind 가능성); 을도적으로는 R311at+ 뗼에 의미 활성화."
+      ],
+      "publishable_decision_summary": "R311as Session<observer> migration — `use std::sync::{Arc, Mutex}` → `use std::sync::Arc; use crate::sync::Mutex`. §5.P Session-last gate close (alias resolves identically on AP).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs line 64: `use std::sync::{Arc, Mutex};` → `use std::sync::Arc;` + `use crate::sync::Mutex;` (R311y 알리아스 동일 underlying type `std::sync::Mutex<T>`; 호환성 100%). 새 import에 R311as 이유 설명 단락 주석 첨부 — R311ar trait shape lock + 미래 wz-runtime-lwip/embassy MCU 프로파일이 자체 sync lock으로 알리아스 re-bind 가능한 구조, 최종 `Session<R: Runtime, T: TimeSource>` reparam은 R311at+에서 `Arc<R::Mutex<...>>` mechanical 리프트 명시.",
+        "crates/wz-runtime-tokio/src/session.rs lines 38-50 ## Locking discipline doc-comment 교체: 기존 `std::sync::Mutex (not tokio::sync::Mutex)` 설명을 alias 관점으로 재프레이밍. AP 프로파일 해석 (`std::sync::Mutex`) 유지 명시 + MCU 프로파일 미래 바인딩 예시 (`critical_section::Mutex<T>` single-core, `embassy_sync::Mutex<RawMutex, T>` multi-priority embassy) 명시 + sync vs async lock semantic 이유 (loopback subscriber callback synchronous = zenoh-pico `_z_session_deliver_push_locally` mirror) 보존. 그 다음 R311as migration 반영 + R311at+ Session reparam 흐름 명시 마지막 몇 줄 추가.",
+        "다른 Mutex 사용 사이트 (Session struct field line 573, Session::new param line 609, Session::observer() return type line 635, test code 3545+) 은 변경 불필요 — bare `Mutex` resolution이 새 import (`crate::sync::Mutex`)로 자동 전환되고 underlying type 동일. External callers (ap-demo `wz::runtime_tokio::sync::Mutex` 채택 환경) 도 추가 변경 없음 — 둘 다 같은 underlying `std::sync::Mutex` resolve.",
+        "§5.P R311x \"Session-last gate\" close — R311x 조사에서 \"only Session<observer> + ap-demo binary remain on §5.P\" 중 Session<observer> 레근 머니셔너이션 완료. ap-demo 잔여 sites는 R311at 차례."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-runtime-tokio: PASS (alias resolution underlying type 동일, 회귀 0).",
+        "cargo test -p wz-runtime-tokio: PASS — 회귀 0 (`test result: ok` 전체 lib unit + integration tests, doc-tests 2 pass/1 ignore 기존 베이스라인 유지).",
+        "bash scripts/run-ci.sh --layer G: 21/21 PASS — trait 처리는 R311ar에서 lands, 본 라운드는 import 아이디어마트만이라 #![no_std] 빌드 영향 0.",
+        "bash scripts/run-ci.sh (fullstack): PASS — Layer A-E 전부 통과, 회귀 0.",
+        "validate_workspace: 이번 append 직후 entries 363→364, sections 255 유지, T1=0, RT 13/13, sync 기대."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311at (next): ap-demo 16 sites 소진 시작 — runner.rs `tokio::spawn` 5 sites / `tokio::time::*` 1 site / `tokio::sync::Mutex` 1 site / `tokio::task::JoinHandle` 1 import + main.rs 3 sites 총 11+ 사이트 대상. binary entry layer는 R 선택 주체라 trait 매개 대신 알리아스 채택이 적절 경우 (`wz::runtime_tokio::*`) 구분 필요.",
+        "R311au: gcc-arm install 후 wz-runtime-lwip + LwipRuntime impl lands. R311ar trait shape + R311as Session alias 머니셔너이션이 prereq — 본 라운드 통과로 LwipRuntime이 own Mutex/RwLock (`embassy_sync::Mutex` or `critical_section::Mutex`) 가져올 자리 mechanical 준비 완료. Layer G default lane 승격 주체가 됩.",
+        "R311av+: SCE-upstream codegen consistency carry (R311aq carry promotion). cross-repo (SCE session 별도).",
+        "R311aw+: 추가 cross-compile target audit (R311ap carry).",
+        "Architectural carries unchanged: R267 Session<R,T> reparam (R311at+ cascade 진행 중), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (R311au), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter.",
+        "Honest claim: R311as는 1개 import alias 교체 — underlying type 변화 0, 행위 변화 0. 의미는 architectural unlock (Session<R,T> reparam prereq + MCU 프로파일 lock rebind 가능성); 을도적으로는 R311at+ 뗼에 의미 활성화."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [

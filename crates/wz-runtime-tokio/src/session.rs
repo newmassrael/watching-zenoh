@@ -37,17 +37,30 @@
 //!
 //! ## Locking discipline
 //!
-//! The observer is wrapped in [`std::sync::Mutex`] (not
-//! [`tokio::sync::Mutex`]) because the loopback branch runs the
-//! subscriber callbacks synchronously — exactly the semantic of a
-//! locally-published Sample under zenoh-pico's
+//! The observer is wrapped in the per-runtime synchronous [`Mutex`]
+//! alias exposed by [`crate::sync`] (R311y option (a) per-runtime
+//! type alias; R311ar trait shape mechanical land). On the AP profile
+//! this resolves to [`std::sync::Mutex`]; the future MCU profiles
+//! (`wz-runtime-lwip` / `wz-runtime-embassy`) will rebind the alias
+//! to a profile-native synchronous lock with the same
+//! exclusive-access semantic (e.g. `critical_section::Mutex<T>` on
+//! single-core MCU, `embassy_sync::Mutex<RawMutex, T>` on
+//! multi-priority embassy executors). The choice of a *synchronous*
+//! lock (over [`tokio::sync::Mutex`] or its embassy async-mutex
+//! equivalents) reflects the loopback branch's contract: subscriber
+//! callbacks run synchronously — exactly the semantic of a locally-
+//! published Sample under zenoh-pico's
 //! `_z_session_deliver_push_locally`
 //! (`vendor/zenoh-pico/src/session/loopback.c` 70-100) which fires
 //! the subscription callbacks in-line under the session lock. A
 //! `tokio::sync::Mutex` would force `publish` to be `async`, which
 //! would in turn force callers to be `async`, propagating a
 //! coloring change for no measurable benefit — the lock window is
-//! the time it takes to walk the subscriber table once.
+//! the time it takes to walk the subscriber table once. R311as
+//! migration replaces the previous direct `std::sync::Mutex` import
+//! with the alias so the eventual `Session<R: Runtime, T:
+//! TimeSource>` reparam (R311at+) lifts to `Arc<R::Mutex<...>>`
+//! mechanically; the underlying type on the AP profile is unchanged.
 //!
 //! ## Wire / loopback symmetry today (R228) vs zenoh-pico
 //!
@@ -61,7 +74,17 @@
 //! intermediate `PublishRecord` that the wire side encodes and the
 //! loopback side projects to `Sample`).
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+// R311as — Session<observer> migrates from direct `std::sync::Mutex`
+// to the per-runtime synchronous lock alias exposed by
+// [`crate::sync::Mutex`] (R311y option (a) per-runtime type alias;
+// R311ar trait shape lock). The alias resolves to
+// `std::sync::Mutex<T>` on the AP profile (no behavioural change);
+// the future MCU profiles re-bind the same name to a profile-native
+// synchronous lock so the eventual `Session<R: Runtime, T:
+// TimeSource>` reparam (R311at+) lifts to `Arc<R::Mutex<...>>`
+// mechanically. Closes the §5.P "Session-last" gate raised at R311x.
+use crate::sync::Mutex;
 
 // R307 — `wz_codecs::query::Query` is referenced bare only by the
 // loopback fan inside `Session::query` (`Query::default()`); the
