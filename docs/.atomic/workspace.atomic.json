@@ -16885,6 +16885,64 @@
         "R311a4 cascade closure: catalog ↔ Cargo.toml ↔ build emit ↔ binary footprint is now 1:1 mechanically true for codec-init-body / codec-open-body. R311a recanon-pre + recanon + 1 + 2 + 3 + 4 sequence is the canonical pattern for the remaining 12 codec cascades."
       ]
     },
+    "Round 311aa": {
+      "decision_summary": "R311aa SCE pin bump ac701ec4a→55243e886 (33 commits). wz call site 영향 0 (763 tests pass, R311v baseline 유지). untracked 4파일 자동 흡수.",
+      "changes_bullets": [
+        "vendor/sce HEAD ac701ec4a → 55243e886 (detached, 33 commits forward).",
+        "33 commits (a) synth-invoke fix 6 — c13c08934 parser pure / 8d37b71aa dead workaround removal / 34b25d08e re-emit -o / c594493ee pattern-block .gitignore / c06126785 WASM inline test / 848f07d31 regen simplify.",
+        "33 commits (b) NL→IR C1 Enum/EventSchema 10 — 9e4f93dc3 Enum IR / 10b404cb6 Enum codegen / c46b1dbff EventSchema 18th re-land / 7b13a5566 payload codegen / 76d5c15a6 cross-doc width / ec9b14192 acceptance doc / 1f8c600b3 strict variant / 86e9a130d helpers / 9fda6da66 codegen opacity / 78dfeda97 fmt.",
+        "33 commits (c) Item 2-4 series 5 — 6acbf234e cross-kind typed binding / 2d0baebac graph reachability / acf4982c0 event-set exhaustiveness / 85669c8ec guard analysis / 0803c08ff physical-quantity.",
+        "33 commits (d) Atomic B land-revert-relaund 6 — 0b0545379 17th kind / 8ccf9b3c4 fmt / 47d615ab7 B-core / dd9a1d038 B-DL7 mesh + 4 reverts (86719113e 6503ab8e1 e0efccf1e 6210b65e2).",
+        "33 commits (e) infra/hygiene 6 — 4deed68bc fmt gate pre-commit / 4da0d9719 vocab generalize / a2597acab gitignore mesh test / 55243e886 clippy gate + 6 regressions clear.",
+        "4 untracked synth-invoke files (integration_resources/donedata_local_invoke ×2, sce-build/tests/fixtures/codegen_smoke ×1, tests/mesh ×1) 자동 흡수 — 새 pin .gitignore에 `**/*__sce_synth_invoke__*.scxml` pattern-block (c594493ee).",
+        "crates/* workspace source/Cargo.toml 변경 0 — pin bump only."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace (crates/) — 8.26s 깨끗.",
+        "scripts/run-ci.sh — 5 lanes (A validate-workspace / B verify-codegen / C1 cargo test / C2 cargo clippy -D warnings / D deploy yaml) + Layer E pass; Layer F opt-in skip. all required layers pass.",
+        "cargo test --workspace TOTAL passed: 763 — R311v baseline 763 동일. wz call site 영향 0 확증.",
+        "validate_workspace — docs=13/13, T1=0, RT 13/13, T3 warn=862 / T4 info=429 변동 0, GENERATED.md=sync.",
+        "atomic ledger: entries 342 → 343 (R311aa), sections 255 변동 0.",
+        "git -C vendor/sce status 깨끗, HEAD 분리 55243e886."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311ab — §5.P Session-last reparam 본격화. R311x 인벤토리 (production leaf 0, Session<observer> + ap-demo 16 sites 잔존) 기준으로 Session<R,T> 2-param reparam cascade. R311w/y/x 결정 lock (per-runtime type alias) 그대로 적용.",
+        "R311aa는 NL→IR C1 Enum kind / EventSchema 18th 토대를 SCE forge 레벨에 land 시켰으나, wz codec/spec에서 이 kind들을 도입한 곳 아직 0. 향후 codec 라운드에서 NetworkMessage variant id Enum kind 인코딩 / payload schema EventSchema 타입화 가능; 북극성 composable framework 표현력 강화 토대.",
+        "33 commits 중 EventSchema 17th + Atomic B (per-SCXML imports + DL-7 mesh) reverts/replays — SCE 내부 land-revert-relaund 사이클 흡수. wz 측 fork/우회 시도 없음 ([[feedback_sce_codegen_issue_stop_first]] 원칙 자연 적용).",
+        "R311ab 절차 — (a) ap-demo 16 sites 인벤토리 재측정. (b) Session<R> → Session<R,T> cascade의 leaf 첫 site 식별. (c) 2-3 site씩 묶어 incremental land (R311t/s/r Querier/Reply/Queryable cascade 동일 패턴)."
+      ],
+      "publishable_decision_summary": "R311aa SCE pin bump ac701ec4a→55243e886 (33 commits). wz call site 영향 0 (763 tests pass, R311v baseline 유지). untracked 4파일 자동 흡수.",
+      "publishable_changes_bullets": [
+        "vendor/sce HEAD ac701ec4a → 55243e886 (detached, 33 commits forward).",
+        "33 commits (a) synth-invoke fix 6 — c13c08934 parser pure / 8d37b71aa dead workaround removal / 34b25d08e re-emit -o / c594493ee pattern-block .gitignore / c06126785 WASM inline test / 848f07d31 regen simplify.",
+        "33 commits (b) NL→IR C1 Enum/EventSchema 10 — 9e4f93dc3 Enum IR / 10b404cb6 Enum codegen / c46b1dbff EventSchema 18th re-land / 7b13a5566 payload codegen / 76d5c15a6 cross-doc width / ec9b14192 acceptance doc / 1f8c600b3 strict variant / 86e9a130d helpers / 9fda6da66 codegen opacity / 78dfeda97 fmt.",
+        "33 commits (c) Item 2-4 series 5 — 6acbf234e cross-kind typed binding / 2d0baebac graph reachability / acf4982c0 event-set exhaustiveness / 85669c8ec guard analysis / 0803c08ff physical-quantity.",
+        "33 commits (d) Atomic B land-revert-relaund 6 — 0b0545379 17th kind / 8ccf9b3c4 fmt / 47d615ab7 B-core / dd9a1d038 B-DL7 mesh + 4 reverts (86719113e 6503ab8e1 e0efccf1e 6210b65e2).",
+        "33 commits (e) infra/hygiene 6 — 4deed68bc fmt gate pre-commit / 4da0d9719 vocab generalize / a2597acab gitignore mesh test / 55243e886 clippy gate + 6 regressions clear.",
+        "4 untracked synth-invoke files (integration_resources/donedata_local_invoke ×2, sce-build/tests/fixtures/codegen_smoke ×1, tests/mesh ×1) 자동 흡수 — 새 pin .gitignore에 `**/*__sce_synth_invoke__*.scxml` pattern-block (c594493ee).",
+        "crates/* workspace source/Cargo.toml 변경 0 — pin bump only."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace (crates/) — 8.26s 깨끗.",
+        "scripts/run-ci.sh — 5 lanes (A validate-workspace / B verify-codegen / C1 cargo test / C2 cargo clippy -D warnings / D deploy yaml) + Layer E pass; Layer F opt-in skip. all required layers pass.",
+        "cargo test --workspace TOTAL passed: 763 — R311v baseline 763 동일. wz call site 영향 0 확증.",
+        "validate_workspace — docs=13/13, T1=0, RT 13/13, T3 warn=862 / T4 info=429 변동 0, GENERATED.md=sync.",
+        "atomic ledger: entries 342 → 343 (R311aa), sections 255 변동 0.",
+        "git -C vendor/sce status 깨끗, HEAD 분리 55243e886."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ab — §5.P Session-last reparam 본격화. R311x 인벤토리 (production leaf 0, Session<observer> + ap-demo 16 sites 잔존) 기준으로 Session<R,T> 2-param reparam cascade. R311w/y/x 결정 lock (per-runtime type alias) 그대로 적용.",
+        "R311aa는 NL→IR C1 Enum kind / EventSchema 18th 토대를 SCE forge 레벨에 land 시켰으나, wz codec/spec에서 이 kind들을 도입한 곳 아직 0. 향후 codec 라운드에서 NetworkMessage variant id Enum kind 인코딩 / payload schema EventSchema 타입화 가능; 북극성 composable framework 표현력 강화 토대.",
+        "33 commits 중 EventSchema 17th + Atomic B (per-SCXML imports + DL-7 mesh) reverts/replays — SCE 내부 land-revert-relaund 사이클 흡수. wz 측 fork/우회 시도 없음 ([[feedback_sce_codegen_issue_stop_first]] 원칙 자연 적용).",
+        "R311ab 절차 — (a) ap-demo 16 sites 인벤토리 재측정. (b) Session<R> → Session<R,T> cascade의 leaf 첫 site 식별. (c) 2-3 site씩 묶어 incremental land (R311t/s/r Querier/Reply/Queryable cascade 동일 패턴)."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
