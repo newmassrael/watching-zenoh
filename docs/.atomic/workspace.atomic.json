@@ -2152,7 +2152,9 @@
         "profile-mcu may not reach all 6 backends; lwip-only initial scope per Phase W.",
         "PublishOptions metadata propagation (R228 carry) orthogonal — separate retire round.",
         "R311w Mutex/RwLock lock: per-runtime type alias (a); GAT (b) + AP/MCU fork (c) rejected.",
-        "R311w Session reparam shape: Session<R: Runtime, T: TimeSource>; Mutex<T> alias avoids extra param."
+        "R311w Session reparam shape: Session<R: Runtime, T: TimeSource>; Mutex<T> alias avoids extra param.",
+        "R311x inventory delta: wz-runtime-tokio production leaf=0 (R230 baseline 71→0 via R252-R267).",
+        "R311x ap-demo 27→16, it 11→0, ts 2→0; only Session<observer> + ap-demo binary remain on §5.P."
       ],
       "alternatives_rejected": [
         {
@@ -18108,6 +18110,42 @@
         "Session<R, T> generic-param landing stays Session-last per §5.P 'leaf first, Session last'.",
         "wz-runtime-embassy crate creation deferred to Phase W; alias decision pre-commits eventual shape.",
         "R311v carries: ReplyEmitter PhantomData, Reply/Push attachment, SourceInfo/Payload ext, R311n."
+      ]
+    },
+    "Round 311x": {
+      "decision_summary": "R311x §5.P inventory re-measurement — wz-runtime-tokio production leaf reduced 71→0 via R252-R267; only Session<observer> + ap-demo binary remain in §5.P scope; Session-last gate now active.",
+      "changes_bullets": [
+        "§5.P caveats +2: R311x inventory delta (production leaf=0); end-state of R252-R267 retire wave.",
+        "Inventory snapshot: wz-runtime-tokio prod=0, ap-demo=16, integration_tests=0, ts=0 (R230 baseline 111).",
+        "Measurement-only round — no Rust code change; R230 baseline 111 sites refreshed vs current tree."
+      ],
+      "verification_bullets": [
+        "validate_workspace: T1=0, RT 13/13, sync, entries 339→340; R311v cargo gates (763 pass) carry."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311y candidate: Session reparam first step — default-typed generic Session<R, T> params.",
+        "ap-demo 16 sites + Session observer Mutex are the only §5.P scope remaining; Session-last gate up.",
+        "R311v carries: ReplyEmitter PhantomData (low pri), Reply/Push attach parity, ext mirror, R311n."
+      ],
+      "publishable_decision_summary": "R311x §5.P inventory re-measurement — wz-runtime-tokio production leaf reduced 71→0 via R252-R267; only Session<observer> + ap-demo binary remain in §5.P scope; Session-last gate now active.",
+      "publishable_changes_bullets": [
+        "§5.P caveats +2: R311x inventory delta (production leaf=0); end-state of R252-R267 retire wave.",
+        "Inventory snapshot: wz-runtime-tokio prod=0, ap-demo=16, integration_tests=0, ts=0 (R230 baseline 111).",
+        "Measurement-only round — no Rust code change; R230 baseline 111 sites refreshed vs current tree."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: T1=0, RT 13/13, sync, entries 339→340; R311v cargo gates (763 pass) carry."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311y candidate: Session reparam first step — default-typed generic Session<R, T> params.",
+        "ap-demo 16 sites + Session observer Mutex are the only §5.P scope remaining; Session-last gate up.",
+        "R311v carries: ReplyEmitter PhantomData (low pri), Reply/Push attach parity, ext mirror, R311n."
       ]
     },
     "Round 32": {
