@@ -17057,6 +17057,62 @@
         "R311aa 의 NL→IR C1 Enum kind / EventSchema 18th 가 SCE forge 측에 land이라 활용처는 아직 0 — codec 라운드 (예: NetworkMessage variant id Enum kind, payload schema EventSchema)에서 적용. 쓴텍스트 표현력 강화 토대이자 carry."
       ]
     },
+    "Round 311ad": {
+      "decision_summary": "R311ad ap-demo teardown.rs 5 sites tokio::time::timeout → TimeSource::timeout cascade. 5 typestate에 TokioTime clock 필드 추가; R311ac trait method 첫 실사용.",
+      "changes_bullets": [
+        "wz-ap-demo/src/teardown.rs imports: `use std::time::Duration` 제거 (더 이상 필요 없음); `use wz::runtime_core::TimeSource` + `use wz::runtime_tokio::runtime_impl::TokioTime` 추가.",
+        "5 typestate (TeardownInitial, TasksJoined, TokenDropped, CloseEmitted, ActionsDropped) 모두에 `clock: TokioTime` 필드 추가. 각 typestate transition (.abort_sweep_join_tasks / .drop_liveliness_token / .emit_close_if_cancelled / .drop_actions)에서 다음 state로 clock forward.",
+        "tokio::time::timeout 5 사이트 모두 `self.clock.timeout(ms, fut).await` 형태로 전환 — abort_sweep_join_tasks 의 publisher / query / declare handle 3 timeouts (각 200ms), drop_liveliness_token 의 token_rx timeout (200ms), drain_writer 의 writer_handle timeout (50ms). 타이멃 예산 값 동일, tokio::time::timeout 직접 호출 0.",
+        "wz-ap-demo/src/runner.rs L732 TeardownInitial 구조체 생성자에 `clock: session_clock` 필드 추가 — 기존 R263 session_clock (single TokioTime instance 이미 존재) 그대로 forward. session_clock은 declare_task / query_task / sweep_task 에서 이미 참조하는 공유 clock; teardown이 동일 인스턴스를 보면 monotonic epoch 일관성 유지.",
+        "doc-comment에 R311ad 명시 — TeardownInitial.clock 필드의 doc은 'Concrete TokioTime here because the ap-demo binary is AP-only; the Session<T: TimeSource> reparam round will generalise this to T: TimeSource' 명시."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace (crates/) 깨끗.",
+        "cargo clippy --workspace --all-targets -- -D warnings 깨끗 (Layer C2 pass).",
+        "scripts/run-ci.sh 재시도 시 전 Layer pass (0/A/A2/B/C0/C1/C1b/C2/D/E). all required layers pass.",
+        "cargo test --workspace TOTAL passed: 765 — R311ac baseline 동일. wz-ap-demo + wz-integration-tests 동수 완전.",
+        "validate_workspace — docs=13/13, T1=0, RT 13/13, T3 warn=862 / T4 info=429 변동 0, GENERATED.md=sync.",
+        "atomic ledger: entries 345 → 346 (R311ad), sections 255 변동 0.",
+        "ap-demo 의 tokio::time::timeout 호출 수 — grep 제로 (5곳 모두 제거). 단 runner.rs / link_driver.rs / tasks.rs 의 tokio::spawn / tokio::sync 는 §5.P 범위는 R311ae+ cascade."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "**Layer E first-run flake 알림** — R311ad cargo fmt rebuild 직후 첫 run-ci.sh 에서 Layer E (wz_publisher_round_trip_against_zenoh_pico_z_sub) FAIL 1회, 재실행 PASS. [[feedback_no_flaky_ever]] 명시: retry pass = 진단 면제 X. R311ae 명시적 작업으로 root cause mechanical 제거 필요. 가설: cargo fmt 후 wz-ap-demo binary rebuild 직후 첫 실행은 page cache cold + .so loading + tokio scheduler cold 누적. 해결책 후보: scripts/run-ci.sh 가 Layer E 전에 wz-ap-demo warm-up 1회 생성 수행 또는 e2e test의 timeout 느슨.",
+        "R311ae — ap-demo runner.rs 의 남은 §5.P sites cascade. tokio::spawn 5 (146 writer_task / 430 publisher_task / 441 query_task / 455 declare_task / 665 sweep_task), tokio::task::JoinHandle 2 (runner.rs 45 / teardown.rs 38) — 모두 Runtime trait method / GAT 적용 대상. 하지만 R: Runtime generic 도입이 필요 — Session¬ 는 아직 R:Runtime 안 받고 SessionLinkActions도 R 안 받음. 몇몇 site는 wz-ap-demo 내부에서 R: Runtime + T: TimeSource pair를 명시적 generic param으로 처리 가능 — ap-demo binary main에서 TokioRuntime + TokioTime 단일 instance 주입.",
+        "Session reparam 다른 경로: 현재 소감된 sites 는 모두 논리적 leaf (teardown). 다음은 ap-demo 내부의 spawn cluster (writer/publisher/query/declare/sweep task spawn 동시 처리). 이 sites는 wz upper layer가 제공하지 않는 binary-side concerns; ap-demo 자체가 R: Runtime generic을 쓰는 구조로 재구성 가능.",
+        "TimeSource::timeout 계약 시점 (R311ac 단계)에서 API가 owning future만 지원. ap-demo teardown의 5 sites 모두 owned future (JoinHandle, oneshot::Receiver) 이므로 R311ad에서 API mismatch 없이 cascade 완료 — lifetime-borrowed timeout은 여전히 future round carry."
+      ],
+      "publishable_decision_summary": "R311ad ap-demo teardown.rs 5 sites tokio::time::timeout → TimeSource::timeout cascade. 5 typestate에 TokioTime clock 필드 추가; R311ac trait method 첫 실사용.",
+      "publishable_changes_bullets": [
+        "wz-ap-demo/src/teardown.rs imports: `use std::time::Duration` 제거 (더 이상 필요 없음); `use wz::runtime_core::TimeSource` + `use wz::runtime_tokio::runtime_impl::TokioTime` 추가.",
+        "5 typestate (TeardownInitial, TasksJoined, TokenDropped, CloseEmitted, ActionsDropped) 모두에 `clock: TokioTime` 필드 추가. 각 typestate transition (.abort_sweep_join_tasks / .drop_liveliness_token / .emit_close_if_cancelled / .drop_actions)에서 다음 state로 clock forward.",
+        "tokio::time::timeout 5 사이트 모두 `self.clock.timeout(ms, fut).await` 형태로 전환 — abort_sweep_join_tasks 의 publisher / query / declare handle 3 timeouts (각 200ms), drop_liveliness_token 의 token_rx timeout (200ms), drain_writer 의 writer_handle timeout (50ms). 타이멃 예산 값 동일, tokio::time::timeout 직접 호출 0.",
+        "wz-ap-demo/src/runner.rs L732 TeardownInitial 구조체 생성자에 `clock: session_clock` 필드 추가 — 기존 R263 session_clock (single TokioTime instance 이미 존재) 그대로 forward. session_clock은 declare_task / query_task / sweep_task 에서 이미 참조하는 공유 clock; teardown이 동일 인스턴스를 보면 monotonic epoch 일관성 유지.",
+        "doc-comment에 R311ad 명시 — TeardownInitial.clock 필드의 doc은 'Concrete TokioTime here because the ap-demo binary is AP-only; the Session<T: TimeSource> reparam round will generalise this to T: TimeSource' 명시."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace (crates/) 깨끗.",
+        "cargo clippy --workspace --all-targets -- -D warnings 깨끗 (Layer C2 pass).",
+        "scripts/run-ci.sh 재시도 시 전 Layer pass (0/A/A2/B/C0/C1/C1b/C2/D/E). all required layers pass.",
+        "cargo test --workspace TOTAL passed: 765 — R311ac baseline 동일. wz-ap-demo + wz-integration-tests 동수 완전.",
+        "validate_workspace — docs=13/13, T1=0, RT 13/13, T3 warn=862 / T4 info=429 변동 0, GENERATED.md=sync.",
+        "atomic ledger: entries 345 → 346 (R311ad), sections 255 변동 0.",
+        "ap-demo 의 tokio::time::timeout 호출 수 — grep 제로 (5곳 모두 제거). 단 runner.rs / link_driver.rs / tasks.rs 의 tokio::spawn / tokio::sync 는 §5.P 범위는 R311ae+ cascade."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "**Layer E first-run flake 알림** — R311ad cargo fmt rebuild 직후 첫 run-ci.sh 에서 Layer E (wz_publisher_round_trip_against_zenoh_pico_z_sub) FAIL 1회, 재실행 PASS. [[feedback_no_flaky_ever]] 명시: retry pass = 진단 면제 X. R311ae 명시적 작업으로 root cause mechanical 제거 필요. 가설: cargo fmt 후 wz-ap-demo binary rebuild 직후 첫 실행은 page cache cold + .so loading + tokio scheduler cold 누적. 해결책 후보: scripts/run-ci.sh 가 Layer E 전에 wz-ap-demo warm-up 1회 생성 수행 또는 e2e test의 timeout 느슨.",
+        "R311ae — ap-demo runner.rs 의 남은 §5.P sites cascade. tokio::spawn 5 (146 writer_task / 430 publisher_task / 441 query_task / 455 declare_task / 665 sweep_task), tokio::task::JoinHandle 2 (runner.rs 45 / teardown.rs 38) — 모두 Runtime trait method / GAT 적용 대상. 하지만 R: Runtime generic 도입이 필요 — Session¬ 는 아직 R:Runtime 안 받고 SessionLinkActions도 R 안 받음. 몇몇 site는 wz-ap-demo 내부에서 R: Runtime + T: TimeSource pair를 명시적 generic param으로 처리 가능 — ap-demo binary main에서 TokioRuntime + TokioTime 단일 instance 주입.",
+        "Session reparam 다른 경로: 현재 소감된 sites 는 모두 논리적 leaf (teardown). 다음은 ap-demo 내부의 spawn cluster (writer/publisher/query/declare/sweep task spawn 동시 처리). 이 sites는 wz upper layer가 제공하지 않는 binary-side concerns; ap-demo 자체가 R: Runtime generic을 쓰는 구조로 재구성 가능.",
+        "TimeSource::timeout 계약 시점 (R311ac 단계)에서 API가 owning future만 지원. ap-demo teardown의 5 sites 모두 owned future (JoinHandle, oneshot::Receiver) 이므로 R311ad에서 API mismatch 없이 cascade 완료 — lifetime-borrowed timeout은 여전히 future round carry."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [

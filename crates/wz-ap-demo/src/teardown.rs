@@ -32,10 +32,11 @@
 // doc-comments below, anchored against R277 + R278 + R284.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use wz::runtime_core::TimeSource;
+use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::session::LivelinessToken;
 use wz::runtime_tokio::session_glue::{CloseReason, SessionLinkActions};
 
@@ -53,6 +54,14 @@ pub(crate) struct TeardownInitial {
     pub actions: Arc<SessionLinkActions>,
     pub writer_handle: JoinHandle<()>,
     pub was_cancelled: bool,
+    /// R311ad — clock used by every timeout-bounded step in the
+    /// chain. Passing it in (instead of letting each step construct
+    /// `TokioTime::new()` afresh) keeps the typestate self-contained
+    /// and lets a future MCU profile bind the same field to a non-
+    /// tokio TimeSource. Concrete `TokioTime` here because the
+    /// ap-demo binary is AP-only; the Session<T: TimeSource> reparam
+    /// round will generalise this to `T: TimeSource`.
+    pub clock: TokioTime,
 }
 
 impl TeardownInitial {
@@ -73,19 +82,20 @@ impl TeardownInitial {
     pub(crate) async fn abort_sweep_join_tasks(self) -> TasksJoined {
         self.sweep_task.abort();
         if let Some(h) = self.publisher_handle {
-            let _ = tokio::time::timeout(Duration::from_millis(200), h).await;
+            let _ = self.clock.timeout(200, h).await;
         }
         if let Some(h) = self.query_handle {
-            let _ = tokio::time::timeout(Duration::from_millis(200), h).await;
+            let _ = self.clock.timeout(200, h).await;
         }
         if let Some(h) = self.declare_handle {
-            let _ = tokio::time::timeout(Duration::from_millis(200), h).await;
+            let _ = self.clock.timeout(200, h).await;
         }
         TasksJoined {
             token_rx: self.token_rx,
             actions: self.actions,
             writer_handle: self.writer_handle,
             was_cancelled: self.was_cancelled,
+            clock: self.clock,
         }
     }
 }
@@ -105,12 +115,13 @@ pub(crate) struct TasksJoined {
     actions: Arc<SessionLinkActions>,
     writer_handle: JoinHandle<()>,
     was_cancelled: bool,
+    clock: TokioTime,
 }
 
 impl TasksJoined {
     pub(crate) async fn drop_liveliness_token(self) -> TokenDropped {
         if let Some(rx) = self.token_rx {
-            let token = match tokio::time::timeout(Duration::from_millis(200), rx).await {
+            let token = match self.clock.timeout(200, rx).await {
                 Ok(Ok(token)) => Some(token),
                 _ => None,
             };
@@ -120,6 +131,7 @@ impl TasksJoined {
             actions: self.actions,
             writer_handle: self.writer_handle,
             was_cancelled: self.was_cancelled,
+            clock: self.clock,
         }
     }
 }
@@ -135,6 +147,7 @@ pub(crate) struct TokenDropped {
     actions: Arc<SessionLinkActions>,
     writer_handle: JoinHandle<()>,
     was_cancelled: bool,
+    clock: TokioTime,
 }
 
 impl TokenDropped {
@@ -153,6 +166,7 @@ impl TokenDropped {
         CloseEmitted {
             actions: self.actions,
             writer_handle: self.writer_handle,
+            clock: self.clock,
         }
     }
 }
@@ -168,6 +182,7 @@ impl TokenDropped {
 pub(crate) struct CloseEmitted {
     actions: Arc<SessionLinkActions>,
     writer_handle: JoinHandle<()>,
+    clock: TokioTime,
 }
 
 impl CloseEmitted {
@@ -175,6 +190,7 @@ impl CloseEmitted {
         drop(self.actions);
         ActionsDropped {
             writer_handle: self.writer_handle,
+            clock: self.clock,
         }
     }
 }
@@ -188,11 +204,12 @@ impl CloseEmitted {
 /// 50ms is generous on every link we test.
 pub(crate) struct ActionsDropped {
     writer_handle: JoinHandle<()>,
+    clock: TokioTime,
 }
 
 impl ActionsDropped {
     pub(crate) async fn drain_writer(self) -> WriterDrained {
-        let _ = tokio::time::timeout(Duration::from_millis(50), self.writer_handle).await;
+        let _ = self.clock.timeout(50, self.writer_handle).await;
         WriterDrained
     }
 }
