@@ -17363,6 +17363,56 @@
         "Phase W 후반 (20-50R, user permission 해제 후): wz-runtime-lwip crate 재도입 + lwIP C source 통합 + cross-compile build + scouting/session FSM link 호출 path 통합 + real driver code."
       ]
     },
+    "Round 311aj": {
+      "decision_summary": "R311aj carry hygiene audit — R310.5c get_matching_status 4 sites (ledger R310.5c + session.rs 2198/2344/2467/2569) 이미 완료, R311af carry stale; Phase W 다음 mechanical step (R311ak wz-runtime-lwip) gcc-arm install user-permission gate 재확인.",
+      "changes_bullets": [
+        "Audit round only — 코드 변경 0; stale carry retraction 명시 목적.",
+        "R310.5c 완료 재확인: docs/GENERATED.md:13097 'Round 310.5c restores Publisher/Querier/aliased get_matching_status signatures to always-visible; body branches on declare-* feature ... (zenoh-cpp parity)' entry 존재, atomic store 안 R310.5c reference 35회; session.rs 의 4 sites (Querier::get_matching_status §2198 / QuerierAliased::get_matching_status §2344 / Publisher::get_matching_status §2467 / PublisherAliased::get_matching_status §2569) 모두 R310.5c rustdoc + body-only cfg branch + 'matching: false' 기본값 패턴 적용 확인.",
+        "R311af carry forward 의 'R310.5c get_matching_status conservative-false doc-surface (0.5R)' 항목은 stale carry — 이미 완료된 작업이 carry list 에 잔존. frozen-ledger semantics 준수: R311af entry body 는 수정 불가, 이 R311aj entry 가 retraction 구역.",
+        "Phase W mechanical next step 다시 lock: R311ak wz-runtime-lwip crate real impl 재도입 필요, R63 lesson 'NOP-stub skeleton 금지' 때문에 lwIP C source build 섬언 시점 prereq=arm-none-eabi-gcc 시스템 install (sudo apt install gcc-arm-none-eabi, user permission required). 자동 진행 이 지점에서 멈춤.",
+        "Pivot 후보 재정리 (R311af stale-aware): (a) R311m pubsub.rs consumer cascade — R311h carry deferred, 그러나 architectural cascade (~30+ .subscribers refs in session.rs + observer.rs subscribers field + Subscriber RAII + Drop), 단일 라운드 불가 5-10R 추정; (b) R303++ atomic field population (39 outline-only sub-sections, catalog 문서화 closure, 다R); (c) R299 carry #2/#3 wz↔pico canon divergence (a trace / b shim / c upstream patch 결정 라운드); (d) keyexpr_canon proptest filter hole (1R analysis); (e) R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis)."
+      ],
+      "verification_bullets": [
+        "docs/GENERATED.md grep '^### Round 310\\.5c': 1 hit (line 13097) — ledger entry 존재 확인.",
+        "atomic store grep 'R310.5c\\|Round 310.5c': 35 references — cross-cite 텔팅 풍부.",
+        "session.rs Read §2160-2480: 4 get_matching_status method 모두 'pub fn get_matching_status' 시그니처 노출 + body 안 #[cfg(feature = \"declare-*\")] branch + #[cfg(not(feature))] let matching = false 패턴 적용; R310.5c rustdoc cite 존재.",
+        "validate_workspace baseline R311ai 유지: T1=0 (ledger=1 R193 §66 known-stale), RT 13/13, sync; entries 351 → 352, sections 255 변동 0 (예상)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape"
+      ],
+      "carry_forward_bullets": [
+        "R311ak Phase W mechanical work prereq: arm-none-eabi-gcc 시스템 install (sudo apt install gcc-arm-none-eabi), user permission required. install 후 wz-runtime-lwip crate 재도입 scaffolding (Cargo.toml + lib.rs no_std + #[no_main] target thumbv7em-none-eabihf; R63 교훈 준수 — lwIP source 통합 시점에 real impl, NOP-stub skeleton 회피).",
+        "Pivot 후보 (user permission 대기 중 자동 진행 가능): (a) R311m pubsub.rs consumer cascade first sub-step (Subscriber struct + Drop + impl cfg-gate, declare-subscriber feature; session.rs publish* 는 후속 라운드), (b) R303++ atomic field population first batch (§5.1 transport 또는 §5.2 locator atomic field intent/inputs/outputs), (c) keyexpr_canon proptest filter hole analysis (1R), (d) R304 wz-ap-demo stderr non-UTF-8 byte source analysis (1R).",
+        "Stale carry retraction 명시: R311af carry forward 의 'R310.5c get_matching_status conservative-false doc-surface (0.5R)' 항목 회수 — R310.5c 이미 완료 (ledger R310.5c + session.rs 4 sites); 이후 carry forward 자동 참조 시 본 R311aj retraction 우선.",
+        "Sequential 종속 없음 — R311aj 는 audit/closure round, R311ak+ pivot 가 그 결과 없이도 가능."
+      ],
+      "publishable_decision_summary": "R311aj carry hygiene audit — R310.5c get_matching_status 4 sites (ledger R310.5c + session.rs 2198/2344/2467/2569) 이미 완료, R311af carry stale; Phase W 다음 mechanical step (R311ak wz-runtime-lwip) gcc-arm install user-permission gate 재확인.",
+      "publishable_changes_bullets": [
+        "Audit round only — 코드 변경 0; stale carry retraction 명시 목적.",
+        "R310.5c 완료 재확인: docs/GENERATED.md:13097 'Round 310.5c restores Publisher/Querier/aliased get_matching_status signatures to always-visible; body branches on declare-* feature ... (zenoh-cpp parity)' entry 존재, atomic store 안 R310.5c reference 35회; session.rs 의 4 sites (Querier::get_matching_status §2198 / QuerierAliased::get_matching_status §2344 / Publisher::get_matching_status §2467 / PublisherAliased::get_matching_status §2569) 모두 R310.5c rustdoc + body-only cfg branch + 'matching: false' 기본값 패턴 적용 확인.",
+        "R311af carry forward 의 'R310.5c get_matching_status conservative-false doc-surface (0.5R)' 항목은 stale carry — 이미 완료된 작업이 carry list 에 잔존. frozen-ledger semantics 준수: R311af entry body 는 수정 불가, 이 R311aj entry 가 retraction 구역.",
+        "Phase W mechanical next step 다시 lock: R311ak wz-runtime-lwip crate real impl 재도입 필요, R63 lesson 'NOP-stub skeleton 금지' 때문에 lwIP C source build 섬언 시점 prereq=arm-none-eabi-gcc 시스템 install (sudo apt install gcc-arm-none-eabi, user permission required). 자동 진행 이 지점에서 멈춤.",
+        "Pivot 후보 재정리 (R311af stale-aware): (a) R311m pubsub.rs consumer cascade — R311h carry deferred, 그러나 architectural cascade (~30+ .subscribers refs in session.rs + observer.rs subscribers field + Subscriber RAII + Drop), 단일 라운드 불가 5-10R 추정; (b) R303++ atomic field population (39 outline-only sub-sections, catalog 문서화 closure, 다R); (c) R299 carry #2/#3 wz↔pico canon divergence (a trace / b shim / c upstream patch 결정 라운드); (d) keyexpr_canon proptest filter hole (1R analysis); (e) R304 wz-ap-demo stderr non-UTF-8 byte source (1R analysis)."
+      ],
+      "publishable_verification_bullets": [
+        "docs/GENERATED.md grep '^### Round 310\\.5c': 1 hit (line 13097) — ledger entry 존재 확인.",
+        "atomic store grep 'R310.5c\\|Round 310.5c': 35 references — cross-cite 텔팅 풍부.",
+        "session.rs Read §2160-2480: 4 get_matching_status method 모두 'pub fn get_matching_status' 시그니처 노출 + body 안 #[cfg(feature = \"declare-*\")] branch + #[cfg(not(feature))] let matching = false 패턴 적용; R310.5c rustdoc cite 존재.",
+        "validate_workspace baseline R311ai 유지: T1=0 (ledger=1 R193 §66 known-stale), RT 13/13, sync; entries 351 → 352, sections 255 변동 0 (예상)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ak Phase W mechanical work prereq: arm-none-eabi-gcc 시스템 install (sudo apt install gcc-arm-none-eabi), user permission required. install 후 wz-runtime-lwip crate 재도입 scaffolding (Cargo.toml + lib.rs no_std + #[no_main] target thumbv7em-none-eabihf; R63 교훈 준수 — lwIP source 통합 시점에 real impl, NOP-stub skeleton 회피).",
+        "Pivot 후보 (user permission 대기 중 자동 진행 가능): (a) R311m pubsub.rs consumer cascade first sub-step (Subscriber struct + Drop + impl cfg-gate, declare-subscriber feature; session.rs publish* 는 후속 라운드), (b) R303++ atomic field population first batch (§5.1 transport 또는 §5.2 locator atomic field intent/inputs/outputs), (c) keyexpr_canon proptest filter hole analysis (1R), (d) R304 wz-ap-demo stderr non-UTF-8 byte source analysis (1R).",
+        "Stale carry retraction 명시: R311af carry forward 의 'R310.5c get_matching_status conservative-false doc-surface (0.5R)' 항목 회수 — R310.5c 이미 완료 (ledger R310.5c + session.rs 4 sites); 이후 carry forward 자동 참조 시 본 R311aj retraction 우선.",
+        "Sequential 종속 없음 — R311aj 는 audit/closure round, R311ak+ pivot 가 그 결과 없이도 가능."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
