@@ -18148,6 +18148,52 @@
         "R311v carries: ReplyEmitter PhantomData (low pri), Reply/Push attach parity, ext mirror, R311n."
       ]
     },
+    "Round 311y": {
+      "decision_summary": "R311y wz-runtime-tokio::sync alias module — `pub type Mutex<T> = std::sync::Mutex<T>` + `pub type RwLock<T> = std::sync::RwLock<T>` lands per R311w option (a); call sites unchanged.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/sync.rs new: Mutex<T> + RwLock<T> aliases to std::sync per R311w.",
+        "crates/wz-runtime-tokio/src/lib.rs adds `pub mod sync;` with module doc citing R311y + R311z+ map.",
+        "No call site changes — alias surface lands for progressive migration; existing std::sync direct."
+      ],
+      "verification_bullets": [
+        "cargo check default + --no-default-features: clean.",
+        "cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings: clean.",
+        "cargo fmt -p wz-runtime-tokio --check: clean.",
+        "cargo test --workspace: 763 passed (R311v baseline unchanged — alias-only change)."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311z first migration: pubsub.rs test capture mutexes or ap-demo 16 sites (smallest scope first).",
+        "Session observer migration is Session-last; defer until ap-demo + tests retire complete.",
+        "wz-runtime-embassy crate creation deferred to Phase W; alias shape pre-committed by R311w.",
+        "R311v carries unchanged: ReplyEmitter PhantomData, Reply/Push attach, ext mirror, R311n."
+      ],
+      "publishable_decision_summary": "R311y wz-runtime-tokio::sync alias module — `pub type Mutex<T> = std::sync::Mutex<T>` + `pub type RwLock<T> = std::sync::RwLock<T>` lands per R311w option (a); call sites unchanged.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/sync.rs new: Mutex<T> + RwLock<T> aliases to std::sync per R311w.",
+        "crates/wz-runtime-tokio/src/lib.rs adds `pub mod sync;` with module doc citing R311y + R311z+ map.",
+        "No call site changes — alias surface lands for progressive migration; existing std::sync direct."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check default + --no-default-features: clean.",
+        "cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings: clean.",
+        "cargo fmt -p wz-runtime-tokio --check: clean.",
+        "cargo test --workspace: 763 passed (R311v baseline unchanged — alias-only change)."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311z first migration: pubsub.rs test capture mutexes or ap-demo 16 sites (smallest scope first).",
+        "Session observer migration is Session-last; defer until ap-demo + tests retire complete.",
+        "wz-runtime-embassy crate creation deferred to Phase W; alias shape pre-committed by R311w.",
+        "R311v carries unchanged: ReplyEmitter PhantomData, Reply/Push attach, ext mirror, R311n."
+      ]
+    },
     "Round 32": {
       "decision_summary": "B5 codec track continues — sources/codecs/frame.scxml + fragment.scxml authored. First VLE + tail primitive composition (B1-α + tail) plus first inline test-vector land (B5-θ 4-case set). Both share identical body shape per zenoh-pico (sn:VLE + payload:tail, no extensions); differ only in enclosing MID (0x05 Frame / 0x06 Fragment).",
       "changes_bullets": [
