@@ -17413,6 +17413,60 @@
         "Sequential 종속 없음 — R311aj 는 audit/closure round, R311ak+ pivot 가 그 결과 없이도 가능."
       ]
     },
+    "Round 311ak-pre": {
+      "decision_summary": "R311ak-pre carry planning — Phase W mechanical first gate Layer G (wz-runtime-core thumbv7em-none-eabihf cross-compile lib build) 다음 세션 load 첫 라운드 자동 실행 lock; R311ae→R311af 패턴 그대로 부채 즉시 상환.",
+      "changes_bullets": [
+        "Atomic ledger entry + memory lock only — 코드 변경 0; carry planning round.",
+        "[[project_r311ak_phase_w_load_trigger]] 메모리 신규 작성 — description 에 '부채 + R311ak 다음 세션 load 첫 라운드 자동 실행 (gcc-arm 불필요)' 명시; MEMORY.md 인덱스 line 추가 (line 6).",
+        "Phase W mechanical gate 0개 부채 식별: wz-runtime-core 가 R251부터 §5.P entry crate (#![no_std] + opt-in alloc + R63 anti-stub rule 명시) 로 lands 되어 있으나, workspace 어디에도 thumbv7em-none-eabihf cross-compile build 도입 없음 — MCU half 진입 mechanical 진실성 미증명.",
+        "R311ak 절차 lock (memory 본문 'Load 첫 라운드 자동 실행 절차' 7단계 참조): (1) sanity check `cargo build -p wz-runtime-core --target thumbv7em-none-eabihf --no-default-features` 단독 실행 → (2) 결과 분류 (PASS / dep 종속 FAIL / rustup target FAIL) → (3) Layer G 함수 추가 (Layer F opt-in mirror, SKIP graceful degrade) → (4) 검증 → (5) atomic ledger entry R311ak → (6) commit → (7) push 보류.",
+        "R63 lesson 준수 근거 ([[feedback_no_document_around_hack]]): wz-runtime-core 는 R251부터 real Phase W entry crate (NOP impl 아니고 trait skeleton + real callers expectation pattern); Layer G 는 real lib cross-compile build (caller 부재 NOP-stub 아님); R53 NOP-stub host-build skeleton + udp_recv NOP impl 과 명확히 구별."
+      ],
+      "verification_bullets": [
+        "memory 신규 파일 재확인: project_r311ak_phase_w_load_trigger.md 작성 완료, description / R311ak 절차 / R63 lesson 근거 / fallback / R311al-an cascade 7개 섹션 포함.",
+        "MEMORY.md 인덱스 line 6 갱신 확인 (description 200-char cap 없음 관계로 충분한 context 1줄 hook).",
+        "wz-runtime-core/Cargo.toml 점검: '#![no_std] + opt-in alloc + R63 anti-stub rule 명시' 구문 확인; thumbv7em 사용 site grep = 0 (workspace 전체 cross-compile 도입 이전 확인).",
+        "rustup target list --installed thumbv7em-none-eabihf 확인 완료 (R311ag audit 적) — R311ak 자동 진행 시 rustup install 단계 일반적으로 skip 가능.",
+        "validate_workspace baseline R311aj 유지: T1=0 (ledger=1 R193 §66 known-stale), RT 13/13, sync; entries 352 → 353, sections 255 변동 0 (예상)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "[즉시 상환 1순위] R311ak Phase W mechanical first gate: 다음 세션 load 첫 라운드 자동 실행. 절차: [[project_r311ak_phase_w_load_trigger]] 본문 'Load 첫 라운드 자동 실행 절차' 섹션 참조. 예상 소요: 5-15분 (cargo build incremental + Layer G 작성 + commit).",
+        "기대 효과: Phase W (wz-runtime-core R251 entry) 의 mechanical 진실성 첫 증명; MCU half (북극성 절반) 진입 토대 mechanical 완성; R311al-an cascade unblocked (transitive dep no_std audit / wz-runtime-tokio reverse audit / wz-runtime-lwip crate 생성).",
+        "Sequential cascade lock: R311ak 통과 시 R311al (transitive dep no_std audit) → R311am (wz-runtime-tokio reverse trait/impl 분리 audit) → R311an (wz-runtime-lwip crate 생성, LinkBackend trait + extern \"C\" lwIP API real declarations; lwIP source 통합 R311ao+); 세션 한계 80%까지 3-5R 진행 가능.",
+        "Failure 시 fallback (memory 본문 명시): (a) sanity check cascade dep FAIL 시 R311ak audit-only round 로 닫고 R311al 더 깊은 fix; (b) rustup target add FAIL (network 없음 등) 시 R311ak audit-only + rustup install 재시도 carry; (c) Layer G fullstack run-ci 회귀 시 R311ak revert + root cause 라운드 별도.",
+        "gcc-arm install carry (R311ao+, R311aj carry에서 이동): wz-runtime-lwip crate 완성 + lwIP C source 통합 시점 sudo apt install gcc-arm-none-eabi 필요 — 그 이전 라운드들 (R311ak-an) 은 모두 user permission 불필요."
+      ],
+      "publishable_decision_summary": "R311ak-pre carry planning — Phase W mechanical first gate Layer G (wz-runtime-core thumbv7em-none-eabihf cross-compile lib build) 다음 세션 load 첫 라운드 자동 실행 lock; R311ae→R311af 패턴 그대로 부채 즉시 상환.",
+      "publishable_changes_bullets": [
+        "Atomic ledger entry + memory lock only — 코드 변경 0; carry planning round.",
+        "[[project_r311ak_phase_w_load_trigger]] 메모리 신규 작성 — description 에 '부채 + R311ak 다음 세션 load 첫 라운드 자동 실행 (gcc-arm 불필요)' 명시; MEMORY.md 인덱스 line 추가 (line 6).",
+        "Phase W mechanical gate 0개 부채 식별: wz-runtime-core 가 R251부터 §5.P entry crate (#![no_std] + opt-in alloc + R63 anti-stub rule 명시) 로 lands 되어 있으나, workspace 어디에도 thumbv7em-none-eabihf cross-compile build 도입 없음 — MCU half 진입 mechanical 진실성 미증명.",
+        "R311ak 절차 lock (memory 본문 'Load 첫 라운드 자동 실행 절차' 7단계 참조): (1) sanity check `cargo build -p wz-runtime-core --target thumbv7em-none-eabihf --no-default-features` 단독 실행 → (2) 결과 분류 (PASS / dep 종속 FAIL / rustup target FAIL) → (3) Layer G 함수 추가 (Layer F opt-in mirror, SKIP graceful degrade) → (4) 검증 → (5) atomic ledger entry R311ak → (6) commit → (7) push 보류.",
+        "R63 lesson 준수 근거 ([[feedback_no_document_around_hack]]): wz-runtime-core 는 R251부터 real Phase W entry crate (NOP impl 아니고 trait skeleton + real callers expectation pattern); Layer G 는 real lib cross-compile build (caller 부재 NOP-stub 아님); R53 NOP-stub host-build skeleton + udp_recv NOP impl 과 명확히 구별."
+      ],
+      "publishable_verification_bullets": [
+        "memory 신규 파일 재확인: project_r311ak_phase_w_load_trigger.md 작성 완료, description / R311ak 절차 / R63 lesson 근거 / fallback / R311al-an cascade 7개 섹션 포함.",
+        "MEMORY.md 인덱스 line 6 갱신 확인 (description 200-char cap 없음 관계로 충분한 context 1줄 hook).",
+        "wz-runtime-core/Cargo.toml 점검: '#![no_std] + opt-in alloc + R63 anti-stub rule 명시' 구문 확인; thumbv7em 사용 site grep = 0 (workspace 전체 cross-compile 도입 이전 확인).",
+        "rustup target list --installed thumbv7em-none-eabihf 확인 완료 (R311ag audit 적) — R311ak 자동 진행 시 rustup install 단계 일반적으로 skip 가능.",
+        "validate_workspace baseline R311aj 유지: T1=0 (ledger=1 R193 §66 known-stale), RT 13/13, sync; entries 352 → 353, sections 255 변동 0 (예상)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "[즉시 상환 1순위] R311ak Phase W mechanical first gate: 다음 세션 load 첫 라운드 자동 실행. 절차: [[project_r311ak_phase_w_load_trigger]] 본문 'Load 첫 라운드 자동 실행 절차' 섹션 참조. 예상 소요: 5-15분 (cargo build incremental + Layer G 작성 + commit).",
+        "기대 효과: Phase W (wz-runtime-core R251 entry) 의 mechanical 진실성 첫 증명; MCU half (북극성 절반) 진입 토대 mechanical 완성; R311al-an cascade unblocked (transitive dep no_std audit / wz-runtime-tokio reverse audit / wz-runtime-lwip crate 생성).",
+        "Sequential cascade lock: R311ak 통과 시 R311al (transitive dep no_std audit) → R311am (wz-runtime-tokio reverse trait/impl 분리 audit) → R311an (wz-runtime-lwip crate 생성, LinkBackend trait + extern \"C\" lwIP API real declarations; lwIP source 통합 R311ao+); 세션 한계 80%까지 3-5R 진행 가능.",
+        "Failure 시 fallback (memory 본문 명시): (a) sanity check cascade dep FAIL 시 R311ak audit-only round 로 닫고 R311al 더 깊은 fix; (b) rustup target add FAIL (network 없음 등) 시 R311ak audit-only + rustup install 재시도 carry; (c) Layer G fullstack run-ci 회귀 시 R311ak revert + root cause 라운드 별도.",
+        "gcc-arm install carry (R311ao+, R311aj carry에서 이동): wz-runtime-lwip crate 완성 + lwIP C source 통합 시점 sudo apt install gcc-arm-none-eabi 필요 — 그 이전 라운드들 (R311ak-an) 은 모두 user permission 불필요."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
