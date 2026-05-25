@@ -17669,6 +17669,60 @@
         "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false."
       ]
     },
+    "Round 311ao": {
+      "decision_summary": "R311ao MCU cross-compile catalog portability widening — Layer G가 4 targets (cortex-m0+/m3/m4f-m7/riscv32imac) × 2 crates (wz-runtime-core + wz facade) 매트릭스로 일반화; 8/8 PASS. composable framework MCU half portability 진실성 강화.",
+      "changes_bullets": [
+        "rustup target add: thumbv6m-none-eabi (Cortex-M0+) / thumbv7m-none-eabi (Cortex-M3) / riscv32imac-unknown-none-elf (RISC-V 32-bit IMAC) install — 이미 설치되어있던 thumbv7em-none-eabihf (Cortex-M4F/M7) + wasm32 + x86_64에 추가.",
+        "scripts/run-ci.sh: Layer G header docblock을 \"MCU cross-compile catalog (Phase W)\" 로 갱신; catalog matrix = (crate × target) 명시, 결과 2 × 4 = 8 builds. Per-target SKIP graceful (rustup target 미설치 시 개별 SKIP, 전체 실행 계속). 아무 target 도 설치 안 되면 전체 Layer SKIP.",
+        "scripts/run-ci.sh: layer_g_cross_compile_cortex_m() 함수 일반화 — hardcoded thumbv7em 로직을 targets=() array + for-loop 구조로 재작성. 각 (target, crate) 쇵 PASS/FAIL 로그 개별 출력 (\"G.1 wz-runtime-core <target> OK\" / \"G.2 wz facade <target> OK\"). any_ran=0 일 때 전체 SKIP 처리.",
+        "crates/wz-runtime-core/src/lib.rs: \"## Mechanical MCU cross-compile gate (R311ak / R311am / R311ao)\" doc section의 G.1/G.2 설명을 crate 섬션과 target 섬션 두 부분으로 재구조; 4 targets 나열 (cortex-m0+/m3/m4f-m7/RISC-V IMAC) + per-target SKIP 설명 추가. wz-codecs/zenoh-pico-sys out-of-scope 설명 유지.",
+        "구조적 시사점: wz-runtime-core (deps=0 trait skeleton) + wz facade (R302a empty no_std facade) 의 포넌블리티 입증 — ARM계 3 세대 (M0+ / M3 / M4F+M7) 와 RISC-V (대안 ISA) 모두서 빌드 가능. 이는 우리 코드가 특정 ARM 세대에 종속되지 않아서 몇 대 platform-* feature 확장시 의식적 제약 없이 lands 가능함을 입증. R63 NOP-stub 패턴 텍스트북 결정 (\"caller 와 함께 lands\") 가 이 4 target 다양성에 대해 소용됨."
+      ],
+      "verification_bullets": [
+        "`rustup target list --installed`: thumbv7em-none-eabihf, thumbv6m-none-eabi, thumbv7m-none-eabi, riscv32imac-unknown-none-elf 네 다 포함 확인.",
+        "`bash scripts/run-ci.sh --layer G` PASS — 8 줄 (\"G.1 wz-runtime-core <target> OK\" + \"G.2 wz facade <target> OK\" 각 4 회수) 출력 후 \"Layer G pass\".",
+        "`bash scripts/run-ci.sh` 풀스택 PASS — Layer 0/A/A2/B/C0/C1/C1b/C2/D/E 전부 통과 + Layer F SKIP + Layer G SKIP. 회귀 0.",
+        "`bash scripts/run-ci.sh --layer 0` PASS — fmt --check OK (doc comment update 정상 포맷, missing_docs deny 위반 0).",
+        "atomic ledger entries 357→358, sections 255 유지, T1=0, RT 13/13, sync 예상 (validate_workspace 철어별 확인 직후)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311ap (다음 후보, audit-only 가능): wz-runtime-core trait surface의 missing primitive identification — R311ac TimeSource::timeout 추가 패턴 mirror, real caller (wz-runtime-tokio Mutex/RwLock R311w 결정) 대비 trait surface enumeration. R311w 결정 (a) per-runtime Mutex<T> type alias을 wz-runtime-core trait 에 표현하는 shape 검토.",
+        "R311aq+: gcc-arm-none-eabi install 이후 라운드 — zenoh-pico-sys cross-compile + wz-runtime-lwip crate 생성 (caller-와-함께-lands 패턴, R63 lesson). 이 시점에 Layer G default lane 승격 조건 충족 (wz-runtime-lwip caller lands), --layer G opt-in 제거 및 dispatch 자동화.",
+        "R311ar+: wz-codecs no_std + alloc 마이그레이션 (R40 carry 소진) — wz-runtime-lwip arrival 시점과 함께. wz-codecs/src/lib.rs line 22-25 명시된 시점.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Honest claim 한계 명시: R311ao는 4 targets x 2 crates (deps=0 trait crate + empty facade) 에만 해당. 진정한 portability 입증은 wz-runtime-lwip + concrete impl (LwipRuntime / EmbassyRuntime) lands 후 동일 매트릭스에서 PASS 시 달성. 현 라운드는 baseline 방호막 (silent regression 주조로) 의미."
+      ],
+      "publishable_decision_summary": "R311ao MCU cross-compile catalog portability widening — Layer G가 4 targets (cortex-m0+/m3/m4f-m7/riscv32imac) × 2 crates (wz-runtime-core + wz facade) 매트릭스로 일반화; 8/8 PASS. composable framework MCU half portability 진실성 강화.",
+      "publishable_changes_bullets": [
+        "rustup target add: thumbv6m-none-eabi (Cortex-M0+) / thumbv7m-none-eabi (Cortex-M3) / riscv32imac-unknown-none-elf (RISC-V 32-bit IMAC) install — 이미 설치되어있던 thumbv7em-none-eabihf (Cortex-M4F/M7) + wasm32 + x86_64에 추가.",
+        "scripts/run-ci.sh: Layer G header docblock을 \"MCU cross-compile catalog (Phase W)\" 로 갱신; catalog matrix = (crate × target) 명시, 결과 2 × 4 = 8 builds. Per-target SKIP graceful (rustup target 미설치 시 개별 SKIP, 전체 실행 계속). 아무 target 도 설치 안 되면 전체 Layer SKIP.",
+        "scripts/run-ci.sh: layer_g_cross_compile_cortex_m() 함수 일반화 — hardcoded thumbv7em 로직을 targets=() array + for-loop 구조로 재작성. 각 (target, crate) 쇵 PASS/FAIL 로그 개별 출력 (\"G.1 wz-runtime-core <target> OK\" / \"G.2 wz facade <target> OK\"). any_ran=0 일 때 전체 SKIP 처리.",
+        "crates/wz-runtime-core/src/lib.rs: \"## Mechanical MCU cross-compile gate (R311ak / R311am / R311ao)\" doc section의 G.1/G.2 설명을 crate 섬션과 target 섬션 두 부분으로 재구조; 4 targets 나열 (cortex-m0+/m3/m4f-m7/RISC-V IMAC) + per-target SKIP 설명 추가. wz-codecs/zenoh-pico-sys out-of-scope 설명 유지.",
+        "구조적 시사점: wz-runtime-core (deps=0 trait skeleton) + wz facade (R302a empty no_std facade) 의 포넌블리티 입증 — ARM계 3 세대 (M0+ / M3 / M4F+M7) 와 RISC-V (대안 ISA) 모두서 빌드 가능. 이는 우리 코드가 특정 ARM 세대에 종속되지 않아서 몇 대 platform-* feature 확장시 의식적 제약 없이 lands 가능함을 입증. R63 NOP-stub 패턴 텍스트북 결정 (\"caller 와 함께 lands\") 가 이 4 target 다양성에 대해 소용됨."
+      ],
+      "publishable_verification_bullets": [
+        "`rustup target list --installed`: thumbv7em-none-eabihf, thumbv6m-none-eabi, thumbv7m-none-eabi, riscv32imac-unknown-none-elf 네 다 포함 확인.",
+        "`bash scripts/run-ci.sh --layer G` PASS — 8 줄 (\"G.1 wz-runtime-core <target> OK\" + \"G.2 wz facade <target> OK\" 각 4 회수) 출력 후 \"Layer G pass\".",
+        "`bash scripts/run-ci.sh` 풀스택 PASS — Layer 0/A/A2/B/C0/C1/C1b/C2/D/E 전부 통과 + Layer F SKIP + Layer G SKIP. 회귀 0.",
+        "`bash scripts/run-ci.sh --layer 0` PASS — fmt --check OK (doc comment update 정상 포맷, missing_docs deny 위반 0).",
+        "atomic ledger entries 357→358, sections 255 유지, T1=0, RT 13/13, sync 예상 (validate_workspace 철어별 확인 직후)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ap (다음 후보, audit-only 가능): wz-runtime-core trait surface의 missing primitive identification — R311ac TimeSource::timeout 추가 패턴 mirror, real caller (wz-runtime-tokio Mutex/RwLock R311w 결정) 대비 trait surface enumeration. R311w 결정 (a) per-runtime Mutex<T> type alias을 wz-runtime-core trait 에 표현하는 shape 검토.",
+        "R311aq+: gcc-arm-none-eabi install 이후 라운드 — zenoh-pico-sys cross-compile + wz-runtime-lwip crate 생성 (caller-와-함께-lands 패턴, R63 lesson). 이 시점에 Layer G default lane 승격 조건 충족 (wz-runtime-lwip caller lands), --layer G opt-in 제거 및 dispatch 자동화.",
+        "R311ar+: wz-codecs no_std + alloc 마이그레이션 (R40 carry 소진) — wz-runtime-lwip arrival 시점과 함께. wz-codecs/src/lib.rs line 22-25 명시된 시점.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Honest claim 한계 명시: R311ao는 4 targets x 2 crates (deps=0 trait crate + empty facade) 에만 해당. 진정한 portability 입증은 wz-runtime-lwip + concrete impl (LwipRuntime / EmbassyRuntime) lands 후 동일 매트릭스에서 PASS 시 달성. 현 라운드는 baseline 방호막 (silent regression 주조로) 의미."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [

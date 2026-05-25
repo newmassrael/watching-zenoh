@@ -55,27 +55,38 @@
 //!   (concrete impls land alongside real callers, not as premature
 //!   trait declarations).
 //!
-//! ## Mechanical MCU cross-compile gate (R311ak / R311am)
+//! ## Mechanical MCU cross-compile gate (R311ak / R311am / R311ao)
 //!
 //! `scripts/run-ci.sh` Layer G is the opt-in (`--layer G` or
 //! `WZ_RUN_LAYER_G=1`) lane that proves the no_std/MCU half stays
-//! buildable as wz upper layers grow:
+//! buildable as wz upper layers grow. Catalog = crate × target:
 //!
-//! - **G.1 (R311ak)** — this crate (`wz-runtime-core`) for
-//!   `thumbv7em-none-eabihf` with `--no-default-features`. Deps=0 per
-//!   the R311al `cargo tree` audit; the gate catches any future dep
-//!   addition that drags std transitively into the trait skeleton.
-//! - **G.2 (R311am)** — `wz` facade for the same target with
-//!   `--no-default-features`; exercises the
-//!   `#![cfg_attr(not(any(test, feature = "runtime-tokio")), no_std)]`
-//!   toggle in `wz/src/lib.rs` so a future feature-gate insertion
-//!   cannot silently break the MCU compile path.
+//! Crates:
+//! - **G.1 (R311ak)** — this crate (`wz-runtime-core`),
+//!   `--no-default-features`. Deps=0 per the R311al `cargo tree`
+//!   audit; the gate catches any future dep addition that drags std
+//!   transitively into the trait skeleton.
+//! - **G.2 (R311am)** — `wz` facade, `--no-default-features`;
+//!   exercises the `#![cfg_attr(not(any(test, feature =
+//!   "runtime-tokio")), no_std)]` toggle in `wz/src/lib.rs` so a
+//!   future feature-gate insertion cannot silently break the MCU
+//!   compile path.
+//!
+//! Targets (R311ao portability widening):
+//! - `thumbv7em-none-eabihf` (Cortex-M4F/M7, original R311ak)
+//! - `thumbv6m-none-eabi` (Cortex-M0+)
+//! - `thumbv7m-none-eabi` (Cortex-M3)
+//! - `riscv32imac-unknown-none-elf` (RISC-V 32-bit IMAC)
+//!
+//! Each target SKIPs gracefully if the corresponding rustup target is
+//! not installed (no auto-install — keeps a developer machine without
+//! cross-compile interest free of the lane).
 //!
 //! Out of scope today: `wz-codecs` MCU build (R40 carry — `no_std +
 //! alloc` variant lands with `wz-runtime-lwip` per `wz-codecs/src/
-//! lib.rs` line 22-25) and `zenoh-pico-sys` MCU build (`arm-none-eabi-
-//! gcc` install carry, R311ao+). Layer G promotes to a default lane
-//! at the point those carries close.
+//! lib.rs` line 22-25) and `zenoh-pico-sys` MCU build (`arm-none-
+//! eabi-gcc` install carry, R311ao+). Layer G promotes to a default
+//! lane at the point those carries close.
 
 #![no_std]
 #![deny(missing_docs)]
