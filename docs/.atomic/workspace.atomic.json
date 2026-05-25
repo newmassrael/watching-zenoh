@@ -17413,6 +17413,60 @@
         "Sequential 종속 없음 — R311aj 는 audit/closure round, R311ak+ pivot 가 그 결과 없이도 가능."
       ]
     },
+    "Round 311ak": {
+      "decision_summary": "R311ak lands Layer G cross-compile cortex-m gate — wz-runtime-core builds for thumbv7em-none-eabihf, opt-in lane (--layer G / WZ_RUN_LAYER_G=1) per R311ak-pre lock.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: header docblock에 Layer G 섹션 추가 (R311n Layer F 설명 직후) — Phase W mechanical first gate 정체성 + opt-in / rustup-target SKIP 분기 + wz-runtime-lwip caller lands 시점에 default lane 승격 약속 명시.",
+        "scripts/run-ci.sh: layer_g_cross_compile_cortex_m() 함수 신설 (Layer F 함수 직후) — opt-in 검사 → rustup target 설치 검사 → `(cd crates && cargo build -p wz-runtime-core --target thumbv7em-none-eabihf --no-default-features --quiet)` 실행. 두 단계 모두 미충족 시 SKIP graceful degrade (R64.1 single-source-of-truth lane 패턴 유지).",
+        "scripts/run-ci.sh: dispatch 블록 (line 518 직후) `run_layer G layer_g_cross_compile_cortex_m || overall=1` 1줄 추가 — Layer F 다음 위치, 8-lane → 9-lane (G opt-in default-SKIP) 확장.",
+        "Sanity check (R311ak-pre 절차 1번): `(cd crates && cargo build -p wz-runtime-core --target thumbv7em-none-eabihf --no-default-features)` 단독 PASS (`Finished dev profile in 0.11s`) — rustup target 사전 설치 확인 (thumbv7em-none-eabihf, wasm32-unknown-unknown 둘 다 존재). cascade dep no_std 종속 오류 없음 — R311ae→R311af 패턴 그대로 옵션 A (Layer G 함수 작성) 진입."
+      ],
+      "verification_bullets": [
+        "`bash scripts/run-ci.sh --layer G` 단독 PASS (Layer G pass / run-ci: all required layers pass).",
+        "`bash scripts/run-ci.sh --layer 0` PASS (dispatch 구조 무회귀 sanity).",
+        "`bash scripts/run-ci.sh` 풀스택 PASS — Layer 0/A/A2/B/C0/C1/C1b/C2/D/E 모두 통과 + Layer F SKIP + Layer G SKIP. 회귀 0 (R311ak-pre 절차 4번 요구사항 충족).",
+        "rustup target list --installed: thumbv7em-none-eabihf 존재 확인 — Layer G default-SKIP path 미관측 environment 임을 명시.",
+        "Phase W mechanical first gate 진실성 입증: wz-runtime-core (R251 §5.P entry crate, #![no_std] + opt-in alloc) 가 MCU target 으로 빌드 통과 — R63 lesson 준수 (real lib build, caller 부재 NOP-stub 아님; R53 NOP-skeleton 패턴과 명확 구분)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311al (next): wz-runtime-core 의 transitive dep no_std audit — `cargo tree -p wz-runtime-core --target thumbv7em-none-eabihf --no-default-features` 로 dep tree full inspection, std 종속 dep 식별 + alternative no_std crate evaluation. R311ak 가 PASS 했으므로 현재 dep tree 는 이미 no_std safe 이지만, alloc/dev-dep 분리 명시화는 별도 round. 예상 0.5-1R.",
+        "R311am: wz-runtime-tokio reverse audit — 어떤 부분이 wz-runtime-core 의 pure trait + concrete tokio impl 분리 안 되어있는지 점검 (R252+ reparam 잔여 카운트). Layer G가 wz-runtime-core 단독 빌드를 보호하므로 reverse audit 시 회귀 즉시 검출 가능. 예상 1-2R.",
+        "R311an: wz-runtime-lwip crate 생성 — caller-와-함께-lands 패턴 (R63 lesson). cross-compile lib build 통과한 wz-runtime-core 위에 LinkBackend trait + extern \"C\" lwIP API signatures real declaration. lwIP C source 통합 + 실 link은 R311ao+ (gcc-arm install 필요 시점). 예상 2-3R.",
+        "Layer G default lane 승격 시점 lock: wz-runtime-lwip caller가 lands 되면 (R311an+) Layer G의 opt-in 분기 (--layer G / WZ_RUN_LAYER_G=1) 제거하고 dispatch 자동 lane으로 promote. 이 carry는 R311an 라운드 완료 시점에 함께 처리.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (R311an+ cascade에서 20-50R 소진 예상; MCU half 북극성), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false doc-surface decision.",
+        "[[project_r311ak_phase_w_load_trigger]] memory description 갱신 필요: 'tentative resolved (Layer G 단독 build PASS; cascade R311al-an 진행 가능)'. 단 완전 해결 (MCU binary build + real lwIP driver) 까지 memory 보존 — 본 commit 직후 또는 R311al 시작 시 처리."
+      ],
+      "publishable_decision_summary": "R311ak lands Layer G cross-compile cortex-m gate — wz-runtime-core builds for thumbv7em-none-eabihf, opt-in lane (--layer G / WZ_RUN_LAYER_G=1) per R311ak-pre lock.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: header docblock에 Layer G 섹션 추가 (R311n Layer F 설명 직후) — Phase W mechanical first gate 정체성 + opt-in / rustup-target SKIP 분기 + wz-runtime-lwip caller lands 시점에 default lane 승격 약속 명시.",
+        "scripts/run-ci.sh: layer_g_cross_compile_cortex_m() 함수 신설 (Layer F 함수 직후) — opt-in 검사 → rustup target 설치 검사 → `(cd crates && cargo build -p wz-runtime-core --target thumbv7em-none-eabihf --no-default-features --quiet)` 실행. 두 단계 모두 미충족 시 SKIP graceful degrade (R64.1 single-source-of-truth lane 패턴 유지).",
+        "scripts/run-ci.sh: dispatch 블록 (line 518 직후) `run_layer G layer_g_cross_compile_cortex_m || overall=1` 1줄 추가 — Layer F 다음 위치, 8-lane → 9-lane (G opt-in default-SKIP) 확장.",
+        "Sanity check (R311ak-pre 절차 1번): `(cd crates && cargo build -p wz-runtime-core --target thumbv7em-none-eabihf --no-default-features)` 단독 PASS (`Finished dev profile in 0.11s`) — rustup target 사전 설치 확인 (thumbv7em-none-eabihf, wasm32-unknown-unknown 둘 다 존재). cascade dep no_std 종속 오류 없음 — R311ae→R311af 패턴 그대로 옵션 A (Layer G 함수 작성) 진입."
+      ],
+      "publishable_verification_bullets": [
+        "`bash scripts/run-ci.sh --layer G` 단독 PASS (Layer G pass / run-ci: all required layers pass).",
+        "`bash scripts/run-ci.sh --layer 0` PASS (dispatch 구조 무회귀 sanity).",
+        "`bash scripts/run-ci.sh` 풀스택 PASS — Layer 0/A/A2/B/C0/C1/C1b/C2/D/E 모두 통과 + Layer F SKIP + Layer G SKIP. 회귀 0 (R311ak-pre 절차 4번 요구사항 충족).",
+        "rustup target list --installed: thumbv7em-none-eabihf 존재 확인 — Layer G default-SKIP path 미관측 environment 임을 명시.",
+        "Phase W mechanical first gate 진실성 입증: wz-runtime-core (R251 §5.P entry crate, #![no_std] + opt-in alloc) 가 MCU target 으로 빌드 통과 — R63 lesson 준수 (real lib build, caller 부재 NOP-stub 아님; R53 NOP-skeleton 패턴과 명확 구분)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311al (next): wz-runtime-core 의 transitive dep no_std audit — `cargo tree -p wz-runtime-core --target thumbv7em-none-eabihf --no-default-features` 로 dep tree full inspection, std 종속 dep 식별 + alternative no_std crate evaluation. R311ak 가 PASS 했으므로 현재 dep tree 는 이미 no_std safe 이지만, alloc/dev-dep 분리 명시화는 별도 round. 예상 0.5-1R.",
+        "R311am: wz-runtime-tokio reverse audit — 어떤 부분이 wz-runtime-core 의 pure trait + concrete tokio impl 분리 안 되어있는지 점검 (R252+ reparam 잔여 카운트). Layer G가 wz-runtime-core 단독 빌드를 보호하므로 reverse audit 시 회귀 즉시 검출 가능. 예상 1-2R.",
+        "R311an: wz-runtime-lwip crate 생성 — caller-와-함께-lands 패턴 (R63 lesson). cross-compile lib build 통과한 wz-runtime-core 위에 LinkBackend trait + extern \"C\" lwIP API signatures real declaration. lwIP C source 통합 + 실 link은 R311ao+ (gcc-arm install 필요 시점). 예상 2-3R.",
+        "Layer G default lane 승격 시점 lock: wz-runtime-lwip caller가 lands 되면 (R311an+) Layer G의 opt-in 분기 (--layer G / WZ_RUN_LAYER_G=1) 제거하고 dispatch 자동 lane으로 promote. 이 carry는 R311an 라운드 완료 시점에 함께 처리.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (R311an+ cascade에서 20-50R 소진 예상; MCU half 북극성), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false doc-surface decision.",
+        "[[project_r311ak_phase_w_load_trigger]] memory description 갱신 필요: 'tentative resolved (Layer G 단독 build PASS; cascade R311al-an 진행 가능)'. 단 완전 해결 (MCU binary build + real lwIP driver) 까지 memory 보존 — 본 commit 직후 또는 R311al 시작 시 처리."
+      ]
+    },
     "Round 311ak-pre": {
       "decision_summary": "R311ak-pre carry planning — Phase W mechanical first gate Layer G (wz-runtime-core thumbv7em-none-eabihf cross-compile lib build) 다음 세션 load 첫 라운드 자동 실행 lock; R311ae→R311af 패턴 그대로 부채 즉시 상환.",
       "changes_bullets": [

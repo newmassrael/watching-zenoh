@@ -51,6 +51,17 @@
 #              (~5-10 min cold; multiple wz-ap-demo release builds)
 #              so it stays off the default dispatch path; run it
 #              explicitly when authoring a codec cascade.
+#   Layer G  — wz-runtime-core thumbv7em-none-eabihf cross-compile
+#              gate (R311ak). Opt-in via `--layer G` or
+#              `WZ_RUN_LAYER_G=1`. Phase W mechanical first gate —
+#              the §5.P runtime-services-tier entry crate must build
+#              for an MCU target so the no_std/MCU half stays
+#              mechanically truthful as concrete impls
+#              (wz-runtime-lwip + extern symbols) land in R311al+.
+#              SKIPs gracefully if the rustup target is not
+#              installed. Stays opt-in until the wz-runtime-lwip
+#              caller lands (R311an+); promoted to default lane
+#              once the cross-compile path has a real consumer.
 #
 # Exit codes:
 #   0  every required layer passed
@@ -503,6 +514,33 @@ layer_f_codec_footprint() {
     bash scripts/measure-codec-footprint.sh
 }
 
+# ─── Layer G — cross-compile cortex-m wz-runtime-core lib build ────
+#
+# Opt-in via `--layer G` or `WZ_RUN_LAYER_G=1`. Phase W mechanical
+# first gate (R311ak) — wz-runtime-core is the §5.P
+# runtime-services-tier entry crate (R251) and must build for an
+# MCU target so the no_std/MCU half of the composable framework
+# stays mechanically truthful as concrete impls (wz-runtime-lwip +
+# extern lwIP symbols) land in R311al+. SKIPs gracefully if the
+# rustup target is not installed so a host-only developer machine
+# is not forced to install a cross-compile toolchain just to run
+# the default lanes. Promoted to default once the wz-runtime-lwip
+# caller lands and the cross-compile path has a real consumer
+# (concrete-impls-land-alongside-real-callers, R63 lesson).
+layer_g_cross_compile_cortex_m() {
+    if [[ "$ONLY_LAYER" != "G" && "${WZ_RUN_LAYER_G:-0}" -ne 1 ]]; then
+        echo "Layer G SKIP (opt-in: --layer G or WZ_RUN_LAYER_G=1)"
+        return 0
+    fi
+    if ! rustup target list --installed 2>/dev/null \
+        | grep -q thumbv7em-none-eabihf; then
+        echo "Layer G SKIP (rustup target thumbv7em-none-eabihf not installed; install: rustup target add thumbv7em-none-eabihf)"
+        return 0
+    fi
+    (cd crates && cargo build -p wz-runtime-core \
+        --target thumbv7em-none-eabihf --no-default-features --quiet)
+}
+
 # ─── dispatch ──────────────────────────────────────────────────────
 overall=0
 run_layer 0 layer_0_preflight_lints || overall=1
@@ -516,6 +554,7 @@ run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer D layer_d_validate_deploy || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer F layer_f_codec_footprint || overall=1
+run_layer G layer_g_cross_compile_cortex_m || overall=1
 
 if [[ $overall -eq 0 ]]; then
     echo ""
