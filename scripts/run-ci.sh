@@ -62,6 +62,9 @@
 #                  G.4-alloc (R311av) wz-runtime-lwip --features alloc
 #                                 (LwipRuntime + impl Runtime + LwipTime)
 #                                 SKIPs thumbv6m: M0+ lacks atomic CAS
+#                  G.5 (R311ax) wz facade --features runtime-lwip
+#                                 (composes wz-runtime-lwip through the
+#                                 public facade surface; same M0+ SKIP)
 #                Targets (R311ao + R311ap portability widening):
 #                  thumbv7em-none-eabihf  (Cortex-M4F/M7, original R311ak)
 #                  thumbv6m-none-eabi     (Cortex-M0+)
@@ -625,6 +628,21 @@ layer_g_cross_compile_cortex_m() {
             echo "  G.4-alloc wz-runtime-lwip $t OK"
         else
             echo "  G.4-alloc wz-runtime-lwip $t FAIL" >&2
+            fail=1
+        fi
+        # G.5 (R311ax) wz facade --features runtime-lwip — composes
+        # wz-runtime-lwip via the public facade surface so a future
+        # consumer enabling the `runtime-lwip` feature finds
+        # `wz::runtime_lwip::*` cross-compiled on every Phase W
+        # target. Same M0+ alloc gap as G.4-alloc; same SKIP rule.
+        if [[ "$t" == "thumbv6m-none-eabi" ]]; then
+            echo "  G.5 wz facade runtime-lwip $t SKIP (M0+ inherits G.4-alloc gap)"
+        elif (cd crates && cargo build -p wz \
+            --target "$t" --no-default-features \
+            --features runtime-lwip --quiet); then
+            echo "  G.5 wz facade runtime-lwip $t OK"
+        else
+            echo "  G.5 wz facade runtime-lwip $t FAIL" >&2
             fail=1
         fi
     done

@@ -68,6 +68,13 @@ workspace = true
 [dependencies]
 wz-runtime-tokio = { path = "../wz-runtime-tokio", optional = true, default-features = false }
 wz-runtime-core = { path = "../wz-runtime-core", optional = true, default-features = false, features = ["alloc"] }
+# R311ax — wz-runtime-lwip enters the facade as an optional dep.
+# The `runtime-lwip` feature pulls this crate with its `alloc`
+# feature on; lwIP's runtime-services-tier (LwipRuntime + LwipTime
+# + sync::Mutex aliases) becomes available at `wz::runtime_lwip::*`
+# when the consumer opts in. Mutual exclusion with `runtime-tokio`
+# is enforced via a compile_error! gate in `src/lib.rs`.
+wz-runtime-lwip = { path = "../wz-runtime-lwip", optional = true, default-features = false }
 sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime", optional = true }
 sce-rust-lua = { path = "../../vendor/sce/sce-rust-lua", optional = true }
 
@@ -264,9 +271,22 @@ routing-router = []
 routing-routes = ["routing-router"]
 routing-static-routes = ["routing-router"]
 
-# ----- domain: runtime (6 atomic, 1 active / 5 reserved) -----
+# ----- domain: runtime (6 atomic, 2 active / 4 reserved) -----
 runtime-async-std = []
-runtime-lwip = []
+# R311ax — runtime-lwip activates: pulls wz-runtime-lwip + wz-runtime-
+# core (alloc-on) so a consumer enabling `runtime-lwip` gets the
+# §5.P MCU profile end-to-end (LwipRuntime + LwipTime + sync::Mutex
+# aliases). Mutual exclusion with `runtime-tokio` is enforced in
+# `src/lib.rs` via `compile_error!` — the catalog cannot express
+# mutex relations directly, but cfg(all(...)) attribute fires at
+# build time if both runtimes are co-enabled. The check fails the
+# build with a clear "pick one runtime per deploy" message rather
+# than silently building a bin that links both runtimes.
+runtime-lwip = [
+    "dep:wz-runtime-lwip",
+    "dep:wz-runtime-core",
+    "wz-runtime-lwip/alloc",
+]
 runtime-no-std = []
 # R302b — runtime-tokio pulls the wz-runtime-tokio crate into the
 # build via `dep:` syntax. Bare `runtime-tokio` with no sub-feature
