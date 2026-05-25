@@ -17261,6 +17261,54 @@
         "Phase W 후반 (20-50R): lwIP C source 통합 (build.rs cc::Build 또는 git submodule) + cross-compile build + scouting/session FSM 와 link 호출 path 통합 + real driver code (udp_recv / udp_sendto / lwIP netif initialization wiring); MCU half 하프 완성."
       ]
     },
+    "Round 311ah": {
+      "decision_summary": "R311ah sources/links/lwip_udp_session.scxml authoring (RFC §5.C B6-α happy-path, backpressure=block / framer=frame); link_emitter_b6 mirror test PASS; udp_session SCXML gap 닫힘.",
+      "changes_bullets": [
+        "sources/links/lwip_udp_session.scxml 신규 작성 — RFC §5.C link kind, SCE B6-α happy-path schema (link-class=udp + framer=frame + backpressure=block + 1 inbound link.session.rx + 1 outbound link.session.tx encode=frame). Authoring note에 RFC §5.C / session-fsm sec 6 / SCE C10-α listener-pair resolution / deploy yaml udp_session 매핑 / scout 와 차이점 (block vs drop, link.session.* vs link.scout.*, framer=frame vs scout) cite.",
+        "crates/wz-integration-tests/tests/link_emitter_b6.rs 확장 — helper `emit_link_c11(name)` + `assert_b6_tokens(emit, &[...])` 추출; 신규 test `r311ah_sce_b6_link_emitter_emits_expected_session_c11_shape` 추가 (lwip_udp_session_link_t + LWIP_UDP_SESSION_LINK_CLASS/FRAMER_REF/BACKPRESSURE macro + 4 inline fns init/rx/tx/poll 검증).",
+        "다른 코드 / SCXML / deploy yaml 변경 없음 — R63 lesson 준수 (NOP-stub skeleton 안 만듦; SCXML authoring + emit gate 만 장착)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-integration-tests --test link_emitter_b6: 2 passed / 0 failed (compile 0.84s + run 0.01s); R63 scout test + R311ah session test 모두 PASS.",
+        "bash scripts/run-ci.sh fullstack: all required layers PASS (1m27s wall-clock); Layer 0 fmt + Layer A/A2/B/C0/C1/C1b/C2/D/E 모두 통과; Layer F SKIP (opt-in).",
+        "SCE codegen B6-α happy-path schema 준수 확인 — sce-codegen generate --language c11 이 lwip_udp_session.scxml 에서 lwip_udp_session_link_t + LINK_CLASS/FRAMER_REF/BACKPRESSURE macro + sce_forge_link_t driver + 4 inline fns C11 header 정상 emit.",
+        "validate_workspace baseline R311ag 유지: T1=0 (ledger=1 R193 §66 known-stale), RT 13/13, sync; entries 349 → 350, sections 255 변동 0 (예상)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "session-fsm--prose-level-sketch/6-link-layer-interaction"
+      ],
+      "carry_forward_bullets": [
+        "R311ai next: deploy/mcu_target.yaml::udp_session ↔ lwip_udp_session.scxml mesh 검증 — sce-codegen 이 deploy yaml + SCXML 동시 input 으로 per-link wrapper emit 하는 path 가 (a) deploy trust_class=session_arming 이 SCE C10-α listener-pair 합성 트리거 하는지, (b) emit 된 lwip_udp_session_link_t 의 driver field 가 deploy lwip_udp driver string 과 mesh 되는지, (c) sibling (established_session) 자동 합성 결과 확인 — wz 에 sce-codegen multi-input 호출 path 존재 여부부터 audit.",
+        "R311aj later: arm-none-eabi-gcc 시스템 install (sudo apt install gcc-arm-none-eabi — user permission required, 1라운드 안 닫힘) + wz-runtime-lwip crate 재도입 scaffolding (Cargo.toml + lib.rs no_std + thumbv7em-none-eabihf; R63 교훈 준수: NOP-stub 대신 lwIP source 통합 시점에 real impl).",
+        "Phase W 후반 (20-50R): lwIP C source 통합 (build.rs cc::Build 또는 git submodule) + cross-compile build + scouting/session FSM 와 link 호출 path 통합 + real driver code (udp_recv / udp_sendto / lwIP netif initialization wiring); MCU half 하프 완성.",
+        "tcp_session SCXML 추가 (deploy yaml 에서 commented Phase B+) 는 Phase W 외 — lwip_tcp driver + session-fsm TCP variant authoring 시점 이제."
+      ],
+      "publishable_decision_summary": "R311ah sources/links/lwip_udp_session.scxml authoring (RFC §5.C B6-α happy-path, backpressure=block / framer=frame); link_emitter_b6 mirror test PASS; udp_session SCXML gap 닫힘.",
+      "publishable_changes_bullets": [
+        "sources/links/lwip_udp_session.scxml 신규 작성 — RFC §5.C link kind, SCE B6-α happy-path schema (link-class=udp + framer=frame + backpressure=block + 1 inbound link.session.rx + 1 outbound link.session.tx encode=frame). Authoring note에 RFC §5.C / session-fsm sec 6 / SCE C10-α listener-pair resolution / deploy yaml udp_session 매핑 / scout 와 차이점 (block vs drop, link.session.* vs link.scout.*, framer=frame vs scout) cite.",
+        "crates/wz-integration-tests/tests/link_emitter_b6.rs 확장 — helper `emit_link_c11(name)` + `assert_b6_tokens(emit, &[...])` 추출; 신규 test `r311ah_sce_b6_link_emitter_emits_expected_session_c11_shape` 추가 (lwip_udp_session_link_t + LWIP_UDP_SESSION_LINK_CLASS/FRAMER_REF/BACKPRESSURE macro + 4 inline fns init/rx/tx/poll 검증).",
+        "다른 코드 / SCXML / deploy yaml 변경 없음 — R63 lesson 준수 (NOP-stub skeleton 안 만듦; SCXML authoring + emit gate 만 장착)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-integration-tests --test link_emitter_b6: 2 passed / 0 failed (compile 0.84s + run 0.01s); R63 scout test + R311ah session test 모두 PASS.",
+        "bash scripts/run-ci.sh fullstack: all required layers PASS (1m27s wall-clock); Layer 0 fmt + Layer A/A2/B/C0/C1/C1b/C2/D/E 모두 통과; Layer F SKIP (opt-in).",
+        "SCE codegen B6-α happy-path schema 준수 확인 — sce-codegen generate --language c11 이 lwip_udp_session.scxml 에서 lwip_udp_session_link_t + LINK_CLASS/FRAMER_REF/BACKPRESSURE macro + sce_forge_link_t driver + 4 inline fns C11 header 정상 emit.",
+        "validate_workspace baseline R311ag 유지: T1=0 (ledger=1 R193 §66 known-stale), RT 13/13, sync; entries 349 → 350, sections 255 변동 0 (예상)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "session-fsm--prose-level-sketch/6-link-layer-interaction"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ai next: deploy/mcu_target.yaml::udp_session ↔ lwip_udp_session.scxml mesh 검증 — sce-codegen 이 deploy yaml + SCXML 동시 input 으로 per-link wrapper emit 하는 path 가 (a) deploy trust_class=session_arming 이 SCE C10-α listener-pair 합성 트리거 하는지, (b) emit 된 lwip_udp_session_link_t 의 driver field 가 deploy lwip_udp driver string 과 mesh 되는지, (c) sibling (established_session) 자동 합성 결과 확인 — wz 에 sce-codegen multi-input 호출 path 존재 여부부터 audit.",
+        "R311aj later: arm-none-eabi-gcc 시스템 install (sudo apt install gcc-arm-none-eabi — user permission required, 1라운드 안 닫힘) + wz-runtime-lwip crate 재도입 scaffolding (Cargo.toml + lib.rs no_std + thumbv7em-none-eabihf; R63 교훈 준수: NOP-stub 대신 lwIP source 통합 시점에 real impl).",
+        "Phase W 후반 (20-50R): lwIP C source 통합 (build.rs cc::Build 또는 git submodule) + cross-compile build + scouting/session FSM 와 link 호출 path 통합 + real driver code (udp_recv / udp_sendto / lwIP netif initialization wiring); MCU half 하프 완성.",
+        "tcp_session SCXML 추가 (deploy yaml 에서 commented Phase B+) 는 Phase W 외 — lwip_tcp driver + session-fsm TCP variant authoring 시점 이제."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
