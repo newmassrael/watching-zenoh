@@ -18194,6 +18194,50 @@
         "R311v carries unchanged: ReplyEmitter PhantomData, Reply/Push attach, ext mirror, R311n."
       ]
     },
+    "Round 311z": {
+      "decision_summary": "R311z carry planning — SCE pin bump 55243e886 (33 commits ahead) surfaced as immediate-amortization candidate; synth-invoke untracked 4파일 + NL→IR Enum kind / EventSchema 18th kind 토대 확보 1-라운드 절차 lock.",
+      "changes_bullets": [
+        "Atomic ledger entry only — carry planning round; SCE pin bump procedure locked for next session load.",
+        "33 commits 분류: synth-invoke fix 6, NL→IR C1 Enum kind 10, Item 2-4 series 5, infra/hygiene 4.",
+        "R52.1+ 17 bumps 모두 wz call site=0 ([[sce_vendor_pin_state]]); template-side만 변경 예상."
+      ],
+      "verification_bullets": [
+        "git -C vendor/sce log ac701ec4a..origin/main = 33 commits; synth-invoke fix 6 (c594493ee + 5 others).",
+        "validate_workspace: T1=0, RT 13/13, sync; R311v cargo baseline 763 pass carries."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "[즉시 상환 1순위] R311aa SCE pin bump 55243e886: load 시 첫 라운드로 실행.",
+        "절차: git -C vendor/sce checkout 55243e886 → cargo check/clippy/test workspace → wz pin bump commit.",
+        "기대 효과: untracked 4파일 자동 해소 + NL→IR Enum kind + EventSchema 18th kind 토대.",
+        "Sequential 종속 없음: ReplyEmitter, Reply/Push attach, ext mirror, R311n 그대로.",
+        "Session-last reparam + ap-demo 16 sites는 pin bump 후 R311ab+; §5.P scope 0 유지.",
+        "Failure 시 fallback: pin bump 보류 + 33 commits 중 wz call-site 영향 분석 라운드로 분기."
+      ],
+      "publishable_decision_summary": "R311z carry planning — SCE pin bump 55243e886 (33 commits ahead) surfaced as immediate-amortization candidate; synth-invoke untracked 4파일 + NL→IR Enum kind / EventSchema 18th kind 토대 확보 1-라운드 절차 lock.",
+      "publishable_changes_bullets": [
+        "Atomic ledger entry only — carry planning round; SCE pin bump procedure locked for next session load.",
+        "33 commits 분류: synth-invoke fix 6, NL→IR C1 Enum kind 10, Item 2-4 series 5, infra/hygiene 4.",
+        "R52.1+ 17 bumps 모두 wz call site=0 ([[sce_vendor_pin_state]]); template-side만 변경 예상."
+      ],
+      "publishable_verification_bullets": [
+        "git -C vendor/sce log ac701ec4a..origin/main = 33 commits; synth-invoke fix 6 (c594493ee + 5 others).",
+        "validate_workspace: T1=0, RT 13/13, sync; R311v cargo baseline 763 pass carries."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "[즉시 상환 1순위] R311aa SCE pin bump 55243e886: load 시 첫 라운드로 실행.",
+        "절차: git -C vendor/sce checkout 55243e886 → cargo check/clippy/test workspace → wz pin bump commit.",
+        "기대 효과: untracked 4파일 자동 해소 + NL→IR Enum kind + EventSchema 18th kind 토대.",
+        "Sequential 종속 없음: ReplyEmitter, Reply/Push attach, ext mirror, R311n 그대로.",
+        "Session-last reparam + ap-demo 16 sites는 pin bump 후 R311ab+; §5.P scope 0 유지.",
+        "Failure 시 fallback: pin bump 보류 + 33 commits 중 wz call-site 영향 분석 라운드로 분기."
+      ]
+    },
     "Round 32": {
       "decision_summary": "B5 codec track continues — sources/codecs/frame.scxml + fragment.scxml authored. First VLE + tail primitive composition (B1-α + tail) plus first inline test-vector land (B5-θ 4-case set). Both share identical body shape per zenoh-pico (sn:VLE + payload:tail, no extensions); differ only in enclosing MID (0x05 Frame / 0x06 Fragment).",
       "changes_bullets": [
