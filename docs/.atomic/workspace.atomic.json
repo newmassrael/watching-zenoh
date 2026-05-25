@@ -18067,6 +18067,64 @@
         "Honest claim: R311as는 1개 import alias 교체 — underlying type 변화 0, 행위 변화 0. 의미는 architectural unlock (Session<R,T> reparam prereq + MCU 프로파일 lock rebind 가능성); 을도적으로는 R311at+ 뗼에 의미 활성화."
       ]
     },
+    "Round 311at": {
+      "decision_summary": "R311at ap-demo §5.P trait-mediated migration — 5x tokio::spawn → TokioRuntime.spawn; JoinHandle → TokioJoinHandle 전체 (runner+teardown). Reference binary가 trait surface 시범.",
+      "changes_bullets": [
+        "crates/wz-ap-demo/src/runner.rs imports: `use tokio::task::JoinHandle;` 제거, `use wz::runtime_core::Runtime;` + `use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioRuntime};` 추가. import 블록에 R311at 이유 설명 (TokioJoinHandle .await가 Result<T, RuntimeError> resolve / TokioRuntime.spawn() unit struct 제로 비용 / wz-runtime-lwip+embassy 프로파일이 채움 후 reference binary가 per-profile swap shape 시범 / teardown.rs lockstep 명시).",
+        "crates/wz-ap-demo/src/runner.rs spawn 마이그레이션: line 147 writer_handle (wire_link_pipeline), line 431 publisher_handle, line 442 query_handle, line 456 declare_handle, line 666 sweep_task — 총 5건 `tokio::spawn(fut)` → `TokioRuntime.spawn(fut)`. 함수 반환 타입 (wire_link_pipeline tuple 3 element) `JoinHandle<()>` → `TokioJoinHandle<()>`. SpawnedTasks struct 3 필드 같이 `Option<TokioJoinHandle<()>>` 으로 교체.",
+        "crates/wz-ap-demo/src/teardown.rs imports: `use tokio::task::JoinHandle;` 제거, `use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioTime};` 합쳤 (TokioTime 기존 import 파이프에 TokioJoinHandle 추가). R311at 이유 설명 주석 첨부 (.abort() surface 보존 + .await Result<(), RuntimeError> 전환, timeout-join 소비자 `let _` discard 이미 있어 consumer-invisible 명시).",
+        "crates/wz-ap-demo/src/teardown.rs 필드 타입: TeardownInitial.{sweep_task, publisher_handle, query_handle, declare_handle, writer_handle} 총 5개 + TasksJoined.writer_handle + TokenDropped.writer_handle + CloseEmitted.writer_handle + ActionsDropped.writer_handle 총 9개 사이트 `JoinHandle<()>` → `TokioJoinHandle<()>`. typestate 체인 전체가 이제 trait wrapper 관통.",
+        "consumer 차이 분석: TokioJoinHandle.poll() → Result<T, RuntimeError> (JoinError는 RuntimeError::JoinFailed/JoinCancelled R257+R266 매핑). teardown.rs step 3 / step 7의 timeout-join 사이트는 기존에도 `let _ = self.clock.timeout(200, h).await;` 패턴으로 결과 무시 — error type 전환 invisible. .abort() API는 TokioJoinHandle에 동일 존재 (R259+ 컨트랙트). 의미론적 일치 입증 완료."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-ap-demo: PASS — 첫 시도 clean compile, 에러 0.",
+        "cargo clippy -p wz-ap-demo --all-targets -- -D warnings: clean.",
+        "bash scripts/run-ci.sh (fullstack): PASS — Layer A-E 전부 통과, Layer F/G SKIP (opt-in). 회귀 0.",
+        "validate_workspace: 이번 append 직후 entries 364→365, sections 255 유지, T1=0, RT 13/13, sync 기대.",
+        "잔여 audit (grep): runner.rs + teardown.rs 안 `tokio::spawn` / `JoinHandle` (non-TokioJoinHandle) 쟁여 0 확인."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "§5.P inventory delta (R311at 후): ap-demo `tokio::spawn` 5→0, `tokio::task::JoinHandle` import 1→0. 잔여 ap-demo 사이트: `tokio::sync::Mutex` 1 (알리아스 채택 적절 caller 경계 유지), `tokio::sync::oneshot/mpsc` (Runtime trait 에 channel 아직 없음), `tokio::select!` (매크로 유지). 이 한계는 Runtime trait 에 channel/select 추상 추가 시점으로 carry.",
+        "R311au (next): gcc-arm install 후 wz-runtime-lwip + LwipRuntime impl lands. R311ar trait shape + R311as Session alias + R311at ap-demo trait 매개 와 결합 = mechanical add 완전도 달성. LwipRuntime이 own Mutex/RwLock/JoinHandle (`embassy_sync::Mutex` / lwIP raw_pcb-based task), TokioRuntime.spawn과 동일 패턴으로 LwipRuntime.spawn 제공. Layer G default lane 승격.",
+        "R311av+: SCE-upstream codegen consistency carry (R311aq carry promotion) — sce-codegen Rust backend template String/ToString 자동 emit. wz codec_alloc_prelude! 매크로 제거 가능해짐. cross-repo (SCE session 별도).",
+        "R311aw+: 추가 cross-compile target audit (R311ap carry) — aarch64-unknown-none / wasm32-wasi / riscv64gc. use case 명확화 후.",
+        "Future round (Runtime trait channel/select 확장): wz-runtime-tokio + lwip가 동일 surface mpsc/oneshot/Notify/select! 매크로 제공하면 ap-demo의 나머지 직접 호출도 소진. R311ax 또는 더 후속 라운드.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam (R311at에서 reference binary 면 활성; Session struct 자체 generic은 후속), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (R311au), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Honest claim: R311at는 binary layer reference site 마이그레이션 — underlying tokio runtime 사용 변화 0 (TokioRuntime은 tokio::task::spawn wrapper, TokioJoinHandle는 tokio::task::JoinHandle wrapper). 의미는 architectural — reference binary가 이제 per-profile swap shape 시범, wz-runtime-lwip가 같은 패턴으로 lands 가능."
+      ],
+      "publishable_decision_summary": "R311at ap-demo §5.P trait-mediated migration — 5x tokio::spawn → TokioRuntime.spawn; JoinHandle → TokioJoinHandle 전체 (runner+teardown). Reference binary가 trait surface 시범.",
+      "publishable_changes_bullets": [
+        "crates/wz-ap-demo/src/runner.rs imports: `use tokio::task::JoinHandle;` 제거, `use wz::runtime_core::Runtime;` + `use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioRuntime};` 추가. import 블록에 R311at 이유 설명 (TokioJoinHandle .await가 Result<T, RuntimeError> resolve / TokioRuntime.spawn() unit struct 제로 비용 / wz-runtime-lwip+embassy 프로파일이 채움 후 reference binary가 per-profile swap shape 시범 / teardown.rs lockstep 명시).",
+        "crates/wz-ap-demo/src/runner.rs spawn 마이그레이션: line 147 writer_handle (wire_link_pipeline), line 431 publisher_handle, line 442 query_handle, line 456 declare_handle, line 666 sweep_task — 총 5건 `tokio::spawn(fut)` → `TokioRuntime.spawn(fut)`. 함수 반환 타입 (wire_link_pipeline tuple 3 element) `JoinHandle<()>` → `TokioJoinHandle<()>`. SpawnedTasks struct 3 필드 같이 `Option<TokioJoinHandle<()>>` 으로 교체.",
+        "crates/wz-ap-demo/src/teardown.rs imports: `use tokio::task::JoinHandle;` 제거, `use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioTime};` 합쳤 (TokioTime 기존 import 파이프에 TokioJoinHandle 추가). R311at 이유 설명 주석 첨부 (.abort() surface 보존 + .await Result<(), RuntimeError> 전환, timeout-join 소비자 `let _` discard 이미 있어 consumer-invisible 명시).",
+        "crates/wz-ap-demo/src/teardown.rs 필드 타입: TeardownInitial.{sweep_task, publisher_handle, query_handle, declare_handle, writer_handle} 총 5개 + TasksJoined.writer_handle + TokenDropped.writer_handle + CloseEmitted.writer_handle + ActionsDropped.writer_handle 총 9개 사이트 `JoinHandle<()>` → `TokioJoinHandle<()>`. typestate 체인 전체가 이제 trait wrapper 관통.",
+        "consumer 차이 분석: TokioJoinHandle.poll() → Result<T, RuntimeError> (JoinError는 RuntimeError::JoinFailed/JoinCancelled R257+R266 매핑). teardown.rs step 3 / step 7의 timeout-join 사이트는 기존에도 `let _ = self.clock.timeout(200, h).await;` 패턴으로 결과 무시 — error type 전환 invisible. .abort() API는 TokioJoinHandle에 동일 존재 (R259+ 컨트랙트). 의미론적 일치 입증 완료."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-ap-demo: PASS — 첫 시도 clean compile, 에러 0.",
+        "cargo clippy -p wz-ap-demo --all-targets -- -D warnings: clean.",
+        "bash scripts/run-ci.sh (fullstack): PASS — Layer A-E 전부 통과, Layer F/G SKIP (opt-in). 회귀 0.",
+        "validate_workspace: 이번 append 직후 entries 364→365, sections 255 유지, T1=0, RT 13/13, sync 기대.",
+        "잔여 audit (grep): runner.rs + teardown.rs 안 `tokio::spawn` / `JoinHandle` (non-TokioJoinHandle) 쟁여 0 확인."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "§5.P inventory delta (R311at 후): ap-demo `tokio::spawn` 5→0, `tokio::task::JoinHandle` import 1→0. 잔여 ap-demo 사이트: `tokio::sync::Mutex` 1 (알리아스 채택 적절 caller 경계 유지), `tokio::sync::oneshot/mpsc` (Runtime trait 에 channel 아직 없음), `tokio::select!` (매크로 유지). 이 한계는 Runtime trait 에 channel/select 추상 추가 시점으로 carry.",
+        "R311au (next): gcc-arm install 후 wz-runtime-lwip + LwipRuntime impl lands. R311ar trait shape + R311as Session alias + R311at ap-demo trait 매개 와 결합 = mechanical add 완전도 달성. LwipRuntime이 own Mutex/RwLock/JoinHandle (`embassy_sync::Mutex` / lwIP raw_pcb-based task), TokioRuntime.spawn과 동일 패턴으로 LwipRuntime.spawn 제공. Layer G default lane 승격.",
+        "R311av+: SCE-upstream codegen consistency carry (R311aq carry promotion) — sce-codegen Rust backend template String/ToString 자동 emit. wz codec_alloc_prelude! 매크로 제거 가능해짐. cross-repo (SCE session 별도).",
+        "R311aw+: 추가 cross-compile target audit (R311ap carry) — aarch64-unknown-none / wasm32-wasi / riscv64gc. use case 명확화 후.",
+        "Future round (Runtime trait channel/select 확장): wz-runtime-tokio + lwip가 동일 surface mpsc/oneshot/Notify/select! 매크로 제공하면 ap-demo의 나머지 직접 호출도 소진. R311ax 또는 더 후속 라운드.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam (R311at에서 reference binary 면 활성; Session struct 자체 generic은 후속), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (R311au), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Honest claim: R311at는 binary layer reference site 마이그레이션 — underlying tokio runtime 사용 변화 0 (TokioRuntime은 tokio::task::spawn wrapper, TokioJoinHandle는 tokio::task::JoinHandle wrapper). 의미는 architectural — reference binary가 이제 per-profile swap shape 시범, wz-runtime-lwip가 같은 패턴으로 lands 가능."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
