@@ -18131,6 +18131,64 @@
         "Honest claim: R311at는 binary layer reference site 마이그레이션 — underlying tokio runtime 사용 변화 0 (TokioRuntime은 tokio::task::spawn wrapper, TokioJoinHandle는 tokio::task::JoinHandle wrapper). 의미는 architectural — reference binary가 이제 per-profile swap shape 시범, wz-runtime-lwip가 같은 패턴으로 lands 가능."
       ]
     },
+    "Round 311at-fmt-fix": {
+      "decision_summary": "R311at cargo fmt drift fix — use ordering + sig wrap; pure cosmetic, no semantic change.",
+      "changes_bullets": [
+        "crates/wz-ap-demo/src/runner.rs:56 — use 순서 정렬 (runtime_core::TimeSource 먼저, runtime_tokio::runtime_impl::TokioTime 다음에 {TokioJoinHandle, TokioRuntime} 그룹)",
+        "crates/wz-ap-demo/src/runner.rs:154 — wire_link_pipeline 반환 튜플 멀티라인 wrap (rustfmt max_width 위반 회피)",
+        "crates/wz-ap-demo/src/teardown.rs:43 — use 순서 정렬 (runtime_core::TimeSource 먼저, runtime_tokio::runtime_impl::{TokioJoinHandle, TokioTime} 다음)",
+        "R311at 0bee3be commit 후 cargo fmt --all 재실행 미수행이 root cause; pre-commit hook은 mnemosyne validate-workspace만 게이트하고 cargo fmt는 pre-push run-ci.sh Layer 0에서만 잡힘",
+        "R311at 본문 frozen-ledger 준수 — 신규 entry로 보정 (R311au-prep-fix와 동일 패턴)",
+        "commit: 0baf6e6 chore(ap-demo): R311at-fmt-fix cargo fmt use ordering + sig wrap"
+      ],
+      "verification_bullets": [
+        "cd crates && cargo fmt --all → diff 2-file 7+/3- 적용 (순수 cosmetic)",
+        "git diff 검토: import 순서 + 함수 시그니처 멀티라인만 변경, 의미 변경 0",
+        "commit-msg hook: chore type 통과",
+        "pre-commit hook: validate_workspace T1=0 / RT 13/13 / GENERATED.md=sync 유지",
+        "pre-push run-ci.sh Layer 0 fmt --check: 다음 push 시점 통과 예정",
+        "atomic ledger entries 367→368, sections 255 유지"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "push 승인 대기: 5 unpushed commits (8c41d15..0baf6e6) = R311as + R311at + R311au-prep + R311au-prep-fix + R311at-fmt-fix",
+        "pre-commit hook gap 인지: cargo fmt --check가 pre-commit이 아닌 pre-push에서만 게이트됨 — fmt drift commit 재발 가능성 있음. 해결 옵션: (a) pre-commit hook에 cargo fmt --check 추가 (b) author workflow에 cargo fmt 강제 (c) drift 발생 시마다 -fmt-fix entry 추가. 향후 라운드 결정.",
+        "R311au gcc-arm-none-eabi 설치 + LwipRuntime 구체 impl — Phase W ladder 최종 단계, 사용자 권한 대기",
+        "R311ax candidate: Runtime trait channel/select extension — 두 번째 profile(lwIP)이 실제 필요 시점까지 보류",
+        "R267 Session<R,T> reparam — R311at trait-mediated reference 진입로 확보, Session struct generic은 후속"
+      ],
+      "publishable_decision_summary": "R311at cargo fmt drift fix — use ordering + sig wrap; pure cosmetic, no semantic change.",
+      "publishable_changes_bullets": [
+        "crates/wz-ap-demo/src/runner.rs:56 — use 순서 정렬 (runtime_core::TimeSource 먼저, runtime_tokio::runtime_impl::TokioTime 다음에 {TokioJoinHandle, TokioRuntime} 그룹)",
+        "crates/wz-ap-demo/src/runner.rs:154 — wire_link_pipeline 반환 튜플 멀티라인 wrap (rustfmt max_width 위반 회피)",
+        "crates/wz-ap-demo/src/teardown.rs:43 — use 순서 정렬 (runtime_core::TimeSource 먼저, runtime_tokio::runtime_impl::{TokioJoinHandle, TokioTime} 다음)",
+        "R311at 0bee3be commit 후 cargo fmt --all 재실행 미수행이 root cause; pre-commit hook은 mnemosyne validate-workspace만 게이트하고 cargo fmt는 pre-push run-ci.sh Layer 0에서만 잡힘",
+        "R311at 본문 frozen-ledger 준수 — 신규 entry로 보정 (R311au-prep-fix와 동일 패턴)",
+        "commit: 0baf6e6 chore(ap-demo): R311at-fmt-fix cargo fmt use ordering + sig wrap"
+      ],
+      "publishable_verification_bullets": [
+        "cd crates && cargo fmt --all → diff 2-file 7+/3- 적용 (순수 cosmetic)",
+        "git diff 검토: import 순서 + 함수 시그니처 멀티라인만 변경, 의미 변경 0",
+        "commit-msg hook: chore type 통과",
+        "pre-commit hook: validate_workspace T1=0 / RT 13/13 / GENERATED.md=sync 유지",
+        "pre-push run-ci.sh Layer 0 fmt --check: 다음 push 시점 통과 예정",
+        "atomic ledger entries 367→368, sections 255 유지"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "push 승인 대기: 5 unpushed commits (8c41d15..0baf6e6) = R311as + R311at + R311au-prep + R311au-prep-fix + R311at-fmt-fix",
+        "pre-commit hook gap 인지: cargo fmt --check가 pre-commit이 아닌 pre-push에서만 게이트됨 — fmt drift commit 재발 가능성 있음. 해결 옵션: (a) pre-commit hook에 cargo fmt --check 추가 (b) author workflow에 cargo fmt 강제 (c) drift 발생 시마다 -fmt-fix entry 추가. 향후 라운드 결정.",
+        "R311au gcc-arm-none-eabi 설치 + LwipRuntime 구체 impl — Phase W ladder 최종 단계, 사용자 권한 대기",
+        "R311ax candidate: Runtime trait channel/select extension — 두 번째 profile(lwIP)이 실제 필요 시점까지 보류",
+        "R267 Session<R,T> reparam — R311at trait-mediated reference 진입로 확보, Session struct generic은 후속"
+      ]
+    },
     "Round 311au-prep": {
       "decision_summary": "R311au-prep §5.P caveat refresh — R311at inventory delta (ap-demo 16→4) + LwipRuntime contract sketch (own Mutex/RwLock/JoinHandle bind) + channel/select carry note.",
       "changes_bullets": [
