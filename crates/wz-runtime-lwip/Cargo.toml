@@ -1,18 +1,39 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# wz-runtime-lwip — Phase W MCU profile entry (R311au scope C).
+# wz-runtime-lwip — Phase W MCU profile entry.
 #
-# R311au reintroduces this crate at a deliberately narrow scope:
-# **sync primitive aliases only**. The `Runtime` trait impl
-# (LwipRuntime + spawn + JoinHandle) and the lwIP-sys FFI bridge are
-# deferred to subsequent rounds. The narrowing was explicit per the
-# R311au architectural fork — embassy_executor's static-task model
-# does not compose with the trait's generic `spawn<F: Future>`, and a
-# self-rolled cooperative task pool is a multi-round project; landing
-# sync primitives first gives the rest of the workspace a real
-# per-profile alias surface to bind against while the executor
-# decision works itself out.
+# R311au scope (C) shipped the sync primitive aliases
+# (`critical_section::Mutex<RefCell<T>>`). R311av builds on top by
+# landing the `impl Runtime for LwipRuntime` surface behind the
+# `alloc` feature gate: a self-rolled cooperative task pool (see
+# `src/executor.rs`) + `LwipJoinHandle` (`src/join_handle.rs`) + an
+# own `ClockSource` trait + `LwipTime` (`src/time.rs`) that satisfy
+# the §5.P runtime-services-tier contract authored in
+# `wz-runtime-core`. The R311av-pre ledger records the 8 design
+# decisions that the executor obeys (Pin<Box<dyn Future + Send>>;
+# per-LwipRuntime `Arc<ExecutorState>`; `Vec<Option<TaskSlot>>`
+# storage; custom RawWaker + per-task atomic wake_flag; LwipRuntime:
+# Clone for nested spawn; JoinHandle = Arc<sync::Mutex<RefCell<
+# JoinState<T>>>>; own ClockSource only with embedded-time rejected;
+# abort deferred to R311az+).
+#
+# Why a self-rolled executor (not embassy or C-side lwIP integration):
+#
+#   - The §5.P `Runtime::spawn<F: Future + Send + 'static>` contract
+#     does not compose with embassy_executor's static-task model
+#     (embassy spawns `#[embassy::task]` SpawnTokens, not generic
+#     Futures). Wrapping embassy would surface its static-slot
+#     lifetime invariants as a leaky abstraction.
+#   - alloc-based `Pin<Box<dyn Future + Send>>` matches the trait
+#     surface one-to-one and aligns with wz-codecs's existing alloc
+#     dependency (composable framework north star: per-preset heap
+#     + slot configuration, no compile-time hard cap from a static
+#     slot array).
+#   - C-side lwIP integration is a link-tier (§5.C) concern, not a
+#     runtime-services-tier (§5.P) concern; `LwipRuntime` is
+#     link/transport agnostic and a future `wz-link-lwip` crate
+#     will bridge the lwIP TCP/UDP API to the async wire surface.
 #
 # Why this differs from the R53/R58 NOP-stub history (R63 retrospect):
 #
@@ -20,18 +41,18 @@
 #     future; R58 reframed it as a "Phase W deferred skeleton" with a
 #     multi-paragraph "intentionally NOP" doc-comment. R63 reverted
 #     both as document-around-the-hack patterns.
-#   - R311au scope (C) ships **only real impls**. `pub type Mutex<T>
-#     = critical_section::Mutex<RefCell<T>>;` is a real per-profile
-#     binding to a working IRQ-disabling lock — not a stub. The Runtime
-#     impl is absent (not stubbed); a downstream reader who calls
-#     `cargo build -p wz-runtime-lwip` gets a working library, and a
-#     reader who looks for `impl Runtime for LwipRuntime` finds no such
-#     item rather than a misleading NOP. The two outcomes are
-#     production-honest in a way the R53/R58 path was not.
+#   - R311av ships only real impls. `LwipRuntime::spawn` actually
+#     queues the future into a `Vec<Option<TaskSlot>>` and polls it
+#     on `run_until_idle`; `LwipJoinHandle::poll` actually checks
+#     the shared `JoinState<T>` for a result and registers a waker;
+#     `LwipTime::now_monotonic_ms` reads the user-supplied
+#     `ClockSource` and divides by 1000. No `unimplemented!()`, no
+#     silently-dropped futures, no doc-only "intentionally NOP".
 #
-# Layer G.4 (scripts/run-ci.sh) registers a cross-compile build of
-# this crate for every Phase W MCU target so the sync alias compiles
-# under #![no_std] on each architecture before any consumer arrives.
+# Layer G.4 (scripts/run-ci.sh) keeps the no-alloc sync-only build
+# path covered for every Phase W MCU target; Layer G.4-alloc lands
+# alongside R311av as the alloc-on cross-compile lane for the
+# executor + Runtime impl surface.
 
 [package]
 name = "wz-runtime-lwip"
@@ -42,11 +63,24 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme.workspace = true
-description = "Phase W MCU profile sync primitive aliases (R311au scope C; LwipRuntime + lwIP FFI deferred)."
+description = "Phase W MCU profile runtime (R311av cooperative task pool; LwipRuntime + LwipTime impl Runtime + TimeSource via own ClockSource trait)."
 
 [lib]
 name = "wz_runtime_lwip"
 path = "src/lib.rs"
+
+# R311av — `alloc` feature gates the LwipRuntime + LwipTime + executor
+# + JoinHandle modules. Default-off keeps the R311au scope (C) sync-
+# alias build path (no_std, no alloc) intact: a `cargo build -p
+# wz-runtime-lwip` with default features still pulls only the sync
+# primitives + critical-section, matching the R311au Layer G.4 lane.
+# `--features alloc` adds the cooperative task pool executor and the
+# `impl Runtime for LwipRuntime` surface that R311av lands; the
+# wz-runtime-core dep is feature-gated so the no-alloc build stays
+# trait-skeleton-free.
+[features]
+default = []
+alloc = ["dep:wz-runtime-core", "wz-runtime-core/alloc"]
 
 [dependencies]
 # critical-section provides the IRQ-disabling Mutex<T> primitive
@@ -58,6 +92,24 @@ path = "src/lib.rs"
 # only the trait crate and compiles cleanly on every MCU target
 # without pulling a per-arch impl into this crate's dep graph.
 critical-section = "1"
+# R311av — Runtime / TimeSource trait surface. Optional + alloc-gated
+# so the no-alloc sync-only build path stays trait-skeleton-free.
+# `wz-runtime-core/alloc` is required because RuntimeError under
+# alloc carries the `JoinFailed { payload: Box<dyn Any + Send> }`
+# variant shape; LwipRuntime never constructs JoinFailed itself
+# (success arm only — no catch_unwind on no_std), but the dep's
+# alloc gate governs the whole error enum and aligns with the AP
+# profile (wz-runtime-tokio also pulls `wz-runtime-core/alloc`).
+wz-runtime-core = { path = "../wz-runtime-core", default-features = false, optional = true }
+
+[dev-dependencies]
+# critical-section's `std` feature provides a software-emulated impl
+# based on std::sync::Mutex so the host `cargo test` path can drive
+# critical_section::with(..) without a per-arch impl being linked.
+# Cross-compile lane (Layer G.4 + G.4-alloc) does not pull this in
+# because `[dev-dependencies]` only activate for test builds — the
+# MCU build still requires the deploy crate to provide the impl.
+critical-section = { version = "1", features = ["std"] }
 
 [lints]
 workspace = true
