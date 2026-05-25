@@ -18279,6 +18279,60 @@
         "Honest claim: R311au-prep-fix는 micro-correction round — R311au-prep 내 설명 부정확 (Mutex 명칭 명먹 + tokio::net 누락) 자명 프레임. frozen-ledger는 본문 보존 + 새 caveat append로 도레이 (수정 X)."
       ]
     },
+    "Round 311au-prep-hook": {
+      "decision_summary": "R311au-prep-hook lands .githooks/pre-commit Check 2 — cargo fmt --check on staged crates/**.rs (R311at-fmt-fix 재발 방지); run-ci.sh Layer 0 R64.1 mirror.",
+      "changes_bullets": [
+        "Pre-commit 헤더 코멘트: two checks → three checks (Check 2 신규 설명 블록 추가)",
+        "체크 순서 정의: (1) Cargo.toml/lock sync → (2) fmt --check → (3) mnemosyne SSOT exec",
+        "fmt 게이트 필터: git diff --cached --diff-filter=ACM | grep crates/**.rs; staged 0개면 skip",
+        "staged ≥1 시 (cd crates && cargo fmt --all -- --check) — scripts/run-ci.sh Layer 0 명령 동일",
+        "실패 시 staged .rs 목록 + (cd crates && cargo fmt --all) && git add -u fix 안내 후 exit 1",
+        "Mnemosyne-only commit (atomic ledger 등록)은 rustfmt boot 비용 0 — Check 2 silently skip"
+      ],
+      "verification_bullets": [
+        "Negative case: sync.rs EOF에 1-line drift (no-space let _=1) 주입 + git add → hook exit 1 확인",
+        "rustfmt diff 출력 + 친절한 fix 안내 메시지 + staged 목록 출력 확인 (3-line 메시지 모두 출력)",
+        "Drift fully reverted: git restore --staged + git restore 작업 트리 복원 (diff bak 파일 동일 확인)",
+        "Positive case: nothing staged → Check 1+2 skip → Check 3 validate_workspace exit 0 통과",
+        "Baseline preserved: entries=368 sections=255 T1=0 RT 13/13 GENERATED.md=sync (변화 없음)",
+        "본 ledger append 후 entries 368→369 + 본 entry impact_refs §watching-zenoh/local-ci-gates 1건"
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Push 보류: hook 변경 + ledger entry 2 local commits 예정; 사용자 명시 push 승인 대기",
+        "R311au 진입 차단 모두 해제 (gcc-arm-none-eabi 10.3.1 설치 확인 + 본 hook gate 견고화)",
+        "Section body refresh 후보: watching-zenoh/local-ci-gates pre-commit 설명에 fmt 게이트 명시 — 다음 round",
+        "R311ax/R267/R284/R283/R301 §8/R299 #2-3/R300/R304/keyexpr_canon proptest/R310.5c — architectural carries unchanged"
+      ],
+      "publishable_decision_summary": "R311au-prep-hook lands .githooks/pre-commit Check 2 — cargo fmt --check on staged crates/**.rs (R311at-fmt-fix 재발 방지); run-ci.sh Layer 0 R64.1 mirror.",
+      "publishable_changes_bullets": [
+        "Pre-commit 헤더 코멘트: two checks → three checks (Check 2 신규 설명 블록 추가)",
+        "체크 순서 정의: (1) Cargo.toml/lock sync → (2) fmt --check → (3) mnemosyne SSOT exec",
+        "fmt 게이트 필터: git diff --cached --diff-filter=ACM | grep crates/**.rs; staged 0개면 skip",
+        "staged ≥1 시 (cd crates && cargo fmt --all -- --check) — scripts/run-ci.sh Layer 0 명령 동일",
+        "실패 시 staged .rs 목록 + (cd crates && cargo fmt --all) && git add -u fix 안내 후 exit 1",
+        "Mnemosyne-only commit (atomic ledger 등록)은 rustfmt boot 비용 0 — Check 2 silently skip"
+      ],
+      "publishable_verification_bullets": [
+        "Negative case: sync.rs EOF에 1-line drift (no-space let _=1) 주입 + git add → hook exit 1 확인",
+        "rustfmt diff 출력 + 친절한 fix 안내 메시지 + staged 목록 출력 확인 (3-line 메시지 모두 출력)",
+        "Drift fully reverted: git restore --staged + git restore 작업 트리 복원 (diff bak 파일 동일 확인)",
+        "Positive case: nothing staged → Check 1+2 skip → Check 3 validate_workspace exit 0 통과",
+        "Baseline preserved: entries=368 sections=255 T1=0 RT 13/13 GENERATED.md=sync (변화 없음)",
+        "본 ledger append 후 entries 368→369 + 본 entry impact_refs §watching-zenoh/local-ci-gates 1건"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Push 보류: hook 변경 + ledger entry 2 local commits 예정; 사용자 명시 push 승인 대기",
+        "R311au 진입 차단 모두 해제 (gcc-arm-none-eabi 10.3.1 설치 확인 + 본 hook gate 견고화)",
+        "Section body refresh 후보: watching-zenoh/local-ci-gates pre-commit 설명에 fmt 게이트 명시 — 다음 round",
+        "R311ax/R267/R284/R283/R301 §8/R299 #2-3/R300/R304/keyexpr_canon proptest/R310.5c — architectural carries unchanged"
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
