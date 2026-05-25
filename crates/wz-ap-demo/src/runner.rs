@@ -42,7 +42,21 @@ use std::sync::Arc;
 
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
+// R311at — JoinHandle types migrate from raw `tokio::task::JoinHandle`
+// to wz's [`TokioJoinHandle`], the trait-wrapped form returned by
+// `<TokioRuntime as Runtime>::spawn`. The wrapper exposes the same
+// `.abort()` + Future shape but yields `Result<T, RuntimeError>` on
+// `.await` (instead of `Result<T, tokio::task::JoinError>`), keeping
+// the ap-demo binary boundary on the trait surface that
+// `wz-runtime-lwip` / `wz-runtime-embassy` will eventually populate
+// — the reference binary therefore models the per-profile swap shape
+// that downstream consumers inherit. R311at also replaces every
+// `tokio::spawn(fut)` call with `TokioRuntime.spawn(fut)`; the
+// concrete TokioRuntime instance is a unit struct so each call site
+// pays zero runtime cost. teardown.rs migrates the same field types
+// in lockstep so the typestate handoff stays type-uniform.
+use wz::runtime_core::Runtime;
+use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use wz::runtime_core::TimeSource;
 use wz::runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
 use wz::runtime_tokio::observer::ApplicationLayerObserver;
@@ -90,9 +104,9 @@ struct SessionHandles {
 /// LivelinessToken (if any) is received from `token_rx` and dropped
 /// (RAII; emits `Declare(UndeclToken)` on the wire).
 struct SpawnedTasks {
-    publisher_handle: Option<JoinHandle<()>>,
-    query_handle: Option<JoinHandle<()>>,
-    declare_handle: Option<JoinHandle<()>>,
+    publisher_handle: Option<TokioJoinHandle<()>>,
+    query_handle: Option<TokioJoinHandle<()>>,
+    declare_handle: Option<TokioJoinHandle<()>>,
     token_rx: Option<oneshot::Receiver<LivelinessToken>>,
 }
 
@@ -140,11 +154,11 @@ async fn establish_link(role: &Role) -> io::Result<TcpStream> {
 /// peer.
 fn wire_link_pipeline(
     stream: TcpStream,
-) -> (InboundReadDriver, Arc<OutboundWriteDriver>, JoinHandle<()>) {
+) -> (InboundReadDriver, Arc<OutboundWriteDriver>, TokioJoinHandle<()>) {
     let (reader, writer) = stream.into_split();
     let inbound = InboundReadDriver::new(reader);
     let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_handle = tokio::spawn(writer_task(writer, outbound_rx));
+    let writer_handle = TokioRuntime.spawn(writer_task(writer, outbound_rx));
     let outbound = Arc::new(OutboundWriteDriver::new(outbound_tx));
     (inbound, outbound, writer_handle)
 }
@@ -428,7 +442,7 @@ fn spawn_background_tasks(
 ) -> SpawnedTasks {
     let publisher_handle = publisher_spec.map(|(keyexpr, operation, declare_id)| {
         let session_for_publisher = session.clone();
-        tokio::spawn(publisher_task(
+        TokioRuntime.spawn(publisher_task(
             session_for_publisher,
             keyexpr,
             operation,
@@ -439,7 +453,7 @@ fn spawn_background_tasks(
 
     let query_handle = query_spec.map(|keyexpr| {
         let actions_for_query = actions.clone();
-        tokio::spawn(query_task(actions_for_query, keyexpr, session_clock))
+        TokioRuntime.spawn(query_task(actions_for_query, keyexpr, session_clock))
     });
 
     let has_declares = declare_spec.subscriber_keyexpr.is_some()
@@ -453,7 +467,7 @@ fn spawn_background_tasks(
     };
     let declare_handle = if has_declares {
         let session_for_declare = session.clone();
-        Some(tokio::spawn(declare_task(
+        Some(TokioRuntime.spawn(declare_task(
             session_for_declare,
             declare_spec,
             session_clock,
@@ -663,7 +677,7 @@ pub(crate) async fn run_demo(
     let sweep_clock = session_clock;
     let observer_for_sweep = observer.clone();
     let sweep_cadence_ms = u64::from(reply_log_spec.sweep_cadence_ms);
-    let sweep_task = tokio::spawn(async move {
+    let sweep_task = TokioRuntime.spawn(async move {
         loop {
             sweep_clock.sleep(sweep_cadence_ms).await;
             // Lock the observer for the minimum window: a single

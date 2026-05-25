@@ -34,9 +34,17 @@
 use std::sync::Arc;
 
 use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
+// R311at — JoinHandle types migrate from raw `tokio::task::JoinHandle`
+// to wz's [`TokioJoinHandle`] so the typestate handoff inside this
+// teardown chain stays type-uniform with `runner.rs::SpawnedTasks`
+// (which holds the same wrapper). The wrapper's `.abort()` surface is
+// preserved (step 2 sweep_task abort), and `.await` resolves to
+// `Result<(), wz_runtime_core::RuntimeError>` instead of
+// `Result<(), tokio::task::JoinError>`; the timeout-join sites in
+// step 3 + step 7 already discard the result via `let _`, so the
+// error-type shift is consumer-invisible.
+use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioTime};
 use wz::runtime_core::TimeSource;
-use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::session::LivelinessToken;
 use wz::runtime_tokio::session_glue::{CloseReason, SessionLinkActions};
 
@@ -46,13 +54,13 @@ use wz::runtime_tokio::session_glue::{CloseReason, SessionLinkActions};
 /// natural-exit arm (FSM Closing state already fired the
 /// script-side Close, so the rust-side emit is suppressed).
 pub(crate) struct TeardownInitial {
-    pub sweep_task: JoinHandle<()>,
-    pub publisher_handle: Option<JoinHandle<()>>,
-    pub query_handle: Option<JoinHandle<()>>,
-    pub declare_handle: Option<JoinHandle<()>>,
+    pub sweep_task: TokioJoinHandle<()>,
+    pub publisher_handle: Option<TokioJoinHandle<()>>,
+    pub query_handle: Option<TokioJoinHandle<()>>,
+    pub declare_handle: Option<TokioJoinHandle<()>>,
     pub token_rx: Option<oneshot::Receiver<LivelinessToken>>,
     pub actions: Arc<SessionLinkActions>,
-    pub writer_handle: JoinHandle<()>,
+    pub writer_handle: TokioJoinHandle<()>,
     pub was_cancelled: bool,
     /// R311ad — clock used by every timeout-bounded step in the
     /// chain. Passing it in (instead of letting each step construct
@@ -113,7 +121,7 @@ impl TeardownInitial {
 pub(crate) struct TasksJoined {
     token_rx: Option<oneshot::Receiver<LivelinessToken>>,
     actions: Arc<SessionLinkActions>,
-    writer_handle: JoinHandle<()>,
+    writer_handle: TokioJoinHandle<()>,
     was_cancelled: bool,
     clock: TokioTime,
 }
@@ -145,7 +153,7 @@ impl TasksJoined {
 /// double-send. `was_cancelled` is the discriminator.
 pub(crate) struct TokenDropped {
     actions: Arc<SessionLinkActions>,
-    writer_handle: JoinHandle<()>,
+    writer_handle: TokioJoinHandle<()>,
     was_cancelled: bool,
     clock: TokioTime,
 }
@@ -181,7 +189,7 @@ impl TokenDropped {
 /// last sender by construction.
 pub(crate) struct CloseEmitted {
     actions: Arc<SessionLinkActions>,
-    writer_handle: JoinHandle<()>,
+    writer_handle: TokioJoinHandle<()>,
     clock: TokioTime,
 }
 
@@ -203,7 +211,7 @@ impl CloseEmitted {
 /// writer is a length-prefixed shim, not a blocking flush, so
 /// 50ms is generous on every link we test.
 pub(crate) struct ActionsDropped {
-    writer_handle: JoinHandle<()>,
+    writer_handle: TokioJoinHandle<()>,
     clock: TokioTime,
 }
 
