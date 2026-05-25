@@ -2160,7 +2160,9 @@
         "R311au-prep: ap-demo §5.P sites 16→4 (Mutex+oneshot+mpsc+select! remain; spawn 5→0, JoinHandle 5→0).",
         "R311au-prep: R311at trait surface proof (TokioRuntime.spawn + TokioJoinHandle); lwip mechanical add.",
         "R311au-prep: LwipRuntime binds own Mutex/RwLock (critical_section or embassy_sync) + own JoinHandle.",
-        "R311au-prep: remaining 4 sites are channel/select not on Runtime trait; extend trait when needed."
+        "R311au-prep: remaining 4 sites are channel/select not on Runtime trait; extend trait when needed.",
+        "R311au-prep correction: post-R311at = oneshot 2 + mpsc 1 + select! 1; tokio::net 2 link-layer.",
+        "R311au-prep: tokio::net TcpListener/TcpStream are link-layer (lwIP uses own API; out of §5.P scope)."
       ],
       "alternatives_rejected": [
         {
@@ -18175,6 +18177,48 @@
         "Runtime trait channel/select 확장 (R311ax 후보): wz-runtime-tokio + lwip 동일 surface mpsc/oneshot/Notify/select! 트레이트 추상 도입. 제2 프로파일 (lwip) 이 실제 필요 시점에 lands. 현재 는 carry.",
         "Architectural carries unchanged: R267 Session<R,T> reparam (R311at에서 reference binary 면 활성; Session struct generic은 후속), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (R311au), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
         "Honest claim: R311au-prep는 ledger-only — code mutation 0; §5.P inventory delta + LwipRuntime contract sketch 서론 장치. 다음 세션이 R311au 진입할 때 sketch를 이정표로 사용 가능."
+      ]
+    },
+    "Round 311au-prep-fix": {
+      "decision_summary": "R311au-prep-fix §5.P caveats +2 correction — post-R311at actual remaining tokio:: 정확화 (oneshot 2, mpsc 1, select! 1, tokio::net link-layer separation).",
+      "changes_bullets": [
+        "§5.P caveats +2 새 bullet append (frozen-ledger 존중 — R311au-prep 기존 caveat 4 건 모두 보존): (1) post-R311at actual inventory 정확화 — oneshot 2 + mpsc 1 + select! 1 (R311au-prep 명시 \"Mutex+oneshot+mpsc+select!\" 중 Mutex는 wz alias이라 직접 tokio 아님; tokio::net 2 더 있음), (2) tokio::net TcpListener/TcpStream link-layer 구분 (lwIP은 own API 사용 — §5.P runtime services tier 외 transport tier).",
+        "근거: grep audit `grep -nE \"tokio::(sync|select|spawn|task|time|pin|net)\" crates/wz-ap-demo/src/{runner,teardown,main}.rs` post-R311at = oneshot ×2 (runner+teardown), mpsc ×1 (runner outbound_tx), select! ×1 (runner drive_session race), net ×2 (TcpListener+TcpStream). tokio::sync::Mutex 0 (이전 계산 패턴에 wz alias 명칭이 명먹됨).",
+        "수정 vs 추가 결정: R311au-prep 기존 caveat는 frozen 본문; 보정은 새 caveat append (append-only frozen-ledger 아키텍처 준수). 명시 이유: 정확한 inventory는 R311au LwipRuntime 구현 시 transport tier 분리 결정에 직접 영향 (tokio::net 은 보공적 LwipRuntime에 없고 별도 lwip-pcb transport tier)."
+      ],
+      "verification_bullets": [
+        "validate_workspace: caveat append 2차례 성공; 본 ledger entry append 직후 entries 366→367, T1=0, RT 13/13, sync 기대.",
+        "code mutation 0 — caveat append-only round; cargo build/test 재실행 불필요.",
+        "정확 검증 단서: 새 caveat의 널 수치는 grep 파이프 결과로 임파입髄 verification 완료; bullet 2건 모두 ≤100B 준수 확인."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311au (next, 권한 회답 후): wz-runtime-lwip + LwipRuntime impl lands. R311ar+as+at+au-prep+au-prep-fix 세트 prereq. 정확한 inventory caveat 기반으로 LwipRuntime은 Mutex/RwLock/JoinHandle 바인딩 + transport tier는 별도 결정 (lwIP-pcb).",
+        "Runtime trait channel 확장 carry: oneshot/mpsc 추상은 lwIP 상황 명칛해진 후에 결정 (embassy는 embassy-sync::channel, lwIP standalone은 일반적으로 single-task 이라서 channel 자체가 극단적).",
+        "Architectural carries unchanged: R267 Session<R,T> reparam (R311at에서 reference binary 면 활성), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (R311au), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Honest claim: R311au-prep-fix는 micro-correction round — R311au-prep 내 설명 부정확 (Mutex 명칭 명먹 + tokio::net 누락) 자명 프레임. frozen-ledger는 본문 보존 + 새 caveat append로 도레이 (수정 X)."
+      ],
+      "publishable_decision_summary": "R311au-prep-fix §5.P caveats +2 correction — post-R311at actual remaining tokio:: 정확화 (oneshot 2, mpsc 1, select! 1, tokio::net link-layer separation).",
+      "publishable_changes_bullets": [
+        "§5.P caveats +2 새 bullet append (frozen-ledger 존중 — R311au-prep 기존 caveat 4 건 모두 보존): (1) post-R311at actual inventory 정확화 — oneshot 2 + mpsc 1 + select! 1 (R311au-prep 명시 \"Mutex+oneshot+mpsc+select!\" 중 Mutex는 wz alias이라 직접 tokio 아님; tokio::net 2 더 있음), (2) tokio::net TcpListener/TcpStream link-layer 구분 (lwIP은 own API 사용 — §5.P runtime services tier 외 transport tier).",
+        "근거: grep audit `grep -nE \"tokio::(sync|select|spawn|task|time|pin|net)\" crates/wz-ap-demo/src/{runner,teardown,main}.rs` post-R311at = oneshot ×2 (runner+teardown), mpsc ×1 (runner outbound_tx), select! ×1 (runner drive_session race), net ×2 (TcpListener+TcpStream). tokio::sync::Mutex 0 (이전 계산 패턴에 wz alias 명칭이 명먹됨).",
+        "수정 vs 추가 결정: R311au-prep 기존 caveat는 frozen 본문; 보정은 새 caveat append (append-only frozen-ledger 아키텍처 준수). 명시 이유: 정확한 inventory는 R311au LwipRuntime 구현 시 transport tier 분리 결정에 직접 영향 (tokio::net 은 보공적 LwipRuntime에 없고 별도 lwip-pcb transport tier)."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: caveat append 2차례 성공; 본 ledger entry append 직후 entries 366→367, T1=0, RT 13/13, sync 기대.",
+        "code mutation 0 — caveat append-only round; cargo build/test 재실행 불필요.",
+        "정확 검증 단서: 새 caveat의 널 수치는 grep 파이프 결과로 임파입髄 verification 완료; bullet 2건 모두 ≤100B 준수 확인."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311au (next, 권한 회답 후): wz-runtime-lwip + LwipRuntime impl lands. R311ar+as+at+au-prep+au-prep-fix 세트 prereq. 정확한 inventory caveat 기반으로 LwipRuntime은 Mutex/RwLock/JoinHandle 바인딩 + transport tier는 별도 결정 (lwIP-pcb).",
+        "Runtime trait channel 확장 carry: oneshot/mpsc 추상은 lwIP 상황 명칛해진 후에 결정 (embassy는 embassy-sync::channel, lwIP standalone은 일반적으로 single-task 이라서 channel 자체가 극단적).",
+        "Architectural carries unchanged: R267 Session<R,T> reparam (R311at에서 reference binary 면 활성), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (R311au), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Honest claim: R311au-prep-fix는 micro-correction round — R311au-prep 내 설명 부정확 (Mutex 명칭 명먹 + tokio::net 누락) 자명 프레임. frozen-ledger는 본문 보존 + 새 caveat append로 도레이 (수정 X)."
       ]
     },
     "Round 311b": {
