@@ -854,6 +854,77 @@
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
       "decision_status": "active"
     },
+    "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default": {
+      "title": "§6.7 preset-cortex-m4-default v0.1.0",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "intent": "First production-shape MCU preset for Cortex-M4F (thumbv7em-none-eabihf): wz-runtime-lwip + LwipTime + full wz-codecs catalog. Composable-framework first MCU deploy contract.",
+      "rationale_bullets": [
+        "platform-bare-metal",
+        "runtime-lwip",
+        "runtime-no-std",
+        "transport-unicast",
+        "transport-link-udp",
+        "transport-link-tcp",
+        "transport-keepalive",
+        "transport-fragmentation",
+        "locator-udp",
+        "locator-tcp",
+        "scouting-active",
+        "session-unicast-open",
+        "link-frame",
+        "link-fragment",
+        "link-batching",
+        "keyexpr-literal",
+        "keyexpr-canon",
+        "keyexpr-include",
+        "declare-keyexpr",
+        "declare-subscriber",
+        "declare-queryable",
+        "declare-token",
+        "declare-undeclare",
+        "declare-final",
+        "declare-interest",
+        "pubsub-put",
+        "pubsub-delete",
+        "pubsub-sample",
+        "pubsub-priority",
+        "pubsub-congestion-control",
+        "query-get",
+        "query-queryable",
+        "query-reply",
+        "query-target",
+        "query-timeout",
+        "query-consolidation",
+        "liveliness-token",
+        "liveliness-subscriber",
+        "encoding-empty",
+        "encoding-utf8",
+        "encoding-bytes",
+        "codec-scout",
+        "codec-hello",
+        "codec-init-body",
+        "codec-open-body",
+        "codec-close",
+        "codec-keep-alive",
+        "codec-frame",
+        "codec-fragment",
+        "codec-declare",
+        "codec-push",
+        "codec-request",
+        "codec-response",
+        "codec-response-final",
+        "routing-client",
+        "time-ntp64"
+      ],
+      "impact_scope": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "decision_status": "active"
+    },
     "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism": {
       "title": "§7 Cargo feature emission mechanism",
       "parent_doc": "docs/feature_inventory.md",
@@ -18630,6 +18701,60 @@
         "R311ay next: first MCU preset cortex-m4-default add_section feature-inventory 6-7 or update 6-2",
         "R311az+ unchanged carries: LwipJoinHandle abort; real timer queue; portable-atomic M0+ polyfill",
         "R311az+ optional: embedded-time ecosystem adapter; wz-link-lwip lwIP-sys FFI link tier §5.C",
+        "Architectural carries unchanged: R267 R283 R284 R299 R300 R301 §8 R304 keyexpr_canon R310.5c"
+      ]
+    },
+    "Round 311ay": {
+      "decision_summary": "R311ay first production MCU preset cortex-m4-default lands as feature-inventory 6-7; Phase W ladder 5단계 mantissa closure; composable framework north star first MCU deploy contract",
+      "changes_bullets": [
+        "add_section 6-7-preset-cortex-m4-default under 6-presets parent; v0.1.0 title",
+        "set_section_intent: Cortex-M4F target + wz-runtime-lwip + LwipTime + full wz-codecs catalog",
+        "set_section_rationale: 55 atomic features list (platform/runtime/transport/locator/session/link/keyexpr/declare/pubsub/query/liveliness/encoding/codec/routing/time)",
+        "set_section_impact_scope: §5.P + lwIP-runtime-header + 5-13-runtime + 5-12-codec",
+        "Includes runtime-lwip + runtime-no-std atomic gates so the preset hits the R311ax facade feature path"
+      ],
+      "verification_bullets": [
+        "validate_workspace: sections 255 to 256; T1=0 RT 13/13 sync after add_section + 3 setters + entry append",
+        "impact_scope cross-refs validated by T1: all 4 targets exist in atomic store",
+        "rationale_bullets all <=100 bytes per T3 default; 55 feature names ASCII compact",
+        "Code mutation 0; no behavioural cargo build/test/Layer G impact from atomic-store-only mutation"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "Phase W ladder 5단계 mantissa marker reached; full closure on real STM32F4 board e2e demo (separate cascade)",
+        "wz-link-lwip lwIP-sys FFI bridge §5.C link tier - separate cascade R311az+",
+        "R311az+: LwipJoinHandle abort + real timer queue + portable-atomic M0+ polyfill + embedded-time adapter",
+        "wz/Cargo.toml preset-cortex-m4-default feature entry (cargo-side mirror of atomic catalog) - R311ay-2 candidate",
+        "Architectural carries unchanged: R267 R283 R284 R299 R300 R301 §8 R304 keyexpr_canon R310.5c"
+      ],
+      "publishable_decision_summary": "R311ay first production MCU preset cortex-m4-default lands as feature-inventory 6-7; Phase W ladder 5단계 mantissa closure; composable framework north star first MCU deploy contract",
+      "publishable_changes_bullets": [
+        "add_section 6-7-preset-cortex-m4-default under 6-presets parent; v0.1.0 title",
+        "set_section_intent: Cortex-M4F target + wz-runtime-lwip + LwipTime + full wz-codecs catalog",
+        "set_section_rationale: 55 atomic features list (platform/runtime/transport/locator/session/link/keyexpr/declare/pubsub/query/liveliness/encoding/codec/routing/time)",
+        "set_section_impact_scope: §5.P + lwIP-runtime-header + 5-13-runtime + 5-12-codec",
+        "Includes runtime-lwip + runtime-no-std atomic gates so the preset hits the R311ax facade feature path"
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: sections 255 to 256; T1=0 RT 13/13 sync after add_section + 3 setters + entry append",
+        "impact_scope cross-refs validated by T1: all 4 targets exist in atomic store",
+        "rationale_bullets all <=100 bytes per T3 default; 55 feature names ASCII compact",
+        "Code mutation 0; no behavioural cargo build/test/Layer G impact from atomic-store-only mutation"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase W ladder 5단계 mantissa marker reached; full closure on real STM32F4 board e2e demo (separate cascade)",
+        "wz-link-lwip lwIP-sys FFI bridge §5.C link tier - separate cascade R311az+",
+        "R311az+: LwipJoinHandle abort + real timer queue + portable-atomic M0+ polyfill + embedded-time adapter",
+        "wz/Cargo.toml preset-cortex-m4-default feature entry (cargo-side mirror of atomic catalog) - R311ay-2 candidate",
         "Architectural carries unchanged: R267 R283 R284 R299 R300 R301 §8 R304 keyexpr_canon R310.5c"
       ]
     },
