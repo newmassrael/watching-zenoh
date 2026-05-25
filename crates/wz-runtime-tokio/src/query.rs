@@ -73,6 +73,7 @@
 
 use std::collections::HashMap;
 
+use wz_codecs::ext_entry::ExtEntryVariant;
 use wz_codecs::query::Query;
 use wz_codecs::request::{Request, RequestVariant};
 // R311r — `Response` + the `ResponseReplyBuilder` / `ResponseErrBuilder`
@@ -113,6 +114,33 @@ use crate::session_glue::{ResponseErrBuilder, ResponseReplyBuilder};
 /// rationale and the no-op fall-through on the OFF build.
 pub type QueryableCallback =
     Box<dyn FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>) + Send + 'static>;
+
+/// R311v — extract the attachment payload view from an inbound
+/// [`Query`]'s extensions chain.
+///
+/// Wire shape (mirrors zenoh-pico
+/// `vendor/zenoh-pico/src/protocol/codec/message.c:447` /
+/// `_z_query_encode_ext`): the attachment ext header is
+/// `_Z_MSG_EXT_ENC_ZBUF | 0x05`, i.e. lower-4-bit ext_id `0x05` with
+/// encoding `ExtEntryVariant::CodecZenohExtZbuf` (bits 5..6 = `0b10`).
+/// The mandatory-bit (`_Z_MSG_EXT_FLAG_M` = `0x10`) is NOT set for
+/// query-attachment — the peer drops it silently when unknown rather
+/// than rejecting the frame (`_z_query_decode_extensions` falls into
+/// the `default` arm and proceeds without `_z_msg_ext_unknown_error`
+/// only when the M bit is clear). Returns the first matching ext's
+/// body slice; `None` when the chain is absent or carries no
+/// attachment ext.
+fn extract_query_attachment(query: &Query) -> Option<&[u8]> {
+    let exts = query.extensions.as_ref()?;
+    for ext in exts {
+        if ext.ext_id() == 0x05 {
+            if let ExtEntryVariant::CodecZenohExtZbuf(zbuf) = &ext.body {
+                return Some(zbuf.value.as_slice());
+            }
+        }
+    }
+    None
+}
 
 /// Stable handle returned by [`QueryableRegistry::register`] so the
 /// caller can later unregister the queryable without re-keying on
@@ -664,11 +692,11 @@ impl QueryableRegistry {
         // attachment view are stable across all matched callbacks for
         // a single inbound query). The keyexpr field re-borrows the
         // dispatcher's `keyexpr` argument; the parameters field
-        // borrows directly from `Query.parameters`; attachment
-        // extraction from the extensions chain is a future round (the
-        // pre-R311r QueryResponder did not expose attachment either,
-        // so the wrapper preserves that behaviour as `None`).
+        // borrows directly from `Query.parameters`; the attachment
+        // view is extracted from the inbound extensions chain at R311v
+        // (`extract_query_attachment`).
         let parameters_view = query.parameters.as_deref();
+        let attachment_view = extract_query_attachment(query);
         for queryable in &mut self.queryables {
             let allowed = if is_remote {
                 queryable.allowed_origin.allows_remote()
@@ -699,7 +727,7 @@ impl QueryableRegistry {
                 let event = QueryEvent {
                     keyexpr,
                     parameters: parameters_view,
-                    attachment: None,
+                    attachment: attachment_view,
                     rid,
                 };
                 {
@@ -833,7 +861,9 @@ pub fn response_final_for(rid: u64) -> ResponseFinal {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use wz_codecs::ext_entry::ExtEntry;
+    use wz_codecs::ext_zbuf::ExtZbuf;
     use wz_codecs::msg_put::MsgPut;
     use wz_codecs::wireexpr::Wireexpr;
     use wz_codecs::wireexpr_local::WireexprLocal;
@@ -862,6 +892,45 @@ mod tests {
             keyexpr,
             extensions: None,
             body: RequestVariant::CodecZenohQuery(Query::default()),
+        }
+    }
+
+    /// R311v test helper — construct an inbound Query whose
+    /// extensions chain carries a single attachment ext
+    /// (`_Z_MSG_EXT_ENC_ZBUF | 0x05` wire shape per zenoh-pico
+    /// `vendor/zenoh-pico/src/protocol/codec/message.c:447`). The
+    /// `Query.header` `0x80` bit is set so a hypothetical round-trip
+    /// through `Query::decode` would surface the extensions vec; the
+    /// dispatch path only reads `query.extensions` directly so the
+    /// flag is purely for authoring fidelity.
+    fn request_query_with_attachment(rid: u64, suffix: Option<&str>, attachment: &[u8]) -> Request {
+        let suffix_owned = suffix.map(str::to_string);
+        let suffix_len = suffix.map(|s| s.len() as u64);
+        let keyexpr = Wireexpr {
+            body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len,
+                suffix: suffix_owned,
+            }),
+        };
+        let mut ext = ExtEntry::default();
+        ext.set_ext_id(0x05);
+        ext.set_enc(2);
+        ext.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+            value_len: attachment.len() as u64,
+            value: attachment.to_vec(),
+        });
+        let query = Query {
+            header: Query::default().header | 0x80,
+            extensions: Some(vec![ext]),
+            ..Query::default()
+        };
+        Request {
+            header: 0x1c,
+            rid,
+            keyexpr,
+            extensions: None,
+            body: RequestVariant::CodecZenohQuery(query),
         }
     }
 
@@ -1006,6 +1075,55 @@ mod tests {
             invocations.load(Ordering::SeqCst),
             2,
             "unresolvable mapping id must drop silently without firing the callback"
+        );
+    }
+
+    #[test]
+    fn dispatch_threads_attachment_into_query_event_callback() {
+        // R311v — attachment-bearing Query must surface its payload
+        // through QueryEvent.attachment on the consumer-facing
+        // callback. Pins the extract_query_attachment helper against
+        // the zenoh-pico wire shape (ext_id=0x05, enc=ExtZbuf).
+        let mut reg = QueryableRegistry::new();
+        let captured: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let cap_cb = captured.clone();
+        reg.register("home/temp", move |event, _responder| {
+            *cap_cb.lock().unwrap() = event.attachment.map(<[u8]>::to_vec);
+        });
+
+        let req = request_query_with_attachment(11, Some("home/temp"), b"hello-att");
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+
+        let got = captured.lock().unwrap().clone();
+        assert_eq!(
+            got.as_deref(),
+            Some(&b"hello-att"[..]),
+            "attachment ext payload must reach the callback verbatim"
+        );
+    }
+
+    #[test]
+    fn dispatch_query_without_extensions_threads_none_attachment() {
+        // R311v regression guard — the pre-R311v default (always None)
+        // must survive for Queries that carry no extensions chain at
+        // all. Initialise the capture slot non-None so an accidental
+        // skipped-write would surface as a false positive.
+        let mut reg = QueryableRegistry::new();
+        let captured: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(Some(b"dirty".to_vec())));
+        let cap_cb = captured.clone();
+        reg.register("home/temp", move |event, _responder| {
+            *cap_cb.lock().unwrap() = event.attachment.map(<[u8]>::to_vec);
+        });
+
+        let req = request_query(7, 0, Some("home/temp"));
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+
+        assert_eq!(
+            *captured.lock().unwrap(),
+            None,
+            "no-attachment Query must yield QueryEvent.attachment = None"
         );
     }
 
