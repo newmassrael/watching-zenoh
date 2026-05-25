@@ -17891,6 +17891,66 @@
         "gcc-arm install carry (R311au+, R311aj·R311ak-pre·R311ap carry에서 이동): wz-runtime-lwip crate 완성 + lwIP C source 통합 시점 sudo apt install gcc-arm-none-eabi 필요 — 그 이전 라운드들 (R311aq-at) 은 모두 user permission 불필요."
       ]
     },
+    "Round 311ar-pre": {
+      "decision_summary": "R311ar-pre lock — next-load 자동 실행: Runtime trait Mutex<T>/RwLock<T> associated type land + TokioRuntime impl alias binding (R311w per-runtime alias 결정 mechanical 실현). Phase W ladder 4단계. cascade R311as-au prereq.",
+      "changes_bullets": [
+        "audit-only entry — 실제 file mutation 없음. R311ar 작업 (Runtime trait Mutex/RwLock GAT land + TokioRuntime impl alias) 의 lock entry. 메모리 body: project_r311ar_runtime_trait_sync_primitive_load_trigger.md 에 10-step 자동 실행 절차 + 6-branch fallback 명시.",
+        "부채 정의 (북극성 관점): composable framework MCU half 진실성. Runtime trait 이 sync primitive 추상화 안 되면 wz-runtime-lwip 가 own Mutex/RwLock 가져갈 trait surface 없음 — LwipRuntime impl 이 \"trait 어디에 Mutex<T> 넣지?\" 질문에 막힘. R311ak (cross-compile gate) + R311aq (codec MCU readiness) 와 같은 ladder 위 같은 정신: caller arrival 전 trait shape mechanical lands.",
+        "R311w 결정 세 세부 (§5.P caveat line 47-49 인용): (a) per-runtime type alias 채택, (b) MutexFamily GAT 거부, (c) AP/MCU fork 거부. Session reparam shape: `Session<R: Runtime, T: TimeSource>`; Mutex<T> alias avoids extra param. 현재 wz-runtime-tokio/src/sync.rs 에는 R311y 에서 `pub type Mutex<T> = std::sync::Mutex<T>;` lands이고 wz-runtime-core::Runtime trait 에만 associated type 부재. R311ar = trait shape mechanical land (10 step 절차 마지막 step 쿤이는 commit).",
+        "Fallback 6-branch: GAT not stable / Send+Sync+'static bound 자동 충족 실패 / type alias bound propagation 깨짐 / compile_time_assertions unused warning / runtime_and_time_compose_in_generic_code 기존 라인 회귀 / Layer G FAIL (no_std 깨짐). 각 case는 memory body Fallback 섹션 참조 — 자동 분기 또는 audit-only 닫고 R311as 진행.",
+        "cascade lock (R311as-au+) 명시: R311as=Session<observer> 잔여 마이그레이션 (Session reparam Session<R,T>; leaf-first), R311at=ap-demo binary 16 sites 소진, R311au=gcc-arm 후 wz-runtime-lwip + LwipRuntime impl lands (Layer G default 승격), R311av=SCE-upstream codegen consistency (R311aq carry promotion; cross-repo SCE session), R311aw=추가 cross-compile target audit."
+      ],
+      "verification_bullets": [
+        "audit-only entry: file mutation 0; validate_workspace 후 entries +1 (그 외 metric 변화 없음) 기대. entries 361→362, sections 255 유지, T1=0, RT 13/13, sync.",
+        "R311aq lands 후 push 완료 (commit 5c141a7 → origin/main); R311ar-pre 는 commit 후 push 보류. 다음 세션 load 시 메모리 body 의 10-step 자동 실행 — 사용자 “계속” / “진행” 입력 불필요 (R311aq-pre → R311aq cascade 패턴 동일).",
+        "memory body 구조 검증: project_r311ar_runtime_trait_sync_primitive_load_trigger.md = R311aq-pre memory 패턴 mirror (10-step 절차 + 6-branch fallback + cascade lock + Why north-star aligned + Related anchors + 해결 후). MEMORY.md 인덱스 한 줄 추가 (R311ar load-trigger entry).",
+        "next-load 자동 실행 세부 확인: (1) Sanity check 1 = grep `type Mutex|type RwLock` in runtime.rs (empty 기대), (2) Sanity check 2 = edition/rust-version GAT support 확인, (3-6) trait shape 추가 + tokio impl + lib.rs doc 갱신 + compile_time_assertions 보강, (7) host build/test + Layer G + fullstack 4-건 검증, (8) atomic ledger Round 311ar append (이번이 lands), (9) commit `feat(runtime): R311ar Runtime trait Mutex/RwLock GAT land`, (10) push 보류."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape"
+      ],
+      "carry_forward_bullets": [
+        "R311ar (next round, load 자동 실행): wz-runtime-core/src/runtime.rs Runtime trait에 `type Mutex<T>: Send + Sync + 'static where T: Send + 'static;` + `type RwLock<T>` GAT 추가. wz-runtime-tokio/src/runtime_impl.rs TokioRuntime impl에 `type Mutex<T> = crate::sync::Mutex<T>;` + RwLock binding. wz-runtime-core/src/lib.rs + runtime.rs doc-comment 갱신 (R311w 결정 반영). compile_time_assertions 보강. 단일 라운드 mechanical lands.",
+        "R311as: Session<observer> 잔여 마이그레이션 — Session reparam `Session<R: Runtime, T: TimeSource>`. `Arc<std::sync::Mutex<...>>` → `Arc<R::Mutex<...>>` 패턴. leaf-first (§5.P guidance), Session struct last. 2-3R cascade.",
+        "R311at: ap-demo binary 잔여 §5.P inventory 16 sites 소진 (R311x carry).",
+        "R311au: gcc-arm install 후 — zenoh-pico-sys + wz-runtime-lwip lands. LwipRuntime impl이 own Mutex/RwLock 가져옴 (R311ar trait shape이 prereq). Layer G default lane 승격 + --layer G opt-in 제거.",
+        "R311av+: SCE-upstream codegen consistency PR (R311aq carry) — sce-codegen Rust backend template String/ToString 자동 emit. wz codec_alloc_prelude! 매크로 제거 가능해짐. cross-repo (SCE session 별도).",
+        "R311aw+: 추가 cross-compile target audit (R311ap carry) — aarch64-unknown-none / wasm32-wasi / riscv64gc. use case 명확화 후.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam (R311ar-as에서 시작), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (R311au), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Honest claim 재명시: R311ar는 trait surface 확장 + TokioRuntime alias binding만; 기존 std::sync::Mutex 호출 사이트 마이그레이션 0 (R311as+ 충제). 진정한 trait-mediated dispatch (`R::Mutex<...>`)은 R311as부터 소진 시작."
+      ],
+      "publishable_decision_summary": "R311ar-pre lock — next-load 자동 실행: Runtime trait Mutex<T>/RwLock<T> associated type land + TokioRuntime impl alias binding (R311w per-runtime alias 결정 mechanical 실현). Phase W ladder 4단계. cascade R311as-au prereq.",
+      "publishable_changes_bullets": [
+        "audit-only entry — 실제 file mutation 없음. R311ar 작업 (Runtime trait Mutex/RwLock GAT land + TokioRuntime impl alias) 의 lock entry. 메모리 body: project_r311ar_runtime_trait_sync_primitive_load_trigger.md 에 10-step 자동 실행 절차 + 6-branch fallback 명시.",
+        "부채 정의 (북극성 관점): composable framework MCU half 진실성. Runtime trait 이 sync primitive 추상화 안 되면 wz-runtime-lwip 가 own Mutex/RwLock 가져갈 trait surface 없음 — LwipRuntime impl 이 \"trait 어디에 Mutex<T> 넣지?\" 질문에 막힘. R311ak (cross-compile gate) + R311aq (codec MCU readiness) 와 같은 ladder 위 같은 정신: caller arrival 전 trait shape mechanical lands.",
+        "R311w 결정 세 세부 (§5.P caveat line 47-49 인용): (a) per-runtime type alias 채택, (b) MutexFamily GAT 거부, (c) AP/MCU fork 거부. Session reparam shape: `Session<R: Runtime, T: TimeSource>`; Mutex<T> alias avoids extra param. 현재 wz-runtime-tokio/src/sync.rs 에는 R311y 에서 `pub type Mutex<T> = std::sync::Mutex<T>;` lands이고 wz-runtime-core::Runtime trait 에만 associated type 부재. R311ar = trait shape mechanical land (10 step 절차 마지막 step 쿤이는 commit).",
+        "Fallback 6-branch: GAT not stable / Send+Sync+'static bound 자동 충족 실패 / type alias bound propagation 깨짐 / compile_time_assertions unused warning / runtime_and_time_compose_in_generic_code 기존 라인 회귀 / Layer G FAIL (no_std 깨짐). 각 case는 memory body Fallback 섹션 참조 — 자동 분기 또는 audit-only 닫고 R311as 진행.",
+        "cascade lock (R311as-au+) 명시: R311as=Session<observer> 잔여 마이그레이션 (Session reparam Session<R,T>; leaf-first), R311at=ap-demo binary 16 sites 소진, R311au=gcc-arm 후 wz-runtime-lwip + LwipRuntime impl lands (Layer G default 승격), R311av=SCE-upstream codegen consistency (R311aq carry promotion; cross-repo SCE session), R311aw=추가 cross-compile target audit."
+      ],
+      "publishable_verification_bullets": [
+        "audit-only entry: file mutation 0; validate_workspace 후 entries +1 (그 외 metric 변화 없음) 기대. entries 361→362, sections 255 유지, T1=0, RT 13/13, sync.",
+        "R311aq lands 후 push 완료 (commit 5c141a7 → origin/main); R311ar-pre 는 commit 후 push 보류. 다음 세션 load 시 메모리 body 의 10-step 자동 실행 — 사용자 “계속” / “진행” 입력 불필요 (R311aq-pre → R311aq cascade 패턴 동일).",
+        "memory body 구조 검증: project_r311ar_runtime_trait_sync_primitive_load_trigger.md = R311aq-pre memory 패턴 mirror (10-step 절차 + 6-branch fallback + cascade lock + Why north-star aligned + Related anchors + 해결 후). MEMORY.md 인덱스 한 줄 추가 (R311ar load-trigger entry).",
+        "next-load 자동 실행 세부 확인: (1) Sanity check 1 = grep `type Mutex|type RwLock` in runtime.rs (empty 기대), (2) Sanity check 2 = edition/rust-version GAT support 확인, (3-6) trait shape 추가 + tokio impl + lib.rs doc 갱신 + compile_time_assertions 보강, (7) host build/test + Layer G + fullstack 4-건 검증, (8) atomic ledger Round 311ar append (이번이 lands), (9) commit `feat(runtime): R311ar Runtime trait Mutex/RwLock GAT land`, (10) push 보류."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ar (next round, load 자동 실행): wz-runtime-core/src/runtime.rs Runtime trait에 `type Mutex<T>: Send + Sync + 'static where T: Send + 'static;` + `type RwLock<T>` GAT 추가. wz-runtime-tokio/src/runtime_impl.rs TokioRuntime impl에 `type Mutex<T> = crate::sync::Mutex<T>;` + RwLock binding. wz-runtime-core/src/lib.rs + runtime.rs doc-comment 갱신 (R311w 결정 반영). compile_time_assertions 보강. 단일 라운드 mechanical lands.",
+        "R311as: Session<observer> 잔여 마이그레이션 — Session reparam `Session<R: Runtime, T: TimeSource>`. `Arc<std::sync::Mutex<...>>` → `Arc<R::Mutex<...>>` 패턴. leaf-first (§5.P guidance), Session struct last. 2-3R cascade.",
+        "R311at: ap-demo binary 잔여 §5.P inventory 16 sites 소진 (R311x carry).",
+        "R311au: gcc-arm install 후 — zenoh-pico-sys + wz-runtime-lwip lands. LwipRuntime impl이 own Mutex/RwLock 가져옴 (R311ar trait shape이 prereq). Layer G default lane 승격 + --layer G opt-in 제거.",
+        "R311av+: SCE-upstream codegen consistency PR (R311aq carry) — sce-codegen Rust backend template String/ToString 자동 emit. wz codec_alloc_prelude! 매크로 제거 가능해짐. cross-repo (SCE session 별도).",
+        "R311aw+: 추가 cross-compile target audit (R311ap carry) — aarch64-unknown-none / wasm32-wasi / riscv64gc. use case 명확화 후.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam (R311ar-as에서 시작), R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (R311au), R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Honest claim 재명시: R311ar는 trait surface 확장 + TokioRuntime alias binding만; 기존 std::sync::Mutex 호출 사이트 마이그레이션 0 (R311as+ 충제). 진정한 trait-mediated dispatch (`R::Mutex<...>`)은 R311as부터 소진 시작."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
