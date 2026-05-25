@@ -57,6 +57,7 @@
 #                Crates:
 #                  G.1 (R311ak) wz-runtime-core — §5.P trait skeleton
 #                  G.2 (R311am) wz facade no_std cfg_attr toggle
+#                  G.3 (R311aq) wz-codecs no_std + alloc — codec wire
 #                Targets (R311ao + R311ap portability widening):
 #                  thumbv7em-none-eabihf  (Cortex-M4F/M7, original R311ak)
 #                  thumbv6m-none-eabi     (Cortex-M0+)
@@ -70,10 +71,11 @@
 #              cross-compile interest free of the lane). Stays opt-in
 #              until the wz-runtime-lwip caller lands (R311an+);
 #              promotes to default lane at that point.
-#              Out of scope today: wz-codecs (R40 carry — no_std +
-#              alloc variant lands with wz-runtime-lwip per
-#              wz-codecs/src/lib.rs line 22-25), zenoh-pico-sys
-#              (arm-none-eabi-gcc install carry, R311ao+).
+#              Out of scope today: zenoh-pico-sys (arm-none-eabi-gcc
+#              install carry, R311ao+). R40 wz-codecs carry resolved
+#              by R311aq — codec wire encode/decode now cross-compiles
+#              via the alloc-prelude shim in wz-codecs/src/lib.rs;
+#              hosted callers see no behavioural delta.
 #
 # Exit codes:
 #   0  every required layer passed
@@ -578,6 +580,17 @@ layer_g_cross_compile_cortex_m() {
             echo "  G.2 wz facade $t OK"
         else
             echo "  G.2 wz facade $t FAIL" >&2
+            fail=1
+        fi
+        # G.3 (R311aq) wz-codecs — no_std + alloc; codec wire
+        # encode/decode MCU-readiness. Default features kept on so
+        # the full codec catalog exercises the alloc-prelude shim
+        # end-to-end (R40 carry resolved).
+        if (cd crates && cargo build -p wz-codecs \
+            --target "$t" --quiet); then
+            echo "  G.3 wz-codecs $t OK"
+        else
+            echo "  G.3 wz-codecs $t FAIL" >&2
             fail=1
         fi
     done

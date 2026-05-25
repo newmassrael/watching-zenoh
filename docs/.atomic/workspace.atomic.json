@@ -17777,6 +17777,66 @@
         "Honest claim 재명시: R311ao/ap 는 trait-only crate + empty facade 의 portability 만 입증. wz-runtime-lwip + LwipRuntime concrete impl lands 시 다시 Layer G 전체 매트릭스 PASS 입증 필요 — 그가 진정한 MCU half 완성. 현 7-target는 미래 회귀 차단막 의미."
       ]
     },
+    "Round 311aq": {
+      "decision_summary": "R311aq wz-codecs no_std + alloc — codec wire MCU readiness lands. lib.rs #![no_std] + extern crate alloc + per-mod alloc-prelude 매크로; Layer G.3 21 PASS (7 targets × 3 crates); R40 carry resolved.",
+      "changes_bullets": [
+        "crates/wz-codecs/src/lib.rs: `#![no_std]` declaration 추가 + `#[cfg(feature = \"alloc\")] extern crate alloc;` + `#[cfg(test)] extern crate std;` 도입. `codec_alloc_prelude!()` 매크로 정의 후 38개 `pub mod` 블록 head에 invoke — SCE codegen이 `use alloc::vec::Vec;` 자동 emit하지만 `String`/`ToString`은 host scope 가정이라 매크로 한 줄로 일관 주입. line 22-25 R40 carry 문구는 \"R311aq — MCU no_std + alloc lands ahead of the lwip runtime crate\" 패턴으로 갱신; 호스트 callers (wz-runtime-tokio + wz-ap-demo)는 default alloc feature 활성화 상태라 behavioural delta 0.",
+        "scripts/run-ci.sh: layer_g_cross_compile_cortex_m() 함수에 G.3 wz-codecs lane 추가 — per-target `cargo build -p wz-codecs --target <t>` (default features 유지, 매크로 알록-프렐류드 end-to-end 검증). Layer G header docblock의 Crates 나열에 G.3 entry 추가; \"Out of scope today\" 의 wz-codecs 라인 제거 + R40 resolved 명시 갱신.",
+        "R63 준수: real trait/impl 추가 0 — host scope use 선언은 표준 alloc-consumer 패턴 (generated code 직접 수정 아님). caller-와-함께-lands 정신은 caller가 R311au+ lwIP integration 시 lands; mechanical codec compile gate는 caller 무관 입증 가능 (R311ak-ap 패턴 mirror).",
+        "SCE codegen consistency note: Vec는 자동 import하지만 String/ToString은 host 가정 — 호스트 측 매크로 한 줄로 해소했고 generated code 직접 수정 아니므로 [[feedback_sce_codegen_issue_stop_first]] 不발동. SCE template-side에서 alloc-prelude 전부 자동 emit하면 호스트 매크로 불필요 — 별도 SCE-upstream carry (R311ar+)."
+      ],
+      "verification_bullets": [
+        "`cargo build -p wz-codecs --target thumbv7em-none-eabihf` PASS — baseline 19 errors (cannot find macro include / String / to_string) → 0 errors. minimal 변경 (#![no_std] + extern crate alloc) 후 11 errors 잔존 (String/ToString) → alloc-prelude 매크로 적용 후 0 errors.",
+        "`cargo build -p wz-codecs` (host default features) PASS — 회귀 0.",
+        "`cargo test -p wz-codecs` PASS — 7 tests (2 unit oracle ext_envelope round-trip + 5 smoke msg_put/msg_del/reply/stream_envelope/err) 모두 통과, host test harness 영향 0.",
+        "7 MCU targets cross-compile sweep PASS: thumbv6m-none-eabi (M0+) / thumbv7m-none-eabi (M3) / thumbv7em-none-eabihf (M4F/M7) / thumbv8m.base-none-eabi (M23) / thumbv8m.main-none-eabi (M33/M55 soft) / thumbv8m.main-none-eabihf (M33/M55 hard) / riscv32imac-unknown-none-elf (RISC-V 32 IMAC). thumbv7em-none-eabi (soft-float) 는 rustup target 미설치로 graceful SKIP (Layer G targets array 미포함).",
+        "`bash scripts/run-ci.sh --layer G` PASS — 21 줄 (G.1 wz-runtime-core <t> OK + G.2 wz facade <t> OK + G.3 wz-codecs <t> OK 각 7 회수) 출력 후 \"Layer G pass\".",
+        "`bash scripts/run-ci.sh` 풀스택 PASS — 전체 lane 통과 + Layer F SKIP + Layer G SKIP. 회귀 0 (Layer A/A2/B/C0/C1/C1b/C2/D/E 모두 OK)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "carry_forward_bullets": [
+        "R311ar+: SCE-upstream codegen consistency carry — Vec/String/ToString 자동 import 일관성 (현재 Vec만 자동, String/ToString은 호스트 가정). wz 측은 codec_alloc_prelude! 매크로 한 줄로 해소했지만 SCE template-side 에서 alloc-prelude 전부 자동 emit하면 호스트 매크로 불필요. SCE 측 PR 후보 (sce-codegen Rust backend template).",
+        "R311as+: wz-runtime-tokio + wz-ap-demo 의 §5.P inventory 잔여 16 sites trait migration 진행 (R311x carry). Session<observer> + ap-demo binary 잔여 std/tokio 직접 사용 제거. composability infra 완성도 강화.",
+        "R311at+: §5.P R311w Mutex/RwLock per-runtime type alias 결정의 실제 trait shape land. wz-runtime-core/src/runtime.rs 에 Runtime trait associated type 추가 (Mutex<T> / RwLock<T> alias) + wz-runtime-tokio impl. Session<R, T> reparam 다음 cascade.",
+        "R311au+: gcc-arm install 후 작업 (사용자 권한 후 시점) — zenoh-pico-sys + wz-runtime-lwip lands, caller-와-함께-lands R63 완전 충족. Layer G default lane 승격 + --layer G opt-in 제거.",
+        "R311av+: 추가 cross-compile target audit — aarch64-unknown-none / wasm32-wasi / riscv64gc 등. R311ap carry 그대로.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Honest claim 재명시: R311aq 는 wz-codecs trait/impl 추가 0; codec wire MCU readiness mechanical 입증 만. wz-runtime-lwip + LwipRuntime concrete impl 시 진정한 codec→link MCU end-to-end 입증 가능. 현재는 codec generated code 의 MCU compile 진실성 보장."
+      ],
+      "publishable_decision_summary": "R311aq wz-codecs no_std + alloc — codec wire MCU readiness lands. lib.rs #![no_std] + extern crate alloc + per-mod alloc-prelude 매크로; Layer G.3 21 PASS (7 targets × 3 crates); R40 carry resolved.",
+      "publishable_changes_bullets": [
+        "crates/wz-codecs/src/lib.rs: `#![no_std]` declaration 추가 + `#[cfg(feature = \"alloc\")] extern crate alloc;` + `#[cfg(test)] extern crate std;` 도입. `codec_alloc_prelude!()` 매크로 정의 후 38개 `pub mod` 블록 head에 invoke — SCE codegen이 `use alloc::vec::Vec;` 자동 emit하지만 `String`/`ToString`은 host scope 가정이라 매크로 한 줄로 일관 주입. line 22-25 R40 carry 문구는 \"R311aq — MCU no_std + alloc lands ahead of the lwip runtime crate\" 패턴으로 갱신; 호스트 callers (wz-runtime-tokio + wz-ap-demo)는 default alloc feature 활성화 상태라 behavioural delta 0.",
+        "scripts/run-ci.sh: layer_g_cross_compile_cortex_m() 함수에 G.3 wz-codecs lane 추가 — per-target `cargo build -p wz-codecs --target <t>` (default features 유지, 매크로 알록-프렐류드 end-to-end 검증). Layer G header docblock의 Crates 나열에 G.3 entry 추가; \"Out of scope today\" 의 wz-codecs 라인 제거 + R40 resolved 명시 갱신.",
+        "R63 준수: real trait/impl 추가 0 — host scope use 선언은 표준 alloc-consumer 패턴 (generated code 직접 수정 아님). caller-와-함께-lands 정신은 caller가 R311au+ lwIP integration 시 lands; mechanical codec compile gate는 caller 무관 입증 가능 (R311ak-ap 패턴 mirror).",
+        "SCE codegen consistency note: Vec는 자동 import하지만 String/ToString은 host 가정 — 호스트 측 매크로 한 줄로 해소했고 generated code 직접 수정 아니므로 [[feedback_sce_codegen_issue_stop_first]] 不발동. SCE template-side에서 alloc-prelude 전부 자동 emit하면 호스트 매크로 불필요 — 별도 SCE-upstream carry (R311ar+)."
+      ],
+      "publishable_verification_bullets": [
+        "`cargo build -p wz-codecs --target thumbv7em-none-eabihf` PASS — baseline 19 errors (cannot find macro include / String / to_string) → 0 errors. minimal 변경 (#![no_std] + extern crate alloc) 후 11 errors 잔존 (String/ToString) → alloc-prelude 매크로 적용 후 0 errors.",
+        "`cargo build -p wz-codecs` (host default features) PASS — 회귀 0.",
+        "`cargo test -p wz-codecs` PASS — 7 tests (2 unit oracle ext_envelope round-trip + 5 smoke msg_put/msg_del/reply/stream_envelope/err) 모두 통과, host test harness 영향 0.",
+        "7 MCU targets cross-compile sweep PASS: thumbv6m-none-eabi (M0+) / thumbv7m-none-eabi (M3) / thumbv7em-none-eabihf (M4F/M7) / thumbv8m.base-none-eabi (M23) / thumbv8m.main-none-eabi (M33/M55 soft) / thumbv8m.main-none-eabihf (M33/M55 hard) / riscv32imac-unknown-none-elf (RISC-V 32 IMAC). thumbv7em-none-eabi (soft-float) 는 rustup target 미설치로 graceful SKIP (Layer G targets array 미포함).",
+        "`bash scripts/run-ci.sh --layer G` PASS — 21 줄 (G.1 wz-runtime-core <t> OK + G.2 wz facade <t> OK + G.3 wz-codecs <t> OK 각 7 회수) 출력 후 \"Layer G pass\".",
+        "`bash scripts/run-ci.sh` 풀스택 PASS — 전체 lane 통과 + Layer F SKIP + Layer G SKIP. 회귀 0 (Layer A/A2/B/C0/C1/C1b/C2/D/E 모두 OK)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ar+: SCE-upstream codegen consistency carry — Vec/String/ToString 자동 import 일관성 (현재 Vec만 자동, String/ToString은 호스트 가정). wz 측은 codec_alloc_prelude! 매크로 한 줄로 해소했지만 SCE template-side 에서 alloc-prelude 전부 자동 emit하면 호스트 매크로 불필요. SCE 측 PR 후보 (sce-codegen Rust backend template).",
+        "R311as+: wz-runtime-tokio + wz-ap-demo 의 §5.P inventory 잔여 16 sites trait migration 진행 (R311x carry). Session<observer> + ap-demo binary 잔여 std/tokio 직접 사용 제거. composability infra 완성도 강화.",
+        "R311at+: §5.P R311w Mutex/RwLock per-runtime type alias 결정의 실제 trait shape land. wz-runtime-core/src/runtime.rs 에 Runtime trait associated type 추가 (Mutex<T> / RwLock<T> alias) + wz-runtime-tokio impl. Session<R, T> reparam 다음 cascade.",
+        "R311au+: gcc-arm install 후 작업 (사용자 권한 후 시점) — zenoh-pico-sys + wz-runtime-lwip lands, caller-와-함께-lands R63 완전 충족. Layer G default lane 승격 + --layer G opt-in 제거.",
+        "R311av+: 추가 cross-compile target audit — aarch64-unknown-none / wasm32-wasi / riscv64gc 등. R311ap carry 그대로.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Honest claim 재명시: R311aq 는 wz-codecs trait/impl 추가 0; codec wire MCU readiness mechanical 입증 만. wz-runtime-lwip + LwipRuntime concrete impl 시 진정한 codec→link MCU end-to-end 입증 가능. 현재는 codec generated code 의 MCU compile 진실성 보장."
+      ]
+    },
     "Round 311aq-pre": {
       "decision_summary": "R311aq-pre carry planning — Phase W second mechanical gate (R40 carry: wz-codecs no_std + alloc 마이그레이션, Layer G.3 lane 추가) 다음 세션 load 첫 라운드 자동 실행 lock; R311ak-pre→ak 패턴 그대로 부채 즉시 상환.",
       "changes_bullets": [
