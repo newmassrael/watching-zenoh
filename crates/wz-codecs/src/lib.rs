@@ -19,10 +19,23 @@
 //! codec catalog lands incrementally as Layer 3 wire-interop coverage
 //! expands.
 //!
-//! Builds against `std` for R40 (AP target = Linux + tokio). MCU
-//! `no_std + alloc` variant lands when the lwip runtime crate
-//! arrives; the codegen output already supports both per
-//! `sce-forge-runtime` baseline `no_std` contract.
+//! R311aq — MCU `no_std + alloc` lands ahead of the lwip runtime
+//! crate. The crate is `#![no_std]` unconditionally; the `alloc`
+//! feature (default-on) pulls `extern crate alloc;` so generated
+//! codec code referencing `alloc::vec::Vec` / `alloc::string::String`
+//! resolves. `sce-forge-runtime` is imported `default-features = false`
+//! with the `alloc` feature forwarded, so the baseline `no_std`
+//! contract holds. Each `pub mod` block re-exposes the alloc-prelude
+//! items (`String` / `ToString`) that the generated code references
+//! unqualified — `Vec` already arrives via a codegen-emitted
+//! `use alloc::vec::Vec;` at the top of each generated file but
+//! `String` / `ToString` do not, so the host scope supplies them
+//! (standard alloc-consumer pattern; not a codegen edit). Hosted
+//! callers (wz-runtime-tokio + wz-ap-demo) see no behavioural
+//! delta — they already pulled the default `alloc` feature; MCU
+//! cross-compile lanes (Layer G.3) now build the same source against
+//! `thumbv7em-none-eabihf` and the wider ARMv7-E / ARMv8-M / RISC-V
+//! IMAC target catalog.
 //!
 //! Clippy policy: the entire crate body is sce-codegen output —
 //! clippy lints on the generated code's style (unnecessary casts,
@@ -33,203 +46,269 @@
 //! (rustc warnings ARE consumer-actionable; clippy style nits on
 //! generated code are not).
 
+#![no_std]
 #![allow(clippy::all)]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
+#[cfg(test)]
+extern crate std;
+
+// Re-exposes the alloc-prelude items the SCE codegen emits without
+// fully-qualifying. Invoked at the head of every `pub mod` block so
+// the `include!()`-pasted generated code resolves `String` and
+// `ToString`. `Vec` is omitted because the codegen already emits its
+// own `use alloc::vec::Vec;`; `unused_imports` is allowed because
+// codec modules that do not reference `String` (e.g. `timestamp`,
+// `encoding`) would otherwise trip the workspace `warnings = "deny"`
+// policy.
+macro_rules! codec_alloc_prelude {
+    () => {
+        #[cfg(feature = "alloc")]
+        #[allow(unused_imports)]
+        use alloc::string::{String, ToString};
+    };
+}
+
 pub mod timestamp {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/timestamp.rs"));
 }
 
 pub mod encoding {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/encoding.rs"));
 }
 
 pub mod ext_unit {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/ext_unit.rs"));
 }
 
 pub mod ext_zint {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/ext_zint.rs"));
 }
 
 pub mod ext_zbuf {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/ext_zbuf.rs"));
 }
 
 pub mod stream_envelope {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/stream_envelope.rs"));
 }
 
 #[cfg(feature = "codec-close")]
 pub mod close {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/close.rs"));
 }
 
 #[cfg(feature = "codec-frame")]
 pub mod frame {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/frame.rs"));
 }
 
 #[cfg(feature = "codec-fragment")]
 pub mod fragment {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/fragment.rs"));
 }
 
 #[cfg(feature = "codec-scout")]
 pub mod scout {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/scout.rs"));
 }
 
 #[cfg(feature = "codec-init-body")]
 pub mod init_body {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/init_body.rs"));
 }
 
 #[cfg(feature = "codec-open-body")]
 pub mod open_body {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/open_body.rs"));
 }
 
 #[cfg(feature = "codec-join")]
 pub mod join {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/join.rs"));
 }
 
 pub mod locator {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/locator.rs"));
 }
 
 #[cfg(feature = "codec-hello")]
 pub mod hello {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/hello.rs"));
 }
 
 pub mod ext_entry {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/ext_entry.rs"));
 }
 
 pub mod ext_envelope {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/ext_envelope.rs"));
 }
 
 pub mod msg_put {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/msg_put.rs"));
 }
 
 pub mod msg_del {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/msg_del.rs"));
 }
 
 #[cfg(feature = "codec-keep-alive")]
 pub mod keep_alive {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/keep_alive.rs"));
 }
 
 pub mod wireexpr_local {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/wireexpr_local.rs"));
 }
 
 pub mod wireexpr_nonlocal {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/wireexpr_nonlocal.rs"));
 }
 
 pub mod wireexpr {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/wireexpr.rs"));
 }
 
 #[cfg(feature = "codec-request")]
 pub mod query {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/query.rs"));
 }
 
 #[cfg(feature = "codec-request")]
 pub mod request {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/request.rs"));
 }
 
 #[cfg(feature = "codec-push")]
 pub mod push {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/push.rs"));
 }
 
 #[cfg(feature = "codec-response-final")]
 pub mod response_final {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/response_final.rs"));
 }
 
 pub mod oam {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/oam.rs"));
 }
 
 pub mod interest_body {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/interest_body.rs"));
 }
 
 pub mod interest {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/interest.rs"));
 }
 
 #[cfg(feature = "codec-response")]
 pub mod reply {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/reply.rs"));
 }
 
 #[cfg(feature = "codec-response")]
 pub mod err {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/err.rs"));
 }
 
 #[cfg(feature = "codec-response")]
 pub mod response {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/response.rs"));
 }
 
 #[cfg(feature = "codec-declare")]
 pub mod decl_final {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/decl_final.rs"));
 }
 
 #[cfg(feature = "codec-declare")]
 pub mod decl_kexpr {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/decl_kexpr.rs"));
 }
 
 #[cfg(feature = "codec-declare")]
 pub mod undecl_kexpr {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/undecl_kexpr.rs"));
 }
 
 #[cfg(feature = "codec-declare")]
 pub mod decl_subscriber {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/decl_subscriber.rs"));
 }
 
 #[cfg(feature = "codec-declare")]
 pub mod decl_queryable {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/decl_queryable.rs"));
 }
 
 #[cfg(feature = "codec-declare")]
 pub mod decl_token {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/decl_token.rs"));
 }
 
 #[cfg(feature = "codec-declare")]
 pub mod undecl_subscriber {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/undecl_subscriber.rs"));
 }
 
 #[cfg(feature = "codec-declare")]
 pub mod undecl_queryable {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/undecl_queryable.rs"));
 }
 
 #[cfg(feature = "codec-declare")]
 pub mod undecl_token {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/undecl_token.rs"));
 }
 
 #[cfg(feature = "codec-declare")]
 pub mod declare {
+    codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/declare.rs"));
 }
 
