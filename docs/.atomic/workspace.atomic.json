@@ -18397,6 +18397,66 @@
         "R311ax/R267/R284/R283/R301 §8/R299 #2-3/R300/R304/keyexpr_canon proptest/R310.5c — architectural carries unchanged"
       ]
     },
+    "Round 311av-pre": {
+      "decision_summary": "R311av-pre lock self-rolled cooperative task pool 8 design decisions for LwipRuntime impl prereq; D7 own ClockSource only (embedded-time reject); audit-only no code",
+      "changes_bullets": [
+        "Decision 1: TaskSlot = Pin<Box<dyn Future<Output=()> + Send>>; alloc heap type erasure",
+        "Decision 2: Executor = per-LwipRuntime Arc<ExecutorState>; static singleton reject",
+        "Decision 3: Slot storage = Vec<Option<TaskSlot>>; preset-time count no hard cap",
+        "Decision 4: Waker = custom RawWaker + per-task atomic wake_flag; ISR-side wake",
+        "Decision 5: LwipRuntime Clone via Arc<ExecutorState>; nested spawn in tasks",
+        "Decision 6: JoinHandle = Arc<sync::Mutex<RefCell<JoinState<T>>>> critical_section",
+        "Decision 7 finalize: own ClockSource trait only; embedded-time v0.13 stalled reject",
+        "Decision 8: abort out of R311av scope; LwipJoinHandle::abort to R311az+ round"
+      ],
+      "verification_bullets": [
+        "Code mutation 0; audit-only ledger; validate_workspace baseline preserved",
+        "8 decisions cross-checked against wz-runtime-core Runtime + TimeSource trait shapes",
+        "Decision 7 rationale: composable framework zero-external-coupling north star align",
+        "Entry append lifts entries 370 to 371; T1=0 RT 13/13 sync expected"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape"
+      ],
+      "carry_forward_bullets": [
+        "R311av next: 4 new files (executor join_handle runtime_impl time) per 8 decisions",
+        "Layer G.4-alloc lane new: 7 MCU targets cross-compile with alloc feature 35/35",
+        "R311aw post: §5.P caveat append; R311ax: wz facade runtime-lwip feature surface",
+        "R311ay: first MCU preset 6-7-preset-cortex-m4-default add_section atomic primitive",
+        "R311az+ carries: LwipJoinHandle abort; real timer queue; embedded-time optional",
+        "Architectural carries unchanged: R267 R283 R284 R299 R300 R301 §8 R304 R310"
+      ],
+      "publishable_decision_summary": "R311av-pre lock self-rolled cooperative task pool 8 design decisions for LwipRuntime impl prereq; D7 own ClockSource only (embedded-time reject); audit-only no code",
+      "publishable_changes_bullets": [
+        "Decision 1: TaskSlot = Pin<Box<dyn Future<Output=()> + Send>>; alloc heap type erasure",
+        "Decision 2: Executor = per-LwipRuntime Arc<ExecutorState>; static singleton reject",
+        "Decision 3: Slot storage = Vec<Option<TaskSlot>>; preset-time count no hard cap",
+        "Decision 4: Waker = custom RawWaker + per-task atomic wake_flag; ISR-side wake",
+        "Decision 5: LwipRuntime Clone via Arc<ExecutorState>; nested spawn in tasks",
+        "Decision 6: JoinHandle = Arc<sync::Mutex<RefCell<JoinState<T>>>> critical_section",
+        "Decision 7 finalize: own ClockSource trait only; embedded-time v0.13 stalled reject",
+        "Decision 8: abort out of R311av scope; LwipJoinHandle::abort to R311az+ round"
+      ],
+      "publishable_verification_bullets": [
+        "Code mutation 0; audit-only ledger; validate_workspace baseline preserved",
+        "8 decisions cross-checked against wz-runtime-core Runtime + TimeSource trait shapes",
+        "Decision 7 rationale: composable framework zero-external-coupling north star align",
+        "Entry append lifts entries 370 to 371; T1=0 RT 13/13 sync expected"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311av next: 4 new files (executor join_handle runtime_impl time) per 8 decisions",
+        "Layer G.4-alloc lane new: 7 MCU targets cross-compile with alloc feature 35/35",
+        "R311aw post: §5.P caveat append; R311ax: wz facade runtime-lwip feature surface",
+        "R311ay: first MCU preset 6-7-preset-cortex-m4-default add_section atomic primitive",
+        "R311az+ carries: LwipJoinHandle abort; real timer queue; embedded-time optional",
+        "Architectural carries unchanged: R267 R283 R284 R299 R300 R301 §8 R304 R310"
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
