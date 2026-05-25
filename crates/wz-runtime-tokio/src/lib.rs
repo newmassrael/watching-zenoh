@@ -152,6 +152,16 @@ pub mod observer;
 /// Del. Aliased publish + full Sample metadata are R229+ carries.
 pub mod session;
 
+/// R311y — per-runtime synchronization primitive aliases (`Mutex<T>`,
+/// `RwLock<T>`) implementing the R311w option (a) decision lock on
+/// §5.P Mutex/RwLock shape. The tokio profile binds the aliases to
+/// `std::sync::*`; a future `wz-runtime-embassy::sync` module will
+/// re-bind the same names to `embassy_sync::*` so cross-runtime call
+/// sites can switch via cfg gate without renaming. See the module
+/// doc-comment for the per-runtime alias rationale and the R311z+
+/// migration roadmap.
+pub mod sync;
+
 /// R252 — AP-profile concrete impls of the
 /// [`wz_runtime_core::Runtime`] and [`wz_runtime_core::TimeSource`]
 /// trait contracts authored in R251. [`runtime_impl::TokioRuntime`]
