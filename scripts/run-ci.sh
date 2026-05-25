@@ -593,6 +593,20 @@ layer_g_cross_compile_cortex_m() {
             echo "  G.3 wz-codecs $t FAIL" >&2
             fail=1
         fi
+        # G.4 (R311au scope C) wz-runtime-lwip — Phase W MCU profile
+        # sync primitive aliases (critical_section::Mutex<RefCell<T>>
+        # binding). LwipRuntime + impl Runtime + lwIP-sys FFI bridge
+        # remain deferred per the R311au architectural fork (embassy
+        # static-task model vs the trait's generic spawn<F: Future>).
+        # The lane proves the sync surface compiles #![no_std] across
+        # every Phase W rustup target before any consumer arrives.
+        if (cd crates && cargo build -p wz-runtime-lwip \
+            --target "$t" --quiet); then
+            echo "  G.4 wz-runtime-lwip $t OK"
+        else
+            echo "  G.4 wz-runtime-lwip $t FAIL" >&2
+            fail=1
+        fi
     done
     if [[ $any_ran -eq 0 ]]; then
         echo "Layer G SKIP (no Phase W rustup targets installed)"

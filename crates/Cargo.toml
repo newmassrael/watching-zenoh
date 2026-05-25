@@ -38,14 +38,25 @@ members = [
     "wz-runtime-tokio",
     "wz-runtime-tokio-test-support",
     "wz-ap-demo",
-    # wz-runtime-lwip removed at R63 — the R53 NOP-stub skeleton was
-    # not production-honest and the R58 doc-only reframe ("Phase W
-    # deferred skeleton") was a document-around-the-hack pattern.
-    # Phase W will re-introduce the crate alongside actual lwIP API
-    # integration + MCU cross-compile plumbing. The SCE B6 link
-    # C11 emitter end-to-end validation that the deleted crate
-    # proved is preserved as a Layer-3-style test in
-    # wz-integration-tests/tests/link_emitter_b6.rs.
+    "wz-runtime-lwip",
+    # wz-runtime-lwip — R311au scope C reintroduction (Phase W).
+    # R53 NOP-stub skeleton was removed at R63 as a
+    # document-around-the-hack pattern (NOP spawn + multi-paragraph
+    # "intentionally NOP" justification). R311au lands a deliberately
+    # narrower scope: sync primitive aliases ONLY
+    # (`critical_section::Mutex<RefCell<T>>` per-runtime alias for the
+    # MCU profile half of the R311w decision). LwipRuntime + the
+    # `impl Runtime` half + the lwIP-sys FFI bridge stay deferred to
+    # subsequent rounds; this reintroduction is production-honest
+    # because every item shipped is a real working primitive (no NOP
+    # spawn, no stubbed Runtime impl). See
+    # crates/wz-runtime-lwip/{Cargo.toml,src/lib.rs} for the full
+    # scope statement.
+    #
+    # The SCE B6 link C11 emitter end-to-end validation that the
+    # earlier deleted crate proved remains preserved as a Layer-3-
+    # style test in wz-integration-tests/tests/link_emitter_b6.rs;
+    # R311au does not relitigate that validation.
     #
     # wz-ap-demo added at R121a — first non-library deploy artifact
     # (AP MVP demo binary; Phase D.1). The rest of the workspace

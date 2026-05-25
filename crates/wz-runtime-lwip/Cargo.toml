@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-runtime-lwip — Phase W MCU profile entry (R311au scope C).
+#
+# R311au reintroduces this crate at a deliberately narrow scope:
+# **sync primitive aliases only**. The `Runtime` trait impl
+# (LwipRuntime + spawn + JoinHandle) and the lwIP-sys FFI bridge are
+# deferred to subsequent rounds. The narrowing was explicit per the
+# R311au architectural fork — embassy_executor's static-task model
+# does not compose with the trait's generic `spawn<F: Future>`, and a
+# self-rolled cooperative task pool is a multi-round project; landing
+# sync primitives first gives the rest of the workspace a real
+# per-profile alias surface to bind against while the executor
+# decision works itself out.
+#
+# Why this differs from the R53/R58 NOP-stub history (R63 retrospect):
+#
+#   - R53 shipped LwipRuntime::spawn as a NOP that discarded the
+#     future; R58 reframed it as a "Phase W deferred skeleton" with a
+#     multi-paragraph "intentionally NOP" doc-comment. R63 reverted
+#     both as document-around-the-hack patterns.
+#   - R311au scope (C) ships **only real impls**. `pub type Mutex<T>
+#     = critical_section::Mutex<RefCell<T>>;` is a real per-profile
+#     binding to a working IRQ-disabling lock — not a stub. The Runtime
+#     impl is absent (not stubbed); a downstream reader who calls
+#     `cargo build -p wz-runtime-lwip` gets a working library, and a
+#     reader who looks for `impl Runtime for LwipRuntime` finds no such
+#     item rather than a misleading NOP. The two outcomes are
+#     production-honest in a way the R53/R58 path was not.
+#
+# Layer G.4 (scripts/run-ci.sh) registers a cross-compile build of
+# this crate for every Phase W MCU target so the sync alias compiles
+# under #![no_std] on each architecture before any consumer arrives.
+
+[package]
+name = "wz-runtime-lwip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Phase W MCU profile sync primitive aliases (R311au scope C; LwipRuntime + lwIP FFI deferred)."
+
+[lib]
+name = "wz_runtime_lwip"
+path = "src/lib.rs"
+
+[dependencies]
+# critical-section provides the IRQ-disabling Mutex<T> primitive
+# used as the per-profile `sync::Mutex` / `sync::RwLock` alias
+# binding. The crate exposes the `Mutex<T>` type unconditionally;
+# the underlying critical_section *impl* (cortex-m / riscv /
+# software-emulated) is provided by the deploy crate at final-binary
+# link time, not here. A library build under cargo therefore needs
+# only the trait crate and compiles cleanly on every MCU target
+# without pulling a per-arch impl into this crate's dep graph.
+critical-section = "1"
+
+[lints]
+workspace = true
