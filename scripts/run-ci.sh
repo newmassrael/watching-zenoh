@@ -57,10 +57,13 @@
 #                Crates:
 #                  G.1 (R311ak) wz-runtime-core — §5.P trait skeleton
 #                  G.2 (R311am) wz facade no_std cfg_attr toggle
-#                Targets (R311ao portability widening):
-#                  thumbv7em-none-eabihf (Cortex-M4F/M7, original R311ak)
-#                  thumbv6m-none-eabi    (Cortex-M0+)
-#                  thumbv7m-none-eabi    (Cortex-M3)
+#                Targets (R311ao + R311ap portability widening):
+#                  thumbv7em-none-eabihf  (Cortex-M4F/M7, original R311ak)
+#                  thumbv6m-none-eabi     (Cortex-M0+)
+#                  thumbv7m-none-eabi     (Cortex-M3)
+#                  thumbv8m.base-none-eabi    (Cortex-M23, ARMv8-M Base)
+#                  thumbv8m.main-none-eabi    (Cortex-M33/M55 soft-float)
+#                  thumbv8m.main-none-eabihf  (Cortex-M33/M55 hard-float)
 #                  riscv32imac-unknown-none-elf (RISC-V 32-bit IMAC)
 #              Per-target SKIP if the rustup target is not installed
 #              (no auto-install — keeps a developer machine without
@@ -545,6 +548,9 @@ layer_g_cross_compile_cortex_m() {
         thumbv7em-none-eabihf
         thumbv6m-none-eabi
         thumbv7m-none-eabi
+        thumbv8m.base-none-eabi
+        thumbv8m.main-none-eabi
+        thumbv8m.main-none-eabihf
         riscv32imac-unknown-none-elf
     )
     local installed

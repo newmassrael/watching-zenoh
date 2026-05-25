@@ -17723,6 +17723,60 @@
         "Honest claim 한계 명시: R311ao는 4 targets x 2 crates (deps=0 trait crate + empty facade) 에만 해당. 진정한 portability 입증은 wz-runtime-lwip + concrete impl (LwipRuntime / EmbassyRuntime) lands 후 동일 매트릭스에서 PASS 시 달성. 현 라운드는 baseline 방호막 (silent regression 주조로) 의미."
       ]
     },
+    "Round 311ap": {
+      "decision_summary": "R311ap MCU cross-compile catalog ARMv8-M extension — Cortex-M23 / M33 / M55 (soft+hard float) 3 targets 추가; Layer G 매트릭스 14/14 PASS (7 targets × 2 crates). 최신 MCU 세대 (ARMv8-M baseline + mainline) 포함 portability 진실성.",
+      "changes_bullets": [
+        "rustup target add: thumbv8m.base-none-eabi (Cortex-M23, ARMv8-M Baseline) / thumbv8m.main-none-eabi (Cortex-M33 / M55 soft-float) / thumbv8m.main-none-eabihf (Cortex-M33 / M55 hard-float) install. R311ao의 4 targets 에 ARMv8-M 세대 3 targets 추가 = 총 7 targets.",
+        "scripts/run-ci.sh: targets=() array 에 thumbv8m.base-none-eabi / thumbv8m.main-none-eabi / thumbv8m.main-none-eabihf 3줄 추가. Layer G header docblock의 Targets 나열도 7 entries로 확장; \"R311ao\" 는 \"R311ao + R311ap\" 로 portability widening rationale 레이블 갱신.",
+        "crates/wz-runtime-core/src/lib.rs: doc comment Targets 나열 3 entries 추가 (동일 패턴 mirror).",
+        "Catalog 의미: ARMv8-M Mainline (M33/M55) 는 최신 IoT SoC 세대 (TrustZone-M, MVE/Helium, FPU) - composable framework 가 latest MCU generation 까지 cover. ARMv8-M Baseline (M23) 는 cost-sensitive secure-element. 이는 zenoh 진영의 타 구현 (zenoh-pico) 가 single ABI/codegen target 으로 lands하는 것과 대단히 대조되는 wz unique value.",
+        "R63 준수: real trait 또는 impl 추가 0 — 순수 target catalog 확장. wz-runtime-lwip caller 부재로 LinkBackend 같은 trait 추가 안함. \"caller-와-함께-lands\" 정신 유지."
+      ],
+      "verification_bullets": [
+        "`rustup target list --installed`: 7 MCU targets (thumbv6m / thumbv7m / thumbv7em-eabihf / thumbv8m.base / thumbv8m.main / thumbv8m.main-eabihf / riscv32imac) + wasm32 + x86_64 포함 확인.",
+        "`bash scripts/run-ci.sh --layer G` PASS — 14 줄 (\"G.1 wz-runtime-core <target> OK\" + \"G.2 wz facade <target> OK\" 각 7 회수) 출력 후 \"Layer G pass\".",
+        "`bash scripts/run-ci.sh --layer 0` PASS — fmt --check OK (doc comment update 정상 포맷).",
+        "`bash scripts/run-ci.sh` 풀스택 PASS — 전체 lane 통과 + Layer F SKIP + Layer G SKIP. 회귀 0.",
+        "atomic ledger entries 358→359, sections 255 유지, T1=0, RT 13/13, sync 예상 (validate_workspace 후속 확인)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311aq+: 추가 cross-compile target audit — aarch64-unknown-none (Cortex-A bare-metal), wasm32-wasi (WASI sandbox), riscv64gc-unknown-none-elf (RISC-V 64-bit) 등 시도 가능. 단 현시점 ARMv7/v8-M + RISC-V 32 와 겹치는 use case 명확하지 않아 증겁 cost vs catalog 가치 트레이드오프 평가 필요.",
+        "R311ar+: gcc-arm install 이후 라운드들 — zenoh-pico-sys cross-compile, wz-runtime-lwip crate 생성 (caller-와-함께-lands R63 준수). 이 시점에 Layer G default lane 승격, --layer G opt-in 제거.",
+        "R311as+: wz-codecs no_std + alloc 마이그레이션 (R40 carry 소진, wz-runtime-lwip caller arrival 시점).",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Honest claim 재명시: R311ao/ap 는 trait-only crate + empty facade 의 portability 만 입증. wz-runtime-lwip + LwipRuntime concrete impl lands 시 다시 Layer G 전체 매트릭스 PASS 입증 필요 — 그가 진정한 MCU half 완성. 현 7-target는 미래 회귀 차단막 의미."
+      ],
+      "publishable_decision_summary": "R311ap MCU cross-compile catalog ARMv8-M extension — Cortex-M23 / M33 / M55 (soft+hard float) 3 targets 추가; Layer G 매트릭스 14/14 PASS (7 targets × 2 crates). 최신 MCU 세대 (ARMv8-M baseline + mainline) 포함 portability 진실성.",
+      "publishable_changes_bullets": [
+        "rustup target add: thumbv8m.base-none-eabi (Cortex-M23, ARMv8-M Baseline) / thumbv8m.main-none-eabi (Cortex-M33 / M55 soft-float) / thumbv8m.main-none-eabihf (Cortex-M33 / M55 hard-float) install. R311ao의 4 targets 에 ARMv8-M 세대 3 targets 추가 = 총 7 targets.",
+        "scripts/run-ci.sh: targets=() array 에 thumbv8m.base-none-eabi / thumbv8m.main-none-eabi / thumbv8m.main-none-eabihf 3줄 추가. Layer G header docblock의 Targets 나열도 7 entries로 확장; \"R311ao\" 는 \"R311ao + R311ap\" 로 portability widening rationale 레이블 갱신.",
+        "crates/wz-runtime-core/src/lib.rs: doc comment Targets 나열 3 entries 추가 (동일 패턴 mirror).",
+        "Catalog 의미: ARMv8-M Mainline (M33/M55) 는 최신 IoT SoC 세대 (TrustZone-M, MVE/Helium, FPU) - composable framework 가 latest MCU generation 까지 cover. ARMv8-M Baseline (M23) 는 cost-sensitive secure-element. 이는 zenoh 진영의 타 구현 (zenoh-pico) 가 single ABI/codegen target 으로 lands하는 것과 대단히 대조되는 wz unique value.",
+        "R63 준수: real trait 또는 impl 추가 0 — 순수 target catalog 확장. wz-runtime-lwip caller 부재로 LinkBackend 같은 trait 추가 안함. \"caller-와-함께-lands\" 정신 유지."
+      ],
+      "publishable_verification_bullets": [
+        "`rustup target list --installed`: 7 MCU targets (thumbv6m / thumbv7m / thumbv7em-eabihf / thumbv8m.base / thumbv8m.main / thumbv8m.main-eabihf / riscv32imac) + wasm32 + x86_64 포함 확인.",
+        "`bash scripts/run-ci.sh --layer G` PASS — 14 줄 (\"G.1 wz-runtime-core <target> OK\" + \"G.2 wz facade <target> OK\" 각 7 회수) 출력 후 \"Layer G pass\".",
+        "`bash scripts/run-ci.sh --layer 0` PASS — fmt --check OK (doc comment update 정상 포맷).",
+        "`bash scripts/run-ci.sh` 풀스택 PASS — 전체 lane 통과 + Layer F SKIP + Layer G SKIP. 회귀 0.",
+        "atomic ledger entries 358→359, sections 255 유지, T1=0, RT 13/13, sync 예상 (validate_workspace 후속 확인)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311aq+: 추가 cross-compile target audit — aarch64-unknown-none (Cortex-A bare-metal), wasm32-wasi (WASI sandbox), riscv64gc-unknown-none-elf (RISC-V 64-bit) 등 시도 가능. 단 현시점 ARMv7/v8-M + RISC-V 32 와 겹치는 use case 명확하지 않아 증겁 cost vs catalog 가치 트레이드오프 평가 필요.",
+        "R311ar+: gcc-arm install 이후 라운드들 — zenoh-pico-sys cross-compile, wz-runtime-lwip crate 생성 (caller-와-함께-lands R63 준수). 이 시점에 Layer G default lane 승격, --layer G opt-in 제거.",
+        "R311as+: wz-codecs no_std + alloc 마이그레이션 (R40 carry 소진, wz-runtime-lwip caller arrival 시점).",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Honest claim 재명시: R311ao/ap 는 trait-only crate + empty facade 의 portability 만 입증. wz-runtime-lwip + LwipRuntime concrete impl lands 시 다시 Layer G 전체 매트릭스 PASS 입증 필요 — 그가 진정한 MCU half 완성. 현 7-target는 미래 회귀 차단막 의미."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
