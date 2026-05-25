@@ -1,9 +1,22 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! TimeSource trait — monotonic clock + async sleep.
+//! TimeSource trait — monotonic clock + async sleep + budgeted timeout.
 
 use core::future::Future;
+
+/// Error returned by [`TimeSource::timeout`] when the millisecond
+/// budget elapses before the inner future resolves.
+///
+/// Runtime-neutral by design: tokio's own
+/// `tokio::time::error::Elapsed` is intentionally NOT re-exported
+/// because the wz upper layer wants embassy / lwIP profiles to
+/// satisfy the contract without pulling tokio into their dependency
+/// graph. The unit value carries the only information a timeout
+/// offers ("did it elapse") — `Ok(F::Output)` vs `Err(TimeoutElapsed)`
+/// is sufficient at the boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeoutElapsed;
 
 /// Time-related primitives the runtime layer needs.
 ///
@@ -65,4 +78,42 @@ pub trait TimeSource: Send + Sync {
     /// elision degrades naturally to `'static` for usage that needs
     /// it.
     fn sleep(&self, ms: u64) -> impl Future<Output = ()> + Send + '_;
+
+    /// Race `fut` against an `ms`-millisecond budget. Resolves to
+    /// `Ok(fut_output)` if the future completes first, or to
+    /// `Err(TimeoutElapsed)` if the budget elapses first. The
+    /// in-flight future is dropped on timeout — callers needing a
+    /// graceful-shutdown handshake instead of cancellation must
+    /// design that into `fut` itself; this contract only guarantees
+    /// budget enforcement, not cooperative-cancel propagation.
+    ///
+    /// Constraints on `F`:
+    ///
+    /// - `Future + Send + 'static` because timeout typically wraps an
+    ///   owned future (a spawned task `JoinHandle`, an `oneshot::
+    ///   Receiver`, an in-flight RPC) that has no borrow from the
+    ///   caller's stack. The `'static` bound matches the spawn
+    ///   contract on [`crate::Runtime::spawn`] for the same reason.
+    /// - `F::Output: Send` so the success arm can be moved across a
+    ///   tokio scheduler boundary (the timeout future itself is
+    ///   `Send`, and tokio's `select!`-style impl polls both arms
+    ///   from the same task — without the bound, the success value
+    ///   could not flow out of the timeout combinator).
+    ///
+    /// Tokio profile delegates to `tokio::time::timeout` (which is
+    /// implemented as a `select!` between the wrapped future and a
+    /// `sleep` future). Embassy profile composes
+    /// `embassy_futures::select::select` over `Timer::after` + the
+    /// inner future, mapping the timer arm to `TimeoutElapsed`.
+    /// FreeRTOS / lwIP profiles compose a `vTaskDelay`-driven race
+    /// future against the inner. The contract stays uniform so wz
+    /// upper layers consuming timeout do not branch on profile.
+    fn timeout<F>(
+        &self,
+        ms: u64,
+        fut: F,
+    ) -> impl Future<Output = Result<F::Output, TimeoutElapsed>> + Send + '_
+    where
+        F: Future + Send + 'static,
+        F::Output: Send;
 }

@@ -62,4 +62,4 @@ pub mod time;
 pub use allocator::Allocator;
 pub use error::RuntimeError;
 pub use runtime::Runtime;
-pub use time::TimeSource;
+pub use time::{TimeSource, TimeoutElapsed};

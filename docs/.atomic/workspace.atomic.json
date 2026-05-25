@@ -16999,6 +16999,64 @@
         "Session<R: Runtime, T: TimeSource> 2-param reparam은 이 12 sites 모두 alias/trait 통한 접근과 호환 확인 후 최종 site (Session struct 자체)에서 수행. 이게 R311y carry forward 'Session struct last' 극 의미."
       ]
     },
+    "Round 311ac": {
+      "decision_summary": "R311ac TimeSource trait에 timeout method + TimeoutElapsed type 추가; TokioTime impl 동반. composable framework 표현력 직접 증가 — ap-demo cascade는 R311ad+.",
+      "changes_bullets": [
+        "wz-runtime-core/src/time.rs — TimeoutElapsed struct (Debug/Clone/Copy/PartialEq/Eq) + module doc 'monotonic clock + async sleep + budgeted timeout' 으로 권한 명시.",
+        "wz-runtime-core/src/time.rs — TimeSource trait 에 fn timeout<F>(ms: u64, fut: F) -> impl Future<Output = Result<F::Output, TimeoutElapsed>> + Send + '_ where F: Future + Send + 'static, F::Output: Send 추가. Embassy / FreeRTOS profile composition 가이드를 doc-comment에 명시.",
+        "wz-runtime-core/src/lib.rs — `pub use time::{TimeSource, TimeoutElapsed}` re-export.",
+        "wz-runtime-tokio/src/runtime_impl.rs — use 절에 TimeoutElapsed 추가; TokioTime impl 에 async fn timeout 구현 (tokio::time::timeout 위임 + Elapsed -> TimeoutElapsed 변환). clippy::manual_async_fn 회피용으로 async fn 형태로 land (트레이트 RPITIT 와 desugared async fn return 매칭).",
+        "compile_time_assertions::runtime_and_time_compose_in_generic_code 에 `clock.timeout(100, ...).await` 라인 + helper module `async_inner::AsyncInner` 추가 — generic R + T 코드에서 timeout 호출이 컴파일되는지 smoke check.",
+        "tests 모듈에 behavior test 2 추가: tokio_time_timeout_completes_within_budget_returns_ok (50ms inner vs 500ms budget -> Ok), tokio_time_timeout_budget_elapsed_returns_timeout_elapsed (500ms inner vs 50ms budget -> Err(TimeoutElapsed))."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace (crates/) 깨끗.",
+        "cargo clippy --workspace --all-targets -- -D warnings 깨끗 — manual_async_fn lint 행 그엔 async fn 형태로 수정.",
+        "scripts/run-ci.sh 전 Layer pass (0/A/A2/B/C0/C1/C1b/C2/D/E). Layer F opt-in skip. all required layers pass.",
+        "cargo test --workspace TOTAL passed: 765 — R311ab baseline 763 +2 (새 timeout behavior tests).",
+        "wz-runtime-tokio --lib runtime_impl::tests — 17 pass (15 기존 + 2 신규).",
+        "validate_workspace — docs=13/13, T1=0, RT 13/13, T3 warn=862 / T4 info=429 변동 0, GENERATED.md=sync.",
+        "atomic ledger: entries 344 → 345 (R311ac), sections 255 변동 0."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311ad — ap-demo teardown.rs 의 tokio::time::timeout 5 sites (L76/79/82/113/195) cascade 시작. 각 site는 owned future (JoinHandle / oneshot::Receiver) timeout이므로 clock instance 접근 필요 — teardown typestate wrapper struct 에 `clock: T` (T: TimeSource) generic 추가 + run_demo 측에서 session_clock 전달. R311t/s/r cascade 동일 패턴 — 2-3 sites 씩 incremental land.",
+        "TimeSource::timeout API 는 owning future (F: 'static) 만 지원 — ap-demo 현재 호출처 5곳 모두 owned (JoinHandle / oneshot::Receiver) 이므로 API 일치. lifetime-borrowed timeout 이 필요한 미래 라운드에서 trait method 확장 고려 (now TimeSource::timeout_borrowed<'a, F: Future + Send + 'a>).",
+        "TokioTime impl 의 timeout body 는 tokio::time::timeout 단순 위임 — select! / sleep 조합 자체 재구현 아님. Embassy profile impl 은 embassy_futures::select::select 구성 필요; 해당 라운드 연계 시점은 wz-runtime-embassy crate 최초 land 시.",
+        "R311aa 의 NL→IR C1 Enum kind / EventSchema 18th 가 SCE forge 측에 land이라 활용처는 아직 0 — codec 라운드 (예: NetworkMessage variant id Enum kind, payload schema EventSchema)에서 적용. 쓴텍스트 표현력 강화 토대이자 carry."
+      ],
+      "publishable_decision_summary": "R311ac TimeSource trait에 timeout method + TimeoutElapsed type 추가; TokioTime impl 동반. composable framework 표현력 직접 증가 — ap-demo cascade는 R311ad+.",
+      "publishable_changes_bullets": [
+        "wz-runtime-core/src/time.rs — TimeoutElapsed struct (Debug/Clone/Copy/PartialEq/Eq) + module doc 'monotonic clock + async sleep + budgeted timeout' 으로 권한 명시.",
+        "wz-runtime-core/src/time.rs — TimeSource trait 에 fn timeout<F>(ms: u64, fut: F) -> impl Future<Output = Result<F::Output, TimeoutElapsed>> + Send + '_ where F: Future + Send + 'static, F::Output: Send 추가. Embassy / FreeRTOS profile composition 가이드를 doc-comment에 명시.",
+        "wz-runtime-core/src/lib.rs — `pub use time::{TimeSource, TimeoutElapsed}` re-export.",
+        "wz-runtime-tokio/src/runtime_impl.rs — use 절에 TimeoutElapsed 추가; TokioTime impl 에 async fn timeout 구현 (tokio::time::timeout 위임 + Elapsed -> TimeoutElapsed 변환). clippy::manual_async_fn 회피용으로 async fn 형태로 land (트레이트 RPITIT 와 desugared async fn return 매칭).",
+        "compile_time_assertions::runtime_and_time_compose_in_generic_code 에 `clock.timeout(100, ...).await` 라인 + helper module `async_inner::AsyncInner` 추가 — generic R + T 코드에서 timeout 호출이 컴파일되는지 smoke check.",
+        "tests 모듈에 behavior test 2 추가: tokio_time_timeout_completes_within_budget_returns_ok (50ms inner vs 500ms budget -> Ok), tokio_time_timeout_budget_elapsed_returns_timeout_elapsed (500ms inner vs 50ms budget -> Err(TimeoutElapsed))."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace (crates/) 깨끗.",
+        "cargo clippy --workspace --all-targets -- -D warnings 깨끗 — manual_async_fn lint 행 그엔 async fn 형태로 수정.",
+        "scripts/run-ci.sh 전 Layer pass (0/A/A2/B/C0/C1/C1b/C2/D/E). Layer F opt-in skip. all required layers pass.",
+        "cargo test --workspace TOTAL passed: 765 — R311ab baseline 763 +2 (새 timeout behavior tests).",
+        "wz-runtime-tokio --lib runtime_impl::tests — 17 pass (15 기존 + 2 신규).",
+        "validate_workspace — docs=13/13, T1=0, RT 13/13, T3 warn=862 / T4 info=429 변동 0, GENERATED.md=sync.",
+        "atomic ledger: entries 344 → 345 (R311ac), sections 255 변동 0."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ad — ap-demo teardown.rs 의 tokio::time::timeout 5 sites (L76/79/82/113/195) cascade 시작. 각 site는 owned future (JoinHandle / oneshot::Receiver) timeout이므로 clock instance 접근 필요 — teardown typestate wrapper struct 에 `clock: T` (T: TimeSource) generic 추가 + run_demo 측에서 session_clock 전달. R311t/s/r cascade 동일 패턴 — 2-3 sites 씩 incremental land.",
+        "TimeSource::timeout API 는 owning future (F: 'static) 만 지원 — ap-demo 현재 호출처 5곳 모두 owned (JoinHandle / oneshot::Receiver) 이므로 API 일치. lifetime-borrowed timeout 이 필요한 미래 라운드에서 trait method 확장 고려 (now TimeSource::timeout_borrowed<'a, F: Future + Send + 'a>).",
+        "TokioTime impl 의 timeout body 는 tokio::time::timeout 단순 위임 — select! / sleep 조합 자체 재구현 아님. Embassy profile impl 은 embassy_futures::select::select 구성 필요; 해당 라운드 연계 시점은 wz-runtime-embassy crate 최초 land 시.",
+        "R311aa 의 NL→IR C1 Enum kind / EventSchema 18th 가 SCE forge 측에 land이라 활용처는 아직 0 — codec 라운드 (예: NetworkMessage variant id Enum kind, payload schema EventSchema)에서 적용. 쓴텍스트 표현력 강화 토대이자 carry."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
