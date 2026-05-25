@@ -17113,6 +17113,52 @@
         "TimeSource::timeout 계약 시점 (R311ac 단계)에서 API가 owning future만 지원. ap-demo teardown의 5 sites 모두 owned future (JoinHandle, oneshot::Receiver) 이므로 R311ad에서 API mismatch 없이 cascade 완료 — lifetime-borrowed timeout은 여전히 future round carry."
       ]
     },
+    "Round 311ae": {
+      "decision_summary": "R311ae carry planning — R311ad Layer E first-run flake mechanical 진단을 R311af 즉시 상환 1순위로 lock; 다음 세션 load 첫 라운드 자동 실행 절차 명시. R311z→R311aa pin bump 패턴 그대로.",
+      "changes_bullets": [
+        "Atomic ledger entry only — carry planning round; 알림 surfacing과 절차 lock만 수행, 코드 변경 0.",
+        "[[project_layer_e_flake_debt]] 메모리 신규 작성 — description 에 '부채 + R311af 즉시 상환 (load 첫 라운드 자동 실행)' 명시; MEMORY.md 인덱스 line 추가 (line 5).",
+        "MEMORY.md sce_vendor_pin_state 인덱스 line 갱신 — STALE 표시 제거 + R311aa baseline 55243e886 (765 tests baseline) 명시.",
+        "Layer E flake root-cause 3 가설 명시 — (a) cargo fmt rebuild 직후 page cache + tokio scheduler + libc malloc + zenoh-pico .so cold 누적, (b) Layer C* fd/socket/ephemeral port 누적 경쟁, (c) zenoh-pico z_sub CLI cold-start 자체 지연.",
+        "R311af 절차 4 단계 명시 — (1) cargo clean 후 Layer E 단독 5-10회 연속 실행 재현, (2) fail 재현 시 warm-up step 추가 / e2e timeout 확장 중 택, (3) fail 미재현 시 tentative closure, (4) 해결 후 메모리 + MEMORY.md 인덱스 삭제."
+      ],
+      "verification_bullets": [
+        "validate_workspace: T1=0, RT 13/13, sync; R311ad cargo gates (765 pass) carries.",
+        "atomic ledger: entries 346 → 347 (R311ae carry planning), sections 255 변동 0.",
+        "메모리 신규 파일 재확인 — description 과좀 없음 (200-char cap 이 frontmatter 에는 미적용 확인)."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "[즉시 상환 1순위] R311af Layer E first-run flake mechanical 제거: load 시 첫 라운드로 실행. 절차: [[project_layer_e_flake_debt]] 본문 'R311af 절차' 섹션 참조.",
+        "기대 효과: [[feedback_no_flaky_ever]] strict 원칙 즜수; CI infra 안정화; cargo fmt 권한 변경 이후 쪼쪼한 push 안전성 확보.",
+        "Sequential 종속 없음: R311af 자체는 ap-demo spawn cluster cascade (R311ae+ Runtime trait 적용), Session<R,T> reparam, Liveliness/Querier integration 등과 완전 독립. Layer E flake 먼저 상환 안정화.",
+        "Failure 시 fallback: 12회 재현 시도 후 fail 미발생 시 R311af entry에 'tentative closure; 향후 raise 시점 재진단' 명시 + 메모리 description 에 'tentative resolved (재현 불가; flake 패턴 미확증)' 추가 + MEMORY.md 인덱스 line 소감."
+      ],
+      "publishable_decision_summary": "R311ae carry planning — R311ad Layer E first-run flake mechanical 진단을 R311af 즉시 상환 1순위로 lock; 다음 세션 load 첫 라운드 자동 실행 절차 명시. R311z→R311aa pin bump 패턴 그대로.",
+      "publishable_changes_bullets": [
+        "Atomic ledger entry only — carry planning round; 알림 surfacing과 절차 lock만 수행, 코드 변경 0.",
+        "[[project_layer_e_flake_debt]] 메모리 신규 작성 — description 에 '부채 + R311af 즉시 상환 (load 첫 라운드 자동 실행)' 명시; MEMORY.md 인덱스 line 추가 (line 5).",
+        "MEMORY.md sce_vendor_pin_state 인덱스 line 갱신 — STALE 표시 제거 + R311aa baseline 55243e886 (765 tests baseline) 명시.",
+        "Layer E flake root-cause 3 가설 명시 — (a) cargo fmt rebuild 직후 page cache + tokio scheduler + libc malloc + zenoh-pico .so cold 누적, (b) Layer C* fd/socket/ephemeral port 누적 경쟁, (c) zenoh-pico z_sub CLI cold-start 자체 지연.",
+        "R311af 절차 4 단계 명시 — (1) cargo clean 후 Layer E 단독 5-10회 연속 실행 재현, (2) fail 재현 시 warm-up step 추가 / e2e timeout 확장 중 택, (3) fail 미재현 시 tentative closure, (4) 해결 후 메모리 + MEMORY.md 인덱스 삭제."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: T1=0, RT 13/13, sync; R311ad cargo gates (765 pass) carries.",
+        "atomic ledger: entries 346 → 347 (R311ae carry planning), sections 255 변동 0.",
+        "메모리 신규 파일 재확인 — description 과좀 없음 (200-char cap 이 frontmatter 에는 미적용 확인)."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "[즉시 상환 1순위] R311af Layer E first-run flake mechanical 제거: load 시 첫 라운드로 실행. 절차: [[project_layer_e_flake_debt]] 본문 'R311af 절차' 섹션 참조.",
+        "기대 효과: [[feedback_no_flaky_ever]] strict 원칙 즜수; CI infra 안정화; cargo fmt 권한 변경 이후 쪼쪼한 push 안전성 확보.",
+        "Sequential 종속 없음: R311af 자체는 ap-demo spawn cluster cascade (R311ae+ Runtime trait 적용), Session<R,T> reparam, Liveliness/Querier integration 등과 완전 독립. Layer E flake 먼저 상환 안정화.",
+        "Failure 시 fallback: 12회 재현 시도 후 fail 미발생 시 R311af entry에 'tentative closure; 향후 raise 시점 재진단' 명시 + 메모리 description 에 'tentative resolved (재현 불가; flake 패턴 미확증)' 추가 + MEMORY.md 인덱스 line 소감."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
