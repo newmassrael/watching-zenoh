@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pre-commit gate — two checks in sequence:
+# Pre-commit gate — three checks in sequence:
 #
 #   1. Cargo.toml ↔ Cargo.lock synchronisation. R52.1 retrospect:
 #      R51/R52 staged Cargo.toml changes without their Cargo.lock
@@ -9,7 +9,18 @@
 #      a metadata-only edit), stage it explicitly anyway so the
 #      check is intentional.
 #
-#   2. Mnemosyne SSOT gate. Blocks the commit if
+#   2. cargo fmt --check on staged crates/**.rs (R311au-prep-hook).
+#      R311at landed a 5-site ap-demo migration whose follow-up commit
+#      (0bee3be) was fmt-dirty and only got caught at pre-push by
+#      run-ci.sh Layer 0, requiring an R311at-fmt-fix ledger entry to
+#      record the cosmetic correction. This local gate catches fmt
+#      drift earlier so ledger-only commits stay ledger-only. The
+#      pre-push run-ci.sh Layer 0 `cargo fmt --all -- --check` remains
+#      the backup (R64.1 single-source-of-truth invariant). Skipped
+#      silently when no crates/**.rs is staged — mnemosyne-only
+#      commits pay zero rustfmt boot cost.
+#
+#   3. Mnemosyne SSOT gate. Blocks the commit if
 #      `mnemosyne-cli validate-workspace` finds:
 #        - new T1 cross-ref orphans (not registered in [[orphan_ledger]])
 #        - resolved ledger entries (entry stale, drift catch)
@@ -56,7 +67,31 @@ if [[ -n "$staged_manifests" && -z "$staged_lockfile" ]]; then
     fi
 fi
 
-# ─── Check 2: Mnemosyne SSOT gate ──────────────────────────────────
+# ─── Check 2: cargo fmt --check on staged .rs (R311au-prep-hook) ───
+#
+# Filter to staged `crates/**.rs` so mnemosyne-only commits skip
+# silently (no rustfmt boot cost). When any .rs is staged, the gate
+# runs `cargo fmt --all -- --check` in the workspace root — same
+# command as scripts/run-ci.sh Layer 0 (R64.1 mirror). The --all
+# scope is intentional: incidental drift accumulated in unstaged
+# files is *also* surfaced, which is the same defense-in-depth shape
+# the CI lane provides remotely.
+staged_rs=$(git diff --cached --name-only --diff-filter=ACM \
+    | grep -E '^crates/.+\.rs$' || true)
+
+if [[ -n "$staged_rs" ]]; then
+    if ! (cd crates && cargo fmt --all -- --check); then
+        echo "" >&2
+        echo "pre-commit: cargo fmt --check FAIL" >&2
+        echo "  staged crates/**.rs files:" >&2
+        echo "$staged_rs" | sed 's/^/    /' >&2
+        echo "" >&2
+        echo "  fix: (cd crates && cargo fmt --all) && git add -u" >&2
+        exit 1
+    fi
+fi
+
+# ─── Check 3: Mnemosyne SSOT gate ──────────────────────────────────
 if ! command -v mnemosyne-cli >/dev/null 2>&1; then
     echo "pre-commit: mnemosyne-cli not on PATH — install with" >&2
     echo "  cargo install --path /path/to/mnemosyne/crates/mnemosyne-cli" >&2
