@@ -17207,6 +17207,60 @@
         "Sequential 종속 없음 — R311ad-R311af flake 시리즈는 architectural cascade 와 완전 독립, 다음 라운드는 carry priority 자유롭게 선택 가능."
       ]
     },
+    "Round 311ag": {
+      "decision_summary": "R311ag Phase W lwIP entry audit — SCE B6-α emitter pass (link_emitter_b6 OK); 3 gaps: lwip_udp_session.scxml 미author / arm-none-eabi-gcc 미설치 / wz-runtime-lwip 부재. R311ah=session SCXML lock.",
+      "changes_bullets": [
+        "Audit round only — 코드 변경 0; atomic ledger entry 만 명시.",
+        "`cargo test -p wz-integration-tests --test link_emitter_b6`: SCE B6-α emitter 가 sources/links/lwip_udp_scout.scxml 에서 lwip_udp_scout_link_t + LINK_CLASS/FRAMER_REF/BACKPRESSURE macro + 4 inline fns (init/rx/tx/poll) C11 header 정상 emit 확인.",
+        "sources/links/ 점검: lwip_udp_scout.scxml 1개만 존재; deploy/mcu_target.yaml::machines.mcu_node.links 에 정의된 udp_session (trust=session_arming, lwip_udp driver, bind 0.0.0.0:7447, mtu 1472) 매칭 SCXML 부재.",
+        "MCU toolchain 점검: rustup target thumbv7em-none-eabihf 설치됨 (Cortex-M7 Rust cross-compile 가능); arm-none-eabi-gcc 미설치 (lwIP C source build 시점 unblock 필요).",
+        "crate 점검: wz-runtime-lwip 부재 — R63 reverted R53 NOP-stub skeleton (doc-around-hack), Phase W 에서 real lwIP API + MCU cross-compile 로 재도입 예정."
+      ],
+      "verification_bullets": [
+        "link_emitter_b6 test: 1 passed / 0 failed (compile 0.81s + run 0.01s) — SCE B6-α C11 emitter contract 정상 동작.",
+        "crates/ list: wz, wz-ap-demo, wz-codecs, wz-integration-tests, wz-runtime-core, wz-runtime-tokio, wz-runtime-tokio-test-support, zenoh-pico-sys — wz-runtime-lwip 없음.",
+        "sources/ list: codecs/ 41, algorithms/ 14, links/ 1, session/ 1 SCXML files; links/ 에서 udp_session SCXML gap 명확.",
+        "deploy/mcu_target.yaml::links: udp_scout (lwip_udp, untrusted) / udp_session (lwip_udp, session_arming) / tcp_session (commented Phase B+) — udp_session 은 SCXML 없이 deploy-only 정의 상태.",
+        "validate_workspace baseline R311af 유지: T1=0 (ledger=1 R193 §66 known-stale), RT 13/13, sync; entries 348 → 349, sections 255 변동 0 (예상)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/6-next-step-scaffolding",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link"
+      ],
+      "carry_forward_bullets": [
+        "R311ah lock: sources/links/lwip_udp_session.scxml authoring — lwip_udp_scout 패턴 따라 link-class=udp + framer=frame + backpressure=block (session은 best-effort 아님, scouting drop 정책 반대) + events (link.session.rx / link.session.tx); link_emitter_b6 mirror test (link_emitter_b6_session.rs 또는 link_emitter_b6.rs 확장) 으로 emit verification.",
+        "R311ai later: deploy yaml udp_session ↔ SCXML mesh 검증 — sce-codegen 이 deploy yaml 읽어서 per-link wrapper emit 하는 path 통과 확인; lwip_udp_session_link_t typedef + LWIP_UDP_SESSION_LINK_CLASS 등 macro emit 확인.",
+        "R311aj+: arm-none-eabi-gcc 시스템 install (sudo apt install gcc-arm-none-eabi — user permission required) + wz-runtime-lwip crate 재도입 scaffolding (Cargo.toml + lib.rs no_std + #[no_main] target thumbv7em-none-eabihf; R63 교훈 준수: NOP-stub 대신 lwIP source 통합 시점에 real impl).",
+        "Phase W 후반 (20-50R): lwIP C source 통합 (build.rs cc::Build 또는 git submodule) + cross-compile build + scouting/session FSM 와 link 호출 path 통합 + real driver code (udp_recv / udp_sendto / lwIP netif initialization wiring); MCU half 하프 완성."
+      ],
+      "publishable_decision_summary": "R311ag Phase W lwIP entry audit — SCE B6-α emitter pass (link_emitter_b6 OK); 3 gaps: lwip_udp_session.scxml 미author / arm-none-eabi-gcc 미설치 / wz-runtime-lwip 부재. R311ah=session SCXML lock.",
+      "publishable_changes_bullets": [
+        "Audit round only — 코드 변경 0; atomic ledger entry 만 명시.",
+        "`cargo test -p wz-integration-tests --test link_emitter_b6`: SCE B6-α emitter 가 sources/links/lwip_udp_scout.scxml 에서 lwip_udp_scout_link_t + LINK_CLASS/FRAMER_REF/BACKPRESSURE macro + 4 inline fns (init/rx/tx/poll) C11 header 정상 emit 확인.",
+        "sources/links/ 점검: lwip_udp_scout.scxml 1개만 존재; deploy/mcu_target.yaml::machines.mcu_node.links 에 정의된 udp_session (trust=session_arming, lwip_udp driver, bind 0.0.0.0:7447, mtu 1472) 매칭 SCXML 부재.",
+        "MCU toolchain 점검: rustup target thumbv7em-none-eabihf 설치됨 (Cortex-M7 Rust cross-compile 가능); arm-none-eabi-gcc 미설치 (lwIP C source build 시점 unblock 필요).",
+        "crate 점검: wz-runtime-lwip 부재 — R63 reverted R53 NOP-stub skeleton (doc-around-hack), Phase W 에서 real lwIP API + MCU cross-compile 로 재도입 예정."
+      ],
+      "publishable_verification_bullets": [
+        "link_emitter_b6 test: 1 passed / 0 failed (compile 0.81s + run 0.01s) — SCE B6-α C11 emitter contract 정상 동작.",
+        "crates/ list: wz, wz-ap-demo, wz-codecs, wz-integration-tests, wz-runtime-core, wz-runtime-tokio, wz-runtime-tokio-test-support, zenoh-pico-sys — wz-runtime-lwip 없음.",
+        "sources/ list: codecs/ 41, algorithms/ 14, links/ 1, session/ 1 SCXML files; links/ 에서 udp_session SCXML gap 명확.",
+        "deploy/mcu_target.yaml::links: udp_scout (lwip_udp, untrusted) / udp_session (lwip_udp, session_arming) / tcp_session (commented Phase B+) — udp_session 은 SCXML 없이 deploy-only 정의 상태.",
+        "validate_workspace baseline R311af 유지: T1=0 (ledger=1 R193 §66 known-stale), RT 13/13, sync; entries 348 → 349, sections 255 변동 0 (예상)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape/6-next-step-scaffolding",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ah lock: sources/links/lwip_udp_session.scxml authoring — lwip_udp_scout 패턴 따라 link-class=udp + framer=frame + backpressure=block (session은 best-effort 아님, scouting drop 정책 반대) + events (link.session.rx / link.session.tx); link_emitter_b6 mirror test (link_emitter_b6_session.rs 또는 link_emitter_b6.rs 확장) 으로 emit verification.",
+        "R311ai later: deploy yaml udp_session ↔ SCXML mesh 검증 — sce-codegen 이 deploy yaml 읽어서 per-link wrapper emit 하는 path 통과 확인; lwip_udp_session_link_t typedef + LWIP_UDP_SESSION_LINK_CLASS 등 macro emit 확인.",
+        "R311aj+: arm-none-eabi-gcc 시스템 install (sudo apt install gcc-arm-none-eabi — user permission required) + wz-runtime-lwip crate 재도입 scaffolding (Cargo.toml + lib.rs no_std + #[no_main] target thumbv7em-none-eabihf; R63 교훈 준수: NOP-stub 대신 lwIP source 통합 시점에 real impl).",
+        "Phase W 후반 (20-50R): lwIP C source 통합 (build.rs cc::Build 또는 git submodule) + cross-compile build + scouting/session FSM 와 link 호출 path 통합 + real driver code (udp_recv / udp_sendto / lwIP netif initialization wiring); MCU half 하프 완성."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
