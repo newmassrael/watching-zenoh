@@ -16943,6 +16943,62 @@
         "R311ab 절차 — (a) ap-demo 16 sites 인벤토리 재측정. (b) Session<R> → Session<R,T> cascade의 leaf 첫 site 식별. (c) 2-3 site씩 묶어 incremental land (R311t/s/r Querier/Reply/Queryable cascade 동일 패턴)."
       ]
     },
+    "Round 311ab": {
+      "decision_summary": "R311ab ap-demo runner.rs std::sync::Mutex → wz::runtime_tokio::sync::Mutex alias migration. 16 sites cascade의 첫 leaf; alias 덕에 Session::observer (Session-last gate) 와 binary 호환.",
+      "changes_bullets": [
+        "crates/wz-ap-demo/src/runner.rs L41 `use std::sync::{Arc, Mutex}` 을 split: `use std::sync::Arc` + `use wz::runtime_tokio::sync::Mutex` (cargo fmt 이 알파벳 순서로 session_glue 다음 L59 위치 조정).",
+        "Mutex 사용 site들 (L172 fn param `&Arc<Mutex<ApplicationLayerObserver>>`, L563 `Arc::new(Mutex::new(...))`) 동일 식별자로 그대로 동작 — alias `pub type Mutex<T> = std::sync::Mutex<T>` 때문에 type 자체가 동일.",
+        "Session::observer field type (`Arc<std::sync::Mutex<ApplicationLayerObserver>>`) 변경 0 — R311y/x 명시된 Session-last gate 보존. ap-demo 측의 caller가 alias를 쓰더라도 alias 자체가 std::sync::Mutex이므로 Session::new(actions, observer) 호출이 type-mismatch 없이 채택.",
+        "ap-demo 의 다른 §5.P primitive sites — tokio::spawn 5 (runner.rs 146/430/441/455/665), tokio::task::JoinHandle 2 (teardown.rs 38, runner.rs 45), tokio::time::timeout 5 (teardown.rs 76/79/82/113/195) — R311ac+ 다음 라운드 cascade 대상.",
+        "tasks.rs 도키코멘트 (L23, L130, L136) 는 `tokio::spawn` / `tokio::time::sleep` 을 가리키는 doc-only — 이번 라운드 수정 0."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace (crates/) 깨끗 — 0.79s incremental.",
+        "cargo fmt --all 적용 후 import block 제자리. R311aa pin bump으로 감지된 fmt gate (4deed68bc; pre-push → pre-commit) 적용.",
+        "scripts/run-ci.sh 전 Layer pass: 0 (fmt) / A (validate-workspace) / A2 / B (verify-codegen) / C0 / C1 (cargo test) / C1b / C2 (cargo clippy -D warnings) / D (deploy yaml) / E. Layer F opt-in skip. all required layers pass.",
+        "cargo test 총 통과 763 — R311v/R311aa baseline 동일.",
+        "validate_workspace — docs=13/13, T1=0, RT 13/13, T3 warn=862 / T4 info=429 변동 0, GENERATED.md=sync.",
+        "atomic ledger: entries 343 → 344 (R311ab), sections 255 변동 0.",
+        "Session::observer field type unchanged (`grep -n \"observer.*Mutex\" crates/wz-runtime-tokio/src/session.rs` 경과 동일 — L573/609/635). Session-last gate 유지."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311ac — ap-demo 다음 leaf 시트: teardown.rs 의 tokio::time::timeout 5 sites 움직임. R311w lock은 Mutex/RwLock alias만 적용; timeout/spawn은 Runtime/TimeSource trait method로 처리해야 함. TimeSource trait에 timeout method 추가 필요 (현재 now_monotonic_ms + sleep만 존재 가능성; runtime_core/src/time.rs:47 재확인 필요).",
+        "R311ac+ alternative — timeout abstraction 의 cost가 크면 (Trait 확장 + impl 두 곳 + ap-demo 측 cascade) 먼저 tokio::task::JoinHandle 2 sites alias만 추가하고 spawn/timeout은 Session<R: Runtime, T: TimeSource> reparam 라운드에서 함께 첫 수행. JoinHandle alias 추가는 sync.rs 에 `pub type JoinHandle<T> = tokio::task::JoinHandle<T>` 한 줄.",
+        "§5.P scope 남은 ap-demo sites (R311ab 후) — std::sync::Mutex 0 (이번 소감), tokio::spawn 5, tokio::task::JoinHandle 2, tokio::time::timeout 5 = 12 sites. R311ac+ 2-3 sites씩 incremental land (R311t/s/r cascade 동일 패턴).",
+        "Session<R: Runtime, T: TimeSource> 2-param reparam은 이 12 sites 모두 alias/trait 통한 접근과 호환 확인 후 최종 site (Session struct 자체)에서 수행. 이게 R311y carry forward 'Session struct last' 극 의미."
+      ],
+      "publishable_decision_summary": "R311ab ap-demo runner.rs std::sync::Mutex → wz::runtime_tokio::sync::Mutex alias migration. 16 sites cascade의 첫 leaf; alias 덕에 Session::observer (Session-last gate) 와 binary 호환.",
+      "publishable_changes_bullets": [
+        "crates/wz-ap-demo/src/runner.rs L41 `use std::sync::{Arc, Mutex}` 을 split: `use std::sync::Arc` + `use wz::runtime_tokio::sync::Mutex` (cargo fmt 이 알파벳 순서로 session_glue 다음 L59 위치 조정).",
+        "Mutex 사용 site들 (L172 fn param `&Arc<Mutex<ApplicationLayerObserver>>`, L563 `Arc::new(Mutex::new(...))`) 동일 식별자로 그대로 동작 — alias `pub type Mutex<T> = std::sync::Mutex<T>` 때문에 type 자체가 동일.",
+        "Session::observer field type (`Arc<std::sync::Mutex<ApplicationLayerObserver>>`) 변경 0 — R311y/x 명시된 Session-last gate 보존. ap-demo 측의 caller가 alias를 쓰더라도 alias 자체가 std::sync::Mutex이므로 Session::new(actions, observer) 호출이 type-mismatch 없이 채택.",
+        "ap-demo 의 다른 §5.P primitive sites — tokio::spawn 5 (runner.rs 146/430/441/455/665), tokio::task::JoinHandle 2 (teardown.rs 38, runner.rs 45), tokio::time::timeout 5 (teardown.rs 76/79/82/113/195) — R311ac+ 다음 라운드 cascade 대상.",
+        "tasks.rs 도키코멘트 (L23, L130, L136) 는 `tokio::spawn` / `tokio::time::sleep` 을 가리키는 doc-only — 이번 라운드 수정 0."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace (crates/) 깨끗 — 0.79s incremental.",
+        "cargo fmt --all 적용 후 import block 제자리. R311aa pin bump으로 감지된 fmt gate (4deed68bc; pre-push → pre-commit) 적용.",
+        "scripts/run-ci.sh 전 Layer pass: 0 (fmt) / A (validate-workspace) / A2 / B (verify-codegen) / C0 / C1 (cargo test) / C1b / C2 (cargo clippy -D warnings) / D (deploy yaml) / E. Layer F opt-in skip. all required layers pass.",
+        "cargo test 총 통과 763 — R311v/R311aa baseline 동일.",
+        "validate_workspace — docs=13/13, T1=0, RT 13/13, T3 warn=862 / T4 info=429 변동 0, GENERATED.md=sync.",
+        "atomic ledger: entries 343 → 344 (R311ab), sections 255 변동 0.",
+        "Session::observer field type unchanged (`grep -n \"observer.*Mutex\" crates/wz-runtime-tokio/src/session.rs` 경과 동일 — L573/609/635). Session-last gate 유지."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ac — ap-demo 다음 leaf 시트: teardown.rs 의 tokio::time::timeout 5 sites 움직임. R311w lock은 Mutex/RwLock alias만 적용; timeout/spawn은 Runtime/TimeSource trait method로 처리해야 함. TimeSource trait에 timeout method 추가 필요 (현재 now_monotonic_ms + sleep만 존재 가능성; runtime_core/src/time.rs:47 재확인 필요).",
+        "R311ac+ alternative — timeout abstraction 의 cost가 크면 (Trait 확장 + impl 두 곳 + ap-demo 측 cascade) 먼저 tokio::task::JoinHandle 2 sites alias만 추가하고 spawn/timeout은 Session<R: Runtime, T: TimeSource> reparam 라운드에서 함께 첫 수행. JoinHandle alias 추가는 sync.rs 에 `pub type JoinHandle<T> = tokio::task::JoinHandle<T>` 한 줄.",
+        "§5.P scope 남은 ap-demo sites (R311ab 후) — std::sync::Mutex 0 (이번 소감), tokio::spawn 5, tokio::task::JoinHandle 2, tokio::time::timeout 5 = 12 sites. R311ac+ 2-3 sites씩 incremental land (R311t/s/r cascade 동일 패턴).",
+        "Session<R: Runtime, T: TimeSource> 2-param reparam은 이 12 sites 모두 alias/trait 통한 접근과 호환 확인 후 최종 site (Session struct 자체)에서 수행. 이게 R311y carry forward 'Session struct last' 극 의미."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
