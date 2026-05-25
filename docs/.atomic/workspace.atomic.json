@@ -2162,7 +2162,11 @@
         "R311au-prep: LwipRuntime binds own Mutex/RwLock (critical_section or embassy_sync) + own JoinHandle.",
         "R311au-prep: remaining 4 sites are channel/select not on Runtime trait; extend trait when needed.",
         "R311au-prep correction: post-R311at = oneshot 2 + mpsc 1 + select! 1; tokio::net 2 link-layer.",
-        "R311au-prep: tokio::net TcpListener/TcpStream are link-layer (lwIP uses own API; out of §5.P scope)."
+        "R311au-prep: tokio::net TcpListener/TcpStream are link-layer (lwIP uses own API; out of §5.P scope).",
+        "R311av lands LwipRuntime cooperative task pool + LwipTime own ClockSource; Phase W ladder mantissa",
+        "R311av thumbv6m alloc gap: M0+ ARMv6-M lacks atomic CAS so alloc::sync::Arc unavailable; sync-only",
+        "Phase W ladder remaining: facade runtime-lwip feature R311ax; first MCU preset R311ay; abort R311az+",
+        "R311av self-wake busy-poll SleepFuture/TimeoutFuture; real deadline-keyed timer queue is R311az+"
       ],
       "alternatives_rejected": [
         {
@@ -18521,6 +18525,56 @@
         "R311ay: first MCU preset 6-7-preset-cortex-m4-default add_section atomic primitive",
         "R311az+ carries: LwipJoinHandle abort; real timer queue; embedded-time optional",
         "Architectural carries unchanged: R267 R283 R284 R299 R300 R301 §8 R304 R310"
+      ]
+    },
+    "Round 311aw": {
+      "decision_summary": "R311aw §5.P caveat append post-R311av: 4 new bullets record LwipRuntime lands + thumbv6m alloc gap + ladder remaining + busy-poll honest scope; ledger-only no code mutation",
+      "changes_bullets": [
+        "§5.P caveats +4 append-only: R311av LwipRuntime lands + LwipTime ClockSource; thumbv6m alloc gap M0+ no atomic CAS",
+        "Caveat 3: Phase W ladder remaining R311ax facade feature + R311ay first MCU preset + R311az+ abort/timer-queue",
+        "Caveat 4: SleepFuture/TimeoutFuture self-wake busy-poll 1st impl; deadline-keyed timer queue R311az+ honest defer",
+        "frozen-ledger respected: existing caveats R311w(3) + R311x(2) + R311ak/al/am Layer G + R311au-prep(4) + R311au-prep-fix(2) all preserved",
+        "Each new caveat <=100 bytes per mnemosyne MAX_BULLET_CHAR; entries 372 to 373 expected post-append"
+      ],
+      "verification_bullets": [
+        "validate_workspace: T1=0 RT 13/13 sync after 4 caveat appends + entry append",
+        "Code mutation 0; cargo build/test/Layer G unchanged from R311av baseline",
+        "Style violations unchanged: T3 warn=862 T4 info=429 (R138 mobility ratify)",
+        "Append-only frozen-ledger: zero existing caveat mutated; only +4 new bullets at section tail"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311ax next: wz facade runtime-lwip feature surface + mutual exclusion compile_error; Layer G.5 lane",
+        "R311ay post: first MCU preset cortex-m4-default add_section feature-inventory 6-7",
+        "R311az+ unchanged carries: LwipJoinHandle abort + real timer queue + portable-atomic M0+ polyfill",
+        "R311az+ optional: embedded-time ecosystem adapter feature; lwIP-sys FFI link tier §5.C",
+        "Architectural carries unchanged: R267 R283 R284 R299 R300 R301 §8 R304 keyexpr_canon R310.5c"
+      ],
+      "publishable_decision_summary": "R311aw §5.P caveat append post-R311av: 4 new bullets record LwipRuntime lands + thumbv6m alloc gap + ladder remaining + busy-poll honest scope; ledger-only no code mutation",
+      "publishable_changes_bullets": [
+        "§5.P caveats +4 append-only: R311av LwipRuntime lands + LwipTime ClockSource; thumbv6m alloc gap M0+ no atomic CAS",
+        "Caveat 3: Phase W ladder remaining R311ax facade feature + R311ay first MCU preset + R311az+ abort/timer-queue",
+        "Caveat 4: SleepFuture/TimeoutFuture self-wake busy-poll 1st impl; deadline-keyed timer queue R311az+ honest defer",
+        "frozen-ledger respected: existing caveats R311w(3) + R311x(2) + R311ak/al/am Layer G + R311au-prep(4) + R311au-prep-fix(2) all preserved",
+        "Each new caveat <=100 bytes per mnemosyne MAX_BULLET_CHAR; entries 372 to 373 expected post-append"
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: T1=0 RT 13/13 sync after 4 caveat appends + entry append",
+        "Code mutation 0; cargo build/test/Layer G unchanged from R311av baseline",
+        "Style violations unchanged: T3 warn=862 T4 info=429 (R138 mobility ratify)",
+        "Append-only frozen-ledger: zero existing caveat mutated; only +4 new bullets at section tail"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ax next: wz facade runtime-lwip feature surface + mutual exclusion compile_error; Layer G.5 lane",
+        "R311ay post: first MCU preset cortex-m4-default add_section feature-inventory 6-7",
+        "R311az+ unchanged carries: LwipJoinHandle abort + real timer queue + portable-atomic M0+ polyfill",
+        "R311az+ optional: embedded-time ecosystem adapter feature; lwIP-sys FFI link tier §5.C",
+        "Architectural carries unchanged: R267 R283 R284 R299 R300 R301 §8 R304 keyexpr_canon R310.5c"
       ]
     },
     "Round 311b": {
