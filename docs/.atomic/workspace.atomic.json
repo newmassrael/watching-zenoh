@@ -2150,7 +2150,9 @@
         "Async coloring: Runtime::spawn must produce same Future shape across tokio/embassy.",
         "Reliability/Sample types stay in wz-runtime-tokio until trait surfaces stabilize.",
         "profile-mcu may not reach all 6 backends; lwip-only initial scope per Phase W.",
-        "PublishOptions metadata propagation (R228 carry) orthogonal — separate retire round."
+        "PublishOptions metadata propagation (R228 carry) orthogonal — separate retire round.",
+        "R311w Mutex/RwLock lock: per-runtime type alias (a); GAT (b) + AP/MCU fork (c) rejected.",
+        "R311w Session reparam shape: Session<R: Runtime, T: TimeSource>; Mutex<T> alias avoids extra param."
       ],
       "alternatives_rejected": [
         {
@@ -18068,6 +18070,44 @@
         "R311n measurement re-run for the post-R311t/v cumulative catalog truthfulness gate: scripts/measure-codec-footprint.sh against the codec-frame / codec-declare / codec-request / codec-response / minus-all-codecs / handshake-only lanes. R311t/v added no new wire-codec footprint so the measurement is opt-in confirmation, not a blocking gate.",
         "Attachment SourceInfo + Payload ext mirror — R311v extracts only the 0x05 attachment ext from the Query body. Query body also carries 0x01 (SourceInfo) and 0x03 (Payload) ext shapes per zenoh-pico `_z_query_encode_ext` lines 430-449. The wz consumer surface currently exposes neither through QueryEvent; future round adds those when the wz keyexpr v1 spec surfaces application-level needs.",
         "Reply / Push attachment parity — the attachment ext on Reply (0x05) and Push body (0x03) wire shape is symmetric to the Query-side extraction landed here. The Reply / Push side currently surfaces attachment through Sample.attachment for Push (R232) but the Reply side's InboundReply.attachment is the next analogue to wire up. Schedule as a sibling round when the wz consumer surface needs it."
+      ]
+    },
+    "Round 311w": {
+      "decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
+      "changes_bullets": [
+        "§5.P caveats +2: option (a) per-runtime alias; Session<R: Runtime, T: TimeSource> 2-param locked.",
+        "GAT option (b) rejected on HKT ergonomics; AP/MCU fork (c) rejected on single-source-tree.",
+        "Design-only round — no Rust code; R311x+ leaf retire reuses this as the type-signature anchor."
+      ],
+      "verification_bullets": [
+        "validate_workspace: T1=0, RT 13/13, sync, entries 338→339; R311v baseline (763 pass) carries."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311x first leaf retire: smallest non-Session site (test_support / pubsub test-internal captures).",
+        "Session<R, T> generic-param landing stays Session-last per §5.P 'leaf first, Session last'.",
+        "wz-runtime-embassy crate creation deferred to Phase W; alias decision pre-commits eventual shape.",
+        "R311v carries: ReplyEmitter PhantomData, Reply/Push attachment, SourceInfo/Payload ext, R311n."
+      ],
+      "publishable_decision_summary": "R311w §5.P Mutex/RwLock decision lock — per-runtime type alias (a) selected over GAT (b) + AP/MCU fork (c); Session<R: Runtime, T: TimeSource> 2-param shape unblocked.",
+      "publishable_changes_bullets": [
+        "§5.P caveats +2: option (a) per-runtime alias; Session<R: Runtime, T: TimeSource> 2-param locked.",
+        "GAT option (b) rejected on HKT ergonomics; AP/MCU fork (c) rejected on single-source-tree.",
+        "Design-only round — no Rust code; R311x+ leaf retire reuses this as the type-signature anchor."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: T1=0, RT 13/13, sync, entries 338→339; R311v baseline (763 pass) carries."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311x first leaf retire: smallest non-Session site (test_support / pubsub test-internal captures).",
+        "Session<R, T> generic-param landing stays Session-last per §5.P 'leaf first, Session last'.",
+        "wz-runtime-embassy crate creation deferred to Phase W; alias decision pre-commits eventual shape.",
+        "R311v carries: ReplyEmitter PhantomData, Reply/Push attachment, SourceInfo/Payload ext, R311n."
       ]
     },
     "Round 32": {
