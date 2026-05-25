@@ -51,17 +51,31 @@
 #              (~5-10 min cold; multiple wz-ap-demo release builds)
 #              so it stays off the default dispatch path; run it
 #              explicitly when authoring a codec cascade.
-#   Layer G  — wz-runtime-core thumbv7em-none-eabihf cross-compile
-#              gate (R311ak). Opt-in via `--layer G` or
-#              `WZ_RUN_LAYER_G=1`. Phase W mechanical first gate —
-#              the §5.P runtime-services-tier entry crate must build
-#              for an MCU target so the no_std/MCU half stays
-#              mechanically truthful as concrete impls
-#              (wz-runtime-lwip + extern symbols) land in R311al+.
-#              SKIPs gracefully if the rustup target is not
-#              installed. Stays opt-in until the wz-runtime-lwip
-#              caller lands (R311an+); promoted to default lane
-#              once the cross-compile path has a real consumer.
+#   Layer G  — thumbv7em-none-eabihf cross-compile catalog (Phase W).
+#              Opt-in via `--layer G` or `WZ_RUN_LAYER_G=1`. Catalog
+#              members:
+#                G.1 (R311ak) wz-runtime-core — §5.P runtime-services
+#                     -tier entry crate must build for an MCU target
+#                     so the no_std/MCU half stays mechanically truth
+#                     -ful as concrete impls (wz-runtime-lwip + extern
+#                     symbols) land in R311an+.
+#                G.2 (R311am) wz facade --no-default-features — exer
+#                     -cises the `#![cfg_attr(not(any(test, feature =
+#                     "runtime-tokio")), no_std)]` toggle in wz/src
+#                     /lib.rs; proves the composable-framework facade
+#                     itself compiles for MCU when the user has not
+#                     yet selected runtime-tokio. Trivially empty
+#                     today (R302a — all features are no-op labels)
+#                     but the gate ensures future feature gating in
+#                     wz/src/lib.rs can never silently break the no
+#                     _std path.
+#              SKIPs gracefully if the rustup target is not installed.
+#              Stays opt-in until the wz-runtime-lwip caller lands
+#              (R311an+); promoted to default once the cross-compile
+#              path has a real consumer. Out of scope today: wz-codecs
+#              (R40 carry — no_std + alloc variant lands with wz-runt
+#              ime-lwip per src/lib.rs line 22-25), zenoh-pico-sys
+#              (gcc-arm install carry, R311ao+).
 #
 # Exit codes:
 #   0  every required layer passed
@@ -537,8 +551,17 @@ layer_g_cross_compile_cortex_m() {
         echo "Layer G SKIP (rustup target thumbv7em-none-eabihf not installed; install: rustup target add thumbv7em-none-eabihf)"
         return 0
     fi
+    # G.1 (R311ak) wz-runtime-core — §5.P trait skeleton.
     (cd crates && cargo build -p wz-runtime-core \
-        --target thumbv7em-none-eabihf --no-default-features --quiet)
+        --target thumbv7em-none-eabihf --no-default-features --quiet) \
+        || return 1
+    echo "  G.1 wz-runtime-core OK"
+    # G.2 (R311am) wz facade — exercises the no_std cfg_attr toggle
+    # when runtime-tokio is not in the active feature set.
+    (cd crates && cargo build -p wz \
+        --target thumbv7em-none-eabihf --no-default-features --quiet) \
+        || return 1
+    echo "  G.2 wz facade OK"
 }
 
 # ─── dispatch ──────────────────────────────────────────────────────

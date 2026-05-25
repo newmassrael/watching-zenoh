@@ -17565,6 +17565,60 @@
         "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false."
       ]
     },
+    "Round 311am": {
+      "decision_summary": "R311am MCU cross-compile catalog 확장 — Layer G에 G.2 wz facade lane 추가; wz/src/lib.rs no_std cfg_attr toggle 입증; wz-codecs (R40 carry) + zenoh-pico-sys (gcc-arm carry) FAIL은 spec 일치 audit-only.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: Layer G header docblock을 \"thumbv7em-none-eabihf cross-compile catalog (Phase W)\" 타이틀로 갱신; G.1 (R311ak wz-runtime-core) + G.2 (R311am wz facade) catalog 멤버로 재편성. 수행 제외 candidate (wz-codecs, zenoh-pico-sys) 도 docblock에 명시적 제외 이유 적음.",
+        "scripts/run-ci.sh: layer_g_cross_compile_cortex_m() 함수 내부에 G.1 + G.2 두 build 단계로 구조화; 각각 PASS 시 \"  G.1 wz-runtime-core OK\" / \"  G.2 wz facade OK\" 인라이너 인니드셜 로그 출력. 실패 조기 return.",
+        "audit 결과 기록 (코드 변경 없음, 이해 입증 용):",
+        "wz-codecs cross-compile FAIL: `error: cannot find macro include` (no_std prelude 미적용). wz-codecs/src/lib.rs line 22-25 명시한 R40 carry \"MCU `no_std + alloc` variant lands when the lwip runtime crate arrives\" 와 일치. wz 측 의식적 carry, SCE 이슈 아님 (sce-forge-runtime은 #![no_std] baseline default=[]).",
+        "zenoh-pico-sys cross-compile FAIL: cmake 의 arm-none-eabi-gcc PATH 부재. 이미 R311ak-pre carry forward 명시된 gcc-arm install carry 와 일치 (R311ao+ 소진). build.rs가 thumbv7em-none-eabihf target 자동 ARM-cross-compile flags (-mthumb -march=armv7e-m -mfpu=fpv4-sp-d16) 를 이미 wired 해둔 것 자체가 이전 라운드에서 MCU build path 의식적 설계 증거.",
+        "wz facade cross-compile PASS: `cargo build -p wz --target thumbv7em-none-eabihf --no-default-features` 통과. wz/src/lib.rs line 30 `#![cfg_attr(not(any(test, feature = \"runtime-tokio\")), no_std)]` 자동 no_std 토글 입증; R302a \"empty facade\" 스킠낛이지만 future feature-gate (예: runtime-lwip namespace lands) 마다 이 게이트가 silent regression 막아줌."
+      ],
+      "verification_bullets": [
+        "`bash scripts/run-ci.sh --layer G` PASS — G.1 wz-runtime-core OK + G.2 wz facade OK 두 줄 출력 후 \"Layer G pass\".",
+        "`bash scripts/run-ci.sh` 풀스택 PASS — Layer 0/A/A2/B/C0/C1/C1b/C2/D/E 전부 통과 + Layer F SKIP + Layer G SKIP. 회귀 0.",
+        "wz facade thumb build dep tree 확인: --no-default-features 대소 wz-runtime-tokio / wz-runtime-core / sce-rust-runtime / sce-rust-lua 모두 optional+default-features=false 이므로 thumb build dep tree에서 제외. 조건 만족 시 자동 포함 대비 baseline 입증.",
+        "audit-only 결과 atomic ledger 등재 후 validate_workspace baseline R311al 유지 예상 (entries 355→356, sections 255 불변, T1=0, RT 13/13)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311an (다음 진행): §5.P trait skeleton 강화 — wz-runtime-core에 LinkBackend trait 추가 후보. R311ac TimeSource::timeout abstract method 추가 패턴 mirror; lwIP API surface (bind / send / recv / close) 의 abstract Rust trait declaration. impl 없음 (R63 lesson: real caller wz-runtime-lwip 그립 으로 land), 단 trait shape 명세화 → wz-runtime-lwip lands 시점 입장점 명확.",
+        "R311ao→R311ap: wz-codecs no_std + alloc 마이그레이션 (R40 carry 소진) — wz-runtime-lwip caller lands 시점과 함께. wz-codecs/src/lib.rs line 22-25 명시된 시점. SCE-forge-runtime은 이미 #![no_std] baseline이므로 wz 측 lib.rs의 #![cfg_attr(…)] 추가 + cargo Cargo.toml의 alloc feature 웨이는 것으로 해결 예상.",
+        "R311ao+ (gcc-arm install 필요 시점): zenoh-pico-sys + wz-runtime-lwip MCU build path. R311ag/ai/aj carry 이원; 사용자 sudo apt install gcc-arm-none-eabi 필요 시점으로 이동.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Layer G G.2 한계 명시: wz facade --no-default-features는 R302a empty facade이므로 현시점에서 trivially PASS. real 진실성은 wz-runtime-lwip lands 이후 (preset-mcu-minimal feature set로 thumb build 시도 시 동작 경로 진실성 입증). G.2 게이트의 가치는 future regression 차단 — over-claim 금지."
+      ],
+      "publishable_decision_summary": "R311am MCU cross-compile catalog 확장 — Layer G에 G.2 wz facade lane 추가; wz/src/lib.rs no_std cfg_attr toggle 입증; wz-codecs (R40 carry) + zenoh-pico-sys (gcc-arm carry) FAIL은 spec 일치 audit-only.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: Layer G header docblock을 \"thumbv7em-none-eabihf cross-compile catalog (Phase W)\" 타이틀로 갱신; G.1 (R311ak wz-runtime-core) + G.2 (R311am wz facade) catalog 멤버로 재편성. 수행 제외 candidate (wz-codecs, zenoh-pico-sys) 도 docblock에 명시적 제외 이유 적음.",
+        "scripts/run-ci.sh: layer_g_cross_compile_cortex_m() 함수 내부에 G.1 + G.2 두 build 단계로 구조화; 각각 PASS 시 \"  G.1 wz-runtime-core OK\" / \"  G.2 wz facade OK\" 인라이너 인니드셜 로그 출력. 실패 조기 return.",
+        "audit 결과 기록 (코드 변경 없음, 이해 입증 용):",
+        "wz-codecs cross-compile FAIL: `error: cannot find macro include` (no_std prelude 미적용). wz-codecs/src/lib.rs line 22-25 명시한 R40 carry \"MCU `no_std + alloc` variant lands when the lwip runtime crate arrives\" 와 일치. wz 측 의식적 carry, SCE 이슈 아님 (sce-forge-runtime은 #![no_std] baseline default=[]).",
+        "zenoh-pico-sys cross-compile FAIL: cmake 의 arm-none-eabi-gcc PATH 부재. 이미 R311ak-pre carry forward 명시된 gcc-arm install carry 와 일치 (R311ao+ 소진). build.rs가 thumbv7em-none-eabihf target 자동 ARM-cross-compile flags (-mthumb -march=armv7e-m -mfpu=fpv4-sp-d16) 를 이미 wired 해둔 것 자체가 이전 라운드에서 MCU build path 의식적 설계 증거.",
+        "wz facade cross-compile PASS: `cargo build -p wz --target thumbv7em-none-eabihf --no-default-features` 통과. wz/src/lib.rs line 30 `#![cfg_attr(not(any(test, feature = \"runtime-tokio\")), no_std)]` 자동 no_std 토글 입증; R302a \"empty facade\" 스킠낛이지만 future feature-gate (예: runtime-lwip namespace lands) 마다 이 게이트가 silent regression 막아줌."
+      ],
+      "publishable_verification_bullets": [
+        "`bash scripts/run-ci.sh --layer G` PASS — G.1 wz-runtime-core OK + G.2 wz facade OK 두 줄 출력 후 \"Layer G pass\".",
+        "`bash scripts/run-ci.sh` 풀스택 PASS — Layer 0/A/A2/B/C0/C1/C1b/C2/D/E 전부 통과 + Layer F SKIP + Layer G SKIP. 회귀 0.",
+        "wz facade thumb build dep tree 확인: --no-default-features 대소 wz-runtime-tokio / wz-runtime-core / sce-rust-runtime / sce-rust-lua 모두 optional+default-features=false 이므로 thumb build dep tree에서 제외. 조건 만족 시 자동 포함 대비 baseline 입증.",
+        "audit-only 결과 atomic ledger 등재 후 validate_workspace baseline R311al 유지 예상 (entries 355→356, sections 255 불변, T1=0, RT 13/13)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311an (다음 진행): §5.P trait skeleton 강화 — wz-runtime-core에 LinkBackend trait 추가 후보. R311ac TimeSource::timeout abstract method 추가 패턴 mirror; lwIP API surface (bind / send / recv / close) 의 abstract Rust trait declaration. impl 없음 (R63 lesson: real caller wz-runtime-lwip 그립 으로 land), 단 trait shape 명세화 → wz-runtime-lwip lands 시점 입장점 명확.",
+        "R311ao→R311ap: wz-codecs no_std + alloc 마이그레이션 (R40 carry 소진) — wz-runtime-lwip caller lands 시점과 함께. wz-codecs/src/lib.rs line 22-25 명시된 시점. SCE-forge-runtime은 이미 #![no_std] baseline이므로 wz 측 lib.rs의 #![cfg_attr(…)] 추가 + cargo Cargo.toml의 alloc feature 웨이는 것으로 해결 예상.",
+        "R311ao+ (gcc-arm install 필요 시점): zenoh-pico-sys + wz-runtime-lwip MCU build path. R311ag/ai/aj carry 이원; 사용자 sudo apt install gcc-arm-none-eabi 필요 시점으로 이동.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
+        "Layer G G.2 한계 명시: wz facade --no-default-features는 R302a empty facade이므로 현시점에서 trivially PASS. real 진실성은 wz-runtime-lwip lands 이후 (preset-mcu-minimal feature set로 thumb build 시도 시 동작 경로 진실성 입증). G.2 게이트의 가치는 future regression 차단 — over-claim 금지."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
