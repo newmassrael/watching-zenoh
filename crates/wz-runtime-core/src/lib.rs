@@ -72,10 +72,13 @@
 //!   future feature-gate insertion cannot silently break the MCU
 //!   compile path.
 //!
-//! Targets (R311ao portability widening):
+//! Targets (R311ao + R311ap portability widening):
 //! - `thumbv7em-none-eabihf` (Cortex-M4F/M7, original R311ak)
 //! - `thumbv6m-none-eabi` (Cortex-M0+)
 //! - `thumbv7m-none-eabi` (Cortex-M3)
+//! - `thumbv8m.base-none-eabi` (Cortex-M23, ARMv8-M Baseline)
+//! - `thumbv8m.main-none-eabi` (Cortex-M33/M55 soft-float)
+//! - `thumbv8m.main-none-eabihf` (Cortex-M33/M55 hard-float)
 //! - `riscv32imac-unknown-none-elf` (RISC-V 32-bit IMAC)
 //!
 //! Each target SKIPs gracefully if the corresponding rustup target is
