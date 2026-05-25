@@ -17159,6 +17159,54 @@
         "Failure 시 fallback: 12회 재현 시도 후 fail 미발생 시 R311af entry에 'tentative closure; 향후 raise 시점 재진단' 명시 + 메모리 description 에 'tentative resolved (재현 불가; flake 패턴 미확증)' 추가 + MEMORY.md 인덱스 line 소감."
       ]
     },
+    "Round 311af": {
+      "decision_summary": "R311af cargo clean + Layer E 12회 sweep 0 FAIL — feedback_no_flaky_ever 10+ PASS criterion 충족, R311ad flake 부채 tentative closure; mechanical root cause 미확정.",
+      "changes_bullets": [
+        "Diagnostic round only — 코드/script 변경 0; atomic ledger entry + project_layer_e_flake_debt 메모리 description + closure section + MEMORY.md 인덱스 line 갱신.",
+        "`cargo clean` (crates/ workspace) wiped crates/target/ — 56.1 GiB, 256248 files; target/zenoh-pico-cli/ (cargo 관리 밖) 보존.",
+        "`cargo build -p wz-ap-demo` cold rebuild 14.2s (workspace deps re-compile + wz-ap-demo 47 MB debug binary).",
+        "`bash scripts/run-ci.sh --layer E` 12회 연속 실행 — trial 1 = 18s (incremental test-bin compile + 15 binary-dep tests), trial 2-12 각 4-6s.",
+        "가설 (a) cargo fmt rebuild + 즉시 e2e cold-start 누적, (b) Layer C* fd/socket 누적, (c) zenoh-pico z_sub CLI cold-start — 셋 다 12회 sweep 미재현; root cause 미확정 tentative closure."
+      ],
+      "verification_bullets": [
+        "12회 Layer E trial 결과: 12/12 PASS (rc=0); aggregate 180 tests passed / 0 failed / 0 ignored / 75 filtered_out per trial set.",
+        "첫 trial 18s (incremental compile + 15 tests), trial 2-12 평균 5s — warm-path 안정 baseline.",
+        "feedback_no_flaky_ever strict criterion '10+ 연속 통과 또는 mechanical root-cause 제거 증거 필요' 의 10+ 연속 통과 path 충족.",
+        "validate_workspace baseline R311ae 유지: T1=0 (ledger=1 R193 §66 known-stale), RT 13/13, sync; entries 347 → 348, sections 255 변동 0 (예상)."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311ad flake 부채 tentative closure — mechanical root cause 미확정; project_layer_e_flake_debt 메모리 historical record 보존, description 'tentative resolved (재현 불가; flake 패턴 미확증)' 갱신.",
+        "재발 시 재진단 절차: 첫 발생 직후 cargo clean → Layer E 단독 10회 → fail 재현 시 옵션 A (Layer E 직전 wz-ap-demo warm-up 1회) 적용; 옵션 B (timeout 10s→20s) 는 root cause 회피 fallback.",
+        "Architectural carry 진행 가능: R267 Session<R,T> reparam, Liveliness/Querier integration, Phase W lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R303++ atomic field population (39 outline-only sub-sections).",
+        "Sequential 종속 없음 — R311ad-R311af flake 시리즈는 architectural cascade 와 완전 독립, 다음 라운드는 carry priority 자유롭게 선택 가능."
+      ],
+      "publishable_decision_summary": "R311af cargo clean + Layer E 12회 sweep 0 FAIL — feedback_no_flaky_ever 10+ PASS criterion 충족, R311ad flake 부채 tentative closure; mechanical root cause 미확정.",
+      "publishable_changes_bullets": [
+        "Diagnostic round only — 코드/script 변경 0; atomic ledger entry + project_layer_e_flake_debt 메모리 description + closure section + MEMORY.md 인덱스 line 갱신.",
+        "`cargo clean` (crates/ workspace) wiped crates/target/ — 56.1 GiB, 256248 files; target/zenoh-pico-cli/ (cargo 관리 밖) 보존.",
+        "`cargo build -p wz-ap-demo` cold rebuild 14.2s (workspace deps re-compile + wz-ap-demo 47 MB debug binary).",
+        "`bash scripts/run-ci.sh --layer E` 12회 연속 실행 — trial 1 = 18s (incremental test-bin compile + 15 binary-dep tests), trial 2-12 각 4-6s.",
+        "가설 (a) cargo fmt rebuild + 즉시 e2e cold-start 누적, (b) Layer C* fd/socket 누적, (c) zenoh-pico z_sub CLI cold-start — 셋 다 12회 sweep 미재현; root cause 미확정 tentative closure."
+      ],
+      "publishable_verification_bullets": [
+        "12회 Layer E trial 결과: 12/12 PASS (rc=0); aggregate 180 tests passed / 0 failed / 0 ignored / 75 filtered_out per trial set.",
+        "첫 trial 18s (incremental compile + 15 tests), trial 2-12 평균 5s — warm-path 안정 baseline.",
+        "feedback_no_flaky_ever strict criterion '10+ 연속 통과 또는 mechanical root-cause 제거 증거 필요' 의 10+ 연속 통과 path 충족.",
+        "validate_workspace baseline R311ae 유지: T1=0 (ledger=1 R193 §66 known-stale), RT 13/13, sync; entries 347 → 348, sections 255 변동 0 (예상)."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ad flake 부채 tentative closure — mechanical root cause 미확정; project_layer_e_flake_debt 메모리 historical record 보존, description 'tentative resolved (재현 불가; flake 패턴 미확증)' 갱신.",
+        "재발 시 재진단 절차: 첫 발생 직후 cargo clean → Layer E 단독 10회 → fail 재현 시 옵션 A (Layer E 직전 wz-ap-demo warm-up 1회) 적용; 옵션 B (timeout 10s→20s) 는 root cause 회피 fallback.",
+        "Architectural carry 진행 가능: R267 Session<R,T> reparam, Liveliness/Querier integration, Phase W lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R303++ atomic field population (39 outline-only sub-sections).",
+        "Sequential 종속 없음 — R311ad-R311af flake 시리즈는 architectural cascade 와 완전 독립, 다음 라운드는 carry priority 자유롭게 선택 가능."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
