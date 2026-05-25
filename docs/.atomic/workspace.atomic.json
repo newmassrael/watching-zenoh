@@ -18397,6 +18397,72 @@
         "R311ax/R267/R284/R283/R301 §8/R299 #2-3/R300/R304/keyexpr_canon proptest/R310.5c — architectural carries unchanged"
       ]
     },
+    "Round 311av": {
+      "decision_summary": "R311av lands LwipRuntime + LwipTime: self-rolled cooperative task pool impl Runtime + own ClockSource trait + LwipTime impl TimeSource; Phase W ladder mantissa marker",
+      "changes_bullets": [
+        "crates/wz-runtime-lwip/Cargo.toml: alloc feature + wz-runtime-core optional dep + critical-section/std dev-dep",
+        "src/lib.rs: alloc-gated executor + join_handle + runtime_impl + time modules",
+        "src/executor.rs new: ExecutorState + run_until_idle + custom RawWakerVTable",
+        "src/join_handle.rs new: LwipJoinHandle Future poll via Arc<Mutex<RefCell<JoinState<T>>>>",
+        "src/runtime_impl.rs new: LwipRuntime Clone + impl Runtime + block_on + 8 unit tests",
+        "src/time.rs new: ClockSource trait + LwipTime + SleepFuture + TimeoutFuture",
+        "scripts/run-ci.sh: Layer G.4-alloc lane (6 targets PASS + thumbv6m SKIP per M0+ atomic CAS gap)"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-lwip --features alloc: 8/8 PASS (spawn / nested spawn / sleep / timeout)",
+        "cargo clippy --all-targets --features alloc -- -D warnings: clean",
+        "Layer G full 34 PASS + 1 SKIP: G.1-G.4 x 7 + G.4-alloc x 6 (thumbv6m SKIP)",
+        "Bug fix during impl: spawn slot-recycle race vs run_until_idle take/restore - now always-append",
+        "scripts/run-ci.sh 5 lanes PASS overall - workspace regression 0",
+        "compile-time assertions mirror wz-runtime-tokio: Send + Sync on Runtime + Mutex GAT + RwLock GAT"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "runtime-crate--sce_link_runtime_tokio",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "R311aw next: §5.P caveat append - R311av lands acknowledgment + thumbv6m alloc gap",
+        "R311ax post: wz facade runtime-lwip feature surface + mutual exclusion compile_error",
+        "R311ay: first MCU preset cortex-m4-default add_section feature-inventory 6-7",
+        "R311az+ carries: LwipJoinHandle abort + real timer queue + portable-atomic M0+ polyfill",
+        "R311az+ optional: embedded-time ecosystem adapter feature (Decision 7 finalize reject)",
+        "Architectural carries unchanged: R267 R283 R284 R299 R300 R301 §8 R304 R310"
+      ],
+      "publishable_decision_summary": "R311av lands LwipRuntime + LwipTime: self-rolled cooperative task pool impl Runtime + own ClockSource trait + LwipTime impl TimeSource; Phase W ladder mantissa marker",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-lwip/Cargo.toml: alloc feature + wz-runtime-core optional dep + critical-section/std dev-dep",
+        "src/lib.rs: alloc-gated executor + join_handle + runtime_impl + time modules",
+        "src/executor.rs new: ExecutorState + run_until_idle + custom RawWakerVTable",
+        "src/join_handle.rs new: LwipJoinHandle Future poll via Arc<Mutex<RefCell<JoinState<T>>>>",
+        "src/runtime_impl.rs new: LwipRuntime Clone + impl Runtime + block_on + 8 unit tests",
+        "src/time.rs new: ClockSource trait + LwipTime + SleepFuture + TimeoutFuture",
+        "scripts/run-ci.sh: Layer G.4-alloc lane (6 targets PASS + thumbv6m SKIP per M0+ atomic CAS gap)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-lwip --features alloc: 8/8 PASS (spawn / nested spawn / sleep / timeout)",
+        "cargo clippy --all-targets --features alloc -- -D warnings: clean",
+        "Layer G full 34 PASS + 1 SKIP: G.1-G.4 x 7 + G.4-alloc x 6 (thumbv6m SKIP)",
+        "Bug fix during impl: spawn slot-recycle race vs run_until_idle take/restore - now always-append",
+        "scripts/run-ci.sh 5 lanes PASS overall - workspace regression 0",
+        "compile-time assertions mirror wz-runtime-tokio: Send + Sync on Runtime + Mutex GAT + RwLock GAT"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "runtime-crate--sce_link_runtime_tokio",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311aw next: §5.P caveat append - R311av lands acknowledgment + thumbv6m alloc gap",
+        "R311ax post: wz facade runtime-lwip feature surface + mutual exclusion compile_error",
+        "R311ay: first MCU preset cortex-m4-default add_section feature-inventory 6-7",
+        "R311az+ carries: LwipJoinHandle abort + real timer queue + portable-atomic M0+ polyfill",
+        "R311az+ optional: embedded-time ecosystem adapter feature (Decision 7 finalize reject)",
+        "Architectural carries unchanged: R267 R283 R284 R299 R300 R301 §8 R304 R310"
+      ]
+    },
     "Round 311av-pre": {
       "decision_summary": "R311av-pre lock self-rolled cooperative task pool 8 design decisions for LwipRuntime impl prereq; D7 own ClockSource only (embedded-time reject); audit-only no code",
       "changes_bullets": [
