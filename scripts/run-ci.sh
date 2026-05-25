@@ -58,6 +58,10 @@
 #                  G.1 (R311ak) wz-runtime-core — §5.P trait skeleton
 #                  G.2 (R311am) wz facade no_std cfg_attr toggle
 #                  G.3 (R311aq) wz-codecs no_std + alloc — codec wire
+#                  G.4 (R311au) wz-runtime-lwip — sync alias #![no_std]
+#                  G.4-alloc (R311av) wz-runtime-lwip --features alloc
+#                                 (LwipRuntime + impl Runtime + LwipTime)
+#                                 SKIPs thumbv6m: M0+ lacks atomic CAS
 #                Targets (R311ao + R311ap portability widening):
 #                  thumbv7em-none-eabihf  (Cortex-M4F/M7, original R311ak)
 #                  thumbv6m-none-eabi     (Cortex-M0+)
@@ -595,16 +599,32 @@ layer_g_cross_compile_cortex_m() {
         fi
         # G.4 (R311au scope C) wz-runtime-lwip — Phase W MCU profile
         # sync primitive aliases (critical_section::Mutex<RefCell<T>>
-        # binding). LwipRuntime + impl Runtime + lwIP-sys FFI bridge
-        # remain deferred per the R311au architectural fork (embassy
-        # static-task model vs the trait's generic spawn<F: Future>).
-        # The lane proves the sync surface compiles #![no_std] across
-        # every Phase W rustup target before any consumer arrives.
+        # binding). #![no_std] sync surface, no alloc; covers every
+        # Phase W rustup target including Cortex-M0+ (thumbv6m).
         if (cd crates && cargo build -p wz-runtime-lwip \
             --target "$t" --quiet); then
             echo "  G.4 wz-runtime-lwip $t OK"
         else
             echo "  G.4 wz-runtime-lwip $t FAIL" >&2
+            fail=1
+        fi
+        # G.4-alloc (R311av) wz-runtime-lwip --features alloc —
+        # LwipRuntime self-rolled cooperative task pool + impl
+        # Runtime + LwipTime impl TimeSource. Pulls in wz-runtime-
+        # core with its alloc feature so the Runtime / TimeSource
+        # trait impls cross-compile end-to-end. SKIP on
+        # thumbv6m-none-eabi: Cortex-M0+ (ARMv6-M) lacks atomic
+        # pointer CAS, so alloc::sync::Arc is unavailable; M0+
+        # deploys stay on the sync-only G.4 lane. R311az+ carries
+        # the portable-atomic polyfill decision that would unlock
+        # alloc-on M0+ if a deploy reports the need.
+        if [[ "$t" == "thumbv6m-none-eabi" ]]; then
+            echo "  G.4-alloc wz-runtime-lwip $t SKIP (M0+ lacks atomic CAS; sync-only on this target)"
+        elif (cd crates && cargo build -p wz-runtime-lwip \
+            --target "$t" --features alloc --quiet); then
+            echo "  G.4-alloc wz-runtime-lwip $t OK"
+        else
+            echo "  G.4-alloc wz-runtime-lwip $t FAIL" >&2
             fail=1
         fi
     done
