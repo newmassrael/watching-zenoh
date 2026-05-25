@@ -17521,6 +17521,50 @@
         "gcc-arm install carry (R311ao+, R311aj carry에서 이동): wz-runtime-lwip crate 완성 + lwIP C source 통합 시점 sudo apt install gcc-arm-none-eabi 필요 — 그 이전 라운드들 (R311ak-an) 은 모두 user permission 불필요."
       ]
     },
+    "Round 311al": {
+      "decision_summary": "R311al wz-runtime-core transitive dep no_std audit — `cargo tree --target thumbv7em-none-eabihf --no-default-features` (and `--features alloc`) 양쪽 모두 deps=0 확인; trait-only crate라 std 종속 transitive 없음. R311ak Layer G PASS의 이유가 mechanical 입증됨.",
+      "changes_bullets": [
+        "Audit-only round — 코드 변경 0; cargo tree inspection 결과 atomic ledger 기록.",
+        "`cargo tree -p wz-runtime-core --target thumbv7em-none-eabihf --no-default-features` 결과: deps=0 (자기 자신만 출력). `--features alloc` 추가해도 deps=0 (alloc feature는 trait body에서 core::alloc / extern crate alloc 사용 의도, dep crate 추가 아님).",
+        "R311ak Layer G PASS 근거 진실성 입증: dep tree에 transitive std-종속 crate 제로이므로 cross-compile fail risk source는 wz-runtime-core src 코드 한 조각도 없음. 향후 dep 추가 제안 시 본 audit baseline을 잨대고 evaluate.",
+        "R311am candidate 확장: wz-codecs / zenoh-pico-sys / wz facade 에 대해도 동일 패턴의 cross-compile audit 시도 — 이게 composable framework MCU half catalog 의 다음 진실성 근거."
+      ],
+      "verification_bullets": [
+        "`cargo tree -p wz-runtime-core --target thumbv7em-none-eabihf --no-default-features` 실행: 유일 출력 줄 = `wz-runtime-core v0.1.0 (...)`. dep node 추가 0.",
+        "`cargo tree -p wz-runtime-core --target thumbv7em-none-eabihf --no-default-features --features alloc` 실행: 동일 결과 (deps=0). alloc feature flag는 cargo metadata-internal toggle, 외부 crate 검색 유발 안 함.",
+        "validate_workspace baseline R311ak 유지 (코드 변경 0이므로 entries +1, sections 0, T1=0, RT 13/13 그대로 예상)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311am (바로 진행): MCU cross-compile catalog 확장 audit — wz-codecs / zenoh-pico-sys / wz facade. wz-codecs는 src/lib.rs line 22-25에서 R40 carry 명시 (\"MCU `no_std + alloc` variant lands when the lwip runtime crate arrives\") — 현 라운드 결과는 이 carry 일치 확인 용도. zenoh-pico-sys는 FFI crate, lwIP target에서 허용 가능성 존재.",
+        "R311an: §5.P trait skeleton 강화 (LinkBackend trait 추가 후보) — R311ac TimeSource::timeout 추가 패턴 mirror. wz-runtime-core에 lwIP API abstract surface declaration (no impl, trait 선언만) 으로 wz-runtime-lwip arrival 대비 stable trait contract 구축. R63 lesson 준수 (impl 없음, real caller wz-runtime-tokio가 trait 부재로 완전 fall-through).",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false."
+      ],
+      "publishable_decision_summary": "R311al wz-runtime-core transitive dep no_std audit — `cargo tree --target thumbv7em-none-eabihf --no-default-features` (and `--features alloc`) 양쪽 모두 deps=0 확인; trait-only crate라 std 종속 transitive 없음. R311ak Layer G PASS의 이유가 mechanical 입증됨.",
+      "publishable_changes_bullets": [
+        "Audit-only round — 코드 변경 0; cargo tree inspection 결과 atomic ledger 기록.",
+        "`cargo tree -p wz-runtime-core --target thumbv7em-none-eabihf --no-default-features` 결과: deps=0 (자기 자신만 출력). `--features alloc` 추가해도 deps=0 (alloc feature는 trait body에서 core::alloc / extern crate alloc 사용 의도, dep crate 추가 아님).",
+        "R311ak Layer G PASS 근거 진실성 입증: dep tree에 transitive std-종속 crate 제로이므로 cross-compile fail risk source는 wz-runtime-core src 코드 한 조각도 없음. 향후 dep 추가 제안 시 본 audit baseline을 잨대고 evaluate.",
+        "R311am candidate 확장: wz-codecs / zenoh-pico-sys / wz facade 에 대해도 동일 패턴의 cross-compile audit 시도 — 이게 composable framework MCU half catalog 의 다음 진실성 근거."
+      ],
+      "publishable_verification_bullets": [
+        "`cargo tree -p wz-runtime-core --target thumbv7em-none-eabihf --no-default-features` 실행: 유일 출력 줄 = `wz-runtime-core v0.1.0 (...)`. dep node 추가 0.",
+        "`cargo tree -p wz-runtime-core --target thumbv7em-none-eabihf --no-default-features --features alloc` 실행: 동일 결과 (deps=0). alloc feature flag는 cargo metadata-internal toggle, 외부 crate 검색 유발 안 함.",
+        "validate_workspace baseline R311ak 유지 (코드 변경 0이므로 entries +1, sections 0, T1=0, RT 13/13 그대로 예상)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311am (바로 진행): MCU cross-compile catalog 확장 audit — wz-codecs / zenoh-pico-sys / wz facade. wz-codecs는 src/lib.rs line 22-25에서 R40 carry 명시 (\"MCU `no_std + alloc` variant lands when the lwip runtime crate arrives\") — 현 라운드 결과는 이 carry 일치 확인 용도. zenoh-pico-sys는 FFI crate, lwIP target에서 허용 가능성 존재.",
+        "R311an: §5.P trait skeleton 강화 (LinkBackend trait 추가 후보) — R311ac TimeSource::timeout 추가 패턴 mirror. wz-runtime-core에 lwIP API abstract surface declaration (no impl, trait 선언만) 으로 wz-runtime-lwip arrival 대비 stable trait contract 구축. R63 lesson 준수 (impl 없음, real caller wz-runtime-tokio가 trait 부재로 완전 fall-through).",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false."
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
