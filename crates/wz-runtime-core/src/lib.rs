@@ -47,6 +47,35 @@
 //!   (R230 §5.P inventory baseline) need to migrate to trait-mediated
 //!   calls; this is the multi-round R252+ work, with `Session` last
 //!   per "leaf crates first, Session struct last" §5.P guidance.
+//! - **LinkBackend trait**: link kind (lwIP UDP send/recv/bind) is SCE
+//!   B6 emitter territory, not §5.P. SCE generates the
+//!   `sce_link_runtime_lwip` C11 header + glue; wz-runtime-core does
+//!   not own the link-side trait surface. Crossing the §5.P/§5.B
+//!   boundary into this crate would re-litigate the R63 lesson
+//!   (concrete impls land alongside real callers, not as premature
+//!   trait declarations).
+//!
+//! ## Mechanical MCU cross-compile gate (R311ak / R311am)
+//!
+//! `scripts/run-ci.sh` Layer G is the opt-in (`--layer G` or
+//! `WZ_RUN_LAYER_G=1`) lane that proves the no_std/MCU half stays
+//! buildable as wz upper layers grow:
+//!
+//! - **G.1 (R311ak)** — this crate (`wz-runtime-core`) for
+//!   `thumbv7em-none-eabihf` with `--no-default-features`. Deps=0 per
+//!   the R311al `cargo tree` audit; the gate catches any future dep
+//!   addition that drags std transitively into the trait skeleton.
+//! - **G.2 (R311am)** — `wz` facade for the same target with
+//!   `--no-default-features`; exercises the
+//!   `#![cfg_attr(not(any(test, feature = "runtime-tokio")), no_std)]`
+//!   toggle in `wz/src/lib.rs` so a future feature-gate insertion
+//!   cannot silently break the MCU compile path.
+//!
+//! Out of scope today: `wz-codecs` MCU build (R40 carry — `no_std +
+//! alloc` variant lands with `wz-runtime-lwip` per `wz-codecs/src/
+//! lib.rs` line 22-25) and `zenoh-pico-sys` MCU build (`arm-none-eabi-
+//! gcc` install carry, R311ao+). Layer G promotes to a default lane
+//! at the point those carries close.
 
 #![no_std]
 #![deny(missing_docs)]

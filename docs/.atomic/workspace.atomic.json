@@ -2154,7 +2154,9 @@
         "R311w Mutex/RwLock lock: per-runtime type alias (a); GAT (b) + AP/MCU fork (c) rejected.",
         "R311w Session reparam shape: Session<R: Runtime, T: TimeSource>; Mutex<T> alias avoids extra param.",
         "R311x inventory delta: wz-runtime-tokio production leaf=0 (R230 baseline 71→0 via R252-R267).",
-        "R311x ap-demo 27→16, it 11→0, ts 2→0; only Session<observer> + ap-demo binary remain on §5.P."
+        "R311x ap-demo 27→16, it 11→0, ts 2→0; only Session<observer> + ap-demo binary remain on §5.P.",
+        "R311ak/al/am Layer G mech-gate: G.1 wz-runtime-core + G.2 wz facade no_std cfg_attr opt-in lane.",
+        "LinkBackend trait stays Phase W carry — link kind is SCE B6 emitter territory, not §5.P scope."
       ],
       "alternatives_rejected": [
         {
@@ -17617,6 +17619,54 @@
         "R311ao+ (gcc-arm install 필요 시점): zenoh-pico-sys + wz-runtime-lwip MCU build path. R311ag/ai/aj carry 이원; 사용자 sudo apt install gcc-arm-none-eabi 필요 시점으로 이동.",
         "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false.",
         "Layer G G.2 한계 명시: wz facade --no-default-features는 R302a empty facade이므로 현시점에서 trivially PASS. real 진실성은 wz-runtime-lwip lands 이후 (preset-mcu-minimal feature set로 thumb build 시도 시 동작 경로 진실성 입증). G.2 게이트의 가치는 future regression 차단 — over-claim 금지."
+      ]
+    },
+    "Round 311an": {
+      "decision_summary": "R311an §5.P spec 강화 — 2 caveats append (Layer G mech-gate + LinkBackend boundary) + wz-runtime-core/src/lib.rs comment block에 \"Mechanical MCU cross-compile gate\" section 추가; LinkBackend trait는 §5.P 외부 territory로 명시화.",
+      "changes_bullets": [
+        "mnemosyne add_section_caveat ×2 on §5.P: (1) \"R311ak/al/am Layer G mech-gate: G.1 wz-runtime-core + G.2 wz facade no_std cfg_attr opt-in lane.\" (2) \"LinkBackend trait stays Phase W carry — link kind is SCE B6 emitter territory, not §5.P scope.\"",
+        "crates/wz-runtime-core/src/lib.rs: \"What is NOT here (Phase W carry)\" 섬션에 LinkBackend trait 부재 이유 설명 1개 bullet 추가 (link kind = SCE B6 emitter territory, R63 lesson 재검증 위험 명시).",
+        "crates/wz-runtime-core/src/lib.rs: \"## Mechanical MCU cross-compile gate (R311ak / R311am)\" doc section 신설 — Layer G 구조 G.1/G.2 명세, deps=0 audit (R311al) 근거, wz-codecs (R40 carry, src/lib.rs line 22-25) + zenoh-pico-sys (gcc-arm install carry, R311ao+) out-of-scope rationale, Layer G default lane 승격 조건 (wz-runtime-lwip caller lands) 명시.",
+        "이러한 spec position 명시화는 future LinkBackend trait 추가 제안이 잘못된 crate (wz-runtime-core) 에 차도되는 것을 방지; R63 \"concrete impls land alongside real callers\" 재검증 위험 차단.",
+        "했 R63 lesson 준수: 이 라운드도 실제 trait 추가 / impl 추가 없음; spec position과 doc 강화만 — wz-runtime-lwip caller arrival 이전까지 trait surface 확장 금지."
+      ],
+      "verification_bullets": [
+        "`bash scripts/run-ci.sh --layer G` PASS — G.1 wz-runtime-core OK + G.2 wz facade OK 유지 (doc-only edit 만, fn body 변경 없음).",
+        "`bash scripts/run-ci.sh --layer 0` PASS — fmt --check OK (doc comment block 정상 포맷, missing_docs deny 위반 0).",
+        "validate_workspace baseline (R311am 대비): entries 356→357, sections 255 유지 (caveats append만, 섬션 수 변화 없음), T1=0, RT 13/13 예상."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape"
+      ],
+      "carry_forward_bullets": [
+        "R311ao (다음 후보): Layer G 결과를 다른 cross-compile target 로 확장 audit — thumbv6m-none-eabi (Cortex-M0+) / thumbv7m-none-eabi (Cortex-M3) / riscv32imac-unknown-none-elf 시도. 겁 wz-runtime-core + wz facade 가 cortex-m4f 외의 ARM MCU 및 RISC-V 및 no_std target에서도 빌드 가능한지 — composable framework MCU half 의 진정한 portability 입증.",
+        "R311ap+: wz-runtime-core trait surface 자체의 missing primitives audit — R311ac의 TimeSource::timeout 추가 패턴 mirror, 필요 primitives 식별 (예: TimeSource::deadline / Runtime::yield_now / Allocator::try_alloc). real caller (wz-runtime-tokio Mutex/RwLock R311w 결정) 이 완성되면 trait surface 강화.",
+        "R311aq+: wz-codecs no_std + alloc 마이그레이션 (R40 carry 소진) — wz-codecs/src/lib.rs에 #![cfg_attr(…)] 추가 + Cargo.toml 시도. generated code가 이미 sce-forge-runtime no_std baseline 사용이므로 wz 측 wrapper 가 주 변경. wz-runtime-lwip caller 완성 시점과 같이 land.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false."
+      ],
+      "publishable_decision_summary": "R311an §5.P spec 강화 — 2 caveats append (Layer G mech-gate + LinkBackend boundary) + wz-runtime-core/src/lib.rs comment block에 \"Mechanical MCU cross-compile gate\" section 추가; LinkBackend trait는 §5.P 외부 territory로 명시화.",
+      "publishable_changes_bullets": [
+        "mnemosyne add_section_caveat ×2 on §5.P: (1) \"R311ak/al/am Layer G mech-gate: G.1 wz-runtime-core + G.2 wz facade no_std cfg_attr opt-in lane.\" (2) \"LinkBackend trait stays Phase W carry — link kind is SCE B6 emitter territory, not §5.P scope.\"",
+        "crates/wz-runtime-core/src/lib.rs: \"What is NOT here (Phase W carry)\" 섬션에 LinkBackend trait 부재 이유 설명 1개 bullet 추가 (link kind = SCE B6 emitter territory, R63 lesson 재검증 위험 명시).",
+        "crates/wz-runtime-core/src/lib.rs: \"## Mechanical MCU cross-compile gate (R311ak / R311am)\" doc section 신설 — Layer G 구조 G.1/G.2 명세, deps=0 audit (R311al) 근거, wz-codecs (R40 carry, src/lib.rs line 22-25) + zenoh-pico-sys (gcc-arm install carry, R311ao+) out-of-scope rationale, Layer G default lane 승격 조건 (wz-runtime-lwip caller lands) 명시.",
+        "이러한 spec position 명시화는 future LinkBackend trait 추가 제안이 잘못된 crate (wz-runtime-core) 에 차도되는 것을 방지; R63 \"concrete impls land alongside real callers\" 재검증 위험 차단.",
+        "했 R63 lesson 준수: 이 라운드도 실제 trait 추가 / impl 추가 없음; spec position과 doc 강화만 — wz-runtime-lwip caller arrival 이전까지 trait surface 확장 금지."
+      ],
+      "publishable_verification_bullets": [
+        "`bash scripts/run-ci.sh --layer G` PASS — G.1 wz-runtime-core OK + G.2 wz facade OK 유지 (doc-only edit 만, fn body 변경 없음).",
+        "`bash scripts/run-ci.sh --layer 0` PASS — fmt --check OK (doc comment block 정상 포맷, missing_docs deny 위반 0).",
+        "validate_workspace baseline (R311am 대비): entries 356→357, sections 255 유지 (caveats append만, 섬션 수 변화 없음), T1=0, RT 13/13 예상."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ao (다음 후보): Layer G 결과를 다른 cross-compile target 로 확장 audit — thumbv6m-none-eabi (Cortex-M0+) / thumbv7m-none-eabi (Cortex-M3) / riscv32imac-unknown-none-elf 시도. 겁 wz-runtime-core + wz facade 가 cortex-m4f 외의 ARM MCU 및 RISC-V 및 no_std target에서도 빌드 가능한지 — composable framework MCU half 의 진정한 portability 입증.",
+        "R311ap+: wz-runtime-core trait surface 자체의 missing primitives audit — R311ac의 TimeSource::timeout 추가 패턴 mirror, 필요 primitives 식별 (예: TimeSource::deadline / Runtime::yield_now / Allocator::try_alloc). real caller (wz-runtime-tokio Mutex/RwLock R311w 결정) 이 완성되면 trait surface 강화.",
+        "R311aq+: wz-codecs no_std + alloc 마이그레이션 (R40 carry 소진) — wz-codecs/src/lib.rs에 #![cfg_attr(…)] 추가 + Cargo.toml 시도. generated code가 이미 sce-forge-runtime no_std baseline 사용이므로 wz 측 wrapper 가 주 변경. wz-runtime-lwip caller 완성 시점과 같이 land.",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7 cargo wz-config tool, R304, keyexpr_canon proptest filter, R310.5c get_matching_status conservative-false."
       ]
     },
     "Round 311b": {
