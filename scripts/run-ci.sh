@@ -51,31 +51,26 @@
 #              (~5-10 min cold; multiple wz-ap-demo release builds)
 #              so it stays off the default dispatch path; run it
 #              explicitly when authoring a codec cascade.
-#   Layer G  — thumbv7em-none-eabihf cross-compile catalog (Phase W).
-#              Opt-in via `--layer G` or `WZ_RUN_LAYER_G=1`. Catalog
-#              members:
-#                G.1 (R311ak) wz-runtime-core — §5.P runtime-services
-#                     -tier entry crate must build for an MCU target
-#                     so the no_std/MCU half stays mechanically truth
-#                     -ful as concrete impls (wz-runtime-lwip + extern
-#                     symbols) land in R311an+.
-#                G.2 (R311am) wz facade --no-default-features — exer
-#                     -cises the `#![cfg_attr(not(any(test, feature =
-#                     "runtime-tokio")), no_std)]` toggle in wz/src
-#                     /lib.rs; proves the composable-framework facade
-#                     itself compiles for MCU when the user has not
-#                     yet selected runtime-tokio. Trivially empty
-#                     today (R302a — all features are no-op labels)
-#                     but the gate ensures future feature gating in
-#                     wz/src/lib.rs can never silently break the no
-#                     _std path.
-#              SKIPs gracefully if the rustup target is not installed.
-#              Stays opt-in until the wz-runtime-lwip caller lands
-#              (R311an+); promoted to default once the cross-compile
-#              path has a real consumer. Out of scope today: wz-codecs
-#              (R40 carry — no_std + alloc variant lands with wz-runt
-#              ime-lwip per src/lib.rs line 22-25), zenoh-pico-sys
-#              (gcc-arm install carry, R311ao+).
+#   Layer G  — MCU cross-compile catalog (Phase W). Opt-in via
+#              `--layer G` or `WZ_RUN_LAYER_G=1`. Catalog matrix =
+#              (crate × target):
+#                Crates:
+#                  G.1 (R311ak) wz-runtime-core — §5.P trait skeleton
+#                  G.2 (R311am) wz facade no_std cfg_attr toggle
+#                Targets (R311ao portability widening):
+#                  thumbv7em-none-eabihf (Cortex-M4F/M7, original R311ak)
+#                  thumbv6m-none-eabi    (Cortex-M0+)
+#                  thumbv7m-none-eabi    (Cortex-M3)
+#                  riscv32imac-unknown-none-elf (RISC-V 32-bit IMAC)
+#              Per-target SKIP if the rustup target is not installed
+#              (no auto-install — keeps a developer machine without
+#              cross-compile interest free of the lane). Stays opt-in
+#              until the wz-runtime-lwip caller lands (R311an+);
+#              promotes to default lane at that point.
+#              Out of scope today: wz-codecs (R40 carry — no_std +
+#              alloc variant lands with wz-runtime-lwip per
+#              wz-codecs/src/lib.rs line 22-25), zenoh-pico-sys
+#              (arm-none-eabi-gcc install carry, R311ao+).
 #
 # Exit codes:
 #   0  every required layer passed
@@ -546,22 +541,45 @@ layer_g_cross_compile_cortex_m() {
         echo "Layer G SKIP (opt-in: --layer G or WZ_RUN_LAYER_G=1)"
         return 0
     fi
-    if ! rustup target list --installed 2>/dev/null \
-        | grep -q thumbv7em-none-eabihf; then
-        echo "Layer G SKIP (rustup target thumbv7em-none-eabihf not installed; install: rustup target add thumbv7em-none-eabihf)"
+    local targets=(
+        thumbv7em-none-eabihf
+        thumbv6m-none-eabi
+        thumbv7m-none-eabi
+        riscv32imac-unknown-none-elf
+    )
+    local installed
+    installed="$(rustup target list --installed 2>/dev/null)"
+    local any_ran=0
+    local fail=0
+    for t in "${targets[@]}"; do
+        if ! grep -q "^$t$" <<< "$installed"; then
+            echo "  $t SKIP (rustup target not installed; add: rustup target add $t)"
+            continue
+        fi
+        any_ran=1
+        # G.1 (R311ak) wz-runtime-core — §5.P trait skeleton.
+        if (cd crates && cargo build -p wz-runtime-core \
+            --target "$t" --no-default-features --quiet); then
+            echo "  G.1 wz-runtime-core $t OK"
+        else
+            echo "  G.1 wz-runtime-core $t FAIL" >&2
+            fail=1
+        fi
+        # G.2 (R311am) wz facade — no_std cfg_attr toggle when
+        # runtime-tokio is not active in the feature set.
+        if (cd crates && cargo build -p wz \
+            --target "$t" --no-default-features --quiet); then
+            echo "  G.2 wz facade $t OK"
+        else
+            echo "  G.2 wz facade $t FAIL" >&2
+            fail=1
+        fi
+    done
+    if [[ $any_ran -eq 0 ]]; then
+        echo "Layer G SKIP (no Phase W rustup targets installed)"
         return 0
     fi
-    # G.1 (R311ak) wz-runtime-core — §5.P trait skeleton.
-    (cd crates && cargo build -p wz-runtime-core \
-        --target thumbv7em-none-eabihf --no-default-features --quiet) \
-        || return 1
-    echo "  G.1 wz-runtime-core OK"
-    # G.2 (R311am) wz facade — exercises the no_std cfg_attr toggle
-    # when runtime-tokio is not in the active feature set.
-    (cd crates && cargo build -p wz \
-        --target thumbv7em-none-eabihf --no-default-features --quiet) \
-        || return 1
-    echo "  G.2 wz facade OK"
+    return $fail
 }
 
 # ─── dispatch ──────────────────────────────────────────────────────
