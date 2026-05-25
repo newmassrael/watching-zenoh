@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- watching-zenoh RFC §5.C link kind — UDP unicast session link for
+     the MCU bare_metal deploy class. Authored as the session-layer
+     sibling of lwip_udp_scout.scxml (scouting link), completing the
+     two-link MCU profile required by session-fsm §6 (six inbound +
+     three outbound link interactions are realized over this byte
+     channel via session_glue once wz-runtime-lwip lands in Phase W).
+
+     Authoring note. Follows SCE B6-α happy-path schema
+     (vendor/sce/sce-build/src/lib.rs::link_rust_happy_path_emits_wrapper_struct):
+     link-class + framer ref + backpressure + 1 inbound + 1 outbound.
+     The SCXML defines the byte-channel shape only; multi-event
+     interaction (link.open / link.send / link.close, six inbound
+     events) lives in the Rust session_glue layer above the codegen
+     wrapper, exactly as session-fsm sec 6 prescribes ("FSM never
+     touches raw bytes — wz-codecs::* emit per-message body").
+
+     Listener/Initiator role. NOT declared in SCXML. Resolved by SCE
+     C10-α (vendor/sce/sce-build/src/lib.rs line 1567+) as the
+     orchestrator join of deploy/mcu_target.yaml::udp_session
+     domain_attrs.trust_class (session_arming) × session_fsm
+     SCXML Accepting.* substate-present. When the join succeeds the
+     codegen synthesizes the listener + established_session sibling
+     pair; this SCXML supplies the shared link-kind shape both halves
+     inherit.
+
+     deploy.yaml binding. `deploy/mcu_target.yaml::machines.mcu_node.links.udp_session`
+     declares this link with `driver: lwip_udp`, bind 0.0.0.0:7447,
+     mtu_bytes 1472, expected_p99_bytes 1024, trust_class
+     session_arming. The driver value (`lwip_udp`) routes the
+     generated wrapper to the `sce_link_runtime_lwip` impl table
+     (re-introduced in Phase W per R63 / R311ag carry).
+
+     Differences from lwip_udp_scout. (1) backpressure=block —
+     session links are reliability-bearing per session-fsm §6
+     ("Reliability::Reliable in R57 baseline"); drop would lose
+     in-flight session traffic and trigger Closing(INVALID) on the
+     peer. (2) Inbound/outbound event names are link.session.* not
+     link.scout.* so session_glue routes them to the session FSM not
+     the scouting FSM. (3) framer ref is `frame` (the zenoh frame
+     codec) not `scout`; the frame codec wraps init/open/keep_alive/
+     close/data bodies emitted by wz-codecs::* per session-fsm sec 6
+     "Outbound 3" enumeration. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="link" name="lwip_udp_session" version="1.0">
+
+  <sce:link-class>udp</sce:link-class>
+
+  <!-- Framer codec — RFC §5.B `frame` codec is the transport
+       message framer that wraps every session-layer body (init,
+       open, keep_alive, close, payload frame). session_glue (above
+       the codegen wrapper) calls into wz-codecs::init_body /
+       open_body / close / etc. to produce the per-message body,
+       then this link's framer encodes the transport header around
+       it on the way out (RFC §5.C "TX path: event extract →
+       framer.encode → pool slot → driver.send"). -->
+  <sce:framer ref="frame"/>
+
+  <!-- Drop policy on outbound saturation. Session links are
+       reliability-bearing — session-fsm sec 6 baseline is
+       Reliability::Reliable, and the close-handshake assumes
+       in-flight Close fragments are not silently discarded. `block`
+       is the only policy compatible with that invariant: `drop`
+       would lose pieces of a multi-fragment Close and leave the
+       peer wedged, `signal-event` would burden the session FSM
+       with per-saturation work that has no recovery action other
+       than block-and-retry. -->
+  <sce:backpressure>block</sce:backpressure>
+
+  <sce:events>
+    <!-- Inbound — session FSM (via session_glue::handle_inbound)
+         receives a transport message frame. The decoded body is
+         dispatched by transport-message MID per wire-spec §4.1
+         (Init / Open / KeepAlive / Close / Frame / Fragment / Join /
+         OAM) — that classification lives in session_glue's
+         parse_inbound match arm, not in the link layer's `when`
+         clause. -->
+    <sce:inbound event="link.session.rx"/>
+
+    <!-- Outbound — session FSM emits a transport message via
+         session_glue::send_*. encode ref names the frame codec
+         that produces the wire bytes; codegen threads the framer
+         around the inner-body codec output (init_body / open_body /
+         close / etc.) on the link side per RFC §5.C TX path. -->
+    <sce:outbound event="link.session.tx" encode="frame"/>
+  </sce:events>
+
+</scxml>
