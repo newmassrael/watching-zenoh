@@ -18189,6 +18189,70 @@
         "R267 Session<R,T> reparam — R311at trait-mediated reference 진입로 확보, Session struct generic은 후속"
       ]
     },
+    "Round 311au": {
+      "decision_summary": "R311au scope (C) — wz-runtime-lwip 크레이트 재도입; sync::Mutex/RwLock = critical_section::Mutex<RefCell<T>> per-runtime alias만; Runtime impl 보류. Layer G.4 lane 28/28 PASS. R63 honest scope.",
+      "changes_bullets": [
+        "crates/wz-runtime-lwip/ 신설: Cargo.toml + src/lib.rs (#![no_std]) + src/sync.rs",
+        "sync::Mutex<T> = critical_section::Mutex<RefCell<T>> (R311w option (a) per-runtime alias)",
+        "sync::RwLock<T> = 동일 binding (single-core IRQ-disable 환경 에서 reader/writer 구분 unobservable)",
+        "deps: critical-section = \"1\" (impl은 deploy 측 link-time 제공, lib build 재단 없음)",
+        "crates/Cargo.toml workspace members += wz-runtime-lwip + R53/R58/R63 커뮨트 갱신",
+        "scripts/run-ci.sh Layer G.4 lane 신설 — 7 MCU targets x 4 crates = 28 PASS",
+        "Runtime impl + LwipRuntime + lwIP-sys FFI bridge 점 보류 (사용자 fork 선택)"
+      ],
+      "verification_bullets": [
+        "Layer G full 28/28 PASS: thumbv6m / thumbv7m / thumbv7em-hf / thumbv8m.base / thumbv8m.main / thumbv8m.main-hf / riscv32imac x 4 lanes",
+        "scripts/run-ci.sh 5 lanes PASS (Layer 0/A/A2/B/C0/C1/C1b/C2/D/E) — workspace regression 0",
+        "cargo clippy --workspace --all-targets -- -D warnings clean (doc_lazy_continuation fix: bullet 구조 paragraph 구조로 재구성)",
+        "validate_workspace baseline 유지: T1=0, RT 13/13, sync, T3 warn=862, T4 info=429 (delta 0)",
+        "R311au-prep-hook Check 2 fmt 게이트 통과: 본 feat(runtime) commit에 staged crates/**.rs 4개 대상 cargo fmt --all -- --check OK",
+        "이전 R63의 NOP-stub 아니라 실제 critical_section::Mutex 바인딩 — 코드는 link-ready, lib build 성공"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "LwipRuntime + impl Runtime + own JoinHandle: 별도 round (architectural fork 미결정 — embassy_executor vs 자체 cooperative task pool vs C-side lwIP 통합)",
+        "lwIP-sys FFI bridge: tcp_pcb/udp_pcb wrapper + tcpip_callback 브리지 — 후속 round",
+        "wz facade runtime-lwip feature 등록: LwipRuntime impl lands 시 함께 (R63 \"concrete-impls-land-alongside-real-callers\")",
+        "Phase W ladder 5단계 부분 마감 (sync 절반); 완전 마감은 LwipRuntime + FFI lands 시점",
+        "Push 보류: R311au feat + docs 2 commits + R311au-prep-hook 2 commits = 총 4 commits",
+        "Section body refresh 후보: §watching-zenoh/local-ci-gates에 Check 2 fmt gate + Layer G.4 lane 명시 — 다음 round"
+      ],
+      "publishable_decision_summary": "R311au scope (C) — wz-runtime-lwip 크레이트 재도입; sync::Mutex/RwLock = critical_section::Mutex<RefCell<T>> per-runtime alias만; Runtime impl 보류. Layer G.4 lane 28/28 PASS. R63 honest scope.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-lwip/ 신설: Cargo.toml + src/lib.rs (#![no_std]) + src/sync.rs",
+        "sync::Mutex<T> = critical_section::Mutex<RefCell<T>> (R311w option (a) per-runtime alias)",
+        "sync::RwLock<T> = 동일 binding (single-core IRQ-disable 환경 에서 reader/writer 구분 unobservable)",
+        "deps: critical-section = \"1\" (impl은 deploy 측 link-time 제공, lib build 재단 없음)",
+        "crates/Cargo.toml workspace members += wz-runtime-lwip + R53/R58/R63 커뮨트 갱신",
+        "scripts/run-ci.sh Layer G.4 lane 신설 — 7 MCU targets x 4 crates = 28 PASS",
+        "Runtime impl + LwipRuntime + lwIP-sys FFI bridge 점 보류 (사용자 fork 선택)"
+      ],
+      "publishable_verification_bullets": [
+        "Layer G full 28/28 PASS: thumbv6m / thumbv7m / thumbv7em-hf / thumbv8m.base / thumbv8m.main / thumbv8m.main-hf / riscv32imac x 4 lanes",
+        "scripts/run-ci.sh 5 lanes PASS (Layer 0/A/A2/B/C0/C1/C1b/C2/D/E) — workspace regression 0",
+        "cargo clippy --workspace --all-targets -- -D warnings clean (doc_lazy_continuation fix: bullet 구조 paragraph 구조로 재구성)",
+        "validate_workspace baseline 유지: T1=0, RT 13/13, sync, T3 warn=862, T4 info=429 (delta 0)",
+        "R311au-prep-hook Check 2 fmt 게이트 통과: 본 feat(runtime) commit에 staged crates/**.rs 4개 대상 cargo fmt --all -- --check OK",
+        "이전 R63의 NOP-stub 아니라 실제 critical_section::Mutex 바인딩 — 코드는 link-ready, lib build 성공"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "LwipRuntime + impl Runtime + own JoinHandle: 별도 round (architectural fork 미결정 — embassy_executor vs 자체 cooperative task pool vs C-side lwIP 통합)",
+        "lwIP-sys FFI bridge: tcp_pcb/udp_pcb wrapper + tcpip_callback 브리지 — 후속 round",
+        "wz facade runtime-lwip feature 등록: LwipRuntime impl lands 시 함께 (R63 \"concrete-impls-land-alongside-real-callers\")",
+        "Phase W ladder 5단계 부분 마감 (sync 절반); 완전 마감은 LwipRuntime + FFI lands 시점",
+        "Push 보류: R311au feat + docs 2 commits + R311au-prep-hook 2 commits = 총 4 commits",
+        "Section body refresh 후보: §watching-zenoh/local-ci-gates에 Check 2 fmt gate + Layer G.4 lane 명시 — 다음 round"
+      ]
+    },
     "Round 311au-prep": {
       "decision_summary": "R311au-prep §5.P caveat refresh — R311at inventory delta (ap-demo 16→4) + LwipRuntime contract sketch (own Mutex/RwLock/JoinHandle bind) + channel/select carry note.",
       "changes_bullets": [
