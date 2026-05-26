@@ -2,19 +2,27 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 #![no_std]
-// R311az-3a — crate-level cross-compile gate.
+// R311az-3b-ii — crate-level real-build gate.
 //
-// `lwip-sys` ships only the host-side cc::Build path at R311az-1; a
-// cross-compile to `thumbv*-none-eabi*` / `riscv32imac-none-elf` etc.
-// would invoke cmake/cc with the in-crate lwipopts.h that is host-
-// glibc-specific and fail. Until R311az-3b extends lwip-sys to accept
-// deploy-supplied lwipopts.h via a `-I` override and stub the host
-// `sys_now()` port, this entire crate is gated to hosted targets so
-// the facade's `runtime-lwip` feature is selectable from cargo on
-// MCU targets without dragging in an unbuildable C dep. Cross-compile
-// MCU deploys that genuinely need link-tier today must wait on
-// R311az-3b or supply their own lwip-sys variant.
-#![cfg(not(target_os = "none"))]
+// The `lwip_real_build` cfg is set by this crate's build.rs based on
+// `DEP_LWIP_LWIP_REAL_BUILD` (re-exposed by lwip-sys's `links =
+// "lwip"` metadata). lwip-sys emits the value as:
+//
+//   - host build:                     lwip_real_build set (=1)
+//   - cross + WZ_LWIP_PORT set:       lwip_real_build set (=1)
+//   - cross + WZ_LWIP_PORT unset:     lwip_real_build NOT set (=0)
+//
+// When unset, the entire crate body collapses to an empty rlib so
+// downstreams (wz facade with `runtime-lwip`) can compile on bare-
+// metal targets without a deploy port; the visible link tier on
+// such builds is empty, but `cargo check` / `cargo build` succeed.
+// When set, the real `LwipLink` + `LwipUdpSocket` are exposed and
+// reference the real lwip-sys FFI symbols.
+//
+// Replaces R311az-3a's `cfg(not(target_os = "none"))` gate: cross +
+// WZ_LWIP_PORT now exercises this crate end-to-end (preset-cortex-
+// m4-default truthfulness full closure path).
+#![cfg(lwip_real_build)]
 
 //! wz-link-lwip — Phase W §5.C link tier; lwIP raw UDP API wrap.
 //!

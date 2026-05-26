@@ -84,6 +84,16 @@ wz-runtime-lwip = { path = "../wz-runtime-lwip", optional = true, default-featur
 # build is host-only at R311az-1; R311az-3b extends it to accept
 # deploy-supplied lwipopts.h for cross-compile).
 wz-link-lwip = { path = "../wz-link-lwip", optional = true, default-features = false }
+# R311az-3b-ii — direct optional dep on lwip-sys so the facade's
+# build.rs receives `DEP_LWIP_LWIP_REAL_BUILD` (re-exposed via lwIP-sys's
+# `links = "lwip"` metadata). This lets the facade emit a
+# `lwip_real_build` cfg in lockstep with wz-link-lwip, keeping the
+# `wz::link_lwip` namespace re-export gated on the same condition as
+# the underlying crate body. Without this direct edge the metadata
+# would propagate to wz-link-lwip only (siblings don't share the env
+# var), and the facade would have to re-derive the WZ_LWIP_PORT +
+# TARGET logic — a second source of truth, anti-pattern.
+lwip-sys = { path = "../lwip-sys", optional = true }
 sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime", optional = true }
 sce-rust-lua = { path = "../../vendor/sce/sce-rust-lua", optional = true }
 
@@ -295,13 +305,19 @@ runtime-lwip = [
     "dep:wz-runtime-lwip",
     "dep:wz-runtime-core",
     "wz-runtime-lwip/alloc",
-    # R311az-3a — runtime-lwip also pulls the §5.C link tier sibling.
-    # The MCU profile bundles runtime + link as a pair: `LwipRuntime`
-    # (task pool + cooperative poll) + `LwipUdpSocket` (lwIP raw UDP +
-    # heapless mpsc bridge). cross-compile sees an empty wz-link-lwip
-    # via its crate-level `#![cfg(not(target_os = "none"))]` gate until
-    # R311az-3b extends lwip-sys for deploy-supplied lwipopts.h.
+    # R311az-3a / R311az-3b-ii — runtime-lwip pulls the §5.C link tier
+    # sibling. The MCU profile bundles runtime + link as a pair:
+    # `LwipRuntime` (task pool + cooperative poll) + `LwipUdpSocket`
+    # (lwIP raw UDP + heapless mpsc bridge). cross-compile sees an
+    # empty wz-link-lwip via its crate-level `#![cfg(lwip_real_build)]`
+    # gate until WZ_LWIP_PORT is set (R311az-3b deploy-supplied
+    # lwipopts.h) — at which point both wz-link-lwip and the
+    # `wz::link_lwip` re-export light up together.
     "dep:wz-link-lwip",
+    # R311az-3b-ii — direct lwip-sys edge so the facade build.rs
+    # receives `DEP_LWIP_LWIP_REAL_BUILD` and emits `lwip_real_build`
+    # in lockstep with wz-link-lwip.
+    "dep:lwip-sys",
 ]
 runtime-no-std = []
 # R302b — runtime-tokio pulls the wz-runtime-tokio crate into the

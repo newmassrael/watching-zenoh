@@ -60,6 +60,17 @@ fn main() {
              // real cross build (R311az-3b deploy-supplied lwipopts.h + arch/cc.h).\n",
         )
         .expect("write stub bindings.rs");
+        // R311az-3b-ii — propagate build mode to dependents.
+        //
+        // `links = "lwip"` exposes `cargo:KEY=VALUE` lines as
+        // `DEP_LWIP_<KEY>` env vars in the build.rs of any direct
+        // dependent (wz-link-lwip, wz with optional lwip-sys dep). The
+        // dependent build.rs converts the metadata into a
+        // `cargo:rustc-cfg=lwip_real_build` so consuming crates can
+        // gate code blocks on whether the FFI symbols are real or
+        // stubbed without re-deriving the WZ_LWIP_PORT + TARGET logic
+        // (single source of truth: this build.rs).
+        println!("cargo:lwip_real_build=0");
         println!("cargo:rerun-if-env-changed=TARGET");
         println!("cargo:rerun-if-env-changed=WZ_LWIP_PORT");
         return;
@@ -264,4 +275,9 @@ fn main() {
     bindings
         .write_to_file(out_dir.join("bindings.rs"))
         .expect("write OUT_DIR/bindings.rs");
+
+    // R311az-3b-ii — propagate real-build mode to dependents. See the
+    // stub branch above for the rationale; same metadata key, value
+    // `=1` so direct dependents flip `lwip_real_build` on.
+    println!("cargo:lwip_real_build=1");
 }

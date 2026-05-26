@@ -1411,6 +1411,7 @@ dependencies = [
 name = "wz"
 version = "0.1.0"
 dependencies = [
+ "lwip-sys",
  "sce-rust-lua",
  "sce-rust-runtime",
  "wz-link-lwip",

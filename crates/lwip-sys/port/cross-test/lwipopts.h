@@ -17,10 +17,14 @@
  * Diff vs the host `port/include/lwipopts.h`:
  *   - MEM_LIBC_MALLOC=0 / MEMP_MEM_MALLOC=0 — bare-metal targets do
  *     not link the glibc malloc family. Use lwIP's own static mem pool.
- *   - LWIP_NETIF_LOOPBACK=0 — the cross-test does not exercise the
- *     loop_netif output queue; dropping it removes the loopif.c source
- *     from the build set without disturbing the UDP-minimal surface.
  *   - MEM_SIZE / pool counts shrunk — compile-check, not runtime sizing.
+ *
+ * `LWIP_NETIF_LOOPBACK=1` is intentionally kept ON so the cross-test
+ * exercises the same lwIP surface wz-link-lwip uses on the host (the
+ * `netif_poll_all` symbol is part of the bindgen allowlist; turning
+ * loopback off elides it and breaks the wz-link-lwip cross-real
+ * compile against the resulting empty FFI surface). A production
+ * MCU deploy that drives a real NIC can flip this back to 0.
  */
 
 #ifndef LWIP_LWIPOPTS_H
@@ -53,9 +57,9 @@
 #define LWIP_IGMP                       0
 #define LWIP_STATS                      0
 
-/* --- No loopback netif on the cross-test --- */
-#define LWIP_NETIF_LOOPBACK             0
-#define LWIP_HAVE_LOOPIF                0
+/* --- Loopback netif kept on: wz-link-lwip allowlists netif_poll_all --- */
+#define LWIP_NETIF_LOOPBACK             1
+#define LWIP_HAVE_LOOPIF                1
 
 /* --- Memory: lwIP's own static pool (no libc malloc) --- */
 #define MEM_LIBC_MALLOC                 0
