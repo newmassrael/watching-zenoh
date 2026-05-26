@@ -19104,6 +19104,60 @@
         "OQ-W22 trust-class lifecycle ratify"
       ]
     },
+    "Round 311az-3c": {
+      "decision_summary": "R311az-3c Layer G G.4-alloc + G.5 thumbv6m SKIP lift (R311bb closure) + new G.6 lane WZ_LWIP_PORT cross-real mechanical gate for lwip-sys + wz-link-lwip + wz facade",
+      "changes_bullets": [
+        "scripts/run-ci.sh: G.4-alloc thumbv6m SKIP removed (R311bb polyfill closes M0+ gap)",
+        "scripts/run-ci.sh: G.5 thumbv6m SKIP removed (cascades from G.4-alloc)",
+        "scripts/run-ci.sh: new G.6 lane runs cargo build with WZ_LWIP_PORT=cross-test",
+        "scripts/run-ci.sh: G.6 SKIPs riscv32imac on hosts without riscv32-unknown-elf-gcc",
+        "comment header updated to reflect new lane catalog"
+      ],
+      "verification_bullets": [
+        "bash scripts/run-ci.sh --layer G: 42 lanes (7 targets x 6 sub-lanes); 41 PASS + 1 SKIP",
+        "M0+ G.4-alloc + G.5 + G.6 all PASS (previously 2 SKIP on thumbv6m)",
+        "G.6 cross-real exercises lwip-sys C build + bindgen + wz-link-lwip + wz facade",
+        "Only RISC-V G.6 SKIPs (toolchain absent on dev host; deploy responsibility)"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "carry_forward_bullets": [
+        "R311bc: real deadline-keyed timer queue (busy-poll graduation)",
+        "R311bd: LwipJoinHandle abort cancellation",
+        "R311be: QEMU MCU e2e demo",
+        "RISC-V G.6 unlock: bundle riscv32-unknown-elf-gcc setup in scripts/setup-toolchains.sh",
+        "Layer G now mechanical gate for preset-cortex-m4-default catalog truthfulness",
+        "future: G.7 lane for QEMU MCU smoke test (R311be carry)"
+      ],
+      "publishable_decision_summary": "R311az-3c Layer G G.4-alloc + G.5 thumbv6m SKIP lift (R311bb closure) + new G.6 lane WZ_LWIP_PORT cross-real mechanical gate for lwip-sys + wz-link-lwip + wz facade",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: G.4-alloc thumbv6m SKIP removed (R311bb polyfill closes M0+ gap)",
+        "scripts/run-ci.sh: G.5 thumbv6m SKIP removed (cascades from G.4-alloc)",
+        "scripts/run-ci.sh: new G.6 lane runs cargo build with WZ_LWIP_PORT=cross-test",
+        "scripts/run-ci.sh: G.6 SKIPs riscv32imac on hosts without riscv32-unknown-elf-gcc",
+        "comment header updated to reflect new lane catalog"
+      ],
+      "publishable_verification_bullets": [
+        "bash scripts/run-ci.sh --layer G: 42 lanes (7 targets x 6 sub-lanes); 41 PASS + 1 SKIP",
+        "M0+ G.4-alloc + G.5 + G.6 all PASS (previously 2 SKIP on thumbv6m)",
+        "G.6 cross-real exercises lwip-sys C build + bindgen + wz-link-lwip + wz facade",
+        "Only RISC-V G.6 SKIPs (toolchain absent on dev host; deploy responsibility)"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311bc: real deadline-keyed timer queue (busy-poll graduation)",
+        "R311bd: LwipJoinHandle abort cancellation",
+        "R311be: QEMU MCU e2e demo",
+        "RISC-V G.6 unlock: bundle riscv32-unknown-elf-gcc setup in scripts/setup-toolchains.sh",
+        "Layer G now mechanical gate for preset-cortex-m4-default catalog truthfulness",
+        "future: G.7 lane for QEMU MCU smoke test (R311be carry)"
+      ]
+    },
     "Round 311az-pre": {
       "decision_summary": "R311az-pre ledger: wz-link-lwip 5.C UDP link 8 design decisions frozen (lwIP raw API, lwip-sys split, mpsc bridge, LwipRuntime sync site, trust placeholder); R311az implementation rationale baseline",
       "changes_bullets": [
