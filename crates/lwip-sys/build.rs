@@ -22,6 +22,37 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    // R311az-3a — cross-compile stub gate.
+    //
+    // Until R311az-3b extends this crate to accept a deploy-supplied
+    // lwipopts.h via `-I` override and provide a target-side `sys_now`
+    // port, bare-metal targets (`target_os = "none"`) see an empty
+    // FFI surface. The dependent wz-link-lwip crate is also gated
+    // via its own `#![cfg(not(target_os = "none"))]` clause so no
+    // call sites reach the stubbed bindings.
+    //
+    // The stub path emits an empty `bindings.rs` and skips both the
+    // cc::Build static-lib build AND the `cargo:rustc-link-lib=static
+    // =lwip` directive — without the link directive the
+    // `links = "lwip"` manifest declaration stays metadata-only and
+    // does not trigger an `-l lwip` at final link time.
+    let target = env::var("TARGET").unwrap_or_default();
+    let host = env::var("HOST").unwrap_or_default();
+    let is_cross_bare_metal = target != host && target.ends_with("-none-eabi")
+        || target.ends_with("-none-eabihf")
+        || target.ends_with("-none-elf");
+    if is_cross_bare_metal {
+        let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+        std::fs::write(
+            out_dir.join("bindings.rs"),
+            "// R311az-3a cross-compile stub — no FFI symbols emitted.\n\
+             // Deploy-supplied lwipopts.h + lwIP cross-build land at R311az-3b.\n",
+        )
+        .expect("write stub bindings.rs");
+        println!("cargo:rerun-if-env-changed=TARGET");
+        return;
+    }
+
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let lwip_root = manifest_dir
         .join("../../vendor/lwip")

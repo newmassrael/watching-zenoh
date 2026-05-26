@@ -59,6 +59,17 @@ pub use wz_runtime_tokio as runtime_tokio;
 #[cfg(feature = "runtime-lwip")]
 pub use wz_runtime_lwip as runtime_lwip;
 
+// R311az-3a — §5.C link tier re-export under the MCU profile. The
+// `link_lwip` namespace is symmetric with `runtime_lwip`: consumers
+// get `wz::link_lwip::LwipLink` + `wz::link_lwip::LwipUdpSocket`
+// alongside `wz::runtime_lwip::LwipRuntime`. The
+// `cfg(not(target_os = "none"))` clause mirrors wz-link-lwip's own
+// crate-level gate so a `cargo build --target thumbv7em-none-eabihf
+// --features runtime-lwip` succeeds (lwip-sys C build is host-only at
+// R311az-1; cross-compile lands at R311az-3b).
+#[cfg(all(feature = "runtime-lwip", not(target_os = "none")))]
+pub use wz_link_lwip as link_lwip;
+
 // `runtime_core` re-export is needed by BOTH profiles (the trait
 // crate authoring §5.P Runtime / TimeSource / Allocator). The
 // cfg(any(..)) merges the two opt-in paths so consumers always

@@ -18888,6 +18888,76 @@
         "OQ-W22 trust-class lifecycle: blocks multi-trust UDP dispatch"
       ]
     },
+    "Round 311az-3a": {
+      "decision_summary": "R311az-3a facade runtime-lwip pulls wz-link-lwip; lwip-sys cross-compile stub for target_os=none; wz-link-lwip crate-level cfg gate; thumbv7em + M0+ cross pass + host smoke preserved",
+      "changes_bullets": [
+        "crates/wz/Cargo.toml: runtime-lwip feature += dep:wz-link-lwip; wz-link-lwip optional dep added; doc records R311az-3b carry",
+        "crates/wz/src/lib.rs: pub use wz_link_lwip as link_lwip under cfg(all(feature=runtime-lwip, not(target_os=none))); symmetric with runtime_lwip namespace",
+        "crates/wz-link-lwip/src/lib.rs: #![cfg(not(target_os=none))] crate-level cross-compile gate; cross-compile sees empty crate",
+        "crates/lwip-sys/build.rs: cross-compile stub mode for target ending in -none-eabi/-eabihf/-elf (empty bindings.rs, no rustc-link-lib emit)",
+        "crates/lwip-sys/src/lib.rs: #![cfg_attr(target_os=none, no_std)] so stub bindings.rs compiles under bare-metal targets"
+      ],
+      "verification_bullets": [
+        "cargo check --target thumbv7em-none-eabihf -p wz-link-lwip: pass (stub bindings)",
+        "cargo check --target thumbv6m-none-eabi -p wz-link-lwip: pass (M0+ stub bypasses alloc gap)",
+        "cargo check -p wz --features runtime-lwip: clean (wz-link-lwip + link_lwip namespace pulled)",
+        "cargo test -p wz-link-lwip --lib smoke: 1/1 pass (host loopback echo unaffected by gate)",
+        "cargo clippy -p wz-link-lwip / lwip-sys / wz --features runtime-lwip: 0 warnings",
+        "cargo fmt --check: clean",
+        "validate_workspace: entries 379 to 380; T1=0; RT 13/13; sync"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "carry_forward_bullets": [
+        "R311az-3b: lwip-sys cross-compile real build (deploy-supplied lwipopts.h via -I override; target-side sys_now port hook; arm-none-eabi-gcc bindgen path)",
+        "R311az-3c: Layer G CI lane (G.4-alloc-link or G.6) with lwip-sys + wz-link-lwip cross-compile verification under deploy lwipopts.h",
+        "preset-cortex-m4-default cross-compile truthfulness: currently stub mode means preset does NOT actually link a working lwIP on cortex-m4; closure depends on R311az-3b",
+        "R311bb: portable-atomic-util::Arc swap for thumbv6m alloc gap in wz-runtime-lwip",
+        "R311bc: real deadline-keyed timer queue",
+        "R311bd: LwipJoinHandle abort",
+        "R311be: QEMU MCU e2e demo (depends on R311az-3b + R311bb)",
+        "TCP raw API stateful link-class: R311az-alpha separate cascade",
+        "OQ-W22 trust-class lifecycle ratify"
+      ],
+      "publishable_decision_summary": "R311az-3a facade runtime-lwip pulls wz-link-lwip; lwip-sys cross-compile stub for target_os=none; wz-link-lwip crate-level cfg gate; thumbv7em + M0+ cross pass + host smoke preserved",
+      "publishable_changes_bullets": [
+        "crates/wz/Cargo.toml: runtime-lwip feature += dep:wz-link-lwip; wz-link-lwip optional dep added; doc records R311az-3b carry",
+        "crates/wz/src/lib.rs: pub use wz_link_lwip as link_lwip under cfg(all(feature=runtime-lwip, not(target_os=none))); symmetric with runtime_lwip namespace",
+        "crates/wz-link-lwip/src/lib.rs: #![cfg(not(target_os=none))] crate-level cross-compile gate; cross-compile sees empty crate",
+        "crates/lwip-sys/build.rs: cross-compile stub mode for target ending in -none-eabi/-eabihf/-elf (empty bindings.rs, no rustc-link-lib emit)",
+        "crates/lwip-sys/src/lib.rs: #![cfg_attr(target_os=none, no_std)] so stub bindings.rs compiles under bare-metal targets"
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --target thumbv7em-none-eabihf -p wz-link-lwip: pass (stub bindings)",
+        "cargo check --target thumbv6m-none-eabi -p wz-link-lwip: pass (M0+ stub bypasses alloc gap)",
+        "cargo check -p wz --features runtime-lwip: clean (wz-link-lwip + link_lwip namespace pulled)",
+        "cargo test -p wz-link-lwip --lib smoke: 1/1 pass (host loopback echo unaffected by gate)",
+        "cargo clippy -p wz-link-lwip / lwip-sys / wz --features runtime-lwip: 0 warnings",
+        "cargo fmt --check: clean",
+        "validate_workspace: entries 379 to 380; T1=0; RT 13/13; sync"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311az-3b: lwip-sys cross-compile real build (deploy-supplied lwipopts.h via -I override; target-side sys_now port hook; arm-none-eabi-gcc bindgen path)",
+        "R311az-3c: Layer G CI lane (G.4-alloc-link or G.6) with lwip-sys + wz-link-lwip cross-compile verification under deploy lwipopts.h",
+        "preset-cortex-m4-default cross-compile truthfulness: currently stub mode means preset does NOT actually link a working lwIP on cortex-m4; closure depends on R311az-3b",
+        "R311bb: portable-atomic-util::Arc swap for thumbv6m alloc gap in wz-runtime-lwip",
+        "R311bc: real deadline-keyed timer queue",
+        "R311bd: LwipJoinHandle abort",
+        "R311be: QEMU MCU e2e demo (depends on R311az-3b + R311bb)",
+        "TCP raw API stateful link-class: R311az-alpha separate cascade",
+        "OQ-W22 trust-class lifecycle ratify"
+      ]
+    },
     "Round 311az-pre": {
       "decision_summary": "R311az-pre ledger: wz-link-lwip 5.C UDP link 8 design decisions frozen (lwIP raw API, lwip-sys split, mpsc bridge, LwipRuntime sync site, trust placeholder); R311az implementation rationale baseline",
       "changes_bullets": [
