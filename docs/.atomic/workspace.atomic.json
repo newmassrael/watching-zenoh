@@ -18758,6 +18758,72 @@
         "Architectural carries unchanged: R267 R283 R284 R299 R300 R301 §8 R304 keyexpr_canon R310.5c"
       ]
     },
+    "Round 311az-pre": {
+      "decision_summary": "R311az-pre ledger: wz-link-lwip 5.C UDP link 8 design decisions frozen (lwIP raw API, lwip-sys split, mpsc bridge, LwipRuntime sync site, trust placeholder); R311az implementation rationale baseline",
+      "changes_bullets": [
+        "D1 link-class UDP-first: 5.C enum udp/tcp/serial/ws/raw_eth additive; R311az ships udp only; TCP stateful R311az-alpha cascade",
+        "D2 lwIP raw API not BSD socket: udp_new/bind/recv/sendto/remove/disconnect; LWIP_SOCKET=1 rejected (footprint, mandatory pbuf copy break of 5.E zero-copy invariant)",
+        "D3 lwip-sys FFI crate split: vendored lwIP 2.2.0 via cmake/bindgen/allowlist (mirror zenoh-pico-sys R41); allowlist starts at 6 udp_ fns plus pbuf and ip_addr types",
+        "D4 callback-to-async via bounded mpsc: udp_recv lwIP callback runs main loop or ISR; per-link heapless::mpsc try_send only; overflow drops with counter (UDP loss tolerance)",
+        "D5 LwipRuntime sync site: LwipLink::recv future polls mpsc rx returning Pending; deploy main loop interleaves sys_check_timeouts and runtime.run_until_idle cooperative non-preemptive",
+        "D6 alloc and thumbv6m exclusion: Pin Box dyn Future Send requires alloc; Layer G.4-alloc 6-target subset (M0+ excluded until R311bb portable-atomic CAS polyfill closes ARMv6-M atomic-ptr gap)",
+        "D7 netif init is deploy responsibility: wz-link-lwip exposes LwipLink::bind_udp(port) only; lwIP netif_add plus DHCP/static IP plus PHY driver lives in deploy binary (5.K tier separation)",
+        "D8 trust_class placeholder for UDP: 5.C domain_attrs.trust_class plus OQ-W22 listener-link lifecycle deferred; R311az UDP single trust=public code path; multi-trust waits on OQ-W22 ratify"
+      ],
+      "verification_bullets": [
+        "validate_workspace: entries 375 to 376; T1=0; RT 13/13; sync after append_changelog_entry_v2 only",
+        "impact_refs T1 validated: 5.c-link + sce_link_runtime_lwip-c11-header-shape + 5-5-link all exist in atomic store",
+        "Code mutation 0; ledger-only round (R311ay textbook precedent design-decisions-frozen-before-implementation)",
+        "Each of 8 decisions cites specific anchor (5.E pbuf zero-copy; 5.K deploy tier separation; OQ-W22 trust; R311bb forward ref)"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "R311az: wz-link-lwip plus lwip-sys crates lands implementing 8 decisions; UDP-first; Layer G.4-alloc 6-target subset",
+        "R311ba: preset-cortex-m4-default cargo-side mirror (R311ay carry); catalog truthfulness closure",
+        "R311bb: portable-atomic plus critical-section polyfill for thumbv6m alloc gap; Layer G.4-alloc 7-target full",
+        "R311bc: real deadline-keyed timer queue (graduate SleepFuture self-wake busy-poll round-trip)",
+        "R311bd: LwipJoinHandle abort (cancel-token plumbed through TaskSlot; tokio parity)",
+        "R311be: QEMU MCU e2e demo on mps2-an385 or netduino-plus-2 (Phase W ladder FULL closure)",
+        "TCP raw API stateful link-class: R311az-alpha separate cascade after UDP cascade lands",
+        "OQ-W22 trust-class lifecycle ratify: blocks multi-trust dispatch in UDP link"
+      ],
+      "publishable_decision_summary": "R311az-pre ledger: wz-link-lwip 5.C UDP link 8 design decisions frozen (lwIP raw API, lwip-sys split, mpsc bridge, LwipRuntime sync site, trust placeholder); R311az implementation rationale baseline",
+      "publishable_changes_bullets": [
+        "D1 link-class UDP-first: 5.C enum udp/tcp/serial/ws/raw_eth additive; R311az ships udp only; TCP stateful R311az-alpha cascade",
+        "D2 lwIP raw API not BSD socket: udp_new/bind/recv/sendto/remove/disconnect; LWIP_SOCKET=1 rejected (footprint, mandatory pbuf copy break of 5.E zero-copy invariant)",
+        "D3 lwip-sys FFI crate split: vendored lwIP 2.2.0 via cmake/bindgen/allowlist (mirror zenoh-pico-sys R41); allowlist starts at 6 udp_ fns plus pbuf and ip_addr types",
+        "D4 callback-to-async via bounded mpsc: udp_recv lwIP callback runs main loop or ISR; per-link heapless::mpsc try_send only; overflow drops with counter (UDP loss tolerance)",
+        "D5 LwipRuntime sync site: LwipLink::recv future polls mpsc rx returning Pending; deploy main loop interleaves sys_check_timeouts and runtime.run_until_idle cooperative non-preemptive",
+        "D6 alloc and thumbv6m exclusion: Pin Box dyn Future Send requires alloc; Layer G.4-alloc 6-target subset (M0+ excluded until R311bb portable-atomic CAS polyfill closes ARMv6-M atomic-ptr gap)",
+        "D7 netif init is deploy responsibility: wz-link-lwip exposes LwipLink::bind_udp(port) only; lwIP netif_add plus DHCP/static IP plus PHY driver lives in deploy binary (5.K tier separation)",
+        "D8 trust_class placeholder for UDP: 5.C domain_attrs.trust_class plus OQ-W22 listener-link lifecycle deferred; R311az UDP single trust=public code path; multi-trust waits on OQ-W22 ratify"
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace: entries 375 to 376; T1=0; RT 13/13; sync after append_changelog_entry_v2 only",
+        "impact_refs T1 validated: 5.c-link + sce_link_runtime_lwip-c11-header-shape + 5-5-link all exist in atomic store",
+        "Code mutation 0; ledger-only round (R311ay textbook precedent design-decisions-frozen-before-implementation)",
+        "Each of 8 decisions cites specific anchor (5.E pbuf zero-copy; 5.K deploy tier separation; OQ-W22 trust; R311bb forward ref)"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311az: wz-link-lwip plus lwip-sys crates lands implementing 8 decisions; UDP-first; Layer G.4-alloc 6-target subset",
+        "R311ba: preset-cortex-m4-default cargo-side mirror (R311ay carry); catalog truthfulness closure",
+        "R311bb: portable-atomic plus critical-section polyfill for thumbv6m alloc gap; Layer G.4-alloc 7-target full",
+        "R311bc: real deadline-keyed timer queue (graduate SleepFuture self-wake busy-poll round-trip)",
+        "R311bd: LwipJoinHandle abort (cancel-token plumbed through TaskSlot; tokio parity)",
+        "R311be: QEMU MCU e2e demo on mps2-an385 or netduino-plus-2 (Phase W ladder FULL closure)",
+        "TCP raw API stateful link-class: R311az-alpha separate cascade after UDP cascade lands",
+        "OQ-W22 trust-class lifecycle ratify: blocks multi-trust dispatch in UDP link"
+      ]
+    },
     "Round 311b": {
       "decision_summary": "R311b lands codec-keep-alive cascade applying the R311a4 template end-to-end; measurement script generalized to auto-enumerate every codec-* atomic for R311c-l reuse.",
       "changes_bullets": [
