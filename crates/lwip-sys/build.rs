@@ -9,50 +9,63 @@
 //
 //   1. cc::Build: enumerate the NO_SYS-mode lwIP source files
 //      (core + ipv4 + netif/ethernet), include vendor/lwip/src/include
-//      and lwip-sys/port/include (lwipopts.h + arch/cc.h supplied by
-//      lwip-sys), compile into static liblwip.a in $OUT_DIR. Cargo
-//      consumes via `links = "lwip"` + the standard cc-emitted
-//      rustc-link-search.
+//      and a port include dir (lwipopts.h + arch/cc.h). The port
+//      include resolves to `lwip-sys/port/include` on host builds and
+//      to `$WZ_LWIP_PORT` on cross builds where the deploy crate
+//      supplies a bare-metal-friendly port (R311az-3b).
 //
 //   2. bindgen: parse wrapper.h with the same `-I` paths, emit Rust
 //      FFI declarations for the allowlist into $OUT_DIR/bindings.rs.
 //      src/lib.rs include!()s the result.
+//
+// Build modes:
+//   - host:                       real build, host port include
+//   - cross + WZ_LWIP_PORT set:   real build, deploy-supplied port (R311az-3b)
+//   - cross + WZ_LWIP_PORT unset: stub (empty bindings, no liblwip.a) (R311az-3a)
 
 use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    // R311az-3a — cross-compile stub gate.
+    let target = env::var("TARGET").unwrap_or_default();
+    let host = env::var("HOST").unwrap_or_default();
+    let wz_lwip_port = env::var("WZ_LWIP_PORT").ok();
+
+    // Bare-metal cross detection. `target_os = "none"` toolchains have
+    // no libc/stdio so the host port include cannot satisfy lwIP's
+    // platform abstractions. Either the deploy crate supplies its own
+    // port via `WZ_LWIP_PORT` (real cross build) or this crate emits an
+    // empty bindings.rs and skips the C compile (stub mode).
+    let is_cross_bare_metal = target != host
+        && (target.ends_with("-none-eabi")
+            || target.ends_with("-none-eabihf")
+            || target.ends_with("-none-elf"));
+
+    // ─── Stub path: bare-metal cross without a deploy-supplied port ───
     //
-    // Until R311az-3b extends this crate to accept a deploy-supplied
-    // lwipopts.h via `-I` override and provide a target-side `sys_now`
-    // port, bare-metal targets (`target_os = "none"`) see an empty
-    // FFI surface. The dependent wz-link-lwip crate is also gated
-    // via its own `#![cfg(not(target_os = "none"))]` clause so no
-    // call sites reach the stubbed bindings.
-    //
-    // The stub path emits an empty `bindings.rs` and skips both the
+    // The stub emits an empty `bindings.rs` and skips both the
     // cc::Build static-lib build AND the `cargo:rustc-link-lib=static
     // =lwip` directive — without the link directive the
     // `links = "lwip"` manifest declaration stays metadata-only and
-    // does not trigger an `-l lwip` at final link time.
-    let target = env::var("TARGET").unwrap_or_default();
-    let host = env::var("HOST").unwrap_or_default();
-    let is_cross_bare_metal = target != host && target.ends_with("-none-eabi")
-        || target.ends_with("-none-eabihf")
-        || target.ends_with("-none-elf");
-    if is_cross_bare_metal {
+    // does not trigger an `-l lwip` at final link time. Downstream
+    // crates that reference lwip-sys FFI symbols (wz-link-lwip) are
+    // gated to non-bare-metal targets via their own crate-level cfg,
+    // so the empty surface is never imported.
+    if is_cross_bare_metal && wz_lwip_port.is_none() {
         let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
         std::fs::write(
             out_dir.join("bindings.rs"),
-            "// R311az-3a cross-compile stub — no FFI symbols emitted.\n\
-             // Deploy-supplied lwipopts.h + lwIP cross-build land at R311az-3b.\n",
+            "// R311az-3a/3b cross-compile stub — no FFI symbols emitted.\n\
+             // Set WZ_LWIP_PORT=/path/to/deploy/lwip-port to enable the\n\
+             // real cross build (R311az-3b deploy-supplied lwipopts.h + arch/cc.h).\n",
         )
         .expect("write stub bindings.rs");
         println!("cargo:rerun-if-env-changed=TARGET");
+        println!("cargo:rerun-if-env-changed=WZ_LWIP_PORT");
         return;
     }
 
+    // ─── Real path: host build OR cross + WZ_LWIP_PORT supplied ───
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let lwip_root = manifest_dir
         .join("../../vendor/lwip")
@@ -60,8 +73,53 @@ fn main() {
         .expect("canonicalize vendor/lwip — did `git submodule update --init vendor/lwip` run?");
     let lwip_src = lwip_root.join("src");
     let lwip_inc = lwip_src.join("include");
-    let port_inc = manifest_dir.join("port/include");
+    let host_port_inc = manifest_dir.join("port/include");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    // R311az-3b — port include selection.
+    //
+    // Cross build with a deploy-supplied port: the deploy crate's
+    // `WZ_LWIP_PORT` directory must contain `lwipopts.h` (lwIP
+    // options) and `arch/cc.h` (compiler/platform abstractions for
+    // the target). Validate the path eagerly so a typo surfaces at
+    // build configure time rather than as a confusing C preprocessor
+    // error a few stages downstream.
+    //
+    // Host build: in-crate `port/include` ships a glibc-friendly
+    // `lwipopts.h` + `arch/cc.h` good enough for the host smoke
+    // tests; no override.
+    let port_inc: PathBuf = if is_cross_bare_metal {
+        let p = PathBuf::from(
+            wz_lwip_port
+                .as_ref()
+                .expect("is_cross_bare_metal branch already verified WZ_LWIP_PORT is set"),
+        );
+        if !p.is_dir() {
+            panic!(
+                "WZ_LWIP_PORT={} is not a directory; deploy crate must supply \
+                 an include directory containing lwipopts.h + arch/cc.h",
+                p.display()
+            );
+        }
+        if !p.join("lwipopts.h").is_file() {
+            panic!(
+                "WZ_LWIP_PORT={} is missing lwipopts.h; deploy crate must \
+                 supply the lwIP options header for the target",
+                p.display()
+            );
+        }
+        if !p.join("arch").join("cc.h").is_file() {
+            panic!(
+                "WZ_LWIP_PORT={} is missing arch/cc.h; deploy crate must \
+                 supply the platform abstraction header for the target",
+                p.display()
+            );
+        }
+        println!("cargo:rerun-if-changed={}", p.display());
+        p
+    } else {
+        host_port_inc.clone()
+    };
 
     // Stage 1: cc::Build → static liblwip.a.
     //
@@ -70,6 +128,12 @@ fn main() {
     // sources are intentionally excluded (LWIP_TCP=0 in lwipopts.h);
     // including them would link but inflate the static lib. IPv6 and
     // DHCP/AUTOIP/DNS sources are excluded for the same reason.
+    //
+    // On cross builds cc::Build picks up `arm-none-eabi-gcc` (or the
+    // appropriate cross compiler) via the standard `TARGET`-derived
+    // tool lookup. If the cross toolchain is not installed the build
+    // surfaces a clear cc-crate-level error rather than silently
+    // falling back to the host compiler.
     let mut build = cc::Build::new();
     build
         .include(&port_inc)
@@ -119,10 +183,12 @@ fn main() {
     // timeouts (NO_SYS=1 timer pump) + lwip_init.
     let wrapper = manifest_dir.join("wrapper.h");
     println!("cargo:rerun-if-changed={}", wrapper.display());
-    println!("cargo:rerun-if-changed={}", port_inc.display());
+    println!("cargo:rerun-if-changed={}", host_port_inc.display());
     println!("cargo:rerun-if-changed={}", lwip_inc.display());
+    println!("cargo:rerun-if-env-changed=TARGET");
+    println!("cargo:rerun-if-env-changed=WZ_LWIP_PORT");
 
-    let bindings = bindgen::Builder::default()
+    let mut bindgen_builder = bindgen::Builder::default()
         .header(wrapper.to_str().expect("wrapper.h path utf8"))
         .clang_arg(format!("-I{}", port_inc.display()))
         .clang_arg(format!("-I{}", lwip_inc.display()))
@@ -131,6 +197,31 @@ fn main() {
         // packed lwIP structs on some configs these can be flaky. The
         // FFI ABI is still respected; only the auto-test is dropped.
         .layout_tests(false)
+        // R311az-3b — no_std-compatible bindings.
+        //
+        // src/lib.rs has `#![cfg_attr(target_os = "none", no_std)]` so
+        // the emitted bindings.rs must not reference `::std`. Switch
+        // bindgen to emit `::core::option::Option` and pull C-types
+        // from `core::ffi::c_*` (rustc 1.64+). The host build still
+        // sees the same bindings via core, which is re-exported by
+        // std on hosted targets — no host regression.
+        .use_core()
+        .ctypes_prefix("::core::ffi");
+
+    // R311az-3b — cross-target bindings.
+    //
+    // libclang resolves layout-dependent typedefs (sizeof(long),
+    // pointer width, struct padding) from the active target triple.
+    // Without `--target=$TARGET` clang assumes the host triple and
+    // emits bindings whose `repr(C)` layouts diverge from the
+    // arm-none-eabi gcc compile of the same headers — a silent ABI
+    // mismatch that surfaces as memory corruption at runtime. Pass
+    // the rustc TARGET through so bindgen and cc see the same triple.
+    if is_cross_bare_metal {
+        bindgen_builder = bindgen_builder.clang_arg(format!("--target={}", target));
+    }
+
+    let bindings = bindgen_builder
         // UDP raw API.
         .allowlist_function("udp_new")
         .allowlist_function("udp_remove")

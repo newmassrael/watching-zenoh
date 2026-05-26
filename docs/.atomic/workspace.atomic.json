@@ -18958,6 +18958,76 @@
         "OQ-W22 trust-class lifecycle ratify"
       ]
     },
+    "Round 311az-3b": {
+      "decision_summary": "R311az-3b lwip-sys cross-compile real build via WZ_LWIP_PORT deploy-supplied port; stub conditional on cross + WZ_LWIP_PORT unset; cross-test port + bindgen use_core for no_std",
+      "changes_bullets": [
+        "lwip-sys/build.rs: stub narrowed to (cross + WZ_LWIP_PORT unset); else real cc::Build + bindgen",
+        "lwip-sys/build.rs: bindgen --target=$TARGET, use_core, ctypes_prefix=::core::ffi (no_std bindings)",
+        "lwip-sys/port/cross-test/lwipopts.h: NO_SYS UDP-minimal; static pool; no loopif; MEM_SIZE=4096",
+        "lwip-sys/port/cross-test/arch/cc.h: LWIP_NO_{CTYPE,INTTYPES,UNISTD}_H=1; empty diag; loop assert"
+      ],
+      "verification_bullets": [
+        "host: cargo test -p lwip-sys --lib smoke 1/1 pass (no regression)",
+        "host: cargo test -p wz-link-lwip --lib loopback_echo_one_packet 1/1 pass",
+        "cross stub: cargo check -p wz-link-lwip on thumbv7em + thumbv6m unchanged (empty crate)",
+        "cross real (WZ_LWIP_PORT=cross-test): cargo check -p lwip-sys passes on M0+/M3/M4F/M33",
+        "bash scripts/run-ci.sh --layer G: 40 PASS + 2 SKIP (M0+ alloc gap preserved)",
+        "cargo clippy -p lwip-sys -p wz-link-lwip --all-targets -- -D warnings: 0 warnings",
+        "cargo fmt --check: clean"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "carry_forward_bullets": [
+        "wz-link-lwip cfg(not(target_os=none)) gate intact; cross-real exercises lwip-sys only at R311az-3b",
+        "preset-cortex-m4-default truthfulness improves (lwip-sys real); wz-link-lwip gate lift = full closure",
+        "R311bb: portable-atomic-util Arc swap for thumbv6m alloc gap",
+        "R311az-3c: Layer G CI lane add (WZ_LWIP_PORT cross-real verification mechanical gate)",
+        "R311bc: real deadline-keyed timer queue (busy-poll graduation)",
+        "R311bd: LwipJoinHandle abort cancellation",
+        "R311be: QEMU MCU e2e demo (after R311az-3b + R311bb + wz-link-lwip gate lift)",
+        "RISC-V cross-real needs riscv32-unknown-elf-gcc; not tested locally",
+        "TCP raw API stateful link-class: R311az-alpha separate cascade",
+        "OQ-W22 trust-class lifecycle ratify"
+      ],
+      "publishable_decision_summary": "R311az-3b lwip-sys cross-compile real build via WZ_LWIP_PORT deploy-supplied port; stub conditional on cross + WZ_LWIP_PORT unset; cross-test port + bindgen use_core for no_std",
+      "publishable_changes_bullets": [
+        "lwip-sys/build.rs: stub narrowed to (cross + WZ_LWIP_PORT unset); else real cc::Build + bindgen",
+        "lwip-sys/build.rs: bindgen --target=$TARGET, use_core, ctypes_prefix=::core::ffi (no_std bindings)",
+        "lwip-sys/port/cross-test/lwipopts.h: NO_SYS UDP-minimal; static pool; no loopif; MEM_SIZE=4096",
+        "lwip-sys/port/cross-test/arch/cc.h: LWIP_NO_{CTYPE,INTTYPES,UNISTD}_H=1; empty diag; loop assert"
+      ],
+      "publishable_verification_bullets": [
+        "host: cargo test -p lwip-sys --lib smoke 1/1 pass (no regression)",
+        "host: cargo test -p wz-link-lwip --lib loopback_echo_one_packet 1/1 pass",
+        "cross stub: cargo check -p wz-link-lwip on thumbv7em + thumbv6m unchanged (empty crate)",
+        "cross real (WZ_LWIP_PORT=cross-test): cargo check -p lwip-sys passes on M0+/M3/M4F/M33",
+        "bash scripts/run-ci.sh --layer G: 40 PASS + 2 SKIP (M0+ alloc gap preserved)",
+        "cargo clippy -p lwip-sys -p wz-link-lwip --all-targets -- -D warnings: 0 warnings",
+        "cargo fmt --check: clean"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "publishable_carry_forward_bullets": [
+        "wz-link-lwip cfg(not(target_os=none)) gate intact; cross-real exercises lwip-sys only at R311az-3b",
+        "preset-cortex-m4-default truthfulness improves (lwip-sys real); wz-link-lwip gate lift = full closure",
+        "R311bb: portable-atomic-util Arc swap for thumbv6m alloc gap",
+        "R311az-3c: Layer G CI lane add (WZ_LWIP_PORT cross-real verification mechanical gate)",
+        "R311bc: real deadline-keyed timer queue (busy-poll graduation)",
+        "R311bd: LwipJoinHandle abort cancellation",
+        "R311be: QEMU MCU e2e demo (after R311az-3b + R311bb + wz-link-lwip gate lift)",
+        "RISC-V cross-real needs riscv32-unknown-elf-gcc; not tested locally",
+        "TCP raw API stateful link-class: R311az-alpha separate cascade",
+        "OQ-W22 trust-class lifecycle ratify"
+      ]
+    },
     "Round 311az-pre": {
       "decision_summary": "R311az-pre ledger: wz-link-lwip 5.C UDP link 8 design decisions frozen (lwIP raw API, lwip-sys split, mpsc bridge, LwipRuntime sync site, trust placeholder); R311az implementation rationale baseline",
       "changes_bullets": [
