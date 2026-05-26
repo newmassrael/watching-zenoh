@@ -1413,6 +1413,7 @@ version = "0.1.0"
 dependencies = [
  "sce-rust-lua",
  "sce-rust-runtime",
+ "wz-link-lwip",
  "wz-runtime-core",
  "wz-runtime-lwip",
  "wz-runtime-tokio",

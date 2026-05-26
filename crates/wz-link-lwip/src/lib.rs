@@ -2,6 +2,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 #![no_std]
+// R311az-3a — crate-level cross-compile gate.
+//
+// `lwip-sys` ships only the host-side cc::Build path at R311az-1; a
+// cross-compile to `thumbv*-none-eabi*` / `riscv32imac-none-elf` etc.
+// would invoke cmake/cc with the in-crate lwipopts.h that is host-
+// glibc-specific and fail. Until R311az-3b extends lwip-sys to accept
+// deploy-supplied lwipopts.h via a `-I` override and stub the host
+// `sys_now()` port, this entire crate is gated to hosted targets so
+// the facade's `runtime-lwip` feature is selectable from cargo on
+// MCU targets without dragging in an unbuildable C dep. Cross-compile
+// MCU deploys that genuinely need link-tier today must wait on
+// R311az-3b or supply their own lwip-sys variant.
+#![cfg(not(target_os = "none"))]
 
 //! wz-link-lwip — Phase W §5.C link tier; lwIP raw UDP API wrap.
 //!

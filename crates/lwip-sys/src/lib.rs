@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
+#![cfg_attr(target_os = "none", no_std)]
+
 //! lwip-sys — FFI bindings to vendored lwIP 2.2.1 (NO_SYS=1 + UDP minimal).
 //!
 //! R311az-1 walking skeleton: host build proves the cc::Build +
