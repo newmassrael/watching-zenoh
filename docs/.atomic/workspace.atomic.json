@@ -19018,6 +19018,58 @@
         "R310.5c get_matching_status conservative-false doc-surface decision (0.5R)."
       ]
     },
+    "Round 311ba": {
+      "decision_summary": "R311ba lands preset-cortex-m4-default cargo-side mirror (56 atomic features); §6.7 R311ay catalog truthfulness closure; wz facade preset feature resolves runtime-lwip + wz-runtime-lwip alloc graph",
+      "changes_bullets": [
+        "crates/wz/Cargo.toml += preset-cortex-m4-default feature list (56 atomic features mirroring §6.7 R311ay atomic-store entry)",
+        "Inline doc records §6.7 rationale_bullet keyexpr-include vs cargo feature keyexpr-includes reconcile: atomic-store typo not retroactively edited (frozen-ledger); cargo uses §5.6 atomic-catalog truth keyexpr-includes",
+        "Preset placement at end of feature list (after preset-zenoh-cpp tail); v0.1.0 semver-named contract per §6 naming-convention"
+      ],
+      "verification_bullets": [
+        "cargo check -p wz --features preset-cortex-m4-default: resolves clean; runtime-lwip pulls wz-runtime-lwip alloc graph",
+        "All 56 referenced atomic features confirmed present in wz/Cargo.toml feature catalog (no missing label, no typo other than §6.7 rationale label noted in doc)",
+        "validate_workspace: entries 378 to 379; T1=0; RT 13/13; sync",
+        "Workspace untouched aside from crates/wz/Cargo.toml"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default",
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "R311az-3: LwipRuntime::run_until_idle interleave; wz facade link-udp feature; Layer G.4-alloc-link cross-compile lane (deploy supplies lwipopts.h)",
+        "R311bb: portable-atomic + critical-section polyfill for thumbv6m alloc gap",
+        "R311bc: real deadline-keyed timer queue (graduate SleepFuture self-wake)",
+        "R311bd: LwipJoinHandle abort (cancel-token via TaskSlot; tokio parity)",
+        "R311be: QEMU MCU e2e demo (Phase W ladder FULL closure)",
+        "TCP raw API stateful link-class: R311az-alpha separate cascade",
+        "OQ-W22 trust-class lifecycle: blocks multi-trust UDP dispatch"
+      ],
+      "publishable_decision_summary": "R311ba lands preset-cortex-m4-default cargo-side mirror (56 atomic features); §6.7 R311ay catalog truthfulness closure; wz facade preset feature resolves runtime-lwip + wz-runtime-lwip alloc graph",
+      "publishable_changes_bullets": [
+        "crates/wz/Cargo.toml += preset-cortex-m4-default feature list (56 atomic features mirroring §6.7 R311ay atomic-store entry)",
+        "Inline doc records §6.7 rationale_bullet keyexpr-include vs cargo feature keyexpr-includes reconcile: atomic-store typo not retroactively edited (frozen-ledger); cargo uses §5.6 atomic-catalog truth keyexpr-includes",
+        "Preset placement at end of feature list (after preset-zenoh-cpp tail); v0.1.0 semver-named contract per §6 naming-convention"
+      ],
+      "publishable_verification_bullets": [
+        "cargo check -p wz --features preset-cortex-m4-default: resolves clean; runtime-lwip pulls wz-runtime-lwip alloc graph",
+        "All 56 referenced atomic features confirmed present in wz/Cargo.toml feature catalog (no missing label, no typo other than §6.7 rationale label noted in doc)",
+        "validate_workspace: entries 378 to 379; T1=0; RT 13/13; sync",
+        "Workspace untouched aside from crates/wz/Cargo.toml"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default",
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311az-3: LwipRuntime::run_until_idle interleave; wz facade link-udp feature; Layer G.4-alloc-link cross-compile lane (deploy supplies lwipopts.h)",
+        "R311bb: portable-atomic + critical-section polyfill for thumbv6m alloc gap",
+        "R311bc: real deadline-keyed timer queue (graduate SleepFuture self-wake)",
+        "R311bd: LwipJoinHandle abort (cancel-token via TaskSlot; tokio parity)",
+        "R311be: QEMU MCU e2e demo (Phase W ladder FULL closure)",
+        "TCP raw API stateful link-class: R311az-alpha separate cascade",
+        "OQ-W22 trust-class lifecycle: blocks multi-trust UDP dispatch"
+      ]
+    },
     "Round 311c": {
       "decision_summary": "R311c lands codec-close cascade — wire encode/decode + send_close_with_reason + bind_unit gated; CloseReason enum + set_close_reason_* FSM bindings stay unconditional.",
       "changes_bullets": [

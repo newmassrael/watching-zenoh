@@ -1072,3 +1072,72 @@ preset-zenoh-cpp = [
     "time-timestamp-source",
     "time-hlc",
 ]
+
+# preset-cortex-m4-default — first production-shape MCU preset for
+# Cortex-M4F (thumbv7em-none-eabihf). R311ba lands the cargo-side
+# mirror of the atomic catalog §6.7 R311ay registered (56 atomic
+# features). wz-runtime-lwip + LwipTime + full wz-codecs catalog
+# under the alloc-enabled MCU profile. Composable-framework first
+# MCU deploy contract.
+#
+# §6.7 rationale_bullet `keyexpr-include` is the prose label; the
+# cargo feature name is `keyexpr-includes` per §5.6 atomic catalog.
+# This preset uses the cargo-truth name.
+preset-cortex-m4-default = [
+    "platform-bare-metal",
+    "runtime-lwip",
+    "runtime-no-std",
+    "transport-unicast",
+    "transport-link-udp",
+    "transport-link-tcp",
+    "transport-keepalive",
+    "transport-fragmentation",
+    "locator-udp",
+    "locator-tcp",
+    "scouting-active",
+    "session-unicast-open",
+    "link-frame",
+    "link-fragment",
+    "link-batching",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "keyexpr-includes",
+    "declare-keyexpr",
+    "declare-subscriber",
+    "declare-queryable",
+    "declare-token",
+    "declare-undeclare",
+    "declare-final",
+    "declare-interest",
+    "pubsub-put",
+    "pubsub-delete",
+    "pubsub-sample",
+    "pubsub-priority",
+    "pubsub-congestion-control",
+    "query-get",
+    "query-queryable",
+    "query-reply",
+    "query-target",
+    "query-timeout",
+    "query-consolidation",
+    "liveliness-token",
+    "liveliness-subscriber",
+    "encoding-empty",
+    "encoding-utf8",
+    "encoding-bytes",
+    "codec-scout",
+    "codec-hello",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "codec-keep-alive",
+    "codec-frame",
+    "codec-fragment",
+    "codec-declare",
+    "codec-push",
+    "codec-request",
+    "codec-response",
+    "codec-response-final",
+    "routing-client",
+    "time-ntp64",
+]
