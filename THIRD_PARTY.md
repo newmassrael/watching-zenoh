@@ -70,6 +70,26 @@ changelog that authorized the bump.
   `crates/zenoh-pico-sys` FFI is unaffected because that path
   links against the upstream library, not the patched example.
 
+## vendor/lwip — lightweight TCP/IP stack
+
+- **Origin**: https://github.com/lwip-tcpip/lwip
+- **Commit pin**: `77dcd25a` (STABLE-2_2_1_RELEASE)
+- **License**: BSD-3-Clause (modified). Full text in
+  `vendor/lwip/COPYING`. SwedishICS copyright notice + 3-clause
+  redistribution terms; no copyleft.
+- **Scope of use**: Phase W §5.C link tier dependency.
+  `crates/lwip-sys` statically compiles the NO_SYS=1 + UDP-minimal
+  source set (core/ + core/ipv4/ + netif/ethernet.c) into a
+  host-build static library and exposes a bindgen-generated FFI
+  surface (6 raw `udp_*` fns + pbuf + netif lifecycle + lwip_init
+  + sys_check_timeouts). `crates/wz-link-lwip` (R311az-2) wraps
+  the raw FFI into the async LwipLink type via per-link mpsc
+  callback-to-async bridge. Cross-compile to MCU targets stays
+  the deploy crate's responsibility per R311az-pre D7; lwip-sys
+  ships only the host build.
+- **Upstream-tracking**: pin set at R311az-1 lands. Bumps follow
+  lwIP `STABLE-*_RELEASE` tags rather than master branch HEAD.
+
 ## Generated output
 
 Source files under `crates/wz-codecs/out/` are emitted by

@@ -18758,6 +18758,72 @@
         "Architectural carries unchanged: R267 R283 R284 R299 R300 R301 §8 R304 keyexpr_canon R310.5c"
       ]
     },
+    "Round 311az-1": {
+      "decision_summary": "R311az-1 lands lwip-sys host build: vendor/lwip submodule pin STABLE-2_2_1_RELEASE; cc::Build NO_SYS UDP-minimal source set; bindgen 6 udp_* + pbuf + netif allowlist; smoke test pass",
+      "changes_bullets": [
+        "vendor/lwip submodule add pin 77dcd25a (STABLE-2_2_1_RELEASE); .gitmodules updated",
+        "crates/lwip-sys lands: Cargo.toml (cc 1 + bindgen 0.71 build-deps; links lwip), build.rs cc::Build NO_SYS source set + bindgen allowlist, wrapper.h, src/lib.rs FFI + sys_now host port",
+        "crates/lwip-sys/port/include/lwipopts.h: NO_SYS=1 + LWIP_UDP=1 + LWIP_TCP=0 + LWIP_SOCKET=0 + LWIP_NETIF_LOOPBACK=1; MEM_LIBC_MALLOC=1 (host build only; deploy supplies own opts)",
+        "crates/lwip-sys/port/include/arch/cc.h: x86_64-linux + glibc compiler shim; LWIP_PLATFORM_DIAG/ASSERT/RAND impl via stdio+stdlib",
+        "crates/Cargo.toml workspace members += lwip-sys; inline doc references R311az-pre D7 deploy ownership of cross-compile",
+        "THIRD_PARTY.md += vendor/lwip entry: BSD-3-Clause, scope of use, upstream-tracking policy (STABLE-* tags only)"
+      ],
+      "verification_bullets": [
+        "cargo build -p lwip-sys: cc::Build compiles 18 NO_SYS source files; static liblwip.a + bindgen FFI link clean",
+        "cargo test -p lwip-sys --lib smoke: lwip_init_and_udp_new_remove 1/1 pass (FFI round-trip valid)",
+        "cargo clippy -p lwip-sys --all-targets: 0 warnings (workspace warnings=deny)",
+        "cargo check --workspace: no regression in 10 sibling crates",
+        "validate_workspace: entries 376 to 377; T1=0; RT 13/13; sync"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "R311az-2: wz-link-lwip body (LwipLink::bind_udp + per-link heapless::mpsc bridge + raw udp_recv callback)",
+        "R311az-3: LwipRuntime::run_until_idle + sys_check_timeouts interleave; wz facade link-udp feature; Layer G.4-alloc-link cross-compile lane (deploy supplies lwipopts.h)",
+        "R311ba: preset-cortex-m4-default cargo-side mirror (R311ay carry)",
+        "R311bb: portable-atomic + critical-section polyfill for thumbv6m alloc gap",
+        "R311bc: real deadline-keyed timer queue (graduate SleepFuture self-wake)",
+        "R311bd: LwipJoinHandle abort (cancel-token via TaskSlot; tokio parity)",
+        "R311be: QEMU MCU e2e demo (Phase W ladder FULL closure)",
+        "TCP raw API stateful link-class: R311az-alpha separate cascade after UDP lands",
+        "OQ-W22 trust-class lifecycle: blocks multi-trust UDP dispatch"
+      ],
+      "publishable_decision_summary": "R311az-1 lands lwip-sys host build: vendor/lwip submodule pin STABLE-2_2_1_RELEASE; cc::Build NO_SYS UDP-minimal source set; bindgen 6 udp_* + pbuf + netif allowlist; smoke test pass",
+      "publishable_changes_bullets": [
+        "vendor/lwip submodule add pin 77dcd25a (STABLE-2_2_1_RELEASE); .gitmodules updated",
+        "crates/lwip-sys lands: Cargo.toml (cc 1 + bindgen 0.71 build-deps; links lwip), build.rs cc::Build NO_SYS source set + bindgen allowlist, wrapper.h, src/lib.rs FFI + sys_now host port",
+        "crates/lwip-sys/port/include/lwipopts.h: NO_SYS=1 + LWIP_UDP=1 + LWIP_TCP=0 + LWIP_SOCKET=0 + LWIP_NETIF_LOOPBACK=1; MEM_LIBC_MALLOC=1 (host build only; deploy supplies own opts)",
+        "crates/lwip-sys/port/include/arch/cc.h: x86_64-linux + glibc compiler shim; LWIP_PLATFORM_DIAG/ASSERT/RAND impl via stdio+stdlib",
+        "crates/Cargo.toml workspace members += lwip-sys; inline doc references R311az-pre D7 deploy ownership of cross-compile",
+        "THIRD_PARTY.md += vendor/lwip entry: BSD-3-Clause, scope of use, upstream-tracking policy (STABLE-* tags only)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p lwip-sys: cc::Build compiles 18 NO_SYS source files; static liblwip.a + bindgen FFI link clean",
+        "cargo test -p lwip-sys --lib smoke: lwip_init_and_udp_new_remove 1/1 pass (FFI round-trip valid)",
+        "cargo clippy -p lwip-sys --all-targets: 0 warnings (workspace warnings=deny)",
+        "cargo check --workspace: no regression in 10 sibling crates",
+        "validate_workspace: entries 376 to 377; T1=0; RT 13/13; sync"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311az-2: wz-link-lwip body (LwipLink::bind_udp + per-link heapless::mpsc bridge + raw udp_recv callback)",
+        "R311az-3: LwipRuntime::run_until_idle + sys_check_timeouts interleave; wz facade link-udp feature; Layer G.4-alloc-link cross-compile lane (deploy supplies lwipopts.h)",
+        "R311ba: preset-cortex-m4-default cargo-side mirror (R311ay carry)",
+        "R311bb: portable-atomic + critical-section polyfill for thumbv6m alloc gap",
+        "R311bc: real deadline-keyed timer queue (graduate SleepFuture self-wake)",
+        "R311bd: LwipJoinHandle abort (cancel-token via TaskSlot; tokio parity)",
+        "R311be: QEMU MCU e2e demo (Phase W ladder FULL closure)",
+        "TCP raw API stateful link-class: R311az-alpha separate cascade after UDP lands",
+        "OQ-W22 trust-class lifecycle: blocks multi-trust UDP dispatch"
+      ]
+    },
     "Round 311az-pre": {
       "decision_summary": "R311az-pre ledger: wz-link-lwip 5.C UDP link 8 design decisions frozen (lwIP raw API, lwip-sys split, mpsc bridge, LwipRuntime sync site, trust placeholder); R311az implementation rationale baseline",
       "changes_bullets": [
