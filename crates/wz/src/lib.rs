@@ -59,15 +59,20 @@ pub use wz_runtime_tokio as runtime_tokio;
 #[cfg(feature = "runtime-lwip")]
 pub use wz_runtime_lwip as runtime_lwip;
 
-// R311az-3a — §5.C link tier re-export under the MCU profile. The
-// `link_lwip` namespace is symmetric with `runtime_lwip`: consumers
-// get `wz::link_lwip::LwipLink` + `wz::link_lwip::LwipUdpSocket`
-// alongside `wz::runtime_lwip::LwipRuntime`. The
-// `cfg(not(target_os = "none"))` clause mirrors wz-link-lwip's own
-// crate-level gate so a `cargo build --target thumbv7em-none-eabihf
-// --features runtime-lwip` succeeds (lwip-sys C build is host-only at
-// R311az-1; cross-compile lands at R311az-3b).
-#[cfg(all(feature = "runtime-lwip", not(target_os = "none")))]
+// R311az-3a / R311az-3b-ii — §5.C link tier re-export under the MCU
+// profile. The `link_lwip` namespace is symmetric with `runtime_lwip`:
+// consumers get `wz::link_lwip::LwipLink` + `wz::link_lwip::LwipUdpSocket`
+// alongside `wz::runtime_lwip::LwipRuntime`. The `lwip_real_build` cfg
+// (set by build.rs via the lwip-sys `DEP_LWIP_LWIP_REAL_BUILD` metadata)
+// mirrors wz-link-lwip's own crate-level gate so the re-export is
+// populated exactly when the underlying crate body is non-empty:
+//   - host build:                     re-exported + body populated
+//   - cross + WZ_LWIP_PORT set:       re-exported + body populated
+//   - cross + WZ_LWIP_PORT unset:     not re-exported (body is empty)
+// Replaces R311az-3a's `cfg(not(target_os = "none"))` gate so the
+// preset-cortex-m4-default catalog truthfulness reaches FULL closure
+// when WZ_LWIP_PORT is supplied by the deploy.
+#[cfg(all(feature = "runtime-lwip", lwip_real_build))]
 pub use wz_link_lwip as link_lwip;
 
 // `runtime_core` re-export is needed by BOTH profiles (the trait

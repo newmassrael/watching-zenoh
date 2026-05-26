@@ -42,6 +42,7 @@ authors.workspace = true
 repository.workspace = true
 readme.workspace = true
 description = "Phase W §5.C link tier — lwIP raw UDP API wrap (R311az-2 LwipUdpSocket + heapless bridge)."
+build = "build.rs"
 
 [lib]
 name = "wz_link_lwip"
