@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-link-lwip — Phase W §5.C link tier; lwIP raw UDP API wrap.
+#
+# R311az-2 lands the safe Rust surface over lwip-sys (R311az-1) raw
+# FFI: `LwipLink` (top-level lwip_init + netif setup) + `LwipUdpSocket`
+# (per-socket udp_pcb wrap + callback-to-async bounded queue bridge
+# per R311az-pre D4). Host build only at this round; LwipRuntime
+# integration + cross-compile lane land at R311az-3.
+#
+# Why a per-socket bounded heapless::spsc::Queue (not Box<dyn Stream>):
+# R311az-pre D4 ratifies a heapless rendezvous between the lwIP
+# `udp_recv` callback (main-loop or ISR context on the MCU; cooperative
+# on the host loopback test) and the application-side async pop. The
+# spsc shape matches the NO_SYS=1 single-thread cooperative model:
+# producer = recv_thunk (callback), consumer = LwipUdpSocket::try_recv.
+# Bounded capacity gives R311az-pre D4 overflow-drop semantics
+# (rx_drop counter) directly without dynamic allocation per packet.
+#
+# Why Pin<Box<Inner>>:
+# `udp_recv(pcb, callback, arg)` stores `arg` inside the udp_pcb and
+# the callback receives it back on every packet. Moving the Inner
+# while the callback's `arg` ptr is live would dangle. Pin<Box<Inner>>
+# binds the address-stability invariant Cargo type-checks; Drop
+# explicitly clears the callback via `udp_recv(pcb, None, null)` so
+# the dangling-arg window never opens.
+#
+# Why #![no_std] + alloc:
+# The MCU profile target is no_std; alloc is the line that lets
+# Pin<Box<Inner>> exist while keeping std::sync out of the dep graph.
+# Host smoke runs the same code path — `cargo test` pulls std at the
+# test-harness level but lib code stays no_std.
+
+[package]
+name = "wz-link-lwip"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Phase W §5.C link tier — lwIP raw UDP API wrap (R311az-2 LwipUdpSocket + heapless bridge)."
+
+[lib]
+name = "wz_link_lwip"
+path = "src/lib.rs"
+
+[dependencies]
+# R311az-1 FFI surface. Host-build only at R311az-2; cross-compile to
+# MCU targets lands at R311az-3 alongside Layer G.4-alloc-link.
+lwip-sys = { path = "../lwip-sys" }
+# Bounded SPSC queue + Vec<u8, N> backing the callback-to-async
+# rendezvous. heapless 0.8 series. No atomic-ptr requirement on the
+# host smoke path (thumbv6m polyfill is R311bb's concern; here on
+# x86_64-linux + cross-targets that have atomic ptr the default impl
+# applies).
+heapless = "0.8"
+
+[dev-dependencies]
+# (none yet — host smoke uses only the library + lwip-sys FFI.)
+
+[lints]
+workspace = true

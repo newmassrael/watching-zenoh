@@ -18824,6 +18824,70 @@
         "OQ-W22 trust-class lifecycle: blocks multi-trust UDP dispatch"
       ]
     },
+    "Round 311az-2": {
+      "decision_summary": "R311az-2 lands wz-link-lwip body: LwipLink + LwipUdpSocket on lwip-sys FFI; Pin<Box<Inner>> + heapless::spsc Queue + recv_thunk callback bridge; loopback echo smoke pass",
+      "changes_bullets": [
+        "crates/wz-link-lwip lands: Cargo.toml (lwip-sys + heapless 0.8 deps; no_std + alloc), src/lib.rs LwipLink + LwipUdpSocket + recv_thunk + ipv4 helpers",
+        "Pin<Box<Inner>> address stability: callback arg ptr never dangles; Drop clears udp_recv(None, null) before udp_remove (teardown order textbook)",
+        "recv_thunk reads src_addr u32 before pbuf_free (lwIP \"addr may point into pbuf\" doc invariant); pbuf_copy_partial bounded at MAX_DATAGRAM=1500",
+        "heapless::spsc::Queue<Datagram, 8> per-socket bounded; overflow drops with rx_drops counter (R311az-pre D4 overflow-with-counter semantics)",
+        "lwip-sys allowlist += netif_poll_all (NO_SYS + LWIP_NETIF_LOOPBACK_MULTITHREADING=0 requires explicit drain of loop_netif output queue)",
+        "crates/Cargo.toml workspace members += wz-link-lwip; placement before wz-runtime-lwip preserves alphabetical-ish workspace topology"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-link-lwip --lib smoke::loopback_echo_one_packet: 1/1 pass (payload + src_addr + src_port + rx_drops=0 verified)",
+        "cargo clippy -p wz-link-lwip --all-targets: 0 warnings (workspace warnings=deny)",
+        "cargo fmt --check -p wz-link-lwip: clean",
+        "cargo check --workspace: 11 sibling crates unaffected",
+        "validate_workspace: entries 377 to 378; T1=0; RT 13/13; sync"
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "R311az-3: LwipRuntime::run_until_idle interleave; wz facade link-udp feature; Layer G.4-alloc-link cross-compile lane (deploy supplies lwipopts.h)",
+        "R311ba: preset-cortex-m4-default cargo-side mirror (R311ay carry); catalog truthfulness closure",
+        "R311bb: portable-atomic + critical-section polyfill for thumbv6m alloc gap",
+        "R311bc: real deadline-keyed timer queue (graduate SleepFuture self-wake)",
+        "R311bd: LwipJoinHandle abort (cancel-token via TaskSlot; tokio parity)",
+        "R311be: QEMU MCU e2e demo (Phase W ladder FULL closure)",
+        "TCP raw API stateful link-class: R311az-alpha separate cascade",
+        "OQ-W22 trust-class lifecycle: blocks multi-trust UDP dispatch"
+      ],
+      "publishable_decision_summary": "R311az-2 lands wz-link-lwip body: LwipLink + LwipUdpSocket on lwip-sys FFI; Pin<Box<Inner>> + heapless::spsc Queue + recv_thunk callback bridge; loopback echo smoke pass",
+      "publishable_changes_bullets": [
+        "crates/wz-link-lwip lands: Cargo.toml (lwip-sys + heapless 0.8 deps; no_std + alloc), src/lib.rs LwipLink + LwipUdpSocket + recv_thunk + ipv4 helpers",
+        "Pin<Box<Inner>> address stability: callback arg ptr never dangles; Drop clears udp_recv(None, null) before udp_remove (teardown order textbook)",
+        "recv_thunk reads src_addr u32 before pbuf_free (lwIP \"addr may point into pbuf\" doc invariant); pbuf_copy_partial bounded at MAX_DATAGRAM=1500",
+        "heapless::spsc::Queue<Datagram, 8> per-socket bounded; overflow drops with rx_drops counter (R311az-pre D4 overflow-with-counter semantics)",
+        "lwip-sys allowlist += netif_poll_all (NO_SYS + LWIP_NETIF_LOOPBACK_MULTITHREADING=0 requires explicit drain of loop_netif output queue)",
+        "crates/Cargo.toml workspace members += wz-link-lwip; placement before wz-runtime-lwip preserves alphabetical-ish workspace topology"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-link-lwip --lib smoke::loopback_echo_one_packet: 1/1 pass (payload + src_addr + src_port + rx_drops=0 verified)",
+        "cargo clippy -p wz-link-lwip --all-targets: 0 warnings (workspace warnings=deny)",
+        "cargo fmt --check -p wz-link-lwip: clean",
+        "cargo check --workspace: 11 sibling crates unaffected",
+        "validate_workspace: entries 377 to 378; T1=0; RT 13/13; sync"
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311az-3: LwipRuntime::run_until_idle interleave; wz facade link-udp feature; Layer G.4-alloc-link cross-compile lane (deploy supplies lwipopts.h)",
+        "R311ba: preset-cortex-m4-default cargo-side mirror (R311ay carry); catalog truthfulness closure",
+        "R311bb: portable-atomic + critical-section polyfill for thumbv6m alloc gap",
+        "R311bc: real deadline-keyed timer queue (graduate SleepFuture self-wake)",
+        "R311bd: LwipJoinHandle abort (cancel-token via TaskSlot; tokio parity)",
+        "R311be: QEMU MCU e2e demo (Phase W ladder FULL closure)",
+        "TCP raw API stateful link-class: R311az-alpha separate cascade",
+        "OQ-W22 trust-class lifecycle: blocks multi-trust UDP dispatch"
+      ]
+    },
     "Round 311az-pre": {
       "decision_summary": "R311az-pre ledger: wz-link-lwip 5.C UDP link 8 design decisions frozen (lwIP raw API, lwip-sys split, mpsc bridge, LwipRuntime sync site, trust placeholder); R311az implementation rationale baseline",
       "changes_bullets": [
