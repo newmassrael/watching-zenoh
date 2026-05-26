@@ -61,10 +61,19 @@
 #                  G.4 (R311au) wz-runtime-lwip — sync alias #![no_std]
 #                  G.4-alloc (R311av) wz-runtime-lwip --features alloc
 #                                 (LwipRuntime + impl Runtime + LwipTime)
-#                                 SKIPs thumbv6m: M0+ lacks atomic CAS
+#                                 R311bb closed M0+ via portable-atomic
+#                                 polyfill — thumbv6m now lands.
 #                  G.5 (R311ax) wz facade --features runtime-lwip
 #                                 (composes wz-runtime-lwip through the
-#                                 public facade surface; same M0+ SKIP)
+#                                 public facade surface; M0+ lands too
+#                                 post-R311bb).
+#                  G.6 (R311az-3c) WZ_LWIP_PORT cross-real lane —
+#                                 lwip-sys + wz-link-lwip + wz facade
+#                                 with cross-test port supplied as
+#                                 WZ_LWIP_PORT (real lwIP C cross-build
+#                                 + lwip_real_build cfg flips on).
+#                                 SKIPs riscv32imac (toolchain not
+#                                 installed on the local dev machine).
 #                Targets (R311ao + R311ap portability widening):
 #                  thumbv7em-none-eabihf  (Cortex-M4F/M7, original R311ak)
 #                  thumbv6m-none-eabi     (Cortex-M0+)
@@ -611,38 +620,64 @@ layer_g_cross_compile_cortex_m() {
             echo "  G.4 wz-runtime-lwip $t FAIL" >&2
             fail=1
         fi
-        # G.4-alloc (R311av) wz-runtime-lwip --features alloc —
-        # LwipRuntime self-rolled cooperative task pool + impl
-        # Runtime + LwipTime impl TimeSource. Pulls in wz-runtime-
-        # core with its alloc feature so the Runtime / TimeSource
-        # trait impls cross-compile end-to-end. SKIP on
-        # thumbv6m-none-eabi: Cortex-M0+ (ARMv6-M) lacks atomic
-        # pointer CAS, so alloc::sync::Arc is unavailable; M0+
-        # deploys stay on the sync-only G.4 lane. R311az+ carries
-        # the portable-atomic polyfill decision that would unlock
-        # alloc-on M0+ if a deploy reports the need.
-        if [[ "$t" == "thumbv6m-none-eabi" ]]; then
-            echo "  G.4-alloc wz-runtime-lwip $t SKIP (M0+ lacks atomic CAS; sync-only on this target)"
-        elif (cd crates && cargo build -p wz-runtime-lwip \
+        # G.4-alloc (R311av + R311bb) wz-runtime-lwip --features alloc.
+        # LwipRuntime self-rolled cooperative task pool + impl Runtime
+        # + LwipTime impl TimeSource. R311bb closed the M0+ gap via
+        # portable-atomic{,-util}: thumbv6m no longer SKIPs because
+        # the crate::atomic alias module substitutes
+        # portable_atomic_util::Arc + portable_atomic::Atomic* on
+        # targets without native CAS. The polyfill rides on the same
+        # critical_section impl the deploy crate supplies for
+        # sync::Mutex, so no extra runtime mechanism is layered on.
+        if (cd crates && cargo build -p wz-runtime-lwip \
             --target "$t" --features alloc --quiet); then
             echo "  G.4-alloc wz-runtime-lwip $t OK"
         else
             echo "  G.4-alloc wz-runtime-lwip $t FAIL" >&2
             fail=1
         fi
-        # G.5 (R311ax) wz facade --features runtime-lwip — composes
-        # wz-runtime-lwip via the public facade surface so a future
-        # consumer enabling the `runtime-lwip` feature finds
-        # `wz::runtime_lwip::*` cross-compiled on every Phase W
-        # target. Same M0+ alloc gap as G.4-alloc; same SKIP rule.
-        if [[ "$t" == "thumbv6m-none-eabi" ]]; then
-            echo "  G.5 wz facade runtime-lwip $t SKIP (M0+ inherits G.4-alloc gap)"
-        elif (cd crates && cargo build -p wz \
+        # G.5 (R311ax + R311bb) wz facade --features runtime-lwip.
+        # Composes wz-runtime-lwip via the public facade surface so a
+        # consumer enabling `runtime-lwip` finds `wz::runtime_lwip::*`
+        # cross-compiled on every Phase W target. R311bb removed the
+        # M0+ SKIP that inherited from G.4-alloc.
+        if (cd crates && cargo build -p wz \
             --target "$t" --no-default-features \
             --features runtime-lwip --quiet); then
             echo "  G.5 wz facade runtime-lwip $t OK"
         else
             echo "  G.5 wz facade runtime-lwip $t FAIL" >&2
+            fail=1
+        fi
+        # G.6 (R311az-3c) WZ_LWIP_PORT cross-real lane — verifies the
+        # `lwip_real_build` cfg path end-to-end:
+        #   1. lwip-sys cross-compiles the real lwIP NO_SYS source set
+        #      against the deploy-supplied port (cross-test in-tree).
+        #   2. bindgen with --target=$t emits real FFI bindings into
+        #      the no_std lwip-sys crate.
+        #   3. wz-link-lwip's lwip_real_build cfg flips on, exposing
+        #      LwipLink + LwipUdpSocket against the real FFI symbols.
+        #   4. wz facade re-exports the `wz::link_lwip` namespace.
+        # SKIPs riscv32imac because the matching `riscv32-unknown-elf-
+        # gcc` cross C toolchain is not installed on the developer
+        # machine — the deploy is responsible for that toolchain, not
+        # the lwip-sys consumer. The check still proves the cross-real
+        # path on the entire ARM lineup, which is the mechanical gate
+        # preset-cortex-m4-default catalog truthfulness depends on.
+        if [[ "$t" == "riscv32imac-unknown-none-elf" ]]; then
+            echo "  G.6 cross-real lwip-sys $t SKIP (riscv32-unknown-elf-gcc not installed on this host)"
+        elif (cd crates && \
+                WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+                cargo build -p wz-link-lwip \
+                    --target "$t" --quiet) && \
+             (cd crates && \
+                WZ_LWIP_PORT="$(realpath lwip-sys/port/cross-test)" \
+                cargo build -p wz \
+                    --target "$t" --no-default-features \
+                    --features runtime-lwip --quiet); then
+            echo "  G.6 cross-real lwip-sys $t OK"
+        else
+            echo "  G.6 cross-real lwip-sys $t FAIL" >&2
             fail=1
         fi
     done
