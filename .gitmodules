@@ -4,3 +4,6 @@
 [submodule "vendor/zenoh-pico"]
 	path = vendor/zenoh-pico
 	url = https://github.com/eclipse-zenoh/zenoh-pico
+[submodule "vendor/lwip"]
+	path = vendor/lwip
+	url = https://github.com/lwip-tcpip/lwip

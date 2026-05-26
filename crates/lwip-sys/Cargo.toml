@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# lwip-sys — FFI bindings to vendored lwIP 2.2.1 (NO_SYS=1 + UDP minimal).
+#
+# R311az-1 (Phase W §5.C link tier): lwIP-side FFI surface that
+# wz-link-lwip wraps into the async LwipLink. Host build pattern
+# mirrors zenoh-pico-sys (R41 walking skeleton): cc::Build compiles
+# the vendored lwIP core sources statically against the in-crate
+# `port/include/{lwipopts.h, arch/cc.h}` NO_SYS configuration; bindgen
+# emits Rust FFI for the allowlisted 6 udp_* fns + pbuf + netif
+# lifecycle subset.
+#
+# vendor/lwip pin: STABLE-2_2_1_RELEASE (77dcd25a). See THIRD_PARTY.md.
+#
+# Why cc::Build (not cmake): lwIP's mainline CMakeLists.txt expects a
+# platform port (contrib/ports/{unix,windows,...}) and does not
+# self-host on plain x86_64 without one. Statically enumerating the
+# NO_SYS source set via cc::Build is cleaner than vendoring an extra
+# contrib port and aligns with R311az-pre D7 (deploy crate owns the
+# cross-compile lwIP build for the MCU target; lwip-sys ships only the
+# host-side build for tests + bindgen smoke).
+#
+# Why NO_SYS=1 + LWIP_RAW=0 + LWIP_UDP=1 + LWIP_TCP=0 + LWIP_SOCKET=0:
+# R311az-pre D1 + D2 + D6: UDP-first, raw API only, no BSD-shim, no
+# sys_arch dependency. R311az+alpha will extend to TCP; R311ax/etc. are
+# unrelated.
+#
+# Allowlist policy: keep the FFI surface bound to symbols wz-link-lwip
+# (R311az-2) actually consumes. Auto-binding the full lwIP API would
+# inflate compile time and lock wz to unstable lwIP internals.
+
+[package]
+name = "lwip-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "FFI bindings to vendored lwIP 2.2.1 (NO_SYS=1 UDP-minimal; Phase W §5.C)."
+build = "build.rs"
+links = "lwip"
+
+[lib]
+name = "lwip_sys"
+path = "src/lib.rs"
+
+[build-dependencies]
+# cc 1.x compiles the vendored lwIP NO_SYS source set into a static
+# liblwip.a inside $OUT_DIR. Same crate the rest of the ecosystem uses
+# for C-source build steps; no version-pin coupling with the workspace
+# beyond major-version stability.
+cc = "1"
+# bindgen 0.71 tracks the rustc edition cycle compatible with workspace
+# rust-version (1.81). Matches zenoh-pico-sys pin.
+bindgen = "0.71"
+
+[lints]
+workspace = true

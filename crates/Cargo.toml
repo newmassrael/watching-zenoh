@@ -39,6 +39,16 @@ members = [
     "wz-runtime-tokio-test-support",
     "wz-ap-demo",
     "wz-runtime-lwip",
+    "lwip-sys",
+    # lwip-sys — R311az-1 (Phase W §5.C link tier dependency). FFI
+    # bindings to vendored lwIP 2.2.1 (vendor/lwip submodule pin
+    # STABLE-2_2_1_RELEASE / 77dcd25a). Host build via cc::Build
+    # statically compiling the NO_SYS=1 + UDP-minimal source set;
+    # bindgen emits the R311az-2 surface allowlist (6 udp_* + pbuf +
+    # netif lifecycle). Cross-compile to MCU targets is the deploy
+    # crate's responsibility (R311az-pre D7); lwip-sys ships only the
+    # host build at R311az-1.
+    #
     # wz-runtime-lwip — R311au scope C reintroduction (Phase W).
     # R53 NOP-stub skeleton was removed at R63 as a
     # document-around-the-hack pattern (NOP spawn + multi-paragraph
