@@ -40,6 +40,7 @@ members = [
     "wz-ap-demo",
     "wz-runtime-lwip",
     "lwip-sys",
+    "wz-link-lwip",
     # lwip-sys — R311az-1 (Phase W §5.C link tier dependency). FFI
     # bindings to vendored lwIP 2.2.1 (vendor/lwip submodule pin
     # STABLE-2_2_1_RELEASE / 77dcd25a). Host build via cc::Build

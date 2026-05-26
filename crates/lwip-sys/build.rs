@@ -119,6 +119,10 @@ fn main() {
         .allowlist_function("netif_add_noaddr")
         .allowlist_function("netif_set_default")
         .allowlist_function("netif_set_up")
+        // Loopback poll (NO_SYS + LWIP_NETIF_LOOPBACK_MULTITHREADING=0
+        // requires explicit poll to drain the loop_netif output queue
+        // into ip_input).
+        .allowlist_function("netif_poll_all")
         // Top-level init + timer pump.
         .allowlist_function("lwip_init")
         .allowlist_function("sys_check_timeouts")
