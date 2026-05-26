@@ -19286,6 +19286,70 @@
         "OQ-W22 trust-class lifecycle: blocks multi-trust UDP dispatch"
       ]
     },
+    "Round 311bb": {
+      "decision_summary": "R311bb portable-atomic + portable-atomic-util polyfill closes thumbv6m alloc gap; crate::atomic alias module symmetric with crate::sync (R311au)",
+      "changes_bullets": [
+        "wz-runtime-lwip/Cargo.toml: alloc feature pulls portable-atomic (fallback + critical-section) + portable-atomic-util/alloc",
+        "wz-runtime-lwip/src/atomic.rs (new): cfg(target_has_atomic) gated aliases Arc/AtomicBool/AtomicU64/Ordering",
+        "wz-runtime-lwip/src/lib.rs: pub(crate) mod atomic under alloc feature",
+        "executor.rs: import Arc + AtomicBool + Ordering from crate::atomic",
+        "runtime_impl.rs: import Arc + AtomicBool + Ordering from crate::atomic; tests AtomicU64 too",
+        "join_handle.rs: import Arc from crate::atomic"
+      ],
+      "verification_bullets": [
+        "host: cargo test -p wz-runtime-lwip --features alloc: 8/8 pass (no regression)",
+        "M0+ alloc: cargo check --target thumbv6m-none-eabi -p wz-runtime-lwip --features alloc PASS (was FAIL)",
+        "M0+ wz facade runtime-lwip stub + cross-real (WZ_LWIP_PORT): both pass",
+        "Layer G full sweep: 40 PASS + 2 SKIP unchanged (SKIP is script-side R311az-3c carry)",
+        "cargo clippy -p wz-runtime-lwip --features alloc --all-targets -- -D warnings: 0",
+        "cargo fmt --check: clean"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "carry_forward_bullets": [
+        "R311az-3c: Layer G script G.4-alloc + G.5 thumbv6m SKIP lift (next; mechanical gate)",
+        "R311bc: real deadline-keyed timer queue (busy-poll graduation)",
+        "R311bd: LwipJoinHandle abort cancellation",
+        "R311be: QEMU MCU e2e demo",
+        "M0+ Arc cost: critical_section per ref-count op; consistent with sync::Mutex discipline",
+        "AtomicU64 carry: only test-only use; production timer queue (R311bc) will exercise it",
+        "M0+ preset variant (preset-cortex-m0plus-default) is future carry once preset catalog adds it"
+      ],
+      "publishable_decision_summary": "R311bb portable-atomic + portable-atomic-util polyfill closes thumbv6m alloc gap; crate::atomic alias module symmetric with crate::sync (R311au)",
+      "publishable_changes_bullets": [
+        "wz-runtime-lwip/Cargo.toml: alloc feature pulls portable-atomic (fallback + critical-section) + portable-atomic-util/alloc",
+        "wz-runtime-lwip/src/atomic.rs (new): cfg(target_has_atomic) gated aliases Arc/AtomicBool/AtomicU64/Ordering",
+        "wz-runtime-lwip/src/lib.rs: pub(crate) mod atomic under alloc feature",
+        "executor.rs: import Arc + AtomicBool + Ordering from crate::atomic",
+        "runtime_impl.rs: import Arc + AtomicBool + Ordering from crate::atomic; tests AtomicU64 too",
+        "join_handle.rs: import Arc from crate::atomic"
+      ],
+      "publishable_verification_bullets": [
+        "host: cargo test -p wz-runtime-lwip --features alloc: 8/8 pass (no regression)",
+        "M0+ alloc: cargo check --target thumbv6m-none-eabi -p wz-runtime-lwip --features alloc PASS (was FAIL)",
+        "M0+ wz facade runtime-lwip stub + cross-real (WZ_LWIP_PORT): both pass",
+        "Layer G full sweep: 40 PASS + 2 SKIP unchanged (SKIP is script-side R311az-3c carry)",
+        "cargo clippy -p wz-runtime-lwip --features alloc --all-targets -- -D warnings: 0",
+        "cargo fmt --check: clean"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311az-3c: Layer G script G.4-alloc + G.5 thumbv6m SKIP lift (next; mechanical gate)",
+        "R311bc: real deadline-keyed timer queue (busy-poll graduation)",
+        "R311bd: LwipJoinHandle abort cancellation",
+        "R311be: QEMU MCU e2e demo",
+        "M0+ Arc cost: critical_section per ref-count op; consistent with sync::Mutex discipline",
+        "AtomicU64 carry: only test-only use; production timer queue (R311bc) will exercise it",
+        "M0+ preset variant (preset-cortex-m0plus-default) is future carry once preset catalog adds it"
+      ]
+    },
     "Round 311c": {
       "decision_summary": "R311c lands codec-close cascade — wire encode/decode + send_close_with_reason + bind_unit gated; CloseReason enum + set_close_reason_* FSM bindings stay unconditional.",
       "changes_bullets": [

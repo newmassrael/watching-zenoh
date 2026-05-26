@@ -41,7 +41,8 @@
 //! the TaskSlot. No abort field is reserved on `LwipJoinHandle`
 //! this round; adding it later is a non-breaking struct change.
 
-use alloc::sync::Arc;
+// R311bb — Arc routed through the polyfill alias for thumbv6m support.
+use crate::atomic::Arc;
 use core::cell::RefCell;
 use core::future::Future;
 use core::pin::Pin;
