@@ -80,7 +80,17 @@ path = "src/lib.rs"
 # trait-skeleton-free.
 [features]
 default = []
-alloc = ["dep:wz-runtime-core", "wz-runtime-core/alloc"]
+# R311bb — alloc lane now pulls portable-atomic{,-util} so Arc /
+# AtomicBool / AtomicU64 stay available on thumbv6m (Cortex-M0+),
+# closing the M0+ alloc gap that R311av documented. Native-atomic
+# targets (M3+ / M7 / Mxx / RISC-V IMAC / AP) bypass the polyfill
+# via `target_has_atomic` cfg in `src/atomic.rs`.
+alloc = [
+    "dep:wz-runtime-core",
+    "wz-runtime-core/alloc",
+    "dep:portable-atomic",
+    "dep:portable-atomic-util",
+]
 
 [dependencies]
 # critical-section provides the IRQ-disabling Mutex<T> primitive
@@ -92,6 +102,17 @@ alloc = ["dep:wz-runtime-core", "wz-runtime-core/alloc"]
 # only the trait crate and compiles cleanly on every MCU target
 # without pulling a per-arch impl into this crate's dep graph.
 critical-section = "1"
+# R311bb — atomic polyfill for thumbv6m (Cortex-M0+). The
+# `critical-section` feature on `portable-atomic` makes the
+# software-emulated atomics route through the same critical_section
+# impl the deploy crate supplies for `sync::Mutex` — single locking
+# discipline across the runtime. `default-features = false` keeps the
+# polyfill from pulling its own arch-specific atomic backend on
+# targets where the cfg falls back to the standard `core` atomics
+# (M3+/M7/Mxx/RISC-V IMAC/AP); on those, the polyfill crate compiles
+# but its types are never instantiated.
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"], optional = true }
+portable-atomic-util = { version = "0.2", default-features = false, features = ["alloc"], optional = true }
 # R311av — Runtime / TimeSource trait surface. Optional + alloc-gated
 # so the no-alloc sync-only build path stays trait-skeleton-free.
 # `wz-runtime-core/alloc` is required because RuntimeError under

@@ -62,11 +62,13 @@
 //!   sharing); they cannot be elided without changing the
 //!   `Runtime` contract.
 
+// R311bb — Arc + AtomicBool + Ordering routed through the crate's
+// polyfill alias so thumbv6m builds engage portable-atomic{,-util}
+// while native-atomic targets stay on the standard library types.
+use crate::atomic::{Arc, AtomicBool, Ordering};
 use alloc::boxed::Box;
-use alloc::sync::Arc;
 use core::cell::RefCell;
 use core::future::Future;
-use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll};
 
 use critical_section::Mutex;
@@ -299,9 +301,9 @@ mod compile_time_assertions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::atomic::AtomicU64;
     use crate::time::{ClockSource, LwipTime};
     use core::pin::Pin;
-    use core::sync::atomic::{AtomicU64, Ordering};
     use wz_runtime_core::TimeSource;
 
     // Host-side ClockSource: monotonic, no real time progression.

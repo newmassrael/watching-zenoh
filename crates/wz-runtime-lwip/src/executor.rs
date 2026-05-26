@@ -52,12 +52,17 @@
 //! - **Cancellation**: see `LwipJoinHandle` doc-comment — R311az+.
 
 use alloc::boxed::Box;
-use alloc::sync::Arc;
+// R311bb — Arc + AtomicBool + Ordering come from the crate's
+// polyfill alias module so thumbv6m (Cortex-M0+) builds substitute
+// `portable_atomic_util::Arc` / `portable_atomic::AtomicBool` /
+// `portable_atomic::Ordering` automatically. Native-atomic targets
+// (M3+/M7/Mxx/RISC-V IMAC/AP) get the standard library types via the
+// same alias — no per-call-site cfg.
+use crate::atomic::{Arc, AtomicBool, Ordering};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, Ordering};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 
 use critical_section::Mutex;

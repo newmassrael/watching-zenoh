@@ -125,6 +125,13 @@ extern crate alloc;
 
 pub mod sync;
 
+// R311bb — Arc + AtomicBool/U64 polyfill via portable-atomic{,-util}
+// for thumbv6m (Cortex-M0+). Crate-private: call sites import via
+// `crate::atomic::Arc` etc. so the polyfill swap stays a single-cfg
+// rewrite rather than per-file conditional imports.
+#[cfg(feature = "alloc")]
+pub(crate) mod atomic;
+
 #[cfg(feature = "alloc")]
 pub mod executor;
 #[cfg(feature = "alloc")]
