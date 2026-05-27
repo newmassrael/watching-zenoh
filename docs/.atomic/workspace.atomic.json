@@ -23815,6 +23815,54 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311di-pre-f5": {
+      "decision_summary": "R311di-pre-f5 — ext-chain Mutex quartet (init_syn_ext + init_ack_ext + open_syn_ext + open_ack_ext) lifts to R::Mutex; encode_init_with_role + encode_open_with_role + set_ext_chain migrate to R::with_mutex_mut; nested-lock hazard captured by lifting init_ack_params() outside the chain-slot closure.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs:846-849 + 1221: four ext-chain Mutex slots + the ext_chain_slot helper return type lift to R::Mutex<Vec<ExtEntry>> / &R::Mutex<...>. Per-profile alias selection now governs all four; R68b independent-slot rationale (one Mutex per role so a setter rewriting one chain does not block sibling roles) carries through unchanged since each slot is its own R::Mutex.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1170 (set_ext_chain): `*self.ext_chain_slot(role).lock().unwrap() = entries;` lifts to `R::with_mutex_mut(self.ext_chain_slot(role), |slot| *slot = entries);`.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1188+ (encode_init_with_role): the prior shape held the chain guard across `self.init_ack_params()` (which acquires `inbound_peer_init_caps`). With per-profile mutexes (lwIP critical_section is non-reentrant; embassy_sync re-entry is undefined) this risks deadlock. Pre-f5 captures the InitAck params owned before entering the chain-slot closure; the chain stays inside the closure so encode composes against `&chain` without an extra clone. AP-side semantic is byte-identical (params clone was already owned in the prior shape).",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1217 (encode_open_with_role): chain-slot lock body migrates verbatim; encode_open call moves inside the closure."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean (1.04s rebuild).",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass (encode_init / encode_open / set_ext_chain exercised by layer3_ext_chain_outbound + layer3_inbound_init + session_fsm_real_tcp integration tests).",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent).",
+        "validate_workspace: entries=451 -> 452, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-pre-f6 (next): outbound_mappings Mutex singleton migration. HashMap<u64, String> field; 10-15 .lock() sites across send_push_aliased + send_request_query_aliased + send_declare_subscriber_aliased + resolve_outbound_mapping + Querier::get + R236 set_own_zid composition path. Larger blast radius than any prior pre-f round; consider sub-splitting (pre-f6a struct + helper accessor; pre-f6b transition the actual call sites) if a single round risks exceeding the textbook one-commit boundary.",
+        "R311di-pre-f7: 4 AtomicU64 fields. Two paths to evaluate at entry: (a) extend Runtime trait with R::Atomic GAT + per-profile fetch_add/load/store/cas methods (cleaner, 4+ trait methods), or (b) keep portable_atomic::AtomicU64 raw across profiles (simpler, portable_atomic is already a workspace dep and spans MCU profiles via unstable-portable-atomic-critical-section).",
+        "R311di proper: wz-session-core crate extraction (no_std + alloc) once all R::Mutex / R::Atomic migrations land. ::new constructor sits on the AP-only TokioRuntime impl block so the generic struct migrates to wz-session-core while the concrete constructor + Lua bindings stay in wz-runtime-tokio.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311di-pre-f5 — ext-chain Mutex quartet (init_syn_ext + init_ack_ext + open_syn_ext + open_ack_ext) lifts to R::Mutex; encode_init_with_role + encode_open_with_role + set_ext_chain migrate to R::with_mutex_mut; nested-lock hazard captured by lifting init_ack_params() outside the chain-slot closure.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs:846-849 + 1221: four ext-chain Mutex slots + the ext_chain_slot helper return type lift to R::Mutex<Vec<ExtEntry>> / &R::Mutex<...>. Per-profile alias selection now governs all four; R68b independent-slot rationale (one Mutex per role so a setter rewriting one chain does not block sibling roles) carries through unchanged since each slot is its own R::Mutex.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1170 (set_ext_chain): `*self.ext_chain_slot(role).lock().unwrap() = entries;` lifts to `R::with_mutex_mut(self.ext_chain_slot(role), |slot| *slot = entries);`.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1188+ (encode_init_with_role): the prior shape held the chain guard across `self.init_ack_params()` (which acquires `inbound_peer_init_caps`). With per-profile mutexes (lwIP critical_section is non-reentrant; embassy_sync re-entry is undefined) this risks deadlock. Pre-f5 captures the InitAck params owned before entering the chain-slot closure; the chain stays inside the closure so encode composes against `&chain` without an extra clone. AP-side semantic is byte-identical (params clone was already owned in the prior shape).",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1217 (encode_open_with_role): chain-slot lock body migrates verbatim; encode_open call moves inside the closure."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean (1.04s rebuild).",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass (encode_init / encode_open / set_ext_chain exercised by layer3_ext_chain_outbound + layer3_inbound_init + session_fsm_real_tcp integration tests).",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent).",
+        "validate_workspace: entries=451 -> 452, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-pre-f6 (next): outbound_mappings Mutex singleton migration. HashMap<u64, String> field; 10-15 .lock() sites across send_push_aliased + send_request_query_aliased + send_declare_subscriber_aliased + resolve_outbound_mapping + Querier::get + R236 set_own_zid composition path. Larger blast radius than any prior pre-f round; consider sub-splitting (pre-f6a struct + helper accessor; pre-f6b transition the actual call sites) if a single round risks exceeding the textbook one-commit boundary.",
+        "R311di-pre-f7: 4 AtomicU64 fields. Two paths to evaluate at entry: (a) extend Runtime trait with R::Atomic GAT + per-profile fetch_add/load/store/cas methods (cleaner, 4+ trait methods), or (b) keep portable_atomic::AtomicU64 raw across profiles (simpler, portable_atomic is already a workspace dep and spans MCU profiles via unstable-portable-atomic-critical-section).",
+        "R311di proper: wz-session-core crate extraction (no_std + alloc) once all R::Mutex / R::Atomic migrations land. ::new constructor sits on the AP-only TokioRuntime impl block so the generic struct migrates to wz-session-core while the concrete constructor + Lua bindings stay in wz-runtime-tokio.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
