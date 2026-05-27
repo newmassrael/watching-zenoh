@@ -88,8 +88,17 @@ use embedded_alloc::LlffHeap as Heap;
 use panic_semihosting as _;
 
 use wz::link_lwip::{ipv4_addr_loopback, LwipLink, LwipUdpSocket};
+
+// R311bq — runtime + time imports gated on native-atomic targets only.
+// thumbv6m (Cortex-M0/M0+) follows the sync-only main path below and
+// does not instantiate `LwipRuntime` / `LwipTime`; gating the imports
+// keeps `cargo clippy -D warnings` clean on the M0 lane (unused-import
+// would otherwise fire).
+#[cfg(target_has_atomic = "32")]
 use wz::runtime_core::Runtime;
+#[cfg(target_has_atomic = "32")]
 use wz::runtime_core::TimeSource;
+#[cfg(target_has_atomic = "32")]
 use wz::runtime_lwip::{ClockSource, LwipRuntime, LwipTime};
 
 // Heap sizing fork per target SRAM budget. mps2 family (M3/M4/M7)
@@ -210,9 +219,18 @@ static GLOBAL_CLOCK: SystickClock = SystickClock::new();
 
 /// Zero-sized `ClockSource` that forwards every `now_us` call to
 /// the shared [`GLOBAL_CLOCK`]. Cheap to clone (unit struct).
+///
+/// R311bq — only used by the async main path (which constructs
+/// `LwipRuntime::new(SystickClockRef)` + `LwipTime::new(&runtime)`).
+/// The sync-only thumbv6m path reads `GLOBAL_CLOCK.now_us()` directly
+/// for any timing it needs (currently none — `wfi()` + the SysTick
+/// interrupt drive cadence), so the impl is gated on native-atomic
+/// targets to keep the M0 build free of unused-symbol warnings.
+#[cfg(target_has_atomic = "32")]
 #[derive(Clone, Copy, Default)]
 struct SystickClockRef;
 
+#[cfg(target_has_atomic = "32")]
 impl ClockSource for SystickClockRef {
     fn now_us(&self) -> u64 {
         GLOBAL_CLOCK.now_us()
@@ -255,14 +273,30 @@ const POLL_BUDGET: u32 = 100;
 fn main() -> ! {
     init_heap();
     GLOBAL_CLOCK.init();
+    let link = LwipLink::init();
+    run(link)
+}
 
+/// Async main path — mps2 family (Cortex-M3/M4/M7/M33). Constructs
+/// `LwipRuntime` + `LwipTime`, spawns an async echo task, drives the
+/// cooperative loop with `wfi()` between SysTick ticks.
+///
+/// R311bq made this branch native-atomic-only because spawn-mode pulls
+/// the full executor (Pin<Box<dyn Future + Send>> task slot + JoinState
+/// Arc + wrapper future state machine) which lives in the heap. With
+/// the default `LwipUdpSocket` (1500-byte payload × 8 queue slots ≈
+/// 12 KB Inner allocation) the spawn-mode path comfortably fits the
+/// 256 KB heap on mps2 SRAM. The microbit `<128, 2>` slim socket +
+/// sync path is the spawn-less twin in the branch below.
+#[cfg(target_has_atomic = "32")]
+fn run(link: LwipLink) -> ! {
     hprintln!("R311bi: lwIP UDP loopback e2e demo starting");
 
     let runtime = LwipRuntime::new(SystickClockRef);
     let time = LwipTime::new(&runtime);
-    let link = LwipLink::init();
 
-    let sock = LwipUdpSocket::bind(&link, ECHO_PORT).expect("bind UDP socket on ANY:5555");
+    let sock: LwipUdpSocket =
+        LwipUdpSocket::bind(&link, ECHO_PORT).expect("bind UDP socket on ANY:5555");
 
     runtime.spawn(echo_task(sock, time));
 
@@ -290,9 +324,76 @@ fn main() -> ! {
     }
 }
 
-/// Spawned task body. Sends one packet to 127.0.0.1:ECHO_PORT and
-/// polls the socket's RX queue for the echo. PASS / FAIL is
-/// signalled via semihosting + `debug::exit`.
+/// Sync-only main path — thumbv6m (Cortex-M0/M0+ / microbit). No
+/// `LwipRuntime`, no `spawn`, no async/await — exercises the same
+/// lwIP UDP loopback path as the async branch but inline so the
+/// 4 KB heap budget fits.
+///
+/// R311bq the heap budget on microbit (nrf51822, 16 KB SRAM total) is
+/// shared with cortex-m-rt + portable-atomic + lwIP MEM_SIZE +
+/// .data/.bss; the wz facade `runtime-lwip` feature would have spawn
+/// allocate a wrapper future + 12 KB `Inner<1500, 8>` rx queue (R311bm
+/// "12 KB BoxFuture" carry, traced to the rx queue rather than the
+/// future state machine). Slim socket `<128, 2>` ≈ 280-byte rx queue
+/// + no spawn path keeps total heap use under 1 KB.
+///
+/// The protocol exchange is identical: send one PAYLOAD to
+/// 127.0.0.1:ECHO_PORT, drain the loopback netif on each iteration,
+/// drain the rx queue, compare. PASS / FAIL semihosted as
+/// `R311bq PASS` / `R311bq FAIL: <reason>` so the Layer Q audit can
+/// distinguish the sync-path PASS from the async-path PASS.
+#[cfg(not(target_has_atomic = "32"))]
+fn run(link: LwipLink) -> ! {
+    hprintln!("R311bq: lwIP UDP loopback e2e demo starting (sync-only)");
+
+    // R311bq slim socket sizing rationale:
+    // - PAYLOAD len = 29 bytes; 128 covers any reasonable echo response.
+    // - Queue depth 2 = one inflight + one buffered; the demo never
+    //   has more than one packet outstanding at a time.
+    // Inner<128, 2> footprint ≈ Datagram<128>(128B + 6B + padding) × 2
+    // + heapless::Queue overhead + NonNull + u32 + PhantomPinned
+    // ≈ 280 bytes versus the default Inner<1500, 8> ≈ 12 KB.
+    let mut sock: LwipUdpSocket<128, 2> =
+        LwipUdpSocket::bind(&link, ECHO_PORT).expect("bind UDP socket on ANY:5555");
+
+    if let Err(e) = sock.send_to(ipv4_addr_loopback(), ECHO_PORT, PAYLOAD) {
+        hprintln!("R311bq FAIL: send_to error {:?}", e);
+        debug::exit(debug::EXIT_FAILURE);
+    }
+
+    // Sync poll budget — POLL_BUDGET iterations at one SysTick (1 ms)
+    // per `wfi()` ≈ 100 ms wall-clock budget, matching the async path.
+    let mut polls_left = POLL_BUDGET;
+    loop {
+        link.poll_loopback();
+        link.check_timeouts();
+        if let Some(dg) = sock.try_recv() {
+            if dg.data.as_slice() == PAYLOAD
+                && dg.src_port == ECHO_PORT
+                && dg.src_addr == ipv4_addr_loopback()
+            {
+                hprintln!("R311bq PASS");
+                debug::exit(debug::EXIT_SUCCESS);
+            }
+            hprintln!("R311bq FAIL: echo mismatch");
+            debug::exit(debug::EXIT_FAILURE);
+        }
+        polls_left = polls_left.saturating_sub(1);
+        if polls_left == 0 {
+            hprintln!("R311bq FAIL: no echo within 100 ms budget");
+            debug::exit(debug::EXIT_FAILURE);
+        }
+        cortex_m::asm::wfi();
+    }
+}
+
+/// Spawned task body for the async main path. Sends one packet to
+/// 127.0.0.1:ECHO_PORT and polls the socket's RX queue for the echo.
+/// PASS / FAIL signalled via semihosting + `debug::exit`.
+///
+/// R311bq native-atomic-only — the sync-path thumbv6m branch does the
+/// same work inline in `run` without going through the executor.
+#[cfg(target_has_atomic = "32")]
 async fn echo_task(mut sock: LwipUdpSocket, time: LwipTime<SystickClockRef>) {
     if let Err(e) = sock.send_to(ipv4_addr_loopback(), ECHO_PORT, PAYLOAD) {
         hprintln!("R311bi FAIL: send_to error {:?}", e);

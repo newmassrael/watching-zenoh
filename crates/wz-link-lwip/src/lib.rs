@@ -77,18 +77,27 @@ use lwip_sys::{
 /// `heapless::Vec` alignment friendliness.
 pub const MAX_DATAGRAM: usize = 1500;
 
-/// Per-socket receive queue depth (R311az-pre D4: overflow drops with
-/// a counter on `LwipUdpSocket::rx_drop_count`). The eight-slot depth
-/// matches the lwipopts.h `MEMP_NUM_PBUF` value so the queue and the
-/// pbuf pool can't deadlock each other under sustained back-pressure.
-const RX_QUEUE_DEPTH: usize = 8;
+/// Default per-socket receive queue depth (R311az-pre D4: overflow
+/// drops with a counter on `LwipUdpSocket::rx_drop_count`). The
+/// eight-slot depth matches the lwipopts.h `MEMP_NUM_PBUF` value so
+/// the queue and the pbuf pool can't deadlock each other under
+/// sustained back-pressure. R311bq promoted from private to public
+/// so deploys with tighter SRAM budgets can instantiate
+/// `LwipUdpSocket<N, Q>` with a smaller `Q`.
+pub const RX_QUEUE_DEPTH: usize = 8;
 
 /// A received UDP datagram captured by the recv callback and routed
 /// to the application via `LwipUdpSocket::try_recv`.
+///
+/// R311bq made the payload capacity a const generic so deploys with a
+/// 16 KB SRAM budget (microbit / nrf51-class) can shrink the in-queue
+/// footprint by picking a smaller `N`. The default `N = MAX_DATAGRAM`
+/// (1500) preserves the R311az-2 public surface for callers that do
+/// not name the generic.
 #[derive(Debug, Clone)]
-pub struct Datagram {
-    /// Payload bytes (length up to [`MAX_DATAGRAM`]).
-    pub data: Vec<u8, MAX_DATAGRAM>,
+pub struct Datagram<const N: usize = MAX_DATAGRAM> {
+    /// Payload bytes (length up to `N`).
+    pub data: Vec<u8, N>,
     /// Source IPv4 address as lwIP stores it (network byte order in
     /// memory; treat as opaque u32 + format via `Ipv4Addr::from(...)`
     /// or by manual byte extraction).
@@ -158,11 +167,15 @@ impl LwipLink {
 }
 
 // Inner state shared between the recv callback and the application
-// thread. Pinned via Pin<Box<Inner>> on the LwipUdpSocket; the
-// callback receives a `*mut Inner` as the udp_pcb's `recv_arg`.
-struct Inner {
+// thread. Pinned via Pin<Box<Inner<N, Q>>> on the LwipUdpSocket; the
+// callback receives a `*mut Inner<N, Q>` as the udp_pcb's `recv_arg`.
+// R311bq: const-generic over the datagram payload capacity `N` and the
+// rx queue slot count `Q` so deploys can shrink the in-queue footprint
+// when SRAM is tight (microbit 16 KB picks `<128, 2>` ~= 280 bytes
+// versus the default `<1500, 8>` ~= 12 KB).
+struct Inner<const N: usize, const Q: usize> {
     pcb: NonNull<udp_pcb>,
-    rx_queue: Queue<Datagram, RX_QUEUE_DEPTH>,
+    rx_queue: Queue<Datagram<N>, Q>,
     rx_drops: u32,
     _pin: PhantomPinned,
 }
@@ -170,26 +183,39 @@ struct Inner {
 // Inner is referenced only by the lwIP single-thread cooperative
 // model; the raw-pointer field rules out automatic Send/Sync. We
 // keep the marker explicit for clarity.
-unsafe impl Send for Inner {}
+unsafe impl<const N: usize, const Q: usize> Send for Inner<N, Q> {}
 
 /// A UDP socket wrapping a single lwIP `udp_pcb`. Owns its receive
-/// queue via `Pin<Box<Inner>>`; Drop unregisters the callback before
-/// removing the pcb.
-pub struct LwipUdpSocket {
-    inner: Pin<Box<Inner>>,
+/// queue via `Pin<Box<Inner<N, Q>>>`; Drop unregisters the callback
+/// before removing the pcb.
+///
+/// R311bq parameters:
+/// - `N` — per-datagram payload capacity in bytes. Default
+///   [`MAX_DATAGRAM`] (1500 — Ethernet MTU minus IP+UDP). Slim deploys
+///   pick a smaller `N` to match the application's known payload size.
+/// - `Q` — receive queue slot count. Default [`RX_QUEUE_DEPTH`] (8 —
+///   matches lwipopts.h `MEMP_NUM_PBUF`). Slim deploys with single-
+///   inflight echo semantics pick `Q = 1` or `Q = 2`.
+///
+/// The default `LwipUdpSocket` (no turbofish) keeps the R311az-2 shape
+/// for code that does not need to slim the footprint.
+pub struct LwipUdpSocket<const N: usize = MAX_DATAGRAM, const Q: usize = RX_QUEUE_DEPTH> {
+    inner: Pin<Box<Inner<N, Q>>>,
 }
 
-unsafe extern "C" fn recv_thunk(
+unsafe extern "C" fn recv_thunk<const N: usize, const Q: usize>(
     arg: *mut c_void,
     _pcb: *mut udp_pcb,
     p: *mut pbuf,
     addr: *const ip_addr_t,
     port: u16_t,
 ) {
-    // SAFETY: `arg` is the same `*mut Inner` we passed to udp_recv
-    // when binding; Inner is `Pin<Box<...>>`-stable and the NO_SYS=1
-    // cooperative model guarantees no concurrent borrow.
-    let inner = unsafe { &mut *(arg as *mut Inner) };
+    // SAFETY: `arg` is the same `*mut Inner<N, Q>` we passed to
+    // udp_recv when binding; Inner is `Pin<Box<...>>`-stable and the
+    // NO_SYS=1 cooperative model guarantees no concurrent borrow. Each
+    // (N, Q) monomorphisation gets its own fn pointer; lwIP receives
+    // the correct one because `bind` passes `recv_thunk::<N, Q>`.
+    let inner = unsafe { &mut *(arg as *mut Inner<N, Q>) };
 
     if p.is_null() {
         return;
@@ -209,8 +235,8 @@ unsafe extern "C" fn recv_thunk(
     // SAFETY: pbuf 'p' is owned by the callback per lwIP contract;
     // tot_len is the total chained payload length in bytes.
     let len = unsafe { (*p).tot_len as usize };
-    let copy_len = core::cmp::min(len, MAX_DATAGRAM);
-    let mut data: Vec<u8, MAX_DATAGRAM> = Vec::new();
+    let copy_len = core::cmp::min(len, N);
+    let mut data: Vec<u8, N> = Vec::new();
     if data.resize_default(copy_len).is_ok() {
         // SAFETY: data has `copy_len` initialised bytes;
         // pbuf_copy_partial writes exactly that many.
@@ -223,7 +249,7 @@ unsafe extern "C" fn recv_thunk(
         pbuf_free(p);
     }
 
-    let datagram = Datagram {
+    let datagram = Datagram::<N> {
         data,
         src_addr,
         src_port: port,
@@ -233,7 +259,7 @@ unsafe extern "C" fn recv_thunk(
     }
 }
 
-impl LwipUdpSocket {
+impl<const N: usize, const Q: usize> LwipUdpSocket<N, Q> {
     /// Bind a fresh UDP pcb to `IP_ADDR_ANY:port`. Registers the recv
     /// callback so incoming datagrams enqueue into the per-socket
     /// receive queue.
@@ -245,7 +271,7 @@ impl LwipUdpSocket {
     /// - [`LinkError::BindFailed`] if `udp_bind` rejects the port
     ///   (e.g. already in use within the lwIP stack).
     pub fn bind(_link: &LwipLink, port: u16) -> Result<Self, LinkError> {
-        let mut inner = Box::pin(Inner {
+        let mut inner: Pin<Box<Inner<N, Q>>> = Box::pin(Inner {
             pcb: NonNull::dangling(),
             rx_queue: Queue::new(),
             rx_drops: 0,
@@ -273,9 +299,11 @@ impl LwipUdpSocket {
         // SAFETY: Inner is pinned; we mutate only the pcb field.
         let inner_mut = unsafe { Pin::get_unchecked_mut(inner.as_mut()) };
         inner_mut.pcb = pcb;
-        let arg = inner_mut as *mut Inner as *mut c_void;
-        // SAFETY: pcb valid, callback fn valid, arg valid for inner's lifetime.
-        unsafe { udp_recv(pcb.as_ptr(), Some(recv_thunk), arg) };
+        let arg = inner_mut as *mut Inner<N, Q> as *mut c_void;
+        // SAFETY: pcb valid, callback fn valid, arg valid for inner's
+        // lifetime. The monomorphised `recv_thunk::<N, Q>` matches the
+        // `Inner<N, Q>` cast inside the callback.
+        unsafe { udp_recv(pcb.as_ptr(), Some(recv_thunk::<N, Q>), arg) };
 
         Ok(Self { inner })
     }
@@ -290,7 +318,7 @@ impl LwipUdpSocket {
         dst_port: u16,
         payload: &[u8],
     ) -> Result<(), LinkError> {
-        let len = payload.len().min(MAX_DATAGRAM) as u16;
+        let len = payload.len().min(N) as u16;
         // SAFETY: pbuf_alloc returns owned pbuf chain or null.
         let p = unsafe { pbuf_alloc(pbuf_layer_PBUF_TRANSPORT, len, pbuf_type_PBUF_RAM) };
         if p.is_null() {
@@ -321,8 +349,9 @@ impl LwipUdpSocket {
     /// `None` if no datagram has arrived since the last call (callers
     /// must drive the lwIP input path via `LwipLink::poll_loopback`
     /// or — on the MCU — netif RX driver callbacks before re-trying).
-    pub fn try_recv(&mut self) -> Option<Datagram> {
-        // SAFETY: Pin<Box<Inner>> stable; mutable borrow scoped here.
+    pub fn try_recv(&mut self) -> Option<Datagram<N>> {
+        // SAFETY: Pin<Box<Inner<N, Q>>> stable; mutable borrow scoped
+        // here.
         let inner = unsafe { Pin::get_unchecked_mut(self.inner.as_mut()) };
         inner.rx_queue.dequeue()
     }
@@ -334,7 +363,7 @@ impl LwipUdpSocket {
     }
 }
 
-impl Drop for LwipUdpSocket {
+impl<const N: usize, const Q: usize> Drop for LwipUdpSocket<N, Q> {
     fn drop(&mut self) {
         // Order: clear callback before removing pcb so a packet
         // arriving mid-drop doesn't dispatch into a free'd Inner.
@@ -379,7 +408,9 @@ mod smoke {
     fn loopback_echo_one_packet() {
         let link = LwipLink::init();
         let port: u16 = 12345;
-        let mut sock = LwipUdpSocket::bind(&link, port).expect("bind ANY:12345");
+        // R311bq: `LwipUdpSocket` (no turbofish) resolves to the
+        // default generic args `<MAX_DATAGRAM, RX_QUEUE_DEPTH>`.
+        let mut sock: LwipUdpSocket = LwipUdpSocket::bind(&link, port).expect("bind ANY:12345");
 
         let payload: &[u8] = b"hello-r311az-2";
         sock.send_to(ipv4_addr_loopback(), port, payload)

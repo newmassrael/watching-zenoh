@@ -589,8 +589,21 @@ domain-transport = [
 # Bare-metal + no_std + UDP unicast + minimal pubsub + literal keyexpr.
 # No discovery (scouting-static config-file only), no query, no
 # liveliness, no wildcards.
+#
+# R311bq aligned this list with atomic store §6.1
+# (feature-inventory--composable-framework-atomic--preset-catalog/
+# 6-presets/6-1-preset-mcu-minimal) by adding `runtime-lwip`. R311bq
+# also lands the microbit Layer Q lane (thumbv6m-none-eabi) as a
+# spawn-less sync-only deploy that actually runs the preset's lwIP
+# UDP path end-to-end on a non-host target. Other §6.1-vs-Cargo
+# feature-list divergences (codec-keep-alive vs codec-keepalive,
+# pubsub-delete + pubsub-encoding + pubsub-timestamp absent from
+# §6.1, etc.) remain as catalog-truthfulness carries for the
+# atomic-feature wire-up debt round; this entry closes the runtime-
+# lwip gap that was blocking the microbit smoke.
 preset-mcu-minimal = [
     "platform-bare-metal",
+    "runtime-lwip",
     "runtime-no-std",
     "transport-link-udp",
     "transport-unicast",

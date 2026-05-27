@@ -752,6 +752,10 @@
         "`routing-client`",
         "`time-ntp64`"
       ],
+      "caveats_bullets": [
+        "R311bq Cargo preset-mcu-minimal에 runtime-lwip 추가 (atomic store §6.1 body의 runtime-lwip 항목과 일치)",
+        "R311bq microbit Q.2 PASS spawn-less sync-only path + slim LwipUdpSocket&lt;128,2&gt;"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-2-preset-mcu-extended": {
@@ -924,7 +928,8 @@
         "R311bj reproducible: bash scripts/run-ci.sh --layer Q then arm-none-eabi-size on the built ELFs.",
         "R311bj footprint: thumbv7em-none-eabihf text=23724 data=4 bss=269916 (mps2-an386 + mps2-an500).",
         "(f) thumbv6m-none-eabi text=23660 data=4 bss=11868 microbit build OK; Q.2 KNOWN_SKIP heap budget",
-        "(g) thumbv8m.main-none-eabi text=24548 data=4 bss=269916 mps2-an505 build OK Q.2 KNOWN_SKIP Lockup"
+        "(g) thumbv8m.main-none-eabi text=24548 data=4 bss=269916 mps2-an505 build OK Q.2 KNOWN_SKIP Lockup",
+        "(h) R311bq thumbv6m text 18584 (-5076 vs 23660); microbit Q.2 PASS sync-only main"
       ],
       "impact_scope": [
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
@@ -20147,6 +20152,84 @@
         "**부채 #8 R303++ atomic field population pending**",
         "**Architectural carries unchanged**: R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter",
         "**Retracted**: north-star Critical path #3 (SCE feature-aware emit cross-repo dependency) — consumer-side ergonomic 으로 격하; alternative path sidecar TOML 또는 codegen CLI flag 도 부채 청산 후 평가"
+      ]
+    },
+    "Round 311bq": {
+      "decision_summary": "R311bq lands spawn-less sync-only main + wz-link-lwip const generic refactor; microbit Q.2 KNOWN_SKIP -> PASS 부채 #1 청산; Cargo preset-mcu-minimal runtime-lwip 추가.",
+      "changes_bullets": [
+        "crates/wz-link-lwip/src/lib.rs: Datagram + LwipUdpSocket + Inner const generic <N, Q>; default <1500,8>",
+        "crates/wz-link-lwip: RX_QUEUE_DEPTH promoted private -> pub for deploy-side slim instantiation",
+        "deploy/mcu-qemu-demo/src/main.rs: cfg(target_has_atomic=32) fork; thumbv6m sync-only run(link) path",
+        "deploy/mcu-qemu-demo/src/main.rs: thumbv6m branch uses LwipUdpSocket<128,2> (~280B vs default ~12KB)",
+        "crates/wz/Cargo.toml: preset-mcu-minimal에 runtime-lwip 추가 (atomic store §6.1 일치)",
+        "scripts/run-ci.sh: Layer Q microbit sub_lane skip -> run (KNOWN_SKIP retired)",
+        "scripts/check-footprint.sh: thumbv6m text baseline 23660 -> 18584 (LTO eliminates async path)"
+      ],
+      "verification_bullets": [
+        "cargo fmt --all --check clean (crates + deploy/mcu-qemu-demo standalone workspace)",
+        "cargo clippy --workspace --all-targets -D warnings clean; deploy clippy thumbv7m + thumbv6m clean",
+        "wz-link-lwip smoke test loopback_echo_one_packet PASS post-refactor (default <1500,8>)",
+        "Layer G 42 lanes PASS (G.1-G.6 × 7 targets; riscv32 G.6 SKIP missing riscv32-unknown-elf-gcc)",
+        "Layer Q microbit Q.2 PASS + mps2-an385/an386/an500 Q.2 PASS no regression",
+        "Layer Q mps2-an505 Q.2 KNOWN_SKIP cortex-m-rt 0.7 Secure-state Lockup (separate carry unchanged)",
+        "footprint thumbv6m text 18584 (+0 vs new baseline); mps2 lanes within ±256 tolerance band",
+        "5 default lanes PASS (Layer 0/A/A2/B/C0/C1/C1b/C2/D/E); pre-push hook gates all five"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link"
+      ],
+      "carry_forward_bullets": [
+        "부채 #1 R311bn-slim-preset RESOLVED at R311bq (const-generic socket + sync-only deploy path)",
+        "부채 #2 R267 Session<R,T> reparam (architectural multi-round; §5.P decision-lock 완료)",
+        "부채 #3 R311g1 ratify 재검토 (long-term large blast radius; #1/#2 후 평가)",
+        "부채 #4 cortex-m-rt 0.8 secure-init survey (mps2-an505 + Cortex-M55 upstream tracking)",
+        "부채 #5 Multi-link non-loopback netif e2e (virtio-net 또는 QEMU TAP; lwIP NIC shim 1-2R)",
+        "부채 #6 atomic feature wire-up 54% reserved + §6.1 Cargo divergences (codec-keepalive 등 mechanical)",
+        "부채 #7 wz-codecs 28 sites facade 통합 audit (small N; 28 -> 14 가능)",
+        "부채 #8 R303++ atomic field population (39 outline-only sub-sections)",
+        "Architectural carries unchanged: R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter"
+      ],
+      "publishable_decision_summary": "R311bq lands spawn-less sync-only main + wz-link-lwip const generic refactor; microbit Q.2 KNOWN_SKIP -> PASS 부채 #1 청산; Cargo preset-mcu-minimal runtime-lwip 추가.",
+      "publishable_changes_bullets": [
+        "crates/wz-link-lwip/src/lib.rs: Datagram + LwipUdpSocket + Inner const generic <N, Q>; default <1500,8>",
+        "crates/wz-link-lwip: RX_QUEUE_DEPTH promoted private -> pub for deploy-side slim instantiation",
+        "deploy/mcu-qemu-demo/src/main.rs: cfg(target_has_atomic=32) fork; thumbv6m sync-only run(link) path",
+        "deploy/mcu-qemu-demo/src/main.rs: thumbv6m branch uses LwipUdpSocket<128,2> (~280B vs default ~12KB)",
+        "crates/wz/Cargo.toml: preset-mcu-minimal에 runtime-lwip 추가 (atomic store §6.1 일치)",
+        "scripts/run-ci.sh: Layer Q microbit sub_lane skip -> run (KNOWN_SKIP retired)",
+        "scripts/check-footprint.sh: thumbv6m text baseline 23660 -> 18584 (LTO eliminates async path)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo fmt --all --check clean (crates + deploy/mcu-qemu-demo standalone workspace)",
+        "cargo clippy --workspace --all-targets -D warnings clean; deploy clippy thumbv7m + thumbv6m clean",
+        "wz-link-lwip smoke test loopback_echo_one_packet PASS post-refactor (default <1500,8>)",
+        "Layer G 42 lanes PASS (G.1-G.6 × 7 targets; riscv32 G.6 SKIP missing riscv32-unknown-elf-gcc)",
+        "Layer Q microbit Q.2 PASS + mps2-an385/an386/an500 Q.2 PASS no regression",
+        "Layer Q mps2-an505 Q.2 KNOWN_SKIP cortex-m-rt 0.7 Secure-state Lockup (separate carry unchanged)",
+        "footprint thumbv6m text 18584 (+0 vs new baseline); mps2 lanes within ±256 tolerance band",
+        "5 default lanes PASS (Layer 0/A/A2/B/C0/C1/C1b/C2/D/E); pre-push hook gates all five"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "부채 #1 R311bn-slim-preset RESOLVED at R311bq (const-generic socket + sync-only deploy path)",
+        "부채 #2 R267 Session<R,T> reparam (architectural multi-round; §5.P decision-lock 완료)",
+        "부채 #3 R311g1 ratify 재검토 (long-term large blast radius; #1/#2 후 평가)",
+        "부채 #4 cortex-m-rt 0.8 secure-init survey (mps2-an505 + Cortex-M55 upstream tracking)",
+        "부채 #5 Multi-link non-loopback netif e2e (virtio-net 또는 QEMU TAP; lwIP NIC shim 1-2R)",
+        "부채 #6 atomic feature wire-up 54% reserved + §6.1 Cargo divergences (codec-keepalive 등 mechanical)",
+        "부채 #7 wz-codecs 28 sites facade 통합 audit (small N; 28 -> 14 가능)",
+        "부채 #8 R303++ atomic field population (39 outline-only sub-sections)",
+        "Architectural carries unchanged: R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter"
       ]
     },
     "Round 311c": {

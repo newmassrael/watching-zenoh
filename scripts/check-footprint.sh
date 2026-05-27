@@ -46,7 +46,15 @@ set -uo pipefail
 # entry — never one without the other (atomic ledger + CI gate
 # must record the same footprint truth).
 declare -A BASELINE_TEXT=(
-    ["thumbv6m-none-eabi"]=23660
+    # R311bq — thumbv6m baseline drops from 23660 -> 18584 (-5076 B)
+    # because the microbit deploy now goes through the sync-only main
+    # branch (cfg(not(target_has_atomic = "32")) in main.rs). The async
+    # path's LwipRuntime + spawn wrapper + executor + timer queue
+    # symbols are no longer referenced from .text, so LTO + dead-code
+    # elimination drops them. The new figure is the honest "lwIP +
+    # cortex-m-rt + portable-atomic + LwipUdpSocket<128, 2> sync
+    # send/recv" baseline for nrf51-class deploys.
+    ["thumbv6m-none-eabi"]=18584
     ["thumbv7m-none-eabi"]=23652
     ["thumbv7em-none-eabihf"]=23724
     ["thumbv8m.main-none-eabi"]=24548
