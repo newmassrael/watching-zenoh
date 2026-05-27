@@ -93,7 +93,7 @@
 #              via the alloc-prelude shim in wz-codecs/src/lib.rs;
 #              hosted callers see no behavioural delta.
 #   Layer Q  — QEMU mps2-an386 UDP loopback e2e demo run (R311be).
-#              Opt-in via `--layer Q` or `WZ_RUN_LAYER_Q=1`. Two
+#              Opt-in via `--layer Q` or `WZ_RUN_LAYER_Q=1`. Three
 #              sub-lanes:
 #                Q.1 build  cargo build --release for thumbv7m-none-
 #                           eabi of deploy/mcu-qemu-demo with
@@ -104,6 +104,19 @@
 #                           asserts on the semihost SYS_EXIT exit
 #                           code (PASS=0 / FAIL=1). Requires
 #                           qemu-system-arm; SKIPs if absent.
+#                Q.3 footprint (R311bl) — `arm-none-eabi-size` on
+#                           the built ELF asserts text + data stay
+#                           within ±256 bytes of the R311bj caveat
+#                           baseline. Per target-triple (not per
+#                           machine) since same-triple machines emit
+#                           byte-identical binaries; deduped on the
+#                           first sub-lane that built a given triple.
+#                           SKIPs if `arm-none-eabi-size` is absent.
+#                           Composable-framework footprint regression
+#                           mechanical gate — silent ROM creep caught
+#                           at the Layer Q invocation that introduced
+#                           it instead of surfacing rounds later when
+#                           someone reads the §6.7 caveat.
 #              Each sub-lane SKIPs gracefully on toolchain absence.
 #              Phase W ladder FULL closure mantissa: composable-
 #              framework MCU stack RUNS on a non-host target end-to-
@@ -785,6 +798,11 @@ layer_q_qemu_mcu_e2e() {
 
     local any_built=0
     local fail=0
+    # Q.3 dedup — record which target-triples have already been
+    # footprint-checked so two machines that share a triple
+    # (mps2-an386 + mps2-an500 both thumbv7em-none-eabihf) do not
+    # measure the byte-identical ELF twice.
+    declare -A footprint_checked=()
 
     for lane in "${sub_lanes[@]}"; do
         local machine="${lane%%:*}"
@@ -817,25 +835,34 @@ layer_q_qemu_mcu_e2e() {
         if [[ "$has_qemu" -ne 1 ]]; then
             echo "  Q.2.${machine} run SKIP (qemu-system-arm not on PATH;" \
                  "install qemu-system-arm)"
-            continue
+        else
+            local bin
+            bin="deploy/mcu-qemu-demo/target/${target}/release/mcu-qemu-demo"
+
+            # Q.2.<machine> run — boot the ELF in QEMU. Semihost
+            # SYS_EXIT propagates the demo's PASS/FAIL into the QEMU
+            # process exit code (0 / 1); a 10s outer timeout bounds
+            # a runaway loop so a hung demo does not block CI
+            # indefinitely.
+            if timeout 10 qemu-system-arm \
+                -cpu "$cpu" -machine "$machine" \
+                -nographic -semihosting-config enable=on,target=native \
+                -kernel "$bin" >/dev/null 2>&1; then
+                echo "  Q.2.${machine} run mcu-qemu-demo via qemu-system-arm ${machine} PASS"
+            else
+                echo "  Q.2.${machine} run mcu-qemu-demo via qemu-system-arm ${machine} FAIL" >&2
+                fail=1
+            fi
         fi
 
-        local bin
-        bin="deploy/mcu-qemu-demo/target/${target}/release/mcu-qemu-demo"
-
-        # Q.2.<machine> run — boot the ELF in QEMU. Semihost
-        # SYS_EXIT propagates the demo's PASS/FAIL into the QEMU
-        # process exit code (0 / 1); a 10s outer timeout bounds
-        # a runaway loop so a hung demo does not block CI
-        # indefinitely.
-        if timeout 10 qemu-system-arm \
-            -cpu "$cpu" -machine "$machine" \
-            -nographic -semihosting-config enable=on,target=native \
-            -kernel "$bin" >/dev/null 2>&1; then
-            echo "  Q.2.${machine} run mcu-qemu-demo via qemu-system-arm ${machine} PASS"
-        else
-            echo "  Q.2.${machine} run mcu-qemu-demo via qemu-system-arm ${machine} FAIL" >&2
-            fail=1
+        # Q.3.<target> footprint — single check per target-triple.
+        # Tolerance band gates ROM-axis silent growth; bss is
+        # informational (HEAP_SIZE dominated, per R311bj caveat (c)).
+        if [[ -z "${footprint_checked[$target]:-}" ]]; then
+            footprint_checked[$target]=1
+            if ! bash scripts/check-footprint.sh "$target"; then
+                fail=1
+            fi
         fi
     done
 
