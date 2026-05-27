@@ -1644,16 +1644,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
         };
         Ok(self.declare_subscriber(resolved, options, callback))
     }
-}
 
-// R311de — split point: declare_subscriber + declare_subscriber_aliased
-// migrated to R::with_mutex_mut + lifted to the R-generic block above.
-// Subscriber impl block (id / keyexpr / options accessors + undeclare)
-// is fully R-generic. The remaining declare_* surface (Queryable +
-// LivelinessToken + LivelinessSubscriber registries) still calls
-// observer.lock().expect(...) at registration time and stays on the
-// AP-bound block until R311df+ migrates them.
-impl<T: TimeSource> Session<TokioRuntime, T> {
     /// R246 — declare a [`Queryable`] for `keyexpr` + `options` that
     /// fires `callback` on every matching inbound `Request(Query)`.
     /// Pub/sub mirror of [`Self::declare_subscriber`] on the
@@ -1686,16 +1677,18 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         keyexpr: impl Into<String>,
         options: QueryableOptions,
         callback: impl FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>) + Send + 'static,
-    ) -> Result<Queryable<TokioRuntime, T>, QueryableAliasError> {
+    ) -> Result<Queryable<R, T>, QueryableAliasError> {
         #[cfg(feature = "query-queryable")]
         {
             let keyexpr_string = keyexpr.into();
-            let id = self
-                .observer
-                .lock()
-                .expect("Session observer mutex poisoned — a queryable callback panicked")
-                .queryables
-                .register_with_locality(keyexpr_string.clone(), options.allowed_origin, callback);
+            // R311df — observer access via R::with_mutex_mut closure form.
+            let id = R::with_mutex_mut(&self.observer, |observer| {
+                observer.queryables.register_with_locality(
+                    keyexpr_string.clone(),
+                    options.allowed_origin,
+                    callback,
+                )
+            });
             Ok(Queryable {
                 session: self.clone(),
                 id,
@@ -1729,7 +1722,7 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         inline_suffix: Option<&str>,
         options: QueryableOptions,
         callback: impl FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>) + Send + 'static,
-    ) -> Result<Queryable<TokioRuntime, T>, QueryableAliasError> {
+    ) -> Result<Queryable<R, T>, QueryableAliasError> {
         #[cfg(feature = "query-queryable")]
         {
             let base = self
@@ -1757,7 +1750,15 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
             Err(QueryableAliasError::FeatureDisabled)
         }
     }
+}
 
+// R311df — split point: declare_queryable + declare_queryable_aliased
+// migrated to R::with_mutex_mut + lifted to the R-generic block above.
+// Queryable impl block (accessors + undeclare) is fully R-generic. The
+// remaining declare_* surface (LivelinessToken + LivelinessSubscriber)
+// still calls observer.lock().expect(...) at registration time and
+// stays on the AP-bound block until R311dg+ migrates them.
+impl<T: TimeSource> Session<TokioRuntime, T> {
     /// R248 — declare a [`LivelinessToken`] on `keyexpr` + `options`,
     /// emitting a `Declare(DeclToken)` on the outbound link so the
     /// peer's liveliness-token table can fan the declaration out to
@@ -3046,7 +3047,7 @@ pub struct Queryable<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
     options: QueryableOptions,
 }
 
-impl<T: TimeSource> Queryable<TokioRuntime, T> {
+impl<R: Runtime, T: TimeSource> Queryable<R, T> {
     /// The stable id assigned by
     /// [`crate::query::QueryableRegistry::register_with_locality`].
     pub fn id(&self) -> QueryableId {
@@ -3069,13 +3070,10 @@ impl<T: TimeSource> Queryable<TokioRuntime, T> {
     /// the [`Drop`] impl will not run a second time. Mirrors
     /// [`Subscriber::undeclare`].
     pub fn undeclare(self) -> bool {
-        let removed = self
-            .session
-            .observer
-            .lock()
-            .expect("Session observer mutex poisoned — a queryable callback panicked")
-            .queryables
-            .unregister(self.id);
+        // R311df — observer access via R::with_mutex_mut closure form.
+        let removed = R::with_mutex_mut(&self.session.observer, |observer| {
+            observer.queryables.unregister(self.id)
+        });
         std::mem::forget(self);
         removed
     }

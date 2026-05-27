@@ -23175,6 +23175,56 @@
         "Architectural carries unchanged: R311ca debt #6 wire-up 19% (unblocked by Session extraction), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311df": {
+      "decision_summary": "R311df — declare_queryable + declare_queryable_aliased + Queryable pipeline fully R-generic; observer.lock at registration + Queryable::undeclare migrated to R::with_mutex_mut",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session::declare_queryable body migrates the query-queryable branch's observer access (queryables.register_with_locality) to R::with_mutex_mut closure form. Return type lifts to Result<Queryable<R, T>, QueryableAliasError>.",
+        "session.rs: Session::declare_queryable_aliased return type lifts to Result<Queryable<R, T>, QueryableAliasError>; body delegates to declare_queryable after mapping resolution.",
+        "session.rs: Queryable impl block lifts from impl<T: TimeSource> Queryable<TokioRuntime, T> to impl<R: Runtime, T: TimeSource> Queryable<R, T>. Queryable::undeclare body migrates the manual lock/unregister/forget pattern to R::with_mutex_mut closure form.",
+        "session.rs: impl-block split point moves from after declare_subscriber_aliased (R311de boundary) to after declare_queryable_aliased. The R-generic block now carries 19 methods."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=438 -> 439, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311dg (next): declare_token + declare_token_aliased + LivelinessToken impl block lift. The Liveliness*Token surface emits a Declare(DeclToken) wire frame via self.actions + registers the token id via observer.lock(); both ops migrate to closure form. Body is larger than declare_subscriber / declare_queryable (handshake-gate logic) but follows the same R::with_mutex_mut pattern.",
+        "R311dh: declare_liveliness_subscriber + declare_liveliness_subscriber_aliased + LivelinessSubscriber impl block lift. Last cluster before the AP-bound block empties entirely.",
+        "Session crate extraction (R311cv carry): AP block now carries 16 remaining methods (down from 18 at R311de). Block continues to shrink each round; trailing rounds extract session.rs + helpers to wz-session-core no_std crate.",
+        "Architectural carries unchanged: R311ca debt #6 wire-up 19% (unblocked by Session extraction), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311df — declare_queryable + declare_queryable_aliased + Queryable pipeline fully R-generic; observer.lock at registration + Queryable::undeclare migrated to R::with_mutex_mut",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session::declare_queryable body migrates the query-queryable branch's observer access (queryables.register_with_locality) to R::with_mutex_mut closure form. Return type lifts to Result<Queryable<R, T>, QueryableAliasError>.",
+        "session.rs: Session::declare_queryable_aliased return type lifts to Result<Queryable<R, T>, QueryableAliasError>; body delegates to declare_queryable after mapping resolution.",
+        "session.rs: Queryable impl block lifts from impl<T: TimeSource> Queryable<TokioRuntime, T> to impl<R: Runtime, T: TimeSource> Queryable<R, T>. Queryable::undeclare body migrates the manual lock/unregister/forget pattern to R::with_mutex_mut closure form.",
+        "session.rs: impl-block split point moves from after declare_subscriber_aliased (R311de boundary) to after declare_queryable_aliased. The R-generic block now carries 19 methods."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=438 -> 439, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311dg (next): declare_token + declare_token_aliased + LivelinessToken impl block lift. The Liveliness*Token surface emits a Declare(DeclToken) wire frame via self.actions + registers the token id via observer.lock(); both ops migrate to closure form. Body is larger than declare_subscriber / declare_queryable (handshake-gate logic) but follows the same R::with_mutex_mut pattern.",
+        "R311dh: declare_liveliness_subscriber + declare_liveliness_subscriber_aliased + LivelinessSubscriber impl block lift. Last cluster before the AP-bound block empties entirely.",
+        "Session crate extraction (R311cv carry): AP block now carries 16 remaining methods (down from 18 at R311de). Block continues to shrink each round; trailing rounds extract session.rs + helpers to wz-session-core no_std crate.",
+        "Architectural carries unchanged: R311ca debt #6 wire-up 19% (unblocked by Session extraction), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
