@@ -715,41 +715,42 @@
       "title": "§6.1 preset-mcu-minimal v0.1.0",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
-      "intent": "Smallest viable MCU deployment — zenoh-pico client-mode parity at minimum footprint (bare-metal + lwIP + UDP + minimal pubsub). 34 atomic features.",
+      "intent": "Smallest viable MCU deployment — zenoh-pico client-mode parity at minimum footprint (bare-metal + lwIP + UDP + minimal pubsub). 35 atomic features.",
       "outputs_bullets": [
         "`platform-bare-metal`",
         "`runtime-lwip`",
         "`runtime-no-std`",
-        "`transport-unicast`",
         "`transport-link-udp`",
+        "`transport-unicast`",
         "`transport-keepalive`",
-        "`locator-udp`",
-        "`scouting-active`",
+        "`transport-batching`",
         "`session-unicast-open`",
-        "`link-frame`",
-        "`link-fragment`",
-        "`link-batching`",
-        "`keyexpr-literal`",
-        "`keyexpr-canon`",
-        "`declare-keyexpr`",
-        "`declare-subscriber`",
-        "`declare-undeclare`",
-        "`pubsub-put`",
-        "`pubsub-sample`",
-        "`encoding-empty`",
-        "`encoding-utf8`",
-        "`encoding-bytes`",
-        "`codec-scout`",
-        "`codec-hello`",
+        "`session-unicast-accept`",
+        "`codec-frame`",
+        "`codec-keep-alive`",
         "`codec-init-body`",
         "`codec-open-body`",
         "`codec-close`",
-        "`codec-keep-alive`",
-        "`codec-frame`",
-        "`codec-fragment`",
-        "`codec-declare`",
         "`codec-push`",
+        "`codec-declare`",
+        "`declare-subscriber`",
+        "`declare-undeclare`",
+        "`pubsub-put`",
+        "`pubsub-delete`",
+        "`pubsub-sample`",
+        "`pubsub-encoding`",
+        "`pubsub-timestamp`",
+        "`encoding-bytes`",
+        "`encoding-empty`",
+        "`encoding-utf8`",
+        "`keyexpr-literal`",
+        "`keyexpr-canon`",
+        "`keyexpr-includes`",
+        "`keyexpr-intersect`",
+        "`locator-udp`",
         "`routing-client`",
+        "`scouting-static`",
+        "`time-system-clock`",
         "`time-ntp64`"
       ],
       "caveats_bullets": [
@@ -20392,6 +20393,52 @@
         "부채 #6 wire-up 54% 부분 R311ca audit + R311cb+ 도메인별 mechanical wire-up",
         "부채 #8 §6.x 4 sub-sections close at R311bu/bw/bx/by; 35 outline-only remainder carry",
         "Architectural carries unchanged: R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter"
+      ]
+    },
+    "Round 311bt": {
+      "decision_summary": "R311bt §6.1 preset-mcu-minimal outputs alignment: 17 divergence resolved to Cargo ground truth; intent 34→35 features.",
+      "changes_bullets": [
+        "set_section_outputs §6.1: atomic 34 → 35 features matching Cargo preset-mcu-minimal exact order",
+        "atomic-only 8 removed: scouting-active / link-frame / link-fragment / link-batching / declare-keyexpr / codec-scout / codec-hello / codec-fragment",
+        "Cargo-only 9 added: transport-batching / session-unicast-accept / pubsub-delete / pubsub-encoding / pubsub-timestamp / keyexpr-includes / keyexpr-intersect / scouting-static / time-system-clock",
+        "set_section_intent §6.1: '34 atomic features' → '35 atomic features' (R311bs measured count)",
+        "Bullet order matches crates/wz/Cargo.toml preset-mcu-minimal definition line 604-640 (Cargo-truth stable order)"
+      ],
+      "verification_bullets": [
+        "query_section §6.1 전후: body outputs 35 entries / intent '35 atomic features' 되었음 확인",
+        "validate_workspace: entries=400→401 sections=256 T1=0 RT=13/13 GENERATED.md=sync; no new T1/T2/T3 violation",
+        "Decision-only mutation: no Cargo.toml edit / no source edit; Layer 0/A/B/C/D/E/G/Q untouched",
+        "Cargo-truth alignment audit: outputs_bullets line-for-line matches Cargo preset-mcu-minimal entries (35 == 35)",
+        "R311bs carry #1 closes mechanically"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal"
+      ],
+      "carry_forward_bullets": [
+        "R311bu next: §6.2 atomic body transcribe Cargo preset-mcu-extended 56 features",
+        "R311bs cascade continues R311bu-bz; 부채 #6 catalog truthfulness incremental closure"
+      ],
+      "publishable_decision_summary": "R311bt §6.1 preset-mcu-minimal outputs alignment: 17 divergence resolved to Cargo ground truth; intent 34→35 features.",
+      "publishable_changes_bullets": [
+        "set_section_outputs §6.1: atomic 34 → 35 features matching Cargo preset-mcu-minimal exact order",
+        "atomic-only 8 removed: scouting-active / link-frame / link-fragment / link-batching / declare-keyexpr / codec-scout / codec-hello / codec-fragment",
+        "Cargo-only 9 added: transport-batching / session-unicast-accept / pubsub-delete / pubsub-encoding / pubsub-timestamp / keyexpr-includes / keyexpr-intersect / scouting-static / time-system-clock",
+        "set_section_intent §6.1: '34 atomic features' → '35 atomic features' (R311bs measured count)",
+        "Bullet order matches crates/wz/Cargo.toml preset-mcu-minimal definition line 604-640 (Cargo-truth stable order)"
+      ],
+      "publishable_verification_bullets": [
+        "query_section §6.1 전후: body outputs 35 entries / intent '35 atomic features' 되었음 확인",
+        "validate_workspace: entries=400→401 sections=256 T1=0 RT=13/13 GENERATED.md=sync; no new T1/T2/T3 violation",
+        "Decision-only mutation: no Cargo.toml edit / no source edit; Layer 0/A/B/C/D/E/G/Q untouched",
+        "Cargo-truth alignment audit: outputs_bullets line-for-line matches Cargo preset-mcu-minimal entries (35 == 35)",
+        "R311bs carry #1 closes mechanically"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311bu next: §6.2 atomic body transcribe Cargo preset-mcu-extended 56 features",
+        "R311bs cascade continues R311bu-bz; 부채 #6 catalog truthfulness incremental closure"
       ]
     },
     "Round 311c": {
