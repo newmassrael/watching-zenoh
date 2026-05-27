@@ -44,6 +44,14 @@ pub mod session_glue;
 /// registrations store the canonical form a peer would emit on the
 /// wire. See `keyexpr_canon` module doc comment for the scope (no
 /// lowercase / no NFC — pure structural) and the call-site wiring.
+// R311cf — keyexpr-canon gates the structural canonicalization mirror
+// (mirrors zenoh-pico's `_z_keyexpr_canonize`). cfg-off: the module
+// is unavailable; callers that need canonical form must construct
+// keyexprs already in canonical shape. The other 7 keyexpr-* features
+// (-literal, -mapping, -intersect, -includes, -wildcard-*, -dollar-star)
+// are cluster-wide behaviors with no single anchor site — carried for
+// per-site wire-up in a follow-up cascade.
+#[cfg(feature = "keyexpr-canon")]
 pub mod keyexpr_canon;
 
 /// R223 — zenoh-style locality filter for subscribers and queryables.

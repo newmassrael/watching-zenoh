@@ -126,6 +126,7 @@ default = [
     "pubsub-timestamp",
     "session-unicast-open",
     "session-unicast-accept",
+    "keyexpr-canon",
 ]
 liveliness-token = ["declare-token", "declare-undeclare"]
 liveliness-subscriber = ["declare-interest", "declare-final"]
@@ -332,6 +333,14 @@ pubsub-timestamp = []
 # resumable, stateless-accept) stay declaration-only at wz facade.
 session-unicast-open = []
 session-unicast-accept = []
+# R311cf — keyexpr domain wire-up. 1 atomic feature initially gated
+# at the wz-runtime-tokio level (Cargo authoring intent "all active"
+# updated to "8 atomic, 1 active / 7 cluster-deferred" per R311cf
+# audit). Other 7 keyexpr-* features are cluster-wide behaviors with
+# no single anchor cfg site — follow-up cascade per-site wire-up.
+#   keyexpr-canon — `pub mod keyexpr_canon` (structural canonicalize
+#                   mirror of zenoh-pico `_z_keyexpr_canonize`).
+keyexpr-canon = []
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }

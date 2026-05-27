@@ -763,6 +763,30 @@
       "title": "§5.6 Keyexpr",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Keyexpr domain catalog: 8 atomic features (1 active wired keyexpr-canon module gate, 7 cluster-deferred for per-site wire-up).",
+      "rationale_bullets": [
+        "Keyexpr is a cluster-wide concern: matchers + canonicalize + mapping table all touch many files.",
+        "keyexpr-canon has a single anchor (pub mod keyexpr_canon) so cfg-gate is mechanical.",
+        "Other 7 features are spread across pubsub.rs / session_glue.rs / declare/ — no single anchor.",
+        "Cargo 'all active' comment corrected to '1 active / 7 cluster-deferred' per R311cf audit.",
+        "Follow-up cascade lands per-site wire-up once anchor functions stabilize."
+      ],
+      "outputs_bullets": [
+        "Active set (1): keyexpr-canon (R311cf wire-up).",
+        "keyexpr-canon gates `pub mod keyexpr_canon` declaration in lib.rs.",
+        "Cluster-deferred (7): -literal, -mapping, -intersect, -includes, -dollar-star.",
+        "Cluster-deferred (cont): -wildcard-single, -wildcard-double.",
+        "Each deferred feature has source behavior across 4+ files; per-site wire-up pending.",
+        "Cargo comment updated 'all active' -> '1 active / 7 cluster-deferred'."
+      ],
+      "caveats_bullets": [
+        "keyexpr-canon cfg-off: callers must pre-canonicalize keyexpr strings (no module access).",
+        "7 cluster-deferred features have source behavior but no single cfg anchor (R311 carry)."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow": {
@@ -21638,6 +21662,50 @@
         "Locator URI parser carry: future round introduces scheme://host:port parsing as a single feature cluster.",
         "Cargo comment honesty: R311ce establishes 'audit confirms estimate' pattern for upcoming cascades.",
         "R311ca debt #6 wire-up progress: unchanged (audit-only); 43/161 wired (26%); 11 domains 0%-wired (locator stays in this bucket but ratified)."
+      ]
+    },
+    "Round 311cf": {
+      "decision_summary": "R311cf keyexpr domain wire-up — keyexpr-canon module-level cfg-gate; 7 cluster-deferred features carried for per-site wire-up.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/Cargo.toml: keyexpr-canon feature + default-on entry; cluster-deferred status documented.",
+        "crates/wz/Cargo.toml: keyexpr-canon forwards wz-runtime-tokio?/keyexpr-canon; 'all active' comment updated to '1 active / 7 cluster-deferred'.",
+        "crates/wz-runtime-tokio/src/lib.rs: pub mod keyexpr_canon cfg(feature='keyexpr-canon') gate.",
+        "§5.6 keyexpr catalog body: intent + 5 rationale + 5 outputs + 2 caveats + impact_scope."
+      ],
+      "verification_bullets": [
+        "Audit verification: keyexpr-canon 1 cfg site at lib.rs.",
+        "cargo check + clippy --all-targets -D warnings + fmt --check + test -p wz-runtime-tokio --lib (593/593): all pass.",
+        "validate_workspace baseline: entries 412 -> 413, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311cg next: encoding 7 features cascade.",
+        "Keyexpr cluster-deferred (7): -literal, -mapping, -intersect, -includes, -dollar-star, -wildcard-single, -wildcard-double — per-site cfg cascade in follow-up round.",
+        "R311ca debt #6 wire-up progress: 43 -> 44 wired (26% -> 27%); 11 domains 0%-wired -> 10 (keyexpr partial)."
+      ],
+      "publishable_decision_summary": "R311cf keyexpr domain wire-up — keyexpr-canon module-level cfg-gate; 7 cluster-deferred features carried for per-site wire-up.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/Cargo.toml: keyexpr-canon feature + default-on entry; cluster-deferred status documented.",
+        "crates/wz/Cargo.toml: keyexpr-canon forwards wz-runtime-tokio?/keyexpr-canon; 'all active' comment updated to '1 active / 7 cluster-deferred'.",
+        "crates/wz-runtime-tokio/src/lib.rs: pub mod keyexpr_canon cfg(feature='keyexpr-canon') gate.",
+        "§5.6 keyexpr catalog body: intent + 5 rationale + 5 outputs + 2 caveats + impact_scope."
+      ],
+      "publishable_verification_bullets": [
+        "Audit verification: keyexpr-canon 1 cfg site at lib.rs.",
+        "cargo check + clippy --all-targets -D warnings + fmt --check + test -p wz-runtime-tokio --lib (593/593): all pass.",
+        "validate_workspace baseline: entries 412 -> 413, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311cg next: encoding 7 features cascade.",
+        "Keyexpr cluster-deferred (7): -literal, -mapping, -intersect, -includes, -dollar-star, -wildcard-single, -wildcard-double — per-site cfg cascade in follow-up round.",
+        "R311ca debt #6 wire-up progress: 43 -> 44 wired (26% -> 27%); 11 domains 0%-wired -> 10 (keyexpr partial)."
       ]
     },
     "Round 311d": {
