@@ -23521,6 +23521,74 @@
         "Cap: append v2 = 200 on decision_summary; publishable setters = 100 per bullet."
       ]
     },
+    "Round 311di-4": {
+      "decision_summary": "R311di-4 sample.rs (917 lines) + Reliability migrate to wz-session-core; non_exhaustive Sample forces pubsub.rs to constructor chain.",
+      "changes_bullets": [
+        "crates/wz-session-core/Cargo.toml: add wz-codecs path dep with default-features=false features=alloc.",
+        "crates/wz-session-core/src/sample.rs: 917 lines moved verbatim plus alloc::string and alloc::vec imports.",
+        "crates/wz-session-core/src/reliability.rs: new 44-line file with Reliability enum + from_reliable_bool helper.",
+        "crates/wz-session-core/src/lib.rs: pub mod sample alloc-gated; pub mod reliability unconditional.",
+        "crates/wz-runtime-tokio/src/sample.rs: deleted (917 lines removed).",
+        "wz-runtime-tokio/src/lib.rs: Reliability enum body deleted; pub use wz_session_core re-export replaces it.",
+        "wz-runtime-tokio/src/lib.rs: sample mod declaration replaced with pub use wz_session_core::sample re-export.",
+        "wz-runtime-tokio/src/pubsub.rs: dispatch_push struct-literal Sample build replaced with new_put or new_del constructor chain.",
+        "Sample::with_timestamp / with_encoding / with_qos / with_attachment / with_source_info / with_reliability used.",
+        "Rationale: non_exhaustive Sample blocks struct literals from outside the defining crate; constructor chain bridges that.",
+        "Per Sample doc comment intra-crate carve-out: pubsub was the intended struct-literal callsite under the old layout.",
+        "9 external callers (tests + wz-integration-tests + wz-ap-demo) reach Reliability via wz_runtime_tokio re-export verbatim."
+      ],
+      "verification_bullets": [
+        "cargo clean -p wz-runtime-tokio -p wz-session-core to drop stale incremental cache before the verification sweep.",
+        "cargo check workspace all-targets: clean across all 6 workspace member crates.",
+        "scripts/run-ci.sh Layer 0..E: all pass; Layer F SKIP opt-in; Layer Q SKIP opt-in.",
+        "scripts/run-ci.sh --layer G across 7 MCU targets plus RISC-V IMAC: 48 PASS plus 1 SKIP (gcc absent).",
+        "G.1 through G.6 OK for thumbv6m thumbv7m thumbv7em thumbv8m.base thumbv8m.main thumbv8m.main-eabihf riscv32imac.",
+        "validate_workspace expected entries 458 to 459, sections 256, T1 orphan 0, RT 13/13, GENERATED.md sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-5 (next): reply.rs (1602 lines) migration; depends on sample types already migrated.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 sec 8 SCE cross-repo.",
+        "Q_B/Q_E codec slots, Phase W full lwIP, R299 carries, R300, R301 sec 7, R304, keyexpr_canon proptest filter continue.",
+        "Push deferred per CLAUDE.md never push without explicit consent; local lands only this round."
+      ],
+      "publishable_decision_summary": "R311di-4 sample.rs (917 lines) + Reliability migrate to wz-session-core; non_exhaustive Sample forces pubsub.rs to constructor chain.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/Cargo.toml: add wz-codecs path dep with default-features=false features=alloc.",
+        "crates/wz-session-core/src/sample.rs: 917 lines moved verbatim plus alloc::string and alloc::vec imports.",
+        "crates/wz-session-core/src/reliability.rs: new 44-line file with Reliability enum + from_reliable_bool helper.",
+        "crates/wz-session-core/src/lib.rs: pub mod sample alloc-gated; pub mod reliability unconditional.",
+        "crates/wz-runtime-tokio/src/sample.rs: deleted (917 lines removed).",
+        "wz-runtime-tokio/src/lib.rs: Reliability enum body deleted; pub use wz_session_core re-export replaces it.",
+        "wz-runtime-tokio/src/lib.rs: sample mod declaration replaced with pub use wz_session_core::sample re-export.",
+        "wz-runtime-tokio/src/pubsub.rs: dispatch_push struct-literal Sample build replaced with new_put or new_del constructor chain.",
+        "Sample::with_timestamp / with_encoding / with_qos / with_attachment / with_source_info / with_reliability used.",
+        "Rationale: non_exhaustive Sample blocks struct literals from outside the defining crate; constructor chain bridges that.",
+        "Per Sample doc comment intra-crate carve-out: pubsub was the intended struct-literal callsite under the old layout.",
+        "9 external callers (tests + wz-integration-tests + wz-ap-demo) reach Reliability via wz_runtime_tokio re-export verbatim."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clean -p wz-runtime-tokio -p wz-session-core to drop stale incremental cache before the verification sweep.",
+        "cargo check workspace all-targets: clean across all 6 workspace member crates.",
+        "scripts/run-ci.sh Layer 0..E: all pass; Layer F SKIP opt-in; Layer Q SKIP opt-in.",
+        "scripts/run-ci.sh --layer G across 7 MCU targets plus RISC-V IMAC: 48 PASS plus 1 SKIP (gcc absent).",
+        "G.1 through G.6 OK for thumbv6m thumbv7m thumbv7em thumbv8m.base thumbv8m.main thumbv8m.main-eabihf riscv32imac.",
+        "validate_workspace expected entries 458 to 459, sections 256, T1 orphan 0, RT 13/13, GENERATED.md sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-5 (next): reply.rs (1602 lines) migration; depends on sample types already migrated.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 sec 8 SCE cross-repo.",
+        "Q_B/Q_E codec slots, Phase W full lwIP, R299 carries, R300, R301 sec 7, R304, keyexpr_canon proptest filter continue.",
+        "Push deferred per CLAUDE.md never push without explicit consent; local lands only this round."
+      ]
+    },
     "Round 311di-pre-a": {
       "decision_summary": "R311di-pre-a — wz-runtime-tokio adds hashbrown + portable-atomic deps; session_glue.rs HashMap + AtomicU64 imports route through them; first step toward wz-session-core no_std move-readiness.",
       "changes_bullets": [

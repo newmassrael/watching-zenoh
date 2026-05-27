@@ -48,6 +48,11 @@ alloc = []
 
 [dependencies]
 wz-runtime-core = { path = "../wz-runtime-core" }
+# R311di-4 — wz-codecs needed by sample.rs for `wz_codecs::ext_entry`
+# projection helpers (extract_qos / extract_attachment / extract_source_info).
+# default-features = false + features = ["alloc"] mirrors wz-runtime-tokio's
+# baseline so MCU profiles stay heap-aware but std-free.
+wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc"] }
 
 [lints]
 workspace = true

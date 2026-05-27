@@ -54,6 +54,9 @@
 //! [`extract_qos`], [`extract_attachment`], and [`extract_source_info`]
 //! to project the relevant extension entries into the typed fields.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
 
 /// Application-level mirror of [`wz_codecs::timestamp::Timestamp`].
@@ -273,7 +276,7 @@ impl SourceInfo {
 // classification share a single typed surface. Re-export keeps the
 // sample-module path stable for callers that already imported through
 // here.
-pub use crate::Reliability;
+pub use crate::reliability::Reliability;
 
 /// Application-layer view of a single inbound Push record.
 ///
@@ -545,6 +548,7 @@ fn read_vle_u64(bytes: &[u8]) -> Option<(u64, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn sample_kind_numeric_repr_matches_zenoh_pico() {
