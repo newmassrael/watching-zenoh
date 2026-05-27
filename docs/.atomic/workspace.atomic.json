@@ -886,7 +886,8 @@
       "caveats_bullets": [
         "session-unicast-open OFF: FSM Initiator role trips `function not found` at send_init_syn.",
         "session-unicast-accept OFF: FSM Acceptor role trips `function not found` at send_init_ack.",
-        "Both features default-on so AP path binds both sides; deploy can disable one for asymmetric profile."
+        "Both features default-on so AP path binds both sides; deploy can disable one for asymmetric profile.",
+        "R311cn audit: 7 reserved 0 cfg (extauth/extcompression/extqos/extshm/multi/resume/stateless)."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
