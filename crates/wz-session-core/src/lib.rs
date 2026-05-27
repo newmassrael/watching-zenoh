@@ -90,3 +90,10 @@ pub mod network_message;
 /// machinery that constructs these values.
 #[cfg(feature = "alloc")]
 pub mod driver_loop;
+
+/// R310.5a / R311di-13 — `resolve_wireexpr` peer-keyexpr-table
+/// lookup shared across the four remote-declaration registries.
+/// Pure HashMap + Wireexpr projection; alloc-gated (returns
+/// `Option<String>`).
+#[cfg(feature = "alloc")]
+pub mod wireexpr_resolve;

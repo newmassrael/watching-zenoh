@@ -77,6 +77,11 @@ wz-codecs = { path = "../wz-codecs", default-features = false, features = ["allo
 # declared direct so the import path `sce_forge_runtime::codec::CodecError`
 # resolves without going through wz-codecs's namespace.
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-features = false }
+# R311di-13 — hashbrown for the resolve_wireexpr peer-keyexpr-table
+# lookup (HashMap<u64, String>). default-features = false stays
+# no_std-clean; the wz-runtime-tokio side already depends on hashbrown
+# for the same reason (R311di-pre-a).
+hashbrown = { version = "0.15", default-features = false }
 
 [lints]
 workspace = true

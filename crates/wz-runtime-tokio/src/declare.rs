@@ -61,9 +61,12 @@
 //! keyexpr), so no resolution is needed — the peer identifies the
 //! prior declaration by the same id it used in its earlier `Decl*`.
 
-use hashbrown::HashMap;
-
-use wz_codecs::wireexpr::WireexprVariant;
+// R311di-13 — resolve_wireexpr moved to
+// wz-session-core::wireexpr_resolve so MCU profiles can compose the
+// remote-declaration registries without inheriting wz-runtime-tokio.
+// Re-exported `pub(super)` to keep the sub-modules' import path
+// (`super::resolve_wireexpr`) compiling unchanged.
+pub(super) use wz_session_core::wireexpr_resolve::resolve_wireexpr;
 
 // R310 — each registry sub-module gates on its corresponding
 // application-layer feature (the wire-emit counterpart was gated at
@@ -105,42 +108,7 @@ pub use queryable::{DeclQueryableCallback, RemoteQueryableRegistry, UndeclQuerya
 #[cfg(feature = "declare-subscriber")]
 pub use subscriber::{DeclSubscriberCallback, RemoteSubscriberRegistry, UndeclSubscriberCallback};
 
-/// Resolve a `Wireexpr` to its literal keyexpr string using a peer
-/// mapping table. Mirror of
-/// [`crate::pubsub::SubscriberRegistry::resolve_wireexpr`] but free-
-/// standing so the three sub-module registries don't need a
-/// reference to the SubscriberRegistry to resolve. Visibility is
-/// `pub(super)` so the sub-module files can import via
-/// `super::resolve_wireexpr` without exposing the resolver to
-/// downstream crates.
-///
-/// R310.5a — always compiled regardless of consumer-feature subset to
-/// keep prod and test surfaces identical (the prior `cfg(any(...,
-/// test))` gated the helper differently between `cargo build
-/// --no-default-features` and `cargo test --no-default-features`,
-/// which is a silent-drift hazard for future refactors). Release-mode
-/// dead-code elimination strips the unused symbol when no sub-module
-/// imports it.
-#[allow(dead_code)]
-pub(super) fn resolve_wireexpr(
-    body: &WireexprVariant,
-    table: &HashMap<u64, String>,
-) -> Option<String> {
-    let (id, suffix_opt) = match body {
-        WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
-        WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
-    };
-    if id == 0 {
-        suffix_opt.map(str::to_string)
-    } else {
-        let base = table.get(&id)?.clone();
-        Some(match suffix_opt {
-            Some(s) => {
-                let mut out = base;
-                out.push_str(s);
-                out
-            }
-            None => base,
-        })
-    }
-}
+// resolve_wireexpr moved to wz-session-core at R311di-13;
+// the pub(super) use re-export above keeps the import path
+// `super::resolve_wireexpr` working for the 3 sub-module callers
+// (subscriber / liveliness / liveliness_subscriber).
