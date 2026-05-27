@@ -913,6 +913,90 @@
       "title": "§6.4 preset-ap-router v0.1.0",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "intent": "preset-ap-client scope + router topology + gossip + multicast — Linux AP router deploy. 78 atomic features.",
+      "outputs_bullets": [
+        "`platform-linux`",
+        "`runtime-tokio`",
+        "`transport-link-tcp`",
+        "`transport-link-udp`",
+        "`transport-unicast`",
+        "`transport-multicast`",
+        "`transport-keepalive`",
+        "`transport-batching`",
+        "`transport-fragmentation`",
+        "`session-unicast-open`",
+        "`session-unicast-accept`",
+        "`session-multicast`",
+        "`link-batching`",
+        "`link-frame`",
+        "`link-fragment`",
+        "`codec-frame`",
+        "`codec-fragment`",
+        "`codec-keep-alive`",
+        "`codec-init-body`",
+        "`codec-open-body`",
+        "`codec-close`",
+        "`codec-push`",
+        "`codec-declare`",
+        "`codec-request`",
+        "`codec-response`",
+        "`codec-response-final`",
+        "`codec-scout`",
+        "`codec-hello`",
+        "`codec-join`",
+        "`declare-subscriber`",
+        "`declare-undeclare`",
+        "`declare-queryable`",
+        "`declare-keyexpr`",
+        "`declare-token`",
+        "`declare-final`",
+        "`declare-interest`",
+        "`pubsub-put`",
+        "`pubsub-delete`",
+        "`pubsub-sample`",
+        "`pubsub-encoding`",
+        "`pubsub-timestamp`",
+        "`encoding-bytes`",
+        "`encoding-empty`",
+        "`encoding-utf8`",
+        "`keyexpr-literal`",
+        "`keyexpr-canon`",
+        "`keyexpr-includes`",
+        "`keyexpr-intersect`",
+        "`keyexpr-mapping`",
+        "`keyexpr-wildcard-single`",
+        "`keyexpr-wildcard-double`",
+        "`keyexpr-dollar-star`",
+        "`query-get`",
+        "`query-queryable`",
+        "`query-reply`",
+        "`query-target`",
+        "`query-timeout`",
+        "`query-consolidation`",
+        "`liveliness-token`",
+        "`liveliness-subscriber`",
+        "`liveliness-history`",
+        "`locator-tcp`",
+        "`locator-udp`",
+        "`locator-iface`",
+        "`routing-client`",
+        "`routing-peer`",
+        "`routing-router`",
+        "`routing-routes`",
+        "`routing-static-routes`",
+        "`routing-failover`",
+        "`scouting-static`",
+        "`scouting-active`",
+        "`scouting-multicast`",
+        "`scouting-gossip`",
+        "`scouting-autoconnect`",
+        "`time-system-clock`",
+        "`time-ntp64`",
+        "`time-timestamp-source`"
+      ],
+      "caveats_bullets": [
+        "R311bw body transcribed from Cargo preset-ap-router 78 features (line 776-855)"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full": {
@@ -20598,6 +20682,52 @@
       "publishable_carry_forward_bullets": [
         "R311bw next: §6.4 atomic body transcribe Cargo preset-ap-router 79 features",
         "Mnemosyne API gap: set_section_caveats / remove_section_caveat primitive missing; §6.3 caveat[0] artifact carry until upstream lands",
+        "부채 #6 catalog cascade R311bs+ continues"
+      ]
+    },
+    "Round 311bw": {
+      "decision_summary": "R311bw §6.4 preset-ap-router body transcribe 78 features (R311bs carry count 79 corrected to measured 78).",
+      "changes_bullets": [
+        "set_section_intent §6.4: 1-sentence purpose + 78 atomic features count",
+        "set_section_outputs §6.4: 78 features transcribed from Cargo preset-ap-router line 776-855",
+        "add_section_caveat §6.4: R311bw transcribe provenance audit-trace",
+        "R311bs carry count correction: 79 → 78 (verified via Python feature count script)"
+      ],
+      "verification_bullets": [
+        "query_section §6.4 전: body=empty / 후: 78 outputs + 1 caveat + intent populated",
+        "validate_workspace: entries=403→404 sections=256 T1=0 RT=13/13 GENERATED.md=sync",
+        "Python feature count: preset-ap-router exactly 78 features (R311bs carry 79 corrected here)",
+        "Cargo-truth alignment: outputs_bullets line-for-line matches Cargo preset-ap-router",
+        "부채 #8 §6.4 outline-only closes; 37 outline-only remainder carry"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-4-preset-ap-router"
+      ],
+      "carry_forward_bullets": [
+        "R311bx next: §6.5 atomic body transcribe Cargo preset-ap-full 131 features (R311bs carry 123 corrected)",
+        "R311by then: §6.6 preset-zenoh-cpp 119 features (R311bs carry 113 corrected)",
+        "부채 #6 catalog cascade R311bs+ continues"
+      ],
+      "publishable_decision_summary": "R311bw §6.4 preset-ap-router body transcribe 78 features (R311bs carry count 79 corrected to measured 78).",
+      "publishable_changes_bullets": [
+        "set_section_intent §6.4: 1-sentence purpose + 78 atomic features count",
+        "set_section_outputs §6.4: 78 features transcribed from Cargo preset-ap-router line 776-855",
+        "add_section_caveat §6.4: R311bw transcribe provenance audit-trace",
+        "R311bs carry count correction: 79 → 78 (verified via Python feature count script)"
+      ],
+      "publishable_verification_bullets": [
+        "query_section §6.4 전: body=empty / 후: 78 outputs + 1 caveat + intent populated",
+        "validate_workspace: entries=403→404 sections=256 T1=0 RT=13/13 GENERATED.md=sync",
+        "Python feature count: preset-ap-router exactly 78 features (R311bs carry 79 corrected here)",
+        "Cargo-truth alignment: outputs_bullets line-for-line matches Cargo preset-ap-router",
+        "부채 #8 §6.4 outline-only closes; 37 outline-only remainder carry"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-4-preset-ap-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311bx next: §6.5 atomic body transcribe Cargo preset-ap-full 131 features (R311bs carry 123 corrected)",
+        "R311by then: §6.6 preset-zenoh-cpp 119 features (R311bs carry 113 corrected)",
         "부채 #6 catalog cascade R311bs+ continues"
       ]
     },
