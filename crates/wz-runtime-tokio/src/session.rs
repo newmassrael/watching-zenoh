@@ -1934,19 +1934,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
             Err(LivelinessAliasError::FeatureDisabled)
         }
     }
-}
 
-// R311dg — split point: declare_token + declare_token_aliased migrated
-// to the R-generic block above. LivelinessToken impl block (id /
-// keyexpr / options accessors + undeclare) is fully R-generic; no
-// observer.lock() to migrate — declare_token bodies use only
-// self.actions.send_declare_token (wire emit) without touching the
-// observer at all (token registration is implicit on the wire-receive
-// side, not the wire-emit side). The remaining declare_* surface
-// (LivelinessSubscriber) still calls observer.lock().expect(...) at
-// registration time and stays on the AP-bound block until R311dh
-// migrates it.
-impl<T: TimeSource> Session<TokioRuntime, T> {
     /// R280 — declare a liveliness subscriber on a literal `keyexpr`
     /// pattern, registering a [`LivelinessSampleCallback`] that fires
     /// for every peer `Decl*Token` whose resolved keyexpr matches the
@@ -2033,7 +2021,7 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         keyexpr: impl Into<String>,
         options: LivelinessSubscriberOptions,
         callback: impl FnMut(LivelinessSample<'_>) + Send + 'static,
-    ) -> Result<LivelinessSubscriber<TokioRuntime, T>, LivelinessSubscriberAliasError> {
+    ) -> Result<LivelinessSubscriber<R, T>, LivelinessSubscriberAliasError> {
         #[cfg(feature = "liveliness-subscriber")]
         {
             let keyexpr_string = keyexpr.into();
@@ -2044,16 +2032,16 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
             // session-layer Reconnect, R267+ topology). The wire-emit
             // panic-free invariant from `send_declare_token` applies
             // equally to `send_interest_liveliness_subscriber`.
-            self.observer
-                .lock()
-                .expect("observer mutex poisoned by an earlier panicked callback")
-                .liveliness_subscribers
-                .register(
+            //
+            // R311dh — observer access via R::with_mutex_mut closure form.
+            R::with_mutex_mut(&self.observer, |observer| {
+                observer.liveliness_subscribers.register(
                     interest_id,
                     keyexpr_string.clone(),
                     options.history,
                     Box::new(callback) as LivelinessSampleCallback,
                 );
+            });
             self.actions.send_interest_liveliness_subscriber(
                 interest_id,
                 options.history,
@@ -2147,7 +2135,7 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         inline_suffix: Option<&str>,
         options: LivelinessSubscriberOptions,
         callback: impl FnMut(LivelinessSample<'_>) + Send + 'static,
-    ) -> Result<LivelinessSubscriber<TokioRuntime, T>, LivelinessSubscriberAliasError> {
+    ) -> Result<LivelinessSubscriber<R, T>, LivelinessSubscriberAliasError> {
         #[cfg(feature = "liveliness-subscriber")]
         {
             // Mapping check first — FSM-state-independent, surfaces a
@@ -2179,16 +2167,16 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
             // arrives before our Interest is processed by the peer) finds
             // the slot ready and fires the callback. Same ordering rule
             // as `declare_liveliness_subscriber`.
-            self.observer
-                .lock()
-                .expect("observer mutex poisoned by an earlier panicked callback")
-                .liveliness_subscribers
-                .register(
+            //
+            // R311dh — observer access via R::with_mutex_mut closure form.
+            R::with_mutex_mut(&self.observer, |observer| {
+                observer.liveliness_subscribers.register(
                     interest_id,
                     resolved.clone(),
                     options.history,
                     Box::new(callback) as LivelinessSampleCallback,
                 );
+            });
             // Wire emit carries the alias form so the peer pays the
             // mapping_id + optional inline_suffix cost rather than the
             // full literal each time — bandwidth parity with
@@ -3495,7 +3483,7 @@ pub struct LivelinessSubscriber<R: Runtime = TokioRuntime, T: TimeSource = Tokio
     options: LivelinessSubscriberOptions,
 }
 
-impl<T: TimeSource> LivelinessSubscriber<TokioRuntime, T> {
+impl<R: Runtime, T: TimeSource> LivelinessSubscriber<R, T> {
     /// The stable interest id allocated at declare time by
     /// [`crate::session_glue::SessionLinkActions::alloc_next_interest_id`].
     /// Exposed for diagnostics; callers should not rely on the exact
@@ -3531,15 +3519,17 @@ impl<T: TimeSource> LivelinessSubscriber<TokioRuntime, T> {
     /// replay complete; subsequent `Decl*Token` records arrive as
     /// new (future) events.
     pub fn history_complete(&self) -> bool {
-        self.session
-            .observer()
-            .lock()
-            .map(|observer| {
-                observer
-                    .liveliness_subscribers
-                    .history_complete(self.interest_id)
-            })
-            .unwrap_or(false)
+        // R311dh — observer access via R::with_mutex_mut closure form.
+        // Per-profile poison-recovery lives inside the runtime impl; the
+        // pre-R311dh code returned `false` on poisoned-lock via the
+        // `.unwrap_or(false)` arm. The closure form propagates the
+        // recovered guard so the inner closure always sees an exclusive
+        // `&mut ApplicationLayerObserver` borrow.
+        R::with_mutex_mut(&self.session.observer, |observer| {
+            observer
+                .liveliness_subscribers
+                .history_complete(self.interest_id)
+        })
     }
 
     /// Explicitly retract this liveliness subscriber. Emits
@@ -3549,9 +3539,14 @@ impl<T: TimeSource> LivelinessSubscriber<TokioRuntime, T> {
     /// [`LivelinessToken::undeclare`]; same `std::mem::forget(self)`
     /// pattern keeps the intent explicit.
     pub fn undeclare(self) {
-        if let Ok(mut observer) = self.session.observer().lock() {
+        // R311dh — observer access via R::with_mutex_mut closure form;
+        // the pre-R311dh `if let Ok(mut observer) = ...lock()` swallow-on-
+        // poison branch is replaced by the trait-mediated closure whose
+        // per-profile impl handles poison recovery (tokio:
+        // PoisonError::into_inner, MCU: no poison concept).
+        R::with_mutex_mut(&self.session.observer, |observer| {
             observer.liveliness_subscribers.unregister(self.interest_id);
-        }
+        });
         self.session.actions().send_interest_final(self.interest_id);
         std::mem::forget(self);
     }
