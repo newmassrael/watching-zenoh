@@ -119,4 +119,32 @@ pub trait Runtime: Send + Sync + 'static {
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static;
+
+    /// R311ct — closure-scoped exclusive access to a [`Self::Mutex<T>`]'s
+    /// inner `T`. Per-profile poison-recovery semantics live inside the
+    /// impl: tokio recovers from `PoisonError` via `into_inner()` so a
+    /// panicked observer task does not leave the shared state
+    /// permanently inaccessible; MCU profiles whose mutex has no poison
+    /// concept (`critical_section::Mutex`, `embassy_sync::Mutex`) just
+    /// acquire-and-yield-guard with no recovery branch.
+    ///
+    /// Closure-scoped (rather than GAT guard) by design: returning a
+    /// `Self::MutexGuard<'m, T>` GAT would require a lifetime-+-type
+    /// GAT pair on the trait and force every consumer to thread the
+    /// `'m` lifetime through their signatures, blowing the
+    /// "single-parameter `Session<R>`" goal that R267 reparam pinned
+    /// (R311w option (a) decision). The closure form keeps the call
+    /// site fully erased of guard lifetime and matches the way every
+    /// existing observer-touch site is already written (acquire →
+    /// mutate → drop guard at scope end).
+    ///
+    /// Cross-runtime contract: callers may assume `f` executes
+    /// exactly once with exclusive `&mut T` access. The runtime is
+    /// free to recover from prior poisoning, re-acquire after a yield
+    /// (single-task MCU profiles), or run the closure under any
+    /// per-profile interrupt-disable mechanism — only the `&mut T`
+    /// access semantic is contracted.
+    fn with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U
+    where
+        T: Send + 'static;
 }

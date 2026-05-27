@@ -22495,6 +22495,54 @@
         "CI gap from R311cp: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination."
       ]
     },
+    "Round 311ct": {
+      "decision_summary": "R311ct: Runtime::with_mutex_mut<T, U> closure API lands; TokioRuntime recovers PoisonError, LwipRuntime wraps critical_section::with - unblocks Drop-carrying handles generic-ization.",
+      "changes_bullets": [
+        "wz-runtime-core/src/runtime.rs: Runtime trait gains with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U where T: Send + 'static — closure-scoped exclusive access; per-profile poison semantics inside impl; doc cites E0366 Drop specialization ban as motivation.",
+        "wz-runtime-tokio/src/runtime_impl.rs: TokioRuntime impl recovers PoisonError via into_inner() then dispatches f(&mut *guard) — matches the AP profile's existing match observer.lock() { Ok | Err(poisoned) } recipe at all observer-touch sites.",
+        "wz-runtime-lwip/src/runtime_impl.rs: LwipRuntime<C> impl wraps critical_section::with + RefCell::borrow_mut — MCU profile interrupt-disabling lock with no poison concept (panic = abort aborts the executor before any observable poison state can form)."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "scripts/run-ci.sh Layer G: 14 MCU targets pass (7 archs x wz-runtime-core/wz-codecs/wz-runtime-lwip)",
+        "validate_workspace: entries=426 to 427, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311cu+: Subscriber / Queryable / LivelinessToken / LivelinessSubscriber generic R with Drop using R::with_mutex_mut. R311cr carry 'Drop impls also need generic' assumption now resolvable via new API. Mechanical 1-2 helpers per round.",
+        "wz-runtime-lwip LwipSession = Session<LwipRuntime<C>, C> alias module pending — non-default R first meaningful binding (LwipSubscriber etc. follow once R311cu+ cascade lands).",
+        "R267 Session R T TimeSource second param (R311w lock; currently method-level generic on Session query / Querier get). Fold-in pending.",
+        "R311ca debt #6 wire-up unchanged at 33 percent. R267 foundation move unblocks runtime-async-std / -no-std / -tokio-uring / -zero-copy reservation once cascade completes.",
+        "CI gap from R311cp: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination."
+      ],
+      "publishable_decision_summary": "R311ct: Runtime::with_mutex_mut<T, U> closure API lands; TokioRuntime recovers PoisonError, LwipRuntime wraps critical_section::with - unblocks Drop-carrying handles generic-ization.",
+      "publishable_changes_bullets": [
+        "wz-runtime-core/src/runtime.rs: Runtime trait gains with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U where T: Send + 'static — closure-scoped exclusive access; per-profile poison semantics inside impl; doc cites E0366 Drop specialization ban as motivation.",
+        "wz-runtime-tokio/src/runtime_impl.rs: TokioRuntime impl recovers PoisonError via into_inner() then dispatches f(&mut *guard) — matches the AP profile's existing match observer.lock() { Ok | Err(poisoned) } recipe at all observer-touch sites.",
+        "wz-runtime-lwip/src/runtime_impl.rs: LwipRuntime<C> impl wraps critical_section::with + RefCell::borrow_mut — MCU profile interrupt-disabling lock with no poison concept (panic = abort aborts the executor before any observable poison state can form)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "scripts/run-ci.sh Layer G: 14 MCU targets pass (7 archs x wz-runtime-core/wz-codecs/wz-runtime-lwip)",
+        "validate_workspace: entries=426 to 427, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311cu+: Subscriber / Queryable / LivelinessToken / LivelinessSubscriber generic R with Drop using R::with_mutex_mut. R311cr carry 'Drop impls also need generic' assumption now resolvable via new API. Mechanical 1-2 helpers per round.",
+        "wz-runtime-lwip LwipSession = Session<LwipRuntime<C>, C> alias module pending — non-default R first meaningful binding (LwipSubscriber etc. follow once R311cu+ cascade lands).",
+        "R267 Session R T TimeSource second param (R311w lock; currently method-level generic on Session query / Querier get). Fold-in pending.",
+        "R311ca debt #6 wire-up unchanged at 33 percent. R267 foundation move unblocks runtime-async-std / -no-std / -tokio-uring / -zero-copy reservation once cascade completes.",
+        "CI gap from R311cp: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination."
+      ]
+    },
     "Round 311d": {
       "decision_summary": "R311d batches codec-scout / codec-hello / codec-join cascade — wz-codecs level only (wz-runtime-tokio does not import these types); forwards stay catalog-uniform for future runtime reuse.",
       "changes_bullets": [

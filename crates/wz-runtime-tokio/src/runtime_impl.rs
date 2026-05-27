@@ -105,6 +105,24 @@ impl Runtime for TokioRuntime {
             inner: tokio::spawn(fut),
         }
     }
+
+    // R311ct — closure-scoped mutex access. AP profile poison-recovery
+    // matches every existing `match observer.lock() { Ok | Err(poisoned)
+    // => poisoned.into_inner() }` call site: a panicking observer task
+    // poisons the mutex, recovering via `into_inner()` lets shutdown
+    // paths (Subscriber Drop / Queryable Drop / LivelinessToken Drop /
+    // LivelinessSubscriber Drop) still unregister their ids instead of
+    // leaking.
+    fn with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U
+    where
+        T: Send + 'static,
+    {
+        let mut guard = match mutex.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        f(&mut *guard)
+    }
 }
 
 /// Wrapper around `tokio::task::JoinHandle<T>` that adapts the
