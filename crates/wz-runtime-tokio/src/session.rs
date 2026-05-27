@@ -727,7 +727,25 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         }
         session
     }
+}
 
+// R311cy — pure-accessor method generic lift. The three accessors
+// below (`actions` / `observer` / `is_established`) and the
+// R311cy-added `clock` accessor read fields directly without acquiring
+// any per-runtime lock, so their bodies compile identically for any
+// `R: Runtime` impl. Moving them to a dedicated `impl<R: Runtime, T:
+// TimeSource> Session<R, T>` block is the first concrete step of the
+// multi-round method generic lift cascade (R311cv carry #4): the
+// 100+ AP-bound methods that DO call `self.observer.lock().expect()`
+// stay on the `impl<T: TimeSource> Session<TokioRuntime, T>` block
+// until follow-up rounds migrate them to the `R::with_mutex_mut`
+// closure form (R311ct API). The `observer()` return type lifts
+// from the per-runtime alias `&Arc<Mutex<...>>` to the trait-
+// projected `&Arc<<R as Runtime>::Mutex<...>>`; for the AP profile
+// this resolves to the same `std::sync::Mutex<...>` concrete type so
+// every existing `session.observer().lock()` call site keeps
+// compiling under `R = TokioRuntime` (no breaking change to consumers).
+impl<R: Runtime, T: TimeSource> Session<R, T> {
     /// Borrow the outbound action handle. Useful when the caller
     /// needs to invoke non-publish methods like `send_declare_*` or
     /// `send_request_query` directly on the actions surface.
@@ -737,9 +755,24 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
 
     /// Borrow the observer handle. Application code registers
     /// callbacks on the contained registries through this — typically
-    /// `session.observer().lock().unwrap().subscribers.register(...)`.
-    pub fn observer(&self) -> &Arc<Mutex<ApplicationLayerObserver>> {
+    /// `session.observer().lock().unwrap().subscribers.register(...)`
+    /// on the AP profile (where `R::Mutex<T>` resolves to
+    /// `std::sync::Mutex<T>`); generic-R callers must route through
+    /// [`wz_runtime_core::Runtime::with_mutex_mut`] instead since the
+    /// `Runtime` trait does not expose a direct `.lock()` method
+    /// across profiles.
+    pub fn observer(&self) -> &Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>> {
         &self.observer
+    }
+
+    /// R311cy — borrow the Session-owned clock (R311cw fold-in
+    /// stored `clock: Arc<T>`). Callers that need to thread the same
+    /// monotonic epoch into a peer task (sweep_task,
+    /// drive_session_until_terminal, etc.) clone this Arc rather
+    /// than rebuilding a separate `T` instance which would carry a
+    /// fresh epoch.
+    pub fn clock(&self) -> &Arc<T> {
+        &self.clock
     }
 
     /// R283 — `true` once the session-FSM has entered `Established`.
@@ -762,7 +795,9 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
     pub fn is_established(&self) -> bool {
         self.actions.is_established()
     }
+}
 
+impl<T: TimeSource> Session<TokioRuntime, T> {
     /// R231 — forward this session's own zid (1..=16 bytes) to the
     /// inbound subscriber registry so wire-arrived self-echoes (a
     /// `Locality::Any` publish that the network routes back to its
