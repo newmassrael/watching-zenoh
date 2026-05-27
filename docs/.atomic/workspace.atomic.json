@@ -655,6 +655,28 @@
       "title": "§5.14 Platform",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Platform domain catalog: 7 atomic features (0 active / 7 reserved) — presentation-layer labels routed by Rust target_os cfg, not Cargo features.",
+      "rationale_bullets": [
+        "Platform identity is governed by Rust `target_os` cfg axis, not Cargo `[features]`.",
+        "platform-* features serve as preset-composition labels (preset-cortex-m4 pulls platform-bare-metal).",
+        "Cfg-gating source on these would duplicate target_os — 0 source cfg sites by design.",
+        "wz-runtime-tokio targets AP (linux/macos/windows); wz-runtime-lwip targets MCU.",
+        "R311ch corrects estimate 1/6 -> honest 0/7."
+      ],
+      "outputs_bullets": [
+        "Active set: empty (R311ch audit).",
+        "Reserved AP (3): -linux, -macos, -windows.",
+        "Reserved MCU/RT (4): -bare-metal, -freertos, -zephyr, -qnx.",
+        "Platform routing happens via target_os cfg (e.g. cfg(target_os = 'linux')).",
+        "Cargo features serve as preset composition labels only."
+      ],
+      "caveats_bullets": [
+        "Platform cfg-gating is by `target_os`, not Cargo features. platform-* features are labels."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing": {
@@ -21770,6 +21792,48 @@
         "R311ch next: platform 7 features cascade (probably similar audit-only ratify for OS-target labels).",
         "Encoding reserved (7): forward-only annotations; no wire-up cascade planned unless per-encoding codec paths emerge.",
         "R311ca debt #6 wire-up progress: unchanged (audit-only); 44/161 wired (27%); 10 domains 0%-wired (encoding stays in this bucket but ratified)."
+      ]
+    },
+    "Round 311ch": {
+      "decision_summary": "R311ch platform domain audit-only ratify — 7 features all reserved (platform identity is target_os cfg, not Cargo features).",
+      "changes_bullets": [
+        "crates/wz/Cargo.toml: platform domain comment 1/6 -> 0/7 corrected with target_os rationale.",
+        "§5.14 platform catalog body: intent + 5 rationale + 5 outputs + 1 caveat + impact_scope.",
+        "No source-level changes — audit confirms 0 cfg sites (target_os already governs)."
+      ],
+      "verification_bullets": [
+        "Audit verification: grep `feature = \"platform-X\"` in crates/wz-runtime-tokio/src/ — 0 hits.",
+        "Rust target_os cfg is the standard mechanism for platform branching.",
+        "validate_workspace baseline: entries 414 -> 415, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311ci next: routing 6 features cascade.",
+        "Platform features: forward-only labels for preset composition (no wire-up cascade planned).",
+        "R311ca debt #6 wire-up progress: unchanged (audit-only); 44/161 wired (27%); 10 domains 0%-wired (platform stays in this bucket but ratified)."
+      ],
+      "publishable_decision_summary": "R311ch platform domain audit-only ratify — 7 features all reserved (platform identity is target_os cfg, not Cargo features).",
+      "publishable_changes_bullets": [
+        "crates/wz/Cargo.toml: platform domain comment 1/6 -> 0/7 corrected with target_os rationale.",
+        "§5.14 platform catalog body: intent + 5 rationale + 5 outputs + 1 caveat + impact_scope.",
+        "No source-level changes — audit confirms 0 cfg sites (target_os already governs)."
+      ],
+      "publishable_verification_bullets": [
+        "Audit verification: grep `feature = \"platform-X\"` in crates/wz-runtime-tokio/src/ — 0 hits.",
+        "Rust target_os cfg is the standard mechanism for platform branching.",
+        "validate_workspace baseline: entries 414 -> 415, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ci next: routing 6 features cascade.",
+        "Platform features: forward-only labels for preset composition (no wire-up cascade planned).",
+        "R311ca debt #6 wire-up progress: unchanged (audit-only); 44/161 wired (27%); 10 domains 0%-wired (platform stays in this bucket but ratified)."
       ]
     },
     "Round 311d": {
