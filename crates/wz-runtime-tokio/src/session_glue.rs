@@ -763,7 +763,7 @@ pub struct SessionLinkActions<R: Runtime = TokioRuntime, T: TimeSource = TokioTi
     /// `handle_inbound`. When populated this overrides
     /// `params.cookie` on the OpenSyn outbound, implementing the
     /// RFC §5.M echo contract on the Initiator side.
-    pub inbound_cookie: Mutex<Option<Vec<u8>>>,
+    pub inbound_cookie: R::Mutex<Option<Vec<u8>>>,
     /// R72b — monotonic timestamp in milliseconds of the most
     /// recently observed inbound KeepAlive frame. Populated by
     /// `handle_inbound` for `InboundFrame::KeepAlive`. Consumers
@@ -821,7 +821,7 @@ pub struct SessionLinkActions<R: Runtime = TokioRuntime, T: TimeSource = TokioTi
     /// back to `params.cookie` verbatim — callers that need strict
     /// HMAC-only behavior must validate the slot before signalling
     /// `inbound.start`.
-    pub inbound_peer_zid: Mutex<Option<Vec<u8>>>,
+    pub inbound_peer_zid: R::Mutex<Option<Vec<u8>>>,
     /// R89 — `cookie` field captured from the most recent inbound
     /// `OpenSyn` frame (`InboundFrame::Open { is_ack: false, .. }`).
     /// Set by `handle_inbound` for the Accepting side; consumed by
@@ -837,7 +837,7 @@ pub struct SessionLinkActions<R: Runtime = TokioRuntime, T: TimeSource = TokioTi
     /// two slots model the same wire field on opposite sides of
     /// the handshake — one slot per role keeps the dispatch
     /// unambiguous.
-    pub inbound_opensyn_cookie: Mutex<Option<Vec<u8>>>,
+    pub inbound_opensyn_cookie: R::Mutex<Option<Vec<u8>>>,
     /// R68b — per-role ext chain slots. Indexed by `ExtChainRole`
     /// via `ext_chain_for`. Each slot lives behind its own `Mutex`
     /// so a setter can swap one chain without blocking the others
@@ -1250,7 +1250,9 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 is_ack: true, body, ..
             } => {
                 if let Some(cookie) = &body.cookie {
-                    *self.inbound_cookie.lock().unwrap() = Some(cookie.clone());
+                    R::with_mutex_mut(&self.inbound_cookie, |slot| {
+                        *slot = Some(cookie.clone());
+                    });
                 }
             }
             #[cfg(feature = "codec-init-body")]
@@ -1262,7 +1264,9 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 // R86 — Accepting-side InitSyn arrival: capture the
                 // peer's claimed zid so the next send_init_ack_with_cookie
                 // can HMAC-bind the outbound cookie to it per RFC §5.M.
-                *self.inbound_peer_zid.lock().unwrap() = Some(body.zid.clone());
+                R::with_mutex_mut(&self.inbound_peer_zid, |slot| {
+                    *slot = Some(body.zid.clone());
+                });
                 // R121d — capture the peer's announced sizing caps
                 // so `init_ack_params` can enforce the wire-spec
                 // `InitAck.size <= InitSyn.size` rule on the
@@ -1284,7 +1288,9 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 // mint) — RFC §5.M anti-amplification on both
                 // sides of the handshake.
                 if let Some(cookie) = &body.cookie {
-                    *self.inbound_opensyn_cookie.lock().unwrap() = Some(cookie.clone());
+                    R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| {
+                        *slot = Some(cookie.clone());
+                    });
                 }
             }
             #[cfg(feature = "codec-keep-alive")]
