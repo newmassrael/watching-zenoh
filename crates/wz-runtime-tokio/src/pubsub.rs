@@ -861,17 +861,31 @@ impl SubscriberRegistry {
         let outer_exts: &[wz_codecs::ext_entry::ExtEntry] =
             push.extensions.as_deref().unwrap_or(&[]);
         let qos = extract_qos(outer_exts);
-        let sample = Sample {
-            keyexpr: resolved,
-            kind,
-            payload,
-            timestamp: body_timestamp,
-            encoding: body_encoding,
-            qos,
-            attachment: body_attachment,
-            source_info: body_source_info,
-            reliability,
+        // R311di-4 — Sample lives in wz-session-core (non_exhaustive)
+        // so wz-runtime-tokio composes via the constructor + with_*
+        // chain. The build order mirrors the prior struct-literal
+        // shape (kind-dispatched constructor + every applicable
+        // optional setter); semantics are byte-identical.
+        let mut sample = match kind {
+            SampleKind::Put => Sample::new_put(resolved, payload),
+            SampleKind::Del => Sample::new_del(resolved),
         };
+        if let Some(ts) = body_timestamp {
+            sample = sample.with_timestamp(ts);
+        }
+        if let Some(enc) = body_encoding {
+            sample = sample.with_encoding(enc);
+        }
+        if let Some(q) = qos {
+            sample = sample.with_qos(q);
+        }
+        if let Some(att) = body_attachment {
+            sample = sample.with_attachment(att);
+        }
+        if let Some(si) = body_source_info {
+            sample = sample.with_source_info(si);
+        }
+        sample = sample.with_reliability(reliability);
 
         // R231 — self-echo dedup. When this dispatch is on the
         // wire-arrival path (is_remote=true) AND the decoded sample

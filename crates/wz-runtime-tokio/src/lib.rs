@@ -77,7 +77,10 @@ pub use wz_session_core::locality;
 /// need to dig into `Push.extensions` to inspect Sample metadata. See
 /// the `sample` module doc for the wire-decode origin of each field
 /// and the `#[non_exhaustive]` future-additive contract.
-pub mod sample;
+// R311di-4 — sample moved to wz-session-core; re-export keeps every
+// `crate::sample::*` callsite (pubsub.rs / session.rs / session_glue.rs)
+// verbatim across the wz-runtime-tokio surface.
+pub use wz_session_core::sample;
 
 /// R98 — application-layer subscriber registry. Routes decoded
 /// `NetworkMessage::Push` records to user-registered callbacks
@@ -252,44 +255,11 @@ pub struct RxFrame {
     pub bytes: Vec<u8>,
 }
 
-/// Reliability hint forwarded to the driver per session-fsm §6
-/// outbound table; also surfaces as the link-layer reliability
-/// classification on inbound samples (zenoh-pico `z_reliability_t`
-/// mirror). R51 baseline TCP impl ignores the hint on the outbound
-/// path (TCP is reliable by definition); UDP/best-effort impl will
-/// honor it. R226 added `Default` / `Hash` / `repr(u8)` so the same
-/// enum can carry inbound `Sample.reliability` per the zenoh-pico
-/// `_z_trigger_push` argument shape.
-///
-/// The default value matches zenoh-pico's
-/// `Z_RELIABILITY_DEFAULT = Z_RELIABILITY_RELIABLE` contract — a
-/// subscriber that does not inspect the field observes the most
-/// permissive delivery guarantee.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[repr(u8)]
-pub enum Reliability {
-    /// Best-effort delivery — samples may be dropped (zenoh-pico
-    /// `Z_RELIABILITY_BEST_EFFORT`).
-    BestEffort = 0,
-    /// Reliable delivery — link layer guarantees ordering and delivery
-    /// (zenoh-pico `Z_RELIABILITY_RELIABLE`, the default).
-    #[default]
-    Reliable = 1,
-}
-
-impl Reliability {
-    /// Map a `reliable: bool` discriminator (the
-    /// `DriverLoopOutcome::FramePayload.reliable` field shape) to the
-    /// typed enum. Inbound dispatch uses this to project the
-    /// frame-level bool into a `Sample.reliability` value.
-    pub fn from_reliable_bool(reliable: bool) -> Self {
-        if reliable {
-            Reliability::Reliable
-        } else {
-            Reliability::BestEffort
-        }
-    }
-}
+// R311di-4 — Reliability moved to wz-session-core::reliability; the
+// re-export keeps every `wz_runtime_tokio::Reliability` external
+// callsite (9 caller files across tests / wz-integration-tests /
+// wz-ap-demo) verbatim across the migration.
+pub use wz_session_core::reliability::Reliability;
 
 /// Single event source surfaced by a link driver. R51 baseline
 /// emits only Ready / Rx / Lost; backpressure + framing_error +
