@@ -206,7 +206,7 @@ layer_0_preflight_lints() {
     # crates/ is the primary workspace; deploy/mcu-qemu-demo is a
     # standalone workspace (R311be `[workspace]` empty table) that
     # the crates/ fmt --check does not visit. R311bn mirrors the
-    # gate there so a deploy-side edit (e.g. R311bm-m0 main.rs
+    # gate there so a deploy-side edit (e.g. R311bq main.rs
     # portable-atomic adoption) cannot ship fmt-dirty either.
     if ! (cd crates && cargo fmt --all -- --check); then
         echo "  fmt --check FAIL crates — run \`(cd crates && cargo fmt --all)\`" >&2
@@ -833,19 +833,22 @@ layer_q_qemu_mcu_e2e() {
     #              the lane).
     #   skip:<why> Q.2 is suppressed with a printed reason. Used
     #              for known-running-but-FAIL configs where the
-    #              binary boots but the wz facade composition
-    #              hits a runtime alloc budget mismatch the catalog
-    #              currently cannot honour (R311bm-m0 microbit:
-    #              wz facade runtime-lwip spawn issues a single
-    #              ~12 KB BoxFuture allocation which exceeds the
-    #              nrf51 16 KB SRAM budget once .data + .bss +
-    #              lwIP MEM_SIZE are accounted for). Build + Q.3
-    #              footprint still run so the catalog records the
-    #              honest cross-compile state plus the baseline
-    #              size the future slim-preset round (north-star
-    #              phase 1 preset-mcu-minimal) will drive down.
+    #              binary boots but a separate compatibility carry
+    #              is outstanding (Cortex-M33 Secure-state init,
+    #              etc.). Build + Q.3 footprint still run so the
+    #              catalog records the honest cross-compile state.
+    #
+    # R311bq promoted the microbit lane from skip → run after the
+    # deploy main.rs gained the spawn-less sync-only branch under
+    # `cfg(not(target_has_atomic = "32"))` and wz-link-lwip went
+    # const-generic so the lane instantiates a slim
+    # `LwipUdpSocket<128, 2>` (~280 B rx queue versus 12 KB at
+    # default `<1500, 8>`). The change closed the
+    # north-star phase 1 anchor (preset-mcu-minimal truthfulness)
+    # while keeping the wz facade `runtime-lwip` surface intact —
+    # mps2 lanes still build + run the async + spawn path.
     local sub_lanes=(
-        "microbit:cortex-m0:thumbv6m-none-eabi:skip:HEAP_SIZE 4 KB < spawn BoxFuture ~12 KB; slim preset carry"
+        "microbit:cortex-m0:thumbv6m-none-eabi:run"
         "mps2-an385:cortex-m3:thumbv7m-none-eabi:run"
         "mps2-an386:cortex-m4:thumbv7em-none-eabihf:run"
         "mps2-an500:cortex-m7:thumbv7em-none-eabihf:run"
