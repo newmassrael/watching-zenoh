@@ -7,8 +7,27 @@
 //! since 2024 and an external ecosystem dep would surface as a
 //! leaky abstraction against the composable-framework north star
 //! (zero external coupling for the runtime contract). An optional
-//! `embedded-time` adapter feature can land in R311az+ if a deploy
-//! reports an ecosystem-alignment need.
+//! `embedded-time` adapter feature can land in a later round if a
+//! deploy reports an ecosystem-alignment need.
+//!
+//! ## R311bc rework: time source borrows from runtime
+//!
+//! Construction sig changed from R311av:
+//!
+//! - R311av: `LwipTime::new(source: C)` — owned the ClockSource;
+//!   `SleepFuture<'a, C>` borrowed `&'a C` directly.
+//! - R311bc: `LwipTime::new(rt: &LwipRuntime<C>)` — clones the
+//!   shared `Arc<RuntimeInner<C>>`; `SleepFuture<C>` is `'static`
+//!   (owns the Arc) and registers its waker with the runtime's
+//!   timer queue on first Pending poll.
+//!
+//! The breaking change is intentional. Under R311av the clock and
+//! the timer source were two different physical objects (clock
+//! owned by `LwipTime`, no timer source at all — sleep futures
+//! self-waked). Under R311bc both live in the same
+//! `Arc<RuntimeInner<C>>` so a deadline registered by one sleep
+//! and a `now_us()` sample taken by `run_until_idle` necessarily
+//! agree.
 //!
 //! ## What the deploy crate must provide
 //!
@@ -23,27 +42,28 @@
 //! - host tests: an `Arc<AtomicU64>` advanced manually (see
 //!   `runtime_impl.rs` test module).
 //!
-//! [`LwipTime`] wraps the source + an epoch (captured at
-//! construction) and exposes the trait-required methods:
-//! `now_monotonic_ms` (microseconds → ms with epoch subtraction),
-//! `sleep(ms)` (returns a [`SleepFuture`] that self-wakes until the
-//! clock crosses the deadline), and `timeout<F>(ms, fut)` (returns
-//! a [`TimeoutFuture`] that polls the inner future and races it
-//! against the same self-waking deadline check).
+//! The deploy passes its `ClockSource` instance to
+//! [`crate::LwipRuntime::new`]; both `LwipTime` and the timer
+//! queue read from that one instance via the shared `Arc`.
 //!
-//! ## Self-wake busy-poll vs. real timer queue
+//! ## Wake-on-deadline (R311bc) vs self-wake (R311av retired)
 //!
-//! [`SleepFuture::poll`] and [`TimeoutFuture::poll`] use the
-//! `cx.waker().wake_by_ref()` pattern when the deadline has not
-//! yet elapsed: return `Pending` after marking the task ready for
-//! the next executor pass. This is correct but wastes power on
-//! battery-constrained MCU deploys — every executor pass re-polls
-//! the sleep future even when nothing has happened. A real timer
-//! queue (deadline-keyed wake list registered with the executor)
-//! is R311az+; the deploy can compensate in the interim by
-//! gating its main-loop iteration on `lwip_poll()` events +
-//! `wfi()` so executor passes only happen on real interrupts.
+//! [`SleepFuture::poll`] and [`TimeoutFuture::poll`] no longer use
+//! the `cx.waker().wake_by_ref()` self-wake pattern. On first poll
+//! that returns `Pending`, the future calls
+//! `runtime.timers().register(deadline_us, cx.waker().clone())`;
+//! subsequent polls (re-triggered by the inner future in the case
+//! of `TimeoutFuture`) check `registered` to avoid duplicate heap
+//! entries.
+//!
+//! The deploy `wfi()`-sleep semantics now hold: when no task is
+//! ready and no timer has elapsed, the executor pass is idle, and
+//! `wfi()` actually sleeps until the next IRQ (HAL timer expiry,
+//! lwIP RX, etc.). Under R311av the executor's self-wake busy-poll
+//! kept every pass active.
 
+use crate::atomic::Arc;
+use crate::runtime_impl::{LwipRuntime, RuntimeInner};
 use alloc::boxed::Box;
 use core::future::Future;
 use core::pin::Pin;
@@ -67,32 +87,39 @@ pub trait ClockSource: Send + Sync + 'static {
     fn now_us(&self) -> u64;
 }
 
-/// `impl TimeSource` backed by a user-supplied [`ClockSource`].
+/// `impl TimeSource` backed by the runtime's shared [`ClockSource`].
 ///
-/// The construction snapshot captures the source's current `now_us`
-/// as the epoch; subsequent `now_monotonic_ms` calls subtract the
-/// epoch and divide by 1000. Two independently-constructed
-/// `LwipTime` instances will report different epochs even on the
-/// same `ClockSource`, mirroring [`wz_runtime_tokio::TokioTime`]
-/// per-instance epoch semantics.
+/// R311bc: construction borrows from [`LwipRuntime`] so the time
+/// source, the runtime's timer queue, and the runtime's task pool
+/// all reference the same `Arc<RuntimeInner<C>>`. The construction
+/// snapshot captures the source's current `now_us` as the epoch;
+/// subsequent `now_monotonic_ms` calls subtract the epoch and
+/// divide by 1000. Two independently-constructed `LwipTime`
+/// instances on the same runtime will report different epochs,
+/// mirroring [`wz_runtime_tokio::TokioTime`] per-instance epoch
+/// semantics.
 pub struct LwipTime<C: ClockSource> {
-    source: C,
+    inner: Arc<RuntimeInner<C>>,
     epoch_us: u64,
 }
 
 impl<C: ClockSource> LwipTime<C> {
-    /// Build a new `LwipTime`. Snapshots the source's current
-    /// `now_us()` as the epoch for this instance.
-    pub fn new(source: C) -> Self {
-        let epoch_us = source.now_us();
-        Self { source, epoch_us }
+    /// Build a new `LwipTime` sharing the runtime's clock + timer
+    /// queue. Snapshots the clock's current `now_us()` as the
+    /// epoch for this instance.
+    pub fn new(rt: &LwipRuntime<C>) -> Self {
+        let epoch_us = rt.clock().now_us();
+        Self {
+            inner: rt.inner.clone(),
+            epoch_us,
+        }
     }
 }
 
-impl<C: ClockSource + Clone> Clone for LwipTime<C> {
+impl<C: ClockSource> Clone for LwipTime<C> {
     fn clone(&self) -> Self {
         Self {
-            source: self.source.clone(),
+            inner: self.inner.clone(),
             epoch_us: self.epoch_us,
         }
     }
@@ -103,13 +130,18 @@ impl<C: ClockSource> TimeSource for LwipTime<C> {
         // Saturating subtraction so a buggy ClockSource that
         // momentarily reports a past time does not wrap into a
         // huge ms value.
-        self.source.now_us().saturating_sub(self.epoch_us) / 1000
+        self.inner.clock.now_us().saturating_sub(self.epoch_us) / 1000
     }
 
     fn sleep(&self, ms: u64) -> impl Future<Output = ()> + Send + '_ {
         SleepFuture {
-            deadline_us: self.source.now_us().saturating_add(ms.saturating_mul(1000)),
-            source: &self.source,
+            deadline_us: self
+                .inner
+                .clock
+                .now_us()
+                .saturating_add(ms.saturating_mul(1000)),
+            inner: self.inner.clone(),
+            registered: false,
         }
     }
 
@@ -123,67 +155,102 @@ impl<C: ClockSource> TimeSource for LwipTime<C> {
         F::Output: Send,
     {
         TimeoutFuture {
-            deadline_us: self.source.now_us().saturating_add(ms.saturating_mul(1000)),
-            source: &self.source,
+            deadline_us: self
+                .inner
+                .clock
+                .now_us()
+                .saturating_add(ms.saturating_mul(1000)),
+            inner: self.inner.clone(),
             fut: Box::pin(fut),
+            registered: false,
         }
     }
 }
 
-/// Future returned by [`LwipTime::sleep`]. Self-wakes via
-/// `cx.waker().wake_by_ref()` on each `Pending` return so the
-/// executor re-polls it on the next pass; resolves to `()` once
-/// the clock crosses the deadline.
+/// Future returned by [`LwipTime::sleep`]. R311bc: registers its
+/// waker with the runtime's [`crate::timer::TimerQueue`] on first
+/// Pending poll instead of self-waking. Resolves to `()` once the
+/// clock crosses the deadline.
 ///
-/// Borrows `&'a C` from the parent `LwipTime`; `Send` carries
-/// because `ClockSource: Send + Sync` guarantees `&C: Send`.
-pub struct SleepFuture<'a, C: ClockSource> {
+/// Owns an `Arc<RuntimeInner<C>>` so the future is `'static` and
+/// composes naturally into `tokio::spawn`-shaped contracts (the
+/// `'static` bound on `Runtime::spawn` matches automatically). The
+/// `Send` half carries because the inner Arc is `Send + Sync`
+/// (which holds when `C: ClockSource` since the trait requires
+/// `Send + Sync + 'static`).
+pub struct SleepFuture<C: ClockSource> {
     deadline_us: u64,
-    source: &'a C,
+    inner: Arc<RuntimeInner<C>>,
+    registered: bool,
 }
 
-impl<'a, C: ClockSource> Future for SleepFuture<'a, C> {
+// SleepFuture has no self-referential storage; the Arc is movable
+// and the bool / u64 are trivially Unpin. Explicit Unpin lets
+// `poll` access fields via the safe `Pin::get_mut` path rather
+// than `unsafe { Pin::into_inner_unchecked }`.
+impl<C: ClockSource> Unpin for SleepFuture<C> {}
+
+impl<C: ClockSource> Future for SleepFuture<C> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        if self.source.now_us() >= self.deadline_us {
-            Poll::Ready(())
-        } else {
-            // R311av busy-wake. R311az+ replaces with a real timer
-            // queue registration so this Pending lands without
-            // re-polling on every executor pass.
-            cx.waker().wake_by_ref();
-            Poll::Pending
+        let this = self.get_mut();
+        if this.inner.clock.now_us() >= this.deadline_us {
+            return Poll::Ready(());
         }
+        if !this.registered {
+            this.inner
+                .timers
+                .register(this.deadline_us, cx.waker().clone());
+            this.registered = true;
+        }
+        Poll::Pending
     }
 }
 
 /// Future returned by [`LwipTime::timeout`]. Polls the inner
 /// future first on every pass; if the inner future resolves before
 /// the deadline elapses, returns `Ok(inner_output)`. If the
-/// deadline elapses first, returns `Err(TimeoutElapsed)`. If
-/// neither — re-arms via `wake_by_ref` and returns `Pending`.
-pub struct TimeoutFuture<'a, C: ClockSource, F: Future> {
+/// deadline elapses first, returns `Err(TimeoutElapsed)`.
+///
+/// R311bc: registers its waker on the timer queue exactly once
+/// (the `registered` flag) instead of re-arming via wake_by_ref.
+/// The inner future's own wakers drive most re-polls; the timer
+/// queue's deadline wake is the fallback when the inner stays
+/// Pending past the deadline.
+pub struct TimeoutFuture<C: ClockSource, F: Future> {
     deadline_us: u64,
-    source: &'a C,
+    inner: Arc<RuntimeInner<C>>,
     fut: Pin<Box<F>>,
+    registered: bool,
 }
 
-impl<'a, C: ClockSource, F: Future> Future for TimeoutFuture<'a, C, F> {
+// Pin<Box<F>> contains the pinning guarantee for F internally; the
+// outer wrapper struct itself can be moved freely because moving
+// it copies the Box pointer, not F. Explicit Unpin to enable safe
+// field access in poll().
+impl<C: ClockSource, F: Future> Unpin for TimeoutFuture<C, F> {}
+
+impl<C: ClockSource, F: Future> Future for TimeoutFuture<C, F> {
     type Output = Result<F::Output, TimeoutElapsed>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
         // Poll inner first — fastest-path: inner Ready before the
         // deadline check matters.
-        match self.fut.as_mut().poll(cx) {
+        match this.fut.as_mut().poll(cx) {
             Poll::Ready(out) => return Poll::Ready(Ok(out)),
             Poll::Pending => {}
         }
-        if self.source.now_us() >= self.deadline_us {
-            Poll::Ready(Err(TimeoutElapsed))
-        } else {
-            cx.waker().wake_by_ref();
-            Poll::Pending
+        if this.inner.clock.now_us() >= this.deadline_us {
+            return Poll::Ready(Err(TimeoutElapsed));
         }
+        if !this.registered {
+            this.inner
+                .timers
+                .register(this.deadline_us, cx.waker().clone());
+            this.registered = true;
+        }
+        Poll::Pending
     }
 }
