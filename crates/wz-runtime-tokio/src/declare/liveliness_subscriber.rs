@@ -73,7 +73,7 @@
 //! it here keeps the cross-registry coupling at zero and matches
 //! zenoh-pico's `_z_session_t._remote_tokens` table sized per session.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use wz_codecs::declare::DeclareVariant;
 

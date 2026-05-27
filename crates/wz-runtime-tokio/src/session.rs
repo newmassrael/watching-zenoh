@@ -6116,7 +6116,7 @@ mod tests {
 
     #[test]
     fn querier_get_matching_status_true_after_peer_decl_with_matching_keyexpr() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         let querier = session.declare_querier("home/temp", QueryOptions::get());
         // Drive a DeclQueryable into the registry directly (no FSM
@@ -6137,7 +6137,7 @@ mod tests {
 
     #[test]
     fn querier_get_matching_status_true_when_peer_pattern_covers_querier_literal() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         let querier = session.declare_querier("home/temp", QueryOptions::get());
         session
@@ -6155,7 +6155,7 @@ mod tests {
 
     #[test]
     fn querier_get_matching_status_true_when_querier_pattern_covers_peer_literal() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         let querier = session.declare_querier("home/**", QueryOptions::get());
         session
@@ -6173,7 +6173,7 @@ mod tests {
 
     #[test]
     fn querier_get_matching_status_false_after_peer_undeclare() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         let querier = session.declare_querier("home/temp", QueryOptions::get());
         session
@@ -6202,7 +6202,7 @@ mod tests {
 
     #[test]
     fn querier_get_matching_status_false_with_non_matching_peer_keyexpr() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         let querier = session.declare_querier("home/temp", QueryOptions::get());
         session
@@ -6220,7 +6220,7 @@ mod tests {
 
     #[test]
     fn querier_get_matching_status_true_when_any_of_many_peer_decls_matches() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         let querier = session.declare_querier("home/temp", QueryOptions::get());
         let mut obs = session.observer().lock().unwrap();
@@ -6241,7 +6241,7 @@ mod tests {
 
     #[test]
     fn querier_clone_shares_matching_status_view() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         let querier = session.declare_querier("home/temp", QueryOptions::get());
         let querier_clone = querier.clone();
@@ -6465,7 +6465,7 @@ mod tests {
 
     #[test]
     fn querier_aliased_get_matching_status_true_when_peer_decl_matches_base_literal() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         session
             .actions()
@@ -6487,7 +6487,7 @@ mod tests {
 
     #[test]
     fn querier_aliased_get_matching_status_threads_inline_suffix_into_consult() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         session
             .actions()
@@ -6537,7 +6537,7 @@ mod tests {
 
     #[test]
     fn querier_aliased_get_matching_status_false_after_undeclared_mapping_drop() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         session
             .actions()
@@ -6796,7 +6796,7 @@ mod tests {
 
     #[test]
     fn publisher_get_matching_status_true_after_peer_decl_with_matching_keyexpr() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         let publisher = session.declare_publisher("home/temp", PublishOptions::put());
         session
@@ -6814,7 +6814,7 @@ mod tests {
 
     #[test]
     fn publisher_get_matching_status_true_when_peer_pattern_covers_publisher_literal() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         let publisher = session.declare_publisher("home/temp", PublishOptions::put());
         session
@@ -6832,7 +6832,7 @@ mod tests {
 
     #[test]
     fn publisher_get_matching_status_false_after_peer_undeclare() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         let publisher = session.declare_publisher("home/temp", PublishOptions::put());
         session
@@ -6860,7 +6860,7 @@ mod tests {
 
     #[test]
     fn publisher_get_matching_status_false_with_non_matching_peer_keyexpr() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         let publisher = session.declare_publisher("home/temp", PublishOptions::put());
         session
@@ -6888,7 +6888,7 @@ mod tests {
 
     #[test]
     fn publisher_aliased_get_matching_status_threads_inline_suffix_into_consult() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         session
             .actions()
@@ -6910,7 +6910,7 @@ mod tests {
 
     #[test]
     fn publisher_aliased_get_matching_status_false_after_undeclared_mapping_drop() {
-        use std::collections::HashMap;
+        use hashbrown::HashMap;
         let (session, _driver) = build_session();
         session
             .actions()
