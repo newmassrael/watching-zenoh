@@ -1445,16 +1445,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
             )
         }
     }
-}
 
-// R311dc — split point: query / query_aliased / query_aliased_auto
-// migrated to R::with_mutex_mut + folded into the R-generic block
-// above. The remaining declare_* surface (Querier / QuerierAliased
-// aggregator constructors + Publisher / PublisherAliased + Subscriber
-// / Queryable / LivelinessToken / LivelinessSubscriber registries)
-// still calls observer.lock().expect(...) for the registry mutations
-// and stays on the AP-bound block until R311dd+ migrates them.
-impl<T: TimeSource> Session<TokioRuntime, T> {
     /// R242 — declare a reusable [`Querier`] bound to `keyexpr` +
     /// `options`. The returned Querier holds a clone of this
     /// session and emits subsequent outbound queries through
@@ -1485,7 +1476,7 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         &self,
         keyexpr: impl Into<String>,
         options: QueryOptions,
-    ) -> Querier<TokioRuntime, T> {
+    ) -> Querier<R, T> {
         Querier {
             session: self.clone(),
             keyexpr: keyexpr.into(),
@@ -1514,7 +1505,7 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         mapping_id: u64,
         inline_suffix: Option<&str>,
         options: QueryOptions,
-    ) -> QuerierAliased<TokioRuntime, T> {
+    ) -> QuerierAliased<R, T> {
         QuerierAliased {
             session: self.clone(),
             mapping_id,
@@ -1540,7 +1531,7 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         &self,
         keyexpr: impl Into<String>,
         options: PublishOptions,
-    ) -> Publisher<TokioRuntime, T> {
+    ) -> Publisher<R, T> {
         Publisher {
             session: self.clone(),
             keyexpr: keyexpr.into(),
@@ -1563,7 +1554,7 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         mapping_id: u64,
         inline_suffix: Option<&str>,
         options: PublishOptions,
-    ) -> PublisherAliased<TokioRuntime, T> {
+    ) -> PublisherAliased<R, T> {
         PublisherAliased {
             session: self.clone(),
             mapping_id,
@@ -1571,7 +1562,18 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
             options,
         }
     }
+}
 
+// R311dd — split point: declare_querier{,_aliased} + declare_publisher
+// {,_aliased} migrated to the R-generic block above. The 4 aggregator
+// constructors return X<R, T> handles whose impl blocks (Querier /
+// QuerierAliased / Publisher / PublisherAliased) are themselves lifted
+// to impl<R, T> in this round; their get_matching_status methods are
+// migrated to R::with_mutex_mut. The remaining declare_* surface
+// (Subscriber / Queryable / LivelinessToken / LivelinessSubscriber
+// registries) still calls observer.lock().expect(...) at registration
+// time and stays on the AP-bound block until R311de+ migrates them.
+impl<T: TimeSource> Session<TokioRuntime, T> {
     /// R245 — declare a [`Subscriber`] for `keyexpr` + `options`
     /// that fires `callback` on every matching inbound `Sample`.
     /// Returns a [`Subscriber`] handle whose `Drop` auto-unregisters
@@ -2316,7 +2318,7 @@ impl<R: Runtime, T: TimeSource> Clone for Querier<R, T> {
     }
 }
 
-impl<T: TimeSource> Querier<TokioRuntime, T> {
+impl<R: Runtime, T: TimeSource> Querier<R, T> {
     /// Borrow the declared keyexpr. The literal form supplied to
     /// [`Session::declare_querier`]; identical to what each
     /// [`Self::get`] call threads to [`Session::query`].
@@ -2396,15 +2398,14 @@ impl<T: TimeSource> Querier<TokioRuntime, T> {
     /// on `declare-queryable`, which broke the zenoh-cpp parity
     /// (consumers had to themselves cfg-gate every call site).
     pub fn get_matching_status(&self) -> MatchingStatus {
+        // R311dd — observer access via R::with_mutex_mut closure form.
+        // Replaces the AP-only `.lock()` + PoisonError::into_inner
+        // recovery pattern; per-profile poison-recovery semantics now
+        // live inside the Runtime impl.
         #[cfg(feature = "declare-queryable")]
-        let matching = {
-            let observer = self.session.observer();
-            let obs = match observer.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+        let matching = R::with_mutex_mut(&self.session.observer, |obs| {
             obs.remote_queryables.has_matching(&self.keyexpr)
-        };
+        });
         #[cfg(not(feature = "declare-queryable"))]
         let matching = false;
         MatchingStatus { matching }
@@ -2480,7 +2481,7 @@ impl<R: Runtime, T: TimeSource> Clone for QuerierAliased<R, T> {
     }
 }
 
-impl<T: TimeSource> QuerierAliased<TokioRuntime, T> {
+impl<R: Runtime, T: TimeSource> QuerierAliased<R, T> {
     /// The declared mapping id. Must have been previously registered
     /// via [`SessionLinkActions::send_declare_keyexpr`] for
     /// [`Self::get`] to succeed.
@@ -2567,15 +2568,11 @@ impl<T: TimeSource> QuerierAliased<TokioRuntime, T> {
                 composed
             }
         };
+        // R311dd — observer access via R::with_mutex_mut closure form.
         #[cfg(feature = "declare-queryable")]
-        let matching = {
-            let observer = self.session.observer();
-            let obs = match observer.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+        let matching = R::with_mutex_mut(&self.session.observer, |obs| {
             obs.remote_queryables.has_matching(&_effective_keyexpr)
-        };
+        });
         #[cfg(not(feature = "declare-queryable"))]
         let matching = false;
         Ok(MatchingStatus { matching })
@@ -2618,7 +2615,7 @@ impl<R: Runtime, T: TimeSource> Clone for Publisher<R, T> {
     }
 }
 
-impl<T: TimeSource> Publisher<TokioRuntime, T> {
+impl<R: Runtime, T: TimeSource> Publisher<R, T> {
     /// Borrow the declared keyexpr.
     pub fn keyexpr(&self) -> &str {
         &self.keyexpr
@@ -2688,15 +2685,11 @@ impl<T: TimeSource> Publisher<TokioRuntime, T> {
     /// on `declare-subscriber`, which broke the zenoh-cpp parity
     /// (consumers had to themselves cfg-gate every call site).
     pub fn get_matching_status(&self) -> MatchingStatus {
+        // R311dd — observer access via R::with_mutex_mut closure form.
         #[cfg(feature = "declare-subscriber")]
-        let matching = {
-            let observer = self.session.observer();
-            let obs = match observer.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+        let matching = R::with_mutex_mut(&self.session.observer, |obs| {
             obs.remote_subscribers.has_matching(&self.keyexpr)
-        };
+        });
         #[cfg(not(feature = "declare-subscriber"))]
         let matching = false;
         MatchingStatus { matching }
@@ -2738,7 +2731,7 @@ impl<R: Runtime, T: TimeSource> Clone for PublisherAliased<R, T> {
     }
 }
 
-impl<T: TimeSource> PublisherAliased<TokioRuntime, T> {
+impl<R: Runtime, T: TimeSource> PublisherAliased<R, T> {
     /// The declared mapping id.
     pub fn mapping_id(&self) -> u64 {
         self.mapping_id
@@ -2815,15 +2808,11 @@ impl<T: TimeSource> PublisherAliased<TokioRuntime, T> {
                 composed
             }
         };
+        // R311dd — observer access via R::with_mutex_mut closure form.
         #[cfg(feature = "declare-subscriber")]
-        let matching = {
-            let observer = self.session.observer();
-            let obs = match observer.lock() {
-                Ok(g) => g,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+        let matching = R::with_mutex_mut(&self.session.observer, |obs| {
             obs.remote_subscribers.has_matching(&_effective_keyexpr)
-        };
+        });
         #[cfg(not(feature = "declare-subscriber"))]
         let matching = false;
         Ok(MatchingStatus { matching })

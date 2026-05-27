@@ -23069,6 +23069,60 @@
         "Architectural carries unchanged: R311ca debt #6 wire-up 19% (unblocked by Session extraction), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311dd": {
+      "decision_summary": "R311dd — Querier / QuerierAliased / Publisher / PublisherAliased pipeline fully R-generic; 4 declare_* aggregator constructors + 4 get_matching_status methods + 4 helper impl blocks all lift to impl<R: Runtime, T: TimeSource>",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Querier::get_matching_status + QuerierAliased::get_matching_status + Publisher::get_matching_status + PublisherAliased::get_matching_status migrate observer access from `self.session.observer().lock()` + match-poison-recovery to R::with_mutex_mut closure form (R311ct API). Per-profile poison-recovery semantics now live inside the Runtime impl.",
+        "session.rs: 4 helper impl blocks lift from impl<T: TimeSource> X<TokioRuntime, T> to impl<R: Runtime, T: TimeSource> X<R, T> for X in {Querier, QuerierAliased, Publisher, PublisherAliased}. Querier/QuerierAliased::get bodies are already R-generic via Session::query / Session::query_aliased_auto (R311dc lift); Publisher/PublisherAliased::put / delete bodies are R-generic via Session::publish / Session::publish_aliased_auto (R311db lift).",
+        "session.rs: declare_querier + declare_querier_aliased + declare_publisher + declare_publisher_aliased return types lift from X<TokioRuntime, T> to X<R, T>. Methods stay textually unchanged but move from impl<T> Session<TokioRuntime, T> into the R-generic impl<R, T> block via the impl-block split rearrangement.",
+        "session.rs: impl-block split point moves from after query_aliased_auto (R311dc boundary) to after declare_publisher_aliased. The 11 R-generic methods now extend to 15; the AP-bound impl<T> Session<TokioRuntime, T> block resumes at declare_subscriber which still calls .lock().expect() at registration time."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=436 -> 437, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311de+ (next): declare_subscriber + declare_subscriber_aliased + Subscriber impl block lift. declare_subscriber body calls self.observer.lock().expect(...).subscribers.register_with_locality(...); migrate to R::with_mutex_mut closure form. Subscriber impl block lifts from <TokioRuntime, T> to <R, T> alongside.",
+        "R311df+: declare_queryable + declare_queryable_aliased + Queryable impl block lift. Same pattern as R311de but for queryables.",
+        "R311dg+: declare_token + declare_token_aliased + LivelinessToken impl block lift. Wire-emit DeclToken via self.actions; observer registers token id via observer.lock().expect(...).tokens.register(...). Same closure-form migration.",
+        "R311dh+: declare_liveliness_subscriber + declare_liveliness_subscriber_aliased + LivelinessSubscriber impl block lift. Last cluster before the AP-bound block empties.",
+        "Session crate extraction (R311cv carry): AP block now carries 20 remaining methods (down from 24 at R311dc). Block continues to shrink each round; trailing rounds extract session.rs + helpers to wz-session-core no_std crate, enabling LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>>.",
+        "Architectural carries unchanged: R311ca debt #6 wire-up 19% (unblocked by Session extraction), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311dd — Querier / QuerierAliased / Publisher / PublisherAliased pipeline fully R-generic; 4 declare_* aggregator constructors + 4 get_matching_status methods + 4 helper impl blocks all lift to impl<R: Runtime, T: TimeSource>",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Querier::get_matching_status + QuerierAliased::get_matching_status + Publisher::get_matching_status + PublisherAliased::get_matching_status migrate observer access from `self.session.observer().lock()` + match-poison-recovery to R::with_mutex_mut closure form (R311ct API). Per-profile poison-recovery semantics now live inside the Runtime impl.",
+        "session.rs: 4 helper impl blocks lift from impl<T: TimeSource> X<TokioRuntime, T> to impl<R: Runtime, T: TimeSource> X<R, T> for X in {Querier, QuerierAliased, Publisher, PublisherAliased}. Querier/QuerierAliased::get bodies are already R-generic via Session::query / Session::query_aliased_auto (R311dc lift); Publisher/PublisherAliased::put / delete bodies are R-generic via Session::publish / Session::publish_aliased_auto (R311db lift).",
+        "session.rs: declare_querier + declare_querier_aliased + declare_publisher + declare_publisher_aliased return types lift from X<TokioRuntime, T> to X<R, T>. Methods stay textually unchanged but move from impl<T> Session<TokioRuntime, T> into the R-generic impl<R, T> block via the impl-block split rearrangement.",
+        "session.rs: impl-block split point moves from after query_aliased_auto (R311dc boundary) to after declare_publisher_aliased. The 11 R-generic methods now extend to 15; the AP-bound impl<T> Session<TokioRuntime, T> block resumes at declare_subscriber which still calls .lock().expect() at registration time."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=436 -> 437, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311de+ (next): declare_subscriber + declare_subscriber_aliased + Subscriber impl block lift. declare_subscriber body calls self.observer.lock().expect(...).subscribers.register_with_locality(...); migrate to R::with_mutex_mut closure form. Subscriber impl block lifts from <TokioRuntime, T> to <R, T> alongside.",
+        "R311df+: declare_queryable + declare_queryable_aliased + Queryable impl block lift. Same pattern as R311de but for queryables.",
+        "R311dg+: declare_token + declare_token_aliased + LivelinessToken impl block lift. Wire-emit DeclToken via self.actions; observer registers token id via observer.lock().expect(...).tokens.register(...). Same closure-form migration.",
+        "R311dh+: declare_liveliness_subscriber + declare_liveliness_subscriber_aliased + LivelinessSubscriber impl block lift. Last cluster before the AP-bound block empties.",
+        "Session crate extraction (R311cv carry): AP block now carries 20 remaining methods (down from 24 at R311dc). Block continues to shrink each round; trailing rounds extract session.rs + helpers to wz-session-core no_std crate, enabling LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>>.",
+        "Architectural carries unchanged: R311ca debt #6 wire-up 19% (unblocked by Session extraction), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
