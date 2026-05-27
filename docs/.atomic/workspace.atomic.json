@@ -23907,6 +23907,48 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311di-pre-f7": {
+      "decision_summary": "R311di-pre-f7 — decision-only round: 4 AtomicU64 fields keep `portable_atomic::AtomicU64` raw across profiles (option b ratified); Runtime trait stays at Mutex + RwLock abstractions only; portable_atomic IS the portable abstraction (option a R::Atomic GAT rejected as over-engineering).",
+      "changes_bullets": [
+        "No source changes — decision-only round per the R311bp pattern (decision_summary records the ratification + atomic store ledger entry; no .rs file mutation). Mirrors the R311di-pre-f6 carry_forward question evaluation: option (a) Runtime trait extension with R::Atomic<u64> GAT + new_atomic + atomic_fetch_add* + atomic_load* methods (cleaner trait surface) vs (b) keep portable_atomic::AtomicU64 raw across profiles (zero added abstraction).",
+        "Ratification rationale: portable_atomic IS already the portable abstraction this problem domain needs. AP profile resolves to std::sync::atomic::AtomicU64 (hardware atomic instructions on x86/ARM64); MCU profile via the unstable-portable-atomic-critical-section feature resolves to a critical_section-emulated atomic that gives correct semantics on single-core MCUs without hardware atomic ops. Wrapping it inside Runtime adds 4+ trait methods without expressivity gain — every binding would call back to portable_atomic verbatim. The Mutex abstraction earned its trait surface because std::sync::Mutex + critical_section::Mutex have genuinely different APIs (lock + PoisonError vs borrow + RefCell); atomic ops do not have that gap.",
+        "Inventory captured for future reviewers: 4 fields (outbound_frame_sn + next_outbound_request_id/token_id/interest_id; session_glue.rs:884/919/943/968) hold AtomicU64 directly. 4 fetch_add sites in the R-generic impl block (line 1343/1364/1383/1402). 4 AtomicU64::new construction sites in the concrete TokioRuntime impl block (line 1121-1125). 11 total portable_atomic references including the module-level import (line 72). All sites stay verbatim; portable_atomic is a workspace dep per R311di-pre-a + pre-b sweep so the dependency surface does not change."
+      ],
+      "verification_bullets": [
+        "No code mutation; validate_workspace entries delta only.",
+        "Mechanical verification: `grep -c AtomicU64 crates/wz-runtime-tokio/src/session_glue.rs` = 11 references (4 field decls + 4 ctor sites + 3 module-level + alpha); all path-through `portable_atomic` not `std::sync::atomic` per R311di-pre-b sweep.",
+        "validate_workspace: entries=453 -> 454, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di proper (next): wz-session-core crate extraction (no_std + alloc). With all Mutex fields migrated (pre-f2/f3/f4/f5/f6) and AtomicU64 fields keeping portable_atomic verbatim (pre-f7 ratify), the SessionLinkActions struct + impl<R: Runtime, T: TimeSource> body is fully runtime-agnostic. Crate extraction becomes mechanical file moves: session_glue.rs (sans Lua-binding helpers + the concrete TokioRuntime impl block holding ::new) + session.rs + observer.rs + declare/* + pubsub.rs + query.rs + reply.rs + sample.rs + locality.rs + keyexpr_canon.rs -> crates/wz-session-core/src/. wz-runtime-tokio shrinks to runtime_impl.rs + sync.rs + lib.rs + the SessionLinkActions::new concrete constructor + the Lua-binding family.",
+        "Crate extraction sub-rounds: (1) crate skeleton + Cargo.toml + lib.rs re-exports; (2) file moves with import path rewrites (`crate::` -> `wz_session_core::` in wz-runtime-tokio + `crate::session_glue::` -> `crate::session_glue::` in wz-session-core); (3) `pub fn new` concrete constructor + Lua bindings stay in wz-runtime-tokio under `impl<T: TimeSource> SessionLinkActions<TokioRuntime, T>`; (4) wz facade Cargo.toml dependency graph update + feature forwarding chain; (5) Layer 0..E + G regression suite confirms no API surface drift.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311di-pre-f7 — decision-only round: 4 AtomicU64 fields keep `portable_atomic::AtomicU64` raw across profiles (option b ratified); Runtime trait stays at Mutex + RwLock abstractions only; portable_atomic IS the portable abstraction (option a R::Atomic GAT rejected as over-engineering).",
+      "publishable_changes_bullets": [
+        "No source changes — decision-only round per the R311bp pattern (decision_summary records the ratification + atomic store ledger entry; no .rs file mutation). Mirrors the R311di-pre-f6 carry_forward question evaluation: option (a) Runtime trait extension with R::Atomic<u64> GAT + new_atomic + atomic_fetch_add* + atomic_load* methods (cleaner trait surface) vs (b) keep portable_atomic::AtomicU64 raw across profiles (zero added abstraction).",
+        "Ratification rationale: portable_atomic IS already the portable abstraction this problem domain needs. AP profile resolves to std::sync::atomic::AtomicU64 (hardware atomic instructions on x86/ARM64); MCU profile via the unstable-portable-atomic-critical-section feature resolves to a critical_section-emulated atomic that gives correct semantics on single-core MCUs without hardware atomic ops. Wrapping it inside Runtime adds 4+ trait methods without expressivity gain — every binding would call back to portable_atomic verbatim. The Mutex abstraction earned its trait surface because std::sync::Mutex + critical_section::Mutex have genuinely different APIs (lock + PoisonError vs borrow + RefCell); atomic ops do not have that gap.",
+        "Inventory captured for future reviewers: 4 fields (outbound_frame_sn + next_outbound_request_id/token_id/interest_id; session_glue.rs:884/919/943/968) hold AtomicU64 directly. 4 fetch_add sites in the R-generic impl block (line 1343/1364/1383/1402). 4 AtomicU64::new construction sites in the concrete TokioRuntime impl block (line 1121-1125). 11 total portable_atomic references including the module-level import (line 72). All sites stay verbatim; portable_atomic is a workspace dep per R311di-pre-a + pre-b sweep so the dependency surface does not change."
+      ],
+      "publishable_verification_bullets": [
+        "No code mutation; validate_workspace entries delta only.",
+        "Mechanical verification: `grep -c AtomicU64 crates/wz-runtime-tokio/src/session_glue.rs` = 11 references (4 field decls + 4 ctor sites + 3 module-level + alpha); all path-through `portable_atomic` not `std::sync::atomic` per R311di-pre-b sweep.",
+        "validate_workspace: entries=453 -> 454, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di proper (next): wz-session-core crate extraction (no_std + alloc). With all Mutex fields migrated (pre-f2/f3/f4/f5/f6) and AtomicU64 fields keeping portable_atomic verbatim (pre-f7 ratify), the SessionLinkActions struct + impl<R: Runtime, T: TimeSource> body is fully runtime-agnostic. Crate extraction becomes mechanical file moves: session_glue.rs (sans Lua-binding helpers + the concrete TokioRuntime impl block holding ::new) + session.rs + observer.rs + declare/* + pubsub.rs + query.rs + reply.rs + sample.rs + locality.rs + keyexpr_canon.rs -> crates/wz-session-core/src/. wz-runtime-tokio shrinks to runtime_impl.rs + sync.rs + lib.rs + the SessionLinkActions::new concrete constructor + the Lua-binding family.",
+        "Crate extraction sub-rounds: (1) crate skeleton + Cargo.toml + lib.rs re-exports; (2) file moves with import path rewrites (`crate::` -> `wz_session_core::` in wz-runtime-tokio + `crate::session_glue::` -> `crate::session_glue::` in wz-session-core); (3) `pub fn new` concrete constructor + Lua bindings stay in wz-runtime-tokio under `impl<T: TimeSource> SessionLinkActions<TokioRuntime, T>`; (4) wz facade Cargo.toml dependency graph update + feature forwarding chain; (5) Layer 0..E + G regression suite confirms no API surface drift.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
