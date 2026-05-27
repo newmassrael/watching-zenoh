@@ -23863,6 +23863,50 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311di-pre-f6": {
+      "decision_summary": "R311di-pre-f6 — outbound_mappings Mutex&lt;HashMap&lt;u64, String&gt;&gt; lifts to R::Mutex; 3 R-generic .lock() sites (send_declare_keyexpr insert + send_undeclare_kexpr remove + resolve_outbound_mapping get) migrate to R::with_mutex_mut closures; R234 keyexpr-alias table is now per-profile-mutex agnostic.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs:901: outbound_mappings field lifts Mutex<HashMap<u64, String>> -> R::Mutex<HashMap<u64, String>>. The R234 keyexpr-alias table (zenoh-pico `_z_session_t._local_resources` mirror) now uses the per-profile mutex alias; AP resolves to std::sync::Mutex, MCU profile binds critical_section::Mutex once R311di proper extracts wz-session-core.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1526 + 1906 + 1927 (send_declare_keyexpr + send_undeclare_kexpr + resolve_outbound_mapping): three .lock() sites migrate to R::with_mutex_mut closures. Insert + remove + get_cloned semantics unchanged. Poison-recover policy normalised via the trait (matches R311di-pre-f4 is_established migration). Wire-emit ordering invariant preserved — the post-`driver.send_blocking` insertion at line 1526 still happens after the wire send so a driver panic does not leave a stale table entry."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean (0.98s rebuild).",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass (send_declare_keyexpr + resolve_outbound_mapping exercised by r300_outbound_keyexpr_gate + wz_remote_declare_round_trip + session_glue_dispatch integration tests).",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent).",
+        "validate_workspace: entries=452 -> 453, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-pre-f7 (next, decision required at entry): 4 AtomicU64 fields (outbound_frame_sn + next_outbound_request_id/token_id/interest_id). Evaluation paths: (a) extend Runtime trait with `R::Atomic<u64>` GAT + `R::new_atomic` + `R::atomic_fetch_add_relaxed` + `R::atomic_load_relaxed` (cleaner abstraction, 4+ new trait methods); (b) keep `portable_atomic::AtomicU64` raw across profiles (simpler, portable_atomic is workspace dep, spans MCU profiles via unstable-portable-atomic-critical-section). Recommendation at f7 entry: (b) — portable_atomic is already an established abstraction layer for this exact problem; reinventing it in Runtime adds trait surface without added expressivity. The wz-session-core extraction (R311di proper) would carry portable_atomic as a dep verbatim.",
+        "R311di proper: wz-session-core crate extraction (no_std + alloc). With pre-f1..pre-f6 closed and pre-f7 likely a no-op (option b), the crate extraction becomes mechanical file moves: session_glue.rs (sans the Lua-binding helpers which stay in wz-runtime-tokio) + session.rs + observer.rs + declare/* + pubsub.rs + query.rs + reply.rs + sample.rs + locality.rs + keyexpr_canon.rs.",
+        "Lua-binding family (install_session_actions + register_outbound_link_fns + register_state_internal_fns + register_guard_fns + bind_unit + bind_close_reason; session_glue.rs:2476-7220+) stays in wz-runtime-tokio post-extraction since the SCXML script engine is std/tokio-dependent. Default-elided SessionLinkActions<TokioRuntime, TokioTime> form persists.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311di-pre-f6 — outbound_mappings Mutex&lt;HashMap&lt;u64, String&gt;&gt; lifts to R::Mutex; 3 R-generic .lock() sites (send_declare_keyexpr insert + send_undeclare_kexpr remove + resolve_outbound_mapping get) migrate to R::with_mutex_mut closures; R234 keyexpr-alias table is now per-profile-mutex agnostic.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs:901: outbound_mappings field lifts Mutex<HashMap<u64, String>> -> R::Mutex<HashMap<u64, String>>. The R234 keyexpr-alias table (zenoh-pico `_z_session_t._local_resources` mirror) now uses the per-profile mutex alias; AP resolves to std::sync::Mutex, MCU profile binds critical_section::Mutex once R311di proper extracts wz-session-core.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1526 + 1906 + 1927 (send_declare_keyexpr + send_undeclare_kexpr + resolve_outbound_mapping): three .lock() sites migrate to R::with_mutex_mut closures. Insert + remove + get_cloned semantics unchanged. Poison-recover policy normalised via the trait (matches R311di-pre-f4 is_established migration). Wire-emit ordering invariant preserved — the post-`driver.send_blocking` insertion at line 1526 still happens after the wire send so a driver panic does not leave a stale table entry."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean (0.98s rebuild).",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass (send_declare_keyexpr + resolve_outbound_mapping exercised by r300_outbound_keyexpr_gate + wz_remote_declare_round_trip + session_glue_dispatch integration tests).",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent).",
+        "validate_workspace: entries=452 -> 453, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-pre-f7 (next, decision required at entry): 4 AtomicU64 fields (outbound_frame_sn + next_outbound_request_id/token_id/interest_id). Evaluation paths: (a) extend Runtime trait with `R::Atomic<u64>` GAT + `R::new_atomic` + `R::atomic_fetch_add_relaxed` + `R::atomic_load_relaxed` (cleaner abstraction, 4+ new trait methods); (b) keep `portable_atomic::AtomicU64` raw across profiles (simpler, portable_atomic is workspace dep, spans MCU profiles via unstable-portable-atomic-critical-section). Recommendation at f7 entry: (b) — portable_atomic is already an established abstraction layer for this exact problem; reinventing it in Runtime adds trait surface without added expressivity. The wz-session-core extraction (R311di proper) would carry portable_atomic as a dep verbatim.",
+        "R311di proper: wz-session-core crate extraction (no_std + alloc). With pre-f1..pre-f6 closed and pre-f7 likely a no-op (option b), the crate extraction becomes mechanical file moves: session_glue.rs (sans the Lua-binding helpers which stay in wz-runtime-tokio) + session.rs + observer.rs + declare/* + pubsub.rs + query.rs + reply.rs + sample.rs + locality.rs + keyexpr_canon.rs.",
+        "Lua-binding family (install_session_actions + register_outbound_link_fns + register_state_internal_fns + register_guard_fns + bind_unit + bind_close_reason; session_glue.rs:2476-7220+) stays in wz-runtime-tokio post-extraction since the SCXML script engine is std/tokio-dependent. Default-elided SessionLinkActions<TokioRuntime, TokioTime> form persists.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
