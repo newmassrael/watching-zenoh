@@ -20232,6 +20232,70 @@
         "Architectural carries unchanged: R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter"
       ]
     },
+    "Round 311br": {
+      "decision_summary": "R311br lands wz-codecs codec_group! macro 통합; codec-declare(10)+codec-response(3)+codec-request(2) 17 cfg sites → group invocation; grep 'cfg(feature' lib.rs 28→14 (R311bp 부채 #7 청산).",
+      "changes_bullets": [
+        "crates/wz-codecs/src/lib.rs: codec_group!($feature, [(name, file), ...]) macro definition added (R311bp 부채 #7 청산)",
+        "crates/wz-codecs/src/lib.rs: codec-declare 10 modules → codec_group!(\"codec-declare\", [...]) invocation",
+        "crates/wz-codecs/src/lib.rs: codec-response 3 modules (reply, err, response) → codec_group! invocation",
+        "crates/wz-codecs/src/lib.rs: codec-request 2 modules (query, request) → codec_group! invocation",
+        "Cargo feature behaviour byte-identical; cfg attribute moved into macro definition (1 site for the macro)",
+        "grep 'cfg(feature' lib.rs: 28 sites -> 14 attribute sites (4 doc-comment mentions excluded)"
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-codecs clean; cargo test -p wz-codecs --lib (ext_envelope_oracle 2 PASS)",
+        "cargo clippy --workspace --all-targets -D warnings clean; cargo fmt --all --check clean",
+        "Layer G full PASS — G.3 wz-codecs 7 targets cross-compile (thumbv6m + thumbv7m + thumbv7em-hf + 8m.base + 8m.main + 8m.main-hf + riscv32imac)",
+        "5 default lanes PASS (Layer 0/A/A2/B/C0/C1/C1b/C2/D/E); pre-push hook gates all five",
+        "cfg-site grep count 14 matches R311bp carry target (28 -> 14)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "부채 #7 wz-codecs facade 통합 audit RESOLVED at R311br (28 -> 14 cfg sites via codec_group!)",
+        "부채 #1 R311bn-slim-preset RESOLVED at R311bq (const-generic socket + sync-only deploy)",
+        "부채 #2 R267 Session<R,T> reparam (architectural multi-round; §5.P decision-lock 완료)",
+        "부채 #3 R311g1 ratify 재검토 (long-term large blast radius; #1/#2 후 평가)",
+        "부채 #4 cortex-m-rt 0.8 secure-init survey (upstream tracking)",
+        "부채 #5 Multi-link non-loopback netif e2e (virtio-net 또는 QEMU TAP)",
+        "부채 #6 atomic feature wire-up 54% + §6.1 vs Cargo divergences (mechanical domain-by-domain)",
+        "부채 #8 R303++ atomic field population (39 outline-only sub-sections)",
+        "Architectural carries unchanged: R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter"
+      ],
+      "publishable_decision_summary": "R311br lands wz-codecs codec_group! macro 통합; codec-declare(10)+codec-response(3)+codec-request(2) 17 cfg sites → group invocation; grep 'cfg(feature' lib.rs 28→14 (R311bp 부채 #7 청산).",
+      "publishable_changes_bullets": [
+        "crates/wz-codecs/src/lib.rs: codec_group!($feature, [(name, file), ...]) macro definition added (R311bp 부채 #7 청산)",
+        "crates/wz-codecs/src/lib.rs: codec-declare 10 modules → codec_group!(\"codec-declare\", [...]) invocation",
+        "crates/wz-codecs/src/lib.rs: codec-response 3 modules (reply, err, response) → codec_group! invocation",
+        "crates/wz-codecs/src/lib.rs: codec-request 2 modules (query, request) → codec_group! invocation",
+        "Cargo feature behaviour byte-identical; cfg attribute moved into macro definition (1 site for the macro)",
+        "grep 'cfg(feature' lib.rs: 28 sites -> 14 attribute sites (4 doc-comment mentions excluded)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-codecs clean; cargo test -p wz-codecs --lib (ext_envelope_oracle 2 PASS)",
+        "cargo clippy --workspace --all-targets -D warnings clean; cargo fmt --all --check clean",
+        "Layer G full PASS — G.3 wz-codecs 7 targets cross-compile (thumbv6m + thumbv7m + thumbv7em-hf + 8m.base + 8m.main + 8m.main-hf + riscv32imac)",
+        "5 default lanes PASS (Layer 0/A/A2/B/C0/C1/C1b/C2/D/E); pre-push hook gates all five",
+        "cfg-site grep count 14 matches R311bp carry target (28 -> 14)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "부채 #7 wz-codecs facade 통합 audit RESOLVED at R311br (28 -> 14 cfg sites via codec_group!)",
+        "부채 #1 R311bn-slim-preset RESOLVED at R311bq (const-generic socket + sync-only deploy)",
+        "부채 #2 R267 Session<R,T> reparam (architectural multi-round; §5.P decision-lock 완료)",
+        "부채 #3 R311g1 ratify 재검토 (long-term large blast radius; #1/#2 후 평가)",
+        "부채 #4 cortex-m-rt 0.8 secure-init survey (upstream tracking)",
+        "부채 #5 Multi-link non-loopback netif e2e (virtio-net 또는 QEMU TAP)",
+        "부채 #6 atomic feature wire-up 54% + §6.1 vs Cargo divergences (mechanical domain-by-domain)",
+        "부채 #8 R303++ atomic field population (39 outline-only sub-sections)",
+        "Architectural carries unchanged: R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter"
+      ]
+    },
     "Round 311c": {
       "decision_summary": "R311c lands codec-close cascade — wire encode/decode + send_close_with_reason + bind_unit gated; CloseReason enum + set_close_reason_* FSM bindings stay unconditional.",
       "changes_bullets": [
