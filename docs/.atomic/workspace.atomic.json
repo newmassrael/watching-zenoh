@@ -606,12 +606,28 @@
       "title": "§5.10 Liveliness",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Liveliness domain catalog: 5 atomic features (2 active wired liveliness-token + liveliness-subscriber per pre-R311, 3 reserved -get/-history/-historical-samples).",
+      "caveats_bullets": [
+        "R311ci audit confirms 2 wired (token 21 cfg + subscriber 14 cfg = 35 sites); 3 reserved unchanged."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage": {
       "title": "§5.11 Storage",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Storage domain catalog: 4 atomic features all reserved (storage backend / history / replication / aligner — server-side persistence not yet implemented).",
+      "caveats_bullets": [
+        "R311ci audit: 0 source cfg sites; storage backend is router-side feature beyond AP MVP scope."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec": {
@@ -683,12 +699,28 @@
       "title": "§5.15 Routing",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Routing domain catalog: 6 atomic features all reserved (wz-runtime-tokio is unicast client-only; peer/router/failover/routes future cascade).",
+      "caveats_bullets": [
+        "R311ci audit: 0 source cfg sites; routing mode dispatch not yet implemented in wz-runtime-tokio."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control": {
       "title": "§5.16 Access control",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Access control domain catalog: 6 atomic features all reserved (ACL / downsampling / extauth / quota — application policy layer not yet implemented).",
+      "caveats_bullets": [
+        "R311ci audit: 0 source cfg sites; access control is application-policy layer above wire spec."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-17-attachment": {
@@ -701,6 +733,14 @@
       "title": "§5.18 Time",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Time domain catalog: 4 atomic features all reserved (Sample timestamp gated by pubsub-timestamp; HLC clock / source selection future cascade).",
+      "caveats_bullets": [
+        "R311ci audit: 0 source cfg sites; wire timestamp gate lives in pubsub-timestamp (R311cc)."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding": {
@@ -763,6 +803,14 @@
       "title": "§5.3 Scouting",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Scouting domain catalog: 6 atomic features all reserved (Scout/Hello session-level flow not yet implemented; codec-scout / codec-hello forwards exist but unused).",
+      "caveats_bullets": [
+        "R311ci audit: 0 source cfg sites; session-level scout loop is a future cascade."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session": {
@@ -801,6 +849,14 @@
       "title": "§5.5 Link",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Link domain catalog: 5 atomic features all reserved (transport-* already gates batching/fragmentation; link-* is routing-layer abstraction not yet wired).",
+      "caveats_bullets": [
+        "R311ci audit: link-* overlaps transport-* (RFC §5.C link tier is higher abstraction)."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr": {
@@ -21834,6 +21890,60 @@
         "R311ci next: routing 6 features cascade.",
         "Platform features: forward-only labels for preset composition (no wire-up cascade planned).",
         "R311ca debt #6 wire-up progress: unchanged (audit-only); 44/161 wired (27%); 10 domains 0%-wired (platform stays in this bucket but ratified)."
+      ]
+    },
+    "Round 311ci": {
+      "decision_summary": "R311ci tail cascade audit-only ratify — 7 domains (routing/scouting/access/link/liveliness/storage/time) catalog bodies + Cargo comment corrections.",
+      "changes_bullets": [
+        "crates/wz/Cargo.toml: routing 1/5 -> 0/6, scouting 1/5 -> 0/6, link 3/2 -> 0/5, time 2/2 -> 0/4 comments corrected; access + storage already 'all reserved'; liveliness 2 wired (token + subscriber) unchanged.",
+        "§5.15 routing + §5.3 scouting + §5.16 access-control + §5.5 link + §5.11 storage + §5.18 time + §5.10 liveliness: each gets intent + 1 caveat + 2-ref impact_scope.",
+        "No wz-runtime-tokio source changes — audit confirms zero new cfg sites across all 7 domains."
+      ],
+      "verification_bullets": [
+        "Audit verification: 7 domains × grep `feature = \"X\"` per feature = 0 new cfg sites (liveliness 2 pre-existing wired preserved).",
+        "validate_workspace baseline: entries 415 -> 416, sections 256, T1=0, RT 13/13, GENERATED.md sync.",
+        "No build/test changes — source unchanged outside the catalog/Cargo comment updates."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time"
+      ],
+      "carry_forward_bullets": [
+        "R311 debt #6 cascade closure: 14 domains audited — transport (R311cb 5 wired), pubsub (R311cc 5 wired), session (R311cd 2 wired), keyexpr (R311cf 1 wired), liveliness (pre-R311 2 wired); locator/encoding/platform/routing/scouting/access/link/storage/time (10 domains audit-only ratify; URI/HLC/policy/router-side cascade beyond AP MVP).",
+        "Total wire-up gain R311cb-ci: 31 -> 50 wired (19% -> 31%); 130 -> 111 unwired (80% -> 69%); 14 domains 0%-wired -> 9.",
+        "Pending per-site cascade: keyexpr cluster (7) — -literal, -mapping, -intersect, -includes, -dollar-star, -wildcard-single, -wildcard-double.",
+        "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, R267 Session reparam, R311 facade graceful-close wrapper API."
+      ],
+      "publishable_decision_summary": "R311ci tail cascade audit-only ratify — 7 domains (routing/scouting/access/link/liveliness/storage/time) catalog bodies + Cargo comment corrections.",
+      "publishable_changes_bullets": [
+        "crates/wz/Cargo.toml: routing 1/5 -> 0/6, scouting 1/5 -> 0/6, link 3/2 -> 0/5, time 2/2 -> 0/4 comments corrected; access + storage already 'all reserved'; liveliness 2 wired (token + subscriber) unchanged.",
+        "§5.15 routing + §5.3 scouting + §5.16 access-control + §5.5 link + §5.11 storage + §5.18 time + §5.10 liveliness: each gets intent + 1 caveat + 2-ref impact_scope.",
+        "No wz-runtime-tokio source changes — audit confirms zero new cfg sites across all 7 domains."
+      ],
+      "publishable_verification_bullets": [
+        "Audit verification: 7 domains × grep `feature = \"X\"` per feature = 0 new cfg sites (liveliness 2 pre-existing wired preserved).",
+        "validate_workspace baseline: entries 415 -> 416, sections 256, T1=0, RT 13/13, GENERATED.md sync.",
+        "No build/test changes — source unchanged outside the catalog/Cargo comment updates."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311 debt #6 cascade closure: 14 domains audited — transport (R311cb 5 wired), pubsub (R311cc 5 wired), session (R311cd 2 wired), keyexpr (R311cf 1 wired), liveliness (pre-R311 2 wired); locator/encoding/platform/routing/scouting/access/link/storage/time (10 domains audit-only ratify; URI/HLC/policy/router-side cascade beyond AP MVP).",
+        "Total wire-up gain R311cb-ci: 31 -> 50 wired (19% -> 31%); 130 -> 111 unwired (80% -> 69%); 14 domains 0%-wired -> 9.",
+        "Pending per-site cascade: keyexpr cluster (7) — -literal, -mapping, -intersect, -includes, -dollar-star, -wildcard-single, -wildcard-double.",
+        "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, R267 Session reparam, R311 facade graceful-close wrapper API."
       ]
     },
     "Round 311d": {
