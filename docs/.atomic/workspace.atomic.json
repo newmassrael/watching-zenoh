@@ -23273,6 +23273,60 @@
         "Architectural carries unchanged: R311ca debt #6 wire-up 19% (Session extraction unblocks the 4 reserved runtime-* features), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311dh": {
+      "decision_summary": "R311dh — LivelinessSubscriber pipeline fully R-generic; final method-lift round. AP-bound impl<T> Session<TokioRuntime, T> block is now EMPTY — every Session method composes generically across R: Runtime",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session::declare_liveliness_subscriber + Session::declare_liveliness_subscriber_aliased bodies migrate `self.observer.lock().expect(...)` at the liveliness_subscribers slot register to R::with_mutex_mut closure form. Return types lift from LivelinessSubscriber<TokioRuntime, T> to LivelinessSubscriber<R, T>.",
+        "session.rs: LivelinessSubscriber impl block lifts from impl<T: TimeSource> LivelinessSubscriber<TokioRuntime, T> to impl<R: Runtime, T: TimeSource> LivelinessSubscriber<R, T>. LivelinessSubscriber::history_complete + LivelinessSubscriber::undeclare bodies migrate the manual lock+swallow-on-poison + lock+unregister patterns to R::with_mutex_mut closure form (per-profile poison-recovery now lives inside the runtime impl).",
+        "session.rs: AP-bound impl<T> Session<TokioRuntime, T> block REMOVED. Every Session method now lives on impl<R: Runtime, T: TimeSource> Session<R, T>. Closes R311cv carry #4 (method generic lift cascade) entirely; the multi-round R311cy-dh cascade lands all 26 Session methods + 8 helper impl blocks at the R-generic shape.",
+        "session.rs: R311dg split-point comment removed (no split point remains; the entire Session surface is one R-generic impl block)."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=440 -> 441, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync.",
+        "grep -nE '^impl<T: TimeSource> Session<TokioRuntime, T>|^impl Session<TokioRuntime' returns zero hits — the AP-bound impl block is empirically gone from session.rs."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di+ (next): Session crate extraction begins. session.rs (7900+ lines) + session_glue.rs (12000+ lines) + 8 helper modules (pubsub / query / declare / observer / sample / reply / locality / keyexpr_canon) are now mechanically runtime-agnostic at the impl level. The carve-out target is a new wz-session-core no_std + alloc crate that wz-runtime-tokio (AP) and wz-runtime-lwip (MCU) both depend on; wz-runtime-tokio shrinks to runtime_impl.rs + lib.rs (network I/O surface: TcpStream + UdpSocket + io + SocketAddr).",
+        "R311di blockers: session_glue.rs's 3 std imports (HashMap / AtomicU64 / std::sync::Mutex direct at lines 53-55) need trait abstraction first — HashMap is alloc-friendly via hashbrown::HashMap; AtomicU64 via portable-atomic (already on the dep tree per R311bb wz-runtime-lwip); std::sync::Mutex direct calls need to flow through crate::sync::Mutex alias which itself lifts to R::Mutex via the same with_mutex_mut pattern. Multi-round to migrate.",
+        "LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>>: this binding becomes constructible once Session lives in wz-session-core. After construction the LwipSession instance is fully usable from no_std + alloc + critical_section + cooperative-task-pool MCU code; first non-default-R Session instance in the workspace.",
+        "R311ca debt #6 wire-up 19% (unchanged across R311cw-dh): the runtime-{async-std, no-std, tokio-uring, zero-copy} 4 atomic features unblock mechanically once Session extraction completes — each can land as a thin wz-runtime-<profile> crate implementing Runtime + TimeSource with its own per-profile primitive bindings.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311dh — LivelinessSubscriber pipeline fully R-generic; final method-lift round. AP-bound impl<T> Session<TokioRuntime, T> block is now EMPTY — every Session method composes generically across R: Runtime",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session::declare_liveliness_subscriber + Session::declare_liveliness_subscriber_aliased bodies migrate `self.observer.lock().expect(...)` at the liveliness_subscribers slot register to R::with_mutex_mut closure form. Return types lift from LivelinessSubscriber<TokioRuntime, T> to LivelinessSubscriber<R, T>.",
+        "session.rs: LivelinessSubscriber impl block lifts from impl<T: TimeSource> LivelinessSubscriber<TokioRuntime, T> to impl<R: Runtime, T: TimeSource> LivelinessSubscriber<R, T>. LivelinessSubscriber::history_complete + LivelinessSubscriber::undeclare bodies migrate the manual lock+swallow-on-poison + lock+unregister patterns to R::with_mutex_mut closure form (per-profile poison-recovery now lives inside the runtime impl).",
+        "session.rs: AP-bound impl<T> Session<TokioRuntime, T> block REMOVED. Every Session method now lives on impl<R: Runtime, T: TimeSource> Session<R, T>. Closes R311cv carry #4 (method generic lift cascade) entirely; the multi-round R311cy-dh cascade lands all 26 Session methods + 8 helper impl blocks at the R-generic shape.",
+        "session.rs: R311dg split-point comment removed (no split point remains; the entire Session surface is one R-generic impl block)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=440 -> 441, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync.",
+        "grep -nE '^impl<T: TimeSource> Session<TokioRuntime, T>|^impl Session<TokioRuntime' returns zero hits — the AP-bound impl block is empirically gone from session.rs."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di+ (next): Session crate extraction begins. session.rs (7900+ lines) + session_glue.rs (12000+ lines) + 8 helper modules (pubsub / query / declare / observer / sample / reply / locality / keyexpr_canon) are now mechanically runtime-agnostic at the impl level. The carve-out target is a new wz-session-core no_std + alloc crate that wz-runtime-tokio (AP) and wz-runtime-lwip (MCU) both depend on; wz-runtime-tokio shrinks to runtime_impl.rs + lib.rs (network I/O surface: TcpStream + UdpSocket + io + SocketAddr).",
+        "R311di blockers: session_glue.rs's 3 std imports (HashMap / AtomicU64 / std::sync::Mutex direct at lines 53-55) need trait abstraction first — HashMap is alloc-friendly via hashbrown::HashMap; AtomicU64 via portable-atomic (already on the dep tree per R311bb wz-runtime-lwip); std::sync::Mutex direct calls need to flow through crate::sync::Mutex alias which itself lifts to R::Mutex via the same with_mutex_mut pattern. Multi-round to migrate.",
+        "LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>>: this binding becomes constructible once Session lives in wz-session-core. After construction the LwipSession instance is fully usable from no_std + alloc + critical_section + cooperative-task-pool MCU code; first non-default-R Session instance in the workspace.",
+        "R311ca debt #6 wire-up 19% (unchanged across R311cw-dh): the runtime-{async-std, no-std, tokio-uring, zero-copy} 4 atomic features unblock mechanically once Session extraction completes — each can land as a thin wz-runtime-<profile> crate implementing Runtime + TimeSource with its own per-profile primitive bindings.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
