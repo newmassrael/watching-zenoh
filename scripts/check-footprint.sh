@@ -46,14 +46,17 @@ set -uo pipefail
 # entry — never one without the other (atomic ledger + CI gate
 # must record the same footprint truth).
 declare -A BASELINE_TEXT=(
+    ["thumbv6m-none-eabi"]=23660
     ["thumbv7m-none-eabi"]=23652
     ["thumbv7em-none-eabihf"]=23724
 )
 declare -A BASELINE_DATA=(
+    ["thumbv6m-none-eabi"]=4
     ["thumbv7m-none-eabi"]=4
     ["thumbv7em-none-eabihf"]=4
 )
 declare -A BASELINE_BSS=(
+    ["thumbv6m-none-eabi"]=11868
     ["thumbv7m-none-eabi"]=269916
     ["thumbv7em-none-eabihf"]=269916
 )

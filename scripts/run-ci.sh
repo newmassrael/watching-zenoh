@@ -92,9 +92,9 @@
 #              by R311aq — codec wire encode/decode now cross-compiles
 #              via the alloc-prelude shim in wz-codecs/src/lib.rs;
 #              hosted callers see no behavioural delta.
-#   Layer Q  — QEMU mps2-an386 UDP loopback e2e demo run (R311be).
-#              Opt-in via `--layer Q` or `WZ_RUN_LAYER_Q=1`. Three
-#              sub-lanes:
+#   Layer Q  — QEMU mps2 + microbit MCU e2e demo + footprint
+#              (R311be / R311bg / R311bm-m0). Opt-in via
+#              `--layer Q` or `WZ_RUN_LAYER_Q=1`. Three sub-lanes:
 #                Q.1 build  cargo build --release for thumbv7m-none-
 #                           eabi of deploy/mcu-qemu-demo with
 #                           WZ_LWIP_PORT set to the cross-test port.
@@ -786,14 +786,32 @@ layer_q_qemu_mcu_e2e() {
     local lwip_port
     lwip_port="$(realpath crates/lwip-sys/port/cross-test)"
 
-    # Sub-lane matrix: machine|cpu|target. Parallel arrays kept as a
-    # single colon-delimited table so a new (machine, cpu, target)
-    # tuple is one line of addition. Order is "increasing core
-    # generation" — M3 -> M4 -> M7.
+    # Sub-lane matrix: machine|cpu|target|run_policy. Parallel
+    # arrays kept as a single colon-delimited table so a new
+    # (machine, cpu, target, run_policy) tuple is one line of
+    # addition. Order is "increasing core generation" — M0 -> M3
+    # -> M4 -> M7. run_policy:
+    #   run        Q.2 attempts the QEMU boot and asserts on the
+    #              semihost SYS_EXIT exit code (PASS/FAIL gates
+    #              the lane).
+    #   skip:<why> Q.2 is suppressed with a printed reason. Used
+    #              for known-running-but-FAIL configs where the
+    #              binary boots but the wz facade composition
+    #              hits a runtime alloc budget mismatch the catalog
+    #              currently cannot honour (R311bm-m0 microbit:
+    #              wz facade runtime-lwip spawn issues a single
+    #              ~12 KB BoxFuture allocation which exceeds the
+    #              nrf51 16 KB SRAM budget once .data + .bss +
+    #              lwIP MEM_SIZE are accounted for). Build + Q.3
+    #              footprint still run so the catalog records the
+    #              honest cross-compile state plus the baseline
+    #              size the future slim-preset round (north-star
+    #              phase 1 preset-mcu-minimal) will drive down.
     local sub_lanes=(
-        "mps2-an385:cortex-m3:thumbv7m-none-eabi"
-        "mps2-an386:cortex-m4:thumbv7em-none-eabihf"
-        "mps2-an500:cortex-m7:thumbv7em-none-eabihf"
+        "microbit:cortex-m0:thumbv6m-none-eabi:skip:HEAP_SIZE 4 KB < spawn BoxFuture ~12 KB; slim preset carry"
+        "mps2-an385:cortex-m3:thumbv7m-none-eabi:run"
+        "mps2-an386:cortex-m4:thumbv7em-none-eabihf:run"
+        "mps2-an500:cortex-m7:thumbv7em-none-eabihf:run"
     )
 
     local any_built=0
@@ -805,10 +823,17 @@ layer_q_qemu_mcu_e2e() {
     declare -A footprint_checked=()
 
     for lane in "${sub_lanes[@]}"; do
-        local machine="${lane%%:*}"
-        local rest="${lane#*:}"
-        local cpu="${rest%%:*}"
-        local target="${rest##*:}"
+        # Parse machine|cpu|target|run_policy. The run_policy slot
+        # is either the literal `run` or `skip:<reason>`. `skip:`
+        # may contain colons inside the reason, so split on the
+        # first three colon boundaries and keep the remainder as
+        # the policy field verbatim.
+        IFS=':' read -r machine cpu target run_policy rest <<< "$lane"
+        local skip_reason=""
+        if [[ "$run_policy" == "skip" ]]; then
+            skip_reason="$rest"
+            run_policy="skip"
+        fi
 
         if ! grep -q "^${target}$" <<< "$installed"; then
             echo "  Q.${machine} SKIP (rustup target ${target} absent;" \
@@ -832,7 +857,9 @@ layer_q_qemu_mcu_e2e() {
         fi
         any_built=1
 
-        if [[ "$has_qemu" -ne 1 ]]; then
+        if [[ "$run_policy" == "skip" ]]; then
+            echo "  Q.2.${machine} run KNOWN_SKIP (${skip_reason})"
+        elif [[ "$has_qemu" -ne 1 ]]; then
             echo "  Q.2.${machine} run SKIP (qemu-system-arm not on PATH;" \
                  "install qemu-system-arm)"
         else

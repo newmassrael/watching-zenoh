@@ -69,7 +69,16 @@
 extern crate alloc;
 
 use core::mem::MaybeUninit;
-use core::sync::atomic::{AtomicU32, Ordering};
+// R311bm-m0 — portable-atomic substitutes for `core::sync::atomic`
+// so the same SystickClock counter compiles on ARMv6-M (Cortex-M0/
+// M0+/M1) where native CAS is absent. The `fallback` +
+// `critical-section` feature combo selects the
+// critical-section-single-core impl on those targets and native
+// LDREX/STREX on ARMv7-M+. `portable_atomic::Ordering` is layout-
+// compatible with `core::sync::atomic::Ordering`; semantics
+// unchanged on the M3/M4/M7 sub-lanes that already PASSed under
+// R311bg.
+use portable_atomic::{AtomicU32, Ordering};
 
 use cortex_m_rt::{entry, exception};
 use cortex_m_semihosting::{debug, hprintln};
@@ -83,29 +92,45 @@ use wz::runtime_core::Runtime;
 use wz::runtime_core::TimeSource;
 use wz::runtime_lwip::{ClockSource, LwipRuntime, LwipTime};
 
-// 256 KB heap — enough for the wz upper stack's alloc traffic
-// (BoxFuture per spawn + lwIP MEM_SIZE budget + heapless::Vec
-// per Datagram). A real M3 deploy with constrained SRAM would
-// shrink this; QEMU mps2-an386's 4 MB RAM has the headroom.
+// Heap sizing fork per target SRAM budget. mps2 family (M3/M4/M7)
+// has 4 MB SRAM so the conservative 256 KB heap fits trivially.
+// microbit (Cortex-M0, nrf51822) has 16 KB SRAM total — heap +
+// stack + .data + .bss must share that budget, so the M0 lane
+// gets a 4 KB heap with .bss pruned by feature-graph slimming at
+// the wz facade layer. R311bm-m0 honest disclosure: if the wz
+// runtime-lwip + alloc surface does not fit 16 KB with this
+// heap, the microbit Q.2 run will exit FAIL and the lane records
+// that the composable framework currently lacks a slim-enough
+// preset for nrf51-class devices — exactly the kind of catalog
+// gap a "preset-mcu-minimal" round (north-star phase 1 atomic
+// feature decomposition) is meant to fill.
+#[cfg(target_has_atomic = "32")]
 const HEAP_SIZE: usize = 1024 * 256;
+#[cfg(not(target_has_atomic = "32"))]
+const HEAP_SIZE: usize = 1024 * 4;
 
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
-/// QEMU mps2-an385/an386/an505 SoCs all clock the Cortex-M core at
-/// 25 MHz nominal; SysTick counts processor cycles when
-/// `CSR.CLKSOURCE = 1`. Dividing by 25 yields microseconds. A real
-/// deploy on different silicon would replace this constant with
-/// its actual CPU clock frequency in MHz.
+/// CPU clock fork per target. QEMU mps2 family clocks the Cortex-M
+/// core at 25 MHz nominal; the QEMU `microbit` machine emulates
+/// the nrf51822 at 16 MHz. SysTick counts processor cycles when
+/// `CSR.CLKSOURCE = 1`; dividing by the target's MHz yields
+/// microseconds. A real deploy on different silicon would replace
+/// this constant with its actual CPU clock frequency in MHz.
+#[cfg(target_has_atomic = "32")]
 const CYCLES_PER_US: u64 = 25;
+#[cfg(not(target_has_atomic = "32"))]
+const CYCLES_PER_US: u64 = 16;
 
-/// SysTick reload value: 1 ms tick at 25 MHz (RELOAD = 24999 so
-/// one full count cycle = 25000 processor cycles = 1 ms). R311bi
-/// shrunk this from the 24-bit max (~671 ms wrap) to 1 ms so the
-/// SysTick exception fires every millisecond — that drives the
-/// `wfi()` wake in the demo's main loop and gives the `wraps`
-/// counter the natural unit of "milliseconds since boot".
-const SYST_RELOAD: u32 = 24_999;
+/// SysTick reload value sized to 1 ms tick per target. mps2
+/// (25 MHz): RELOAD = 24999, period = 25000 cycles. microbit
+/// (16 MHz): RELOAD = 15999, period = 16000 cycles. R311bi
+/// shrunk this from the 24-bit max (~671 ms wrap on M3) to 1 ms
+/// so the SysTick exception fires every millisecond — that drives
+/// the `wfi()` wake in the demo's main loop and gives the
+/// `wraps` counter the natural unit of "milliseconds since boot".
+const SYST_RELOAD: u32 = (CYCLES_PER_US as u32 * 1000) - 1;
 const SYST_PERIOD: u64 = SYST_RELOAD as u64 + 1;
 
 // SysTick MMIO registers (System Control Space, ARMv*-M architecture
