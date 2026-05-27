@@ -227,7 +227,14 @@ liveliness-history = []
 liveliness-subscriber = ["wz-runtime-tokio?/liveliness-subscriber"]
 liveliness-token = ["wz-runtime-tokio?/liveliness-token"]
 
-# ----- domain: locator (9 atomic, 3 active / 6 reserved) -----
+# ----- domain: locator (9 atomic, 0 active / 9 reserved) -----
+# R311ce — audit-only ratify. Locator URI parser (scheme://host:port)
+# is not yet implemented in wz-runtime-tokio; all 9 features stay
+# declaration-only at the wz facade level. Imply edges to
+# transport-link-* preserved for the future cascade (when the URI
+# parser lands, locator-tcp will auto-enable transport-link-tcp etc).
+# The prior comment "3 active / 6 reserved" was a forward-looking
+# estimate; corrected to "0 active / 9 reserved" per R311ce audit.
 locator-iface = []
 locator-quic = ["transport-link-quic"]
 locator-serial = ["transport-link-serial"]
