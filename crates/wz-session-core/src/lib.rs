@@ -47,6 +47,11 @@ pub mod parse_error;
 /// no_alloc clean (pure enum); unconditional.
 pub mod lease;
 
+/// Query-side enums (ConsolidationMode + QueryTarget) shared by the
+/// Request(Query) builder and the application-layer query API.
+/// no_std + no_alloc clean (pure value types with wire_byte helpers).
+pub mod query_mode;
+
 /// R222 / R225 — application-layer `Sample` type for subscriber callbacks.
 /// Mirrors zenoh-pico's `_z_sample_t` projection. Carries alloc-bound
 /// fields (Vec<u8> payload, String keyexpr) so gated on the `alloc`
