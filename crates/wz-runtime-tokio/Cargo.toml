@@ -406,6 +406,25 @@ zeroize = { version = "1", features = ["zeroize_derive"] }
 # tier registry (intrinsics §2.5). Keeping the dep AP-only preserves
 # the no_std contract on the MCU build.
 getrandom = "0.2"
+# R311di-pre-a — no_std-compatible HashMap. `hashbrown` is the upstream
+# implementation of std::collections::HashMap (std re-exports it via
+# alloc + hashbrown). Pulling the crate directly here makes the
+# session_glue.rs / session.rs / declare/* HashMap import surface
+# move-ready: when these modules extract to wz-session-core (no_std +
+# alloc) at R311di, the `use hashbrown::HashMap` line works unchanged.
+# Default features include `default-hasher` (foldhash) + `inline-more`
+# + `allocator-api2` — match the std::collections::HashMap behaviour
+# the existing call sites already assume.
+hashbrown = "0.15"
+# R311di-pre-a — no_std-compatible atomic ints. `portable-atomic`
+# provides AtomicU64 with the same API as std::sync::atomic::AtomicU64;
+# on AP (this crate, has native u64 atomics) it forwards directly to
+# core::sync::atomic, on MCU (wz-runtime-lwip pulls the same crate with
+# the critical-section feature per R311bb) it falls back via interrupt-
+# disable. Migration target: every wz-runtime-tokio AtomicU64 call site
+# routes through this crate so the eventual extraction to wz-session-core
+# (no_std) sees a single dep surface across both runtime profiles.
+portable-atomic = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

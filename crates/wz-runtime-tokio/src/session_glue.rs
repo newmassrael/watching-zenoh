@@ -50,9 +50,20 @@
 //! secret); the integration test uses a fixed 8-byte cookie so
 //! the assertion against zenoh-pico's reference is deterministic.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+// R311di-pre-a — HashMap + AtomicU64 imports route through no_std-compatible
+// crates so the eventual extraction of session_glue.rs to wz-session-core
+// (no_std + alloc) reuses the same dep surface. hashbrown is the upstream
+// std::collections::HashMap implementation (std re-exports it); portable-
+// atomic forwards to core::sync::atomic on AP and falls back via critical-
+// section on MCU (wz-runtime-lwip pulls the same crate per R311bb). The
+// Mutex + Arc imports stay on std for this round — the Mutex story routes
+// through SessionState<R: Runtime>::Mutex<T> at R311di proper (the GAT is
+// already declared on the Runtime trait via R311ar), and the Arc story
+// is a zero-cost relabel deferred to the same round.
 use std::sync::{Arc, Mutex};
+
+use hashbrown::HashMap;
+use portable_atomic::{AtomicU64, Ordering};
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
