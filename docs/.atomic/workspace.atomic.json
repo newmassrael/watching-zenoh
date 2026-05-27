@@ -21258,6 +21258,76 @@
         "R310.5c get_matching_status conservative-false doc-surface (0.5R)."
       ]
     },
+    "Round 311ca": {
+      "decision_summary": "R311ca feature wire-up audit: 161 atomic / 31 wired (19%) / 130 unwired (80%); 14 domain 0% wired; R311bs carry 54% 정정.",
+      "changes_bullets": [
+        "Mechanical audit method: grep `feature\\s*=\\s*\"X\"` in crates/**/*.rs + runtime/**/*.rs + build.rs (source cfg only)",
+        "Atomic count: 161 features (wz/Cargo.toml [features] 169 entries - 7 presets - 1 default)",
+        "Wired sites: 31 features / 161 = 19% (R311bs carry '54%' was misestimate; correction here)",
+        "Unwired sites: 130 / 161 = 80% (포함 19 domain-aggregate forwarding-only entries which are non-atomic by design)",
+        "True atomic unwired: 130 - 19 = 111 / 142 = 78% wire-up gap",
+        "Wired domains: codec 14/14 (100%, R311b-k); declare 7/7 (100%, R309-R311i); query 6/10 (60%, R311r-t); liveliness 2/5 (40%, R311q); runtime 2/6 (33%)",
+        "Fully unwired 14 domains (0%): access / attachment / encoding / keyexpr / link / locator / platform / pubsub / routing / scouting / session / storage / time / transport",
+        "Top unwired domain feature counts: transport 16, pubsub 11, locator 9, session 9, keyexpr 8, encoding 7, platform 7"
+      ],
+      "verification_bullets": [
+        "Python audit script measured 31 wired vs 130 unwired across 161 atomic features (output at /tmp/r311ca_audit.json host-only, not committed)",
+        "validate_workspace baseline: entries=407→408 sections=256 T1=0 RT=13/13 GENERATED.md=sync (decision-only audit ratify)",
+        "Audit excluded Cargo.toml-only feature definitions in sub-crates — only source cfg-attribute references counted (true elision sites)",
+        "R311bs carry correction: wire-up 54% → actual 19% — large measurement drift surface",
+        "부채 #6 wire-up part: scope expands from initially-estimated ~76 unwired (46%) to actual ~111 unwired (78%) — R311cb+ cascade 14 도메인 장기적 작업"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "carry_forward_bullets": [
+        "R311cb cascade plan (per-domain wire-up priority by unwired count + composability impact):",
+        "R311cb transport 16 / R311cc pubsub 11 / R311cd session 9 / R311ce locator 9",
+        "R311cf keyexpr 8 / R311cg encoding 7 / R311ch platform 7 / R311ci routing 6",
+        "R311cj scouting 6 / R311ck access 6 / R311cl link 5 / R311cm liveliness 3",
+        "R311cn storage 4 / R311co time 4",
+        "부채 #6 wire-up: 14 domain mechanical cascade — R311cb-co 장기적 작업 (composable framework 본질)",
+        "북극성 lens: atomic feature 카탈로그 truthfulness 핵심 이제 명시됨 — 19% wired, 81% unwired; 'composable framework' 약속과 실제 광대한 gap",
+        "부채 #8 35 outline-only remainder unchanged",
+        "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter"
+      ],
+      "publishable_decision_summary": "R311ca feature wire-up audit: 161 atomic / 31 wired (19%) / 130 unwired (80%); 14 domain 0% wired; R311bs carry 54% 정정.",
+      "publishable_changes_bullets": [
+        "Mechanical audit method: grep `feature\\s*=\\s*\"X\"` in crates/**/*.rs + runtime/**/*.rs + build.rs (source cfg only)",
+        "Atomic count: 161 features (wz/Cargo.toml [features] 169 entries - 7 presets - 1 default)",
+        "Wired sites: 31 features / 161 = 19% (R311bs carry '54%' was misestimate; correction here)",
+        "Unwired sites: 130 / 161 = 80% (포함 19 domain-aggregate forwarding-only entries which are non-atomic by design)",
+        "True atomic unwired: 130 - 19 = 111 / 142 = 78% wire-up gap",
+        "Wired domains: codec 14/14 (100%, R311b-k); declare 7/7 (100%, R309-R311i); query 6/10 (60%, R311r-t); liveliness 2/5 (40%, R311q); runtime 2/6 (33%)",
+        "Fully unwired 14 domains (0%): access / attachment / encoding / keyexpr / link / locator / platform / pubsub / routing / scouting / session / storage / time / transport",
+        "Top unwired domain feature counts: transport 16, pubsub 11, locator 9, session 9, keyexpr 8, encoding 7, platform 7"
+      ],
+      "publishable_verification_bullets": [
+        "Python audit script measured 31 wired vs 130 unwired across 161 atomic features (output at /tmp/r311ca_audit.json host-only, not committed)",
+        "validate_workspace baseline: entries=407→408 sections=256 T1=0 RT=13/13 GENERATED.md=sync (decision-only audit ratify)",
+        "Audit excluded Cargo.toml-only feature definitions in sub-crates — only source cfg-attribute references counted (true elision sites)",
+        "R311bs carry correction: wire-up 54% → actual 19% — large measurement drift surface",
+        "부채 #6 wire-up part: scope expands from initially-estimated ~76 unwired (46%) to actual ~111 unwired (78%) — R311cb+ cascade 14 도메인 장기적 작업"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311cb cascade plan (per-domain wire-up priority by unwired count + composability impact):",
+        "R311cb transport 16 / R311cc pubsub 11 / R311cd session 9 / R311ce locator 9",
+        "R311cf keyexpr 8 / R311cg encoding 7 / R311ch platform 7 / R311ci routing 6",
+        "R311cj scouting 6 / R311ck access 6 / R311cl link 5 / R311cm liveliness 3",
+        "R311cn storage 4 / R311co time 4",
+        "부채 #6 wire-up: 14 domain mechanical cascade — R311cb-co 장기적 작업 (composable framework 본질)",
+        "북극성 lens: atomic feature 카탈로그 truthfulness 핵심 이제 명시됨 — 19% wired, 81% unwired; 'composable framework' 약속과 실제 광대한 gap",
+        "부채 #8 35 outline-only remainder unchanged",
+        "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter"
+      ]
+    },
     "Round 311d": {
       "decision_summary": "R311d batches codec-scout / codec-hello / codec-join cascade — wz-codecs level only (wz-runtime-tokio does not import these types); forwards stay catalog-uniform for future runtime reuse.",
       "changes_bullets": [
