@@ -25,11 +25,15 @@ rustflags = ["-C", "link-arg=-Tlink.x"]
 # do `cargo run --release` inside `deploy/mcu-qemu-demo/`).
 #
 # -cpu cortex-m3                : ARMv7-M architecture
-# -machine mps2-an386          : ARM MPS2 Cortex-M3 evaluation board
+# -machine mps2-an385          : QEMU's genuine ARM MPS2 Cortex-M3
+#                                evaluation board (mps2-an386 +
+#                                mps2-an505 require Cortex-M4 /
+#                                Cortex-M33 — R311bg will add Q
+#                                sub-lanes for those).
 # -nographic                   : no GUI; route serial to stdout
 # -semihosting-config enable=on,target=native,arg=...
 #                              : enable the M-profile semihost
 #                                channel so `cortex_m_semihosting::
 #                                hprintln!` + `debug::exit` work
 # -kernel <bin>                : load the ELF at FLASH origin
-runner = "qemu-system-arm -cpu cortex-m3 -machine mps2-an386 -nographic -semihosting-config enable=on,target=native -kernel"
+runner = "qemu-system-arm -cpu cortex-m3 -machine mps2-an385 -nographic -semihosting-config enable=on,target=native -kernel"

@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# mcu-qemu-demo — R311be Phase W ladder FULL closure mantissa.
+# mcu-qemu-demo — R311be Phase W ladder FULL closure mantissa
+# (initial R311be DWT clock + mps2-an386 machine choice corrected
+# in R311bf — see src/main.rs header for the SysTick / mps2-an385
+# rationale).
 #
-# QEMU `mps2-an386` (Cortex-M3) target binary that proves the
+# QEMU `mps2-an385` (Cortex-M3) target binary that proves the
 # composable-framework MCU stack works end-to-end on a non-host
 # target. Brings together every Phase W primitive that landed
 # R311au → R311bd:
@@ -11,11 +14,13 @@
 #   - wz facade (`runtime-lwip` feature) — composable framework
 #     surface; pulls `wz-runtime-lwip` + `wz-link-lwip` via the
 #     `lwip_real_build` cfg propagated from `lwip-sys`.
-#   - `LwipRuntime<DwtClock>` (R311av + R311bc) — cooperative task
-#     pool with deadline-keyed timer queue; `DwtClock` reads the
-#     ARMv7-M DWT cycle counter for monotonic time.
+#   - `LwipRuntime<SystickClockRef>` (R311av + R311bc; R311bf
+#     migrated DwtClock → SystickClockRef) — cooperative task
+#     pool with deadline-keyed timer queue; SysTick supplies
+#     monotonic time on every M-class core including QEMU's
+#     Cortex-M3 emulation (which lacks DWT CYCCNT).
 #   - `LwipTime::new(&runtime)` (R311bc breaking sig) — time
-#     source sharing the runtime's Arc<RuntimeInner<DwtClock>>.
+#     source sharing the runtime's Arc<RuntimeInner<C>>.
 #   - `LwipJoinHandle::abort` (R311bd) — exposed but not exercised
 #     by the smoke (success path completes naturally).
 #   - `wz-link-lwip` `LwipLink::init` + `LwipUdpSocket::bind/
@@ -43,18 +48,22 @@
 # `-semihosting-config exit=...` channel propagates the exit code
 # to the host shell so the Layer Q lane can assert on it.
 #
-# # Why mps2-an386 specifically
+# # Why mps2-an385 specifically
 #
 # - Cortex-M3 (`thumbv7m-none-eabi`) — broadest available Phase W
 #   target; the same one Layer G.4 + G.5 + G.6 already cover at
 #   compile time. Running on M3 validates the entire native-atomic
 #   path of the runtime (M0+ via the R311bb polyfill is a separate
 #   future Q-lane addition).
-# - QEMU emulates it at 25 MHz nominal; `DwtClock` divides cycle
-#   count by 25 to surface microseconds. The exact frequency does
-#   not matter for the smoke — both the sleep budget and the
-#   timeout budget scale identically, so the relative timing
-#   matches what a real M3 deploy would see.
+# - mps2-an385 is QEMU's genuine Cortex-M3 mps2 machine; the
+#   neighbouring mps2-an386 / mps2-an505 machines require
+#   Cortex-M4 / Cortex-M33 respectively (qemu rejects -cpu / -kernel
+#   mismatches at boot). R311bg will add Q sub-lanes for those.
+# - QEMU clocks the SoC at 25 MHz nominal; `SystickClock` counts
+#   processor cycles and divides by 25 to surface microseconds. The
+#   exact frequency does not matter for the smoke — both the sleep
+#   budget and the timeout budget scale identically, so the relative
+#   timing matches what a real M3 deploy would see.
 # - 4 MB flash + 4 MB SRAM gives plenty of headroom for the heap
 #   + lwIP pools + the demo's own .data/.bss. Real deploys would
 #   shrink both.
@@ -73,7 +82,7 @@ edition = "2021"
 rust-version = "1.81"
 license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
 authors = ["newmassrael"]
-description = "R311be QEMU mps2-an386 UDP loopback e2e demo (Cortex-M3 + wz facade + wz-link-lwip + wz-runtime-lwip)."
+description = "R311be QEMU mps2-an385 UDP loopback e2e demo (Cortex-M3 + wz facade + wz-link-lwip + wz-runtime-lwip; R311bf SysTick-clock fix)."
 
 [[bin]]
 name = "mcu-qemu-demo"
