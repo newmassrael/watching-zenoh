@@ -97,7 +97,10 @@ use wz_codecs::query::Query;
 // R311s — `TimeSource` is the generic-parameter bound on the
 // type-ungated `Session::query` + `Querier::get` + `QuerierAliased::get`
 // surfaces; the import stays unconditional alongside those methods.
+use wz_runtime_core::Runtime;
 use wz_runtime_core::TimeSource;
+
+use crate::runtime_impl::TokioRuntime;
 
 // R311q — `LivelinessSample` is type-ungated because the unconditional
 // `Session::declare_liveliness_subscriber{_aliased}` Result-form
@@ -584,19 +587,37 @@ impl QueryOptions {
 /// loopback dispatches from a background task are observable to the
 /// main `drive_session` loop's `observer.dispatch` calls and vice
 /// versa.
-#[derive(Clone)]
-pub struct Session {
+pub struct Session<R: Runtime = TokioRuntime> {
     /// Outbound action handle. Cloned `Arc` — multiple `Session`s
     /// can share the same actions if the application binds several
     /// publish surfaces to the same physical session.
     actions: Arc<SessionLinkActions>,
-    /// Inbound observer wrapped in [`Mutex`] so [`Session::publish`]'s
+    /// Inbound observer wrapped in the per-runtime mutex alias
+    /// (`R::Mutex<...>` — R311ar GAT) so [`Session::publish`]'s
     /// loopback branch can borrow the subscriber registry through
-    /// the same handle the main dispatch loop uses.
-    observer: Arc<Mutex<ApplicationLayerObserver>>,
+    /// the same handle the main dispatch loop uses. R267 cascade
+    /// lifts this from the prior `Arc<crate::sync::Mutex<...>>`
+    /// (R311as alias-pierced) to the trait-projected form so MCU
+    /// profiles can bind their own mutex (`embassy_sync::Mutex<...>`,
+    /// `critical_section::Mutex<...>`) without touching this field.
+    observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
 }
 
-impl Session {
+// R267 cascade — manual Clone impl avoids the derive(Clone) auto-added
+// `R: Clone` bound. The `Runtime` trait does not require `Clone` (its
+// instances are zero-sized or carry small handles, and `Arc<...>` is
+// the field shape — `Arc<X>: Clone` for any `X`, so the inner mutex
+// alias's Clone-status is irrelevant).
+impl<R: Runtime> Clone for Session<R> {
+    fn clone(&self) -> Self {
+        Self {
+            actions: self.actions.clone(),
+            observer: self.observer.clone(),
+        }
+    }
+}
+
+impl Session<TokioRuntime> {
     /// Construct a new session bundle from existing handles.
     /// `actions` typically comes from
     /// [`SessionLinkActions::new`](crate::session_glue::SessionLinkActions::new);
@@ -3522,6 +3543,7 @@ impl std::error::Error for PublishAliasError {}
 /// Keeps the metadata-threading rules in one place so a future R232
 /// follow-up that adjusts the propagation policy (e.g. validating QoS
 /// bits or trimming an over-long attachment) only edits this function.
+#[cfg(feature = "pubsub-allow-loop")]
 fn build_loopback_sample(keyexpr: &str, payload: &[u8], opts: &PublishOptions) -> Sample {
     let mut sample = match opts.kind {
         SampleKind::Put => Sample::new_put(keyexpr, payload.to_vec()),

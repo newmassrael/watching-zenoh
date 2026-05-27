@@ -233,6 +233,15 @@ applied_in = "Round 311g"
 content_hash_before = "27dad9de40baa6c550ad328e926a259a04ce81735fc5adb98d6173ca0ae05cac"
 content_hash_after = "27770b52f0b0075e27c1f780b1985d7452110874675830e374776c00b5716a3d"
 
+[[publishable_override_ledger]]
+kind = "redaction"
+target_id = "Round 311co-test"
+fields = ["publishable_decision_summary", "publishable_changes_bullets", "publishable_verification_bullets", "publishable_carry_forward_bullets"]
+reason = "Spurious smoke-test entry from R311co/R267 cascade session diagnosing the 200-char decision_summary cap; real cascade content lands as Round 311cp. Memory feedback_mnemosyne_append_caps already warned this trap exists but the diagnosis path tripped it again. All 4 publishable bullet lists + decision_summary redacted via R295 setters; this row anchors the redaction per R296 gate."
+applied_in = "R311co session (commit pending)"
+content_hash_before = "2e1f43fe97c06f3ea50275b0087710d17f6658b1d85365dce4bc02e15baf5b5b"
+content_hash_after = "ebc66fa7df6f2371f585e834617efd6a6a7a95cbdcae890c71d431a28ce8750a"
+
 # Round 193 atomic-internal orphan absorb — R121j-5c-e2e-action surfaced
 # SessionLinkActions.send_response (tokio runtime trait surface change);
 # the impact_refs citation should have pointed at the
