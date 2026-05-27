@@ -101,6 +101,13 @@ use wz_runtime_core::Runtime;
 use wz_runtime_core::TimeSource;
 
 use crate::runtime_impl::TokioRuntime;
+// R311cw — `TokioTime` is the AP-profile default binding for the
+// new `T: TimeSource` 2nd type parameter on `Session<R, T>` and on
+// the `Querier<R, T>` / `QuerierAliased<R, T>` helper cascade. The
+// `TokioSession` / `TokioQuerier{,Aliased}` type aliases name it
+// explicitly so the default-param shape is documented at the alias
+// site rather than relying on the struct definition's default.
+use crate::runtime_impl::TokioTime;
 
 // R311q — `LivelinessSample` is type-ungated because the unconditional
 // `Session::declare_liveliness_subscriber{_aliased}` Result-form
@@ -587,7 +594,7 @@ impl QueryOptions {
 /// loopback dispatches from a background task are observable to the
 /// main `drive_session` loop's `observer.dispatch` calls and vice
 /// versa.
-pub struct Session<R: Runtime = TokioRuntime> {
+pub struct Session<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
     /// Outbound action handle. Cloned `Arc` — multiple `Session`s
     /// can share the same actions if the application binds several
     /// publish surfaces to the same physical session.
@@ -601,39 +608,78 @@ pub struct Session<R: Runtime = TokioRuntime> {
     /// profiles can bind their own mutex (`embassy_sync::Mutex<...>`,
     /// `critical_section::Mutex<...>`) without touching this field.
     observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
+    /// R311cw — the trait-mediated monotonic clock the query / get
+    /// methods use to compute reply-pending deadlines. Folded from
+    /// the prior method-level `<T: TimeSource>` generic into a
+    /// type-level parameter so a single Session value owns the
+    /// monotonic epoch its background sweep + per-call deadlines
+    /// share, closing the R311w "Session-last" reparam target (T
+    /// fold-in pending since R311ab carry).
+    ///
+    /// Held behind `Arc` so cheap `Session::clone` is unchanged —
+    /// every helper (Querier / QuerierAliased / Publisher /
+    /// Subscriber / Queryable / LivelinessToken /
+    /// LivelinessSubscriber) propagates its own Session clone, and
+    /// the Arc-shared clock keeps the same monotonic anchor across
+    /// all helper-issued query / get calls. AP-profile T binds to
+    /// [`TokioTime`] (Copy), MCU profile will bind to
+    /// `wz_runtime_lwip::LwipTime<C>` once Session moves to a
+    /// runtime-agnostic crate (post-R311cw architectural step).
+    clock: Arc<T>,
 }
 
 // R267 cascade — manual Clone impl avoids the derive(Clone) auto-added
-// `R: Clone` bound. The `Runtime` trait does not require `Clone` (its
-// instances are zero-sized or carry small handles, and `Arc<...>` is
-// the field shape — `Arc<X>: Clone` for any `X`, so the inner mutex
-// alias's Clone-status is irrelevant).
-impl<R: Runtime> Clone for Session<R> {
+// `R: Clone` + `T: Clone` bounds. Neither `Runtime` nor `TimeSource`
+// requires `Clone` (instances are zero-sized or carry small handles,
+// and all three fields are `Arc<...>` — `Arc<X>: Clone` for any `X`,
+// so the inner mutex alias's and TimeSource impl's Clone-status are
+// irrelevant). R311cw extends the bound set with `T: TimeSource` so
+// `Session<R, T>` clones uniformly across both type parameters.
+impl<R: Runtime, T: TimeSource> Clone for Session<R, T> {
     fn clone(&self) -> Self {
         Self {
             actions: self.actions.clone(),
             observer: self.observer.clone(),
+            clock: self.clock.clone(),
         }
     }
 }
 
 /// R311cq — explicit alias for the tokio-runtime-bound Session. The
 /// bare `Session` name still resolves to this through the R267
-/// default-param `Session<R: Runtime = TokioRuntime>`, so existing
-/// call sites stay unchanged. The alias surfaces the runtime binding
-/// explicitly for downstream code that wants its signatures to read
-/// `fn x(s: TokioSession)` rather than `fn x(s: Session)` — useful
-/// once the R267 helper cascade lands and wz-runtime-lwip surfaces
-/// its own `LwipSession = Session<LwipRuntime<C>>` alias so the two
-/// runtimes compose side-by-side without bare-`Session` ambiguity.
-pub type TokioSession = Session<TokioRuntime>;
+/// default-param `Session<R: Runtime = TokioRuntime, T: TimeSource =
+/// TokioTime>`, so existing call sites stay unchanged. The alias
+/// surfaces the runtime binding explicitly for downstream code that
+/// wants its signatures to read `fn x(s: TokioSession)` rather than
+/// `fn x(s: Session)` — useful once the R267 helper cascade lands
+/// and wz-runtime-lwip surfaces its own
+/// `LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>>` alias so
+/// the two runtimes compose side-by-side without bare-`Session`
+/// ambiguity. R311cw extended the alias's second slot from inferred
+/// `TimeSource = TokioTime` default to explicit naming so the
+/// Session<R, T> shape reads literally at the alias site.
+pub type TokioSession = Session<TokioRuntime, TokioTime>;
 
-impl Session<TokioRuntime> {
+// R311cw — `impl` block lifts from the bare `impl Session<TokioRuntime>`
+// to the T-generic `impl<T: TimeSource> Session<TokioRuntime, T>` shape.
+// Every method body in this block accesses the clock exclusively through
+// the `TimeSource::now_monotonic_ms` trait method (no `TokioTime`-specific
+// behaviour), so the impl block compiles uniformly for any
+// `T: TimeSource`. Production AP callers bind `T = TokioTime` through
+// the `TokioSession` alias; test fixtures + future MCU profiles can
+// bind a mock or platform-specific clock with no method-signature
+// change at the call site. Closes the R311w "Session-last" gate's
+// final mechanical step (T fold-in from method-level to type-level).
+impl<T: TimeSource> Session<TokioRuntime, T> {
     /// Construct a new session bundle from existing handles.
     /// `actions` typically comes from
     /// [`SessionLinkActions::new`](crate::session_glue::SessionLinkActions::new);
     /// `observer` is a freshly-wrapped
-    /// [`ApplicationLayerObserver::new`](crate::observer::ApplicationLayerObserver::new).
+    /// [`ApplicationLayerObserver::new`](crate::observer::ApplicationLayerObserver::new);
+    /// `clock` is the shared `Arc<T>` monotonic source the session
+    /// uses to compute reply-pending deadlines from
+    /// [`QueryOptions::timeout_ms`] (R311cw fold-in — previously
+    /// passed per-call to each `query` / `get` invocation).
     ///
     /// ## R236 — auto-wire self-echo dedup from `SessionInitParams.zid`
     ///
@@ -662,8 +708,13 @@ impl Session<TokioRuntime> {
     pub fn new(
         actions: Arc<SessionLinkActions>,
         observer: Arc<Mutex<ApplicationLayerObserver>>,
+        clock: Arc<T>,
     ) -> Self {
-        let session = Self { actions, observer };
+        let session = Self {
+            actions,
+            observer,
+            clock,
+        };
         // R236 — forward the local zid from SessionInitParams into
         // the subscriber registry so wire-arrived self-echo Pushes
         // are dedup'd from session creation onward. The `1..=16`
@@ -1059,17 +1110,16 @@ impl Session<TokioRuntime> {
     /// replies into a non-registration. The R311t transition costs
     /// ~22 internal-test callsites a `.expect()` chaining, which is
     /// the textbook price for the honest-signal property.
-    pub fn query<T: TimeSource>(
+    pub fn query(
         &self,
         keyexpr: &str,
         opts: QueryOptions,
-        clock: &T,
         on_reply: impl FnMut(&InboundReply) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         #[cfg(not(feature = "query-get"))]
         {
-            let _ = (keyexpr, opts, clock, on_reply, on_final);
+            let _ = (keyexpr, opts, on_reply, on_final);
             return Err(QueryAliasError::FeatureDisabled);
         }
         #[cfg(feature = "query-get")]
@@ -1079,15 +1129,19 @@ impl Session<TokioRuntime> {
             let allows_remote = opts.allowed_destination.allows_remote();
             let allows_local = opts.allowed_destination.allows_local();
             // R262 — compute the absolute monotonic-ms deadline from
-            // `clock.now_monotonic_ms()` + `opts.timeout_ms`. timeout_ms == 0
-            // is the "no timeout" sentinel; the pending entry is registered
-            // with deadline_ms = None and survives every sweep until a
-            // wire/loopback Final arrives. The same clock instance MUST be
-            // used by `drive_session_until_terminal` so the sweep call
-            // shares monotonic epoch with this register-time deadline (see
-            // `drive_session_until_terminal`'s clock parameter doc).
-            let deadline_ms =
-                (opts.timeout_ms > 0).then(|| clock.now_monotonic_ms() + opts.timeout_ms as u64);
+            // `self.clock.now_monotonic_ms()` + `opts.timeout_ms`.
+            // timeout_ms == 0 is the "no timeout" sentinel; the pending
+            // entry is registered with deadline_ms = None and survives
+            // every sweep until a wire/loopback Final arrives. The Session-
+            // owned clock (R311cw fold-in) shares monotonic epoch with
+            // `drive_session_until_terminal`'s `clock` parameter as long
+            // as the application threads the same `Arc<T>` instance into
+            // both `Session::new` and `drive_session_until_terminal`; this
+            // is the contract every production caller honours (see
+            // wz-ap-demo/src/runner.rs which builds one `session_clock`
+            // and forks it through both call sites).
+            let deadline_ms = (opts.timeout_ms > 0)
+                .then(|| self.clock.now_monotonic_ms() + opts.timeout_ms as u64);
 
             let handle = {
                 let mut observer = self
@@ -1192,14 +1246,12 @@ impl Session<TokioRuntime> {
     /// already carried `Result<_, QueryAliasError>` for the
     /// `UnknownMapping` signal, so the FeatureDisabled variant
     /// (introduced at R311s) is now the active OFF arm here too.
-    #[allow(clippy::too_many_arguments)]
-    pub fn query_aliased<T: TimeSource>(
+    pub fn query_aliased(
         &self,
         mapping_id: u64,
         inline_suffix: Option<&str>,
         loopback_keyexpr: &str,
         opts: QueryOptions,
-        clock: &T,
         on_reply: impl FnMut(&InboundReply) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
@@ -1210,7 +1262,6 @@ impl Session<TokioRuntime> {
                 inline_suffix,
                 loopback_keyexpr,
                 opts,
-                clock,
                 on_reply,
                 on_final,
             );
@@ -1223,10 +1274,13 @@ impl Session<TokioRuntime> {
             let allows_remote = opts.allowed_destination.allows_remote();
             let allows_local = opts.allowed_destination.allows_local();
             // R262 — same deadline_ms computation as `Session::query`.
-            // The clock must share monotonic epoch with the sweep caller
-            // (typically `drive_session_until_terminal`).
-            let deadline_ms =
-                (opts.timeout_ms > 0).then(|| clock.now_monotonic_ms() + opts.timeout_ms as u64);
+            // R311cw — clock is Session-owned (`Arc<T>` field), same
+            // monotonic epoch shared with the sweep caller as long as
+            // both `Session::new` and `drive_session_until_terminal`
+            // receive the same `Arc<T>` instance (the wz-ap-demo runner
+            // is the production-side fixture that honours this).
+            let deadline_ms = (opts.timeout_ms > 0)
+                .then(|| self.clock.now_monotonic_ms() + opts.timeout_ms as u64);
 
             let handle = {
                 let mut observer = self
@@ -1301,18 +1355,17 @@ impl Session<TokioRuntime> {
     /// adopted Result-form, so the inner delegate call propagates
     /// the inner Result with `?` rather than re-wrapping an inner
     /// `ReplyHandle` in `Ok(...)`.
-    pub fn query_aliased_auto<T: TimeSource>(
+    pub fn query_aliased_auto(
         &self,
         mapping_id: u64,
         inline_suffix: Option<&str>,
         opts: QueryOptions,
-        clock: &T,
         on_reply: impl FnMut(&InboundReply) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         #[cfg(not(feature = "query-get"))]
         {
-            let _ = (mapping_id, inline_suffix, opts, clock, on_reply, on_final);
+            let _ = (mapping_id, inline_suffix, opts, on_reply, on_final);
             return Err(QueryAliasError::FeatureDisabled);
         }
         #[cfg(feature = "query-get")]
@@ -1329,12 +1382,13 @@ impl Session<TokioRuntime> {
                     composed
                 }
             };
+            // R311cw — clock fold-in: the inner `query_aliased` delegate
+            // reads `self.clock` directly; no clock parameter to thread.
             self.query_aliased(
                 mapping_id,
                 inline_suffix,
                 &loopback_keyexpr,
                 opts,
-                clock,
                 on_reply,
                 on_final,
             )
@@ -1367,7 +1421,11 @@ impl Session<TokioRuntime> {
     /// returns `Err(QueryAliasError::FeatureDisabled)` (R311t
     /// Result-form transition — no wire frame, no callback
     /// registration).
-    pub fn declare_querier(&self, keyexpr: impl Into<String>, options: QueryOptions) -> Querier {
+    pub fn declare_querier(
+        &self,
+        keyexpr: impl Into<String>,
+        options: QueryOptions,
+    ) -> Querier<TokioRuntime, T> {
         Querier {
             session: self.clone(),
             keyexpr: keyexpr.into(),
@@ -1396,7 +1454,7 @@ impl Session<TokioRuntime> {
         mapping_id: u64,
         inline_suffix: Option<&str>,
         options: QueryOptions,
-    ) -> QuerierAliased {
+    ) -> QuerierAliased<TokioRuntime, T> {
         QuerierAliased {
             session: self.clone(),
             mapping_id,
@@ -1422,7 +1480,7 @@ impl Session<TokioRuntime> {
         &self,
         keyexpr: impl Into<String>,
         options: PublishOptions,
-    ) -> Publisher {
+    ) -> Publisher<TokioRuntime, T> {
         Publisher {
             session: self.clone(),
             keyexpr: keyexpr.into(),
@@ -1445,7 +1503,7 @@ impl Session<TokioRuntime> {
         mapping_id: u64,
         inline_suffix: Option<&str>,
         options: PublishOptions,
-    ) -> PublisherAliased {
+    ) -> PublisherAliased<TokioRuntime, T> {
         PublisherAliased {
             session: self.clone(),
             mapping_id,
@@ -1475,7 +1533,7 @@ impl Session<TokioRuntime> {
         keyexpr: impl Into<String>,
         options: SubscribeOptions,
         callback: impl FnMut(&Sample) + Send + 'static,
-    ) -> Subscriber {
+    ) -> Subscriber<TokioRuntime, T> {
         let keyexpr_string = keyexpr.into();
         let id = self
             .observer
@@ -1518,7 +1576,7 @@ impl Session<TokioRuntime> {
         inline_suffix: Option<&str>,
         options: SubscribeOptions,
         callback: impl FnMut(&Sample) + Send + 'static,
-    ) -> Result<Subscriber, SubscribeAliasError> {
+    ) -> Result<Subscriber<TokioRuntime, T>, SubscribeAliasError> {
         let base = self
             .actions
             .resolve_outbound_mapping(mapping_id)
@@ -1566,7 +1624,7 @@ impl Session<TokioRuntime> {
         keyexpr: impl Into<String>,
         options: QueryableOptions,
         callback: impl FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>) + Send + 'static,
-    ) -> Result<Queryable, QueryableAliasError> {
+    ) -> Result<Queryable<TokioRuntime, T>, QueryableAliasError> {
         #[cfg(feature = "query-queryable")]
         {
             let keyexpr_string = keyexpr.into();
@@ -1609,7 +1667,7 @@ impl Session<TokioRuntime> {
         inline_suffix: Option<&str>,
         options: QueryableOptions,
         callback: impl FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>) + Send + 'static,
-    ) -> Result<Queryable, QueryableAliasError> {
+    ) -> Result<Queryable<TokioRuntime, T>, QueryableAliasError> {
         #[cfg(feature = "query-queryable")]
         {
             let base = self
@@ -1697,7 +1755,7 @@ impl Session<TokioRuntime> {
         &self,
         keyexpr: impl Into<String>,
         options: LivelinessOptions,
-    ) -> Result<LivelinessToken, LivelinessAliasError> {
+    ) -> Result<LivelinessToken<TokioRuntime, T>, LivelinessAliasError> {
         #[cfg(feature = "liveliness-token")]
         {
             let keyexpr_string = keyexpr.into();
@@ -1761,7 +1819,7 @@ impl Session<TokioRuntime> {
         mapping_id: u64,
         inline_suffix: Option<&str>,
         options: LivelinessOptions,
-    ) -> Result<LivelinessToken, LivelinessAliasError> {
+    ) -> Result<LivelinessToken<TokioRuntime, T>, LivelinessAliasError> {
         #[cfg(feature = "liveliness-token")]
         {
             let base = self
@@ -1908,7 +1966,7 @@ impl Session<TokioRuntime> {
         keyexpr: impl Into<String>,
         options: LivelinessSubscriberOptions,
         callback: impl FnMut(LivelinessSample<'_>) + Send + 'static,
-    ) -> Result<LivelinessSubscriber, LivelinessSubscriberAliasError> {
+    ) -> Result<LivelinessSubscriber<TokioRuntime, T>, LivelinessSubscriberAliasError> {
         #[cfg(feature = "liveliness-subscriber")]
         {
             let keyexpr_string = keyexpr.into();
@@ -2022,7 +2080,7 @@ impl Session<TokioRuntime> {
         inline_suffix: Option<&str>,
         options: LivelinessSubscriberOptions,
         callback: impl FnMut(LivelinessSample<'_>) + Send + 'static,
-    ) -> Result<LivelinessSubscriber, LivelinessSubscriberAliasError> {
+    ) -> Result<LivelinessSubscriber<TokioRuntime, T>, LivelinessSubscriberAliasError> {
         #[cfg(feature = "liveliness-subscriber")]
         {
             // Mapping check first — FSM-state-independent, surfaces a
@@ -2182,13 +2240,13 @@ impl std::error::Error for QueryAliasError {}
 // auto-added `R: Clone` bound (Runtime does not require Clone; inner
 // Session<R> has manual Clone too).
 #[non_exhaustive]
-pub struct Querier<R: Runtime = TokioRuntime> {
-    session: Session<R>,
+pub struct Querier<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+    session: Session<R, T>,
     keyexpr: String,
     options: QueryOptions,
 }
 
-impl<R: Runtime> Clone for Querier<R> {
+impl<R: Runtime, T: TimeSource> Clone for Querier<R, T> {
     fn clone(&self) -> Self {
         Self {
             session: self.session.clone(),
@@ -2198,7 +2256,7 @@ impl<R: Runtime> Clone for Querier<R> {
     }
 }
 
-impl Querier<TokioRuntime> {
+impl<T: TimeSource> Querier<TokioRuntime, T> {
     /// Borrow the declared keyexpr. The literal form supplied to
     /// [`Session::declare_querier`]; identical to what each
     /// [`Self::get`] call threads to [`Session::query`].
@@ -2233,19 +2291,16 @@ impl Querier<TokioRuntime> {
     /// Mirrors zenoh-pico's `z_querier_get`
     /// (`vendor/zenoh-pico/src/api/api.c:1902` —
     /// `_z_query(&sess_rc, _z_optional_id_make_some(querier->_id), ...)`).
-    pub fn get<T: TimeSource>(
+    pub fn get(
         &self,
-        clock: &T,
         on_reply: impl FnMut(&InboundReply) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
-        self.session.query(
-            &self.keyexpr,
-            self.options.clone(),
-            clock,
-            on_reply,
-            on_final,
-        )
+        // R311cw — clock fold-in: `Session::query` now reads the Session-
+        // owned `Arc<T>` clock internally, so this delegate no longer
+        // threads a `clock: &T` argument.
+        self.session
+            .query(&self.keyexpr, self.options.clone(), on_reply, on_final)
     }
 
     /// R288 — mirror of zenoh-pico's `z_querier_get_matching_status`
@@ -2347,14 +2402,14 @@ pub struct MatchingStatus {
 // R311cr — R267 helper cascade. Manual Clone impl mirrors Querier
 // pattern (no derive auto-added R: Clone bound on Runtime).
 #[non_exhaustive]
-pub struct QuerierAliased<R: Runtime = TokioRuntime> {
-    session: Session<R>,
+pub struct QuerierAliased<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+    session: Session<R, T>,
     mapping_id: u64,
     inline_suffix: Option<String>,
     options: QueryOptions,
 }
 
-impl<R: Runtime> Clone for QuerierAliased<R> {
+impl<R: Runtime, T: TimeSource> Clone for QuerierAliased<R, T> {
     fn clone(&self) -> Self {
         Self {
             session: self.session.clone(),
@@ -2365,7 +2420,7 @@ impl<R: Runtime> Clone for QuerierAliased<R> {
     }
 }
 
-impl QuerierAliased<TokioRuntime> {
+impl<T: TimeSource> QuerierAliased<TokioRuntime, T> {
     /// The declared mapping id. Must have been previously registered
     /// via [`SessionLinkActions::send_declare_keyexpr`] for
     /// [`Self::get`] to succeed.
@@ -2396,17 +2451,17 @@ impl QuerierAliased<TokioRuntime> {
     /// On the success path each call allocates a fresh rid; the
     /// returned [`ReplyHandle`] tracks the pending entry on
     /// [`crate::reply::ReplyRegistry`].
-    pub fn get<T: TimeSource>(
+    pub fn get(
         &self,
-        clock: &T,
         on_reply: impl FnMut(&InboundReply) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
+        // R311cw — clock fold-in: delegate path no longer threads
+        // `clock: &T`; `Session::query_aliased_auto` reads `self.clock`.
         self.session.query_aliased_auto(
             self.mapping_id,
             self.inline_suffix.as_deref(),
             self.options.clone(),
-            clock,
             on_reply,
             on_final,
         )
@@ -2487,13 +2542,13 @@ impl QuerierAliased<TokioRuntime> {
 // R311cs — R267 helper cascade. Manual Clone impl mirrors Querier
 // pattern (no derive auto-added R: Clone bound on Runtime).
 #[non_exhaustive]
-pub struct Publisher<R: Runtime = TokioRuntime> {
-    session: Session<R>,
+pub struct Publisher<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+    session: Session<R, T>,
     keyexpr: String,
     options: PublishOptions,
 }
 
-impl<R: Runtime> Clone for Publisher<R> {
+impl<R: Runtime, T: TimeSource> Clone for Publisher<R, T> {
     fn clone(&self) -> Self {
         Self {
             session: self.session.clone(),
@@ -2503,7 +2558,7 @@ impl<R: Runtime> Clone for Publisher<R> {
     }
 }
 
-impl Publisher<TokioRuntime> {
+impl<T: TimeSource> Publisher<TokioRuntime, T> {
     /// Borrow the declared keyexpr.
     pub fn keyexpr(&self) -> &str {
         &self.keyexpr
@@ -2605,14 +2660,14 @@ impl Publisher<TokioRuntime> {
 // R311cs — R267 helper cascade. Manual Clone impl mirrors Querier
 // pattern (no derive auto-added R: Clone bound on Runtime).
 #[non_exhaustive]
-pub struct PublisherAliased<R: Runtime = TokioRuntime> {
-    session: Session<R>,
+pub struct PublisherAliased<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+    session: Session<R, T>,
     mapping_id: u64,
     inline_suffix: Option<String>,
     options: PublishOptions,
 }
 
-impl<R: Runtime> Clone for PublisherAliased<R> {
+impl<R: Runtime, T: TimeSource> Clone for PublisherAliased<R, T> {
     fn clone(&self) -> Self {
         Self {
             session: self.session.clone(),
@@ -2623,7 +2678,7 @@ impl<R: Runtime> Clone for PublisherAliased<R> {
     }
 }
 
-impl PublisherAliased<TokioRuntime> {
+impl<T: TimeSource> PublisherAliased<TokioRuntime, T> {
     /// The declared mapping id.
     pub fn mapping_id(&self) -> u64 {
         self.mapping_id
@@ -2776,14 +2831,14 @@ impl SubscribeOptions {
 // Drop is generic via R::with_mutex_mut (R311ct API) so per-profile
 // poison-recovery semantics stay inside the runtime impl.
 #[non_exhaustive]
-pub struct Subscriber<R: Runtime = TokioRuntime> {
-    session: Session<R>,
+pub struct Subscriber<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+    session: Session<R, T>,
     id: SubscriptionId,
     keyexpr: String,
     options: SubscribeOptions,
 }
 
-impl Subscriber<TokioRuntime> {
+impl<T: TimeSource> Subscriber<TokioRuntime, T> {
     /// The stable id assigned by
     /// [`crate::pubsub::SubscriberRegistry::register_with_locality`].
     /// Exposed for diagnostics; callers should not rely on the
@@ -2829,7 +2884,7 @@ impl Subscriber<TokioRuntime> {
     }
 }
 
-impl<R: Runtime> Drop for Subscriber<R> {
+impl<R: Runtime, T: TimeSource> Drop for Subscriber<R, T> {
     fn drop(&mut self) {
         // R311cu — RAII unregister via R::with_mutex_mut. Per-profile
         // poison-recovery lives inside the runtime impl (AP: recover
@@ -2938,14 +2993,14 @@ impl QueryableOptions {
 // R311cu — R267 helper cascade. Same pattern as Subscriber: `!Clone`
 // by construction; Drop is generic via R::with_mutex_mut.
 #[non_exhaustive]
-pub struct Queryable<R: Runtime = TokioRuntime> {
-    session: Session<R>,
+pub struct Queryable<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+    session: Session<R, T>,
     id: QueryableId,
     keyexpr: String,
     options: QueryableOptions,
 }
 
-impl Queryable<TokioRuntime> {
+impl<T: TimeSource> Queryable<TokioRuntime, T> {
     /// The stable id assigned by
     /// [`crate::query::QueryableRegistry::register_with_locality`].
     pub fn id(&self) -> QueryableId {
@@ -2980,7 +3035,7 @@ impl Queryable<TokioRuntime> {
     }
 }
 
-impl<R: Runtime> Drop for Queryable<R> {
+impl<R: Runtime, T: TimeSource> Drop for Queryable<R, T> {
     fn drop(&mut self) {
         // R311cu — RAII unregister via R::with_mutex_mut. Per-profile
         // poison-recovery lives inside the runtime impl. unregister is
@@ -3135,14 +3190,14 @@ impl LivelinessOptions {
 // session.actions (concrete Arc<SessionLinkActions>, R-independent)
 // so Drop is generic over R without needing R::with_mutex_mut.
 #[non_exhaustive]
-pub struct LivelinessToken<R: Runtime = TokioRuntime> {
-    session: Session<R>,
+pub struct LivelinessToken<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+    session: Session<R, T>,
     id: u64,
     keyexpr: String,
     options: LivelinessOptions,
 }
 
-impl LivelinessToken<TokioRuntime> {
+impl<T: TimeSource> LivelinessToken<TokioRuntime, T> {
     /// The stable token id allocated at declare time by
     /// [`SessionLinkActions::alloc_next_token_id`]. Exposed for
     /// diagnostics; callers should not rely on the exact value
@@ -3189,7 +3244,7 @@ impl LivelinessToken<TokioRuntime> {
     }
 }
 
-impl<R: Runtime> Drop for LivelinessToken<R> {
+impl<R: Runtime, T: TimeSource> Drop for LivelinessToken<R, T> {
     fn drop(&mut self) {
         // R248 RAII — emit Declare(UndeclToken) so the peer's
         // liveliness subscribers receive the DELETE sample. See
@@ -3385,14 +3440,14 @@ impl LivelinessSubscriberOptions {
 // into_inner on AP; no poison concept on MCU). The peer-side
 // Interest(Final) emit was already unconditional.
 #[non_exhaustive]
-pub struct LivelinessSubscriber<R: Runtime = TokioRuntime> {
-    session: Session<R>,
+pub struct LivelinessSubscriber<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+    session: Session<R, T>,
     interest_id: u64,
     keyexpr: String,
     options: LivelinessSubscriberOptions,
 }
 
-impl LivelinessSubscriber<TokioRuntime> {
+impl<T: TimeSource> LivelinessSubscriber<TokioRuntime, T> {
     /// The stable interest id allocated at declare time by
     /// [`crate::session_glue::SessionLinkActions::alloc_next_interest_id`].
     /// Exposed for diagnostics; callers should not rely on the exact
@@ -3454,7 +3509,7 @@ impl LivelinessSubscriber<TokioRuntime> {
     }
 }
 
-impl<R: Runtime> Drop for LivelinessSubscriber<R> {
+impl<R: Runtime, T: TimeSource> Drop for LivelinessSubscriber<R, T> {
     fn drop(&mut self) {
         // R280 / R311cu RAII — unregister the local slot first so any
         // racing inbound dispatch sees no slot, then emit
@@ -3715,7 +3770,11 @@ mod tests {
         let driver = Arc::new(RecordingDriver::new());
         let actions = SessionLinkActions::new(driver.clone(), fixture_params(), TokioTime::new());
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
-        (Session::new(actions, observer), driver)
+        // R311cw — Session::new now takes a third `clock: Arc<T>`
+        // argument (the T fold-in moved the per-call clock parameter
+        // up to a Session-owned field).
+        let clock = Arc::new(TokioTime::new());
+        (Session::new(actions, observer, clock), driver)
     }
 
     #[test]
@@ -4411,7 +4470,9 @@ mod tests {
         params.zid = Vec::new();
         let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
-        let session = Session::new(actions, observer);
+        // R311cw — Session::new gained third `clock: Arc<T>` argument.
+        let clock = Arc::new(TokioTime::new());
+        let session = Session::new(actions, observer, clock);
         assert!(
             session
                 .observer()
@@ -4439,7 +4500,9 @@ mod tests {
         params.zid = vec![0u8; 17];
         let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
-        let session = Session::new(actions, observer);
+        // R311cw — Session::new gained third `clock: Arc<T>` argument.
+        let clock = Arc::new(TokioTime::new());
+        let session = Session::new(actions, observer, clock);
         assert!(
             session
                 .observer()
@@ -4863,7 +4926,6 @@ mod tests {
 
     #[test]
     fn query_locality_session_local_fires_loopback_only_and_completes_inline() {
-        let clock = TokioTime::new();
         let (session, driver) = build_session();
         let reply_count = Arc::new(AtomicUsize::new(0));
         let final_count = Arc::new(AtomicUsize::new(0));
@@ -4882,7 +4944,6 @@ mod tests {
         let _handle = session.query(
             "home/temp",
             QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-            &clock,
             move |reply| {
                 r.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(reply.keyexpr_literal, "home/temp");
@@ -4921,7 +4982,6 @@ mod tests {
 
     #[test]
     fn query_locality_remote_fires_wire_only_and_keeps_pending_until_wire_final() {
-        let clock = TokioTime::new();
         let (session, driver) = build_session();
         let reply_count = Arc::new(AtomicUsize::new(0));
         let final_count = Arc::new(AtomicUsize::new(0));
@@ -4943,7 +5003,6 @@ mod tests {
         let _handle = session.query(
             "home/temp",
             QueryOptions::get().with_allowed_destination(Locality::Remote),
-            &clock,
             move |_reply| {
                 r.fetch_add(1, Ordering::SeqCst);
             },
@@ -4976,7 +5035,6 @@ mod tests {
 
     #[test]
     fn query_locality_any_fires_both_branches_and_waits_for_wire_final() {
-        let clock = TokioTime::new();
         let (session, driver) = build_session();
         let reply_count = Arc::new(AtomicUsize::new(0));
         let final_count = Arc::new(AtomicUsize::new(0));
@@ -4995,7 +5053,6 @@ mod tests {
         let _handle = session.query(
             "home/temp",
             QueryOptions::get(),
-            &clock,
             // Any (default)
             move |_reply| {
                 r.fetch_add(1, Ordering::SeqCst);
@@ -5050,13 +5107,11 @@ mod tests {
 
     #[test]
     fn query_handle_carries_rid_zero_for_first_call_then_monotonic() {
-        let clock = TokioTime::new();
         let (session, _driver) = build_session();
         let h0 = session
             .query(
                 "k",
                 QueryOptions::get().with_allowed_destination(Locality::Remote),
-                &clock,
                 |_| {},
                 |_| {},
             )
@@ -5065,7 +5120,6 @@ mod tests {
             .query(
                 "k",
                 QueryOptions::get().with_allowed_destination(Locality::Remote),
-                &clock,
                 |_| {},
                 |_| {},
             )
@@ -5080,7 +5134,6 @@ mod tests {
 
     #[test]
     fn query_loopback_propagates_del_body() {
-        let clock = TokioTime::new();
         let (session, _driver) = build_session();
         let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
         let cap_cb = captured.clone();
@@ -5098,7 +5151,6 @@ mod tests {
             .query(
                 "clear/me",
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-                &clock,
                 move |reply| {
                     *cap_cb.lock().unwrap() = Some(reply.clone());
                 },
@@ -5117,7 +5169,6 @@ mod tests {
 
     #[test]
     fn query_loopback_propagates_err_body_with_encoding_tuple() {
-        let clock = TokioTime::new();
         let (session, _driver) = build_session();
         let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
         let cap_cb = captured.clone();
@@ -5135,7 +5186,6 @@ mod tests {
             .query(
                 "error/path",
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-                &clock,
                 move |reply| {
                     *cap_cb.lock().unwrap() = Some(reply.clone());
                 },
@@ -5160,7 +5210,6 @@ mod tests {
 
     #[test]
     fn query_with_no_matching_queryable_completes_loopback_with_zero_replies() {
-        let clock = TokioTime::new();
         let (session, _driver) = build_session();
         let reply_count = Arc::new(AtomicUsize::new(0));
         let final_count = Arc::new(AtomicUsize::new(0));
@@ -5183,7 +5232,6 @@ mod tests {
             .query(
                 "home/temp",
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-                &clock,
                 move |_| {
                     r.fetch_add(1, Ordering::SeqCst);
                 },
@@ -5204,7 +5252,6 @@ mod tests {
 
     #[test]
     fn query_session_local_skips_remote_only_queryable() {
-        let clock = TokioTime::new();
         // A Locality::Remote-only queryable must NOT fire on a
         // Locality::SessionLocal query (loopback path uses
         // allows_local() — Remote returns false). Mirrors the
@@ -5229,7 +5276,6 @@ mod tests {
             .query(
                 "home/temp",
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-                &clock,
                 move |_| {
                     r.fetch_add(1, Ordering::SeqCst);
                 },
@@ -5254,7 +5300,6 @@ mod tests {
 
     #[test]
     fn query_session_local_with_session_local_queryable_fires() {
-        let clock = TokioTime::new();
         // SessionLocal queryable on SessionLocal query: both
         // allows_local() — must fire. Verifies the loopback path is
         // not accidentally gated on allows_remote().
@@ -5277,7 +5322,6 @@ mod tests {
             .query(
                 "home/temp",
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-                &clock,
                 move |_| {
                     r.fetch_add(1, Ordering::SeqCst);
                 },
@@ -5291,7 +5335,6 @@ mod tests {
 
     #[test]
     fn query_locality_remote_alone_skips_local_queryable() {
-        let clock = TokioTime::new();
         // A local Locality::Any queryable does fire on its own
         // session's Remote-only query? NO — the loopback branch is
         // gated on opts.allowed_destination.allows_local(); Remote
@@ -5315,7 +5358,6 @@ mod tests {
             .query(
                 "home/temp",
                 QueryOptions::get().with_allowed_destination(Locality::Remote),
-                &clock,
                 move |_| {
                     r.fetch_add(1, Ordering::SeqCst);
                 },
@@ -5379,7 +5421,6 @@ mod tests {
 
     #[test]
     fn query_wire_branch_with_empty_meta_emits_no_meta_fast_path_frame() {
-        let clock = TokioTime::new();
         // Session::query with default options (Locality::Any, no
         // metadata) MUST take the no-meta fast path → wire frame is
         // byte-identical to a standalone send_request_query call.
@@ -5390,7 +5431,6 @@ mod tests {
             .query(
                 "home/temp",
                 QueryOptions::get().with_allowed_destination(Locality::Remote),
-                &clock,
                 |_| {},
                 |_| {},
             )
@@ -5417,7 +5457,6 @@ mod tests {
 
     #[test]
     fn query_wire_branch_with_target_threads_target_through_with_meta() {
-        let clock = TokioTime::new();
         // QueryOptions::with_target lands on the outbound Request via
         // the with-meta path. Pins the R240 Session-level integration
         // between QueryOptions.target → QueryMetadata.target →
@@ -5429,7 +5468,6 @@ mod tests {
                 QueryOptions::get()
                     .with_allowed_destination(Locality::Remote)
                     .with_target(QueryTarget::AllComplete),
-                &clock,
                 |_| {},
                 |_| {},
             )
@@ -5453,7 +5491,6 @@ mod tests {
 
     #[test]
     fn query_wire_branch_with_attachment_threads_attachment_through_with_meta() {
-        let clock = TokioTime::new();
         let (session, driver) = build_session();
         session
             .query(
@@ -5461,7 +5498,6 @@ mod tests {
                 QueryOptions::get()
                     .with_allowed_destination(Locality::Remote)
                     .with_attachment(b"q-att".to_vec()),
-                &clock,
                 |_| {},
                 |_| {},
             )
@@ -5481,7 +5517,6 @@ mod tests {
 
     #[test]
     fn query_wire_branch_with_consolidation_threads_consolidation_through_with_meta() {
-        let clock = TokioTime::new();
         let (session, driver) = build_session();
         session
             .query(
@@ -5489,7 +5524,6 @@ mod tests {
                 QueryOptions::get()
                     .with_allowed_destination(Locality::Remote)
                     .with_consolidation(ConsolidationMode::Latest),
-                &clock,
                 |_| {},
                 |_| {},
             )
@@ -5514,7 +5548,6 @@ mod tests {
 
     #[test]
     fn query_session_local_with_any_metadata_skips_wire_branch_entirely() {
-        let clock = TokioTime::new();
         // R240 invariance: even with non-empty QueryMetadata, a
         // Locality::SessionLocal query MUST NOT touch the wire. The
         // meta extraction happens regardless but the actions surface
@@ -5528,7 +5561,6 @@ mod tests {
                     .with_target(QueryTarget::All)
                     .with_attachment(b"q-att".to_vec())
                     .with_timeout_ms(1_000),
-                &clock,
                 |_| {},
                 |_| {},
             )
@@ -5544,7 +5576,6 @@ mod tests {
 
     #[test]
     fn query_aliased_locality_session_local_fires_loopback_only() {
-        let clock = TokioTime::new();
         let (session, driver) = build_session();
         let reply_count = Arc::new(AtomicUsize::new(0));
         let final_count = Arc::new(AtomicUsize::new(0));
@@ -5566,7 +5597,6 @@ mod tests {
                 None,
                 "home/temp",
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-                &clock,
                 move |_reply| {
                     r.fetch_add(1, Ordering::SeqCst);
                 },
@@ -5583,7 +5613,6 @@ mod tests {
 
     #[test]
     fn query_aliased_locality_remote_fires_wire_with_mapping_id() {
-        let clock = TokioTime::new();
         let (session, driver) = build_session();
         session
             .query_aliased(
@@ -5591,7 +5620,6 @@ mod tests {
                 None,
                 "home/temp",
                 QueryOptions::get().with_allowed_destination(Locality::Remote),
-                &clock,
                 |_| {},
                 |_| {},
             )
@@ -5614,7 +5642,6 @@ mod tests {
 
     #[test]
     fn query_aliased_locality_any_fires_both_branches() {
-        let clock = TokioTime::new();
         let (session, driver) = build_session();
         let reply_count = Arc::new(AtomicUsize::new(0));
         let final_count = Arc::new(AtomicUsize::new(0));
@@ -5635,7 +5662,6 @@ mod tests {
                 None,
                 "home/temp",
                 QueryOptions::get(),
-                &clock,
                 // Any
                 move |_| {
                     r.fetch_add(1, Ordering::SeqCst);
@@ -5657,7 +5683,6 @@ mod tests {
 
     #[test]
     fn query_aliased_inline_suffix_passes_through_to_wire_and_loopback() {
-        let clock = TokioTime::new();
         let (session, driver) = build_session();
         let captured: Arc<Mutex<Option<InboundReply>>> = Arc::new(Mutex::new(None));
         let cap_cb = captured.clone();
@@ -5677,7 +5702,6 @@ mod tests {
                 Some("/kitchen"),
                 "home/temp/kitchen",
                 QueryOptions::get(),
-                &clock,
                 move |reply| {
                     *cap_cb.lock().unwrap() = Some(reply.clone());
                 },
@@ -5700,7 +5724,6 @@ mod tests {
 
     #[test]
     fn query_aliased_auto_resolves_loopback_from_outbound_mapping_table() {
-        let clock = TokioTime::new();
         let (session, driver) = build_session();
         session
             .actions()
@@ -5723,7 +5746,6 @@ mod tests {
                 7,
                 None,
                 QueryOptions::get(),
-                &clock,
                 move |reply| {
                     *cap_cb.lock().unwrap() = Some(reply.clone());
                 },
@@ -5744,7 +5766,6 @@ mod tests {
 
     #[test]
     fn query_aliased_auto_unknown_mapping_returns_err_and_skips_both_branches() {
-        let clock = TokioTime::new();
         let (session, driver) = build_session();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
@@ -5757,7 +5778,7 @@ mod tests {
                 fired_cb.fetch_add(1, Ordering::SeqCst);
             });
 
-        let err = session.query_aliased_auto(99, None, QueryOptions::get(), &clock, |_| {}, |_| {});
+        let err = session.query_aliased_auto(99, None, QueryOptions::get(), |_| {}, |_| {});
         assert_eq!(err, Err(QueryAliasError::UnknownMapping(99)));
         assert_eq!(fired.load(Ordering::SeqCst), 0, "loopback skipped on err");
         assert_eq!(driver.frame_count(), 0, "wire skipped on err");
@@ -5769,7 +5790,6 @@ mod tests {
 
     #[test]
     fn query_aliased_auto_with_inline_suffix_concatenates_for_loopback() {
-        let clock = TokioTime::new();
         let (session, _driver) = build_session();
         session
             .actions()
@@ -5790,7 +5810,6 @@ mod tests {
                 7,
                 Some("/kitchen"),
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-                &clock,
                 move |reply| {
                     *cap_cb.lock().unwrap() = Some(reply.clone());
                 },
@@ -5808,7 +5827,6 @@ mod tests {
 
     #[test]
     fn query_aliased_with_meta_threads_attachment_through_wire() {
-        let clock = TokioTime::new();
         let (session, driver) = build_session();
         session
             .query_aliased(
@@ -5818,7 +5836,6 @@ mod tests {
                 QueryOptions::get()
                     .with_allowed_destination(Locality::Remote)
                     .with_attachment(b"q-att".to_vec()),
-                &clock,
                 |_| {},
                 |_| {},
             )
@@ -5882,7 +5899,6 @@ mod tests {
 
     #[test]
     fn querier_get_fires_loopback_through_session_query_session_local() {
-        let clock = TokioTime::new();
         let (session, driver) = build_session();
         let reply_count = Arc::new(AtomicUsize::new(0));
         let final_count = Arc::new(AtomicUsize::new(0));
@@ -5904,7 +5920,6 @@ mod tests {
         let f = final_count.clone();
         querier
             .get(
-                &clock,
                 move |_| {
                     r.fetch_add(1, Ordering::SeqCst);
                 },
@@ -5921,17 +5936,16 @@ mod tests {
 
     #[test]
     fn querier_get_called_twice_allocates_independent_rids() {
-        let clock = TokioTime::new();
         let (session, _driver) = build_session();
         let querier = session.declare_querier(
             "home/temp",
             QueryOptions::get().with_allowed_destination(Locality::Remote),
         );
         let h0 = querier
-            .get(&clock, |_| {}, |_| {})
+            .get(|_| {}, |_| {})
             .expect("query-get feature is ON in this test build");
         let h1 = querier
-            .get(&clock, |_| {}, |_| {})
+            .get(|_| {}, |_| {})
             .expect("query-get feature is ON in this test build");
         assert_eq!(h0.rid(), 0);
         assert_eq!(
@@ -5948,7 +5962,6 @@ mod tests {
 
     #[test]
     fn querier_get_threads_target_option_into_wire() {
-        let clock = TokioTime::new();
         // Single-knob verification: declare with target=All, observe
         // the wire frame containing the with-target Request encoding.
         // (Multi-knob composite verify lives in R240's
@@ -5964,7 +5977,7 @@ mod tests {
                 .with_target(QueryTarget::All),
         );
         querier
-            .get(&clock, |_| {}, |_| {})
+            .get(|_| {}, |_| {})
             .expect("query-get feature is ON in this test build");
 
         use crate::session_glue::build_request_query_with_target;
@@ -5981,7 +5994,6 @@ mod tests {
 
     #[test]
     fn querier_clone_shares_session_and_options() {
-        let clock = TokioTime::new();
         let (session, _driver) = build_session();
         let querier = session.declare_querier("home/temp", QueryOptions::get());
         let clone = querier.clone();
@@ -5994,10 +6006,10 @@ mod tests {
         // through both and checking the pending count.
         let q1 = querier
             .clone()
-            .get(&clock, |_| {}, |_| {})
+            .get(|_| {}, |_| {})
             .expect("query-get feature is ON in this test build");
         let q2 = clone
-            .get(&clock, |_| {}, |_| {})
+            .get(|_| {}, |_| {})
             .expect("query-get feature is ON in this test build");
         assert_eq!(q1.rid(), 0);
         assert_eq!(q2.rid(), 1, "clones share the same rid allocator");
@@ -6232,7 +6244,6 @@ mod tests {
 
     #[test]
     fn querier_aliased_get_resolves_loopback_through_outbound_mapping_table() {
-        let clock = TokioTime::new();
         let (session, driver) = build_session();
         session
             .actions()
@@ -6257,7 +6268,6 @@ mod tests {
         );
         let handle = qa
             .get(
-                &clock,
                 move |reply| {
                     *cap_cb.lock().unwrap() = Some(reply.clone());
                 },
@@ -6277,7 +6287,6 @@ mod tests {
 
     #[test]
     fn querier_aliased_get_unknown_mapping_returns_err_and_skips_both_branches() {
-        let clock = TokioTime::new();
         let (session, driver) = build_session();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
@@ -6291,7 +6300,7 @@ mod tests {
             });
 
         let qa = session.declare_querier_aliased(99, None, QueryOptions::get());
-        let err = qa.get(&clock, |_| {}, |_| {});
+        let err = qa.get(|_| {}, |_| {});
         assert_eq!(err, Err(QueryAliasError::UnknownMapping(99)));
         assert_eq!(fired.load(Ordering::SeqCst), 0);
         assert_eq!(driver.frame_count(), 0);
@@ -6299,7 +6308,6 @@ mod tests {
 
     #[test]
     fn querier_aliased_get_threads_inline_suffix_into_composite_literal() {
-        let clock = TokioTime::new();
         let (session, _driver) = build_session();
         session
             .actions()
@@ -6321,7 +6329,6 @@ mod tests {
             QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
         );
         qa.get(
-            &clock,
             move |reply| {
                 *cap_cb.lock().unwrap() = Some(reply.clone());
             },
@@ -6339,7 +6346,6 @@ mod tests {
 
     #[test]
     fn querier_aliased_get_twice_allocates_independent_rids() {
-        let clock = TokioTime::new();
         let (session, _driver) = build_session();
         session
             .actions()
@@ -6350,15 +6356,14 @@ mod tests {
             None,
             QueryOptions::get().with_allowed_destination(Locality::Remote),
         );
-        let h0 = qa.get(&clock, |_| {}, |_| {}).unwrap();
-        let h1 = qa.get(&clock, |_| {}, |_| {}).unwrap();
+        let h0 = qa.get(|_| {}, |_| {}).unwrap();
+        let h1 = qa.get(|_| {}, |_| {}).unwrap();
         assert_eq!(h0.rid(), 0);
         assert_eq!(h1.rid(), 1);
     }
 
     #[test]
     fn querier_aliased_clone_shares_session_and_options() {
-        let clock = TokioTime::new();
         let (session, _driver) = build_session();
         session
             .actions()
@@ -6372,8 +6377,8 @@ mod tests {
         let clone = qa.clone();
         assert_eq!(clone.mapping_id(), qa.mapping_id());
         assert_eq!(clone.inline_suffix(), qa.inline_suffix());
-        let h0 = qa.get(&clock, |_| {}, |_| {}).unwrap();
-        let h1 = clone.get(&clock, |_| {}, |_| {}).unwrap();
+        let h0 = qa.get(|_| {}, |_| {}).unwrap();
+        let h1 = clone.get(|_| {}, |_| {}).unwrap();
         assert_eq!(h0.rid(), 0);
         assert_eq!(h1.rid(), 1, "clones share the same rid allocator");
     }
@@ -7138,7 +7143,6 @@ mod tests {
 
     #[test]
     fn declared_queryable_fires_on_loopback_query() {
-        let clock = TokioTime::new();
         let (session, _driver) = build_session();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
@@ -7157,7 +7161,6 @@ mod tests {
             .query(
                 "home/temp",
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-                &clock,
                 move |_reply| {
                     r.fetch_add(1, Ordering::SeqCst);
                 },
@@ -7171,7 +7174,6 @@ mod tests {
 
     #[test]
     fn queryable_drop_auto_unregisters() {
-        let clock = TokioTime::new();
         let (session, _driver) = build_session();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
@@ -7188,7 +7190,6 @@ mod tests {
                 .query(
                     "home/temp",
                     QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-                    &clock,
                     |_| {},
                     |_| {},
                 )
@@ -7201,7 +7202,6 @@ mod tests {
             .query(
                 "home/temp",
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-                &clock,
                 |_| {},
                 |_| {},
             )
@@ -7224,7 +7224,6 @@ mod tests {
 
     #[test]
     fn declare_queryable_with_locality_remote_skips_loopback_query() {
-        let clock = TokioTime::new();
         let (session, _driver) = build_session();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_cb = fired.clone();
@@ -7240,7 +7239,6 @@ mod tests {
             .query(
                 "home/temp",
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-                &clock,
                 |_| {},
                 |_| {},
             )
@@ -7254,7 +7252,6 @@ mod tests {
 
     #[test]
     fn declare_queryable_aliased_resolves_literal_at_declare_time() {
-        let clock = TokioTime::new();
         let (session, _driver) = build_session();
         session
             .actions()
@@ -7279,7 +7276,6 @@ mod tests {
             .query(
                 "home/temp",
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-                &clock,
                 |_| {},
                 |_| {},
             )
