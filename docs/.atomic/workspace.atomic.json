@@ -23577,6 +23577,60 @@
         "Push deferred per CLAUDE.md global never-push-without-explicit-consent rule."
       ]
     },
+    "Round 311di-14": {
+      "decision_summary": "R311di-14 LivelinessRegistry (281 lines) migrates to wz-session-core::declare::liveliness; first declare/* registry move, AP-side tests stay in wz-runtime-tokio wrapper shell.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/declare.rs new 30-line parent module: #[cfg(feature = \"codec-declare\")] pub mod liveliness; with migration roadmap doc (4 registries by size).",
+        "crates/wz-session-core/src/declare/liveliness.rs new 147-line file (production only): pub type DeclTokenCallback / UndeclTokenCallback + pub struct LivelinessRegistry + Default/impl block + dispatch_declare / dispatch_messages / dispatch_iteration_event; std/Box swapped to alloc imports.",
+        "crates/wz-session-core/src/lib.rs: #[cfg(feature = \"alloc\")] pub mod declare; with rationale doc.",
+        "crates/wz-runtime-tokio/src/declare/liveliness.rs replaced with 121-line shell: pub use of LivelinessRegistry + Callback typedefs + cfg(test) tests block carrying all 5 AP-bound test functions verbatim (Arc + crate::sync::Mutex + test_helpers).",
+        "Cumulative session_glue-cluster shrink: di-2..di-14 ~2k LOC moved out of wz-runtime-tokio into wz-session-core; 14 sub-modules total (keyexpr_canon + locality + sample + reliability + link + parse_error + lease + query_mode + metadata + send_declare_error + network_message + driver_loop + wireexpr_resolve + declare::liveliness)."
+      ],
+      "verification_bullets": [
+        "cargo clean -p wz-session-core -p wz-runtime-tokio + cargo check --workspace --all-targets: clean in 1.86s.",
+        "scripts/run-ci.sh: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass (LivelinessRegistry's 5 unit tests now live in wz-runtime-tokio shell but exercise the wz-session-core implementation through the pub use bridge).",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent); the new wz-session-core declare::liveliness sub-module compiles cleanly across every cross-compile target because the implementation is no_std + alloc-only.",
+        "validate_workspace expected entries=468 -> 469, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-15 next: subscriber.rs (558 lines) RemoteSubscriberRegistry migration; same template as di-14 (production -> wz-session-core::declare::subscriber, tests stay in wz-runtime-tokio shell).",
+        "R311di-16: queryable.rs (489 lines).",
+        "R311di-17: liveliness_subscriber.rs (694 lines, largest declare/* file).",
+        "After declare/* (4 files migrated): reply / query / pubsub / observer / session module migration; final round splits session_glue.rs into wz-session-core generic body + wz-runtime-tokio Lua-binding + concrete ::new constructor remainder.",
+        "Architectural carries unchanged: R284 / R283 / R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
+        "Push deferred per CLAUDE.md global never-push-without-explicit-consent rule."
+      ],
+      "publishable_decision_summary": "R311di-14 LivelinessRegistry (281 lines) migrates to wz-session-core::declare::liveliness; first declare/* registry move, AP-side tests stay in wz-runtime-tokio wrapper shell.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/declare.rs new 30-line parent module: #[cfg(feature = \"codec-declare\")] pub mod liveliness; with migration roadmap doc (4 registries by size).",
+        "crates/wz-session-core/src/declare/liveliness.rs new 147-line file (production only): pub type DeclTokenCallback / UndeclTokenCallback + pub struct LivelinessRegistry + Default/impl block + dispatch_declare / dispatch_messages / dispatch_iteration_event; std/Box swapped to alloc imports.",
+        "crates/wz-session-core/src/lib.rs: #[cfg(feature = \"alloc\")] pub mod declare; with rationale doc.",
+        "crates/wz-runtime-tokio/src/declare/liveliness.rs replaced with 121-line shell: pub use of LivelinessRegistry + Callback typedefs + cfg(test) tests block carrying all 5 AP-bound test functions verbatim (Arc + crate::sync::Mutex + test_helpers).",
+        "Cumulative session_glue-cluster shrink: di-2..di-14 ~2k LOC moved out of wz-runtime-tokio into wz-session-core; 14 sub-modules total (keyexpr_canon + locality + sample + reliability + link + parse_error + lease + query_mode + metadata + send_declare_error + network_message + driver_loop + wireexpr_resolve + declare::liveliness)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clean -p wz-session-core -p wz-runtime-tokio + cargo check --workspace --all-targets: clean in 1.86s.",
+        "scripts/run-ci.sh: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass (LivelinessRegistry's 5 unit tests now live in wz-runtime-tokio shell but exercise the wz-session-core implementation through the pub use bridge).",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent); the new wz-session-core declare::liveliness sub-module compiles cleanly across every cross-compile target because the implementation is no_std + alloc-only.",
+        "validate_workspace expected entries=468 -> 469, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-15 next: subscriber.rs (558 lines) RemoteSubscriberRegistry migration; same template as di-14 (production -> wz-session-core::declare::subscriber, tests stay in wz-runtime-tokio shell).",
+        "R311di-16: queryable.rs (489 lines).",
+        "R311di-17: liveliness_subscriber.rs (694 lines, largest declare/* file).",
+        "After declare/* (4 files migrated): reply / query / pubsub / observer / session module migration; final round splits session_glue.rs into wz-session-core generic body + wz-runtime-tokio Lua-binding + concrete ::new constructor remainder.",
+        "Architectural carries unchanged: R284 / R283 / R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
+        "Push deferred per CLAUDE.md global never-push-without-explicit-consent rule."
+      ]
+    },
     "Round 311di-2": {
       "decision_summary": "R311di-2 — keyexpr_canon.rs (806 lines) is the first file migrated into wz-session-core; std::fmt/std::error::Error replaced with core::*, alloc::string + alloc::vec imports add; wz-runtime-tokio re-exports the module so 4 caller files (query.rs / pubsub.rs / session.rs / session_glue.rs) stay verbatim.",
       "changes_bullets": [

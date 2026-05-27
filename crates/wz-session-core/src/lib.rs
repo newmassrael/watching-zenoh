@@ -97,3 +97,11 @@ pub mod driver_loop;
 /// `Option<String>`).
 #[cfg(feature = "alloc")]
 pub mod wireexpr_resolve;
+
+/// R311di-14+ — application-layer remote-declaration registries
+/// (liveliness / subscriber / queryable / liveliness_subscriber).
+/// Each sub-module gates on `codec-declare` because the inbound
+/// dispatch consumes wz-codecs Declare variants. Alloc-gated for
+/// the callback Box + Vec storage.
+#[cfg(feature = "alloc")]
+pub mod declare;
