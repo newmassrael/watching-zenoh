@@ -23373,6 +23373,56 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311di-2": {
+      "decision_summary": "R311di-2 — keyexpr_canon.rs (806 lines) is the first file migrated into wz-session-core; std::fmt/std::error::Error replaced with core::*, alloc::string + alloc::vec imports add; wz-runtime-tokio re-exports the module so 4 caller files (query.rs / pubsub.rs / session.rs / session_glue.rs) stay verbatim.",
+      "changes_bullets": [
+        "git mv crates/wz-runtime-tokio/src/keyexpr_canon.rs -> crates/wz-session-core/src/keyexpr_canon.rs. R-generic structural canonicalization helpers (`canonize_keyexpr` + `check_outbound_keyexpr_pico_safe`) + 2 error enums (`KeyexprCanonError` + `OutboundKeyexprError`) all R/T-agnostic; depends on alloc only. R220-R300 wire-spec mirror untouched; only the std import surface migrates.",
+        "crates/wz-session-core/src/keyexpr_canon.rs:57: `use std::fmt;` -> `use alloc::string::{String, ToString}; use alloc::vec::Vec; use core::fmt;`. Three std references swap to core/alloc equivalents.",
+        "crates/wz-session-core/src/keyexpr_canon.rs:108 + 370-371: `std::error::Error` -> `core::error::Error` (stable since Rust 1.81; workspace rust-version pins 1.81). Source-trait `Option<&(dyn core::error::Error + 'static)>` return type unchanged in semantic.",
+        "crates/wz-session-core/src/lib.rs: gains `#[cfg(feature = \"alloc\")] pub mod keyexpr_canon;`. Module body needs alloc::* so gated on the alloc feature; default-on per crate manifest.",
+        "crates/wz-runtime-tokio/src/lib.rs:54-58: `#[cfg(feature = \"keyexpr-canon\")] pub mod keyexpr_canon;` -> `#[cfg(feature = \"keyexpr-canon\")] pub use wz_session_core::keyexpr_canon;`. The re-export keeps `crate::keyexpr_canon::*` callsite paths verbatim across query.rs / pubsub.rs / session.rs / session_glue.rs (4 caller files; ~10 reference sites).",
+        "crates/wz-runtime-tokio/Cargo.toml: `wz-session-core = { path = \"../wz-session-core\", features = [\"alloc\"] }` dep added alongside the existing wz-runtime-core dep. AP profile keeps the alloc surface active."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean (1.72s; unused `alloc::format` import dropped in second iteration after CI's -D warnings flagged it; macros come through the prelude without explicit use).",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass. keyexpr_canon proptest filter (R299 carry) keeps the integration coverage intact; the file move is byte-for-byte identical save the import block.",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent).",
+        "validate_workspace: entries=455 -> 456, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-3 (next): second smallest file move — locality.rs (R223 zenoh-style locality filter; R-generic; small). Same migration pattern: file move + std -> core/alloc rewrite + wz-runtime-tokio re-export. Follows the R311di-2 template literally.",
+        "R311di-4..di-8: remaining migration set in size order — sample.rs (small) -> reply.rs (medium) -> query.rs (medium) -> declare/* (medium-large; 6 files in subdir) -> pubsub.rs (large) -> observer.rs (large) -> session.rs (large) -> session_glue.rs (LARGE; needs split into wz-session-core generic body + wz-runtime-tokio Lua-binding + concrete-ctor remainder). 8-12 sub-rounds total.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311di-2 — keyexpr_canon.rs (806 lines) is the first file migrated into wz-session-core; std::fmt/std::error::Error replaced with core::*, alloc::string + alloc::vec imports add; wz-runtime-tokio re-exports the module so 4 caller files (query.rs / pubsub.rs / session.rs / session_glue.rs) stay verbatim.",
+      "publishable_changes_bullets": [
+        "git mv crates/wz-runtime-tokio/src/keyexpr_canon.rs -> crates/wz-session-core/src/keyexpr_canon.rs. R-generic structural canonicalization helpers (`canonize_keyexpr` + `check_outbound_keyexpr_pico_safe`) + 2 error enums (`KeyexprCanonError` + `OutboundKeyexprError`) all R/T-agnostic; depends on alloc only. R220-R300 wire-spec mirror untouched; only the std import surface migrates.",
+        "crates/wz-session-core/src/keyexpr_canon.rs:57: `use std::fmt;` -> `use alloc::string::{String, ToString}; use alloc::vec::Vec; use core::fmt;`. Three std references swap to core/alloc equivalents.",
+        "crates/wz-session-core/src/keyexpr_canon.rs:108 + 370-371: `std::error::Error` -> `core::error::Error` (stable since Rust 1.81; workspace rust-version pins 1.81). Source-trait `Option<&(dyn core::error::Error + 'static)>` return type unchanged in semantic.",
+        "crates/wz-session-core/src/lib.rs: gains `#[cfg(feature = \"alloc\")] pub mod keyexpr_canon;`. Module body needs alloc::* so gated on the alloc feature; default-on per crate manifest.",
+        "crates/wz-runtime-tokio/src/lib.rs:54-58: `#[cfg(feature = \"keyexpr-canon\")] pub mod keyexpr_canon;` -> `#[cfg(feature = \"keyexpr-canon\")] pub use wz_session_core::keyexpr_canon;`. The re-export keeps `crate::keyexpr_canon::*` callsite paths verbatim across query.rs / pubsub.rs / session.rs / session_glue.rs (4 caller files; ~10 reference sites).",
+        "crates/wz-runtime-tokio/Cargo.toml: `wz-session-core = { path = \"../wz-session-core\", features = [\"alloc\"] }` dep added alongside the existing wz-runtime-core dep. AP profile keeps the alloc surface active."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean (1.72s; unused `alloc::format` import dropped in second iteration after CI's -D warnings flagged it; macros come through the prelude without explicit use).",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass. keyexpr_canon proptest filter (R299 carry) keeps the integration coverage intact; the file move is byte-for-byte identical save the import block.",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent).",
+        "validate_workspace: entries=455 -> 456, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-3 (next): second smallest file move — locality.rs (R223 zenoh-style locality filter; R-generic; small). Same migration pattern: file move + std -> core/alloc rewrite + wz-runtime-tokio re-export. Follows the R311di-2 template literally.",
+        "R311di-4..di-8: remaining migration set in size order — sample.rs (small) -> reply.rs (medium) -> query.rs (medium) -> declare/* (medium-large; 6 files in subdir) -> pubsub.rs (large) -> observer.rs (large) -> session.rs (large) -> session_glue.rs (LARGE; needs split into wz-session-core generic body + wz-runtime-tokio Lua-binding + concrete-ctor remainder). 8-12 sub-rounds total.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311di-pre-a": {
       "decision_summary": "R311di-pre-a — wz-runtime-tokio adds hashbrown + portable-atomic deps; session_glue.rs HashMap + AtomicU64 imports route through them; first step toward wz-session-core no_std move-readiness.",
       "changes_bullets": [

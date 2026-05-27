@@ -18,3 +18,6 @@
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
+
+#[cfg(feature = "alloc")]
+pub mod keyexpr_canon;
