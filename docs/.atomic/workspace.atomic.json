@@ -22222,6 +22222,48 @@
         "Pending architectural carries unchanged: R284, R283, R301 §8, R267 reparam, Q_B/Q_E, R299 #2/#3, R300, R304, R311 facade graceful-close wrapper API."
       ]
     },
+    "Round 311cn": {
+      "decision_summary": "R311cn session 7 reserved audit-only ratify — extauth/extcompression/extqos/extshm/multicast/resumable/stateless-accept all 0 cfg sites confirmed.",
+      "changes_bullets": [
+        "§5.4 session caveat appended with R311cn 7-reserved audit confirmation.",
+        "No Cargo / source changes — Cargo 2/7 already accurate, audit confirms 0 cfg per reserved feature."
+      ],
+      "verification_bullets": [
+        "Audit verification: session-extauth/extcompression/extqos/extshm/multicast/resumable/stateless-accept all 0 cfg sites.",
+        "validate_workspace baseline: entries 420 -> 421, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "session-extauth: depends on Open-frame Extauth ext negotiation (RFC §5.M); impl pending.",
+        "session-extqos: QoS ext on Open per zenoh-pico; impl pending.",
+        "session-multicast: alternate FSM module (transport-multicast peer-side); long-term cascade.",
+        "session-resumable / -stateless-accept: ResumeCookie cache + stateless-accept primitive; both deferred.",
+        "R311ca debt #6 wire-up progress: unchanged (audit-only); 33% wired (53/161)."
+      ],
+      "publishable_decision_summary": "R311cn session 7 reserved audit-only ratify — extauth/extcompression/extqos/extshm/multicast/resumable/stateless-accept all 0 cfg sites confirmed.",
+      "publishable_changes_bullets": [
+        "§5.4 session caveat appended with R311cn 7-reserved audit confirmation.",
+        "No Cargo / source changes — Cargo 2/7 already accurate, audit confirms 0 cfg per reserved feature."
+      ],
+      "publishable_verification_bullets": [
+        "Audit verification: session-extauth/extcompression/extqos/extshm/multicast/resumable/stateless-accept all 0 cfg sites.",
+        "validate_workspace baseline: entries 420 -> 421, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "session-extauth: depends on Open-frame Extauth ext negotiation (RFC §5.M); impl pending.",
+        "session-extqos: QoS ext on Open per zenoh-pico; impl pending.",
+        "session-multicast: alternate FSM module (transport-multicast peer-side); long-term cascade.",
+        "session-resumable / -stateless-accept: ResumeCookie cache + stateless-accept primitive; both deferred.",
+        "R311ca debt #6 wire-up progress: unchanged (audit-only); 33% wired (53/161)."
+      ]
+    },
     "Round 311d": {
       "decision_summary": "R311d batches codec-scout / codec-hello / codec-join cascade — wz-codecs level only (wz-runtime-tokio does not import these types); forwards stay catalog-uniform for future runtime reuse.",
       "changes_bullets": [
