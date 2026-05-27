@@ -23767,6 +23767,54 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311di-pre-f4": {
+      "decision_summary": "R311di-pre-f4 — timestamp Mutex trio (last_inbound_keepalive_at + established_at + inbound_peer_init_caps) lifts to R::Mutex; 4 R-generic .lock() sites migrate to R::with_mutex_mut; is_established poison policy normalised to the trait's cross-profile contract.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs:783 + 800 + 864: three Mutex slots lift to R::Mutex. last_inbound_keepalive_at + established_at hold u64 monotonic ms (R72b lease comparator + R84 Established-entry stamp); inbound_peer_init_caps holds Option<PeerInitCaps> (R121d wire-spec InitAck.size <= InitSyn.size enforcement input). Per-profile alias selection now governs all three.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1150 + 1275 + 1304: three handle_inbound + init_ack_params .lock() sites migrate to R::with_mutex_mut. init_ack_params reads the peer caps slot via `let peer = R::with_mutex_mut(..., |slot| *slot);` (Option<PeerInitCaps> is Copy); handle_inbound writes via closure form mirroring R311di-pre-f3 cookie/zid trio.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1947 (is_established): poison-recover idiom retired in favour of the Runtime trait's cross-profile contract. The prior PoisonError -> false path no longer applies because lwIP critical_section / embassy_sync mutex aliases do not surface a PoisonError equivalent (R311di-pre-e helper doc lock-acquisition contract). TokioRuntime::with_mutex_mut recovers the inner value via `poisoned.into_inner()`, so a poisoned `established_at` returns the last-stored stamp.is_some() outcome rather than `false`. Doc-block records the policy migration so a future MCU-profile reviewer sees the intentional behaviour change."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass (existing is_established tests do not exercise the poison branch; poison branch covered by pubsub::Subscriber::drop's mirrored idiom which remains untouched).",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent).",
+        "validate_workspace: entries=450 -> 451, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-pre-f5 (next): ext-chain Mutex quartet migration. init_syn_ext + init_ack_ext + open_syn_ext + open_ack_ext (all `Mutex<Vec<ExtEntry>>`) lift to R::Mutex; .lock() sites in set_ext_chain + ext_chain_slot + encode_init_with_role + encode_open_with_role migrate to R::with_mutex_mut closures. Slightly larger carry than pre-f4 since ext-chain reads happen on every outbound handshake frame emit.",
+        "R311di-pre-f6: outbound_mappings Mutex (singleton, HashMap<u64, String>) migration. Larger blast radius than the cookie/timestamp trios since the mapping table is read by send_push_aliased + send_request_query_aliased + send_declare_subscriber_aliased + resolve_outbound_mapping (called from Querier::get / Publisher / etc). 10-15 .lock() sites estimate.",
+        "R311di-pre-f7: 4 AtomicU64 fields (outbound_frame_sn + next_outbound_request_id/token_id/interest_id). Runtime trait does not currently expose a portable atomic abstraction; pre-f7 either (a) extends the trait with `R::Atomic<T>` GAT + `R::new_atomic` + `R::atomic_fetch_add` operations, or (b) keeps the fields as raw `portable_atomic::AtomicU64` and accepts that the SessionLinkActions struct retains a profile-agnostic atomic primitive (portable_atomic crate is already a workspace dep per R311di-pre-b). Evaluation at pre-f7 entry: (b) is simpler + portable_atomic spans MCU profiles via the unstable-portable-atomic-critical-section feature; (a) is conceptually cleaner but adds 4+ trait method surface area.",
+        "R311di proper: wz-session-core crate extraction (no_std + alloc) once all R::Mutex / R::Atomic migrations land.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311di-pre-f4 — timestamp Mutex trio (last_inbound_keepalive_at + established_at + inbound_peer_init_caps) lifts to R::Mutex; 4 R-generic .lock() sites migrate to R::with_mutex_mut; is_established poison policy normalised to the trait's cross-profile contract.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs:783 + 800 + 864: three Mutex slots lift to R::Mutex. last_inbound_keepalive_at + established_at hold u64 monotonic ms (R72b lease comparator + R84 Established-entry stamp); inbound_peer_init_caps holds Option<PeerInitCaps> (R121d wire-spec InitAck.size <= InitSyn.size enforcement input). Per-profile alias selection now governs all three.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1150 + 1275 + 1304: three handle_inbound + init_ack_params .lock() sites migrate to R::with_mutex_mut. init_ack_params reads the peer caps slot via `let peer = R::with_mutex_mut(..., |slot| *slot);` (Option<PeerInitCaps> is Copy); handle_inbound writes via closure form mirroring R311di-pre-f3 cookie/zid trio.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1947 (is_established): poison-recover idiom retired in favour of the Runtime trait's cross-profile contract. The prior PoisonError -> false path no longer applies because lwIP critical_section / embassy_sync mutex aliases do not surface a PoisonError equivalent (R311di-pre-e helper doc lock-acquisition contract). TokioRuntime::with_mutex_mut recovers the inner value via `poisoned.into_inner()`, so a poisoned `established_at` returns the last-stored stamp.is_some() outcome rather than `false`. Doc-block records the policy migration so a future MCU-profile reviewer sees the intentional behaviour change."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass (existing is_established tests do not exercise the poison branch; poison branch covered by pubsub::Subscriber::drop's mirrored idiom which remains untouched).",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent).",
+        "validate_workspace: entries=450 -> 451, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-pre-f5 (next): ext-chain Mutex quartet migration. init_syn_ext + init_ack_ext + open_syn_ext + open_ack_ext (all `Mutex<Vec<ExtEntry>>`) lift to R::Mutex; .lock() sites in set_ext_chain + ext_chain_slot + encode_init_with_role + encode_open_with_role migrate to R::with_mutex_mut closures. Slightly larger carry than pre-f4 since ext-chain reads happen on every outbound handshake frame emit.",
+        "R311di-pre-f6: outbound_mappings Mutex (singleton, HashMap<u64, String>) migration. Larger blast radius than the cookie/timestamp trios since the mapping table is read by send_push_aliased + send_request_query_aliased + send_declare_subscriber_aliased + resolve_outbound_mapping (called from Querier::get / Publisher / etc). 10-15 .lock() sites estimate.",
+        "R311di-pre-f7: 4 AtomicU64 fields (outbound_frame_sn + next_outbound_request_id/token_id/interest_id). Runtime trait does not currently expose a portable atomic abstraction; pre-f7 either (a) extends the trait with `R::Atomic<T>` GAT + `R::new_atomic` + `R::atomic_fetch_add` operations, or (b) keeps the fields as raw `portable_atomic::AtomicU64` and accepts that the SessionLinkActions struct retains a profile-agnostic atomic primitive (portable_atomic crate is already a workspace dep per R311di-pre-b). Evaluation at pre-f7 entry: (b) is simpler + portable_atomic spans MCU profiles via the unstable-portable-atomic-critical-section feature; (a) is conceptually cleaner but adds 4+ trait method surface area.",
+        "R311di proper: wz-session-core crate extraction (no_std + alloc) once all R::Mutex / R::Atomic migrations land.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [

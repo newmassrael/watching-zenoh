@@ -780,7 +780,7 @@ pub struct SessionLinkActions<R: Runtime = TokioRuntime, T: TimeSource = TokioTi
     /// halved to 8-byte u64), and the storage form matches the
     /// [`TimeSource::now_monotonic_ms`] contract that wz callers
     /// will use across AP + Phase W targets.
-    pub last_inbound_keepalive_at: Mutex<Option<u64>>,
+    pub last_inbound_keepalive_at: R::Mutex<Option<u64>>,
     /// R84 — monotonic timestamp in milliseconds captured when the
     /// session FSM enters the `Established` state. Populated by the
     /// `record_established_at()` Lua action wired to the
@@ -797,7 +797,7 @@ pub struct SessionLinkActions<R: Runtime = TokioRuntime, T: TimeSource = TokioTi
     /// shared [`SessionLinkActions::clock`] epoch (R294 migration
     /// from `std::time::Instant`); the lease comparator subtracts
     /// them as pure `u64` arithmetic.
-    pub established_at: Mutex<Option<u64>>,
+    pub established_at: R::Mutex<Option<u64>>,
     /// R294 — monotonic clock shared with the surrounding
     /// drive_session loop. `TokioTime` is `Copy + Clone` (R263), so
     /// every field that needs a `now_monotonic_ms()` read holds a
@@ -861,7 +861,7 @@ pub struct SessionLinkActions<R: Runtime = TokioRuntime, T: TimeSource = TokioTi
     /// falls back to `self.params` verbatim — test paths that
     /// emit InitAck directly without an inbound parse cycle
     /// (R60, layer3_init_body) continue to work.
-    pub inbound_peer_init_caps: Mutex<Option<PeerInitCaps>>,
+    pub inbound_peer_init_caps: R::Mutex<Option<PeerInitCaps>>,
     /// R121e — outbound Frame sequence-number generator. The
     /// session-FSM Established-side path emits one `Frame`
     /// transport-message per outbound application-layer batch
@@ -1147,7 +1147,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
     /// session, which is the R121d immediate symptom this
     /// negotiation closes.
     pub fn init_ack_params(&self) -> SessionInitParams {
-        let peer = *self.inbound_peer_init_caps.lock().unwrap();
+        let peer = R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| *slot);
         let mut params = self.params.clone();
         if let Some(p) = peer {
             params.seq_num_res = params.seq_num_res.min(p.seq_num_res);
@@ -1272,8 +1272,9 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 // `InitAck.size <= InitSyn.size` rule on the
                 // outbound InitAck (zenoh-pico
                 // unicast/transport.c:123-140 rejection condition).
-                *self.inbound_peer_init_caps.lock().unwrap() =
-                    Some(PeerInitCaps::from_init_syn(body.sn_res, body.batch_size));
+                R::with_mutex_mut(&self.inbound_peer_init_caps, |slot| {
+                    *slot = Some(PeerInitCaps::from_init_syn(body.sn_res, body.batch_size));
+                });
             }
             #[cfg(feature = "codec-open-body")]
             InboundFrame::Open {
@@ -1301,8 +1302,10 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 // epoch with drive_session_until_terminal's clock
                 // param) so the lease comparator's later `now_ms`
                 // read is on the same monotonic scale.
-                *self.last_inbound_keepalive_at.lock().unwrap() =
-                    Some(self.clock.now_monotonic_ms());
+                let now = self.clock.now_monotonic_ms();
+                R::with_mutex_mut(&self.last_inbound_keepalive_at, |slot| {
+                    *slot = Some(now);
+                });
             }
             _ => {}
         }
@@ -1936,16 +1939,17 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
     /// is a protocol bug, not a runtime condition the peer can
     /// recover from.
     ///
-    /// A poisoned `established_at` mutex (an earlier panicked Lua
-    /// action) is treated as `false` — refusing emit on a corrupted
-    /// FSM is the conservative + textbook response, matching the
-    /// poison-recover idiom used elsewhere (see
-    /// `crate::pubsub::Subscriber::drop`).
+    /// R311di-pre-f4: poison policy migrated from "PoisonError -> false"
+    /// to the Runtime trait's cross-profile contract — `with_mutex_mut`
+    /// recovers the inner value on poison (TokioRuntime::with_mutex_mut
+    /// calls `poisoned.into_inner()`), so a poisoned `established_at`
+    /// returns the last-stored `stamp.is_some()` outcome. The conservative
+    /// "refuse-on-poison" wording above no longer applies because the
+    /// per-profile mutex aliases (lwIP critical_section, embassy_sync)
+    /// do not surface a PoisonError equivalent — the trait normalises
+    /// the AP side to match.
     pub fn is_established(&self) -> bool {
-        self.established_at
-            .lock()
-            .map(|stamp| stamp.is_some())
-            .unwrap_or(false)
+        R::with_mutex_mut(&self.established_at, |slot| slot.is_some())
     }
 
     /// R300 — reconstruct the full literal keyexpr that the peer
