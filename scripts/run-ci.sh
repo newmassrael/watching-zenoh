@@ -25,6 +25,10 @@
 #              alloc-gated panic_payload tests would otherwise never
 #              run in CI — see crates/wz-runtime-core/Cargo.toml)
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
+#   Layer C3 — cargo clippy -p wz-ap-demo --all-targets -- -D warnings
+#              (R311cv; per-package isolated feature resolution catches
+#              preset-feature lint regressions that the workspace-mode
+#              unified resolver can mask)
 #   Layer D  — deploy/*.yaml schema validate
 #   Layer E  — binary-dep e2e suite via `cargo test ... -- --ignored`
 #              (auto-includes every #[ignore]-marked test in the
@@ -493,6 +497,21 @@ layer_c2_cargo_clippy() {
         --target thumbv7m-none-eabi --quiet -- -D warnings
 }
 
+# ─── Layer C3 — per-package isolated --all-targets ──────────────────
+#
+# R311cv: closes the R311cp carry. `cargo clippy --workspace --all-
+# targets` (Layer C2) resolves features in workspace-unified mode,
+# which can mask regressions that surface only when a binary crate is
+# built in isolation with its own default features. wz-ap-demo's
+# `preset-ap-client` default routes through the wz facade feature
+# graph and the workspace-mode unification can silently re-enable
+# sibling features that hide preset-feature-isolated lint failures.
+# This lane runs `cargo clippy -p wz-ap-demo --all-targets` in
+# isolated mode so preset-feature lint regressions land mechanically.
+layer_c3_per_pkg_isolated_lint() {
+    (cd crates && cargo clippy -p wz-ap-demo --all-targets --quiet -- -D warnings)
+}
+
 # ─── Layer D — deploy yaml schema validate ──────────────────────────
 layer_d_validate_deploy() {
     if ! python3 -c 'import yaml' >/dev/null 2>&1; then
@@ -951,6 +970,7 @@ run_layer C0 layer_c0_test_discipline || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
+run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer D layer_d_validate_deploy || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer F layer_f_codec_footprint || overall=1

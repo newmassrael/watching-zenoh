@@ -22595,6 +22595,50 @@
         "CI gap from R311cp: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination. Now overdue for closure given R267 cascade complete."
       ]
     },
+    "Round 311cv": {
+      "decision_summary": "R311cv: Layer C3 lands - per-package isolated wz-ap-demo --all-targets clippy gate. Immediately catches needless_return in query.rs:142 which workspace-mode unified feature resolver masked.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: new layer_c3_per_pkg_isolated_lint() runs cargo clippy -p wz-ap-demo --all-targets -- -D warnings; slotted between Layer C2 and Layer D. Header lane list updated with R311cv rationale.",
+        "crates/wz-runtime-tokio/src/query.rs:142: needless_return clippy fix; cfg-not(query-attachment) arm `return None;` -> `None` as last expression. Surfaced by the new C3 gate; closure proves C3's value on first run.",
+        "Closes R311cp/cq/cr/cs/ct/cu carry: 'CI gap: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination' - now mechanically gated."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh full lane sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline",
+        "cargo clippy -p wz-ap-demo --all-targets -- -D warnings: clean (post-fix)",
+        "validate_workspace: entries=428 to 429, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "wz-runtime-lwip LwipSession = Session<LwipRuntime<C>, C> alias module - non-default R first meaningful binding. R311ct/cu unblock LwipSubscriber/Queryable/LivelinessToken/LivelinessSubscriber to instantiate directly from generic types (no per-profile re-author).",
+        "R267 Session R T TimeSource second param (R311w lock; currently method-level generic on Session query / Querier get). Fold-in pending.",
+        "R311ca debt #6 wire-up unchanged at 33 percent. R267 foundation move unblocks runtime-async-std / -no-std / -tokio-uring / -zero-copy reservation once Lwip path validates.",
+        "Future Layer C3 expansion: consider per-package isolated lanes for wz-runtime-lwip + wz-runtime-tokio + wz facade once feature-combination regressions surface from those crates. R311cv proves the mechanism on wz-ap-demo first."
+      ],
+      "publishable_decision_summary": "R311cv: Layer C3 lands - per-package isolated wz-ap-demo --all-targets clippy gate. Immediately catches needless_return in query.rs:142 which workspace-mode unified feature resolver masked.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: new layer_c3_per_pkg_isolated_lint() runs cargo clippy -p wz-ap-demo --all-targets -- -D warnings; slotted between Layer C2 and Layer D. Header lane list updated with R311cv rationale.",
+        "crates/wz-runtime-tokio/src/query.rs:142: needless_return clippy fix; cfg-not(query-attachment) arm `return None;` -> `None` as last expression. Surfaced by the new C3 gate; closure proves C3's value on first run.",
+        "Closes R311cp/cq/cr/cs/ct/cu carry: 'CI gap: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination' - now mechanically gated."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh full lane sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline",
+        "cargo clippy -p wz-ap-demo --all-targets -- -D warnings: clean (post-fix)",
+        "validate_workspace: entries=428 to 429, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "wz-runtime-lwip LwipSession = Session<LwipRuntime<C>, C> alias module - non-default R first meaningful binding. R311ct/cu unblock LwipSubscriber/Queryable/LivelinessToken/LivelinessSubscriber to instantiate directly from generic types (no per-profile re-author).",
+        "R267 Session R T TimeSource second param (R311w lock; currently method-level generic on Session query / Querier get). Fold-in pending.",
+        "R311ca debt #6 wire-up unchanged at 33 percent. R267 foundation move unblocks runtime-async-std / -no-std / -tokio-uring / -zero-copy reservation once Lwip path validates.",
+        "Future Layer C3 expansion: consider per-package isolated lanes for wz-runtime-lwip + wz-runtime-tokio + wz facade once feature-combination regressions surface from those crates. R311cv proves the mechanism on wz-ap-demo first."
+      ]
+    },
     "Round 311d": {
       "decision_summary": "R311d batches codec-scout / codec-hello / codec-join cascade — wz-codecs level only (wz-runtime-tokio does not import these types); forwards stay catalog-uniform for future runtime reuse.",
       "changes_bullets": [
