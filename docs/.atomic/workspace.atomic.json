@@ -23719,6 +23719,54 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311di-pre-f3": {
+      "decision_summary": "R311di-pre-f3 — handshake-cookie + identity Mutex trio (inbound_cookie + inbound_peer_zid + inbound_opensyn_cookie) lift to R::Mutex; 3 R-generic .lock() sites migrate to R::with_mutex_mut; Lua-binding 4 sites stay on default-elided inherent .lock().",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs:766 + 824 + 840: three Mutex<Option<Vec<u8>>> fields (inbound_cookie / inbound_peer_zid / inbound_opensyn_cookie) lift to R::Mutex<Option<Vec<u8>>>. All three slot RFC §5.M anti-amplification state captured during the handshake — R62 InitAck.cookie, R86 InitSyn.zid, R89 OpenSyn.cookie verbatim echo. Per-profile mutex alias selection now governs the storage primitive: AP profile resolves to std::sync::Mutex, MCU profile binds critical_section::Mutex once R311di proper extracts wz-session-core.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1253 + 1265 + 1287: three handle_inbound write sites (`*self.inbound_cookie.lock().unwrap() = Some(cookie.clone())` etc.) lift to `R::with_mutex_mut(&self.inbound_<field>, |slot| { *slot = Some(...); })`. Closure-form write keeps the per-runtime lock acquisition discipline (tokio: std::sync::MutexGuard write; MCU: critical_section borrow_mut on the inner RefCell). Body semantics unchanged: each Some(...) replacement supersedes any prior value.",
+        "Lua-binding 4 sites (session_glue.rs:2540 / 2571 / 2709 / 2713) keep inherent `.lock()` form. Default elision applies SessionLinkActions<TokioRuntime, TokioTime> at the bind_unit closure capture, so the Mutex alias resolves to std::sync::Mutex with .lock() in scope. R311di-pre-f1c carry (Lua-binding family R-generic lift) still deferred pending the wz-session-core extraction boundary check."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean (1.00s rebuild; no test fixture / ap-demo callsite update required).",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass.",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent).",
+        "validate_workspace: entries=449 -> 450, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-pre-f4 (next): timestamp Mutex trio migration. last_inbound_keepalive_at: Mutex<Option<u64>>, established_at: Mutex<Option<u64>>, inbound_peer_init_caps: Mutex<Option<PeerInitCaps>> all lift to R::Mutex; .lock() sites in the R-generic surface migrate to R::with_mutex_mut closures. Smaller carry than pre-f3 since these slots see fewer reads/writes (3-6 sites across handle_inbound + check_lease_deadline + init_ack_params).",
+        "R311di-pre-f5..f7: remaining 6 Mutex fields + 4 AtomicU64 fields (ext-chain quartet, outbound_mappings singleton, atomic counters quartet). 2-3 fields per round per R311cw-dh template.",
+        "R311di proper: wz-session-core crate extraction (no_std + alloc) once all R::Mutex / R::Atomic migrations land.",
+        "Lua-binding family R-generic lift (R311di-pre-f1c carry) still deferred; AP-only by spec, defer until R311di proper.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311di-pre-f3 — handshake-cookie + identity Mutex trio (inbound_cookie + inbound_peer_zid + inbound_opensyn_cookie) lift to R::Mutex; 3 R-generic .lock() sites migrate to R::with_mutex_mut; Lua-binding 4 sites stay on default-elided inherent .lock().",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs:766 + 824 + 840: three Mutex<Option<Vec<u8>>> fields (inbound_cookie / inbound_peer_zid / inbound_opensyn_cookie) lift to R::Mutex<Option<Vec<u8>>>. All three slot RFC §5.M anti-amplification state captured during the handshake — R62 InitAck.cookie, R86 InitSyn.zid, R89 OpenSyn.cookie verbatim echo. Per-profile mutex alias selection now governs the storage primitive: AP profile resolves to std::sync::Mutex, MCU profile binds critical_section::Mutex once R311di proper extracts wz-session-core.",
+        "crates/wz-runtime-tokio/src/session_glue.rs:1253 + 1265 + 1287: three handle_inbound write sites (`*self.inbound_cookie.lock().unwrap() = Some(cookie.clone())` etc.) lift to `R::with_mutex_mut(&self.inbound_<field>, |slot| { *slot = Some(...); })`. Closure-form write keeps the per-runtime lock acquisition discipline (tokio: std::sync::MutexGuard write; MCU: critical_section borrow_mut on the inner RefCell). Body semantics unchanged: each Some(...) replacement supersedes any prior value.",
+        "Lua-binding 4 sites (session_glue.rs:2540 / 2571 / 2709 / 2713) keep inherent `.lock()` form. Default elision applies SessionLinkActions<TokioRuntime, TokioTime> at the bind_unit closure capture, so the Mutex alias resolves to std::sync::Mutex with .lock() in scope. R311di-pre-f1c carry (Lua-binding family R-generic lift) still deferred pending the wz-session-core extraction boundary check."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean (1.00s rebuild; no test fixture / ap-demo callsite update required).",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass.",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent).",
+        "validate_workspace: entries=449 -> 450, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-pre-f4 (next): timestamp Mutex trio migration. last_inbound_keepalive_at: Mutex<Option<u64>>, established_at: Mutex<Option<u64>>, inbound_peer_init_caps: Mutex<Option<PeerInitCaps>> all lift to R::Mutex; .lock() sites in the R-generic surface migrate to R::with_mutex_mut closures. Smaller carry than pre-f3 since these slots see fewer reads/writes (3-6 sites across handle_inbound + check_lease_deadline + init_ack_params).",
+        "R311di-pre-f5..f7: remaining 6 Mutex fields + 4 AtomicU64 fields (ext-chain quartet, outbound_mappings singleton, atomic counters quartet). 2-3 fields per round per R311cw-dh template.",
+        "R311di proper: wz-session-core crate extraction (no_std + alloc) once all R::Mutex / R::Atomic migrations land.",
+        "Lua-binding family R-generic lift (R311di-pre-f1c carry) still deferred; AP-only by spec, defer until R311di proper.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
