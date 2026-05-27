@@ -2772,15 +2772,18 @@ impl SubscribeOptions {
 ///
 /// `#[non_exhaustive]`. Construct only through
 /// [`Session::declare_subscriber`] / [`Session::declare_subscriber_aliased`].
+// R311cu — R267 helper cascade. `!Clone` by construction (per doc);
+// Drop is generic via R::with_mutex_mut (R311ct API) so per-profile
+// poison-recovery semantics stay inside the runtime impl.
 #[non_exhaustive]
-pub struct Subscriber {
-    session: Session,
+pub struct Subscriber<R: Runtime = TokioRuntime> {
+    session: Session<R>,
     id: SubscriptionId,
     keyexpr: String,
     options: SubscribeOptions,
 }
 
-impl Subscriber {
+impl Subscriber<TokioRuntime> {
     /// The stable id assigned by
     /// [`crate::pubsub::SubscriberRegistry::register_with_locality`].
     /// Exposed for diagnostics; callers should not rely on the
@@ -2826,26 +2829,18 @@ impl Subscriber {
     }
 }
 
-impl Drop for Subscriber {
+impl<R: Runtime> Drop for Subscriber<R> {
     fn drop(&mut self) {
-        // RAII unregister. A poisoned observer mutex (a subscriber
-        // callback panicked) is recovered with `into_inner` —
-        // panicking again from Drop would abort the whole process
-        // with a double-panic, which is strictly worse than
-        // running unregister against possibly-inconsistent state.
-        // The `unregister` call itself is panic-free (boolean
-        // return), so the worst-case observable outcome is "id
-        // stays registered" — caller can manually
-        // re-poison-recover and re-call `undeclare` if it matters.
-        match self.session.observer.lock() {
-            Ok(mut obs) => {
-                let _ = obs.subscribers.unregister(self.id);
-            }
-            Err(poisoned) => {
-                let mut obs = poisoned.into_inner();
-                let _ = obs.subscribers.unregister(self.id);
-            }
-        }
+        // R311cu — RAII unregister via R::with_mutex_mut. Per-profile
+        // poison-recovery lives inside the runtime impl (AP: recover
+        // PoisonError via into_inner; MCU: no poison concept under
+        // panic = abort). The `unregister` call itself is panic-free
+        // (boolean return), so the worst-case observable outcome on
+        // a corrupted observer is "id stays registered" — caller can
+        // manually re-call `undeclare` if it matters.
+        R::with_mutex_mut(&self.session.observer, |obs| {
+            let _ = obs.subscribers.unregister(self.id);
+        });
     }
 }
 
@@ -2940,15 +2935,17 @@ impl QueryableOptions {
 /// `Err(QueryableAliasError::FeatureDisabled)` without ever
 /// constructing this handle. Drop calls `observer.queryables.unregister`
 /// — unconditionally available after R311r observer field ungate.
+// R311cu — R267 helper cascade. Same pattern as Subscriber: `!Clone`
+// by construction; Drop is generic via R::with_mutex_mut.
 #[non_exhaustive]
-pub struct Queryable {
-    session: Session,
+pub struct Queryable<R: Runtime = TokioRuntime> {
+    session: Session<R>,
     id: QueryableId,
     keyexpr: String,
     options: QueryableOptions,
 }
 
-impl Queryable {
+impl Queryable<TokioRuntime> {
     /// The stable id assigned by
     /// [`crate::query::QueryableRegistry::register_with_locality`].
     pub fn id(&self) -> QueryableId {
@@ -2983,22 +2980,16 @@ impl Queryable {
     }
 }
 
-impl Drop for Queryable {
+impl<R: Runtime> Drop for Queryable<R> {
     fn drop(&mut self) {
-        // RAII unregister with poison-recover, mirroring Subscriber.
-        // unregister is panic-free (boolean return), so the
-        // worst-case observable outcome on a corrupted observer is
-        // "queryable stays registered" — caller can manually
-        // poison-recover and re-undeclare if it matters.
-        match self.session.observer.lock() {
-            Ok(mut obs) => {
-                let _ = obs.queryables.unregister(self.id);
-            }
-            Err(poisoned) => {
-                let mut obs = poisoned.into_inner();
-                let _ = obs.queryables.unregister(self.id);
-            }
-        }
+        // R311cu — RAII unregister via R::with_mutex_mut. Per-profile
+        // poison-recovery lives inside the runtime impl. unregister is
+        // panic-free (boolean return), so the worst-case observable
+        // outcome on a corrupted observer is "queryable stays
+        // registered" — caller can manually re-call undeclare.
+        R::with_mutex_mut(&self.session.observer, |obs| {
+            let _ = obs.queryables.unregister(self.id);
+        });
     }
 }
 
@@ -3140,15 +3131,18 @@ impl LivelinessOptions {
 /// [`crate::session_glue::SessionLinkActions::send_undeclare_token`]
 /// which is itself signature-stable (silent no-op when the underlying
 /// declare-* gate is off).
+// R311cu — R267 helper cascade. `!Clone`; Drop body touches only
+// session.actions (concrete Arc<SessionLinkActions>, R-independent)
+// so Drop is generic over R without needing R::with_mutex_mut.
 #[non_exhaustive]
-pub struct LivelinessToken {
-    session: Session,
+pub struct LivelinessToken<R: Runtime = TokioRuntime> {
+    session: Session<R>,
     id: u64,
     keyexpr: String,
     options: LivelinessOptions,
 }
 
-impl LivelinessToken {
+impl LivelinessToken<TokioRuntime> {
     /// The stable token id allocated at declare time by
     /// [`SessionLinkActions::alloc_next_token_id`]. Exposed for
     /// diagnostics; callers should not rely on the exact value
@@ -3195,7 +3189,7 @@ impl LivelinessToken {
     }
 }
 
-impl Drop for LivelinessToken {
+impl<R: Runtime> Drop for LivelinessToken<R> {
     fn drop(&mut self) {
         // R248 RAII — emit Declare(UndeclToken) so the peer's
         // liveliness subscribers receive the DELETE sample. See
@@ -3384,15 +3378,21 @@ impl LivelinessSubscriberOptions {
 /// alongside `observer.liveliness_subscribers.unregister`, both of
 /// which are unconditionally available after the R311g1 signature-
 /// stability sweep + the R311q observer field ungate.
+// R311cu — R267 helper cascade. `!Clone`; Drop is generic via
+// R::with_mutex_mut so per-profile poison-recovery stays inside the
+// runtime impl. Behavior tightens vs. prior `if let Ok(...)` form: a
+// poisoned observer now also runs unregister (poison recovery via
+// into_inner on AP; no poison concept on MCU). The peer-side
+// Interest(Final) emit was already unconditional.
 #[non_exhaustive]
-pub struct LivelinessSubscriber {
-    session: Session,
+pub struct LivelinessSubscriber<R: Runtime = TokioRuntime> {
+    session: Session<R>,
     interest_id: u64,
     keyexpr: String,
     options: LivelinessSubscriberOptions,
 }
 
-impl LivelinessSubscriber {
+impl LivelinessSubscriber<TokioRuntime> {
     /// The stable interest id allocated at declare time by
     /// [`crate::session_glue::SessionLinkActions::alloc_next_interest_id`].
     /// Exposed for diagnostics; callers should not rely on the exact
@@ -3454,16 +3454,16 @@ impl LivelinessSubscriber {
     }
 }
 
-impl Drop for LivelinessSubscriber {
+impl<R: Runtime> Drop for LivelinessSubscriber<R> {
     fn drop(&mut self) {
-        // R280 RAII — unregister the local slot first so any racing
-        // inbound dispatch sees no slot, then emit Interest(Final) so
-        // the peer drops its end of the subscription. Poisoned mutex
-        // (an earlier callback panicked) is treated as idempotent
-        // no-op — `map` over the lock Result rather than panicking.
-        if let Ok(mut observer) = self.session.observer.lock() {
+        // R280 / R311cu RAII — unregister the local slot first so any
+        // racing inbound dispatch sees no slot, then emit
+        // Interest(Final) so the peer drops its end of the
+        // subscription. Per-profile poison-recovery lives inside the
+        // R::with_mutex_mut impl.
+        R::with_mutex_mut(&self.session.observer, |observer| {
             observer.liveliness_subscribers.unregister(self.interest_id);
-        }
+        });
         self.session.actions.send_interest_final(self.interest_id);
     }
 }
