@@ -1078,7 +1078,7 @@ impl SubscriberRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use portable_atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use wz_codecs::wireexpr::Wireexpr;
     use wz_codecs::wireexpr_local::WireexprLocal;

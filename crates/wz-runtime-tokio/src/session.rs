@@ -3736,7 +3736,7 @@ mod tests {
     use crate::reply::InboundReplyBody;
     use crate::runtime_impl::TokioTime;
     use crate::session_glue::{BoxedLinkDriver, SessionInitParams, SigningKey};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use portable_atomic::{AtomicUsize, Ordering};
     use wz_runtime_core::TimeSource;
 
     /// R283 test helper — force the session-FSM `Established` stamp

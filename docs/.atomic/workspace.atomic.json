@@ -23375,6 +23375,54 @@
         "Architectural carries unchanged from R311dh: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311di-pre-b": {
+      "decision_summary": "R311di-pre-b — sweep `use std::sync::atomic::*` → `use portable_atomic::*` across remaining 11 wz-runtime-tokio src files; zero std::sync::atomic surface remains in the crate.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/{runtime_impl.rs:459, observer.rs:359, reply.rs:675, declare/queryable.rs:252, declare/cross_tests.rs:21, query.rs:881, pubsub.rs:1081, declare/subscriber.rs:235, declare/liveliness_subscriber.rs:430, session.rs:3739, declare/liveliness.rs:152}: each file's `use std::sync::atomic::{AtomicUsize, Ordering};` migrates to `use portable_atomic::{AtomicUsize, Ordering};`. 10 of the 11 imports sit inside `mod tests` blocks (single-thread atomic counter for spawn-or-callback fire-count assertions); 1 (cross_tests.rs:21) sits at module-top under `#![cfg(test)]`. All 11 are test-only paths so the migration has zero production-path effect — it advances the no_std move-readiness contract for any of these files that eventually extract to wz-session-core (test code there will compile against the same portable_atomic crate that the production paths already use post-R311di-pre-a).",
+        "portable_atomic::AtomicUsize is a method-for-method mirror of core::sync::atomic::AtomicUsize on AP (x86_64-unknown-linux-gnu, native usize atomics) and falls back via critical-section on MCU profiles. The test bodies (fetch_add(1, Ordering::SeqCst), load(Ordering::SeqCst), store(0, Ordering::SeqCst)) compose unchanged because portable_atomic exposes the same Ordering enum and the same inherent methods.",
+        "session_glue.rs imports unchanged from R311di-pre-a (already routed through portable_atomic + hashbrown); session.rs's 16 `use std::collections::HashMap;` function-local imports (R311di-pre-c target) and the 8 file-level `use std::sync::Mutex` direct refs across declare/* + query.rs + reply.rs + pubsub.rs (R311di-pre-d target) untouched this round per the per-round atomicity contract."
+      ],
+      "verification_bullets": [
+        "grep -rn 'use std::sync::atomic' crates/wz-runtime-tokio/src/ returns zero hits — every atomic import in the crate now routes through portable_atomic.",
+        "cargo check --workspace --all-targets: clean; the test code that uses AtomicUsize compiles because portable_atomic::AtomicUsize satisfies the same trait surface (Send + Sync + Default + Debug).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline preserved. The `wz_subscriber_round_trip` / `wz_queryable_round_trip` / `wz_liveliness_*` / `query.rs::tests::*` integration tests that consume these AtomicUsize counters report identical fire counts — portable_atomic's native-atomic forwarding on AP is byte-equivalent to std::sync::atomic.",
+        "validate_workspace: entries=442 -> 443, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-pre-c: sweep `use std::collections::HashMap` → `use hashbrown::HashMap` across the remaining wz-runtime-tokio src files. Scope: session.rs has 16 function-local imports (lines 6119-6913 inside tests + helper bodies); declare.rs + reply.rs + query.rs + pubsub.rs + declare/{subscriber, queryable, liveliness, liveliness_subscriber}.rs each have a module-level or test-local HashMap import. Mechanical — each `use std::collections::HashMap;` swaps to `use hashbrown::HashMap;` verbatim.",
+        "R311di-pre-d: sweep `use std::sync::Mutex` direct refs → `use crate::sync::Mutex` alias across the 8 wz-runtime-tokio src files that still hold direct imports (declare/{subscriber, queryable, liveliness_subscriber, liveliness}.rs, query.rs, reply.rs, pubsub.rs, session_glue.rs). After pre-d the only std::sync::* surface in the crate is Arc (zero-cost relabel deferred to R311di proper where alloc::sync::Arc is the no_std target).",
+        "R311di proper: SessionState<R: Runtime> reparam + Mutex GAT migration + wz-session-core crate extraction. Same scope statement as R311di-pre-a carry.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311di-pre-b — sweep `use std::sync::atomic::*` → `use portable_atomic::*` across remaining 11 wz-runtime-tokio src files; zero std::sync::atomic surface remains in the crate.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/{runtime_impl.rs:459, observer.rs:359, reply.rs:675, declare/queryable.rs:252, declare/cross_tests.rs:21, query.rs:881, pubsub.rs:1081, declare/subscriber.rs:235, declare/liveliness_subscriber.rs:430, session.rs:3739, declare/liveliness.rs:152}: each file's `use std::sync::atomic::{AtomicUsize, Ordering};` migrates to `use portable_atomic::{AtomicUsize, Ordering};`. 10 of the 11 imports sit inside `mod tests` blocks (single-thread atomic counter for spawn-or-callback fire-count assertions); 1 (cross_tests.rs:21) sits at module-top under `#![cfg(test)]`. All 11 are test-only paths so the migration has zero production-path effect — it advances the no_std move-readiness contract for any of these files that eventually extract to wz-session-core (test code there will compile against the same portable_atomic crate that the production paths already use post-R311di-pre-a).",
+        "portable_atomic::AtomicUsize is a method-for-method mirror of core::sync::atomic::AtomicUsize on AP (x86_64-unknown-linux-gnu, native usize atomics) and falls back via critical-section on MCU profiles. The test bodies (fetch_add(1, Ordering::SeqCst), load(Ordering::SeqCst), store(0, Ordering::SeqCst)) compose unchanged because portable_atomic exposes the same Ordering enum and the same inherent methods.",
+        "session_glue.rs imports unchanged from R311di-pre-a (already routed through portable_atomic + hashbrown); session.rs's 16 `use std::collections::HashMap;` function-local imports (R311di-pre-c target) and the 8 file-level `use std::sync::Mutex` direct refs across declare/* + query.rs + reply.rs + pubsub.rs (R311di-pre-d target) untouched this round per the per-round atomicity contract."
+      ],
+      "publishable_verification_bullets": [
+        "grep -rn 'use std::sync::atomic' crates/wz-runtime-tokio/src/ returns zero hits — every atomic import in the crate now routes through portable_atomic.",
+        "cargo check --workspace --all-targets: clean; the test code that uses AtomicUsize compiles because portable_atomic::AtomicUsize satisfies the same trait surface (Send + Sync + Default + Debug).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline preserved. The `wz_subscriber_round_trip` / `wz_queryable_round_trip` / `wz_liveliness_*` / `query.rs::tests::*` integration tests that consume these AtomicUsize counters report identical fire counts — portable_atomic's native-atomic forwarding on AP is byte-equivalent to std::sync::atomic.",
+        "validate_workspace: entries=442 -> 443, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-pre-c: sweep `use std::collections::HashMap` → `use hashbrown::HashMap` across the remaining wz-runtime-tokio src files. Scope: session.rs has 16 function-local imports (lines 6119-6913 inside tests + helper bodies); declare.rs + reply.rs + query.rs + pubsub.rs + declare/{subscriber, queryable, liveliness, liveliness_subscriber}.rs each have a module-level or test-local HashMap import. Mechanical — each `use std::collections::HashMap;` swaps to `use hashbrown::HashMap;` verbatim.",
+        "R311di-pre-d: sweep `use std::sync::Mutex` direct refs → `use crate::sync::Mutex` alias across the 8 wz-runtime-tokio src files that still hold direct imports (declare/{subscriber, queryable, liveliness_subscriber, liveliness}.rs, query.rs, reply.rs, pubsub.rs, session_glue.rs). After pre-d the only std::sync::* surface in the crate is Arc (zero-cost relabel deferred to R311di proper where alloc::sync::Arc is the no_std target).",
+        "R311di proper: SessionState<R: Runtime> reparam + Mutex GAT migration + wz-session-core crate extraction. Same scope statement as R311di-pre-a carry.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [

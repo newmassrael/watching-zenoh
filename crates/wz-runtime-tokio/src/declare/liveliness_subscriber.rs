@@ -427,7 +427,7 @@ mod tests {
     use super::super::test_helpers::*;
     use super::*;
     use crate::session_glue::NetworkMessage;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use portable_atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use wz_codecs::declare::DeclareVariant;
     use wz_codecs::interest::Interest;

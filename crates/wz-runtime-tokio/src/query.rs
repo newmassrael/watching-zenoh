@@ -878,7 +878,7 @@ pub fn response_final_for(rid: u64) -> ResponseFinal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use portable_atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use wz_codecs::ext_entry::ExtEntry;
     use wz_codecs::ext_zbuf::ExtZbuf;

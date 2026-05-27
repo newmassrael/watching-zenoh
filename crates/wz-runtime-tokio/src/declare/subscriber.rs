@@ -232,7 +232,7 @@ impl RemoteSubscriberRegistry {
 mod tests {
     use super::super::test_helpers::*;
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use portable_atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     #[test]
