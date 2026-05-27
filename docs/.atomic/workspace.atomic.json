@@ -23429,6 +23429,58 @@
         "Architectural carries unchanged R284 R283 R301 sec 8 R299 R300 R301 sec 7 R304."
       ]
     },
+    "Round 311di-11": {
+      "decision_summary": "R311di-11 NetworkMessage cluster + 6 codec-* feature forwarders extract to wz-session-core; 3-stage codec forwarding chain wz-runtime-tokio -> wz-session-core -> wz-codecs lands as the composable framework reference.",
+      "changes_bullets": [
+        "crates/wz-session-core/Cargo.toml: 6 new features codec-frame / codec-push / codec-request / codec-response / codec-response-final / codec-declare each forwarding to wz-codecs/codec-*; codec-push/request/response/declare imply codec-frame mirroring wz-runtime-tokio; codec-response-final stays envelope-independent matching the R311e/g decision.",
+        "crates/wz-runtime-tokio/Cargo.toml: 6 codec-* features extended to also forward to wz-session-core/codec-* so the 3-stage chain has a single ground-truth gate per body codec.",
+        "crates/wz-session-core/src/network_message.rs new 266-line file: pub enum NetworkMessage + 8 variants (Request/Push/ResponseFinal/Oam/Interest/Response/Declare/Unknown) + manual core::fmt::Debug impl + pub fn parse_frame_payload + private mod wire_const with 7 N_MID_* constants (4 of them previously only in session_glue.rs).",
+        "crates/wz-session-core/src/lib.rs: #[cfg(feature = \"alloc\")] pub mod network_message; with rationale doc.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: enum NetworkMessage (79 lines) + Debug impl (21 lines) + parse_frame_payload (51 lines) replaced by 2 pub use re-exports; wz_codecs::oam::Oam now-orphan import removed; wire_const mod shrunk from 7 N_MID_* constants to 2 (N_MID_PUSH + N_MID_INTEREST) because N_MID_REQUEST/N_MID_RESPONSE_FINAL/N_MID_OAM/N_MID_RESPONSE were parse-only.",
+        "Cumulative session_glue.rs shrink di-5..di-11: ~549 lines from 12284 baseline (current 11735)."
+      ],
+      "verification_bullets": [
+        "cargo clean -p wz-session-core -p wz-runtime-tokio + cargo check --workspace --all-targets: clean in 2.11s (R311di-2-fix textbook fresh-recompile gate).",
+        "scripts/run-ci.sh: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass.",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent).",
+        "validate_workspace expected entries=465 -> 466, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-12 next: DriverLoopOutcome + IterationEvent extract (NetworkMessage now lives in wz-session-core so the enum that wraps Vec<NetworkMessage> can follow).",
+        "After DriverLoopOutcome: declare/* 6 file family migration (depends on Declare codec + NetworkMessage), then reply / query / pubsub / observer / session / session_glue split (the final round splits session_glue.rs into wz-session-core generic body + wz-runtime-tokio Lua-binding remainder).",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
+        "Push deferred per CLAUDE.md global never-push-without-explicit-consent rule; user 'continue / proceed' permits round execution but not push."
+      ],
+      "publishable_decision_summary": "R311di-11 NetworkMessage cluster + 6 codec-* feature forwarders extract to wz-session-core; 3-stage codec forwarding chain wz-runtime-tokio -> wz-session-core -> wz-codecs lands as the composable framework reference.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/Cargo.toml: 6 new features codec-frame / codec-push / codec-request / codec-response / codec-response-final / codec-declare each forwarding to wz-codecs/codec-*; codec-push/request/response/declare imply codec-frame mirroring wz-runtime-tokio; codec-response-final stays envelope-independent matching the R311e/g decision.",
+        "crates/wz-runtime-tokio/Cargo.toml: 6 codec-* features extended to also forward to wz-session-core/codec-* so the 3-stage chain has a single ground-truth gate per body codec.",
+        "crates/wz-session-core/src/network_message.rs new 266-line file: pub enum NetworkMessage + 8 variants (Request/Push/ResponseFinal/Oam/Interest/Response/Declare/Unknown) + manual core::fmt::Debug impl + pub fn parse_frame_payload + private mod wire_const with 7 N_MID_* constants (4 of them previously only in session_glue.rs).",
+        "crates/wz-session-core/src/lib.rs: #[cfg(feature = \"alloc\")] pub mod network_message; with rationale doc.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: enum NetworkMessage (79 lines) + Debug impl (21 lines) + parse_frame_payload (51 lines) replaced by 2 pub use re-exports; wz_codecs::oam::Oam now-orphan import removed; wire_const mod shrunk from 7 N_MID_* constants to 2 (N_MID_PUSH + N_MID_INTEREST) because N_MID_REQUEST/N_MID_RESPONSE_FINAL/N_MID_OAM/N_MID_RESPONSE were parse-only.",
+        "Cumulative session_glue.rs shrink di-5..di-11: ~549 lines from 12284 baseline (current 11735)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clean -p wz-session-core -p wz-runtime-tokio + cargo check --workspace --all-targets: clean in 2.11s (R311di-2-fix textbook fresh-recompile gate).",
+        "scripts/run-ci.sh: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass.",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent).",
+        "validate_workspace expected entries=465 -> 466, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-12 next: DriverLoopOutcome + IterationEvent extract (NetworkMessage now lives in wz-session-core so the enum that wraps Vec<NetworkMessage> can follow).",
+        "After DriverLoopOutcome: declare/* 6 file family migration (depends on Declare codec + NetworkMessage), then reply / query / pubsub / observer / session / session_glue split (the final round splits session_glue.rs into wz-session-core generic body + wz-runtime-tokio Lua-binding remainder).",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
+        "Push deferred per CLAUDE.md global never-push-without-explicit-consent rule; user 'continue / proceed' permits round execution but not push."
+      ]
+    },
     "Round 311di-2": {
       "decision_summary": "R311di-2 — keyexpr_canon.rs (806 lines) is the first file migrated into wz-session-core; std::fmt/std::error::Error replaced with core::*, alloc::string + alloc::vec imports add; wz-runtime-tokio re-exports the module so 4 caller files (query.rs / pubsub.rs / session.rs / session_glue.rs) stay verbatim.",
       "changes_bullets": [
