@@ -267,6 +267,7 @@ dependencies = [
  "cortex-m-semihosting",
  "embedded-alloc",
  "panic-semihosting",
+ "portable-atomic",
  "wz",
 ]
 

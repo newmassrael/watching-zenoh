@@ -922,7 +922,8 @@
         "R311bj bss dominated by demo HEAP_SIZE=256KB; real preset shrinks to lwIP MEM_SIZE + spawn budget.",
         "R311bj demo uses full default features; slimmer §5.12 codec subsets lower text per §3.1 footprint.",
         "R311bj reproducible: bash scripts/run-ci.sh --layer Q then arm-none-eabi-size on the built ELFs.",
-        "R311bj footprint: thumbv7em-none-eabihf text=23724 data=4 bss=269916 (mps2-an386 + mps2-an500)."
+        "R311bj footprint: thumbv7em-none-eabihf text=23724 data=4 bss=269916 (mps2-an386 + mps2-an500).",
+        "(f) thumbv6m-none-eabi text=23660 data=4 bss=11868 microbit build OK; Q.2 KNOWN_SKIP heap budget"
       ],
       "impact_scope": [
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
@@ -19847,6 +19848,72 @@
         "bss informational-only stance: RAM gate driven by lwIP MEM_SIZE + BoxFuture-per-spawn budget is a separate round when applicable",
         "preset-cortex-m0plus / preset-cortex-m33 future baseline rows added alongside R311bm-m0 / R311bm-m33 land",
         "Architectural carries unchanged: R267 Session<R,T> reparam, R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest. R303++ atomic field population pending."
+      ]
+    },
+    "Round 311bm-m0": {
+      "decision_summary": "R311bm-m0 microbit/Cortex-M0 Layer Q sub-lane lands: build PASS thumbv6m-none-eabi, run KNOWN_SKIP heap budget; honest catalog surface.",
+      "changes_bullets": [
+        "deploy/mcu-qemu-demo: core::sync::atomic::AtomicU32 -> portable_atomic::AtomicU32 (R311bb polyfill parity)",
+        "deploy/mcu-qemu-demo Cargo.toml + portable-atomic 1 dep with fallback + critical-section features",
+        "src/main.rs HEAP_SIZE + CYCLES_PER_US + SYST_RELOAD cfg per target_has_atomic = 32 (M0 vs M3+)",
+        "memory.x renamed memory-mps2.x + memory-microbit.x new (16K RAM nrf51 layout); rust-lld crate-root shadow fix",
+        "build.rs branches on TARGET env; cargo:rerun-if-env-changed=TARGET added; thumbv6m -> microbit",
+        "scripts/run-ci.sh Layer Q sub_lanes: microbit lane prepended; run_policy field (run|skip:<reason>)",
+        "scripts/check-footprint.sh BASELINE_* thumbv6m-none-eabi row text=23660 data=4 bss=11868 added",
+        "mnemosyne add_section_caveat 6.7 caveat (f) thumbv6m row + microbit build OK + Q.2 KNOWN_SKIP heap budget"
+      ],
+      "verification_bullets": [
+        "bash scripts/run-ci.sh --layer Q: 4 machines (microbit/an385/an386/an500) Q.1 OK + Q.2 microbit KNOWN_SKIP + 3 mps2 run PASS + Q.3 all +0/+0/+0 OK; Layer Q pass",
+        "bash scripts/run-ci.sh --layer G: 7 targets x 6 G.1-G.6 PASS unchanged (riscv32imac G.6 SKIP-toolchain only)",
+        "arm-none-eabi-readelf _stack_start fork verified: thumbv6m=0x20004000 (16K RAM) / thumbv7m+v7em=0x20400000 (4M)",
+        "qemu-system-arm -machine microbit boots ELF; cortex-m-rt reset vector OK; semihost hprintln R311bi PASS-on-entry",
+        "memory alloc fail captured at 12112 bytes: confirms wz facade runtime-lwip BoxFuture > 4 KB HEAP_SIZE on M0",
+        "validate_workspace: T1=0 RT 13/13 sync; entries 392->393 sections 256 caveats on 6.7 grow 5->6 unchanged orphans"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "carry_forward_bullets": [
+        "R311bn-slim-preset (north-star Phase 1 anchor): preset-mcu-minimal author + atomic feature decomposition that strips BoxFuture path so wz facade runtime-lwip fits 16 KB SRAM nrf51-class budget",
+        "R311bn-slim-preset acceptance: microbit Q.2 KNOWN_SKIP -> PASS without HEAP_SIZE bump beyond 12 KB; baseline thumbv6m bss drop measurable via Q.3",
+        "R311bm-m33 (carry from R311bj): mps2-an505 / Cortex-M33 / thumbv8m.main Layer Q sub-lane; cortex-m-rt 0.7 Secure-init survey first",
+        "Multi-link / non-loopback netif e2e (carry from R311bj): virtio-net or QEMU TAP coverage 1-2 rounds",
+        "preset-cortex-m0plus / preset-cortex-m33 future baseline rows added alongside R311bn / R311bm-m33 lands",
+        "build.rs target -> memory.x mapping textbook: crate root must NEVER hold memory.x (rust-lld shadow lesson R311bm-m0)",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284, R283, R301 8 SCE cross-repo, Q_B/Q_E codec slots, Phase W lwIP, R299 2/3, R300, R301 7, R304, keyexpr_canon proptest. R303++ atomic field population pending."
+      ],
+      "publishable_decision_summary": "R311bm-m0 microbit/Cortex-M0 Layer Q sub-lane lands: build PASS thumbv6m-none-eabi, run KNOWN_SKIP heap budget; honest catalog surface.",
+      "publishable_changes_bullets": [
+        "deploy/mcu-qemu-demo: core::sync::atomic::AtomicU32 -> portable_atomic::AtomicU32 (R311bb polyfill parity)",
+        "deploy/mcu-qemu-demo Cargo.toml + portable-atomic 1 dep with fallback + critical-section features",
+        "src/main.rs HEAP_SIZE + CYCLES_PER_US + SYST_RELOAD cfg per target_has_atomic = 32 (M0 vs M3+)",
+        "memory.x renamed memory-mps2.x + memory-microbit.x new (16K RAM nrf51 layout); rust-lld crate-root shadow fix",
+        "build.rs branches on TARGET env; cargo:rerun-if-env-changed=TARGET added; thumbv6m -> microbit",
+        "scripts/run-ci.sh Layer Q sub_lanes: microbit lane prepended; run_policy field (run|skip:<reason>)",
+        "scripts/check-footprint.sh BASELINE_* thumbv6m-none-eabi row text=23660 data=4 bss=11868 added",
+        "mnemosyne add_section_caveat 6.7 caveat (f) thumbv6m row + microbit build OK + Q.2 KNOWN_SKIP heap budget"
+      ],
+      "publishable_verification_bullets": [
+        "bash scripts/run-ci.sh --layer Q: 4 machines (microbit/an385/an386/an500) Q.1 OK + Q.2 microbit KNOWN_SKIP + 3 mps2 run PASS + Q.3 all +0/+0/+0 OK; Layer Q pass",
+        "bash scripts/run-ci.sh --layer G: 7 targets x 6 G.1-G.6 PASS unchanged (riscv32imac G.6 SKIP-toolchain only)",
+        "arm-none-eabi-readelf _stack_start fork verified: thumbv6m=0x20004000 (16K RAM) / thumbv7m+v7em=0x20400000 (4M)",
+        "qemu-system-arm -machine microbit boots ELF; cortex-m-rt reset vector OK; semihost hprintln R311bi PASS-on-entry",
+        "memory alloc fail captured at 12112 bytes: confirms wz facade runtime-lwip BoxFuture > 4 KB HEAP_SIZE on M0",
+        "validate_workspace: T1=0 RT 13/13 sync; entries 392->393 sections 256 caveats on 6.7 grow 5->6 unchanged orphans"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311bn-slim-preset (north-star Phase 1 anchor): preset-mcu-minimal author + atomic feature decomposition that strips BoxFuture path so wz facade runtime-lwip fits 16 KB SRAM nrf51-class budget",
+        "R311bn-slim-preset acceptance: microbit Q.2 KNOWN_SKIP -> PASS without HEAP_SIZE bump beyond 12 KB; baseline thumbv6m bss drop measurable via Q.3",
+        "R311bm-m33 (carry from R311bj): mps2-an505 / Cortex-M33 / thumbv8m.main Layer Q sub-lane; cortex-m-rt 0.7 Secure-init survey first",
+        "Multi-link / non-loopback netif e2e (carry from R311bj): virtio-net or QEMU TAP coverage 1-2 rounds",
+        "preset-cortex-m0plus / preset-cortex-m33 future baseline rows added alongside R311bn / R311bm-m33 lands",
+        "build.rs target -> memory.x mapping textbook: crate root must NEVER hold memory.x (rust-lld shadow lesson R311bm-m0)",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284, R283, R301 8 SCE cross-repo, Q_B/Q_E codec slots, Phase W lwIP, R299 2/3, R300, R301 7, R304, keyexpr_canon proptest. R303++ atomic field population pending."
       ]
     },
     "Round 311c": {
