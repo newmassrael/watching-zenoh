@@ -22803,6 +22803,54 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311cz": {
+      "decision_summary": "R311cz — set_own_zid / clear_own_zid migrate from direct observer.lock().expect() to R::with_mutex_mut closure form (R311ct API); lift to impl<R: Runtime, T: TimeSource> Session<R, T> block",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session::set_own_zid body migrates from `let mut observer = self.observer.lock().expect(...); observer.subscribers.set_own_zid(zid)` to `R::with_mutex_mut(&self.observer, |observer| observer.subscribers.set_own_zid(zid))`. Method moves from the AP-bound impl<T> Session<TokioRuntime, T> block to the R-generic impl<R, T> Session<R, T> block introduced at R311cy.",
+        "session.rs: Session::clear_own_zid mirrors the migration — R::with_mutex_mut closure form + lift to the R-generic block. Inner closure returns (); call-site outer expression drops the unit.",
+        "R311cy comment block updated implicitly: the impl<R, T> Session<R, T> block now carries 6 methods (3 pure accessors from R311cy + new clock() + 2 zid mutators from R311cz). Layer C3 5-sub-lane gate (R311cx) catches any per-package isolated regression mechanically."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=432 -> 433, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311da (next): migrate Session::new from impl<T> Session<TokioRuntime, T> to impl<R: Runtime, T: TimeSource> Session<R, T>. The internal self.set_own_zid(...) call now compiles generically across R because R311cz already lifted set_own_zid; Session::new constructor body is otherwise lock-free.",
+        "R311db+: migrate Session::publish (and the rest of the publish_aliased / publish_aliased_auto / query / query_aliased / query_aliased_auto / declare_subscriber / declare_queryable / declare_token / declare_liveliness_* cascade) from .lock().expect() to R::with_mutex_mut closure form. Each cluster is 5-20 lines; the cascade unwinds across multiple rounds.",
+        "Session crate extraction (R311cv carry): only meaningful once the impl<R, T> Session<R, T> block carries every method; the AP-bound impl<T> Session<TokioRuntime, T> block should shrink to empty across R311da-onward, after which session.rs is movable to a runtime-agnostic crate.",
+        "Architectural carries unchanged: R311ca debt #6 wire-up 19% (unblocked by Session extraction), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311cz — set_own_zid / clear_own_zid migrate from direct observer.lock().expect() to R::with_mutex_mut closure form (R311ct API); lift to impl<R: Runtime, T: TimeSource> Session<R, T> block",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session::set_own_zid body migrates from `let mut observer = self.observer.lock().expect(...); observer.subscribers.set_own_zid(zid)` to `R::with_mutex_mut(&self.observer, |observer| observer.subscribers.set_own_zid(zid))`. Method moves from the AP-bound impl<T> Session<TokioRuntime, T> block to the R-generic impl<R, T> Session<R, T> block introduced at R311cy.",
+        "session.rs: Session::clear_own_zid mirrors the migration — R::with_mutex_mut closure form + lift to the R-generic block. Inner closure returns (); call-site outer expression drops the unit.",
+        "R311cy comment block updated implicitly: the impl<R, T> Session<R, T> block now carries 6 methods (3 pure accessors from R311cy + new clock() + 2 zid mutators from R311cz). Layer C3 5-sub-lane gate (R311cx) catches any per-package isolated regression mechanically."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=432 -> 433, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311da (next): migrate Session::new from impl<T> Session<TokioRuntime, T> to impl<R: Runtime, T: TimeSource> Session<R, T>. The internal self.set_own_zid(...) call now compiles generically across R because R311cz already lifted set_own_zid; Session::new constructor body is otherwise lock-free.",
+        "R311db+: migrate Session::publish (and the rest of the publish_aliased / publish_aliased_auto / query / query_aliased / query_aliased_auto / declare_subscriber / declare_queryable / declare_token / declare_liveliness_* cascade) from .lock().expect() to R::with_mutex_mut closure form. Each cluster is 5-20 lines; the cascade unwinds across multiple rounds.",
+        "Session crate extraction (R311cv carry): only meaningful once the impl<R, T> Session<R, T> block carries every method; the AP-bound impl<T> Session<TokioRuntime, T> block should shrink to empty across R311da-onward, after which session.rs is movable to a runtime-agnostic crate.",
+        "Architectural carries unchanged: R311ca debt #6 wire-up 19% (unblocked by Session extraction), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311d": {
       "decision_summary": "R311d batches codec-scout / codec-hello / codec-join cascade — wz-codecs level only (wz-runtime-tokio does not import these types); forwards stay catalog-uniform for future runtime reuse.",
       "changes_bullets": [

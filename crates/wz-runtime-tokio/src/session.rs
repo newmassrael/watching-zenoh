@@ -795,9 +795,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
     pub fn is_established(&self) -> bool {
         self.actions.is_established()
     }
-}
 
-impl<T: TimeSource> Session<TokioRuntime, T> {
     /// R231 — forward this session's own zid (1..=16 bytes) to the
     /// inbound subscriber registry so wire-arrived self-echoes (a
     /// `Locality::Any` publish that the network routes back to its
@@ -828,12 +826,18 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
     /// [`Session::clear_own_zid`] released the install and the
     /// caller now wants to reinstate the dedup guard with the
     /// same or a different zid.
+    ///
+    /// R311cz — migrated from direct `self.observer.lock().expect()` to
+    /// the [`wz_runtime_core::Runtime::with_mutex_mut`] closure form
+    /// (R311ct API). Per-runtime poison-recovery semantics live inside
+    /// the impl: tokio recovers via PoisonError::into_inner, MCU
+    /// profiles whose mutex has no poison concept just acquire and
+    /// drop the guard at closure exit. Lifts this method to the
+    /// R-generic impl block.
     pub fn set_own_zid(&self, zid: Vec<u8>) -> bool {
-        let mut observer = self
-            .observer
-            .lock()
-            .expect("ApplicationLayerObserver mutex poisoned");
-        observer.subscribers.set_own_zid(zid)
+        R::with_mutex_mut(&self.observer, |observer| {
+            observer.subscribers.set_own_zid(zid)
+        })
     }
 
     /// R231 — release the previously-installed own zid (paired with
@@ -842,14 +846,17 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
     /// stays disabled until a fresh `set_own_zid` install. Useful
     /// in session re-init / close scenarios where the prior zid
     /// must not bleed into a new session's dispatch state.
+    ///
+    /// R311cz — see [`Self::set_own_zid`] for the R::with_mutex_mut
+    /// migration rationale.
     pub fn clear_own_zid(&self) {
-        let mut observer = self
-            .observer
-            .lock()
-            .expect("ApplicationLayerObserver mutex poisoned");
-        observer.subscribers.clear_own_zid();
+        R::with_mutex_mut(&self.observer, |observer| {
+            observer.subscribers.clear_own_zid();
+        });
     }
+}
 
+impl<T: TimeSource> Session<TokioRuntime, T> {
     /// Publish a literal-keyexpr Sample. Routes both branches per
     /// `opts.allowed_destination`:
     ///
