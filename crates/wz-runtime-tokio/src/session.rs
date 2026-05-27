@@ -84,6 +84,14 @@ use std::sync::Arc;
 // synchronous lock so the eventual `Session<R: Runtime, T:
 // TimeSource>` reparam (R311at+) lifts to `Arc<R::Mutex<...>>`
 // mechanically. Closes the §5.P "Session-last" gate raised at R311x.
+// R311da — after Session::new lifted to impl<R, T> Session<R, T>
+// (the observer parameter now reads `Arc<<R as Runtime>::Mutex<...>>`,
+// no longer the crate-level `Mutex<...>` alias), production-side code
+// in session.rs stops referring to the `Mutex` alias name. Tests still
+// use it (`Arc::new(Mutex::new(ApplicationLayerObserver::new()))`),
+// so the import is cfg(test)-gated to keep test compilation working
+// without producing an unused-import lint on the lib build.
+#[cfg(test)]
 use crate::sync::Mutex;
 
 // R307 — `wz_codecs::query::Query` is referenced bare only by the
@@ -660,22 +668,29 @@ impl<R: Runtime, T: TimeSource> Clone for Session<R, T> {
 /// Session<R, T> shape reads literally at the alias site.
 pub type TokioSession = Session<TokioRuntime, TokioTime>;
 
-// R311cw — `impl` block lifts from the bare `impl Session<TokioRuntime>`
-// to the T-generic `impl<T: TimeSource> Session<TokioRuntime, T>` shape.
-// Every method body in this block accesses the clock exclusively through
-// the `TimeSource::now_monotonic_ms` trait method (no `TokioTime`-specific
-// behaviour), so the impl block compiles uniformly for any
-// `T: TimeSource`. Production AP callers bind `T = TokioTime` through
-// the `TokioSession` alias; test fixtures + future MCU profiles can
-// bind a mock or platform-specific clock with no method-signature
-// change at the call site. Closes the R311w "Session-last" gate's
-// final mechanical step (T fold-in from method-level to type-level).
-impl<T: TimeSource> Session<TokioRuntime, T> {
+// R311cy — pure-accessor method generic lift. The three accessors
+// below (`actions` / `observer` / `is_established`) and the
+// R311cy-added `clock` accessor read fields directly without acquiring
+// any per-runtime lock, so their bodies compile identically for any
+// `R: Runtime` impl. Moving them to a dedicated `impl<R: Runtime, T:
+// TimeSource> Session<R, T>` block is the first concrete step of the
+// multi-round method generic lift cascade (R311cv carry #4): the
+// 100+ AP-bound methods that DO call `self.observer.lock().expect()`
+// stay on the `impl<T: TimeSource> Session<TokioRuntime, T>` block
+// until follow-up rounds migrate them to the `R::with_mutex_mut`
+// closure form (R311ct API). The `observer()` return type lifts
+// from the per-runtime alias `&Arc<Mutex<...>>` to the trait-
+// projected `&Arc<<R as Runtime>::Mutex<...>>`; for the AP profile
+// this resolves to the same `std::sync::Mutex<...>` concrete type so
+// every existing `session.observer().lock()` call site keeps
+// compiling under `R = TokioRuntime` (no breaking change to consumers).
+impl<R: Runtime, T: TimeSource> Session<R, T> {
     /// Construct a new session bundle from existing handles.
     /// `actions` typically comes from
     /// [`SessionLinkActions::new`](crate::session_glue::SessionLinkActions::new);
     /// `observer` is a freshly-wrapped
-    /// [`ApplicationLayerObserver::new`](crate::observer::ApplicationLayerObserver::new);
+    /// [`ApplicationLayerObserver::new`](crate::observer::ApplicationLayerObserver::new)
+    /// inside the per-runtime mutex alias (`R::Mutex<...>`);
     /// `clock` is the shared `Arc<T>` monotonic source the session
     /// uses to compute reply-pending deadlines from
     /// [`QueryOptions::timeout_ms`] (R311cw fold-in — previously
@@ -705,9 +720,21 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
     /// An application that wants to override or re-install the
     /// dedup zid after construction still has the explicit
     /// `set_own_zid` / `clear_own_zid` surface available.
+    ///
+    /// R311da — constructor lifts from the AP-bound impl<T>
+    /// Session<TokioRuntime, T> block to the R-generic impl<R, T>
+    /// Session<R, T> block. The observer parameter type lifts from
+    /// the per-runtime alias `Arc<Mutex<...>>` (resolved to
+    /// std::sync::Mutex on AP) to the trait-projected `Arc<<R as
+    /// Runtime>::Mutex<...>>`; for R = TokioRuntime the resolved
+    /// concrete type is identical so existing call sites
+    /// (`Arc::new(Mutex::new(...))` where `Mutex` is the
+    /// `crate::sync` alias) compile unchanged. The internal
+    /// `set_own_zid` call composes generically over R because
+    /// R311cz lifted that method too. Closes the R311cz carry.
     pub fn new(
         actions: Arc<SessionLinkActions>,
-        observer: Arc<Mutex<ApplicationLayerObserver>>,
+        observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
         clock: Arc<T>,
     ) -> Self {
         let session = Self {
@@ -727,25 +754,7 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         }
         session
     }
-}
 
-// R311cy — pure-accessor method generic lift. The three accessors
-// below (`actions` / `observer` / `is_established`) and the
-// R311cy-added `clock` accessor read fields directly without acquiring
-// any per-runtime lock, so their bodies compile identically for any
-// `R: Runtime` impl. Moving them to a dedicated `impl<R: Runtime, T:
-// TimeSource> Session<R, T>` block is the first concrete step of the
-// multi-round method generic lift cascade (R311cv carry #4): the
-// 100+ AP-bound methods that DO call `self.observer.lock().expect()`
-// stay on the `impl<T: TimeSource> Session<TokioRuntime, T>` block
-// until follow-up rounds migrate them to the `R::with_mutex_mut`
-// closure form (R311ct API). The `observer()` return type lifts
-// from the per-runtime alias `&Arc<Mutex<...>>` to the trait-
-// projected `&Arc<<R as Runtime>::Mutex<...>>`; for the AP profile
-// this resolves to the same `std::sync::Mutex<...>` concrete type so
-// every existing `session.observer().lock()` call site keeps
-// compiling under `R = TokioRuntime` (no breaking change to consumers).
-impl<R: Runtime, T: TimeSource> Session<R, T> {
     /// Borrow the outbound action handle. Useful when the caller
     /// needs to invoke non-publish methods like `send_declare_*` or
     /// `send_request_query` directly on the actions surface.
@@ -4514,7 +4523,11 @@ mod tests {
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
         // R311cw — Session::new gained third `clock: Arc<T>` argument.
         let clock = Arc::new(TokioTime::new());
-        let session = Session::new(actions, observer, clock);
+        // R311da — Session::new lifted to the R-generic block; the
+        // explicit `TokioSession` alias name pins R = TokioRuntime so
+        // type inference resolves through the observer parameter's
+        // concrete `Arc<std::sync::Mutex<...>>` shape.
+        let session = TokioSession::new(actions, observer, clock);
         assert!(
             session
                 .observer()
@@ -4544,7 +4557,11 @@ mod tests {
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
         // R311cw — Session::new gained third `clock: Arc<T>` argument.
         let clock = Arc::new(TokioTime::new());
-        let session = Session::new(actions, observer, clock);
+        // R311da — Session::new lifted to the R-generic block; the
+        // explicit `TokioSession` alias name pins R = TokioRuntime so
+        // type inference resolves through the observer parameter's
+        // concrete `Arc<std::sync::Mutex<...>>` shape.
+        let session = TokioSession::new(actions, observer, clock);
         assert!(
             session
                 .observer()
