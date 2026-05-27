@@ -22909,6 +22909,62 @@
         "R303++ atomic field population still pending."
       ]
     },
+    "Round 311da": {
+      "decision_summary": "R311da — Session::new lifts from impl<T> Session<TokioRuntime, T> to impl<R: Runtime, T: TimeSource> Session<R, T>; observer parameter type generalizes to Arc<<R as Runtime>::Mutex<...>>",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session::new moves into the impl<R: Runtime, T: TimeSource> Session<R, T> block. observer parameter type lifts from `Arc<Mutex<ApplicationLayerObserver>>` (crate::sync::Mutex alias) to `Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>`. Body unchanged — the internal self.set_own_zid call composes generically since R311cz already lifted that method.",
+        "session.rs: `use crate::sync::Mutex;` cfg(test)-gated. Production code no longer references the alias name (every Mutex<T> appearance is now through the trait projection `<R as Runtime>::Mutex<T>`); tests still construct fixtures via Arc::new(Mutex::new(...)) so the import remains under #[cfg(test)].",
+        "session.rs: 2 inline test sites (session_new_with_empty_zid_skips + session_new_with_overlength_zid_silently_skips) switch from `Session::new(...)` to `TokioSession::new(...)`. The R-generic constructor can no longer infer R = TokioRuntime from the observer's `Arc<std::sync::Mutex<...>>` shape alone (multiple Runtime impls could plausibly bind their Mutex assoc to std::sync::Mutex), so the AP-bound alias pins it.",
+        "session.rs: build_session test helper at line 3820 keeps the bare Session::new form because its fn signature `-> (Session, ...)` already pins R + T via the bare-Session default-param chain.",
+        "wz-ap-demo/src/runner.rs:636: unchanged. Downstream `install_session_handles(&session, ...)` + `spawn_background_tasks(&session, ...)` carry concrete Session<TokioRuntime, TokioTime> signatures that propagate R inference through the local binding."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=433 -> 434, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311db+: continue method generic lift cascade. Session::publish is the next textbook target — the cfg(feature=pubsub-allow-loop) branch acquires the observer lock for the loopback dispatch path; that branch migrates to R::with_mutex_mut. Method body is otherwise short enough to land in a single round.",
+        "R311dc+: publish_aliased + publish_aliased_auto migrate (same pattern as publish; the auto variant resolves mapping_id through self.actions which is already R-agnostic).",
+        "R311dd+: query + query_aliased + query_aliased_auto migrate. The bodies acquire observer.lock() for the reply registry mutation + loopback queryable dispatch; closure-form migration via R::with_mutex_mut. Largest cluster after publish.",
+        "R311de+: declare_subscriber / declare_queryable / declare_token / declare_liveliness_* + their aliased counterparts (10+ methods). Each registers a callback into observer.subscribers / .queryables / .tokens / .liveliness; mechanical migration to with_mutex_mut.",
+        "Session crate extraction (R311cv carry): the AP-bound impl<T> Session<TokioRuntime, T> block currently contains 30+ remaining methods (publish + query + declare_* surface). When this block empties to nothing, session.rs is movable to a runtime-agnostic crate (wz-session-core no_std target) and LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>> finally becomes meaningful.",
+        "Architectural carries unchanged: R311ca debt #6 wire-up 19% (unblocked by Session extraction), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311da — Session::new lifts from impl<T> Session<TokioRuntime, T> to impl<R: Runtime, T: TimeSource> Session<R, T>; observer parameter type generalizes to Arc<<R as Runtime>::Mutex<...>>",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session::new moves into the impl<R: Runtime, T: TimeSource> Session<R, T> block. observer parameter type lifts from `Arc<Mutex<ApplicationLayerObserver>>` (crate::sync::Mutex alias) to `Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>`. Body unchanged — the internal self.set_own_zid call composes generically since R311cz already lifted that method.",
+        "session.rs: `use crate::sync::Mutex;` cfg(test)-gated. Production code no longer references the alias name (every Mutex<T> appearance is now through the trait projection `<R as Runtime>::Mutex<T>`); tests still construct fixtures via Arc::new(Mutex::new(...)) so the import remains under #[cfg(test)].",
+        "session.rs: 2 inline test sites (session_new_with_empty_zid_skips + session_new_with_overlength_zid_silently_skips) switch from `Session::new(...)` to `TokioSession::new(...)`. The R-generic constructor can no longer infer R = TokioRuntime from the observer's `Arc<std::sync::Mutex<...>>` shape alone (multiple Runtime impls could plausibly bind their Mutex assoc to std::sync::Mutex), so the AP-bound alias pins it.",
+        "session.rs: build_session test helper at line 3820 keeps the bare Session::new form because its fn signature `-> (Session, ...)` already pins R + T via the bare-Session default-param chain.",
+        "wz-ap-demo/src/runner.rs:636: unchanged. Downstream `install_session_handles(&session, ...)` + `spawn_background_tasks(&session, ...)` carry concrete Session<TokioRuntime, TokioTime> signatures that propagate R inference through the local binding."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=433 -> 434, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311db+: continue method generic lift cascade. Session::publish is the next textbook target — the cfg(feature=pubsub-allow-loop) branch acquires the observer lock for the loopback dispatch path; that branch migrates to R::with_mutex_mut. Method body is otherwise short enough to land in a single round.",
+        "R311dc+: publish_aliased + publish_aliased_auto migrate (same pattern as publish; the auto variant resolves mapping_id through self.actions which is already R-agnostic).",
+        "R311dd+: query + query_aliased + query_aliased_auto migrate. The bodies acquire observer.lock() for the reply registry mutation + loopback queryable dispatch; closure-form migration via R::with_mutex_mut. Largest cluster after publish.",
+        "R311de+: declare_subscriber / declare_queryable / declare_token / declare_liveliness_* + their aliased counterparts (10+ methods). Each registers a callback into observer.subscribers / .queryables / .tokens / .liveliness; mechanical migration to with_mutex_mut.",
+        "Session crate extraction (R311cv carry): the AP-bound impl<T> Session<TokioRuntime, T> block currently contains 30+ remaining methods (publish + query + declare_* surface). When this block empties to nothing, session.rs is movable to a runtime-agnostic crate (wz-session-core no_std target) and LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>> finally becomes meaningful.",
+        "Architectural carries unchanged: R311ca debt #6 wire-up 19% (unblocked by Session extraction), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
