@@ -81,3 +81,12 @@ pub mod sample;
 /// callsite compatibility with the query / declare / tests modules.
 #[cfg(feature = "alloc")]
 pub mod network_message;
+
+/// R76 / R83 / R311di-12 — `DriverLoopOutcome` + `IterationEvent`
+/// driver-loop observer surface. Wraps `Vec<NetworkMessage>` +
+/// `Vec<ExtEntry>` (FramePayload variant) so alloc-gated.
+/// Runtime-agnostic; the wz-runtime-tokio side keeps the concrete
+/// `poll_and_dispatch_one` + `drive_session_until_terminal` loop
+/// machinery that constructs these values.
+#[cfg(feature = "alloc")]
+pub mod driver_loop;
