@@ -22543,6 +22543,58 @@
         "CI gap from R311cp: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination."
       ]
     },
+    "Round 311cu": {
+      "decision_summary": "R311cu: Subscriber/Queryable/LivelinessToken/LivelinessSubscriber generic R - R267 cascade bottom-half lands; Drop uses R311ct R::with_mutex_mut so per-profile poison stays inside runtime impl.",
+      "changes_bullets": [
+        "session.rs Subscriber<R: Runtime = TokioRuntime> + impl Subscriber<TokioRuntime> + impl<R: Runtime> Drop for Subscriber<R> body migrated from inline observer.lock() match to R::with_mutex_mut(&observer, |obs| obs.subscribers.unregister(self.id)).",
+        "session.rs Queryable<R> + Drop migration same pattern; observer.queryables.unregister(self.id) routed through R::with_mutex_mut.",
+        "session.rs LivelinessToken<R> generic + Drop generic; Drop body only touches session.actions (R-independent Arc) so no with_mutex_mut needed - simplest leaf of the cascade.",
+        "session.rs LivelinessSubscriber<R> + Drop migration; tightens semantics from `if let Ok(observer)` (silent no-op on poison) to R::with_mutex_mut (AP poison recovers via into_inner, MCU no poison) - now always unregisters on Drop. Interest(Final) emit was already unconditional."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "scripts/run-ci.sh Layer A-G: all required + Layer G 14 MCU targets pass",
+        "12-sweep flake check on wz_publisher_round_trip_against_zenoh_pico_z_sub: 12/12 OK (consistent with project_layer_e_flake_debt historical pattern; first-run flake recurrence, not regression from R311cu)",
+        "validate_workspace: entries=427 to 428, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R267 cascade leaves now ALL landed (6/6): Publisher/PublisherAliased (R311cs) + Querier/QuerierAliased (R311cr) + Subscriber/Queryable/LivelinessToken/LivelinessSubscriber (R311cu). Default R = TokioRuntime keeps every call site unchanged; non-default R bindings ready when wz-runtime-lwip lands LwipSession.",
+        "wz-runtime-lwip LwipSession = Session<LwipRuntime<C>, C> alias module - non-default R first meaningful binding. R311ct + R311cu unblock LwipSubscriber/Queryable/LivelinessToken/LivelinessSubscriber to instantiate directly from the generic types (no per-profile re-author).",
+        "R267 Session R T TimeSource second param (R311w lock; currently method-level generic on Session query / Querier get). Fold-in pending.",
+        "R311ca debt #6 wire-up unchanged at 33 percent. R267 foundation move unblocks runtime-async-std / -no-std / -tokio-uring / -zero-copy reservation once Lwip path validates.",
+        "CI gap from R311cp: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination. Now overdue for closure given R267 cascade complete."
+      ],
+      "publishable_decision_summary": "R311cu: Subscriber/Queryable/LivelinessToken/LivelinessSubscriber generic R - R267 cascade bottom-half lands; Drop uses R311ct R::with_mutex_mut so per-profile poison stays inside runtime impl.",
+      "publishable_changes_bullets": [
+        "session.rs Subscriber<R: Runtime = TokioRuntime> + impl Subscriber<TokioRuntime> + impl<R: Runtime> Drop for Subscriber<R> body migrated from inline observer.lock() match to R::with_mutex_mut(&observer, |obs| obs.subscribers.unregister(self.id)).",
+        "session.rs Queryable<R> + Drop migration same pattern; observer.queryables.unregister(self.id) routed through R::with_mutex_mut.",
+        "session.rs LivelinessToken<R> generic + Drop generic; Drop body only touches session.actions (R-independent Arc) so no with_mutex_mut needed - simplest leaf of the cascade.",
+        "session.rs LivelinessSubscriber<R> + Drop migration; tightens semantics from `if let Ok(observer)` (silent no-op on poison) to R::with_mutex_mut (AP poison recovers via into_inner, MCU no poison) - now always unregisters on Drop. Interest(Final) emit was already unconditional."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "scripts/run-ci.sh Layer A-G: all required + Layer G 14 MCU targets pass",
+        "12-sweep flake check on wz_publisher_round_trip_against_zenoh_pico_z_sub: 12/12 OK (consistent with project_layer_e_flake_debt historical pattern; first-run flake recurrence, not regression from R311cu)",
+        "validate_workspace: entries=427 to 428, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R267 cascade leaves now ALL landed (6/6): Publisher/PublisherAliased (R311cs) + Querier/QuerierAliased (R311cr) + Subscriber/Queryable/LivelinessToken/LivelinessSubscriber (R311cu). Default R = TokioRuntime keeps every call site unchanged; non-default R bindings ready when wz-runtime-lwip lands LwipSession.",
+        "wz-runtime-lwip LwipSession = Session<LwipRuntime<C>, C> alias module - non-default R first meaningful binding. R311ct + R311cu unblock LwipSubscriber/Queryable/LivelinessToken/LivelinessSubscriber to instantiate directly from the generic types (no per-profile re-author).",
+        "R267 Session R T TimeSource second param (R311w lock; currently method-level generic on Session query / Querier get). Fold-in pending.",
+        "R311ca debt #6 wire-up unchanged at 33 percent. R267 foundation move unblocks runtime-async-std / -no-std / -tokio-uring / -zero-copy reservation once Lwip path validates.",
+        "CI gap from R311cp: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination. Now overdue for closure given R267 cascade complete."
+      ]
+    },
     "Round 311d": {
       "decision_summary": "R311d batches codec-scout / codec-hello / codec-join cascade — wz-codecs level only (wz-runtime-tokio does not import these types); forwards stay catalog-uniform for future runtime reuse.",
       "changes_bullets": [
