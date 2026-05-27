@@ -6239,54 +6239,11 @@ pub enum InboundFrame {
     Unknown { mid: u8 },
 }
 
-/// Error surface for `parse_inbound`. Distinct from `CodecError` so
-/// callers can react to "empty wire" (link delivered a zero-byte
-/// frame, programming error) without conflating it with codec-level
-/// `NeedMoreBytes`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InboundParseError {
-    /// The frame was zero bytes — no transport-message header to
-    /// dispatch on.
-    Empty,
-    /// The body codec rejected the wire (truncated, VLE overflow,
-    /// etc.).
-    Codec(CodecError),
-    /// R68c — the transport header set the Z flag but the trailing
-    /// ext chain exceeded `MAX_EXT_CHAIN_DEPTH` without surfacing a
-    /// chain-terminator entry (Z bit clear). Mirrors
-    /// `ext_envelope.scxml::on-overflow="reject"` so a malformed
-    /// peer cannot pin the decoder into an unbounded loop.
-    ExtChainOverflow,
-}
-
-impl std::fmt::Display for InboundParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Empty => write!(f, "inbound frame was empty (no transport header)"),
-            Self::Codec(e) => write!(f, "inbound body codec rejected wire: {:?}", e),
-            Self::ExtChainOverflow => write!(
-                f,
-                "inbound ext chain exceeded MAX_EXT_CHAIN_DEPTH={} without terminator",
-                MAX_EXT_CHAIN_DEPTH
-            ),
-        }
-    }
-}
-
-/// R68c — upper bound on ext-chain entries decoded per inbound
-/// frame. Mirrors `ext_envelope.scxml::max-depth="8"` so the wz
-/// inbound decoder fails closed on the same chain length zenoh-pico
-/// would already reject. Production deploys with a higher ceiling
-/// would have to bump this AND `ext_envelope.scxml` together.
-pub const MAX_EXT_CHAIN_DEPTH: usize = 8;
-
-impl std::error::Error for InboundParseError {}
-
-impl From<CodecError> for InboundParseError {
-    fn from(e: CodecError) -> Self {
-        Self::Codec(e)
-    }
-}
+// R311di-6 — InboundParseError + MAX_EXT_CHAIN_DEPTH moved to
+// wz-session-core::parse_error. Re-exports keep every callsite
+// (session_glue.rs internal + wz-runtime-tokio external) working
+// verbatim across the migration.
+pub use wz_session_core::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
 
 /// Parse a single transport-message frame from `bytes`.
 ///
