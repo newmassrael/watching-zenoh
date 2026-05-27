@@ -46,6 +46,24 @@ default = ["alloc"]
 # default-off `alloc` for MCU profiles that prefer stack/static-only.
 alloc = []
 
+# R311di-11 — body-codec feature forwarders for the NetworkMessage
+# dispatch cluster. Each forwards to wz-codecs/codec-* so the 3-stage
+# chain (wz-runtime-tokio codec-X -> wz-session-core codec-X ->
+# wz-codecs codec-X) keeps a single ground-truth gate per body codec.
+# Implication shape mirrors wz-runtime-tokio: codec-push / codec-request
+# / codec-response / codec-declare imply codec-frame (Frame envelope is
+# the wire carrier for every Push/Request/Response/Declare record per
+# parse_frame_payload's match arms). codec-response-final does NOT
+# imply codec-frame: the parse_frame_payload N_MID_RESPONSE_FINAL arm
+# is cfg(all(codec-frame, codec-response-final)), matching the R311e/g
+# decision to keep the body codec independently selectable.
+codec-frame = ["wz-codecs/codec-frame"]
+codec-push = ["codec-frame", "wz-codecs/codec-push"]
+codec-request = ["codec-frame", "wz-codecs/codec-request"]
+codec-response = ["codec-frame", "wz-codecs/codec-response"]
+codec-response-final = ["wz-codecs/codec-response-final"]
+codec-declare = ["codec-frame", "wz-codecs/codec-declare"]
+
 [dependencies]
 wz-runtime-core = { path = "../wz-runtime-core" }
 # R311di-4 — wz-codecs needed by sample.rs for `wz_codecs::ext_entry`

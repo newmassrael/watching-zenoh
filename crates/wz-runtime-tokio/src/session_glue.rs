@@ -133,7 +133,6 @@ use wz_codecs::keep_alive::KeepAlive;
 use wz_codecs::msg_del::MsgDel;
 #[cfg(any(feature = "codec-push", feature = "codec-response"))]
 use wz_codecs::msg_put::MsgPut;
-use wz_codecs::oam::Oam;
 #[cfg(feature = "codec-open-body")]
 use wz_codecs::open_body::OpenBody;
 #[cfg(feature = "codec-push")]
@@ -372,74 +371,20 @@ mod wire_const {
     ))]
     pub const FLAG_T_Z: u8 = 0x80;
 
-    /// Network-message MID for `Frame.payload` batch entries that
-    /// wrap a query / put / del (network.h:36). First R74-decoded
-    /// network MID.
-    ///
-    /// R311g — only callsite is the [`parse_frame_payload`] inbound
-    /// dispatcher (itself gated on `codec-frame`) + the outbound
-    /// `encode_frame_with_request` (gated on `codec-request`).
-    ///
-    /// R311j — gate broadened from `codec-frame` to `codec-request`:
-    /// the request envelope is now its own atomic body codec with
-    /// `codec-request = ["codec-frame"]` imply edge.
-    #[cfg(feature = "codec-request")]
-    pub const N_MID_REQUEST: u8 = 0x1C;
     /// R90 — Push envelope MID (network.h:35). Pub/sub data
-    /// carrier wrapping a put / del inner body; sibling to
-    /// `N_MID_REQUEST` minus the rid field per zenoh-pico
-    /// `_z_push_encode`.
-    ///
-    /// R311h — gated on `codec-push`. Sole consumer is the
-    /// `parse_frame_payload` `N_MID_PUSH` arm and the outbound
-    /// `encode_frame_with_push` helper, both behind the same gate.
+    /// carrier wrapping a put / del inner body. R311di-11 moved the
+    /// inbound `parse_frame_payload` consumer to wz-session-core;
+    /// the remaining consumer in this module is the outbound
+    /// `build_push_*` helper family (`encode_frame_with_push`
+    /// emits the Frame envelope around the inner Push struct).
     #[cfg(feature = "codec-push")]
     pub const N_MID_PUSH: u8 = 0x1D;
-    /// R91 — Response-final marker MID (network.h:38). Pure
-    /// correlation marker closing a Request's reply stream per
-    /// zenoh-pico `_z_response_final_encode`: 1-byte header +
-    /// request_id VLE + optional ext-chain, no body.
-    ///
-    /// R311g — additionally gated on `codec-frame` because the only
-    /// current call site is the `parse_frame_payload` dispatcher
-    /// (Frame envelope → NetworkMessage::ResponseFinal). Both
-    /// features must be on for the constant to have any live use;
-    /// when either is off the constant elides cleanly.
-    #[cfg(all(feature = "codec-response-final", feature = "codec-frame"))]
-    pub const N_MID_RESPONSE_FINAL: u8 = 0x1A;
-    /// R92 — OAM (Operations & Maintenance) MID (network.h:33).
-    /// Diagnostic / control-plane envelope per zenoh-pico
-    /// `_z_oam_encode`: header (with mid, enc, Z bits) plus a VLE
-    /// id, optional ext-chain, and a body variant dispatched on
-    /// `header.enc` (UNIT / ZINT / ZBUF re-using ext_* inner
-    /// codecs).
-    ///
-    /// R311g — currently consumed only by [`parse_frame_payload`]
-    /// (codec-frame-gated). Moves to a broader gate when a future
-    /// round adds an OAM encoder.
-    #[cfg(feature = "codec-frame")]
-    pub const N_MID_OAM: u8 = 0x1F;
     /// R93/R94 — Interest envelope MID (network.h:39). Declarations
     /// discovery / liveliness subscriber registration carrier per
-    /// zenoh-pico `_z_n_interest_encode`. R93 landed the envelope
-    /// layer (is_final form, RESPONSE_FINAL sibling); R94 closed the
-    /// inner body via the `header.C || header.F` disjunction present-
-    /// if (interest_body sub-codec wraps the body_flags + R-gated
-    /// wireexpr per `_z_interest_encode`).
+    /// zenoh-pico `_z_n_interest_encode`. Consumed by the outbound
+    /// `build_interest_*` / `encode_frame_with_interest` helpers
+    /// (the inbound parse arm moved to wz-session-core at R311di-11).
     pub const N_MID_INTEREST: u8 = 0x19;
-    /// R97 — Response envelope MID (network.h:37). Query reply
-    /// carrier wrapping a reply (0x04) or err (0x05) inner body per
-    /// zenoh-pico `_z_response_encode`. Wire-shape sibling to
-    /// `N_MID_REQUEST`: header(N@5,M@6,Z@7) + rid VLE + wireexpr
-    /// embed + Z-gated ext-chain + peek-byte body variant on the
-    /// inner MID bit-range.
-    ///
-    /// R311k — gate broadened from `codec-frame` to `codec-response`:
-    /// the response envelope is its own atomic body codec with
-    /// `codec-response = ["codec-frame"]` imply edge, closing the
-    /// fourth body-codec-implies-envelope edge.
-    #[cfg(feature = "codec-response")]
-    pub const N_MID_RESPONSE: u8 = 0x1B;
     /// R110/R115 — Declare envelope MID (network.h:34). Declarations
     /// envelope wrapping one of the nine sub-MID bodies (DECL_KEXPR
     /// 0x00 / DECL_SUBSCRIBER 0x01 / DECL_QUERYABLE 0x02 /
@@ -6165,214 +6110,18 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
     }
 }
 
-/// R74 — one application-layer message inside a `Frame.payload` batch.
-///
-/// `Frame.payload` models `Vec<NetworkMessage>` per
-/// `docs/wire-spec-subset.md` §4 (the Established-session payload
-/// carrier; zenoh-pico maps it to `_z_network_message_t`). Each
-/// record starts with a header byte where bits 0..4 carry the network
-/// MID and bits 5..7 carry per-MID flags + the shared Z bit. The full
-/// network-MID set is 7 wide (PUSH 0x1D, REQUEST 0x1C, RESPONSE 0x1B,
-/// RESPONSE_FINAL 0x1A, DECLARE 0x1E, INTEREST 0x19, OAM 0x1F per
-/// `vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/network.h:33-39`).
-///
-/// R74 ships the first application-layer envelope decoder — `Request`
-/// — because `wz_codecs::request` is the only network-envelope codec
-/// authored so far. Unknown MIDs surface as `Unknown { mid, body }`
-/// absorbing the rest of the payload bytes verbatim; the batch parse
-/// stops at the first Unknown because skipping past an unknown body
-/// without a length-aware decoder would risk misaligning the cursor.
-///
-/// No `Debug` derive on the wrapped `Request` — wz-codecs structs only
-/// derive `Default` (sce-codegen output, see
-/// `crates/wz-codecs/tests/smoke.rs` header). The manual `Debug` impl
-/// below surfaces the variant kind without recursing into codec fields
-/// so `DriverLoopOutcome` can keep its `#[derive(Debug)]`.
-pub enum NetworkMessage {
-    /// Network MID `_Z_MID_N_REQUEST` (0x1C). Carries a query / put /
-    /// del wrapped in a Wireexpr + request-id envelope with response
-    /// correlation. Decoded via `wz_codecs::request::Request`. The
-    /// `Box` keeps the enum variant size small — `Request` carries
-    /// `Wireexpr` + a `RequestVariant` whose arms hold MsgPut / MsgDel
-    /// / Query structs, making the inline form much larger than the
-    /// `Unknown` variant.
-    #[cfg(feature = "codec-request")]
-    Request(Box<Request>),
-    /// R90 — Network MID `_Z_MID_N_PUSH` (0x1D). Pub/sub data
-    /// carrier wrapping a put / del inner body — same envelope
-    /// shape as `Request` minus the rid field. The `Box` mirrors
-    /// the `Request` variant's size-balancing rationale.
-    ///
-    /// R311h — gated on `codec-push` (the `Push` type itself
-    /// disappears when the feature is off).
-    #[cfg(feature = "codec-push")]
-    Push(Box<Push>),
-    /// R91 — Network MID `_Z_MID_N_RESPONSE_FINAL` (0x1A). Pure
-    /// correlation marker that closes a Request's reply stream;
-    /// payload is header + request_id VLE only (no embed, no
-    /// inner body). Inlined (no `Box`) because the struct is
-    /// small — just three integer fields plus an optional ext
-    /// vec.
-    #[cfg(feature = "codec-response-final")]
-    ResponseFinal(ResponseFinal),
-    /// R92 — Network MID `_Z_MID_N_OAM` (0x1F). Diagnostic /
-    /// control-plane envelope; header (mid+enc+Z) + VLE id +
-    /// optional ext-chain + body variant on `header.enc` (UNIT
-    /// / ZINT / ZBUF inner codec). The body variant arms hold
-    /// `ExtUnit` / `ExtZint` / `ExtZbuf` — small enough to inline
-    /// like `ResponseFinal`.
-    Oam(Oam),
-    /// R93/R94 — Network MID `_Z_MID_N_INTEREST` (0x19).
-    /// Declarations discovery / liveliness subscriber registration
-    /// envelope; header (mid+C+F+Z) + VLE interest_id + (C||F)-gated
-    /// inner body + Z-gated ext-chain. R94 closed the body via the
-    /// interest_body sub-codec (body_flags byte + R-gated wireexpr).
-    /// Inlined (no `Box`) because the struct is small — header byte
-    /// + u64 + optional body + optional ext vec.
-    Interest(Interest),
-    /// R97 — Network MID `_Z_MID_N_RESPONSE` (0x1B). Query reply
-    /// carrier wrapping a reply (0x04) or err (0x05) inner body
-    /// dispatched via peek-byte on the inner MID bit-range. Same
-    /// envelope shape as `Request` minus the body kind set. The
-    /// `Box` keeps the enum variant size small — `Response`
-    /// carries `Wireexpr` + `ResponseVariant` whose arms hold
-    /// Reply / Err structs, making the inline form larger than
-    /// the `Unknown` variant (mirrors the Request sizing
-    /// rationale).
-    #[cfg(feature = "codec-response")]
-    Response(Box<Response>),
-    /// R110/R115 — Network MID `_Z_MID_N_DECLARE` (0x1E). Declarations
-    /// envelope wrapping one of the nine sub-MID inner bodies
-    /// (DECL_KEXPR / DECL_SUBSCRIBER / DECL_QUERYABLE / DECL_TOKEN /
-    /// UNDECL_KEXPR / UNDECL_SUBSCRIBER / UNDECL_QUERYABLE /
-    /// UNDECL_TOKEN / DECL_FINAL) dispatched via peek-byte on the
-    /// inner header MID. R110a-e closed the wz-side authoring chain
-    /// and the byte-equiv Layer 3 wire-interop vs zenoh-pico
-    /// `_z_declare_encode`; R115 wires the inbound dispatch so a
-    /// peer-emitted DECLARE record surfaces here. The `Box` mirrors
-    /// the `Request`/`Push`/`Response` sizing rationale — `Declare`
-    /// carries an optional interest_id + ext vec + the inner
-    /// `DeclareVariant` whose arms hold the nine sub-body structs,
-    /// making the inline form much larger than `Unknown`.
-    ///
-    /// R311i — gated on `codec-declare`.
-    #[cfg(feature = "codec-declare")]
-    Declare(Box<Declare>),
-    /// Header byte's MID falls outside the
-    /// {REQUEST, PUSH, RESPONSE_FINAL, OAM, INTEREST, RESPONSE, DECLARE}
-    /// subset wz-codecs has authored envelope coverage for. `body`
-    /// carries the rest of the payload bytes (header byte included)
-    /// verbatim so a future per-MID decoder can re-parse without
-    /// losing data; the parse stops here to avoid mis-cursor-advancing
-    /// across an unknown body length.
-    Unknown { mid: u8, body: Vec<u8> },
-}
-
-impl std::fmt::Debug for NetworkMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            #[cfg(feature = "codec-request")]
-            Self::Request(_) => f.write_str("Request(..)"),
-            #[cfg(feature = "codec-push")]
-            Self::Push(_) => f.write_str("Push(..)"),
-            #[cfg(feature = "codec-response-final")]
-            Self::ResponseFinal(_) => f.write_str("ResponseFinal(..)"),
-            Self::Oam(_) => f.write_str("Oam(..)"),
-            Self::Interest(_) => f.write_str("Interest(..)"),
-            #[cfg(feature = "codec-response")]
-            Self::Response(_) => f.write_str("Response(..)"),
-            #[cfg(feature = "codec-declare")]
-            Self::Declare(_) => f.write_str("Declare(..)"),
-            Self::Unknown { mid, body } => {
-                write!(f, "Unknown {{ mid: {mid:#04x}, body_len: {} }}", body.len())
-            }
-        }
-    }
-}
-
-/// R74 — decode a `Frame.payload` byte slice into the in-order batch
-/// of network messages it carries.
-///
-/// Loop shape: peek the cursor's next byte, mask to `mid = byte & 0x1F`,
-/// dispatch to the matching envelope decoder. On `N_MID_REQUEST` calls
-/// `Request::decode` which re-reads the header byte itself (peek-byte
-/// primitive per RFC §5.B Y3 atomic 2b-ii) so no double-consumption.
-/// On any other MID, absorbs the remaining bytes as `Unknown { mid,
-/// body }` and terminates the batch loop — see
-/// [`NetworkMessage::Unknown`] for the rationale.
-///
-/// An empty `bytes` slice returns `Ok(vec![])` (an empty batch is a
-/// valid Frame.payload — the transport envelope is fine, no
-/// application-layer records).
-///
-/// Codec errors propagate as `CodecError`. The caller is responsible
-/// for deciding whether to surface them as a transport-FSM
-/// `FramingError` (current `poll_and_dispatch_one` behavior, since the
-/// transport envelope already parsed but the application-layer batch
-/// is malformed) or to log and continue with the partially-decoded
-/// batch.
-///
-/// R311g — gated on `codec-frame`. The only caller is the
-/// `InboundFrame::Frame` arm in [`poll_and_dispatch_one`] (also
-/// codec-frame-gated), so a codec-frame-OFF build never reaches a
-/// caller; cfg-gating the definition itself elides ~80 lines of
-/// dispatch + the `NetworkMessage` decoders for every body codec
-/// without leaving an orphan public symbol. When R311h..R311k land
-/// the body-codec cascades, individual match arms inside this
-/// function will gain their own per-body cfg (e.g. `N_MID_PUSH`
-/// under `codec-push`).
+// R74 / R311di-11 — NetworkMessage + parse_frame_payload extracted to
+// wz-session-core::network_message. Re-exported here so all callsite
+// paths (`crate::session_glue::NetworkMessage`, the `parse_frame_payload`
+// integration tests, the query / declare inbound-batch consumers) keep
+// compiling unchanged. The 4 envelope MID constants (REQUEST / RESPONSE
+// / RESPONSE_FINAL / OAM) that only the parse dispatcher consumed went
+// with the move; PUSH / DECLARE / INTEREST remain in `wire_const` below
+// because the outbound encode helpers (`build_push_*` / `build_declare_*`
+// / `build_interest_*`) still reference them.
 #[cfg(feature = "codec-frame")]
-pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecError> {
-    let mut messages = Vec::new();
-    let mut cursor = SceCursor::new(bytes);
-    while cursor.remaining() > 0 {
-        let header = cursor.peek_slice(1)?[0];
-        let mid = header & 0x1F;
-        match mid {
-            #[cfg(feature = "codec-request")]
-            wire_const::N_MID_REQUEST => {
-                let req = Request::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Request(Box::new(req)));
-            }
-            #[cfg(feature = "codec-push")]
-            wire_const::N_MID_PUSH => {
-                let push = Push::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Push(Box::new(push)));
-            }
-            #[cfg(feature = "codec-response-final")]
-            wire_const::N_MID_RESPONSE_FINAL => {
-                let rf = ResponseFinal::decode(&mut cursor)?;
-                messages.push(NetworkMessage::ResponseFinal(rf));
-            }
-            wire_const::N_MID_OAM => {
-                let oam = Oam::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Oam(oam));
-            }
-            wire_const::N_MID_INTEREST => {
-                let interest = Interest::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Interest(interest));
-            }
-            #[cfg(feature = "codec-response")]
-            wire_const::N_MID_RESPONSE => {
-                let resp = Response::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Response(Box::new(resp)));
-            }
-            #[cfg(feature = "codec-declare")]
-            wire_const::N_MID_DECLARE => {
-                let decl = Declare::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Declare(Box::new(decl)));
-            }
-            _ => {
-                let rem = cursor.remaining();
-                let body = cursor.peek_slice(rem)?.to_vec();
-                cursor.advance(rem)?;
-                messages.push(NetworkMessage::Unknown { mid, body });
-                break;
-            }
-        }
-    }
-    Ok(messages)
-}
+pub use wz_session_core::network_message::parse_frame_payload;
+pub use wz_session_core::network_message::NetworkMessage;
 
 /// R69b — map a parsed inbound transport frame to the matching
 /// session-FSM external event variant.

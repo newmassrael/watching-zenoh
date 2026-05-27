@@ -70,3 +70,14 @@ pub mod send_declare_error;
 /// callsite compatibility.
 #[cfg(feature = "alloc")]
 pub mod sample;
+
+/// R74 / R311di-11 — `NetworkMessage` application-layer envelope batch
+/// + `parse_frame_payload` dispatcher. Uses `Box<Request>` etc. so
+/// gated on `alloc`. Body variants (Request / Push / Response /
+/// ResponseFinal / Declare) are individually `codec-*`-gated per the
+/// 3-stage feature-forwarding chain. The `Oam`, `Interest`, and
+/// `Unknown` variants stay unconditional. Re-exported from
+/// wz-runtime-tokio at `crate::session_glue::NetworkMessage` for
+/// callsite compatibility with the query / declare / tests modules.
+#[cfg(feature = "alloc")]
+pub mod network_message;
