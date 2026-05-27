@@ -258,7 +258,15 @@ locator-unixsock = ["transport-link-unixsock"]
 locator-vsock = ["transport-link-vsock"]
 locator-ws = ["transport-link-ws"]
 
-# ----- domain: platform (7 atomic, 1 active / 6 reserved) -----
+# ----- domain: platform (7 atomic, 0 active / 7 reserved) -----
+# R311ch — audit-only ratify. Platform identity flows through Rust's
+# `target_os` cfg axis (a Cargo `[target.'cfg(target_os = "linux")']`
+# dep is the standard mechanism), not through Cargo `[features]`.
+# These `platform-*` features are presentation-layer labels for
+# preset compositions (e.g. preset-cortex-m4-default pulls
+# platform-bare-metal). Cfg-gating source on them would duplicate
+# what `target_os` already handles. 0 source cfg sites, by design.
+# Prior comment "1 active / 6 reserved" corrected to "0 active / 7".
 platform-bare-metal = []
 platform-freertos = []
 platform-linux = []
