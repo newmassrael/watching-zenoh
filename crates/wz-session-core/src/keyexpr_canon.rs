@@ -143,7 +143,7 @@ enum ChunkShape {
 /// # Examples
 ///
 /// ```
-/// use wz_runtime_tokio::keyexpr_canon::canonize_keyexpr;
+/// use wz_session_core::keyexpr_canon::canonize_keyexpr;
 ///
 /// // Already-canonical input is returned unchanged.
 /// assert_eq!(canonize_keyexpr("home/temp").unwrap(), "home/temp");
@@ -399,7 +399,7 @@ impl core::error::Error for OutboundKeyexprError {
 /// # Examples
 ///
 /// ```
-/// use wz_runtime_tokio::keyexpr_canon::{
+/// use wz_session_core::keyexpr_canon::{
 ///     check_outbound_keyexpr_pico_safe, OutboundKeyexprError,
 /// };
 ///

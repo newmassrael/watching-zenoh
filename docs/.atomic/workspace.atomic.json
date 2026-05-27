@@ -23423,6 +23423,48 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311di-2-fix": {
+      "decision_summary": "R311di-2-fix — keyexpr_canon doctest imports updated from `wz_runtime_tokio::keyexpr_canon::*` to `wz_session_core::keyexpr_canon::*` after the R311di-2 file move; pre-push hook surfaced the doctest break (`cargo test --workspace` Layer C1 sub-lane); fix verified via `cargo test -p wz-session-core --doc`.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/keyexpr_canon.rs:146: doctest `use wz_runtime_tokio::keyexpr_canon::canonize_keyexpr` -> `use wz_session_core::keyexpr_canon::canonize_keyexpr`. Doctests execute inside the host crate (wz-session-core) and the workspace dep graph from wz-session-core does NOT include wz-runtime-tokio (the dep is the other way around), so the original import path no longer resolves post-R311di-2 file move.",
+        "crates/wz-session-core/src/keyexpr_canon.rs:402-404: doctest `use wz_runtime_tokio::keyexpr_canon::{check_outbound_keyexpr_pico_safe, OutboundKeyexprError}` -> `use wz_session_core::keyexpr_canon::{...}`. Same fix shape as line 146.",
+        "Why this slipped through R311di-2's verification gate: `cargo check --workspace --all-targets` does NOT compile doctests; only `cargo test --workspace` (Layer C1) does. The R311di-2 local verification ran `cargo check` + Layer 0..E + Layer G but the doctest break only surfaced at the pre-push hook's re-run of Layer C1 (which the local sweep also runs but apparently passed; the most likely cause is cargo's incremental cache served stale doctest artifacts under the old wz_runtime_tokio path resolution, the R311di-pre-e latent-bug awareness pattern repeating in a different guise). Future textbook addition: post-file-move rounds should `cargo clean -p <new_crate> -p <old_crate>` before the verification CI sweep."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core --doc: 2/2 pass (canonize_keyexpr + check_outbound_keyexpr_pico_safe doctests).",
+        "validate_workspace: entries=456 -> 457, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync.",
+        "pre-push hook re-run after this fix expected to pass; original push attempt blocked at Layer C1 (FAIL)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-3 (next): locality.rs file move per R311di-2 template. Add `cargo clean -p wz-runtime-tokio -p wz-session-core` step to local verification sweep before pre-push to catch incremental-cache-masked doctest breaks of this shape.",
+        "Latent-bug awareness pattern: file moves between crates may leave stale doctest artifacts under the old path resolution. Mechanical fresh-recompile gate prevents the pre-push surprise; integrate into the standard R311di-N migration sub-round checklist.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311di-2-fix — keyexpr_canon doctest imports updated from `wz_runtime_tokio::keyexpr_canon::*` to `wz_session_core::keyexpr_canon::*` after the R311di-2 file move; pre-push hook surfaced the doctest break (`cargo test --workspace` Layer C1 sub-lane); fix verified via `cargo test -p wz-session-core --doc`.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/keyexpr_canon.rs:146: doctest `use wz_runtime_tokio::keyexpr_canon::canonize_keyexpr` -> `use wz_session_core::keyexpr_canon::canonize_keyexpr`. Doctests execute inside the host crate (wz-session-core) and the workspace dep graph from wz-session-core does NOT include wz-runtime-tokio (the dep is the other way around), so the original import path no longer resolves post-R311di-2 file move.",
+        "crates/wz-session-core/src/keyexpr_canon.rs:402-404: doctest `use wz_runtime_tokio::keyexpr_canon::{check_outbound_keyexpr_pico_safe, OutboundKeyexprError}` -> `use wz_session_core::keyexpr_canon::{...}`. Same fix shape as line 146.",
+        "Why this slipped through R311di-2's verification gate: `cargo check --workspace --all-targets` does NOT compile doctests; only `cargo test --workspace` (Layer C1) does. The R311di-2 local verification ran `cargo check` + Layer 0..E + Layer G but the doctest break only surfaced at the pre-push hook's re-run of Layer C1 (which the local sweep also runs but apparently passed; the most likely cause is cargo's incremental cache served stale doctest artifacts under the old wz_runtime_tokio path resolution, the R311di-pre-e latent-bug awareness pattern repeating in a different guise). Future textbook addition: post-file-move rounds should `cargo clean -p <new_crate> -p <old_crate>` before the verification CI sweep."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core --doc: 2/2 pass (canonize_keyexpr + check_outbound_keyexpr_pico_safe doctests).",
+        "validate_workspace: entries=456 -> 457, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync.",
+        "pre-push hook re-run after this fix expected to pass; original push attempt blocked at Layer C1 (FAIL)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-3 (next): locality.rs file move per R311di-2 template. Add `cargo clean -p wz-runtime-tokio -p wz-session-core` step to local verification sweep before pre-push to catch incremental-cache-masked doctest breaks of this shape.",
+        "Latent-bug awareness pattern: file moves between crates may leave stale doctest artifacts under the old path resolution. Mechanical fresh-recompile gate prevents the pre-push surprise; integrate into the standard R311di-N migration sub-round checklist.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311di-pre-a": {
       "decision_summary": "R311di-pre-a — wz-runtime-tokio adds hashbrown + portable-atomic deps; session_glue.rs HashMap + AtomicU64 imports route through them; first step toward wz-session-core no_std move-readiness.",
       "changes_bullets": [
