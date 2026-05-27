@@ -130,16 +130,28 @@ pub type QueryableCallback =
 /// only when the M bit is clear). Returns the first matching ext's
 /// body slice; `None` when the chain is absent or carries no
 /// attachment ext.
+// R311cj — query-attachment gates the inbound Query.attachment ext
+// extraction. cfg-off: callback always observes attachment=None.
+// Signature stable (returns Option), behavior change is the early
+// short-circuit at the function entry.
 fn extract_query_attachment(query: &Query) -> Option<&[u8]> {
-    let exts = query.extensions.as_ref()?;
-    for ext in exts {
-        if ext.ext_id() == 0x05 {
-            if let ExtEntryVariant::CodecZenohExtZbuf(zbuf) = &ext.body {
-                return Some(zbuf.value.as_slice());
+    #[cfg(not(feature = "query-attachment"))]
+    {
+        let _ = query;
+        return None;
+    }
+    #[cfg(feature = "query-attachment")]
+    {
+        let exts = query.extensions.as_ref()?;
+        for ext in exts {
+            if ext.ext_id() == 0x05 {
+                if let ExtEntryVariant::CodecZenohExtZbuf(zbuf) = &ext.body {
+                    return Some(zbuf.value.as_slice());
+                }
             }
         }
+        None
     }
-    None
 }
 
 /// Stable handle returned by [`QueryableRegistry::register`] so the
@@ -695,7 +707,12 @@ impl QueryableRegistry {
         // borrows directly from `Query.parameters`; the attachment
         // view is extracted from the inbound extensions chain at R311v
         // (`extract_query_attachment`).
+        // R311cj — query-selector-parameters gates the parameters
+        // slice projection. cfg-off: callback always observes None.
+        #[cfg(feature = "query-selector-parameters")]
         let parameters_view = query.parameters.as_deref();
+        #[cfg(not(feature = "query-selector-parameters"))]
+        let parameters_view: Option<&[u8]> = None;
         let attachment_view = extract_query_attachment(query);
         for queryable in &mut self.queryables {
             let allowed = if is_remote {

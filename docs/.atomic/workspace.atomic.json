@@ -933,6 +933,30 @@
       "title": "§5.9 Query",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Query domain catalog: 10 atomic features (9 active wired in wz-runtime-tokio, 1 reserved query-source-info).",
+      "rationale_bullets": [
+        "Composable framework lens: each query capability is one atomic feature toggle.",
+        "R307 wired 6 features; R311cj adds 3 more (-attachment, -selector-parameters, -reply-err).",
+        "query-source-info remains reserved — implementation pending.",
+        "All active features signature-stable on cfg-off (R311g1).",
+        "Total 9/10 wired covers AP MVP query surface."
+      ],
+      "outputs_bullets": [
+        "Active set (9): -get, -queryable, -reply, -consolidation, -target, -timeout (R307).",
+        "Active set (9 cont): -attachment, -selector-parameters, -reply-err (R311cj).",
+        "query-attachment gates extract_query_attachment fn early-return.",
+        "query-selector-parameters gates parameters_view projection in dispatch.",
+        "query-reply-err combined with query-queryable on Err-form reply emit.",
+        "Reserved (1): query-source-info — Request source_info ext not yet implemented."
+      ],
+      "caveats_bullets": [
+        "query-attachment cfg-off: QueryEvent.attachment always None (signature stable).",
+        "query-reply-err cfg-off: ReplyEmitter::reply_err silent no-op (combined with -queryable gate)."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/6-presets": {
@@ -21944,6 +21968,54 @@
         "Total wire-up gain R311cb-ci: 31 -> 50 wired (19% -> 31%); 130 -> 111 unwired (80% -> 69%); 14 domains 0%-wired -> 9.",
         "Pending per-site cascade: keyexpr cluster (7) — -literal, -mapping, -intersect, -includes, -dollar-star, -wildcard-single, -wildcard-double.",
         "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, R267 Session reparam, R311 facade graceful-close wrapper API."
+      ]
+    },
+    "Round 311cj": {
+      "decision_summary": "R311cj query domain wire-up extension — 3 reserved features wired (-attachment, -selector-parameters, -reply-err); 9/10 active; query-source-info stays reserved (no impl).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/Cargo.toml: query-attachment + query-selector-parameters + query-reply-err features + default-on.",
+        "crates/wz/Cargo.toml: 3 facade forwards via ?-syntax; query 6/4 -> 9/1 comment update.",
+        "crates/wz-runtime-tokio/src/query.rs: extract_query_attachment early-return cfg + parameters_view cfg-aware binding.",
+        "crates/wz-runtime-tokio/src/query_event.rs: reply_err combined gate all(query-queryable, query-reply-err).",
+        "§5.9 query catalog body: intent + 5 rationale + 6 outputs + 2 caveats + impact_scope."
+      ],
+      "verification_bullets": [
+        "Audit verification: query-attachment 2 / query-selector-parameters 2 / query-reply-err 2 = 6 new cfg sites.",
+        "cargo check + clippy --all-targets -D warnings + fmt --check + test -p wz-runtime-tokio --lib (593/593): all pass.",
+        "validate_workspace baseline: entries 416 -> 417, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "query-source-info reserved: build_request_query_with_source_info implementation is doc-referenced but missing; wire-up when impl arrives.",
+        "Keyexpr 7 cluster-deferred remains carry: per-site cfg on matchers risks fan-out break, requires careful multi-round wire-up.",
+        "Runtime 4 reserved + liveliness 3 reserved are remaining wire-up targets in respective domains.",
+        "R311ca debt #6 wire-up progress: 50 -> 53 wired (31% -> 33%); 9 domains 0%-wired unchanged (query was already wired)."
+      ],
+      "publishable_decision_summary": "R311cj query domain wire-up extension — 3 reserved features wired (-attachment, -selector-parameters, -reply-err); 9/10 active; query-source-info stays reserved (no impl).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/Cargo.toml: query-attachment + query-selector-parameters + query-reply-err features + default-on.",
+        "crates/wz/Cargo.toml: 3 facade forwards via ?-syntax; query 6/4 -> 9/1 comment update.",
+        "crates/wz-runtime-tokio/src/query.rs: extract_query_attachment early-return cfg + parameters_view cfg-aware binding.",
+        "crates/wz-runtime-tokio/src/query_event.rs: reply_err combined gate all(query-queryable, query-reply-err).",
+        "§5.9 query catalog body: intent + 5 rationale + 6 outputs + 2 caveats + impact_scope."
+      ],
+      "publishable_verification_bullets": [
+        "Audit verification: query-attachment 2 / query-selector-parameters 2 / query-reply-err 2 = 6 new cfg sites.",
+        "cargo check + clippy --all-targets -D warnings + fmt --check + test -p wz-runtime-tokio --lib (593/593): all pass.",
+        "validate_workspace baseline: entries 416 -> 417, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "query-source-info reserved: build_request_query_with_source_info implementation is doc-referenced but missing; wire-up when impl arrives.",
+        "Keyexpr 7 cluster-deferred remains carry: per-site cfg on matchers risks fan-out break, requires careful multi-round wire-up.",
+        "Runtime 4 reserved + liveliness 3 reserved are remaining wire-up targets in respective domains.",
+        "R311ca debt #6 wire-up progress: 50 -> 53 wired (31% -> 33%); 9 domains 0%-wired unchanged (query was already wired)."
       ]
     },
     "Round 311d": {
