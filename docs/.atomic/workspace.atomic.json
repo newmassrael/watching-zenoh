@@ -20296,6 +20296,104 @@
         "Architectural carries unchanged: R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter"
       ]
     },
+    "Round 311bs": {
+      "decision_summary": "R311bs preset catalog ground-truth ratify: Cargo features = atomic §6.x outputs source of truth; 7-preset audit table (3 measured / 4 body-empty).",
+      "changes_bullets": [
+        "Ground-truth ratify: Cargo Side preset definitions (crates/wz/Cargo.toml [features]) = atomic §6.x outputs_bullets source of truth (실제 빌드되는 코드 진실)",
+        "§6.1 preset-mcu-minimal measured: atomic 34 / Cargo 35; 17 divergence (atomic-only 8 + Cargo-only 9); R311bt aligns",
+        "§6.1 atomic-only 8: scouting-active / link-frame / link-fragment / link-batching / declare-keyexpr / codec-scout / codec-hello / codec-fragment",
+        "§6.1 Cargo-only 9: transport-batching / session-unicast-accept / pubsub-delete / pubsub-encoding / pubsub-timestamp / keyexpr-includes / keyexpr-intersect / scouting-static / time-system-clock",
+        "§6.2 preset-mcu-extended: atomic body empty (부채 #8 outline-only hit); R311bu transcribes Cargo 56 features",
+        "§6.3 preset-ap-client measured: atomic 64 / Cargo 65; 3 divergence (atomic-only codec-join + Cargo-only scouting-static / time-timestamp-source); R311bv aligns + body trailing artifact </bullet> cleanup",
+        "§6.4 preset-ap-router: atomic body empty; R311bw transcribes Cargo 79 features",
+        "§6.5 preset-ap-full: atomic body empty; R311bx transcribes Cargo 123 features",
+        "§6.6 preset-zenoh-cpp: atomic body empty; R311by transcribes Cargo 113 features",
+        "§6.7 preset-cortex-m4-default measured: atomic 56 / Cargo 56; 1 typo (keyexpr-include atomic vs keyexpr-includes Cargo correct); R311bz fixes",
+        "부채 #6 atomic feature catalog truthfulness 부분 R311bt-bz cascade에서 청산; wire-up 54% 부분은 R311ca audit + R311cb+ 후속",
+        "부채 #8 R303++ 39 outline-only sub-sections: §6.x 4개 (§6.2/§6.4/§6.5/§6.6) R311bu/bw/bx/by closes; 나머지 35 outline-only carry"
+      ],
+      "verification_bullets": [
+        "Diff method: §6.x atomic outputs_bullets text-list vs Cargo preset feature list, sort + set-diff per preset",
+        "§6.1 audit: atomic 34 entries vs Cargo preset-mcu-minimal 35 entries; 17 line-level divergence per measured 8 + 9 split",
+        "§6.3 audit: atomic 64 entries vs Cargo preset-ap-client 65 entries; 3 line-level divergence per measured 1 + 2 split",
+        "§6.7 audit: atomic 56 entries vs Cargo preset-cortex-m4-default 56 entries; 1 typo divergence (Cargo.toml comment already flags as prose-vs-canon-name; atomic side typo)",
+        "§6.2 §6.4 §6.5 §6.6 atomic body empty: confirmed via query_section body field empty string return",
+        "validate_workspace baseline 캡처: entries=399 sections=256 T1=0 RT=13/13 GENERATED.md=sync; R311bs ratify entry-only mutation (no source / no atomic outputs touch)",
+        "Decision-only ratify: no Cargo.toml edit / no source edit / no test re-run; Layer 0/A/B/C/D/E/G/Q unchanged",
+        "북극성 lens: atomic feature 카탈로그 truthfulness 가 composable framework 약속 토대; 카탈로그 진실=Cargo 결정은 'Cargo가 실제 빌드 진실' 일관성 (kconfig/NixOS/Buildroot pattern)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-2-preset-mcu-extended",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-3-preset-ap-client",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-4-preset-ap-router",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-6-preset-zenoh-cpp",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "R311bt: §6.1 atomic outputs_bullets set to Cargo preset-mcu-minimal 35 features (sort-stable order)",
+        "R311bu: §6.2 atomic body transcribe Cargo preset-mcu-extended 56 features (부채 #8 partial closure)",
+        "R311bv: §6.3 outputs_bullets +scouting-static +time-timestamp-source -codec-join + body trailing </bullet>/</invoke> artifact cleanup",
+        "R311bw: §6.4 atomic body transcribe Cargo preset-ap-router 79 features",
+        "R311bx: §6.5 atomic body transcribe Cargo preset-ap-full 123 features",
+        "R311by: §6.6 atomic body transcribe Cargo preset-zenoh-cpp 113 features",
+        "R311bz: §6.7 outputs_bullets keyexpr-include → keyexpr-includes typo fix",
+        "부채 #6 catalog truthfulness 부분 closes at R311bz",
+        "부채 #6 wire-up 54% 부분 R311ca audit + R311cb+ 도메인별 mechanical wire-up",
+        "부채 #8 §6.x 4 sub-sections close at R311bu/bw/bx/by; 35 outline-only remainder carry",
+        "Architectural carries unchanged: R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter"
+      ],
+      "publishable_decision_summary": "R311bs preset catalog ground-truth ratify: Cargo features = atomic §6.x outputs source of truth; 7-preset audit table (3 measured / 4 body-empty).",
+      "publishable_changes_bullets": [
+        "Ground-truth ratify: Cargo Side preset definitions (crates/wz/Cargo.toml [features]) = atomic §6.x outputs_bullets source of truth (실제 빌드되는 코드 진실)",
+        "§6.1 preset-mcu-minimal measured: atomic 34 / Cargo 35; 17 divergence (atomic-only 8 + Cargo-only 9); R311bt aligns",
+        "§6.1 atomic-only 8: scouting-active / link-frame / link-fragment / link-batching / declare-keyexpr / codec-scout / codec-hello / codec-fragment",
+        "§6.1 Cargo-only 9: transport-batching / session-unicast-accept / pubsub-delete / pubsub-encoding / pubsub-timestamp / keyexpr-includes / keyexpr-intersect / scouting-static / time-system-clock",
+        "§6.2 preset-mcu-extended: atomic body empty (부채 #8 outline-only hit); R311bu transcribes Cargo 56 features",
+        "§6.3 preset-ap-client measured: atomic 64 / Cargo 65; 3 divergence (atomic-only codec-join + Cargo-only scouting-static / time-timestamp-source); R311bv aligns + body trailing artifact </bullet> cleanup",
+        "§6.4 preset-ap-router: atomic body empty; R311bw transcribes Cargo 79 features",
+        "§6.5 preset-ap-full: atomic body empty; R311bx transcribes Cargo 123 features",
+        "§6.6 preset-zenoh-cpp: atomic body empty; R311by transcribes Cargo 113 features",
+        "§6.7 preset-cortex-m4-default measured: atomic 56 / Cargo 56; 1 typo (keyexpr-include atomic vs keyexpr-includes Cargo correct); R311bz fixes",
+        "부채 #6 atomic feature catalog truthfulness 부분 R311bt-bz cascade에서 청산; wire-up 54% 부분은 R311ca audit + R311cb+ 후속",
+        "부채 #8 R303++ 39 outline-only sub-sections: §6.x 4개 (§6.2/§6.4/§6.5/§6.6) R311bu/bw/bx/by closes; 나머지 35 outline-only carry"
+      ],
+      "publishable_verification_bullets": [
+        "Diff method: §6.x atomic outputs_bullets text-list vs Cargo preset feature list, sort + set-diff per preset",
+        "§6.1 audit: atomic 34 entries vs Cargo preset-mcu-minimal 35 entries; 17 line-level divergence per measured 8 + 9 split",
+        "§6.3 audit: atomic 64 entries vs Cargo preset-ap-client 65 entries; 3 line-level divergence per measured 1 + 2 split",
+        "§6.7 audit: atomic 56 entries vs Cargo preset-cortex-m4-default 56 entries; 1 typo divergence (Cargo.toml comment already flags as prose-vs-canon-name; atomic side typo)",
+        "§6.2 §6.4 §6.5 §6.6 atomic body empty: confirmed via query_section body field empty string return",
+        "validate_workspace baseline 캡처: entries=399 sections=256 T1=0 RT=13/13 GENERATED.md=sync; R311bs ratify entry-only mutation (no source / no atomic outputs touch)",
+        "Decision-only ratify: no Cargo.toml edit / no source edit / no test re-run; Layer 0/A/B/C/D/E/G/Q unchanged",
+        "북극성 lens: atomic feature 카탈로그 truthfulness 가 composable framework 약속 토대; 카탈로그 진실=Cargo 결정은 'Cargo가 실제 빌드 진실' 일관성 (kconfig/NixOS/Buildroot pattern)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-2-preset-mcu-extended",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-3-preset-ap-client",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-4-preset-ap-router",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-6-preset-zenoh-cpp",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311bt: §6.1 atomic outputs_bullets set to Cargo preset-mcu-minimal 35 features (sort-stable order)",
+        "R311bu: §6.2 atomic body transcribe Cargo preset-mcu-extended 56 features (부채 #8 partial closure)",
+        "R311bv: §6.3 outputs_bullets +scouting-static +time-timestamp-source -codec-join + body trailing </bullet>/</invoke> artifact cleanup",
+        "R311bw: §6.4 atomic body transcribe Cargo preset-ap-router 79 features",
+        "R311bx: §6.5 atomic body transcribe Cargo preset-ap-full 123 features",
+        "R311by: §6.6 atomic body transcribe Cargo preset-zenoh-cpp 113 features",
+        "R311bz: §6.7 outputs_bullets keyexpr-include → keyexpr-includes typo fix",
+        "부채 #6 catalog truthfulness 부분 closes at R311bz",
+        "부채 #6 wire-up 54% 부분 R311ca audit + R311cb+ 도메인별 mechanical wire-up",
+        "부채 #8 §6.x 4 sub-sections close at R311bu/bw/bx/by; 35 outline-only remainder carry",
+        "Architectural carries unchanged: R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter"
+      ]
+    },
     "Round 311c": {
       "decision_summary": "R311c lands codec-close cascade — wire encode/decode + send_close_with_reason + bind_unit gated; CloseReason enum + set_close_reason_* FSM bindings stay unconditional.",
       "changes_bullets": [
