@@ -1562,18 +1562,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
             options,
         }
     }
-}
 
-// R311dd — split point: declare_querier{,_aliased} + declare_publisher
-// {,_aliased} migrated to the R-generic block above. The 4 aggregator
-// constructors return X<R, T> handles whose impl blocks (Querier /
-// QuerierAliased / Publisher / PublisherAliased) are themselves lifted
-// to impl<R, T> in this round; their get_matching_status methods are
-// migrated to R::with_mutex_mut. The remaining declare_* surface
-// (Subscriber / Queryable / LivelinessToken / LivelinessSubscriber
-// registries) still calls observer.lock().expect(...) at registration
-// time and stays on the AP-bound block until R311de+ migrates them.
-impl<T: TimeSource> Session<TokioRuntime, T> {
     /// R245 — declare a [`Subscriber`] for `keyexpr` + `options`
     /// that fires `callback` on every matching inbound `Sample`.
     /// Returns a [`Subscriber`] handle whose `Drop` auto-unregisters
@@ -1595,14 +1584,16 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         keyexpr: impl Into<String>,
         options: SubscribeOptions,
         callback: impl FnMut(&Sample) + Send + 'static,
-    ) -> Subscriber<TokioRuntime, T> {
+    ) -> Subscriber<R, T> {
         let keyexpr_string = keyexpr.into();
-        let id = self
-            .observer
-            .lock()
-            .expect("Session observer mutex poisoned — a subscriber callback panicked")
-            .subscribers
-            .register_with_locality(keyexpr_string.clone(), options.allowed_origin, callback);
+        // R311de — observer access via R::with_mutex_mut closure form.
+        let id = R::with_mutex_mut(&self.observer, |observer| {
+            observer.subscribers.register_with_locality(
+                keyexpr_string.clone(),
+                options.allowed_origin,
+                callback,
+            )
+        });
         Subscriber {
             session: self.clone(),
             id,
@@ -1638,7 +1629,7 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         inline_suffix: Option<&str>,
         options: SubscribeOptions,
         callback: impl FnMut(&Sample) + Send + 'static,
-    ) -> Result<Subscriber<TokioRuntime, T>, SubscribeAliasError> {
+    ) -> Result<Subscriber<R, T>, SubscribeAliasError> {
         let base = self
             .actions
             .resolve_outbound_mapping(mapping_id)
@@ -1653,7 +1644,16 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         };
         Ok(self.declare_subscriber(resolved, options, callback))
     }
+}
 
+// R311de — split point: declare_subscriber + declare_subscriber_aliased
+// migrated to R::with_mutex_mut + lifted to the R-generic block above.
+// Subscriber impl block (id / keyexpr / options accessors + undeclare)
+// is fully R-generic. The remaining declare_* surface (Queryable +
+// LivelinessToken + LivelinessSubscriber registries) still calls
+// observer.lock().expect(...) at registration time and stays on the
+// AP-bound block until R311df+ migrates them.
+impl<T: TimeSource> Session<TokioRuntime, T> {
     /// R246 — declare a [`Queryable`] for `keyexpr` + `options` that
     /// fires `callback` on every matching inbound `Request(Query)`.
     /// Pub/sub mirror of [`Self::declare_subscriber`] on the
@@ -2887,7 +2887,7 @@ pub struct Subscriber<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
     options: SubscribeOptions,
 }
 
-impl<T: TimeSource> Subscriber<TokioRuntime, T> {
+impl<R: Runtime, T: TimeSource> Subscriber<R, T> {
     /// The stable id assigned by
     /// [`crate::pubsub::SubscriberRegistry::register_with_locality`].
     /// Exposed for diagnostics; callers should not rely on the
@@ -2917,13 +2917,10 @@ impl<T: TimeSource> Subscriber<TokioRuntime, T> {
     /// raw `unregister(id)` outside this handle, so the false case
     /// is reachable only via a future round adding such a surface).
     pub fn undeclare(self) -> bool {
-        let removed = self
-            .session
-            .observer
-            .lock()
-            .expect("Session observer mutex poisoned — a subscriber callback panicked")
-            .subscribers
-            .unregister(self.id);
+        // R311de — observer access via R::with_mutex_mut closure form.
+        let removed = R::with_mutex_mut(&self.session.observer, |observer| {
+            observer.subscribers.unregister(self.id)
+        });
         // Skip the Drop impl so it does not no-op-unregister an
         // already-removed id (cosmetic — second unregister is a
         // boolean false, not a panic, but std::mem::forget makes
