@@ -1516,6 +1516,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-session-core"
+version = "0.1.0"
+dependencies = [
+ "wz-runtime-core",
+]
+
+[[package]]
 name = "zenoh-pico-sys"
 version = "0.1.0"
 dependencies = [

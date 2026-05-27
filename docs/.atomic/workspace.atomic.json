@@ -23327,6 +23327,52 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311di-1": {
+      "decision_summary": "R311di-1 — wz-session-core crate skeleton lands; empty no_std + alloc crate, workspace member registered, deps wz-runtime-core only; future sub-rounds (R311di-2+) move generic session machinery in incrementally.",
+      "changes_bullets": [
+        "crates/wz-session-core/Cargo.toml: new crate manifest. Description: 'R311di proper - runtime-agnostic Session / SessionLinkActions / helper surface (Phase W §5.P + §5.C consumer).' deps = wz-runtime-core only (path dep); features `default = [\"alloc\"]` with explicit `alloc = []` switch so MCU bare-metal profiles can disable. Workspace-level fields (version / edition / rust-version / license / authors / repository / readme) all inherit. Manifest doc-block records the AP-only retained surface (Lua bindings + SessionLinkActions::new concrete constructor stay in wz-runtime-tokio).",
+        "crates/wz-session-core/src/lib.rs: 21-line skeleton. `#![no_std]` unconditional; `extern crate alloc;` cfg-gated on the `alloc` feature; `#[cfg_attr(not(feature = \"alloc\"), allow(unused_extern_crates))]` so the unconditional skeleton compiles without warnings on either feature state. Doc-block records the R311di-1 entry point and the per-sub-round migration plan.",
+        "crates/Cargo.toml: workspace.members list gains `wz-session-core` between `wz-runtime-core` and `zenoh-pico-sys` (alphabetical adjacency + functional adjacency — both are the runtime-services-tier foundation that downstream crates build on)."
+      ],
+      "verification_bullets": [
+        "cargo check -p wz-session-core: clean (0.05s; empty crate compiles to empty rlib).",
+        "cargo check --workspace --all-targets: clean (0.86s; new crate joins workspace without breaking any downstream crate).",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass.",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent). wz-session-core does not need its own Layer G lane yet (no source surface); future sub-rounds will add G.X for the session-core crate once it has non-trivial content.",
+        "validate_workspace: entries=454 -> 455, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-2 (next): first file move — keyexpr_canon.rs is the smallest of the migration set (R-generic input validation utilities; depends only on wz-runtime-core trait imports + alloc::String / alloc::Vec; no Lua / no std beyond what alloc covers). Move + import path rewrite in wz-runtime-tokio (`crate::keyexpr_canon::*` -> `wz_session_core::keyexpr_canon::*` via lib.rs re-export) + cargo check regression.",
+        "R311di-3..di-8: subsequent file moves — locality.rs (small) -> sample.rs (small) -> reply.rs (medium) -> query.rs (medium) -> declare/* (medium-large) -> pubsub.rs (large) -> observer.rs (large) -> session.rs (large) -> session_glue.rs (split into wz-session-core generic body + wz-runtime-tokio Lua-binding + concrete-ctor remainder). Multi-week long tail; estimated 8-12 sub-rounds.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311di-1 — wz-session-core crate skeleton lands; empty no_std + alloc crate, workspace member registered, deps wz-runtime-core only; future sub-rounds (R311di-2+) move generic session machinery in incrementally.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/Cargo.toml: new crate manifest. Description: 'R311di proper - runtime-agnostic Session / SessionLinkActions / helper surface (Phase W §5.P + §5.C consumer).' deps = wz-runtime-core only (path dep); features `default = [\"alloc\"]` with explicit `alloc = []` switch so MCU bare-metal profiles can disable. Workspace-level fields (version / edition / rust-version / license / authors / repository / readme) all inherit. Manifest doc-block records the AP-only retained surface (Lua bindings + SessionLinkActions::new concrete constructor stay in wz-runtime-tokio).",
+        "crates/wz-session-core/src/lib.rs: 21-line skeleton. `#![no_std]` unconditional; `extern crate alloc;` cfg-gated on the `alloc` feature; `#[cfg_attr(not(feature = \"alloc\"), allow(unused_extern_crates))]` so the unconditional skeleton compiles without warnings on either feature state. Doc-block records the R311di-1 entry point and the per-sub-round migration plan.",
+        "crates/Cargo.toml: workspace.members list gains `wz-session-core` between `wz-runtime-core` and `zenoh-pico-sys` (alphabetical adjacency + functional adjacency — both are the runtime-services-tier foundation that downstream crates build on)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check -p wz-session-core: clean (0.05s; empty crate compiles to empty rlib).",
+        "cargo check --workspace --all-targets: clean (0.86s; new crate joins workspace without breaking any downstream crate).",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass.",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent). wz-session-core does not need its own Layer G lane yet (no source surface); future sub-rounds will add G.X for the session-core crate once it has non-trivial content.",
+        "validate_workspace: entries=454 -> 455, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-2 (next): first file move — keyexpr_canon.rs is the smallest of the migration set (R-generic input validation utilities; depends only on wz-runtime-core trait imports + alloc::String / alloc::Vec; no Lua / no std beyond what alloc covers). Move + import path rewrite in wz-runtime-tokio (`crate::keyexpr_canon::*` -> `wz_session_core::keyexpr_canon::*` via lib.rs re-export) + cargo check regression.",
+        "R311di-3..di-8: subsequent file moves — locality.rs (small) -> sample.rs (small) -> reply.rs (medium) -> query.rs (medium) -> declare/* (medium-large) -> pubsub.rs (large) -> observer.rs (large) -> session.rs (large) -> session_glue.rs (split into wz-session-core generic body + wz-runtime-tokio Lua-binding + concrete-ctor remainder). Multi-week long tail; estimated 8-12 sub-rounds.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311di-pre-a": {
       "decision_summary": "R311di-pre-a — wz-runtime-tokio adds hashbrown + portable-atomic deps; session_glue.rs HashMap + AtomicU64 imports route through them; first step toward wz-session-core no_std move-readiness.",
       "changes_bullets": [
