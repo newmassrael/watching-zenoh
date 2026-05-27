@@ -200,8 +200,13 @@ encoding-mime = []
 encoding-protobuf = []
 encoding-utf8 = []
 
-# ----- domain: keyexpr (8 atomic, all active) -----
-keyexpr-canon = []
+# ----- domain: keyexpr (8 atomic, 1 active / 7 cluster-deferred) -----
+# R311cf — keyexpr-canon forwards the keyexpr_canon module gate;
+# remaining 7 features (-literal, -mapping, -intersect, -includes,
+# -wildcard-single, -wildcard-double, -dollar-star) are cluster-wide
+# behaviors with no single anchor cfg site. Per-site wire-up lands in
+# a follow-up cascade. "all active" comment corrected to mark the gap.
+keyexpr-canon = ["wz-runtime-tokio?/keyexpr-canon"]
 keyexpr-dollar-star = []
 keyexpr-includes = []
 keyexpr-intersect = []
