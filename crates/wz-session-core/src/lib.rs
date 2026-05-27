@@ -52,6 +52,12 @@ pub mod lease;
 /// no_std + no_alloc clean (pure value types with wire_byte helpers).
 pub mod query_mode;
 
+/// Wire-encode-time metadata bundles (PushMetadata + QueryMetadata)
+/// routed from session API through the codec layer. Uses Sample +
+/// query_mode types; alloc-gated due to Vec<u8> attachment slots.
+#[cfg(feature = "alloc")]
+pub mod metadata;
+
 /// R222 / R225 — application-layer `Sample` type for subscriber callbacks.
 /// Mirrors zenoh-pico's `_z_sample_t` projection. Carries alloc-bound
 /// fields (Vec<u8> payload, String keyexpr) so gated on the `alloc`
