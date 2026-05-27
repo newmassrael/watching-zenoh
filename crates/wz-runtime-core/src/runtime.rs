@@ -147,4 +147,46 @@ pub trait Runtime: Send + Sync + 'static {
     fn with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U
     where
         T: Send + 'static;
+
+    /// R311di-pre-e — construction-side complement of
+    /// [`Self::with_mutex_mut`]. Wraps `value` in a `Self::Mutex<T>`
+    /// using the per-profile concrete-type constructor: tokio binds to
+    /// `std::sync::Mutex::new(value)`; MCU profiles construct via the
+    /// profile's primitive (e.g. lwIP profile binds to
+    /// `critical_section::Mutex::new(RefCell::new(value))`).
+    ///
+    /// The trait method is required because generic-R code cannot
+    /// invoke inherent methods on the GAT type `Self::Mutex<T>` — the
+    /// trait declares the type as opaque (`Send + Sync + 'static`) and
+    /// inherent methods belong to the per-profile concrete type. The
+    /// natural pattern in generic code (`R::Mutex::new(value)` /
+    /// `R::Mutex::<T>::new(value)`) does not resolve through the GAT;
+    /// the textbook fix is a trait method that takes ownership of
+    /// `value` and returns the GAT type.
+    ///
+    /// Together with [`Self::with_mutex_mut`], this completes the
+    /// minimal Mutex API surface a generic `Session<R: Runtime>` needs:
+    /// construct (`new_mutex`) and operate (`with_mutex_mut`). Dropping
+    /// the constructed `Self::Mutex<T>` value runs the per-profile
+    /// destructor (tokio: `std::sync::Mutex` Drop; MCU: critical_section
+    /// no-op since the Mutex itself owns no allocation).
+    fn new_mutex<T>(value: T) -> Self::Mutex<T>
+    where
+        T: Send + 'static;
+
+    /// R311di-pre-e — construction-side complement of [`Self::RwLock`].
+    /// Same per-profile binding discipline as [`Self::new_mutex`]:
+    /// tokio binds to `std::sync::RwLock::new(value)`; MCU profiles
+    /// where RwLock collapses to Mutex (single-core IRQ-safe model)
+    /// construct via the collapsed primitive (e.g. lwIP profile binds
+    /// to `critical_section::Mutex::new(RefCell::new(value))`).
+    ///
+    /// The `T: Send + Sync + 'static` bound matches the type-level
+    /// [`Self::RwLock`] bound — one tighter than [`Self::new_mutex`]
+    /// because shared-read access lets `&T` cross threads, so `T`
+    /// itself must be `Sync` (whereas Mutex's exclusive-access lock
+    /// only requires `T: Send`).
+    fn new_rwlock<T>(value: T) -> Self::RwLock<T>
+    where
+        T: Send + Sync + 'static;
 }
