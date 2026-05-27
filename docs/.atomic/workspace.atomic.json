@@ -763,6 +763,70 @@
       "title": "§6.2 preset-mcu-extended v0.1.0",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "intent": "preset-mcu-minimal scope + query + liveliness + wildcards + active scouting — extended MCU deployment for richer pubsub/query workflows on bare-metal targets. 57 atomic features.",
+      "outputs_bullets": [
+        "`platform-bare-metal`",
+        "`runtime-no-std`",
+        "`transport-link-udp`",
+        "`transport-unicast`",
+        "`transport-keepalive`",
+        "`transport-batching`",
+        "`session-unicast-open`",
+        "`session-unicast-accept`",
+        "`codec-frame`",
+        "`codec-keep-alive`",
+        "`codec-init-body`",
+        "`codec-open-body`",
+        "`codec-close`",
+        "`codec-push`",
+        "`codec-declare`",
+        "`codec-request`",
+        "`codec-response`",
+        "`codec-response-final`",
+        "`codec-scout`",
+        "`codec-hello`",
+        "`declare-subscriber`",
+        "`declare-undeclare`",
+        "`declare-queryable`",
+        "`declare-keyexpr`",
+        "`declare-token`",
+        "`declare-final`",
+        "`declare-interest`",
+        "`pubsub-put`",
+        "`pubsub-delete`",
+        "`pubsub-sample`",
+        "`pubsub-encoding`",
+        "`pubsub-timestamp`",
+        "`encoding-bytes`",
+        "`encoding-empty`",
+        "`encoding-utf8`",
+        "`keyexpr-literal`",
+        "`keyexpr-canon`",
+        "`keyexpr-includes`",
+        "`keyexpr-intersect`",
+        "`keyexpr-mapping`",
+        "`keyexpr-wildcard-single`",
+        "`keyexpr-wildcard-double`",
+        "`keyexpr-dollar-star`",
+        "`query-get`",
+        "`query-queryable`",
+        "`query-reply`",
+        "`query-target`",
+        "`query-timeout`",
+        "`query-consolidation`",
+        "`liveliness-token`",
+        "`liveliness-subscriber`",
+        "`locator-udp`",
+        "`routing-client`",
+        "`scouting-static`",
+        "`scouting-active`",
+        "`time-system-clock`",
+        "`time-ntp64`"
+      ],
+      "caveats_bullets": [
+        "R311bu body transcribed from Cargo preset-mcu-extended ground truth (line 644-702)",
+        "R311bu Cargo inconsistency: runtime-lwip omitted (mcu-minimal has it); R311ca audit"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-3-preset-ap-client": {
@@ -20439,6 +20503,52 @@
       "publishable_carry_forward_bullets": [
         "R311bu next: §6.2 atomic body transcribe Cargo preset-mcu-extended 56 features",
         "R311bs cascade continues R311bu-bz; 부채 #6 catalog truthfulness incremental closure"
+      ]
+    },
+    "Round 311bu": {
+      "decision_summary": "R311bu §6.2 preset-mcu-extended body transcribe from Cargo 57 features; runtime-lwip omission caveat audit-traced.",
+      "changes_bullets": [
+        "set_section_intent §6.2: 1-sentence purpose + '57 atomic features' count (R311bs carry corrected: 56 → 57)",
+        "set_section_outputs §6.2: 57 features transcribed from Cargo preset-mcu-extended line 644-702 exact order",
+        "add_section_caveat §6.2: R311bu transcribe provenance audit-trace",
+        "add_section_caveat §6.2: Cargo Side inconsistency note — runtime-lwip omitted (mcu-minimal has it); R311ca audit"
+      ],
+      "verification_bullets": [
+        "query_section §6.2 전: body=empty / 후: 57 outputs + 2 caveats + intent populated",
+        "validate_workspace: entries=401→402 sections=256 T1=0 RT=13/13 GENERATED.md=sync",
+        "R311bs carry typo correction: 56 → 57 features (Cargo.toml line count verified)",
+        "Cargo-truth alignment audit: outputs_bullets line-for-line matches Cargo preset-mcu-extended",
+        "부채 #8 §6.2 outline-only closes; 38 outline-only remainder carry"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-2-preset-mcu-extended"
+      ],
+      "carry_forward_bullets": [
+        "R311bv next: §6.3 outputs +scouting-static +time-timestamp-source -codec-join + body trailing artifact cleanup",
+        "R311ca audit candidate: preset-mcu-extended runtime-lwip omission — Cargo Side design bug 가능성",
+        "부채 #6 catalog cascade R311bs+ continues"
+      ],
+      "publishable_decision_summary": "R311bu §6.2 preset-mcu-extended body transcribe from Cargo 57 features; runtime-lwip omission caveat audit-traced.",
+      "publishable_changes_bullets": [
+        "set_section_intent §6.2: 1-sentence purpose + '57 atomic features' count (R311bs carry corrected: 56 → 57)",
+        "set_section_outputs §6.2: 57 features transcribed from Cargo preset-mcu-extended line 644-702 exact order",
+        "add_section_caveat §6.2: R311bu transcribe provenance audit-trace",
+        "add_section_caveat §6.2: Cargo Side inconsistency note — runtime-lwip omitted (mcu-minimal has it); R311ca audit"
+      ],
+      "publishable_verification_bullets": [
+        "query_section §6.2 전: body=empty / 후: 57 outputs + 2 caveats + intent populated",
+        "validate_workspace: entries=401→402 sections=256 T1=0 RT=13/13 GENERATED.md=sync",
+        "R311bs carry typo correction: 56 → 57 features (Cargo.toml line count verified)",
+        "Cargo-truth alignment audit: outputs_bullets line-for-line matches Cargo preset-mcu-extended",
+        "부채 #8 §6.2 outline-only closes; 38 outline-only remainder carry"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-2-preset-mcu-extended"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311bv next: §6.3 outputs +scouting-static +time-timestamp-source -codec-join + body trailing artifact cleanup",
+        "R311ca audit candidate: preset-mcu-extended runtime-lwip omission — Cargo Side design bug 가능성",
+        "부채 #6 catalog cascade R311bs+ continues"
       ]
     },
     "Round 311c": {
