@@ -898,7 +898,7 @@ pub struct SessionLinkActions<R: Runtime = TokioRuntime, T: TimeSource = TokioTi
     /// single-key lookup); the contended-write penalty of RwLock
     /// would dwarf the read parallelism gain at the expected
     /// access pattern.
-    pub outbound_mappings: Mutex<HashMap<u64, String>>,
+    pub outbound_mappings: R::Mutex<HashMap<u64, String>>,
     /// R239 — monotonic outbound `Request.request_id` allocator.
     /// Mirrors zenoh-pico's `_z_session_t._query_id` slot
     /// (`vendor/zenoh-pico/src/session/query.c:99` —
@@ -1523,10 +1523,9 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             // panic does not leave a table entry that the peer never
             // saw. Mirrors zenoh-pico's `_z_register_resource` which
             // executes on the local-side declaration emit path.
-            self.outbound_mappings
-                .lock()
-                .expect("outbound_mappings poisoned by an earlier panicked publish")
-                .insert(mapping_id, suffix.to_string());
+            R::with_mutex_mut(&self.outbound_mappings, |table| {
+                table.insert(mapping_id, suffix.to_string());
+            });
             Ok(())
         }
         #[cfg(not(feature = "declare-keyexpr"))]
@@ -1903,10 +1902,9 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             // an absent id is a no-op. Mirrors zenoh-pico's
             // `_z_unregister_resource` invoked on the local-side
             // undeclare emit path.
-            self.outbound_mappings
-                .lock()
-                .expect("outbound_mappings poisoned by an earlier panicked publish")
-                .remove(&mapping_id);
+            R::with_mutex_mut(&self.outbound_mappings, |table| {
+                table.remove(&mapping_id);
+            });
         }
         #[cfg(not(all(feature = "declare-keyexpr", feature = "declare-undeclare")))]
         let _ = mapping_id;
@@ -1924,11 +1922,9 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
     /// `_z_session_t._local_resources`, queried via
     /// `_z_get_resource_by_id` on the publish path.
     pub fn resolve_outbound_mapping(&self, mapping_id: u64) -> Option<String> {
-        self.outbound_mappings
-            .lock()
-            .expect("outbound_mappings poisoned by an earlier panicked publish")
-            .get(&mapping_id)
-            .cloned()
+        R::with_mutex_mut(&self.outbound_mappings, |table| {
+            table.get(&mapping_id).cloned()
+        })
     }
 
     /// R283 — `true` once the session-FSM has entered the `Established`
