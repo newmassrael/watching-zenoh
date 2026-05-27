@@ -22639,6 +22639,70 @@
         "Future Layer C3 expansion: consider per-package isolated lanes for wz-runtime-lwip + wz-runtime-tokio + wz facade once feature-combination regressions surface from those crates. R311cv proves the mechanism on wz-ap-demo first."
       ]
     },
+    "Round 311cw": {
+      "decision_summary": "R311cw — Session R T reparam: T TimeSource folds from 5 method-level generics to type-level 2nd param; clock now Session-owned Arc",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> + clock: Arc<T> field; manual Clone <R, T>; TokioSession alias gains explicit TokioTime slot.",
+        "session.rs: 5 methods (Session::query / query_aliased / query_aliased_auto + Querier::get + QuerierAliased::get) lose <T: TimeSource> generic + clock: &T parameter; bodies read self.clock.now_monotonic_ms() instead.",
+        "session.rs: 8 helper structs (Querier / QuerierAliased / Publisher / PublisherAliased / Subscriber / Queryable / LivelinessToken / LivelinessSubscriber) gain T: TimeSource = TokioTime 2nd param; session field type lifts from Session<R> to Session<R, T>; manual Clone + Drop impls extend bound set.",
+        "session.rs: 12 helper impl blocks (impl Querier<TokioRuntime> -> impl<T: TimeSource> Querier<TokioRuntime, T> etc.) propagate T through the type-level binding.",
+        "session.rs: 10 declare_* return types tighten from bare Helper to Helper<TokioRuntime, T> so self.clone() in the constructor body matches the helper struct field type.",
+        "session.rs: Session::new(actions, observer) -> Session::new(actions, observer, clock: Arc<T>); build_session test fixture + 2 session_new_with_*_zid edge case tests pass Arc<TokioTime>.",
+        "session.rs: 31 standalone &clock, argument lines + 36 unused let clock = TokioTime::new() bindings removed from #[cfg(test)] test bodies (sed mechanical strip).",
+        "crates/wz-ap-demo/src/runner.rs:627: Session::new gains Arc::new(session_clock) third argument; comment documents the same-monotonic-epoch contract shared with SessionLinkActions::new + drive_session_until_terminal."
+      ],
+      "verification_bullets": [
+        "cargo check -p wz-runtime-tokio --all-targets: clean (lib + tests + bins).",
+        "cargo check --workspace --all-targets: clean (every crate including wz-ap-demo + wz-integration-tests).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "cargo test -p wz-runtime-tokio --lib: 593/593 pass.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=429 -> 430, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "Session struct still lives in wz-runtime-tokio crate (which pulls tokio std). Next architectural step: extract Session + 8 helpers + SessionInitParams + SessionLinkActions + ApplicationLayerObserver into a runtime-agnostic crate (candidate name wz-session-core, no_std + alloc) so wz-runtime-lwip can finally bind LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>>. Multi-round refactor — session_glue.rs has 3 std imports (HashMap / AtomicU64 / std::sync::Mutex direct) + lib.rs has 5 tokio/std network imports (io / SocketAddr / AsyncReadExt / TcpStream / UdpSocket) that need to split into link-tier crate first.",
+        "Method generic lift: impl<T: TimeSource> Session<TokioRuntime, T> is still locked on TokioRuntime concrete. Lifting the 100+ AP method block to impl<R: Runtime, T: TimeSource> Session<R, T> requires every self.observer.lock() / .expect() site to migrate to R::with_mutex_mut closure form (R311ct API). Multi-round per session.rs surface size (~7900 lines).",
+        "R311ca debt #6 wire-up at 19% wired (post-R267 unchanged). R311cw unblocks the runtime-{async-std, no-std, tokio-uring, zero-copy} 4 reserved features mechanically once Session moves to a runtime-agnostic crate.",
+        "Layer C3 expansion: wz facade + wz-runtime-tokio + wz-runtime-lwip per-package isolated --all-targets clippy gates. R311cv proved the mechanism on wz-ap-demo; the same regression class (preset-feature lint masked by workspace unified resolver) could surface elsewhere.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311cw — Session R T reparam: T TimeSource folds from 5 method-level generics to type-level 2nd param; clock now Session-owned Arc",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> + clock: Arc<T> field; manual Clone <R, T>; TokioSession alias gains explicit TokioTime slot.",
+        "session.rs: 5 methods (Session::query / query_aliased / query_aliased_auto + Querier::get + QuerierAliased::get) lose <T: TimeSource> generic + clock: &T parameter; bodies read self.clock.now_monotonic_ms() instead.",
+        "session.rs: 8 helper structs (Querier / QuerierAliased / Publisher / PublisherAliased / Subscriber / Queryable / LivelinessToken / LivelinessSubscriber) gain T: TimeSource = TokioTime 2nd param; session field type lifts from Session<R> to Session<R, T>; manual Clone + Drop impls extend bound set.",
+        "session.rs: 12 helper impl blocks (impl Querier<TokioRuntime> -> impl<T: TimeSource> Querier<TokioRuntime, T> etc.) propagate T through the type-level binding.",
+        "session.rs: 10 declare_* return types tighten from bare Helper to Helper<TokioRuntime, T> so self.clone() in the constructor body matches the helper struct field type.",
+        "session.rs: Session::new(actions, observer) -> Session::new(actions, observer, clock: Arc<T>); build_session test fixture + 2 session_new_with_*_zid edge case tests pass Arc<TokioTime>.",
+        "session.rs: 31 standalone &clock, argument lines + 36 unused let clock = TokioTime::new() bindings removed from #[cfg(test)] test bodies (sed mechanical strip).",
+        "crates/wz-ap-demo/src/runner.rs:627: Session::new gains Arc::new(session_clock) third argument; comment documents the same-monotonic-epoch contract shared with SessionLinkActions::new + drive_session_until_terminal."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check -p wz-runtime-tokio --all-targets: clean (lib + tests + bins).",
+        "cargo check --workspace --all-targets: clean (every crate including wz-ap-demo + wz-integration-tests).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "cargo test -p wz-runtime-tokio --lib: 593/593 pass.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=429 -> 430, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Session struct still lives in wz-runtime-tokio crate (which pulls tokio std). Next architectural step: extract Session + 8 helpers + SessionInitParams + SessionLinkActions + ApplicationLayerObserver into a runtime-agnostic crate (candidate name wz-session-core, no_std + alloc) so wz-runtime-lwip can finally bind LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>>. Multi-round refactor — session_glue.rs has 3 std imports (HashMap / AtomicU64 / std::sync::Mutex direct) + lib.rs has 5 tokio/std network imports (io / SocketAddr / AsyncReadExt / TcpStream / UdpSocket) that need to split into link-tier crate first.",
+        "Method generic lift: impl<T: TimeSource> Session<TokioRuntime, T> is still locked on TokioRuntime concrete. Lifting the 100+ AP method block to impl<R: Runtime, T: TimeSource> Session<R, T> requires every self.observer.lock() / .expect() site to migrate to R::with_mutex_mut closure form (R311ct API). Multi-round per session.rs surface size (~7900 lines).",
+        "R311ca debt #6 wire-up at 19% wired (post-R267 unchanged). R311cw unblocks the runtime-{async-std, no-std, tokio-uring, zero-copy} 4 reserved features mechanically once Session moves to a runtime-agnostic crate.",
+        "Layer C3 expansion: wz facade + wz-runtime-tokio + wz-runtime-lwip per-package isolated --all-targets clippy gates. R311cv proved the mechanism on wz-ap-demo; the same regression class (preset-feature lint masked by workspace unified resolver) could surface elsewhere.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311d": {
       "decision_summary": "R311d batches codec-scout / codec-hello / codec-join cascade — wz-codecs level only (wz-runtime-tokio does not import these types); forwards stay catalog-uniform for future runtime reuse.",
       "changes_bullets": [

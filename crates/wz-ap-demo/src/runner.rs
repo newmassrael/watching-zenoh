@@ -624,7 +624,16 @@ pub(crate) async fn run_demo(
     // through to the loopback subscriber registry while the
     // drive_session loop's `observer.dispatch` is observing inbound
     // wire frames on the same registry.
-    let session = Session::new(actions.clone(), observer.clone());
+    // R311cw — Session::new now takes a third `clock: Arc<T>` argument
+    // (T fold-in lifted the per-call `clock: &T` parameter into a
+    // Session-owned `Arc<T>` field). The runner threads the same
+    // `session_clock` epoch through `SessionLinkActions::new` (line 610)
+    // and `drive_session_until_terminal` (later) so the wrapped
+    // `Arc::new(session_clock)` here keeps the monotonic epoch
+    // load-bearing for R261 register-time deadline_ms vs sweep-time
+    // now_ms comparison. TokioTime is Copy so the Arc::new construction
+    // simply value-copies the same epoch field.
+    let session = Session::new(actions.clone(), observer.clone(), Arc::new(session_clock));
 
     let _handles = install_session_handles(
         &session,
