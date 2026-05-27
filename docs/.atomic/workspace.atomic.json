@@ -19458,6 +19458,58 @@
         "Deploy main loop diagnostic surface: LwipRuntime::timers().next_deadline_us() exposes earliest deadline so a deploy can size wfi()-sleep budget against a HAL timer; runtime itself does not require deploy to do so."
       ]
     },
+    "Round 311bd": {
+      "decision_summary": "R311bd LwipJoinHandle::abort cancellation lands; AP/MCU parity with TokioJoinHandle::abort; cancel_flag Arc<AtomicBool> shared between TaskSlot + LwipJoinHandle; synchronous JoinState write makes awaiting handle resolve immediately while executor sweep drops the task body.",
+      "changes_bullets": [
+        "crates/wz-runtime-lwip/src/executor.rs: TaskSlot gains cancel_flag: Arc<AtomicBool> field; ExecutorState::spawn signature now takes (fut, cancel_flag); run_until_idle adds cancel-first sweep that takes the slot + drops the future body when cancel_flag is set; module doc retired the 'cancellation R311az+' carry + added the R311bd closure summary.",
+        "crates/wz-runtime-lwip/src/join_handle.rs: LwipJoinHandle<T> gains cancel_flag: Arc<AtomicBool>; pub fn abort(&self) writes Release flag + critical_section JoinState write Err(JoinCancelled) under is_none() guard + wakes the handle waker; new() ctor takes both state + cancel_flag; module doc documents race resolution + tokio parity.",
+        "crates/wz-runtime-lwip/src/runtime_impl.rs: LwipRuntime::spawn creates fresh Arc<AtomicBool>::new(false), clones for handle, passes to executor.spawn(); wrapper async block adds is_none() guard before writing Ok(output) so abort that raced ahead is preserved (first-result-wins semantic).",
+        "crates/wz-runtime-lwip/src/lib.rs: retired 'LwipJoinHandle::abort R311bc+ carry' bullet + added R311bd closure bullet (AP/MCU parity + sync JoinState write + race resolution via is_none guard).",
+        "crates/wz-runtime-lwip/src/runtime_impl.rs tests: 3 new R311bd tests — abort_resolves_handle_to_join_cancelled (long sleep + abort → Err(JoinCancelled)); abort_after_completion_is_noop (run_until_idle to completion + abort → Ok preserved); abort_is_idempotent (3 repeat aborts → single JoinCancelled)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-lwip --features alloc: 13/13 PASS (10 R311bc tests preserved + 3 new R311bd tests).",
+        "WZ_RUN_LAYER_G=1 bash scripts/run-ci.sh --layer G: 48/49 PASS + 1 SKIP (RISC-V G.6 toolchain absent on dev host); cancel_flag Arc + AtomicBool route through R311bb portable-atomic polyfill on thumbv6m identically to wake_flag.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean; no new lints from the cancel_flag plumbing.",
+        "cargo fmt --all --check: clean (rustfmt collapsed one 2-line LwipJoinHandle::new struct init into single-line form; no semantic change).",
+        "Manual review: race resolution — wrapper's is_none() guard + abort's is_none() guard ensure first-result-wins semantic matches tokio's JoinHandle::abort behaviour ('task finished before cancellation arrived' wins; 'cancellation arrived before completion' wins)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311be: QEMU mps2-an386 UDP loopback e2e demo — deploy/mcu-qemu-demo crate + Layer Q opt-in CI lane; first end-to-end MCU truth on real lwIP wire path; R311bc + R311bd together unblock honest shutdown sequence (abort → timer drain → exit).",
+        "AP/MCU abort parity audit: tokio's TokioJoinHandle::abort can interrupt mid-poll via scheduler; LwipJoinHandle::abort cannot (cooperative executor cannot preempt). The visible-behaviour difference is bounded by R311bd's 'next run_until_idle pass' latency; deploy main loops with sub-ms iteration land cancellation within one cycle.",
+        "Slot compaction: cancelled slots stay as Some(None) Vec entries until natural Vec growth pushes them out. A compaction sweep would condense dropped slots; deferred until a profile reports heap growth as a real issue."
+      ],
+      "publishable_decision_summary": "R311bd LwipJoinHandle::abort cancellation lands; AP/MCU parity with TokioJoinHandle::abort; cancel_flag Arc<AtomicBool> shared between TaskSlot + LwipJoinHandle; synchronous JoinState write makes awaiting handle resolve immediately while executor sweep drops the task body.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-lwip/src/executor.rs: TaskSlot gains cancel_flag: Arc<AtomicBool> field; ExecutorState::spawn signature now takes (fut, cancel_flag); run_until_idle adds cancel-first sweep that takes the slot + drops the future body when cancel_flag is set; module doc retired the 'cancellation R311az+' carry + added the R311bd closure summary.",
+        "crates/wz-runtime-lwip/src/join_handle.rs: LwipJoinHandle<T> gains cancel_flag: Arc<AtomicBool>; pub fn abort(&self) writes Release flag + critical_section JoinState write Err(JoinCancelled) under is_none() guard + wakes the handle waker; new() ctor takes both state + cancel_flag; module doc documents race resolution + tokio parity.",
+        "crates/wz-runtime-lwip/src/runtime_impl.rs: LwipRuntime::spawn creates fresh Arc<AtomicBool>::new(false), clones for handle, passes to executor.spawn(); wrapper async block adds is_none() guard before writing Ok(output) so abort that raced ahead is preserved (first-result-wins semantic).",
+        "crates/wz-runtime-lwip/src/lib.rs: retired 'LwipJoinHandle::abort R311bc+ carry' bullet + added R311bd closure bullet (AP/MCU parity + sync JoinState write + race resolution via is_none guard).",
+        "crates/wz-runtime-lwip/src/runtime_impl.rs tests: 3 new R311bd tests — abort_resolves_handle_to_join_cancelled (long sleep + abort → Err(JoinCancelled)); abort_after_completion_is_noop (run_until_idle to completion + abort → Ok preserved); abort_is_idempotent (3 repeat aborts → single JoinCancelled)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-lwip --features alloc: 13/13 PASS (10 R311bc tests preserved + 3 new R311bd tests).",
+        "WZ_RUN_LAYER_G=1 bash scripts/run-ci.sh --layer G: 48/49 PASS + 1 SKIP (RISC-V G.6 toolchain absent on dev host); cancel_flag Arc + AtomicBool route through R311bb portable-atomic polyfill on thumbv6m identically to wake_flag.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean; no new lints from the cancel_flag plumbing.",
+        "cargo fmt --all --check: clean (rustfmt collapsed one 2-line LwipJoinHandle::new struct init into single-line form; no semantic change).",
+        "Manual review: race resolution — wrapper's is_none() guard + abort's is_none() guard ensure first-result-wins semantic matches tokio's JoinHandle::abort behaviour ('task finished before cancellation arrived' wins; 'cancellation arrived before completion' wins)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311be: QEMU mps2-an386 UDP loopback e2e demo — deploy/mcu-qemu-demo crate + Layer Q opt-in CI lane; first end-to-end MCU truth on real lwIP wire path; R311bc + R311bd together unblock honest shutdown sequence (abort → timer drain → exit).",
+        "AP/MCU abort parity audit: tokio's TokioJoinHandle::abort can interrupt mid-poll via scheduler; LwipJoinHandle::abort cannot (cooperative executor cannot preempt). The visible-behaviour difference is bounded by R311bd's 'next run_until_idle pass' latency; deploy main loops with sub-ms iteration land cancellation within one cycle.",
+        "Slot compaction: cancelled slots stay as Some(None) Vec entries until natural Vec growth pushes them out. A compaction sweep would condense dropped slots; deferred until a profile reports heap growth as a real issue."
+      ]
+    },
     "Round 311c": {
       "decision_summary": "R311c lands codec-close cascade — wire encode/decode + send_close_with_reason + bind_unit gated; CloseReason enum + set_close_reason_* FSM bindings stay unconditional.",
       "changes_bullets": [

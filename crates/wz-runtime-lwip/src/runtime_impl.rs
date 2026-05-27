@@ -297,22 +297,38 @@ impl<C: ClockSource> Runtime for LwipRuntime<C> {
         let state: Arc<Mutex<RefCell<JoinState<F::Output>>>> =
             Arc::new(Mutex::new(RefCell::new(JoinState::new())));
         let state_for_wrapper = state.clone();
+        // R311bd — cancel_flag shared between the executor task
+        // slot and the LwipJoinHandle returned here. Initial value
+        // = false; set to true by `LwipJoinHandle::abort()`.
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_flag_for_handle = cancel_flag.clone();
         // Wrapper drives the user future and pushes the result into
         // JoinState + wakes any registered handle waker. The wrapper
         // returns () so it fits the type-erased BoxFuture slot.
+        //
+        // R311bd: the `is_none()` guard preserves the result that
+        // landed first. If `LwipJoinHandle::abort()` raced ahead of
+        // this wrapper and stored `Err(JoinCancelled)`, the natural
+        // `Ok(output)` write here becomes a no-op; the handle
+        // returns the cancellation. Conversely, if the wrapper
+        // completes first and stores `Ok(output)`, a later abort
+        // sees the populated result and is a no-op. Either order
+        // is honest about which event landed first.
         let wrapper = async move {
             let output = fut.await;
             critical_section::with(|cs| {
                 let mut s = state_for_wrapper.borrow(cs).borrow_mut();
-                s.result = Some(Ok(output));
-                if let Some(w) = s.waker.take() {
-                    w.wake();
+                if s.result.is_none() {
+                    s.result = Some(Ok(output));
+                    if let Some(w) = s.waker.take() {
+                        w.wake();
+                    }
                 }
             });
         };
         let boxed: crate::executor::BoxFuture = Box::pin(wrapper);
-        self.inner.executor.spawn(boxed);
-        LwipJoinHandle::new(state)
+        self.inner.executor.spawn(boxed, cancel_flag);
+        LwipJoinHandle::new(state, cancel_flag_for_handle)
     }
 }
 
@@ -639,5 +655,74 @@ mod tests {
             cx.waker().wake_by_ref();
             Poll::Pending
         }
+    }
+
+    #[test]
+    fn abort_resolves_handle_to_join_cancelled() {
+        // R311bd: spawn a task that never completes (NeverReady
+        // self-waker would dominate the executor; instead use a
+        // sleep on a never-advanced clock so the registered timer
+        // queue waiter never fires). Abort the handle; the await
+        // should resolve immediately to Err(JoinCancelled) via
+        // the synchronous JoinState write inside abort().
+        use wz_runtime_core::RuntimeError;
+        let rt = LwipRuntime::new(TestClock::new());
+        let time = LwipTime::new(&rt);
+        let h = rt.spawn(async move {
+            time.sleep(u64::MAX / 2).await; // effectively forever
+            999_u32
+        });
+        h.abort();
+        // After abort, the next iteration of the executor will
+        // sweep the slot and drop the task body; the handle itself
+        // already resolved synchronously inside abort. block_on
+        // polls the handle once, sees JoinCancelled, returns.
+        let result = rt.block_on(h);
+        assert!(
+            matches!(result, Err(RuntimeError::JoinCancelled)),
+            "expected JoinCancelled, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn abort_after_completion_is_noop() {
+        // R311bd: a task that completes naturally before abort
+        // arrives stores its Ok(output) in JoinState; the later
+        // abort sees result.is_some() and skips the JoinCancelled
+        // write. The handle resolves to Ok(output).
+        let rt = LwipRuntime::new(NopClock);
+        let h = rt.spawn(async { 17_u32 });
+        // First drive the task to completion via block_on. We
+        // can't await the handle here because we need to keep it
+        // alive for the post-completion abort call; instead we
+        // run_until_idle until JoinState has a result.
+        // The spawned task is ready (wake_flag=true on spawn); a
+        // single run_until_idle pass polls it to Ready.
+        rt.run_until_idle();
+        // Now abort — the wrapper has already stored Ok(17), so
+        // abort's is_none() guard short-circuits.
+        h.abort();
+        let result = rt.block_on(h);
+        assert_eq!(result.expect("ok preserved"), 17);
+    }
+
+    #[test]
+    fn abort_is_idempotent() {
+        // R311bd: repeated abort calls are no-ops after the first.
+        // The first abort writes JoinCancelled; subsequent calls
+        // see result.is_some() and skip the write (and the
+        // cancel_flag.store(true) is itself idempotent).
+        use wz_runtime_core::RuntimeError;
+        let rt = LwipRuntime::new(TestClock::new());
+        let time = LwipTime::new(&rt);
+        let h = rt.spawn(async move {
+            time.sleep(u64::MAX / 2).await;
+            42_u32
+        });
+        h.abort();
+        h.abort();
+        h.abort();
+        let result = rt.block_on(h);
+        assert!(matches!(result, Err(RuntimeError::JoinCancelled)));
     }
 }
