@@ -37,16 +37,31 @@
 //!   next `run_until_idle` pass after the loopback callback
 //!   enqueues the datagram.
 //!
-//! ## Why DWT cycle counter for `ClockSource`
+//! ## Why SysTick IRQ-driven `ClockSource` + `wfi()` main loop
 //!
-//! QEMU's `mps2-an386` machine emulates a Cortex-M3 at 25 MHz
-//! nominal. The DWT (Data Watchpoint and Trace) unit exposes a
-//! 32-bit `CYCCNT` register that increments every CPU cycle —
-//! the simplest monotonic clock source on ARMv7-M that doesn't
-//! require configuring SysTick or a peripheral timer. Wraparound
-//! at 2^32 cycles ≈ 171 seconds is well beyond the demo's 100 ms
-//! budget; a production deploy would extend via a software
-//! wraparound counter incremented from the SysTick ISR.
+//! R311bi migrated the clock source from DWT cycle counter (which
+//! QEMU 6.2's Cortex-M3 emulation stubs to 0) to SysTick poll mode.
+//! R311bi closes R311be carry #2 by enabling SysTick `TICKINT` and
+//! providing a `SysTick` exception handler so the wraparound count
+//! advances from the ISR, the CPU can `wfi()` between ticks
+//! (genuine power-down between IRQs — proving the R311bc
+//! TimerQueue + LwipTime::sleep path uses the runtime services
+//! tier the way a real MCU deploy would), and the demo's tight
+//! poll loop becomes interrupt-driven.
+//!
+//! Reload value: 1 ms at 25 MHz (RELOAD = 24999 cycles per tick).
+//! Picked so the demo's 1 ms sleep budget surfaces one ISR per
+//! sleep iteration; the `wraps` AtomicU32 represents milliseconds
+//! since boot, and `now_us` snaps `wraps` either side of the CVR
+//! read to detect ISR firing during the sample (re-loops on
+//! mismatch — the standard ISR-vs-thread lock-free read pattern
+//! for an interrupt-incremented counter + a hardware counter
+//! that decrements in parallel).
+//!
+//! SysTick is ARMv6-M base spec onward, so the same impl boots
+//! on every M-class core the catalog targets (M3 / M4 / M7
+//! covered by R311bg's Layer Q sub-lanes; M0 / M23 / M33 / M55
+//! tracked as separate carries).
 
 #![no_std]
 #![no_main]
@@ -54,9 +69,9 @@
 extern crate alloc;
 
 use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicU32, Ordering};
 
-use cortex_m::peripheral::DWT;
-use cortex_m_rt::entry;
+use cortex_m_rt::{entry, exception};
 use cortex_m_semihosting::{debug, hprintln};
 // embedded-alloc 0.6 split the API: `LlffHeap` = linked-list-first-fit
 // (the conventional `embedded_alloc::Heap` from 0.5 series).
@@ -77,22 +92,105 @@ const HEAP_SIZE: usize = 1024 * 256;
 #[global_allocator]
 static HEAP: Heap = Heap::empty();
 
-/// QEMU mps2-an386 nominal frequency is 25 MHz; DWT::cycle_count()
-/// reports cycles, so divide by 25 to get microseconds. A real
-/// Cortex-M3 deploy on different silicon would replace this
-/// constant with its actual clock frequency in MHz.
+/// QEMU mps2-an385/an386/an505 SoCs all clock the Cortex-M core at
+/// 25 MHz nominal; SysTick counts processor cycles when
+/// `CSR.CLKSOURCE = 1`. Dividing by 25 yields microseconds. A real
+/// deploy on different silicon would replace this constant with
+/// its actual CPU clock frequency in MHz.
 const CYCLES_PER_US: u64 = 25;
 
-/// [`wz::runtime_lwip::ClockSource`] backed by the ARMv7-M DWT
-/// cycle counter. Cheap to clone (unit struct). The DWT counter
-/// must be enabled before any `now_us()` call returns a non-zero
-/// value; `main()` performs the enable sequence on entry.
-#[derive(Clone, Copy, Default)]
-struct DwtClock;
+/// SysTick reload value: 1 ms tick at 25 MHz (RELOAD = 24999 so
+/// one full count cycle = 25000 processor cycles = 1 ms). R311bi
+/// shrunk this from the 24-bit max (~671 ms wrap) to 1 ms so the
+/// SysTick exception fires every millisecond — that drives the
+/// `wfi()` wake in the demo's main loop and gives the `wraps`
+/// counter the natural unit of "milliseconds since boot".
+const SYST_RELOAD: u32 = 24_999;
+const SYST_PERIOD: u64 = SYST_RELOAD as u64 + 1;
 
-impl ClockSource for DwtClock {
+// SysTick MMIO registers (System Control Space, ARMv*-M architecture
+// reference; same offsets on every M-class core).
+const SYST_CSR: *mut u32 = 0xE000_E010 as *mut u32;
+const SYST_RVR: *mut u32 = 0xE000_E014 as *mut u32;
+const SYST_CVR: *mut u32 = 0xE000_E018 as *mut u32;
+const SYST_CSR_CLKSOURCE: u32 = 1 << 2;
+const SYST_CSR_TICKINT: u32 = 1 << 1;
+const SYST_CSR_ENABLE: u32 = 1 << 0;
+
+/// Interrupt-incremented wraparound counter. With `TICKINT` set in
+/// `SYST_CSR` the `SysTick` exception increments `wraps` once per
+/// reload (every `SYST_PERIOD` cycles = 1 ms at 25 MHz). `now_us`
+/// snaps `wraps` either side of the CVR read and re-loops on a
+/// mismatch — the standard ISR-vs-thread lock-free read pattern
+/// for an interrupt-incremented counter paired with a hardware
+/// counter that decrements independently.
+struct SystickClock {
+    wraps: AtomicU32,
+}
+
+impl SystickClock {
+    const fn new() -> Self {
+        Self {
+            wraps: AtomicU32::new(0),
+        }
+    }
+
+    /// Enable SysTick with TICKINT — the SysTick exception then
+    /// fires on every reload (every `SYST_PERIOD` cycles), the
+    /// `SysTick` handler advances `wraps`, and the main loop's
+    /// `wfi()` wakes on each tick. R311bi replaces R311bi's poll
+    /// mode + `nop()` main loop, closing R311be carry #2.
+    fn init(&self) {
+        unsafe {
+            SYST_CSR.write_volatile(0);
+            SYST_RVR.write_volatile(SYST_RELOAD);
+            SYST_CVR.write_volatile(0);
+            SYST_CSR.write_volatile(SYST_CSR_CLKSOURCE | SYST_CSR_TICKINT | SYST_CSR_ENABLE);
+        }
+    }
+
     fn now_us(&self) -> u64 {
-        DWT::cycle_count() as u64 / CYCLES_PER_US
+        // Standard double-snap pattern for an interrupt-incremented
+        // counter paired with a hardware down-counter. If `wraps`
+        // advanced during the CVR read, the CVR snapshot belongs to
+        // a different period than the snapped `wraps` value — retry
+        // once `wraps` is stable across the read.
+        loop {
+            let w1 = self.wraps.load(Ordering::Acquire);
+            let cvr = unsafe { SYST_CVR.read_volatile() } & SYST_RELOAD;
+            let w2 = self.wraps.load(Ordering::Acquire);
+            if w1 == w2 {
+                let total_cycles = w1 as u64 * SYST_PERIOD + (SYST_RELOAD - cvr) as u64;
+                return total_cycles / CYCLES_PER_US;
+            }
+        }
+    }
+}
+
+/// SysTick exception handler — fires every `SYST_PERIOD` cycles
+/// (1 ms at 25 MHz) once `SystickClock::init` enables `TICKINT`.
+/// Sole side effect is the `wraps` increment so the ISR stays
+/// short (no allocation, no locks); the main loop reads `wraps`
+/// for monotonic time and lwIP's `sys_now()` reads the same.
+#[exception]
+fn SysTick() {
+    GLOBAL_CLOCK.wraps.fetch_add(1, Ordering::Release);
+}
+
+/// Single global SysTick instance — both the `ClockSource` handle
+/// passed to `LwipRuntime::new` and the lwIP-side `sys_now()`
+/// extern share this so wrap accounting stays consistent across
+/// both call surfaces.
+static GLOBAL_CLOCK: SystickClock = SystickClock::new();
+
+/// Zero-sized `ClockSource` that forwards every `now_us` call to
+/// the shared [`GLOBAL_CLOCK`]. Cheap to clone (unit struct).
+#[derive(Clone, Copy, Default)]
+struct SystickClockRef;
+
+impl ClockSource for SystickClockRef {
+    fn now_us(&self) -> u64 {
+        GLOBAL_CLOCK.now_us()
     }
 }
 
@@ -102,13 +200,12 @@ impl ClockSource for DwtClock {
 /// unconditionally to expire its internal timer wheel; without
 /// this symbol the link fails with "undefined symbol: sys_now".
 ///
-/// Returns milliseconds since boot. Same source as `DwtClock` —
-/// cycle counter divided to milliseconds (25 MHz × 1000 = 25 000
-/// cycles per ms). Wraps every ~171 s at 25 MHz which is well
-/// beyond the demo's 100 ms budget.
+/// Returns milliseconds since boot, sampled from the same
+/// [`GLOBAL_CLOCK`] the `ClockSource` impl reads so lwIP's
+/// timer wheel and the runtime's `TimerQueue` see identical time.
 #[unsafe(no_mangle)]
 pub extern "C" fn sys_now() -> u32 {
-    (DWT::cycle_count() as u64 / (CYCLES_PER_US * 1000)) as u32
+    (GLOBAL_CLOCK.now_us() / 1000) as u32
 }
 
 /// UDP port the demo socket binds to. 5555 is arbitrary and
@@ -132,11 +229,11 @@ const POLL_BUDGET: u32 = 100;
 #[entry]
 fn main() -> ! {
     init_heap();
-    enable_dwt_cycle_counter();
+    GLOBAL_CLOCK.init();
 
-    hprintln!("R311be: lwIP UDP loopback e2e demo starting");
+    hprintln!("R311bi: lwIP UDP loopback e2e demo starting");
 
-    let runtime = LwipRuntime::new(DwtClock);
+    let runtime = LwipRuntime::new(SystickClockRef);
     let time = LwipTime::new(&runtime);
     let link = LwipLink::init();
 
@@ -153,27 +250,27 @@ fn main() -> ! {
     // runtime's `run_until_idle` then pops any expired
     // SleepFuture timers + polls ready tasks.
     //
-    // We deliberately do NOT call `cortex_m::asm::wfi()` here —
-    // QEMU mps2-an386's default setup has no SysTick / peripheral
-    // IRQ configured to wake from wfi(), so a wfi() would block
-    // forever and the DWT cycle counter would not advance. The
-    // tight `nop` keeps cycles ticking; a real MCU deploy with
-    // SysTick configured would substitute `wfi()` here for
-    // genuine power-down between IRQs.
+    // After each pass, `wfi()` puts the CPU to sleep until the
+    // next interrupt — the SysTick exception fires every 1 ms
+    // (R311bi enabled TICKINT in SystickClock::init), at which
+    // point the handler bumps `GLOBAL_CLOCK.wraps`, the CPU wakes,
+    // and the loop polls again. This is the textbook MCU idle
+    // pattern: cycles only burn during work + the time it takes
+    // to handle the tick ISR, not in a tight nop spin.
     loop {
         link.poll_loopback();
         link.check_timeouts();
         runtime.run_until_idle();
-        cortex_m::asm::nop();
+        cortex_m::asm::wfi();
     }
 }
 
 /// Spawned task body. Sends one packet to 127.0.0.1:ECHO_PORT and
 /// polls the socket's RX queue for the echo. PASS / FAIL is
 /// signalled via semihosting + `debug::exit`.
-async fn echo_task(mut sock: LwipUdpSocket, time: LwipTime<DwtClock>) {
+async fn echo_task(mut sock: LwipUdpSocket, time: LwipTime<SystickClockRef>) {
     if let Err(e) = sock.send_to(ipv4_addr_loopback(), ECHO_PORT, PAYLOAD) {
-        hprintln!("R311be FAIL: send_to error {:?}", e);
+        hprintln!("R311bi FAIL: send_to error {:?}", e);
         debug::exit(debug::EXIT_FAILURE);
     }
 
@@ -183,19 +280,19 @@ async fn echo_task(mut sock: LwipUdpSocket, time: LwipTime<DwtClock>) {
                 && dg.src_port == ECHO_PORT
                 && dg.src_addr == ipv4_addr_loopback()
             {
-                hprintln!("R311be PASS");
+                hprintln!("R311bi PASS");
                 debug::exit(debug::EXIT_SUCCESS);
             }
             // Payload mismatch or unexpected source — surface
             // explicitly so a future regression in the lwIP path
             // (pbuf copy, src addr mangling, port routing) is
             // distinguishable from a no-echo failure.
-            hprintln!("R311be FAIL: echo mismatch");
+            hprintln!("R311bi FAIL: echo mismatch");
             debug::exit(debug::EXIT_FAILURE);
         }
         time.sleep(1).await;
     }
-    hprintln!("R311be FAIL: no echo within 100 ms budget");
+    hprintln!("R311bi FAIL: no echo within 100 ms budget");
     debug::exit(debug::EXIT_FAILURE);
 }
 
@@ -213,16 +310,4 @@ fn init_heap() {
         let ptr = core::ptr::addr_of_mut!(HEAP_MEM) as usize;
         HEAP.init(ptr, HEAP_SIZE);
     }
-}
-
-/// Enable the ARMv7-M DWT cycle counter so [`DwtClock::now_us`]
-/// returns monotonic values. The unlock sequence is required on
-/// ARMv7-M to clear the lock register before CYCCNT can be
-/// enabled; cortex-m 0.7's `unlock` API encapsulates the unlock
-/// MMIO write. On a real silicon that gates DWT behind a debug
-/// authentication step the equivalent setup happens at boot.
-fn enable_dwt_cycle_counter() {
-    let mut cp = cortex_m::Peripherals::take().expect("Peripherals::take");
-    cp.DCB.enable_trace();
-    cp.DWT.enable_cycle_counter();
 }

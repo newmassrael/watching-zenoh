@@ -1,10 +1,11 @@
 /* SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
  * SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
  *
- * QEMU `mps2-an386` (Cortex-M3) memory layout — R311be.
+ * QEMU `mps2-an385` (Cortex-M3) memory layout — R311be (machine
+ * choice corrected R311bf; mps2-an386 is a Cortex-M4 board).
  *
- * Per QEMU's mps2-an386 machine source (`hw/arm/mps2.c`) the
- * Cortex-M3 image runs out of:
+ * Per QEMU's mps2 machine source (`hw/arm/mps2.c`) the Cortex-M3
+ * mps2-an385 image runs out of:
  *
  *   - 0x00000000 - 0x003FFFFF   ZBT-SSRAM1 aliased as code memory
  *                               (4 MB; QEMU loads `-kernel` here)

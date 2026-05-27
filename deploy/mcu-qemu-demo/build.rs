@@ -20,6 +20,16 @@ fn main() {
     let memory_x = include_bytes!("memory.x");
     fs::write(out_dir.join("memory.x"), memory_x).expect("write memory.x to OUT_DIR");
     println!("cargo:rustc-link-search={}", out_dir.display());
+    // R311bf: pass `-Tlink.x` here in addition to the same flag
+    // in `.cargo/config.toml`. Cargo's `.cargo/config.toml` lookup
+    // walks from CWD, not from the manifest dir, so a `cargo build
+    // --manifest-path deploy/mcu-qemu-demo/Cargo.toml` invoked
+    // from the workspace root (e.g. scripts/run-ci.sh Layer Q.1)
+    // does NOT see the per-crate config and silently produces an
+    // empty ELF. Emitting the directive from build.rs makes the
+    // link-arg cwd-invariant; the config.toml entry remains for
+    // `cargo run` ergonomics inside the crate dir.
+    println!("cargo:rustc-link-arg=-Tlink.x");
     println!("cargo:rerun-if-changed=memory.x");
     println!("cargo:rerun-if-changed=build.rs");
 
