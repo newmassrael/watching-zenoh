@@ -607,6 +607,20 @@
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
       "intent": "Liveliness domain catalog: 5 atomic features (2 active wired liveliness-token + liveliness-subscriber per pre-R311, 3 reserved -get/-history/-historical-samples).",
+      "rationale_bullets": [
+        "Composable framework lens: each liveliness capability is one atomic feature toggle.",
+        "Token + subscriber pre-R311 wired (21 + 14 = 35 cfg sites).",
+        "Get / history / historical-samples are cluster-deferred or unimplemented.",
+        "liveliness-get depends on query-get but pub API method missing.",
+        "liveliness-history field exists but cfg-gating the field is invasive (R311g1 stability)."
+      ],
+      "outputs_bullets": [
+        "Active set (2): liveliness-token (21 cfg sites), liveliness-subscriber (14 cfg sites).",
+        "Reserved (3): liveliness-get (no pub API impl), -history + -historical-samples (cluster cfg risk).",
+        "liveliness-historical-samples implies liveliness-history (Cargo dependency chain).",
+        "liveliness-get implies query-get (Cargo dependency chain).",
+        "R311cl ratifies 2/3 audit; deferred wire-up pending API impl + cluster cfg pattern."
+      ],
       "caveats_bullets": [
         "R311ci audit confirms 2 wired (token 21 cfg + subscriber 14 cfg = 35 sites); 3 reserved unchanged."
       ],
@@ -22080,6 +22094,48 @@
         "R311 cascade total wire-up gain (R311cb-ck): 31 -> 53 wired (19% -> 33%); 9 domains 0%-wired closed by audit.",
         "Pending wire-up clusters: keyexpr 7 (matcher cluster), runtime-async-std/no-std/tokio-uring/zero-copy (4 alternative-impl), pubsub 6 reserved (sample/encoding/source-info/priority/congestion/express), session 7 reserved (extauth/extcompression/extqos/extshm/multicast/resumable/stateless-accept).",
         "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, R267 Session reparam, R311 facade graceful-close wrapper API."
+      ]
+    },
+    "Round 311cl": {
+      "decision_summary": "R311cl liveliness domain audit-only ratify — 2/3 confirmed (token + subscriber wired pre-R311; get/history/historical-samples deferred).",
+      "changes_bullets": [
+        "§5.10 liveliness rationale + outputs rewritten with R311cl audit detail.",
+        "No Cargo comment change — 2 active / 3 reserved already accurate.",
+        "No source-level changes — liveliness-token + liveliness-subscriber wired pre-R311."
+      ],
+      "verification_bullets": [
+        "Audit verification: liveliness-token 21 + liveliness-subscriber 14 = 35 cfg sites.",
+        "Reserved 3: liveliness-get 0 (no pub API impl), -history 0, -historical-samples 0.",
+        "validate_workspace baseline: entries 418 -> 419, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "liveliness-get: requires pub fn get_liveliness method on Session (mirror of zenoh-pico z_liveliness_get).",
+        "liveliness-history + -historical-samples: cluster-deferred (history field + history_complete getter; R311g1 stability requires careful per-call cfg-gate, not field gate).",
+        "R311ca debt #6 wire-up progress: unchanged (audit-only); 33% wired (53/161); 9 domains 0%-wired."
+      ],
+      "publishable_decision_summary": "R311cl liveliness domain audit-only ratify — 2/3 confirmed (token + subscriber wired pre-R311; get/history/historical-samples deferred).",
+      "publishable_changes_bullets": [
+        "§5.10 liveliness rationale + outputs rewritten with R311cl audit detail.",
+        "No Cargo comment change — 2 active / 3 reserved already accurate.",
+        "No source-level changes — liveliness-token + liveliness-subscriber wired pre-R311."
+      ],
+      "publishable_verification_bullets": [
+        "Audit verification: liveliness-token 21 + liveliness-subscriber 14 = 35 cfg sites.",
+        "Reserved 3: liveliness-get 0 (no pub API impl), -history 0, -historical-samples 0.",
+        "validate_workspace baseline: entries 418 -> 419, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "liveliness-get: requires pub fn get_liveliness method on Session (mirror of zenoh-pico z_liveliness_get).",
+        "liveliness-history + -historical-samples: cluster-deferred (history field + history_complete getter; R311g1 stability requires careful per-call cfg-gate, not field gate).",
+        "R311ca debt #6 wire-up progress: unchanged (audit-only); 33% wired (53/161); 9 domains 0%-wired."
       ]
     },
     "Round 311d": {
