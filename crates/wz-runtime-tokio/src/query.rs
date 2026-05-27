@@ -139,7 +139,7 @@ fn extract_query_attachment(query: &Query) -> Option<&[u8]> {
     #[cfg(not(feature = "query-attachment"))]
     {
         let _ = query;
-        return None;
+        None
     }
     #[cfg(feature = "query-attachment")]
     {
