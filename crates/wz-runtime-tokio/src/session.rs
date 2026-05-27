@@ -863,9 +863,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
             observer.subscribers.clear_own_zid();
         });
     }
-}
 
-impl<T: TimeSource> Session<TokioRuntime, T> {
     /// Publish a literal-keyexpr Sample. Routes both branches per
     /// `opts.allowed_destination`:
     ///
@@ -925,14 +923,17 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         // branch of Session::publish. cfg-off short-circuits to 0
         // (only remote dispatch fires); the Locality::Any default
         // becomes effectively Locality::Remote_Only.
+        //
+        // R311db — observer access migrates from
+        // `self.observer.lock().expect(...).subscribers.local_publish(&sample)`
+        // to the R::with_mutex_mut closure form (R311ct API) so this
+        // method composes generically across the runtime profile.
         #[cfg(feature = "pubsub-allow-loop")]
         if opts.allowed_destination.allows_local() {
             let sample = build_loopback_sample(keyexpr, payload, &opts);
-            self.observer
-                .lock()
-                .expect("Session observer mutex poisoned — a subscriber callback panicked")
-                .subscribers
-                .local_publish(&sample)
+            R::with_mutex_mut(&self.observer, |observer| {
+                observer.subscribers.local_publish(&sample)
+            })
         } else {
             0
         }
@@ -1024,14 +1025,13 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         }
         // R311cc — pubsub-allow-loop gates the aliased-publish
         // loopback fan-out (mirror of Session::publish gate).
+        // R311db — observer access via R::with_mutex_mut (closure form).
         #[cfg(feature = "pubsub-allow-loop")]
         if opts.allowed_destination.allows_local() {
             let sample = build_loopback_sample(loopback_keyexpr, payload, &opts);
-            self.observer
-                .lock()
-                .expect("Session observer mutex poisoned — a subscriber callback panicked")
-                .subscribers
-                .local_publish(&sample)
+            R::with_mutex_mut(&self.observer, |observer| {
+                observer.subscribers.local_publish(&sample)
+            })
         } else {
             0
         }
@@ -1086,7 +1086,14 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         };
         Ok(self.publish_aliased(mapping_id, inline_suffix, &loopback_keyexpr, payload, opts))
     }
+}
 
+// R311db — split point: publish / publish_aliased / publish_aliased_auto
+// migrated to R::with_mutex_mut + lifted to the R-generic block above.
+// The methods below still call `self.observer.lock().expect(...)` and
+// stay on the AP-bound block until follow-up rounds (R311dc onward)
+// migrate them via the same closure-form pattern.
+impl<T: TimeSource> Session<TokioRuntime, T> {
     /// R239 — issue a query on `keyexpr` and route replies to
     /// `on_reply` (one fire per Reply or Err) plus `on_final` (one
     /// fire after every expected branch has emitted its Final).

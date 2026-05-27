@@ -22965,6 +22965,58 @@
         "Architectural carries unchanged: R311ca debt #6 wire-up 19% (unblocked by Session extraction), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311db": {
+      "decision_summary": "R311db — publish / publish_aliased / publish_aliased_auto migrate from observer.lock().expect() to R::with_mutex_mut; lift to impl<R: Runtime, T: TimeSource> Session<R, T>",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session::publish body migrates the pubsub-allow-loop branch from `self.observer.lock().expect(...).subscribers.local_publish(&sample)` to `R::with_mutex_mut(&self.observer, |observer| observer.subscribers.local_publish(&sample))`. Wire branch (self.actions.send_push_with_meta_*) unchanged — actions field is profile-agnostic.",
+        "session.rs: Session::publish_aliased mirrors the migration on the aliased-keyexpr loopback branch (same closure-form pattern).",
+        "session.rs: Session::publish_aliased_auto unchanged in body (delegates to publish_aliased after mapping_id resolution); lifts to the R-generic block alongside the other two by virtue of the impl-block split.",
+        "session.rs: the impl<R: Runtime, T: TimeSource> Session<R, T> block extends to carry these 3 publish methods. New split-point comment marks where the AP-bound impl<T> Session<TokioRuntime, T> block resumes (query + declare_* methods still call .lock().expect() until R311dc+ migrates them).",
+        "session.rs: pubsub-allow-loop-off arm preserved — the `let _ = (keyexpr, payload, opts);` / `let _ = (loopback_keyexpr, payload, opts);` discards keep the feature-OFF compile path lint-clean."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=434 -> 435, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311dc+ (next): query + query_aliased + query_aliased_auto migrate. These 3 methods each call self.observer.lock().expect(...) for reply-registry mutation + queryable local-query dispatch in the cfg(feature=query-get) branches. Pattern identical to R311db (closure form + lift to R-generic block); bodies are larger (~30-40 lines each post-fold-in) so each round may absorb 1-2 methods rather than the 3 R311db delivered.",
+        "R311dd+: declare_subscriber + declare_subscriber_aliased + declare_queryable + declare_queryable_aliased + declare_token + declare_token_aliased + declare_liveliness_subscriber + declare_liveliness_subscriber_aliased (8+ methods). All register callbacks into the observer's per-domain registry mutex; mechanical closure-form migration. Multi-round.",
+        "Session crate extraction (R311cv carry): the AP-bound impl<T> Session<TokioRuntime, T> block now carries 27+ remaining methods (query cluster + declare_* surface). Block shrinks each round until empty; the trailing extraction round moves session.rs + helpers to wz-session-core no_std crate. LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>> becomes meaningful at that point.",
+        "Architectural carries unchanged: R311ca debt #6 wire-up 19% (unblocked by Session extraction), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311db — publish / publish_aliased / publish_aliased_auto migrate from observer.lock().expect() to R::with_mutex_mut; lift to impl<R: Runtime, T: TimeSource> Session<R, T>",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session::publish body migrates the pubsub-allow-loop branch from `self.observer.lock().expect(...).subscribers.local_publish(&sample)` to `R::with_mutex_mut(&self.observer, |observer| observer.subscribers.local_publish(&sample))`. Wire branch (self.actions.send_push_with_meta_*) unchanged — actions field is profile-agnostic.",
+        "session.rs: Session::publish_aliased mirrors the migration on the aliased-keyexpr loopback branch (same closure-form pattern).",
+        "session.rs: Session::publish_aliased_auto unchanged in body (delegates to publish_aliased after mapping_id resolution); lifts to the R-generic block alongside the other two by virtue of the impl-block split.",
+        "session.rs: the impl<R: Runtime, T: TimeSource> Session<R, T> block extends to carry these 3 publish methods. New split-point comment marks where the AP-bound impl<T> Session<TokioRuntime, T> block resumes (query + declare_* methods still call .lock().expect() until R311dc+ migrates them).",
+        "session.rs: pubsub-allow-loop-off arm preserved — the `let _ = (keyexpr, payload, opts);` / `let _ = (loopback_keyexpr, payload, opts);` discards keep the feature-OFF compile path lint-clean."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=434 -> 435, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311dc+ (next): query + query_aliased + query_aliased_auto migrate. These 3 methods each call self.observer.lock().expect(...) for reply-registry mutation + queryable local-query dispatch in the cfg(feature=query-get) branches. Pattern identical to R311db (closure form + lift to R-generic block); bodies are larger (~30-40 lines each post-fold-in) so each round may absorb 1-2 methods rather than the 3 R311db delivered.",
+        "R311dd+: declare_subscriber + declare_subscriber_aliased + declare_queryable + declare_queryable_aliased + declare_token + declare_token_aliased + declare_liveliness_subscriber + declare_liveliness_subscriber_aliased (8+ methods). All register callbacks into the observer's per-domain registry mutex; mechanical closure-form migration. Multi-round.",
+        "Session crate extraction (R311cv carry): the AP-bound impl<T> Session<TokioRuntime, T> block now carries 27+ remaining methods (query cluster + declare_* surface). Block shrinks each round until empty; the trailing extraction round moves session.rs + helpers to wz-session-core no_std crate. LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>> becomes meaningful at that point.",
+        "Architectural carries unchanged: R311ca debt #6 wire-up 19% (unblocked by Session extraction), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
