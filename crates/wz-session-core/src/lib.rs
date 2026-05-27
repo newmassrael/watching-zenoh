@@ -31,6 +31,13 @@ pub mod locality;
 /// no_std + no_alloc clean (pure enum + helper); unconditional.
 pub mod reliability;
 
+/// Link-layer value types (TxFrame / RxFrame / LinkEvent / LostCause).
+/// RxFrame carries Vec<u8> so the module is alloc-gated. The
+/// LinkDriver trait + concrete TcpDriver/UdpDriver impls remain in
+/// wz-runtime-tokio because they are tokio-specific.
+#[cfg(feature = "alloc")]
+pub mod link;
+
 /// R222 / R225 — application-layer `Sample` type for subscriber callbacks.
 /// Mirrors zenoh-pico's `_z_sample_t` projection. Carries alloc-bound
 /// fields (Vec<u8> payload, String keyexpr) so gated on the `alloc`

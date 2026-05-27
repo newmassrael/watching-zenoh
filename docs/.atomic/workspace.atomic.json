@@ -23589,6 +23589,76 @@
         "Push deferred per CLAUDE.md never push without explicit consent; local lands only this round."
       ]
     },
+    "Round 311di-5": {
+      "decision_summary": "R311di-5 TxFrame RxFrame LinkEvent LostCause extract from wz-runtime-tokio root to wz-session-core::link. Scope revised: link-layer value types extraction before session_glue type cluster split.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/link.rs: new 46-line file with TxFrame RxFrame LinkEvent LostCause types.",
+        "crates/wz-session-core/src/lib.rs: pub mod link alloc-gated due to RxFrame Vec u8 payload.",
+        "crates/wz-runtime-tokio/src/lib.rs: 4 type definitions removed (TxFrame RxFrame LinkEvent LostCause).",
+        "crates/wz-runtime-tokio/src/lib.rs: pub use wz_session_core::link re-export replaces the removed defs.",
+        "LinkDriver trait + TcpDriver + UdpDriver impls stay in wz-runtime-tokio (tokio-specific concrete types).",
+        "External callers reach the moved types via wz_runtime_tokio re-export verbatim across the migration.",
+        "Scope revision rationale: planned R311di-5 reply.rs migration is blocked by session_glue type cluster.",
+        "reply.rs imports NetworkMessage DriverLoopOutcome IterationEvent from session_glue which is still in wz-runtime-tokio.",
+        "Same blocker applies to declare query pubsub observer session; all import session_glue types.",
+        "Foundational dependency graph: session_glue.rs must split before downstream file moves can proceed.",
+        "R311di-6 next will extract NetworkMessage cluster from session_glue to wz-session-core."
+      ],
+      "verification_bullets": [
+        "cargo check workspace all-targets: clean across all 6 workspace member crates.",
+        "scripts/run-ci.sh Layer 0..E: all pass.",
+        "scripts/run-ci.sh --layer G across 7 MCU targets plus RISC-V IMAC: 48 PASS plus 1 SKIP gcc absent.",
+        "validate_workspace expected: entries 459 to 460, sections 256, T1 orphan 0, RT 13/13.",
+        "Test files importing wz_runtime_tokio::LostCause across tests stay green via re-export."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-6 next: extract NetworkMessage DriverLoopOutcome IterationEvent InboundParseError LeaseCheckOutcome from session_glue.",
+        "Constants needed: MAX_EXT_CHAIN_DEPTH plus sce_forge_runtime::CodecError dep for InboundParseError.",
+        "wz-session-core needs sce-forge-runtime as direct dep for CodecError; or wz-codecs re-exports it.",
+        "Foundational extraction unblocks declare reply query pubsub observer session migration in subsequent rounds.",
+        "Reality check: original R311di-3..di-11 9-round plan needs revision; actual scope is 12+ rounds.",
+        "Push deferred per CLAUDE.md never push without explicit consent rule.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 sec 8 SCE cross-repo."
+      ],
+      "publishable_decision_summary": "R311di-5 TxFrame RxFrame LinkEvent LostCause extract from wz-runtime-tokio root to wz-session-core::link. Scope revised: link-layer value types extraction before session_glue type cluster split.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/link.rs: new 46-line file with TxFrame RxFrame LinkEvent LostCause types.",
+        "crates/wz-session-core/src/lib.rs: pub mod link alloc-gated due to RxFrame Vec u8 payload.",
+        "crates/wz-runtime-tokio/src/lib.rs: 4 type definitions removed (TxFrame RxFrame LinkEvent LostCause).",
+        "crates/wz-runtime-tokio/src/lib.rs: pub use wz_session_core::link re-export replaces the removed defs.",
+        "LinkDriver trait + TcpDriver + UdpDriver impls stay in wz-runtime-tokio (tokio-specific concrete types).",
+        "External callers reach the moved types via wz_runtime_tokio re-export verbatim across the migration.",
+        "Scope revision rationale: planned R311di-5 reply.rs migration is blocked by session_glue type cluster.",
+        "reply.rs imports NetworkMessage DriverLoopOutcome IterationEvent from session_glue which is still in wz-runtime-tokio.",
+        "Same blocker applies to declare query pubsub observer session; all import session_glue types.",
+        "Foundational dependency graph: session_glue.rs must split before downstream file moves can proceed.",
+        "R311di-6 next will extract NetworkMessage cluster from session_glue to wz-session-core."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check workspace all-targets: clean across all 6 workspace member crates.",
+        "scripts/run-ci.sh Layer 0..E: all pass.",
+        "scripts/run-ci.sh --layer G across 7 MCU targets plus RISC-V IMAC: 48 PASS plus 1 SKIP gcc absent.",
+        "validate_workspace expected: entries 459 to 460, sections 256, T1 orphan 0, RT 13/13.",
+        "Test files importing wz_runtime_tokio::LostCause across tests stay green via re-export."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-6 next: extract NetworkMessage DriverLoopOutcome IterationEvent InboundParseError LeaseCheckOutcome from session_glue.",
+        "Constants needed: MAX_EXT_CHAIN_DEPTH plus sce_forge_runtime::CodecError dep for InboundParseError.",
+        "wz-session-core needs sce-forge-runtime as direct dep for CodecError; or wz-codecs re-exports it.",
+        "Foundational extraction unblocks declare reply query pubsub observer session migration in subsequent rounds.",
+        "Reality check: original R311di-3..di-11 9-round plan needs revision; actual scope is 12+ rounds.",
+        "Push deferred per CLAUDE.md never push without explicit consent rule.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 sec 8 SCE cross-repo."
+      ]
+    },
     "Round 311di-pre-a": {
       "decision_summary": "R311di-pre-a — wz-runtime-tokio adds hashbrown + portable-atomic deps; session_glue.rs HashMap + AtomicU64 imports route through them; first step toward wz-session-core no_std move-readiness.",
       "changes_bullets": [
