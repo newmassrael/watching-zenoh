@@ -1750,15 +1750,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
             Err(QueryableAliasError::FeatureDisabled)
         }
     }
-}
 
-// R311df — split point: declare_queryable + declare_queryable_aliased
-// migrated to R::with_mutex_mut + lifted to the R-generic block above.
-// Queryable impl block (accessors + undeclare) is fully R-generic. The
-// remaining declare_* surface (LivelinessToken + LivelinessSubscriber)
-// still calls observer.lock().expect(...) at registration time and
-// stays on the AP-bound block until R311dg+ migrates them.
-impl<T: TimeSource> Session<TokioRuntime, T> {
     /// R248 — declare a [`LivelinessToken`] on `keyexpr` + `options`,
     /// emitting a `Declare(DeclToken)` on the outbound link so the
     /// peer's liveliness-token table can fan the declaration out to
@@ -1818,7 +1810,7 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         &self,
         keyexpr: impl Into<String>,
         options: LivelinessOptions,
-    ) -> Result<LivelinessToken<TokioRuntime, T>, LivelinessAliasError> {
+    ) -> Result<LivelinessToken<R, T>, LivelinessAliasError> {
         #[cfg(feature = "liveliness-token")]
         {
             let keyexpr_string = keyexpr.into();
@@ -1882,7 +1874,7 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
         mapping_id: u64,
         inline_suffix: Option<&str>,
         options: LivelinessOptions,
-    ) -> Result<LivelinessToken<TokioRuntime, T>, LivelinessAliasError> {
+    ) -> Result<LivelinessToken<R, T>, LivelinessAliasError> {
         #[cfg(feature = "liveliness-token")]
         {
             let base = self
@@ -1942,7 +1934,19 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
             Err(LivelinessAliasError::FeatureDisabled)
         }
     }
+}
 
+// R311dg — split point: declare_token + declare_token_aliased migrated
+// to the R-generic block above. LivelinessToken impl block (id /
+// keyexpr / options accessors + undeclare) is fully R-generic; no
+// observer.lock() to migrate — declare_token bodies use only
+// self.actions.send_declare_token (wire emit) without touching the
+// observer at all (token registration is implicit on the wire-receive
+// side, not the wire-emit side). The remaining declare_* surface
+// (LivelinessSubscriber) still calls observer.lock().expect(...) at
+// registration time and stays on the AP-bound block until R311dh
+// migrates it.
+impl<T: TimeSource> Session<TokioRuntime, T> {
     /// R280 — declare a liveliness subscriber on a literal `keyexpr`
     /// pattern, registering a [`LivelinessSampleCallback`] that fires
     /// for every peer `Decl*Token` whose resolved keyexpr matches the
@@ -3241,7 +3245,7 @@ pub struct LivelinessToken<R: Runtime = TokioRuntime, T: TimeSource = TokioTime>
     options: LivelinessOptions,
 }
 
-impl<T: TimeSource> LivelinessToken<TokioRuntime, T> {
+impl<R: Runtime, T: TimeSource> LivelinessToken<R, T> {
     /// The stable token id allocated at declare time by
     /// [`SessionLinkActions::alloc_next_token_id`]. Exposed for
     /// diagnostics; callers should not rely on the exact value

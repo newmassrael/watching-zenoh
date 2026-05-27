@@ -23225,6 +23225,54 @@
         "Architectural carries unchanged: R311ca debt #6 wire-up 19% (unblocked by Session extraction), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311dg": {
+      "decision_summary": "R311dg — declare_token + declare_token_aliased + LivelinessToken pipeline fully R-generic; no with_mutex_mut migration needed — wire-emit-only paths",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session::declare_token + Session::declare_token_aliased return types lift from LivelinessToken<TokioRuntime, T> to LivelinessToken<R, T>. Bodies unchanged — both call only self.actions.alloc_next_token_id + self.actions.send_declare_token (wire-emit only) without touching the observer. Token registration is implicit on the peer's wire-receive side, not the local wire-emit side.",
+        "session.rs: LivelinessToken impl block lifts from impl<T: TimeSource> LivelinessToken<TokioRuntime, T> to impl<R: Runtime, T: TimeSource> LivelinessToken<R, T>. LivelinessToken::undeclare body unchanged — calls self.session.actions.send_undeclare_token (wire emit) without observer access.",
+        "session.rs: impl-block split point moves from after declare_queryable_aliased (R311df boundary) to after declare_token_aliased. The R-generic block now carries 21 methods. Comment updated to note the token cluster's wire-emit-only nature (no with_mutex_mut migration needed for this leg of the cascade)."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=439 -> 440, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311dh (next + final method-lift round): declare_liveliness_subscriber + declare_liveliness_subscriber_aliased + LivelinessSubscriber impl block lift. These methods register an Interest slot via observer.lock().expect(...).liveliness_interests.register(...) plus emit an Interest(KEYEXPRS|TOKENS|RESTRICTED|FUTURE[|CURRENT]) wire frame; closure-form migration via R::with_mutex_mut. After R311dh the AP-bound impl<T> Session<TokioRuntime, T> block should be empty.",
+        "R311di+ (Session crate extraction prep): with the AP-bound block empty, session.rs + 8 helper structs are runtime-agnostic at the impl level. Next: split wz-runtime-tokio into wz-session-core (no_std, holds Session + helpers + ApplicationLayerObserver + SessionInitParams + SessionLinkActions) + wz-runtime-tokio thin (network I/O + TokioRuntime + TokioTime + TCP/UDP link drivers). Multi-round refactor due to session_glue.rs's 3 std imports (HashMap / AtomicU64 / std::sync::Mutex direct) needing trait abstraction first.",
+        "After R311di completes, wz-runtime-lwip can finally bind LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>> — the first non-default-R Session instance, closing the R311cv carry #1.",
+        "Architectural carries unchanged: R311ca debt #6 wire-up 19% (Session extraction unblocks the 4 reserved runtime-* features), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311dg — declare_token + declare_token_aliased + LivelinessToken pipeline fully R-generic; no with_mutex_mut migration needed — wire-emit-only paths",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session::declare_token + Session::declare_token_aliased return types lift from LivelinessToken<TokioRuntime, T> to LivelinessToken<R, T>. Bodies unchanged — both call only self.actions.alloc_next_token_id + self.actions.send_declare_token (wire-emit only) without touching the observer. Token registration is implicit on the peer's wire-receive side, not the local wire-emit side.",
+        "session.rs: LivelinessToken impl block lifts from impl<T: TimeSource> LivelinessToken<TokioRuntime, T> to impl<R: Runtime, T: TimeSource> LivelinessToken<R, T>. LivelinessToken::undeclare body unchanged — calls self.session.actions.send_undeclare_token (wire emit) without observer access.",
+        "session.rs: impl-block split point moves from after declare_queryable_aliased (R311df boundary) to after declare_token_aliased. The R-generic block now carries 21 methods. Comment updated to note the token cluster's wire-emit-only nature (no with_mutex_mut migration needed for this leg of the cascade)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "validate_workspace: entries=439 -> 440, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311dh (next + final method-lift round): declare_liveliness_subscriber + declare_liveliness_subscriber_aliased + LivelinessSubscriber impl block lift. These methods register an Interest slot via observer.lock().expect(...).liveliness_interests.register(...) plus emit an Interest(KEYEXPRS|TOKENS|RESTRICTED|FUTURE[|CURRENT]) wire frame; closure-form migration via R::with_mutex_mut. After R311dh the AP-bound impl<T> Session<TokioRuntime, T> block should be empty.",
+        "R311di+ (Session crate extraction prep): with the AP-bound block empty, session.rs + 8 helper structs are runtime-agnostic at the impl level. Next: split wz-runtime-tokio into wz-session-core (no_std, holds Session + helpers + ApplicationLayerObserver + SessionInitParams + SessionLinkActions) + wz-runtime-tokio thin (network I/O + TokioRuntime + TokioTime + TCP/UDP link drivers). Multi-round refactor due to session_glue.rs's 3 std imports (HashMap / AtomicU64 / std::sync::Mutex direct) needing trait abstraction first.",
+        "After R311di completes, wz-runtime-lwip can finally bind LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>> — the first non-default-R Session instance, closing the R311cv carry #1.",
+        "Architectural carries unchanged: R311ca debt #6 wire-up 19% (Session extraction unblocks the 4 reserved runtime-* features), R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
