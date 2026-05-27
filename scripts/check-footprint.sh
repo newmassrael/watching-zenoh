@@ -49,16 +49,19 @@ declare -A BASELINE_TEXT=(
     ["thumbv6m-none-eabi"]=23660
     ["thumbv7m-none-eabi"]=23652
     ["thumbv7em-none-eabihf"]=23724
+    ["thumbv8m.main-none-eabi"]=24548
 )
 declare -A BASELINE_DATA=(
     ["thumbv6m-none-eabi"]=4
     ["thumbv7m-none-eabi"]=4
     ["thumbv7em-none-eabihf"]=4
+    ["thumbv8m.main-none-eabi"]=4
 )
 declare -A BASELINE_BSS=(
     ["thumbv6m-none-eabi"]=11868
     ["thumbv7m-none-eabi"]=269916
     ["thumbv7em-none-eabihf"]=269916
+    ["thumbv8m.main-none-eabi"]=269916
 )
 
 # Per-axis tolerance in bytes. Matches the north-star atomic-feature

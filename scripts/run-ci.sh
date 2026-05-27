@@ -812,6 +812,7 @@ layer_q_qemu_mcu_e2e() {
         "mps2-an385:cortex-m3:thumbv7m-none-eabi:run"
         "mps2-an386:cortex-m4:thumbv7em-none-eabihf:run"
         "mps2-an500:cortex-m7:thumbv7em-none-eabihf:run"
+        "mps2-an505:cortex-m33:thumbv8m.main-none-eabi:skip:cortex-m-rt 0.7 ARMv8-M Secure-state Lockup PC=0x56ea; cortex-m-rt 0.8 carry"
     )
 
     local any_built=0
