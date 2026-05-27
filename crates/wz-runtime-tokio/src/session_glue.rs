@@ -3158,35 +3158,8 @@ pub fn build_push_del_aliased(mapping_id: u64, suffix: Option<&str>) -> Push {
 /// stays oblivious to publisher locality predicates, and the
 /// `session` module owns the conversion via
 /// `PublishOptions::push_metadata`.
-#[derive(Debug, Clone, Default)]
-pub struct PushMetadata {
-    /// Body-level timestamp (zenoh-pico `_z_m_push_commons_t._timestamp`,
-    /// gated by `_Z_FLAG_Z_P_T` for Put / `_Z_FLAG_Z_D_T` for Del).
-    pub timestamp: Option<crate::sample::TimestampHint>,
-    /// Body-level encoding (Put kind only; zenoh-pico `_z_msg_del_t`
-    /// has no encoding slot so a `Del` build_push call ignores this
-    /// field even when set).
-    pub encoding: Option<crate::sample::EncodingHint>,
-    /// Body-level source identification (ext_id=0x01 ENC_ZBUF).
-    pub source_info: Option<crate::sample::SourceInfo>,
-    /// Body-level attachment blob (ext_id=0x03 ENC_ZBUF).
-    pub attachment: Option<Vec<u8>>,
-    /// Outer-level QoS metadata (Push extension ext_id=0x01 ENC_ZINT).
-    pub qos: Option<crate::sample::QosLevel>,
-}
-
-impl PushMetadata {
-    /// `true` when every metadata slot is `None` — callers can use
-    /// this to short-circuit to the no-metadata `build_push_*` fast
-    /// paths without paying the with-meta builder cost.
-    pub fn is_empty(&self) -> bool {
-        self.timestamp.is_none()
-            && self.encoding.is_none()
-            && self.source_info.is_none()
-            && self.attachment.is_none()
-            && self.qos.is_none()
-    }
-}
+// R311di-9 — PushMetadata moved to wz-session-core::metadata.
+pub use wz_session_core::metadata::PushMetadata;
 
 /// R240 — Query-side counterpart of [`PushMetadata`]. Bundles the
 /// caller-set [`crate::session::QueryOptions`] fields that route
@@ -3215,36 +3188,8 @@ impl PushMetadata {
 /// for the no-metadata fast path; [`Self::is_empty`] mirrors
 /// [`PushMetadata::is_empty`] so callers can short-circuit the
 /// builder allocation.
-#[derive(Debug, Clone, Default)]
-pub struct QueryMetadata {
-    /// Reply target hint (`Q_T` flag on the outbound Query). `None`
-    /// elides the target byte → peer decodes
-    /// `Z_QUERY_TARGET_DEFAULT` = `BEST_MATCHING`.
-    pub target: Option<QueryTarget>,
-    /// Reply consolidation hint (`Q_C` flag + consolidation byte).
-    /// `None` elides → peer decodes `Z_CONSOLIDATION_MODE_AUTO`.
-    pub consolidation: Option<ConsolidationMode>,
-    /// Query-level attachment blob (ext_id=0x03 ZBUF on the Query
-    /// ext chain). `None` elides the ext.
-    pub attachment: Option<Vec<u8>>,
-    /// Request-level timeout in milliseconds. `0` elides the ext
-    /// per zenoh-pico's `_z_n_msg_request_needed_exts` predicate
-    /// (`msg->_ext_timeout_ms != 0`).
-    pub timeout_ms: u32,
-}
-
-impl QueryMetadata {
-    /// `true` when every wire-propagatable slot is empty — callers
-    /// can use this to short-circuit
-    /// [`SessionLinkActions::send_request_query`]'s no-metadata fast
-    /// path. Symmetric to [`PushMetadata::is_empty`].
-    pub fn is_empty(&self) -> bool {
-        self.target.is_none()
-            && self.consolidation.is_none()
-            && self.attachment.is_none()
-            && self.timeout_ms == 0
-    }
-}
+// R311di-9 — QueryMetadata moved to wz-session-core::metadata.
+pub use wz_session_core::metadata::QueryMetadata;
 
 /// R233 — build the body-level extension chain (`source_info` +
 /// `attachment`) for a `MsgPut` or `MsgDel`. Returns `None` when

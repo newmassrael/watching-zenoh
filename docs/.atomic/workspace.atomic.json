@@ -23837,6 +23837,60 @@
         "Architectural carries unchanged R284 R283 R301 sec 8 R299 R300 R301 sec 7 R304."
       ]
     },
+    "Round 311di-9": {
+      "decision_summary": "R311di-9 PushMetadata + QueryMetadata bundles move from session_glue.rs to wz-session-core::metadata; all field types already migrated in di-4/di-8.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/metadata.rs new 110-line file with PushMetadata + QueryMetadata structs.",
+        "Field types resolved within wz-session-core: sample types from di-4 and query_mode enums from di-8.",
+        "crates/wz-session-core/src/lib.rs pub mod metadata alloc-gated due to Vec u8 attachment slot.",
+        "crates/wz-runtime-tokio/src/session_glue.rs 64-line block removed; two pub use re-exports replace.",
+        "Cumulative session_glue.rs shrink across di-5..di-9 about 220 lines from 12284 baseline.",
+        "Each extraction validates that wz-session-core can express dispatch-boundary value types runtime-agnostic."
+      ],
+      "verification_bullets": [
+        "cargo check workspace all-targets clean across all 6 workspace member crates.",
+        "scripts/run-ci.sh Layer 0..E all pass.",
+        "scripts/run-ci.sh --layer G 7 MCU targets plus RISC-V IMAC all PASS (one G.6 SKIP gcc absent).",
+        "validate_workspace expected entries 463 to 464 sections 256 T1 orphan 0 RT 13/13."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-10 next NetworkMessage with codec-* feature forwarding (the harder gate).",
+        "R311di-10 alternative SendDeclareError if a smaller fixed-deps surface exists.",
+        "After NetworkMessage cluster downstream file moves declare/reply/query/pubsub/observer/session unblock.",
+        "Push deferred per CLAUDE.md never push without explicit consent rule.",
+        "Architectural carries unchanged R284 R283 R301 sec 8 R299 R300 R301 sec 7 R304."
+      ],
+      "publishable_decision_summary": "R311di-9 PushMetadata + QueryMetadata bundles move from session_glue.rs to wz-session-core::metadata; all field types already migrated in di-4/di-8.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/metadata.rs new 110-line file with PushMetadata + QueryMetadata structs.",
+        "Field types resolved within wz-session-core: sample types from di-4 and query_mode enums from di-8.",
+        "crates/wz-session-core/src/lib.rs pub mod metadata alloc-gated due to Vec u8 attachment slot.",
+        "crates/wz-runtime-tokio/src/session_glue.rs 64-line block removed; two pub use re-exports replace.",
+        "Cumulative session_glue.rs shrink across di-5..di-9 about 220 lines from 12284 baseline.",
+        "Each extraction validates that wz-session-core can express dispatch-boundary value types runtime-agnostic."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check workspace all-targets clean across all 6 workspace member crates.",
+        "scripts/run-ci.sh Layer 0..E all pass.",
+        "scripts/run-ci.sh --layer G 7 MCU targets plus RISC-V IMAC all PASS (one G.6 SKIP gcc absent).",
+        "validate_workspace expected entries 463 to 464 sections 256 T1 orphan 0 RT 13/13."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-10 next NetworkMessage with codec-* feature forwarding (the harder gate).",
+        "R311di-10 alternative SendDeclareError if a smaller fixed-deps surface exists.",
+        "After NetworkMessage cluster downstream file moves declare/reply/query/pubsub/observer/session unblock.",
+        "Push deferred per CLAUDE.md never push without explicit consent rule.",
+        "Architectural carries unchanged R284 R283 R301 sec 8 R299 R300 R301 sec 7 R304."
+      ]
+    },
     "Round 311di-pre-a": {
       "decision_summary": "R311di-pre-a — wz-runtime-tokio adds hashbrown + portable-atomic deps; session_glue.rs HashMap + AtomicU64 imports route through them; first step toward wz-session-core no_std move-readiness.",
       "changes_bullets": [
