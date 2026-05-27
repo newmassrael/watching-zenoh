@@ -23529,6 +23529,54 @@
         "Push deferred per CLAUDE.md global never-push-without-explicit-consent rule."
       ]
     },
+    "Round 311di-13": {
+      "decision_summary": "R311di-13 resolve_wireexpr helper extract from wz-runtime-tokio::declare to wz-session-core::wireexpr_resolve; unblocks subsequent declare/* registry migrations by removing the super:: dep.",
+      "changes_bullets": [
+        "crates/wz-session-core/Cargo.toml: hashbrown dep added (no_std, default-features = false) for the HashMap<u64, String> table type.",
+        "crates/wz-session-core/src/wireexpr_resolve.rs new 44-line file: pub fn resolve_wireexpr(body, table) -> Option<String>; pure HashMap + Wireexpr projection; alloc-gated.",
+        "crates/wz-session-core/src/lib.rs: #[cfg(feature = \"alloc\")] pub mod wireexpr_resolve; with rationale doc.",
+        "crates/wz-runtime-tokio/src/declare.rs: 31-line resolve_wireexpr fn (+ #[allow(dead_code)] attr) replaced by pub(super) use wz_session_core::wireexpr_resolve::resolve_wireexpr; the now-unused use hashbrown::HashMap + use wz_codecs::wireexpr::WireexprVariant imports also removed. The 3 sub-module callers (subscriber.rs / liveliness.rs / liveliness_subscriber.rs) keep their `super::resolve_wireexpr` import path verbatim through the re-export."
+      ],
+      "verification_bullets": [
+        "cargo clean -p wz-session-core -p wz-runtime-tokio + cargo check --workspace --all-targets: clean in 1.79s (fresh-recompile gate).",
+        "scripts/run-ci.sh: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass (fmt --check FAIL on first iteration; cargo fmt --all + re-run cleared the gate).",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent).",
+        "validate_workspace expected entries=467 -> 468, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-14 next: liveliness.rs (281 lines) — smallest declare/* registry file; resolve_wireexpr dep already cleared at R311di-13. Migration template: file move + std/std::error::Error -> core/alloc rewrite + wz-runtime-tokio re-export from declare.rs.",
+        "After liveliness: subscriber.rs (558) -> queryable.rs (489) -> liveliness_subscriber.rs (694) -> remaining session_glue split + observer / session / pubsub / reply / query migration.",
+        "Architectural carries unchanged: R284 / R283 / R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
+        "Push deferred per CLAUDE.md global never-push-without-explicit-consent rule."
+      ],
+      "publishable_decision_summary": "R311di-13 resolve_wireexpr helper extract from wz-runtime-tokio::declare to wz-session-core::wireexpr_resolve; unblocks subsequent declare/* registry migrations by removing the super:: dep.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/Cargo.toml: hashbrown dep added (no_std, default-features = false) for the HashMap<u64, String> table type.",
+        "crates/wz-session-core/src/wireexpr_resolve.rs new 44-line file: pub fn resolve_wireexpr(body, table) -> Option<String>; pure HashMap + Wireexpr projection; alloc-gated.",
+        "crates/wz-session-core/src/lib.rs: #[cfg(feature = \"alloc\")] pub mod wireexpr_resolve; with rationale doc.",
+        "crates/wz-runtime-tokio/src/declare.rs: 31-line resolve_wireexpr fn (+ #[allow(dead_code)] attr) replaced by pub(super) use wz_session_core::wireexpr_resolve::resolve_wireexpr; the now-unused use hashbrown::HashMap + use wz_codecs::wireexpr::WireexprVariant imports also removed. The 3 sub-module callers (subscriber.rs / liveliness.rs / liveliness_subscriber.rs) keep their `super::resolve_wireexpr` import path verbatim through the re-export."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clean -p wz-session-core -p wz-runtime-tokio + cargo check --workspace --all-targets: clean in 1.79s (fresh-recompile gate).",
+        "scripts/run-ci.sh: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass (fmt --check FAIL on first iteration; cargo fmt --all + re-run cleared the gate).",
+        "scripts/run-ci.sh --layer G: 7 MCU targets x 6 sub-lanes = 42 PASS + 1 SKIP (G.6 riscv32imac riscv32-unknown-elf-gcc absent).",
+        "validate_workspace expected entries=467 -> 468, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-14 next: liveliness.rs (281 lines) — smallest declare/* registry file; resolve_wireexpr dep already cleared at R311di-13. Migration template: file move + std/std::error::Error -> core/alloc rewrite + wz-runtime-tokio re-export from declare.rs.",
+        "After liveliness: subscriber.rs (558) -> queryable.rs (489) -> liveliness_subscriber.rs (694) -> remaining session_glue split + observer / session / pubsub / reply / query migration.",
+        "Architectural carries unchanged: R284 / R283 / R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
+        "Push deferred per CLAUDE.md global never-push-without-explicit-consent rule."
+      ]
+    },
     "Round 311di-2": {
       "decision_summary": "R311di-2 — keyexpr_canon.rs (806 lines) is the first file migrated into wz-session-core; std::fmt/std::error::Error replaced with core::*, alloc::string + alloc::vec imports add; wz-runtime-tokio re-exports the module so 4 caller files (query.rs / pubsub.rs / session.rs / session_glue.rs) stay verbatim.",
       "changes_bullets": [
