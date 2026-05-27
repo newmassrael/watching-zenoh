@@ -1086,14 +1086,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
         };
         Ok(self.publish_aliased(mapping_id, inline_suffix, &loopback_keyexpr, payload, opts))
     }
-}
 
-// R311db — split point: publish / publish_aliased / publish_aliased_auto
-// migrated to R::with_mutex_mut + lifted to the R-generic block above.
-// The methods below still call `self.observer.lock().expect(...)` and
-// stay on the AP-bound block until follow-up rounds (R311dc onward)
-// migrate them via the same closure-form pattern.
-impl<T: TimeSource> Session<TokioRuntime, T> {
     /// R239 — issue a query on `keyexpr` and route replies to
     /// `on_reply` (one fire per Reply or Err) plus `on_final` (one
     /// fire after every expected branch has emitted its Final).
@@ -1201,11 +1194,13 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
             let deadline_ms = (opts.timeout_ms > 0)
                 .then(|| self.clock.now_monotonic_ms() + opts.timeout_ms as u64);
 
-            let handle = {
-                let mut observer = self
-                    .observer
-                    .lock()
-                    .expect("Session observer mutex poisoned — a reply callback panicked");
+            // R311dc — observer access migrates from `.lock().expect()` to
+            // R::with_mutex_mut closure form (R311ct API). The closure body
+            // performs all observer-side mutations (replies.register +
+            // queryables.local_query + replies.deliver_local_*) under a
+            // single lock acquisition, identical to the prior pattern; the
+            // closure returns the ReplyHandle which propagates out.
+            let handle = R::with_mutex_mut(&self.observer, |observer| {
                 let handle = observer.replies.register(
                     rid,
                     expected_finals,
@@ -1233,7 +1228,7 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
                     observer.replies.deliver_local_final(rid);
                 }
                 handle
-            };
+            });
 
             if allows_remote {
                 // R240 — thread QueryOptions metadata (target /
@@ -1340,11 +1335,9 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
             let deadline_ms = (opts.timeout_ms > 0)
                 .then(|| self.clock.now_monotonic_ms() + opts.timeout_ms as u64);
 
-            let handle = {
-                let mut observer = self
-                    .observer
-                    .lock()
-                    .expect("Session observer mutex poisoned — a reply callback panicked");
+            // R311dc — closure-form observer access via R::with_mutex_mut
+            // (R311ct API). Same closure body shape as Session::query.
+            let handle = R::with_mutex_mut(&self.observer, |observer| {
                 let handle = observer.replies.register(
                     rid,
                     expected_finals,
@@ -1365,7 +1358,7 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
                     observer.replies.deliver_local_final(rid);
                 }
                 handle
-            };
+            });
 
             if allows_remote {
                 let meta = opts.query_metadata();
@@ -1452,7 +1445,16 @@ impl<T: TimeSource> Session<TokioRuntime, T> {
             )
         }
     }
+}
 
+// R311dc — split point: query / query_aliased / query_aliased_auto
+// migrated to R::with_mutex_mut + folded into the R-generic block
+// above. The remaining declare_* surface (Querier / QuerierAliased
+// aggregator constructors + Publisher / PublisherAliased + Subscriber
+// / Queryable / LivelinessToken / LivelinessSubscriber registries)
+// still calls observer.lock().expect(...) for the registry mutations
+// and stays on the AP-bound block until R311dd+ migrates them.
+impl<T: TimeSource> Session<TokioRuntime, T> {
     /// R242 — declare a reusable [`Querier`] bound to `keyexpr` +
     /// `options`. The returned Querier holds a clone of this
     /// session and emits subsequent outbound queries through
