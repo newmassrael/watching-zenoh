@@ -296,7 +296,10 @@ pubsub-sample = []
 pubsub-source-info = []
 pubsub-timestamp = ["wz-runtime-tokio?/pubsub-timestamp"]
 
-# ----- domain: query (10 atomic, 6 active / 4 reserved) -----
+# ----- domain: query (10 atomic, 9 active / 1 reserved) -----
+# R311cj — query-attachment + -selector-parameters + -reply-err wire-up;
+# query-source-info stays reserved (build_request_query_with_source_info
+# is doc-referenced but not yet implemented).
 # R307 — six atomic features in the query domain forward into
 # `wz-runtime-tokio` (cargo `?` syntax: only when runtime-tokio is
 # also active). Internal implication edges live in
@@ -307,13 +310,13 @@ pubsub-timestamp = ["wz-runtime-tokio?/pubsub-timestamp"]
 # / `query-selector-parameters` / `query-source-info` /
 # `query-attachment` stay reserved (no source-level gate yet); they
 # remain pure feature-labels until their runtime impls land.
-query-attachment = ["attachment-bytes"]
+query-attachment = ["attachment-bytes", "wz-runtime-tokio?/query-attachment"]
 query-consolidation = ["wz-runtime-tokio?/query-consolidation"]
 query-get = ["wz-runtime-tokio?/query-get"]
 query-queryable = ["wz-runtime-tokio?/query-queryable"]
 query-reply = ["wz-runtime-tokio?/query-reply"]
-query-reply-err = []
-query-selector-parameters = []
+query-reply-err = ["wz-runtime-tokio?/query-reply-err"]
+query-selector-parameters = ["wz-runtime-tokio?/query-selector-parameters"]
 query-source-info = []
 query-target = ["wz-runtime-tokio?/query-target"]
 query-timeout = ["wz-runtime-tokio?/query-timeout"]

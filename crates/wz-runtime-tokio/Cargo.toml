@@ -127,6 +127,9 @@ default = [
     "session-unicast-open",
     "session-unicast-accept",
     "keyexpr-canon",
+    "query-attachment",
+    "query-selector-parameters",
+    "query-reply-err",
 ]
 liveliness-token = ["declare-token", "declare-undeclare"]
 liveliness-subscriber = ["declare-interest", "declare-final"]
@@ -341,6 +344,19 @@ session-unicast-accept = []
 #   keyexpr-canon — `pub mod keyexpr_canon` (structural canonicalize
 #                   mirror of zenoh-pico `_z_keyexpr_canonize`).
 keyexpr-canon = []
+# R311cj — query domain 3 additional wire-ups (6 active -> 9 active):
+#   query-attachment            — Query inbound attachment ext extraction.
+#                                 cfg-off: callback observes None.
+#   query-selector-parameters   — Query.parameters slice projection in
+#                                 dispatch. cfg-off: parameters_view = None.
+#   query-reply-err             — Err-form reply emit via ReplyEmitter
+#                                 (combined with query-queryable gate).
+# query-source-info (10th feature) stays cluster-deferred: no source
+# implementation of build_request_query_with_source_info yet (doc-only
+# reference); wire-up cascade lands when the impl arrives.
+query-attachment = []
+query-selector-parameters = []
+query-reply-err = []
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }

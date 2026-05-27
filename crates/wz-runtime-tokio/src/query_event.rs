@@ -147,9 +147,12 @@ impl<'a> ReplyEmitter<'a> {
     /// Emit an Err-form reply. Mirror of
     /// [`crate::query::QueryResponder::send_err`].
     pub fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]) {
-        #[cfg(feature = "query-queryable")]
+        // R311cj — query-reply-err gates the Err-form reply emit on
+        // top of the existing query-queryable gate. cfg-off (either
+        // axis): silent no-op (R311g1 signature stability).
+        #[cfg(all(feature = "query-queryable", feature = "query-reply-err"))]
         self.inner.send_err(encoding_id, schema, payload);
-        #[cfg(not(feature = "query-queryable"))]
+        #[cfg(not(all(feature = "query-queryable", feature = "query-reply-err")))]
         {
             let _ = (encoding_id, schema, payload);
         }
