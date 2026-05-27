@@ -223,7 +223,12 @@ keyexpr-mapping = []
 keyexpr-wildcard-double = []
 keyexpr-wildcard-single = []
 
-# ----- domain: link (5 atomic, 3 active / 2 reserved) -----
+# ----- domain: link (5 atomic, 0 active / 5 reserved) -----
+# R311ci — audit-only ratify. link-* features overlap conceptually
+# with transport-* (transport-batching, transport-fragmentation
+# already gate the actual behavior in wz-runtime-tokio). The link-*
+# axis is the higher-level routing-layer abstraction (per RFC §5.C)
+# and not yet wired in source. "3 active / 2 reserved" -> 0/5.
 link-batching = []
 link-flow-control = []
 link-fragment = ["transport-fragmentation"]
@@ -313,7 +318,10 @@ query-source-info = []
 query-target = ["wz-runtime-tokio?/query-target"]
 query-timeout = ["wz-runtime-tokio?/query-timeout"]
 
-# ----- domain: routing (6 atomic, 1 active / 5 reserved) -----
+# ----- domain: routing (6 atomic, 0 active / 6 reserved) -----
+# R311ci — audit-only ratify. wz-runtime-tokio is unicast client-only;
+# routing/peer/router mode dispatch + routes table + failover are
+# future cascades. "1 active / 5 reserved" estimate corrected to 0/6.
 routing-client = []
 routing-failover = ["routing-router"]
 routing-peer = []
@@ -373,7 +381,10 @@ runtime-tokio = [
 runtime-tokio-uring = ["runtime-tokio"]
 runtime-zero-copy = []
 
-# ----- domain: scouting (6 atomic, 1 active / 5 reserved) -----
+# ----- domain: scouting (6 atomic, 0 active / 6 reserved) -----
+# R311ci — audit-only ratify. Scout/Hello flow not yet implemented
+# (codec-scout / codec-hello forwards exist but no session-level
+# scout loop). "1 active / 5 reserved" estimate corrected to 0/6.
 scouting-active = []
 scouting-autoconnect = []
 scouting-gossip = ["routing-router"]
@@ -400,7 +411,11 @@ storage-backend = []
 storage-history = ["storage-backend"]
 storage-replication = ["storage-backend"]
 
-# ----- domain: time (4 atomic, 2 active / 2 reserved) -----
+# ----- domain: time (4 atomic, 0 active / 4 reserved) -----
+# R311ci — audit-only ratify. Sample.timestamp (NTP64 wire word) is
+# already gated by pubsub-timestamp (R311cc). time-* features are
+# higher-level abstractions (HLC clock, timestamp source selection)
+# not yet wired in source. "2 active / 2 reserved" estimate -> 0/4.
 time-hlc = []
 time-ntp64 = []
 time-system-clock = []
