@@ -23777,6 +23777,66 @@
         "Architectural carries unchanged R284 R283 R301 sec 8 R299 R300 R301 sec 7 R304."
       ]
     },
+    "Round 311di-8": {
+      "decision_summary": "R311di-8 ConsolidationMode + QueryTarget extract from session_glue.rs to wz-session-core::query_mode; both pure value enums with wire_byte helpers; no dependencies.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/query_mode.rs new 86-line file with ConsolidationMode + QueryTarget enums.",
+        "Both enums carry only u8 const wire_byte() helpers; no allocations no external types.",
+        "crates/wz-session-core/src/lib.rs pub mod query_mode unconditional.",
+        "crates/wz-runtime-tokio/src/session_glue.rs 60-line block removed; two pub use re-exports replace.",
+        "Cumulative session_glue.rs shrink across di-5..di-8 about 150 lines from 12284 baseline.",
+        "Leaf-enum extraction strategy validates incremental wz-session-core surface growth.",
+        "Next target NetworkMessage requires codec-* feature forwarding through workspace dep tree."
+      ],
+      "verification_bullets": [
+        "cargo check workspace all-targets clean across all 6 workspace member crates.",
+        "scripts/run-ci.sh Layer 0..E all pass.",
+        "scripts/run-ci.sh --layer G 7 MCU targets plus RISC-V IMAC 48 PASS plus 1 SKIP gcc absent.",
+        "validate_workspace expected entries 462 to 463 sections 256 T1 orphan 0 RT 13/13."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-9 next NetworkMessage extraction. Requires codec-* feature forwarding wz-session-core to wz-codecs.",
+        "wz-runtime-tokio codec-* features must also enable wz-session-core codec-* features to align cfg gates.",
+        "Plumbing chain wz-runtime-tokio::codec-foo enables wz-session-core::codec-foo enables wz-codecs::codec-foo.",
+        "DriverLoopOutcome + IterationEvent follow after NetworkMessage lands (depend on it directly).",
+        "After NetworkMessage cluster downstream file moves declare/reply/query/pubsub/observer/session unblock.",
+        "Push deferred per CLAUDE.md never push without explicit consent rule.",
+        "Architectural carries unchanged R284 R283 R301 sec 8 R299 R300 R301 sec 7 R304."
+      ],
+      "publishable_decision_summary": "R311di-8 ConsolidationMode + QueryTarget extract from session_glue.rs to wz-session-core::query_mode; both pure value enums with wire_byte helpers; no dependencies.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/query_mode.rs new 86-line file with ConsolidationMode + QueryTarget enums.",
+        "Both enums carry only u8 const wire_byte() helpers; no allocations no external types.",
+        "crates/wz-session-core/src/lib.rs pub mod query_mode unconditional.",
+        "crates/wz-runtime-tokio/src/session_glue.rs 60-line block removed; two pub use re-exports replace.",
+        "Cumulative session_glue.rs shrink across di-5..di-8 about 150 lines from 12284 baseline.",
+        "Leaf-enum extraction strategy validates incremental wz-session-core surface growth.",
+        "Next target NetworkMessage requires codec-* feature forwarding through workspace dep tree."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check workspace all-targets clean across all 6 workspace member crates.",
+        "scripts/run-ci.sh Layer 0..E all pass.",
+        "scripts/run-ci.sh --layer G 7 MCU targets plus RISC-V IMAC 48 PASS plus 1 SKIP gcc absent.",
+        "validate_workspace expected entries 462 to 463 sections 256 T1 orphan 0 RT 13/13."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-9 next NetworkMessage extraction. Requires codec-* feature forwarding wz-session-core to wz-codecs.",
+        "wz-runtime-tokio codec-* features must also enable wz-session-core codec-* features to align cfg gates.",
+        "Plumbing chain wz-runtime-tokio::codec-foo enables wz-session-core::codec-foo enables wz-codecs::codec-foo.",
+        "DriverLoopOutcome + IterationEvent follow after NetworkMessage lands (depend on it directly).",
+        "After NetworkMessage cluster downstream file moves declare/reply/query/pubsub/observer/session unblock.",
+        "Push deferred per CLAUDE.md never push without explicit consent rule.",
+        "Architectural carries unchanged R284 R283 R301 sec 8 R299 R300 R301 sec 7 R304."
+      ]
+    },
     "Round 311di-pre-a": {
       "decision_summary": "R311di-pre-a — wz-runtime-tokio adds hashbrown + portable-atomic deps; session_glue.rs HashMap + AtomicU64 imports route through them; first step toward wz-session-core no_std move-readiness.",
       "changes_bullets": [
