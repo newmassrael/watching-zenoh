@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# mcu-qemu-demo .cargo/config.toml — R311be.
+#
+# Pins this standalone crate to the Cortex-M3 target + wires
+# cortex-m-rt's link script + makes `cargo run` boot the binary
+# in QEMU with semihosting enabled.
+
+[build]
+target = "thumbv7m-none-eabi"
+
+[target.thumbv7m-none-eabi]
+# cortex-m-rt ships `link.x` which INCLUDEs `memory.x` (provided
+# in OUT_DIR via build.rs). `link.x` also adds the cortex-m-rt
+# .vector_table at FLASH origin so the Cortex-M reset vector
+# points at cortex-m-rt's `Reset` symbol.
+rustflags = ["-C", "link-arg=-Tlink.x"]
+
+# `cargo run` boots the binary in QEMU. The Layer Q lane
+# (scripts/run-ci.sh) invokes QEMU directly instead of via
+# `cargo run` so it can capture exit code + stdout for the
+# semihost PASS/FAIL assertion. This runner is here for
+# developer ergonomics (a developer iterating on the demo can
+# do `cargo run --release` inside `deploy/mcu-qemu-demo/`).
+#
+# -cpu cortex-m3                : ARMv7-M architecture
+# -machine mps2-an386          : ARM MPS2 Cortex-M3 evaluation board
+# -nographic                   : no GUI; route serial to stdout
+# -semihosting-config enable=on,target=native,arg=...
+#                              : enable the M-profile semihost
+#                                channel so `cortex_m_semihosting::
+#                                hprintln!` + `debug::exit` work
+# -kernel <bin>                : load the ELF at FLASH origin
+runner = "qemu-system-arm -cpu cortex-m3 -machine mps2-an386 -nographic -semihosting-config enable=on,target=native -kernel"

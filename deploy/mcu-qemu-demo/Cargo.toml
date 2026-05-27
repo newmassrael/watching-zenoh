@@ -1,0 +1,123 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# mcu-qemu-demo — R311be Phase W ladder FULL closure mantissa.
+#
+# QEMU `mps2-an386` (Cortex-M3) target binary that proves the
+# composable-framework MCU stack works end-to-end on a non-host
+# target. Brings together every Phase W primitive that landed
+# R311au → R311bd:
+#
+#   - wz facade (`runtime-lwip` feature) — composable framework
+#     surface; pulls `wz-runtime-lwip` + `wz-link-lwip` via the
+#     `lwip_real_build` cfg propagated from `lwip-sys`.
+#   - `LwipRuntime<DwtClock>` (R311av + R311bc) — cooperative task
+#     pool with deadline-keyed timer queue; `DwtClock` reads the
+#     ARMv7-M DWT cycle counter for monotonic time.
+#   - `LwipTime::new(&runtime)` (R311bc breaking sig) — time
+#     source sharing the runtime's Arc<RuntimeInner<DwtClock>>.
+#   - `LwipJoinHandle::abort` (R311bd) — exposed but not exercised
+#     by the smoke (success path completes naturally).
+#   - `wz-link-lwip` `LwipLink::init` + `LwipUdpSocket::bind/
+#     send_to/try_recv` (R311az-2) — UDP raw API wrap.
+#   - `lwip-sys` cross-real build via the cross-test port (Layer
+#     G.6 cross-real lane already proves this compiles per-target;
+#     R311be additionally proves it RUNS).
+#
+# This is a STANDALONE crate workspace (`[workspace]` table below)
+# so cargo does not try to pull it into the `crates/` workspace's
+# default-member build. The `wz` path dep crosses the workspace
+# boundary explicitly; cargo resolves the wz crate's workspace
+# inheritance against `crates/Cargo.toml` independently.
+#
+# # Smoke shape
+#
+# `main()` initialises a 256 KB heap from BSS, enables the DWT
+# cycle counter, constructs `LwipRuntime::new(DwtClock)` +
+# `LwipLink::init()`, binds a UDP socket on port 5555, spawns a
+# task that sends a payload to 127.0.0.1:5555 and polls
+# `try_recv()` for the echo. On success the task writes
+# `R311be PASS` via semihosting and calls
+# `debug::exit(EXIT_SUCCESS)`. On budget exhaustion (100 ms) it
+# writes `R311be FAIL` and exits with EXIT_FAILURE. The QEMU
+# `-semihosting-config exit=...` channel propagates the exit code
+# to the host shell so the Layer Q lane can assert on it.
+#
+# # Why mps2-an386 specifically
+#
+# - Cortex-M3 (`thumbv7m-none-eabi`) — broadest available Phase W
+#   target; the same one Layer G.4 + G.5 + G.6 already cover at
+#   compile time. Running on M3 validates the entire native-atomic
+#   path of the runtime (M0+ via the R311bb polyfill is a separate
+#   future Q-lane addition).
+# - QEMU emulates it at 25 MHz nominal; `DwtClock` divides cycle
+#   count by 25 to surface microseconds. The exact frequency does
+#   not matter for the smoke — both the sleep budget and the
+#   timeout budget scale identically, so the relative timing
+#   matches what a real M3 deploy would see.
+# - 4 MB flash + 4 MB SRAM gives plenty of headroom for the heap
+#   + lwIP pools + the demo's own .data/.bss. Real deploys would
+#   shrink both.
+
+[workspace]
+# Empty workspace table — declares this crate as its own workspace
+# root so cargo does not search upward and try to pull this crate
+# into `crates/Cargo.toml`'s member list (where it would be
+# default-built on the host and fail because thumbv7m-none-eabi
+# is not the host triple).
+
+[package]
+name = "mcu-qemu-demo"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+authors = ["newmassrael"]
+description = "R311be QEMU mps2-an386 UDP loopback e2e demo (Cortex-M3 + wz facade + wz-link-lwip + wz-runtime-lwip)."
+
+[[bin]]
+name = "mcu-qemu-demo"
+path = "src/main.rs"
+
+[dependencies]
+# Cortex-M runtime + entry point. cortex-m's
+# `critical-section-single-core` feature provides the
+# critical-section impl that `wz-runtime-lwip::sync` + the
+# `portable-atomic` polyfill (R311bb) require on Cortex-M.
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+
+# Semihosting for `hprintln!` PASS/FAIL output + `debug::exit` to
+# terminate QEMU with a host-visible exit code (the QEMU
+# `-semihosting-config exit=...` channel surfaces the M-profile
+# `SYS_EXIT` semihost call as the process exit code).
+cortex-m-semihosting = "0.5"
+
+# Panic handler: routes panic messages to semihosting and exits
+# QEMU with EXIT_FAILURE on panic.
+panic-semihosting = { version = "0.6", features = ["exit"] }
+
+# Heap allocator. The wz upper stack (alloc-feature build) needs
+# a #[global_allocator]; embedded-alloc is the conventional
+# Cortex-M choice (linked-list allocator backed by a static
+# BSS region the binary initialises in main).
+embedded-alloc = "0.6"
+
+# wz facade — the composable-framework entry point. `runtime-lwip`
+# feature pulls wz-runtime-lwip + wz-link-lwip. Cross-workspace
+# path dep into `crates/wz`; cargo resolves wz's workspace
+# inheritance against `crates/Cargo.toml` independently.
+wz = { path = "../../crates/wz", default-features = false, features = ["runtime-lwip"] }
+
+[profile.release]
+# LTO + abort-on-panic shrink the binary so it fits the mps2-an386
+# flash. The QEMU semihost channel still surfaces panic messages
+# because panic-semihosting's panic handler runs BEFORE the abort,
+# and the abort path itself terminates via `debug::exit`.
+codegen-units = 1
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"

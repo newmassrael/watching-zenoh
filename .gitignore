@@ -8,6 +8,10 @@
 /target/
 crates/target/
 vendor/sce/target/
+# R311be — deploy/mcu-qemu-demo is a standalone workspace
+# (cross-compile to thumbv7m-none-eabi); its target/ is build
+# output identical in policy to crates/target/.
+deploy/mcu-qemu-demo/target/
 **/*.rs.bk
 
 # Cargo.lock policy: COMMITTED for the wz Rust workspace
