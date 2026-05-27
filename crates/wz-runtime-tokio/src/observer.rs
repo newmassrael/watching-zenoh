@@ -121,6 +121,7 @@ use crate::query::{QueryReply, QueryableRegistry};
 // codec features are in).
 use crate::reply::ReplyRegistry;
 use crate::session_glue::{IterationEvent, SessionLinkActions};
+use wz_runtime_core::TimeSource;
 
 /// Six-registry application-layer dispatch bundle. See module-level
 /// docs for the rationale and dispatch flow.
@@ -301,7 +302,7 @@ impl ApplicationLayerObserver {
     /// enqueue synchronously onto the OutboundWriteDriver mpsc
     /// channel, so the wire order mirrors enqueue order: every
     /// Reply for rid R precedes the matching ResponseFinal for R.
-    pub fn flush_pending(&mut self, actions: &SessionLinkActions) {
+    pub fn flush_pending<T: TimeSource>(&mut self, actions: &SessionLinkActions<T>) {
         #[cfg(feature = "query-queryable")]
         {
             for reply in self.pending_replies.drain(..) {
@@ -326,7 +327,11 @@ impl ApplicationLayerObserver {
     /// inside the `drive_session_until_terminal` observer closure.
     /// Equivalent to `dispatch_event(event)` followed by
     /// `flush_pending(actions)`.
-    pub fn dispatch(&mut self, event: IterationEvent<'_>, actions: &SessionLinkActions) {
+    pub fn dispatch<T: TimeSource>(
+        &mut self,
+        event: IterationEvent<'_>,
+        actions: &SessionLinkActions<T>,
+    ) {
         self.dispatch_event(event);
         self.flush_pending(actions);
     }
