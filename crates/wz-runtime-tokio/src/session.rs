@@ -617,6 +617,17 @@ impl<R: Runtime> Clone for Session<R> {
     }
 }
 
+/// R311cq — explicit alias for the tokio-runtime-bound Session. The
+/// bare `Session` name still resolves to this through the R267
+/// default-param `Session<R: Runtime = TokioRuntime>`, so existing
+/// call sites stay unchanged. The alias surfaces the runtime binding
+/// explicitly for downstream code that wants its signatures to read
+/// `fn x(s: TokioSession)` rather than `fn x(s: Session)` — useful
+/// once the R267 helper cascade lands and wz-runtime-lwip surfaces
+/// its own `LwipSession = Session<LwipRuntime<C>>` alias so the two
+/// runtimes compose side-by-side without bare-`Session` ambiguity.
+pub type TokioSession = Session<TokioRuntime>;
+
 impl Session<TokioRuntime> {
     /// Construct a new session bundle from existing handles.
     /// `actions` typically comes from
