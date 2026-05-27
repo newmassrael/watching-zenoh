@@ -55,15 +55,23 @@
 // (no_std + alloc) reuses the same dep surface. hashbrown is the upstream
 // std::collections::HashMap implementation (std re-exports it); portable-
 // atomic forwards to core::sync::atomic on AP and falls back via critical-
-// section on MCU (wz-runtime-lwip pulls the same crate per R311bb). The
-// Mutex + Arc imports stay on std for this round — the Mutex story routes
-// through SessionState<R: Runtime>::Mutex<T> at R311di proper (the GAT is
-// already declared on the Runtime trait via R311ar), and the Arc story
-// is a zero-cost relabel deferred to the same round.
-use std::sync::{Arc, Mutex};
+// section on MCU (wz-runtime-lwip pulls the same crate per R311bb).
+//
+// R311di-pre-d — Mutex direct ref routes through wz_runtime_tokio::sync::Mutex
+// (R311y alias = `pub type Mutex<T> = std::sync::Mutex<T>;`), uniformising
+// the migration path with the rest of the wz-runtime-tokio src tree. The
+// eventual SessionState<R: Runtime> reparam at R311di proper will lift these
+// field types to R::Mutex<T> via the GAT (declared on the Runtime trait via
+// R311ar). Arc stays on std::sync::Arc for now — std::sync::Arc and
+// alloc::sync::Arc are the same type, and the zero-cost relabel is deferred
+// to R311di proper where the file moves to wz-session-core (no_std + alloc)
+// and the import line becomes `use alloc::sync::Arc;`.
+use std::sync::Arc;
 
 use hashbrown::HashMap;
 use portable_atomic::{AtomicU64, Ordering};
+
+use crate::sync::Mutex;
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -10481,7 +10489,7 @@ mod tests {
     /// transform the Response between the builder and the wire.
     #[test]
     fn send_response_emits_reliable_frame_with_seeded_sn() {
-        use std::sync::Mutex;
+        use crate::sync::Mutex;
 
         struct RecordingDriver {
             frames: Mutex<Vec<(Vec<u8>, Reliability)>>,
@@ -10558,7 +10566,7 @@ mod tests {
     #[cfg(feature = "codec-close")]
     #[test]
     fn send_close_with_reason_emits_zenoh_pico_compatible_wire_bytes() {
-        use std::sync::Mutex;
+        use crate::sync::Mutex;
 
         struct RecordingDriver {
             frames: Mutex<Vec<(Vec<u8>, Reliability)>>,
@@ -10643,7 +10651,7 @@ mod tests {
     /// stall the requester's z_get future).
     #[test]
     fn send_response_and_final_share_sn_counter() {
-        use std::sync::Mutex;
+        use crate::sync::Mutex;
 
         struct RecordingDriver {
             frames: Mutex<Vec<Vec<u8>>>,

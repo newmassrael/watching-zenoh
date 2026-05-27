@@ -2012,7 +2012,7 @@ mod tests {
     #[test]
     fn dispatch_projects_put_push_into_sample_put_with_payload() {
         use crate::sample::SampleKind;
-        use std::sync::Mutex;
+        use crate::sync::Mutex;
         let mut registry = SubscriberRegistry::new();
         let captured = Arc::new(Mutex::new(None::<crate::sample::Sample>));
         let captured_clone = captured.clone();
@@ -2032,7 +2032,7 @@ mod tests {
     #[test]
     fn dispatch_projects_del_push_into_sample_del_with_empty_payload() {
         use crate::sample::SampleKind;
-        use std::sync::Mutex;
+        use crate::sync::Mutex;
         let mut registry = SubscriberRegistry::new();
         let captured = Arc::new(Mutex::new(None::<crate::sample::Sample>));
         let captured_clone = captured.clone();
@@ -2058,7 +2058,7 @@ mod tests {
         // id=7 → "sensors/room1/temp"; subsequent Push with id=7 +
         // suffix=None must surface Sample.keyexpr == the resolved
         // literal, NOT the raw id form.
-        use std::sync::Mutex;
+        use crate::sync::Mutex;
         let mut registry = SubscriberRegistry::new();
         let captured = Arc::new(Mutex::new(None::<String>));
         let captured_clone = captured.clone();

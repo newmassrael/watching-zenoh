@@ -23469,6 +23469,54 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311di-pre-d": {
+      "decision_summary": "R311di-pre-d — sweep `use std::sync::Mutex` direct refs → `use crate::sync::Mutex` alias across the 8 wz-runtime-tokio src files; the only std::sync::* surface remaining in the crate is Arc.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs:63 (file-level): `use std::sync::{Arc, Mutex};` split into `use std::sync::Arc;` + `use crate::sync::Mutex;` (the latter via a new `use crate::sync::Mutex;` line after the hashbrown/portable-atomic group). R311di-pre-a comment block expanded to record the Mutex routing decision (crate::sync alias bridges this round to R311di proper's R::Mutex<T> GAT lift).",
+        "crates/wz-runtime-tokio/src/{session_glue.rs:10484, 10561, 10646, pubsub.rs:2015, 2035, 2061}: 6 function-local `        use std::sync::Mutex;` migrations to `        use crate::sync::Mutex;` via replace_all per file (3 occurrences in session_glue.rs tests + 3 occurrences in pubsub.rs tests — each test asserts a Mutex-guarded slot's state under concurrent access).",
+        "crates/wz-runtime-tokio/src/{declare/liveliness_subscriber.rs:431, declare/queryable.rs:253, reply.rs:676, query.rs:882, declare/subscriber.rs:236, declare/liveliness.rs:153}: 6 test-mod `    use std::sync::{Arc, Mutex};` splits into `    use std::sync::Arc;` + `    use crate::sync::Mutex;` (combined-form imports inside `mod tests { ... }` blocks; Arc stays on std for this round and lifts to `alloc::sync::Arc` at R311di proper alongside the wz-session-core extraction).",
+        "wz_runtime_tokio::sync::Mutex (R311y `pub type Mutex<T> = std::sync::Mutex<T>;`) is now the single Mutex surface across the entire wz-runtime-tokio src tree. The eventual SessionState<R: Runtime> reparam at R311di proper migrates this alias to `R::Mutex<T>` via the GAT — each file gets one import-line edit (`use crate::sync::Mutex;` is removed and the field type changes to `R::Mutex<...>`) rather than the heterogenous `std::sync::Mutex` vs `crate::sync::Mutex` mix this round closed."
+      ],
+      "verification_bullets": [
+        "grep -rn 'use std::sync::Mutex\\|use std::sync::{.*Mutex' crates/wz-runtime-tokio/src/ returns zero hits — every Mutex import in the crate now routes through crate::sync::Mutex.",
+        "cargo check --workspace --all-targets: clean; crate::sync::Mutex is a type alias for std::sync::Mutex so all `Mutex::new(...)` / `Mutex<T>` references resolve through the alias to the same concrete type — zero semantic change.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline preserved.",
+        "validate_workspace: entries=444 -> 445, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di proper: SessionState<R: Runtime> reparam + Mutex GAT migration + wz-session-core crate extraction. Three sub-decisions remain to land: (1) Runtime trait helper for Mutex construction — `fn new_mutex<T: Send + 'static>(t: T) -> Self::Mutex<T>` on the Runtime trait, since callers cannot invoke `R::Mutex<T>::new(...)` without an inherent-method GAT (closure-form constructors are the other candidate); (2) SessionState fields' Mutex<T> field types lift to R::Mutex<T> — ~30 field-init sites in SessionState::new + helper builders; (3) module move — session_glue.rs + session.rs + observer.rs + declare/* + pubsub.rs + query.rs + reply.rs + sample.rs + locality.rs + keyexpr_canon.rs move to crates/wz-session-core (no_std + alloc); wz-runtime-tokio shrinks to runtime_impl.rs + lib.rs + sync.rs.",
+        "R311di pre-extraction also lifts the file-level `use std::sync::Arc;` lines across the crate to `use alloc::sync::Arc;` (or via a `wz_runtime_tokio::sync::Arc` alias if a per-runtime Arc binding is wanted — e.g. critical_section-based MCU profile may need a single-thread Arc instead of the standard atomic-refcount Arc). The relabel is zero-cost on AP because std re-exports alloc::sync::Arc, but the import discipline matters for wz-session-core's no_std + alloc move-readiness.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311di-pre-d — sweep `use std::sync::Mutex` direct refs → `use crate::sync::Mutex` alias across the 8 wz-runtime-tokio src files; the only std::sync::* surface remaining in the crate is Arc.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs:63 (file-level): `use std::sync::{Arc, Mutex};` split into `use std::sync::Arc;` + `use crate::sync::Mutex;` (the latter via a new `use crate::sync::Mutex;` line after the hashbrown/portable-atomic group). R311di-pre-a comment block expanded to record the Mutex routing decision (crate::sync alias bridges this round to R311di proper's R::Mutex<T> GAT lift).",
+        "crates/wz-runtime-tokio/src/{session_glue.rs:10484, 10561, 10646, pubsub.rs:2015, 2035, 2061}: 6 function-local `        use std::sync::Mutex;` migrations to `        use crate::sync::Mutex;` via replace_all per file (3 occurrences in session_glue.rs tests + 3 occurrences in pubsub.rs tests — each test asserts a Mutex-guarded slot's state under concurrent access).",
+        "crates/wz-runtime-tokio/src/{declare/liveliness_subscriber.rs:431, declare/queryable.rs:253, reply.rs:676, query.rs:882, declare/subscriber.rs:236, declare/liveliness.rs:153}: 6 test-mod `    use std::sync::{Arc, Mutex};` splits into `    use std::sync::Arc;` + `    use crate::sync::Mutex;` (combined-form imports inside `mod tests { ... }` blocks; Arc stays on std for this round and lifts to `alloc::sync::Arc` at R311di proper alongside the wz-session-core extraction).",
+        "wz_runtime_tokio::sync::Mutex (R311y `pub type Mutex<T> = std::sync::Mutex<T>;`) is now the single Mutex surface across the entire wz-runtime-tokio src tree. The eventual SessionState<R: Runtime> reparam at R311di proper migrates this alias to `R::Mutex<T>` via the GAT — each file gets one import-line edit (`use crate::sync::Mutex;` is removed and the field type changes to `R::Mutex<...>`) rather than the heterogenous `std::sync::Mutex` vs `crate::sync::Mutex` mix this round closed."
+      ],
+      "publishable_verification_bullets": [
+        "grep -rn 'use std::sync::Mutex\\|use std::sync::{.*Mutex' crates/wz-runtime-tokio/src/ returns zero hits — every Mutex import in the crate now routes through crate::sync::Mutex.",
+        "cargo check --workspace --all-targets: clean; crate::sync::Mutex is a type alias for std::sync::Mutex so all `Mutex::new(...)` / `Mutex<T>` references resolve through the alias to the same concrete type — zero semantic change.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline preserved.",
+        "validate_workspace: entries=444 -> 445, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di proper: SessionState<R: Runtime> reparam + Mutex GAT migration + wz-session-core crate extraction. Three sub-decisions remain to land: (1) Runtime trait helper for Mutex construction — `fn new_mutex<T: Send + 'static>(t: T) -> Self::Mutex<T>` on the Runtime trait, since callers cannot invoke `R::Mutex<T>::new(...)` without an inherent-method GAT (closure-form constructors are the other candidate); (2) SessionState fields' Mutex<T> field types lift to R::Mutex<T> — ~30 field-init sites in SessionState::new + helper builders; (3) module move — session_glue.rs + session.rs + observer.rs + declare/* + pubsub.rs + query.rs + reply.rs + sample.rs + locality.rs + keyexpr_canon.rs move to crates/wz-session-core (no_std + alloc); wz-runtime-tokio shrinks to runtime_impl.rs + lib.rs + sync.rs.",
+        "R311di pre-extraction also lifts the file-level `use std::sync::Arc;` lines across the crate to `use alloc::sync::Arc;` (or via a `wz_runtime_tokio::sync::Arc` alias if a per-runtime Arc binding is wanted — e.g. critical_section-based MCU profile may need a single-thread Arc instead of the standard atomic-refcount Arc). The relabel is zero-cost on AP because std re-exports alloc::sync::Arc, but the import discipline matters for wz-session-core's no_std + alloc move-readiness.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [

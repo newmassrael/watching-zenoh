@@ -250,7 +250,9 @@ mod tests {
     use super::super::test_helpers::*;
     use super::*;
     use portable_atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
+
+    use crate::sync::Mutex;
 
     #[test]
     fn queryable_empty_registry_dispatch_is_noop() {
