@@ -19783,6 +19783,72 @@
         "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP (residual upstream-coverage carry beyond the demo path), R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter. R303++ atomic field population still pending."
       ]
     },
+    "Round 311bl": {
+      "decision_summary": "R311bl footprint regression CI gate — Layer Q gains Q.3 arm-none-eabi-size sub-lane with ±256-byte tolerance against R311bj caveat baseline.",
+      "changes_bullets": [
+        "scripts/check-footprint.sh new — per-triple BASELINE_TEXT/DATA/BSS table; ROM axes gated, bss informational",
+        "scripts/run-ci.sh Layer Q gains Q.3 footprint check dedup-per-triple after Q.1 build; SKIPs on toolchain absence",
+        "thumbv7m-none-eabi baseline text=23652 data=4 bss=269916 (R311bj caveat (a) mps2-an385 anchor)",
+        "thumbv7em-none-eabihf baseline text=23724 data=4 bss=269916 (R311bj caveat (b) M4+M7 byte-identical)",
+        "tolerance ±256 bytes per ROM axis = north-star atomic-feature footprint threshold; granularity match",
+        "bss informational-only — R311bj caveat (c) HEAP_SIZE dominance disclosure; RAM gate is a separate round",
+        "Q.3 dedup via associative array footprint_checked[$target]=1 — mps2-an386 + mps2-an500 share triple, one check",
+        "no source / Cargo.toml / build.rs change — pure CI infra; R311bj caveat values stay authoritative source"
+      ],
+      "verification_bullets": [
+        "bash scripts/run-ci.sh --layer Q : Q.1×3 build OK + Q.2×3 run PASS + Q.3×2 +0/+0 OK; Layer Q pass overall",
+        "footprint check measured exactly R311bj caveat figures (text+0 data+0 bss+0 across both triples)",
+        "Q.3 dedup empirically verified: mps2-an500 second-pass thumbv7em-none-eabihf emits no duplicate Q.3 line",
+        "SKIP paths exercised mentally: binary missing exits 0 graceful, arm-none-eabi-size absent exits 0 graceful",
+        "validate_workspace before+after: T1=0, RT 13/13, GENERATED.md=sync; entries 391→392, no new orphans",
+        "check-footprint.sh standalone invocation: per-target PASS text/data/bss line emitted with ±tolerance band display"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "carry_forward_bullets": [
+        "R311bm-m0 (carry from R311bj): microbit/M0 thumbv6m lane — main.rs portable-atomic AtomicU32 + memory.x + slimmer preset baseline",
+        "R311bm-m33 (carry from R311bj): mps2-an505/M33 thumbv8m.main lane — cortex-m-rt 0.7 Secure-init survey + path lock",
+        "Multi-link / non-loopback netif e2e (carry from R311bj): virtio-net or QEMU host TAP path; lwIP NIC driver shim 1-2 rounds",
+        "Baseline update procedure: scripts/check-footprint.sh BASELINE_* + §6.7 caveat must update in the same Round entry",
+        "bss informational-only stance: RAM gate driven by lwIP MEM_SIZE + BoxFuture-per-spawn budget is a separate round when applicable",
+        "preset-cortex-m0plus / preset-cortex-m33 future baseline rows added alongside R311bm-m0 / R311bm-m33 land",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest. R303++ atomic field population pending."
+      ],
+      "publishable_decision_summary": "R311bl footprint regression CI gate — Layer Q gains Q.3 arm-none-eabi-size sub-lane with ±256-byte tolerance against R311bj caveat baseline.",
+      "publishable_changes_bullets": [
+        "scripts/check-footprint.sh new — per-triple BASELINE_TEXT/DATA/BSS table; ROM axes gated, bss informational",
+        "scripts/run-ci.sh Layer Q gains Q.3 footprint check dedup-per-triple after Q.1 build; SKIPs on toolchain absence",
+        "thumbv7m-none-eabi baseline text=23652 data=4 bss=269916 (R311bj caveat (a) mps2-an385 anchor)",
+        "thumbv7em-none-eabihf baseline text=23724 data=4 bss=269916 (R311bj caveat (b) M4+M7 byte-identical)",
+        "tolerance ±256 bytes per ROM axis = north-star atomic-feature footprint threshold; granularity match",
+        "bss informational-only — R311bj caveat (c) HEAP_SIZE dominance disclosure; RAM gate is a separate round",
+        "Q.3 dedup via associative array footprint_checked[$target]=1 — mps2-an386 + mps2-an500 share triple, one check",
+        "no source / Cargo.toml / build.rs change — pure CI infra; R311bj caveat values stay authoritative source"
+      ],
+      "publishable_verification_bullets": [
+        "bash scripts/run-ci.sh --layer Q : Q.1×3 build OK + Q.2×3 run PASS + Q.3×2 +0/+0 OK; Layer Q pass overall",
+        "footprint check measured exactly R311bj caveat figures (text+0 data+0 bss+0 across both triples)",
+        "Q.3 dedup empirically verified: mps2-an500 second-pass thumbv7em-none-eabihf emits no duplicate Q.3 line",
+        "SKIP paths exercised mentally: binary missing exits 0 graceful, arm-none-eabi-size absent exits 0 graceful",
+        "validate_workspace before+after: T1=0, RT 13/13, GENERATED.md=sync; entries 391→392, no new orphans",
+        "check-footprint.sh standalone invocation: per-target PASS text/data/bss line emitted with ±tolerance band display"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311bm-m0 (carry from R311bj): microbit/M0 thumbv6m lane — main.rs portable-atomic AtomicU32 + memory.x + slimmer preset baseline",
+        "R311bm-m33 (carry from R311bj): mps2-an505/M33 thumbv8m.main lane — cortex-m-rt 0.7 Secure-init survey + path lock",
+        "Multi-link / non-loopback netif e2e (carry from R311bj): virtio-net or QEMU host TAP path; lwIP NIC driver shim 1-2 rounds",
+        "Baseline update procedure: scripts/check-footprint.sh BASELINE_* + §6.7 caveat must update in the same Round entry",
+        "bss informational-only stance: RAM gate driven by lwIP MEM_SIZE + BoxFuture-per-spawn budget is a separate round when applicable",
+        "preset-cortex-m0plus / preset-cortex-m33 future baseline rows added alongside R311bm-m0 / R311bm-m33 land",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest. R303++ atomic field population pending."
+      ]
+    },
     "Round 311c": {
       "decision_summary": "R311c lands codec-close cascade — wire encode/decode + send_close_with_reason + bind_unit gated; CloseReason enum + set_close_reason_* FSM bindings stay unconditional.",
       "changes_bullets": [
