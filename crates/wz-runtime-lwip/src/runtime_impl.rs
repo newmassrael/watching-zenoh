@@ -330,6 +330,23 @@ impl<C: ClockSource> Runtime for LwipRuntime<C> {
         self.inner.executor.spawn(boxed, cancel_flag);
         LwipJoinHandle::new(state, cancel_flag_for_handle)
     }
+
+    // R311ct — closure-scoped mutex access. MCU profile binds through
+    // `critical_section::with` (interrupt-disabling) + `RefCell::borrow_mut`
+    // (interior-mutable shared access inside the critical section). No
+    // poison concept on this profile: a panicking observer task would
+    // abort the whole executor under `panic = "abort"` (MCU default),
+    // so the only observable lock-failure mode is the runtime never
+    // resuming — recovery is not meaningful.
+    fn with_mutex_mut<T, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U
+    where
+        T: Send + 'static,
+    {
+        critical_section::with(|cs| {
+            let mut borrow = mutex.borrow(cs).borrow_mut();
+            f(&mut *borrow)
+        })
+    }
 }
 
 #[cfg(test)]
