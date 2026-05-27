@@ -356,7 +356,7 @@ impl ApplicationLayerObserver {
 mod tests {
     use super::*;
     use crate::session_glue::{DriverLoopOutcome, NetworkMessage};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use portable_atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use wz_codecs::decl_subscriber::DeclSubscriber;
     use wz_codecs::declare::{Declare, DeclareVariant};
