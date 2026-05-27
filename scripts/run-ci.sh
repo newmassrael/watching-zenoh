@@ -461,8 +461,36 @@ layer_c1b_cargo_test_alloc() {
 }
 
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
+#
+# R311bo: mirror the gate to deploy/mcu-qemu-demo (standalone
+# workspace, same shape as R311bn fmt mirror). Cross-compile
+# clippy on thumbv7m-none-eabi catches the universal portion of
+# the deploy-side lint surface (cfg-attribute consistency, unused
+# bindings, type-state issues) without paying for all five Phase W
+# targets each invocation — the issues that vary by target triple
+# are caught by Layer G's per-triple build matrix. SKIP gracefully
+# if the thumbv7m-none-eabi rustup target or arm-none-eabi-gcc is
+# absent so a host-only developer is not forced to install the
+# cross toolchain just to clear C2.
 layer_c2_cargo_clippy() {
-    (cd crates && cargo clippy --workspace --all-targets --quiet -- -D warnings)
+    (cd crates && cargo clippy --workspace --all-targets --quiet -- -D warnings) || return 1
+
+    local installed
+    installed="$(rustup target list --installed 2>/dev/null)"
+    if ! grep -q "^thumbv7m-none-eabi$" <<< "$installed"; then
+        echo "  C2 deploy SKIP (thumbv7m-none-eabi target absent)"
+        return 0
+    fi
+    if ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
+        echo "  C2 deploy SKIP (arm-none-eabi-gcc not on PATH)"
+        return 0
+    fi
+
+    local lwip_port
+    lwip_port="$(realpath crates/lwip-sys/port/cross-test)"
+    WZ_LWIP_PORT="$lwip_port" cargo clippy --release \
+        --manifest-path deploy/mcu-qemu-demo/Cargo.toml \
+        --target thumbv7m-none-eabi --quiet -- -D warnings
 }
 
 # ─── Layer D — deploy yaml schema validate ──────────────────────────
