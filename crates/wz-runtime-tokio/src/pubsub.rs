@@ -799,33 +799,64 @@ impl SubscriberRegistry {
         // through a Sample callback with arbitrary `tag` would
         // semantically lie about the kind (it is neither a
         // confirmed Put nor a confirmed Del).
+        // R311cc — pubsub-put / pubsub-delete arm cfg gates the wire
+        // Put / Del body branches. cfg-off routes the corresponding
+        // variant to the silent-drop `_ =>` fall-through, matching the
+        // PushVariant::Default behavior (subscriber callback not fired).
+        // pubsub-attachment / pubsub-timestamp gate the per-arm
+        // projection helpers — fields stay declared on Sample for
+        // signature stability (R311g1); cfg-off populator returns None.
         let (kind, payload, body_timestamp, body_encoding, body_attachment, body_source_info) =
             match &push.body {
+                #[cfg(feature = "pubsub-put")]
                 PushVariant::CodecZenohMsgPut(put) => {
                     let body_exts: &[wz_codecs::ext_entry::ExtEntry] =
                         put.extensions.as_deref().unwrap_or(&[]);
+                    #[cfg(feature = "pubsub-timestamp")]
+                    let body_timestamp = put.timestamp.as_ref().map(TimestampHint::from_codec);
+                    #[cfg(not(feature = "pubsub-timestamp"))]
+                    let body_timestamp: Option<TimestampHint> = None;
+                    #[cfg(feature = "pubsub-attachment")]
+                    let body_attachment = extract_attachment(body_exts);
+                    #[cfg(not(feature = "pubsub-attachment"))]
+                    let body_attachment: Option<Vec<u8>> = {
+                        let _ = body_exts;
+                        None
+                    };
                     (
                         SampleKind::Put,
                         put.payload.clone(),
-                        put.timestamp.as_ref().map(TimestampHint::from_codec),
+                        body_timestamp,
                         put.encoding.as_ref().map(EncodingHint::from_codec),
-                        extract_attachment(body_exts),
+                        body_attachment,
                         extract_source_info(body_exts),
                     )
                 }
+                #[cfg(feature = "pubsub-delete")]
                 PushVariant::CodecZenohMsgDel(del) => {
                     let body_exts: &[wz_codecs::ext_entry::ExtEntry] =
                         del.extensions.as_deref().unwrap_or(&[]);
+                    #[cfg(feature = "pubsub-timestamp")]
+                    let body_timestamp = del.timestamp.as_ref().map(TimestampHint::from_codec);
+                    #[cfg(not(feature = "pubsub-timestamp"))]
+                    let body_timestamp: Option<TimestampHint> = None;
+                    #[cfg(feature = "pubsub-attachment")]
+                    let body_attachment = extract_attachment(body_exts);
+                    #[cfg(not(feature = "pubsub-attachment"))]
+                    let body_attachment: Option<Vec<u8>> = {
+                        let _ = body_exts;
+                        None
+                    };
                     (
                         SampleKind::Del,
                         Vec::new(),
-                        del.timestamp.as_ref().map(TimestampHint::from_codec),
+                        body_timestamp,
                         None,
-                        extract_attachment(body_exts),
+                        body_attachment,
                         extract_source_info(body_exts),
                     )
                 }
-                PushVariant::Default { .. } => return,
+                _ => return,
             };
         let outer_exts: &[wz_codecs::ext_entry::ExtEntry] =
             push.extensions.as_deref().unwrap_or(&[]);

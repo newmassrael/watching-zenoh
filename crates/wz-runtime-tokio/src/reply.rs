@@ -393,17 +393,23 @@ impl ReplyRegistry {
             Some(s) => s,
             None => return,
         };
+        // R311cc — pubsub-put / pubsub-delete gate the inbound Reply
+        // body variants. cfg-off drops the corresponding Reply (the
+        // query-side dispatcher mirror of pubsub.rs PushVariant arms).
         let body = match &response.body {
             ResponseVariant::CodecZenohReply(reply) => match &reply.body {
+                #[cfg(feature = "pubsub-put")]
                 ReplyVariant::CodecZenohMsgPut(put) => InboundReplyBody::Put {
                     payload: put.payload.clone(),
                 },
+                #[cfg(feature = "pubsub-delete")]
                 ReplyVariant::CodecZenohMsgDel(_) => InboundReplyBody::Del,
                 // Default arm carries a runtime tag whose MID falls
                 // outside {MsgPut, MsgDel}. zenoh-pico's inner-body
                 // dispatch treats this as a wire-spec violation; the
-                // AP MVP path mirrors that by dropping silently.
-                ReplyVariant::Default { .. } => return,
+                // AP MVP path mirrors that by dropping silently. cfg-off
+                // pubsub-put / -delete arms also fall through here.
+                _ => return,
             },
             ResponseVariant::CodecZenohErr(err) => {
                 let encoding = err

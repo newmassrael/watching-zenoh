@@ -119,6 +119,11 @@ default = [
     "transport-unicast",
     "transport-keepalive",
     "transport-batching",
+    "pubsub-put",
+    "pubsub-delete",
+    "pubsub-allow-loop",
+    "pubsub-attachment",
+    "pubsub-timestamp",
 ]
 liveliness-token = ["declare-token", "declare-undeclare"]
 liveliness-subscriber = ["declare-interest", "declare-final"]
@@ -282,6 +287,33 @@ transport-link-udp = []
 transport-unicast = []
 transport-keepalive = []
 transport-batching = []
+# R311cc — pubsub domain wire-up. 5 atomic features that have real
+# source behavior in this crate (Cargo.toml authoring intent: "11
+# atomic, 5 active / 6 reserved"). Each gates a concrete cfg site:
+#   pubsub-put         — MsgPut import in query.rs + SampleKind::Put
+#                        emission at the Push consumer in pubsub.rs.
+#                        Feature-off elides the Put body branch.
+#   pubsub-delete      — MsgDel import + Delete branch in query.rs;
+#                        SampleKind::Delete fan-out path. Feature-off
+#                        leaves only Put-shaped samples observable.
+#   pubsub-allow-loop  — local_publish loopback registry call in
+#                        session.rs (Session::publish-self path).
+#                        Feature-off short-circuits the loopback so
+#                        only remote inbound triggers subscribers.
+#   pubsub-attachment  — `Sample::with_attachment` setter in sample.rs
+#                        + the Push consumer attachment projection.
+#                        Feature-off keeps the Option field but never
+#                        populates it (signature stability).
+#   pubsub-timestamp   — `Sample::with_timestamp` setter + Push
+#                        consumer timestamp projection. Same shape
+#                        as -attachment: field stays, populator gates.
+# 6 reserved (encoding, source-info, priority, congestion-control,
+# express, sample) stay declaration-only at the wz facade level.
+pubsub-put = []
+pubsub-delete = []
+pubsub-allow-loop = []
+pubsub-attachment = []
+pubsub-timestamp = []
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }
