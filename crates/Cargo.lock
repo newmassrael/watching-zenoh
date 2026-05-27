@@ -1520,6 +1520,7 @@ dependencies = [
 name = "wz-session-core"
 version = "0.1.0"
 dependencies = [
+ "sce-forge-runtime",
  "wz-codecs",
  "wz-runtime-core",
 ]

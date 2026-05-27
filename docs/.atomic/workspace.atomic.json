@@ -23659,6 +23659,70 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 sec 8 SCE cross-repo."
       ]
     },
+    "Round 311di-6": {
+      "decision_summary": "R311di-6 InboundParseError + MAX_EXT_CHAIN_DEPTH extract from session_glue.rs to wz-session-core::parse_error; scope narrowed to the foundational sub-cluster for CodecError dep validation.",
+      "changes_bullets": [
+        "crates/wz-session-core/Cargo.toml: add sce-forge-runtime path dep with default-features=false for CodecError import.",
+        "crates/wz-session-core/src/parse_error.rs: new 63-line file with InboundParseError + MAX_EXT_CHAIN_DEPTH.",
+        "core::fmt::Display + core::error::Error impls replace std variants (Rust 1.81 core::error stabilized).",
+        "crates/wz-session-core/src/lib.rs: pub mod parse_error unconditional; carries no Vec/String allocations.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: 38 lines removed; pub use re-export replaces them.",
+        "Scope narrowed from full cluster to foundational sub-cluster: NetworkMessage etc carries codec feature gates.",
+        "Feature gates on NetworkMessage variants depend on codec-push codec-request etc cargo features.",
+        "Forwarding those features through wz-session-core needs careful Cargo plumbing per dep crate.",
+        "R311di-6 lands sce-forge-runtime dep wiring as the validation step before bigger cluster moves."
+      ],
+      "verification_bullets": [
+        "cargo check workspace all-targets: clean across all 6 workspace member crates.",
+        "scripts/run-ci.sh Layer 0..E: all pass.",
+        "scripts/run-ci.sh --layer G across 7 MCU targets plus RISC-V IMAC: 48 PASS plus 1 SKIP gcc absent.",
+        "validate_workspace expected entries 460 to 461 sections 256 T1 orphan 0 RT 13/13."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-7 next: extract NetworkMessage with codec feature forwarding from wz-session-core to wz-codecs.",
+        "Feature forwarding plumbing: wz-session-core needs codec-* features each forwarding to wz-codecs equivalent.",
+        "wz-runtime-tokio codec-* features also need to enable wz-session-core codec-* features so cfg gates align.",
+        "DriverLoopOutcome + LeaseCheckOutcome + IterationEvent follow after NetworkMessage lands.",
+        "Then downstream file moves declare/reply/query/pubsub/observer/session can proceed.",
+        "Architectural carries unchanged: R284 uniform Established gate R283 peer Interest bilateral.",
+        "Push deferred per CLAUDE.md never push without explicit consent rule."
+      ],
+      "publishable_decision_summary": "R311di-6 InboundParseError + MAX_EXT_CHAIN_DEPTH extract from session_glue.rs to wz-session-core::parse_error; scope narrowed to the foundational sub-cluster for CodecError dep validation.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/Cargo.toml: add sce-forge-runtime path dep with default-features=false for CodecError import.",
+        "crates/wz-session-core/src/parse_error.rs: new 63-line file with InboundParseError + MAX_EXT_CHAIN_DEPTH.",
+        "core::fmt::Display + core::error::Error impls replace std variants (Rust 1.81 core::error stabilized).",
+        "crates/wz-session-core/src/lib.rs: pub mod parse_error unconditional; carries no Vec/String allocations.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: 38 lines removed; pub use re-export replaces them.",
+        "Scope narrowed from full cluster to foundational sub-cluster: NetworkMessage etc carries codec feature gates.",
+        "Feature gates on NetworkMessage variants depend on codec-push codec-request etc cargo features.",
+        "Forwarding those features through wz-session-core needs careful Cargo plumbing per dep crate.",
+        "R311di-6 lands sce-forge-runtime dep wiring as the validation step before bigger cluster moves."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check workspace all-targets: clean across all 6 workspace member crates.",
+        "scripts/run-ci.sh Layer 0..E: all pass.",
+        "scripts/run-ci.sh --layer G across 7 MCU targets plus RISC-V IMAC: 48 PASS plus 1 SKIP gcc absent.",
+        "validate_workspace expected entries 460 to 461 sections 256 T1 orphan 0 RT 13/13."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-7 next: extract NetworkMessage with codec feature forwarding from wz-session-core to wz-codecs.",
+        "Feature forwarding plumbing: wz-session-core needs codec-* features each forwarding to wz-codecs equivalent.",
+        "wz-runtime-tokio codec-* features also need to enable wz-session-core codec-* features so cfg gates align.",
+        "DriverLoopOutcome + LeaseCheckOutcome + IterationEvent follow after NetworkMessage lands.",
+        "Then downstream file moves declare/reply/query/pubsub/observer/session can proceed.",
+        "Architectural carries unchanged: R284 uniform Established gate R283 peer Interest bilateral.",
+        "Push deferred per CLAUDE.md never push without explicit consent rule."
+      ]
+    },
     "Round 311di-pre-a": {
       "decision_summary": "R311di-pre-a — wz-runtime-tokio adds hashbrown + portable-atomic deps; session_glue.rs HashMap + AtomicU64 imports route through them; first step toward wz-session-core no_std move-readiness.",
       "changes_bullets": [

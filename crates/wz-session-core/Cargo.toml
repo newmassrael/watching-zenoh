@@ -53,6 +53,12 @@ wz-runtime-core = { path = "../wz-runtime-core" }
 # default-features = false + features = ["alloc"] mirrors wz-runtime-tokio's
 # baseline so MCU profiles stay heap-aware but std-free.
 wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc"] }
+# R311di-6 — sce-forge-runtime supplies `CodecError` needed by
+# InboundParseError variants. default-features = false stays MCU-aware;
+# `alloc` is implied via wz-codecs's transitive enable but the dep is
+# declared direct so the import path `sce_forge_runtime::codec::CodecError`
+# resolves without going through wz-codecs's namespace.
+sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-features = false }
 
 [lints]
 workspace = true

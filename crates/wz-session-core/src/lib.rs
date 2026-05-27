@@ -38,6 +38,11 @@ pub mod reliability;
 #[cfg(feature = "alloc")]
 pub mod link;
 
+/// Inbound-parse error surface + ext-chain depth ceiling. Precursor
+/// for the NetworkMessage / DriverLoopOutcome dispatch cluster.
+/// no_std clean (core::fmt + core::error::Error); unconditional.
+pub mod parse_error;
+
 /// R222 / R225 — application-layer `Sample` type for subscriber callbacks.
 /// Mirrors zenoh-pico's `_z_sample_t` projection. Carries alloc-bound
 /// fields (Vec<u8> payload, String keyexpr) so gated on the `alloc`
