@@ -20081,6 +20081,74 @@
         "Architectural carries unchanged: R267 Session<R,T> reparam, R284, R283, R301 8 SCE cross-repo, Q_B/Q_E codec slots, Phase W lwIP, R299 2/3, R300, R301 7, R304, keyexpr_canon proptest. R303++ atomic field population pending."
       ]
     },
+    "Round 311bp": {
+      "decision_summary": "R311bp 결정 record: SCE sce:requires RFC 폐기 + north-star Critical path #3 retracted + 부채 청산을 다음 세션 1순위로 ratify.",
+      "changes_bullets": [
+        "No source / Cargo.toml / build.rs change — decision-only round, R311z pattern parallel",
+        "SCE sce:requires attribute RFC 폐기 ratify: Mesh Path B Rule 1 violation + 5+5 scope test 2 trigger hit",
+        "north-star Critical path #3 (SCE feature-aware emit cross-repo) retracted; consumer-side ergonomic option 으로 격하",
+        "3 학습 anchor lands in memory: mesh-path-b-scxml-purity, sce-scope-5plus5-test, 311-cfg-audit-first",
+        "311 cfg-sites audit empirical: 84% wz-runtime-tokio R311g1 signature stability cost — SCE 무관 architectural cost",
+        "부채 청산이 다음 세션 1순위 — 새 atomic feature wire-up 또는 catalog 확장 작업 금지 until 부채 cleared"
+      ],
+      "verification_bullets": [
+        "wz facade audit: find crates -name '*.rs' grep cfg(feature) = 311 total / 31 unique / 10.0x duplication factor",
+        "per-crate distribution: wz-runtime-tokio 262 (84%) / wz-codecs 28 / wz-runtime-lwip 10 / wz-runtime-core 7 / wz 4",
+        "categorical conflation evidence: 60 sce:* attribute in SCE 가 codegen IR vocabulary (sce:helper / sce:length-from / sce:variant-dispatch); deployment-flavored attribute 아님",
+        "validate_workspace: T1=0 RT 13/13 sync entries 396->397 sections 256 caveats unchanged orphans unchanged",
+        "mesh_path_b_scxml_purity.md (2026-04-14 Session E) Rule 1 명시 사후 검증: 'Reject any new sce:* attribute proposal'"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "carry_forward_bullets": [
+        "**다음 세션 1순위 = 부채 청산** (사용자 명시 2026-05-27): 신규 feature/preset/catalog 확장 작업 금지 until 아래 부채 cleared",
+        "**부채 #1 R311bn-slim-preset** (north-star Phase 1 anchor; architectural): wz-runtime-lwip task pool redesign — spawn-less 또는 inline-state Future path 로 BoxFuture 12 KB 분해 → microbit Q.2 KNOWN_SKIP -> PASS + preset-mcu-minimal 실현. 단일 라운드 가능",
+        "**부채 #2 R267 Session<R,T> reparam** (north-star Critical path #5; architectural multi-round): Session 2-param 도입 + ap-demo 16+ sites cascade. R311w/x/y 까지 §5.P decision-lock 완료, 실제 reparam 미적용",
+        "**부채 #3 R311g1 ratify 재검토** (long-term; large blast radius): wz-runtime-tokio 262 body cfg-gate 가 signature stability 의 architectural cost. method 분해 (50+ -> 150+) 가 더 atomic-feature aligned. R311bn/R267 끝난 후 evidence 기반 검토",
+        "**부채 #4 R311bo cortex-m-rt 0.8 secure-init survey** (cortex-m-rt upstream tracking): mps2-an505 + Cortex-M55 ARMv8-M Secure-state init. upstream 0.8 plan 조사 또는 fork",
+        "**부채 #5 Multi-link / non-loopback netif e2e** (R311bj carry): virtio-net 또는 QEMU TAP. lwIP NIC driver shim 1-2 라운드",
+        "**부채 #6 atomic feature wire-up 54% reserved**: 144 atomic features 중 ~76 still cargo-listed but source #[cfg(feature)] 미부착. domain-by-domain mechanical (codec/declare/keyexpr 가 이미 100% wired)",
+        "**부채 #7 wz-codecs 28 sites facade 통합 audit** (small N, mechanical): facade 한 곳에 모으면 28 -> 14 가능",
+        "**부채 #8 R303++ atomic field population pending**",
+        "**Architectural carries unchanged**: R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter",
+        "**Retracted**: north-star Critical path #3 (SCE feature-aware emit cross-repo dependency) — consumer-side ergonomic 으로 격하; alternative path sidecar TOML 또는 codegen CLI flag 도 부채 청산 후 평가"
+      ],
+      "publishable_decision_summary": "R311bp 결정 record: SCE sce:requires RFC 폐기 + north-star Critical path #3 retracted + 부채 청산을 다음 세션 1순위로 ratify.",
+      "publishable_changes_bullets": [
+        "No source / Cargo.toml / build.rs change — decision-only round, R311z pattern parallel",
+        "SCE sce:requires attribute RFC 폐기 ratify: Mesh Path B Rule 1 violation + 5+5 scope test 2 trigger hit",
+        "north-star Critical path #3 (SCE feature-aware emit cross-repo) retracted; consumer-side ergonomic option 으로 격하",
+        "3 학습 anchor lands in memory: mesh-path-b-scxml-purity, sce-scope-5plus5-test, 311-cfg-audit-first",
+        "311 cfg-sites audit empirical: 84% wz-runtime-tokio R311g1 signature stability cost — SCE 무관 architectural cost",
+        "부채 청산이 다음 세션 1순위 — 새 atomic feature wire-up 또는 catalog 확장 작업 금지 until 부채 cleared"
+      ],
+      "publishable_verification_bullets": [
+        "wz facade audit: find crates -name '*.rs' grep cfg(feature) = 311 total / 31 unique / 10.0x duplication factor",
+        "per-crate distribution: wz-runtime-tokio 262 (84%) / wz-codecs 28 / wz-runtime-lwip 10 / wz-runtime-core 7 / wz 4",
+        "categorical conflation evidence: 60 sce:* attribute in SCE 가 codegen IR vocabulary (sce:helper / sce:length-from / sce:variant-dispatch); deployment-flavored attribute 아님",
+        "validate_workspace: T1=0 RT 13/13 sync entries 396->397 sections 256 caveats unchanged orphans unchanged",
+        "mesh_path_b_scxml_purity.md (2026-04-14 Session E) Rule 1 명시 사후 검증: 'Reject any new sce:* attribute proposal'"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "publishable_carry_forward_bullets": [
+        "**다음 세션 1순위 = 부채 청산** (사용자 명시 2026-05-27): 신규 feature/preset/catalog 확장 작업 금지 until 아래 부채 cleared",
+        "**부채 #1 R311bn-slim-preset** (north-star Phase 1 anchor; architectural): wz-runtime-lwip task pool redesign — spawn-less 또는 inline-state Future path 로 BoxFuture 12 KB 분해 → microbit Q.2 KNOWN_SKIP -> PASS + preset-mcu-minimal 실현. 단일 라운드 가능",
+        "**부채 #2 R267 Session<R,T> reparam** (north-star Critical path #5; architectural multi-round): Session 2-param 도입 + ap-demo 16+ sites cascade. R311w/x/y 까지 §5.P decision-lock 완료, 실제 reparam 미적용",
+        "**부채 #3 R311g1 ratify 재검토** (long-term; large blast radius): wz-runtime-tokio 262 body cfg-gate 가 signature stability 의 architectural cost. method 분해 (50+ -> 150+) 가 더 atomic-feature aligned. R311bn/R267 끝난 후 evidence 기반 검토",
+        "**부채 #4 R311bo cortex-m-rt 0.8 secure-init survey** (cortex-m-rt upstream tracking): mps2-an505 + Cortex-M55 ARMv8-M Secure-state init. upstream 0.8 plan 조사 또는 fork",
+        "**부채 #5 Multi-link / non-loopback netif e2e** (R311bj carry): virtio-net 또는 QEMU TAP. lwIP NIC driver shim 1-2 라운드",
+        "**부채 #6 atomic feature wire-up 54% reserved**: 144 atomic features 중 ~76 still cargo-listed but source #[cfg(feature)] 미부착. domain-by-domain mechanical (codec/declare/keyexpr 가 이미 100% wired)",
+        "**부채 #7 wz-codecs 28 sites facade 통합 audit** (small N, mechanical): facade 한 곳에 모으면 28 -> 14 가능",
+        "**부채 #8 R303++ atomic field population pending**",
+        "**Architectural carries unchanged**: R284, R283, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter",
+        "**Retracted**: north-star Critical path #3 (SCE feature-aware emit cross-repo dependency) — consumer-side ergonomic 으로 격하; alternative path sidecar TOML 또는 codegen CLI flag 도 부채 청산 후 평가"
+      ]
+    },
     "Round 311c": {
       "decision_summary": "R311c lands codec-close cascade — wire encode/decode + send_close_with_reason + bind_unit gated; CloseReason enum + set_close_reason_* FSM bindings stay unconditional.",
       "changes_bullets": [
