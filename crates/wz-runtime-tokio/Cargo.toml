@@ -114,6 +114,11 @@ default = [
     "codec-declare",
     "codec-request",
     "codec-response",
+    "transport-link-tcp",
+    "transport-link-udp",
+    "transport-unicast",
+    "transport-keepalive",
+    "transport-batching",
 ]
 liveliness-token = ["declare-token", "declare-undeclare"]
 liveliness-subscriber = ["declare-interest", "declare-final"]
@@ -241,6 +246,42 @@ codec-request = ["codec-frame"]
 # and query-queryable imply codec-response (the reply emit path on
 # the queryable side).
 codec-response = ["codec-frame"]
+# R311cb — transport domain wire-up. 5 atomic features that have real
+# source behavior in this crate (Cargo.toml authoring intent: "16
+# atomic, 5 active / 11 reserved"). Each gates a concrete cfg site:
+#   transport-link-tcp     — TcpDriver struct + LinkDriver impl + the
+#                            tokio::net::TcpStream import (lib.rs ~315).
+#   transport-link-udp     — UdpDriver struct + LinkDriver impl + the
+#                            tokio::net::UdpSocket import (lib.rs ~517).
+#   transport-unicast      — pub mod session_fsm_unicast (lib.rs ~203);
+#                            the entire session_glue.rs depends on the
+#                            SessionFsmUnicast{Event,Policy} types so
+#                            feature-off is intentionally not buildable
+#                            until transport-multicast (currently
+#                            reserved) introduces an alternate FSM.
+#                            Default-on so the AP path keeps compiling.
+#   transport-keepalive    — start_keepalive_worker / stop_keepalive_worker
+#                            action bindings + the worker spawn body in
+#                            session_glue.rs. R311g1 silent no-op when
+#                            disabled (the bind_unit registers a no-op
+#                            so the SCXML script-action surface stays
+#                            available; the spawn body short-circuits).
+#                            Wire-level KeepAlive parse stays governed
+#                            by codec-keep-alive — transport-keepalive
+#                            disables only the active sender side.
+#   transport-batching     — INIT handshake batch_size negotiation in
+#                            PeerInitCaps::from_init_syn. Feature-off
+#                            forces batch_size = 65535 (full MTU) and
+#                            skips the min(peer, local) reduction at
+#                            the OpenAck arm.
+# 11 reserved (link-tls/quic/ws/unixsock/vsock/serial, multicast,
+# fragmentation, compression, shm, lowlatency) stay declaration-only
+# at the wz facade Cargo.toml level; this crate does not own them.
+transport-link-tcp = []
+transport-link-udp = []
+transport-unicast = []
+transport-keepalive = []
+transport-batching = []
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }

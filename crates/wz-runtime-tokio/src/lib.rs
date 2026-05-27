@@ -18,11 +18,22 @@
 //! and is composed via `session_glue::install_session_actions` for
 //! every native dispatch from `<script>...</script>` action bodies.
 
+// R311cb — TCP/UDP imports are wire-up-gated. cfg-off elides the
+// tokio::net dependency at the driver-construction site (the tokio
+// dep stays unconditional because session_glue.rs uses tokio::time +
+// tokio::sync regardless of which link kind is enabled).
+#[cfg(feature = "transport-link-tcp")]
 use sce_forge_runtime::codec::SceCursor;
 use std::io;
+#[cfg(feature = "transport-link-udp")]
 use std::net::SocketAddr;
+#[cfg(feature = "transport-link-tcp")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, UdpSocket};
+#[cfg(feature = "transport-link-tcp")]
+use tokio::net::TcpStream;
+#[cfg(feature = "transport-link-udp")]
+use tokio::net::UdpSocket;
+#[cfg(feature = "transport-link-tcp")]
 use wz_codecs::stream_envelope::StreamEnvelope;
 
 pub mod session_glue;
@@ -197,6 +208,14 @@ pub mod runtime_impl;
 #[allow(unused_labels)]
 #[allow(unreachable_patterns)]
 #[allow(unreachable_code)]
+// R311cb — transport-unicast gates the SCE-generated FSM module. The
+// entire session_glue.rs depends on SessionFsmUnicast{Event,Policy},
+// so cfg-off is intentionally not buildable until transport-multicast
+// (currently reserved) introduces an alternate FSM. Default-on keeps
+// the AP path compiling; the cfg site exists to wire the catalog
+// promise to the source and to give the future multicast cascade a
+// single edit point.
+#[cfg(feature = "transport-unicast")]
 #[allow(unused_assignments)]
 #[allow(clippy::style)]
 #[allow(clippy::complexity)]
@@ -312,6 +331,7 @@ pub trait LinkDriver {
 /// codec's `decode` requires the full frame in the cursor before
 /// it can run). The duplication is bounded to a 2-byte `[u8; 2]`
 /// length sniff; the structural decode runs through the codec.
+#[cfg(feature = "transport-link-tcp")]
 pub struct TcpDriver {
     stream: Option<TcpStream>,
     /// R265 — partial-read state machine for the cancel-safe
@@ -343,6 +363,7 @@ pub struct TcpDriver {
 /// cancel-safe (no bytes consumed if the future is dropped before
 /// completion), so dropping `poll_event` mid-state leaves the
 /// captured offset / buffer intact for the next invocation.
+#[cfg(feature = "transport-link-tcp")]
 #[derive(Default)]
 enum ReadState {
     /// No partial read in flight. Next `poll_event` enters
@@ -364,6 +385,7 @@ enum ReadState {
     Payload { frame: Vec<u8>, offset: usize },
 }
 
+#[cfg(feature = "transport-link-tcp")]
 impl TcpDriver {
     /// Wrap an already-open TcpStream (acceptor side). The
     /// `open()` method is a no-op for this constructor.
@@ -375,6 +397,7 @@ impl TcpDriver {
     }
 }
 
+#[cfg(feature = "transport-link-tcp")]
 impl LinkDriver for TcpDriver {
     async fn open(&mut self) -> io::Result<()> {
         // R51 baseline: caller passes an already-open stream via
@@ -514,11 +537,13 @@ impl LinkDriver for TcpDriver {
 /// silently drops the hint on `Reliability::Reliable` (the session
 /// FSM's responsibility — UDP cannot enforce reliability at the
 /// link layer).
+#[cfg(feature = "transport-link-udp")]
 pub struct UdpDriver {
     socket: Option<UdpSocket>,
     peer: Option<SocketAddr>,
 }
 
+#[cfg(feature = "transport-link-udp")]
 impl UdpDriver {
     /// Wrap a bound UdpSocket + the remote peer the driver
     /// `send()` targets. R51 baseline: caller establishes the
@@ -532,6 +557,7 @@ impl UdpDriver {
     }
 }
 
+#[cfg(feature = "transport-link-udp")]
 impl LinkDriver for UdpDriver {
     async fn open(&mut self) -> io::Result<()> {
         if self.socket.is_some() && self.peer.is_some() {

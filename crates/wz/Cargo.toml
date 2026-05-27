@@ -374,22 +374,30 @@ time-system-clock = []
 time-timestamp-source = []
 
 # ----- domain: transport (16 atomic, 5 active / 11 reserved) -----
-transport-batching = []
+# R311cb — 5 active features forward to wz-runtime-tokio (TCP/UDP
+# driver, unicast FSM, keepalive worker, INIT batch_size negotiation).
+# 11 reserved features (link-tls/quic/ws/unixsock/vsock/serial,
+# multicast, fragmentation, compression, shm, lowlatency) stay
+# declaration-only — no wz-runtime-tokio counterpart exists yet, and
+# adding a forward to a missing feature would surface as a Cargo
+# resolver error. They land as wire-up cascades as their behavior
+# arrives (e.g. session-multicast pulls transport-multicast, R311+).
+transport-batching = ["wz-runtime-tokio?/transport-batching"]
 transport-compression = []
 transport-fragmentation = []
-transport-keepalive = []
+transport-keepalive = ["wz-runtime-tokio?/transport-keepalive"]
 transport-link-quic = []
 transport-link-serial = []
-transport-link-tcp = []
+transport-link-tcp = ["wz-runtime-tokio?/transport-link-tcp"]
 transport-link-tls = ["transport-link-tcp"]
-transport-link-udp = []
+transport-link-udp = ["wz-runtime-tokio?/transport-link-udp"]
 transport-link-unixsock = []
 transport-link-vsock = []
 transport-link-ws = []
 transport-lowlatency = []
 transport-multicast = []
 transport-shm = []
-transport-unicast = []
+transport-unicast = ["wz-runtime-tokio?/transport-unicast"]
 
 # ============================================================
 # Domain aggregates (19 entries, each = union of domain's atomic set)

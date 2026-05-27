@@ -570,6 +570,36 @@
       "title": "§5.1 Transport",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Transport domain catalog: 16 atomic features (5 active wired in wz-runtime-tokio, 11 reserved declaration-only) covering link kinds + session topology + envelope behaviors.",
+      "rationale_bullets": [
+        "Composable framework lens (R267-R299): each transport capability is one atomic feature toggle.",
+        "Cargo.toml authoring intent: 16 features split 5 active / 11 reserved per the source comment.",
+        "Active set follows real wz-runtime-tokio behavior, not catalog wish list — gate where code exists.",
+        "Reserved set is declaration-only at wz facade; no wz-runtime-tokio forward until behavior lands.",
+        "R311ca audit method (grep `feature = \"X\"`) counts only source cfg sites, not Cargo.toml refs."
+      ],
+      "outputs_bullets": [
+        "Active set (5): -link-tcp, -link-udp, -unicast, -keepalive, -batching (R311cb wire-up).",
+        "transport-link-tcp gates TcpDriver + LinkDriver impl + tokio::net::TcpStream import at lib.rs.",
+        "transport-link-udp gates UdpDriver + LinkDriver impl + tokio::net::UdpSocket import at lib.rs.",
+        "transport-unicast gates `pub mod session_fsm_unicast` (SCE-generated FSM module declaration).",
+        "transport-keepalive gates start_keepalive_worker / stop_keepalive_worker SCXML action bindings.",
+        "transport-batching gates INIT handshake batch_size honoring + min(local, peer) reduction.",
+        "Reserved link kinds (6): -link-tls, -link-quic, -link-ws, -link-unixsock, -link-vsock, -link-serial.",
+        "Reserved envelope/topology (5): -multicast, -fragmentation, -compression, -shm, -lowlatency.",
+        "Reserved features stay declaration-only in wz facade Cargo.toml until behavior lands."
+      ],
+      "caveats_bullets": [
+        "transport-unicast cfg-off intentionally not buildable until transport-multicast lands (R311cb).",
+        "transport-keepalive cfg-off makes session FSM fail at start_keepalive_worker SCXML action call.",
+        "transport-batching cfg-off forces batch_size = 65535; ignores peer-advertised reduction.",
+        "transport-link-tls forwards transport-link-tcp via Cargo imply but has no source cfg yet (reserved).",
+        "Wire-level KeepAlive parse governed by codec-keep-alive (separate from transport-keepalive worker)."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness": {
@@ -21326,6 +21356,68 @@
         "북극성 lens: atomic feature 카탈로그 truthfulness 핵심 이제 명시됨 — 19% wired, 81% unwired; 'composable framework' 약속과 실제 광대한 gap",
         "부채 #8 35 outline-only remainder unchanged",
         "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter"
+      ]
+    },
+    "Round 311cb": {
+      "decision_summary": "R311cb transport domain wire-up — 5 active features cfg-gated in wz-runtime-tokio (19 source cfg sites); 11 reserved stay declaration-only.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/Cargo.toml: 5 features added (transport-link-tcp, -link-udp, -unicast, -keepalive, -batching) + default-on list extension.",
+        "crates/wz/Cargo.toml: 5 active features forward to wz-runtime-tokio?/transport-* via ?-syntax; 11 reserved stay empty.",
+        "crates/wz-runtime-tokio/src/lib.rs: TCP imports + TcpDriver block (struct, ReadState, impl, LinkDriver impl) cfg(feature = 'transport-link-tcp'); UDP imports + UdpDriver block cfg(feature = 'transport-link-udp'); pub mod session_fsm_unicast cfg(feature = 'transport-unicast').",
+        "crates/wz-runtime-tokio/src/session_glue.rs: 2 bind_unit sites for start_keepalive_worker / stop_keepalive_worker cfg(feature = 'transport-keepalive'); PeerInitCaps::from_init_syn batch_size honoring cfg(feature = 'transport-batching'); init_ack_params min(local, peer) reduction cfg(feature = 'transport-batching').",
+        "docs/feature_inventory.md §5.1: intent + rationale (5 bullets) + outputs (9 bullets) + 5 caveats + impact_scope (2 refs)."
+      ],
+      "verification_bullets": [
+        "Audit verification: grep `feature = \"X\"` in crates/wz-runtime-tokio/src/ — transport-link-tcp 8 / transport-link-udp 5 / transport-unicast 1 / transport-keepalive 2 / transport-batching 3 = 19 total cfg sites; all 5 features count as wired in R311ca audit method.",
+        "cargo check -p wz-runtime-tokio (default features): pass.",
+        "cargo clippy -p wz-runtime-tokio --all-targets -D warnings: clean.",
+        "cargo fmt --check -p wz-runtime-tokio + -p wz: clean.",
+        "cargo test -p wz-runtime-tokio --lib: 593/593 pass.",
+        "cargo build --workspace: pass.",
+        "validate_workspace baseline: entries 408 -> 409, sections 256, T1 orphan 0, round-trip 13/13, GENERATED.md sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311cc next: pubsub 11 unwired features cascade (composable framework lens — second largest unwired domain after transport).",
+        "Transport reserved (11): link-tls/quic/ws/unixsock/vsock/serial, multicast, fragmentation, compression, shm, lowlatency — wire-up cascade lands when real source behavior arrives.",
+        "transport-multicast wire-up will require companion transport-unicast cfg-off path (alternate FSM module).",
+        "transport-fragmentation wire-up will follow reassembly logic introduction (RFC §5.M reassembly_fsm prose-sketch).",
+        "transport-shm + transport-compression wire-up tied to session-extshm + session-extcompression facade aggregates.",
+        "R311ca debt #6 wire-up progress: 31 -> 36 wired (19% -> 22%); 130 -> 125 unwired (80% -> 78%); 14 domains -> 13 still 0% wired.",
+        "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter, R267, R311 facade graceful-close wrapper API."
+      ],
+      "publishable_decision_summary": "R311cb transport domain wire-up — 5 active features cfg-gated in wz-runtime-tokio (19 source cfg sites); 11 reserved stay declaration-only.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/Cargo.toml: 5 features added (transport-link-tcp, -link-udp, -unicast, -keepalive, -batching) + default-on list extension.",
+        "crates/wz/Cargo.toml: 5 active features forward to wz-runtime-tokio?/transport-* via ?-syntax; 11 reserved stay empty.",
+        "crates/wz-runtime-tokio/src/lib.rs: TCP imports + TcpDriver block (struct, ReadState, impl, LinkDriver impl) cfg(feature = 'transport-link-tcp'); UDP imports + UdpDriver block cfg(feature = 'transport-link-udp'); pub mod session_fsm_unicast cfg(feature = 'transport-unicast').",
+        "crates/wz-runtime-tokio/src/session_glue.rs: 2 bind_unit sites for start_keepalive_worker / stop_keepalive_worker cfg(feature = 'transport-keepalive'); PeerInitCaps::from_init_syn batch_size honoring cfg(feature = 'transport-batching'); init_ack_params min(local, peer) reduction cfg(feature = 'transport-batching').",
+        "docs/feature_inventory.md §5.1: intent + rationale (5 bullets) + outputs (9 bullets) + 5 caveats + impact_scope (2 refs)."
+      ],
+      "publishable_verification_bullets": [
+        "Audit verification: grep `feature = \"X\"` in crates/wz-runtime-tokio/src/ — transport-link-tcp 8 / transport-link-udp 5 / transport-unicast 1 / transport-keepalive 2 / transport-batching 3 = 19 total cfg sites; all 5 features count as wired in R311ca audit method.",
+        "cargo check -p wz-runtime-tokio (default features): pass.",
+        "cargo clippy -p wz-runtime-tokio --all-targets -D warnings: clean.",
+        "cargo fmt --check -p wz-runtime-tokio + -p wz: clean.",
+        "cargo test -p wz-runtime-tokio --lib: 593/593 pass.",
+        "cargo build --workspace: pass.",
+        "validate_workspace baseline: entries 408 -> 409, sections 256, T1 orphan 0, round-trip 13/13, GENERATED.md sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311cc next: pubsub 11 unwired features cascade (composable framework lens — second largest unwired domain after transport).",
+        "Transport reserved (11): link-tls/quic/ws/unixsock/vsock/serial, multicast, fragmentation, compression, shm, lowlatency — wire-up cascade lands when real source behavior arrives.",
+        "transport-multicast wire-up will require companion transport-unicast cfg-off path (alternate FSM module).",
+        "transport-fragmentation wire-up will follow reassembly logic introduction (RFC §5.M reassembly_fsm prose-sketch).",
+        "transport-shm + transport-compression wire-up tied to session-extshm + session-extcompression facade aggregates.",
+        "R311ca debt #6 wire-up progress: 31 -> 36 wired (19% -> 22%); 130 -> 125 unwired (80% -> 78%); 14 domains -> 13 still 0% wired.",
+        "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter, R267, R311 facade graceful-close wrapper API."
       ]
     },
     "Round 311d": {
