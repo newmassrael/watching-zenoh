@@ -22357,6 +22357,48 @@
         "Operating lesson re-confirmed: memory feedback_mnemosyne_append_caps was 6 days old and warned of the 200-char decision_summary cap + misleading missing field changes_bullets error. Diagnosis path still tripped the trap; spurious Round 311co-test entry is now audit-traced + redacted. Future R267 rounds: count decision_summary length BEFORE the first append call."
       ]
     },
+    "Round 311cq": {
+      "decision_summary": "R311cq adds TokioSession = Session<TokioRuntime> type alias. R311cp carry #3 immediate-repayment; surfaces tokio runtime binding for downstream signature readability.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: add pub type TokioSession = Session<TokioRuntime> directly after the manual Clone impl for Session R block, before impl Session TokioRuntime. Doc comment explains the alias surfaces runtime binding explicitly while bare Session name still works via default param resolution."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh Layer A-E: all required layers pass.",
+        "No source-site changes required — bare Session resolves identically to TokioSession via R267 default-param. Alias is additive surface only.",
+        "validate_workspace post-append: entries=423->424, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync, publishable/audit divergence 22/22."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R267 helper struct cascade (R311cr+): Querier / QuerierAliased / Publisher / PublisherAliased / Subscriber / Queryable / LivelinessToken / LivelinessSubscriber each holds session: Session field; generic R param + manual Clone + impl block scope to TokioRuntime. Drop impls for Subscriber / Queryable / LivelinessToken / LivelinessSubscriber also need generic. Mechanical pattern; 2-3 helpers per round per R311ab carry.",
+        "wz-runtime-lwip needs wz_runtime_lwip sync Mutex T alias module + matching LwipSession = Session LwipRuntime C alias before non-default Session R binding is meaningful. LwipRuntime impl lands R311av; sync alias + LwipSession alias pending.",
+        "R267 Session R T TimeSource second param locked by R311w but not introduced; T currently method-level generic on Session query / Querier get. Fold-in sub-decision pending.",
+        "R311ca debt #6 wire-up unchanged at 33 percent. R267 cascade is foundation move; unblocks runtime-async-std / -no-std / -tokio-uring / -zero-copy reservation once cascade completes.",
+        "CI gap from R311cp carry: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination."
+      ],
+      "publishable_decision_summary": "R311cq adds TokioSession = Session<TokioRuntime> type alias. R311cp carry #3 immediate-repayment; surfaces tokio runtime binding for downstream signature readability.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: add pub type TokioSession = Session<TokioRuntime> directly after the manual Clone impl for Session R block, before impl Session TokioRuntime. Doc comment explains the alias surfaces runtime binding explicitly while bare Session name still works via default param resolution."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh Layer A-E: all required layers pass.",
+        "No source-site changes required — bare Session resolves identically to TokioSession via R267 default-param. Alias is additive surface only.",
+        "validate_workspace post-append: entries=423->424, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync, publishable/audit divergence 22/22."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R267 helper struct cascade (R311cr+): Querier / QuerierAliased / Publisher / PublisherAliased / Subscriber / Queryable / LivelinessToken / LivelinessSubscriber each holds session: Session field; generic R param + manual Clone + impl block scope to TokioRuntime. Drop impls for Subscriber / Queryable / LivelinessToken / LivelinessSubscriber also need generic. Mechanical pattern; 2-3 helpers per round per R311ab carry.",
+        "wz-runtime-lwip needs wz_runtime_lwip sync Mutex T alias module + matching LwipSession = Session LwipRuntime C alias before non-default Session R binding is meaningful. LwipRuntime impl lands R311av; sync alias + LwipSession alias pending.",
+        "R267 Session R T TimeSource second param locked by R311w but not introduced; T currently method-level generic on Session query / Querier get. Fold-in sub-decision pending.",
+        "R311ca debt #6 wire-up unchanged at 33 percent. R267 cascade is foundation move; unblocks runtime-async-std / -no-std / -tokio-uring / -zero-copy reservation once cascade completes.",
+        "CI gap from R311cp carry: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination."
+      ]
+    },
     "Round 311d": {
       "decision_summary": "R311d batches codec-scout / codec-hello / codec-join cascade — wz-codecs level only (wz-runtime-tokio does not import these types); forwards stay catalog-uniform for future runtime reuse.",
       "changes_bullets": [
