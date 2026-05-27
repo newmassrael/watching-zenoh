@@ -191,7 +191,15 @@ declare-subscriber = ["wz-runtime-tokio?/declare-subscriber"]
 declare-token = ["wz-runtime-tokio?/declare-token"]
 declare-undeclare = ["wz-runtime-tokio?/declare-undeclare"]
 
-# ----- domain: encoding (7 atomic, 3 active / 4 reserved) -----
+# ----- domain: encoding (7 atomic, 0 active / 7 reserved) -----
+# R311cg — audit-only ratify. Encoding in wz is the wire-level
+# `Encoding { packed_id, schema_len, schema }` triplet (zenoh-pico
+# `_z_encoding_t` mirror), where schema is a free-form application
+# MIME-like string. There is no per-encoding source dispatch: a
+# subscriber receiving "application/json" or "text/utf-8" handles the
+# bytes itself. Cfg-gating each encoding name would create dead-code
+# stubs, not elision. All 7 features stay declaration-only. The prior
+# comment "3 active / 4 reserved" was a forward-looking estimate.
 encoding-bytes = []
 encoding-cbor = []
 encoding-empty = []
