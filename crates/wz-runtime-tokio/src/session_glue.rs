@@ -162,9 +162,9 @@ use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
-use wz_runtime_core::TimeSource;
+use wz_runtime_core::{Runtime, TimeSource};
 
-use crate::runtime_impl::TokioTime;
+use crate::runtime_impl::{TokioRuntime, TokioTime};
 
 // R309 — `check_outbound_keyexpr_pico_safe` is consumed only by
 // `send_declare_keyexpr` / `send_declare_subscriber` /
@@ -755,10 +755,10 @@ impl From<OutboundKeyexprError> for SendDeclareError {
 }
 
 /// Bundle of state shared across the 17 native script functions.
-pub struct SessionLinkActions<T: TimeSource = TokioTime> {
+pub struct SessionLinkActions<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
     pub driver: Arc<dyn BoxedLinkDriver>,
     pub params: SessionInitParams,
-    pub trace: Mutex<ActionTrace>,
+    pub trace: R::Mutex<ActionTrace>,
     /// Cookie material captured from a peer's InitAck via
     /// `handle_inbound`. When populated this overrides
     /// `params.cookie` on the OpenSyn outbound, implementing the
@@ -1069,7 +1069,18 @@ pub fn default_init_patch_ext_entry() -> ExtEntry {
     }
 }
 
-impl<T: TimeSource> SessionLinkActions<T> {
+// R311di-pre-f2 — `::new` constructor sits on the TokioRuntime-concrete
+// impl block so callers (`SessionLinkActions::new(driver, params,
+// clock)`) keep inferring `R = TokioRuntime` without a turbofish.
+// Generic-R callers (future MCU profile, post-wz-session-core
+// extraction) will gain a sibling `new_generic<R, T>` factory that
+// composes the same body via `R::new_mutex`; until that factory
+// lands the AP-only profile is the sole live caller, so the concrete
+// constructor is the textbook backward-compat shape (mirrors the
+// `TokioSession` alias / `impl<T> Session<TokioRuntime, T>` pattern
+// from the R311cw-dh cascade — both establish a concrete-bound AP
+// entry point on top of a generic struct).
+impl<T: TimeSource> SessionLinkActions<TokioRuntime, T> {
     /// Construct a session action bundle for one logical FSM instance.
     /// The `params` are captured by value; production callers
     /// supplying per-deploy values stage them once at session
@@ -1089,7 +1100,7 @@ impl<T: TimeSource> SessionLinkActions<T> {
         Arc::new(Self {
             driver,
             params,
-            trace: Mutex::new(ActionTrace::default()),
+            trace: TokioRuntime::new_mutex(ActionTrace::default()),
             inbound_cookie: Mutex::new(None),
             last_inbound_keepalive_at: Mutex::new(None),
             established_at: Mutex::new(None),
@@ -1114,7 +1125,9 @@ impl<T: TimeSource> SessionLinkActions<T> {
             next_outbound_interest_id: AtomicU64::new(0),
         })
     }
+}
 
+impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
     /// R121d — derive the SessionInitParams the Accepting side
     /// will emit on the outbound InitAck. Caps `seq_num_res`,
     /// `req_id_res`, and `batch_size` to `min(self.params.x,
@@ -1215,7 +1228,7 @@ impl<T: TimeSource> SessionLinkActions<T> {
     }
 
     pub fn trace_snapshot(&self) -> ActionTrace {
-        self.trace.lock().unwrap().clone_via_copy()
+        R::with_mutex_mut(&self.trace, |t| t.clone_via_copy())
     }
 
     /// Initiator-side inbound dispatch — parse the wire bytes, and if
@@ -2413,10 +2426,7 @@ impl<T: TimeSource> SessionLinkActions<T> {
     pub fn send_close_with_reason(&self, reason: CloseReason) {
         #[cfg(feature = "codec-close")]
         {
-            self.trace
-                .lock()
-                .expect("trace poisoned by an earlier panicked Lua action")
-                .send_close_frame_with_reason += 1;
+            R::with_mutex_mut(&self.trace, |t| t.send_close_frame_with_reason += 1);
             let bytes = encode_close(reason as u8);
             self.driver.send_blocking(&bytes, Reliability::Reliable);
         }
