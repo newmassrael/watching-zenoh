@@ -2487,7 +2487,15 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
         a.driver.open_blocking();
     });
 
-    #[cfg(feature = "codec-init-body")]
+    // R311cd — session-unicast-open gates the open-side (Initiator)
+    // wire emit script-actions. cfg-off: send_init_syn /
+    // send_open_syn names are not bound, so a session FSM in the
+    // Initiator role trips `function not found` at the
+    // `<onentry>send_init_syn</onentry>` transition. Honest semantic:
+    // open-side OFF means the deploy is acceptor-only (cannot
+    // outbound-dial a peer). Default-on so the AP path keeps both
+    // sides bindable.
+    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-open"))]
     bind_unit(lua, "send_init_syn", actions, |a| {
         a.trace.lock().unwrap().send_init_syn += 1;
         let bytes = a.encode_init_with_role(
@@ -2498,7 +2506,7 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
-    #[cfg(feature = "codec-open-body")]
+    #[cfg(all(feature = "codec-open-body", feature = "session-unicast-open"))]
     bind_unit(lua, "send_open_syn", actions, |a| {
         a.trace.lock().unwrap().send_open_syn += 1;
         // RFC §5.M echo contract: prefer the cookie captured from a
@@ -2513,7 +2521,14 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
-    #[cfg(feature = "codec-init-body")]
+    // R311cd — session-unicast-accept gates the accept-side (Acceptor)
+    // wire emit script-actions. cfg-off: send_init_ack_with_cookie /
+    // send_open_ack names are not bound, so a session FSM in the
+    // Acceptor role trips `function not found`. Honest semantic:
+    // accept-side OFF means the deploy is initiator-only (can dial
+    // but cannot listen). Default-on so the AP path keeps both
+    // sides bindable.
+    #[cfg(all(feature = "codec-init-body", feature = "session-unicast-accept"))]
     bind_unit(lua, "send_init_ack_with_cookie", actions, |a| {
         a.trace.lock().unwrap().send_init_ack_with_cookie += 1;
         // R86 — Accepting-side cookie binding per RFC §5.M
@@ -2539,7 +2554,7 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
-    #[cfg(feature = "codec-open-body")]
+    #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
     bind_unit(lua, "send_open_ack", actions, |a| {
         a.trace.lock().unwrap().send_open_ack += 1;
         // Accepting side OpenAck: cookie is consumed by the time we

@@ -124,6 +124,8 @@ default = [
     "pubsub-allow-loop",
     "pubsub-attachment",
     "pubsub-timestamp",
+    "session-unicast-open",
+    "session-unicast-accept",
 ]
 liveliness-token = ["declare-token", "declare-undeclare"]
 liveliness-subscriber = ["declare-interest", "declare-final"]
@@ -314,6 +316,22 @@ pubsub-delete = []
 pubsub-allow-loop = []
 pubsub-attachment = []
 pubsub-timestamp = []
+# R311cd — session domain wire-up. 2 atomic features that have real
+# source behavior (Cargo.toml authoring intent: "9 atomic, 2 active /
+# 7 reserved"):
+#   session-unicast-open   — open-side bind for send_init_syn /
+#                            send_open_syn SCXML actions (Initiator
+#                            wire emit). Combined with codec-init-body
+#                            / codec-open-body so OFF on either axis
+#                            collapses the binding.
+#   session-unicast-accept — accept-side bind for
+#                            send_init_ack_with_cookie / send_open_ack
+#                            (Acceptor wire emit). Combined with the
+#                            same codec gates.
+# 7 reserved (extauth, extcompression, extqos, extshm, multicast,
+# resumable, stateless-accept) stay declaration-only at wz facade.
+session-unicast-open = []
+session-unicast-accept = []
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }

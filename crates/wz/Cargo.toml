@@ -361,8 +361,10 @@ session-extshm = ["transport-shm"]
 session-multicast = []
 session-resumable = []
 session-stateless-accept = []
-session-unicast-accept = []
-session-unicast-open = []
+# R311cd — session-unicast-* features forward to wz-runtime-tokio
+# bind sites for accept-side / open-side SCXML script-actions.
+session-unicast-accept = ["wz-runtime-tokio?/session-unicast-accept"]
+session-unicast-open = ["wz-runtime-tokio?/session-unicast-open"]
 
 # ----- domain: storage (4 atomic, all reserved) -----
 storage-aligner = []

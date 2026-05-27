@@ -703,6 +703,32 @@
       "title": "§5.4 Session",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Session domain catalog: 9 atomic features (2 active wired in wz-runtime-tokio open-side / accept-side SCXML script-action bindings, 7 reserved declaration-only).",
+      "rationale_bullets": [
+        "Composable framework lens: each session capability is one atomic feature toggle (R267-R299).",
+        "Cargo.toml authoring intent: 9 features split 2 active / 7 reserved per the source comment.",
+        "Open / accept role split: deploy can be initiator-only OR acceptor-only OR both.",
+        "Each role gates `bind_unit` for two wire emit script-actions (init + open frames).",
+        "Cross-feature `all(codec-*, session-unicast-*)` combines codec gate with role gate."
+      ],
+      "outputs_bullets": [
+        "Active set (2): session-unicast-open, session-unicast-accept (R311cd wire-up).",
+        "session-unicast-open gates send_init_syn + send_open_syn bind_unit sites in session_glue.",
+        "session-unicast-accept gates send_init_ack_with_cookie + send_open_ack bind_unit sites.",
+        "Both features combined with codec-init-body / codec-open-body via `all(...)` cfg.",
+        "Reserved auth/ext (4): -extauth, -extcompression, -extqos, -extshm.",
+        "Reserved topology (3): -multicast, -resumable, -stateless-accept.",
+        "Reserved features stay declaration-only in wz facade; binding always-on for codec features."
+      ],
+      "caveats_bullets": [
+        "session-unicast-open OFF: FSM Initiator role trips `function not found` at send_init_syn.",
+        "session-unicast-accept OFF: FSM Acceptor role trips `function not found` at send_init_ack.",
+        "Both features default-on so AP path binds both sides; deploy can disable one for asymmetric profile."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link": {
@@ -21502,6 +21528,50 @@
         "Pubsub reserved (6): -encoding, -source-info, -priority, -congestion-control, -express, -sample — wire-up cascade lands when API extension or schema changes warrant it (sample API anchor stays always-on indefinitely).",
         "R311ca debt #6 wire-up progress: 36 -> 41 wired (22% -> 25%); 125 -> 120 unwired (78% -> 75%); 13 domains 0%-wired -> 12 (pubsub closed).",
         "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter, R267, R311 facade graceful-close wrapper API."
+      ]
+    },
+    "Round 311cd": {
+      "decision_summary": "R311cd session domain wire-up — 2 active features (open-side + accept-side) cfg-gated at 4 bind_unit sites; 7 reserved stay declaration-only.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/Cargo.toml: session-unicast-open + session-unicast-accept features + default-on entries.",
+        "crates/wz/Cargo.toml: 2 active forward to wz-runtime-tokio?/session-unicast-*; 7 reserved stay declaration-only.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: 4 bind_unit cfg gates upgraded from single-feature codec-init-body / codec-open-body to all(codec-*, session-unicast-*) combined gates.",
+        "§5.4 session catalog body: intent + 5 rationale + 7 outputs + 3 caveats + impact_scope."
+      ],
+      "verification_bullets": [
+        "Audit verification: session-unicast-open 2 cfg sites + session-unicast-accept 2 cfg sites = 4 total.",
+        "cargo check + clippy --all-targets -D warnings + fmt --check + test -p wz-runtime-tokio --lib (593/593): all pass.",
+        "validate_workspace baseline: entries 410 -> 411, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311ce next: locator 9 unwired features cascade.",
+        "Session reserved (7): -extauth, -extcompression, -extqos, -extshm, -multicast, -resumable, -stateless-accept — wire-up cascade lands as each capability arrives.",
+        "R311ca debt #6 wire-up progress: 41 -> 43 wired (25% -> 26%); 120 -> 118 unwired (75% -> 73%); 12 domains 0%-wired -> 11 (session closed)."
+      ],
+      "publishable_decision_summary": "R311cd session domain wire-up — 2 active features (open-side + accept-side) cfg-gated at 4 bind_unit sites; 7 reserved stay declaration-only.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/Cargo.toml: session-unicast-open + session-unicast-accept features + default-on entries.",
+        "crates/wz/Cargo.toml: 2 active forward to wz-runtime-tokio?/session-unicast-*; 7 reserved stay declaration-only.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: 4 bind_unit cfg gates upgraded from single-feature codec-init-body / codec-open-body to all(codec-*, session-unicast-*) combined gates.",
+        "§5.4 session catalog body: intent + 5 rationale + 7 outputs + 3 caveats + impact_scope."
+      ],
+      "publishable_verification_bullets": [
+        "Audit verification: session-unicast-open 2 cfg sites + session-unicast-accept 2 cfg sites = 4 total.",
+        "cargo check + clippy --all-targets -D warnings + fmt --check + test -p wz-runtime-tokio --lib (593/593): all pass.",
+        "validate_workspace baseline: entries 410 -> 411, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ce next: locator 9 unwired features cascade.",
+        "Session reserved (7): -extauth, -extcompression, -extqos, -extshm, -multicast, -resumable, -stateless-accept — wire-up cascade lands as each capability arrives.",
+        "R311ca debt #6 wire-up progress: 41 -> 43 wired (25% -> 26%); 120 -> 118 unwired (75% -> 73%); 12 domains 0%-wired -> 11 (session closed)."
       ]
     },
     "Round 311d": {
