@@ -23723,6 +23723,60 @@
         "Push deferred per CLAUDE.md never push without explicit consent rule."
       ]
     },
+    "Round 311di-7": {
+      "decision_summary": "R311di-7 LeaseCheckOutcome extracted from session_glue.rs to wz-session-core::lease; pure enum, no external deps, no_std+no_alloc clean.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/lease.rs: new 42-line file with LeaseCheckOutcome enum.",
+        "crates/wz-session-core/src/lib.rs: pub mod lease unconditional; pure derive enum no allocations.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: 27-line def removed; pub use re-export replaces it.",
+        "Helper check_lease_deadline stays in session_glue (touches the SCXML engine via process_event).",
+        "Type extraction validates the leaf-enum migration shape one step at a time before bigger clusters.",
+        "R311di-5 plus di-6 plus di-7 cumulatively shrink session_glue.rs by 90 lines."
+      ],
+      "verification_bullets": [
+        "cargo check workspace all-targets clean across all 6 workspace member crates.",
+        "scripts/run-ci.sh Layer 0..E all pass.",
+        "scripts/run-ci.sh --layer G 7 MCU targets plus RISC-V IMAC: 48 PASS plus 1 SKIP gcc absent.",
+        "validate_workspace expected entries 461 to 462 sections 256 T1 orphan 0 RT 13/13."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-8 next NetworkMessage extraction with codec-* feature forwarding to wz-codecs.",
+        "Or R311di-8 alternative IterationEvent which depends only on DriverLoopOutcome and LeaseCheckOutcome.",
+        "DriverLoopOutcome depends on InboundParseError (done) plus NetworkMessage (pending) plus LostCause (done) plus ExtEntry.",
+        "Push deferred per CLAUDE.md never push without explicit consent rule.",
+        "Architectural carries unchanged R284 R283 R301 sec 8 R299 R300 R301 sec 7 R304."
+      ],
+      "publishable_decision_summary": "R311di-7 LeaseCheckOutcome extracted from session_glue.rs to wz-session-core::lease; pure enum, no external deps, no_std+no_alloc clean.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/lease.rs: new 42-line file with LeaseCheckOutcome enum.",
+        "crates/wz-session-core/src/lib.rs: pub mod lease unconditional; pure derive enum no allocations.",
+        "crates/wz-runtime-tokio/src/session_glue.rs: 27-line def removed; pub use re-export replaces it.",
+        "Helper check_lease_deadline stays in session_glue (touches the SCXML engine via process_event).",
+        "Type extraction validates the leaf-enum migration shape one step at a time before bigger clusters.",
+        "R311di-5 plus di-6 plus di-7 cumulatively shrink session_glue.rs by 90 lines."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check workspace all-targets clean across all 6 workspace member crates.",
+        "scripts/run-ci.sh Layer 0..E all pass.",
+        "scripts/run-ci.sh --layer G 7 MCU targets plus RISC-V IMAC: 48 PASS plus 1 SKIP gcc absent.",
+        "validate_workspace expected entries 461 to 462 sections 256 T1 orphan 0 RT 13/13."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-8 next NetworkMessage extraction with codec-* feature forwarding to wz-codecs.",
+        "Or R311di-8 alternative IterationEvent which depends only on DriverLoopOutcome and LeaseCheckOutcome.",
+        "DriverLoopOutcome depends on InboundParseError (done) plus NetworkMessage (pending) plus LostCause (done) plus ExtEntry.",
+        "Push deferred per CLAUDE.md never push without explicit consent rule.",
+        "Architectural carries unchanged R284 R283 R301 sec 8 R299 R300 R301 sec 7 R304."
+      ]
+    },
     "Round 311di-pre-a": {
       "decision_summary": "R311di-pre-a — wz-runtime-tokio adds hashbrown + portable-atomic deps; session_glue.rs HashMap + AtomicU64 imports route through them; first step toward wz-session-core no_std move-readiness.",
       "changes_bullets": [
