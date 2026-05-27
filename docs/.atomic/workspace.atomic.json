@@ -665,6 +665,28 @@
       "title": "§5.13 Runtime",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Runtime domain catalog: 6 atomic features (2 active runtime-tokio + runtime-lwip via dep: gates, 4 reserved alternative impls).",
+      "rationale_bullets": [
+        "Runtime axis is mutually exclusive: pick exactly one runtime per binary deploy.",
+        "runtime-tokio + runtime-lwip enforce exclusion via compile_error at the facade.",
+        "runtime-tokio pulls AP std-tokio path; runtime-lwip pulls MCU no-std lwIP path.",
+        "Reserved alternative runtimes have no impl crate yet.",
+        "R311ck ratifies audit confirming 2/4 split."
+      ],
+      "outputs_bullets": [
+        "Active set (2): runtime-tokio (AP), runtime-lwip (MCU).",
+        "runtime-tokio gates dep:wz-runtime-tokio + sce-rust-runtime/lua pair + wz-runtime-core.",
+        "runtime-lwip gates dep:wz-runtime-lwip + dep:wz-link-lwip + dep:lwip-sys (R311ax/az).",
+        "Reserved (4): runtime-async-std, runtime-no-std, runtime-tokio-uring, runtime-zero-copy.",
+        "Reserved features stay declaration-only — no impl crate yet."
+      ],
+      "caveats_bullets": [
+        "Runtime selection is mutually exclusive at compile time (facade compile_error guard)."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform": {
@@ -22016,6 +22038,48 @@
         "Keyexpr 7 cluster-deferred remains carry: per-site cfg on matchers risks fan-out break, requires careful multi-round wire-up.",
         "Runtime 4 reserved + liveliness 3 reserved are remaining wire-up targets in respective domains.",
         "R311ca debt #6 wire-up progress: 50 -> 53 wired (31% -> 33%); 9 domains 0%-wired unchanged (query was already wired)."
+      ]
+    },
+    "Round 311ck": {
+      "decision_summary": "R311ck runtime domain audit-only ratify — 2/4 confirmed (tokio + lwip wired via dep gates; async-std / no-std / tokio-uring / zero-copy reserved).",
+      "changes_bullets": [
+        "§5.13 runtime catalog body: intent + 5 rationale + 5 outputs + 1 caveat + impact_scope.",
+        "No Cargo comment change — 2 active / 4 reserved was already accurate.",
+        "No source-level changes — runtime-tokio + runtime-lwip already wired via dep: gates."
+      ],
+      "verification_bullets": [
+        "Audit verification: runtime-tokio 5 cfg sites + runtime-lwip 4 cfg sites = 9 (wire-up pre-R311ck).",
+        "Reserved 4: runtime-async-std 0 / runtime-no-std 0 / runtime-tokio-uring 0 / runtime-zero-copy 0 cfg sites.",
+        "validate_workspace baseline: entries 417 -> 418, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311 cascade total wire-up gain (R311cb-ck): 31 -> 53 wired (19% -> 33%); 9 domains 0%-wired closed by audit.",
+        "Pending wire-up clusters: keyexpr 7 (matcher cluster), runtime-async-std/no-std/tokio-uring/zero-copy (4 alternative-impl), pubsub 6 reserved (sample/encoding/source-info/priority/congestion/express), session 7 reserved (extauth/extcompression/extqos/extshm/multicast/resumable/stateless-accept).",
+        "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, R267 Session reparam, R311 facade graceful-close wrapper API."
+      ],
+      "publishable_decision_summary": "R311ck runtime domain audit-only ratify — 2/4 confirmed (tokio + lwip wired via dep gates; async-std / no-std / tokio-uring / zero-copy reserved).",
+      "publishable_changes_bullets": [
+        "§5.13 runtime catalog body: intent + 5 rationale + 5 outputs + 1 caveat + impact_scope.",
+        "No Cargo comment change — 2 active / 4 reserved was already accurate.",
+        "No source-level changes — runtime-tokio + runtime-lwip already wired via dep: gates."
+      ],
+      "publishable_verification_bullets": [
+        "Audit verification: runtime-tokio 5 cfg sites + runtime-lwip 4 cfg sites = 9 (wire-up pre-R311ck).",
+        "Reserved 4: runtime-async-std 0 / runtime-no-std 0 / runtime-tokio-uring 0 / runtime-zero-copy 0 cfg sites.",
+        "validate_workspace baseline: entries 417 -> 418, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311 cascade total wire-up gain (R311cb-ck): 31 -> 53 wired (19% -> 33%); 9 domains 0%-wired closed by audit.",
+        "Pending wire-up clusters: keyexpr 7 (matcher cluster), runtime-async-std/no-std/tokio-uring/zero-copy (4 alternative-impl), pubsub 6 reserved (sample/encoding/source-info/priority/congestion/express), session 7 reserved (extauth/extcompression/extqos/extshm/multicast/resumable/stateless-accept).",
+        "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, R267 Session reparam, R311 facade graceful-close wrapper API."
       ]
     },
     "Round 311d": {
