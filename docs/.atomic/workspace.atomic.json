@@ -691,6 +691,28 @@
       "title": "§5.2 Locator",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Locator domain catalog: 9 atomic features (0 active / 9 reserved per R311ce audit) covering URI scheme variants for connection endpoint addressing.",
+      "rationale_bullets": [
+        "Locator URI parser maps scheme:// addresses to LinkDriver instantiation.",
+        "wz-runtime-tokio accepts pre-constructed TcpStream / UdpSocket via from_stream/from_socket today.",
+        "URI string parsing (tcp://host:port) is a future feature — 0 active in source.",
+        "Each scheme-specific locator-* implies the matching transport-link-* for future cascade.",
+        "R311ce ratifies the audit — declaration-only is the honest current shape."
+      ],
+      "outputs_bullets": [
+        "Active set: empty (R311ce audit).",
+        "Reserved scheme features (8): -tcp, -udp, -tls, -quic, -ws, -unixsock, -vsock, -serial.",
+        "Reserved interface feature (1): -iface (multicast group / NIC binding hint).",
+        "Imply edges to transport-link-* preserved for future URI parser cascade.",
+        "Cargo comment updated 3 active / 6 reserved -> 0 active / 9 reserved."
+      ],
+      "caveats_bullets": [
+        "No source cfg sites yet; URI parser is the prerequisite for wire-up (R311 cascade carry)."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting": {
@@ -21572,6 +21594,50 @@
         "R311ce next: locator 9 unwired features cascade.",
         "Session reserved (7): -extauth, -extcompression, -extqos, -extshm, -multicast, -resumable, -stateless-accept — wire-up cascade lands as each capability arrives.",
         "R311ca debt #6 wire-up progress: 41 -> 43 wired (25% -> 26%); 120 -> 118 unwired (75% -> 73%); 12 domains 0%-wired -> 11 (session closed)."
+      ]
+    },
+    "Round 311ce": {
+      "decision_summary": "R311ce locator domain audit-only ratify — 9 features all reserved (URI parser not yet implemented); Cargo comment 3/6 -> 0/9 corrected.",
+      "changes_bullets": [
+        "crates/wz/Cargo.toml: locator domain comment updated 3 active / 6 reserved -> 0 active / 9 reserved; imply edges preserved for future cascade.",
+        "§5.2 locator catalog body: intent + 5 rationale + 5 outputs + 1 caveat + impact_scope.",
+        "No source-level changes — audit confirmed 0 cfg sites across all 9 features."
+      ],
+      "verification_bullets": [
+        "Audit verification: grep `feature = \"locator-X\"` in crates/wz-runtime-tokio/src/ — 0 hits across all 9 features.",
+        "Probe URI scheme strings (tcp://, udp://, quic://, ...): 0 source matches.",
+        "validate_workspace baseline: entries 411 -> 412, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311cf next: keyexpr 8 features cascade.",
+        "Locator URI parser carry: future round introduces scheme://host:port parsing as a single feature cluster.",
+        "Cargo comment honesty: R311ce establishes 'audit confirms estimate' pattern for upcoming cascades.",
+        "R311ca debt #6 wire-up progress: unchanged (audit-only); 43/161 wired (26%); 11 domains 0%-wired (locator stays in this bucket but ratified)."
+      ],
+      "publishable_decision_summary": "R311ce locator domain audit-only ratify — 9 features all reserved (URI parser not yet implemented); Cargo comment 3/6 -> 0/9 corrected.",
+      "publishable_changes_bullets": [
+        "crates/wz/Cargo.toml: locator domain comment updated 3 active / 6 reserved -> 0 active / 9 reserved; imply edges preserved for future cascade.",
+        "§5.2 locator catalog body: intent + 5 rationale + 5 outputs + 1 caveat + impact_scope.",
+        "No source-level changes — audit confirmed 0 cfg sites across all 9 features."
+      ],
+      "publishable_verification_bullets": [
+        "Audit verification: grep `feature = \"locator-X\"` in crates/wz-runtime-tokio/src/ — 0 hits across all 9 features.",
+        "Probe URI scheme strings (tcp://, udp://, quic://, ...): 0 source matches.",
+        "validate_workspace baseline: entries 411 -> 412, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311cf next: keyexpr 8 features cascade.",
+        "Locator URI parser carry: future round introduces scheme://host:port parsing as a single feature cluster.",
+        "Cargo comment honesty: R311ce establishes 'audit confirms estimate' pattern for upcoming cascades.",
+        "R311ca debt #6 wire-up progress: unchanged (audit-only); 43/161 wired (26%); 11 domains 0%-wired (locator stays in this bucket but ratified)."
       ]
     },
     "Round 311d": {
