@@ -22749,6 +22749,60 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311cy": {
+      "decision_summary": "R311cy — pure accessors (actions / observer / is_established + new clock) move from impl<T> Session<TokioRuntime, T> to impl<R: Runtime, T: TimeSource> Session<R, T>; first concrete step of method generic lift cascade",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: new impl<R: Runtime, T: TimeSource> Session<R, T> block inserted between Session::new (AP-bound) and the rest of the AP-bound methods; carries 4 accessors that read fields directly without acquiring per-runtime locks.",
+        "session.rs: Session::actions / Session::is_established lift unchanged in body to the new R-generic block (return types do not reference R or T at the surface).",
+        "session.rs: Session::observer return type lifts from alias `&Arc<Mutex<ApplicationLayerObserver>>` (resolved at impl site to std::sync::Mutex) to the trait-projected `&Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>`; for R = TokioRuntime the projected type is the same std::sync::Mutex concrete so every existing session.observer().lock() call site keeps compiling under the AP profile.",
+        "session.rs: new Session::clock(&self) -> &Arc<T> accessor added (R311cy companion to the R311cw fold-in field); peer tasks (sweep_task / drive_session_until_terminal / spawn_background_tasks) can borrow the same monotonic-epoch Arc instead of rebuilding a separate TimeSource instance which would carry a fresh epoch.",
+        "session.rs: 100+ AP-bound methods (publish / query / declare_* / etc.) stay on the impl<T: TimeSource> Session<TokioRuntime, T> block because their bodies call self.observer.lock().expect() which does not compose generically over R — migrating those is the R311cz+ multi-round carry."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean (post auto-fmt of two blank-line artefacts in the impl-block-split insertion site).",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline. Layer C3 5-sub-lane gate (R311cx) catches the impl-block-split formatting regressions immediately under per-package isolated mode.",
+        "validate_workspace: entries=431 -> 432, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311cz+ (next): migrate set_own_zid / clear_own_zid / publish bodies from self.observer.lock().expect() to R::with_mutex_mut closure form (R311ct API). These three methods are the smallest cluster after the pure accessors and proven by the R311cu Drop-impl migration pattern. Once these lift, the impl block split widens further; R311da-onward batches publish_aliased / publish_aliased_auto / declare_subscriber / declare_queryable / declare_token + their aliased counterparts; the cascade ends when the entire impl<T> Session<TokioRuntime, T> block is empty and Session::new is the only remaining AP-concrete method.",
+        "Session crate extraction (carry): only meaningful once the impl<R, T> Session<R, T> block carries every method except Session::new. session.rs (7900+ lines) + session_glue.rs (12000+ lines) need to move out of wz-runtime-tokio leaving only the network I/O surface (lib.rs + runtime_impl.rs).",
+        "Session<R, T>::new should also lift to impl<R: Runtime, T: TimeSource> Session<R, T> at some point. The internal set_own_zid call uses .lock() so the lift requires set_own_zid migration first; sequencing: R311cz set_own_zid+clear_own_zid migrate, R311da Session::new lift.",
+        "R311ca debt #6 wire-up at 19% wired (unchanged across R311cw + R311cx + R311cy): the runtime-{async-std, no-std, tokio-uring, zero-copy} 4 atomic features stay reserved until Session migrates to a runtime-agnostic crate; method generic lift is the precondition.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311cy — pure accessors (actions / observer / is_established + new clock) move from impl<T> Session<TokioRuntime, T> to impl<R: Runtime, T: TimeSource> Session<R, T>; first concrete step of method generic lift cascade",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: new impl<R: Runtime, T: TimeSource> Session<R, T> block inserted between Session::new (AP-bound) and the rest of the AP-bound methods; carries 4 accessors that read fields directly without acquiring per-runtime locks.",
+        "session.rs: Session::actions / Session::is_established lift unchanged in body to the new R-generic block (return types do not reference R or T at the surface).",
+        "session.rs: Session::observer return type lifts from alias `&Arc<Mutex<ApplicationLayerObserver>>` (resolved at impl site to std::sync::Mutex) to the trait-projected `&Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>`; for R = TokioRuntime the projected type is the same std::sync::Mutex concrete so every existing session.observer().lock() call site keeps compiling under the AP profile.",
+        "session.rs: new Session::clock(&self) -> &Arc<T> accessor added (R311cy companion to the R311cw fold-in field); peer tasks (sweep_task / drive_session_until_terminal / spawn_background_tasks) can borrow the same monotonic-epoch Arc instead of rebuilding a separate TimeSource instance which would carry a fresh epoch.",
+        "session.rs: 100+ AP-bound methods (publish / query / declare_* / etc.) stay on the impl<T: TimeSource> Session<TokioRuntime, T> block because their bodies call self.observer.lock().expect() which does not compose generically over R — migrating those is the R311cz+ multi-round carry."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --check: clean (post auto-fmt of two blank-line artefacts in the impl-block-split insertion site).",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline. Layer C3 5-sub-lane gate (R311cx) catches the impl-block-split formatting regressions immediately under per-package isolated mode.",
+        "validate_workspace: entries=431 -> 432, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311cz+ (next): migrate set_own_zid / clear_own_zid / publish bodies from self.observer.lock().expect() to R::with_mutex_mut closure form (R311ct API). These three methods are the smallest cluster after the pure accessors and proven by the R311cu Drop-impl migration pattern. Once these lift, the impl block split widens further; R311da-onward batches publish_aliased / publish_aliased_auto / declare_subscriber / declare_queryable / declare_token + their aliased counterparts; the cascade ends when the entire impl<T> Session<TokioRuntime, T> block is empty and Session::new is the only remaining AP-concrete method.",
+        "Session crate extraction (carry): only meaningful once the impl<R, T> Session<R, T> block carries every method except Session::new. session.rs (7900+ lines) + session_glue.rs (12000+ lines) need to move out of wz-runtime-tokio leaving only the network I/O surface (lib.rs + runtime_impl.rs).",
+        "Session<R, T>::new should also lift to impl<R: Runtime, T: TimeSource> Session<R, T> at some point. The internal set_own_zid call uses .lock() so the lift requires set_own_zid migration first; sequencing: R311cz set_own_zid+clear_own_zid migrate, R311da Session::new lift.",
+        "R311ca debt #6 wire-up at 19% wired (unchanged across R311cw + R311cx + R311cy): the runtime-{async-std, no-std, tokio-uring, zero-copy} 4 atomic features stay reserved until Session migrates to a runtime-agnostic crate; method generic lift is the precondition.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311d": {
       "decision_summary": "R311d batches codec-scout / codec-hello / codec-join cascade — wz-codecs level only (wz-runtime-tokio does not import these types); forwards stay catalog-uniform for future runtime reuse.",
       "changes_bullets": [
