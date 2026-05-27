@@ -843,10 +843,10 @@ pub struct SessionLinkActions<R: Runtime = TokioRuntime, T: TimeSource = TokioTi
     /// so a setter can swap one chain without blocking the others
     /// (e.g. mid-handshake auth-step rotation can rewrite the
     /// OpenSyn chain without touching the InitSyn record).
-    init_syn_ext: Mutex<Vec<ExtEntry>>,
-    init_ack_ext: Mutex<Vec<ExtEntry>>,
-    open_syn_ext: Mutex<Vec<ExtEntry>>,
-    open_ack_ext: Mutex<Vec<ExtEntry>>,
+    init_syn_ext: R::Mutex<Vec<ExtEntry>>,
+    init_ack_ext: R::Mutex<Vec<ExtEntry>>,
+    open_syn_ext: R::Mutex<Vec<ExtEntry>>,
+    open_ack_ext: R::Mutex<Vec<ExtEntry>>,
     /// R121d — sizing parameters parsed from the peer's inbound
     /// `InitSyn`. The Accepting side caps its outbound InitAck
     /// `seq_num_res / req_id_res / batch_size` to `min(own,
@@ -1167,7 +1167,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
     /// stage their negotiation result here; the next outbound frame
     /// of `role` reads the new chain via the encoder.
     pub fn set_ext_chain(&self, role: ExtChainRole, entries: Vec<ExtEntry>) {
-        *self.ext_chain_slot(role).lock().unwrap() = entries;
+        R::with_mutex_mut(self.ext_chain_slot(role), |slot| *slot = entries);
     }
 
     /// Lock the ext-chain slot for the given role and encode the
@@ -1192,19 +1192,27 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
         cookie_override: Option<&[u8]>,
         role: ExtChainRole,
     ) -> Vec<u8> {
-        let chain = self.ext_chain_slot(role).lock().unwrap();
-        if is_ack {
-            // R121d — capped-to-peer params so the outbound InitAck
-            // satisfies the wire-spec `InitAck.size <= InitSyn.size`
-            // invariant. The owned clone is cheap (the heavy field
-            // is `cookie_signing_key`, which is a 32-byte
-            // `Zeroizing<Vec<u8>>` clone) and stays local to this
-            // call frame.
-            let params = self.init_ack_params();
-            encode_init(&params, is_ack, &chain, cookie_override)
+        // R121d — capped-to-peer params so the outbound InitAck
+        // satisfies the wire-spec `InitAck.size <= InitSyn.size`
+        // invariant. The owned clone is cheap (the heavy field is
+        // `cookie_signing_key`, a 32-byte `Zeroizing<Vec<u8>>`) and
+        // stays local to this call frame. R311di-pre-f5 — params
+        // captured outside the with_mutex_mut closure since
+        // `init_ack_params` also acquires `inbound_peer_init_caps`
+        // and nested R::with_mutex_mut on the same SessionLinkActions
+        // would deadlock on a per-profile mutex (lwIP critical_section
+        // is non-reentrant; embassy_sync re-entry is undefined). The
+        // chain slot stays inside the closure so the encode call
+        // composes against `&chain` without an extra clone.
+        let params_owned = if is_ack {
+            Some(self.init_ack_params())
         } else {
-            encode_init(&self.params, is_ack, &chain, cookie_override)
-        }
+            None
+        };
+        R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            let params = params_owned.as_ref().unwrap_or(&self.params);
+            encode_init(params, is_ack, chain, cookie_override)
+        })
     }
 
     #[cfg(feature = "codec-open-body")]
@@ -1214,11 +1222,12 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
         cookie_override: Option<&[u8]>,
         role: ExtChainRole,
     ) -> Vec<u8> {
-        let chain = self.ext_chain_slot(role).lock().unwrap();
-        encode_open(&self.params, is_ack, cookie_override, &chain)
+        R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
+            encode_open(&self.params, is_ack, cookie_override, chain)
+        })
     }
 
-    fn ext_chain_slot(&self, role: ExtChainRole) -> &Mutex<Vec<ExtEntry>> {
+    fn ext_chain_slot(&self, role: ExtChainRole) -> &R::Mutex<Vec<ExtEntry>> {
         match role {
             ExtChainRole::InitSyn => &self.init_syn_ext,
             ExtChainRole::InitAck => &self.init_ack_ext,
