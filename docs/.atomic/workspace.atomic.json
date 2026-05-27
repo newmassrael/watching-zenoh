@@ -23423,6 +23423,52 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311di-pre-c": {
+      "decision_summary": "R311di-pre-c — sweep `use std::collections::HashMap` → `use hashbrown::HashMap` across 9 wz-runtime-tokio src files (8 module-level + 1 file with 16 function-local imports); zero std::collections::HashMap surface remains.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/{declare.rs:64, declare/queryable.rs:9, declare/subscriber.rs:9, declare/liveliness.rs:10, declare/liveliness_subscriber.rs:76, query.rs:74, reply.rs:77, pubsub.rs:74}: 8 module-level `use std::collections::HashMap;` migrations to `use hashbrown::HashMap;`. These imports back the 5 Remote* registry slot tables on the application-layer subscriber / queryable / liveliness side — the table types stay shape-identical (HashMap<RegistryId, Slot>) because hashbrown::HashMap is the upstream implementation of std::collections::HashMap (std re-exports it).",
+        "crates/wz-runtime-tokio/src/session.rs: 16 function-local `use std::collections::HashMap;` imports (lines 6119, 6140, 6158, 6176, 6205, 6223, 6244, 6468, 6490, 6540, 6799, 6817, 6835, 6863, 6891, 6913) migrate to `use hashbrown::HashMap;` via a single replace_all. The 16 sites are all inside `mod tests` `#[test]` function bodies (`querier_get_matching_status_*`, `publisher_get_matching_status_*`, `subscriber_get_matching_status_*`, `queryable_get_matching_status_*` test families) that materialise expected-state HashMaps for assert_eq! against the Session’s registry snapshots. Test semantic unchanged — hashbrown::HashMap supports new() / insert() / from_iter() / Eq with the same API.",
+        "Round-wide effect: every HashMap surface in wz-runtime-tokio that participates in production paths (the 5 module-level Remote*Registry slot tables) AND every test-only HashMap (the 16 session.rs assertion helpers) now imports from hashbrown. Combined with R311di-pre-b's portable_atomic sweep, the crate's no_std-move-readiness surface for HashMap + atomic is complete; the remaining std::sync::* surface in the crate is Mutex direct refs (R311di-pre-d target) and Arc (R311di proper target)."
+      ],
+      "verification_bullets": [
+        "grep -rn 'use std::collections::HashMap' crates/wz-runtime-tokio/src/ returns zero hits — every HashMap import in the crate now routes through hashbrown.",
+        "cargo check --workspace --all-targets: clean; hashbrown::HashMap satisfies the same trait bounds (Clone + Debug + Default + Send + Sync + IntoIterator + Extend + PartialEq + Eq) the production paths and test assertions consume.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline preserved. The 4 get_matching_status_* test families (querier / publisher / subscriber / queryable) report identical PASS — the assertion helpers' HashMap::from_iter([(k, v); N]) builds the same logical map under hashbrown's foldhash as it did under std's SipHash13.",
+        "validate_workspace: entries=443 -> 444, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-pre-d: sweep `use std::sync::Mutex` direct refs → `use crate::sync::Mutex` alias across the 8 wz-runtime-tokio src files that still hold direct imports (declare/{subscriber, queryable, liveliness, liveliness_subscriber}.rs, query.rs, reply.rs, pubsub.rs, session_glue.rs). The Mutex alias is already defined at wz_runtime_tokio::sync::Mutex (`pub type Mutex<T> = std::sync::Mutex<T>;` per R311y); pre-d advances every direct ref to the alias so the eventual R311di SessionState<R: Runtime> reparam migrates a single import-line per file (`use crate::sync::Mutex;` → `R::Mutex<T>` via GAT).",
+        "R311di proper: SessionState<R: Runtime> reparam + Mutex GAT migration + wz-session-core crate extraction. Requires Runtime::new_mutex<T: Send + 'static>(t: T) -> Self::Mutex<T> trait helper for the ~30 SessionState `Mutex::new(...)` field-init sites; once that lands the extraction is a pure file-move.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311di-pre-c — sweep `use std::collections::HashMap` → `use hashbrown::HashMap` across 9 wz-runtime-tokio src files (8 module-level + 1 file with 16 function-local imports); zero std::collections::HashMap surface remains.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/{declare.rs:64, declare/queryable.rs:9, declare/subscriber.rs:9, declare/liveliness.rs:10, declare/liveliness_subscriber.rs:76, query.rs:74, reply.rs:77, pubsub.rs:74}: 8 module-level `use std::collections::HashMap;` migrations to `use hashbrown::HashMap;`. These imports back the 5 Remote* registry slot tables on the application-layer subscriber / queryable / liveliness side — the table types stay shape-identical (HashMap<RegistryId, Slot>) because hashbrown::HashMap is the upstream implementation of std::collections::HashMap (std re-exports it).",
+        "crates/wz-runtime-tokio/src/session.rs: 16 function-local `use std::collections::HashMap;` imports (lines 6119, 6140, 6158, 6176, 6205, 6223, 6244, 6468, 6490, 6540, 6799, 6817, 6835, 6863, 6891, 6913) migrate to `use hashbrown::HashMap;` via a single replace_all. The 16 sites are all inside `mod tests` `#[test]` function bodies (`querier_get_matching_status_*`, `publisher_get_matching_status_*`, `subscriber_get_matching_status_*`, `queryable_get_matching_status_*` test families) that materialise expected-state HashMaps for assert_eq! against the Session’s registry snapshots. Test semantic unchanged — hashbrown::HashMap supports new() / insert() / from_iter() / Eq with the same API.",
+        "Round-wide effect: every HashMap surface in wz-runtime-tokio that participates in production paths (the 5 module-level Remote*Registry slot tables) AND every test-only HashMap (the 16 session.rs assertion helpers) now imports from hashbrown. Combined with R311di-pre-b's portable_atomic sweep, the crate's no_std-move-readiness surface for HashMap + atomic is complete; the remaining std::sync::* surface in the crate is Mutex direct refs (R311di-pre-d target) and Arc (R311di proper target)."
+      ],
+      "publishable_verification_bullets": [
+        "grep -rn 'use std::collections::HashMap' crates/wz-runtime-tokio/src/ returns zero hits — every HashMap import in the crate now routes through hashbrown.",
+        "cargo check --workspace --all-targets: clean; hashbrown::HashMap satisfies the same trait bounds (Clone + Debug + Default + Send + Sync + IntoIterator + Extend + PartialEq + Eq) the production paths and test assertions consume.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline preserved. The 4 get_matching_status_* test families (querier / publisher / subscriber / queryable) report identical PASS — the assertion helpers' HashMap::from_iter([(k, v); N]) builds the same logical map under hashbrown's foldhash as it did under std's SipHash13.",
+        "validate_workspace: entries=443 -> 444, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-pre-d: sweep `use std::sync::Mutex` direct refs → `use crate::sync::Mutex` alias across the 8 wz-runtime-tokio src files that still hold direct imports (declare/{subscriber, queryable, liveliness, liveliness_subscriber}.rs, query.rs, reply.rs, pubsub.rs, session_glue.rs). The Mutex alias is already defined at wz_runtime_tokio::sync::Mutex (`pub type Mutex<T> = std::sync::Mutex<T>;` per R311y); pre-d advances every direct ref to the alias so the eventual R311di SessionState<R: Runtime> reparam migrates a single import-line per file (`use crate::sync::Mutex;` → `R::Mutex<T>` via GAT).",
+        "R311di proper: SessionState<R: Runtime> reparam + Mutex GAT migration + wz-session-core crate extraction. Requires Runtime::new_mutex<T: Send + 'static>(t: T) -> Self::Mutex<T> trait helper for the ~30 SessionState `Mutex::new(...)` field-init sites; once that lands the extraction is a pure file-move.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [

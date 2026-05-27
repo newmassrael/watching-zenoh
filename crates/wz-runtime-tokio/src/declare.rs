@@ -61,7 +61,7 @@
 //! keyexpr), so no resolution is needed — the peer identifies the
 //! prior declaration by the same id it used in its earlier `Decl*`.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use wz_codecs::wireexpr::WireexprVariant;
 

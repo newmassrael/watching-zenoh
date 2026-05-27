@@ -74,7 +74,7 @@
 //! drives the registry from a single observer closure so no Mutex is
 //! needed there.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use wz_codecs::reply::ReplyVariant;
 use wz_codecs::response::{Response, ResponseVariant};

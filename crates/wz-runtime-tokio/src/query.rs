@@ -71,7 +71,7 @@
 //! Callers that need cross-task sharing wrap in `Arc<Mutex<…>>` or
 //! `Arc<tokio::sync::Mutex<…>>`.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 #[cfg(any(feature = "query-attachment", test))]
 use wz_codecs::ext_entry::ExtEntryVariant;

@@ -7,7 +7,7 @@
 //! (`_z_liveliness_process_token_declare` /
 //! `_z_liveliness_process_token_undeclare` upstream).
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use wz_codecs::decl_token::DeclToken;
 use wz_codecs::declare::DeclareVariant;

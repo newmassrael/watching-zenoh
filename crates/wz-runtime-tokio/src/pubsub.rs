@@ -71,7 +71,7 @@
 //! application can inspect `Push.body` (msg_put / msg_del peek-byte
 //! variant) without taking ownership.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::DeclareVariant;

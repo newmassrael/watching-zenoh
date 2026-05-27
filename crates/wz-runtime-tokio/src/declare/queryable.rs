@@ -6,7 +6,7 @@
 //! Q-side mirror of [`crate::declare::RemoteSubscriberRegistry`];
 //! see [`crate::declare`] module docs for the rationale.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use wz_codecs::decl_queryable::DeclQueryable;
 use wz_codecs::declare::DeclareVariant;

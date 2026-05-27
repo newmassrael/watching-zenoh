@@ -6,7 +6,7 @@
 //! See [`crate::declare`] module docs for the cross-registry rationale
 //! and callback contract.
 
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 use wz_codecs::decl_subscriber::DeclSubscriber;
 use wz_codecs::declare::DeclareVariant;
