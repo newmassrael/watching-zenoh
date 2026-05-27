@@ -248,17 +248,20 @@ platform-windows = []
 platform-zephyr = []
 
 # ----- domain: pubsub (11 atomic, 5 active / 6 reserved) -----
-pubsub-allow-loop = []
-pubsub-attachment = ["attachment-bytes"]
+# R311cc — 5 active features forward to wz-runtime-tokio (-put/-delete
+# msg body variants, -allow-loop loopback, -attachment / -timestamp
+# Sample optional field populators). 6 reserved stay declaration-only.
+pubsub-allow-loop = ["wz-runtime-tokio?/pubsub-allow-loop"]
+pubsub-attachment = ["attachment-bytes", "wz-runtime-tokio?/pubsub-attachment"]
 pubsub-congestion-control = []
-pubsub-delete = []
+pubsub-delete = ["wz-runtime-tokio?/pubsub-delete"]
 pubsub-encoding = []
 pubsub-express = []
 pubsub-priority = ["session-extqos"]
-pubsub-put = []
+pubsub-put = ["wz-runtime-tokio?/pubsub-put"]
 pubsub-sample = []
 pubsub-source-info = []
-pubsub-timestamp = []
+pubsub-timestamp = ["wz-runtime-tokio?/pubsub-timestamp"]
 
 # ----- domain: query (10 atomic, 6 active / 4 reserved) -----
 # R307 — six atomic features in the query domain forward into

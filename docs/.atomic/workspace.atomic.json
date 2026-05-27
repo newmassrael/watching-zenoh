@@ -727,6 +727,34 @@
       "title": "§5.8 Pubsub",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Pubsub domain catalog: 11 atomic features (5 active wired in wz-runtime-tokio msg body + Sample projection + loopback, 6 reserved declaration-only).",
+      "rationale_bullets": [
+        "Composable framework lens: each pubsub capability is one atomic feature toggle (R267-R299).",
+        "Cargo.toml authoring intent: 11 features split 5 active / 6 reserved per the source comment.",
+        "Active set follows real wz-runtime-tokio source behavior, not catalog wish list.",
+        "Sample API anchor: pubsub-sample reserved (API surface always-on; cfg-off would API-break).",
+        "R311g1 signature stability: cfg-off populator returns None; Sample optional fields stay declared."
+      ],
+      "outputs_bullets": [
+        "Active set (5): -put, -delete, -allow-loop, -attachment, -timestamp (R311cc wire-up).",
+        "pubsub-put gates Push + Reply MsgPut match arms in pubsub.rs + reply.rs.",
+        "pubsub-delete gates Push + Reply MsgDel match arms in pubsub.rs + reply.rs.",
+        "pubsub-allow-loop gates Session::publish + publish_aliased loopback fan-out.",
+        "pubsub-attachment gates extract_attachment in pubsub Push consumer arms.",
+        "pubsub-timestamp gates TimestampHint::from_codec in pubsub Push consumer arms.",
+        "Reserved (6): -sample API anchor, -encoding, -source-info, -priority, -congestion-control, -express.",
+        "Reserved features stay declaration-only in wz facade Cargo.toml; populator always-on."
+      ],
+      "caveats_bullets": [
+        "pubsub-put + pubsub-delete cfg-off: inbound Push / Reply silently drops; subscriber not fired.",
+        "pubsub-allow-loop cfg-off: Locality::Any default effectively becomes Locality::Remote only.",
+        "pubsub-attachment + pubsub-timestamp cfg-off: Sample optional fields always None (field declared).",
+        "pubsub-sample reserved: Sample type is API anchor (cfg-off would be wholesale API break)."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query": {
@@ -21417,6 +21445,62 @@
         "transport-fragmentation wire-up will follow reassembly logic introduction (RFC §5.M reassembly_fsm prose-sketch).",
         "transport-shm + transport-compression wire-up tied to session-extshm + session-extcompression facade aggregates.",
         "R311ca debt #6 wire-up progress: 31 -> 36 wired (19% -> 22%); 130 -> 125 unwired (80% -> 78%); 14 domains -> 13 still 0% wired.",
+        "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter, R267, R311 facade graceful-close wrapper API."
+      ]
+    },
+    "Round 311cc": {
+      "decision_summary": "R311cc pubsub domain wire-up — 5 active features cfg-gated (16 source cfg sites); 6 reserved stay declaration-only including pubsub-sample API anchor.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/Cargo.toml: 5 features added (pubsub-put, -delete, -allow-loop, -attachment, -timestamp) + default-on list extension; comment block documents each cfg site.",
+        "crates/wz/Cargo.toml: 5 active features forward to wz-runtime-tokio?/pubsub-* via ?-syntax; 6 reserved stay declaration-only (-encoding, -source-info, -priority, -congestion-control, -express, -sample).",
+        "crates/wz-runtime-tokio/src/pubsub.rs: PushVariant match arm cfg-gates for pubsub-put + pubsub-delete; per-arm `let body_timestamp` + `let body_attachment` cfg-aware bindings for pubsub-timestamp + pubsub-attachment (4 sites each); Default fall-through changed from `PushVariant::Default { .. }` to `_` so cfg-off Put / Del also drop silently.",
+        "crates/wz-runtime-tokio/src/reply.rs: ReplyVariant match arm cfg-gates for pubsub-put + pubsub-delete; Default fall-through changed to `_` for parity with pubsub.rs.",
+        "crates/wz-runtime-tokio/src/session.rs: pubsub-allow-loop cfg gate at Session::publish + Session::publish_aliased local_publish fan-out branches (2 cfg pairs).",
+        "§5.8 pubsub catalog body: intent + rationale (5 bullets) + outputs (8 bullets) + 4 caveats + impact_scope (2 refs)."
+      ],
+      "verification_bullets": [
+        "Audit verification: grep `feature = \"X\"` in crates/wz-runtime-tokio/src/ — pubsub-put 2 / pubsub-delete 2 / pubsub-allow-loop 4 / pubsub-attachment 4 / pubsub-timestamp 4 = 16 total cfg sites.",
+        "cargo check -p wz-runtime-tokio (default features): pass.",
+        "cargo clippy -p wz-runtime-tokio --all-targets -D warnings: clean.",
+        "cargo fmt --check -p wz-runtime-tokio: clean.",
+        "cargo test -p wz-runtime-tokio --lib: 593/593 pass.",
+        "validate_workspace baseline: entries 409 -> 410, sections 256, T1 orphan 0, round-trip 13/13, GENERATED.md sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311cd next: session 9 unwired features cascade (third largest unwired domain by R311ca count).",
+        "Pubsub reserved (6): -encoding, -source-info, -priority, -congestion-control, -express, -sample — wire-up cascade lands when API extension or schema changes warrant it (sample API anchor stays always-on indefinitely).",
+        "R311ca debt #6 wire-up progress: 36 -> 41 wired (22% -> 25%); 125 -> 120 unwired (78% -> 75%); 13 domains 0%-wired -> 12 (pubsub closed).",
+        "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter, R267, R311 facade graceful-close wrapper API."
+      ],
+      "publishable_decision_summary": "R311cc pubsub domain wire-up — 5 active features cfg-gated (16 source cfg sites); 6 reserved stay declaration-only including pubsub-sample API anchor.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/Cargo.toml: 5 features added (pubsub-put, -delete, -allow-loop, -attachment, -timestamp) + default-on list extension; comment block documents each cfg site.",
+        "crates/wz/Cargo.toml: 5 active features forward to wz-runtime-tokio?/pubsub-* via ?-syntax; 6 reserved stay declaration-only (-encoding, -source-info, -priority, -congestion-control, -express, -sample).",
+        "crates/wz-runtime-tokio/src/pubsub.rs: PushVariant match arm cfg-gates for pubsub-put + pubsub-delete; per-arm `let body_timestamp` + `let body_attachment` cfg-aware bindings for pubsub-timestamp + pubsub-attachment (4 sites each); Default fall-through changed from `PushVariant::Default { .. }` to `_` so cfg-off Put / Del also drop silently.",
+        "crates/wz-runtime-tokio/src/reply.rs: ReplyVariant match arm cfg-gates for pubsub-put + pubsub-delete; Default fall-through changed to `_` for parity with pubsub.rs.",
+        "crates/wz-runtime-tokio/src/session.rs: pubsub-allow-loop cfg gate at Session::publish + Session::publish_aliased local_publish fan-out branches (2 cfg pairs).",
+        "§5.8 pubsub catalog body: intent + rationale (5 bullets) + outputs (8 bullets) + 4 caveats + impact_scope (2 refs)."
+      ],
+      "publishable_verification_bullets": [
+        "Audit verification: grep `feature = \"X\"` in crates/wz-runtime-tokio/src/ — pubsub-put 2 / pubsub-delete 2 / pubsub-allow-loop 4 / pubsub-attachment 4 / pubsub-timestamp 4 = 16 total cfg sites.",
+        "cargo check -p wz-runtime-tokio (default features): pass.",
+        "cargo clippy -p wz-runtime-tokio --all-targets -D warnings: clean.",
+        "cargo fmt --check -p wz-runtime-tokio: clean.",
+        "cargo test -p wz-runtime-tokio --lib: 593/593 pass.",
+        "validate_workspace baseline: entries 409 -> 410, sections 256, T1 orphan 0, round-trip 13/13, GENERATED.md sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311cd next: session 9 unwired features cascade (third largest unwired domain by R311ca count).",
+        "Pubsub reserved (6): -encoding, -source-info, -priority, -congestion-control, -express, -sample — wire-up cascade lands when API extension or schema changes warrant it (sample API anchor stays always-on indefinitely).",
+        "R311ca debt #6 wire-up progress: 36 -> 41 wired (22% -> 25%); 125 -> 120 unwired (78% -> 75%); 13 domains 0%-wired -> 12 (pubsub closed).",
         "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter, R267, R311 facade graceful-close wrapper API."
       ]
     },

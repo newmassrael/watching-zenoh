@@ -787,6 +787,11 @@ impl Session {
                 }
             }
         }
+        // R311cc — pubsub-allow-loop gates the local_publish loopback
+        // branch of Session::publish. cfg-off short-circuits to 0
+        // (only remote dispatch fires); the Locality::Any default
+        // becomes effectively Locality::Remote_Only.
+        #[cfg(feature = "pubsub-allow-loop")]
         if opts.allowed_destination.allows_local() {
             let sample = build_loopback_sample(keyexpr, payload, &opts);
             self.observer
@@ -795,6 +800,11 @@ impl Session {
                 .subscribers
                 .local_publish(&sample)
         } else {
+            0
+        }
+        #[cfg(not(feature = "pubsub-allow-loop"))]
+        {
+            let _ = (keyexpr, payload, opts);
             0
         }
     }
@@ -878,6 +888,9 @@ impl Session {
                 }
             }
         }
+        // R311cc — pubsub-allow-loop gates the aliased-publish
+        // loopback fan-out (mirror of Session::publish gate).
+        #[cfg(feature = "pubsub-allow-loop")]
         if opts.allowed_destination.allows_local() {
             let sample = build_loopback_sample(loopback_keyexpr, payload, &opts);
             self.observer
@@ -886,6 +899,11 @@ impl Session {
                 .subscribers
                 .local_publish(&sample)
         } else {
+            0
+        }
+        #[cfg(not(feature = "pubsub-allow-loop"))]
+        {
+            let _ = (loopback_keyexpr, payload, opts);
             0
         }
     }
