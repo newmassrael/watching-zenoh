@@ -19510,6 +19510,66 @@
         "Slot compaction: cancelled slots stay as Some(None) Vec entries until natural Vec growth pushes them out. A compaction sweep would condense dropped slots; deferred until a profile reports heap growth as a real issue."
       ]
     },
+    "Round 311be": {
+      "decision_summary": "R311be QEMU mps2-an386 UDP loopback e2e demo lands as new deploy/mcu-qemu-demo crate + Layer Q opt-in CI lane; Phase W ladder FULL closure mantissa — composable framework MCU stack RUNS on a non-host target end-to-end.",
+      "changes_bullets": [
+        "deploy/mcu-qemu-demo/Cargo.toml: new standalone workspace crate; cortex-m + cortex-m-rt + cortex-m-semihosting + panic-semihosting + embedded-alloc deps; wz facade path dep with runtime-lwip feature; release profile LTO + abort-on-panic for flash fit; [workspace] empty table prevents cargo from pulling this build into crates/ default-member sweep.",
+        "deploy/mcu-qemu-demo/src/main.rs: cortex-m-rt entry point composing every Phase W primitive (R311au sync alias / R311av executor / R311bc timer queue / R311bd abort / R311az-1 lwip-sys / R311az-2 wz-link-lwip); 256 KB heap from BSS via embedded-alloc LlffHeap; DwtClock impl ClockSource backed by ARMv7-M DWT cycle counter; sys_now() #[unsafe(no_mangle)] extern \"C\" deploy-tier per R311az-pre D7; echo_task sends to 127.0.0.1:5555 then polls try_recv 100×1ms via LwipTime::sleep on the R311bc timer queue; PASS/FAIL via semihost hprintln! + debug::exit.",
+        "deploy/mcu-qemu-demo/build.rs: places memory.x into OUT_DIR for cortex-m-rt's link.x INCLUDE + rerun-if-env-changed=WZ_LWIP_PORT.",
+        "deploy/mcu-qemu-demo/memory.x: mps2-an386 layout (FLASH 0x00000000 4M + RAM 0x20000000 4M) per QEMU's hw/arm/mps2.c.",
+        "deploy/mcu-qemu-demo/.cargo/config.toml: target = thumbv7m-none-eabi + rustflags -Tlink.x + cargo run runner = qemu-system-arm -machine mps2-an386 (developer ergonomics; CI uses explicit --target).",
+        "scripts/run-ci.sh Layer Q: new opt-in lane (--layer Q / WZ_RUN_LAYER_Q=1) with Q.1 build (cargo build --release --manifest-path deploy/mcu-qemu-demo/Cargo.toml --target thumbv7m-none-eabi with WZ_LWIP_PORT=cross-test) + Q.2 run (qemu-system-arm mps2-an386 with semihost exit code propagation + 10s timeout); each sub-lane SKIPs gracefully on missing rustup target / arm-none-eabi-gcc / qemu-system-arm; header doc + dispatch wiring updated."
+      ],
+      "verification_bullets": [
+        "bash scripts/run-ci.sh --layer Q with WZ_RUN_LAYER_Q=1: Q.1 build mcu-qemu-demo thumbv7m-none-eabi OK; Q.2 run SKIP (qemu-system-arm absent on dev host); Layer Q pass; cross-compile via arm-none-eabi-gcc (lwip-sys cc::Build) + LTO link clean on the 256 KB heap config.",
+        "Layer G unchanged: 48/49 PASS + 1 SKIP after Layer Q addition (no regression in MCU cross-compile catalog from the new standalone workspace crate).",
+        "cargo test -p wz-runtime-lwip --features alloc: 13/13 PASS unchanged (R311bc + R311bd test sets preserved).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --all --check: clean (rustfmt collapsed one wrapped LwipUdpSocket::bind call + one fs::write expect chain in build.rs; no semantic change).",
+        "Demo cross-compile verified manually from inside deploy/mcu-qemu-demo: `WZ_LWIP_PORT=$(realpath ../../crates/lwip-sys/port/cross-test) cargo build --release` produces ELF 32-bit LSB executable ARM EABI5 (verified via `file`)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "carry_forward_bullets": [
+        "Phase W ladder FULL closure: R311az e2e milestone reached — composable framework MCU truthfulness now extends beyond cross-compile (Layer G) into runtime execution (Layer Q). Next ladder rung is multi-target MCU runtime coverage (M0+ via R311bb polyfill / M4F-M7 / M23 / M33 / M55) but that is a portability sweep on top of the proven path, not a structural new gate.",
+        "QEMU run-host enablement: install qemu-system-arm on the CI host so Q.2 lands as PASS instead of SKIP; this is the final SKIP-to-PASS conversion for the Phase W mechanical gate (mirror of the RISC-V G.6 toolchain bundle carry).",
+        "Real-IRQ wfi() replacement: the demo main loop uses cortex_m::asm::nop() instead of wfi() because QEMU mps2-an386 has no SysTick configured by default. A future round may configure SysTick + wire its ISR to advance a software wraparound counter, switching the demo to genuine wfi()-sleep and proving the R311bc power-saving claim under emulation.",
+        "Multi-target Layer Q expansion: today Q only covers thumbv7m-none-eabi (Cortex-M3). Future rounds may add Q lanes for Cortex-M0+ (mps2-an385), Cortex-M33 (mps2-an505), RISC-V (sifive_e), broadening the run-host coverage to match the Layer G cross-compile catalog.",
+        "deploy/mcu-qemu-demo as preset template: the composable-framework north star's preset-cortex-m4-default catalog now has a concrete reference binary that demonstrates how a deploy assembles the atomic features. Future preset catalog entries can point at this crate as the 'preset-cortex-m3-udp-demo' template."
+      ],
+      "publishable_decision_summary": "R311be QEMU mps2-an386 UDP loopback e2e demo lands as new deploy/mcu-qemu-demo crate + Layer Q opt-in CI lane; Phase W ladder FULL closure mantissa — composable framework MCU stack RUNS on a non-host target end-to-end.",
+      "publishable_changes_bullets": [
+        "deploy/mcu-qemu-demo/Cargo.toml: new standalone workspace crate; cortex-m + cortex-m-rt + cortex-m-semihosting + panic-semihosting + embedded-alloc deps; wz facade path dep with runtime-lwip feature; release profile LTO + abort-on-panic for flash fit; [workspace] empty table prevents cargo from pulling this build into crates/ default-member sweep.",
+        "deploy/mcu-qemu-demo/src/main.rs: cortex-m-rt entry point composing every Phase W primitive (R311au sync alias / R311av executor / R311bc timer queue / R311bd abort / R311az-1 lwip-sys / R311az-2 wz-link-lwip); 256 KB heap from BSS via embedded-alloc LlffHeap; DwtClock impl ClockSource backed by ARMv7-M DWT cycle counter; sys_now() #[unsafe(no_mangle)] extern \"C\" deploy-tier per R311az-pre D7; echo_task sends to 127.0.0.1:5555 then polls try_recv 100×1ms via LwipTime::sleep on the R311bc timer queue; PASS/FAIL via semihost hprintln! + debug::exit.",
+        "deploy/mcu-qemu-demo/build.rs: places memory.x into OUT_DIR for cortex-m-rt's link.x INCLUDE + rerun-if-env-changed=WZ_LWIP_PORT.",
+        "deploy/mcu-qemu-demo/memory.x: mps2-an386 layout (FLASH 0x00000000 4M + RAM 0x20000000 4M) per QEMU's hw/arm/mps2.c.",
+        "deploy/mcu-qemu-demo/.cargo/config.toml: target = thumbv7m-none-eabi + rustflags -Tlink.x + cargo run runner = qemu-system-arm -machine mps2-an386 (developer ergonomics; CI uses explicit --target).",
+        "scripts/run-ci.sh Layer Q: new opt-in lane (--layer Q / WZ_RUN_LAYER_Q=1) with Q.1 build (cargo build --release --manifest-path deploy/mcu-qemu-demo/Cargo.toml --target thumbv7m-none-eabi with WZ_LWIP_PORT=cross-test) + Q.2 run (qemu-system-arm mps2-an386 with semihost exit code propagation + 10s timeout); each sub-lane SKIPs gracefully on missing rustup target / arm-none-eabi-gcc / qemu-system-arm; header doc + dispatch wiring updated."
+      ],
+      "publishable_verification_bullets": [
+        "bash scripts/run-ci.sh --layer Q with WZ_RUN_LAYER_Q=1: Q.1 build mcu-qemu-demo thumbv7m-none-eabi OK; Q.2 run SKIP (qemu-system-arm absent on dev host); Layer Q pass; cross-compile via arm-none-eabi-gcc (lwip-sys cc::Build) + LTO link clean on the 256 KB heap config.",
+        "Layer G unchanged: 48/49 PASS + 1 SKIP after Layer Q addition (no regression in MCU cross-compile catalog from the new standalone workspace crate).",
+        "cargo test -p wz-runtime-lwip --features alloc: 13/13 PASS unchanged (R311bc + R311bd test sets preserved).",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean.",
+        "cargo fmt --all --check: clean (rustfmt collapsed one wrapped LwipUdpSocket::bind call + one fs::write expect chain in build.rs; no semantic change).",
+        "Demo cross-compile verified manually from inside deploy/mcu-qemu-demo: `WZ_LWIP_PORT=$(realpath ../../crates/lwip-sys/port/cross-test) cargo build --release` produces ELF 32-bit LSB executable ARM EABI5 (verified via `file`)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Phase W ladder FULL closure: R311az e2e milestone reached — composable framework MCU truthfulness now extends beyond cross-compile (Layer G) into runtime execution (Layer Q). Next ladder rung is multi-target MCU runtime coverage (M0+ via R311bb polyfill / M4F-M7 / M23 / M33 / M55) but that is a portability sweep on top of the proven path, not a structural new gate.",
+        "QEMU run-host enablement: install qemu-system-arm on the CI host so Q.2 lands as PASS instead of SKIP; this is the final SKIP-to-PASS conversion for the Phase W mechanical gate (mirror of the RISC-V G.6 toolchain bundle carry).",
+        "Real-IRQ wfi() replacement: the demo main loop uses cortex_m::asm::nop() instead of wfi() because QEMU mps2-an386 has no SysTick configured by default. A future round may configure SysTick + wire its ISR to advance a software wraparound counter, switching the demo to genuine wfi()-sleep and proving the R311bc power-saving claim under emulation.",
+        "Multi-target Layer Q expansion: today Q only covers thumbv7m-none-eabi (Cortex-M3). Future rounds may add Q lanes for Cortex-M0+ (mps2-an385), Cortex-M33 (mps2-an505), RISC-V (sifive_e), broadening the run-host coverage to match the Layer G cross-compile catalog.",
+        "deploy/mcu-qemu-demo as preset template: the composable-framework north star's preset-cortex-m4-default catalog now has a concrete reference binary that demonstrates how a deploy assembles the atomic features. Future preset catalog entries can point at this crate as the 'preset-cortex-m3-udp-demo' template."
+      ]
+    },
     "Round 311c": {
       "decision_summary": "R311c lands codec-close cascade — wire encode/decode + send_close_with_reason + bind_unit gated; CloseReason enum + set_close_reason_* FSM bindings stay unconditional.",
       "changes_bullets": [

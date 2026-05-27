@@ -92,6 +92,25 @@
 #              by R311aq — codec wire encode/decode now cross-compiles
 #              via the alloc-prelude shim in wz-codecs/src/lib.rs;
 #              hosted callers see no behavioural delta.
+#   Layer Q  — QEMU mps2-an386 UDP loopback e2e demo run (R311be).
+#              Opt-in via `--layer Q` or `WZ_RUN_LAYER_Q=1`. Two
+#              sub-lanes:
+#                Q.1 build  cargo build --release for thumbv7m-none-
+#                           eabi of deploy/mcu-qemu-demo with
+#                           WZ_LWIP_PORT set to the cross-test port.
+#                           Requires thumbv7m-none-eabi rustup target
+#                           + arm-none-eabi-gcc.
+#                Q.2 run    qemu-system-arm boots the built ELF and
+#                           asserts on the semihost SYS_EXIT exit
+#                           code (PASS=0 / FAIL=1). Requires
+#                           qemu-system-arm; SKIPs if absent.
+#              Each sub-lane SKIPs gracefully on toolchain absence.
+#              Phase W ladder FULL closure mantissa: composable-
+#              framework MCU stack RUNS on a non-host target end-to-
+#              end (wz facade + runtime-lwip + LwipRuntime timer
+#              queue + LwipJoinHandle::abort + wz-link-lwip UDP raw
+#              API + lwip-sys cross-real C build, all in one
+#              binary).
 #
 # Exit codes:
 #   0  every required layer passed
@@ -688,6 +707,95 @@ layer_g_cross_compile_cortex_m() {
     return $fail
 }
 
+# ─── Layer Q — QEMU mps2-an386 UDP loopback e2e demo run ───────────
+#
+# Opt-in via `--layer Q` or `WZ_RUN_LAYER_Q=1`. R311be — proves the
+# composable framework MCU stack RUNS end-to-end on a non-host
+# target. Two sub-lanes:
+#
+#   Q.1 build   cargo build --release for thumbv7m-none-eabi of
+#               deploy/mcu-qemu-demo with WZ_LWIP_PORT pointed at
+#               the cross-test port (same one Layer G.6 uses).
+#               Requires the rustup target + arm-none-eabi-gcc
+#               (lwip-sys cc::Build invokes the C cross-compiler).
+#   Q.2 run     qemu-system-arm boots the built ELF and asserts
+#               on the semihost SYS_EXIT exit code. PASS=0 /
+#               FAIL=1; 10s timeout bounds a runaway loop.
+#               Requires qemu-system-arm; SKIPs if absent so a
+#               dev host without QEMU still gets Q.1 build PASS.
+#
+# Phase W ladder FULL closure mantissa: composable-framework MCU
+# stack runs end-to-end (wz facade + runtime-lwip + LwipRuntime
+# timer queue (R311bc) + LwipJoinHandle::abort surface (R311bd) +
+# wz-link-lwip UDP raw API (R311az-2) + lwip-sys cross-real build
+# (R311az-1) all composed in one Cortex-M3 binary).
+layer_q_qemu_mcu_e2e() {
+    if [[ "$ONLY_LAYER" != "Q" && "${WZ_RUN_LAYER_Q:-0}" -ne 1 ]]; then
+        echo "Layer Q SKIP (opt-in: --layer Q or WZ_RUN_LAYER_Q=1)"
+        return 0
+    fi
+
+    local installed
+    installed="$(rustup target list --installed 2>/dev/null)"
+
+    if ! grep -q "^thumbv7m-none-eabi$" <<< "$installed"; then
+        echo "  Q SKIP (thumbv7m-none-eabi rustup target absent;" \
+             "rustup target add thumbv7m-none-eabi)"
+        return 0
+    fi
+
+    if ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
+        echo "  Q SKIP (arm-none-eabi-gcc not on PATH;" \
+             "install gcc-arm-none-eabi)"
+        return 0
+    fi
+
+    local lwip_port
+    lwip_port="$(realpath crates/lwip-sys/port/cross-test)"
+
+    # Q.1 build — cross-compile the demo with the cross-test
+    # lwIP port. The demo's Cargo.toml is a standalone workspace
+    # so cargo does not pull this build into the crates/
+    # workspace's default-member sweep. `--target` is passed
+    # explicitly because cargo's `.cargo/config.toml` lookup
+    # starts at the CWD (not the manifest dir), so the demo's
+    # own per-crate config is invisible from this script's
+    # workspace-root CWD; the explicit flag makes the
+    # cross-compile target invariant of where cargo is invoked.
+    if WZ_LWIP_PORT="$lwip_port" cargo build --release \
+        --manifest-path deploy/mcu-qemu-demo/Cargo.toml \
+        --target thumbv7m-none-eabi --quiet; then
+        echo "  Q.1 build mcu-qemu-demo thumbv7m-none-eabi OK"
+    else
+        echo "  Q.1 build mcu-qemu-demo thumbv7m-none-eabi FAIL" >&2
+        return 1
+    fi
+
+    if ! command -v qemu-system-arm >/dev/null 2>&1; then
+        echo "  Q.2 run SKIP (qemu-system-arm not on PATH;" \
+             "install qemu-system-arm)"
+        return 0
+    fi
+
+    local bin
+    bin="deploy/mcu-qemu-demo/target/thumbv7m-none-eabi/release/mcu-qemu-demo"
+
+    # Q.2 run — boot the ELF in QEMU. Semihost SYS_EXIT
+    # propagates the demo's PASS/FAIL into the QEMU process exit
+    # code (0 / 1); a 10s outer timeout bounds a runaway loop so
+    # a hung demo does not block CI indefinitely.
+    if timeout 10 qemu-system-arm \
+        -cpu cortex-m3 -machine mps2-an386 \
+        -nographic -semihosting-config enable=on,target=native \
+        -kernel "$bin" >/dev/null 2>&1; then
+        echo "  Q.2 run mcu-qemu-demo via qemu-system-arm mps2-an386 PASS"
+        return 0
+    else
+        echo "  Q.2 run mcu-qemu-demo via qemu-system-arm mps2-an386 FAIL" >&2
+        return 1
+    fi
+}
+
 # ─── dispatch ──────────────────────────────────────────────────────
 overall=0
 run_layer 0 layer_0_preflight_lints || overall=1
@@ -702,6 +810,7 @@ run_layer D layer_d_validate_deploy || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
+run_layer Q layer_q_qemu_mcu_e2e || overall=1
 
 if [[ $overall -eq 0 ]]; then
     echo ""
