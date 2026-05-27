@@ -970,11 +970,22 @@ impl PeerInitCaps {
     /// packed `(seq_num_res & 0x03) | ((req_id_res & 0x03) << 2)`
     /// per zenoh-pico transport.c:196-197.
     pub fn from_init_syn(sn_res_byte: Option<u8>, batch_size: Option<u16>) -> Self {
+        // R311cb — transport-batching gates the peer-advertised
+        // batch_size honoring. cfg-off forces 65535 (full MTU) and
+        // ignores the peer's advertised value; honest semantic is
+        // "we always batch up to the wire limit and never reduce."
+        // The S-bit clear arm always returns 65535 regardless of the
+        // feature state — that path is the peer-declined-S baseline,
+        // not a negotiation outcome.
+        #[cfg(feature = "transport-batching")]
+        let honored_batch_size = batch_size.unwrap_or(65535);
+        #[cfg(not(feature = "transport-batching"))]
+        let honored_batch_size = 65535u16;
         match sn_res_byte {
             Some(b) => Self {
                 seq_num_res: b & 0x03,
                 req_id_res: (b >> 2) & 0x03,
-                batch_size: batch_size.unwrap_or(65535),
+                batch_size: honored_batch_size,
             },
             None => Self {
                 // S bit clear → both peer defaults to
@@ -1113,7 +1124,13 @@ impl SessionLinkActions {
         if let Some(p) = peer {
             params.seq_num_res = params.seq_num_res.min(p.seq_num_res);
             params.req_id_res = params.req_id_res.min(p.req_id_res);
-            params.batch_size = params.batch_size.min(p.batch_size);
+            // R311cb — transport-batching gates the min(local, peer)
+            // reduction on batch_size. cfg-off keeps the local
+            // advertised batch_size as-is (no downward negotiation).
+            #[cfg(feature = "transport-batching")]
+            {
+                params.batch_size = params.batch_size.min(p.batch_size);
+            }
         }
         params
     }
@@ -2572,9 +2589,20 @@ pub fn register_state_internal_fns(lua: &dyn IScriptEngine, actions: &Arc<Sessio
     bind_unit(lua, "stop_lease_monitor", actions, |a| {
         a.trace.lock().unwrap().stop_lease_monitor += 1;
     });
+    // R311cb — transport-keepalive gates the SCXML script-action bind
+    // for the keepalive worker. cfg-off: the action names are not
+    // registered with the Lua engine, so a session FSM that reaches a
+    // `<script>start_keepalive_worker</script>` body trips
+    // `function not found` and fails the transition. Honest semantic:
+    // keepalive-OFF means the FSM cannot enter the lease-monitored
+    // Established sub-region. Default-on so the AP path still binds.
+    // Wire-level KeepAlive parse (last_inbound_keepalive_at stamp) is
+    // a separate axis governed by codec-keep-alive.
+    #[cfg(feature = "transport-keepalive")]
     bind_unit(lua, "start_keepalive_worker", actions, |a| {
         a.trace.lock().unwrap().start_keepalive_worker += 1;
     });
+    #[cfg(feature = "transport-keepalive")]
     bind_unit(lua, "stop_keepalive_worker", actions, |a| {
         a.trace.lock().unwrap().stop_keepalive_worker += 1;
     });
