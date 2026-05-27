@@ -2178,15 +2178,27 @@ impl std::error::Error for QueryAliasError {}
 /// of [`Session::declare_querier`] means no observer access happens
 /// at construction, so the type stays usable across all
 /// consumer-feature subsets.
-#[derive(Clone)]
+// R311cr — R267 helper cascade. Manual Clone impl avoids derive
+// auto-added `R: Clone` bound (Runtime does not require Clone; inner
+// Session<R> has manual Clone too).
 #[non_exhaustive]
-pub struct Querier {
-    session: Session,
+pub struct Querier<R: Runtime = TokioRuntime> {
+    session: Session<R>,
     keyexpr: String,
     options: QueryOptions,
 }
 
-impl Querier {
+impl<R: Runtime> Clone for Querier<R> {
+    fn clone(&self) -> Self {
+        Self {
+            session: self.session.clone(),
+            keyexpr: self.keyexpr.clone(),
+            options: self.options.clone(),
+        }
+    }
+}
+
+impl Querier<TokioRuntime> {
     /// Borrow the declared keyexpr. The literal form supplied to
     /// [`Session::declare_querier`]; identical to what each
     /// [`Self::get`] call threads to [`Session::query`].
@@ -2332,16 +2344,28 @@ pub struct MatchingStatus {
 /// alongside inline suffix added; aggregator-only construction means
 /// the struct is always usable regardless of `query-get` feature
 /// state.
-#[derive(Clone)]
+// R311cr — R267 helper cascade. Manual Clone impl mirrors Querier
+// pattern (no derive auto-added R: Clone bound on Runtime).
 #[non_exhaustive]
-pub struct QuerierAliased {
-    session: Session,
+pub struct QuerierAliased<R: Runtime = TokioRuntime> {
+    session: Session<R>,
     mapping_id: u64,
     inline_suffix: Option<String>,
     options: QueryOptions,
 }
 
-impl QuerierAliased {
+impl<R: Runtime> Clone for QuerierAliased<R> {
+    fn clone(&self) -> Self {
+        Self {
+            session: self.session.clone(),
+            mapping_id: self.mapping_id,
+            inline_suffix: self.inline_suffix.clone(),
+            options: self.options.clone(),
+        }
+    }
+}
+
+impl QuerierAliased<TokioRuntime> {
     /// The declared mapping id. Must have been previously registered
     /// via [`SessionLinkActions::send_declare_keyexpr`] for
     /// [`Self::get`] to succeed.

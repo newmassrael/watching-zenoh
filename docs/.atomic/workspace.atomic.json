@@ -22399,6 +22399,54 @@
         "CI gap from R311cp carry: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination."
       ]
     },
+    "Round 311cr": {
+      "decision_summary": "R311cr Querier + QuerierAliased generic R - R267 helper cascade first leaf pair. session field becomes Session R; impl blocks scoped to TokioRuntime; manual Clone avoids derive auto-bound.",
+      "changes_bullets": [
+        "session.rs Querier struct: pub struct Querier becomes pub struct Querier R Runtime default TokioRuntime; session field becomes Session R; derive Clone removed; manual impl R Runtime Clone for Querier R; impl Querier becomes impl Querier TokioRuntime.",
+        "session.rs QuerierAliased struct: same pattern — pub struct QuerierAliased R Runtime default TokioRuntime; session field becomes Session R; derive Clone removed; manual impl R Runtime Clone for QuerierAliased R; impl QuerierAliased becomes impl QuerierAliased TokioRuntime.",
+        "No external call site changes — default param keeps Querier and QuerierAliased bare names working at 3 wz-ap-demo helper call sites + internal Session::declare_querier returns."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace --all-targets: clean",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "scripts/run-ci.sh Layer A-E: all required layers pass",
+        "validate_workspace: entries=424 to 425, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync, publishable/audit divergence 22/22"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R267 helper struct cascade continuation (R311cs+): Publisher / PublisherAliased / Subscriber / Queryable / LivelinessToken / LivelinessSubscriber. Drop impls for Subscriber / Queryable / LivelinessToken / LivelinessSubscriber also need generic. Mechanical pattern per R311cp/cr; 2-3 helpers per round.",
+        "wz-runtime-lwip wz_runtime_lwip sync Mutex T alias module + LwipSession = Session LwipRuntime C alias pending before non-default Session R binding meaningful.",
+        "R267 Session R T TimeSource second param locked by R311w but not introduced; T currently method-level generic on Session query / Querier get. Fold-in pending.",
+        "R311ca debt #6 wire-up unchanged at 33 percent. R267 foundation move unblocks runtime-async-std / -no-std / -tokio-uring / -zero-copy reservation once cascade completes.",
+        "CI gap from R311cp: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination."
+      ],
+      "publishable_decision_summary": "R311cr Querier + QuerierAliased generic R - R267 helper cascade first leaf pair. session field becomes Session R; impl blocks scoped to TokioRuntime; manual Clone avoids derive auto-bound.",
+      "publishable_changes_bullets": [
+        "session.rs Querier struct: pub struct Querier becomes pub struct Querier R Runtime default TokioRuntime; session field becomes Session R; derive Clone removed; manual impl R Runtime Clone for Querier R; impl Querier becomes impl Querier TokioRuntime.",
+        "session.rs QuerierAliased struct: same pattern — pub struct QuerierAliased R Runtime default TokioRuntime; session field becomes Session R; derive Clone removed; manual impl R Runtime Clone for QuerierAliased R; impl QuerierAliased becomes impl QuerierAliased TokioRuntime.",
+        "No external call site changes — default param keeps Querier and QuerierAliased bare names working at 3 wz-ap-demo helper call sites + internal Session::declare_querier returns."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace --all-targets: clean",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "scripts/run-ci.sh Layer A-E: all required layers pass",
+        "validate_workspace: entries=424 to 425, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync, publishable/audit divergence 22/22"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R267 helper struct cascade continuation (R311cs+): Publisher / PublisherAliased / Subscriber / Queryable / LivelinessToken / LivelinessSubscriber. Drop impls for Subscriber / Queryable / LivelinessToken / LivelinessSubscriber also need generic. Mechanical pattern per R311cp/cr; 2-3 helpers per round.",
+        "wz-runtime-lwip wz_runtime_lwip sync Mutex T alias module + LwipSession = Session LwipRuntime C alias pending before non-default Session R binding meaningful.",
+        "R267 Session R T TimeSource second param locked by R311w but not introduced; T currently method-level generic on Session query / Querier get. Fold-in pending.",
+        "R311ca debt #6 wire-up unchanged at 33 percent. R267 foundation move unblocks runtime-async-std / -no-std / -tokio-uring / -zero-copy reservation once cascade completes.",
+        "CI gap from R311cp: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination."
+      ]
+    },
     "Round 311d": {
       "decision_summary": "R311d batches codec-scout / codec-hello / codec-join cascade — wz-codecs level only (wz-runtime-tokio does not import these types); forwards stay catalog-uniform for future runtime reuse.",
       "changes_bullets": [
