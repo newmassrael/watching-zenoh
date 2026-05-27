@@ -25,7 +25,7 @@
 //! [`Locality::Any`] and [`Locality::Remote`] subscribers fire.
 //!
 //! `SubscriberRegistry::local_publish` (R227) routes a caller-built
-//! [`crate::sample::Sample`] with `is_remote = false`, applying
+//! `Sample` with `is_remote = false`, applying
 //! [`Locality::allows_local`] — subscribers pinned to
 //! [`Locality::Remote`] are suppressed, [`Locality::Any`] and
 //! [`Locality::SessionLocal`] subscribers fire. Both paths converge

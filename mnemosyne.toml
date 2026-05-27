@@ -242,6 +242,15 @@ applied_in = "R311co session (commit pending)"
 content_hash_before = "2e1f43fe97c06f3ea50275b0087710d17f6658b1d85365dce4bc02e15baf5b5b"
 content_hash_after = "ebc66fa7df6f2371f585e834617efd6a6a7a95cbdcae890c71d431a28ce8750a"
 
+[[publishable_override_ledger]]
+kind = "stub-recovery"
+target_id = "Round 311di-3"
+fields = ["publishable_decision_summary", "publishable_changes_bullets", "publishable_verification_bullets", "publishable_impact_refs", "publishable_carry_forward_bullets"]
+reason = "R311di-3 first append_changelog_entry_v2 call surfaced misleading missing-field error; stubbed with placeholder bullets to unblock entry creation, then populated publishable half via R295 setters with the actual locality.rs migration content. Feedback memory feedback_mnemosyne_append_caps captures the lesson: append_changelog_entry_v2 has a 200-char decision_summary cap AND undocumented brittleness around long bullets with bracket/equals tokens; publishable setters have a separate 100-char-per-bullet cap. This row anchors all 5 publishable field overrides per R296 gate."
+applied_in = "R311di-3"
+content_hash_before = "fa8d49cd8190166ca746dfcba06cd3fc006204943554123b903fa690a32b8359"
+content_hash_after = "d72647521dc5c6a6e26dfa9e775bfd339fa8e1038408aa60877328c6cf451547"
+
 # Round 193 atomic-internal orphan absorb — R121j-5c-e2e-action surfaced
 # SessionLinkActions.send_response (tokio runtime trait surface change);
 # the impact_refs citation should have pointed at the

@@ -23465,6 +23465,62 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311di-3": {
+      "decision_summary": "R311di-3 locality.rs migrates to wz-session-core.",
+      "changes_bullets": [
+        "test change"
+      ],
+      "verification_bullets": [
+        "test verification"
+      ],
+      "publishable_decision_summary": "R311di-3 — locality.rs (114 lines) migrates to wz-session-core; no_std + no_alloc clean; wz-runtime-tokio re-exports so 3 caller files stay verbatim.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/locality.rs: new file (114 lines), verbatim copy of prior definition.",
+        "Type carries no allocations (pure repr(u8) enum + two bool helpers + tests); no alloc gate.",
+        "crates/wz-session-core/src/lib.rs: append pub mod locality after the keyexpr_canon block.",
+        "First wz-session-core surface that compiles under default-features=false MCU profile.",
+        "crates/wz-runtime-tokio/src/locality.rs: deleted (114 lines removed).",
+        "wz-runtime-tokio/src/lib.rs: locality module replaced with wz_session_core re-export.",
+        "3 caller files (pubsub.rs / query.rs / session.rs) reference crate::locality and stay verbatim.",
+        "33 crate::locality::* sites across the caller files unchanged across the rewrite.",
+        "Migration ordering: locality first because zero downstream wz-runtime-tokio dependencies.",
+        "Pure leaf-type, no Runtime / TimeSource / std / tokio coupling.",
+        "Migrating it first validates the wz-session-core re-export shim shape under simplest boundary."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clean -p wz-runtime-tokio -p wz-session-core: 28117 files / 9.6 GiB removed.",
+        "Fresh-recompile gate per R311di-2-fix textbook; prevents incremental-cache-masked breaks.",
+        "cargo check --workspace --all-targets: clean across all 6 workspace member crates.",
+        "scripts/run-ci.sh Layer 0..E: all pass.",
+        "Layer F SKIP opt-in, Layer Q SKIP opt-in.",
+        "Layer G across 7 MCU targets + RISC-V IMAC: 48 PASS + 1 SKIP.",
+        "G.6 cross-real lwip-sys riscv32imac SKIP (riscv32-unknown-elf-gcc absent, pre-existing baseline).",
+        "G.1 wz-runtime-core OK for all 8 targets including riscv32imac.",
+        "G.2 wz facade OK for all 8 targets.",
+        "G.3 wz-codecs OK for all 8 targets.",
+        "G.4 wz-runtime-lwip (+G.4-alloc) OK for all 8 targets.",
+        "G.5 wz facade runtime-lwip OK for all 8 targets.",
+        "validate_workspace: entries=458, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-4 (next): sample.rs (917 lines) migration.",
+        "Audit first for tokio deps; Sample is wire-data projection likely alloc-bound but tokio-free.",
+        "If audit confirms, follow R311di-2/3 template (file move + re-export shim).",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral.",
+        "R301 sec 8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP carries continue.",
+        "R299 #2/#3, R300, R301 sec 7, R304, keyexpr_canon proptest filter carries continue.",
+        "Push deferred; local lands only per CLAUDE.md never push without explicit consent.",
+        "Cascade-push at the end of R311di-N series after all 9 sub-rounds land.",
+        "Lesson: stub Round 311di-3 because append_changelog_entry_v2 first attempt failed.",
+        "Misleading missing-field error; bullets ungated by MCP JSON parser was the actual cause.",
+        "Recovery used R295 publishable override path; future rounds must use simpler bullet content.",
+        "Cap: append v2 = 200 on decision_summary; publishable setters = 100 per bullet."
+      ]
+    },
     "Round 311di-pre-a": {
       "decision_summary": "R311di-pre-a — wz-runtime-tokio adds hashbrown + portable-atomic deps; session_glue.rs HashMap + AtomicU64 imports route through them; first step toward wz-session-core no_std move-readiness.",
       "changes_bullets": [

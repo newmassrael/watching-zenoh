@@ -21,3 +21,8 @@ extern crate alloc;
 
 #[cfg(feature = "alloc")]
 pub mod keyexpr_canon;
+
+/// R223 — zenoh-style locality filter (no_std + no_alloc; pure enum + helpers).
+/// Mirrors zenoh-pico's `z_locality_t` and `_z_locality_allows_{local,remote}`.
+/// Available unconditionally because the type carries no allocations.
+pub mod locality;
