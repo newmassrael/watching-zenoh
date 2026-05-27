@@ -22703,6 +22703,52 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311cx": {
+      "decision_summary": "R311cx — Layer C3 expansion from 1 to 5 per-package isolated --all-targets clippy sub-lanes; surfaces 4 doc_lazy_continuation lint hits in wz-runtime-lwip that workspace-mode unified resolver masked",
+      "changes_bullets": [
+        "scripts/run-ci.sh: layer_c3_per_pkg_isolated_lint() extends from 1 to 5 sub-lanes: (1) wz-ap-demo (R311cv original), (2) wz facade under --no-default-features --features preset-ap-client, (3) wz-runtime-tokio default, (4) wz-runtime-lwip default (sync-only no_std), (5) wz-runtime-lwip --features alloc. Header comment block updated with R311cx expansion rationale.",
+        "crates/wz-runtime-lwip/src/runtime_impl.rs:113-118: rewrite of `Arc` shared-state doc-comment paragraph; the leading `+` on the `LwipTime::new(&runtime)` continuation line was being detected by clippy::doc_lazy_continuation as a markdown bullet list item start, cascading 4 lint hits across the surrounding lines. Rewrote `+` to `and` + collapsed the indent to a uniform paragraph; rendered meaning unchanged (the doc-comment still names both clone sites that observe the shared executor + timer + clock instance)."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh --layer C3: pass (5/5 sub-lanes clean post-doc-comment fix).",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "cargo clippy -p wz-runtime-lwip --features alloc --all-targets -- -D warnings: clean (the surfaced lint hit closed by the doc-comment rewrite).",
+        "validate_workspace: entries=430 -> 431, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311cv carry #4 fully closed: Layer C3 expansion proves the per-package isolated lint mechanism's value beyond the initial wz-ap-demo lane — the wz-runtime-lwip doc_lazy_continuation hit was masked by workspace-mode resolver for an unknown duration before this round.",
+        "Method generic lift for Session (R311cv carry: impl<T: TimeSource> Session<TokioRuntime, T> -> impl<R: Runtime, T: TimeSource> Session<R, T>): every self.observer.lock() / self.observer.lock().expect() site in session.rs needs to migrate to R::with_mutex_mut closure form (R311ct API). 100+ method bodies; multi-round.",
+        "Session crate extraction (carry: wz-session-core no_std crate that wz-runtime-lwip can depend on): session.rs (7900+ lines) + session_glue.rs (12000+ lines) + 8 helper files need to move out of wz-runtime-tokio leaving only the network I/O surface (lib.rs 629 lines + runtime_impl.rs 797 lines). Architectural multi-round; LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>> only meaningful after extraction.",
+        "R311ca debt #6 wire-up at 19% wired (unchanged across R311cw + R311cx): runtime-{async-std, no-std, tokio-uring, zero-copy} 4 atomic features stay reserved until Session moves to a runtime-agnostic crate.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ],
+      "publishable_decision_summary": "R311cx — Layer C3 expansion from 1 to 5 per-package isolated --all-targets clippy sub-lanes; surfaces 4 doc_lazy_continuation lint hits in wz-runtime-lwip that workspace-mode unified resolver masked",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: layer_c3_per_pkg_isolated_lint() extends from 1 to 5 sub-lanes: (1) wz-ap-demo (R311cv original), (2) wz facade under --no-default-features --features preset-ap-client, (3) wz-runtime-tokio default, (4) wz-runtime-lwip default (sync-only no_std), (5) wz-runtime-lwip --features alloc. Header comment block updated with R311cx expansion rationale.",
+        "crates/wz-runtime-lwip/src/runtime_impl.rs:113-118: rewrite of `Arc` shared-state doc-comment paragraph; the leading `+` on the `LwipTime::new(&runtime)` continuation line was being detected by clippy::doc_lazy_continuation as a markdown bullet list item start, cascading 4 lint hits across the surrounding lines. Rewrote `+` to `and` + collapsed the indent to a uniform paragraph; rendered meaning unchanged (the doc-comment still names both clone sites that observe the shared executor + timer + clock instance)."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh --layer C3: pass (5/5 sub-lanes clean post-doc-comment fix).",
+        "scripts/run-ci.sh full sweep: Layer 0 + A + A2 + B + C0 + C1 + C1b + C2 + C3 + D + E all pass; F/G/Q SKIP opt-in baseline.",
+        "cargo clippy -p wz-runtime-lwip --features alloc --all-targets -- -D warnings: clean (the surfaced lint hit closed by the doc-comment rewrite).",
+        "validate_workspace: entries=430 -> 431, sections=256, T1 orphan total=0, RT 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311cv carry #4 fully closed: Layer C3 expansion proves the per-package isolated lint mechanism's value beyond the initial wz-ap-demo lane — the wz-runtime-lwip doc_lazy_continuation hit was masked by workspace-mode resolver for an unknown duration before this round.",
+        "Method generic lift for Session (R311cv carry: impl<T: TimeSource> Session<TokioRuntime, T> -> impl<R: Runtime, T: TimeSource> Session<R, T>): every self.observer.lock() / self.observer.lock().expect() site in session.rs needs to migrate to R::with_mutex_mut closure form (R311ct API). 100+ method bodies; multi-round.",
+        "Session crate extraction (carry: wz-session-core no_std crate that wz-runtime-lwip can depend on): session.rs (7900+ lines) + session_glue.rs (12000+ lines) + 8 helper files need to move out of wz-runtime-tokio leaving only the network I/O surface (lib.rs 629 lines + runtime_impl.rs 797 lines). Architectural multi-round; LwipSession<C> = Session<LwipRuntime<C>, LwipTime<C>> only meaningful after extraction.",
+        "R311ca debt #6 wire-up at 19% wired (unchanged across R311cw + R311cx): runtime-{async-std, no-std, tokio-uring, zero-copy} 4 atomic features stay reserved until Session moves to a runtime-agnostic crate.",
+        "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
+      ]
+    },
     "Round 311d": {
       "decision_summary": "R311d batches codec-scout / codec-hello / codec-join cascade — wz-codecs level only (wz-runtime-tokio does not import these types); forwards stay catalog-uniform for future runtime reuse.",
       "changes_bullets": [

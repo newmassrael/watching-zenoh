@@ -25,10 +25,15 @@
 #              alloc-gated panic_payload tests would otherwise never
 #              run in CI — see crates/wz-runtime-core/Cargo.toml)
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
-#   Layer C3 — cargo clippy -p wz-ap-demo --all-targets -- -D warnings
-#              (R311cv; per-package isolated feature resolution catches
-#              preset-feature lint regressions that the workspace-mode
-#              unified resolver can mask)
+#   Layer C3 — per-package isolated `cargo clippy ... --all-targets`
+#              sub-lanes (R311cv; per-package isolated feature
+#              resolution catches preset-feature lint regressions that
+#              the workspace-mode unified resolver can mask). R311cx
+#              expansion: wz-ap-demo (R311cv original) + wz facade
+#              under preset-ap-client + wz-runtime-tokio default +
+#              wz-runtime-lwip default sync-only + wz-runtime-lwip
+#              with `--features alloc`. Five sub-lanes total; any
+#              failure short-circuits the whole layer.
 #   Layer D  — deploy/*.yaml schema validate
 #   Layer E  — binary-dep e2e suite via `cargo test ... -- --ignored`
 #              (auto-includes every #[ignore]-marked test in the
@@ -506,10 +511,25 @@ layer_c2_cargo_clippy() {
 # `preset-ap-client` default routes through the wz facade feature
 # graph and the workspace-mode unification can silently re-enable
 # sibling features that hide preset-feature-isolated lint failures.
-# This lane runs `cargo clippy -p wz-ap-demo --all-targets` in
-# isolated mode so preset-feature lint regressions land mechanically.
+#
+# R311cx expansion: extends the original wz-ap-demo lane to also cover
+# the wz facade itself (under `preset-ap-client` — the same surface
+# wz-ap-demo selects, but linted at the facade's own crate boundary so
+# preset wiring regressions surface even if no consumer-binary catches
+# them yet), wz-runtime-tokio on its default feature bundle (the
+# largest single source of cfg combinations in the workspace), and
+# both wz-runtime-lwip lanes (default sync-only + `--features alloc`)
+# so Phase W MCU profile feature combinations are caught the same way
+# the AP-tokio lane catches them.
 layer_c3_per_pkg_isolated_lint() {
-    (cd crates && cargo clippy -p wz-ap-demo --all-targets --quiet -- -D warnings)
+    (cd crates \
+        && cargo clippy -p wz-ap-demo --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz --no-default-features --features preset-ap-client \
+            --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-tokio --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-lwip --all-targets --quiet -- -D warnings \
+        && cargo clippy -p wz-runtime-lwip --features alloc \
+            --all-targets --quiet -- -D warnings)
 }
 
 # ─── Layer D — deploy yaml schema validate ──────────────────────────
