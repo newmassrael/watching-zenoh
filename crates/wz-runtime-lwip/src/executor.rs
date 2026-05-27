@@ -35,21 +35,28 @@
 //!   read on the polling side is `AcqRel`-ordered swap so the wake
 //!   signal is visible across cores if the future supports it.
 //!
+//! ## What R311bc + R311bd close
+//!
+//! - **Real timer queue** (R311bc): see [`crate::timer::TimerQueue`].
+//!   The deploy main loop can now `wfi()`-sleep between IRQs; the
+//!   self-wake busy-poll pattern is retired.
+//! - **Cancellation** (R311bd): each [`TaskSlot`] carries a
+//!   `cancel_flag: Arc<AtomicBool>` shared with
+//!   [`crate::LwipJoinHandle`]. `LwipJoinHandle::abort()` sets the
+//!   flag and synchronously writes `Err(RuntimeError::JoinCancelled)`
+//!   into the shared `JoinState`; the next `run_until_idle` pass
+//!   sweeps the cancel-flag set, drops the corresponding task
+//!   future (releasing any resources it held), and vacates the
+//!   slot. Idempotent + race-safe against natural completion via
+//!   the `JoinState::result.is_none()` guard in both abort and the
+//!   spawn wrapper.
+//!
 //! ## What is intentionally NOT here
 //!
-//! - **Real timer queue**: [`crate::time::SleepFuture`] busy-wakes via
-//!   `cx.waker().wake_by_ref()`. The deploy main loop drives time
-//!   forward by repeating `runtime.run_until_idle()` between
-//!   `lwip_poll()` + `cortex_m::asm::wfi()` (or RISC-V `wfi`). A
-//!   deadline-keyed timer queue is R311az+; the busy-wake shape is
-//!   honest for R311av — every iteration the executor returns
-//!   control to the outer driver so power-down can happen between
-//!   passes.
 //! - **Priorities**: tasks are polled in slot order. Round-robin
 //!   fairness is fine for the cooperative model; priority-aware
 //!   scheduling is a deploy-level concern outside the executor
 //!   surface.
-//! - **Cancellation**: see `LwipJoinHandle` doc-comment — R311az+.
 
 use alloc::boxed::Box;
 // R311bb — Arc + AtomicBool + Ordering come from the crate's
@@ -73,6 +80,15 @@ pub(crate) type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 struct TaskSlot {
     fut: BoxFuture,
     wake_flag: Arc<AtomicBool>,
+    // R311bd — abort propagation. Shared with the corresponding
+    // `LwipJoinHandle`'s `cancel_flag`; the handle's `abort()`
+    // method sets it and the next `run_until_idle` pass drops the
+    // task future (vacating the slot). The handle has already
+    // written `RuntimeError::JoinCancelled` into its `JoinState`
+    // synchronously inside `abort()` itself, so the executor
+    // sweep here only needs to release the task's resources, not
+    // notify any waker.
+    cancel_flag: Arc<AtomicBool>,
 }
 
 struct Inner {
@@ -97,6 +113,14 @@ impl ExecutorState {
     /// Push `fut` into the task pool. The future is initially marked
     /// ready so the first `run_until_idle` call polls it.
     ///
+    /// `cancel_flag` is the shared abort signal between the spawned
+    /// task slot and the [`crate::LwipJoinHandle`] that the caller
+    /// holds (R311bd). The handle's `abort()` sets the flag; the
+    /// next `run_until_idle` sweep drops the corresponding task's
+    /// future. The caller owns the `Arc<AtomicBool>` and holds a
+    /// clone on the handle side, so the slot's drop releases the
+    /// only remaining reference and lets the AtomicBool deallocate.
+    ///
     /// Always appends to the tail; slot recycling is intentionally
     /// not done here because `run_until_idle` temporarily vacates a
     /// slot during a polled task's iteration (the entry is held in
@@ -106,10 +130,14 @@ impl ExecutorState {
     /// and the polled task's Pending-restore would then overwrite
     /// the new spawn, silently dropping it. Vec growth is the
     /// honest tradeoff; a compaction sweep that condenses dropped
-    /// slots is a R311az+ refinement.
-    pub(crate) fn spawn(&self, fut: BoxFuture) {
+    /// slots is a later refinement.
+    pub(crate) fn spawn(&self, fut: BoxFuture, cancel_flag: Arc<AtomicBool>) {
         let wake_flag = Arc::new(AtomicBool::new(true));
-        let entry = TaskSlot { fut, wake_flag };
+        let entry = TaskSlot {
+            fut,
+            wake_flag,
+            cancel_flag,
+        };
         critical_section::with(|cs| {
             let mut inner = self.inner.borrow(cs).borrow_mut();
             inner.tasks.push(Some(entry));
@@ -132,6 +160,38 @@ impl ExecutorState {
     pub fn run_until_idle(&self) {
         let task_count = critical_section::with(|cs| self.inner.borrow(cs).borrow().tasks.len());
         for idx in 0..task_count {
+            // R311bd — cancel-first sweep. If a slot's
+            // cancel_flag is set, take the slot (dropping the
+            // future to release any resources it held) and
+            // continue. The matching `LwipJoinHandle::abort`
+            // call has already written
+            // `RuntimeError::JoinCancelled` into the JoinState
+            // synchronously, so the awaiting handle has already
+            // resolved; the executor side here only needs to
+            // free the task body.
+            let cancelled_slot = critical_section::with(|cs| {
+                let mut inner = self.inner.borrow(cs).borrow_mut();
+                let slot = inner.tasks.get_mut(idx)?;
+                let is_cancelled = slot
+                    .as_ref()
+                    .map(|t| t.cancel_flag.load(Ordering::Acquire))
+                    .unwrap_or(false);
+                if is_cancelled {
+                    slot.take()
+                } else {
+                    None
+                }
+            });
+            if let Some(taken) = cancelled_slot {
+                // Explicit drop for clarity: the future + its
+                // captured state is released here. The wake_flag
+                // and cancel_flag Arcs decrement; if no other
+                // clone exists (handle dropped before abort), the
+                // AtomicBool deallocates.
+                drop(taken);
+                continue;
+            }
+
             // Per-task ready snapshot + slot vacate. The combined
             // swap-and-take keeps the critical section short.
             let entry = critical_section::with(|cs| {

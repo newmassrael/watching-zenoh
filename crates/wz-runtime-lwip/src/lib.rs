@@ -57,13 +57,8 @@
 //! `runtime.spawn(future).await` receives that future's output,
 //! not silently-discarded work.
 //!
-//! ## What R311av deliberately defers (R311bc+ carries)
+//! ## What R311av deliberately defers
 //!
-//! - **`LwipJoinHandle::abort()`**: not implemented this round. The
-//!   handle exposes only the `Future` impl; cooperative cancellation
-//!   is a R311bd carry (cancel-token plumbed through TaskSlot, or
-//!   a separate `Cancellable` trait). The trait surface stays
-//!   unchanged — `Runtime` does not require abort.
 //! - **`embedded-time` ecosystem adapter**: own [`ClockSource`]
 //!   trait only. `embedded-time` v0.13 has been stalled since 2024;
 //!   the composable-framework north star prefers a self-contained
@@ -84,6 +79,21 @@
 //!   the executor pass is genuinely idle when no task is ready and
 //!   no timer has elapsed; previously the self-wake busy-poll kept
 //!   the executor active every cycle.
+//!
+//! ## What R311bd closes
+//!
+//! - **`LwipJoinHandle::abort()`**: AP/MCU parity with
+//!   `wz_runtime_tokio::TokioJoinHandle::abort`. Each spawned task
+//!   slot carries a `cancel_flag: Arc<AtomicBool>` shared with the
+//!   returned `LwipJoinHandle`. `abort()` writes the flag (the
+//!   next `run_until_idle` sweeps the cancelled slots and drops
+//!   their futures) AND synchronously writes
+//!   `Err(RuntimeError::JoinCancelled)` into the shared
+//!   `JoinState` so an awaiting handle resolves immediately
+//!   without needing the executor pass to land. Race against
+//!   natural completion resolves by "first result wins" via the
+//!   `JoinState::result.is_none()` guard on both write paths;
+//!   idempotent under repeated abort calls.
 //!
 //! ## Layer G.4 / G.4-alloc cross-compile gate
 //!
