@@ -23373,6 +23373,62 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311di-10": {
+      "decision_summary": "R311di-10 SendDeclareError extract from session_glue.rs to wz-session-core::send_declare_error; uses OutboundKeyexprError already in wz-session-core::keyexpr_canon.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/send_declare_error.rs new 100-line file with SendDeclareError enum + impls.",
+        "core::fmt::Display + core::error::Error replace std variants per Rust 1.81 stabilization.",
+        "From OutboundKeyexprError SendDeclareError impl preserved.",
+        "crates/wz-session-core/src/lib.rs pub mod send_declare_error alloc-gated via dep chain.",
+        "crates/wz-runtime-tokio/src/session_glue.rs 98-line block removed; pub use replaces.",
+        "Now-unused use crate::keyexpr_canon::OutboundKeyexprError removed from session_glue.rs.",
+        "Cumulative session_glue.rs shrink di-5..di-10 about 320 lines from 12284 baseline."
+      ],
+      "verification_bullets": [
+        "cargo check workspace all-targets clean across all 6 workspace member crates.",
+        "scripts/run-ci.sh Layer 0..E all pass.",
+        "scripts/run-ci.sh --layer G 7 MCU targets plus RISC-V IMAC all PASS.",
+        "validate_workspace expected entries 464 to 465 sections 256 T1 orphan 0 RT 13/13."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R311di-11 next NetworkMessage with codec-* feature forwarding wz-session-core to wz-codecs.",
+        "Plumbing chain wz-runtime-tokio codec-foo enables wz-session-core codec-foo enables wz-codecs codec-foo.",
+        "DriverLoopOutcome + IterationEvent follow after NetworkMessage lands.",
+        "Push deferred per CLAUDE.md never push without explicit consent rule.",
+        "Architectural carries unchanged R284 R283 R301 sec 8 R299 R300 R301 sec 7 R304."
+      ],
+      "publishable_decision_summary": "R311di-10 SendDeclareError extract from session_glue.rs to wz-session-core::send_declare_error; uses OutboundKeyexprError already in wz-session-core::keyexpr_canon.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/send_declare_error.rs new 100-line file with SendDeclareError enum + impls.",
+        "core::fmt::Display + core::error::Error replace std variants per Rust 1.81 stabilization.",
+        "From OutboundKeyexprError SendDeclareError impl preserved.",
+        "crates/wz-session-core/src/lib.rs pub mod send_declare_error alloc-gated via dep chain.",
+        "crates/wz-runtime-tokio/src/session_glue.rs 98-line block removed; pub use replaces.",
+        "Now-unused use crate::keyexpr_canon::OutboundKeyexprError removed from session_glue.rs.",
+        "Cumulative session_glue.rs shrink di-5..di-10 about 320 lines from 12284 baseline."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check workspace all-targets clean across all 6 workspace member crates.",
+        "scripts/run-ci.sh Layer 0..E all pass.",
+        "scripts/run-ci.sh --layer G 7 MCU targets plus RISC-V IMAC all PASS.",
+        "validate_workspace expected entries 464 to 465 sections 256 T1 orphan 0 RT 13/13."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311di-11 next NetworkMessage with codec-* feature forwarding wz-session-core to wz-codecs.",
+        "Plumbing chain wz-runtime-tokio codec-foo enables wz-session-core codec-foo enables wz-codecs codec-foo.",
+        "DriverLoopOutcome + IterationEvent follow after NetworkMessage lands.",
+        "Push deferred per CLAUDE.md never push without explicit consent rule.",
+        "Architectural carries unchanged R284 R283 R301 sec 8 R299 R300 R301 sec 7 R304."
+      ]
+    },
     "Round 311di-2": {
       "decision_summary": "R311di-2 — keyexpr_canon.rs (806 lines) is the first file migrated into wz-session-core; std::fmt/std::error::Error replaced with core::*, alloc::string + alloc::vec imports add; wz-runtime-tokio re-exports the module so 4 caller files (query.rs / pubsub.rs / session.rs / session_glue.rs) stay verbatim.",
       "changes_bullets": [

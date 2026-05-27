@@ -179,7 +179,6 @@ use crate::runtime_impl::{TokioRuntime, TokioTime};
     feature = "declare-token",
 ))]
 use crate::keyexpr_canon::check_outbound_keyexpr_pico_safe;
-use crate::keyexpr_canon::OutboundKeyexprError;
 
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
@@ -650,109 +649,8 @@ pub enum ExtChainRole {
     OpenAck,
 }
 
-/// R300 — typed reject from the outbound DECLARE-side gate that
-/// guards against (a) malformed keyexprs (structural canon
-/// violations) and (b) zenoh-pico bug #3 SIGABRT patterns (R299
-/// fixture). Returned by [`SessionLinkActions::send_declare_keyexpr`]
-/// / `send_declare_subscriber` / `send_declare_queryable` /
-/// `send_declare_token` instead of letting the failing emit reach
-/// the wire (where pico would crash) or panic at
-/// [`build_declare_kexpr`]'s `mapping_id != 0` assertion.
-///
-/// The gate runs BEFORE any wire bytes are produced or any
-/// outbound-mapping-table side effect — every variant is a
-/// no-emit reject (the session-link state is unchanged on Err).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SendDeclareError {
-    /// The reconstructed keyexpr (resolved from `(mapping_id,
-    /// suffix)` via the outbound mapping table) failed the
-    /// pico-safety check. Inner [`OutboundKeyexprError`] separates
-    /// structural canon violations from R299 bug #3 patterns.
-    Keyexpr(OutboundKeyexprError),
-    /// `send_declare_keyexpr(mapping_id = 0, ..)` — the keyexpr
-    /// mapping id space reserves `0` for "literal" indication on
-    /// the subscriber / queryable / token side, so registering a
-    /// new mapping AT id 0 has no wire interpretation. Mirrors
-    /// [`build_declare_kexpr`]'s `mapping_id != 0` assertion; the
-    /// gate elevates the developer-visible failure mode from
-    /// panic-at-builder to typed error-at-action.
-    ReservedMappingIdZero,
-    /// `send_declare_subscriber` / `_queryable` / `_token` was
-    /// called with a `mapping_id != 0` that has no entry in
-    /// [`SessionLinkActions::outbound_mappings`]. Either no prior
-    /// [`SessionLinkActions::send_declare_keyexpr`] established
-    /// the mapping, or a
-    /// [`SessionLinkActions::send_undeclare_kexpr`] retracted it
-    /// before this call. Sending the wire frame anyway would
-    /// reach the peer as an "unknown wireexpr id" error.
-    UnknownMappingId(u64),
-    /// `send_declare_subscriber` / `_queryable` / `_token` was
-    /// called with `mapping_id == 0` AND `keyexpr_suffix == None`
-    /// — no keyexpr at all. The peer cannot resolve a missing
-    /// keyexpr; the gate surfaces this as a typed protocol error
-    /// instead of letting it reach the wire as a malformed
-    /// DECLARE.
-    MissingKeyexpr,
-    /// R311g1 — the matching `declare-*` Cargo feature is OFF in
-    /// this build, so the wire emit path is elided. The
-    /// `SessionLinkActions` method signature stays stable
-    /// regardless of feature configuration (per
-    /// `feedback_signature_stability` — consumer-side cfg burden
-    /// is absorbed by wz-runtime-tokio); the caller observes the
-    /// build-time choice as an honest runtime reject rather than
-    /// a silent `Ok(())` (which would falsely promise a wire
-    /// emit) or a compile error (which would re-introduce the
-    /// `#[cfg(feature)] pub fn` anti-pattern this round retires).
-    ///
-    /// Variant ordering: appended at end so existing match arms
-    /// in downstream crates surface a non-exhaustive-match
-    /// warning (when applicable) rather than silently rebind a
-    /// prior variant.
-    FeatureDisabled,
-}
-
-impl std::fmt::Display for SendDeclareError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Keyexpr(e) => write!(f, "send_declare: {e}"),
-            Self::ReservedMappingIdZero => f.write_str(
-                "send_declare_keyexpr: mapping_id 0 is reserved \
-                 (cannot register a new keyexpr mapping at id 0)",
-            ),
-            Self::UnknownMappingId(id) => write!(
-                f,
-                "send_declare: mapping_id {id} has no outbound entry \
-                 (no preceding send_declare_keyexpr for this id, \
-                 or it was undeclared before this call)"
-            ),
-            Self::MissingKeyexpr => f.write_str(
-                "send_declare: mapping_id 0 requires a literal keyexpr \
-                 suffix (received None)",
-            ),
-            Self::FeatureDisabled => f.write_str(
-                "send_declare: matching declare-* Cargo feature is OFF \
-                 in this build; wire emit elided (signature-stability \
-                 contract — caller observes build-time choice as \
-                 runtime reject)",
-            ),
-        }
-    }
-}
-
-impl std::error::Error for SendDeclareError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Keyexpr(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<OutboundKeyexprError> for SendDeclareError {
-    fn from(e: OutboundKeyexprError) -> Self {
-        Self::Keyexpr(e)
-    }
-}
+// R311di-10 — SendDeclareError moved to wz-session-core::send_declare_error.
+pub use wz_session_core::send_declare_error::SendDeclareError;
 
 /// Bundle of state shared across the 17 native script functions.
 pub struct SessionLinkActions<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {

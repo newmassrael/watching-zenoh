@@ -58,6 +58,11 @@ pub mod query_mode;
 #[cfg(feature = "alloc")]
 pub mod metadata;
 
+/// Typed reject for the outbound DECLARE-side gate (R300). Uses
+/// OutboundKeyexprError (alloc-bound) so the module is alloc-gated.
+#[cfg(feature = "alloc")]
+pub mod send_declare_error;
+
 /// R222 / R225 — application-layer `Sample` type for subscriber callbacks.
 /// Mirrors zenoh-pico's `_z_sample_t` projection. Carries alloc-bound
 /// fields (Vec<u8> payload, String keyexpr) so gated on the `alloc`
