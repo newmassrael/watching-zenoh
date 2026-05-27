@@ -648,22 +648,21 @@
       "title": "§5.12 Codec",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
-      "intent": "Wire-message codec atomic features — one per single-SCXML codec emit unit (14 entries; init-syn/ack share init_body, open-syn/ack share open_body).",
+      "intent": "Codec domain catalog: 14 atomic features, 10 active wired (body codecs + envelope), 3 forward-only (scout/hello/join), 1 partial (fragment wz-codecs gate only).",
+      "rationale_bullets": [
+        "Codec features gate wire-level encode/decode + envelope handling.",
+        "R311a-k wired 10 body codecs (init/open/close/keepalive/+frame family).",
+        "codec-frame is envelope; codec-push/declare/request/response imply it.",
+        "Scout/Hello/Join codecs forward wz-codecs only; runtime no consumer.",
+        "Handshake-only deploy: codec-frame OFF requires all body codecs OFF."
+      ],
       "outputs_bullets": [
-        "`codec-scout` — SCOUT (active, wz)",
-        "`codec-hello` — HELLO (active, wz)",
-        "`codec-init-body` — Init body (InitSyn + InitAck via parent.S/A flags; active, wz)",
-        "`codec-open-body` — Open body (OpenSyn + OpenAck via parent.A negation; active, wz)",
-        "`codec-close` — CLOSE (active, wz)",
-        "`codec-keep-alive` — KEEP_ALIVE (active, wz)",
-        "`codec-join` — JOIN (active, wz)",
-        "`codec-frame` — FRAME (active, wz)",
-        "`codec-fragment` — FRAGMENT (active, wz)",
-        "`codec-declare` — DECLARE outer (active, wz)",
-        "`codec-push` — PUSH (active, wz)",
-        "`codec-request` — REQUEST (active, wz)",
-        "`codec-response` — RESPONSE (active, wz)",
-        "`codec-response-final` — RESPONSE-FINAL (active, wz)"
+        "Active body codecs (10): -init-body, -open-body, -close, -keep-alive, -frame.",
+        "Active body codecs (cont): -push, -declare, -request, -response, -response-final.",
+        "Envelope codec-frame gates inbound Frame variant + encode_frame_with_*.",
+        "Forward-only (3): -scout, -hello, -join — wz-runtime-tokio no consumer.",
+        "codec-fragment (1): wz-codecs gate only; runtime reassembly missing.",
+        "Total wired: 11 codec features active in source."
       ],
       "caveats_bullets": [
         "R311a4 Footprint: init-body -10328B / open-body -6520B.</bullet>\n</invoke>",
@@ -671,7 +670,13 @@
         "R311c Footprint: codec-close +1792B elision (wire encode/decode + ap-demo cfg).</bullet>\n</invoke>",
         "R311d scout/hello/join: wz-codecs gate only; LTO discards ~0 binary delta.</bullet>\n</invoke>",
         "R311e Footprint: codec-response-final +4216B (cross-module cascade).</bullet>\n</invoke>",
-        "R311f codec-fragment: wz-codecs gate only; -80B noise (LTO discards).</bullet>\n</invoke>"
+        "R311f codec-fragment: wz-codecs gate only; -80B noise (LTO discards).</bullet>\n</invoke>",
+        "codec-frame OFF requires every body codec OFF (handshake-only deploy contract per R311g-k).",
+        "codec-scout/hello/join: catalog-uniform forwards for future scouting/multicast runtime cascade."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
       ],
       "decision_status": "active"
     },
@@ -763,6 +768,14 @@
       "title": "§5.17 Attachment",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Attachment domain catalog: 2 atomic features all reserved (attachment-bytes raw + attachment-encoding-aware MIME-typed; populator gating handled by sibling domains).",
+      "caveats_bullets": [
+        "attachment-bytes implies population by pubsub-attachment + query-attachment (cross-domain dep)."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time": {
@@ -929,6 +942,29 @@
       "title": "§5.7 Declare flow",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "intent": "Declare-flow domain catalog: 7 atomic features all active wired (declare-keyexpr / -subscriber / -queryable / -token / -interest / -undeclare / -final).",
+      "rationale_bullets": [
+        "Declare flow gates consumer-side declare/undeclare wire surface.",
+        "R309/R311i wired all 7 features; each implies codec-declare.",
+        "liveliness-token + -subscriber compose declare-token/-undeclare/-interest/-final.",
+        "Each declare-* gates: keyexpr alias, subscriber, queryable, token, interest, undeclare, final.",
+        "Total 7/7 wired covers AP MVP declare surface."
+      ],
+      "outputs_bullets": [
+        "Active set (7): -keyexpr, -subscriber, -queryable, -token, -interest, -undeclare, -final.",
+        "declare-keyexpr (5 cfg sites): outbound keyexpr alias mapping.",
+        "declare-subscriber (19): subscriber registration + wire emit.",
+        "declare-queryable (19): queryable registration + wire emit.",
+        "declare-token / -interest / -undeclare / -final: liveliness composition + Interest flow.",
+        "Each feature implies codec-declare for the wire envelope path (R311i)."
+      ],
+      "caveats_bullets": [
+        "declare-* features imply codec-declare; codec-declare OFF requires all declare-* OFF."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
       "decision_status": "active"
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub": {
@@ -22136,6 +22172,54 @@
         "liveliness-get: requires pub fn get_liveliness method on Session (mirror of zenoh-pico z_liveliness_get).",
         "liveliness-history + -historical-samples: cluster-deferred (history field + history_complete getter; R311g1 stability requires careful per-call cfg-gate, not field gate).",
         "R311ca debt #6 wire-up progress: unchanged (audit-only); 33% wired (53/161); 9 domains 0%-wired."
+      ]
+    },
+    "Round 311cm": {
+      "decision_summary": "R311cm catalog body fill — §5.17 attachment + §5.12 codec + §5.7 declare-flow bodies authored; audit-only ratify of pre-R311 wire-up.",
+      "changes_bullets": [
+        "§5.17 attachment: intent + 1 caveat + impact_scope (2 atomic, all reserved — populator gating cross-domain).",
+        "§5.12 codec: intent + 5 rationale + 5 outputs + 2 caveats + impact_scope (14 atomic; 11 wired, 3 forward-only).",
+        "§5.7 declare-flow: intent + 5 rationale + 5 outputs + 1 caveat + impact_scope (7 atomic, all 7 wired).",
+        "No Cargo / source-level changes — audit ratifies existing R307/R309/R311a-k wire-up."
+      ],
+      "verification_bullets": [
+        "Codec audit: 11 features wired (close 20 + init-body 28 + open-body 22 + keep-alive 14 + frame 13 + push 45 + declare 36 + request 23 + response 29 + response-final 20 = 250 cfg sites); 3 forward-only (scout/hello/join 0 source cfg).",
+        "Declare audit: 7 features wired (-keyexpr 5 + -subscriber 19 + -queryable 19 + -token 5 + -interest 4 + -undeclare 8 + -final 1 = 61 cfg sites).",
+        "Attachment audit: 2 features 0 source cfg (population gated by pubsub-attachment + query-attachment).",
+        "validate_workspace baseline: entries 419 -> 420, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-17-attachment",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow"
+      ],
+      "carry_forward_bullets": [
+        "R311 cascade closure: 19 catalog sections (5.1-5.19) all have body bodies authored or audit-ratified.",
+        "R311ca debt #6 wire-up cumulative: 31 -> 53 wired (19% -> 33%); 9 domains 0%-wired permanently ratified beyond AP MVP.",
+        "Pending architectural carries unchanged: R284, R283, R301 §8, R267 reparam, Q_B/Q_E, R299 #2/#3, R300, R304, R311 facade graceful-close wrapper API."
+      ],
+      "publishable_decision_summary": "R311cm catalog body fill — §5.17 attachment + §5.12 codec + §5.7 declare-flow bodies authored; audit-only ratify of pre-R311 wire-up.",
+      "publishable_changes_bullets": [
+        "§5.17 attachment: intent + 1 caveat + impact_scope (2 atomic, all reserved — populator gating cross-domain).",
+        "§5.12 codec: intent + 5 rationale + 5 outputs + 2 caveats + impact_scope (14 atomic; 11 wired, 3 forward-only).",
+        "§5.7 declare-flow: intent + 5 rationale + 5 outputs + 1 caveat + impact_scope (7 atomic, all 7 wired).",
+        "No Cargo / source-level changes — audit ratifies existing R307/R309/R311a-k wire-up."
+      ],
+      "publishable_verification_bullets": [
+        "Codec audit: 11 features wired (close 20 + init-body 28 + open-body 22 + keep-alive 14 + frame 13 + push 45 + declare 36 + request 23 + response 29 + response-final 20 = 250 cfg sites); 3 forward-only (scout/hello/join 0 source cfg).",
+        "Declare audit: 7 features wired (-keyexpr 5 + -subscriber 19 + -queryable 19 + -token 5 + -interest 4 + -undeclare 8 + -final 1 = 61 cfg sites).",
+        "Attachment audit: 2 features 0 source cfg (population gated by pubsub-attachment + query-attachment).",
+        "validate_workspace baseline: entries 419 -> 420, sections 256, T1=0, RT 13/13, GENERATED.md sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-17-attachment",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311 cascade closure: 19 catalog sections (5.1-5.19) all have body bodies authored or audit-ratified.",
+        "R311ca debt #6 wire-up cumulative: 31 -> 53 wired (19% -> 33%); 9 domains 0%-wired permanently ratified beyond AP MVP.",
+        "Pending architectural carries unchanged: R284, R283, R301 §8, R267 reparam, Q_B/Q_E, R299 #2/#3, R300, R304, R311 facade graceful-close wrapper API."
       ]
     },
     "Round 311d": {
