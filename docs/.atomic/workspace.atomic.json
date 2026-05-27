@@ -1336,6 +1336,64 @@
         "routing-client",
         "time-ntp64"
       ],
+      "outputs_bullets": [
+        "`platform-bare-metal`",
+        "`runtime-lwip`",
+        "`runtime-no-std`",
+        "`transport-unicast`",
+        "`transport-link-udp`",
+        "`transport-link-tcp`",
+        "`transport-keepalive`",
+        "`transport-fragmentation`",
+        "`locator-udp`",
+        "`locator-tcp`",
+        "`scouting-active`",
+        "`session-unicast-open`",
+        "`link-frame`",
+        "`link-fragment`",
+        "`link-batching`",
+        "`keyexpr-literal`",
+        "`keyexpr-canon`",
+        "`keyexpr-includes`",
+        "`declare-keyexpr`",
+        "`declare-subscriber`",
+        "`declare-queryable`",
+        "`declare-token`",
+        "`declare-undeclare`",
+        "`declare-final`",
+        "`declare-interest`",
+        "`pubsub-put`",
+        "`pubsub-delete`",
+        "`pubsub-sample`",
+        "`pubsub-priority`",
+        "`pubsub-congestion-control`",
+        "`query-get`",
+        "`query-queryable`",
+        "`query-reply`",
+        "`query-target`",
+        "`query-timeout`",
+        "`query-consolidation`",
+        "`liveliness-token`",
+        "`liveliness-subscriber`",
+        "`encoding-empty`",
+        "`encoding-utf8`",
+        "`encoding-bytes`",
+        "`codec-scout`",
+        "`codec-hello`",
+        "`codec-init-body`",
+        "`codec-open-body`",
+        "`codec-close`",
+        "`codec-keep-alive`",
+        "`codec-frame`",
+        "`codec-fragment`",
+        "`codec-declare`",
+        "`codec-push`",
+        "`codec-request`",
+        "`codec-response`",
+        "`codec-response-final`",
+        "`routing-client`",
+        "`time-ntp64`"
+      ],
       "caveats_bullets": [
         "R311bj footprint: thumbv7m-none-eabi text=23652 data=4 bss=269916 (mps2-an385 Cortex-M3 PASS).",
         "R311bj bss dominated by demo HEAP_SIZE=256KB; real preset shrinks to lwIP MEM_SIZE + spawn budget.",
@@ -1344,7 +1402,8 @@
         "R311bj footprint: thumbv7em-none-eabihf text=23724 data=4 bss=269916 (mps2-an386 + mps2-an500).",
         "(f) thumbv6m-none-eabi text=23660 data=4 bss=11868 microbit build OK; Q.2 KNOWN_SKIP heap budget",
         "(g) thumbv8m.main-none-eabi text=24548 data=4 bss=269916 mps2-an505 build OK Q.2 KNOWN_SKIP Lockup",
-        "(h) R311bq thumbv6m text 18584 (-5076 vs 23660); microbit Q.2 PASS sync-only main"
+        "(h) R311bq thumbv6m text 18584 (-5076 vs 23660); microbit Q.2 PASS sync-only main",
+        "R311bz outputs typo fix: keyexpr-include → keyexpr-includes; backtick formatting normalized"
       ],
       "impact_scope": [
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
@@ -21085,6 +21144,56 @@
         "R311bz next: §6.7 keyexpr-include → keyexpr-includes typo fix — 부채 #6 catalog 부분 closure",
         "R311ca: feature wire-up 54% audit + domain-by-domain mechanical plan",
         "부채 #6 catalog cascade R311bs+ 근접 마무리"
+      ]
+    },
+    "Round 311bz": {
+      "decision_summary": "R311bz §6.7 keyexpr-include typo fix → keyexpr-includes; backtick normalize; 부채 #6 catalog 부분 closure.",
+      "changes_bullets": [
+        "set_section_outputs §6.7: 56 features per Cargo preset-cortex-m4-default; keyexpr-include → keyexpr-includes typo fix",
+        "Backtick formatting normalized: §6.7 outputs gain ` ` wrapping (matches §6.1/§6.3/§6.4/§6.5/§6.6 style)",
+        "add_section_caveat §6.7: R311bz typo + formatting normalization audit-trace",
+        "부채 #6 catalog truthfulness 부분 R311bs cascade (R311bt-bz) CLOSURE"
+      ],
+      "verification_bullets": [
+        "query_section §6.7 전후: outputs 56 유지 + keyexpr-include → keyexpr-includes + backtick 추가",
+        "validate_workspace: entries=406→407 sections=256 T1=0 RT=13/13 GENERATED.md=sync",
+        "Cargo-truth alignment: §6.7 outputs_bullets line-for-line matches Cargo preset-cortex-m4-default 56 features",
+        "Cargo.toml line 1128-1130 코멘트 (keyexpr-include = prose label / keyexpr-includes = canon name) 이제 일관성 해소",
+        "§6.1-§6.7 7개 preset 전부 Cargo ground truth alignment 완료",
+        "부채 #6 catalog truthfulness CLOSURE — wire-up 54% audit 명시만 R311ca 로 carry"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "carry_forward_bullets": [
+        "R311ca next: feature wire-up 54% audit — cfg(feature=X) elision sites grep + domain-by-domain plan",
+        "부채 #6 catalog (preset divergence + body-empty) CLOSED R311bs-bz cascade; wire-up 54% 부분 R311ca audit + R311cb+ 도메인별 적용",
+        "부채 #8 §6.x 4 outline-only 처리 완료; 35 outline-only remainder carry",
+        "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter"
+      ],
+      "publishable_decision_summary": "R311bz §6.7 keyexpr-include typo fix → keyexpr-includes; backtick normalize; 부채 #6 catalog 부분 closure.",
+      "publishable_changes_bullets": [
+        "set_section_outputs §6.7: 56 features per Cargo preset-cortex-m4-default; keyexpr-include → keyexpr-includes typo fix",
+        "Backtick formatting normalized: §6.7 outputs gain ` ` wrapping (matches §6.1/§6.3/§6.4/§6.5/§6.6 style)",
+        "add_section_caveat §6.7: R311bz typo + formatting normalization audit-trace",
+        "부채 #6 catalog truthfulness 부분 R311bs cascade (R311bt-bz) CLOSURE"
+      ],
+      "publishable_verification_bullets": [
+        "query_section §6.7 전후: outputs 56 유지 + keyexpr-include → keyexpr-includes + backtick 추가",
+        "validate_workspace: entries=406→407 sections=256 T1=0 RT=13/13 GENERATED.md=sync",
+        "Cargo-truth alignment: §6.7 outputs_bullets line-for-line matches Cargo preset-cortex-m4-default 56 features",
+        "Cargo.toml line 1128-1130 코멘트 (keyexpr-include = prose label / keyexpr-includes = canon name) 이제 일관성 해소",
+        "§6.1-§6.7 7개 preset 전부 Cargo ground truth alignment 완료",
+        "부채 #6 catalog truthfulness CLOSURE — wire-up 54% audit 명시만 R311ca 로 carry"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ca next: feature wire-up 54% audit — cfg(feature=X) elision sites grep + domain-by-domain plan",
+        "부채 #6 catalog (preset divergence + body-empty) CLOSED R311bs-bz cascade; wire-up 54% 부분 R311ca audit + R311cb+ 도메인별 적용",
+        "부채 #8 §6.x 4 outline-only 처리 완료; 35 outline-only remainder carry",
+        "Architectural carries unchanged: R284, R283, R301 §8, Q_B/Q_E, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter"
       ]
     },
     "Round 311c": {
