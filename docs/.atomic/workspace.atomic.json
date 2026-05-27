@@ -19404,6 +19404,60 @@
         "M0+ preset variant (preset-cortex-m0plus-default) is future carry once preset catalog adds it"
       ]
     },
+    "Round 311bc": {
+      "decision_summary": "R311bc real deadline-keyed timer queue lands; LwipRuntime::new(C: ClockSource) + LwipTime::new(&rt) breaking sigs; SleepFuture/TimeoutFuture register on TimerQueue instead of self-wake busy-poll; wfi()-sleep semantics now genuine.",
+      "changes_bullets": [
+        "crates/wz-runtime-lwip/src/timer.rs: new module — TimerQueue with BinaryHeap<Reverse<TimerEntry>> min-heap; register(deadline_us, Waker) + pop_expired(now_us) + pending_count() + next_deadline_us(); critical_section::Mutex<RefCell<inner>> per R311bb atomic alias discipline.",
+        "crates/wz-runtime-lwip/src/runtime_impl.rs: LwipRuntime is now generic `LwipRuntime<C: ClockSource>`; RuntimeInner<C> holds executor + timers + clock siblings; new(clock) breaking sig from R311av's new(); run_until_idle pops expired timers BEFORE polling tasks so wake fires same pass; block_on deadlock check adds timers.pending_count()==0 clause; Clone impl manual (Arc<RuntimeInner<C>> share).",
+        "crates/wz-runtime-lwip/src/time.rs: LwipTime<C>::new(rt: &LwipRuntime<C>) breaking sig (was new(source)); shares Arc<RuntimeInner<C>>; SleepFuture<C>/TimeoutFuture<C, F> drop the `'a` lifetime + register waker on first Pending poll with `registered: bool` guard against duplicate heap entries; explicit Unpin impls remove unsafe Pin::get_unchecked_mut.",
+        "crates/wz-runtime-lwip/src/lib.rs: `pub mod timer;` added under alloc feature; module doc retired the R311av 'real timer queue R311az+ carry' bullet + added R311bc closure bullet documenting deadline-keyed registration + genuine wfi()-sleep semantics.",
+        "crates/wz-runtime-lwip/src/runtime_impl.rs tests: sleep test now uses rt.clock().clone() then LwipTime::new(&rt); new sleep_zero_resolves_immediately edge test; new timer_queue_pending_count_tracks_registered_sleeps diagnostic test confirms register-on-first-Pending behaviour."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-lwip --features alloc: 10/10 PASS (8 R311av tests preserved + 2 new R311bc tests; sleep_completes_when_clock_advances_past_deadline + timeout_inner_pending_past_deadline_returns_elapsed re-validated against the new register-once shape).",
+        "WZ_RUN_LAYER_G=1 bash scripts/run-ci.sh --layer G: 48/49 PASS + 1 SKIP (RISC-V G.6 riscv32-unknown-elf-gcc absent on dev host); 7 targets × 7 sub-lanes; M0+ G.4-alloc continues PASS via R311bb portable-atomic polyfill.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean; portable-atomic-util Arc + BinaryHeap from alloc::collections compose under #![no_std] with zero new lints.",
+        "cargo fmt --all --check: clean (rustfmt collapsed one multi-line saturating_sub chain in time.rs::now_monotonic_ms; no semantic change).",
+        "Manual review: wfi()-sleep semantics — under R311av every executor pass had a self-waking sleep keeping wake_flag=true so wfi() returned immediately; under R311bc when no task is ready and no timer elapsed, executor pass is idle and wfi() actually sleeps until next IRQ."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "R311bd: LwipJoinHandle::abort cancellation — RuntimeError::JoinCancelled variant + AbortAwareTask wrapper; AP/MCU parity (tokio's JoinHandle has abort).",
+        "R311be: QEMU mps2-an386 UDP loopback e2e demo — deploy/mcu-qemu-demo crate + Layer Q opt-in CI lane; first end-to-end MCU truth on real lwIP wire path.",
+        "Timer queue Drop semantics refinement: dropped-sleep entries fire harmlessly at deadline (documented in timer.rs module doc); per-entry Arc<AtomicBool> cancellation flag is deferred until a profile reports growing heap retention.",
+        "Deploy main loop diagnostic surface: LwipRuntime::timers().next_deadline_us() exposes earliest deadline so a deploy can size wfi()-sleep budget against a HAL timer; runtime itself does not require deploy to do so."
+      ],
+      "publishable_decision_summary": "R311bc real deadline-keyed timer queue lands; LwipRuntime::new(C: ClockSource) + LwipTime::new(&rt) breaking sigs; SleepFuture/TimeoutFuture register on TimerQueue instead of self-wake busy-poll; wfi()-sleep semantics now genuine.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-lwip/src/timer.rs: new module — TimerQueue with BinaryHeap<Reverse<TimerEntry>> min-heap; register(deadline_us, Waker) + pop_expired(now_us) + pending_count() + next_deadline_us(); critical_section::Mutex<RefCell<inner>> per R311bb atomic alias discipline.",
+        "crates/wz-runtime-lwip/src/runtime_impl.rs: LwipRuntime is now generic `LwipRuntime<C: ClockSource>`; RuntimeInner<C> holds executor + timers + clock siblings; new(clock) breaking sig from R311av's new(); run_until_idle pops expired timers BEFORE polling tasks so wake fires same pass; block_on deadlock check adds timers.pending_count()==0 clause; Clone impl manual (Arc<RuntimeInner<C>> share).",
+        "crates/wz-runtime-lwip/src/time.rs: LwipTime<C>::new(rt: &LwipRuntime<C>) breaking sig (was new(source)); shares Arc<RuntimeInner<C>>; SleepFuture<C>/TimeoutFuture<C, F> drop the `'a` lifetime + register waker on first Pending poll with `registered: bool` guard against duplicate heap entries; explicit Unpin impls remove unsafe Pin::get_unchecked_mut.",
+        "crates/wz-runtime-lwip/src/lib.rs: `pub mod timer;` added under alloc feature; module doc retired the R311av 'real timer queue R311az+ carry' bullet + added R311bc closure bullet documenting deadline-keyed registration + genuine wfi()-sleep semantics.",
+        "crates/wz-runtime-lwip/src/runtime_impl.rs tests: sleep test now uses rt.clock().clone() then LwipTime::new(&rt); new sleep_zero_resolves_immediately edge test; new timer_queue_pending_count_tracks_registered_sleeps diagnostic test confirms register-on-first-Pending behaviour."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-lwip --features alloc: 10/10 PASS (8 R311av tests preserved + 2 new R311bc tests; sleep_completes_when_clock_advances_past_deadline + timeout_inner_pending_past_deadline_returns_elapsed re-validated against the new register-once shape).",
+        "WZ_RUN_LAYER_G=1 bash scripts/run-ci.sh --layer G: 48/49 PASS + 1 SKIP (RISC-V G.6 riscv32-unknown-elf-gcc absent on dev host); 7 targets × 7 sub-lanes; M0+ G.4-alloc continues PASS via R311bb portable-atomic polyfill.",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean; portable-atomic-util Arc + BinaryHeap from alloc::collections compose under #![no_std] with zero new lints.",
+        "cargo fmt --all --check: clean (rustfmt collapsed one multi-line saturating_sub chain in time.rs::now_monotonic_ms; no semantic change).",
+        "Manual review: wfi()-sleep semantics — under R311av every executor pass had a self-waking sleep keeping wake_flag=true so wfi() returned immediately; under R311bc when no task is ready and no timer elapsed, executor pass is idle and wfi() actually sleeps until next IRQ."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311bd: LwipJoinHandle::abort cancellation — RuntimeError::JoinCancelled variant + AbortAwareTask wrapper; AP/MCU parity (tokio's JoinHandle has abort).",
+        "R311be: QEMU mps2-an386 UDP loopback e2e demo — deploy/mcu-qemu-demo crate + Layer Q opt-in CI lane; first end-to-end MCU truth on real lwIP wire path.",
+        "Timer queue Drop semantics refinement: dropped-sleep entries fire harmlessly at deadline (documented in timer.rs module doc); per-entry Arc<AtomicBool> cancellation flag is deferred until a profile reports growing heap retention.",
+        "Deploy main loop diagnostic surface: LwipRuntime::timers().next_deadline_us() exposes earliest deadline so a deploy can size wfi()-sleep budget against a HAL timer; runtime itself does not require deploy to do so."
+      ]
+    },
     "Round 311c": {
       "decision_summary": "R311c lands codec-close cascade — wire encode/decode + send_close_with_reason + bind_unit gated; CloseReason enum + set_close_reason_* FSM bindings stay unconditional.",
       "changes_bullets": [

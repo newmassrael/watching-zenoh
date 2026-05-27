@@ -57,25 +57,33 @@
 //! `runtime.spawn(future).await` receives that future's output,
 //! not silently-discarded work.
 //!
-//! ## What R311av deliberately defers (R311az+ carries)
+//! ## What R311av deliberately defers (R311bc+ carries)
 //!
 //! - **`LwipJoinHandle::abort()`**: not implemented this round. The
 //!   handle exposes only the `Future` impl; cooperative cancellation
-//!   is a R311az+ design (cancel-token plumbed through TaskSlot, or
+//!   is a R311bd carry (cancel-token plumbed through TaskSlot, or
 //!   a separate `Cancellable` trait). The trait surface stays
 //!   unchanged — `Runtime` does not require abort.
-//! - **Real timer queue**: [`SleepFuture::poll`] uses the
-//!   `cx.waker().wake_by_ref()` self-wake pattern. The future becomes
-//!   ready for the next `run_until_idle` iteration unconditionally,
-//!   so the deploy main loop drives time forward by repeating
-//!   `runtime.run_until_idle()` between `lwip_poll()` + `wfi()`.
-//!   A real timer queue (deadline-keyed wake list, no busy-wake
-//!   round-trips) is R311az+.
 //! - **`embedded-time` ecosystem adapter**: own [`ClockSource`]
 //!   trait only. `embedded-time` v0.13 has been stalled since 2024;
 //!   the composable-framework north star prefers a self-contained
 //!   trait + optional adapter feature in a future round over a
 //!   maintenance-mode external dep.
+//!
+//! ## What R311bc closes
+//!
+//! - **Real timer queue**: [`timer::TimerQueue`] lands as a
+//!   deadline-keyed `BinaryHeap<Reverse<TimerEntry>>`; sleep /
+//!   timeout futures register `(deadline_us, Waker)` on first
+//!   Pending poll instead of self-waking. [`LwipRuntime::new`]
+//!   takes a [`ClockSource`] (breaking sig from R311av's
+//!   `LwipRuntime::new()`); [`LwipRuntime::run_until_idle`] calls
+//!   `timers.pop_expired(clock.now_us())` before polling the task
+//!   pool so wake-on-deadline becomes the natural shape. The
+//!   deploy main loop can now `wfi()`-sleep between IRQs because
+//!   the executor pass is genuinely idle when no task is ready and
+//!   no timer has elapsed; previously the self-wake busy-poll kept
+//!   the executor active every cycle.
 //!
 //! ## Layer G.4 / G.4-alloc cross-compile gate
 //!
@@ -140,6 +148,8 @@ pub mod join_handle;
 pub mod runtime_impl;
 #[cfg(feature = "alloc")]
 pub mod time;
+#[cfg(feature = "alloc")]
+pub mod timer;
 
 #[cfg(feature = "alloc")]
 pub use join_handle::LwipJoinHandle;

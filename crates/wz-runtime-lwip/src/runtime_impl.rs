@@ -1,33 +1,40 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `LwipRuntime` — `impl wz_runtime_core::Runtime` for the MCU
-//! profile. R311av-pre Decisions 1-6 realised in code.
+//! `LwipRuntime<C>` — `impl wz_runtime_core::Runtime` for the MCU
+//! profile. R311av-pre Decisions 1-6 realised in code; R311bc adds
+//! the deadline-keyed [`crate::timer::TimerQueue`] + clock ownership.
 //!
 //! ## What this module ships
 //!
-//! - [`LwipRuntime`] — `Clone` (`Arc<ExecutorState>` inside) so
-//!   spawned task closures can capture a runtime handle and call
-//!   nested `spawn` (R311av-pre Decision 5).
-//! - `impl Runtime for LwipRuntime`:
+//! - [`LwipRuntime<C: ClockSource>`] — `Clone` (`Arc<RuntimeInner<C>>`
+//!   inside) so spawned task closures can capture a runtime handle
+//!   and call nested `spawn` (R311av-pre Decision 5).
+//! - `impl Runtime for LwipRuntime<C>`:
 //!   - `type JoinHandle<T> = LwipJoinHandle<T>`
 //!   - `type Mutex<T> = crate::sync::Mutex<T>`
 //!   - `type RwLock<T> = crate::sync::RwLock<T>`
 //!   - `fn spawn<F>(..) -> LwipJoinHandle<F::Output>`: heap-allocates
 //!     a wrapper future that drives the user future to completion,
 //!     stores its output into the shared `JoinState<T>`, and wakes
-//!     the join handle's waker; pushes the wrapper into
+//!     the join handle's waker; pushes the wrapper into the inner
 //!     `ExecutorState`'s task vector.
-//! - [`LwipRuntime::run_until_idle`] — drives the executor one
-//!   single-pass step. Deploy main loop pattern:
+//! - [`LwipRuntime::run_until_idle`] — drives one executor step.
+//!   R311bc adds a `pop_expired(clock.now_us())` pass *before* the
+//!   task-pool sweep so wake-on-deadline timers fire ahead of the
+//!   tasks they wake. Deploy main loop pattern:
 //!
 //!   ```ignore
 //!   loop {
 //!       lwip_poll();                  // process lwIP I/O
-//!       runtime.run_until_idle();     // poll every ready task once
+//!       runtime.run_until_idle();     // pop_expired + poll ready tasks
 //!       cortex_m::asm::wfi();         // sleep until next IRQ
 //!   }
 //!   ```
+//!
+//!   Because R311bc closes the self-wake busy-poll, the `wfi()` line
+//!   actually sleeps now — under R311av the executor was always
+//!   ready and `wfi()` returned immediately on the next pass.
 //!
 //! - [`LwipRuntime::block_on`] — drive a single outer future to
 //!   completion. Used by host tests + by deploy code that needs a
@@ -37,17 +44,41 @@
 //!   `Pin<Box<F>>` heap allocation matches the spawn discipline —
 //!   one allocation per outer call.
 //!
-//! ## Send + Sync chain
+//! ## Why `LwipRuntime` is generic over `C: ClockSource`
+//!
+//! R311bc Decision: runtime owns the clock + timer queue, time
+//! source borrows from runtime. The alternatives:
+//!
+//! - **(a) Clock owned by `LwipTime`, runtime stateless**: would
+//!   force `LwipTime::sleep` to register its waker with a queue
+//!   owned somewhere else — either a global (`once_cell` singleton,
+//!   rejected per R311av-pre Decision 2) or a separately-passed
+//!   handle (every caller of `sleep` would need both `LwipTime` AND
+//!   `LwipRuntime`, defeating the trait abstraction).
+//! - **(b) Clock as runtime trait method**: would extend the
+//!   §5.P Runtime trait surface beyond the cross-profile contract.
+//!   AP-side `TokioRuntime` does not need a clock parameter (tokio
+//!   has its own internal time driver); putting `ClockSource` on
+//!   `Runtime` is a leaky MCU-profile detail.
+//! - **(c) Chosen: runtime generic over C, time source borrows
+//!   `Arc<RuntimeInner<C>>` from the runtime**: keeps the §5.P
+//!   trait clean (`impl Runtime for LwipRuntime<C>` where C is the
+//!   MCU profile's free parameter, mirroring tokio's `TokioRuntime`
+//!   single-type shape but with the MCU-specific clock injection at
+//!   construction time). `LwipTime::new(&runtime)` shares the
+//!   `Arc<RuntimeInner<C>>` so the timer queue and clock are the
+//!   same physical instance the runtime polls.
+//!
+//! ## Send + Sync chain (post-R311bc)
 //!
 //! The trait requires `Runtime: Send + Sync + 'static`. The
 //! storage chain holds because:
 //!
 //! - `Arc<T>: Send + Sync where T: Send + Sync`.
-//! - `ExecutorState` is `Send + Sync` because its inner
-//!   `critical_section::Mutex<RefCell<Inner>>` is `Send + Sync where
-//!   Inner: Send`, and `Inner` (a `Vec<Option<TaskSlot>>`) is `Send`
-//!   because `TaskSlot.fut: BoxFuture` requires `Send` at the
-//!   trait-object bound and `Arc<AtomicBool>` is `Send + Sync`.
+//! - `RuntimeInner<C>` is `Send + Sync` because `ExecutorState`
+//!   (R311av), [`crate::timer::TimerQueue`] (R311bc, same Mutex
+//!   shape) and `C: ClockSource` (trait requires `Send + Sync +
+//!   'static`) all are.
 //!
 //! Run-time invariants:
 //!
@@ -76,29 +107,97 @@ use wz_runtime_core::Runtime;
 
 use crate::executor::{make_waker, ExecutorState};
 use crate::join_handle::{JoinState, LwipJoinHandle};
+use crate::time::ClockSource;
+use crate::timer::TimerQueue;
 
-/// `impl Runtime` for the MCU profile. Cheap to clone — the entire
-/// state lives in `Arc<ExecutorState>`. Multiple clones share the
-/// same task pool; task closures may capture a `LwipRuntime` clone
-/// and call nested `spawn` (R311av-pre Decision 5).
-#[derive(Clone)]
-pub struct LwipRuntime {
-    executor: Arc<ExecutorState>,
+/// Shared inner state held inside an `Arc` so `LwipRuntime` clones
+/// + `LwipTime::new(&runtime)` all reference the same executor,
+/// timer queue, and clock instance. R311bc consolidation: the three
+/// fields are siblings because they need to be polled / updated
+/// from `run_until_idle` in a single atomic step (timer fire +
+/// task wake + task poll).
+pub(crate) struct RuntimeInner<C: ClockSource> {
+    pub(crate) executor: ExecutorState,
+    pub(crate) timers: TimerQueue,
+    pub(crate) clock: C,
 }
 
-impl LwipRuntime {
-    /// Construct a new runtime with an empty task pool.
-    pub fn new() -> Self {
+/// `impl Runtime` for the MCU profile. Cheap to clone — the entire
+/// state lives in `Arc<RuntimeInner<C>>`. Multiple clones share the
+/// same task pool, timer queue, and clock; task closures may capture
+/// a `LwipRuntime` clone and call nested `spawn` (R311av-pre
+/// Decision 5).
+pub struct LwipRuntime<C: ClockSource> {
+    pub(crate) inner: Arc<RuntimeInner<C>>,
+}
+
+impl<C: ClockSource> Clone for LwipRuntime<C> {
+    fn clone(&self) -> Self {
         Self {
-            executor: Arc::new(ExecutorState::new()),
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<C: ClockSource> LwipRuntime<C> {
+    /// Construct a new runtime backed by `clock`. The clock is moved
+    /// into the runtime; `LwipTime::new(&runtime)` then borrows the
+    /// shared `Arc<RuntimeInner<C>>` so time-source ops and runtime
+    /// ops see the same instance.
+    ///
+    /// R311bc breaking sig — R311av's parameterless `new()` is
+    /// retired because the runtime now owns the timer queue and
+    /// timer-queue evaluation needs a clock reference at every
+    /// `run_until_idle` pass.
+    pub fn new(clock: C) -> Self {
+        Self {
+            inner: Arc::new(RuntimeInner {
+                executor: ExecutorState::new(),
+                timers: TimerQueue::new(),
+                clock,
+            }),
         }
     }
 
-    /// Poll every currently-ready spawned task at most once. The
-    /// deploy main loop calls this between hardware-poll passes.
+    /// Borrow the runtime's clock source. Used internally by
+    /// [`crate::time::LwipTime::new`] to snapshot the construction
+    /// epoch; deploy code typically reads time via `LwipTime`
+    /// rather than this method.
+    pub fn clock(&self) -> &C {
+        &self.inner.clock
+    }
+
+    /// Borrow the runtime's timer queue. Crate-internal accessor for
+    /// [`crate::time::SleepFuture`] / [`crate::time::TimeoutFuture`]
+    /// to register deadline-keyed wakes; the public surface for
+    /// deploy diagnostics is via [`crate::timer::TimerQueue`]
+    /// methods on this return value.
+    pub fn timers(&self) -> &TimerQueue {
+        &self.inner.timers
+    }
+
+    /// Poll every currently-ready spawned task at most once.
+    ///
+    /// R311bc pass shape:
+    ///
+    /// 1. Sample `clock.now_us()` once.
+    /// 2. `timers.pop_expired(now)` — wake every registered waker
+    ///    whose deadline has elapsed. Each wake sets a task slot's
+    ///    `wake_flag = true`, making that task ready for step 3.
+    /// 3. `executor.run_until_idle()` — poll every ready task once,
+    ///    re-store Pending futures.
+    ///
+    /// The ordering (timers before tasks) ensures a task waiting on
+    /// a sleep that elapsed *this* pass is polled the same pass,
+    /// not the next one. The opposite ordering would cost one
+    /// `run_until_idle` cycle of latency per deadline.
+    ///
+    /// The deploy main loop calls this between hardware-poll passes.
     /// See module doc for the canonical loop shape.
     pub fn run_until_idle(&self) {
-        self.executor.run_until_idle();
+        let now = self.inner.clock.now_us();
+        self.inner.timers.pop_expired(now);
+        self.inner.executor.run_until_idle();
     }
 
     /// Drive a single outer future to completion. Returns the
@@ -114,11 +213,18 @@ impl LwipRuntime {
     /// requiring `F: Unpin`.
     ///
     /// Panics if the outer future returns `Pending` while the
-    /// executor reports no ready tasks AND no live tasks — that
-    /// shape indicates a deadlocked future with no external wake
-    /// source (caller bug). On real MCU deploys the equivalent
-    /// situation would be `wfi()` blocking forever; the panic here
-    /// surfaces the bug at test time.
+    /// executor reports no ready tasks AND no live tasks AND no
+    /// pending timers — that shape indicates a deadlocked future
+    /// with no external wake source (caller bug). On real MCU
+    /// deploys the equivalent situation would be `wfi()` blocking
+    /// forever; the panic here surfaces the bug at test time.
+    ///
+    /// R311bc extension: the pending-timer check distinguishes
+    /// "legitimately waiting for a deadline" from "permanently
+    /// stuck". A test that registers a sleep but never advances its
+    /// clock will hang in `block_on` (not panic) — the runtime
+    /// cannot tell the difference between "deploy waiting for a
+    /// timer to fire" and "test forgot to drive the clock".
     pub fn block_on<F: Future>(&self, fut: F) -> F::Output {
         let mut fut = Box::pin(fut);
         let flag = Arc::new(AtomicBool::new(true));
@@ -133,34 +239,38 @@ impl LwipRuntime {
                     return out;
                 }
             }
-            // Give spawned tasks a chance to make progress.
-            self.executor.run_until_idle();
+            // Give spawned tasks a chance to make progress (and let
+            // any expired timers fire ahead of them).
+            self.run_until_idle();
 
-            // Loop progress guard. If nothing is ready and no live
-            // tasks exist, we would spin forever. In practice on
-            // host tests a self-waking SleepFuture keeps the flag
-            // set; this guard only fires when the caller has handed
-            // us a permanently-stuck future.
+            // Deadlock detection. If the outer flag is unset, no
+            // task is ready, no live spawned tasks exist, AND no
+            // timer is pending — there is no possible future wake
+            // source. Panic surfaces the bug at test time. On a
+            // real MCU deploy `wfi()` outside this loop would block
+            // forever in the same situation.
             if !flag.load(Ordering::Acquire)
-                && !self.executor.any_ready()
-                && self.executor.live_task_count() == 0
+                && !self.inner.executor.any_ready()
+                && self.inner.executor.live_task_count() == 0
+                && self.inner.timers.pending_count() == 0
             {
                 panic!(
                     "LwipRuntime::block_on: outer future Pending with no \
-                     live tasks and no wakers — deadlocked future?"
+                     live tasks, no wakers, and no pending timers — \
+                     deadlocked future?"
                 );
             }
         }
     }
 }
 
-impl Default for LwipRuntime {
+impl<C: ClockSource + Default> Default for LwipRuntime<C> {
     fn default() -> Self {
-        Self::new()
+        Self::new(C::default())
     }
 }
 
-impl Runtime for LwipRuntime {
+impl<C: ClockSource> Runtime for LwipRuntime<C> {
     type JoinHandle<T>
         = LwipJoinHandle<T>
     where
@@ -201,7 +311,7 @@ impl Runtime for LwipRuntime {
             });
         };
         let boxed: crate::executor::BoxFuture = Box::pin(wrapper);
-        self.executor.spawn(boxed);
+        self.inner.executor.spawn(boxed);
         LwipJoinHandle::new(state)
     }
 }
@@ -218,12 +328,11 @@ mod compile_time_assertions {
     // as a compile error rather than at the first concrete-impl swap.
 
     fn _assert_send<T: Send>() {}
-    fn _assert_sync<T: Sync>() {}
     fn _assert_send_sync<T: Send + Sync>() {}
 
     #[allow(dead_code)]
     fn lwip_runtime_trait_bounds_compile() {
-        _assert_send_sync::<LwipRuntime>();
+        _assert_send_sync::<LwipRuntime<NopClock>>();
         // LwipJoinHandle: trait-required Send (Sync is a happy
         // accident of the storage chain; not asserted here so a
         // future single-consumer redesign that drops Sync stays
@@ -234,10 +343,10 @@ mod compile_time_assertions {
 
     #[allow(dead_code)]
     fn lwip_runtime_mutex_rwlock_bounds_compile() {
-        _assert_send_sync::<<LwipRuntime as Runtime>::Mutex<u32>>();
-        _assert_send_sync::<<LwipRuntime as Runtime>::Mutex<u64>>();
-        _assert_send_sync::<<LwipRuntime as Runtime>::RwLock<u32>>();
-        _assert_send_sync::<<LwipRuntime as Runtime>::RwLock<u64>>();
+        _assert_send_sync::<<LwipRuntime<NopClock> as Runtime>::Mutex<u32>>();
+        _assert_send_sync::<<LwipRuntime<NopClock> as Runtime>::Mutex<u64>>();
+        _assert_send_sync::<<LwipRuntime<NopClock> as Runtime>::RwLock<u32>>();
+        _assert_send_sync::<<LwipRuntime<NopClock> as Runtime>::RwLock<u64>>();
     }
 
     // R258 / R311av — generic-composition smoke fn. Validates
@@ -284,12 +393,12 @@ mod compile_time_assertions {
     // elimination can let bound violations slip).
     #[allow(dead_code)]
     fn instantiate_compose_for_lwip() {
-        let rt = LwipRuntime::new();
-        let clock = LwipTime::new(NopClock);
+        let rt: LwipRuntime<NopClock> = LwipRuntime::new(NopClock);
+        let clock = LwipTime::new(&rt);
         runtime_and_time_compose_in_generic_code(&rt, &clock);
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Default)]
     struct NopClock;
     impl ClockSource for NopClock {
         fn now_us(&self) -> u64 {
@@ -332,9 +441,19 @@ mod tests {
         }
     }
 
+    /// Default trivial clock for tests that do not care about time
+    /// (spawn / nested-spawn / unit-output / string-round-trip).
+    #[derive(Clone, Default)]
+    struct NopClock;
+    impl ClockSource for NopClock {
+        fn now_us(&self) -> u64 {
+            0
+        }
+    }
+
     #[test]
     fn spawn_resolves_to_future_output() {
-        let rt = LwipRuntime::new();
+        let rt = LwipRuntime::new(NopClock);
         let h = rt.spawn(async { 42_u32 });
         let result = rt.block_on(h);
         assert_eq!(result.expect("spawn ok"), 42);
@@ -342,14 +461,14 @@ mod tests {
 
     #[test]
     fn spawn_unit_output_resolves_to_ok_unit() {
-        let rt = LwipRuntime::new();
+        let rt = LwipRuntime::new(NopClock);
         let h = rt.spawn(async {});
         rt.block_on(h).expect("spawn returns Ok(())");
     }
 
     #[test]
     fn spawn_string_output_round_trips() {
-        let rt = LwipRuntime::new();
+        let rt = LwipRuntime::new(NopClock);
         let h = rt.spawn(async { alloc::string::String::from("payload") });
         let s = rt.block_on(h).expect("spawn ok");
         assert_eq!(s, "payload");
@@ -361,7 +480,7 @@ mod tests {
         // a task closure can spawn nested tasks. Pin the contract:
         // outer task spawns an inner task, awaits it, and returns
         // inner+1.
-        let rt = LwipRuntime::new();
+        let rt = LwipRuntime::new(NopClock);
         let rt2 = rt.clone();
         let h = rt.spawn(async move {
             let inner = rt2.spawn(async { 100_u32 });
@@ -373,7 +492,8 @@ mod tests {
     #[test]
     fn time_now_monotonic_ms_reflects_clock_advance() {
         let clock = TestClock::new();
-        let time = LwipTime::new(clock.clone());
+        let rt = LwipRuntime::new(clock.clone());
+        let time = LwipTime::new(&rt);
         let t0 = time.now_monotonic_ms();
         clock.tick_us(2_500); // 2.5ms
         let t1 = time.now_monotonic_ms();
@@ -383,26 +503,19 @@ mod tests {
 
     #[test]
     fn sleep_completes_when_clock_advances_past_deadline() {
-        // SleepFuture self-wakes via wake_by_ref; on each polling
-        // round it re-checks clock.now_us() against the deadline.
-        // We spawn a tiny driver task that advances the clock once
-        // per executor pass so the sleep can complete.
-        let rt = LwipRuntime::new();
-        let clock = TestClock::new();
-        let time = LwipTime::new(clock.clone());
+        // R311bc: SleepFuture registers its waker on the timer
+        // queue on first Pending poll. The driver task ticks the
+        // clock once per executor pass + yields; each
+        // run_until_idle calls pop_expired(now), and once the
+        // clock crosses the 5ms deadline the registered waker
+        // fires and the sleep task is polled to Ready.
+        let rt = LwipRuntime::new(TestClock::new());
+        let clock = rt.clock().clone();
+        let time = LwipTime::new(&rt);
         let advance_clock = clock.clone();
-        // Driver task: every poll, bump the clock by 10ms. Will be
-        // re-polled until the sleep target releases the executor.
         rt.spawn(async move {
-            // Loop forever — driver task. block_on exits when the
-            // outer (the sleep_then_42 task) resolves; this driver
-            // task remains spawned but is harmless.
             loop {
                 advance_clock.tick_us(10_000);
-                // Yield to give the sleep future a chance to poll.
-                // Without an explicit yield the executor would re-
-                // enter this same driver before any other task. We
-                // implement yield-once as a custom future.
                 YieldOnce::default().await;
             }
         });
@@ -411,6 +524,44 @@ mod tests {
             7_u32
         });
         assert_eq!(rt.block_on(h).expect("ok"), 7);
+    }
+
+    #[test]
+    fn sleep_zero_resolves_immediately() {
+        // R311bc edge: ms=0 yields to runtime; with clock at
+        // construction-time t=0 the deadline is exactly now and
+        // the first poll sees `now_us >= deadline_us` and returns
+        // Ready without ever registering on the timer queue.
+        let rt = LwipRuntime::new(TestClock::new());
+        let time = LwipTime::new(&rt);
+        let h = rt.spawn(async move {
+            time.sleep(0).await;
+            123_u32
+        });
+        assert_eq!(rt.block_on(h).expect("ok"), 123);
+    }
+
+    #[test]
+    fn timer_queue_pending_count_tracks_registered_sleeps() {
+        // R311bc diagnostic surface: while a sleep is pending the
+        // queue's pending_count() reports >= 1. Drives the runtime
+        // through one executor pass (so the sleep registers via
+        // its first Pending poll) and then samples the count.
+        let rt = LwipRuntime::new(TestClock::new());
+        let time = LwipTime::new(&rt);
+        let _h = rt.spawn(async move {
+            time.sleep(100).await;
+        });
+        // Single pass: the spawned task is initially ready (wake
+        // flag = true on spawn), polls, registers a sleep on the
+        // queue, returns Pending.
+        rt.run_until_idle();
+        assert!(
+            rt.timers().pending_count() >= 1,
+            "after first run_until_idle the sleep should have \
+             registered a timer entry, pending_count was {}",
+            rt.timers().pending_count()
+        );
     }
 
     /// Yield once: returns `Pending` on the first poll (registering
@@ -441,9 +592,8 @@ mod tests {
         // deadline elapsed → Ok(output). With TestClock not
         // advancing, the deadline never elapses; an immediately-
         // ready inner future resolves Ok.
-        let rt = LwipRuntime::new();
-        let clock = TestClock::new();
-        let time = LwipTime::new(clock);
+        let rt = LwipRuntime::new(TestClock::new());
+        let time = LwipTime::new(&rt);
         let h = rt.spawn(async move { time.timeout(1000, async { 99_u32 }).await });
         let result = rt.block_on(h).expect("spawn ok");
         assert_eq!(result.expect("inner ok"), 99);
@@ -453,11 +603,14 @@ mod tests {
     fn timeout_inner_pending_past_deadline_returns_elapsed() {
         // Trait `timeout` contract: inner Pending after deadline
         // elapsed → Err(TimeoutElapsed). We arrange this by making
-        // the inner future a pending YieldOnce (re-wakes once) and
-        // advancing the clock past the deadline via a driver.
-        let rt = LwipRuntime::new();
-        let clock = TestClock::new();
-        let time = LwipTime::new(clock.clone());
+        // the inner future a NeverReady self-waker and advancing
+        // the clock past the deadline via a driver. R311bc: the
+        // outer TimeoutFuture registers its waker on the timer
+        // queue exactly once; subsequent polls re-check the inner
+        // + the deadline without re-registering.
+        let rt = LwipRuntime::new(TestClock::new());
+        let clock = rt.clock().clone();
+        let time = LwipTime::new(&rt);
         let advance_clock = clock.clone();
         rt.spawn(async move {
             loop {
