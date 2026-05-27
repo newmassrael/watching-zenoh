@@ -6814,39 +6814,8 @@ pub async fn poll_and_dispatch_one<D: LinkDriver>(
     }
 }
 
-/// R77 — outcome of a single lease-deadline check against
-/// `SessionLinkActions`' baseline stamps.
-///
-/// Baseline selection (R84): the lease counts from
-/// `max(established_at, last_inbound_keepalive_at)` — whichever is
-/// most recent. Both slots being `None` means the FSM has not
-/// reached Established yet AND no peer KeepAlive has been
-/// observed (e.g. pre-handshake), and the helper defers via
-/// `NoBaseline`. The prior R77 baseline was `last_inbound_keepalive_at`
-/// alone, which left `NoBaseline` pinned indefinitely until the
-/// first peer KeepAlive — violating session-fsm §2.5 ("lease
-/// counts from Established entry").
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LeaseCheckOutcome {
-    /// Both `established_at` and `last_inbound_keepalive_at` are
-    /// `None`. The helper makes no decision and does NOT inject
-    /// `LeaseExpired`. In practice this surfaces only pre-Established
-    /// (since `Established.onentry` populates `established_at` per
-    /// R84). Production callers treat this as "still polling".
-    NoBaseline,
-    /// `now.duration_since(baseline) < params.lease` where
-    /// `baseline = max(established_at, last_inbound_keepalive_at)`.
-    /// The helper performed no FSM mutation; engine state is
-    /// unchanged.
-    WithinLease,
-    /// `now.duration_since(baseline) >= params.lease` where
-    /// `baseline = max(established_at, last_inbound_keepalive_at)`.
-    /// The helper has invoked
-    /// `engine.process_event(SessionFsmUnicastEvent::LeaseExpired)`
-    /// so the session-fsm `lease.expired -> Closing(Expired)`
-    /// transition fires.
-    Expired,
-}
+// R311di-7 — LeaseCheckOutcome moved to wz-session-core::lease.
+pub use wz_session_core::lease::LeaseCheckOutcome;
 
 /// R77 — compare `last_inbound_keepalive_at` against `params.lease`
 /// and inject `SessionFsmUnicastEvent::LeaseExpired` when the

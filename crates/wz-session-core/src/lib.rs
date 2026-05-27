@@ -43,6 +43,10 @@ pub mod link;
 /// no_std clean (core::fmt + core::error::Error); unconditional.
 pub mod parse_error;
 
+/// Lease-deadline check outcome (R77 helper surface). no_std +
+/// no_alloc clean (pure enum); unconditional.
+pub mod lease;
+
 /// R222 / R225 — application-layer `Sample` type for subscriber callbacks.
 /// Mirrors zenoh-pico's `_z_sample_t` projection. Carries alloc-bound
 /// fields (Vec<u8> payload, String keyexpr) so gated on the `alloc`
