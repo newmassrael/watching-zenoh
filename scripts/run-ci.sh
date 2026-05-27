@@ -202,12 +202,21 @@ run_layer() {
 # actionlint stays optional (SKIP if not installed) — yaml workflow
 # lint is a nice-to-have, not a correctness gate.
 layer_0_preflight_lints() {
-    # 0.1 cargo fmt --check (mandatory)
+    # 0.1 cargo fmt --check across both workspaces (mandatory).
+    # crates/ is the primary workspace; deploy/mcu-qemu-demo is a
+    # standalone workspace (R311be `[workspace]` empty table) that
+    # the crates/ fmt --check does not visit. R311bn mirrors the
+    # gate there so a deploy-side edit (e.g. R311bm-m0 main.rs
+    # portable-atomic adoption) cannot ship fmt-dirty either.
     if ! (cd crates && cargo fmt --all -- --check); then
-        echo "  fmt --check FAIL — run \`(cd crates && cargo fmt --all)\` to fix" >&2
+        echo "  fmt --check FAIL crates — run \`(cd crates && cargo fmt --all)\`" >&2
         return 1
     fi
-    echo "  fmt --check OK"
+    if ! (cd deploy/mcu-qemu-demo && cargo fmt --all -- --check); then
+        echo "  fmt --check FAIL deploy/mcu-qemu-demo — run \`(cd deploy/mcu-qemu-demo && cargo fmt --all)\`" >&2
+        return 1
+    fi
+    echo "  fmt --check OK (crates + deploy/mcu-qemu-demo)"
 
     # 0.2 actionlint (optional)
     if ! command -v actionlint >/dev/null 2>&1; then

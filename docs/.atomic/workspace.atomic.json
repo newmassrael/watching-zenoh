@@ -19979,6 +19979,60 @@
         "Architectural carries unchanged: R267 Session<R,T> reparam, R284, R283, R301 8 SCE cross-repo, Q_B/Q_E codec slots, Phase W lwIP, R299 2/3, R300, R301 7, R304, keyexpr_canon proptest. R303++ atomic field population pending."
       ]
     },
+    "Round 311bn": {
+      "decision_summary": "R311bn Layer 0 fmt --check mirrors to deploy/mcu-qemu-demo standalone workspace; R311bm-m0 deploy-side edits gated by CI fmt now.",
+      "changes_bullets": [
+        "scripts/run-ci.sh Layer 0 0.1: second cargo fmt --check invocation against deploy/mcu-qemu-demo dir",
+        "R311be empty workspace table left deploy crate outside crates/ rustfmt sweep; R311bm-m0 main.rs edits surfaced the gap",
+        "R64.1 single-source-of-truth invariant preserved: ci.yml + .githooks/pre-push both dispatch via run-ci.sh",
+        "pre-commit hook unaffected (gate runs on workspace mnemosyne validate; fmt enforcement stays at Layer 0 pre-push)",
+        "OK message updated to disclose both workspaces visited for transparency in the lane output"
+      ],
+      "verification_bullets": [
+        "bash scripts/run-ci.sh --layer 0: 0.1 fmt --check OK (crates + deploy/mcu-qemu-demo) + 0.2 actionlint SKIP not-installed; Layer 0 pass",
+        "deploy/mcu-qemu-demo already fmt-clean since R311bm-m0 lands (no diff to apply); regression-free",
+        "FAIL path tested mentally: cargo fmt --check returns non-zero, hint message points at the exact dir to run cargo fmt --all",
+        "validate_workspace: T1=0 RT 13/13 sync entries 394->395 sections 256 unchanged orphans",
+        "ci.yml inspected: rustfmt component installed once, no separate fmt CLI line; lane fully delegated to run-ci.sh"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "carry_forward_bullets": [
+        "R311bn-slim-preset (north-star Phase 1 anchor): preset-mcu-minimal + atomic decomposition to lift microbit Q.2 KNOWN_SKIP",
+        "R311bo-m33 cortex-m-rt 0.8 secure-init survey: upstream tracking + #[pre_init] pattern to lift mps2-an505 Q.2 KNOWN_SKIP",
+        "Multi-link / non-loopback netif e2e (carry from R311bj): virtio-net or QEMU TAP coverage 1-2 rounds",
+        "Layer C2 clippy mirror to deploy/mcu-qemu-demo: parallel mechanical mirror of R311bn fmt gate",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284, R283, R301 8 SCE cross-repo, Q_B/Q_E codec slots, Phase W lwIP, R299 2/3, R300, R301 7, R304, keyexpr_canon proptest. R303++ atomic field population pending."
+      ],
+      "publishable_decision_summary": "R311bn Layer 0 fmt --check mirrors to deploy/mcu-qemu-demo standalone workspace; R311bm-m0 deploy-side edits gated by CI fmt now.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh Layer 0 0.1: second cargo fmt --check invocation against deploy/mcu-qemu-demo dir",
+        "R311be empty workspace table left deploy crate outside crates/ rustfmt sweep; R311bm-m0 main.rs edits surfaced the gap",
+        "R64.1 single-source-of-truth invariant preserved: ci.yml + .githooks/pre-push both dispatch via run-ci.sh",
+        "pre-commit hook unaffected (gate runs on workspace mnemosyne validate; fmt enforcement stays at Layer 0 pre-push)",
+        "OK message updated to disclose both workspaces visited for transparency in the lane output"
+      ],
+      "publishable_verification_bullets": [
+        "bash scripts/run-ci.sh --layer 0: 0.1 fmt --check OK (crates + deploy/mcu-qemu-demo) + 0.2 actionlint SKIP not-installed; Layer 0 pass",
+        "deploy/mcu-qemu-demo already fmt-clean since R311bm-m0 lands (no diff to apply); regression-free",
+        "FAIL path tested mentally: cargo fmt --check returns non-zero, hint message points at the exact dir to run cargo fmt --all",
+        "validate_workspace: T1=0 RT 13/13 sync entries 394->395 sections 256 unchanged orphans",
+        "ci.yml inspected: rustfmt component installed once, no separate fmt CLI line; lane fully delegated to run-ci.sh"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311bn-slim-preset (north-star Phase 1 anchor): preset-mcu-minimal + atomic decomposition to lift microbit Q.2 KNOWN_SKIP",
+        "R311bo-m33 cortex-m-rt 0.8 secure-init survey: upstream tracking + #[pre_init] pattern to lift mps2-an505 Q.2 KNOWN_SKIP",
+        "Multi-link / non-loopback netif e2e (carry from R311bj): virtio-net or QEMU TAP coverage 1-2 rounds",
+        "Layer C2 clippy mirror to deploy/mcu-qemu-demo: parallel mechanical mirror of R311bn fmt gate",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284, R283, R301 8 SCE cross-repo, Q_B/Q_E codec slots, Phase W lwIP, R299 2/3, R300, R301 7, R304, keyexpr_canon proptest. R303++ atomic field population pending."
+      ]
+    },
     "Round 311c": {
       "decision_summary": "R311c lands codec-close cascade — wire encode/decode + send_close_with_reason + bind_unit gated; CloseReason enum + set_close_reason_* FSM bindings stay unconditional.",
       "changes_bullets": [
