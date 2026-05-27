@@ -64,7 +64,10 @@ pub use wz_session_core::keyexpr_canon;
 /// session-local samples, only on remote samples, or both
 /// (default). See `locality` module doc for the dispatch invariant
 /// and the surface-vs-dispatch distinction.
-pub mod locality;
+// R311di-3 — locality moved to wz-session-core; re-export keeps every
+// `crate::locality::*` callsite (pubsub.rs / query.rs / session.rs)
+// verbatim across the wz-runtime-tokio surface.
+pub use wz_session_core::locality;
 
 /// R222 / R225 — application-layer `Sample` type for subscriber callbacks.
 /// Mirrors zenoh-pico's `_z_sample_t` projection. R222 introduced the
