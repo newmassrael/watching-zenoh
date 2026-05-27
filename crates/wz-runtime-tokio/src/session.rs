@@ -605,8 +605,15 @@ impl QueryOptions {
 pub struct Session<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
     /// Outbound action handle. Cloned `Arc` — multiple `Session`s
     /// can share the same actions if the application binds several
-    /// publish surfaces to the same physical session.
-    actions: Arc<SessionLinkActions>,
+    /// publish surfaces to the same physical session. R311di-pre-f1b
+    /// binds the actions' TimeSource parameter to the same `T` as
+    /// the surrounding Session so the action bundle's `clock` field
+    /// (R311di-pre-f1 reparam) shares the monotonic epoch with the
+    /// Session's own `clock: Arc<T>` slot — the R311cw single-epoch
+    /// invariant ("single Session value owns the monotonic epoch
+    /// its background sweep + per-call deadlines share") now extends
+    /// to the action bundle by type.
+    actions: Arc<SessionLinkActions<T>>,
     /// Inbound observer wrapped in the per-runtime mutex alias
     /// (`R::Mutex<...>` — R311ar GAT) so [`Session::publish`]'s
     /// loopback branch can borrow the subscriber registry through
@@ -733,7 +740,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
     /// `set_own_zid` call composes generically over R because
     /// R311cz lifted that method too. Closes the R311cz carry.
     pub fn new(
-        actions: Arc<SessionLinkActions>,
+        actions: Arc<SessionLinkActions<T>>,
         observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
         clock: Arc<T>,
     ) -> Self {
@@ -758,7 +765,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
     /// Borrow the outbound action handle. Useful when the caller
     /// needs to invoke non-publish methods like `send_declare_*` or
     /// `send_request_query` directly on the actions surface.
-    pub fn actions(&self) -> &Arc<SessionLinkActions> {
+    pub fn actions(&self) -> &Arc<SessionLinkActions<T>> {
         &self.actions
     }
 
