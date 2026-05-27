@@ -20033,6 +20033,54 @@
         "Architectural carries unchanged: R267 Session<R,T> reparam, R284, R283, R301 8 SCE cross-repo, Q_B/Q_E codec slots, Phase W lwIP, R299 2/3, R300, R301 7, R304, keyexpr_canon proptest. R303++ atomic field population pending."
       ]
     },
+    "Round 311bo": {
+      "decision_summary": "R311bo Layer C2 cargo clippy mirrors to deploy/mcu-qemu-demo on thumbv7m-none-eabi; parallel mechanical to R311bn fmt mirror.",
+      "changes_bullets": [
+        "scripts/run-ci.sh Layer C2 second clippy invocation against deploy/mcu-qemu-demo --target thumbv7m-none-eabi",
+        "SKIP graceful on missing thumbv7m-none-eabi rustup target or arm-none-eabi-gcc; host-only devs unaffected",
+        "Single target (thumbv7m-none-eabi) chosen since cfg-attribute / unused / typestate issues are universal",
+        "Per-target variation caught by Layer G build matrix; C2 stays cheap per invocation by clipping to one triple"
+      ],
+      "verification_bullets": [
+        "bash scripts/run-ci.sh --layer C2: crates clippy OK + deploy thumbv7m clippy OK; Layer C2 pass",
+        "deploy/mcu-qemu-demo clippy on thumbv7m-none-eabi clean baseline; no R311bm-m0 cfg-attribute lint regression",
+        "SKIP path mentally exercised: missing target -> deploy SKIP message + return 0 graceful",
+        "validate_workspace: T1=0 RT 13/13 sync entries 395->396 sections 256 unchanged orphans"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "carry_forward_bullets": [
+        "R311bn-slim-preset (north-star Phase 1 anchor): preset-mcu-minimal + atomic decomposition to lift microbit Q.2 KNOWN_SKIP",
+        "R311bo-m33 cortex-m-rt 0.8 secure-init survey: upstream tracking + #[pre_init] pattern to lift mps2-an505 Q.2 KNOWN_SKIP",
+        "Multi-link / non-loopback netif e2e (carry from R311bj): virtio-net or QEMU TAP coverage 1-2 rounds",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284, R283, R301 8 SCE cross-repo, Q_B/Q_E codec slots, Phase W lwIP, R299 2/3, R300, R301 7, R304, keyexpr_canon proptest. R303++ atomic field population pending."
+      ],
+      "publishable_decision_summary": "R311bo Layer C2 cargo clippy mirrors to deploy/mcu-qemu-demo on thumbv7m-none-eabi; parallel mechanical to R311bn fmt mirror.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh Layer C2 second clippy invocation against deploy/mcu-qemu-demo --target thumbv7m-none-eabi",
+        "SKIP graceful on missing thumbv7m-none-eabi rustup target or arm-none-eabi-gcc; host-only devs unaffected",
+        "Single target (thumbv7m-none-eabi) chosen since cfg-attribute / unused / typestate issues are universal",
+        "Per-target variation caught by Layer G build matrix; C2 stays cheap per invocation by clipping to one triple"
+      ],
+      "publishable_verification_bullets": [
+        "bash scripts/run-ci.sh --layer C2: crates clippy OK + deploy thumbv7m clippy OK; Layer C2 pass",
+        "deploy/mcu-qemu-demo clippy on thumbv7m-none-eabi clean baseline; no R311bm-m0 cfg-attribute lint regression",
+        "SKIP path mentally exercised: missing target -> deploy SKIP message + return 0 graceful",
+        "validate_workspace: T1=0 RT 13/13 sync entries 395->396 sections 256 unchanged orphans"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311bn-slim-preset (north-star Phase 1 anchor): preset-mcu-minimal + atomic decomposition to lift microbit Q.2 KNOWN_SKIP",
+        "R311bo-m33 cortex-m-rt 0.8 secure-init survey: upstream tracking + #[pre_init] pattern to lift mps2-an505 Q.2 KNOWN_SKIP",
+        "Multi-link / non-loopback netif e2e (carry from R311bj): virtio-net or QEMU TAP coverage 1-2 rounds",
+        "Architectural carries unchanged: R267 Session<R,T> reparam, R284, R283, R301 8 SCE cross-repo, Q_B/Q_E codec slots, Phase W lwIP, R299 2/3, R300, R301 7, R304, keyexpr_canon proptest. R303++ atomic field population pending."
+      ]
+    },
     "Round 311c": {
       "decision_summary": "R311c lands codec-close cascade — wire encode/decode + send_close_with_reason + bind_unit gated; CloseReason enum + set_close_reason_* FSM bindings stay unconditional.",
       "changes_bullets": [
