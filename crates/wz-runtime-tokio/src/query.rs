@@ -879,7 +879,9 @@ pub fn response_final_for(rid: u64) -> ResponseFinal {
 mod tests {
     use super::*;
     use portable_atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
+
+    use crate::sync::Mutex;
     use wz_codecs::ext_entry::ExtEntry;
     use wz_codecs::ext_zbuf::ExtZbuf;
     use wz_codecs::msg_put::MsgPut;

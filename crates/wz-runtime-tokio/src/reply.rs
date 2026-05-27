@@ -673,7 +673,9 @@ fn resolve_wireexpr(
 mod tests {
     use super::*;
     use portable_atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
+
+    use crate::sync::Mutex;
     use wz_codecs::encoding::Encoding;
     use wz_codecs::err::Err as ErrBody;
     use wz_codecs::msg_del::MsgDel;
