@@ -80,10 +80,10 @@ use wz_codecs::push::{Push, PushVariant};
 #[cfg(feature = "codec-declare")]
 use wz_codecs::wireexpr::WireexprVariant;
 
+#[cfg(all(feature = "codec-push", feature = "pubsub-attachment"))]
+use crate::sample::extract_attachment;
 #[cfg(feature = "codec-push")]
-use crate::sample::{
-    extract_attachment, extract_qos, extract_source_info, EncodingHint, SampleKind, TimestampHint,
-};
+use crate::sample::{extract_qos, extract_source_info, EncodingHint, SampleKind, TimestampHint};
 use crate::sample::{Reliability, Sample};
 use crate::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
 

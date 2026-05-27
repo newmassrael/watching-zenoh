@@ -73,6 +73,7 @@
 
 use std::collections::HashMap;
 
+#[cfg(any(feature = "query-attachment", test))]
 use wz_codecs::ext_entry::ExtEntryVariant;
 use wz_codecs::query::Query;
 use wz_codecs::request::{Request, RequestVariant};

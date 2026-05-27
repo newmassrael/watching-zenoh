@@ -22265,6 +22265,98 @@
         "R311ca debt #6 wire-up progress: unchanged (audit-only); 33% wired (53/161)."
       ]
     },
+    "Round 311co-test": {
+      "decision_summary": "smoke test",
+      "changes_bullets": [
+        "bullet a",
+        "bullet b"
+      ],
+      "verification_bullets": [
+        "bullet v"
+      ],
+      "publishable_decision_summary": "REDACTED — spurious smoke-test entry from R311co session; real content lands as Round 311cp.",
+      "publishable_changes_bullets": [
+        "REDACTED — spurious smoke-test bullet"
+      ],
+      "publishable_verification_bullets": [
+        "REDACTED — spurious smoke-test bullet"
+      ],
+      "publishable_carry_forward_bullets": [
+        "REDACTED — spurious smoke-test bullet; see Round 311cp for the real R267 cascade entry"
+      ]
+    },
+    "Round 311cp": {
+      "decision_summary": "R311cp lands Session R-generic — R267 cascade first leaf. observer migrates to per-runtime Mutex alias; impl scoped to TokioRuntime; 3 baseline lint debts cleared.",
+      "changes_bullets": [
+        "session.rs imports add use wz_runtime_core::Runtime + use crate::runtime_impl::TokioRuntime alongside existing TimeSource import (R311s anchor).",
+        "session.rs L587-597 struct: pub struct Session becomes pub struct Session R Runtime default TokioRuntime; observer field becomes Arc per-runtime-Mutex over ApplicationLayerObserver; derive Clone removed.",
+        "session.rs adds manual impl R Runtime Clone for Session R block — avoids derive auto-added R Clone bound (Runtime trait does not require Clone, Arc X Clone for any X).",
+        "session.rs L599: impl Session becomes impl Session TokioRuntime; all 100+ inherent methods stay in TokioRuntime-specific block this round; per-R generics deferred.",
+        "pubsub.rs L85 baseline debt: split extract_attachment from 6-symbol multi-import into separate use line gated cfg all codec-push pubsub-attachment.",
+        "query.rs L76 baseline debt: gate use ExtEntryVariant with cfg any query-attachment test — covers cfg test mod super path plus cfg query-attachment production path.",
+        "session.rs L3546 baseline debt: gate fn build_loopback_sample definition with cfg pubsub-allow-loop — mirrors three call-site gates at L817 L916 L4718.",
+        "Spurious Round 311co-test entry from this session lands redacted via R295 publishable setters + manual publishable_override_ledger row (mnemosyne.toml); real cascade content is this Round 311cp entry."
+      ],
+      "verification_bullets": [
+        "cargo check -p wz-runtime-tokio --all-targets: clean",
+        "cargo check --workspace --all-targets: clean",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "cargo fmt --check: clean",
+        "cargo test -p wz-runtime-tokio --lib: 593/593 pass (zero delta — type-level reshape only)",
+        "scripts/run-ci.sh Layer A-E: all required layers pass",
+        "scripts/run-ci.sh --layer G: 40 PASS + 1 SKIP riscv32imac G.6 host GCC absent baseline",
+        "git stash + cargo check -p wz-ap-demo --all-targets on origin/main e974f1e reproduces same 3 lint errors confirming pre-existing debt cleared per immediate-repayment policy",
+        "validate_workspace post-redact + this entry: entries=423 sections=256 T1 orphan total=0 RT 13/13 GENERATED.md=sync publishable/audit divergence 23/23"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "carry_forward_bullets": [
+        "R267 cascade continuation: Session R-generic propagation to helper structs Querier / Publisher / Subscriber / Queryable / LivelinessToken / LivelinessSubscriber each holds session field; default param keeps transparent; convert one leaf at a time.",
+        "R267 Session R T TimeSource second param locked by R311w but not introduced; T currently method-level generic on Session query and Querier get. R311ab carry phrased Session R first; T fold-in sub-decision pending.",
+        "TokioSession Session TokioRuntime type alias not yet introduced; default-param keeps Session bare name working.",
+        "Future MCU binding: wz-runtime-lwip needs wz_runtime_lwip sync Mutex T alias module before non-default Session R binding is meaningful. LwipRuntime impl lands R311av; sync alias pending.",
+        "R311ca debt #6 wire-up unchanged at 33 percent (53 of 161). R267 is foundation move; unblocks runtime-async-std / -no-std / -tokio-uring / -zero-copy reservation once cascade completes.",
+        "CI gap: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination; consider adding a lane that runs cargo check -p wz-ap-demo --all-targets so preset-feature lint regressions surface mechanically.",
+        "Operating lesson re-confirmed: memory feedback_mnemosyne_append_caps was 6 days old and warned of the 200-char decision_summary cap + misleading missing field changes_bullets error. Diagnosis path still tripped the trap; spurious Round 311co-test entry is now audit-traced + redacted. Future R267 rounds: count decision_summary length BEFORE the first append call."
+      ],
+      "publishable_decision_summary": "R311cp lands Session R-generic — R267 cascade first leaf. observer migrates to per-runtime Mutex alias; impl scoped to TokioRuntime; 3 baseline lint debts cleared.",
+      "publishable_changes_bullets": [
+        "session.rs imports add use wz_runtime_core::Runtime + use crate::runtime_impl::TokioRuntime alongside existing TimeSource import (R311s anchor).",
+        "session.rs L587-597 struct: pub struct Session becomes pub struct Session R Runtime default TokioRuntime; observer field becomes Arc per-runtime-Mutex over ApplicationLayerObserver; derive Clone removed.",
+        "session.rs adds manual impl R Runtime Clone for Session R block — avoids derive auto-added R Clone bound (Runtime trait does not require Clone, Arc X Clone for any X).",
+        "session.rs L599: impl Session becomes impl Session TokioRuntime; all 100+ inherent methods stay in TokioRuntime-specific block this round; per-R generics deferred.",
+        "pubsub.rs L85 baseline debt: split extract_attachment from 6-symbol multi-import into separate use line gated cfg all codec-push pubsub-attachment.",
+        "query.rs L76 baseline debt: gate use ExtEntryVariant with cfg any query-attachment test — covers cfg test mod super path plus cfg query-attachment production path.",
+        "session.rs L3546 baseline debt: gate fn build_loopback_sample definition with cfg pubsub-allow-loop — mirrors three call-site gates at L817 L916 L4718.",
+        "Spurious Round 311co-test entry from this session lands redacted via R295 publishable setters + manual publishable_override_ledger row (mnemosyne.toml); real cascade content is this Round 311cp entry."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check -p wz-runtime-tokio --all-targets: clean",
+        "cargo check --workspace --all-targets: clean",
+        "cargo clippy --workspace --all-targets -- -D warnings: clean",
+        "cargo fmt --check: clean",
+        "cargo test -p wz-runtime-tokio --lib: 593/593 pass (zero delta — type-level reshape only)",
+        "scripts/run-ci.sh Layer A-E: all required layers pass",
+        "scripts/run-ci.sh --layer G: 40 PASS + 1 SKIP riscv32imac G.6 host GCC absent baseline",
+        "git stash + cargo check -p wz-ap-demo --all-targets on origin/main e974f1e reproduces same 3 lint errors confirming pre-existing debt cleared per immediate-repayment policy",
+        "validate_workspace post-redact + this entry: entries=423 sections=256 T1 orphan total=0 RT 13/13 GENERATED.md=sync publishable/audit divergence 23/23"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R267 cascade continuation: Session R-generic propagation to helper structs Querier / Publisher / Subscriber / Queryable / LivelinessToken / LivelinessSubscriber each holds session field; default param keeps transparent; convert one leaf at a time.",
+        "R267 Session R T TimeSource second param locked by R311w but not introduced; T currently method-level generic on Session query and Querier get. R311ab carry phrased Session R first; T fold-in sub-decision pending.",
+        "TokioSession Session TokioRuntime type alias not yet introduced; default-param keeps Session bare name working.",
+        "Future MCU binding: wz-runtime-lwip needs wz_runtime_lwip sync Mutex T alias module before non-default Session R binding is meaningful. LwipRuntime impl lands R311av; sync alias pending.",
+        "R311ca debt #6 wire-up unchanged at 33 percent (53 of 161). R267 is foundation move; unblocks runtime-async-std / -no-std / -tokio-uring / -zero-copy reservation once cascade completes.",
+        "CI gap: scripts/run-ci.sh does not exercise wz-ap-demo --all-targets feature combination; consider adding a lane that runs cargo check -p wz-ap-demo --all-targets so preset-feature lint regressions surface mechanically.",
+        "Operating lesson re-confirmed: memory feedback_mnemosyne_append_caps was 6 days old and warned of the 200-char decision_summary cap + misleading missing field changes_bullets error. Diagnosis path still tripped the trap; spurious Round 311co-test entry is now audit-traced + redacted. Future R267 rounds: count decision_summary length BEFORE the first append call."
+      ]
+    },
     "Round 311d": {
       "decision_summary": "R311d batches codec-scout / codec-hello / codec-join cascade — wz-codecs level only (wz-runtime-tokio does not import these types); forwards stay catalog-uniform for future runtime reuse.",
       "changes_bullets": [
