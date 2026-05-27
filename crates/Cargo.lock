@@ -1503,6 +1503,7 @@ dependencies = [
  "wz-codecs",
  "wz-runtime-core",
  "wz-runtime-tokio-test-support",
+ "wz-session-core",
  "zeroize",
 ]
 

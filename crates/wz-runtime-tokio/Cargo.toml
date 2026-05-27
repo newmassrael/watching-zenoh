@@ -380,6 +380,7 @@ wz-codecs = { path = "../wz-codecs", default-features = false, features = ["allo
 # panic-capture variant; the trait crate itself stays unconditionally
 # no_std (std is available at the binary linker level for AP).
 wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
+wz-session-core = { path = "../wz-session-core", features = ["alloc"] }
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
 sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
 sce-rust-lua = { path = "../../vendor/sce/sce-rust-lua" }

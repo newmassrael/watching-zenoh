@@ -51,8 +51,11 @@ pub mod session_glue;
 // (-literal, -mapping, -intersect, -includes, -wildcard-*, -dollar-star)
 // are cluster-wide behaviors with no single anchor site — carried for
 // per-site wire-up in a follow-up cascade.
+// R311di-2 — keyexpr_canon moved to wz-session-core; re-export keeps
+// `crate::keyexpr_canon::*` callsites verbatim across the wz-runtime-tokio
+// surface (query.rs / pubsub.rs / session.rs / session_glue.rs).
 #[cfg(feature = "keyexpr-canon")]
-pub mod keyexpr_canon;
+pub use wz_session_core::keyexpr_canon;
 
 /// R223 — zenoh-style locality filter for subscribers and queryables.
 /// Mirrors zenoh-pico's `z_locality_t` enum and the

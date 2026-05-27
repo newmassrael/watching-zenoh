@@ -54,7 +54,9 @@
 //! to `Result`-returning `register` is a future round (R222 cluster
 //! API rewrite).
 
-use std::fmt;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt;
 
 /// Errors produced by [`canonize_keyexpr`] when the input violates
 /// the structural keyexpr grammar that zenoh-pico's
@@ -105,7 +107,7 @@ impl fmt::Display for KeyexprCanonError {
     }
 }
 
-impl std::error::Error for KeyexprCanonError {}
+impl core::error::Error for KeyexprCanonError {}
 
 /// Internal classification of one chunk's structural shape after
 /// per-character validation. Drives the chunk-level rewriting
@@ -367,8 +369,8 @@ impl fmt::Display for OutboundKeyexprError {
     }
 }
 
-impl std::error::Error for OutboundKeyexprError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+impl core::error::Error for OutboundKeyexprError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::NotCanonical(inner) => Some(inner),
             Self::PicoBugThreeFamily { .. } => None,
