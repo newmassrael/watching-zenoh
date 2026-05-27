@@ -240,44 +240,18 @@ pub mod session_fsm_unicast {
     include!(concat!(env!("OUT_DIR"), "/session_fsm_unicast_sm.rs"));
 }
 
-/// Outbound payload to send over a link. The R51 baseline carries
-/// raw bytes; future rounds extend to typed frames (carrying codec
-/// metadata for re-encoding on the link side without copy).
-pub struct TxFrame<'a> {
-    pub bytes: &'a [u8],
-}
-
-/// Inbound frame received from a link. R51 baseline: owned `Vec<u8>`.
-/// Future rounds (per docs/runtime-crate-tokio.md §2.3) will switch
-/// this to a pool-slot borrow `RxFrame<'pool>` for zero-copy decode.
-#[derive(Debug)]
-pub struct RxFrame {
-    pub bytes: Vec<u8>,
-}
-
 // R311di-4 — Reliability moved to wz-session-core::reliability; the
 // re-export keeps every `wz_runtime_tokio::Reliability` external
 // callsite (9 caller files across tests / wz-integration-tests /
 // wz-ap-demo) verbatim across the migration.
 pub use wz_session_core::reliability::Reliability;
 
-/// Single event source surfaced by a link driver. R51 baseline
-/// emits only Ready / Rx / Lost; backpressure + framing_error +
-/// tx_drained land when their consumers (codec-level decoder +
-/// session FSM) are wired.
-#[derive(Debug)]
-pub enum LinkEvent {
-    Ready,
-    Rx(RxFrame),
-    Lost { cause: LostCause },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LostCause {
-    PeerClosed,
-    Timeout,
-    OsError,
-}
+// R311di-5 — TxFrame / RxFrame / LinkEvent / LostCause moved to
+// wz-session-core::link; tokio-specific LinkDriver trait + driver
+// impls (TcpDriver / UdpDriver) stay in this crate. Re-exports keep
+// every external callsite (`wz_runtime_tokio::{TxFrame, RxFrame,
+// LinkEvent, LostCause}`) verbatim across the migration.
+pub use wz_session_core::link::{LinkEvent, LostCause, RxFrame, TxFrame};
 
 /// The 4-method `LinkDriver` trait. Matches
 /// docs/runtime-crate-tokio.md §2.1. Trust-class flavored variants
