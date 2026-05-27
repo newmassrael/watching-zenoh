@@ -2484,15 +2484,26 @@ impl QuerierAliased<TokioRuntime> {
 /// Mirrors zenoh-pico's `z_publisher_t`
 /// (`vendor/zenoh-pico/include/zenoh-pico/api/types.h`) with
 /// `z_declare_publisher` + `z_publisher_put` + `z_publisher_delete`.
-#[derive(Clone)]
+// R311cs — R267 helper cascade. Manual Clone impl mirrors Querier
+// pattern (no derive auto-added R: Clone bound on Runtime).
 #[non_exhaustive]
-pub struct Publisher {
-    session: Session,
+pub struct Publisher<R: Runtime = TokioRuntime> {
+    session: Session<R>,
     keyexpr: String,
     options: PublishOptions,
 }
 
-impl Publisher {
+impl<R: Runtime> Clone for Publisher<R> {
+    fn clone(&self) -> Self {
+        Self {
+            session: self.session.clone(),
+            keyexpr: self.keyexpr.clone(),
+            options: self.options.clone(),
+        }
+    }
+}
+
+impl Publisher<TokioRuntime> {
     /// Borrow the declared keyexpr.
     pub fn keyexpr(&self) -> &str {
         &self.keyexpr
@@ -2591,16 +2602,28 @@ impl Publisher {
 ///
 /// `#[non_exhaustive]`. Construct only through
 /// [`Session::declare_publisher_aliased`].
-#[derive(Clone)]
+// R311cs — R267 helper cascade. Manual Clone impl mirrors Querier
+// pattern (no derive auto-added R: Clone bound on Runtime).
 #[non_exhaustive]
-pub struct PublisherAliased {
-    session: Session,
+pub struct PublisherAliased<R: Runtime = TokioRuntime> {
+    session: Session<R>,
     mapping_id: u64,
     inline_suffix: Option<String>,
     options: PublishOptions,
 }
 
-impl PublisherAliased {
+impl<R: Runtime> Clone for PublisherAliased<R> {
+    fn clone(&self) -> Self {
+        Self {
+            session: self.session.clone(),
+            mapping_id: self.mapping_id,
+            inline_suffix: self.inline_suffix.clone(),
+            options: self.options.clone(),
+        }
+    }
+}
+
+impl PublisherAliased<TokioRuntime> {
     /// The declared mapping id.
     pub fn mapping_id(&self) -> u64 {
         self.mapping_id
