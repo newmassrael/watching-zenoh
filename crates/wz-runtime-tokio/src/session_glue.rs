@@ -755,7 +755,7 @@ impl From<OutboundKeyexprError> for SendDeclareError {
 }
 
 /// Bundle of state shared across the 17 native script functions.
-pub struct SessionLinkActions {
+pub struct SessionLinkActions<T: TimeSource = TokioTime> {
     pub driver: Arc<dyn BoxedLinkDriver>,
     pub params: SessionInitParams,
     pub trace: Mutex<ActionTrace>,
@@ -809,7 +809,7 @@ pub struct SessionLinkActions {
     /// keepalive-or-lease comparator path may pass any fresh
     /// `TokioTime::new()`; the per-test isolated epoch is fine
     /// because there is no cross-test stamp comparison.
-    pub clock: TokioTime,
+    pub clock: T,
     /// R86 — `zid` field captured from the most recent inbound
     /// `InitSyn` frame (`InboundFrame::Init { is_ack: false, .. }`).
     /// The Accepting side reads this slot inside
@@ -1069,7 +1069,7 @@ pub fn default_init_patch_ext_entry() -> ExtEntry {
     }
 }
 
-impl SessionLinkActions {
+impl<T: TimeSource> SessionLinkActions<T> {
     /// Construct a session action bundle for one logical FSM instance.
     /// The `params` are captured by value; production callers
     /// supplying per-deploy values stage them once at session
@@ -1079,11 +1079,7 @@ impl SessionLinkActions {
     /// the same `TokioTime` that [`drive_session_until_terminal`]
     /// receives so the lease comparator's `now_ms` and the recorded
     /// `keepalive_ms` / `established_ms` share an epoch.
-    pub fn new(
-        driver: Arc<dyn BoxedLinkDriver>,
-        params: SessionInitParams,
-        clock: TokioTime,
-    ) -> Arc<Self> {
+    pub fn new(driver: Arc<dyn BoxedLinkDriver>, params: SessionInitParams, clock: T) -> Arc<Self> {
         // R121e — seed the outbound Frame SN with `params.initial_sn`
         // so the first emitted Frame matches the value announced in
         // the OpenSyn/OpenAck body. The peer enforces this start
