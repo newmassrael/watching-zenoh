@@ -71,6 +71,34 @@ macro_rules! codec_alloc_prelude {
     };
 }
 
+// R311br — multi-module same-feature gating helper. Used by the
+// codec-declare (10 modules), codec-response (3 modules), and
+// codec-request (2 modules) families so the same `#[cfg(feature =
+// "codec-X")]` attribute is authored once instead of repeated on
+// each sibling `pub mod` block. Reduces the per-file cfg-site count
+// from 28 -> 14 (counted by `grep 'cfg(feature' src/lib.rs`),
+// closing the R311bp 부채 #7 line item.
+//
+// The expansion is per-module verbatim — each entry still gets its
+// own `pub mod $name { codec_alloc_prelude!(); include!(...) }`
+// block with the same `#[cfg(feature = $feature)]` attribute the
+// non-grouped sites carry. Cargo feature behaviour is byte-
+// identical; the audit-trace cfg-site count drops because the
+// attribute is now authored inside the macro definition (one
+// `cfg(feature = ...)` line for the macro itself) rather than
+// repeated at every sibling module.
+macro_rules! codec_group {
+    ($feature:literal, [ $( ($name:ident, $file:literal) ),+ $(,)? ]) => {
+        $(
+            #[cfg(feature = $feature)]
+            pub mod $name {
+                codec_alloc_prelude!();
+                include!(concat!(env!("OUT_DIR"), "/", $file));
+            }
+        )+
+    };
+}
+
 pub mod timestamp {
     codec_alloc_prelude!();
     include!(concat!(env!("OUT_DIR"), "/timestamp.rs"));
@@ -195,17 +223,10 @@ pub mod wireexpr {
     include!(concat!(env!("OUT_DIR"), "/wireexpr.rs"));
 }
 
-#[cfg(feature = "codec-request")]
-pub mod query {
-    codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/query.rs"));
-}
-
-#[cfg(feature = "codec-request")]
-pub mod request {
-    codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/request.rs"));
-}
+codec_group!(
+    "codec-request",
+    [(query, "query.rs"), (request, "request.rs"),]
+);
 
 #[cfg(feature = "codec-push")]
 pub mod push {
@@ -234,83 +255,30 @@ pub mod interest {
     include!(concat!(env!("OUT_DIR"), "/interest.rs"));
 }
 
-#[cfg(feature = "codec-response")]
-pub mod reply {
-    codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/reply.rs"));
-}
+codec_group!(
+    "codec-response",
+    [
+        (reply, "reply.rs"),
+        (err, "err.rs"),
+        (response, "response.rs"),
+    ]
+);
 
-#[cfg(feature = "codec-response")]
-pub mod err {
-    codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/err.rs"));
-}
-
-#[cfg(feature = "codec-response")]
-pub mod response {
-    codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/response.rs"));
-}
-
-#[cfg(feature = "codec-declare")]
-pub mod decl_final {
-    codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/decl_final.rs"));
-}
-
-#[cfg(feature = "codec-declare")]
-pub mod decl_kexpr {
-    codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/decl_kexpr.rs"));
-}
-
-#[cfg(feature = "codec-declare")]
-pub mod undecl_kexpr {
-    codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/undecl_kexpr.rs"));
-}
-
-#[cfg(feature = "codec-declare")]
-pub mod decl_subscriber {
-    codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/decl_subscriber.rs"));
-}
-
-#[cfg(feature = "codec-declare")]
-pub mod decl_queryable {
-    codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/decl_queryable.rs"));
-}
-
-#[cfg(feature = "codec-declare")]
-pub mod decl_token {
-    codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/decl_token.rs"));
-}
-
-#[cfg(feature = "codec-declare")]
-pub mod undecl_subscriber {
-    codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/undecl_subscriber.rs"));
-}
-
-#[cfg(feature = "codec-declare")]
-pub mod undecl_queryable {
-    codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/undecl_queryable.rs"));
-}
-
-#[cfg(feature = "codec-declare")]
-pub mod undecl_token {
-    codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/undecl_token.rs"));
-}
-
-#[cfg(feature = "codec-declare")]
-pub mod declare {
-    codec_alloc_prelude!();
-    include!(concat!(env!("OUT_DIR"), "/declare.rs"));
-}
+codec_group!(
+    "codec-declare",
+    [
+        (decl_final, "decl_final.rs"),
+        (decl_kexpr, "decl_kexpr.rs"),
+        (undecl_kexpr, "undecl_kexpr.rs"),
+        (decl_subscriber, "decl_subscriber.rs"),
+        (decl_queryable, "decl_queryable.rs"),
+        (decl_token, "decl_token.rs"),
+        (undecl_subscriber, "undecl_subscriber.rs"),
+        (undecl_queryable, "undecl_queryable.rs"),
+        (undecl_token, "undecl_token.rs"),
+        (declare, "declare.rs"),
+    ]
+);
 
 #[cfg(test)]
 mod ext_envelope_oracle {
