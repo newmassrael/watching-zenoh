@@ -61,7 +61,7 @@ fn subscriber_and_queryable_registries_share_a_message_stream() {
             Some("c"),
         )))),
     ];
-    let peer_table = std::collections::HashMap::new();
+    let peer_table = hashbrown::HashMap::new();
     sub_reg.dispatch_messages(&messages, &peer_table);
     q_reg.dispatch_messages(&messages, &peer_table);
 
@@ -116,7 +116,7 @@ fn three_registries_share_a_message_stream_independently() {
             Some("d"),
         )))),
     ];
-    let peer_table = std::collections::HashMap::new();
+    let peer_table = hashbrown::HashMap::new();
     sub_reg.dispatch_messages(&messages, &peer_table);
     q_reg.dispatch_messages(&messages, &peer_table);
     l_reg.dispatch_messages(&messages, &peer_table);

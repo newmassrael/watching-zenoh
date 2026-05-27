@@ -123,6 +123,27 @@ impl Runtime for TokioRuntime {
         };
         f(&mut *guard)
     }
+
+    // R311di-pre-e — construction-side Mutex/RwLock helpers. AP profile
+    // forwards to the std primitive's `new` constructor; the type alias
+    // `crate::sync::Mutex<T> = std::sync::Mutex<T>` makes the constructor
+    // call resolve to `std::sync::Mutex::new(value)` directly. No poison
+    // state is materialised at construction time — `std::sync::Mutex`
+    // poisoning is a runtime side-effect of a panicking lock holder, not
+    // a construction-time choice.
+    fn new_mutex<T>(value: T) -> Self::Mutex<T>
+    where
+        T: Send + 'static,
+    {
+        crate::sync::Mutex::new(value)
+    }
+
+    fn new_rwlock<T>(value: T) -> Self::RwLock<T>
+    where
+        T: Send + Sync + 'static,
+    {
+        crate::sync::RwLock::new(value)
+    }
 }
 
 /// Wrapper around `tokio::task::JoinHandle<T>` that adapts the

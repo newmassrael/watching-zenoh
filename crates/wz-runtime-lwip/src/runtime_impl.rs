@@ -347,6 +347,30 @@ impl<C: ClockSource> Runtime for LwipRuntime<C> {
             f(&mut *borrow)
         })
     }
+
+    // R311di-pre-e — construction-side Mutex/RwLock helpers. MCU profile
+    // wraps `value` in `RefCell<T>` first (interior-mutable storage that
+    // `critical_section::Mutex` exposes via `borrow(cs).borrow_mut()`),
+    // then in `critical_section::Mutex<RefCell<T>>` (the interrupt-
+    // disabling outer lock). RwLock collapses to the same shape per the
+    // single-core IRQ-safe model — see crate::sync module doc.
+    //
+    // Both constructors are infallible — `critical_section::Mutex::new` /
+    // `RefCell::new` are pure value-wrapping with no allocator or syscall
+    // dependency, matching the no_std + alloc constraint of this profile.
+    fn new_mutex<T>(value: T) -> Self::Mutex<T>
+    where
+        T: Send + 'static,
+    {
+        Mutex::new(RefCell::new(value))
+    }
+
+    fn new_rwlock<T>(value: T) -> Self::RwLock<T>
+    where
+        T: Send + Sync + 'static,
+    {
+        Mutex::new(RefCell::new(value))
+    }
 }
 
 #[cfg(test)]
