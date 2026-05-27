@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-session-core — R311di proper entry (skeleton at R311di-1).
+#
+# Runtime-agnostic Session + SessionLinkActions + helper surface; the
+# no_std + alloc home of the SCXML-driven session FSM tier currently
+# spread across `wz-runtime-tokio::{session, session_glue, observer,
+# declare, pubsub, query, reply, sample, locality, keyexpr_canon}`.
+# This crate hosts the generic `impl<R: Runtime, T: TimeSource>` bodies
+# so MCU profiles (`R = LwipRuntime<C>`, `T = LwipTime<C>`) compose
+# the same session machinery without dragging in std / tokio / Lua.
+#
+# Phase W placement: §5.P runtime-services-tier consumer (wz-runtime-core
+# trait surface) + §5.C link-tier consumer (BoxedLinkDriver). The Lua
+# binding family (`install_session_actions` + `register_*` + `bind_unit`)
+# stays in wz-runtime-tokio because the SCXML script engine is std/tokio-
+# dependent and AP-only by spec. The `SessionLinkActions::new` concrete
+# TokioRuntime-bound constructor also stays in wz-runtime-tokio for the
+# same reason (AP-only entry point).
+#
+# R311di-1 lands the empty skeleton; subsequent sub-rounds (R311di-2 +
+# beyond) move files in incrementally with import path rewrites and
+# regression coverage at each step. The crate compiles unconditionally
+# `no_std` with an opt-in `alloc` feature so MCU bare-metal profiles
+# without a heap can still link the trait surface and the no-alloc
+# subset of the session machinery.
+
+[package]
+name = "wz-session-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "R311di proper — runtime-agnostic Session / SessionLinkActions / helper surface (Phase W §5.P + §5.C consumer)."
+
+[features]
+default = ["alloc"]
+# `alloc` brings `Box`/`Vec`/`String` into scope so the session machinery
+# (HashMap-backed mapping tables, Vec-backed ext chains, owned codec
+# byte buffers) can compose. R311di-2+ will gate the alloc-bound surface
+# on this feature; the trait-only sub-surface stays available with
+# default-off `alloc` for MCU profiles that prefer stack/static-only.
+alloc = []
+
+[dependencies]
+wz-runtime-core = { path = "../wz-runtime-core" }
+
+[lints]
+workspace = true

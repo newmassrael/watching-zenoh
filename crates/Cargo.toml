@@ -33,6 +33,7 @@ members = [
     "wz",
     "wz-codecs",
     "wz-runtime-core",
+    "wz-session-core",
     "zenoh-pico-sys",
     "wz-integration-tests",
     "wz-runtime-tokio",
