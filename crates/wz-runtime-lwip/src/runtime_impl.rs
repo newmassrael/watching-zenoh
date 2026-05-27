@@ -111,11 +111,11 @@ use crate::time::ClockSource;
 use crate::timer::TimerQueue;
 
 /// Shared inner state held inside an `Arc` so `LwipRuntime` clones
-/// + `LwipTime::new(&runtime)` all reference the same executor,
+/// and `LwipTime::new(&runtime)` all reference the same executor,
 /// timer queue, and clock instance. R311bc consolidation: the three
 /// fields are siblings because they need to be polled / updated
-/// from `run_until_idle` in a single atomic step (timer fire +
-/// task wake + task poll).
+/// from `run_until_idle` in a single atomic step (timer fire + task
+/// wake + task poll).
 pub(crate) struct RuntimeInner<C: ClockSource> {
     pub(crate) executor: ExecutorState,
     pub(crate) timers: TimerQueue,
