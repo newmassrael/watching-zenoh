@@ -25309,6 +25309,42 @@
         "long-tail carry preserved: P0a pre-push flake / SCE smell #2 codec-oam+codec-interest / R311cb-co --no-default-features cascade (wz-runtime-tokio 16 + wz-codecs 39 errors)"
       ]
     },
+    "Round 311ds-c1c": {
+      "decision_summary": "explicit Layer C1c (cargo test -p wz-session-core --features codec-declare) added to run-ci.sh + ci.yml so the 58 codec-declare-gated declare tests run independently of wz-runtime-tokio feature unification",
+      "changes_bullets": [
+        "scripts/run-ci.sh: Layer C1c (`cargo test -p wz-session-core --features codec-declare`) added after C1b -- function + dispatch line + header lane-list doc mirror the C1b shape",
+        ".github/workflows/ci.yml: Layer C1c step mirrored after the C1b step (run-ci.sh <-> ci.yml anti-drift invariant per the script header contract)"
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh --layer C1c: wz-session-core lib 114 passed under codec-declare; Layer C1c pass",
+        "cargo test -p wz-session-core (default, no codec-declare): 56 passed -- the 58-test delta (54 R311ds behavioural + 4 R311dm thin) is exactly what C1c now guards explicitly",
+        "bash -n scripts/run-ci.sh OK; Layer 0 fmt --check OK; ci.yml parses via python yaml.safe_load with C1c present in C1/C1b/C1c order"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "C1c closes the R311ds post-push audit gap: CI execution of the codec-declare-gated wz-session-core tests no longer depends on the implicit wz-runtime-tokio default -> wz-session-core/codec-declare feature-unification coincidence; the pre-existing latent gap (R311dm 4 thin tests) is hardened too",
+        "long-tail carry preserved: wz-runtime-tokio declare/* shell removal (caller import migration) / module-migration cascade R311dt+ (observer/reply/query/pubsub/session_glue) / P0a pre-push flake / SCE smell #2 codec-oam+codec-interest / R311cb-co --no-default-features cascade"
+      ],
+      "publishable_decision_summary": "explicit Layer C1c (cargo test -p wz-session-core --features codec-declare) added to run-ci.sh + ci.yml so the 58 codec-declare-gated declare tests run independently of wz-runtime-tokio feature unification",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: Layer C1c (`cargo test -p wz-session-core --features codec-declare`) added after C1b -- function + dispatch line + header lane-list doc mirror the C1b shape",
+        ".github/workflows/ci.yml: Layer C1c step mirrored after the C1b step (run-ci.sh <-> ci.yml anti-drift invariant per the script header contract)"
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh --layer C1c: wz-session-core lib 114 passed under codec-declare; Layer C1c pass",
+        "cargo test -p wz-session-core (default, no codec-declare): 56 passed -- the 58-test delta (54 R311ds behavioural + 4 R311dm thin) is exactly what C1c now guards explicitly",
+        "bash -n scripts/run-ci.sh OK; Layer 0 fmt --check OK; ci.yml parses via python yaml.safe_load with C1c present in C1/C1b/C1c order"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "C1c closes the R311ds post-push audit gap: CI execution of the codec-declare-gated wz-session-core tests no longer depends on the implicit wz-runtime-tokio default -> wz-session-core/codec-declare feature-unification coincidence; the pre-existing latent gap (R311dm 4 thin tests) is hardened too",
+        "long-tail carry preserved: wz-runtime-tokio declare/* shell removal (caller import migration) / module-migration cascade R311dt+ (observer/reply/query/pubsub/session_glue) / P0a pre-push flake / SCE smell #2 codec-oam+codec-interest / R311cb-co --no-default-features cascade"
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
