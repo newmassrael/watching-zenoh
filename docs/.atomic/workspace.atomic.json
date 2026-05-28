@@ -25445,6 +25445,56 @@
         "long-tail carry preserved: P0a pre-push flake / SCE smell #2 codec-oam+codec-interest / R311cb-co --no-default-features cascade (wz-runtime-tokio 16 + wz-codecs 39 errors)"
       ]
     },
+    "Round 311dv": {
+      "decision_summary": "R311dv lifts the Response-builder cluster (build_response_* + Response{Reply,Err}Builder + ext encoders) into wz-session-core::response_build; AP re-export shell; query-migration precursor.",
+      "changes_bullets": [
+        "git-extracted the 716-line Response-builder cluster (build_response_{reply,err}_{literal,aliased} + ResponseReplyBuilder + ResponseErrBuilder + encode_{source_info,responder}_ext_body + encode_vle_u64_into) from crates/wz-runtime-tokio/src/session_glue.rs:4868-5584 into new crates/wz-session-core/src/response_build.rs (byte-exact relocation; pure wz_codecs wire-record construction, no async/tokio, so it is runtime-agnostic and serves both the AP and MCU runtimes).",
+        "crates/wz-session-core/src/lib.rs registers `#[cfg(all(feature=\"alloc\", feature=\"codec-response\"))] pub mod response_build;` -- the whole module gates on codec-response because without the Response codec there is no wire frame to build.",
+        "5 runtime-tokio-only intra-doc links inside the lifted block (RequestQueryBuilder x4, encode_frame_envelope x1) converted to plain backtick text -- wz-session-core cannot back-reference wz-runtime-tokio (R311du playbook step 4).",
+        "encode_source_info_ext_body + encode_responder_ext_body promoted to `pub fn` (session_glue still calls the former at its non-cluster source_info encode path + both appear in session_glue tests); encode_vle_u64_into stays private (cluster-local helper).",
+        "crates/wz-runtime-tokio/src/session_glue.rs re-exports build_response_* + Response{Reply,Err}Builder + the two ext encoders under `#[cfg(feature=\"codec-response\")]` so `crate::session_glue::*` callers (query.rs `QueryReply::into_response` + the session_glue regression tests) resolve unchanged; the Response-builder regression tests stay in session_glue `mod tests` (relocation deferred to the query round).",
+        "removed now-unused session_glue lib imports (wz_codecs::{encoding::Encoding, err::Err, reply::{Reply,ReplyVariant}, response::ResponseVariant}); ReplyVariant + ResponseVariant re-imported test-locally inside `mod tests` (used only by Response/Reply destructuring assertions once the cluster left the lib)."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh full: all required layers pass (Layer 0/A/A2/B/C0/C1/C1b/C1c/C1d/C2/C3/D/E); zero warnings/errors; Layer F/G/Q opt-in.",
+        "Layer G MCU cross-compile (WZ_RUN_LAYER_G=1): 7 targets (thumbv6m, thumbv7m, thumbv7em-eabihf, thumbv8m.base, thumbv8m.main, thumbv8m.main-eabihf, riscv32imac) all OK; only G.6 riscv cross-real SKIP (riscv32-unknown-elf-gcc absent on host).",
+        "cargo build -p wz-session-core --features codec-response,codec-declare clean; cargo clippy -p wz-runtime-tokio --all-targets -D warnings clean; cargo test -p wz-runtime-tokio --lib --no-run compiles."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311dw (next): migrate query.rs QueryableRegistry (~1803 LOC) + query_event.rs (~216 LOC, mutually dependent -- they reference each other's types) together into wz-session-core; QueryReply::into_response then reaches the builders via crate::response_build instead of crate::session_glue; relocate the Response-builder regression tests from session_glue mod tests into response_build in the same round.",
+        "then R311dx reply (ReplyRegistry ~1602 LOC) -> R311dy observer (ApplicationLayerObserver ~639 LOC, depends on pubsub+query+reply); shell-collapse round afterwards to drop the re-export shells (R311dt precedent).",
+        "DP1/DP2/DP3 (user calls) unchanged: --no-default-features composability gap (SCE codec-oam/codec-interest feature + alloc-off policy) / declare+pubsub+response facade full removal vs thin facade / session_glue.rs (~9.5k LOC after the -716 extraction) + session.rs monster-file split.",
+        "latent feature-combo hygiene: `cargo build -p wz-session-core --features codec-response` ALONE fails on pubsub.rs unused `ToString` import (codec-response-only, pubsub-* + codec-push off) -- pre-existing R311du surface, not a run-ci lane; relates to DP1 composability.",
+        "long-tail carry preserved: P0a pre-push flake / SCE smell #2 codec-oam+codec-interest / R311cb-co --no-default-features cascade (wz-runtime-tokio + wz-codecs errors)."
+      ],
+      "publishable_decision_summary": "R311dv lifts the Response-builder cluster (build_response_* + Response{Reply,Err}Builder + ext encoders) into wz-session-core::response_build; AP re-export shell; query-migration precursor.",
+      "publishable_changes_bullets": [
+        "git-extracted the 716-line Response-builder cluster (build_response_{reply,err}_{literal,aliased} + ResponseReplyBuilder + ResponseErrBuilder + encode_{source_info,responder}_ext_body + encode_vle_u64_into) from crates/wz-runtime-tokio/src/session_glue.rs:4868-5584 into new crates/wz-session-core/src/response_build.rs (byte-exact relocation; pure wz_codecs wire-record construction, no async/tokio, so it is runtime-agnostic and serves both the AP and MCU runtimes).",
+        "crates/wz-session-core/src/lib.rs registers `#[cfg(all(feature=\"alloc\", feature=\"codec-response\"))] pub mod response_build;` -- the whole module gates on codec-response because without the Response codec there is no wire frame to build.",
+        "5 runtime-tokio-only intra-doc links inside the lifted block (RequestQueryBuilder x4, encode_frame_envelope x1) converted to plain backtick text -- wz-session-core cannot back-reference wz-runtime-tokio (R311du playbook step 4).",
+        "encode_source_info_ext_body + encode_responder_ext_body promoted to `pub fn` (session_glue still calls the former at its non-cluster source_info encode path + both appear in session_glue tests); encode_vle_u64_into stays private (cluster-local helper).",
+        "crates/wz-runtime-tokio/src/session_glue.rs re-exports build_response_* + Response{Reply,Err}Builder + the two ext encoders under `#[cfg(feature=\"codec-response\")]` so `crate::session_glue::*` callers (query.rs `QueryReply::into_response` + the session_glue regression tests) resolve unchanged; the Response-builder regression tests stay in session_glue `mod tests` (relocation deferred to the query round).",
+        "removed now-unused session_glue lib imports (wz_codecs::{encoding::Encoding, err::Err, reply::{Reply,ReplyVariant}, response::ResponseVariant}); ReplyVariant + ResponseVariant re-imported test-locally inside `mod tests` (used only by Response/Reply destructuring assertions once the cluster left the lib)."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh full: all required layers pass (Layer 0/A/A2/B/C0/C1/C1b/C1c/C1d/C2/C3/D/E); zero warnings/errors; Layer F/G/Q opt-in.",
+        "Layer G MCU cross-compile (WZ_RUN_LAYER_G=1): 7 targets (thumbv6m, thumbv7m, thumbv7em-eabihf, thumbv8m.base, thumbv8m.main, thumbv8m.main-eabihf, riscv32imac) all OK; only G.6 riscv cross-real SKIP (riscv32-unknown-elf-gcc absent on host).",
+        "cargo build -p wz-session-core --features codec-response,codec-declare clean; cargo clippy -p wz-runtime-tokio --all-targets -D warnings clean; cargo test -p wz-runtime-tokio --lib --no-run compiles."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311dw (next): migrate query.rs QueryableRegistry (~1803 LOC) + query_event.rs (~216 LOC, mutually dependent -- they reference each other's types) together into wz-session-core; QueryReply::into_response then reaches the builders via crate::response_build instead of crate::session_glue; relocate the Response-builder regression tests from session_glue mod tests into response_build in the same round.",
+        "then R311dx reply (ReplyRegistry ~1602 LOC) -> R311dy observer (ApplicationLayerObserver ~639 LOC, depends on pubsub+query+reply); shell-collapse round afterwards to drop the re-export shells (R311dt precedent).",
+        "DP1/DP2/DP3 (user calls) unchanged: --no-default-features composability gap (SCE codec-oam/codec-interest feature + alloc-off policy) / declare+pubsub+response facade full removal vs thin facade / session_glue.rs (~9.5k LOC after the -716 extraction) + session.rs monster-file split.",
+        "latent feature-combo hygiene: `cargo build -p wz-session-core --features codec-response` ALONE fails on pubsub.rs unused `ToString` import (codec-response-only, pubsub-* + codec-push off) -- pre-existing R311du surface, not a run-ci lane; relates to DP1 composability.",
+        "long-tail carry preserved: P0a pre-push flake / SCE smell #2 codec-oam+codec-interest / R311cb-co --no-default-features cascade (wz-runtime-tokio + wz-codecs errors)."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
