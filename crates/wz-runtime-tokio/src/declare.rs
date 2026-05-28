@@ -61,54 +61,39 @@
 //! keyexpr), so no resolution is needed — the peer identifies the
 //! prior declaration by the same id it used in its earlier `Decl*`.
 
-// R311dq — resolve_wireexpr re-export removed (all four registry
-// sub-modules now live in wz-session-core and reach the helper
-// directly via `crate::wireexpr_resolve::resolve_wireexpr`). The
-// wz-runtime-tokio shells are pure re-exports + AP-bound test
-// fixtures, neither of which calls resolve_wireexpr.
-
-// R310 — each registry sub-module gates on its corresponding
-// application-layer feature (the wire-emit counterpart was gated at
-// R309 inside session_glue). The liveliness pair was already gated at
-// R302b; R310 extends the same mechanical shape to subscriber +
-// queryable so a `--no-default-features --features declare-subscriber`
-// build carries only the RemoteSubscriberRegistry path and elides the
-// peer-queryable observer entirely.
-#[cfg(feature = "liveliness-token")]
-mod liveliness;
-// R311q — `liveliness_subscriber` module is type-ungated: the
-// LivelinessSubscriberRegistry struct + LivelinessSample +
-// LivelinessSampleKind + LivelinessSampleCallback types are always
-// defined so `observer.liveliness_subscribers` and the
-// `Session::declare_liveliness_subscriber{_aliased}` Result-form
-// signatures compile unconditionally. The wire-codec dispatch body
-// inside the module uses `wz_codecs::declare::DeclareVariant`, which
-// is always available because the wz-codecs dep hardcodes
-// `codec-declare` (Cargo.toml dep features), independent of the
-// wz-runtime-tokio `codec-declare` consumer-side gate.
-mod liveliness_subscriber;
-#[cfg(feature = "declare-queryable")]
-mod queryable;
-#[cfg(feature = "declare-subscriber")]
-mod subscriber;
-
-// R311ds — `cross_tests` + the per-registry behavioural
-// `#[cfg(test)] mod tests` blocks migrated to wz-session-core next to
-// the registry code (R311dr-wider-tests carry closure). The four
-// sub-modules below are now pure re-export shells with no test-only
-// code; the fixture-builder dev-dep moved to wz-session-core too.
+// R311dt — the four declare sub-modules (subscriber / queryable /
+// liveliness / liveliness_subscriber) were pure re-export shells after
+// R311do-dq moved every registry body into wz-session-core. This parent
+// module now re-exports the registry types directly from
+// `wz_session_core::declare::*`, collapsing the redundant double hop
+// (declare.rs -> declare/X.rs shell -> wz_session_core) into a single
+// hop and deleting the four shell files. The
+// `wz_runtime_tokio::declare::*` consumer path is unchanged.
+//
+// The per-feature `#[cfg]` gate stays on each re-export so a
+// `--no-default-features --features declare-subscriber` build re-exposes
+// only the RemoteSubscriberRegistry surface and elides the
+// peer-queryable / liveliness observers entirely — exactly the eliding
+// behaviour the `#[cfg] mod X;` gate provided before (R310).
 
 #[cfg(feature = "liveliness-token")]
-pub use liveliness::{DeclTokenCallback, LivelinessRegistry, UndeclTokenCallback};
-pub use liveliness_subscriber::{
+pub use wz_session_core::declare::liveliness::{
+    DeclTokenCallback, LivelinessRegistry, UndeclTokenCallback,
+};
+// R311q — the liveliness_subscriber surface is type-ungated: the
+// LivelinessSubscriberRegistry + LivelinessSample + LivelinessSampleKind
+// + LivelinessSampleCallback types are always re-exported so
+// `observer.liveliness_subscribers` and the Result-form
+// `Session::declare_liveliness_subscriber{_aliased}` signatures compile
+// unconditionally.
+pub use wz_session_core::declare::liveliness_subscriber::{
     LivelinessSample, LivelinessSampleCallback, LivelinessSampleKind, LivelinessSubscriberRegistry,
 };
 #[cfg(feature = "declare-queryable")]
-pub use queryable::{DeclQueryableCallback, RemoteQueryableRegistry, UndeclQueryableCallback};
+pub use wz_session_core::declare::queryable::{
+    DeclQueryableCallback, RemoteQueryableRegistry, UndeclQueryableCallback,
+};
 #[cfg(feature = "declare-subscriber")]
-pub use subscriber::{DeclSubscriberCallback, RemoteSubscriberRegistry, UndeclSubscriberCallback};
-
-// resolve_wireexpr moved to wz-session-core at R311di-13;
-// the pub(super) use re-export above keeps the import path
-// `super::resolve_wireexpr` working for the 3 sub-module callers
-// (subscriber / liveliness / liveliness_subscriber).
+pub use wz_session_core::declare::subscriber::{
+    DeclSubscriberCallback, RemoteSubscriberRegistry, UndeclSubscriberCallback,
+};
