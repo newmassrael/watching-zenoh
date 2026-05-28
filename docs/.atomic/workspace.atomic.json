@@ -24771,6 +24771,68 @@
         "Architectural carries unchanged: R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter."
       ]
     },
+    "Round 311dj": {
+      "decision_summary": "SCE pin 55243e886→14ff5e36d (RustDeriveCategory SSOT) absorbed; wz manual core::fmt::Debug impl 3 sites removed",
+      "changes_bullets": [
+        "vendor/sce submodule 55243e886 -> 14ff5e36d (sce-build/src/forge/rust_derive_policy.rs SSOT, 7 categories; CodecStruct + CodecVariantEnum + EventSchemaPayload now derive Debug + Clone + PartialEq)",
+        "wz-session-core/src/network_message.rs: NetworkMessage enum gains #[derive(Debug)]; manual fmt::Debug impl + use core::fmt removed",
+        "wz-session-core/src/driver_loop.rs: DriverLoopOutcome + IterationEvent<'a> gain Debug derive; manual fmt::Debug impls (2) + use core::fmt removed",
+        "Module-level doc comments updated to reference SCE RustDeriveCategory::CodecStruct SSOT instead of historical 'sce-codegen only derives Default' explanation",
+        "Net diff: +14 / -71 across 3 files (vendor/sce pointer + 2 wz source files)"
+      ],
+      "verification_bullets": [
+        "cargo check -p wz-runtime-tokio 1.22s OK after manual impl removal (initial recompile 40.62s after sce-build version bump)",
+        "scripts/run-ci.sh Layer 0..E + F/G/Q SKIP: all required layers pass",
+        "WZ_RUN_LAYER_G=1: Layer G cross-compile gate G.1-G.6 7 MCU targets PASS (G.6 riscv32 SKIP only — host gcc absent)",
+        "wz-codecs codegen output verified post-bump: push.rs / ext_entry.rs emit #[derive(Debug, Clone, PartialEq)] on codec struct"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "carry_forward_bullets": [
+        "P0a pre-push hook flake (R311di-14 1차 fail incident): warm cache 10/10 PASS reproduction failed; R311af cumulative 22/22 PASS; mechanical root cause unidentified; feedback_no_flaky_ever strict carry preserved — apply Layer E warm-up mechanical option on next recurrence",
+        "R311dk: wz-runtime-tokio -> wz-codecs deps cleanup (composability 3-tier chain restoration)",
+        "R311dl: wire_const -> wz-codecs::wire_const home (N_MID_* DRY consolidation)",
+        "R311dm: wz-session-core self cfg(test) (alloc::sync::Arc + portable_atomic + spin::Mutex)",
+        "R311dn (di-15-pre): keyexpr_intersect_patterns + helpers -> wz-session-core::keyexpr_match (~200 LOC)",
+        "R311do (di-15): declare/subscriber.rs clean inherent has_matching",
+        "R311dp (di-16): declare/queryable.rs clean inherent has_matching",
+        "R311dq (di-17): declare/liveliness_subscriber.rs (694 lines + keyexpr_pattern_matches dep)",
+        "R311dr+: reply / query / pubsub / observer / session_glue cascade (long-tail; session_glue split is final round)",
+        "SCE smell carry: codec-oam / codec-interest features absent (sce-codegen-side round, cross-repo flow)"
+      ],
+      "publishable_decision_summary": "SCE pin 55243e886→14ff5e36d (RustDeriveCategory SSOT) absorbed; wz manual core::fmt::Debug impl 3 sites removed",
+      "publishable_changes_bullets": [
+        "vendor/sce submodule 55243e886 -> 14ff5e36d (sce-build/src/forge/rust_derive_policy.rs SSOT, 7 categories; CodecStruct + CodecVariantEnum + EventSchemaPayload now derive Debug + Clone + PartialEq)",
+        "wz-session-core/src/network_message.rs: NetworkMessage enum gains #[derive(Debug)]; manual fmt::Debug impl + use core::fmt removed",
+        "wz-session-core/src/driver_loop.rs: DriverLoopOutcome + IterationEvent<'a> gain Debug derive; manual fmt::Debug impls (2) + use core::fmt removed",
+        "Module-level doc comments updated to reference SCE RustDeriveCategory::CodecStruct SSOT instead of historical 'sce-codegen only derives Default' explanation",
+        "Net diff: +14 / -71 across 3 files (vendor/sce pointer + 2 wz source files)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo check -p wz-runtime-tokio 1.22s OK after manual impl removal (initial recompile 40.62s after sce-build version bump)",
+        "scripts/run-ci.sh Layer 0..E + F/G/Q SKIP: all required layers pass",
+        "WZ_RUN_LAYER_G=1: Layer G cross-compile gate G.1-G.6 7 MCU targets PASS (G.6 riscv32 SKIP only — host gcc absent)",
+        "wz-codecs codegen output verified post-bump: push.rs / ext_entry.rs emit #[derive(Debug, Clone, PartialEq)] on codec struct"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "publishable_carry_forward_bullets": [
+        "P0a pre-push hook flake (R311di-14 1차 fail incident): warm cache 10/10 PASS reproduction failed; R311af cumulative 22/22 PASS; mechanical root cause unidentified; feedback_no_flaky_ever strict carry preserved — apply Layer E warm-up mechanical option on next recurrence",
+        "R311dk: wz-runtime-tokio -> wz-codecs deps cleanup (composability 3-tier chain restoration)",
+        "R311dl: wire_const -> wz-codecs::wire_const home (N_MID_* DRY consolidation)",
+        "R311dm: wz-session-core self cfg(test) (alloc::sync::Arc + portable_atomic + spin::Mutex)",
+        "R311dn (di-15-pre): keyexpr_intersect_patterns + helpers -> wz-session-core::keyexpr_match (~200 LOC)",
+        "R311do (di-15): declare/subscriber.rs clean inherent has_matching",
+        "R311dp (di-16): declare/queryable.rs clean inherent has_matching",
+        "R311dq (di-17): declare/liveliness_subscriber.rs (694 lines + keyexpr_pattern_matches dep)",
+        "R311dr+: reply / query / pubsub / observer / session_glue cascade (long-tail; session_glue split is final round)",
+        "SCE smell carry: codec-oam / codec-interest features absent (sce-codegen-side round, cross-repo flow)"
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [

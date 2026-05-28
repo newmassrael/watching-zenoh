@@ -23,7 +23,6 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::fmt;
 
 use sce_forge_runtime::codec::{CodecError, SceCursor};
 
@@ -79,12 +78,12 @@ mod wire_const {
 /// R74 — one application-layer message inside a `Frame.payload` batch.
 ///
 /// See the module docstring for the wire-shape rationale and per-
-/// variant cfg gating policy. No `Debug` derive on the wrapped codec
-/// structs — wz-codecs structs only derive `Default` (sce-codegen
-/// output, see `crates/wz-codecs/tests/smoke.rs` header). The manual
-/// `Debug` impl below surfaces the variant kind without recursing
-/// into codec fields so consumers (`DriverLoopOutcome`, etc.) can
-/// keep their `#[derive(Debug)]`.
+/// variant cfg gating policy. `#[derive(Debug)]` derives transitively
+/// over wz-codecs codec structs — those carry the category-uniform
+/// `Debug + Clone + PartialEq` derive set per
+/// `sce-build::forge::rust_derive_policy::RustDeriveCategory::CodecStruct`
+/// SSOT (SCE 14ff5e36d).
+#[derive(Debug)]
 pub enum NetworkMessage {
     /// Network MID `_Z_MID_N_REQUEST` (0x1C). Carries a query / put /
     /// del wrapped in a Wireexpr + request-id envelope with response
@@ -158,28 +157,6 @@ pub enum NetworkMessage {
     /// losing data; the parse stops here to avoid mis-cursor-advancing
     /// across an unknown body length.
     Unknown { mid: u8, body: Vec<u8> },
-}
-
-impl fmt::Debug for NetworkMessage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            #[cfg(feature = "codec-request")]
-            Self::Request(_) => f.write_str("Request(..)"),
-            #[cfg(feature = "codec-push")]
-            Self::Push(_) => f.write_str("Push(..)"),
-            #[cfg(feature = "codec-response-final")]
-            Self::ResponseFinal(_) => f.write_str("ResponseFinal(..)"),
-            Self::Oam(_) => f.write_str("Oam(..)"),
-            Self::Interest(_) => f.write_str("Interest(..)"),
-            #[cfg(feature = "codec-response")]
-            Self::Response(_) => f.write_str("Response(..)"),
-            #[cfg(feature = "codec-declare")]
-            Self::Declare(_) => f.write_str("Declare(..)"),
-            Self::Unknown { mid, body } => {
-                write!(f, "Unknown {{ mid: {mid:#04x}, body_len: {} }}", body.len())
-            }
-        }
-    }
 }
 
 /// R74 — decode a `Frame.payload` byte slice into the in-order batch

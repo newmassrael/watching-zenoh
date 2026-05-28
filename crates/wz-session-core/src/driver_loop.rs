@@ -21,7 +21,6 @@
 //! `FramePayload.extensions`. Alloc-gated due to the Vec fields.
 
 use alloc::vec::Vec;
-use core::fmt;
 
 use wz_codecs::ext_entry::ExtEntry;
 
@@ -39,11 +38,12 @@ use crate::parse_error::InboundParseError;
 /// parse (the helper raises `FramingError` to the FSM and returns
 /// `ParseError` for logging); or the link itself terminated.
 ///
-/// No `derive(Debug)`: the `FramePayload.extensions` field is
-/// `Vec<ExtEntry>` and `ExtEntry` is wz-codecs sce-codegen output that
-/// only derives `Default`. The manual `Debug` impl below summarizes
-/// each variant without recursing into codec fields so existing test
-/// assertions of the form `{outcome:?}` keep working.
+/// `#[derive(Debug)]` derives transitively over wz-codecs codec
+/// structs (e.g. `ExtEntry`) — those carry the category-uniform
+/// `Debug + Clone + PartialEq` derive set per
+/// `sce-build::forge::rust_derive_policy::RustDeriveCategory::CodecStruct`
+/// SSOT (SCE 14ff5e36d).
+#[derive(Debug)]
 pub enum DriverLoopOutcome {
     /// A typed `SessionFsmUnicastEvent` reached `Engine::process_event`;
     /// any state transition triggered by the event has completed.
@@ -76,31 +76,6 @@ pub enum DriverLoopOutcome {
     /// `LinkLost` into the engine so the `link.lost` transition
     /// fires; the cause is returned for logging.
     LinkLost(LostCause),
-}
-
-impl fmt::Debug for DriverLoopOutcome {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AdvancedFsm => f.write_str("AdvancedFsm"),
-            Self::SideEffectOnly => f.write_str("SideEffectOnly"),
-            Self::FramePayload {
-                reliable,
-                sn,
-                messages,
-                has_ext,
-                extensions,
-            } => f
-                .debug_struct("FramePayload")
-                .field("reliable", reliable)
-                .field("sn", sn)
-                .field("messages", messages)
-                .field("has_ext", has_ext)
-                .field("ext_count", &extensions.len())
-                .finish(),
-            Self::ParseError(e) => write!(f, "ParseError({e:?})"),
-            Self::LinkLost(c) => write!(f, "LinkLost({c:?})"),
-        }
-    }
 }
 
 /// R83 — per-iteration event surfaced to the
@@ -145,7 +120,7 @@ impl fmt::Debug for DriverLoopOutcome {
 /// `dispatch_iteration_event` consumers (subscriber + queryable
 /// registries) without having to manually re-construct the variant
 /// or split the dispatch into separate iterations.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum IterationEvent<'a> {
     /// `poll_and_dispatch_one` returned. The borrowed outcome
     /// covers all five `DriverLoopOutcome` variants.
@@ -155,13 +130,4 @@ pub enum IterationEvent<'a> {
     /// verdict is carried here. `Copy` because the enum has only
     /// unit variants.
     Lease(LeaseCheckOutcome),
-}
-
-impl fmt::Debug for IterationEvent<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Poll(o) => write!(f, "Poll({o:?})"),
-            Self::Lease(o) => write!(f, "Lease({o:?})"),
-        }
-    }
 }
