@@ -31,6 +31,13 @@
 #              wz-runtime-tokio's defaults transitively enable
 #              wz-session-core/codec-declare; this lane makes that
 #              coverage explicit instead of an implicit coincidence)
+#   Layer C1d — cargo test -p wz-session-core (pub/sub data plane)
+#              (R311du; same shape as C1c. The migrated pubsub
+#              SubscriberRegistry test module gates on the full pub/sub
+#              data-plane union codec-push + codec-declare +
+#              codec-response-final + pubsub-{put,delete,attachment,
+#              timestamp}; this lane enumerates that union so the tests
+#              cannot silently drop out of CI on a defaults change)
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
 #   Layer C3 — per-package isolated `cargo clippy ... --all-targets`
 #              sub-lanes (R311cv; per-package isolated feature
@@ -491,6 +498,20 @@ layer_c1b_cargo_test_alloc() {
 # ever stops enabling codec-declare by default.
 layer_c1c_cargo_test_codec_declare() {
     (cd crates && cargo test -p wz-session-core --features codec-declare --quiet)
+}
+
+# ─── Layer C1d — cargo test -p wz-session-core (pub/sub data plane) ──
+#
+# R311du: same shape as C1c. The pubsub SubscriberRegistry test module
+# (migrated from wz-runtime-tokio) gates on the full pub/sub data-plane
+# feature union (codec-push + codec-declare + codec-response-final +
+# pubsub-{put,delete,attachment,timestamp}). Layer C1's
+# `cargo test --workspace` runs them because wz-runtime-tokio's defaults
+# enable all of those, but that is an implicit cross-crate coincidence.
+# This lane enumerates the union explicitly so the pubsub tests cannot
+# silently drop out of CI if wz-runtime-tokio's defaults change.
+layer_c1d_cargo_test_pubsub() {
+    (cd crates && cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --quiet)
 }
 
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
@@ -1014,6 +1035,7 @@ run_layer C0 layer_c0_test_discipline || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1
+run_layer C1d layer_c1d_cargo_test_pubsub || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer D layer_d_validate_deploy || overall=1

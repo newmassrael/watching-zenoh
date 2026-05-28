@@ -125,3 +125,13 @@ pub mod wireexpr_resolve;
 /// the callback Box + Vec storage.
 #[cfg(feature = "alloc")]
 pub mod declare;
+
+/// R311du — application-layer local subscriber registry
+/// (`SubscriberRegistry` + `SubscriptionId`): the keyexpr callbacks the
+/// application registers so an inbound `Push` fires them. The dispatch
+/// arms gate on `codec-push` (they consume wz-codecs `Push` records);
+/// the struct itself is alloc-gated for the callback `Box` + `Vec`
+/// storage. Runtime-agnostic (`FnMut + Send`, no async), so the same
+/// registry serves the tokio (AP) and lwIP (MCU) runtimes.
+#[cfg(feature = "alloc")]
+pub mod pubsub;

@@ -64,6 +64,17 @@ codec-response = ["codec-frame", "wz-codecs/codec-response"]
 codec-response-final = ["wz-codecs/codec-response-final"]
 codec-declare = ["codec-frame", "wz-codecs/codec-declare"]
 
+# R311du — pub/sub data-plane gates for the migrated SubscriberRegistry
+# dispatch arms (Put / Del payload handling + attachment / timestamp ext
+# extraction). Standalone (no wz-codecs forward — the gating is at the
+# wz-session-core dispatch level, not the codec level); the
+# wz-runtime-tokio side forwards its same-named features here so the
+# gated production arms compile consistently across the workspace.
+pubsub-put = []
+pubsub-delete = []
+pubsub-attachment = []
+pubsub-timestamp = []
+
 [dependencies]
 wz-runtime-core = { path = "../wz-runtime-core" }
 # R311di-4 — wz-codecs needed by sample.rs for `wz_codecs::ext_entry`
@@ -86,6 +97,12 @@ sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-
 # resolves `HashMap<u64, String>::get` without leaning on the
 # wz-runtime-tokio side enabling it transitively.
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"] }
+# R311du — log facade for the SubscriberRegistry keyexpr-resolution warn
+# path (register_with_locality emits log::warn! when a registered keyexpr
+# fails canonicalization). no_std-compatible facade; mirrors the
+# wz-runtime-tokio log dep so the migrated production code resolves
+# `log::warn!` without a new transitive assumption.
+log = "0.4"
 
 [dev-dependencies]
 # R311ds — the four declare/* registries' wider behavioural tests

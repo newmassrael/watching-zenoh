@@ -25391,6 +25391,60 @@
         "long-tail carry preserved: P0a pre-push flake / SCE smell #2 codec-oam+codec-interest / R311cb-co --no-default-features cascade (wz-runtime-tokio 16 + wz-codecs 39 errors)"
       ]
     },
+    "Round 311du": {
+      "decision_summary": "R311du migrates the pubsub SubscriberRegistry to wz-session-core (move + AP re-export shell), adding the pubsub-* features, a log dep, and the explicit C1d test lane.",
+      "changes_bullets": [
+        "git mv crates/wz-runtime-tokio/src/pubsub.rs -> crates/wz-session-core/src/pubsub.rs (SubscriberRegistry + SubscriptionId + SubscriberCallback + the keyexpr_match re-export; ~816 production LOC + 83 behavioural tests). Runtime-agnostic (FnMut + Send, no async), so the same registry serves the tokio (AP) and lwIP (MCU) runtimes",
+        "production import rewrites: crate::session_glue::{DriverLoopOutcome,IterationEvent} -> crate::driver_loop, NetworkMessage -> crate::network_message, wz_session_core::keyexpr_match -> crate::keyexpr_match (self-crate path is invalid inside wz-session-core); added `use alloc::{boxed::Box, string::{String,ToString}, vec::Vec}` because no_std has no std prelude (network_message.rs convention)",
+        "4 consumer-crate intra-doc links (crate::session::Session, crate::query::QueryableRegistry, crate::session_glue::*) converted to plain backtick text -- wz-session-core cannot back-reference wz-runtime-tokio (matches the migrated driver_loop.rs which carries zero such refs)",
+        "test module gated #[cfg(all(test, codec-push, codec-declare, codec-response-final, pubsub-put, pubsub-delete, pubsub-attachment, pubsub-timestamp))] -- the full data-plane union it exercises; test imports rewritten (portable_atomic -> core::sync::atomic, crate::sync::Mutex -> std::sync::Mutex, crate::session_glue::IterationEvent -> crate::driver_loop) + alloc prelude added",
+        "crates/wz-session-core/Cargo.toml: pubsub-{put,delete,attachment,timestamp} features added (standalone) + log = \"0.4\" dependency (register_with_locality emits log::warn!); crates/wz-session-core/src/lib.rs registers `#[cfg(feature=\"alloc\")] pub mod pubsub;`",
+        "crates/wz-runtime-tokio/src/pubsub.rs is now a re-export shell (pub use wz_session_core::pubsub::*); crates/wz-runtime-tokio/Cargo.toml forwards pubsub-{put,delete,attachment,timestamp} to wz-session-core (pubsub-allow-loop stays AP-only -- it gates the self-publish loopback path, which has no session-core arm)",
+        "scripts/run-ci.sh + .github/workflows/ci.yml: Layer C1d (cargo test -p wz-session-core --features <pubsub union>) added after C1c so the migrated pubsub tests are non-implicit CI coverage (R311ds-c1c precedent)"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --lib: 197 passed; 0 failed (114 prior codec-declare set + 83 migrated pubsub tests)",
+        "bash scripts/run-ci.sh --layer C1d: pass (dispatch routes correctly); bash -n scripts/run-ci.sh OK; ci.yml parses via python yaml.safe_load with C1c/C1d/C2 order preserved",
+        "scripts/run-ci.sh full: all required layers pass (A, A2, B per-codec codegen, C0, C1 cargo test --workspace, C1b, C1c, C1d, C2 clippy --workspace --all-targets -D warnings, C3 per-package isolated clippy, D, E); zero warnings/errors across the entire run; Layer F/G/Q opt-in SKIP",
+        "consumer path wz_runtime_tokio::pubsub::* still resolves via the shell -- observer / query / reply / session / session_glue and the integration tests all compile under the C1 workspace lane"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "module-migration cascade continues bottom-up: query (QueryableRegistry ~878 prod LOC), reply (ReplyRegistry ~672), observer (ApplicationLayerObserver ~360, depends on pubsub+query+reply) still in wz-runtime-tokio",
+        "pubsub re-export shell (wz_runtime_tokio::pubsub) to be collapsed together with the query/reply/observer shells in a future shell-collapse round (R311dt precedent)",
+        "pre-existing broken intra-doc link crate::pubsub::Subscriber in wz-runtime-tokio/src/session.rs (a Subscriber type that never existed at that path); out of R311du scope -- flagged for a session.rs doc cleanup",
+        "DP1/DP2/DP3 (user calls) unchanged: --no-default-features composability gap (SCE codec-oam/codec-interest feature + alloc-off policy) / declare+pubsub facade full removal vs thin facade / session_glue.rs + session.rs monster-file split",
+        "long-tail carry preserved: P0a pre-push flake / SCE smell #2 codec-oam+codec-interest / R311cb-co --no-default-features cascade (wz-runtime-tokio 16 + wz-codecs 39 errors)"
+      ],
+      "publishable_decision_summary": "R311du migrates the pubsub SubscriberRegistry to wz-session-core (move + AP re-export shell), adding the pubsub-* features, a log dep, and the explicit C1d test lane.",
+      "publishable_changes_bullets": [
+        "git mv crates/wz-runtime-tokio/src/pubsub.rs -> crates/wz-session-core/src/pubsub.rs (SubscriberRegistry + SubscriptionId + SubscriberCallback + the keyexpr_match re-export; ~816 production LOC + 83 behavioural tests). Runtime-agnostic (FnMut + Send, no async), so the same registry serves the tokio (AP) and lwIP (MCU) runtimes",
+        "production import rewrites: crate::session_glue::{DriverLoopOutcome,IterationEvent} -> crate::driver_loop, NetworkMessage -> crate::network_message, wz_session_core::keyexpr_match -> crate::keyexpr_match (self-crate path is invalid inside wz-session-core); added `use alloc::{boxed::Box, string::{String,ToString}, vec::Vec}` because no_std has no std prelude (network_message.rs convention)",
+        "4 consumer-crate intra-doc links (crate::session::Session, crate::query::QueryableRegistry, crate::session_glue::*) converted to plain backtick text -- wz-session-core cannot back-reference wz-runtime-tokio (matches the migrated driver_loop.rs which carries zero such refs)",
+        "test module gated #[cfg(all(test, codec-push, codec-declare, codec-response-final, pubsub-put, pubsub-delete, pubsub-attachment, pubsub-timestamp))] -- the full data-plane union it exercises; test imports rewritten (portable_atomic -> core::sync::atomic, crate::sync::Mutex -> std::sync::Mutex, crate::session_glue::IterationEvent -> crate::driver_loop) + alloc prelude added",
+        "crates/wz-session-core/Cargo.toml: pubsub-{put,delete,attachment,timestamp} features added (standalone) + log = \"0.4\" dependency (register_with_locality emits log::warn!); crates/wz-session-core/src/lib.rs registers `#[cfg(feature=\"alloc\")] pub mod pubsub;`",
+        "crates/wz-runtime-tokio/src/pubsub.rs is now a re-export shell (pub use wz_session_core::pubsub::*); crates/wz-runtime-tokio/Cargo.toml forwards pubsub-{put,delete,attachment,timestamp} to wz-session-core (pubsub-allow-loop stays AP-only -- it gates the self-publish loopback path, which has no session-core arm)",
+        "scripts/run-ci.sh + .github/workflows/ci.yml: Layer C1d (cargo test -p wz-session-core --features <pubsub union>) added after C1c so the migrated pubsub tests are non-implicit CI coverage (R311ds-c1c precedent)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --lib: 197 passed; 0 failed (114 prior codec-declare set + 83 migrated pubsub tests)",
+        "bash scripts/run-ci.sh --layer C1d: pass (dispatch routes correctly); bash -n scripts/run-ci.sh OK; ci.yml parses via python yaml.safe_load with C1c/C1d/C2 order preserved",
+        "scripts/run-ci.sh full: all required layers pass (A, A2, B per-codec codegen, C0, C1 cargo test --workspace, C1b, C1c, C1d, C2 clippy --workspace --all-targets -D warnings, C3 per-package isolated clippy, D, E); zero warnings/errors across the entire run; Layer F/G/Q opt-in SKIP",
+        "consumer path wz_runtime_tokio::pubsub::* still resolves via the shell -- observer / query / reply / session / session_glue and the integration tests all compile under the C1 workspace lane"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "module-migration cascade continues bottom-up: query (QueryableRegistry ~878 prod LOC), reply (ReplyRegistry ~672), observer (ApplicationLayerObserver ~360, depends on pubsub+query+reply) still in wz-runtime-tokio",
+        "pubsub re-export shell (wz_runtime_tokio::pubsub) to be collapsed together with the query/reply/observer shells in a future shell-collapse round (R311dt precedent)",
+        "pre-existing broken intra-doc link crate::pubsub::Subscriber in wz-runtime-tokio/src/session.rs (a Subscriber type that never existed at that path); out of R311du scope -- flagged for a session.rs doc cleanup",
+        "DP1/DP2/DP3 (user calls) unchanged: --no-default-features composability gap (SCE codec-oam/codec-interest feature + alloc-off policy) / declare+pubsub facade full removal vs thin facade / session_glue.rs + session.rs monster-file split",
+        "long-tail carry preserved: P0a pre-push flake / SCE smell #2 codec-oam+codec-interest / R311cb-co --no-default-features cascade (wz-runtime-tokio 16 + wz-codecs 39 errors)"
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
