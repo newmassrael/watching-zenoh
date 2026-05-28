@@ -21,9 +21,16 @@
 //! always present in wz-codecs (no `codec-oam` / `codec-interest`
 //! feature exists).
 
+#[cfg(any(
+    feature = "codec-request",
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-declare",
+))]
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+#[cfg(feature = "codec-frame")]
 use sce_forge_runtime::codec::{CodecError, SceCursor};
 
 #[cfg(feature = "codec-declare")]
