@@ -15,12 +15,12 @@ pub use wz_session_core::declare::queryable::{
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_helpers::*;
     use super::*;
     use hashbrown::HashMap;
     use portable_atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use wz_codecs::declare::DeclareVariant;
+    use wz_session_core::declare::test_helpers::*;
 
     use crate::session_glue::NetworkMessage;
     use crate::sync::Mutex;

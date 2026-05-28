@@ -94,8 +94,11 @@ mod subscriber;
 
 #[cfg(test)]
 mod cross_tests;
-#[cfg(test)]
-mod test_helpers;
+// R311dr — `test_helpers` migrated to
+// `wz-session-core::declare::test_helpers` under the `test-helpers`
+// Cargo feature; the dev-dep activation in this crate's Cargo.toml
+// exposes the builders to the shell `#[cfg(test)] mod tests` blocks
+// below without keeping a duplicate fixture file here.
 
 #[cfg(feature = "liveliness-token")]
 pub use liveliness::{DeclTokenCallback, LivelinessRegistry, UndeclTokenCallback};

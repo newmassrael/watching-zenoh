@@ -22,12 +22,12 @@ pub use wz_session_core::declare::liveliness_subscriber::{
 // here for self-documentation.
 #[cfg(all(test, feature = "liveliness-subscriber", feature = "codec-declare"))]
 mod tests {
-    use super::super::test_helpers::*;
     use super::*;
     use crate::session_glue::NetworkMessage;
     use hashbrown::HashMap;
     use portable_atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use wz_session_core::declare::test_helpers::*;
 
     use crate::sync::Mutex;
     use wz_codecs::declare::DeclareVariant;
