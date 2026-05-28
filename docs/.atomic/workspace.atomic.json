@@ -25141,6 +25141,58 @@
         "R311dj/dk/dl/dm/dn/do/dp/dq carry preserved: P0a flake / SCE smell #2 / R311cb-co --no-default-features cascade / R311dn-tests / R311dm-helpers"
       ]
     },
+    "Round 311dr": {
+      "decision_summary": "test_helpers fixture builders migrated to wz-session-core/declare under `test-helpers` Cargo feature (dev-dep); 5 callsites switched to wz_session_core path.",
+      "changes_bullets": [
+        "wz-session-core/Cargo.toml: feature `test-helpers = [\"alloc\", \"codec-declare\"]` added; off by default so production wz-session-core artifacts carry no fixture code",
+        "wz-session-core/src/declare.rs: `#[cfg(feature = \"test-helpers\")] pub mod test_helpers;` registered; module-doc updated to reflect R311dr migration (cross_tests + wider behavioural tests stay in wz-runtime-tokio per R311dm carry)",
+        "wz-session-core/src/declare/test_helpers.rs: new module (~167 LOC); contents migrated verbatim from wz-runtime-tokio with pub(super) -> pub visibility, `#[cfg(any(liveliness-token, liveliness-subscriber))]` gates removed (test-helpers feature already implies codec-declare so all four builder families always compile), and `use alloc::string::ToString;` added for no_std + alloc footing",
+        "wz-runtime-tokio/Cargo.toml: dev-dependency `wz-session-core = { ..., features = [\"test-helpers\"] }` added alongside the existing alloc dep; Cargo dev-vs-regular feature isolation keeps production builds helper-free",
+        "wz-runtime-tokio/src/declare.rs: `#[cfg(test)] mod test_helpers;` removed (replaced by short carry-pointer comment to wz_session_core::declare::test_helpers)",
+        "wz-runtime-tokio/src/declare/test_helpers.rs: deleted (166 LOC retired)",
+        "wz-runtime-tokio/src/declare/{subscriber,queryable,liveliness,liveliness_subscriber,cross_tests}.rs: 5 callsites switched from `super::[super::]test_helpers::*` to `wz_session_core::declare::test_helpers::*`"
+      ],
+      "verification_bullets": [
+        "cargo check -p wz-session-core --features test-helpers: PASS (0.12s, alloc::string::ToString import resolved)",
+        "cargo test -p wz-runtime-tokio --lib: 537 passed; 0 failed (R311dq baseline preserved across cross-crate fixture move)",
+        "scripts/run-ci.sh Layer 0..E + F/G/Q SKIP: all required layers pass",
+        "WZ_RUN_LAYER_G=1: Layer G 7 MCU targets (M0+/M3/M4F/M7/M23/M33/M55SF/M55HF + RISC-V IMAC) x G.1-G.6 PASS (cross-real RISC-V toolchain SKIP audit-traced)"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "wider behavioural `#[cfg(test)] mod tests` (Arc<Mutex<Vec<...>>> capture patterns) intentionally remain in wz-runtime-tokio/src/declare/{subscriber,queryable,liveliness,liveliness_subscriber}.rs per R311dm carry — no alloc::sync::Mutex equivalent for the std::sync::Mutex alias; migrating those is a separate later sub-round, not R311dr scope",
+        "R311ds+ pubsub.rs cascade (R311dq carry priority 2): keyexpr_match tests (R311dn-tests carry) + reply/query/observer/session_glue surface; pubsub.rs (~1700 LOC) is the next-biggest single file",
+        "R311e codec-response-final cascade reserved (codec-* gate + 9 session_glue cfg sites)",
+        "Long-tail carry preserved: P0a flake / SCE smell #2 / R311cb-co --no-default-features cascade"
+      ],
+      "publishable_decision_summary": "test_helpers fixture builders migrated to wz-session-core/declare under `test-helpers` Cargo feature (dev-dep); 5 callsites switched to wz_session_core path.",
+      "publishable_changes_bullets": [
+        "wz-session-core/Cargo.toml: feature `test-helpers = [\"alloc\", \"codec-declare\"]` added; off by default so production wz-session-core artifacts carry no fixture code",
+        "wz-session-core/src/declare.rs: `#[cfg(feature = \"test-helpers\")] pub mod test_helpers;` registered; module-doc updated to reflect R311dr migration (cross_tests + wider behavioural tests stay in wz-runtime-tokio per R311dm carry)",
+        "wz-session-core/src/declare/test_helpers.rs: new module (~167 LOC); contents migrated verbatim from wz-runtime-tokio with pub(super) -> pub visibility, `#[cfg(any(liveliness-token, liveliness-subscriber))]` gates removed (test-helpers feature already implies codec-declare so all four builder families always compile), and `use alloc::string::ToString;` added for no_std + alloc footing",
+        "wz-runtime-tokio/Cargo.toml: dev-dependency `wz-session-core = { ..., features = [\"test-helpers\"] }` added alongside the existing alloc dep; Cargo dev-vs-regular feature isolation keeps production builds helper-free",
+        "wz-runtime-tokio/src/declare.rs: `#[cfg(test)] mod test_helpers;` removed (replaced by short carry-pointer comment to wz_session_core::declare::test_helpers)",
+        "wz-runtime-tokio/src/declare/test_helpers.rs: deleted (166 LOC retired)",
+        "wz-runtime-tokio/src/declare/{subscriber,queryable,liveliness,liveliness_subscriber,cross_tests}.rs: 5 callsites switched from `super::[super::]test_helpers::*` to `wz_session_core::declare::test_helpers::*`"
+      ],
+      "publishable_verification_bullets": [
+        "cargo check -p wz-session-core --features test-helpers: PASS (0.12s, alloc::string::ToString import resolved)",
+        "cargo test -p wz-runtime-tokio --lib: 537 passed; 0 failed (R311dq baseline preserved across cross-crate fixture move)",
+        "scripts/run-ci.sh Layer 0..E + F/G/Q SKIP: all required layers pass",
+        "WZ_RUN_LAYER_G=1: Layer G 7 MCU targets (M0+/M3/M4F/M7/M23/M33/M55SF/M55HF + RISC-V IMAC) x G.1-G.6 PASS (cross-real RISC-V toolchain SKIP audit-traced)"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "wider behavioural `#[cfg(test)] mod tests` (Arc<Mutex<Vec<...>>> capture patterns) intentionally remain in wz-runtime-tokio/src/declare/{subscriber,queryable,liveliness,liveliness_subscriber}.rs per R311dm carry — no alloc::sync::Mutex equivalent for the std::sync::Mutex alias; migrating those is a separate later sub-round, not R311dr scope",
+        "R311ds+ pubsub.rs cascade (R311dq carry priority 2): keyexpr_match tests (R311dn-tests carry) + reply/query/observer/session_glue surface; pubsub.rs (~1700 LOC) is the next-biggest single file",
+        "R311e codec-response-final cascade reserved (codec-* gate + 9 session_glue cfg sites)",
+        "Long-tail carry preserved: P0a flake / SCE smell #2 / R311cb-co --no-default-features cascade"
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [

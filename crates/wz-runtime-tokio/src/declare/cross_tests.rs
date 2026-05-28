@@ -15,8 +15,8 @@
 
 #![cfg(test)]
 
-use super::test_helpers::*;
 use super::*;
+use wz_session_core::declare::test_helpers::*;
 
 use portable_atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

@@ -21,9 +21,13 @@
 //! | R311di-16 | (queryable, planned)                 | 489             |
 //! | R311di-17 | (liveliness_subscriber, planned)     | 694             |
 //!
-//! The `cross_tests.rs` + `test_helpers.rs` AP-side test fixtures
-//! stay in wz-runtime-tokio because they exercise the AP-bound
-//! Tokio sync primitives (`crate::sync::Mutex` + `std::sync::Arc`).
+//! R311dr — `test_helpers.rs` migrated into wz-session-core under the
+//! `test-helpers` Cargo feature so the four wz-runtime-tokio shell
+//! tests no longer carry duplicate fixture code. `cross_tests.rs`
+//! plus the wider behavioural `#[cfg(test)] mod tests` blocks stay
+//! in wz-runtime-tokio because they exercise AP-bound Tokio sync
+//! primitives (`crate::sync::Mutex` + `std::sync::Arc`) that the
+//! no_std + alloc footing here does not provide (R311dm carry).
 
 #[cfg(feature = "codec-declare")]
 pub mod liveliness;
@@ -36,3 +40,6 @@ pub mod queryable;
 
 #[cfg(feature = "codec-declare")]
 pub mod liveliness_subscriber;
+
+#[cfg(feature = "test-helpers")]
+pub mod test_helpers;
