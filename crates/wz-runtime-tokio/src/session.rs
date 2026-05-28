@@ -6077,11 +6077,12 @@ mod tests {
 
     /// Local construction helper for inbound `DeclQueryable` /
     /// `UndeclQueryable` records that exercise the
-    /// `remote_queryables` registry from session.rs tests. The
-    /// `crate::declare::test_helpers` versions are
-    /// `pub(super)`-scoped to the declare module so we cannot import
-    /// them here; the constructors are intentionally small so
-    /// inlining is cheaper than relaxing the helper visibility.
+    /// `remote_queryables` registry from session.rs tests. Returns a
+    /// ready `DeclareVariant` body from a single keyexpr literal —
+    /// distinct ergonomics from the `wz-session-core-test-support`
+    /// record builders (those return the unwrapped `DeclQueryable`
+    /// and take a separate `mapping_id`), so the 1-arg wrapper stays
+    /// inline here rather than threading the lower-level builders.
     fn make_decl_queryable(id: u64, keyexpr_literal: &str) -> wz_codecs::declare::DeclareVariant {
         use wz_codecs::decl_queryable::DeclQueryable;
         use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
@@ -6759,9 +6760,9 @@ mod tests {
 
     /// R290 — local DeclSubscriber / UndeclSubscriber constructors
     /// for session.rs tests. Mirror of the R288 make_decl_queryable /
-    /// make_undecl_queryable helpers; the
-    /// crate::declare::test_helpers versions are pub(super)-scoped
-    /// to the declare module and not visible here.
+    /// make_undecl_queryable helpers; returns a ready `DeclareVariant`
+    /// body from a single keyexpr literal, distinct ergonomics from
+    /// the `wz-session-core-test-support` record builders.
     fn make_decl_subscriber(id: u64, keyexpr_literal: &str) -> wz_codecs::declare::DeclareVariant {
         use wz_codecs::decl_subscriber::DeclSubscriber;
         use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};

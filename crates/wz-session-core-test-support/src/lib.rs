@@ -1,26 +1,28 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Shared fixture builders for the four declare/* registry tests.
-//! Each helper composes a minimal codec record (DeclSubscriber /
-//! DeclQueryable / DeclToken and their Undecl counterparts) so the
-//! AP-side `#[cfg(test)] mod tests` blocks in
-//! `wz-runtime-tokio/src/declare/{subscriber,queryable,liveliness,
-//! liveliness_subscriber,cross_tests}.rs` share a single source for
-//! fixture shape.
+//! Test fixture builders for the four `wz-session-core::declare/*`
+//! registries. Consumed exclusively by the AP-side
+//! `#[cfg(test)] mod tests` blocks in
+//! `wz-runtime-tokio/src/declare/{subscriber, queryable, liveliness,
+//! liveliness_subscriber, cross_tests}.rs`.
 //!
-//! Exposed under the `test-helpers` Cargo feature so the helpers
-//! compile only when an explicit consumer (wz-runtime-tokio's
-//! dev-dependency) opts in. Production wz-session-core artifacts
-//! carry no fixture code (R311dr feature-gate contract).
+//! R311dr-sibling entry — the body migrated unchanged from
+//! `wz-session-core/src/declare/test_helpers.rs` (intermediate R311dr
+//! home) to this sibling crate. The intermediate feature-gated module
+//! reintroduced the production-crate-feature-flag anti-pattern that
+//! R71 already ratified out (see `wz-runtime-tokio-test-support`
+//! header for the original R71 rationale). This crate restores R71
+//! shape: production wz-session-core builds carry zero test-only
+//! code paths regardless of workspace-level Cargo feature unification.
 //!
-//! Cross-crate visibility note (R311dr migration from wz-runtime-tokio
-//! `pub(super)`): the helpers are `pub` here because the consumer
-//! `#[cfg(test)]` blocks live in a sibling crate. The function bodies
-//! themselves remain unchanged from the pre-R311dr wz-runtime-tokio
-//! home — only the visibility and module path moved.
-
-use alloc::string::ToString;
+//! Why a second sibling at this tier (not folded into
+//! `wz-runtime-tokio-test-support`): the declare/* fixture builders
+//! reach only wz-codecs types, while the R71 sibling reaches the
+//! full Lua + tokio + Session surface. Folding would inflate the
+//! transitive dev-dep graph for every declare/* test mod
+//! unnecessarily, breaking the production-tier separation
+//! (wz-codecs + wz-session-core sit a tier below wz-runtime-tokio).
 
 use wz_codecs::decl_queryable::DeclQueryable;
 use wz_codecs::decl_subscriber::DeclSubscriber;
