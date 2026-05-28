@@ -24833,6 +24833,52 @@
         "SCE smell carry: codec-oam / codec-interest features absent (sce-codegen-side round, cross-repo flow)"
       ]
     },
+    "Round 311dk": {
+      "decision_summary": "wz-runtime-tokio -> wz-codecs deps cleanup: drop hard-coded codec-* force-on; restore 3-tier composability chain",
+      "changes_bullets": [
+        "wz-runtime-tokio/Cargo.toml: wz-codecs dep features [\"alloc\", \"codec-push\", \"codec-declare\", \"codec-request\", \"codec-response\"] -> [\"alloc\"] only (default-features = false retained)",
+        "codec-push / codec-declare / codec-request / codec-response feature lines extended to forward wz-codecs/codec-X (R311h..R311k uniform pattern)",
+        "wz-session-core/src/network_message.rs: cfg-gate use alloc::boxed::Box on any(codec-request, codec-push, codec-response, codec-declare); cfg-gate use sce_forge_runtime::codec::{CodecError, SceCursor} on codec-frame",
+        "Net: wz-codecs hard-coded force-on subset eliminated; facade-level --no-default-features now actually elides codec-push/declare/request/response (R311a4 composability honesty restored)"
+      ],
+      "verification_bullets": [
+        "cargo check -p wz-runtime-tokio default: 0.36s OK",
+        "cargo check -p wz-session-core --no-default-features: 0.58s OK (composability propagation verified at session-core seam)",
+        "scripts/run-ci.sh Layer 0..E + F/G/Q SKIP: all required layers pass",
+        "WZ_RUN_LAYER_G=1 cross-compile gate: Layer G 7 MCU targets x lanes G.1-G.6 PASS (G.6 riscv32 SKIP host gcc absent)"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "carry_forward_bullets": [
+        "wz-runtime-tokio --no-default-features 16 errors surfaced (E0432/E0433 unresolved imports: crate::session_fsm_unicast x7, wz_codecs::query/request/declare/reply/response x5, crate::keyexpr_canon x1; 1 unused_variable batch_size) -- R311ca audit 'wz-runtime-tokio 80% unwired' territory; R311cb-co cascade carry (multi-week long tail)",
+        "wz-codecs --no-default-features 39 errors -- alloc OFF + codec-* OFF cascade; codec module Vec/String/sce-codegen output unwired sites; separate round",
+        "R311dj carry preserved: P0a flake / R311dl wire_const / R311dm cfg(test) / R311dn..dq di-15-pre/15/16/17 / R311dr+ reply..session_glue / SCE smell #2 codec-oam/codec-interest"
+      ],
+      "publishable_decision_summary": "wz-runtime-tokio -> wz-codecs deps cleanup: drop hard-coded codec-* force-on; restore 3-tier composability chain",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/Cargo.toml: wz-codecs dep features [\"alloc\", \"codec-push\", \"codec-declare\", \"codec-request\", \"codec-response\"] -> [\"alloc\"] only (default-features = false retained)",
+        "codec-push / codec-declare / codec-request / codec-response feature lines extended to forward wz-codecs/codec-X (R311h..R311k uniform pattern)",
+        "wz-session-core/src/network_message.rs: cfg-gate use alloc::boxed::Box on any(codec-request, codec-push, codec-response, codec-declare); cfg-gate use sce_forge_runtime::codec::{CodecError, SceCursor} on codec-frame",
+        "Net: wz-codecs hard-coded force-on subset eliminated; facade-level --no-default-features now actually elides codec-push/declare/request/response (R311a4 composability honesty restored)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo check -p wz-runtime-tokio default: 0.36s OK",
+        "cargo check -p wz-session-core --no-default-features: 0.58s OK (composability propagation verified at session-core seam)",
+        "scripts/run-ci.sh Layer 0..E + F/G/Q SKIP: all required layers pass",
+        "WZ_RUN_LAYER_G=1 cross-compile gate: Layer G 7 MCU targets x lanes G.1-G.6 PASS (G.6 riscv32 SKIP host gcc absent)"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "publishable_carry_forward_bullets": [
+        "wz-runtime-tokio --no-default-features 16 errors surfaced (E0432/E0433 unresolved imports: crate::session_fsm_unicast x7, wz_codecs::query/request/declare/reply/response x5, crate::keyexpr_canon x1; 1 unused_variable batch_size) -- R311ca audit 'wz-runtime-tokio 80% unwired' territory; R311cb-co cascade carry (multi-week long tail)",
+        "wz-codecs --no-default-features 39 errors -- alloc OFF + codec-* OFF cascade; codec module Vec/String/sce-codegen output unwired sites; separate round",
+        "R311dj carry preserved: P0a flake / R311dl wire_const / R311dm cfg(test) / R311dn..dq di-15-pre/15/16/17 / R311dr+ reply..session_glue / SCE smell #2 codec-oam/codec-interest"
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [

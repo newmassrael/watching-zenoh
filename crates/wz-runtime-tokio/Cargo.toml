@@ -224,7 +224,7 @@ codec-frame = ["wz-codecs/codec-frame", "wz-session-core/codec-frame"]
 # closes the first body-codec handshake-only-deploy contract slot
 # (codec-frame OFF now requires codec-push OFF; R311i/j/k will extend
 # the same imply to declare/request/response).
-codec-push = ["codec-frame", "wz-session-core/codec-push"]
+codec-push = ["wz-codecs/codec-push", "codec-frame", "wz-session-core/codec-push"]
 # R311i — codec-declare gates wz-runtime-tokio's Declare wire surface
 # in session_glue.rs: Declare/DeclareVariant/Decl*/Undecl* imports,
 # N_MID_DECLARE const, 8 build_declare_* + 4 build_undeclare_* +
@@ -236,7 +236,7 @@ codec-push = ["codec-frame", "wz-session-core/codec-push"]
 # subscriber/queryable/liveliness/liveliness_subscriber modules
 # + pubsub.rs absorb_declare stay always-on at this round per the
 # R311m architectural deferral.
-codec-declare = ["codec-frame", "wz-session-core/codec-declare"]
+codec-declare = ["wz-codecs/codec-declare", "codec-frame", "wz-session-core/codec-declare"]
 # R311j — codec-request gates the wz-runtime-tokio Request wire surface
 # in session_glue.rs: Request/RequestVariant/Query imports, N_MID_REQUEST
 # const, build_request_query + build_request_query_with_meta +
@@ -245,7 +245,7 @@ codec-declare = ["codec-frame", "wz-session-core/codec-declare"]
 # body-codec-implies-envelope edge. query-get / query-queryable imply
 # codec-request so the wire path is mechanically available whenever
 # the high-level query surface is on.
-codec-request = ["codec-frame", "wz-session-core/codec-request"]
+codec-request = ["wz-codecs/codec-request", "codec-frame", "wz-session-core/codec-request"]
 # R311k — codec-response gates the wz-runtime-tokio Response wire
 # surface in session_glue.rs: Response/ResponseVariant/Reply/Err
 # imports, N_MID_RESPONSE const, 4 build_response_* builders,
@@ -256,7 +256,7 @@ codec-request = ["codec-frame", "wz-session-core/codec-request"]
 # deploy contract (Init / Open / Close + KeepAlive only). query-reply
 # and query-queryable imply codec-response (the reply emit path on
 # the queryable side).
-codec-response = ["codec-frame", "wz-session-core/codec-response"]
+codec-response = ["wz-codecs/codec-response", "codec-frame", "wz-session-core/codec-response"]
 # R311cb — transport domain wire-up. 5 atomic features that have real
 # source behavior in this crate (Cargo.toml authoring intent: "16
 # atomic, 5 active / 11 reserved"). Each gates a concrete cfg site:
@@ -364,13 +364,18 @@ sce-build = { path = "../../vendor/sce/sce-build" }
 [dependencies]
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
 # R311a1 — `default-features = false` + explicit `alloc` so the codec
-# emit/include of `init_body` / `open_body` is governed strictly by the
-# `codec-init-body` / `codec-open-body` forwards above. Without
-# disabling defaults the codec features would always activate via
-# wz-codecs's own default list, making the forwards a no-op and
-# preventing facade-level `--no-default-features` from elide-ing the
-# pair.
-wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc", "codec-push", "codec-declare", "codec-request", "codec-response"] }
+# emit/include of every codec-* is governed strictly by the matching
+# `codec-*` forward above. Without disabling defaults the codec
+# features would always activate via wz-codecs's own default list,
+# making the forwards a no-op and preventing facade-level
+# `--no-default-features` from eliding any codec.
+#
+# R311dk — codec-push / codec-declare / codec-request / codec-response
+# are NOT hard-pinned here anymore; they reach wz-codecs through the
+# matching `wz-codecs/codec-*` line in the feature-forward block above
+# (R311h..R311k). This is the textbook 3-tier composability chain:
+# wz facade -> wz-runtime-tokio codec-* -> wz-codecs/codec-*.
+wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc"] }
 # R252 — Runtime / TimeSource / Allocator trait surface. The AP profile
 # (this crate) bridges tokio + std into the trait contract authored in
 # R251; the MCU profile (future wz-runtime-lwip) will provide the same
