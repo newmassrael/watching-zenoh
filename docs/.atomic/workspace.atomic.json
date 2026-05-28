@@ -24923,6 +24923,46 @@
         "R311ca audit territory: wz-runtime-tokio --no-default-features 16 errors + wz-codecs 39 errors carry (R311cb-co cascade)"
       ]
     },
+    "Round 311dm": {
+      "decision_summary": "wz-session-core self cfg(test) home for LivelinessRegistry (no_std + alloc footing); hashbrown default-hasher self-contained",
+      "changes_bullets": [
+        "wz-session-core/src/declare/liveliness.rs: #[cfg(test)] mod tests block added with 4 inline tests (empty_registry_reports_zero_callback_counts, on_token_declared_increments_declare_count, on_token_undeclared_increments_undeclare_count, dispatch_iteration_event_lease_branch_is_noop)",
+        "wz-session-core/Cargo.toml: hashbrown features += [\"default-hasher\"] so `cargo test -p wz-session-core --lib` resolves HashMap<u64, String>::get without leaning on wz-runtime-tokio transitive feature enable",
+        "Tests use alloc + hashbrown only -- no std::sync::Arc / Mutex / test_helpers dependency; helper-free baseline established at the seam where the production registry lives"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core --lib: 56 passed (52 prior + 4 new liveliness self-tests); 0 failed",
+        "scripts/run-ci.sh Layer 0..E + F/G/Q SKIP: all required layers pass",
+        "WZ_RUN_LAYER_G=1: Layer G 7 MCU targets x G.1-G.6 PASS (G.6 riscv32 SKIP host gcc absent)"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311dm-helpers: migrate wider behavioural coverage (callback fan-out, mixed-message dispatch, DeclareVariant builder integration) from wz-runtime-tokio shell tests into wz-session-core self-test home -- requires alloc-friendly test_helpers fixture replacement (current shell uses crate::sync::Mutex + std::sync::Arc + Lua-bound test env)",
+        "R311dj/dk/dl carry preserved: P0a flake / R311dn..dq di-15-pre/15/16/17 / R311dr+ reply..session_glue / SCE smell #2 codec-oam/codec-interest",
+        "R311ca audit territory: wz-runtime-tokio --no-default-features 16 errors + wz-codecs 39 errors carry (R311cb-co cascade)"
+      ],
+      "publishable_decision_summary": "wz-session-core self cfg(test) home for LivelinessRegistry (no_std + alloc footing); hashbrown default-hasher self-contained",
+      "publishable_changes_bullets": [
+        "wz-session-core/src/declare/liveliness.rs: #[cfg(test)] mod tests block added with 4 inline tests (empty_registry_reports_zero_callback_counts, on_token_declared_increments_declare_count, on_token_undeclared_increments_undeclare_count, dispatch_iteration_event_lease_branch_is_noop)",
+        "wz-session-core/Cargo.toml: hashbrown features += [\"default-hasher\"] so `cargo test -p wz-session-core --lib` resolves HashMap<u64, String>::get without leaning on wz-runtime-tokio transitive feature enable",
+        "Tests use alloc + hashbrown only -- no std::sync::Arc / Mutex / test_helpers dependency; helper-free baseline established at the seam where the production registry lives"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core --lib: 56 passed (52 prior + 4 new liveliness self-tests); 0 failed",
+        "scripts/run-ci.sh Layer 0..E + F/G/Q SKIP: all required layers pass",
+        "WZ_RUN_LAYER_G=1: Layer G 7 MCU targets x G.1-G.6 PASS (G.6 riscv32 SKIP host gcc absent)"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311dm-helpers: migrate wider behavioural coverage (callback fan-out, mixed-message dispatch, DeclareVariant builder integration) from wz-runtime-tokio shell tests into wz-session-core self-test home -- requires alloc-friendly test_helpers fixture replacement (current shell uses crate::sync::Mutex + std::sync::Arc + Lua-bound test env)",
+        "R311dj/dk/dl carry preserved: P0a flake / R311dn..dq di-15-pre/15/16/17 / R311dr+ reply..session_glue / SCE smell #2 codec-oam/codec-interest",
+        "R311ca audit territory: wz-runtime-tokio --no-default-features 16 errors + wz-codecs 39 errors carry (R311cb-co cascade)"
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [

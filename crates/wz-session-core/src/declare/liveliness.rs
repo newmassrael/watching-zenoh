@@ -147,3 +147,62 @@ impl LivelinessRegistry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! R311dm — wz-session-core self-tests for `LivelinessRegistry`.
+    //!
+    //! These tests exercise the registry without dragging in the
+    //! wz-runtime-tokio test_helpers fixture chain (which depends on
+    //! `crate::sync::Mutex` + `std::sync::Arc` + a Lua-bound test
+    //! environment). The point of the self-test home is mechanical:
+    //! `cargo test -p wz-session-core` exercises the registry on a
+    //! pure no_std + alloc footing, so MCU-profile regressions land
+    //! at the same seam where the production code lives.
+    //!
+    //! Wider behavioural coverage (callback fan-out, mixed-message
+    //! dispatch, `DeclareVariant` builder integration) stays in the
+    //! wz-runtime-tokio shell tests where the fixture helpers live;
+    //! migrating them here is a later sub-round and tracked under the
+    //! R311dm-helpers carry.
+
+    use super::*;
+    use crate::lease::LeaseCheckOutcome;
+    use hashbrown::HashMap;
+
+    #[test]
+    fn empty_registry_reports_zero_callback_counts() {
+        let reg = LivelinessRegistry::new();
+        assert_eq!(reg.on_decl_len(), 0);
+        assert_eq!(reg.on_undecl_len(), 0);
+    }
+
+    #[test]
+    fn on_token_declared_increments_declare_count() {
+        let mut reg = LivelinessRegistry::new();
+        reg.on_token_declared(|_d, _r| {});
+        reg.on_token_declared(|_d, _r| {});
+        assert_eq!(reg.on_decl_len(), 2);
+        assert_eq!(reg.on_undecl_len(), 0);
+    }
+
+    #[test]
+    fn on_token_undeclared_increments_undeclare_count() {
+        let mut reg = LivelinessRegistry::new();
+        reg.on_token_undeclared(|_u| {});
+        assert_eq!(reg.on_decl_len(), 0);
+        assert_eq!(reg.on_undecl_len(), 1);
+    }
+
+    #[test]
+    fn dispatch_iteration_event_lease_branch_is_noop() {
+        // The Lease arm of IterationEvent does not produce a
+        // FramePayload, so dispatch_iteration_event short-circuits
+        // without touching the (empty) callback set.
+        let mut reg = LivelinessRegistry::new();
+        let event = IterationEvent::Lease(LeaseCheckOutcome::NoBaseline);
+        reg.dispatch_iteration_event(event, &HashMap::new());
+        assert_eq!(reg.on_decl_len(), 0);
+        assert_eq!(reg.on_undecl_len(), 0);
+    }
+}
