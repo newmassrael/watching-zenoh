@@ -92,13 +92,11 @@ mod queryable;
 #[cfg(feature = "declare-subscriber")]
 mod subscriber;
 
-#[cfg(test)]
-mod cross_tests;
-// R311dr-sibling — `test_helpers` fixtures live in the dedicated
-// sibling crate `wz-session-core-test-support` (R71 pattern); the
-// dev-dep in this crate's Cargo.toml exposes the builders to the
-// shell `#[cfg(test)] mod tests` blocks below without any test-only
-// code path entering a production crate.
+// R311ds — `cross_tests` + the per-registry behavioural
+// `#[cfg(test)] mod tests` blocks migrated to wz-session-core next to
+// the registry code (R311dr-wider-tests carry closure). The four
+// sub-modules below are now pure re-export shells with no test-only
+// code; the fixture-builder dev-dep moved to wz-session-core too.
 
 #[cfg(feature = "liveliness-token")]
 pub use liveliness::{DeclTokenCallback, LivelinessRegistry, UndeclTokenCallback};

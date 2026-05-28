@@ -25255,6 +25255,60 @@
         "R311ds+ pubsub.rs cascade + R311e codec-response-final cascade + R311ca audit territory carries preserved"
       ]
     },
+    "Round 311ds": {
+      "decision_summary": "wider declare behavioural tests migrated from wz-runtime-tokio shells to wz-session-core via wz-codecs cfg(test) extern crate std convention; R311dm-helpers carry closed (537 tests preserved)",
+      "changes_bullets": [
+        "wz-session-core/src/lib.rs: `#[cfg(test)] extern crate std;` added (mirrors wz-codecs/src/lib.rs:55-56); production stays #![no_std] because cfg(test) code is excluded from the artifact + Layer G cross-compile independently proves the no_std footing",
+        "wz-session-core/src/declare/{subscriber,queryable,liveliness_subscriber}.rs: `#[cfg(test)] mod tests` added (19 + 15 + 12 behavioural tests); liveliness.rs merges 6 behavioural tests into its existing 4 R311dm thin self-tests; module docs updated",
+        "wz-session-core/src/declare/cross_tests.rs: new file (2 cross-registry tests); registered as `#[cfg(all(test, feature = \"codec-declare\"))] mod cross_tests;` in declare.rs since it references all three registries",
+        "import rewrites in migrated tests: crate::sync::Mutex -> std::sync::Mutex, crate::session_glue::NetworkMessage -> crate::network_message::NetworkMessage, portable_atomic -> core::sync::atomic; Arc/Mutex from std, Vec/String/Box/vec from alloc",
+        "wz-session-core/Cargo.toml: dev-dependency wz-session-core-test-support added (fixture builders, R71 sibling-crate path-dep)",
+        "wz-runtime-tokio/src/declare/{subscriber,queryable,liveliness,liveliness_subscriber}.rs: `#[cfg(test)] mod tests` removed -> pure `pub use` re-export shells; cross_tests.rs deleted; declare.rs `mod cross_tests` decl removed",
+        "wz-runtime-tokio/Cargo.toml: wz-session-core-test-support dev-dep removed (only the migrated shell tests consumed it; session.rs references it in doc-comment prose only)"
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-session-core --features codec-declare --lib: 114 passed (60 prior + 54 migrated); 0 failed",
+        "cargo test -p wz-runtime-tokio --lib: 483 passed (537 - 54 migrated); 0 failed -- 537 total preserved, zero net loss",
+        "cargo test --workspace: wz-session-core lib reports 114 (codec-declare active via wz-runtime-tokio feature unification), so Layer C1 covers the migrated tests with no new lane",
+        "scripts/run-ci.sh Layer 0..E + F + Q: all pass (Layer C2 clippy --workspace --all-targets -D warnings + C3 per-package isolated clippy clean)",
+        "WZ_RUN_LAYER_G=1: Layer G 7 MCU targets x G.1-G.6 OK (G.6 riscv32 SKIP host gcc absent) -- confirms `extern crate std` under cfg(test) does NOT leak into the MCU production cross-compile"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311dm-helpers carry CLOSED: the resolution was the wz-codecs cfg(test) extern crate std convention, not the alloc::sync::Mutex equivalent the carry assumed was needed (none exists); the prior 'no std even in cfg(test)' framing was a double-standard vs the wz-codecs sibling crate",
+        "wz-runtime-tokio/src/declare/* are now pure `pub use` re-export shells; full shell removal (migrate caller imports to wz_session_core direct) remains a separate carry",
+        "module-migration cascade preserved (observer.rs / reply.rs / query.rs / pubsub.rs / session_glue.rs split) -- sequence shifts one letter past R311ds in the R311dq next-priority queue",
+        "long-tail carry preserved: P0a pre-push flake / SCE smell #2 codec-oam+codec-interest / R311cb-co --no-default-features cascade (wz-runtime-tokio 16 + wz-codecs 39 errors)"
+      ],
+      "publishable_decision_summary": "wider declare behavioural tests migrated from wz-runtime-tokio shells to wz-session-core via wz-codecs cfg(test) extern crate std convention; R311dm-helpers carry closed (537 tests preserved)",
+      "publishable_changes_bullets": [
+        "wz-session-core/src/lib.rs: `#[cfg(test)] extern crate std;` added (mirrors wz-codecs/src/lib.rs:55-56); production stays #![no_std] because cfg(test) code is excluded from the artifact + Layer G cross-compile independently proves the no_std footing",
+        "wz-session-core/src/declare/{subscriber,queryable,liveliness_subscriber}.rs: `#[cfg(test)] mod tests` added (19 + 15 + 12 behavioural tests); liveliness.rs merges 6 behavioural tests into its existing 4 R311dm thin self-tests; module docs updated",
+        "wz-session-core/src/declare/cross_tests.rs: new file (2 cross-registry tests); registered as `#[cfg(all(test, feature = \"codec-declare\"))] mod cross_tests;` in declare.rs since it references all three registries",
+        "import rewrites in migrated tests: crate::sync::Mutex -> std::sync::Mutex, crate::session_glue::NetworkMessage -> crate::network_message::NetworkMessage, portable_atomic -> core::sync::atomic; Arc/Mutex from std, Vec/String/Box/vec from alloc",
+        "wz-session-core/Cargo.toml: dev-dependency wz-session-core-test-support added (fixture builders, R71 sibling-crate path-dep)",
+        "wz-runtime-tokio/src/declare/{subscriber,queryable,liveliness,liveliness_subscriber}.rs: `#[cfg(test)] mod tests` removed -> pure `pub use` re-export shells; cross_tests.rs deleted; declare.rs `mod cross_tests` decl removed",
+        "wz-runtime-tokio/Cargo.toml: wz-session-core-test-support dev-dep removed (only the migrated shell tests consumed it; session.rs references it in doc-comment prose only)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-session-core --features codec-declare --lib: 114 passed (60 prior + 54 migrated); 0 failed",
+        "cargo test -p wz-runtime-tokio --lib: 483 passed (537 - 54 migrated); 0 failed -- 537 total preserved, zero net loss",
+        "cargo test --workspace: wz-session-core lib reports 114 (codec-declare active via wz-runtime-tokio feature unification), so Layer C1 covers the migrated tests with no new lane",
+        "scripts/run-ci.sh Layer 0..E + F + Q: all pass (Layer C2 clippy --workspace --all-targets -D warnings + C3 per-package isolated clippy clean)",
+        "WZ_RUN_LAYER_G=1: Layer G 7 MCU targets x G.1-G.6 OK (G.6 riscv32 SKIP host gcc absent) -- confirms `extern crate std` under cfg(test) does NOT leak into the MCU production cross-compile"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311dm-helpers carry CLOSED: the resolution was the wz-codecs cfg(test) extern crate std convention, not the alloc::sync::Mutex equivalent the carry assumed was needed (none exists); the prior 'no std even in cfg(test)' framing was a double-standard vs the wz-codecs sibling crate",
+        "wz-runtime-tokio/src/declare/* are now pure `pub use` re-export shells; full shell removal (migrate caller imports to wz_session_core direct) remains a separate carry",
+        "module-migration cascade preserved (observer.rs / reply.rs / query.rs / pubsub.rs / session_glue.rs split) -- sequence shifts one letter past R311ds in the R311dq next-priority queue",
+        "long-tail carry preserved: P0a pre-push flake / SCE smell #2 codec-oam+codec-interest / R311cb-co --no-default-features cascade (wz-runtime-tokio 16 + wz-codecs 39 errors)"
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [

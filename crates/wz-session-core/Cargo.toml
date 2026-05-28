@@ -87,5 +87,15 @@ sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-
 # wz-runtime-tokio side enabling it transitively.
 hashbrown = { version = "0.15", default-features = false, features = ["default-hasher"] }
 
+[dev-dependencies]
+# R311ds — the four declare/* registries' wider behavioural tests
+# (callback fan-out value capture, mixed-message dispatch) migrated
+# here from the wz-runtime-tokio shells, joining the existing R311dm
+# thin self-tests. They build the inbound Declare/Interest records via
+# the shared fixture builders in the R71-pattern sibling crate; the
+# path-dep boundary keeps zero test-only code in the production
+# artifact regardless of workspace-level Cargo feature unification.
+wz-session-core-test-support = { path = "../wz-session-core-test-support" }
+
 [lints]
 workspace = true

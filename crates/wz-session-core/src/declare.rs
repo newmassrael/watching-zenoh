@@ -29,11 +29,15 @@
 //! crate restores mechanical isolation so wz-session-core production
 //! builds carry zero test-only code paths.
 //!
-//! `cross_tests.rs` plus the wider behavioural `#[cfg(test)] mod
-//! tests` blocks remain in wz-runtime-tokio because they exercise
-//! AP-bound Tokio sync primitives (`crate::sync::Mutex` +
-//! `std::sync::Arc`) that the no_std + alloc footing here does not
-//! provide (R311dm carry preserved).
+//! R311ds — the wider behavioural `#[cfg(test)] mod tests` blocks
+//! (callback fan-out value capture, mixed-message dispatch) plus
+//! `cross_tests.rs` migrated here from the wz-runtime-tokio shells,
+//! next to the registry code they exercise. The `Arc<Mutex<…>>`
+//! capture cells use `std` under `#[cfg(test)]` (see the crate-root
+//! `extern crate std`, mirroring the wz-codecs sibling-crate
+//! convention); the production artifact stays strictly no_std. This
+//! closes the R311dm carry that had stranded these tests in the AP
+//! shell on a since-revised "no std even in cfg(test)" rationale.
 
 #[cfg(feature = "codec-declare")]
 pub mod liveliness;
@@ -46,3 +50,12 @@ pub mod queryable;
 
 #[cfg(feature = "codec-declare")]
 pub mod liveliness_subscriber;
+
+// R311ds — cross-registry composability tests (R311dr-wider-tests
+// carry closure). Gated on `codec-declare` as well as `test` because
+// it references all three registries, which compile only under
+// `codec-declare`; the per-registry behavioural tests live inside
+// each `declare/*.rs` `#[cfg(test)] mod tests` and inherit the
+// module's own `codec-declare` gate.
+#[cfg(all(test, feature = "codec-declare"))]
+mod cross_tests;

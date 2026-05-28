@@ -441,14 +441,10 @@ tokio = { version = "1", features = ["full"] }
 # contract because a downstream consumer cannot enable the feature
 # transitively to import the fixtures.
 wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
-# R311dr-sibling — declare/* shell tests pull the four-registry fixture
-# builders (decl_subscriber / decl_queryable / decl_token / undecl_* /
-# declare_envelope_*) from the dedicated sibling crate. The path-dep
-# boundary (R71 pattern) is the mechanical isolation contract:
-# wz-session-core production builds carry zero fixture code regardless
-# of workspace-level Cargo feature unification, which the superseded
-# R311dr `wz-session-core/test-helpers` feature could not guarantee.
-wz-session-core-test-support = { path = "../wz-session-core-test-support" }
+# R311ds — the wz-session-core-test-support dev-dep moved to
+# wz-session-core: the declare/* shells no longer host the behavioural
+# tests (they migrated to wz-session-core next to the registry code),
+# so this crate no longer consumes the four-registry fixture builders.
 
 [lints]
 workspace = true
