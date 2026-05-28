@@ -135,3 +135,14 @@ pub mod declare;
 /// registry serves the tokio (AP) and lwIP (MCU) runtimes.
 #[cfg(feature = "alloc")]
 pub mod pubsub;
+
+/// R311dv — Response-builder cluster (`build_response_{reply,err}_*`
+/// + `ResponseReplyBuilder` / `ResponseErrBuilder`): pure value
+/// construction of a `Response(Reply|Err)` wire record from a
+/// request_id + keyexpr + payload. Lifted from
+/// `wz-runtime-tokio::session_glue`; gated on `codec-response` because
+/// without the Response codec there is no wire frame to build. The
+/// precursor that lets `query.rs` (with its `codec-response`-gated
+/// `QueryReply::into_response`) migrate into wz-session-core.
+#[cfg(all(feature = "alloc", feature = "codec-response"))]
+pub mod response_build;
