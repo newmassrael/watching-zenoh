@@ -1504,6 +1504,7 @@ dependencies = [
  "wz-runtime-core",
  "wz-runtime-tokio-test-support",
  "wz-session-core",
+ "wz-session-core-test-support",
  "zeroize",
 ]
 
@@ -1524,6 +1525,13 @@ dependencies = [
  "sce-forge-runtime",
  "wz-codecs",
  "wz-runtime-core",
+]
+
+[[package]]
+name = "wz-session-core-test-support"
+version = "0.1.0"
+dependencies = [
+ "wz-codecs",
 ]
 
 [[package]]

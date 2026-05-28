@@ -27,7 +27,7 @@ mod tests {
     use hashbrown::HashMap;
     use portable_atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-    use wz_session_core::declare::test_helpers::*;
+    use wz_session_core_test_support::*;
 
     use crate::sync::Mutex;
     use wz_codecs::declare::DeclareVariant;

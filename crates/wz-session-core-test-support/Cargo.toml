@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-session-core-test-support — test-only fixture crate for the
+# four declare/* registries hosted in wz-session-core.
+#
+# R311dr-sibling entry. Supersedes the R311dr-introduced feature-gated
+# `pub mod test_helpers` inside wz-session-core. R71 already ratified
+# the textbook pattern for cross-crate test fixtures: an explicit
+# sibling crate with a path-dep boundary, not a feature flag on the
+# production crate. R311dr lapsed by re-introducing exactly the
+# feature-flag-in-production-crate shape R71 carved out as
+# anti-pattern; this crate restores R71-style mechanical isolation so
+# wz-session-core production builds carry zero test-only code paths
+# regardless of workspace-level feature unification.
+#
+# Scope: 167 LOC of pure wz-codecs builder fixtures
+# (decl_subscriber / decl_queryable / decl_token / undecl_* /
+# declare_envelope_*) consumed by the
+# wz-runtime-tokio/src/declare/{subscriber, queryable, liveliness,
+# liveliness_subscriber, cross_tests}.rs shell-test mods.
+#
+# Why not folded into wz-runtime-tokio-test-support (the R71 sibling):
+# wz-runtime-tokio-test-support depends on the wz-runtime-tokio
+# production surface (SessionInitParams, install_session_actions,
+# dispatch_script), which in turn carries the full Lua + tokio +
+# Session machinery. The declare/* fixture builders need only
+# wz-codecs types; pulling them through wz-runtime-tokio-test-support
+# would inflate the dev-dep transitive graph for every declare/*
+# test module unnecessarily. A second sibling at the lower tier
+# matches the production tier separation
+# (wz-codecs + wz-session-core ↔ wz-runtime-tokio).
+
+[package]
+name = "wz-session-core-test-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Test-only fixture builders for the four wz-session-core declare/* registries (R311dr-sibling R71-pattern realisation)."
+publish = false
+
+[lib]
+name = "wz_session_core_test_support"
+path = "src/lib.rs"
+
+[dependencies]
+# wz-codecs supplies the DeclSubscriber / DeclQueryable / DeclToken /
+# Undecl* / Declare envelope types the builders construct. The
+# fixture crate runs on host (AP) only — std is implicitly available
+# — so `default-features = false` is unnecessary; the codec-declare
+# feature is required because every builder references types from
+# the declare codec surface.
+wz-codecs = { path = "../wz-codecs", features = ["codec-declare"] }
+
+[lints]
+workspace = true

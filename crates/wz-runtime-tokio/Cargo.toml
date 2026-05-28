@@ -441,14 +441,14 @@ tokio = { version = "1", features = ["full"] }
 # contract because a downstream consumer cannot enable the feature
 # transitively to import the fixtures.
 wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
-# R311dr — declare/* shell tests pull the four-registry fixture builders
-# (decl_subscriber / decl_queryable / decl_token / undecl_* /
-# declare_envelope_*) from wz-session-core under the `test-helpers`
-# feature. The dev-dependency form keeps the feature inactive in
-# production wz-runtime-tokio builds (Cargo unifies regular-deps +
-# dev-deps features only for `cargo test`/`bench`/`example` graphs,
-# so the wz-session-core production artifact stays helper-free).
-wz-session-core = { path = "../wz-session-core", features = ["test-helpers"] }
+# R311dr-sibling — declare/* shell tests pull the four-registry fixture
+# builders (decl_subscriber / decl_queryable / decl_token / undecl_* /
+# declare_envelope_*) from the dedicated sibling crate. The path-dep
+# boundary (R71 pattern) is the mechanical isolation contract:
+# wz-session-core production builds carry zero fixture code regardless
+# of workspace-level Cargo feature unification, which the superseded
+# R311dr `wz-session-core/test-helpers` feature could not guarantee.
+wz-session-core-test-support = { path = "../wz-session-core-test-support" }
 
 [lints]
 workspace = true

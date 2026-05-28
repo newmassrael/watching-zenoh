@@ -64,17 +64,6 @@ codec-response = ["codec-frame", "wz-codecs/codec-response"]
 codec-response-final = ["wz-codecs/codec-response-final"]
 codec-declare = ["codec-frame", "wz-codecs/codec-declare"]
 
-# R311dr — cross-crate test fixtures for the four declare/* registries.
-# Off by default; consumers (wz-runtime-tokio dev-dependencies) opt in
-# via `features = ["test-helpers"]` so the helpers compile only under
-# test/example/bench profiles and never appear in production wz-session-
-# core artifacts. Implies `alloc` because the builders allocate owned
-# `String` suffixes + `Box<Wireexpr>` envelopes; `codec-declare` because
-# the helpers construct DeclSubscriber / DeclQueryable / DeclToken /
-# Undecl* records from wz-codecs (no point exposing the helpers unless
-# the declare codec surface itself is enabled).
-test-helpers = ["alloc", "codec-declare"]
-
 [dependencies]
 wz-runtime-core = { path = "../wz-runtime-core" }
 # R311di-4 — wz-codecs needed by sample.rs for `wz_codecs::ext_entry`

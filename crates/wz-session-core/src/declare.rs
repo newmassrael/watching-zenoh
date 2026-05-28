@@ -21,13 +21,19 @@
 //! | R311di-16 | (queryable, planned)                 | 489             |
 //! | R311di-17 | (liveliness_subscriber, planned)     | 694             |
 //!
-//! R311dr — `test_helpers.rs` migrated into wz-session-core under the
-//! `test-helpers` Cargo feature so the four wz-runtime-tokio shell
-//! tests no longer carry duplicate fixture code. `cross_tests.rs`
-//! plus the wider behavioural `#[cfg(test)] mod tests` blocks stay
-//! in wz-runtime-tokio because they exercise AP-bound Tokio sync
-//! primitives (`crate::sync::Mutex` + `std::sync::Arc`) that the
-//! no_std + alloc footing here does not provide (R311dm carry).
+//! R311dr-sibling — test fixture builders moved to the dedicated
+//! sibling crate `wz-session-core-test-support` (R71 pattern). The
+//! intermediate R311dr `#[cfg(feature = "test-helpers")] pub mod
+//! test_helpers;` shape reintroduced the production-crate-feature-flag
+//! anti-pattern R71 already ratified out; relocating to a sibling
+//! crate restores mechanical isolation so wz-session-core production
+//! builds carry zero test-only code paths.
+//!
+//! `cross_tests.rs` plus the wider behavioural `#[cfg(test)] mod
+//! tests` blocks remain in wz-runtime-tokio because they exercise
+//! AP-bound Tokio sync primitives (`crate::sync::Mutex` +
+//! `std::sync::Arc`) that the no_std + alloc footing here does not
+//! provide (R311dm carry preserved).
 
 #[cfg(feature = "codec-declare")]
 pub mod liveliness;
@@ -40,6 +46,3 @@ pub mod queryable;
 
 #[cfg(feature = "codec-declare")]
 pub mod liveliness_subscriber;
-
-#[cfg(feature = "test-helpers")]
-pub mod test_helpers;
