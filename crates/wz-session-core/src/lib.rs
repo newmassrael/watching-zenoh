@@ -22,6 +22,16 @@ extern crate alloc;
 #[cfg(feature = "alloc")]
 pub mod keyexpr_canon;
 
+/// R311dn / di-15-pre — keyexpr glob + intersection matchers
+/// (zenoh `**` / `*` / `$*` DSL) lifted from
+/// `wz-runtime-tokio::pubsub`. The two `pub fn` entry points
+/// (`keyexpr_pattern_matches`, `keyexpr_intersect_patterns`) back
+/// the future inherent `has_matching` methods on
+/// `Remote{Subscriber,Queryable}Registry` (R311do / R311dp) once
+/// those registries migrate into wz-session-core.
+#[cfg(feature = "alloc")]
+pub mod keyexpr_match;
+
 /// R223 — zenoh-style locality filter (no_std + no_alloc; pure enum + helpers).
 /// Mirrors zenoh-pico's `z_locality_t` and `_z_locality_allows_{local,remote}`.
 /// Available unconditionally because the type carries no allocations.
