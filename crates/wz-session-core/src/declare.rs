@@ -27,3 +27,6 @@
 
 #[cfg(feature = "codec-declare")]
 pub mod liveliness;
+
+#[cfg(feature = "codec-declare")]
+pub mod subscriber;
