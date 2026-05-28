@@ -46,41 +46,13 @@ use wz_codecs::response::Response;
 #[cfg(feature = "codec-response-final")]
 use wz_codecs::response_final::ResponseFinal;
 
-/// Network-message MID constants extracted from
-/// `wz-runtime-tokio::session_glue::wire_const`. Duplicated here
-/// (RFC-spec fixed bytes, drift-free) so the alloc-bound dispatcher
-/// stays self-contained inside wz-session-core. The source-side
-/// `wire_const` module in session_glue.rs keeps the same constants
-/// for the outbound-encode helpers that still live there
-/// (build_push_*, build_declare_*, send_request_query, etc.).
-mod wire_const {
-    /// REQUEST envelope MID (network.h:36). Gated on `codec-request`.
-    #[cfg(feature = "codec-request")]
-    pub const N_MID_REQUEST: u8 = 0x1C;
-    /// PUSH envelope MID (network.h:35). Gated on `codec-push`.
-    #[cfg(feature = "codec-push")]
-    pub const N_MID_PUSH: u8 = 0x1D;
-    /// RESPONSE_FINAL marker MID (network.h:38). Gated on
-    /// `all(codec-response-final, codec-frame)` to mirror the parse
-    /// arm — the only call site is inside `parse_frame_payload` which
-    /// itself is `codec-frame`-gated.
-    #[cfg(all(feature = "codec-response-final", feature = "codec-frame"))]
-    pub const N_MID_RESPONSE_FINAL: u8 = 0x1A;
-    /// OAM envelope MID (network.h:33). Unconditional — the `oam`
-    /// codec module is always present in wz-codecs.
-    #[cfg(feature = "codec-frame")]
-    pub const N_MID_OAM: u8 = 0x1F;
-    /// INTEREST envelope MID (network.h:39). Unconditional —
-    /// the `interest` codec module is always present in wz-codecs.
-    #[cfg(feature = "codec-frame")]
-    pub const N_MID_INTEREST: u8 = 0x19;
-    /// RESPONSE envelope MID (network.h:37). Gated on `codec-response`.
-    #[cfg(feature = "codec-response")]
-    pub const N_MID_RESPONSE: u8 = 0x1B;
-    /// DECLARE envelope MID (network.h:34). Gated on `codec-declare`.
-    #[cfg(feature = "codec-declare")]
-    pub const N_MID_DECLARE: u8 = 0x1E;
-}
+/// R311dl — re-export the wire-spec MID constants from the
+/// wz-codecs single-source-of-truth home. Callsite references
+/// (`wire_const::N_MID_REQUEST` etc.) below keep their existing
+/// shape; the constants themselves are defined in
+/// [`wz_codecs::wire_const`].
+#[cfg(feature = "codec-frame")]
+use wz_codecs::wire_const;
 
 /// R74 — one application-layer message inside a `Frame.payload` batch.
 ///
