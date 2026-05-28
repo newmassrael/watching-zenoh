@@ -25009,6 +25009,50 @@
         "R311ca audit territory: wz-runtime-tokio --no-default-features 16 errors + wz-codecs 39 errors carry (R311cb-co cascade)"
       ]
     },
+    "Round 311do": {
+      "decision_summary": "RemoteSubscriberRegistry migrated to wz-session-core::declare::subscriber with clean inherent has_matching",
+      "changes_bullets": [
+        "wz-session-core/src/declare/subscriber.rs: new module hosting RemoteSubscriberRegistry + DeclSubscriberCallback + UndeclSubscriberCallback (~230 LOC production body migrated from wz-runtime-tokio); has_matching is an inherent method calling crate::keyexpr_match::keyexpr_intersect_patterns directly (no RegistryHasMatching trait split)",
+        "wz-session-core/src/declare.rs: #[cfg(feature = \"codec-declare\")] pub mod subscriber added",
+        "wz-runtime-tokio/src/declare/subscriber.rs: production body stripped (-229 lines); shell re-exports the migrated types and hosts the AP-bound #[cfg(test)] mod with crate::sync::Mutex + std::sync::Arc fixtures untouched"
+      ],
+      "verification_bullets": [
+        "cargo check -p wz-runtime-tokio: 0.34s OK",
+        "cargo test -p wz-runtime-tokio --lib: 537 passed; 0 failed (test shell preserves all subscriber tests)",
+        "scripts/run-ci.sh Layer 0..E + F/G/Q SKIP: all required layers pass",
+        "WZ_RUN_LAYER_G=1: Layer G 7 MCU targets x G.1-G.6 PASS (G.6 riscv32 SKIP host gcc absent)"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311dp (di-16): declare/queryable.rs (~489 LOC) -- same pattern; inherent has_matching",
+        "R311dq (di-17): declare/liveliness_subscriber.rs (~694 LOC) -- biggest declare/* migration + keyexpr_pattern_matches dep",
+        "R311dn-tests / R311dm-helpers carry preserved: migrate tests into wz-session-core::*::tests once test_helpers alloc-friendly replacement lands",
+        "R311dj/dk/dl/dm/dn carry preserved: P0a flake / SCE smell #2 codec-oam/codec-interest / R311cb-co --no-default-features cascade"
+      ],
+      "publishable_decision_summary": "RemoteSubscriberRegistry migrated to wz-session-core::declare::subscriber with clean inherent has_matching",
+      "publishable_changes_bullets": [
+        "wz-session-core/src/declare/subscriber.rs: new module hosting RemoteSubscriberRegistry + DeclSubscriberCallback + UndeclSubscriberCallback (~230 LOC production body migrated from wz-runtime-tokio); has_matching is an inherent method calling crate::keyexpr_match::keyexpr_intersect_patterns directly (no RegistryHasMatching trait split)",
+        "wz-session-core/src/declare.rs: #[cfg(feature = \"codec-declare\")] pub mod subscriber added",
+        "wz-runtime-tokio/src/declare/subscriber.rs: production body stripped (-229 lines); shell re-exports the migrated types and hosts the AP-bound #[cfg(test)] mod with crate::sync::Mutex + std::sync::Arc fixtures untouched"
+      ],
+      "publishable_verification_bullets": [
+        "cargo check -p wz-runtime-tokio: 0.34s OK",
+        "cargo test -p wz-runtime-tokio --lib: 537 passed; 0 failed (test shell preserves all subscriber tests)",
+        "scripts/run-ci.sh Layer 0..E + F/G/Q SKIP: all required layers pass",
+        "WZ_RUN_LAYER_G=1: Layer G 7 MCU targets x G.1-G.6 PASS (G.6 riscv32 SKIP host gcc absent)"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311dp (di-16): declare/queryable.rs (~489 LOC) -- same pattern; inherent has_matching",
+        "R311dq (di-17): declare/liveliness_subscriber.rs (~694 LOC) -- biggest declare/* migration + keyexpr_pattern_matches dep",
+        "R311dn-tests / R311dm-helpers carry preserved: migrate tests into wz-session-core::*::tests once test_helpers alloc-friendly replacement lands",
+        "R311dj/dk/dl/dm/dn carry preserved: P0a flake / SCE smell #2 codec-oam/codec-interest / R311cb-co --no-default-features cascade"
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
