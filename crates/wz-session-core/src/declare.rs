@@ -33,3 +33,6 @@ pub mod subscriber;
 
 #[cfg(feature = "codec-declare")]
 pub mod queryable;
+
+#[cfg(feature = "codec-declare")]
+pub mod liveliness_subscriber;
