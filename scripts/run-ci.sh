@@ -24,6 +24,13 @@
 #              (R269; the workspace lane uses default features so the
 #              alloc-gated panic_payload tests would otherwise never
 #              run in CI — see crates/wz-runtime-core/Cargo.toml)
+#   Layer C1c — cargo test -p wz-session-core --features codec-declare
+#              (R311ds; same shape as C1b. The 58 codec-declare-gated
+#              wz-session-core declare tests (54 behavioural + 4 R311dm
+#              thin) run under the workspace lane only because
+#              wz-runtime-tokio's defaults transitively enable
+#              wz-session-core/codec-declare; this lane makes that
+#              coverage explicit instead of an implicit coincidence)
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
 #   Layer C3 — per-package isolated `cargo clippy ... --all-targets`
 #              sub-lanes (R311cv; per-package isolated feature
@@ -467,6 +474,23 @@ layer_c1_cargo_test() {
 # alloc-mode behaviour is gated in CI.
 layer_c1b_cargo_test_alloc() {
     (cd crates && cargo test -p wz-runtime-core --features alloc --quiet)
+}
+
+# ─── Layer C1c — cargo test -p wz-session-core --features codec-declare ─
+#
+# R311ds: same shape as C1b. wz-session-core's default features =
+# ["alloc"] (codec-declare OFF). The four declare/* registry test
+# modules (`#[cfg(test)] mod tests` inside the
+# `#[cfg(feature = "codec-declare")] pub mod` registries) + cross_tests
+# compile only under codec-declare. Layer C1's `cargo test --workspace`
+# happens to run them because wz-runtime-tokio's default features
+# transitively enable `wz-session-core/codec-declare` — but that is an
+# implicit cross-crate coincidence. This lane runs the 58 codec-declare-
+# gated tests (54 R311ds declare behavioural + 4 R311dm liveliness thin)
+# explicitly so they cannot silently drop out of CI if wz-runtime-tokio
+# ever stops enabling codec-declare by default.
+layer_c1c_cargo_test_codec_declare() {
+    (cd crates && cargo test -p wz-session-core --features codec-declare --quiet)
 }
 
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
@@ -989,6 +1013,7 @@ run_layer B layer_b_verify_codegen || overall=1
 run_layer C0 layer_c0_test_discipline || overall=1
 run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
+run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer D layer_d_validate_deploy || overall=1

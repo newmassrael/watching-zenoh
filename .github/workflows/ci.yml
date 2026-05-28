@@ -195,6 +195,15 @@ jobs:
         # build is still validated by Layer C2 (-D warnings).
         run: bash scripts/run-ci.sh --layer C1b
 
+      - name: Layer C1c — cargo test -p wz-session-core --features codec-declare
+        # R311ds — same shape as C1b. The workspace test runs the
+        # codec-declare-gated wz-session-core declare tests only because
+        # wz-runtime-tokio's defaults transitively enable
+        # wz-session-core/codec-declare. This lane runs the 58 gated
+        # tests (54 R311ds behavioural + 4 R311dm thin) explicitly so
+        # coverage cannot silently drop if that transitive enable changes.
+        run: bash scripts/run-ci.sh --layer C1c
+
       - name: Layer C2 — cargo clippy --deny warnings
         run: bash scripts/run-ci.sh --layer C2
 
