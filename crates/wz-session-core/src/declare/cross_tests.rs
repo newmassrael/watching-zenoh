@@ -12,17 +12,27 @@
 //! `liveliness`) rather than inside any single sub-module because
 //! these tests reference all three at once — they don't conceptually
 //! belong to any one of the sub-types.
+//!
+//! R311ds — migrated here from the wz-runtime-tokio
+//! `declare/cross_tests.rs` shell (R311dr-wider-tests carry closure).
+//! The module declaration in `declare.rs` gates on
+//! `all(test, feature = "codec-declare")` because the three registries
+//! it references compile only under `codec-declare`. The
+//! `liveliness-token` gate on the second test (wz-runtime-tokio side)
+//! drops here — the whole declare module shares the single
+//! `codec-declare` gate.
 
-#![cfg(test)]
-
-use super::*;
+use super::liveliness::LivelinessRegistry;
+use super::queryable::RemoteQueryableRegistry;
+use super::subscriber::RemoteSubscriberRegistry;
 use wz_session_core_test_support::*;
 
-use portable_atomic::{AtomicUsize, Ordering};
+use alloc::boxed::Box;
+use alloc::vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use wz_codecs::declare::DeclareVariant;
 
-use crate::session_glue::NetworkMessage;
+use crate::network_message::NetworkMessage;
 
 #[test]
 fn subscriber_and_queryable_registries_share_a_message_stream() {
@@ -69,7 +79,6 @@ fn subscriber_and_queryable_registries_share_a_message_stream() {
     assert_eq!(q_count.load(Ordering::SeqCst), 1);
 }
 
-#[cfg(feature = "liveliness-token")]
 #[test]
 fn three_registries_share_a_message_stream_independently() {
     // The full R121k surface: subscriber + queryable + liveliness
@@ -123,9 +132,4 @@ fn three_registries_share_a_message_stream_independently() {
     assert_eq!(s.load(Ordering::SeqCst), 1);
     assert_eq!(q.load(Ordering::SeqCst), 1);
     assert_eq!(l.load(Ordering::SeqCst), 2);
-
-    // Suppress unused-import for DeclareVariant — the helper re-exports
-    // it transitively but referencing it directly here makes the
-    // dependency explicit for readers (no actual call site needed).
-    let _ = std::marker::PhantomData::<DeclareVariant>;
 }

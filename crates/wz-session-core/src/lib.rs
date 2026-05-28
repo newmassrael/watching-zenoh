@@ -19,6 +19,16 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+// R311ds — host-run unit tests use std (Arc + Mutex capture cells for
+// the `Box<dyn FnMut + Send>` callback fan-out tests). The production
+// artifact stays strictly `#![no_std]`: `#[cfg(test)]` code is never
+// compiled into it (and the Layer G MCU cross-compile, which excludes
+// test code, independently proves the no_std footing). Mirrors the
+// established wz-codecs sibling-crate convention
+// (`wz-codecs/src/lib.rs` `#[cfg(test)] extern crate std;`).
+#[cfg(test)]
+extern crate std;
+
 #[cfg(feature = "alloc")]
 pub mod keyexpr_canon;
 
