@@ -61,12 +61,11 @@
 //! keyexpr), so no resolution is needed — the peer identifies the
 //! prior declaration by the same id it used in its earlier `Decl*`.
 
-// R311di-13 — resolve_wireexpr moved to
-// wz-session-core::wireexpr_resolve so MCU profiles can compose the
-// remote-declaration registries without inheriting wz-runtime-tokio.
-// Re-exported `pub(super)` to keep the sub-modules' import path
-// (`super::resolve_wireexpr`) compiling unchanged.
-pub(super) use wz_session_core::wireexpr_resolve::resolve_wireexpr;
+// R311dq — resolve_wireexpr re-export removed (all four registry
+// sub-modules now live in wz-session-core and reach the helper
+// directly via `crate::wireexpr_resolve::resolve_wireexpr`). The
+// wz-runtime-tokio shells are pure re-exports + AP-bound test
+// fixtures, neither of which calls resolve_wireexpr.
 
 // R310 — each registry sub-module gates on its corresponding
 // application-layer feature (the wire-emit counterpart was gated at
