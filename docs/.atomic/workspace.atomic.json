@@ -24879,6 +24879,50 @@
         "R311dj carry preserved: P0a flake / R311dl wire_const / R311dm cfg(test) / R311dn..dq di-15-pre/15/16/17 / R311dr+ reply..session_glue / SCE smell #2 codec-oam/codec-interest"
       ]
     },
+    "Round 311dl": {
+      "decision_summary": "wire_const MID/flag constants consolidated to wz-codecs::wire_const SSOT; consumer crates re-export",
+      "changes_bullets": [
+        "wz-codecs/src/lib.rs: new pub mod wire_const housing the wire-spec-frozen MID + flag byte constants (T_MID_*, FLAG_T_*, N_MID_*) with per-feature cfg gates mirroring wz-codecs codec-* features",
+        "wz-runtime-tokio/src/session_glue.rs: prior 88-line mod wire_const replaced by single `use wz_codecs::wire_const;` line; 95 callsite references untouched",
+        "wz-session-core/src/network_message.rs: prior 35-line mod wire_const replaced by `#[cfg(feature = \"codec-frame\")] use wz_codecs::wire_const;`; 7 parse arms untouched",
+        "Net diff: +105 / -129 (24 line removal across 3 files; mostly comment density savings from the consolidation)"
+      ],
+      "verification_bullets": [
+        "cargo check -p wz-runtime-tokio default: 0.38s OK",
+        "cargo fmt --all -- --check: clean",
+        "scripts/run-ci.sh Layer 0..E + F/G/Q SKIP: all required layers pass",
+        "WZ_RUN_LAYER_G=1: Layer G 7 MCU targets x G.1-G.6 PASS (G.6 riscv32 SKIP host gcc absent)"
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "carry_forward_bullets": [
+        "R311dj/dk carry preserved: P0a flake / R311dm cfg(test) / R311dn..dq di-15-pre/15/16/17 / R311dr+ reply..session_glue / SCE smell #2 codec-oam/codec-interest",
+        "R311ca audit territory: wz-runtime-tokio --no-default-features 16 errors + wz-codecs 39 errors carry (R311cb-co cascade)"
+      ],
+      "publishable_decision_summary": "wire_const MID/flag constants consolidated to wz-codecs::wire_const SSOT; consumer crates re-export",
+      "publishable_changes_bullets": [
+        "wz-codecs/src/lib.rs: new pub mod wire_const housing the wire-spec-frozen MID + flag byte constants (T_MID_*, FLAG_T_*, N_MID_*) with per-feature cfg gates mirroring wz-codecs codec-* features",
+        "wz-runtime-tokio/src/session_glue.rs: prior 88-line mod wire_const replaced by single `use wz_codecs::wire_const;` line; 95 callsite references untouched",
+        "wz-session-core/src/network_message.rs: prior 35-line mod wire_const replaced by `#[cfg(feature = \"codec-frame\")] use wz_codecs::wire_const;`; 7 parse arms untouched",
+        "Net diff: +105 / -129 (24 line removal across 3 files; mostly comment density savings from the consolidation)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo check -p wz-runtime-tokio default: 0.38s OK",
+        "cargo fmt --all -- --check: clean",
+        "scripts/run-ci.sh Layer 0..E + F/G/Q SKIP: all required layers pass",
+        "WZ_RUN_LAYER_G=1: Layer G 7 MCU targets x G.1-G.6 PASS (G.6 riscv32 SKIP host gcc absent)"
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311dj/dk carry preserved: P0a flake / R311dm cfg(test) / R311dn..dq di-15-pre/15/16/17 / R311dr+ reply..session_glue / SCE smell #2 codec-oam/codec-interest",
+        "R311ca audit territory: wz-runtime-tokio --no-default-features 16 errors + wz-codecs 39 errors carry (R311cb-co cascade)"
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [

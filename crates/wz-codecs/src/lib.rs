@@ -280,6 +280,98 @@ codec_group!(
     ]
 );
 
+/// R311dl — single-source-of-truth wire-protocol MID / flag constants.
+///
+/// Each constant is a wire-spec-frozen byte from
+/// `vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/{transport,network}.h`.
+/// Prior to R311dl these constants were duplicated across
+/// `wz-runtime-tokio::session_glue::wire_const` and
+/// `wz-session-core::network_message::wire_const`; the spec-frozen
+/// nature of the bytes made the duplication harmless but the DRY
+/// violation was an authoring smell. wz-codecs is the natural home
+/// because codec emit/decode is what owns the wire-shape ground truth.
+///
+/// Both consumer modules now `pub use wz_codecs::wire_const::*;` and
+/// keep their local `wire_const` shim purely as a re-export so callsite
+/// references (`wire_const::N_MID_PUSH` etc.) stay untouched.
+pub mod wire_const {
+    /// Transport-message INIT (transport.h:20). Gated on
+    /// `codec-init-body`.
+    #[cfg(feature = "codec-init-body")]
+    pub const T_MID_INIT: u8 = 0x01;
+    /// Transport-message OPEN (transport.h:21). Gated on
+    /// `codec-open-body`.
+    #[cfg(feature = "codec-open-body")]
+    pub const T_MID_OPEN: u8 = 0x02;
+    /// Transport-message CLOSE (transport.h:22). Gated on `codec-close`.
+    #[cfg(feature = "codec-close")]
+    pub const T_MID_CLOSE: u8 = 0x03;
+    /// Per-session liveness ping (transport.h:24 MID 0x04). Lease-timer
+    /// reset on receive.
+    #[cfg(feature = "codec-keep-alive")]
+    pub const T_MID_KEEP_ALIVE: u8 = 0x04;
+    /// Established-session payload carrier (transport.h:79 MID 0x05).
+    /// Body = VLE sn + tail payload; optional ext chain between sn and
+    /// payload when Z flag set.
+    pub const T_MID_FRAME: u8 = 0x05;
+    /// Reliable channel discriminator for `T_MID_FRAME` (1 = reliable,
+    /// 0 = best-effort) per transport.h:80.
+    pub const FLAG_T_FRAME_R: u8 = 0x20;
+
+    /// InitAck discriminator (0 = InitSyn, 1 = InitAck).
+    #[cfg(feature = "codec-init-body")]
+    pub const FLAG_T_INIT_A: u8 = 0x20;
+    /// Size parameters carrier (sn_res + batch_size present).
+    #[cfg(feature = "codec-init-body")]
+    pub const FLAG_T_INIT_S: u8 = 0x40;
+
+    /// OpenAck discriminator (0 = OpenSyn, 1 = OpenAck).
+    #[cfg(feature = "codec-open-body")]
+    pub const FLAG_T_OPEN_A: u8 = 0x20;
+    /// Lease in seconds (1) vs milliseconds (0).
+    #[cfg(feature = "codec-open-body")]
+    pub const FLAG_T_OPEN_T: u8 = 0x40;
+
+    /// Session-close vs link-only close.
+    #[cfg(feature = "codec-close")]
+    pub const FLAG_T_CLOSE_S: u8 = 0x20;
+
+    /// Transport-message ext-chain presence bit shared across every
+    /// `T_MID_T_*` header (transport.h:44 `_Z_FLAG_T_Z = 0x80`).
+    #[cfg(any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive",
+        feature = "codec-frame"
+    ))]
+    pub const FLAG_T_Z: u8 = 0x80;
+
+    /// REQUEST envelope MID (network.h:36). Gated on `codec-request`.
+    #[cfg(feature = "codec-request")]
+    pub const N_MID_REQUEST: u8 = 0x1C;
+    /// PUSH envelope MID (network.h:35). Pub/sub data carrier.
+    #[cfg(feature = "codec-push")]
+    pub const N_MID_PUSH: u8 = 0x1D;
+    /// RESPONSE_FINAL marker MID (network.h:38).
+    #[cfg(feature = "codec-response-final")]
+    pub const N_MID_RESPONSE_FINAL: u8 = 0x1A;
+    /// OAM envelope MID (network.h:33). Unconditional — the `oam`
+    /// codec module is always present in wz-codecs (no codec-oam
+    /// feature exists).
+    pub const N_MID_OAM: u8 = 0x1F;
+    /// INTEREST envelope MID (network.h:39). Unconditional — the
+    /// `interest` codec module is always present in wz-codecs (no
+    /// codec-interest feature exists).
+    pub const N_MID_INTEREST: u8 = 0x19;
+    /// RESPONSE envelope MID (network.h:37). Gated on `codec-response`.
+    #[cfg(feature = "codec-response")]
+    pub const N_MID_RESPONSE: u8 = 0x1B;
+    /// DECLARE envelope MID (network.h:34). Gated on `codec-declare`.
+    #[cfg(feature = "codec-declare")]
+    pub const N_MID_DECLARE: u8 = 0x1E;
+}
+
 #[cfg(test)]
 mod ext_envelope_oracle {
     //! R67b: SCXML-comment oracle pinned as cargo test.

@@ -308,100 +308,12 @@ fn compute_hmac_sha256_full(key: &[u8], data: &[u8]) -> [u8; 32] {
     mac.finalize().into_bytes().into()
 }
 
-/// Transport-message header constants from
-/// `vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/transport.h`.
-/// Kept local (rather than re-exported from zenoh-pico-sys) so this
-/// module does not pull the zenoh-pico FFI into its hot path on
-/// MCU builds — wz-runtime-tokio is the AP/linux runtime, but the
-/// constants themselves are wire-spec-frozen across both runtimes.
-mod wire_const {
-    #[cfg(feature = "codec-init-body")]
-    pub const T_MID_INIT: u8 = 0x01;
-    #[cfg(feature = "codec-open-body")]
-    pub const T_MID_OPEN: u8 = 0x02;
-    #[cfg(feature = "codec-close")]
-    pub const T_MID_CLOSE: u8 = 0x03;
-    /// Per-session liveness ping — zero-byte body; lease-timer
-    /// reset on receive (transport.h:24 commentary, MID 0x04).
-    #[cfg(feature = "codec-keep-alive")]
-    pub const T_MID_KEEP_ALIVE: u8 = 0x04;
-    /// Established-session payload carrier (transport.h:79 MID 0x05).
-    /// Body = VLE sn + tail payload; optional ext chain between sn
-    /// and payload when Z flag set (zenoh-pico skips non-mandatories
-    /// on inbound, transport.c::_z_frame_decode L388).
-    pub const T_MID_FRAME: u8 = 0x05;
-    /// Reliable channel discriminator (1 = reliable, 0 = best-effort)
-    /// for `_Z_MID_T_FRAME` per transport.h:80.
-    pub const FLAG_T_FRAME_R: u8 = 0x20;
-
-    /// InitAck discriminator (0 = InitSyn, 1 = InitAck).
-    #[cfg(feature = "codec-init-body")]
-    pub const FLAG_T_INIT_A: u8 = 0x20;
-    /// Size parameters carrier (sn_res + batch_size present).
-    #[cfg(feature = "codec-init-body")]
-    pub const FLAG_T_INIT_S: u8 = 0x40;
-
-    /// OpenAck discriminator (0 = OpenSyn, 1 = OpenAck).
-    #[cfg(feature = "codec-open-body")]
-    pub const FLAG_T_OPEN_A: u8 = 0x20;
-    /// Lease in seconds (1) vs milliseconds (0).
-    #[cfg(feature = "codec-open-body")]
-    pub const FLAG_T_OPEN_T: u8 = 0x40;
-
-    /// Session-close vs link-only close.
-    #[cfg(feature = "codec-close")]
-    pub const FLAG_T_CLOSE_S: u8 = 0x20;
-
-    /// Transport-message ext-chain presence bit shared across every
-    /// `_Z_MID_T_*` header (transport.h:44 `_Z_FLAG_T_Z = 0x80`).
-    /// When set the parent header signals that one or more
-    /// `ExtEntry` records follow the body bytes, terminated by an
-    /// entry whose own `Z` bit is clear.
-    ///
-    /// R311g1 — gated on the same predicate as the
-    /// [`crate::session_glue::parse_inbound`] `has_ext` extraction:
-    /// the constant is only referenced from codec-feature-gated
-    /// dispatch arms, so the minus-all-codecs lane drops it cleanly.
-    #[cfg(any(
-        feature = "codec-init-body",
-        feature = "codec-open-body",
-        feature = "codec-close",
-        feature = "codec-keep-alive",
-        feature = "codec-frame"
-    ))]
-    pub const FLAG_T_Z: u8 = 0x80;
-
-    /// R90 — Push envelope MID (network.h:35). Pub/sub data
-    /// carrier wrapping a put / del inner body. R311di-11 moved the
-    /// inbound `parse_frame_payload` consumer to wz-session-core;
-    /// the remaining consumer in this module is the outbound
-    /// `build_push_*` helper family (`encode_frame_with_push`
-    /// emits the Frame envelope around the inner Push struct).
-    #[cfg(feature = "codec-push")]
-    pub const N_MID_PUSH: u8 = 0x1D;
-    /// R93/R94 — Interest envelope MID (network.h:39). Declarations
-    /// discovery / liveliness subscriber registration carrier per
-    /// zenoh-pico `_z_n_interest_encode`. Consumed by the outbound
-    /// `build_interest_*` / `encode_frame_with_interest` helpers
-    /// (the inbound parse arm moved to wz-session-core at R311di-11).
-    pub const N_MID_INTEREST: u8 = 0x19;
-    /// R110/R115 — Declare envelope MID (network.h:34). Declarations
-    /// envelope wrapping one of the nine sub-MID bodies (DECL_KEXPR
-    /// 0x00 / DECL_SUBSCRIBER 0x01 / DECL_QUERYABLE 0x02 /
-    /// DECL_TOKEN 0x03 / UNDECL_KEXPR 0x04 / UNDECL_SUBSCRIBER 0x05 /
-    /// UNDECL_QUERYABLE 0x06 / UNDECL_TOKEN 0x07 / DECL_FINAL 0x08)
-    /// per zenoh-pico `_z_declare_encode`. Wire-shape: header(I@5,
-    /// Z@7) + optional interest_id VLE + Z-gated ext-chain + peek-
-    /// byte inner declaration variant. R110a-e closed the wz-side
-    /// authoring chain (9/9 sub-MIDs + envelope) and the byte-equiv
-    /// Layer 3 wire-interop vs `_z_declare_encode`. R115 wires the
-    /// inbound dispatch on this const so [`parse_frame_payload`]
-    /// surfaces DECLARE records to the application layer.
-    ///
-    /// R311i — gated on `codec-declare`.
-    #[cfg(feature = "codec-declare")]
-    pub const N_MID_DECLARE: u8 = 0x1E;
-}
+/// R311dl — re-export the wire-spec MID / flag constants from the
+/// wz-codecs single-source-of-truth home. Callsite references
+/// (`wire_const::T_MID_INIT`, `wire_const::FLAG_T_FRAME_R`, etc.)
+/// below keep their existing shape; the constants themselves are
+/// defined in [`wz_codecs::wire_const`].
+use wz_codecs::wire_const;
 
 /// Per-deploy parameters that drive the codec field values for the
 /// 4-way handshake + close. Production callers source these from
