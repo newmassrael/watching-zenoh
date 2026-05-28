@@ -204,6 +204,15 @@ jobs:
         # coverage cannot silently drop if that transitive enable changes.
         run: bash scripts/run-ci.sh --layer C1c
 
+      - name: Layer C1d — cargo test -p wz-session-core (pub/sub data plane)
+        # R311du — same shape as C1c. The migrated pubsub
+        # SubscriberRegistry test module gates on the full pub/sub
+        # data-plane feature union; the workspace lane runs them only via
+        # wz-runtime-tokio's transitive defaults. This lane enumerates
+        # the union explicitly so coverage cannot silently drop if those
+        # defaults change.
+        run: bash scripts/run-ci.sh --layer C1d
+
       - name: Layer C2 — cargo clippy --deny warnings
         run: bash scripts/run-ci.sh --layer C2
 

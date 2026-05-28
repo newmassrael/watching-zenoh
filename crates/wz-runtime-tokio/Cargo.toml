@@ -315,11 +315,16 @@ transport-batching = []
 #                        as -attachment: field stays, populator gates.
 # 6 reserved (encoding, source-info, priority, congestion-control,
 # express, sample) stay declaration-only at the wz facade level.
-pubsub-put = []
-pubsub-delete = []
+# R311du — forward to wz-session-core: the pub/sub dispatch arms moved
+# there with SubscriberRegistry, so the AP-side feature must enable the
+# session-core gate (3-stage shape mirrors the codec-* forwarders).
+# pubsub-allow-loop stays AP-only (no session-core dispatch arm gates on
+# it — it governs the wz-runtime-tokio self-publish loopback path).
+pubsub-put = ["wz-session-core/pubsub-put"]
+pubsub-delete = ["wz-session-core/pubsub-delete"]
 pubsub-allow-loop = []
-pubsub-attachment = []
-pubsub-timestamp = []
+pubsub-attachment = ["wz-session-core/pubsub-attachment"]
+pubsub-timestamp = ["wz-session-core/pubsub-timestamp"]
 # R311cd — session domain wire-up. 2 atomic features that have real
 # source behavior (Cargo.toml authoring intent: "9 atomic, 2 active /
 # 7 reserved"):
