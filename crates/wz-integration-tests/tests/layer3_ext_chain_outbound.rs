@@ -19,7 +19,7 @@
 
 use std::sync::Arc;
 
-use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
+use wz_codecs::ext_entry::{ExtEntry, ExtEntryOwned, ExtEntryVariant};
 use wz_codecs::ext_unit::ExtUnit;
 use wz_codecs::ext_zbuf::ExtZbuf;
 use wz_codecs::ext_zint::ExtZint;
@@ -144,7 +144,7 @@ fn pico_oracle_ext_chain() -> Vec<u8> {
 /// Build the wz-side oracle chain — 3 ExtEntry records with the
 /// non-Z bits author-set (`ext_id`, `M`, `enc`). The encoder owns
 /// the Z bit per chain position.
-fn wz_oracle_chain() -> Vec<ExtEntry> {
+fn wz_oracle_chain() -> Vec<ExtEntryOwned> {
     let mut unit = ExtEntry::default();
     unit.set_ext_id(ENTRY0_ID_UNIT);
     unit.set_enc(0);
@@ -164,10 +164,15 @@ fn wz_oracle_chain() -> Vec<ExtEntry> {
     zbuf.set_enc(2);
     zbuf.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
         value_len: ENTRY2_ZBUF_VAL.len() as u64,
-        value: ENTRY2_ZBUF_VAL.to_vec(),
+        value: &ENTRY2_ZBUF_VAL,
     });
 
+    // `set_ext_chain` now takes the lifetime-free owned ext chain, so
+    // deep-copy the borrowed builder views at the boundary.
     vec![unit, zint, zbuf]
+        .into_iter()
+        .map(|e| e.into_owned())
+        .collect()
 }
 
 #[test]

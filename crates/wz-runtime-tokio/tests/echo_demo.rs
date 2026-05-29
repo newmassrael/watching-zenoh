@@ -70,7 +70,7 @@ async fn echo_demo_msg_put_round_trip() {
 
         // Decode via wz-codecs.
         let mut cursor = SceCursor::new(&frame_bytes);
-        let received = MsgPut::decode(&mut cursor).expect("decode");
+        let received = MsgPut::decode(&mut cursor).expect("decode").into_owned();
         driver.close().await.expect("subscriber close");
         received
     });
@@ -95,7 +95,7 @@ async fn echo_demo_msg_put_round_trip() {
             encoding: None,
             extensions: None,
             payload_len: 5,
-            payload: vec![0xCA, 0xFE, 0xBA, 0xBE, 0x42],
+            payload: &[0xCA, 0xFE, 0xBA, 0xBE, 0x42],
         };
         let bytes = original.encode_to_vec();
         driver

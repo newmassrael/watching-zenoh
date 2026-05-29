@@ -76,11 +76,11 @@
 
 use hashbrown::HashMap;
 
-use wz_codecs::reply::ReplyVariant;
-use wz_codecs::response::{Response, ResponseVariant};
+use wz_codecs::reply::ReplyOwnedVariant;
+use wz_codecs::response::{ResponseOwned, ResponseOwnedVariant};
 #[cfg(feature = "codec-response-final")]
-use wz_codecs::response_final::ResponseFinal;
-use wz_codecs::wireexpr::WireexprVariant;
+use wz_codecs::response_final::ResponseFinalOwned;
+use wz_codecs::wireexpr::WireexprOwnedVariant;
 
 // R307 — `query-queryable` gates the producer-side `QueryReply` enum
 // because it lives in `crate::query`, which is gated on the same
@@ -386,7 +386,7 @@ impl ReplyRegistry {
     ///   surfacing them as `FramingError` if needed).
     pub fn dispatch_response(
         &mut self,
-        response: &Response,
+        response: &ResponseOwned,
         peer_keyexpr_table: &HashMap<u64, String>,
     ) {
         let resolved = match resolve_wireexpr(&response.keyexpr.body, peer_keyexpr_table) {
@@ -397,13 +397,13 @@ impl ReplyRegistry {
         // body variants. cfg-off drops the corresponding Reply (the
         // query-side dispatcher mirror of pubsub.rs PushVariant arms).
         let body = match &response.body {
-            ResponseVariant::CodecZenohReply(reply) => match &reply.body {
+            ResponseOwnedVariant::CodecZenohReply(reply) => match &reply.body {
                 #[cfg(feature = "pubsub-put")]
-                ReplyVariant::CodecZenohMsgPut(put) => InboundReplyBody::Put {
+                ReplyOwnedVariant::CodecZenohMsgPut(put) => InboundReplyBody::Put {
                     payload: put.payload.clone(),
                 },
                 #[cfg(feature = "pubsub-delete")]
-                ReplyVariant::CodecZenohMsgDel(_) => InboundReplyBody::Del,
+                ReplyOwnedVariant::CodecZenohMsgDel(_) => InboundReplyBody::Del,
                 // Default arm carries a runtime tag whose MID falls
                 // outside {MsgPut, MsgDel}. zenoh-pico's inner-body
                 // dispatch treats this as a wire-spec violation; the
@@ -411,7 +411,7 @@ impl ReplyRegistry {
                 // pubsub-put / -delete arms also fall through here.
                 _ => return,
             },
-            ResponseVariant::CodecZenohErr(err) => {
+            ResponseOwnedVariant::CodecZenohErr(err) => {
                 let encoding = err
                     .encoding
                     .as_ref()
@@ -422,7 +422,7 @@ impl ReplyRegistry {
                 }
             }
             // See ResponseVariant::Default rationale on Reply arm.
-            ResponseVariant::Default { .. } => return,
+            ResponseOwnedVariant::Default { .. } => return,
         };
         let inbound = InboundReply {
             rid: response.request_id,
@@ -439,7 +439,7 @@ impl ReplyRegistry {
     /// registration order) and all are removed in the same dispatch.
     /// Unknown rids drop silently.
     #[cfg(feature = "codec-response-final")]
-    pub fn dispatch_response_final(&mut self, response_final: &ResponseFinal) {
+    pub fn dispatch_response_final(&mut self, response_final: &ResponseFinalOwned) {
         self.fire_final_for(response_final.request_id);
     }
 
@@ -647,12 +647,12 @@ impl ReplyRegistry {
 /// `(id=0, suffix=None)` form). The caller drops the dispatch on
 /// `None` so a partial keyexpr never reaches a user callback.
 fn resolve_wireexpr(
-    body: &WireexprVariant,
+    body: &WireexprOwnedVariant,
     peer_keyexpr_table: &HashMap<u64, String>,
 ) -> Option<String> {
     let (id, suffix_opt) = match body {
-        WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
-        WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
+        WireexprOwnedVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
+        WireexprOwnedVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
     };
     if id == 0 {
         suffix_opt.map(str::to_string)
@@ -676,12 +676,16 @@ mod tests {
     use std::sync::Arc;
 
     use crate::sync::Mutex;
+    // Fixtures build the borrowed codec views then `.into_owned()` at
+    // the dispatch boundary (which now takes the `*Owned` mirrors).
     use wz_codecs::encoding::Encoding;
     use wz_codecs::err::Err as ErrBody;
     use wz_codecs::msg_del::MsgDel;
     use wz_codecs::msg_put::MsgPut;
-    use wz_codecs::reply::Reply;
-    use wz_codecs::wireexpr::Wireexpr;
+    use wz_codecs::reply::{Reply, ReplyVariant};
+    use wz_codecs::response::{Response, ResponseVariant};
+    use wz_codecs::response_final::ResponseFinal;
+    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
     use wz_codecs::wireexpr_local::WireexprLocal;
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
@@ -690,20 +694,19 @@ mod tests {
         mapping_id: u64,
         suffix: Option<&str>,
         payload: &[u8],
-    ) -> Response {
-        let suffix_owned = suffix.map(str::to_string);
+    ) -> ResponseOwned {
         let suffix_len = suffix.map(|s| s.len() as u64);
         let keyexpr = Wireexpr {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: mapping_id,
                 suffix_len,
-                suffix: suffix_owned,
+                suffix,
             }),
         };
         let reply = Reply {
             body: ReplyVariant::CodecZenohMsgPut(MsgPut {
                 payload_len: payload.len() as u64,
-                payload: payload.to_vec(),
+                payload,
                 ..MsgPut::default()
             }),
             ..Reply::default()
@@ -714,14 +717,15 @@ mod tests {
             body: ResponseVariant::CodecZenohReply(reply),
             ..Response::default()
         }
+        .into_owned()
     }
 
-    fn response_reply_del(rid: u64, suffix: &str) -> Response {
+    fn response_reply_del(rid: u64, suffix: &str) -> ResponseOwned {
         let keyexpr = Wireexpr {
             body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix.to_string()),
+                suffix: Some(suffix),
             }),
         };
         let reply = Reply {
@@ -734,6 +738,7 @@ mod tests {
             body: ResponseVariant::CodecZenohReply(reply),
             ..Response::default()
         }
+        .into_owned()
     }
 
     fn response_err(
@@ -742,25 +747,24 @@ mod tests {
         packed_id: u32,
         schema: Option<&str>,
         payload: &[u8],
-    ) -> Response {
+    ) -> ResponseOwned {
         let keyexpr = Wireexpr {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix.to_string()),
+                suffix: Some(suffix),
             }),
         };
-        let schema_owned = schema.map(str::to_string);
         let schema_len = schema.map(|s| s.len() as u64);
         let encoding = Encoding {
             packed_id,
             schema_len,
-            schema: schema_owned,
+            schema,
         };
         let err_body = ErrBody {
             encoding: Some(encoding),
             payload_len: payload.len() as u64,
-            payload: payload.to_vec(),
+            payload,
             ..ErrBody::default()
         };
         Response {
@@ -769,13 +773,15 @@ mod tests {
             body: ResponseVariant::CodecZenohErr(err_body),
             ..Response::default()
         }
+        .into_owned()
     }
 
-    fn response_final_for(rid: u64) -> ResponseFinal {
+    fn response_final_for(rid: u64) -> ResponseFinalOwned {
         ResponseFinal {
             request_id: rid,
             ..ResponseFinal::default()
         }
+        .into_owned()
     }
 
     #[test]

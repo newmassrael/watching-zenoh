@@ -92,7 +92,7 @@ fn layer3_msg_put_no_flags_payload_variants() {
             encoding: None,
             extensions: None,
             payload_len: payload.len() as u64,
-            payload: payload.clone(),
+            payload: &payload,
         }
         .encode_to_vec();
         let pico_bytes = zenoh_pico_encode_put_no_flags(&payload);
@@ -114,7 +114,7 @@ fn layer3_msg_put_empty_payload_yields_header_and_zero_vle() {
         encoding: None,
         extensions: None,
         payload_len: 0,
-        payload: vec![],
+        payload: &[],
     }
     .encode_to_vec();
     let pico = zenoh_pico_encode_put_no_flags(&[]);

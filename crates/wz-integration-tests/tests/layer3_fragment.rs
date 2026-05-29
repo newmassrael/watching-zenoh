@@ -121,7 +121,7 @@ fn layer3_fragment_vle_width_boundaries() {
     for (sn, payload) in corpus {
         let wz_bytes = Fragment {
             sn,
-            payload: payload.clone(),
+            payload: &payload,
         }
         .encode_to_vec();
         let pico_bytes = zenoh_pico_encode_fragment(sn, &payload);
@@ -139,7 +139,7 @@ fn layer3_fragment_empty_payload_yields_vle_only() {
     // alone — no trailing padding, no length sentinel.
     let wz = Fragment {
         sn: 0,
-        payload: vec![],
+        payload: &[],
     }
     .encode_to_vec();
     let pico = zenoh_pico_encode_fragment(0, &[]);

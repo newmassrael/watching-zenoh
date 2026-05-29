@@ -446,7 +446,7 @@ async fn r99_subscriber_registry_routes_framepayload_push_to_callback() {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len: Some(keyexpr_literal.len() as u64),
-                suffix: Some(keyexpr_literal.into()),
+                suffix: Some(keyexpr_literal),
             }),
         },
         ..Push::default()

@@ -20,8 +20,8 @@ use alloc::vec::Vec;
 
 use hashbrown::HashMap;
 
-use wz_codecs::decl_subscriber::DeclSubscriber;
-use wz_codecs::declare::DeclareVariant;
+use wz_codecs::decl_subscriber::DeclSubscriberOwned;
+use wz_codecs::declare::DeclareOwnedVariant;
 use wz_codecs::undecl_subscriber::UndeclSubscriber;
 
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
@@ -33,7 +33,7 @@ use crate::wireexpr_resolve::resolve_wireexpr;
 /// `Declare(DeclSubscriber)` is decoded and its keyexpr resolves to a
 /// literal. The callback receives the codec record + the resolved
 /// keyexpr literal so consumers don't have to re-resolve.
-pub type DeclSubscriberCallback = Box<dyn FnMut(&DeclSubscriber, &str) + Send + 'static>;
+pub type DeclSubscriberCallback = Box<dyn FnMut(&DeclSubscriberOwned, &str) + Send + 'static>;
 
 /// Boxed callback invoked when an inbound
 /// `Declare(UndeclSubscriber)` is decoded. The undeclare body has no
@@ -93,7 +93,7 @@ impl RemoteSubscriberRegistry {
     /// dispatch fires them in registration order.
     pub fn on_subscriber_declared(
         &mut self,
-        callback: impl FnMut(&DeclSubscriber, &str) + Send + 'static,
+        callback: impl FnMut(&DeclSubscriberOwned, &str) + Send + 'static,
     ) {
         self.on_decl.push(Box::new(callback));
     }
@@ -156,7 +156,7 @@ impl RemoteSubscriberRegistry {
     }
 
     /// Route an inbound `Declare` envelope's inner body through the
-    /// remote-subscriber callbacks. `DeclareVariant` arms other than
+    /// remote-subscriber callbacks. `DeclareOwnedVariant` arms other than
     /// `DeclSubscriber` / `UndeclSubscriber` are no-ops here — the
     /// queryable / token / kexpr / final arms route through their own
     /// dedicated registries.
@@ -168,11 +168,11 @@ impl RemoteSubscriberRegistry {
     /// firing on a partial keyexpr.
     pub fn dispatch_declare(
         &mut self,
-        body: &DeclareVariant,
+        body: &DeclareOwnedVariant,
         peer_keyexpr_table: &HashMap<u64, String>,
     ) {
         match body {
-            DeclareVariant::CodecZenohDeclSubscriber(decl) => {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl) => {
                 let resolved = match resolve_wireexpr(&decl.keyexpr.body, peer_keyexpr_table) {
                     Some(s) => s,
                     None => return,
@@ -185,7 +185,7 @@ impl RemoteSubscriberRegistry {
                     cb(decl, &resolved);
                 }
             }
-            DeclareVariant::CodecZenohUndeclSubscriber(undecl) => {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl) => {
                 // R290 — drop the membership entry first so a
                 // get_matching_status fired from inside the
                 // on_undecl callback chain observes the post-
@@ -251,7 +251,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use hashbrown::HashMap;
-    use wz_codecs::declare::DeclareVariant;
+    use wz_codecs::declare::DeclareOwnedVariant;
     use wz_session_core_test_support::*;
 
     use crate::network_message::NetworkMessage;
@@ -260,7 +260,7 @@ mod tests {
     fn empty_registry_dispatch_is_noop() {
         let mut reg = RemoteSubscriberRegistry::new();
         let body =
-            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(7, 0, Some("home/temp")));
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(7, 0, Some("home/temp")));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(reg.on_decl_len(), 0);
         assert_eq!(reg.on_undecl_len(), 0);
@@ -279,7 +279,7 @@ mod tests {
         });
 
         let body =
-            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(7, 0, Some("home/temp")));
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(7, 0, Some("home/temp")));
         reg.dispatch_declare(&body, &HashMap::new());
 
         let captured = captured.lock().unwrap();
@@ -300,10 +300,11 @@ mod tests {
         peer_table.insert(11u64, "sensors/temp".to_string());
 
         // mapping_id=11, no suffix -> table lookup -> "sensors/temp"
-        let body = DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(1, 11, None));
+        let body = DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(1, 11, None));
         reg.dispatch_declare(&body, &peer_table);
         // mapping_id=11, suffix="/extra" -> concat
-        let body = DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(2, 11, Some("/extra")));
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(2, 11, Some("/extra")));
         reg.dispatch_declare(&body, &peer_table);
 
         let captured = captured.lock().unwrap();
@@ -323,7 +324,7 @@ mod tests {
         });
 
         // mapping_id=99 not in (empty) peer table -> skip.
-        let body = DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(1, 99, None));
+        let body = DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(1, 99, None));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(
             fired.load(Ordering::SeqCst),
@@ -341,7 +342,7 @@ mod tests {
             captured_for_cb.lock().unwrap().push(u.id);
         });
 
-        let body = DeclareVariant::CodecZenohUndeclSubscriber(undecl_subscriber(42));
+        let body = DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl_subscriber(42));
         reg.dispatch_declare(&body, &HashMap::new());
 
         let captured = captured.lock().unwrap();
@@ -358,7 +359,8 @@ mod tests {
         reg.on_subscriber_declared(move |_d, _r| order_b.lock().unwrap().push(2));
         assert_eq!(reg.on_decl_len(), 2);
 
-        let body = DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(3, 0, Some("a/b")));
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(3, 0, Some("a/b")));
         reg.dispatch_declare(&body, &HashMap::new());
 
         assert_eq!(*order.lock().unwrap(), vec![1, 2]);
@@ -373,7 +375,7 @@ mod tests {
             captured_for_cb.lock().unwrap().push(r.to_string())
         });
 
-        let body = DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber_nonlocal(
+        let body = DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber_nonlocal(
             9,
             0,
             Some("zone/1"),
@@ -397,7 +399,8 @@ mod tests {
         // — it lives in the SubscriberRegistry's path (DeclKexpr /
         // UndeclKexpr) or the future RemoteQueryableRegistry path
         // (DeclQueryable).
-        let body = DeclareVariant::CodecZenohDeclFinal(wz_codecs::decl_final::DeclFinal::default());
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclFinal(wz_codecs::decl_final::DeclFinal::default());
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(
             fired.load(Ordering::SeqCst),
@@ -466,23 +469,29 @@ mod tests {
         let mut reg = RemoteSubscriberRegistry::new();
         assert_eq!(reg.declared_count(), 0);
 
-        let decl1 =
-            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(10, 0, Some("home/temp")));
+        let decl1 = DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(
+            10,
+            0,
+            Some("home/temp"),
+        ));
         reg.dispatch_declare(&decl1, &HashMap::new());
         assert_eq!(reg.declared_count(), 1);
 
-        let decl2 =
-            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(11, 0, Some("home/door")));
+        let decl2 = DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(
+            11,
+            0,
+            Some("home/door"),
+        ));
         reg.dispatch_declare(&decl2, &HashMap::new());
         assert_eq!(reg.declared_count(), 2);
 
-        let undecl1 = DeclareVariant::CodecZenohUndeclSubscriber(undecl_subscriber(10));
+        let undecl1 = DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl_subscriber(10));
         reg.dispatch_declare(&undecl1, &HashMap::new());
         assert_eq!(reg.declared_count(), 1);
         let remaining: Vec<(u64, &str)> = reg.iter_declared().collect();
         assert_eq!(remaining, vec![(11, "home/door")]);
 
-        let undecl2 = DeclareVariant::CodecZenohUndeclSubscriber(undecl_subscriber(11));
+        let undecl2 = DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl_subscriber(11));
         reg.dispatch_declare(&undecl2, &HashMap::new());
         assert_eq!(reg.declared_count(), 0);
     }
@@ -498,7 +507,7 @@ mod tests {
     fn subscriber_has_matching_true_on_literal_keyexpr_equality() {
         let mut reg = RemoteSubscriberRegistry::new();
         let body =
-            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(7, 0, Some("home/temp")));
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(7, 0, Some("home/temp")));
         reg.dispatch_declare(&body, &HashMap::new());
         assert!(reg.has_matching("home/temp"));
         assert!(!reg.has_matching("home/door"));
@@ -507,7 +516,8 @@ mod tests {
     #[test]
     fn subscriber_has_matching_true_when_peer_pattern_covers_publish_literal() {
         let mut reg = RemoteSubscriberRegistry::new();
-        let body = DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(8, 0, Some("home/**")));
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(8, 0, Some("home/**")));
         reg.dispatch_declare(&body, &HashMap::new());
         assert!(reg.has_matching("home/temp"));
         assert!(reg.has_matching("home/door/inner"));
@@ -518,7 +528,7 @@ mod tests {
     fn subscriber_has_matching_true_when_publish_pattern_covers_peer_literal() {
         let mut reg = RemoteSubscriberRegistry::new();
         let body =
-            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(9, 0, Some("home/temp")));
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(9, 0, Some("home/temp")));
         reg.dispatch_declare(&body, &HashMap::new());
         assert!(reg.has_matching("home/**"));
         assert!(reg.has_matching("**"));
@@ -528,11 +538,14 @@ mod tests {
     #[test]
     fn subscriber_has_matching_false_after_undeclare() {
         let mut reg = RemoteSubscriberRegistry::new();
-        let decl =
-            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(12, 0, Some("home/temp")));
+        let decl = DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(
+            12,
+            0,
+            Some("home/temp"),
+        ));
         reg.dispatch_declare(&decl, &HashMap::new());
         assert!(reg.has_matching("home/temp"));
-        let undecl = DeclareVariant::CodecZenohUndeclSubscriber(undecl_subscriber(12));
+        let undecl = DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl_subscriber(12));
         reg.dispatch_declare(&undecl, &HashMap::new());
         assert!(!reg.has_matching("home/temp"));
     }
@@ -547,8 +560,11 @@ mod tests {
         // keyexpr share `home/sensor/temp` — pre-R293 the matcher
         // missed this; R293 honest intersection fires.
         let mut reg = RemoteSubscriberRegistry::new();
-        let d =
-            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(30, 0, Some("home/*/temp")));
+        let d = DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(
+            30,
+            0,
+            Some("home/*/temp"),
+        ));
         reg.dispatch_declare(&d, &HashMap::new());
         assert!(reg.has_matching("*/sensor/temp"));
         assert!(reg.has_matching("*/*/temp"));
@@ -558,8 +574,11 @@ mod tests {
     fn subscriber_has_matching_false_when_two_patterns_have_disjoint_anchors() {
         // Pub-side mirror of the Q-side disjoint-anchor negative test.
         let mut reg = RemoteSubscriberRegistry::new();
-        let d =
-            DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(31, 0, Some("home/**/temp")));
+        let d = DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(
+            31,
+            0,
+            Some("home/**/temp"),
+        ));
         reg.dispatch_declare(&d, &HashMap::new());
         assert!(!reg.has_matching("kitchen/**/temp"));
     }
@@ -569,7 +588,8 @@ mod tests {
         // Pub-side mirror — `home/** ∩ **/temp` shares `home/temp`
         // and any `home/<x>.../temp`. Backtracking on both sides.
         let mut reg = RemoteSubscriberRegistry::new();
-        let d = DeclareVariant::CodecZenohDeclSubscriber(decl_subscriber(32, 0, Some("home/**")));
+        let d =
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(32, 0, Some("home/**")));
         reg.dispatch_declare(&d, &HashMap::new());
         assert!(reg.has_matching("**/temp"));
         assert!(reg.has_matching("**"));

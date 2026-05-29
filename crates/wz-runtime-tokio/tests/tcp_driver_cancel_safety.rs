@@ -79,7 +79,7 @@ async fn loopback_pair() -> (TcpStream, TcpDriver) {
 fn envelope_bytes(payload: &[u8]) -> Vec<u8> {
     let envelope = StreamEnvelope {
         payload_len: payload.len() as u16,
-        payload: payload.to_vec(),
+        payload,
     };
     envelope.encode_to_vec()
 }

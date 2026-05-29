@@ -33,18 +33,23 @@ use alloc::vec::Vec;
 #[cfg(feature = "codec-frame")]
 use sce_forge_runtime::codec::{CodecError, SceCursor};
 
+// Only the lifetime-free `*Owned` mirrors are imported at module level —
+// they are what `NetworkMessage` stores. The borrowed `Foo<'a>` decode
+// views are referenced by fully-qualified path inside the codec-frame
+// gated `parse_frame_payload` (their only use), so no borrowed import
+// needs cfg-gating against the body-codec feature matrix.
 #[cfg(feature = "codec-declare")]
-use wz_codecs::declare::Declare;
-use wz_codecs::interest::Interest;
-use wz_codecs::oam::Oam;
+use wz_codecs::declare::DeclareOwned;
+use wz_codecs::interest::InterestOwned;
+use wz_codecs::oam::OamOwned;
 #[cfg(feature = "codec-push")]
-use wz_codecs::push::Push;
+use wz_codecs::push::PushOwned;
 #[cfg(feature = "codec-request")]
-use wz_codecs::request::Request;
+use wz_codecs::request::RequestOwned;
 #[cfg(feature = "codec-response")]
-use wz_codecs::response::Response;
+use wz_codecs::response::ResponseOwned;
 #[cfg(feature = "codec-response-final")]
-use wz_codecs::response_final::ResponseFinal;
+use wz_codecs::response_final::ResponseFinalOwned;
 
 /// R311dl — re-export the wire-spec MID constants from the
 /// wz-codecs single-source-of-truth home. Callsite references
@@ -72,13 +77,13 @@ pub enum NetworkMessage {
     /// / Query structs, making the inline form much larger than the
     /// `Unknown` variant.
     #[cfg(feature = "codec-request")]
-    Request(Box<Request>),
+    Request(Box<RequestOwned>),
     /// R90 — Network MID `_Z_MID_N_PUSH` (0x1D). Pub/sub data
     /// carrier wrapping a put / del inner body — same envelope
     /// shape as `Request` minus the rid field. The `Box` mirrors
     /// the `Request` variant's size-balancing rationale.
     #[cfg(feature = "codec-push")]
-    Push(Box<Push>),
+    Push(Box<PushOwned>),
     /// R91 — Network MID `_Z_MID_N_RESPONSE_FINAL` (0x1A). Pure
     /// correlation marker that closes a Request's reply stream;
     /// payload is header + request_id VLE only (no embed, no
@@ -86,14 +91,14 @@ pub enum NetworkMessage {
     /// small — just three integer fields plus an optional ext
     /// vec.
     #[cfg(feature = "codec-response-final")]
-    ResponseFinal(ResponseFinal),
+    ResponseFinal(ResponseFinalOwned),
     /// R92 — Network MID `_Z_MID_N_OAM` (0x1F). Diagnostic /
     /// control-plane envelope; header (mid+enc+Z) + VLE id +
     /// optional ext-chain + body variant on `header.enc` (UNIT
     /// / ZINT / ZBUF inner codec). The body variant arms hold
     /// `ExtUnit` / `ExtZint` / `ExtZbuf` — small enough to inline
     /// like `ResponseFinal`.
-    Oam(Oam),
+    Oam(OamOwned),
     /// R93/R94 — Network MID `_Z_MID_N_INTEREST` (0x19).
     /// Declarations discovery / liveliness subscriber registration
     /// envelope; header (mid+C+F+Z) + VLE interest_id + (C||F)-gated
@@ -101,7 +106,7 @@ pub enum NetworkMessage {
     /// interest_body sub-codec (body_flags byte + R-gated wireexpr).
     /// Inlined (no `Box`) because the struct is small — header byte
     /// + u64 + optional body + optional ext vec.
-    Interest(Interest),
+    Interest(InterestOwned),
     /// R97 — Network MID `_Z_MID_N_RESPONSE` (0x1B). Query reply
     /// carrier wrapping a reply (0x04) or err (0x05) inner body
     /// dispatched via peek-byte on the inner MID bit-range. Same
@@ -112,7 +117,7 @@ pub enum NetworkMessage {
     /// the `Unknown` variant (mirrors the Request sizing
     /// rationale).
     #[cfg(feature = "codec-response")]
-    Response(Box<Response>),
+    Response(Box<ResponseOwned>),
     /// R110/R115 — Network MID `_Z_MID_N_DECLARE` (0x1E). Declarations
     /// envelope wrapping one of the nine sub-MID inner bodies
     /// (DECL_KEXPR / DECL_SUBSCRIBER / DECL_QUERYABLE / DECL_TOKEN /
@@ -127,7 +132,7 @@ pub enum NetworkMessage {
     /// `DeclareVariant` whose arms hold the nine sub-body structs,
     /// making the inline form much larger than `Unknown`.
     #[cfg(feature = "codec-declare")]
-    Declare(Box<Declare>),
+    Declare(Box<DeclareOwned>),
     /// Header byte's MID falls outside the
     /// {REQUEST, PUSH, RESPONSE_FINAL, OAM, INTEREST, RESPONSE, DECLARE}
     /// subset wz-codecs has authored envelope coverage for. `body`
@@ -178,36 +183,36 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
         match mid {
             #[cfg(feature = "codec-request")]
             wire_const::N_MID_REQUEST => {
-                let req = Request::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Request(Box::new(req)));
+                let req = wz_codecs::request::Request::decode(&mut cursor)?;
+                messages.push(NetworkMessage::Request(Box::new(req.into_owned())));
             }
             #[cfg(feature = "codec-push")]
             wire_const::N_MID_PUSH => {
-                let push = Push::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Push(Box::new(push)));
+                let push = wz_codecs::push::Push::decode(&mut cursor)?;
+                messages.push(NetworkMessage::Push(Box::new(push.into_owned())));
             }
             #[cfg(feature = "codec-response-final")]
             wire_const::N_MID_RESPONSE_FINAL => {
-                let rf = ResponseFinal::decode(&mut cursor)?;
-                messages.push(NetworkMessage::ResponseFinal(rf));
+                let rf = wz_codecs::response_final::ResponseFinal::decode(&mut cursor)?;
+                messages.push(NetworkMessage::ResponseFinal(rf.into_owned()));
             }
             wire_const::N_MID_OAM => {
-                let oam = Oam::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Oam(oam));
+                let oam = wz_codecs::oam::Oam::decode(&mut cursor)?;
+                messages.push(NetworkMessage::Oam(oam.into_owned()));
             }
             wire_const::N_MID_INTEREST => {
-                let interest = Interest::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Interest(interest));
+                let interest = wz_codecs::interest::Interest::decode(&mut cursor)?;
+                messages.push(NetworkMessage::Interest(interest.into_owned()));
             }
             #[cfg(feature = "codec-response")]
             wire_const::N_MID_RESPONSE => {
-                let resp = Response::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Response(Box::new(resp)));
+                let resp = wz_codecs::response::Response::decode(&mut cursor)?;
+                messages.push(NetworkMessage::Response(Box::new(resp.into_owned())));
             }
             #[cfg(feature = "codec-declare")]
             wire_const::N_MID_DECLARE => {
-                let decl = Declare::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Declare(Box::new(decl)));
+                let decl = wz_codecs::declare::Declare::decode(&mut cursor)?;
+                messages.push(NetworkMessage::Declare(Box::new(decl.into_owned())));
             }
             _ => {
                 let rem = cursor.remaining();

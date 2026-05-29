@@ -23,16 +23,16 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use wz_codecs::encoding::Encoding;
-use wz_codecs::err::Err;
-use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
-use wz_codecs::ext_zbuf::ExtZbuf;
-use wz_codecs::msg_del::MsgDel;
-use wz_codecs::msg_put::MsgPut;
-use wz_codecs::reply::{Reply, ReplyVariant};
-use wz_codecs::response::{Response, ResponseVariant};
-use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-use wz_codecs::wireexpr_local::WireexprLocal;
+use wz_codecs::encoding::EncodingOwned;
+use wz_codecs::err::ErrOwned;
+use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+use wz_codecs::ext_zbuf::ExtZbufOwned;
+use wz_codecs::msg_del::MsgDelOwned;
+use wz_codecs::msg_put::MsgPutOwned;
+use wz_codecs::reply::{ReplyOwned, ReplyOwnedVariant};
+use wz_codecs::response::{ResponseOwned, ResponseOwnedVariant};
+use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
+use wz_codecs::wireexpr_local::WireexprLocalOwned;
 
 use crate::query_mode::ConsolidationMode;
 
@@ -81,7 +81,7 @@ pub fn build_response_reply_literal(
     request_id: u64,
     keyexpr_suffix: &str,
     payload: &[u8],
-) -> Response {
+) -> ResponseOwned {
     assert!(
         !keyexpr_suffix.is_empty(),
         "build_response_reply_literal requires a non-empty keyexpr suffix; \
@@ -89,25 +89,25 @@ pub fn build_response_reply_literal(
     );
     let suffix_string = keyexpr_suffix.to_string();
     let suffix_len = Some(suffix_string.len() as u64);
-    Response {
+    ResponseOwned {
         // MID 0x1B | N 0x20 (suffix present) | M codegen-derived
         // (Local arm sets 0x40). Z stays clear (no Response exts).
         header: 0x1B | 0x20,
         request_id,
-        keyexpr: Wireexpr {
-            body: WireexprVariant::WireexprLocal(WireexprLocal {
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len,
                 suffix: Some(suffix_string),
             }),
         },
         extensions: None,
-        body: ResponseVariant::CodecZenohReply(Reply {
+        body: ResponseOwnedVariant::CodecZenohReply(ReplyOwned {
             // MID 0x04 only; no C (consolidation), no Z (Reply exts).
             header: 0x04,
             consolidation: None,
             extensions: None,
-            body: ReplyVariant::CodecZenohMsgPut(MsgPut {
+            body: ReplyOwnedVariant::CodecZenohMsgPut(MsgPutOwned {
                 // MID 0x01 only; no T/E/Z gates.
                 header: 0x01,
                 timestamp: None,
@@ -140,7 +140,7 @@ pub fn build_response_reply_aliased(
     mapping_id: u64,
     suffix: Option<&str>,
     payload: &[u8],
-) -> Response {
+) -> ResponseOwned {
     assert!(
         mapping_id != 0,
         "build_response_reply_aliased requires a non-zero mapping id; \
@@ -149,22 +149,22 @@ pub fn build_response_reply_aliased(
     let suffix_string = suffix.map(str::to_string);
     let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
-    Response {
+    ResponseOwned {
         header: 0x1B | n_flag,
         request_id,
-        keyexpr: Wireexpr {
-            body: WireexprVariant::WireexprLocal(WireexprLocal {
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: mapping_id,
                 suffix_len,
                 suffix: suffix_string,
             }),
         },
         extensions: None,
-        body: ResponseVariant::CodecZenohReply(Reply {
+        body: ResponseOwnedVariant::CodecZenohReply(ReplyOwned {
             header: 0x04,
             consolidation: None,
             extensions: None,
-            body: ReplyVariant::CodecZenohMsgPut(MsgPut {
+            body: ReplyOwnedVariant::CodecZenohMsgPut(MsgPutOwned {
                 header: 0x01,
                 timestamp: None,
                 encoding: None,
@@ -214,7 +214,7 @@ pub fn build_response_err_literal(
     request_id: u64,
     keyexpr_suffix: &str,
     payload: &[u8],
-) -> Response {
+) -> ResponseOwned {
     assert!(
         !keyexpr_suffix.is_empty(),
         "build_response_err_literal requires a non-empty keyexpr suffix; \
@@ -222,18 +222,18 @@ pub fn build_response_err_literal(
     );
     let suffix_string = keyexpr_suffix.to_string();
     let suffix_len = Some(suffix_string.len() as u64);
-    Response {
+    ResponseOwned {
         header: 0x1B | 0x20, // MID | N (M codegen-derived from Local)
         request_id,
-        keyexpr: Wireexpr {
-            body: WireexprVariant::WireexprLocal(WireexprLocal {
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len,
                 suffix: Some(suffix_string),
             }),
         },
         extensions: None,
-        body: ResponseVariant::CodecZenohErr(Err {
+        body: ResponseOwnedVariant::CodecZenohErr(ErrOwned {
             // MID 0x05 only; no E (encoding), no Z (exts).
             header: 0x05,
             encoding: None,
@@ -255,7 +255,7 @@ pub fn build_response_err_aliased(
     mapping_id: u64,
     suffix: Option<&str>,
     payload: &[u8],
-) -> Response {
+) -> ResponseOwned {
     assert!(
         mapping_id != 0,
         "build_response_err_aliased requires a non-zero mapping id; \
@@ -264,18 +264,18 @@ pub fn build_response_err_aliased(
     let suffix_string = suffix.map(str::to_string);
     let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
-    Response {
+    ResponseOwned {
         header: 0x1B | n_flag,
         request_id,
-        keyexpr: Wireexpr {
-            body: WireexprVariant::WireexprLocal(WireexprLocal {
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: mapping_id,
                 suffix_len,
                 suffix: suffix_string,
             }),
         },
         extensions: None,
-        body: ResponseVariant::CodecZenohErr(Err {
+        body: ResponseOwnedVariant::CodecZenohErr(ErrOwned {
             header: 0x05,
             encoding: None,
             extensions: None,
@@ -410,7 +410,7 @@ impl ResponseReplyBuilder {
     /// the existing literal-or-aliased builder, then applies the
     /// Reply-layer settings. Panics on `(mapping_id=0, suffix=None)`
     /// because the literal path requires an inline keyexpr suffix.
-    pub fn build(self) -> Response {
+    pub fn build(self) -> ResponseOwned {
         let mut response = if self.keyexpr_mapping_id == 0 {
             let suffix = self.keyexpr_suffix.as_deref().unwrap_or_else(|| {
                 panic!(
@@ -428,7 +428,7 @@ impl ResponseReplyBuilder {
             )
         };
 
-        if let ResponseVariant::CodecZenohReply(ref mut reply) = response.body {
+        if let ResponseOwnedVariant::CodecZenohReply(ref mut reply) = response.body {
             if self.body_kind_del {
                 // Swap MsgPut arm for MsgDel arm. The MsgPut allocated
                 // by build_response_reply_literal/aliased gets dropped
@@ -438,7 +438,7 @@ impl ResponseReplyBuilder {
                 // baseline helpers to expose envelope-only construction
                 // without the put body, but the present additive
                 // shape keeps the one-shot helpers unchanged.
-                reply.body = ReplyVariant::CodecZenohMsgDel(MsgDel {
+                reply.body = ReplyOwnedVariant::CodecZenohMsgDel(MsgDelOwned {
                     header: 0x02, // _Z_MID_Z_DEL
                     timestamp: None,
                     extensions: None,
@@ -462,11 +462,11 @@ impl ResponseReplyBuilder {
         if let Some((zid, eid)) = self.responder {
             let value = encode_responder_ext_body(&zid, eid);
             response.header |= 0x80; // _Z_FLAG_Z_Z on Response envelope
-            response.extensions = Some(vec![ExtEntry {
+            response.extensions = Some(vec![ExtEntryOwned {
                 // ENC_ZBUF(0x40) | id_responder(0x03). No M flag and no
                 // Z chain-continuation (sole envelope ext today).
                 header: 0x40 | 0x03,
-                body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+                body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                     value_len: value.len() as u64,
                     value,
                 }),
@@ -600,7 +600,7 @@ impl ResponseErrBuilder {
     /// the existing literal-or-aliased builder, then applies the
     /// Err-layer settings. Panics on `(mapping_id=0, suffix=None)`
     /// because the literal path requires an inline keyexpr suffix.
-    pub fn build(self) -> Response {
+    pub fn build(self) -> ResponseOwned {
         let mut response = if self.keyexpr_mapping_id == 0 {
             let suffix = self.keyexpr_suffix.as_deref().unwrap_or_else(|| {
                 panic!(
@@ -618,12 +618,12 @@ impl ResponseErrBuilder {
             )
         };
 
-        if let ResponseVariant::CodecZenohErr(ref mut err) = response.body {
+        if let ResponseOwnedVariant::CodecZenohErr(ref mut err) = response.body {
             if let Some((id, schema)) = self.encoding {
                 err.header |= 0x40; // _Z_FLAG_Z_E (Err encoding present)
                 let has_schema = schema.is_some();
                 let packed = (id << 1) | if has_schema { 1 } else { 0 };
-                err.encoding = Some(Encoding {
+                err.encoding = Some(EncodingOwned {
                     packed_id: packed,
                     schema_len: schema.as_ref().map(|s| s.len() as u64),
                     schema,
@@ -634,7 +634,7 @@ impl ResponseErrBuilder {
                 // _Z_FLAG_Z_Z(0x80) signals ext-chain presence to the
                 // peer's `_z_err_decode` (message.c:594-595).
                 err.header |= 0x80;
-                err.extensions = Some(vec![ExtEntry {
+                err.extensions = Some(vec![ExtEntryOwned {
                     // ENC_ZBUF(0x40) | id_source_info(0x01). No M flag
                     // (informational hint) and no Z chain-continuation
                     // (single entry today; the chain-plumb step lands
@@ -642,7 +642,7 @@ impl ResponseErrBuilder {
                     // RequestQueryBuilder.build at
                     // session_glue.rs:2772-2782).
                     header: 0x40 | 0x01,
-                    body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+                    body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                         value_len: value.len() as u64,
                         value,
                     }),
@@ -661,9 +661,9 @@ impl ResponseErrBuilder {
         if let Some((zid, eid)) = self.responder {
             let value = encode_responder_ext_body(&zid, eid);
             response.header |= 0x80; // _Z_FLAG_Z_Z on Response envelope
-            response.extensions = Some(vec![ExtEntry {
+            response.extensions = Some(vec![ExtEntryOwned {
                 header: 0x40 | 0x03,
-                body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+                body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                     value_len: value.len() as u64,
                     value,
                 }),

@@ -44,7 +44,10 @@ fn declare_default_round_trips_through_parse_frame_payload() {
         NetworkMessage::Declare(decl) => {
             let mut cursor = SceCursor::new(&wire);
             let canonical = Declare::decode(&mut cursor).expect("canonical decode");
-            let re_encoded = decl.encode_to_vec();
+            let re_encoded = decl
+                .try_as_borrowed()
+                .expect("test: <=N exts by construction")
+                .encode_to_vec();
             assert_eq!(
                 re_encoded,
                 canonical.encode_to_vec(),

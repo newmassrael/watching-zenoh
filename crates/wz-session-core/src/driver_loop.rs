@@ -22,7 +22,7 @@
 
 use alloc::vec::Vec;
 
-use wz_codecs::ext_entry::ExtEntry;
+use wz_codecs::ext_entry::ExtEntryOwned;
 
 use crate::lease::LeaseCheckOutcome;
 use crate::link::LostCause;
@@ -62,7 +62,7 @@ pub enum DriverLoopOutcome {
         sn: u64,
         messages: Vec<NetworkMessage>,
         has_ext: bool,
-        extensions: Vec<ExtEntry>,
+        extensions: Vec<ExtEntryOwned>,
     },
     /// `parse_inbound` rejected the wire bytes, OR the Frame envelope
     /// parsed but `parse_frame_payload` could not decode an authored

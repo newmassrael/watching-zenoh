@@ -25495,6 +25495,52 @@
         "long-tail carry preserved: P0a pre-push flake / SCE smell #2 codec-oam+codec-interest / R311cb-co --no-default-features cascade (wz-runtime-tokio + wz-codecs errors)."
       ]
     },
+    "Round 311dw": {
+      "decision_summary": "R311dw absorbs the SCE owned/borrowed codec split into wz: *Owned mirrors are held and encoded via try_as_borrowed at sink boundaries; vendor/sce->f224941a6; AP-preset composability gap 83->0.",
+      "changes_bullets": [
+        "vendor/sce pin 14ff5e36d -> f224941a6 (SCE owned->borrowed codec projection: as_borrowed / try_as_borrowed / into_owned + fallible-path tests); crates/Cargo.lock heapless dep refresh.",
+        "wz-session-core: NetworkMessage variants -> *Owned with decode-loop into_owned (network_message.rs); sample.rs from_codec(&*Owned) + to_codec(&self)->Foo<'_> + extract_* over &[ExtEntryOwned]; driver_loop.rs FramePayload.extensions Vec<ExtEntryOwned>; wireexpr_resolve.rs WireexprOwnedVariant; response_build.rs Option-D *Owned builders; pubsub.rs + 4 declare/* registries owned dispatch; sibling wz-session-core-test-support owned fixtures.",
+        "wz-runtime-tokio session_glue.rs: full inbound+outbound codec boundary owned-swap -- handshake ext storage Vec<ExtEntryOwned>, encode_init/open build *BodyOwned + as_borrowed().encode, build_push/declare/request/interest/response_final builders return *Owned, MsgPut/MsgDel meta builders OR header flag bits directly (owned read-only), encode_frame_with_* take owned + try_as_borrowed().expect(<=N exts), InboundFrame holds *BodyOwned + Vec<ExtEntryOwned>, parse_inbound + decode_ext_chain into_owned.",
+        "wz-runtime-tokio query.rs/reply.rs/lib.rs: into_response -> ResponseOwned, response_final_for -> ResponseFinalOwned (borrowed-build + into_owned, owned has no Default), dispatch_request/response/_final + resolve_wireexpr take *Owned; StreamEnvelope encodes via borrowed zero-copy view over frame.bytes.",
+        "Test fixtures across wz-runtime-tokio (observer/query/reply/session/session_glue + 5 integration tests), wz-session-core (sample/pubsub/liveliness_subscriber mods) and wz-codecs smoke: build borrowed codec views then .into_owned() at the owned API boundary; session_glue TestWire trait centralises owned .wire() via try_as_borrowed; HelloOwned used for the empty heapless-locator fixture."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh: all required layers pass (0/A/A2/B/C0/C1/C1b/C1c/C1d/C2/C3/D/E), run-ci exit 0 -- C1 cargo test --workspace, C1c codec-declare, C1d full pubsub feature set, C2 cargo clippy --workspace --all-targets -D warnings all green.",
+        "Layer G MCU cross-compile (WZ_RUN_LAYER_G=1): thumbv8m.base/main/main-eabihf + riscv32imac (and the thumbv6m/7m/7em set) all OK; only G.6 riscv32 cross-real SKIP (riscv32-unknown-elf-gcc absent on host) -- no_std regression-free after the wz-codecs owned-mirror change.",
+        "cargo build -p wz --no-default-features --features preset-ap-client: 0 errors (AP composability gap closed; was 83 lifetime errors). preset-mcu path unaffected.",
+        "400 wz-runtime-tokio lib tests + 56/114 wz-session-core lib tests pass; cargo clippy clean on both crates."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "Query migration (formerly reserved as R311dw) shifts to R311dx: query.rs QueryableRegistry (~1803 LOC) + query_event.rs into wz-session-core; then R311dy reply (ReplyRegistry) -> R311dz observer (ApplicationLayerObserver); shell-collapse round afterwards.",
+        "DP1/DP2/DP3 (user calls) unchanged: --no-default-features composability now closed at AP layer; declare+pubsub+response facade thin-vs-full removal; session_glue.rs + session.rs monster-file split.",
+        "Update [[sce_vendor_pin_state]] memory to f224941a6 (last committed pin was 14ff5e36d at R311dj); the borrowed-absorb WIP memory is now resolved/committed."
+      ],
+      "publishable_decision_summary": "R311dw absorbs the SCE owned/borrowed codec split into wz: *Owned mirrors are held and encoded via try_as_borrowed at sink boundaries; vendor/sce->f224941a6; AP-preset composability gap 83->0.",
+      "publishable_changes_bullets": [
+        "vendor/sce pin 14ff5e36d -> f224941a6 (SCE owned->borrowed codec projection: as_borrowed / try_as_borrowed / into_owned + fallible-path tests); crates/Cargo.lock heapless dep refresh.",
+        "wz-session-core: NetworkMessage variants -> *Owned with decode-loop into_owned (network_message.rs); sample.rs from_codec(&*Owned) + to_codec(&self)->Foo<'_> + extract_* over &[ExtEntryOwned]; driver_loop.rs FramePayload.extensions Vec<ExtEntryOwned>; wireexpr_resolve.rs WireexprOwnedVariant; response_build.rs Option-D *Owned builders; pubsub.rs + 4 declare/* registries owned dispatch; sibling wz-session-core-test-support owned fixtures.",
+        "wz-runtime-tokio session_glue.rs: full inbound+outbound codec boundary owned-swap -- handshake ext storage Vec<ExtEntryOwned>, encode_init/open build *BodyOwned + as_borrowed().encode, build_push/declare/request/interest/response_final builders return *Owned, MsgPut/MsgDel meta builders OR header flag bits directly (owned read-only), encode_frame_with_* take owned + try_as_borrowed().expect(<=N exts), InboundFrame holds *BodyOwned + Vec<ExtEntryOwned>, parse_inbound + decode_ext_chain into_owned.",
+        "wz-runtime-tokio query.rs/reply.rs/lib.rs: into_response -> ResponseOwned, response_final_for -> ResponseFinalOwned (borrowed-build + into_owned, owned has no Default), dispatch_request/response/_final + resolve_wireexpr take *Owned; StreamEnvelope encodes via borrowed zero-copy view over frame.bytes.",
+        "Test fixtures across wz-runtime-tokio (observer/query/reply/session/session_glue + 5 integration tests), wz-session-core (sample/pubsub/liveliness_subscriber mods) and wz-codecs smoke: build borrowed codec views then .into_owned() at the owned API boundary; session_glue TestWire trait centralises owned .wire() via try_as_borrowed; HelloOwned used for the empty heapless-locator fixture."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh: all required layers pass (0/A/A2/B/C0/C1/C1b/C1c/C1d/C2/C3/D/E), run-ci exit 0 -- C1 cargo test --workspace, C1c codec-declare, C1d full pubsub feature set, C2 cargo clippy --workspace --all-targets -D warnings all green.",
+        "Layer G MCU cross-compile (WZ_RUN_LAYER_G=1): thumbv8m.base/main/main-eabihf + riscv32imac (and the thumbv6m/7m/7em set) all OK; only G.6 riscv32 cross-real SKIP (riscv32-unknown-elf-gcc absent on host) -- no_std regression-free after the wz-codecs owned-mirror change.",
+        "cargo build -p wz --no-default-features --features preset-ap-client: 0 errors (AP composability gap closed; was 83 lifetime errors). preset-mcu path unaffected.",
+        "400 wz-runtime-tokio lib tests + 56/114 wz-session-core lib tests pass; cargo clippy clean on both crates."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Query migration (formerly reserved as R311dw) shifts to R311dx: query.rs QueryableRegistry (~1803 LOC) + query_event.rs into wz-session-core; then R311dy reply (ReplyRegistry) -> R311dz observer (ApplicationLayerObserver); shell-collapse round afterwards.",
+        "DP1/DP2/DP3 (user calls) unchanged: --no-default-features composability now closed at AP layer; declare+pubsub+response facade thin-vs-full removal; session_glue.rs + session.rs monster-file split.",
+        "Update [[sce_vendor_pin_state]] memory to f224941a6 (last committed pin was 14ff5e36d at R311dj); the borrowed-absorb WIP memory is now resolved/committed."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [

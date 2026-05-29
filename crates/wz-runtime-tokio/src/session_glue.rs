@@ -102,47 +102,26 @@ use wz_codecs::close::Close;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::decl_final::DeclFinal;
 #[cfg(feature = "codec-declare")]
-use wz_codecs::decl_kexpr::DeclKexpr;
-#[cfg(feature = "codec-declare")]
-use wz_codecs::decl_queryable::DeclQueryable;
-#[cfg(feature = "codec-declare")]
-use wz_codecs::decl_subscriber::DeclSubscriber;
-#[cfg(feature = "codec-declare")]
-use wz_codecs::decl_token::DeclToken;
-#[cfg(feature = "codec-declare")]
-use wz_codecs::declare::{Declare, DeclareVariant};
-use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-request"
-))]
-use wz_codecs::ext_zbuf::ExtZbuf;
+use wz_codecs::declare::Declare;
+use wz_codecs::ext_entry::ExtEntry;
 use wz_codecs::ext_zint::ExtZint;
 #[cfg(feature = "codec-init-body")]
 use wz_codecs::init_body::InitBody;
 use wz_codecs::interest::Interest;
-use wz_codecs::interest_body::InterestBody;
 #[cfg(feature = "codec-keep-alive")]
 use wz_codecs::keep_alive::KeepAlive;
-#[cfg(any(feature = "codec-push", feature = "codec-response"))]
-use wz_codecs::msg_del::MsgDel;
-#[cfg(any(feature = "codec-push", feature = "codec-response"))]
-use wz_codecs::msg_put::MsgPut;
 #[cfg(feature = "codec-open-body")]
 use wz_codecs::open_body::OpenBody;
 #[cfg(feature = "codec-push")]
-use wz_codecs::push::{Push, PushVariant};
+use wz_codecs::push::Push;
 #[cfg(feature = "codec-request")]
-use wz_codecs::query::Query;
-#[cfg(feature = "codec-request")]
-use wz_codecs::request::{Request, RequestVariant};
+use wz_codecs::request::Request;
 #[cfg(feature = "codec-response")]
 use wz_codecs::response::Response;
 #[cfg(feature = "codec-response-final")]
 use wz_codecs::response_final::ResponseFinal;
-#[cfg(any(feature = "codec-request", feature = "codec-push"))]
-use wz_codecs::timestamp::Timestamp;
+#[cfg(feature = "codec-request")]
+use wz_codecs::timestamp::TimestampOwned;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::undecl_kexpr::UndeclKexpr;
 #[cfg(feature = "codec-declare")]
@@ -151,10 +130,54 @@ use wz_codecs::undecl_queryable::UndeclQueryable;
 use wz_codecs::undecl_subscriber::UndeclSubscriber;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::undecl_token::UndeclToken;
-use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-use wz_codecs::wireexpr_local::WireexprLocal;
+
+// SCE owned-view absorb — the lifetime-free `*Owned` mirrors that the
+// runtime stores / builds / dispatches. Decode reads a borrowed
+// `Foo<'a>` then `.into_owned()`; encode builds a `*Owned` then
+// `.as_borrowed()` / `.try_as_borrowed()` at the sink boundary. The
+// borrowed imports above stay for the `::decode` calls and the
+// `MAX_ENCODED_BYTES` capacity hints.
 #[cfg(feature = "codec-declare")]
-use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+use wz_codecs::decl_kexpr::DeclKexprOwned;
+#[cfg(feature = "codec-declare")]
+use wz_codecs::decl_queryable::DeclQueryableOwned;
+#[cfg(feature = "codec-declare")]
+use wz_codecs::decl_subscriber::DeclSubscriberOwned;
+#[cfg(feature = "codec-declare")]
+use wz_codecs::decl_token::DeclTokenOwned;
+#[cfg(feature = "codec-declare")]
+use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
+use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-response",
+    feature = "codec-request"
+))]
+use wz_codecs::ext_zbuf::ExtZbufOwned;
+#[cfg(feature = "codec-init-body")]
+use wz_codecs::init_body::InitBodyOwned;
+use wz_codecs::interest::InterestOwned;
+use wz_codecs::interest_body::InterestBodyOwned;
+#[cfg(any(feature = "codec-push", feature = "codec-response"))]
+use wz_codecs::msg_del::MsgDelOwned;
+#[cfg(any(feature = "codec-push", feature = "codec-response"))]
+use wz_codecs::msg_put::MsgPutOwned;
+#[cfg(feature = "codec-open-body")]
+use wz_codecs::open_body::OpenBodyOwned;
+#[cfg(feature = "codec-push")]
+use wz_codecs::push::{PushOwned, PushOwnedVariant};
+#[cfg(feature = "codec-request")]
+use wz_codecs::query::QueryOwned;
+#[cfg(feature = "codec-request")]
+use wz_codecs::request::{RequestOwned, RequestOwnedVariant};
+#[cfg(feature = "codec-response")]
+use wz_codecs::response::ResponseOwned;
+#[cfg(feature = "codec-response-final")]
+use wz_codecs::response_final::ResponseFinalOwned;
+use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
+use wz_codecs::wireexpr_local::WireexprLocalOwned;
+#[cfg(feature = "codec-declare")]
+use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
 use wz_runtime_core::{Runtime, TimeSource};
 
 use crate::runtime_impl::{TokioRuntime, TokioTime};
@@ -592,10 +615,10 @@ pub struct SessionLinkActions<R: Runtime = TokioRuntime, T: TimeSource = TokioTi
     /// so a setter can swap one chain without blocking the others
     /// (e.g. mid-handshake auth-step rotation can rewrite the
     /// OpenSyn chain without touching the InitSyn record).
-    init_syn_ext: R::Mutex<Vec<ExtEntry>>,
-    init_ack_ext: R::Mutex<Vec<ExtEntry>>,
-    open_syn_ext: R::Mutex<Vec<ExtEntry>>,
-    open_ack_ext: R::Mutex<Vec<ExtEntry>>,
+    init_syn_ext: R::Mutex<Vec<ExtEntryOwned>>,
+    init_ack_ext: R::Mutex<Vec<ExtEntryOwned>>,
+    open_syn_ext: R::Mutex<Vec<ExtEntryOwned>>,
+    open_ack_ext: R::Mutex<Vec<ExtEntryOwned>>,
     /// R121d — sizing parameters parsed from the peer's inbound
     /// `InitSyn`. The Accepting side caps its outbound InitAck
     /// `seq_num_res / req_id_res / batch_size` to `min(own,
@@ -804,7 +827,7 @@ impl PeerInitCaps {
 /// R121f1 carry surfaced when wz initiator dialed zenoh-pico
 /// peer-listen; the wz↔wz path (R121f) was symptom-free because
 /// both ends previously emitted Init bodies with `Z=0`.
-pub fn default_init_patch_ext_entry() -> ExtEntry {
+pub fn default_init_patch_ext_entry() -> ExtEntryOwned {
     // header byte layout per `vendor/zenoh-pico/include/zenoh-pico/
     // protocol/ext.h:47-65`:
     //   bits 0..3 = ext_id 0x07 (INIT_PATCH)
@@ -812,9 +835,9 @@ pub fn default_init_patch_ext_entry() -> ExtEntry {
     //   bits 5..6 = enc = 0x01 (ZINT)
     //   bit 7     = Z (chain continuation) — encoder owns this bit
     //               via `encode_ext_chain`, so leave it cleared here.
-    ExtEntry {
+    ExtEntryOwned {
         header: 0x07 | 0x20, // _Z_MSG_EXT_ID_INIT_PATCH literal
-        body: ExtEntryVariant::CodecZenohExtZint(ExtZint { value: 1 }),
+        body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value: 1 }),
     }
 }
 
@@ -915,7 +938,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
     /// Replace the ext chain for the given role. Production callers
     /// stage their negotiation result here; the next outbound frame
     /// of `role` reads the new chain via the encoder.
-    pub fn set_ext_chain(&self, role: ExtChainRole, entries: Vec<ExtEntry>) {
+    pub fn set_ext_chain(&self, role: ExtChainRole, entries: Vec<ExtEntryOwned>) {
         R::with_mutex_mut(self.ext_chain_slot(role), |slot| *slot = entries);
     }
 
@@ -976,7 +999,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
         })
     }
 
-    fn ext_chain_slot(&self, role: ExtChainRole) -> &R::Mutex<Vec<ExtEntry>> {
+    fn ext_chain_slot(&self, role: ExtChainRole) -> &R::Mutex<Vec<ExtEntryOwned>> {
         match role {
             ExtChainRole::InitSyn => &self.init_syn_ext,
             ExtChainRole::InitAck => &self.init_ack_ext,
@@ -2140,7 +2163,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
     /// cannot stay stable without un-gating the type — deferred to
     /// R267 Session<R,T> reparam-adjacent architectural cascade).
     #[cfg(feature = "codec-response")]
-    pub fn send_response(&self, response: Response) {
+    pub fn send_response(&self, response: ResponseOwned) {
         let sn = self.next_outbound_frame_sn();
         let wire = encode_frame_with_response(sn, response, /*reliable=*/ true);
         self.driver.send_blocking(&wire, Reliability::Reliable);
@@ -2498,7 +2521,7 @@ pub fn register_guard_fns(lua: &dyn IScriptEngine, actions: &Arc<SessionLinkActi
 fn encode_init(
     params: &SessionInitParams,
     is_ack: bool,
-    extensions: &[ExtEntry],
+    extensions: &[ExtEntryOwned],
     cookie_override: Option<&[u8]>,
 ) -> Vec<u8> {
     let mut parent_flags = wire_const::FLAG_T_INIT_S;
@@ -2525,7 +2548,7 @@ fn encode_init(
     } else {
         None
     };
-    let body = InitBody {
+    let body = InitBodyOwned {
         version: params.version,
         cbyte,
         zid: params.zid.clone(),
@@ -2542,7 +2565,9 @@ fn encode_init(
     let a = (parent_flags >> 5) & 1;
     {
         let mut sink = VecSink::new(&mut wire);
-        body.encode(&mut sink, s, a).expect("VecSink is infallible");
+        body.as_borrowed()
+            .encode(&mut sink, s, a)
+            .expect("VecSink is infallible");
     }
     wire.extend_from_slice(&ext_bytes);
     wire
@@ -2564,7 +2589,7 @@ fn encode_open(
     params: &SessionInitParams,
     is_ack: bool,
     cookie_override: Option<&[u8]>,
-    extensions: &[ExtEntry],
+    extensions: &[ExtEntryOwned],
 ) -> Vec<u8> {
     let mut parent_flags = 0u8;
     if params.lease_in_seconds {
@@ -2582,7 +2607,7 @@ fn encode_open(
     } else {
         &[]
     };
-    let body = OpenBody {
+    let body = OpenBodyOwned {
         lease: params.lease,
         initial_sn: params.initial_sn,
         cookie_len: if !is_ack {
@@ -2603,7 +2628,9 @@ fn encode_open(
     let a = (parent_flags >> 5) & 1;
     {
         let mut sink = VecSink::new(&mut wire);
-        body.encode(&mut sink, a).expect("VecSink is infallible");
+        body.as_borrowed()
+            .encode(&mut sink, a)
+            .expect("VecSink is infallible");
     }
     wire.extend_from_slice(&ext_bytes);
     wire
@@ -2622,14 +2649,14 @@ fn encode_open(
 /// non-Z bits (`ext_id`, `M`, `enc`) stay author-set; the helper
 /// preserves them via a byte-level patch on the first byte.
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
-fn encode_ext_chain(entries: &[ExtEntry]) -> Vec<u8> {
+fn encode_ext_chain(entries: &[ExtEntryOwned]) -> Vec<u8> {
     if entries.is_empty() {
         return Vec::new();
     }
     let mut buf = Vec::with_capacity(entries.len() * 4);
     let last = entries.len() - 1;
     for (i, entry) in entries.iter().enumerate() {
-        let mut bytes = entry.encode_to_vec();
+        let mut bytes = entry.as_borrowed().encode_to_vec();
         // ExtEntry::encode pushes the header byte first (see
         // ext_entry codegen line 145); flip the Z bit per chain
         // position before emitting.
@@ -2702,24 +2729,24 @@ fn encode_close(reason: u8) -> Vec<u8> {
 /// `wz_codecs::push::Push`; principled exemption from the
 /// signature-stability sweep per `feedback_signature_stability`).
 #[cfg(feature = "codec-push")]
-pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> Push {
+pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> PushOwned {
     let suffix_string = keyexpr_suffix.to_string();
     let suffix_len = suffix_string.len() as u64;
     let payload_bytes = value.to_vec();
     let payload_len = payload_bytes.len() as u64;
-    Push {
+    PushOwned {
         // `N_MID_PUSH | N_flag(0x20)` — M flag derives from the
         // WireexprLocal arm at encode time (push.rs:189).
         header: wire_const::N_MID_PUSH | 0x20,
-        keyexpr: Wireexpr {
-            body: WireexprVariant::WireexprLocal(WireexprLocal {
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(suffix_len),
                 suffix: Some(suffix_string),
             }),
         },
         extensions: None,
-        body: PushVariant::CodecZenohMsgPut(MsgPut {
+        body: PushOwnedVariant::CodecZenohMsgPut(MsgPutOwned {
             header: 0x01,
             timestamp: None,
             encoding: None,
@@ -2759,7 +2786,7 @@ pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> Push {
 /// shapes apart at the API surface so a caller cannot silently
 /// invert them.
 #[cfg(feature = "codec-push")]
-pub fn build_push_aliased(mapping_id: u64, suffix: Option<&str>, value: &[u8]) -> Push {
+pub fn build_push_aliased(mapping_id: u64, suffix: Option<&str>, value: &[u8]) -> PushOwned {
     assert!(
         mapping_id != 0,
         "build_push_aliased requires a non-zero mapping id; use build_push_literal for id=0",
@@ -2778,17 +2805,17 @@ pub fn build_push_aliased(mapping_id: u64, suffix: Option<&str>, value: &[u8]) -
     // `Unknown message type received` (zenoh-pico
     // `_z_network_message_decode` MID switch on a stale byte).
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
-    Push {
+    PushOwned {
         header: wire_const::N_MID_PUSH | n_flag,
-        keyexpr: Wireexpr {
-            body: WireexprVariant::WireexprLocal(WireexprLocal {
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: mapping_id,
                 suffix_len,
                 suffix: suffix_string,
             }),
         },
         extensions: None,
-        body: PushVariant::CodecZenohMsgPut(MsgPut {
+        body: PushOwnedVariant::CodecZenohMsgPut(MsgPutOwned {
             header: 0x01,
             timestamp: None,
             encoding: None,
@@ -2824,25 +2851,25 @@ pub fn build_push_aliased(mapping_id: u64, suffix: Option<&str>, value: &[u8]) -
 /// substring — distinguishable from a Put-with-empty-value only by
 /// the wz-side codec round-trip witness.
 #[cfg(feature = "codec-push")]
-pub fn build_push_del_literal(keyexpr_suffix: &str) -> Push {
+pub fn build_push_del_literal(keyexpr_suffix: &str) -> PushOwned {
     let suffix_string = keyexpr_suffix.to_string();
     let suffix_len = suffix_string.len() as u64;
-    Push {
+    PushOwned {
         // `N_MID_PUSH | N_flag(0x20)` — M flag derives from the
         // WireexprLocal arm at encode time (push.rs:189). Identical
         // header shape to the Put path; only the inner body MID
         // (0x02 vs 0x01) and the absence of payload bytes differ
         // on the wire.
         header: wire_const::N_MID_PUSH | 0x20,
-        keyexpr: Wireexpr {
-            body: WireexprVariant::WireexprLocal(WireexprLocal {
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(suffix_len),
                 suffix: Some(suffix_string),
             }),
         },
         extensions: None,
-        body: PushVariant::CodecZenohMsgDel(MsgDel {
+        body: PushOwnedVariant::CodecZenohMsgDel(MsgDelOwned {
             header: 0x02,
             timestamp: None,
             extensions: None,
@@ -2861,7 +2888,7 @@ pub fn build_push_del_literal(keyexpr_suffix: &str) -> Push {
 /// the two shapes apart at the API surface so a caller cannot
 /// silently invert them.
 #[cfg(feature = "codec-push")]
-pub fn build_push_del_aliased(mapping_id: u64, suffix: Option<&str>) -> Push {
+pub fn build_push_del_aliased(mapping_id: u64, suffix: Option<&str>) -> PushOwned {
     assert!(
         mapping_id != 0,
         "build_push_del_aliased requires a non-zero mapping id; use build_push_del_literal for id=0",
@@ -2873,17 +2900,17 @@ pub fn build_push_del_aliased(mapping_id: u64, suffix: Option<&str>) -> Push {
     // pure-aliased shape. The flag has identical decoder semantics
     // regardless of the inner body MID (Put vs Del).
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
-    Push {
+    PushOwned {
         header: wire_const::N_MID_PUSH | n_flag,
-        keyexpr: Wireexpr {
-            body: WireexprVariant::WireexprLocal(WireexprLocal {
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: mapping_id,
                 suffix_len,
                 suffix: suffix_string,
             }),
         },
         extensions: None,
-        body: PushVariant::CodecZenohMsgDel(MsgDel {
+        body: PushOwnedVariant::CodecZenohMsgDel(MsgDelOwned {
             header: 0x02,
             timestamp: None,
             extensions: None,
@@ -2953,20 +2980,20 @@ pub use wz_session_core::metadata::QueryMetadata;
 fn build_body_extensions(
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
-) -> Option<Vec<ExtEntry>> {
-    let mut exts: Vec<ExtEntry> = Vec::new();
+) -> Option<Vec<ExtEntryOwned>> {
+    let mut exts: Vec<ExtEntryOwned> = Vec::new();
     if let Some(si) = source_info {
         let prefix = si.zid_prefix();
         if !prefix.is_empty() {
             let body_bytes = encode_source_info_ext_body(prefix, si.eid, si.sn);
-            exts.push(ExtEntry {
+            exts.push(ExtEntryOwned {
                 // ENC_ZBUF(0x40) | id_source_info(0x01). No M flag —
                 // source_info is informational (zenoh-pico
                 // `_z_msg_ext_t._source_info` emit at
                 // message.c:_z_push_body_encode_extensions has no M
                 // bit). Z chain-continuation bit applied below.
                 header: 0x40 | 0x01,
-                body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+                body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                     value_len: body_bytes.len() as u64,
                     value: body_bytes,
                 }),
@@ -2975,14 +3002,14 @@ fn build_body_extensions(
     }
     if let Some(bytes) = attachment {
         let owned = bytes.to_vec();
-        exts.push(ExtEntry {
+        exts.push(ExtEntryOwned {
             // ENC_ZBUF(0x40) | id_attachment(0x03). Attachment is
             // informational; M flag stays clear (zenoh-pico
             // `_z_push_body_encode_extensions` at message.c emits
             // the attachment ext without M). Z chain bit applied
             // below.
             header: 0x40 | 0x03,
-            body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                 value_len: owned.len() as u64,
                 value: owned,
             }),
@@ -3004,7 +3031,7 @@ fn build_body_extensions(
 /// transport-message chains) so body / outer Push chains share the
 /// same invariant. Single-entry chains keep Z=0 (terminator).
 #[cfg(feature = "codec-push")]
-fn apply_chain_z_bits(entries: &mut [ExtEntry]) {
+fn apply_chain_z_bits(entries: &mut [ExtEntryOwned]) {
     if entries.is_empty() {
         return;
     }
@@ -3025,15 +3052,15 @@ fn apply_chain_z_bits(entries: &mut [ExtEntry]) {
 /// at network.c — qos lands on the outer chain, source_info /
 /// attachment on the body chain (`_z_push_body_encode_extensions`).
 #[cfg(feature = "codec-push")]
-fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<Vec<ExtEntry>> {
-    let mut exts: Vec<ExtEntry> = Vec::new();
+fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<Vec<ExtEntryOwned>> {
+    let mut exts: Vec<ExtEntryOwned> = Vec::new();
     if let Some(q) = qos {
-        exts.push(ExtEntry {
+        exts.push(ExtEntryOwned {
             // ENC_ZINT(0x20) | id_qos(0x01). No M flag — qos is
             // informational per zenoh-pico `_z_n_msg_encode_push`
             // outer-chain emit (network.c).
             header: 0x20 | 0x01,
-            body: ExtEntryVariant::CodecZenohExtZint(ExtZint {
+            body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint {
                 value: q.raw as u64,
             }),
         });
@@ -3060,26 +3087,30 @@ fn build_msg_put_with_meta(
     encoding: Option<&crate::sample::EncodingHint>,
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
-) -> MsgPut {
+) -> MsgPutOwned {
     let payload_bytes = payload.to_vec();
     let payload_len = payload_bytes.len() as u64;
     let extensions = build_body_extensions(source_info, attachment);
-    let mut put = MsgPut {
+    let mut put = MsgPutOwned {
         header: 0x01,
-        timestamp: timestamp.map(|t| t.to_codec()),
-        encoding: encoding.map(|e| e.to_codec()),
+        timestamp: timestamp.map(|t| t.to_codec().into_owned()),
+        encoding: encoding.map(|e| e.to_codec().into_owned()),
         extensions,
         payload_len,
         payload: payload_bytes,
     };
+    // `MsgPutOwned` is read-only (no `set_*` write accessors —
+    // those live on the borrowed view per the owned-encode-omitted
+    // SCE policy), so the header flag bits are OR'd directly. Bit
+    // masks match `MsgPut::set_t/set_e/set_z` (0x20/0x40/0x80).
     if put.timestamp.is_some() {
-        put.set_t(true);
+        put.header |= 0x20;
     }
     if put.encoding.is_some() {
-        put.set_e(true);
+        put.header |= 0x40;
     }
     if put.extensions.is_some() {
-        put.set_z(true);
+        put.header |= 0x80;
     }
     put
 }
@@ -3097,18 +3128,20 @@ fn build_msg_del_with_meta(
     timestamp: Option<&crate::sample::TimestampHint>,
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
-) -> MsgDel {
+) -> MsgDelOwned {
     let extensions = build_body_extensions(source_info, attachment);
-    let mut del = MsgDel {
+    let mut del = MsgDelOwned {
         header: 0x02,
-        timestamp: timestamp.map(|t| t.to_codec()),
+        timestamp: timestamp.map(|t| t.to_codec().into_owned()),
         extensions,
     };
+    // `MsgDelOwned` is read-only; OR the header flag bits directly
+    // (masks match `MsgDel::set_t/set_z` — 0x20/0x80).
     if del.timestamp.is_some() {
-        del.set_t(true);
+        del.header |= 0x20;
     }
     if del.extensions.is_some() {
-        del.set_z(true);
+        del.header |= 0x80;
     }
     del
 }
@@ -3123,20 +3156,20 @@ pub fn build_push_literal_with_meta(
     keyexpr_suffix: &str,
     value: &[u8],
     meta: &PushMetadata,
-) -> Push {
+) -> PushOwned {
     let outer_exts = build_push_outer_extensions(meta.qos);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
-    Push {
+    PushOwned {
         header: wire_const::N_MID_PUSH | 0x20 | z_flag,
-        keyexpr: Wireexpr {
-            body: WireexprVariant::WireexprLocal(WireexprLocal {
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(keyexpr_suffix.len() as u64),
                 suffix: Some(keyexpr_suffix.to_string()),
             }),
         },
         extensions: outer_exts,
-        body: PushVariant::CodecZenohMsgPut(build_msg_put_with_meta(
+        body: PushOwnedVariant::CodecZenohMsgPut(build_msg_put_with_meta(
             value,
             meta.timestamp.as_ref(),
             meta.encoding.as_ref(),
@@ -3153,7 +3186,7 @@ pub fn build_push_aliased_with_meta(
     suffix: Option<&str>,
     value: &[u8],
     meta: &PushMetadata,
-) -> Push {
+) -> PushOwned {
     assert!(
         mapping_id != 0,
         "build_push_aliased_with_meta requires a non-zero mapping id; \
@@ -3164,17 +3197,17 @@ pub fn build_push_aliased_with_meta(
     let suffix_string = suffix.map(str::to_string);
     let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
-    Push {
+    PushOwned {
         header: wire_const::N_MID_PUSH | n_flag | z_flag,
-        keyexpr: Wireexpr {
-            body: WireexprVariant::WireexprLocal(WireexprLocal {
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: mapping_id,
                 suffix_len,
                 suffix: suffix_string,
             }),
         },
         extensions: outer_exts,
-        body: PushVariant::CodecZenohMsgPut(build_msg_put_with_meta(
+        body: PushOwnedVariant::CodecZenohMsgPut(build_msg_put_with_meta(
             value,
             meta.timestamp.as_ref(),
             meta.encoding.as_ref(),
@@ -3189,20 +3222,20 @@ pub fn build_push_aliased_with_meta(
 /// encoding slot — the loopback path enforces the same projection
 /// in `crate::session::build_loopback_sample`.
 #[cfg(feature = "codec-push")]
-pub fn build_push_del_literal_with_meta(keyexpr_suffix: &str, meta: &PushMetadata) -> Push {
+pub fn build_push_del_literal_with_meta(keyexpr_suffix: &str, meta: &PushMetadata) -> PushOwned {
     let outer_exts = build_push_outer_extensions(meta.qos);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
-    Push {
+    PushOwned {
         header: wire_const::N_MID_PUSH | 0x20 | z_flag,
-        keyexpr: Wireexpr {
-            body: WireexprVariant::WireexprLocal(WireexprLocal {
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(keyexpr_suffix.len() as u64),
                 suffix: Some(keyexpr_suffix.to_string()),
             }),
         },
         extensions: outer_exts,
-        body: PushVariant::CodecZenohMsgDel(build_msg_del_with_meta(
+        body: PushOwnedVariant::CodecZenohMsgDel(build_msg_del_with_meta(
             meta.timestamp.as_ref(),
             meta.source_info.as_ref(),
             meta.attachment.as_deref(),
@@ -3216,7 +3249,7 @@ pub fn build_push_del_aliased_with_meta(
     mapping_id: u64,
     suffix: Option<&str>,
     meta: &PushMetadata,
-) -> Push {
+) -> PushOwned {
     assert!(
         mapping_id != 0,
         "build_push_del_aliased_with_meta requires a non-zero mapping id; \
@@ -3227,17 +3260,17 @@ pub fn build_push_del_aliased_with_meta(
     let suffix_string = suffix.map(str::to_string);
     let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
-    Push {
+    PushOwned {
         header: wire_const::N_MID_PUSH | n_flag | z_flag,
-        keyexpr: Wireexpr {
-            body: WireexprVariant::WireexprLocal(WireexprLocal {
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: mapping_id,
                 suffix_len,
                 suffix: suffix_string,
             }),
         },
         extensions: outer_exts,
-        body: PushVariant::CodecZenohMsgDel(build_msg_del_with_meta(
+        body: PushOwnedVariant::CodecZenohMsgDel(build_msg_del_with_meta(
             meta.timestamp.as_ref(),
             meta.source_info.as_ref(),
             meta.attachment.as_deref(),
@@ -3271,14 +3304,14 @@ pub fn build_push_del_aliased_with_meta(
 /// literal-keyexpr sentinel and a DECLARE with id=0 has no
 /// table-population semantics in zenoh-pico.
 #[cfg(feature = "codec-declare")]
-pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> Declare {
+pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> DeclareOwned {
     assert!(
         mapping_id != 0,
         "build_declare_kexpr requires a non-zero mapping id; id=0 is the literal-keyexpr sentinel",
     );
     let suffix_string = suffix.to_string();
     let suffix_len = Some(suffix_string.len() as u64);
-    Declare {
+    DeclareOwned {
         // `N_MID_DECLARE (0x1E)` — no I (interest_id), no Z
         // (extensions); the MVP wires only the unsolicited
         // mapping-population shape that zenoh-pico emits on
@@ -3286,7 +3319,7 @@ pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> Declare {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
-        body: DeclareVariant::CodecZenohDeclKexpr(DeclKexpr {
+        body: DeclareOwnedVariant::CodecZenohDeclKexpr(DeclKexprOwned {
             // Inner DeclKexpr header MUST carry `_Z_DECL_KEXPR_FLAG_N
             // (0x20)` when the keyexpr has a suffix string, per
             // `vendor/zenoh-pico/src/protocol/codec/declarations.c:52-58`.
@@ -3313,8 +3346,8 @@ pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> Declare {
             // has retired with this pin bump.
             header: 0x20, // _Z_DECL_KEXPR_FLAG_N
             id: mapping_id,
-            keyexpr: Wireexpr {
-                body: WireexprVariant::WireexprLocal(WireexprLocal {
+            keyexpr: WireexprOwned {
+                body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                     id: 0,
                     suffix_len,
                     suffix: Some(suffix_string),
@@ -3373,7 +3406,7 @@ pub fn build_declare_subscriber(
     subscriber_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> Declare {
+) -> DeclareOwned {
     let suffix_string = keyexpr_suffix.map(str::to_string);
     let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
     let n_flag = if keyexpr_suffix.is_some() {
@@ -3381,17 +3414,17 @@ pub fn build_declare_subscriber(
     } else {
         0x00u8
     };
-    Declare {
+    DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
-        body: DeclareVariant::CodecZenohDeclSubscriber(DeclSubscriber {
+        body: DeclareOwnedVariant::CodecZenohDeclSubscriber(DeclSubscriberOwned {
             // MID 0x02 (decl_subscriber) + N gate; M is codegen-
             // derived (see fn-level doc comment).
             header: 0x02 | n_flag,
             id: subscriber_id,
-            keyexpr: Wireexpr {
-                body: WireexprVariant::WireexprLocal(WireexprLocal {
+            keyexpr: WireexprOwned {
+                body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                     id: keyexpr_mapping_id,
                     suffix_len,
                     suffix: suffix_string,
@@ -3451,7 +3484,7 @@ pub fn build_declare_queryable(
     queryable_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> Declare {
+) -> DeclareOwned {
     let suffix_string = keyexpr_suffix.map(str::to_string);
     let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
     let n_flag = if keyexpr_suffix.is_some() {
@@ -3459,18 +3492,18 @@ pub fn build_declare_queryable(
     } else {
         0x00u8
     };
-    Declare {
+    DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
-        body: DeclareVariant::CodecZenohDeclQueryable(DeclQueryable {
+        body: DeclareOwnedVariant::CodecZenohDeclQueryable(DeclQueryableOwned {
             // MID 0x04 (_Z_DECL_QUERYABLE_MID per
             // vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/declarations.h:32)
             // + N gate; M is codegen-derived.
             header: 0x04 | n_flag,
             id: queryable_id,
-            keyexpr: Wireexpr {
-                body: WireexprVariant::WireexprLocal(WireexprLocal {
+            keyexpr: WireexprOwned {
+                body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                     id: keyexpr_mapping_id,
                     suffix_len,
                     suffix: suffix_string,
@@ -3517,7 +3550,7 @@ pub fn build_declare_token(
     token_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> Declare {
+) -> DeclareOwned {
     let suffix_string = keyexpr_suffix.map(str::to_string);
     let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
     let n_flag = if keyexpr_suffix.is_some() {
@@ -3525,18 +3558,18 @@ pub fn build_declare_token(
     } else {
         0x00u8
     };
-    Declare {
+    DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
-        body: DeclareVariant::CodecZenohDeclToken(DeclToken {
+        body: DeclareOwnedVariant::CodecZenohDeclToken(DeclTokenOwned {
             // MID 0x06 (_Z_DECL_TOKEN_MID per
             // vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/declarations.h:34)
             // + N gate; M is codegen-derived.
             header: 0x06 | n_flag,
             id: token_id,
-            keyexpr: Wireexpr {
-                body: WireexprVariant::WireexprLocal(WireexprLocal {
+            keyexpr: WireexprOwned {
+                body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                     id: keyexpr_mapping_id,
                     suffix_len,
                     suffix: suffix_string,
@@ -3622,7 +3655,7 @@ pub fn build_declare_subscriber_nonlocal(
     subscriber_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> Declare {
+) -> DeclareOwned {
     assert!(
         keyexpr_mapping_id != 0,
         "build_declare_subscriber_nonlocal requires a non-zero mapping id; \
@@ -3636,15 +3669,15 @@ pub fn build_declare_subscriber_nonlocal(
     } else {
         0x00u8
     };
-    Declare {
+    DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
-        body: DeclareVariant::CodecZenohDeclSubscriber(DeclSubscriber {
+        body: DeclareOwnedVariant::CodecZenohDeclSubscriber(DeclSubscriberOwned {
             header: 0x02 | n_flag,
             id: subscriber_id,
-            keyexpr: Wireexpr {
-                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+            keyexpr: WireexprOwned {
+                body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
                     id: keyexpr_mapping_id,
                     suffix_len,
                     suffix: suffix_string,
@@ -3667,7 +3700,7 @@ pub fn build_declare_queryable_nonlocal(
     queryable_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> Declare {
+) -> DeclareOwned {
     assert!(
         keyexpr_mapping_id != 0,
         "build_declare_queryable_nonlocal requires a non-zero mapping id; \
@@ -3680,15 +3713,15 @@ pub fn build_declare_queryable_nonlocal(
     } else {
         0x00u8
     };
-    Declare {
+    DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
-        body: DeclareVariant::CodecZenohDeclQueryable(DeclQueryable {
+        body: DeclareOwnedVariant::CodecZenohDeclQueryable(DeclQueryableOwned {
             header: 0x04 | n_flag,
             id: queryable_id,
-            keyexpr: Wireexpr {
-                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+            keyexpr: WireexprOwned {
+                body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
                     id: keyexpr_mapping_id,
                     suffix_len,
                     suffix: suffix_string,
@@ -3708,7 +3741,7 @@ pub fn build_declare_token_nonlocal(
     token_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> Declare {
+) -> DeclareOwned {
     assert!(
         keyexpr_mapping_id != 0,
         "build_declare_token_nonlocal requires a non-zero mapping id; \
@@ -3721,15 +3754,15 @@ pub fn build_declare_token_nonlocal(
     } else {
         0x00u8
     };
-    Declare {
+    DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
-        body: DeclareVariant::CodecZenohDeclToken(DeclToken {
+        body: DeclareOwnedVariant::CodecZenohDeclToken(DeclTokenOwned {
             header: 0x06 | n_flag,
             id: token_id,
-            keyexpr: Wireexpr {
-                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+            keyexpr: WireexprOwned {
+                body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
                     id: keyexpr_mapping_id,
                     suffix_len,
                     suffix: suffix_string,
@@ -3758,12 +3791,12 @@ pub fn build_declare_token_nonlocal(
 /// header and is left clear by every conformant zenoh-pico
 /// emit — wz mirrors that contract.
 #[cfg(feature = "codec-declare")]
-pub fn build_undeclare_kexpr(mapping_id: u64) -> Declare {
-    Declare {
+pub fn build_undeclare_kexpr(mapping_id: u64) -> DeclareOwned {
+    DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
-        body: DeclareVariant::CodecZenohUndeclKexpr(UndeclKexpr {
+        body: DeclareOwnedVariant::CodecZenohUndeclKexpr(UndeclKexpr {
             header: 0x01, // _Z_UNDECL_KEXPR_MID
             id: mapping_id,
         }),
@@ -3793,12 +3826,12 @@ pub fn build_undeclare_kexpr(mapping_id: u64) -> Declare {
 ///   VLE(subscriber_id)
 /// ```
 #[cfg(feature = "codec-declare")]
-pub fn build_undeclare_subscriber(subscriber_id: u64) -> Declare {
-    Declare {
+pub fn build_undeclare_subscriber(subscriber_id: u64) -> DeclareOwned {
+    DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
-        body: DeclareVariant::CodecZenohUndeclSubscriber(UndeclSubscriber {
+        body: DeclareOwnedVariant::CodecZenohUndeclSubscriber(UndeclSubscriber {
             header: 0x03, // _Z_UNDECL_SUBSCRIBER_MID
             id: subscriber_id,
         }),
@@ -3819,12 +3852,12 @@ pub fn build_undeclare_subscriber(subscriber_id: u64) -> Declare {
 ///   VLE(queryable_id)
 /// ```
 #[cfg(feature = "codec-declare")]
-pub fn build_undeclare_queryable(queryable_id: u64) -> Declare {
-    Declare {
+pub fn build_undeclare_queryable(queryable_id: u64) -> DeclareOwned {
+    DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
-        body: DeclareVariant::CodecZenohUndeclQueryable(UndeclQueryable {
+        body: DeclareOwnedVariant::CodecZenohUndeclQueryable(UndeclQueryable {
             header: 0x05, // _Z_UNDECL_QUERYABLE_MID
             id: queryable_id,
         }),
@@ -3845,12 +3878,12 @@ pub fn build_undeclare_queryable(queryable_id: u64) -> Declare {
 ///   VLE(token_id)
 /// ```
 #[cfg(feature = "codec-declare")]
-pub fn build_undeclare_token(token_id: u64) -> Declare {
-    Declare {
+pub fn build_undeclare_token(token_id: u64) -> DeclareOwned {
+    DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
-        body: DeclareVariant::CodecZenohUndeclToken(UndeclToken {
+        body: DeclareOwnedVariant::CodecZenohUndeclToken(UndeclToken {
             header: 0x07, // _Z_UNDECL_TOKEN_MID
             id: token_id,
         }),
@@ -3873,12 +3906,12 @@ pub fn build_undeclare_token(token_id: u64) -> Declare {
 ///
 /// Wire shape: `[N_MID_DECLARE, 0x1A]` — exactly two bytes.
 #[cfg(feature = "codec-declare")]
-pub fn build_declare_final() -> Declare {
-    Declare {
+pub fn build_declare_final() -> DeclareOwned {
+    DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
-        body: DeclareVariant::CodecZenohDeclFinal(DeclFinal {
+        body: DeclareOwnedVariant::CodecZenohDeclFinal(DeclFinal {
             header: 0x1A, // _Z_DECL_FINAL_MID
         }),
     }
@@ -3942,7 +3975,7 @@ pub fn build_interest_liveliness_subscriber(
     history: bool,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> Interest {
+) -> InterestOwned {
     let suffix_string = keyexpr_suffix.map(str::to_string);
     let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
 
@@ -3970,13 +4003,13 @@ pub fn build_interest_liveliness_subscriber(
     let m_flag = 0x40u8; // Local arm (M=1)
     let body_header = ke_flag | to_flag | r_flag | n_flag | m_flag;
 
-    Interest {
+    InterestOwned {
         header: wire_const::N_MID_INTEREST | c_flag | f_flag,
         interest_id,
-        body: Some(InterestBody {
+        body: Some(InterestBodyOwned {
             header: body_header,
-            keyexpr: Some(Wireexpr {
-                body: WireexprVariant::WireexprLocal(WireexprLocal {
+            keyexpr: Some(WireexprOwned {
+                body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                     id: keyexpr_mapping_id,
                     suffix_len,
                     suffix: suffix_string,
@@ -3999,8 +4032,8 @@ pub fn build_interest_liveliness_subscriber(
 /// two bytes for `interest_id <= 0xFF`. No inner body (the
 /// `_Z_INTEREST_NOT_FINAL_MASK` gate at interest.h:35 — C||F — is
 /// clear), no extensions.
-pub fn build_interest_final(interest_id: u64) -> Interest {
-    Interest {
+pub fn build_interest_final(interest_id: u64) -> InterestOwned {
+    InterestOwned {
         header: wire_const::N_MID_INTEREST,
         interest_id,
         body: None,
@@ -4064,7 +4097,7 @@ pub fn build_request_query(
     rid: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> Request {
+) -> RequestOwned {
     let suffix_string = keyexpr_suffix.map(str::to_string);
     let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
     let n_flag = if keyexpr_suffix.is_some() {
@@ -4072,21 +4105,21 @@ pub fn build_request_query(
     } else {
         0x00u8
     };
-    Request {
+    RequestOwned {
         // MID 0x1C (_Z_MID_N_REQUEST) + N gate; M is codegen-derived
         // from the wireexpr Local arm. Z (outer ext) stays clear:
         // this minimal builder emits no Request-level extensions.
         header: 0x1C | n_flag,
         rid,
-        keyexpr: Wireexpr {
-            body: WireexprVariant::WireexprLocal(WireexprLocal {
+        keyexpr: WireexprOwned {
+            body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: keyexpr_mapping_id,
                 suffix_len,
                 suffix: suffix_string,
             }),
         },
         extensions: None,
-        body: RequestVariant::CodecZenohQuery(Query {
+        body: RequestOwnedVariant::CodecZenohQuery(QueryOwned {
             // MID 0x03 (_Z_MID_Z_QUERY) only. No C (consolidation),
             // no P (params), no Z (Query-level exts). The byte-
             // compare test below pins this minimal shape.
@@ -4139,7 +4172,7 @@ pub struct RequestQueryBuilder {
     query_attachment: Option<Vec<u8>>,
     // Request-layer ext settings.
     request_qos: Option<u8>,
-    request_tstamp: Option<Timestamp>,
+    request_tstamp: Option<TimestampOwned>,
     request_target: Option<QueryTarget>,
     request_budget: Option<u32>,
     request_timeout_ms: Option<u64>,
@@ -4260,7 +4293,7 @@ impl RequestQueryBuilder {
             "RequestQueryBuilder::request_tstamp zid length {} exceeds zenoh _Z_ID_LENGTH (16)",
             zid.len(),
         );
-        self.request_tstamp = Some(Timestamp {
+        self.request_tstamp = Some(TimestampOwned {
             time,
             zid_len: zid.len() as u64,
             zid: zid.to_vec(),
@@ -4353,7 +4386,7 @@ impl RequestQueryBuilder {
     /// the inner Query body, then assembles Request-level extensions
     /// in zenoh-pico's emit order with proper Z chain-continuation
     /// bits on intermediate entries.
-    pub fn build(self) -> Request {
+    pub fn build(self) -> RequestOwned {
         let mut request = build_request_query(
             self.rid,
             self.keyexpr_mapping_id,
@@ -4363,7 +4396,7 @@ impl RequestQueryBuilder {
         // Query-layer settings (consolidation / parameters /
         // Q-attachment). The codec gates these on Query.header
         // flags Q_C(0x20) / Q_P(0x40) / Q_Z(0x80).
-        if let RequestVariant::CodecZenohQuery(ref mut query) = request.body {
+        if let RequestOwnedVariant::CodecZenohQuery(ref mut query) = request.body {
             if let Some(mode) = self.consolidation {
                 query.header |= 0x20;
                 query.consolidation = Some(mode.wire_byte());
@@ -4375,9 +4408,9 @@ impl RequestQueryBuilder {
             }
             if let Some(attachment) = self.query_attachment {
                 query.header |= 0x80;
-                query.extensions = Some(vec![ExtEntry {
+                query.extensions = Some(vec![ExtEntryOwned {
                     header: 0x40 | 0x05, // ENC_ZBUF | id_attachment
-                    body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+                    body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                         value_len: attachment.len() as u64,
                         value: attachment,
                     }),
@@ -4394,9 +4427,9 @@ impl RequestQueryBuilder {
         // tstamp → target → budget → timeout (network.c:122-167).
         // Today qos + tstamp + target + budget + timeout are exposed;
         // any future ext lands in its position-correct slot here.
-        let mut request_exts: Vec<ExtEntry> = Vec::new();
+        let mut request_exts: Vec<ExtEntryOwned> = Vec::new();
         if let Some(packed) = self.request_qos {
-            request_exts.push(ExtEntry {
+            request_exts.push(ExtEntryOwned {
                 // ENC_ZINT(0x20) | id_qos(0x01). No M flag — qos is
                 // an informational hint, not mandatory per the
                 // ext_qos M=0 convention at zenoh-pico
@@ -4404,7 +4437,7 @@ impl RequestQueryBuilder {
                 // Z bit set below as a chain-continuation step if a
                 // later ext follows.
                 header: 0x20 | 0x01,
-                body: ExtEntryVariant::CodecZenohExtZint(ExtZint {
+                body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint {
                     value: packed as u64,
                 }),
             });
@@ -4420,43 +4453,43 @@ impl RequestQueryBuilder {
             // `_z_zsize_encode(ext_size)` before the Timestamp body;
             // wz's ExtZbuf encode at ext_zbuf.rs auto-emits
             // VLE(value_len) + bytes which matches that wire shape).
-            let body_bytes = tstamp.encode_to_vec();
-            request_exts.push(ExtEntry {
+            let body_bytes = tstamp.as_borrowed().encode_to_vec();
+            request_exts.push(ExtEntryOwned {
                 header: 0x40 | 0x02,
-                body: ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+                body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                     value_len: body_bytes.len() as u64,
                     value: body_bytes,
                 }),
             });
         }
         if let Some(target) = self.request_target {
-            request_exts.push(ExtEntry {
+            request_exts.push(ExtEntryOwned {
                 // ENC_ZINT(0x20) | M(0x10) | id_target(0x04). Z bit
                 // set below as a chain step if a later ext follows.
                 header: 0x20 | 0x10 | 0x04,
-                body: ExtEntryVariant::CodecZenohExtZint(ExtZint {
+                body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint {
                     value: target.wire_byte() as u64,
                 }),
             });
         }
         if let Some(budget) = self.request_budget {
-            request_exts.push(ExtEntry {
+            request_exts.push(ExtEntryOwned {
                 // ENC_ZINT(0x20) | id_budget(0x05). No M flag —
                 // budget is informational per zenoh-pico's encode
                 // pattern at network.c:144-149. Position between
                 // target and timeout per the same source.
                 header: 0x20 | 0x05,
-                body: ExtEntryVariant::CodecZenohExtZint(ExtZint {
+                body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint {
                     value: budget as u64,
                 }),
             });
         }
         if let Some(timeout_ms) = self.request_timeout_ms {
-            request_exts.push(ExtEntry {
+            request_exts.push(ExtEntryOwned {
                 // ENC_ZINT(0x20) | id_timeout(0x06). M stays clear
                 // (timeout is informational).
                 header: 0x20 | 0x06,
-                body: ExtEntryVariant::CodecZenohExtZint(ExtZint { value: timeout_ms }),
+                body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value: timeout_ms }),
             });
         }
 
@@ -4588,7 +4621,7 @@ pub fn build_request_query_with_consolidation(
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
     consolidation: ConsolidationMode,
-) -> Request {
+) -> RequestOwned {
     RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
         .consolidation(consolidation)
         .build()
@@ -4642,7 +4675,7 @@ pub fn build_request_query_with_parameters(
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
     params: &[u8],
-) -> Request {
+) -> RequestOwned {
     RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
         .parameters(params)
         .build()
@@ -4720,7 +4753,7 @@ pub fn build_request_query_with_attachment(
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
     attachment: &[u8],
-) -> Request {
+) -> RequestOwned {
     RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
         .query_attachment(attachment)
         .build()
@@ -4778,7 +4811,7 @@ pub fn build_request_query_with_timeout_ms(
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
     timeout_ms: u64,
-) -> Request {
+) -> RequestOwned {
     RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
         .request_timeout_ms(timeout_ms)
         .build()
@@ -4830,7 +4863,7 @@ pub fn build_request_query_with_target(
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
     target: QueryTarget,
-) -> Request {
+) -> RequestOwned {
     RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
         .request_target(target)
         .build()
@@ -4862,8 +4895,8 @@ pub fn build_request_query_with_target(
 /// `request_id` MUST equal the `rid` from the matching
 /// [`build_request_query`] that opened the Query/Reply session.
 #[cfg(feature = "codec-response-final")]
-pub fn build_response_final(request_id: u64) -> ResponseFinal {
-    ResponseFinal {
+pub fn build_response_final(request_id: u64) -> ResponseFinalOwned {
+    ResponseFinalOwned {
         // MID 0x1A (_Z_MID_N_RESPONSE_FINAL). Z bit-7 stays clear:
         // minimal shape has no RF-level extensions.
         header: 0x1A,
@@ -4923,14 +4956,17 @@ where
 /// is the production-safe choice; callers passing `false` accept
 /// the consequence.
 #[cfg(feature = "codec-response")]
-pub fn encode_frame_with_response(sn: u64, response: Response, reliable: bool) -> Vec<u8> {
+pub fn encode_frame_with_response(sn: u64, response: ResponseOwned, reliable: bool) -> Vec<u8> {
     let parent_flags = if reliable {
         wire_const::FLAG_T_FRAME_R
     } else {
         0u8
     };
     encode_frame_envelope(sn, parent_flags, Response::MAX_ENCODED_BYTES, |sink| {
-        response.encode(sink)
+        response
+            .try_as_borrowed()
+            .expect("wz builders emit <=N exts by construction")
+            .encode(sink)
     })
 }
 
@@ -4948,7 +4984,7 @@ pub fn encode_frame_with_response(sn: u64, response: Response, reliable: bool) -
 #[cfg(feature = "codec-response-final")]
 pub fn encode_frame_with_response_final(
     sn: u64,
-    response_final: ResponseFinal,
+    response_final: ResponseFinalOwned,
     reliable: bool,
 ) -> Vec<u8> {
     let parent_flags = if reliable {
@@ -4957,7 +4993,10 @@ pub fn encode_frame_with_response_final(
         0u8
     };
     encode_frame_envelope(sn, parent_flags, ResponseFinal::MAX_ENCODED_BYTES, |sink| {
-        response_final.encode(sink)
+        response_final
+            .try_as_borrowed()
+            .expect("wz builders emit <=N exts by construction")
+            .encode(sink)
     })
 }
 
@@ -4973,14 +5012,17 @@ pub fn encode_frame_with_response_final(
 /// `z_get` future hung without a Response or ResponseFinal. Callers
 /// that pass `reliable=false` accept that risk explicitly.
 #[cfg(feature = "codec-request")]
-pub fn encode_frame_with_request(sn: u64, request: Request, reliable: bool) -> Vec<u8> {
+pub fn encode_frame_with_request(sn: u64, request: RequestOwned, reliable: bool) -> Vec<u8> {
     let parent_flags = if reliable {
         wire_const::FLAG_T_FRAME_R
     } else {
         0u8
     };
     encode_frame_envelope(sn, parent_flags, Request::MAX_ENCODED_BYTES, |sink| {
-        request.encode(sink)
+        request
+            .try_as_borrowed()
+            .expect("wz builders emit <=N exts by construction")
+            .encode(sink)
     })
 }
 
@@ -5000,14 +5042,17 @@ pub fn encode_frame_with_request(sn: u64, request: Request, reliable: bool) -> V
 /// after a referencing Push and the peer's resolver will reject
 /// the unknown id — useful only for fuzz / negative tests.
 #[cfg(feature = "codec-declare")]
-pub fn encode_frame_with_declare(sn: u64, declare: Declare, reliable: bool) -> Vec<u8> {
+pub fn encode_frame_with_declare(sn: u64, declare: DeclareOwned, reliable: bool) -> Vec<u8> {
     let parent_flags = if reliable {
         wire_const::FLAG_T_FRAME_R
     } else {
         0u8
     };
     encode_frame_envelope(sn, parent_flags, Declare::MAX_ENCODED_BYTES, |sink| {
-        declare.encode(sink)
+        declare
+            .try_as_borrowed()
+            .expect("wz builders emit <=N exts by construction")
+            .encode(sink)
     })
 }
 
@@ -5028,14 +5073,17 @@ pub fn encode_frame_with_declare(sn: u64, declare: Declare, reliable: bool) -> V
 /// Interest may arrive after a peer-side state change and the peer's
 /// resolver may serve a stale history snapshot — useful only for
 /// fuzz / negative tests.
-pub fn encode_frame_with_interest(sn: u64, interest: Interest, reliable: bool) -> Vec<u8> {
+pub fn encode_frame_with_interest(sn: u64, interest: InterestOwned, reliable: bool) -> Vec<u8> {
     let parent_flags = if reliable {
         wire_const::FLAG_T_FRAME_R
     } else {
         0u8
     };
     encode_frame_envelope(sn, parent_flags, Interest::MAX_ENCODED_BYTES, |sink| {
-        interest.encode(sink)
+        interest
+            .try_as_borrowed()
+            .expect("wz builders emit <=N exts by construction")
+            .encode(sink)
     })
 }
 
@@ -5067,14 +5115,16 @@ pub fn encode_frame_with_interest(sn: u64, interest: Interest, reliable: bool) -
 /// helper composes only the one transport header byte that
 /// `Frame::encode` does not emit.
 #[cfg(feature = "codec-push")]
-pub fn encode_frame_with_push(sn: u64, push: Push, reliable: bool) -> Vec<u8> {
+pub fn encode_frame_with_push(sn: u64, push: PushOwned, reliable: bool) -> Vec<u8> {
     let parent_flags = if reliable {
         wire_const::FLAG_T_FRAME_R
     } else {
         0u8
     };
     encode_frame_envelope(sn, parent_flags, Push::MAX_ENCODED_BYTES, |sink| {
-        push.encode(sink)
+        push.try_as_borrowed()
+            .expect("wz builders emit <=N exts by construction")
+            .encode(sink)
     })
 }
 
@@ -5106,8 +5156,8 @@ pub enum InboundFrame {
     Init {
         is_ack: bool,
         has_ext: bool,
-        body: InitBody,
-        extensions: Vec<ExtEntry>,
+        body: InitBodyOwned,
+        extensions: Vec<ExtEntryOwned>,
     },
     /// `_Z_MID_T_OPEN` (0x02). `is_ack` mirrors `_Z_FLAG_T_OPEN_A`;
     /// `lease_in_seconds` mirrors `_Z_FLAG_T_OPEN_T`.
@@ -5116,15 +5166,15 @@ pub enum InboundFrame {
         is_ack: bool,
         lease_in_seconds: bool,
         has_ext: bool,
-        body: OpenBody,
-        extensions: Vec<ExtEntry>,
+        body: OpenBodyOwned,
+        extensions: Vec<ExtEntryOwned>,
     },
     /// `_Z_MID_T_CLOSE` (0x03). `reason` is the single body byte.
     #[cfg(feature = "codec-close")]
     Close {
         reason: u8,
         has_ext: bool,
-        extensions: Vec<ExtEntry>,
+        extensions: Vec<ExtEntryOwned>,
     },
     /// `_Z_MID_T_KEEP_ALIVE` (0x04). Empty-body liveness ping; the
     /// only payload is the optional ext chain (Z flag-gated). The
@@ -5133,7 +5183,7 @@ pub enum InboundFrame {
     #[cfg(feature = "codec-keep-alive")]
     KeepAlive {
         has_ext: bool,
-        extensions: Vec<ExtEntry>,
+        extensions: Vec<ExtEntryOwned>,
     },
     /// `_Z_MID_T_FRAME` (0x05). Established-session payload carrier:
     /// `reliable` mirrors `_Z_FLAG_T_FRAME_R`; `sn` is the VLE
@@ -5155,7 +5205,7 @@ pub enum InboundFrame {
         sn: u64,
         payload: Vec<u8>,
         has_ext: bool,
-        extensions: Vec<ExtEntry>,
+        extensions: Vec<ExtEntryOwned>,
     },
     /// MID outside the handshake/close/keepalive set.
     Unknown { mid: u8 },
@@ -5221,7 +5271,8 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
     match mid {
         #[cfg(feature = "codec-init-body")]
         wire_const::T_MID_INIT => {
-            let body = InitBody::decode(&mut cursor, (flags >> 6) & 1, (flags >> 5) & 1)?;
+            let body =
+                InitBody::decode(&mut cursor, (flags >> 6) & 1, (flags >> 5) & 1)?.into_owned();
             let extensions = if has_ext {
                 decode_ext_chain(&mut cursor)?
             } else {
@@ -5236,7 +5287,7 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
         }
         #[cfg(feature = "codec-open-body")]
         wire_const::T_MID_OPEN => {
-            let body = OpenBody::decode(&mut cursor, (flags >> 5) & 1)?;
+            let body = OpenBody::decode(&mut cursor, (flags >> 5) & 1)?.into_owned();
             let extensions = if has_ext {
                 decode_ext_chain(&mut cursor)?
             } else {
@@ -5712,12 +5763,15 @@ where
     feature = "codec-keep-alive",
     feature = "codec-frame"
 ))]
-fn decode_ext_chain(cursor: &mut SceCursor<'_>) -> Result<Vec<ExtEntry>, InboundParseError> {
+fn decode_ext_chain(cursor: &mut SceCursor<'_>) -> Result<Vec<ExtEntryOwned>, InboundParseError> {
     let mut entries = Vec::new();
     for _ in 0..MAX_EXT_CHAIN_DEPTH {
         let entry = ExtEntry::decode(cursor).map_err(InboundParseError::Codec)?;
         let z = entry.z();
-        entries.push(entry);
+        // Deep-copy the borrowed decode view into the lifetime-free
+        // owned mirror so the parsed chain can outlive the input
+        // buffer in `InboundFrame::*.extensions`.
+        entries.push(entry.into_owned());
         if !z {
             return Ok(entries);
         }
@@ -5846,15 +5900,51 @@ pub const REGISTERED_SCRIPT_NAMES: &[&str] = &[
 mod tests {
     use super::*;
 
+    // SCE owned-view absorb test helper. The `build_*` fixtures + reply
+    // builders now return the lifetime-free `*Owned` mirrors, whose wire
+    // bytes come via `try_as_borrowed()` (encode lives on the borrowed
+    // view). `.wire()` centralises that projection so the byte-compare
+    // tests read `built.wire()` uniformly; borrowed codecs that tests
+    // encode directly get a pass-through impl. The `.expect()` is sound
+    // by construction — wz builders emit far fewer than the heapless ext
+    // cap N.
+    trait TestWire {
+        fn wire(&self) -> Vec<u8>;
+    }
+    macro_rules! impl_test_wire_owned {
+        ($($owned:ty),+ $(,)?) => {
+            $(impl TestWire for $owned {
+                fn wire(&self) -> Vec<u8> {
+                    self.try_as_borrowed()
+                        .expect("test: <=N exts by construction")
+                        .encode_to_vec()
+                }
+            })+
+        };
+    }
+    #[cfg(feature = "codec-push")]
+    impl_test_wire_owned!(PushOwned);
+    #[cfg(feature = "codec-declare")]
+    impl_test_wire_owned!(DeclareOwned);
+    #[cfg(feature = "codec-request")]
+    impl_test_wire_owned!(RequestOwned);
+    #[cfg(feature = "codec-response")]
+    impl_test_wire_owned!(ResponseOwned);
+    #[cfg(feature = "codec-response-final")]
+    impl_test_wire_owned!(ResponseFinalOwned);
+    impl_test_wire_owned!(InterestOwned);
+
     // R311dv — the Response-builder cluster moved to
     // wz-session-core::response_build, so these inner variant types are
     // no longer imported at module scope (the production lib no longer
     // matches on them). The Response/Reply assertion tests below still
     // destructure them, so re-import test-locally.
+    // Both built fixtures and `decode().into_owned()` round-trip values
+    // are owned, so the assertion match arms read the `*OwnedVariant`.
     #[cfg(feature = "codec-response")]
-    use wz_codecs::reply::ReplyVariant;
+    use wz_codecs::reply::ReplyOwnedVariant;
     #[cfg(feature = "codec-response")]
-    use wz_codecs::response::ResponseVariant;
+    use wz_codecs::response::ResponseOwnedVariant;
 
     /// HMAC-SHA256 cookie generator must produce 16-byte output and
     /// be deterministic given the same (key, peer_zid) inputs.
@@ -6128,7 +6218,7 @@ mod tests {
             "Push.header must carry N_MID_PUSH (0x1D) | N flag (0x20); M derives at encode"
         );
         match &push.keyexpr.body {
-            WireexprVariant::WireexprLocal(arm) => {
+            WireexprOwnedVariant::WireexprLocal(arm) => {
                 assert_eq!(arm.id, 0, "literal-keyexpr path uses id=0 sentinel");
                 assert_eq!(
                     arm.suffix.as_deref(),
@@ -6141,12 +6231,12 @@ mod tests {
                     "suffix_len must match suffix.len() so the encoder emits the VLE width"
                 );
             }
-            WireexprVariant::WireexprNonlocal(_) => {
+            WireexprOwnedVariant::WireexprNonlocal(_) => {
                 panic!("literal-keyexpr path must select the WireexprLocal arm (M=1)")
             }
         }
         match &push.body {
-            PushVariant::CodecZenohMsgPut(put) => {
+            PushOwnedVariant::CodecZenohMsgPut(put) => {
                 assert_eq!(put.header, 0x01, "MsgPut header MID = 0x01 with no flags");
                 assert_eq!(
                     put.payload, b"hello",
@@ -6166,9 +6256,9 @@ mod tests {
             other => panic!(
                 "MVP build_push_literal must emit MsgPut body, got {:?}",
                 match other {
-                    PushVariant::CodecZenohMsgDel(_) => "MsgDel",
-                    PushVariant::Default { .. } => "Default",
-                    PushVariant::CodecZenohMsgPut(_) => unreachable!(),
+                    PushOwnedVariant::CodecZenohMsgDel(_) => "MsgDel",
+                    PushOwnedVariant::Default { .. } => "Default",
+                    PushOwnedVariant::CodecZenohMsgPut(_) => unreachable!(),
                 }
             ),
         }
@@ -6180,7 +6270,7 @@ mod tests {
 
     /// `encode_frame_with_push` composes the transport-envelope
     /// header byte (T_MID_FRAME | parent_flags) with the
-    /// `Frame.encode_to_vec()` body (VLE(sn) + payload). With reliable=true
+    /// `Frame.wire()` body (VLE(sn) + payload). With reliable=true
     /// the FLAG_T_FRAME_R bit appears in the header byte.
     #[test]
     fn encode_frame_with_push_emits_transport_header_plus_frame_body() {
@@ -6188,27 +6278,27 @@ mod tests {
         // the transport-envelope header byte and the Frame body
         // shape. Push::default()'s wire bytes are independently
         // pinned by layer3_push.rs's byte-equiv test.
-        let push = Push::default();
-        let push_bytes = push.encode_to_vec();
+        let push = Push::default().into_owned();
+        let push_bytes = push.wire();
 
         // Reliable Frame at sn=0.
-        let wire_reliable = encode_frame_with_push(0, Push::default(), true);
+        let wire_reliable = encode_frame_with_push(0, Push::default().into_owned(), true);
         assert_eq!(
             wire_reliable[0],
             wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME,
             "reliable Frame must set FLAG_T_FRAME_R (0x20) on the parent header byte"
         );
         // Body shape: VLE(sn=0) = single byte 0x00, followed by
-        // Push.encode_to_vec() bytes verbatim.
+        // Push.wire() bytes verbatim.
         assert_eq!(wire_reliable[1], 0x00, "Frame.sn=0 VLE width = 1 byte 0x00");
         assert_eq!(
             &wire_reliable[2..],
             push_bytes.as_slice(),
-            "tail of Frame envelope must be the Push.encode_to_vec() bytes byte-for-byte"
+            "tail of Frame envelope must be the Push.wire() bytes byte-for-byte"
         );
 
         // Best-effort Frame: same shape minus FLAG_T_FRAME_R.
-        let wire_best_effort = encode_frame_with_push(0, Push::default(), false);
+        let wire_best_effort = encode_frame_with_push(0, Push::default().into_owned(), false);
         assert_eq!(
             wire_best_effort[0],
             wire_const::T_MID_FRAME,
@@ -6225,7 +6315,7 @@ mod tests {
     #[test]
     fn encode_frame_with_push_carries_vle_sn_across_widths() {
         for sn in [0u64, 1, 127, 128, 16383, 16384, 1_000_000] {
-            let wire = encode_frame_with_push(sn, Push::default(), true);
+            let wire = encode_frame_with_push(sn, Push::default().into_owned(), true);
             // Round-trip through parse_inbound to recover the
             // sn — it carries us through both the transport-header
             // byte decode AND the Frame.sn VLE decode.
@@ -6275,7 +6365,7 @@ mod tests {
     fn build_push_aliased_carries_non_zero_id_with_optional_suffix() {
         let pure = build_push_aliased(7, None, b"hello");
         match &pure.keyexpr.body {
-            WireexprVariant::WireexprLocal(w) => {
+            WireexprOwnedVariant::WireexprLocal(w) => {
                 assert_eq!(w.id, 7, "pure aliased Push id must equal mapping_id");
                 assert_eq!(w.suffix, None, "pure aliased Push must omit suffix");
                 assert_eq!(w.suffix_len, None, "pure aliased Push must omit suffix_len");
@@ -6283,7 +6373,7 @@ mod tests {
             _ => panic!("build_push_aliased must produce a WireexprLocal arm"),
         }
         match &pure.body {
-            PushVariant::CodecZenohMsgPut(p) => {
+            PushOwnedVariant::CodecZenohMsgPut(p) => {
                 assert_eq!(p.payload, b"hello".to_vec());
                 assert_eq!(p.payload_len, 5);
             }
@@ -6292,7 +6382,7 @@ mod tests {
 
         let composite = build_push_aliased(7, Some("tail"), b"hi");
         match &composite.keyexpr.body {
-            WireexprVariant::WireexprLocal(w) => {
+            WireexprOwnedVariant::WireexprLocal(w) => {
                 assert_eq!(w.id, 7);
                 assert_eq!(w.suffix.as_deref(), Some("tail"));
                 assert_eq!(w.suffix_len, Some(4));
@@ -6322,7 +6412,7 @@ mod tests {
             "Push.header must carry N_MID_PUSH (0x1D) | N flag (0x20) — same as the Put literal path"
         );
         match &push.keyexpr.body {
-            WireexprVariant::WireexprLocal(arm) => {
+            WireexprOwnedVariant::WireexprLocal(arm) => {
                 assert_eq!(arm.id, 0, "literal-keyexpr path uses id=0 sentinel");
                 assert_eq!(
                     arm.suffix.as_deref(),
@@ -6335,12 +6425,12 @@ mod tests {
                     "suffix_len must match suffix.len() for the VLE writer"
                 );
             }
-            WireexprVariant::WireexprNonlocal(_) => {
+            WireexprOwnedVariant::WireexprNonlocal(_) => {
                 panic!("literal-keyexpr path must select the WireexprLocal arm (M=1)")
             }
         }
         match &push.body {
-            PushVariant::CodecZenohMsgDel(del) => {
+            PushOwnedVariant::CodecZenohMsgDel(del) => {
                 assert_eq!(del.header, 0x02, "MsgDel header MID = 0x02 with no flags");
                 assert!(
                     del.timestamp.is_none(),
@@ -6354,9 +6444,9 @@ mod tests {
             other => panic!(
                 "build_push_del_literal must emit MsgDel body, got {:?}",
                 match other {
-                    PushVariant::CodecZenohMsgPut(_) => "MsgPut",
-                    PushVariant::Default { .. } => "Default",
-                    PushVariant::CodecZenohMsgDel(_) => unreachable!(),
+                    PushOwnedVariant::CodecZenohMsgPut(_) => "MsgPut",
+                    PushOwnedVariant::Default { .. } => "Default",
+                    PushOwnedVariant::CodecZenohMsgDel(_) => unreachable!(),
                 }
             ),
         }
@@ -6380,7 +6470,7 @@ mod tests {
             "pure aliased Push (no suffix) must clear the N flag",
         );
         match &pure.keyexpr.body {
-            WireexprVariant::WireexprLocal(w) => {
+            WireexprOwnedVariant::WireexprLocal(w) => {
                 assert_eq!(w.id, 7, "pure aliased Push id must equal mapping_id");
                 assert_eq!(w.suffix, None, "pure aliased Push must omit suffix");
                 assert_eq!(w.suffix_len, None, "pure aliased Push must omit suffix_len");
@@ -6388,7 +6478,7 @@ mod tests {
             _ => panic!("build_push_del_aliased must produce a WireexprLocal arm"),
         }
         match &pure.body {
-            PushVariant::CodecZenohMsgDel(d) => {
+            PushOwnedVariant::CodecZenohMsgDel(d) => {
                 assert_eq!(d.header, 0x02);
             }
             _ => panic!("build_push_del_aliased must wrap a MsgDel body"),
@@ -6401,7 +6491,7 @@ mod tests {
             "composite aliased Push (suffix present) must set the N flag",
         );
         match &composite.keyexpr.body {
-            WireexprVariant::WireexprLocal(w) => {
+            WireexprOwnedVariant::WireexprLocal(w) => {
                 assert_eq!(w.id, 7);
                 assert_eq!(w.suffix.as_deref(), Some("tail"));
                 assert_eq!(w.suffix_len, Some(4));
@@ -6409,7 +6499,7 @@ mod tests {
             _ => panic!("composite aliased Push must produce a WireexprLocal arm"),
         }
         match &composite.body {
-            PushVariant::CodecZenohMsgDel(d) => {
+            PushOwnedVariant::CodecZenohMsgDel(d) => {
                 assert_eq!(d.header, 0x02);
             }
             _ => panic!("composite aliased Push must wrap a MsgDel body"),
@@ -6451,7 +6541,7 @@ mod tests {
         );
         match &messages[0] {
             NetworkMessage::Push(p) => match &p.body {
-                PushVariant::CodecZenohMsgDel(d) => {
+                PushOwnedVariant::CodecZenohMsgDel(d) => {
                     assert_eq!(
                         d.header, 0x02,
                         "round-tripped MsgDel must preserve its MID byte"
@@ -6460,9 +6550,9 @@ mod tests {
                 other => panic!(
                     "round-tripped Push body must be MsgDel, got {:?}",
                     match other {
-                        PushVariant::CodecZenohMsgPut(_) => "MsgPut",
-                        PushVariant::Default { .. } => "Default",
-                        PushVariant::CodecZenohMsgDel(_) => unreachable!(),
+                        PushOwnedVariant::CodecZenohMsgPut(_) => "MsgPut",
+                        PushOwnedVariant::Default { .. } => "Default",
+                        PushOwnedVariant::CodecZenohMsgDel(_) => unreachable!(),
                     }
                 ),
             },
@@ -6496,14 +6586,14 @@ mod tests {
             "MVP DECLARE has no extensions"
         );
         match &declare.body {
-            DeclareVariant::CodecZenohDeclKexpr(dk) => {
+            DeclareOwnedVariant::CodecZenohDeclKexpr(dk) => {
                 assert_eq!(dk.id, 7, "DeclKexpr.id must equal mapping_id argument");
                 assert_eq!(
                     dk.header, 0x20,
                     "DeclKexpr.header must carry _Z_DECL_KEXPR_FLAG_N (0x20)"
                 );
                 match &dk.keyexpr.body {
-                    WireexprVariant::WireexprLocal(w) => {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(
                             w.id, 0,
                             "inner Wireexpr.id is the literal-keyexpr sentinel 0"
@@ -6524,7 +6614,7 @@ mod tests {
     }
 
     /// R121g — Wire-byte regression gate: the bytes emitted by
-    /// `build_declare_kexpr(7, "demo/test").encode_to_vec()` must equal
+    /// `build_declare_kexpr(7, "demo/test").wire()` must equal
     /// zenoh-pico's `_z_decl_kexpr_encode` output for the same
     /// arguments. Authored as a byte-literal compare so a future
     /// codegen drift on either DeclKexpr.header derivation or
@@ -6539,7 +6629,7 @@ mod tests {
     #[test]
     fn build_declare_kexpr_emits_zenoh_pico_compatible_wire_bytes() {
         let declare = build_declare_kexpr(7, "demo/test");
-        let outer = declare.encode_to_vec();
+        let outer = declare.wire();
         // Skip the outer Declare envelope header (0x1E) — that
         // single byte is the wz Declare codec's own emit; the rest
         // is the DeclKexpr inner body. The byte-compare gate sits
@@ -6569,14 +6659,14 @@ mod tests {
     }
 
     /// R121g — `encode_frame_with_declare` produces the same
-    /// `[parent_flags | T_MID_FRAME]` + `Frame.encode_to_vec()` wrapping
-    /// as `encode_frame_with_push`, with `Declare.encode_to_vec()` as the
+    /// `[parent_flags | T_MID_FRAME]` + `Frame.wire()` wrapping
+    /// as `encode_frame_with_push`, with `Declare.wire()` as the
     /// inner payload bytes. Reliable / best-effort header flag
     /// behaviour mirrors the Push variant.
     #[test]
     fn encode_frame_with_declare_wraps_declare_in_frame_envelope() {
         let declare = build_declare_kexpr(7, "demo/test");
-        let declare_bytes = declare.encode_to_vec();
+        let declare_bytes = declare.wire();
 
         let wire_reliable = encode_frame_with_declare(0, build_declare_kexpr(7, "demo/test"), true);
         assert_eq!(
@@ -6588,7 +6678,7 @@ mod tests {
         assert_eq!(
             &wire_reliable[2..],
             declare_bytes.as_slice(),
-            "Frame body tail must be Declare.encode_to_vec() bytes verbatim",
+            "Frame body tail must be Declare.wire() bytes verbatim",
         );
 
         let wire_best_effort =
@@ -6616,14 +6706,14 @@ mod tests {
             "Declare envelope header must carry N_MID_DECLARE",
         );
         match &alias.body {
-            DeclareVariant::CodecZenohDeclSubscriber(d) => {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
                 assert_eq!(d.id, 5, "DeclSubscriber.id must equal subscriber_id");
                 assert_eq!(
                     d.header, 0x02,
                     "header carries MID only; N clear (no suffix) and M is codegen-derived"
                 );
                 match &d.keyexpr.body {
-                    WireexprVariant::WireexprLocal(w) => {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 7, "Wireexpr.id must equal keyexpr_mapping_id");
                         assert!(w.suffix.is_none(), "alias case has no suffix");
                         assert!(w.suffix_len.is_none());
@@ -6637,13 +6727,13 @@ mod tests {
         // Case 2 — composite: alias N + tail suffix.
         let composite = build_declare_subscriber(5, 7, Some("tail"));
         match &composite.body {
-            DeclareVariant::CodecZenohDeclSubscriber(d) => {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
                 assert_eq!(
                     d.header, 0x22,
                     "header MID 0x02 | N(0x20) when suffix present"
                 );
                 match &d.keyexpr.body {
-                    WireexprVariant::WireexprLocal(w) => {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 7);
                         assert_eq!(w.suffix.as_deref(), Some("tail"));
                         assert_eq!(w.suffix_len, Some(4));
@@ -6657,10 +6747,10 @@ mod tests {
         // Case 3 — literal: id=0 sentinel + suffix carries the keyexpr.
         let literal = build_declare_subscriber(5, 0, Some("demo/test"));
         match &literal.body {
-            DeclareVariant::CodecZenohDeclSubscriber(d) => {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
                 assert_eq!(d.header, 0x22, "literal case still sets N (suffix present)");
                 match &d.keyexpr.body {
-                    WireexprVariant::WireexprLocal(w) => {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 0, "literal sentinel id=0");
                         assert_eq!(w.suffix.as_deref(), Some("demo/test"));
                     }
@@ -6672,7 +6762,7 @@ mod tests {
     }
 
     /// R121i — Wire-byte regression gate: the bytes emitted by
-    /// `build_declare_subscriber(5, 7, None).encode_to_vec()` must equal
+    /// `build_declare_subscriber(5, 7, None).wire()` must equal
     /// zenoh-pico's `_z_decl_subscriber_encode` /
     /// `_z_decl_commons_encode` output for the same arguments
     /// (vendor/zenoh-pico/src/protocol/codec/declarations.c:65-84
@@ -6697,7 +6787,7 @@ mod tests {
         //   VLE(subscriber_id=5)     = 0x05
         //   wireexpr Local id=7 only = 0x07
         let alias = build_declare_subscriber(5, 7, None);
-        let alias_wire = alias.encode_to_vec();
+        let alias_wire = alias.wire();
         let alias_expected = vec![
             wire_const::N_MID_DECLARE, // 0x1E
             0x42,                      // MID(0x02) | M(0x40)
@@ -6716,7 +6806,7 @@ mod tests {
         //   suffix_len VLE(3) = 0x03
         //   suffix bytes = "abc"
         let composite = build_declare_subscriber(5, 7, Some("abc"));
-        let composite_wire = composite.encode_to_vec();
+        let composite_wire = composite.wire();
         let mut composite_expected = vec![
             wire_const::N_MID_DECLARE,
             0x62, // MID | N | M
@@ -6737,7 +6827,7 @@ mod tests {
         //   suffix_len VLE(9) = 0x09
         //   suffix bytes = "demo/test"
         let literal = build_declare_subscriber(5, 0, Some("demo/test"));
-        let literal_wire = literal.encode_to_vec();
+        let literal_wire = literal.wire();
         let mut literal_expected = vec![wire_const::N_MID_DECLARE, 0x62, 0x05, 0x00, 0x09];
         literal_expected.extend_from_slice(b"demo/test");
         assert_eq!(
@@ -6761,14 +6851,14 @@ mod tests {
             "Declare envelope header must carry N_MID_DECLARE",
         );
         match &alias.body {
-            DeclareVariant::CodecZenohDeclQueryable(d) => {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
                 assert_eq!(d.id, 9, "DeclQueryable.id must equal queryable_id");
                 assert_eq!(
                     d.header, 0x04,
                     "header carries MID 0x04 only; N clear (no suffix), M codegen-derived"
                 );
                 match &d.keyexpr.body {
-                    WireexprVariant::WireexprLocal(w) => {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 7, "Wireexpr.id must equal keyexpr_mapping_id");
                         assert!(w.suffix.is_none(), "alias case has no suffix");
                         assert!(w.suffix_len.is_none());
@@ -6782,13 +6872,13 @@ mod tests {
         // Case 2 — composite: alias N + tail suffix.
         let composite = build_declare_queryable(9, 7, Some("tail"));
         match &composite.body {
-            DeclareVariant::CodecZenohDeclQueryable(d) => {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
                 assert_eq!(
                     d.header, 0x24,
                     "header MID 0x04 | N(0x20) when suffix present"
                 );
                 match &d.keyexpr.body {
-                    WireexprVariant::WireexprLocal(w) => {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 7);
                         assert_eq!(w.suffix.as_deref(), Some("tail"));
                         assert_eq!(w.suffix_len, Some(4));
@@ -6802,10 +6892,10 @@ mod tests {
         // Case 3 — literal: id=0 sentinel + suffix carries the keyexpr.
         let literal = build_declare_queryable(9, 0, Some("demo/test"));
         match &literal.body {
-            DeclareVariant::CodecZenohDeclQueryable(d) => {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
                 assert_eq!(d.header, 0x24, "literal case still sets N (suffix present)");
                 match &d.keyexpr.body {
-                    WireexprVariant::WireexprLocal(w) => {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 0, "literal sentinel id=0");
                         assert_eq!(w.suffix.as_deref(), Some("demo/test"));
                     }
@@ -6817,7 +6907,7 @@ mod tests {
     }
 
     /// R121i-b — Wire-byte regression gate: the bytes emitted by
-    /// `build_declare_queryable(...).encode_to_vec()` must equal zenoh-pico's
+    /// `build_declare_queryable(...).wire()` must equal zenoh-pico's
     /// `_z_decl_queryable_encode` output for the no-info-ext shape
     /// (vendor/zenoh-pico/src/protocol/codec/declarations.c:105-118
     ///   with `has_info_ext = false` short-circuit at line 109).
@@ -6836,7 +6926,7 @@ mod tests {
         //   VLE(queryable_id=9)  = 0x09
         //   wireexpr Local id=7  = 0x07
         let alias = build_declare_queryable(9, 7, None);
-        let alias_wire = alias.encode_to_vec();
+        let alias_wire = alias.wire();
         let alias_expected = vec![
             wire_const::N_MID_DECLARE, // 0x1E
             0x44,                      // MID(0x04) | M(0x40)
@@ -6855,7 +6945,7 @@ mod tests {
         //   suffix_len VLE(3) = 0x03
         //   suffix bytes = "abc"
         let composite = build_declare_queryable(9, 7, Some("abc"));
-        let composite_wire = composite.encode_to_vec();
+        let composite_wire = composite.wire();
         let mut composite_expected = vec![
             wire_const::N_MID_DECLARE,
             0x64, // MID | N | M
@@ -6876,7 +6966,7 @@ mod tests {
         //   suffix_len VLE(9) = 0x09
         //   suffix bytes = "demo/test"
         let literal = build_declare_queryable(9, 0, Some("demo/test"));
-        let literal_wire = literal.encode_to_vec();
+        let literal_wire = literal.wire();
         let mut literal_expected = vec![wire_const::N_MID_DECLARE, 0x64, 0x09, 0x00, 0x09];
         literal_expected.extend_from_slice(b"demo/test");
         assert_eq!(
@@ -6893,14 +6983,14 @@ mod tests {
         // Case 1 — pure alias.
         let alias = build_declare_token(11, 7, None);
         match &alias.body {
-            DeclareVariant::CodecZenohDeclToken(d) => {
+            DeclareOwnedVariant::CodecZenohDeclToken(d) => {
                 assert_eq!(d.id, 11, "DeclToken.id must equal token_id");
                 assert_eq!(
                     d.header, 0x06,
                     "header carries MID 0x06 only; N clear, M codegen-derived"
                 );
                 match &d.keyexpr.body {
-                    WireexprVariant::WireexprLocal(w) => {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 7);
                         assert!(w.suffix.is_none());
                     }
@@ -6913,10 +7003,10 @@ mod tests {
         // Case 2 — composite.
         let composite = build_declare_token(11, 7, Some("tail"));
         match &composite.body {
-            DeclareVariant::CodecZenohDeclToken(d) => {
+            DeclareOwnedVariant::CodecZenohDeclToken(d) => {
                 assert_eq!(d.header, 0x26, "header MID 0x06 | N(0x20)");
                 match &d.keyexpr.body {
-                    WireexprVariant::WireexprLocal(w) => {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 7);
                         assert_eq!(w.suffix.as_deref(), Some("tail"));
                     }
@@ -6929,10 +7019,10 @@ mod tests {
         // Case 3 — literal.
         let literal = build_declare_token(11, 0, Some("demo/test"));
         match &literal.body {
-            DeclareVariant::CodecZenohDeclToken(d) => {
+            DeclareOwnedVariant::CodecZenohDeclToken(d) => {
                 assert_eq!(d.header, 0x26);
                 match &d.keyexpr.body {
-                    WireexprVariant::WireexprLocal(w) => {
+                    WireexprOwnedVariant::WireexprLocal(w) => {
                         assert_eq!(w.id, 0);
                         assert_eq!(w.suffix.as_deref(), Some("demo/test"));
                     }
@@ -6944,7 +7034,7 @@ mod tests {
     }
 
     /// R121i-b — Wire-byte regression gate: the bytes emitted by
-    /// `build_declare_token(...).encode_to_vec()` must equal zenoh-pico's
+    /// `build_declare_token(...).wire()` must equal zenoh-pico's
     /// `_z_decl_token_encode` output
     /// (vendor/zenoh-pico/src/protocol/codec/declarations.c:123-126).
     ///
@@ -6956,7 +7046,7 @@ mod tests {
     fn build_declare_token_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — pure alias (token_id=11, mapping_id=7, no suffix).
         let alias = build_declare_token(11, 7, None);
-        let alias_wire = alias.encode_to_vec();
+        let alias_wire = alias.wire();
         let alias_expected = vec![
             wire_const::N_MID_DECLARE, // 0x1E
             0x46,                      // MID(0x06) | M(0x40)
@@ -6970,7 +7060,7 @@ mod tests {
 
         // Case 2 — composite (id=7 + tail "abc").
         let composite = build_declare_token(11, 7, Some("abc"));
-        let composite_wire = composite.encode_to_vec();
+        let composite_wire = composite.wire();
         let mut composite_expected = vec![
             wire_const::N_MID_DECLARE,
             0x66, // MID(0x06) | N | M
@@ -6986,7 +7076,7 @@ mod tests {
 
         // Case 3 — literal (id=0 + suffix "demo/test").
         let literal = build_declare_token(11, 0, Some("demo/test"));
-        let literal_wire = literal.encode_to_vec();
+        let literal_wire = literal.wire();
         let mut literal_expected = vec![wire_const::N_MID_DECLARE, 0x66, 0x0B, 0x00, 0x09];
         literal_expected.extend_from_slice(b"demo/test");
         assert_eq!(
@@ -7012,7 +7102,7 @@ mod tests {
         //   DeclSubscriber.header = MID(0x02) | M(0x00) = 0x02
         let alias = build_declare_subscriber_nonlocal(5, 7, None);
         assert_eq!(
-            alias.encode_to_vec(),
+            alias.wire(),
             vec![
                 wire_const::N_MID_DECLARE, // 0x1E outer
                 0x02,                      // MID only, no N, no M
@@ -7035,7 +7125,7 @@ mod tests {
         ];
         composite_expected.extend_from_slice(b"abc");
         assert_eq!(
-            composite.encode_to_vec(),
+            composite.wire(),
             composite_expected,
             "DeclSubscriber Nonlocal composite-case wire bytes must \
              match zenoh-pico reference",
@@ -7047,7 +7137,7 @@ mod tests {
         // regression surface on the Nonlocal arm.
         let large = build_declare_subscriber_nonlocal(5, 200, None);
         assert_eq!(
-            large.encode_to_vec(),
+            large.wire(),
             vec![
                 wire_const::N_MID_DECLARE,
                 0x02,
@@ -7061,8 +7151,8 @@ mod tests {
 
         // Inner-arm sanity check — must be Nonlocal, not Local.
         match &alias.body {
-            DeclareVariant::CodecZenohDeclSubscriber(d) => match &d.keyexpr.body {
-                WireexprVariant::WireexprNonlocal(w) => {
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => match &d.keyexpr.body {
+                WireexprOwnedVariant::WireexprNonlocal(w) => {
                     assert_eq!(w.id, 7);
                     assert!(w.suffix.is_none());
                 }
@@ -7093,7 +7183,7 @@ mod tests {
         // Case 1 — pure alias.
         let alias = build_declare_queryable_nonlocal(9, 7, None);
         assert_eq!(
-            alias.encode_to_vec(),
+            alias.wire(),
             vec![
                 wire_const::N_MID_DECLARE,
                 0x04, // MID only, no N, no M
@@ -7115,7 +7205,7 @@ mod tests {
         ];
         composite_expected.extend_from_slice(b"abc");
         assert_eq!(
-            composite.encode_to_vec(),
+            composite.wire(),
             composite_expected,
             "DeclQueryable Nonlocal composite-case wire bytes must match \
              zenoh-pico reference",
@@ -7124,15 +7214,15 @@ mod tests {
         // Case 3 — multi-byte VLE boundary on the peer's mapping id.
         let large = build_declare_queryable_nonlocal(9, 200, None);
         assert_eq!(
-            large.encode_to_vec(),
+            large.wire(),
             vec![wire_const::N_MID_DECLARE, 0x04, 0x09, 0xC8, 0x01,],
             "DeclQueryable Nonlocal multi-byte VLE id wire bytes must \
              match zenoh-pico reference",
         );
 
         match &alias.body {
-            DeclareVariant::CodecZenohDeclQueryable(d) => match &d.keyexpr.body {
-                WireexprVariant::WireexprNonlocal(w) => {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(d) => match &d.keyexpr.body {
+                WireexprOwnedVariant::WireexprNonlocal(w) => {
                     assert_eq!(w.id, 7);
                     assert!(w.suffix.is_none());
                 }
@@ -7160,7 +7250,7 @@ mod tests {
     fn build_declare_token_nonlocal_emits_zenoh_pico_compatible_wire_bytes() {
         let alias = build_declare_token_nonlocal(11, 7, None);
         assert_eq!(
-            alias.encode_to_vec(),
+            alias.wire(),
             vec![
                 wire_const::N_MID_DECLARE,
                 0x06, // MID only, no N, no M
@@ -7181,7 +7271,7 @@ mod tests {
         ];
         composite_expected.extend_from_slice(b"abc");
         assert_eq!(
-            composite.encode_to_vec(),
+            composite.wire(),
             composite_expected,
             "DeclToken Nonlocal composite-case wire bytes must match \
              zenoh-pico reference",
@@ -7189,15 +7279,15 @@ mod tests {
 
         let large = build_declare_token_nonlocal(11, 200, None);
         assert_eq!(
-            large.encode_to_vec(),
+            large.wire(),
             vec![wire_const::N_MID_DECLARE, 0x06, 0x0B, 0xC8, 0x01,],
             "DeclToken Nonlocal multi-byte VLE id wire bytes must match \
              zenoh-pico reference",
         );
 
         match &alias.body {
-            DeclareVariant::CodecZenohDeclToken(d) => match &d.keyexpr.body {
-                WireexprVariant::WireexprNonlocal(w) => {
+            DeclareOwnedVariant::CodecZenohDeclToken(d) => match &d.keyexpr.body {
+                WireexprOwnedVariant::WireexprNonlocal(w) => {
                     assert_eq!(w.id, 7);
                     assert!(w.suffix.is_none());
                 }
@@ -7228,7 +7318,7 @@ mod tests {
     fn build_undeclare_kexpr_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — single-byte VLE id (id=42 fits in 7 bits).
         let small = build_undeclare_kexpr(42);
-        let small_wire = small.encode_to_vec();
+        let small_wire = small.wire();
         let small_expected = vec![
             wire_const::N_MID_DECLARE, // 0x1E outer
             0x01,                      // _Z_UNDECL_KEXPR_MID
@@ -7243,7 +7333,7 @@ mod tests {
         // boundary; first byte = 0xC8 (low 7 bits 0x48 + cont 0x80),
         // second byte = 0x01).
         let large = build_undeclare_kexpr(200);
-        let large_wire = large.encode_to_vec();
+        let large_wire = large.wire();
         let large_expected = vec![
             wire_const::N_MID_DECLARE,
             0x01,
@@ -7257,7 +7347,7 @@ mod tests {
 
         // Inner-arm sanity check on the small-id case.
         match &small.body {
-            DeclareVariant::CodecZenohUndeclKexpr(d) => {
+            DeclareOwnedVariant::CodecZenohUndeclKexpr(d) => {
                 assert_eq!(d.header, 0x01, "header carries MID only; Z (bit-7) clear");
                 assert_eq!(d.id, 42);
             }
@@ -7275,7 +7365,7 @@ mod tests {
     #[test]
     fn build_undeclare_subscriber_emits_zenoh_pico_compatible_wire_bytes() {
         let small = build_undeclare_subscriber(42);
-        let small_wire = small.encode_to_vec();
+        let small_wire = small.wire();
         assert_eq!(
             small_wire,
             vec![
@@ -7287,7 +7377,7 @@ mod tests {
         );
 
         let large = build_undeclare_subscriber(200);
-        let large_wire = large.encode_to_vec();
+        let large_wire = large.wire();
         assert_eq!(
             large_wire,
             vec![wire_const::N_MID_DECLARE, 0x03, 0xC8, 0x01,],
@@ -7295,7 +7385,7 @@ mod tests {
         );
 
         match &small.body {
-            DeclareVariant::CodecZenohUndeclSubscriber(d) => {
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(d) => {
                 assert_eq!(d.header, 0x03);
                 assert_eq!(d.id, 42);
             }
@@ -7311,7 +7401,7 @@ mod tests {
     fn build_undeclare_queryable_emits_zenoh_pico_compatible_wire_bytes() {
         let small = build_undeclare_queryable(42);
         assert_eq!(
-            small.encode_to_vec(),
+            small.wire(),
             vec![
                 wire_const::N_MID_DECLARE,
                 0x05, // _Z_UNDECL_QUERYABLE_MID
@@ -7322,13 +7412,13 @@ mod tests {
 
         let large = build_undeclare_queryable(200);
         assert_eq!(
-            large.encode_to_vec(),
+            large.wire(),
             vec![wire_const::N_MID_DECLARE, 0x05, 0xC8, 0x01,],
             "UndeclQueryable multi-byte VLE id wire bytes must match zenoh-pico reference",
         );
 
         match &small.body {
-            DeclareVariant::CodecZenohUndeclQueryable(d) => {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(d) => {
                 assert_eq!(d.header, 0x05);
                 assert_eq!(d.id, 42);
             }
@@ -7344,7 +7434,7 @@ mod tests {
     fn build_undeclare_token_emits_zenoh_pico_compatible_wire_bytes() {
         let small = build_undeclare_token(42);
         assert_eq!(
-            small.encode_to_vec(),
+            small.wire(),
             vec![
                 wire_const::N_MID_DECLARE,
                 0x07, // _Z_UNDECL_TOKEN_MID
@@ -7355,13 +7445,13 @@ mod tests {
 
         let large = build_undeclare_token(200);
         assert_eq!(
-            large.encode_to_vec(),
+            large.wire(),
             vec![wire_const::N_MID_DECLARE, 0x07, 0xC8, 0x01,],
             "UndeclToken multi-byte VLE id wire bytes must match zenoh-pico reference",
         );
 
         match &small.body {
-            DeclareVariant::CodecZenohUndeclToken(d) => {
+            DeclareOwnedVariant::CodecZenohUndeclToken(d) => {
                 assert_eq!(d.header, 0x07);
                 assert_eq!(d.id, 42);
             }
@@ -7378,7 +7468,7 @@ mod tests {
     #[test]
     fn build_declare_final_emits_two_byte_marker() {
         let declare = build_declare_final();
-        let wire = declare.encode_to_vec();
+        let wire = declare.wire();
         assert_eq!(
             wire,
             vec![
@@ -7389,7 +7479,7 @@ mod tests {
         );
 
         match &declare.body {
-            DeclareVariant::CodecZenohDeclFinal(d) => {
+            DeclareOwnedVariant::CodecZenohDeclFinal(d) => {
                 assert_eq!(
                     d.header, 0x1A,
                     "DeclFinal.header must equal _Z_DECL_FINAL_MID"
@@ -7425,7 +7515,7 @@ mod tests {
             /*mapping_id=*/ 0,
             Some("liveliness/dev"),
         );
-        let future_only_wire = future_only.encode_to_vec();
+        let future_only_wire = future_only.wire();
         let mut future_only_expected = vec![
             0x59u8, // outer: MID | F
             0x07,   // VLE(interest_id=7)
@@ -7450,7 +7540,7 @@ mod tests {
             /*mapping_id=*/ 0,
             Some("a"),
         );
-        let current_future_wire = current_future.encode_to_vec();
+        let current_future_wire = current_future.wire();
         let mut current_future_expected = vec![
             0x79u8, // outer: MID | C | F
             0x03,   // VLE(interest_id=3)
@@ -7472,7 +7562,7 @@ mod tests {
         let alias = build_interest_liveliness_subscriber(
             5, /*history=*/ false, /*mapping_id=*/ 11, None,
         );
-        let alias_wire = alias.encode_to_vec();
+        let alias_wire = alias.wire();
         assert_eq!(
             alias_wire,
             vec![0x59u8, 0x05, 0x59, 0x0B],
@@ -7488,7 +7578,7 @@ mod tests {
             /*mapping_id=*/ 11,
             Some("/tail"),
         );
-        let composite_wire = composite.encode_to_vec();
+        let composite_wire = composite.wire();
         let mut composite_expected = vec![0x59u8, 0x05, 0x79, 0x0B, 0x05];
         composite_expected.extend_from_slice(b"/tail");
         assert_eq!(
@@ -7505,8 +7595,8 @@ mod tests {
                     "InterestBody.header must carry KE | TO | R | N | M",
                 );
                 match &body.keyexpr {
-                    Some(Wireexpr {
-                        body: WireexprVariant::WireexprLocal(w),
+                    Some(WireexprOwned {
+                        body: WireexprOwnedVariant::WireexprLocal(w),
                     }) => {
                         assert_eq!(w.id, 0, "literal-keyexpr → wireexpr.id=0 sentinel");
                         assert_eq!(
@@ -7536,7 +7626,7 @@ mod tests {
     #[test]
     fn build_interest_final_emits_two_byte_marker() {
         let small = build_interest_final(7);
-        let small_wire = small.encode_to_vec();
+        let small_wire = small.wire();
         assert_eq!(
             small_wire,
             vec![wire_const::N_MID_INTEREST, 0x07],
@@ -7553,7 +7643,7 @@ mod tests {
 
         let large = build_interest_final(200);
         assert_eq!(
-            large.encode_to_vec(),
+            large.wire(),
             vec![wire_const::N_MID_INTEREST, 0xC8, 0x01],
             "InterestFinal multi-byte VLE id wire bytes must match zenoh-pico reference",
         );
@@ -7577,7 +7667,7 @@ mod tests {
         );
         assert_eq!(alias.rid, 42, "Request.rid must equal the requested rid");
         match &alias.keyexpr.body {
-            WireexprVariant::WireexprLocal(w) => {
+            WireexprOwnedVariant::WireexprLocal(w) => {
                 assert_eq!(w.id, 7);
                 assert!(w.suffix.is_none());
             }
@@ -7588,7 +7678,7 @@ mod tests {
             "minimal shape: no Request-level exts"
         );
         match &alias.body {
-            RequestVariant::CodecZenohQuery(q) => {
+            RequestOwnedVariant::CodecZenohQuery(q) => {
                 assert_eq!(
                     q.header, 0x03,
                     "Query.header is MID 0x03 only — no C / P / Z flags in minimal shape"
@@ -7608,7 +7698,7 @@ mod tests {
             "Request header carries MID 0x1C | N(0x20) = 0x3C when suffix present",
         );
         match &composite.keyexpr.body {
-            WireexprVariant::WireexprLocal(w) => {
+            WireexprOwnedVariant::WireexprLocal(w) => {
                 assert_eq!(w.id, 7);
                 assert_eq!(w.suffix.as_deref(), Some("tail"));
                 assert_eq!(w.suffix_len, Some(4));
@@ -7623,7 +7713,7 @@ mod tests {
             "literal case still sets N (suffix present)"
         );
         match &literal.keyexpr.body {
-            WireexprVariant::WireexprLocal(w) => {
+            WireexprOwnedVariant::WireexprLocal(w) => {
                 assert_eq!(w.id, 0, "literal sentinel id=0");
                 assert_eq!(w.suffix.as_deref(), Some("demo/test"));
             }
@@ -7632,7 +7722,7 @@ mod tests {
     }
 
     /// R121j-1 — Wire-byte regression gate: the bytes emitted by
-    /// `build_request_query(...).encode_to_vec()` must equal zenoh-pico's
+    /// `build_request_query(...).wire()` must equal zenoh-pico's
     /// `_z_request_encode` + `_z_query_encode` output for the
     /// minimal-shape inputs (no consolidation, no params, no exts at
     /// either level). Three vectors lock the alias / composite /
@@ -7655,7 +7745,7 @@ mod tests {
         //   wireexpr.id VLE(7) = 0x07
         //   Query.header   = MID(0x03)
         let alias = build_request_query(42, 7, None);
-        let alias_wire = alias.encode_to_vec();
+        let alias_wire = alias.wire();
         let alias_expected = vec![
             0x5C, // Request: MID 0x1C | M 0x40
             0x2A, // VLE(rid=42)
@@ -7675,7 +7765,7 @@ mod tests {
         //   wireexpr.suffix bytes = "abc"
         //   Query.header = 0x03
         let composite = build_request_query(42, 7, Some("abc"));
-        let composite_wire = composite.encode_to_vec();
+        let composite_wire = composite.wire();
         let mut composite_expected = vec![
             0x7C, // MID | N | M
             0x2A, 0x07, 0x03,
@@ -7695,7 +7785,7 @@ mod tests {
         //   wireexpr.suffix bytes = "demo/test"
         //   Query.header = 0x03
         let literal = build_request_query(42, 0, Some("demo/test"));
-        let literal_wire = literal.encode_to_vec();
+        let literal_wire = literal.wire();
         let mut literal_expected = vec![0x7C, 0x2A, 0x00, 0x09];
         literal_expected.extend_from_slice(b"demo/test");
         literal_expected.push(0x03); // Query MID
@@ -7726,7 +7816,7 @@ mod tests {
         ];
         for (mode, expected_byte) in cases {
             let request = build_request_query_with_consolidation(42, 7, None, mode);
-            let wire = request.encode_to_vec();
+            let wire = request.wire();
             let expected = vec![
                 0x5C,          // Request: MID 0x1C | M 0x40
                 0x2A,          // VLE(rid=42)
@@ -7746,7 +7836,7 @@ mod tests {
         // the codegen produces from query.scxml's `sce:present-if`.
         let r = build_request_query_with_consolidation(42, 7, None, ConsolidationMode::Monotonic);
         match &r.body {
-            RequestVariant::CodecZenohQuery(q) => {
+            RequestOwnedVariant::CodecZenohQuery(q) => {
                 assert_eq!(
                     q.header, 0x23,
                     "Query.header must carry MID(0x03) | Q_C(0x20)"
@@ -7791,7 +7881,7 @@ mod tests {
         //   Query:   [0x43, 0x03, b'k', b'=', b'v']
         //              (MID(0x03) | Q_P(0x40), VLE(len=3), 3 bytes)
         let small = build_request_query_with_parameters(42, 7, None, b"k=v");
-        let small_wire = small.encode_to_vec();
+        let small_wire = small.wire();
         let mut small_expected = vec![
             0x5C, // Request: MID 0x1C | M 0x40
             0x2A, // VLE(rid=42)
@@ -7812,7 +7902,7 @@ mod tests {
         // on the parameters_len field specifically.
         let mid_params: Vec<u8> = (0u8..128).collect();
         let mid = build_request_query_with_parameters(42, 7, None, &mid_params);
-        let mid_wire = mid.encode_to_vec();
+        let mid_wire = mid.wire();
         let mut mid_expected = vec![
             0x5C, 0x2A, 0x07, 0x43, 0x80, // VLE(128) low 7 + cont bit
             0x01, // VLE(128) high byte
@@ -7827,7 +7917,7 @@ mod tests {
         // Case 3 — at max-size (256 bytes). VLE(256) = 0x80 0x02.
         let max_params: Vec<u8> = (0..256).map(|i| (i % 251) as u8).collect();
         let max = build_request_query_with_parameters(42, 7, None, &max_params);
-        let max_wire = max.encode_to_vec();
+        let max_wire = max.wire();
         let mut max_expected = vec![0x5C, 0x2A, 0x07, 0x43, 0x80, 0x02];
         max_expected.extend_from_slice(&max_params);
         assert_eq!(
@@ -7838,7 +7928,7 @@ mod tests {
 
         // Inner-arm sanity check.
         match &small.body {
-            RequestVariant::CodecZenohQuery(q) => {
+            RequestOwnedVariant::CodecZenohQuery(q) => {
                 assert_eq!(q.header, 0x43, "Query.header MID | Q_P");
                 assert_eq!(q.parameters_len, Some(3));
                 assert_eq!(q.parameters.as_deref(), Some(b"k=v".as_slice()));
@@ -7882,7 +7972,7 @@ mod tests {
         //   ExtEntry header: [0x45]          (ENC_ZBUF(0x40) | id(0x05))
         //   ExtZbuf: [0x02, b'h', b'i']      (VLE(2), bytes)
         let small = build_request_query_with_attachment(42, 7, None, b"hi");
-        let small_wire = small.encode_to_vec();
+        let small_wire = small.wire();
         let mut small_expected = vec![
             0x5C, // Request: MID 0x1C | M 0x40
             0x2A, // VLE(rid=42)
@@ -7902,7 +7992,7 @@ mod tests {
         // 0..32). VLE(32) = 0x20 (single byte, fits in 7 bits).
         let max_attach: Vec<u8> = (0u8..32).collect();
         let max = build_request_query_with_attachment(42, 7, None, &max_attach);
-        let max_wire = max.encode_to_vec();
+        let max_wire = max.wire();
         let mut max_expected = vec![
             0x5C, 0x2A, 0x07, 0x83, // Query header with Q_Z
             0x45, // ExtEntry header
@@ -7918,7 +8008,7 @@ mod tests {
         // Inner-arm sanity: Query.header carries Q_Z; extensions vec
         // has exactly one entry with the expected ext_id + ZBuf body.
         match &small.body {
-            RequestVariant::CodecZenohQuery(q) => {
+            RequestOwnedVariant::CodecZenohQuery(q) => {
                 assert_eq!(q.header, 0x83, "Query.header MID(0x03) | Q_Z(0x80)");
                 let exts = q
                     .extensions
@@ -7930,7 +8020,7 @@ mod tests {
                     "ExtEntry.header = ENC_ZBUF(0x40) | id_attachment(0x05)"
                 );
                 match &exts[0].body {
-                    ExtEntryVariant::CodecZenohExtZbuf(zb) => {
+                    ExtEntryOwnedVariant::CodecZenohExtZbuf(zb) => {
                         assert_eq!(zb.value_len, 2);
                         assert_eq!(zb.value.as_slice(), b"hi".as_slice());
                     }
@@ -7982,7 +8072,7 @@ mod tests {
         //   ExtZint.value VLE(50) = 0x32
         //   Query.header = 0x03
         let small = build_request_query_with_timeout_ms(42, 7, None, 50);
-        let small_wire = small.encode_to_vec();
+        let small_wire = small.wire();
         assert_eq!(
             small_wire,
             vec![
@@ -7999,7 +8089,7 @@ mod tests {
 
         // Case 2 — multi-byte VLE boundary (1000ms = 0xE8 0x07).
         let mid = build_request_query_with_timeout_ms(42, 7, None, 1000);
-        let mid_wire = mid.encode_to_vec();
+        let mid_wire = mid.wire();
         assert_eq!(
             mid_wire,
             vec![
@@ -8014,7 +8104,7 @@ mod tests {
         // Case 3 — large VLE (2^32 = 0x1_0000_0000 = 5-byte VLE in
         // base-128: 0x80 0x80 0x80 0x80 0x10).
         let large = build_request_query_with_timeout_ms(42, 7, None, 1u64 << 32);
-        let large_wire = large.encode_to_vec();
+        let large_wire = large.wire();
         assert_eq!(
             large_wire,
             vec![
@@ -8028,7 +8118,7 @@ mod tests {
         // Inner-arm sanity: Request.extensions has 1 entry with ZInt
         // body; Query body is minimal-shape (no Q_C / Q_P / Q_Z).
         match &small.body {
-            RequestVariant::CodecZenohQuery(q) => {
+            RequestOwnedVariant::CodecZenohQuery(q) => {
                 assert_eq!(q.header, 0x03, "Query.header minimal (no Q flags)");
                 assert!(q.consolidation.is_none());
                 assert!(q.parameters.is_none());
@@ -8046,7 +8136,7 @@ mod tests {
             "Request ExtEntry.header = ENC_ZINT(0x20) | id_timeout(0x06)"
         );
         match &req_exts[0].body {
-            ExtEntryVariant::CodecZenohExtZint(zi) => {
+            ExtEntryOwnedVariant::CodecZenohExtZint(zi) => {
                 assert_eq!(zi.value, 50);
             }
             _ => panic!("timeout ext body must be CodecZenohExtZint"),
@@ -8080,7 +8170,7 @@ mod tests {
             [(QueryTarget::All, 0x01), (QueryTarget::AllComplete, 0x02)];
         for (target, target_byte) in cases {
             let request = build_request_query_with_target(42, 7, None, target);
-            let wire = request.encode_to_vec();
+            let wire = request.wire();
             assert_eq!(
                 wire,
                 vec![
@@ -8113,7 +8203,7 @@ mod tests {
              without target awareness reject the frame on unknown M-bit exts"
         );
         match &req_exts[0].body {
-            ExtEntryVariant::CodecZenohExtZint(zi) => {
+            ExtEntryOwnedVariant::CodecZenohExtZint(zi) => {
                 assert_eq!(zi.value, 1);
             }
             _ => panic!("target ext body must be CodecZenohExtZint"),
@@ -8150,7 +8240,7 @@ mod tests {
             .consolidation(ConsolidationMode::Monotonic)
             .parameters(b"k=v")
             .build();
-        let wire = request.encode_to_vec();
+        let wire = request.wire();
         let mut expected = vec![
             0x5C, // Request: MID | M
             0x2A, // VLE(rid=42)
@@ -8202,7 +8292,7 @@ mod tests {
             .request_target(QueryTarget::All)
             .request_timeout_ms(1000)
             .build();
-        let wire = request.encode_to_vec();
+        let wire = request.wire();
         let mut expected = vec![
             0xDC, // Request: MID | M | N_Z
             0x2A, // VLE(rid=42)
@@ -8269,7 +8359,7 @@ mod tests {
             "qos ext header = ENC_ZINT(0x20) | id_qos(0x01); no M, no Z (last)",
         );
         match &req_exts[0].body {
-            ExtEntryVariant::CodecZenohExtZint(zint) => {
+            ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
                 assert_eq!(
                     zint.value, 0x05,
                     "qos packed byte 0x05 lifts into ZINT VLE value verbatim"
@@ -8342,7 +8432,7 @@ mod tests {
             "budget ext header = ENC_ZINT(0x20) | id_budget(0x05); no M, no Z (last)",
         );
         match &req_exts[0].body {
-            ExtEntryVariant::CodecZenohExtZint(zint) => {
+            ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
                 assert_eq!(
                     zint.value, 0x1234_5678,
                     "budget u32 widens into u64 ZINT value verbatim"
@@ -8423,7 +8513,7 @@ mod tests {
             "tstamp ext header = ENC_ZBUF(0x40) | id_tstamp(0x02); no M, no Z (last)",
         );
         match &req_exts[0].body {
-            ExtEntryVariant::CodecZenohExtZbuf(zbuf) => {
+            ExtEntryOwnedVariant::CodecZenohExtZbuf(zbuf) => {
                 assert_eq!(
                     zbuf.value_len, 4,
                     "Timestamp encode = VLE(42)+VLE(2)+zid[2] = 4 bytes"
@@ -8532,7 +8622,7 @@ mod tests {
             .build();
         let req_exts = request.extensions.as_ref().expect("qos ext present");
         match &req_exts[0].body {
-            ExtEntryVariant::CodecZenohExtZint(zint) => {
+            ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
                 assert_eq!(zint.value, 0x07, "Background(7) + Drop + !express = 0x07");
             }
             _ => panic!("qos body must be ExtZint"),
@@ -8546,7 +8636,7 @@ mod tests {
             .build();
         let req_exts = request.extensions.as_ref().expect("qos ext present");
         match &req_exts[0].body {
-            ExtEntryVariant::CodecZenohExtZint(zint) => {
+            ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
                 assert_eq!(
                     zint.value, 0x19,
                     "RealTime(1) + Block + express = 0x10|0x08|0x01"
@@ -8563,7 +8653,7 @@ mod tests {
             .build();
         let req_exts = request.extensions.as_ref().expect("qos ext present");
         match &req_exts[0].body {
-            ExtEntryVariant::CodecZenohExtZint(zint) => {
+            ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
                 assert_eq!(zint.value, 0x05, "Data(5) + Drop + !express = 0x05");
             }
             _ => panic!("qos body must be ExtZint"),
@@ -8607,8 +8697,8 @@ mod tests {
             .request_timeout_ms(1000)
             .build();
         assert_eq!(
-            typed.encode_to_vec(),
-            raw.encode_to_vec(),
+            typed.wire(),
+            raw.wire(),
             "typed and raw qos setters must produce byte-identical wire emit",
         );
     }
@@ -8633,9 +8723,9 @@ mod tests {
     }
 
     /// R121j-1 — `encode_frame_with_request` produces the same
-    /// `[parent_flags | T_MID_FRAME]` + `Frame.encode_to_vec()` wrapping as
+    /// `[parent_flags | T_MID_FRAME]` + `Frame.wire()` wrapping as
     /// the existing `encode_frame_with_push` / `encode_frame_with_declare`
-    /// helpers, with `Request.encode_to_vec()` as the inner payload bytes.
+    /// helpers, with `Request.wire()` as the inner payload bytes.
     /// Reliable / best-effort header-flag behaviour mirrors the other
     /// two helpers so the SN-window ordering contract stays uniform
     /// across PUSH / DECLARE / REQUEST outbound paths.
@@ -8650,7 +8740,7 @@ mod tests {
     fn build_response_final_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — single-byte VLE rid (rid=42).
         let small = build_response_final(42);
-        let small_wire = small.encode_to_vec();
+        let small_wire = small.wire();
         assert_eq!(
             small_wire,
             vec![
@@ -8662,7 +8752,7 @@ mod tests {
 
         // Case 2 — multi-byte VLE rid (rid=200, encodes as 0xC8 0x01).
         let large = build_response_final(200);
-        let large_wire = large.encode_to_vec();
+        let large_wire = large.wire();
         assert_eq!(
             large_wire,
             vec![
@@ -8685,7 +8775,7 @@ mod tests {
 
     /// R121j-2 — `encode_frame_with_response_final` produces the
     /// same Frame envelope wrap as the other `encode_frame_with_*`
-    /// helpers, with `ResponseFinal.encode_to_vec()` as the payload bytes.
+    /// helpers, with `ResponseFinal.wire()` as the payload bytes.
     /// Reliable / best-effort header-flag behaviour mirrors the
     /// other three helpers; the production action layer hard-codes
     /// reliable=true but the helper accepts the flag for fuzz /
@@ -8694,7 +8784,7 @@ mod tests {
     #[test]
     fn encode_frame_with_response_final_wraps_in_frame_envelope() {
         let rf = build_response_final(42);
-        let rf_bytes = rf.encode_to_vec();
+        let rf_bytes = rf.wire();
 
         let wire_reliable = encode_frame_with_response_final(0, build_response_final(42), true);
         assert_eq!(
@@ -8706,7 +8796,7 @@ mod tests {
         assert_eq!(
             &wire_reliable[2..],
             rf_bytes.as_slice(),
-            "Frame body tail must be ResponseFinal.encode_to_vec() bytes verbatim",
+            "Frame body tail must be ResponseFinal.wire() bytes verbatim",
         );
 
         let wire_best_effort = encode_frame_with_response_final(0, build_response_final(42), false);
@@ -8735,7 +8825,7 @@ mod tests {
         //   MsgPut.payload_len(11) → 0x0B
         //   payload "hello-reply"
         let small = build_response_reply_literal(42, "demo/test", b"hello-reply");
-        let small_wire = small.encode_to_vec();
+        let small_wire = small.wire();
         let mut small_expected = vec![
             0x7B, // Response: MID | N | M
             0x2A, // VLE(rid=42)
@@ -8756,7 +8846,7 @@ mod tests {
 
         // Case 2 — multi-byte VLE boundary on rid (200 = 0xC8 0x01).
         let large = build_response_reply_literal(200, "k", b"v");
-        let large_wire = large.encode_to_vec();
+        let large_wire = large.wire();
         let large_expected = vec![
             0x7B, 0xC8, // VLE(200) low + cont
             0x01, // VLE(200) high
@@ -8775,12 +8865,12 @@ mod tests {
 
         // Inner-arm sanity.
         match &small.body {
-            ResponseVariant::CodecZenohReply(reply) => {
+            ResponseOwnedVariant::CodecZenohReply(reply) => {
                 assert_eq!(reply.header, 0x04, "Reply.header MID only");
                 assert!(reply.consolidation.is_none());
                 assert!(reply.extensions.is_none());
                 match &reply.body {
-                    ReplyVariant::CodecZenohMsgPut(put) => {
+                    ReplyOwnedVariant::CodecZenohMsgPut(put) => {
                         assert_eq!(put.header, 0x01);
                         assert_eq!(put.payload_len, 11);
                         assert_eq!(put.payload.as_slice(), b"hello-reply");
@@ -8813,7 +8903,7 @@ mod tests {
         //   payload_len(1) → 0x01
         //   payload "v"
         let alias = build_response_reply_aliased(42, 7, None, b"v");
-        let alias_wire = alias.encode_to_vec();
+        let alias_wire = alias.wire();
         assert_eq!(
             alias_wire,
             vec![
@@ -8833,7 +8923,7 @@ mod tests {
         //   Response.header = MID | N | M = 0x7B
         //   wireexpr Local: id=7 + suffix_len(4) + "tail"
         let composite = build_response_reply_aliased(42, 7, Some("tail"), b"data");
-        let composite_wire = composite.encode_to_vec();
+        let composite_wire = composite.wire();
         let mut composite_expected = vec![
             0x7B, 0x2A, 0x07, // wireexpr.id
             0x04, // suffix_len(4)
@@ -8851,7 +8941,7 @@ mod tests {
 
         // Case 3 — multi-byte VLE alias (mapping_id=200).
         let large = build_response_reply_aliased(42, 200, None, b"x");
-        let large_wire = large.encode_to_vec();
+        let large_wire = large.wire();
         assert_eq!(
             large_wire,
             vec![
@@ -8886,7 +8976,7 @@ mod tests {
         //   payload_len(4) = 0x04
         //   "fail"
         let small = build_response_err_literal(42, "k", b"fail");
-        let small_wire = small.encode_to_vec();
+        let small_wire = small.wire();
         let mut small_expected = vec![
             0x7B, 0x2A, 0x00, // wireexpr id=0
             0x01, // suffix_len(1)
@@ -8902,7 +8992,7 @@ mod tests {
 
         // Case 2 — multi-byte VLE rid (200).
         let large = build_response_err_literal(200, "x", b"e");
-        let large_wire = large.encode_to_vec();
+        let large_wire = large.wire();
         assert_eq!(
             large_wire,
             vec![
@@ -8919,7 +9009,7 @@ mod tests {
 
         // Inner-arm sanity.
         match &small.body {
-            ResponseVariant::CodecZenohErr(err) => {
+            ResponseOwnedVariant::CodecZenohErr(err) => {
                 assert_eq!(err.header, 0x05, "Err.header MID only");
                 assert!(err.encoding.is_none());
                 assert!(err.extensions.is_none());
@@ -8943,7 +9033,7 @@ mod tests {
     fn build_response_err_aliased_emits_zenoh_pico_compatible_wire_bytes() {
         // Pure alias: rid=42, mapping_id=7, no suffix, payload "e".
         let alias = build_response_err_aliased(42, 7, None, b"e");
-        let alias_wire = alias.encode_to_vec();
+        let alias_wire = alias.wire();
         assert_eq!(
             alias_wire,
             vec![
@@ -8960,7 +9050,7 @@ mod tests {
 
         // Composite: rid=42, mapping_id=7, suffix "tail", payload "data".
         let composite = build_response_err_aliased(42, 7, Some("tail"), b"data");
-        let composite_wire = composite.encode_to_vec();
+        let composite_wire = composite.wire();
         let mut composite_expected = vec![
             0x7B, // Response: MID | N | M
             0x2A, 0x07, 0x04, // suffix_len(4)
@@ -8983,13 +9073,13 @@ mod tests {
     }
 
     /// R121j-3 — `encode_frame_with_response` produces the same
-    /// `[parent_flags | T_MID_FRAME]` + `Frame.encode_to_vec()` wrapping as
-    /// the other helpers, with `Response.encode_to_vec()` as the inner
+    /// `[parent_flags | T_MID_FRAME]` + `Frame.wire()` wrapping as
+    /// the other helpers, with `Response.wire()` as the inner
     /// payload bytes. Reply data delivery defaults to reliable.
     #[test]
     fn encode_frame_with_response_wraps_response_in_frame_envelope() {
         let response = build_response_reply_literal(42, "k", b"v");
-        let response_bytes = response.encode_to_vec();
+        let response_bytes = response.wire();
 
         let wire_reliable =
             encode_frame_with_response(0, build_response_reply_literal(42, "k", b"v"), true);
@@ -9002,7 +9092,7 @@ mod tests {
         assert_eq!(
             &wire_reliable[2..],
             response_bytes.as_slice(),
-            "Frame body tail must be Response.encode_to_vec() bytes verbatim",
+            "Frame body tail must be Response.wire() bytes verbatim",
         );
 
         let wire_best_effort =
@@ -9017,7 +9107,7 @@ mod tests {
     #[test]
     fn encode_frame_with_request_wraps_request_in_frame_envelope() {
         let request = build_request_query(42, 7, None);
-        let request_bytes = request.encode_to_vec();
+        let request_bytes = request.wire();
 
         let wire_reliable = encode_frame_with_request(0, build_request_query(42, 7, None), true);
         assert_eq!(
@@ -9029,7 +9119,7 @@ mod tests {
         assert_eq!(
             &wire_reliable[2..],
             request_bytes.as_slice(),
-            "Frame body tail must be Request.encode_to_vec() bytes verbatim",
+            "Frame body tail must be Request.wire() bytes verbatim",
         );
 
         let wire_best_effort =
@@ -9304,10 +9394,10 @@ mod tests {
     /// change the minimal-shape output.
     #[test]
     fn response_reply_builder_no_setters_matches_aliased_baseline() {
-        let direct = build_response_reply_aliased(42, 7, None, b"hello").encode_to_vec();
+        let direct = build_response_reply_aliased(42, 7, None, b"hello").wire();
         let built = ResponseReplyBuilder::new(42, 7, None, b"hello")
             .build()
-            .encode_to_vec();
+            .wire();
         assert_eq!(
             direct, built,
             "ReplyBuilder.new+build must match build_response_reply_aliased byte-for-byte"
@@ -9320,11 +9410,11 @@ mod tests {
     /// `_z_reply_encode` at vendor/zenoh-pico/src/protocol/codec/message.c.
     #[test]
     fn response_reply_builder_consolidation_sets_r_c_flag_and_byte() {
-        let baseline = build_response_reply_aliased(42, 7, None, b"hello").encode_to_vec();
+        let baseline = build_response_reply_aliased(42, 7, None, b"hello").wire();
         let with_c = ResponseReplyBuilder::new(42, 7, None, b"hello")
             .consolidation(ConsolidationMode::Latest)
             .build()
-            .encode_to_vec();
+            .wire();
         // The C-bit-set wire differs from baseline only in the Reply.header
         // byte (R_C bit) and a freshly inserted consolidation byte (0x02 =
         // Latest) directly after it.
@@ -9360,10 +9450,8 @@ mod tests {
     /// exact same wire bytes as the baseline aliased helper.
     #[test]
     fn response_err_builder_no_setters_matches_aliased_baseline() {
-        let direct = build_response_err_aliased(42, 7, None, b"oops").encode_to_vec();
-        let built = ResponseErrBuilder::new(42, 7, None, b"oops")
-            .build()
-            .encode_to_vec();
+        let direct = build_response_err_aliased(42, 7, None, b"oops").wire();
+        let built = ResponseErrBuilder::new(42, 7, None, b"oops").build().wire();
         assert_eq!(
             direct, built,
             "ErrBuilder.new+build must match build_response_err_aliased byte-for-byte"
@@ -9378,7 +9466,7 @@ mod tests {
         let with_enc = ResponseErrBuilder::new(42, 7, None, b"oops")
             .encoding(4, None) // 4 = application/json prefix
             .build()
-            .encode_to_vec();
+            .wire();
         // Layout up through Err.header:
         //   Response.header(1) + VLE(42)(1) + VLE(7)(1) + Err.header(1) at offset 3
         assert_eq!(
@@ -9401,7 +9489,7 @@ mod tests {
         let with_enc = ResponseErrBuilder::new(42, 7, None, b"oops")
             .encoding(4, Some("schema_v1"))
             .build()
-            .encode_to_vec();
+            .wire();
         assert_eq!(
             with_enc[3] & 0x40,
             0x40,
@@ -9456,7 +9544,7 @@ mod tests {
         let wire = ResponseErrBuilder::new(42, 7, None, b"oops")
             .source_info(&[0xAA; 4], 11, 17)
             .build()
-            .encode_to_vec();
+            .wire();
         // Layout up through Err.header: Response.header(1) + VLE(42)(1)
         // + VLE(7)(1) + Err.header(1) at offset 3. The source_info
         // setter must set Z(0x80) and leave E(0x40) clear (no encoding
@@ -9517,7 +9605,7 @@ mod tests {
             .encoding(4, None)
             .source_info(&[0xBB; 1], 1, 2)
             .build()
-            .encode_to_vec();
+            .wire();
         // Err.header at offset 3: E(0x40) | Z(0x80) = 0xC0.
         assert_eq!(
             wire[3] & 0xC0,
@@ -9577,11 +9665,11 @@ mod tests {
     fn response_reply_builder_responder_emits_envelope_zbuf_ext_entry() {
         let baseline = ResponseReplyBuilder::new(42, 7, None, b"hello")
             .build()
-            .encode_to_vec();
+            .wire();
         let wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
             .responder(&[0xAA; 4], 11)
             .build()
-            .encode_to_vec();
+            .wire();
         // Envelope: Response.header(1) + VLE(42)(1) + VLE(7)(1) = 3-byte
         // prefix; responder ext lands at offset 3 (no keyexpr suffix in
         // the aliased mapping_id=7 + None path).
@@ -9626,7 +9714,7 @@ mod tests {
             .responder(&[0xBB; 1], 1)
             .consolidation(ConsolidationMode::Latest)
             .build()
-            .encode_to_vec();
+            .wire();
         // Envelope Z set on Response.header at offset 0.
         assert_eq!(
             wire[0] & 0x80,
@@ -9664,13 +9752,11 @@ mod tests {
     /// independent of the envelope ext.
     #[test]
     fn response_err_builder_responder_emits_envelope_zbuf_ext_entry() {
-        let baseline = ResponseErrBuilder::new(42, 7, None, b"oops")
-            .build()
-            .encode_to_vec();
+        let baseline = ResponseErrBuilder::new(42, 7, None, b"oops").build().wire();
         let wire = ResponseErrBuilder::new(42, 7, None, b"oops")
             .responder(&[0xCC; 2], 5)
             .build()
-            .encode_to_vec();
+            .wire();
         assert_eq!(
             wire[0],
             baseline[0] | 0x80,
@@ -9705,7 +9791,7 @@ mod tests {
             .responder(&[0xDD; 1], 9)
             .source_info(&[0xEE; 1], 3, 4)
             .build()
-            .encode_to_vec();
+            .wire();
         // Envelope Z on Response.header.
         assert_eq!(
             wire[0] & 0x80,
@@ -9825,11 +9911,11 @@ mod tests {
     fn response_reply_builder_reply_del_swaps_inner_arm_to_msgdel() {
         let put_wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
             .build()
-            .encode_to_vec();
+            .wire();
         let del_wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
             .reply_del()
             .build()
-            .encode_to_vec();
+            .wire();
         // Layout up through Reply.header: Response.header(1) + VLE(42)(1) +
         // VLE(7)(1) + Reply.header(1) at offset 3. Inner MID at offset 4.
         assert_eq!(put_wire[4], 0x01, "Put path inner MID = _Z_MID_Z_PUT(0x01)");
@@ -9861,7 +9947,7 @@ mod tests {
             .reply_del()
             .consolidation(ConsolidationMode::Latest)
             .build()
-            .encode_to_vec();
+            .wire();
         // Reply.header at offset 3 must carry R_C(0x20).
         assert_eq!(
             wire[3] & 0x20,
@@ -9953,7 +10039,7 @@ mod tests {
             put.z(),
             "Z flag must be set when body extensions are present"
         );
-        if let ExtEntryVariant::CodecZenohExtZbuf(z) = &exts[0].body {
+        if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &exts[0].body {
             // First byte of source_info payload is `(zidlen - 1) << 4`.
             assert_eq!(z.value[0], (4 - 1) << 4);
             assert_eq!(&z.value[1..5], &[0x11, 0x22, 0x33, 0x44]);
@@ -9974,7 +10060,7 @@ mod tests {
         assert_eq!(exts.len(), 2, "source_info + attachment = 2 entries");
         assert_eq!(exts[0].header & 0x4F, 0x41, "source_info first");
         assert_eq!(exts[1].header & 0x4F, 0x43, "attachment second");
-        if let ExtEntryVariant::CodecZenohExtZbuf(z) = &exts[1].body {
+        if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &exts[1].body {
             assert_eq!(z.value, b"attach-payload");
         } else {
             panic!("attachment must use ExtZbuf body");
@@ -10013,7 +10099,7 @@ mod tests {
         assert_eq!(exts.len(), 1);
         // ENC_ZINT(0x20) | id_qos(0x01); no M, no Z (single ext).
         assert_eq!(exts[0].header & 0x2F, 0x21);
-        if let ExtEntryVariant::CodecZenohExtZint(z) = &exts[0].body {
+        if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &exts[0].body {
             assert_eq!(z.value, 0b0001_1010);
         } else {
             panic!("qos must use ExtZint body");
@@ -10037,7 +10123,7 @@ mod tests {
         assert_eq!(push.header & 0x80, 0x80);
         assert!(push.extensions.is_some());
         // No body metadata → MsgPut.extensions stays None.
-        if let PushVariant::CodecZenohMsgPut(put) = &push.body {
+        if let PushOwnedVariant::CodecZenohMsgPut(put) = &push.body {
             assert!(put.extensions.is_none());
             assert!(!put.z(), "MsgPut Z stays clear without body extensions");
         } else {
@@ -10065,13 +10151,15 @@ mod tests {
             qos: Some(QosLevel::from_raw(0b0001_1010)),
         };
         let push = build_push_literal_with_meta("home/temp", b"payload", &meta);
-        let encoded = push.encode_to_vec();
+        let encoded = push.wire();
 
         // Decode back via SCE-emitted cursor path. wz-codecs re-exports
         // SceCursor through the runtime crate; use the same path the
         // dispatcher takes when handling wire-arrived frames.
         let mut cursor = sce_forge_runtime::codec::SceCursor::new(&encoded);
-        let decoded = Push::decode(&mut cursor).expect("Push round-trip decode");
+        let decoded = Push::decode(&mut cursor)
+            .expect("Push round-trip decode")
+            .into_owned();
 
         // Outer Push extensions: qos must round-trip.
         let outer = decoded
@@ -10079,14 +10167,14 @@ mod tests {
             .as_deref()
             .expect("outer ext chain present");
         assert_eq!(outer.len(), 1);
-        if let ExtEntryVariant::CodecZenohExtZint(z) = &outer[0].body {
+        if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &outer[0].body {
             assert_eq!(z.value, 0b0001_1010);
         } else {
             panic!("qos outer ext must decode to ExtZint");
         }
 
         // Inner MsgPut: timestamp/encoding/extensions round-trip.
-        if let PushVariant::CodecZenohMsgPut(put) = &decoded.body {
+        if let PushOwnedVariant::CodecZenohMsgPut(put) = &decoded.body {
             let ts = put.timestamp.as_ref().expect("timestamp round-trips");
             assert_eq!(ts.time, 0x1122_3344_5566_7788);
             assert_eq!(ts.zid, vec![0xAA, 0xBB, 0xCC]);
@@ -10130,11 +10218,13 @@ mod tests {
             qos: Some(QosLevel::from_raw(0x10)),
         };
         let push = build_push_del_literal_with_meta("home/temp", &meta);
-        let encoded = push.encode_to_vec();
+        let encoded = push.wire();
         let mut cursor = sce_forge_runtime::codec::SceCursor::new(&encoded);
-        let decoded = Push::decode(&mut cursor).expect("Push(MsgDel) round-trip");
+        let decoded = Push::decode(&mut cursor)
+            .expect("Push(MsgDel) round-trip")
+            .into_owned();
 
-        if let PushVariant::CodecZenohMsgDel(del) = &decoded.body {
+        if let PushOwnedVariant::CodecZenohMsgDel(del) = &decoded.body {
             assert_eq!(del.timestamp.as_ref().unwrap().time, 0xAABB_CCDD);
             let body_exts = del.extensions.as_deref().expect("body ext chain present");
             // Del bodies carry source_info + attachment but NOT encoding.
@@ -10177,7 +10267,7 @@ mod tests {
         // and assert the trailing Push bytes are byte-identical to the
         // bytes that follow the Frame envelope in the recorded buffer.
         let standalone_push = build_push_literal_with_meta("home/temp", b"data", &meta);
-        let standalone_bytes = standalone_push.encode_to_vec();
+        let standalone_bytes = standalone_push.wire();
         assert!(
             frames[0]
                 .0
@@ -10695,7 +10785,7 @@ mod tests {
 
         let standalone =
             build_request_query_with_target(42, 0, Some("home/temp"), QueryTarget::All);
-        let standalone_bytes = standalone.encode_to_vec();
+        let standalone_bytes = standalone.wire();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
             frame
@@ -10725,7 +10815,7 @@ mod tests {
             Some("home/temp"),
             ConsolidationMode::Latest,
         );
-        let standalone_bytes = standalone.encode_to_vec();
+        let standalone_bytes = standalone.wire();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
             frame
@@ -10750,7 +10840,7 @@ mod tests {
         actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
 
         let standalone = build_request_query_with_attachment(42, 0, Some("home/temp"), b"q-att");
-        let standalone_bytes = standalone.encode_to_vec();
+        let standalone_bytes = standalone.wire();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
             frame
@@ -10785,7 +10875,7 @@ mod tests {
         // but the wire emission elides the ext because the inner
         // slice is empty).
         let baseline = build_request_query(42, 0, Some("home/temp"));
-        let baseline_bytes = baseline.encode_to_vec();
+        let baseline_bytes = baseline.wire();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
             frame
@@ -10810,7 +10900,7 @@ mod tests {
         actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
 
         let standalone = build_request_query_with_timeout_ms(42, 0, Some("home/temp"), 5_000);
-        let standalone_bytes = standalone.encode_to_vec();
+        let standalone_bytes = standalone.wire();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
             frame

@@ -14,7 +14,7 @@
 //! Wire shape under test:
 //!   `[parent_flags|T_MID_INIT, ...init_body, ...ext_chain]`
 
-use wz_codecs::ext_entry::ExtEntryVariant;
+use wz_codecs::ext_entry::ExtEntryOwnedVariant;
 use wz_runtime_tokio::session_glue::{
     parse_inbound, InboundFrame, InboundParseError, MAX_EXT_CHAIN_DEPTH,
 };
@@ -133,7 +133,7 @@ fn parse_inbound_decodes_ext_chain_from_pico_wire() {
             assert!(extensions[0].z(), "non-terminal entry must keep Z=1");
             assert!(matches!(
                 extensions[0].body,
-                ExtEntryVariant::CodecZenohExtUnit(_)
+                ExtEntryOwnedVariant::CodecZenohExtUnit(_)
             ));
 
             // Entry 1 — ZInt (id=1, M=1, enc=1, Z=1 chain-continue,
@@ -143,7 +143,7 @@ fn parse_inbound_decodes_ext_chain_from_pico_wire() {
             assert_eq!(extensions[1].enc(), 1);
             assert!(extensions[1].z());
             match &extensions[1].body {
-                ExtEntryVariant::CodecZenohExtZint(b) => {
+                ExtEntryOwnedVariant::CodecZenohExtZint(b) => {
                     assert_eq!(b.value, ENTRY1_ZINT_VAL)
                 }
                 _ => panic!("entry 1 must decode to ZInt"),
@@ -156,7 +156,7 @@ fn parse_inbound_decodes_ext_chain_from_pico_wire() {
             assert_eq!(extensions[2].enc(), 2);
             assert!(!extensions[2].z(), "terminal entry must clear Z");
             match &extensions[2].body {
-                ExtEntryVariant::CodecZenohExtZbuf(b) => {
+                ExtEntryOwnedVariant::CodecZenohExtZbuf(b) => {
                     assert_eq!(b.value, ENTRY2_ZBUF_VAL.to_vec())
                 }
                 _ => panic!("entry 2 must decode to ZBuf"),

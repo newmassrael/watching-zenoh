@@ -381,9 +381,12 @@ impl LinkDriver for TcpDriver {
             .len()
             .try_into()
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "frame > 65535 bytes"))?;
+        // Borrowed zero-copy view over the in-scope frame buffer — the
+        // SCE borrowed codec encodes directly from `frame.bytes` with
+        // no owned copy (the envelope lives only until `encode_to_vec`).
         let envelope = StreamEnvelope {
             payload_len,
-            payload: frame.bytes.to_vec(),
+            payload: frame.bytes,
         };
         let wire = envelope.encode_to_vec();
         stream.write_all(&wire).await?;
@@ -459,7 +462,9 @@ impl LinkDriver for TcpDriver {
                         self.read_state = ReadState::Idle;
                         let mut cursor = SceCursor::new(&bytes);
                         return match StreamEnvelope::decode(&mut cursor) {
-                            Ok(env) => LinkEvent::Rx(RxFrame { bytes: env.payload }),
+                            Ok(env) => LinkEvent::Rx(RxFrame {
+                                bytes: env.payload.to_vec(),
+                            }),
                             Err(_) => LinkEvent::Lost {
                                 cause: LostCause::PeerClosed,
                             },

@@ -79,7 +79,7 @@ use alloc::vec::Vec;
 
 use hashbrown::HashMap;
 
-use wz_codecs::declare::DeclareVariant;
+use wz_codecs::declare::DeclareOwnedVariant;
 
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 use crate::keyexpr_match::keyexpr_pattern_matches;
@@ -306,11 +306,11 @@ impl LivelinessSubscriberRegistry {
     /// to the callback).
     pub fn dispatch_declare(
         &mut self,
-        body: &DeclareVariant,
+        body: &DeclareOwnedVariant,
         peer_keyexpr_table: &HashMap<u64, String>,
     ) {
         match body {
-            DeclareVariant::CodecZenohDeclToken(decl) => {
+            DeclareOwnedVariant::CodecZenohDeclToken(decl) => {
                 let resolved = match resolve_wireexpr(&decl.keyexpr.body, peer_keyexpr_table) {
                     Some(s) => s,
                     None => return,
@@ -318,14 +318,14 @@ impl LivelinessSubscriberRegistry {
                 self.peer_token_table.insert(decl.id, resolved.clone());
                 self.fan_to_matching_slots(LivelinessSampleKind::Put, &resolved, decl.id);
             }
-            DeclareVariant::CodecZenohUndeclToken(undecl) => {
+            DeclareOwnedVariant::CodecZenohUndeclToken(undecl) => {
                 let resolved = match self.peer_token_table.remove(&undecl.id) {
                     Some(s) => s,
                     None => return,
                 };
                 self.fan_to_matching_slots(LivelinessSampleKind::Delete, &resolved, undecl.id);
             }
-            // Other DeclareVariant arms are not the liveliness layer's
+            // Other DeclareOwnedVariant arms are not the liveliness layer's
             // concern.
             _ => {}
         }
@@ -440,7 +440,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use hashbrown::HashMap;
-    use wz_codecs::declare::DeclareVariant;
+    use wz_codecs::declare::DeclareOwnedVariant;
     use wz_codecs::interest::Interest;
     use wz_codecs::interest_body::InterestBody;
     use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
@@ -498,7 +498,8 @@ mod tests {
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(1, "liveliness/*", false, make_subscriber(sink.clone()));
 
-        let body = DeclareVariant::CodecZenohDeclToken(decl_token(42, 0, Some("liveliness/dev42")));
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclToken(decl_token(42, 0, Some("liveliness/dev42")));
         reg.dispatch_declare(&body, &HashMap::new());
 
         let captured = sink.lock().unwrap().clone();
@@ -516,10 +517,10 @@ mod tests {
         reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()));
 
         let decl =
-            DeclareVariant::CodecZenohDeclToken(decl_token(7, 0, Some("liveliness/svc/api")));
+            DeclareOwnedVariant::CodecZenohDeclToken(decl_token(7, 0, Some("liveliness/svc/api")));
         reg.dispatch_declare(&decl, &HashMap::new());
 
-        let undecl = DeclareVariant::CodecZenohUndeclToken(undecl_token(7));
+        let undecl = DeclareOwnedVariant::CodecZenohUndeclToken(undecl_token(7));
         reg.dispatch_declare(&undecl, &HashMap::new());
 
         let captured = sink.lock().unwrap().clone();
@@ -543,7 +544,8 @@ mod tests {
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
         reg.register(1, "alpha/*", false, make_subscriber(sink.clone()));
 
-        let body = DeclareVariant::CodecZenohDeclToken(decl_token(5, 0, Some("beta/instance")));
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclToken(decl_token(5, 0, Some("beta/instance")));
         reg.dispatch_declare(&body, &HashMap::new());
 
         assert!(
@@ -571,7 +573,7 @@ mod tests {
             }),
         );
         // mapping_id=55 with no peer-keyexpr table entry → resolve_wireexpr returns None.
-        let body = DeclareVariant::CodecZenohDeclToken(decl_token(1, 55, None));
+        let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token(1, 55, None));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(
             fired.load(Ordering::SeqCst),
@@ -593,7 +595,7 @@ mod tests {
 
         // DeclToken with mapping_id=10 + suffix="/dev42" composes to
         // "liveliness/dev42" through resolve_wireexpr.
-        let body = DeclareVariant::CodecZenohDeclToken(decl_token(99, 10, Some("/dev42")));
+        let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token(99, 10, Some("/dev42")));
         reg.dispatch_declare(&body, &table);
 
         let captured = sink.lock().unwrap().clone();
@@ -610,7 +612,7 @@ mod tests {
         reg.register(1, "**", false, make_subscriber(sink1.clone()));
         reg.register(2, "alpha/*", false, make_subscriber(sink2.clone()));
 
-        let body = DeclareVariant::CodecZenohDeclToken(decl_token(3, 0, Some("alpha/one")));
+        let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token(3, 0, Some("alpha/one")));
         reg.dispatch_declare(&body, &HashMap::new());
 
         assert_eq!(sink1.lock().unwrap().len(), 1, "** catches all");
@@ -630,7 +632,8 @@ mod tests {
             interest_id: 1,
             body: None,
             extensions: None,
-        };
+        }
+        .into_owned();
         let messages = vec![NetworkMessage::Interest(interest_final)];
         reg.dispatch_messages(&messages, &HashMap::new());
 
@@ -662,12 +665,13 @@ mod tests {
                     body: WireexprVariant::WireexprLocal(WireexprLocal {
                         id: 0,
                         suffix_len: Some(1),
-                        suffix: Some("x".to_string()),
+                        suffix: Some("x"),
                     }),
                 }),
             }),
             extensions: None,
-        };
+        }
+        .into_owned();
         let messages = vec![NetworkMessage::Interest(non_final)];
         reg.dispatch_messages(&messages, &HashMap::new());
 

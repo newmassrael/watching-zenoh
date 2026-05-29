@@ -24,7 +24,7 @@
 //   - bytes 2+: zid
 //   - parent.L: VLE(num_locators) + repeat<locator>
 
-use wz_codecs::hello::Hello;
+use wz_codecs::hello::{Hello, HelloOwned};
 use zenoh_pico_sys::{
     _z_hello_encode, _z_id_t, _z_locator_array_t, _z_s_msg_hello_t, _z_wbuf_clear, _z_wbuf_make,
     _z_wbuf_to_zbuf, _z_zbuf_clear, z_whatami_t,
@@ -91,7 +91,7 @@ fn layer3_hello_l0_no_locators() {
     let wz = Hello {
         version,
         cbyte,
-        zid: zid.clone(),
+        zid: &zid,
         num_locators: None,
         locators: None,
     }
@@ -110,13 +110,18 @@ fn layer3_hello_l1_empty_locator_array() {
     let zid = vec![0xAA, 0xBB, 0xCC, 0xDD];
 
     let cbyte = compute_hello_cbyte(whatami, zid.len() as u8);
-    let wz = Hello {
+    // Owned builder: the empty locator chain is an alloc `Vec` of
+    // `LocatorOwned` (vs the borrowed heapless `Vec<_, 64>`); encode via
+    // the `try_as_borrowed` projection.
+    let wz = HelloOwned {
         version,
         cbyte,
         zid: zid.clone(),
         num_locators: Some(0),
         locators: Some(vec![]),
     }
+    .try_as_borrowed()
+    .expect("test: empty locator chain")
     .encode_to_vec(((FLAG_HELLO_L) >> 5) & 1);
 
     let pico = zenoh_pico_encode_hello(FLAG_HELLO_L, version, whatami, &zid);
@@ -138,7 +143,7 @@ fn layer3_hello_l0_max_zid() {
     let wz = Hello {
         version,
         cbyte,
-        zid: zid.clone(),
+        zid: &zid,
         num_locators: None,
         locators: None,
     }
