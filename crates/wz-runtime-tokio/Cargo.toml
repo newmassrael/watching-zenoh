@@ -159,7 +159,7 @@ query-get = ["query-reply", "query-queryable", "codec-request"]
 # (z_get-side reply consume) both imply codec-response so the wire
 # Response surface compiles whenever the high-level query reply
 # capability is on.
-query-queryable = ["codec-request", "codec-response"]
+query-queryable = ["codec-request", "codec-response", "wz-session-core/query-queryable"]
 query-reply = ["codec-request", "codec-response"]
 query-target = ["query-get"]
 query-timeout = ["query-get"]
@@ -359,9 +359,9 @@ keyexpr-canon = []
 # query-source-info (10th feature) stays cluster-deferred: no source
 # implementation of build_request_query_with_source_info yet (doc-only
 # reference); wire-up cascade lands when the impl arrives.
-query-attachment = []
-query-selector-parameters = []
-query-reply-err = []
+query-attachment = ["wz-session-core/query-attachment"]
+query-selector-parameters = ["wz-session-core/query-selector-parameters"]
+query-reply-err = ["wz-session-core/query-reply-err"]
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }
