@@ -25541,6 +25541,50 @@
         "Update [[sce_vendor_pin_state]] memory to f224941a6 (last committed pin was 14ff5e36d at R311dj); the borrowed-absorb WIP memory is now resolved/committed."
       ]
     },
+    "Round 311dw-compose": {
+      "decision_summary": "wz-session-core pubsub dispatch builds under arbitrary codec/pubsub subsets: dispatch_push + imports regated to any(pubsub-put, pubsub-delete) so a codec-push-only build is drop-only.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/pubsub.rs: WireexprOwnedVariant import gate widened from codec-declare to the union of its push + declare use sites, matching the adjacent ToString import precedent.",
+        "pubsub.rs: dispatch_push fn + its NetworkMessage::Push dispatch arm + the reliability binding regated from codec-push to any(pubsub-put, pubsub-delete); a codec-push-only build parses a Push frame but drops it (no body op to project into a Sample), mirroring the silent PushOwnedVariant default fall-through.",
+        "pubsub.rs: PushOwned/PushOwnedVariant, EncodingHint (pubsub-put only), extract_qos/extract_source_info/SampleKind/TimestampHint (any put|delete), and extract_attachment (all(any put|delete, pubsub-attachment)) imports precisely gated to their use-site conditions to satisfy workspace deny-warnings.",
+        "Stale R311h comment on the Push arm corrected to describe the any(pubsub-put, pubsub-delete) gate and the drop-only degenerate."
+      ],
+      "verification_bullets": [
+        "12 wz-session-core --no-default-features codec/pubsub subsets build clean (alloc, codec-push-only, put-only, delete-only, +-timestamp, +-attachment, codec-declare, codec-request/response/response-final).",
+        "No regression: wz-session-core full-feature lib tests 197+2 pass; wz --features preset-ap-client builds clean.",
+        "scripts/run-ci.sh required layers 0/A/A2/B/C0/C1/C1b/C1c/C1d/C2/C3/D/E all pass; Layer G MCU cross-compile pass (G.6 riscv32 cross-real SKIP, host toolchain absent)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "wz-runtime-tokio arbitrary composition remains: query.rs/reply.rs/declare.rs are unconditionally compiled and unconditionally import codec-feature-gated types; session.rs unconditionally imports data/handle types (QueryReply, QueryableId, ReplyHandle, InboundReply, LivelinessSample, LivelinessSampleCallback) defined in those codec-coupled modules.",
+        "Textbook fix = separate codec-agnostic data/handle types (always-compiled) from codec-coupled registries (feature-gated); Session handle-returning signatures stay stable so R311g1 is preserved with no principle relaxation. Fold this separation into the R311dx/dy/dz query/reply/observer extraction cascade since it touches the same modules.",
+        "transport-unicast confirmed as the genuine session-FSM dependency: a coherent combo that includes it resolves every session_fsm_unicast + keyexpr_canon error, so no session-driver gate-out is needed.",
+        "Trivial residuals for a coherent pubsub-only combo: session_glue.rs batch_size unused under transport-batching-off + encode_source_info_ext_body call/def gate alignment."
+      ],
+      "publishable_decision_summary": "wz-session-core pubsub dispatch builds under arbitrary codec/pubsub subsets: dispatch_push + imports regated to any(pubsub-put, pubsub-delete) so a codec-push-only build is drop-only.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/pubsub.rs: WireexprOwnedVariant import gate widened from codec-declare to the union of its push + declare use sites, matching the adjacent ToString import precedent.",
+        "pubsub.rs: dispatch_push fn + its NetworkMessage::Push dispatch arm + the reliability binding regated from codec-push to any(pubsub-put, pubsub-delete); a codec-push-only build parses a Push frame but drops it (no body op to project into a Sample), mirroring the silent PushOwnedVariant default fall-through.",
+        "pubsub.rs: PushOwned/PushOwnedVariant, EncodingHint (pubsub-put only), extract_qos/extract_source_info/SampleKind/TimestampHint (any put|delete), and extract_attachment (all(any put|delete, pubsub-attachment)) imports precisely gated to their use-site conditions to satisfy workspace deny-warnings.",
+        "Stale R311h comment on the Push arm corrected to describe the any(pubsub-put, pubsub-delete) gate and the drop-only degenerate."
+      ],
+      "publishable_verification_bullets": [
+        "12 wz-session-core --no-default-features codec/pubsub subsets build clean (alloc, codec-push-only, put-only, delete-only, +-timestamp, +-attachment, codec-declare, codec-request/response/response-final).",
+        "No regression: wz-session-core full-feature lib tests 197+2 pass; wz --features preset-ap-client builds clean.",
+        "scripts/run-ci.sh required layers 0/A/A2/B/C0/C1/C1b/C1c/C1d/C2/C3/D/E all pass; Layer G MCU cross-compile pass (G.6 riscv32 cross-real SKIP, host toolchain absent)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "wz-runtime-tokio arbitrary composition remains: query.rs/reply.rs/declare.rs are unconditionally compiled and unconditionally import codec-feature-gated types; session.rs unconditionally imports data/handle types (QueryReply, QueryableId, ReplyHandle, InboundReply, LivelinessSample, LivelinessSampleCallback) defined in those codec-coupled modules.",
+        "Textbook fix = separate codec-agnostic data/handle types (always-compiled) from codec-coupled registries (feature-gated); Session handle-returning signatures stay stable so R311g1 is preserved with no principle relaxation. Fold this separation into the R311dx/dy/dz query/reply/observer extraction cascade since it touches the same modules.",
+        "transport-unicast confirmed as the genuine session-FSM dependency: a coherent combo that includes it resolves every session_fsm_unicast + keyexpr_canon error, so no session-driver gate-out is needed.",
+        "Trivial residuals for a coherent pubsub-only combo: session_glue.rs batch_size unused under transport-batching-off + encode_source_info_ext_body call/def gate alignment."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
