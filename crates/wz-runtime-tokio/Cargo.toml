@@ -404,21 +404,17 @@ sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
 sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
 sce-rust-lua = { path = "../../vendor/sce/sce-rust-lua" }
 log = "0.4"
-# Cookie generation per RFC §5.M (Accepting-side anti-amplification
-# cookie). HMAC-SHA256 is the wire-spec-mandated MAC; the RustCrypto
-# `hmac` + `sha2` pair is the standard Rust ecosystem choice. The
-# MCU sibling (wz-runtime-lwip + Phase W) will swap this for
-# sce_intrinsics_runtime::hmac_sha256 once that intrinsic lands per
-# the §5.I architectural-tier registry (OQ-W15 (a) closure).
-hmac = "0.12"
-sha2 = "0.10"
+# R311ei — the HMAC-SHA256 cookie primitive (hmac + sha2) moved to
+# wz-session-core::signing_key (runtime-agnostic, MCU-cross-compiled).
+# This crate keeps only the OS-entropy constructor (a free fn), so it
+# retains `zeroize` (the Zeroizing key wrapper) + `getrandom`.
 # Zeroize cookie signing keys on drop. RustCrypto ecosystem standard;
 # the `Zeroizing<Vec<u8>>` wrapper clears the heap allocation when
 # the SigningKey owning it is dropped, preventing cryptographic
 # secret residue in core dumps / heap leaks / panic backtraces
 # (3rd review #4 from R63's strict audit retrospect).
 zeroize = { version = "1", features = ["zeroize_derive"] }
-# R69 — AP-side entropy source for SigningKey::new_random. RustCrypto
+# R69 — AP-side entropy source for signing_key_from_os_entropy. RustCrypto
 # ecosystem chooses `getrandom` for OS-syscall-backed (Linux: getrandom(2)
 # fallback to /dev/urandom; macOS: getentropy) cryptographic random bytes.
 # MCU sibling (wz-runtime-lwip Phase W) does NOT pull this dep — it

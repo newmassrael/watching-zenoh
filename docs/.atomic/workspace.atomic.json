@@ -26130,6 +26130,54 @@
         "DP1/DP2 user calls unchanged."
       ]
     },
+    "Round 311ei": {
+      "decision_summary": "R311ei moves the SigningKey newtype + HMAC-SHA256 cookie primitive from session_glue to wz-session-core::signing_key (no_std + alloc; hmac/sha2/zeroize); new_random demoted to a getrandom free fn signing_key_from_os_entropy -- seventh DP3 leaf, unblocks SessionInitParams.",
+      "changes_bullets": [
+        "New wz-session-core::signing_key module (gated alloc, no_std): SigningKey (Zeroizing<Vec<u8>> newtype, manual redacting Debug) + SigningKeyTooShort (core::error::Error) + SigningKey::new/len/is_empty + generate_cookie_hmac_sha256 + the private compute_hmac_sha256_full HMAC-SHA256 primitive, with the 10 crypto tests (cookie determinism, short-key reject, Debug-redact, RFC 4231 TC1-7) moved alongside.",
+        "Crypto deps moved to wz-session-core (default-features=false, no_std): hmac 0.12 + sha2 0.10 + zeroize 1 (features=[alloc]). Removed from wz-runtime-tokio.",
+        "std::->core:: transition for the no_std crate: SigningKeyTooShort Display/Error and SigningKey Debug now use core::fmt / core::error::Error (parse_error precedent).",
+        "SigningKey::new_random() inherent method DEMOTED to a free fn signing_key_from_os_entropy() in wz-runtime-tokio::session_glue (keeps getrandom AP-only; getrandom has no MCU backend, and the orphan rule forbids a cross-crate inherent method). Builds the key via the public SigningKey::new. Its test rewritten to assert length via len() + distinctness via the cookie MAC (raw bytes now private to session-core).",
+        "session_glue.rs re-exports SigningKey / SigningKeyTooShort / generate_cookie_hmac_sha256; the SessionInitParams.cookie_signing_key field, the Accepting-side InitAck cookie path, wz-ap-demo, and the session_fsm_* tests resolve unchanged.",
+        "Seventh DP3 leaf; UNBLOCKS SessionInitParams (it carried a SigningKey field)."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b..C1h/C2/C3/C4/D/E) EXIT 0; Layer G MCU cross-compile pass ALL 7 targets (thumbv6m/7m/7em/8m.base/8m.main/8m.main-hf + riscv32imac) EXIT 0 -- the hmac+sha2 crypto stack cross-compiles to every MCU target via wz-runtime-lwip / wz facade transitive deps. This empirically resolves the prior deferral concern (crypto on MCU).",
+        "The 10 crypto tests (cookie determinism + RFC 4231 TC1-7 + short-key + Debug-redact) pass under wz-session-core --lib; the rewritten signing_key_from_os_entropy distinctness test passes under the workspace lane.",
+        "Full workspace build + test-compile clean; wz-ap-demo + session_fsm_accepting_path + session_glue_dispatch (external SigningKey / generate_cookie consumers) resolve via the re-export unchanged."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "DP3 cascade: 7 leaves done (qos, close_reason, ext_chain_role, action_trace, peer_init_caps, request_build, signing_key). SigningKey crypto leaf was the deferred one (getrandom/orphan-rule split) -- resolved by demoting new_random to a free fn + confirming hmac/sha2 cross-compile to MCU.",
+        "NEXT now UNBLOCKED: SessionInitParams (session_glue.rs ~343) can move to wz-session-core -- its cookie_signing_key: SigningKey field now resolves cross-crate. It holds Vec<u8> (zid/cookie) so alloc-gate; no codec coupling. The deterministic fixture builder already lives in the R71 sibling test-support crate, so production move is clean.",
+        "SessionLinkActions + Lua/tokio glue + install_session_actions stay in wz-runtime-tokio (AP-only by spec).",
+        "DP1/DP2 user calls unchanged."
+      ],
+      "publishable_decision_summary": "R311ei moves the SigningKey newtype + HMAC-SHA256 cookie primitive from session_glue to wz-session-core::signing_key (no_std + alloc; hmac/sha2/zeroize); new_random demoted to a getrandom free fn signing_key_from_os_entropy -- seventh DP3 leaf, unblocks SessionInitParams.",
+      "publishable_changes_bullets": [
+        "New wz-session-core::signing_key module (gated alloc, no_std): SigningKey (Zeroizing<Vec<u8>> newtype, manual redacting Debug) + SigningKeyTooShort (core::error::Error) + SigningKey::new/len/is_empty + generate_cookie_hmac_sha256 + the private compute_hmac_sha256_full HMAC-SHA256 primitive, with the 10 crypto tests (cookie determinism, short-key reject, Debug-redact, RFC 4231 TC1-7) moved alongside.",
+        "Crypto deps moved to wz-session-core (default-features=false, no_std): hmac 0.12 + sha2 0.10 + zeroize 1 (features=[alloc]). Removed from wz-runtime-tokio.",
+        "std::->core:: transition for the no_std crate: SigningKeyTooShort Display/Error and SigningKey Debug now use core::fmt / core::error::Error (parse_error precedent).",
+        "SigningKey::new_random() inherent method DEMOTED to a free fn signing_key_from_os_entropy() in wz-runtime-tokio::session_glue (keeps getrandom AP-only; getrandom has no MCU backend, and the orphan rule forbids a cross-crate inherent method). Builds the key via the public SigningKey::new. Its test rewritten to assert length via len() + distinctness via the cookie MAC (raw bytes now private to session-core).",
+        "session_glue.rs re-exports SigningKey / SigningKeyTooShort / generate_cookie_hmac_sha256; the SessionInitParams.cookie_signing_key field, the Accepting-side InitAck cookie path, wz-ap-demo, and the session_fsm_* tests resolve unchanged.",
+        "Seventh DP3 leaf; UNBLOCKS SessionInitParams (it carried a SigningKey field)."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b..C1h/C2/C3/C4/D/E) EXIT 0; Layer G MCU cross-compile pass ALL 7 targets (thumbv6m/7m/7em/8m.base/8m.main/8m.main-hf + riscv32imac) EXIT 0 -- the hmac+sha2 crypto stack cross-compiles to every MCU target via wz-runtime-lwip / wz facade transitive deps. This empirically resolves the prior deferral concern (crypto on MCU).",
+        "The 10 crypto tests (cookie determinism + RFC 4231 TC1-7 + short-key + Debug-redact) pass under wz-session-core --lib; the rewritten signing_key_from_os_entropy distinctness test passes under the workspace lane.",
+        "Full workspace build + test-compile clean; wz-ap-demo + session_fsm_accepting_path + session_glue_dispatch (external SigningKey / generate_cookie consumers) resolve via the re-export unchanged."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "DP3 cascade: 7 leaves done (qos, close_reason, ext_chain_role, action_trace, peer_init_caps, request_build, signing_key). SigningKey crypto leaf was the deferred one (getrandom/orphan-rule split) -- resolved by demoting new_random to a free fn + confirming hmac/sha2 cross-compile to MCU.",
+        "NEXT now UNBLOCKED: SessionInitParams (session_glue.rs ~343) can move to wz-session-core -- its cookie_signing_key: SigningKey field now resolves cross-crate. It holds Vec<u8> (zid/cookie) so alloc-gate; no codec coupling. The deterministic fixture builder already lives in the R71 sibling test-support crate, so production move is clean.",
+        "SessionLinkActions + Lua/tokio glue + install_session_actions stay in wz-runtime-tokio (AP-only by spec).",
+        "DP1/DP2 user calls unchanged."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [

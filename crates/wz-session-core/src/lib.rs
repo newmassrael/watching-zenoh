@@ -89,6 +89,17 @@ pub mod action_trace;
 /// in the tokio crate).
 pub mod peer_init_caps;
 
+/// R311ei — anti-amplification cookie signing key (`SigningKey` +
+/// `SigningKeyTooShort`) + the HMAC-SHA256 cookie primitive
+/// (`generate_cookie_hmac_sha256`). Pure crypto/value construction over
+/// the RustCrypto hmac + sha2 stack; alloc-gated (the key is
+/// `Zeroizing<Vec<u8>>`). DP3 leaf lifted from
+/// `wz-runtime-tokio::session_glue`; the OS-entropy constructor stays
+/// AP-only as a free fn in the tokio crate (getrandom has no MCU
+/// backend, and the orphan rule forbids a cross-crate inherent method).
+#[cfg(feature = "alloc")]
+pub mod signing_key;
+
 /// Link-layer value types (TxFrame / RxFrame / LinkEvent / LostCause).
 /// RxFrame carries Vec<u8> so the module is alloc-gated. The
 /// LinkDriver trait + concrete TcpDriver/UdpDriver impls remain in

@@ -139,6 +139,15 @@ hashbrown = { version = "0.15", default-features = false, features = ["default-h
 # wz-runtime-tokio log dep so the migrated production code resolves
 # `log::warn!` without a new transitive assumption.
 log = "0.4"
+# R311ei — HMAC-SHA256 anti-amplification cookie primitive (the
+# signing_key module). default-features = false keeps the RustCrypto
+# stack no_std so the Accepting-side cookie path cross-compiles to the
+# Layer G MCU targets (the OS-entropy constructor stays AP-only as a
+# free fn in wz-runtime-tokio; getrandom is NOT pulled here). zeroize's
+# `alloc` feature supplies the `Zeroizing<Vec<u8>>` key wrapper.
+hmac = { version = "0.12", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 # R311ds — the four declare/* registries' wider behavioural tests

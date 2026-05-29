@@ -1492,14 +1492,12 @@ version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",
  "hashbrown 0.15.5",
- "hmac",
  "log",
  "portable-atomic",
  "sce-build",
  "sce-forge-runtime",
  "sce-rust-lua",
  "sce-rust-runtime",
- "sha2",
  "tokio",
  "wz-codecs",
  "wz-runtime-core",
@@ -1522,11 +1520,14 @@ name = "wz-session-core"
 version = "0.1.0"
 dependencies = [
  "hashbrown 0.15.5",
+ "hmac",
  "log",
  "sce-forge-runtime",
+ "sha2",
  "wz-codecs",
  "wz-runtime-core",
  "wz-session-core-test-support",
+ "zeroize",
 ]
 
 [[package]]
