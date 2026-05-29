@@ -59,6 +59,13 @@ pub mod reliability;
 /// Session/actions split.
 pub mod qos;
 
+/// R311ed — session `CloseReason` discriminator (byte-valued enum
+/// mirroring the session FSM's four close-reason mutators). Pure no_std
+/// + no_alloc; unconditional. Second DP3 leaf lifted from
+/// `wz-runtime-tokio::session_glue`; the Close codec encode stays in the
+/// tokio crate next to the rest of the Close path.
+pub mod close_reason;
+
 /// Link-layer value types (TxFrame / RxFrame / LinkEvent / LostCause).
 /// RxFrame carries Vec<u8> so the module is alloc-gated. The
 /// LinkDriver trait + concrete TcpDriver/UdpDriver impls remain in
