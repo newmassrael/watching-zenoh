@@ -63,6 +63,15 @@
 #              which compiles the observer with the queryable slot elided
 #              — the arbitrary-subset class C1c-f's maximal-preset tests
 #              never exercise.)
+#   Layer C1h — wz-session-core arbitrary-subset composability matrix
+#              (R311ea; `cargo build`s the crate under several
+#              deliberately-incomplete coherent consumer profiles —
+#              minimal / pubsub-only / queryable-only / zget-reply-only /
+#              declare-observer / codec-declare-bare. deny-warnings turns
+#              every subset-specific unused-import / dead-code into a
+#              hard error, so this is the mechanical guard that each
+#              migrated registry composes under arbitrary feature
+#              selection — the class the maximal-union C1c-g lanes miss.)
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
 #   Layer C3 — per-package isolated `cargo clippy ... --all-targets`
 #              sub-lanes (R311cv; per-package isolated feature
@@ -597,6 +606,41 @@ layer_c1g_cargo_test_observer() {
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet)
 }
 
+# ─── Layer C1h — wz-session-core arbitrary-subset composability matrix ─
+#
+# R311ea: the C1c-g lanes each build wz-session-core under ONE maximal
+# feature union (per dispatch plane), so a gating regression that only
+# surfaces in a deliberately-incomplete coherent subset passes CI
+# invisibly. This lane closes that gap: it `cargo build`s the crate
+# under several representative coherent consumer profiles, none of which
+# any other lane builds in isolation. The `[workspace.lints] warnings =
+# "deny"` policy turns every subset-specific unused-import / dead-code /
+# single-pattern-match into a hard error, so this lane is the mechanical
+# guard that the migrated registries (pubsub / query / reply / declare /
+# observer) each compose under arbitrary feature selection — the
+# north-star "compose only what you wire" property. `cargo build` (lib,
+# no --all-targets) is the right surface: it is the compile-composability
+# check; the per-plane test modules are already covered by C1c-g's
+# maximal unions.
+#
+# Subsets (each a real consumer shape):
+#   1. minimal           alloc                       (trait/value surface, no codec)
+#   2. pubsub-only       +codec-push +pubsub-*       (subscriber data plane, no query/reply/declare)
+#   3. queryable-only    +query-queryable +query-*   (in-process queryable server, no pubsub/declare)
+#   4. zget-reply-only   +codec-response(+final)     (z_get initiator reply plane, no queryable/declare)
+#   5. declare-observer  +codec-declare +declare/liveliness  (peer-declare + liveliness observer, NO query/reply
+#                                                      — builds the observer with the queryables slot elided)
+#   6. codec-declare-bare +codec-declare             (registries present, zero consumer features)
+layer_c1h_arbitrary_subset_matrix() {
+    (cd crates \
+        && cargo build -p wz-session-core --no-default-features --features alloc --quiet \
+        && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --quiet \
+        && cargo build -p wz-session-core --no-default-features --features alloc,query-queryable,query-attachment,query-selector-parameters,query-reply-err --quiet \
+        && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-response,codec-response-final,pubsub-put,pubsub-delete --quiet \
+        && cargo build -p wz-session-core --no-default-features --features alloc,codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber --quiet \
+        && cargo build -p wz-session-core --no-default-features --features alloc,codec-declare --quiet)
+}
+
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
 #
 # R311bo: mirror the gate to deploy/mcu-qemu-demo (standalone
@@ -1122,6 +1166,7 @@ run_layer C1d layer_c1d_cargo_test_pubsub || overall=1
 run_layer C1e layer_c1e_cargo_test_query || overall=1
 run_layer C1f layer_c1f_cargo_test_reply || overall=1
 run_layer C1g layer_c1g_cargo_test_observer || overall=1
+run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer D layer_d_validate_deploy || overall=1
