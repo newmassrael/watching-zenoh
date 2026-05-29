@@ -100,6 +100,15 @@ pub mod peer_init_caps;
 #[cfg(feature = "alloc")]
 pub mod signing_key;
 
+/// R311ej — per-deploy session handshake parameters (`SessionInitParams`:
+/// version / whatami / zid / resolutions / lease / cookie + signing
+/// key). Pure owned value type; alloc-gated (Vec zid/cookie + SigningKey).
+/// DP3 leaf lifted from `wz-runtime-tokio::session_glue`; unblocked by
+/// R311ei moving SigningKey here. No codec coupling — drives the session
+/// FSM identically on the tokio (AP) and lwIP (MCU) runtimes.
+#[cfg(feature = "alloc")]
+pub mod session_init_params;
+
 /// Link-layer value types (TxFrame / RxFrame / LinkEvent / LostCause).
 /// RxFrame carries Vec<u8> so the module is alloc-gated. The
 /// LinkDriver trait + concrete TcpDriver/UdpDriver impls remain in
