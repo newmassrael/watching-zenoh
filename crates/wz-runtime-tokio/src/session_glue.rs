@@ -693,55 +693,14 @@ pub struct SessionLinkActions<R: Runtime = TokioRuntime, T: TimeSource = TokioTi
     pub next_outbound_interest_id: AtomicU64,
 }
 
-/// R121d — peer-announced sizing caps captured from `InitSyn` for
-/// the Accepting-side negotiation rule
-/// `InitAck.size <= InitSyn.size`. Defaults match
-/// zenoh-pico's behaviour when the `_Z_FLAG_T_INIT_S` bit is
-/// clear on InitSyn (zenoh-pico/src/protocol/codec/transport.c:267-269
-/// — falls back to `_Z_DEFAULT_RESOLUTION_SIZE = 2` and
-/// `_Z_DEFAULT_UNICAST_BATCH_SIZE = 65535`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PeerInitCaps {
-    pub seq_num_res: u8,
-    pub req_id_res: u8,
-    pub batch_size: u16,
-}
-
-impl PeerInitCaps {
-    /// Decode the InitSyn `sn_res` byte + optional `batch_size`
-    /// field per the init_body codec (parent.S=1 carries both,
-    /// parent.S=0 falls back to defaults). The `sn_res` byte is
-    /// packed `(seq_num_res & 0x03) | ((req_id_res & 0x03) << 2)`
-    /// per zenoh-pico transport.c:196-197.
-    pub fn from_init_syn(sn_res_byte: Option<u8>, batch_size: Option<u16>) -> Self {
-        // R311cb — transport-batching gates the peer-advertised
-        // batch_size honoring. cfg-off forces 65535 (full MTU) and
-        // ignores the peer's advertised value; honest semantic is
-        // "we always batch up to the wire limit and never reduce."
-        // The S-bit clear arm always returns 65535 regardless of the
-        // feature state — that path is the peer-declined-S baseline,
-        // not a negotiation outcome.
-        #[cfg(feature = "transport-batching")]
-        let honored_batch_size = batch_size.unwrap_or(65535);
-        #[cfg(not(feature = "transport-batching"))]
-        let honored_batch_size = 65535u16;
-        match sn_res_byte {
-            Some(b) => Self {
-                seq_num_res: b & 0x03,
-                req_id_res: (b >> 2) & 0x03,
-                batch_size: honored_batch_size,
-            },
-            None => Self {
-                // S bit clear → both peer defaults to
-                // `_Z_DEFAULT_RESOLUTION_SIZE = 2` and
-                // `_Z_DEFAULT_UNICAST_BATCH_SIZE = 65535`.
-                seq_num_res: 2,
-                req_id_res: 2,
-                batch_size: 65535,
-            },
-        }
-    }
-}
+// R311eg — PeerInitCaps + its from_init_syn decoder moved to
+// wz-session-core::peer_init_caps (pure no_std/no_alloc; the
+// transport-batching gate moved with the decoder). Re-exported so the
+// `crate::session_glue::PeerInitCaps` callsites (the
+// inbound_peer_init_caps slot, the InitSyn dispatch arm, and the
+// session_fsm_accepting_path tests) resolve unchanged. The live
+// `R::Mutex<Option<PeerInitCaps>>` slot stays below (runtime-bound). DP3 leaf.
+pub use wz_session_core::peer_init_caps::PeerInitCaps;
 
 /// R121f1 — wire-spec-mandatory Patch extension entry for the Init
 /// transport-message ext chain. Zenoh's Init handshake includes a

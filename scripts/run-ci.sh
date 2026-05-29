@@ -637,6 +637,9 @@ layer_c1g_cargo_test_observer() {
 #   5. declare-observer  +codec-declare +declare/liveliness  (peer-declare + liveliness observer, NO query/reply
 #                                                      — builds the observer with the queryables slot elided)
 #   6. codec-declare-bare +codec-declare             (registries present, zero consumer features)
+#   7. transport-batching +transport-batching        (R311eg: PeerInitCaps::from_init_syn honors the
+#                                                      peer-advertised batch_size; guards the gate-ON arm
+#                                                      that the alloc-only subset #1 leaves OFF)
 layer_c1h_arbitrary_subset_matrix() {
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features alloc --quiet \
@@ -644,7 +647,8 @@ layer_c1h_arbitrary_subset_matrix() {
         && cargo build -p wz-session-core --no-default-features --features alloc,query-queryable,query-attachment,query-selector-parameters,query-reply-err --quiet \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-response,codec-response-final,pubsub-put,pubsub-delete --quiet \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber --quiet \
-        && cargo build -p wz-session-core --no-default-features --features alloc,codec-declare --quiet)
+        && cargo build -p wz-session-core --no-default-features --features alloc,codec-declare --quiet \
+        && cargo build -p wz-session-core --no-default-features --features alloc,transport-batching --quiet)
 }
 
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
