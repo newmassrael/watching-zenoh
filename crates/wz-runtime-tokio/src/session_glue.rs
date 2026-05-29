@@ -73,8 +73,10 @@ use portable_atomic::{AtomicU64, Ordering};
 
 use crate::sync::Mutex;
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
+// R311ei — the HMAC-SHA256 cookie primitive + SigningKey newtype moved
+// to wz-session-core::signing_key; only the OS-entropy constructor stays
+// here (as a free fn), so this crate keeps just the `Zeroizing` wrapper +
+// `getrandom` deps (hmac / sha2 moved out with the primitive).
 use zeroize::Zeroizing;
 
 use sce_rust_runtime::scripting::{IScriptEngine, NativeMethod, ScriptValue};
@@ -198,131 +200,45 @@ use crate::keyexpr_canon::check_outbound_keyexpr_pico_safe;
 
 use crate::{LinkDriver, LinkEvent, Reliability, TxFrame};
 
-/// Cryptographic key for the anti-amplification cookie MAC.
+// R311ei — SigningKey + SigningKeyTooShort + the HMAC-SHA256 cookie
+// primitive generate_cookie_hmac_sha256 moved to
+// wz-session-core::signing_key (runtime-agnostic crypto/value
+// construction). Re-exported so the crate::session_glue::{SigningKey,
+// SigningKeyTooShort, generate_cookie_hmac_sha256} callsites
+// (SessionInitParams.cookie_signing_key, the Accepting-side InitAck
+// cookie path, wz-ap-demo, and the session_fsm_* tests) resolve
+// unchanged across the reorg.
+pub use wz_session_core::signing_key::{
+    generate_cookie_hmac_sha256, SigningKey, SigningKeyTooShort,
+};
+
+/// R69 / R311ei — construct a `SigningKey` from OS-backed cryptographic
+/// entropy. Pulls 32 bytes from `getrandom::getrandom` (Linux
+/// `getrandom(2)` fallback to `/dev/urandom`; macOS `getentropy`) — the
+/// RustCrypto-ecosystem standard for AP-side secret-key material. Length
+/// is fixed at 32 so the result always satisfies the `>= 32` invariant
+/// the [`SigningKey::new`] constructor enforces.
 ///
-/// Type-safe wrapper around `Zeroizing<Vec<u8>>` so the heap
-/// allocation backing the key bytes is wiped on drop. Construction
-/// validates the RFC §5.M length contract (>= 32 bytes); passing a
-/// short slice returns `Err(SigningKeyTooShort)` instead of panicking
-/// at the eventual HMAC call site (3rd review production-safety
-/// retrospect: panic at construct vs. silent corruption).
+/// The fallible surface returns `getrandom::Error` so a deploy that runs
+/// in a sandbox without entropy access (e.g. container without
+/// `/dev/urandom`) sees a typed error rather than a panic.
 ///
-/// The newtype hides the raw bytes from public API; only this
-/// module's `generate_cookie_hmac_sha256` can read them, via
-/// `as_slice`. Consumers store / move / clone a `SigningKey` like
-/// any other value type but cannot accidentally serialise it or
-/// log its inner bytes.
-#[derive(Clone)]
-pub struct SigningKey {
-    bytes: Zeroizing<Vec<u8>>,
-}
-
-impl std::fmt::Debug for SigningKey {
-    /// Manual Debug impl — never reveals the key bytes. Logs +
-    /// panic backtraces show only the length.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SigningKey")
-            .field("len", &self.bytes.len())
-            .field("bytes", &"<redacted>")
-            .finish()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SigningKeyTooShort(pub usize);
-
-impl std::fmt::Display for SigningKeyTooShort {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "cookie_signing_key must be >= 32 bytes per RFC §5.M (got {})",
-            self.0
-        )
-    }
-}
-
-impl std::error::Error for SigningKeyTooShort {}
-
-impl SigningKey {
-    /// Construct a key from owned bytes. The input is moved into a
-    /// `Zeroizing` wrapper; passing a shorter-than-32-byte slice
-    /// returns the typed error without retaining the bytes.
-    pub fn new(bytes: Vec<u8>) -> Result<Self, SigningKeyTooShort> {
-        if bytes.len() < 32 {
-            // Zeroize the rejected input before returning — the
-            // caller's Vec<u8> would otherwise persist on the
-            // stack until they explicitly drop it.
-            let _ = Zeroizing::new(bytes);
-            return Err(SigningKeyTooShort(0)); // length already inspected
-        }
-        Ok(Self {
-            bytes: Zeroizing::new(bytes),
-        })
-    }
-
-    /// R69 — construct a SigningKey from OS-backed cryptographic
-    /// entropy. Pulls 32 bytes from `getrandom::getrandom` (Linux
-    /// `getrandom(2)` fallback to `/dev/urandom`; macOS `getentropy`)
-    /// — the RustCrypto-ecosystem standard for AP-side secret-key
-    /// material. Length is fixed at 32 so the result always
-    /// satisfies the `>= 32` invariant; the constructor cannot
-    /// return `SigningKeyTooShort`.
-    ///
-    /// The fallible surface returns `getrandom::Error` so a deploy
-    /// that runs in a sandbox without entropy access (e.g.
-    /// container without `/dev/urandom`) sees a typed error rather
-    /// than a panic.
-    ///
-    /// MCU sibling does NOT use this path — the wz-runtime-lwip
-    /// build will source entropy via `sce_intrinsics_runtime::rng`
-    /// per §5.I architectural-tier registry (intrinsics §2.5).
-    /// Keeping the `getrandom` dep AP-only preserves the no_std
-    /// contract on MCU builds.
-    pub fn new_random() -> Result<Self, getrandom::Error> {
-        let mut buf = Zeroizing::new(vec![0u8; 32]);
-        getrandom::getrandom(buf.as_mut_slice())?;
-        // The buf is already Zeroizing-wrapped, but `new` re-wraps
-        // its input. Move the inner Vec out (preserving the wipe
-        // on the original wrapper's drop should an early-return
-        // occur in future edits).
-        Ok(Self {
-            bytes: Zeroizing::new(std::mem::take(&mut *buf)),
-        })
-    }
-
-    /// Crate-internal slice view; not exposed to consumers.
-    fn as_slice(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-
-/// Anti-amplification cookie generated by the Accepting side on
-/// InitAck and echoed back by the Initiator on OpenSyn.
-///
-/// **Wire shape**. HMAC-SHA256 output truncated to the first
-/// 16 bytes (RFC §5.M cookie shape; the truncation matches
-/// zenoh-pico's _z_t_msg_init_t._cookie ZSlice convention and is
-/// the same width as a zid). The 32-byte raw HMAC is **not**
-/// emitted on the wire; only the truncated 16-byte prefix.
-///
-/// **Key sourcing**. Caller passes a validated `SigningKey`
-/// constructed via `SigningKey::new(bytes)`; length validation +
-/// drop-time zeroize happen at the newtype layer so this function
-/// is panic-free given a non-null key.
-pub fn generate_cookie_hmac_sha256(cookie_signing_key: &SigningKey, peer_zid: &[u8]) -> Vec<u8> {
-    let full = compute_hmac_sha256_full(cookie_signing_key.as_slice(), peer_zid);
-    full[..16].to_vec()
-}
-
-/// Pure HMAC-SHA256 primitive — used by the cookie generator and
-/// directly by the RFC 4231 test-vector cross-check. Returns the
-/// untruncated 32-byte MAC; the cookie wire-shape truncation is
-/// owned by `generate_cookie_hmac_sha256`.
-fn compute_hmac_sha256_full(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key)
-        .expect("HMAC-SHA256 accepts any non-zero key length");
-    mac.update(data);
-    mac.finalize().into_bytes().into()
+/// **Why a free fn, not `SigningKey::new_random`.** `getrandom` has no
+/// bare-metal backend (thumbv6m-none-eabi et al.), so it cannot live in
+/// the MCU-cross-compiled `wz-session-core` crate where `SigningKey` now
+/// lives. The orphan rule forbids defining an inherent method on
+/// `SigningKey` from this crate, so the former `new_random` inherent
+/// method is demoted to this free function (R311ei). The MCU sibling
+/// sources entropy via `sce_intrinsics_runtime::rng` per the §5.I
+/// intrinsics tier instead.
+pub fn signing_key_from_os_entropy() -> Result<SigningKey, getrandom::Error> {
+    let mut buf = Zeroizing::new(vec![0u8; 32]);
+    getrandom::getrandom(buf.as_mut_slice())?;
+    // SigningKey::new re-wraps the bytes in its own Zeroizing; 32 bytes
+    // always satisfies the >= 32 length contract, so the construct is
+    // infallible here. std::mem::take leaves the source wrapper zeroed.
+    Ok(SigningKey::new(std::mem::take(&mut *buf))
+        .expect("32-byte entropy buffer always satisfies the >= 32 length contract"))
 }
 
 /// R311dl — re-export the wire-spec MID / flag constants from the
@@ -5070,232 +4986,30 @@ mod tests {
     #[cfg(feature = "codec-response")]
     use wz_codecs::response::ResponseOwnedVariant;
 
-    /// HMAC-SHA256 cookie generator must produce 16-byte output and
-    /// be deterministic given the same (key, peer_zid) inputs.
-    /// Cross-checks against the RustCrypto `hmac` + `sha2` baseline
-    /// — if either crate drifts on us the byte sequence will move
-    /// and this test catches it before the wire interop tests fail.
+    /// R69 / R311ei — `signing_key_from_os_entropy` yields a 32-byte
+    /// key (satisfies the >= 32 invariant by construction) and two
+    /// successive calls produce distinct material with overwhelming
+    /// probability (collision space = 2^256, never observed in
+    /// practice). The test asserts both surfaces: length (via the
+    /// public `len()`) AND distinctness — observed through the cookie
+    /// MAC since the raw key bytes are private to wz-session-core. A
+    /// regression that wires a constant entropy source (zero-fill,
+    /// counter, etc.) fires loud on the distinctness assertion.
     #[test]
-    fn cookie_hmac_sha256_deterministic_16_byte_output() {
-        let key = SigningKey::new(vec![0xAB; 32]).expect("32-byte key valid");
+    fn signing_key_from_os_entropy_yields_distinct_32_byte_keys() {
+        let a = signing_key_from_os_entropy().expect("AP entropy available");
+        let b = signing_key_from_os_entropy().expect("AP entropy available");
+        assert_eq!(a.len(), 32, "OS-entropy key must be 32 bytes");
+        assert_eq!(b.len(), 32);
+        // Distinctness is observed through the cookie MAC (the raw key
+        // bytes are not publicly readable): distinct keys over the same
+        // peer_zid produce distinct cookies.
         let peer_zid = vec![0x01, 0x02, 0x03, 0x04];
-        let cookie_a = generate_cookie_hmac_sha256(&key, &peer_zid);
-        let cookie_b = generate_cookie_hmac_sha256(&key, &peer_zid);
-        assert_eq!(cookie_a.len(), 16, "cookie wire width is 16 bytes");
-        assert_eq!(cookie_a, cookie_b, "same inputs → same cookie");
-
-        let different_peer = vec![0x05, 0x06, 0x07, 0x08];
-        let cookie_c = generate_cookie_hmac_sha256(&key, &different_peer);
         assert_ne!(
-            cookie_a, cookie_c,
-            "different peer_zid must yield different cookie"
+            generate_cookie_hmac_sha256(&a, &peer_zid),
+            generate_cookie_hmac_sha256(&b, &peer_zid),
+            "two OS-entropy keys must produce distinct cookies (2^256 space)"
         );
-    }
-
-    /// R69 — SigningKey::new_random yields a 32-byte key (satisfies
-    /// the >= 32 invariant by construction) and two successive
-    /// calls produce distinct material with overwhelming probability
-    /// (collision space = 2^256, never observed in practice).
-    /// The test asserts both surfaces: length AND distinctness, so
-    /// a regression that wires a constant entropy source (zero-fill,
-    /// counter, etc.) fires loud.
-    #[test]
-    fn signing_key_new_random_yields_distinct_32_byte_keys() {
-        let a = SigningKey::new_random().expect("AP entropy available");
-        let b = SigningKey::new_random().expect("AP entropy available");
-        assert_eq!(a.as_slice().len(), 32, "new_random must yield 32 bytes");
-        assert_eq!(b.as_slice().len(), 32);
-        assert_ne!(
-            a.as_slice(),
-            b.as_slice(),
-            "two new_random calls must produce distinct keys (2^256 collision space)"
-        );
-    }
-
-    /// Short-key reject is loud at construction site (RFC §5.M
-    /// mandates >= 32 bytes; the typed constructor returns
-    /// `Err(SigningKeyTooShort)` instead of letting a 16-byte key
-    /// reach the wire-decode-time peer reject path).
-    #[test]
-    fn signing_key_short_returns_err() {
-        let too_short = vec![0xAA; 16];
-        let result = SigningKey::new(too_short);
-        assert!(matches!(result, Err(SigningKeyTooShort(_))));
-    }
-
-    /// SigningKey Debug impl never leaks the bytes — only the
-    /// length. Catches a regression where a future contributor
-    /// adds `#[derive(Debug)]` (which would print the inner Vec).
-    #[test]
-    fn signing_key_debug_redacts_bytes() {
-        let key = SigningKey::new(vec![0xDE; 32]).unwrap();
-        let dbg = format!("{:?}", key);
-        assert!(dbg.contains("<redacted>"), "Debug must redact: {dbg}");
-        assert!(!dbg.contains("DE"), "Debug must not leak hex: {dbg}");
-    }
-
-    /// RFC 4231 Test Case 1 — pinned cross-check against the public
-    /// HMAC-SHA256 test vector. If RustCrypto's `hmac` + `sha2`
-    /// crates ever regress, this assertion fires.
-    ///
-    /// Key  = 0x0b × 20
-    /// Data = "Hi There"
-    /// HMAC = b0344c61d8db38535ca8afceaf0bf12b
-    ///        881dc200c9833da726e9376c2e32cff7
-    #[test]
-    fn rfc4231_test_case_1_full_hmac_sha256() {
-        let key = vec![0x0b; 20];
-        let data = b"Hi There";
-        let mac = compute_hmac_sha256_full(&key, data);
-        let expected: [u8; 32] = [
-            0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53, 0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b,
-            0xf1, 0x2b, 0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7, 0x26, 0xe9, 0x37, 0x6c,
-            0x2e, 0x32, 0xcf, 0xf7,
-        ];
-        assert_eq!(mac, expected, "RFC 4231 TC1 byte mismatch");
-    }
-
-    /// RFC 4231 Test Case 2 — verifies the implementation handles
-    /// the canonical "short key, longer data" combination correctly.
-    ///
-    /// Key  = "Jefe"
-    /// Data = "what do ya want for nothing?"
-    /// HMAC = 5bdcc146bf60754e6a042426089575c7
-    ///        5a003f089d2739839dec58b964ec3843
-    #[test]
-    fn rfc4231_test_case_2_full_hmac_sha256() {
-        let key = b"Jefe";
-        let data = b"what do ya want for nothing?";
-        let mac = compute_hmac_sha256_full(key, data);
-        let expected: [u8; 32] = [
-            0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e, 0x6a, 0x04, 0x24, 0x26, 0x08, 0x95,
-            0x75, 0xc7, 0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83, 0x9d, 0xec, 0x58, 0xb9,
-            0x64, 0xec, 0x38, 0x43,
-        ];
-        assert_eq!(mac, expected, "RFC 4231 TC2 byte mismatch");
-    }
-
-    /// RFC 4231 Test Case 3 — uniform-byte key + uniform-byte data
-    /// stresses the block-mix path (both key and data 20+ bytes,
-    /// neither block-size-aligned to anything special).
-    ///
-    /// Key  = 0xaa × 20
-    /// Data = 0xdd × 50
-    /// HMAC = 773ea91e36800e46854db8ebd09181a7
-    ///        2959098b3ef8c122d9635514ced565fe
-    #[test]
-    fn rfc4231_test_case_3_full_hmac_sha256() {
-        let key = vec![0xaa; 20];
-        let data = vec![0xdd; 50];
-        let mac = compute_hmac_sha256_full(&key, &data);
-        let expected: [u8; 32] = [
-            0x77, 0x3e, 0xa9, 0x1e, 0x36, 0x80, 0x0e, 0x46, 0x85, 0x4d, 0xb8, 0xeb, 0xd0, 0x91,
-            0x81, 0xa7, 0x29, 0x59, 0x09, 0x8b, 0x3e, 0xf8, 0xc1, 0x22, 0xd9, 0x63, 0x55, 0x14,
-            0xce, 0xd5, 0x65, 0xfe,
-        ];
-        assert_eq!(mac, expected, "RFC 4231 TC3 byte mismatch");
-    }
-
-    /// RFC 4231 Test Case 4 — sequential-byte key (0x01..=0x19)
-    /// with uniform-byte data. Catches off-by-one in key
-    /// padding / inner-pad XOR.
-    ///
-    /// Key  = 0x01, 0x02, …, 0x19  (25 bytes)
-    /// Data = 0xcd × 50
-    /// HMAC = 82558a389a443c0ea4cc819899f2083a
-    ///        85f0faa3e578f8077a2e3ff46729665b
-    #[test]
-    fn rfc4231_test_case_4_full_hmac_sha256() {
-        let key: Vec<u8> = (0x01..=0x19).collect();
-        let data = vec![0xcd; 50];
-        let mac = compute_hmac_sha256_full(&key, &data);
-        let expected: [u8; 32] = [
-            0x82, 0x55, 0x8a, 0x38, 0x9a, 0x44, 0x3c, 0x0e, 0xa4, 0xcc, 0x81, 0x98, 0x99, 0xf2,
-            0x08, 0x3a, 0x85, 0xf0, 0xfa, 0xa3, 0xe5, 0x78, 0xf8, 0x07, 0x7a, 0x2e, 0x3f, 0xf4,
-            0x67, 0x29, 0x66, 0x5b,
-        ];
-        assert_eq!(mac, expected, "RFC 4231 TC4 byte mismatch");
-    }
-
-    /// RFC 4231 Test Case 5 — truncated-MAC scenario. RFC §4.5
-    /// documents the truncation-to-128-bits use case which is
-    /// exactly what `generate_cookie_hmac_sha256` does (truncate
-    /// to first 16 bytes). The expected output here is the full
-    /// MAC; the truncation invariant is asserted separately so a
-    /// reader can see both the source MAC and the truncated form.
-    ///
-    /// Key  = 0x0c × 20
-    /// Data = "Test With Truncation"
-    /// HMAC = a3b6167473100ee06e0c796c2955552b
-    ///        fa6f7c0a6a8aef8b93f860aab0cd20c5
-    /// Truncated (first 16 bytes) = a3b6167473100ee06e0c796c2955552b
-    #[test]
-    fn rfc4231_test_case_5_truncation_invariant() {
-        let key = vec![0x0c; 20];
-        let data = b"Test With Truncation";
-        let full = compute_hmac_sha256_full(&key, data);
-        let expected_full: [u8; 32] = [
-            0xa3, 0xb6, 0x16, 0x74, 0x73, 0x10, 0x0e, 0xe0, 0x6e, 0x0c, 0x79, 0x6c, 0x29, 0x55,
-            0x55, 0x2b, 0xfa, 0x6f, 0x7c, 0x0a, 0x6a, 0x8a, 0xef, 0x8b, 0x93, 0xf8, 0x60, 0xaa,
-            0xb0, 0xcd, 0x20, 0xc5,
-        ];
-        assert_eq!(full, expected_full, "RFC 4231 TC5 full MAC");
-        // First 16 bytes — the cookie wire-shape truncation
-        // matches RFC §4.5 96/128-bit MAC truncation. Asserts
-        // that generate_cookie_hmac_sha256's slice [..16] yields
-        // exactly the RFC truncated form.
-        let expected_truncated: [u8; 16] = [
-            0xa3, 0xb6, 0x16, 0x74, 0x73, 0x10, 0x0e, 0xe0, 0x6e, 0x0c, 0x79, 0x6c, 0x29, 0x55,
-            0x55, 0x2b,
-        ];
-        assert_eq!(
-            &full[..16],
-            expected_truncated.as_slice(),
-            "RFC 4231 TC5 truncated"
-        );
-    }
-
-    /// RFC 4231 Test Case 6 — block-size+ key triggers the
-    /// "key longer than block size, hash first" path
-    /// (HMAC algorithm pre-hashes the key when len > 64).
-    ///
-    /// Key  = 0xaa × 131
-    /// Data = "Test Using Larger Than Block-Size Key - Hash Key First"
-    /// HMAC = 60e431591ee0b67f0d8a26aacbf5b77f
-    ///        8e0bc6213728c5140546040f0ee37f54
-    #[test]
-    fn rfc4231_test_case_6_full_hmac_sha256() {
-        let key = vec![0xaa; 131];
-        let data = b"Test Using Larger Than Block-Size Key - Hash Key First";
-        let mac = compute_hmac_sha256_full(&key, data);
-        let expected: [u8; 32] = [
-            0x60, 0xe4, 0x31, 0x59, 0x1e, 0xe0, 0xb6, 0x7f, 0x0d, 0x8a, 0x26, 0xaa, 0xcb, 0xf5,
-            0xb7, 0x7f, 0x8e, 0x0b, 0xc6, 0x21, 0x37, 0x28, 0xc5, 0x14, 0x05, 0x46, 0x04, 0x0f,
-            0x0e, 0xe3, 0x7f, 0x54,
-        ];
-        assert_eq!(mac, expected, "RFC 4231 TC6 byte mismatch");
-    }
-
-    /// RFC 4231 Test Case 7 — block-size+ key AND block-size+
-    /// data. Stresses both the key-prehash path AND the multi-
-    /// block message absorption path.
-    ///
-    /// Key  = 0xaa × 131
-    /// Data = "This is a test using a larger than block-size key
-    ///         and a larger than block-size data. ..."
-    /// HMAC = 9b09ffa71b942fcb27635fbcd5b0e944
-    ///        bfdc63644f0713938a7f51535c3a35e2
-    #[test]
-    fn rfc4231_test_case_7_full_hmac_sha256() {
-        let key = vec![0xaa; 131];
-        let data = b"This is a test using a larger than block-size key and a larger than block-size data. The key needs to be hashed before being used by the HMAC algorithm.";
-        let mac = compute_hmac_sha256_full(&key, data);
-        let expected: [u8; 32] = [
-            0x9b, 0x09, 0xff, 0xa7, 0x1b, 0x94, 0x2f, 0xcb, 0x27, 0x63, 0x5f, 0xbc, 0xd5, 0xb0,
-            0xe9, 0x44, 0xbf, 0xdc, 0x63, 0x64, 0x4f, 0x07, 0x13, 0x93, 0x8a, 0x7f, 0x51, 0x53,
-            0x5c, 0x3a, 0x35, 0xe2,
-        ];
-        assert_eq!(mac, expected, "RFC 4231 TC7 byte mismatch");
     }
 
     /// init_cbyte must match zenoh-pico's transport.c:189-192
