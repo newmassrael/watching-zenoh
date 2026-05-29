@@ -187,3 +187,14 @@ pub mod query_event;
 /// on `query-queryable`. Mirrors the `SubscriberRegistry` shape.
 #[cfg(feature = "alloc")]
 pub mod reply;
+
+/// R311dz-pre — `ResponseSink` IoC trait: the outbound-reply drain
+/// abstraction the application-layer observer's `flush_pending` /
+/// `dispatch` depend on, inverting their dependency on the concrete
+/// tokio `SessionLinkActions<R, T>` so the observer can migrate here
+/// without the tokio actions layer. `SessionLinkActions` impls it in
+/// wz-runtime-tokio. Alloc-gated (the `send_response` method takes a
+/// `wz_codecs::response::ResponseOwned`); the method set is empty in a
+/// build with neither response codec so the trait is always-nameable.
+#[cfg(feature = "alloc")]
+pub mod response_sink;

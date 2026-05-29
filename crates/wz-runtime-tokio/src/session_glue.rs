@@ -179,6 +179,10 @@ use wz_codecs::wireexpr_local::WireexprLocalOwned;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::wireexpr_nonlocal::WireexprNonlocalOwned;
 use wz_runtime_core::{Runtime, TimeSource};
+// R311dz-pre — `SessionLinkActions` impls `ResponseSink` (below) so the
+// application-layer observer can drain replies through the IoC trait
+// rather than this concrete type.
+use wz_session_core::response_sink::ResponseSink;
 
 use crate::runtime_impl::{TokioRuntime, TokioTime};
 
@@ -852,6 +856,26 @@ pub fn default_init_patch_ext_entry() -> ExtEntryOwned {
 // `TokioSession` alias / `impl<T> Session<TokioRuntime, T>` pattern
 // from the R311cw-dh cascade — both establish a concrete-bound AP
 // entry point on top of a generic struct).
+// R311dz-pre — bridge the observer's generic reply drain to the concrete
+// tokio actions. The inherent `send_response` / `send_response_final`
+// methods (below, in the `impl<R: Runtime, T: TimeSource>` block) carry
+// the real encode + enqueue; these trait methods delegate to them so
+// `ApplicationLayerObserver::flush_pending<S: ResponseSink>` can drive any
+// runtime's actions handle. The delegating `self.send_response(..)` calls
+// resolve to the inherent methods (inherent shadows trait in method-call
+// resolution), so there is no recursion. The method set is empty in a
+// build with neither response codec, matching the trait's gated surface.
+impl<R: Runtime, T: TimeSource> ResponseSink for SessionLinkActions<R, T> {
+    #[cfg(feature = "codec-response")]
+    fn send_response(&self, response: ResponseOwned) {
+        self.send_response(response);
+    }
+    #[cfg(feature = "codec-response-final")]
+    fn send_response_final(&self, request_id: u64) {
+        self.send_response_final(request_id);
+    }
+}
+
 impl<T: TimeSource> SessionLinkActions<TokioRuntime, T> {
     /// Construct a session action bundle for one logical FSM instance.
     /// The `params` are captured by value; production callers
