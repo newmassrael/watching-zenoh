@@ -185,6 +185,17 @@ pub mod pubsub;
 #[cfg(all(feature = "alloc", feature = "codec-response"))]
 pub mod response_build;
 
+/// R311eh — Request-builder cluster (`build_request_query` + the five
+/// `build_request_query_with_*` layered variants + `RequestQueryBuilder`
+/// + the two size-bound consts): pure value construction of a
+/// `Request(Query)` wire record from a request_id + keyexpr + Query/
+/// Request-layer settings. Lifted from `wz-runtime-tokio::session_glue`;
+/// the mirror of the `response_build` move. Gated on
+/// `all(alloc, codec-request)` — the builders allocate owned codec
+/// buffers and there is no Request frame to build without the codec.
+#[cfg(all(feature = "alloc", feature = "codec-request"))]
+pub mod request_build;
+
 /// R311dx — application-layer queryable registry (`QueryableRegistry`
 /// + `QueryReply` / `ReplyBody` / `QueryResponder` / `QueryableId` /
 /// `QueryableCallback`): routes inbound `Request(Query)` records to
