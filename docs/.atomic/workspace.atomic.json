@@ -25850,6 +25850,44 @@
         "DP1/DP2/DP3 user calls unchanged."
       ]
     },
+    "Round 311eb": {
+      "decision_summary": "R311eb adds Layer C4: a wz facade preset composability matrix that cargo-builds all 7 named presets, so a preset feature-list drift or incoherent combo cannot pass CI invisibly.",
+      "changes_bullets": [
+        "New Layer C4 (scripts/run-ci.sh + .github/workflows/ci.yml + header doc) cargo-builds the wz facade under all 7 named presets: mcu-minimal / mcu-extended / ap-client / ap-router / ap-full / zenoh-cpp / cortex-m4-default. Facade-level analog of C1h's wz-session-core subset matrix.",
+        "Closes the gap that C3 builds only preset-ap-client and Layer G cross-compiles the facade under its default/runtime-lwip bundles, leaving the other presets' feature lists unguarded against drift (a renamed/removed feature or an incoherent combo that no longer type-checks). [workspace.lints] warnings=deny still applies, so preset-specific unused-import/dead-code is a hard error too.",
+        "Enforced in ci.yml (unlike the local-only C3 lint-isolation lane) because it is a composability guard, not a redundant lint pass; the no_std footing of the MCU presets stays Layer G's cross-compile job, so C4 is the fast host feature-shape guard."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh --layer C4 pass (all 7 preset builds 0 errors); full run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b..C1h/C2/C3/C4/D/E) with EXIT 0. ci.yml YAML parse-valid (python3 yaml.safe_load); bash -n run-ci.sh clean.",
+        "CI-infra only this round (no wz facade / crate Rust change), so the Layer G MCU matrix is unaffected; all 7 presets were probed building clean before wiring (diagnose-first)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "Facade preset composability now CI-guarded (C4) + wz-session-core subset composability CI-guarded (C1h); the composability frontier is now the wz-runtime-tokio internal arbitrary subset (session.rs + session_glue.rs unconditional codec-gated compiles) -- opens with the SessionLinkActions migration (DP3).",
+        "C3 stays local-only by maintainer convention (lint isolation, partially redundant with C2); C4 deliberately differs (composability, CI-enforced).",
+        "DP1/DP2/DP3 user calls unchanged."
+      ],
+      "publishable_decision_summary": "R311eb adds Layer C4: a wz facade preset composability matrix that cargo-builds all 7 named presets, so a preset feature-list drift or incoherent combo cannot pass CI invisibly.",
+      "publishable_changes_bullets": [
+        "New Layer C4 (scripts/run-ci.sh + .github/workflows/ci.yml + header doc) cargo-builds the wz facade under all 7 named presets: mcu-minimal / mcu-extended / ap-client / ap-router / ap-full / zenoh-cpp / cortex-m4-default. Facade-level analog of C1h's wz-session-core subset matrix.",
+        "Closes the gap that C3 builds only preset-ap-client and Layer G cross-compiles the facade under its default/runtime-lwip bundles, leaving the other presets' feature lists unguarded against drift (a renamed/removed feature or an incoherent combo that no longer type-checks). [workspace.lints] warnings=deny still applies, so preset-specific unused-import/dead-code is a hard error too.",
+        "Enforced in ci.yml (unlike the local-only C3 lint-isolation lane) because it is a composability guard, not a redundant lint pass; the no_std footing of the MCU presets stays Layer G's cross-compile job, so C4 is the fast host feature-shape guard."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh --layer C4 pass (all 7 preset builds 0 errors); full run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b..C1h/C2/C3/C4/D/E) with EXIT 0. ci.yml YAML parse-valid (python3 yaml.safe_load); bash -n run-ci.sh clean.",
+        "CI-infra only this round (no wz facade / crate Rust change), so the Layer G MCU matrix is unaffected; all 7 presets were probed building clean before wiring (diagnose-first)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Facade preset composability now CI-guarded (C4) + wz-session-core subset composability CI-guarded (C1h); the composability frontier is now the wz-runtime-tokio internal arbitrary subset (session.rs + session_glue.rs unconditional codec-gated compiles) -- opens with the SessionLinkActions migration (DP3).",
+        "C3 stays local-only by maintainer convention (lint isolation, partially redundant with C2); C4 deliberately differs (composability, CI-enforced).",
+        "DP1/DP2/DP3 user calls unchanged."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [

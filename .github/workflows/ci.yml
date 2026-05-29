@@ -258,6 +258,16 @@ jobs:
       - name: Layer C2 — cargo clippy --deny warnings
         run: bash scripts/run-ci.sh --layer C2
 
+      - name: Layer C4 — wz facade preset composability matrix
+        # R311eb — cargo-builds the wz facade under all 7 named presets
+        # (mcu-minimal/-extended, ap-client/-router/-full, zenoh-cpp,
+        # cortex-m4-default) so a preset feature-list drift or incoherent
+        # combo cannot pass CI invisibly. Facade-level analog of C1h;
+        # enforced here (unlike the local-only C3 lint-isolation lane)
+        # because it is a composability guard, not a redundant lint pass.
+        # no_std footing of the MCU presets stays Layer G's cross-compile.
+        run: bash scripts/run-ci.sh --layer C4
+
       - name: Install python3-yaml (Layer D dep)
         # Layer D's run-ci.sh path no-ops gracefully when python3-yaml
         # is missing; on CI we install it explicitly so the lane
