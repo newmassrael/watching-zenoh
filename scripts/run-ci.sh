@@ -82,6 +82,12 @@
 #              wz-runtime-lwip default sync-only + wz-runtime-lwip
 #              with `--features alloc`. Five sub-lanes total; any
 #              failure short-circuits the whole layer.
+#   Layer C4 — wz facade preset composability matrix (R311eb; cargo-
+#              builds the facade under all 7 named presets — mcu-minimal/
+#              -extended, ap-client/-router/-full, zenoh-cpp, cortex-m4-
+#              default — so a preset feature-list drift or incoherent
+#              combo cannot pass CI invisibly. Facade-level analog of
+#              C1h; no_std footing stays Layer G's cross-compile job.)
 #   Layer D  — deploy/*.yaml schema validate
 #   Layer E  — binary-dep e2e suite via `cargo test ... -- --ignored`
 #              (auto-includes every #[ignore]-marked test in the
@@ -704,6 +710,42 @@ layer_c3_per_pkg_isolated_lint() {
             --all-targets --quiet -- -D warnings)
 }
 
+# ─── Layer C4 — wz facade preset composability matrix ───────────────
+#
+# R311eb: the wz facade exposes 7 named presets (the user-facing
+# composition surface — `mnemosyne.toml` north-star "compose a profile,
+# not a feature soup"). C3 builds only `preset-ap-client`; Layer G
+# cross-compiles the facade under its default / runtime-lwip bundles.
+# Neither guards the OTHER presets' feature lists from drift — a preset
+# that references a renamed/removed feature, or selects an incoherent
+# combo that no longer type-checks, would pass CI invisibly. This lane
+# `cargo build`s the facade under each named preset (host typecheck +
+# feature-resolution; `[workspace.lints] warnings = "deny"` still turns
+# any preset-specific unused-import / dead-code into a hard error). It is
+# the facade-level analog of C1h's wz-session-core subset matrix. The
+# no_std footing of the MCU presets is independently proven by Layer G's
+# cross-compile; this lane is the fast feature-shape guard that runs on
+# the host without the cross toolchain.
+layer_c4_preset_matrix() {
+    local presets=(
+        preset-mcu-minimal
+        preset-mcu-extended
+        preset-ap-client
+        preset-ap-router
+        preset-ap-full
+        preset-zenoh-cpp
+        preset-cortex-m4-default
+    )
+    local p
+    for p in "${presets[@]}"; do
+        if ! (cd crates && cargo build -p wz --no-default-features --features "$p" --quiet); then
+            echo "  C4 FAIL: wz preset $p did not build"
+            return 1
+        fi
+        echo "  C4 wz $p OK"
+    done
+}
+
 # ─── Layer D — deploy yaml schema validate ──────────────────────────
 layer_d_validate_deploy() {
     if ! python3 -c 'import yaml' >/dev/null 2>&1; then
@@ -1169,6 +1211,7 @@ run_layer C1g layer_c1g_cargo_test_observer || overall=1
 run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
+run_layer C4 layer_c4_preset_matrix || overall=1
 run_layer D layer_d_validate_deploy || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer F layer_f_codec_footprint || overall=1
