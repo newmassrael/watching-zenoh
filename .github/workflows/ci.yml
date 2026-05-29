@@ -245,6 +245,16 @@ jobs:
         # tests never exercise.
         run: bash scripts/run-ci.sh --layer C1g
 
+      - name: Layer C1h — wz-session-core arbitrary-subset composability matrix
+        # R311ea — the C1c-g lanes each build wz-session-core under ONE
+        # maximal feature union, so a gating regression that only shows in
+        # a deliberately-incomplete coherent subset passes CI invisibly.
+        # This lane builds the crate under several representative consumer
+        # profiles (minimal / pubsub-only / queryable-only / zget-reply /
+        # declare-observer / codec-declare-bare); deny-warnings turns every
+        # subset-specific unused-import / dead-code into a hard error.
+        run: bash scripts/run-ci.sh --layer C1h
+
       - name: Layer C2 — cargo clippy --deny warnings
         run: bash scripts/run-ci.sh --layer C2
 

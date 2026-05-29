@@ -25812,6 +25812,44 @@
         "R311 carry: facade graceful-close wrapper API + similar wrappers for send_query / declare / get — R311c surfaced wz-ap-demo cfg-aware burden, R311e doesn't add (wz-ap-demo doesn't call send_response_final). Hoist when multiple binaries become facade consumers."
       ]
     },
+    "Round 311ea": {
+      "decision_summary": "R311ea adds Layer C1h: a wz-session-core arbitrary-subset composability matrix (6 coherent feature subsets) under deny-warnings, guarding that each migrated registry composes.",
+      "changes_bullets": [
+        "New Layer C1h (scripts/run-ci.sh + .github/workflows/ci.yml + header doc) cargo-builds wz-session-core under 6 deliberately-incomplete coherent feature subsets: minimal(alloc) / pubsub-only / queryable-only / zget-reply-only / declare-observer(no query/reply) / codec-declare-bare.",
+        "Closes the gap that C1c-g each build only ONE maximal per-plane union, so a gating regression visible only in an incomplete subset passed CI invisibly. The [workspace.lints] warnings=deny policy turns every subset-specific unused-import / dead-code / single-pattern-match into a hard error, making C1h the mechanical guard that pubsub/query/reply/declare/observer compose under arbitrary feature selection (the north-star property).",
+        "cargo build (lib, no --all-targets) is the right surface: it is the compile-composability check; the per-plane test modules stay covered by C1c-g maximal unions. The declare-observer subset additionally re-exercises the R311dz queryable-slot-elided observer build via a distinct feature combo."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh --layer C1h pass (all 6 subset builds 0 errors / 0 deny-warnings); full run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b..C1h/C2/C3/D/E) with EXIT 0. bash -n scripts/run-ci.sh clean.",
+        "CI-infra only this round (no wz-session-core / wz-runtime-tokio Rust change), so the Layer G MCU matrix is unaffected; the 6 subsets were probed compiling clean before wiring (diagnose-first)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "Arbitrary-subset CI lane carry CLOSED for wz-session-core (C1h). Remaining composability frontier is the wz-runtime-tokio facade/preset level (session.rs + session_glue.rs still unconditionally compile codec-gated types) — opens once SessionLinkActions migrates (DP3).",
+        "Optional: extend C1h subset list as new coherent consumer profiles emerge; keep it a representative sample, not exhaustive (combinatorial blowup).",
+        "DP1/DP2/DP3 user calls unchanged."
+      ],
+      "publishable_decision_summary": "R311ea adds Layer C1h: a wz-session-core arbitrary-subset composability matrix (6 coherent feature subsets) under deny-warnings, guarding that each migrated registry composes.",
+      "publishable_changes_bullets": [
+        "New Layer C1h (scripts/run-ci.sh + .github/workflows/ci.yml + header doc) cargo-builds wz-session-core under 6 deliberately-incomplete coherent feature subsets: minimal(alloc) / pubsub-only / queryable-only / zget-reply-only / declare-observer(no query/reply) / codec-declare-bare.",
+        "Closes the gap that C1c-g each build only ONE maximal per-plane union, so a gating regression visible only in an incomplete subset passed CI invisibly. The [workspace.lints] warnings=deny policy turns every subset-specific unused-import / dead-code / single-pattern-match into a hard error, making C1h the mechanical guard that pubsub/query/reply/declare/observer compose under arbitrary feature selection (the north-star property).",
+        "cargo build (lib, no --all-targets) is the right surface: it is the compile-composability check; the per-plane test modules stay covered by C1c-g maximal unions. The declare-observer subset additionally re-exercises the R311dz queryable-slot-elided observer build via a distinct feature combo."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh --layer C1h pass (all 6 subset builds 0 errors / 0 deny-warnings); full run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b..C1h/C2/C3/D/E) with EXIT 0. bash -n scripts/run-ci.sh clean.",
+        "CI-infra only this round (no wz-session-core / wz-runtime-tokio Rust change), so the Layer G MCU matrix is unaffected; the 6 subsets were probed compiling clean before wiring (diagnose-first)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Arbitrary-subset CI lane carry CLOSED for wz-session-core (C1h). Remaining composability frontier is the wz-runtime-tokio facade/preset level (session.rs + session_glue.rs still unconditionally compile codec-gated types) — opens once SessionLinkActions migrates (DP3).",
+        "Optional: extend C1h subset list as new coherent consumer profiles emerge; keep it a representative sample, not exhaustive (combinatorial blowup).",
+        "DP1/DP2/DP3 user calls unchanged."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [
