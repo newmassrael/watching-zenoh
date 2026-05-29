@@ -25585,6 +25585,48 @@
         "Trivial residuals for a coherent pubsub-only combo: session_glue.rs batch_size unused under transport-batching-off + encode_source_info_ext_body call/def gate alignment."
       ]
     },
+    "Round 311dx": {
+      "decision_summary": "R311dx lifts QueryableRegistry + query callback wrappers to wz-session-core: codec-agnostic data/handle types stay always-compiled, the codec-coupled registry/responder gate on codec-request.",
+      "changes_bullets": [
+        "query.rs (1848 LOC) + query_event.rs lifted from wz-runtime-tokio to wz-session-core::{query,query_event}; both wz-runtime-tokio files reduced to re-export shells. Import rewrites: crate::session_glue -> crate::{driver_loop,network_message,response_build}; std::marker::PhantomData -> core; module-body alloc prelude (Box/String/Vec) per the pubsub convention.",
+        "Textbook data/handle <-> codec-coupled split: QueryReply / ReplyBody / QueryableId / QueryEvent / ReplyEmitter / QueryableCallback stay always-compiled (alloc-gated); the private Queryable struct + QueryableRegistry + QueryResponder + ReplyEmitter::from_responder gate on codec-request (the Query/Request codec_group), since both wire-dispatch and loopback fundamentally consume a Query -- unlike SubscriberRegistry whose codec-agnostic Sample loopback keeps it always-compiled.",
+        "wz-session-core gains query-queryable (= codec-request + codec-response) / query-attachment / query-selector-parameters / query-reply-err features; wz-runtime-tokio forwards each same-named feature to wz-session-core/*. dispatch_messages Request match collapsed to if-let (clippy single-pattern) now the impl is uniformly codec-request-gated.",
+        "New Layer C1e (scripts/run-ci.sh + .github/workflows/ci.yml) runs the migrated query test module under the query dispatch feature union (query-queryable + query-attachment + query-selector-parameters + query-reply-err + codec-response-final), mirroring the C1c/C1d explicit-coverage precedent."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b/C1c/C1d/C1e/C2/C3/D/E); C1e runs 87 migrated query tests green. Layer G MCU cross-compile pass across thumbv8m.base/main/main-eabihf + riscv32imac (G.6 riscv32 cross-real SKIP, host gcc absent).",
+        "wz-session-core query subset sweep clean under [workspace.lints] deny-warnings: alloc-only / codec-request / codec-response / codec-response-final / each query-* standalone / full union all build with zero warnings (codec-request-OFF subset elides the registry cleanly).",
+        "AP-preset composability guard held: cargo build -p wz --no-default-features --features preset-ap-client = 0 errors. cargo fmt --check clean; cargo clippy -p wz-session-core --all-targets (query union) clean."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "Query-migration cascade continues: R311dy reply.rs ReplyRegistry -> wz-session-core (codec-response / codec-response-final gating, Z_get-side mirror); R311dz observer.rs ApplicationLayerObserver; then a shell-collapse round.",
+        "wz-runtime-tokio arbitrary-composition residual unchanged: session.rs + observer.rs still unconditionally compile and import codec-gated types (QueryReply/QueryableId consumed unconditionally is fine -- they are always-compiled now -- but wz_codecs::query::Query direct imports + QueryableRegistry use in observer remain unconditional); closes as observer/session migrate.",
+        "DP1/DP2/DP3 user calls unchanged (--no-default-features/SCE alloc-off gap; facade thin-vs-full removal; session_glue.rs + session.rs monster-file split)."
+      ],
+      "publishable_decision_summary": "R311dx lifts QueryableRegistry + query callback wrappers to wz-session-core: codec-agnostic data/handle types stay always-compiled, the codec-coupled registry/responder gate on codec-request.",
+      "publishable_changes_bullets": [
+        "query.rs (1848 LOC) + query_event.rs lifted from wz-runtime-tokio to wz-session-core::{query,query_event}; both wz-runtime-tokio files reduced to re-export shells. Import rewrites: crate::session_glue -> crate::{driver_loop,network_message,response_build}; std::marker::PhantomData -> core; module-body alloc prelude (Box/String/Vec) per the pubsub convention.",
+        "Textbook data/handle <-> codec-coupled split: QueryReply / ReplyBody / QueryableId / QueryEvent / ReplyEmitter / QueryableCallback stay always-compiled (alloc-gated); the private Queryable struct + QueryableRegistry + QueryResponder + ReplyEmitter::from_responder gate on codec-request (the Query/Request codec_group), since both wire-dispatch and loopback fundamentally consume a Query -- unlike SubscriberRegistry whose codec-agnostic Sample loopback keeps it always-compiled.",
+        "wz-session-core gains query-queryable (= codec-request + codec-response) / query-attachment / query-selector-parameters / query-reply-err features; wz-runtime-tokio forwards each same-named feature to wz-session-core/*. dispatch_messages Request match collapsed to if-let (clippy single-pattern) now the impl is uniformly codec-request-gated.",
+        "New Layer C1e (scripts/run-ci.sh + .github/workflows/ci.yml) runs the migrated query test module under the query dispatch feature union (query-queryable + query-attachment + query-selector-parameters + query-reply-err + codec-response-final), mirroring the C1c/C1d explicit-coverage precedent."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b/C1c/C1d/C1e/C2/C3/D/E); C1e runs 87 migrated query tests green. Layer G MCU cross-compile pass across thumbv8m.base/main/main-eabihf + riscv32imac (G.6 riscv32 cross-real SKIP, host gcc absent).",
+        "wz-session-core query subset sweep clean under [workspace.lints] deny-warnings: alloc-only / codec-request / codec-response / codec-response-final / each query-* standalone / full union all build with zero warnings (codec-request-OFF subset elides the registry cleanly).",
+        "AP-preset composability guard held: cargo build -p wz --no-default-features --features preset-ap-client = 0 errors. cargo fmt --check clean; cargo clippy -p wz-session-core --all-targets (query union) clean."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Query-migration cascade continues: R311dy reply.rs ReplyRegistry -> wz-session-core (codec-response / codec-response-final gating, Z_get-side mirror); R311dz observer.rs ApplicationLayerObserver; then a shell-collapse round.",
+        "wz-runtime-tokio arbitrary-composition residual unchanged: session.rs + observer.rs still unconditionally compile and import codec-gated types (QueryReply/QueryableId consumed unconditionally is fine -- they are always-compiled now -- but wz_codecs::query::Query direct imports + QueryableRegistry use in observer remain unconditional); closes as observer/session migrate.",
+        "DP1/DP2/DP3 user calls unchanged (--no-default-features/SCE alloc-off gap; facade thin-vs-full removal; session_glue.rs + session.rs monster-file split)."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [

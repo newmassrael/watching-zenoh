@@ -75,6 +75,19 @@ pubsub-delete = []
 pubsub-attachment = []
 pubsub-timestamp = []
 
+# R311dx — query-side dispatch gates for the migrated QueryableRegistry
+# (`wz-session-core::query`). `query-queryable` forwards to the
+# codec-request (Request/Query dispatch) + codec-response (reply-build)
+# halves, mirroring wz-runtime-tokio's same-named feature. The other
+# three are standalone dispatch-arm gates with no wz-codecs forward
+# (attachment ext extraction / selector-parameters projection / Err-form
+# reply emit); the wz-runtime-tokio side forwards its same-named features
+# here so the gated production arms compile consistently workspace-wide.
+query-queryable = ["codec-request", "codec-response"]
+query-attachment = []
+query-selector-parameters = []
+query-reply-err = []
+
 [dependencies]
 wz-runtime-core = { path = "../wz-runtime-core" }
 # R311di-4 — wz-codecs needed by sample.rs for `wz_codecs::ext_entry`

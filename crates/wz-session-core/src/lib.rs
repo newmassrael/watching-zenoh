@@ -146,3 +146,29 @@ pub mod pubsub;
 /// `QueryReply::into_response`) migrate into wz-session-core.
 #[cfg(all(feature = "alloc", feature = "codec-response"))]
 pub mod response_build;
+
+/// R311dx — application-layer queryable registry (`QueryableRegistry`
+/// + `QueryReply` / `ReplyBody` / `QueryResponder` / `QueryableId` /
+/// `QueryableCallback`): routes inbound `Request(Query)` records to
+/// user-registered on_query callbacks, accumulating Reply / Err
+/// records into a caller-owned `Vec<QueryReply>`. Lifted from
+/// `wz-runtime-tokio::query`. The codec-agnostic accumulator + handle
+/// types are always-compiled (alloc-gated); the wire-dispatch entry
+/// points (`dispatch_request` / `local_query` / `fire_matching_queryables`
+/// / `extract_query_attachment`) gate on `codec-request` (the
+/// `Request` / `Query` codec_group), and `QueryReply::into_response` /
+/// `response_final_for` gate on `codec-response` / `codec-response-final`.
+/// Runtime-agnostic (`FnMut + Send`, no async).
+#[cfg(feature = "alloc")]
+pub mod query;
+
+/// R311dx — consumer-facing query callback wrappers (`QueryEvent` +
+/// `ReplyEmitter`) lifted from `wz-runtime-tokio::query_event`. They
+/// decouple the application callback signature from the wz-codecs wire
+/// types; both are always-nameable (a `query-queryable`-OFF
+/// `PhantomData` arm keeps the structs well-formed) so the type-ungated
+/// `Session::declare_queryable{_aliased}` signatures compile in every
+/// feature subset. Alloc-gated because `ReplyEmitter` borrows the
+/// alloc-bound `crate::query::QueryResponder`.
+#[cfg(feature = "alloc")]
+pub mod query_event;

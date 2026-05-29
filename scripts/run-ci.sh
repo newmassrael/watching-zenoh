@@ -38,6 +38,13 @@
 #              codec-response-final + pubsub-{put,delete,attachment,
 #              timestamp}; this lane enumerates that union so the tests
 #              cannot silently drop out of CI on a defaults change)
+#   Layer C1e — cargo test -p wz-session-core (query dispatch plane)
+#              (R311dx; same shape as C1d. The migrated QueryableRegistry
+#              test module gates on the query dispatch union
+#              query-queryable (implies codec-request + codec-response) +
+#              query-attachment + query-selector-parameters +
+#              query-reply-err + codec-response-final; enumerated so the
+#              query tests cannot silently drop out of CI)
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
 #   Layer C3 — per-package isolated `cargo clippy ... --all-targets`
 #              sub-lanes (R311cv; per-package isolated feature
@@ -512,6 +519,22 @@ layer_c1c_cargo_test_codec_declare() {
 # silently drop out of CI if wz-runtime-tokio's defaults change.
 layer_c1d_cargo_test_pubsub() {
     (cd crates && cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --quiet)
+}
+
+# ─── Layer C1e — cargo test -p wz-session-core (query dispatch plane) ──
+#
+# R311dx: same shape as C1c/C1d. The migrated QueryableRegistry test
+# module (lifted from wz-runtime-tokio::query) gates on the query
+# dispatch-plane union (query-queryable — which implies codec-request +
+# codec-response — plus query-attachment / query-selector-parameters /
+# query-reply-err, and codec-response-final for the response_final_for
+# tests). Layer C1's `cargo test --workspace` runs them because
+# wz-runtime-tokio's defaults enable all of those, but that is an
+# implicit cross-crate coincidence. This lane enumerates the union
+# explicitly so the query tests cannot silently drop out of CI if
+# wz-runtime-tokio's defaults change.
+layer_c1e_cargo_test_query() {
+    (cd crates && cargo test -p wz-session-core --features query-queryable,query-attachment,query-selector-parameters,query-reply-err,codec-response-final --quiet)
 }
 
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
@@ -1036,6 +1059,7 @@ run_layer C1 layer_c1_cargo_test || overall=1
 run_layer C1b layer_c1b_cargo_test_alloc || overall=1
 run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1
 run_layer C1d layer_c1d_cargo_test_pubsub || overall=1
+run_layer C1e layer_c1e_cargo_test_query || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer D layer_d_validate_deploy || overall=1
