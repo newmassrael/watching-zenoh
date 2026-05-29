@@ -51,6 +51,14 @@ pub mod locality;
 /// no_std + no_alloc clean (pure enum + helper); unconditional.
 pub mod reliability;
 
+/// R311ec — QoS packed-byte value types (`Priority` +
+/// `CongestionControl`): the two enum components of the zenoh-pico qos
+/// packed byte not already covered by `reliability`. Pure no_std +
+/// no_alloc (const wire helpers); unconditional. First DP3 leaf lifted
+/// from `wz-runtime-tokio::session_glue` toward the runtime-agnostic
+/// Session/actions split.
+pub mod qos;
+
 /// Link-layer value types (TxFrame / RxFrame / LinkEvent / LostCause).
 /// RxFrame carries Vec<u8> so the module is alloc-gated. The
 /// LinkDriver trait + concrete TcpDriver/UdpDriver impls remain in
