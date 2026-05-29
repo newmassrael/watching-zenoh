@@ -131,16 +131,21 @@ default = [
     "query-selector-parameters",
     "query-reply-err",
 ]
-liveliness-token = ["declare-token", "declare-undeclare"]
-liveliness-subscriber = ["declare-interest", "declare-final"]
+# R311dz — liveliness-* / declare-{subscriber,queryable} additionally
+# forward to the wz-session-core same-named gate-only feature so the
+# migrated `ApplicationLayerObserver` field for that domain is composed
+# consistently with this crate's selection. The richer declare-* wire
+# implications below are unchanged.
+liveliness-token = ["declare-token", "declare-undeclare", "wz-session-core/liveliness-token"]
+liveliness-subscriber = ["declare-interest", "declare-final", "wz-session-core/liveliness-subscriber"]
 # R311i — every declare-* feature implies codec-declare so the wire
 # emit path (`send_declare_*` body-cfg branch) is mechanically
 # available whenever the high-level declare surface is on.
 declare-final = ["codec-declare"]
 declare-interest = ["codec-declare"]
 declare-keyexpr = ["codec-declare"]
-declare-queryable = ["codec-declare"]
-declare-subscriber = ["codec-declare"]
+declare-queryable = ["codec-declare", "wz-session-core/declare-queryable"]
+declare-subscriber = ["codec-declare", "wz-session-core/declare-subscriber"]
 declare-token = ["codec-declare"]
 declare-undeclare = ["codec-declare"]
 # `query-get` implies BOTH `query-reply` (the get-side ReplyRegistry

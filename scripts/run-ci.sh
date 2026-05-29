@@ -52,6 +52,17 @@
 #              pubsub-delete + query-queryable (+ codec-push for the
 #              pubsub dispatch path); enumerated so the reply tests
 #              cannot silently drop out of CI)
+#   Layer C1g — cargo test -p wz-session-core (observer dispatch plane)
+#              (R311dz; same shape as C1e/C1f. The migrated
+#              ApplicationLayerObserver test module gates on the full
+#              observer fan-out union — codec-push + codec-declare +
+#              query-queryable + liveliness-token + liveliness-subscriber
+#              + declare-subscriber + declare-queryable + codec-response-
+#              final + pubsub-{put,delete}. PLUS a composability build
+#              of the new codec-declare-on / query-queryable-off subset,
+#              which compiles the observer with the queryable slot elided
+#              — the arbitrary-subset class C1c-f's maximal-preset tests
+#              never exercise.)
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
 #   Layer C3 — per-package isolated `cargo clippy ... --all-targets`
 #              sub-lanes (R311cv; per-package isolated feature
@@ -557,6 +568,33 @@ layer_c1e_cargo_test_query() {
 # silently drop out of CI on a wz-runtime-tokio defaults change.
 layer_c1f_cargo_test_reply() {
     (cd crates && cargo test -p wz-session-core --features codec-push,codec-response,codec-response-final,pubsub-put,pubsub-delete,query-queryable --quiet)
+}
+
+# ─── Layer C1g — cargo test -p wz-session-core (observer dispatch plane) ─
+#
+# R311dz: same shape as C1e/C1f. The migrated ApplicationLayerObserver
+# test module (lifted from wz-runtime-tokio::observer) gates on the full
+# observer fan-out union: codec-push (the subscriber Push fixture +
+# module test gate) + codec-declare (the peer-declare registries it
+# aggregates) + query-queryable (the queryable slot + its staged-reply
+# test) + liveliness-token + liveliness-subscriber + declare-subscriber
+# + declare-queryable (the per-domain assertion / cross-talk tests) +
+# codec-response-final (the ResponseFinal drain) + pubsub-{put,delete}.
+# Layer C1's `cargo test --workspace` runs them because wz-runtime-tokio's
+# defaults enable all of those, but that is an implicit cross-crate
+# coincidence — this lane enumerates the union explicitly.
+#
+# The lane also adds a composability BUILD of the codec-declare-on /
+# query-queryable-off subset: it must compile the observer with the
+# `queryables` field (+ its dispatch / drain arms) elided. This is the
+# arbitrary-subset class the maximal-preset tests in C1c-f never
+# exercise (they only ever build the full union), so it is enumerated
+# here as the first explicit guard that the observer composes when a
+# consumer wires pub/sub + liveliness but no in-process queryable.
+layer_c1g_cargo_test_observer() {
+    (cd crates \
+        && cargo test -p wz-session-core --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet \
+        && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-declare,codec-response,codec-response-final,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete --quiet)
 }
 
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
@@ -1083,6 +1121,7 @@ run_layer C1c layer_c1c_cargo_test_codec_declare || overall=1
 run_layer C1d layer_c1d_cargo_test_pubsub || overall=1
 run_layer C1e layer_c1e_cargo_test_query || overall=1
 run_layer C1f layer_c1f_cargo_test_reply || overall=1
+run_layer C1g layer_c1g_cargo_test_observer || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer D layer_d_validate_deploy || overall=1

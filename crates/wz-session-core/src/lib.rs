@@ -198,3 +198,20 @@ pub mod reply;
 /// build with neither response codec so the trait is always-nameable.
 #[cfg(feature = "alloc")]
 pub mod response_sink;
+
+/// R311dz — application-layer observer bundle (`ApplicationLayerObserver`):
+/// combines the six per-domain registries (subscribers, queryables,
+/// remote_subscribers, remote_queryables, liveliness,
+/// liveliness_subscribers, replies) plus the queryable side's
+/// pending-reply / pending-final staging buffers into one cohesive
+/// struct so a production caller drives the whole dispatch graph with a
+/// single [`observer::ApplicationLayerObserver::dispatch`] call per
+/// `IterationEvent`. Migrated from `wz-runtime-tokio::observer`; the move
+/// was unblocked by R311dz-pre's `ResponseSink` IoC trait (the drain's
+/// only dependency on the tokio actions layer). Gated on `codec-declare`
+/// because its `liveliness_subscribers` field's type lives under the
+/// `codec-declare`-gated `declare` module; the `queryables` field
+/// additionally gates on `query-queryable`. Runtime-agnostic so the same
+/// bundle serves the tokio (AP) and lwIP (MCU) profiles.
+#[cfg(all(feature = "alloc", feature = "codec-declare"))]
+pub mod observer;
