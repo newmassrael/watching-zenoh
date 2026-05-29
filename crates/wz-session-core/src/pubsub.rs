@@ -73,7 +73,11 @@
 
 use alloc::boxed::Box;
 use alloc::string::String;
-#[cfg(any(feature = "codec-push", feature = "codec-declare"))]
+#[cfg(any(
+    feature = "pubsub-put",
+    feature = "pubsub-delete",
+    feature = "codec-declare"
+))]
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
@@ -81,17 +85,26 @@ use hashbrown::HashMap;
 
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::DeclareOwnedVariant;
-#[cfg(feature = "codec-push")]
+#[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
 use wz_codecs::push::{PushOwned, PushOwnedVariant};
-#[cfg(feature = "codec-declare")]
+#[cfg(any(
+    feature = "pubsub-put",
+    feature = "pubsub-delete",
+    feature = "codec-declare"
+))]
 use wz_codecs::wireexpr::WireexprOwnedVariant;
 
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 use crate::network_message::NetworkMessage;
-#[cfg(all(feature = "codec-push", feature = "pubsub-attachment"))]
+#[cfg(all(
+    any(feature = "pubsub-put", feature = "pubsub-delete"),
+    feature = "pubsub-attachment"
+))]
 use crate::sample::extract_attachment;
-#[cfg(feature = "codec-push")]
-use crate::sample::{extract_qos, extract_source_info, EncodingHint, SampleKind, TimestampHint};
+#[cfg(feature = "pubsub-put")]
+use crate::sample::EncodingHint;
+#[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+use crate::sample::{extract_qos, extract_source_info, SampleKind, TimestampHint};
 use crate::sample::{Reliability, Sample};
 
 /// Boxed callback invoked when a Push message's keyexpr matches a
@@ -419,7 +432,7 @@ impl SubscriberRegistry {
     /// `reliability` because the peer-mapping absorb is reliability-
     /// agnostic (declarations always travel on the reliable channel).
     pub fn dispatch(&mut self, message: &NetworkMessage, _reliability: Reliability) {
-        #[cfg(feature = "codec-push")]
+        #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
         let reliability = _reliability;
         match message {
             // R227 — wire-arrived Push carries `is_remote = true` so
@@ -429,13 +442,17 @@ impl SubscriberRegistry {
             // [`fire_to_subscribers`](Self::fire_to_subscribers)
             // directly with `is_remote = false`.
             //
-            // R311h — wz-runtime-tokio `codec-push` feature gates the
-            // wire arm; when the feature is off the
-            // `NetworkMessage::Push` variant is elided and the match
-            // arm with it. The loopback path
-            // ([`local_publish`](Self::local_publish)) stays unguarded
-            // — it does not depend on the wire codec gate.
-            #[cfg(feature = "codec-push")]
+            // R311h — the `NetworkMessage::Push` variant is elided when
+            // `codec-push` is off. R311dx-pre — the dispatch arm here is
+            // gated one level finer, on `any(pubsub-put, pubsub-delete)`:
+            // projecting a Push into a Sample needs at least one body op
+            // (Put/Del), so a `codec-push`-only build can parse a Push
+            // frame but has no body op to interpret it. The arm is then
+            // absent and the Push falls through to `_ => {}` (drop),
+            // mirroring the `PushOwnedVariant::Default` silent-drop. The
+            // loopback path ([`local_publish`](Self::local_publish)) stays
+            // unguarded — it does not depend on the wire codec gate.
+            #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
             NetworkMessage::Push(push) => self.dispatch_push(push, reliability, true),
             #[cfg(feature = "codec-declare")]
             NetworkMessage::Declare(decl) => self.absorb_declare(&decl.body),
@@ -459,7 +476,7 @@ impl SubscriberRegistry {
     /// (`vendor/zenoh-pico/src/session/loopback.c` 70-100 calls
     /// `_z_handle_network_message` with a wz-equivalent
     /// `is_remote = false` semantic).
-    #[cfg(feature = "codec-push")]
+    #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
     fn dispatch_push(&mut self, push: &PushOwned, reliability: Reliability, is_remote: bool) {
         // R125c2: keyexpr is now a tagged-union (B5-ν parent-tag
         // variant dispatch on parent.M); extract id + suffix from
