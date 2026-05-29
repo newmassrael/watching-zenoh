@@ -18,8 +18,8 @@ use alloc::vec::Vec;
 
 use hashbrown::HashMap;
 
-use wz_codecs::decl_queryable::DeclQueryable;
-use wz_codecs::declare::DeclareVariant;
+use wz_codecs::decl_queryable::DeclQueryableOwned;
+use wz_codecs::declare::DeclareOwnedVariant;
 use wz_codecs::undecl_queryable::UndeclQueryable;
 
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
@@ -35,7 +35,7 @@ use crate::wireexpr_resolve::resolve_wireexpr;
 /// signal mirrors the subscriber surface; consumers may install a
 /// queryable-side counterpart of every subscriber-side hook (metrics,
 /// route table, debug log).
-pub type DeclQueryableCallback = Box<dyn FnMut(&DeclQueryable, &str) + Send + 'static>;
+pub type DeclQueryableCallback = Box<dyn FnMut(&DeclQueryableOwned, &str) + Send + 'static>;
 
 /// Boxed callback invoked when an inbound
 /// `Declare(UndeclQueryable)` is decoded. The undeclare body has no
@@ -101,7 +101,7 @@ impl RemoteQueryableRegistry {
     /// fires them in registration order.
     pub fn on_queryable_declared(
         &mut self,
-        callback: impl FnMut(&DeclQueryable, &str) + Send + 'static,
+        callback: impl FnMut(&DeclQueryableOwned, &str) + Send + 'static,
     ) {
         self.on_decl.push(Box::new(callback));
     }
@@ -190,11 +190,11 @@ impl RemoteQueryableRegistry {
     /// layer.
     pub fn dispatch_declare(
         &mut self,
-        body: &DeclareVariant,
+        body: &DeclareOwnedVariant,
         peer_keyexpr_table: &HashMap<u64, String>,
     ) {
         match body {
-            DeclareVariant::CodecZenohDeclQueryable(decl) => {
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl) => {
                 let resolved = match resolve_wireexpr(&decl.keyexpr.body, peer_keyexpr_table) {
                     Some(s) => s,
                     None => return,
@@ -210,7 +210,7 @@ impl RemoteQueryableRegistry {
                     cb(decl, &resolved);
                 }
             }
-            DeclareVariant::CodecZenohUndeclQueryable(undecl) => {
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl) => {
                 // R288 — drop the membership entry first so a
                 // get_matching_status fired from inside the
                 // on_undecl callback chain observes the post-
@@ -270,7 +270,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use hashbrown::HashMap;
-    use wz_codecs::declare::DeclareVariant;
+    use wz_codecs::declare::DeclareOwnedVariant;
     use wz_session_core_test_support::*;
 
     use crate::network_message::NetworkMessage;
@@ -278,7 +278,8 @@ mod tests {
     #[test]
     fn queryable_empty_registry_dispatch_is_noop() {
         let mut reg = RemoteQueryableRegistry::new();
-        let body = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(7, 0, Some("home/temp")));
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(7, 0, Some("home/temp")));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(reg.on_decl_len(), 0);
         assert_eq!(reg.on_undecl_len(), 0);
@@ -295,7 +296,8 @@ mod tests {
                 .unwrap()
                 .push((decl.id, resolved.to_string()));
         });
-        let body = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(8, 0, Some("home/door")));
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(8, 0, Some("home/door")));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(
             *captured.lock().unwrap(),
@@ -311,7 +313,7 @@ mod tests {
         reg.on_queryable_declared(move |_d, _r| {
             fired_for_cb.fetch_add(1, Ordering::SeqCst);
         });
-        let body = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(1, 77, None));
+        let body = DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(1, 77, None));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(fired.load(Ordering::SeqCst), 0);
     }
@@ -324,7 +326,7 @@ mod tests {
         reg.on_queryable_undeclared(move |u| {
             captured_for_cb.lock().unwrap().push(u.id);
         });
-        let body = DeclareVariant::CodecZenohUndeclQueryable(undecl_queryable(99));
+        let body = DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl_queryable(99));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(*captured.lock().unwrap(), vec![99]);
     }
@@ -336,25 +338,25 @@ mod tests {
 
         // DeclQueryable id=10 keyexpr=home/temp → count 1
         let decl1 =
-            DeclareVariant::CodecZenohDeclQueryable(decl_queryable(10, 0, Some("home/temp")));
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(10, 0, Some("home/temp")));
         reg.dispatch_declare(&decl1, &HashMap::new());
         assert_eq!(reg.declared_count(), 1);
 
         // DeclQueryable id=11 keyexpr=home/door → count 2
         let decl2 =
-            DeclareVariant::CodecZenohDeclQueryable(decl_queryable(11, 0, Some("home/door")));
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(11, 0, Some("home/door")));
         reg.dispatch_declare(&decl2, &HashMap::new());
         assert_eq!(reg.declared_count(), 2);
 
         // UndeclQueryable id=10 → count 1 (only id=11 remains)
-        let undecl1 = DeclareVariant::CodecZenohUndeclQueryable(undecl_queryable(10));
+        let undecl1 = DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl_queryable(10));
         reg.dispatch_declare(&undecl1, &HashMap::new());
         assert_eq!(reg.declared_count(), 1);
         let remaining: Vec<(u64, &str)> = reg.iter_declared().collect();
         assert_eq!(remaining, vec![(11, "home/door")]);
 
         // UndeclQueryable id=11 → count 0
-        let undecl2 = DeclareVariant::CodecZenohUndeclQueryable(undecl_queryable(11));
+        let undecl2 = DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl_queryable(11));
         reg.dispatch_declare(&undecl2, &HashMap::new());
         assert_eq!(reg.declared_count(), 0);
     }
@@ -369,7 +371,8 @@ mod tests {
     #[test]
     fn queryable_has_matching_true_on_literal_keyexpr_equality() {
         let mut reg = RemoteQueryableRegistry::new();
-        let body = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(7, 0, Some("home/temp")));
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(7, 0, Some("home/temp")));
         reg.dispatch_declare(&body, &HashMap::new());
         assert!(reg.has_matching("home/temp"));
         assert!(!reg.has_matching("home/door"));
@@ -378,7 +381,8 @@ mod tests {
     #[test]
     fn queryable_has_matching_true_when_peer_pattern_covers_query_literal() {
         let mut reg = RemoteQueryableRegistry::new();
-        let body = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(8, 0, Some("home/**")));
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(8, 0, Some("home/**")));
         reg.dispatch_declare(&body, &HashMap::new());
         assert!(reg.has_matching("home/temp"));
         assert!(reg.has_matching("home/door/inner"));
@@ -388,7 +392,8 @@ mod tests {
     #[test]
     fn queryable_has_matching_true_when_query_pattern_covers_peer_literal() {
         let mut reg = RemoteQueryableRegistry::new();
-        let body = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(9, 0, Some("home/temp")));
+        let body =
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(9, 0, Some("home/temp")));
         reg.dispatch_declare(&body, &HashMap::new());
         assert!(reg.has_matching("home/**"));
         assert!(reg.has_matching("**"));
@@ -399,10 +404,10 @@ mod tests {
     fn queryable_has_matching_false_after_undeclare() {
         let mut reg = RemoteQueryableRegistry::new();
         let decl =
-            DeclareVariant::CodecZenohDeclQueryable(decl_queryable(12, 0, Some("home/temp")));
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(12, 0, Some("home/temp")));
         reg.dispatch_declare(&decl, &HashMap::new());
         assert!(reg.has_matching("home/temp"));
-        let undecl = DeclareVariant::CodecZenohUndeclQueryable(undecl_queryable(12));
+        let undecl = DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl_queryable(12));
         reg.dispatch_declare(&undecl, &HashMap::new());
         assert!(!reg.has_matching("home/temp"));
     }
@@ -410,9 +415,11 @@ mod tests {
     #[test]
     fn queryable_has_matching_with_mixed_peers_finds_any_match() {
         let mut reg = RemoteQueryableRegistry::new();
-        let d1 = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(20, 0, Some("other/foo")));
-        let d2 = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(21, 0, Some("home/temp")));
-        let d3 = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(22, 0, Some("a/b/c")));
+        let d1 =
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(20, 0, Some("other/foo")));
+        let d2 =
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(21, 0, Some("home/temp")));
+        let d3 = DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(22, 0, Some("a/b/c")));
         reg.dispatch_declare(&d1, &HashMap::new());
         reg.dispatch_declare(&d2, &HashMap::new());
         reg.dispatch_declare(&d3, &HashMap::new());
@@ -438,7 +445,11 @@ mod tests {
         // containment, so this case returned false. R293 honest
         // intersection returns true.
         let mut reg = RemoteQueryableRegistry::new();
-        let d = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(30, 0, Some("home/*/temp")));
+        let d = DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(
+            30,
+            0,
+            Some("home/*/temp"),
+        ));
         reg.dispatch_declare(&d, &HashMap::new());
         assert!(reg.has_matching("*/sensor/temp"));
         assert!(reg.has_matching("*/*/temp"));
@@ -451,8 +462,11 @@ mod tests {
         // anchor disagreement. Negative-side coverage for the same
         // two-pattern domain as the test above.
         let mut reg = RemoteQueryableRegistry::new();
-        let d =
-            DeclareVariant::CodecZenohDeclQueryable(decl_queryable(31, 0, Some("home/**/temp")));
+        let d = DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(
+            31,
+            0,
+            Some("home/**/temp"),
+        ));
         reg.dispatch_declare(&d, &HashMap::new());
         assert!(!reg.has_matching("kitchen/**/temp"));
     }
@@ -463,7 +477,8 @@ mod tests {
         // `home/<x>/.../temp`. Both sides are unrestricted-tail / -head
         // patterns; the matcher must walk both **-backtracks.
         let mut reg = RemoteQueryableRegistry::new();
-        let d = DeclareVariant::CodecZenohDeclQueryable(decl_queryable(32, 0, Some("home/**")));
+        let d =
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(32, 0, Some("home/**")));
         reg.dispatch_declare(&d, &HashMap::new());
         assert!(reg.has_matching("**/temp"));
         assert!(reg.has_matching("**"));

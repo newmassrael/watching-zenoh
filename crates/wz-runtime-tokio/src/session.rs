@@ -1217,7 +1217,10 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                 );
                 if allows_local {
                     let mut replies: Vec<QueryReply> = Vec::new();
-                    let query = Query::default();
+                    // `QueryOwned` has no `Default`; build the borrowed
+                    // default and deep-copy into the owned form the
+                    // loopback dispatch path (`local_query`) now takes.
+                    let query = Query::default().into_owned();
                     observer
                         .queryables
                         .local_query(rid, keyexpr, &query, &mut replies);
@@ -1354,7 +1357,10 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                 );
                 if allows_local {
                     let mut replies: Vec<QueryReply> = Vec::new();
-                    let query = Query::default();
+                    // `QueryOwned` has no `Default`; build the borrowed
+                    // default and deep-copy into the owned form the
+                    // loopback dispatch path (`local_query`) now takes.
+                    let query = Query::default().into_owned();
                     observer
                         .queryables
                         .local_query(rid, loopback_keyexpr, &query, &mut replies);
@@ -5146,10 +5152,12 @@ mod tests {
         // expected finals — and observe on_final fire then.
         use wz_codecs::response_final::ResponseFinal;
         let mut observer = session.observer().lock().unwrap();
-        observer.replies.dispatch_response_final(&ResponseFinal {
+        let response_final = ResponseFinal {
             request_id: 0,
             ..ResponseFinal::default()
-        });
+        }
+        .into_owned();
+        observer.replies.dispatch_response_final(&response_final);
         drop(observer);
 
         assert_eq!(
@@ -5537,7 +5545,10 @@ mod tests {
         use crate::session_glue::build_request_query_with_target;
         let standalone =
             build_request_query_with_target(0, 0, Some("home/temp"), QueryTarget::AllComplete);
-        let standalone_bytes = standalone.encode_to_vec();
+        let standalone_bytes = standalone
+            .try_as_borrowed()
+            .expect("test: <=N exts by construction")
+            .encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
             frame
@@ -5563,7 +5574,10 @@ mod tests {
 
         use crate::session_glue::build_request_query_with_attachment;
         let standalone = build_request_query_with_attachment(0, 0, Some("home/temp"), b"q-att");
-        let standalone_bytes = standalone.encode_to_vec();
+        let standalone_bytes = standalone
+            .try_as_borrowed()
+            .expect("test: <=N exts by construction")
+            .encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
             frame
@@ -5594,7 +5608,10 @@ mod tests {
             Some("home/temp"),
             ConsolidationMode::Latest,
         );
-        let standalone_bytes = standalone.encode_to_vec();
+        let standalone_bytes = standalone
+            .try_as_borrowed()
+            .expect("test: <=N exts by construction")
+            .encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
             frame
@@ -5688,7 +5705,10 @@ mod tests {
         // build_request_query with mapping_id=7.
         use crate::session_glue::build_request_query;
         let standalone = build_request_query(0, 7, None);
-        let standalone_bytes = standalone.encode_to_vec();
+        let standalone_bytes = standalone
+            .try_as_borrowed()
+            .expect("test: <=N exts by construction")
+            .encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
             frame
@@ -5901,7 +5921,10 @@ mod tests {
 
         use crate::session_glue::build_request_query_with_attachment;
         let standalone = build_request_query_with_attachment(0, 7, None, b"q-att");
-        let standalone_bytes = standalone.encode_to_vec();
+        let standalone_bytes = standalone
+            .try_as_borrowed()
+            .expect("test: <=N exts by construction")
+            .encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
             frame
@@ -6040,7 +6063,10 @@ mod tests {
 
         use crate::session_glue::build_request_query_with_target;
         let standalone = build_request_query_with_target(0, 0, Some("home/temp"), QueryTarget::All);
-        let standalone_bytes = standalone.encode_to_vec();
+        let standalone_bytes = standalone
+            .try_as_borrowed()
+            .expect("test: <=N exts by construction")
+            .encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
             frame
@@ -6083,32 +6109,38 @@ mod tests {
     /// record builders (those return the unwrapped `DeclQueryable`
     /// and take a separate `mapping_id`), so the 1-arg wrapper stays
     /// inline here rather than threading the lower-level builders.
-    fn make_decl_queryable(id: u64, keyexpr_literal: &str) -> wz_codecs::declare::DeclareVariant {
+    fn make_decl_queryable(
+        id: u64,
+        keyexpr_literal: &str,
+    ) -> wz_codecs::declare::DeclareOwnedVariant {
         use wz_codecs::decl_queryable::DeclQueryable;
         use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
         use wz_codecs::wireexpr_local::WireexprLocal;
-        let suffix = keyexpr_literal.to_string();
-        let suffix_len = Some(suffix.len() as u64);
+        let suffix_len = Some(keyexpr_literal.len() as u64);
         let keyexpr = Wireexpr {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len,
-                suffix: Some(suffix),
+                suffix: Some(keyexpr_literal),
             }),
         };
+        // Build the borrowed variant then deep-copy into the owned
+        // mirror that `dispatch_declare` now takes.
         wz_codecs::declare::DeclareVariant::CodecZenohDeclQueryable(DeclQueryable {
             id,
             keyexpr,
             ..DeclQueryable::default()
         })
+        .into_owned()
     }
 
-    fn make_undecl_queryable(id: u64) -> wz_codecs::declare::DeclareVariant {
+    fn make_undecl_queryable(id: u64) -> wz_codecs::declare::DeclareOwnedVariant {
         use wz_codecs::undecl_queryable::UndeclQueryable;
         wz_codecs::declare::DeclareVariant::CodecZenohUndeclQueryable(UndeclQueryable {
             id,
             ..UndeclQueryable::default()
         })
+        .into_owned()
     }
 
     #[test]
@@ -6763,17 +6795,19 @@ mod tests {
     /// make_undecl_queryable helpers; returns a ready `DeclareVariant`
     /// body from a single keyexpr literal, distinct ergonomics from
     /// the `wz-session-core-test-support` record builders.
-    fn make_decl_subscriber(id: u64, keyexpr_literal: &str) -> wz_codecs::declare::DeclareVariant {
+    fn make_decl_subscriber(
+        id: u64,
+        keyexpr_literal: &str,
+    ) -> wz_codecs::declare::DeclareOwnedVariant {
         use wz_codecs::decl_subscriber::DeclSubscriber;
         use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
         use wz_codecs::wireexpr_local::WireexprLocal;
-        let suffix = keyexpr_literal.to_string();
-        let suffix_len = Some(suffix.len() as u64);
+        let suffix_len = Some(keyexpr_literal.len() as u64);
         let keyexpr = Wireexpr {
             body: WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len,
-                suffix: Some(suffix),
+                suffix: Some(keyexpr_literal),
             }),
         };
         wz_codecs::declare::DeclareVariant::CodecZenohDeclSubscriber(DeclSubscriber {
@@ -6781,14 +6815,16 @@ mod tests {
             keyexpr,
             ..DeclSubscriber::default()
         })
+        .into_owned()
     }
 
-    fn make_undecl_subscriber(id: u64) -> wz_codecs::declare::DeclareVariant {
+    fn make_undecl_subscriber(id: u64) -> wz_codecs::declare::DeclareOwnedVariant {
         use wz_codecs::undecl_subscriber::UndeclSubscriber;
         wz_codecs::declare::DeclareVariant::CodecZenohUndeclSubscriber(UndeclSubscriber {
             id,
             ..UndeclSubscriber::default()
         })
+        .into_owned()
     }
 
     #[test]
@@ -7442,8 +7478,10 @@ mod tests {
             .declare_token("liveliness/devA", LivelinessOptions::default())
             .expect("hardcoded canonical literal keyexpr");
 
-        let expected =
-            build_declare_token(0, /*mapping_id=*/ 0, Some("liveliness/devA")).encode_to_vec();
+        let expected = build_declare_token(0, /*mapping_id=*/ 0, Some("liveliness/devA"))
+            .try_as_borrowed()
+            .expect("test: <=N exts by construction")
+            .encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
             frame.windows(expected.len()).any(|w| w == expected),
@@ -7500,7 +7538,10 @@ mod tests {
                 .expect("hardcoded canonical literal keyexpr");
             // Token id 0 was just allocated; drop will retract it.
         }
-        let expected = build_undeclare_token(0).encode_to_vec();
+        let expected = build_undeclare_token(0)
+            .try_as_borrowed()
+            .expect("test: <=N exts by construction")
+            .encode_to_vec();
         let frame = &driver.frames.lock().unwrap()[1].0;
         assert!(
             frame.windows(expected.len()).any(|w| w == expected),
@@ -7610,6 +7651,8 @@ mod tests {
             /*mapping_id=*/ 7,
             Some("/sensor"),
         )
+        .try_as_borrowed()
+        .expect("test: <=N exts by construction")
         .encode_to_vec();
         let token_frame = &driver.frames.lock().unwrap()[baseline_frames].0;
         assert!(
@@ -7763,6 +7806,8 @@ mod tests {
             /*mapping_id=*/ 7,
             Some("/sensor"),
         )
+        .try_as_borrowed()
+        .expect("test: <=N exts by construction")
         .encode_to_vec();
         let interest_frame = &driver.frames.lock().unwrap()[baseline_frames].0;
         assert!(

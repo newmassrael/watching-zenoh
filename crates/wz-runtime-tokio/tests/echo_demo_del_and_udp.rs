@@ -43,7 +43,7 @@ async fn echo_msg_del_tcp_round_trip() {
             other => panic!("expected Rx, got {other:?}"),
         };
         let mut cursor = SceCursor::new(&frame_bytes);
-        let received = MsgDel::decode(&mut cursor).expect("decode");
+        let received = MsgDel::decode(&mut cursor).expect("decode").into_owned();
         driver.close().await.expect("close");
         received
     });
@@ -97,7 +97,7 @@ async fn echo_msg_put_udp_round_trip() {
             other => panic!("expected Rx, got {other:?}"),
         };
         let mut cursor = SceCursor::new(&frame_bytes);
-        let received = MsgPut::decode(&mut cursor).expect("decode");
+        let received = MsgPut::decode(&mut cursor).expect("decode").into_owned();
         driver.close().await.expect("close");
         received
     });
@@ -114,7 +114,7 @@ async fn echo_msg_put_udp_round_trip() {
             encoding: None,
             extensions: None,
             payload_len: 3,
-            payload: vec![0x11, 0x22, 0x33],
+            payload: &[0x11, 0x22, 0x33],
         };
         let bytes = original.encode_to_vec();
         // Tiny grace so the subscriber's recv_from is ready; UDP

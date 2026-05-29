@@ -13,8 +13,8 @@ use alloc::vec::Vec;
 
 use hashbrown::HashMap;
 
-use wz_codecs::decl_token::DeclToken;
-use wz_codecs::declare::DeclareVariant;
+use wz_codecs::decl_token::DeclTokenOwned;
+use wz_codecs::declare::DeclareOwnedVariant;
 use wz_codecs::undecl_token::UndeclToken;
 
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
@@ -26,7 +26,7 @@ use crate::wireexpr_resolve::resolve_wireexpr;
 /// "an entity (process / device / sub-system) just declared itself
 /// alive on keyexpr X". Consumers wire this into watchdog or
 /// presence-detection logic, e.g. a UI that surfaces "online" badges.
-pub type DeclTokenCallback = Box<dyn FnMut(&DeclToken, &str) + Send + 'static>;
+pub type DeclTokenCallback = Box<dyn FnMut(&DeclTokenOwned, &str) + Send + 'static>;
 
 /// Boxed callback invoked when an inbound `Declare(UndeclToken)` is
 /// decoded. The undeclare body carries only `id: u64`; the peer
@@ -74,7 +74,10 @@ impl LivelinessRegistry {
     /// `Declare(DeclToken)` whose keyexpr resolves through the peer
     /// keyexpr table. Duplicate callbacks allowed; dispatch fires
     /// them in registration order.
-    pub fn on_token_declared(&mut self, callback: impl FnMut(&DeclToken, &str) + Send + 'static) {
+    pub fn on_token_declared(
+        &mut self,
+        callback: impl FnMut(&DeclTokenOwned, &str) + Send + 'static,
+    ) {
         self.on_decl.push(Box::new(callback));
     }
 
@@ -100,11 +103,11 @@ impl LivelinessRegistry {
     /// handled by their own dedicated registries.
     pub fn dispatch_declare(
         &mut self,
-        body: &DeclareVariant,
+        body: &DeclareOwnedVariant,
         peer_keyexpr_table: &HashMap<u64, String>,
     ) {
         match body {
-            DeclareVariant::CodecZenohDeclToken(decl) => {
+            DeclareOwnedVariant::CodecZenohDeclToken(decl) => {
                 let resolved = match resolve_wireexpr(&decl.keyexpr.body, peer_keyexpr_table) {
                     Some(s) => s,
                     None => return,
@@ -113,7 +116,7 @@ impl LivelinessRegistry {
                     cb(decl, &resolved);
                 }
             }
-            DeclareVariant::CodecZenohUndeclToken(undecl) => {
+            DeclareOwnedVariant::CodecZenohUndeclToken(undecl) => {
                 for cb in &mut self.on_undecl {
                     cb(undecl);
                 }
@@ -174,7 +177,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use hashbrown::HashMap;
-    use wz_codecs::declare::DeclareVariant;
+    use wz_codecs::declare::DeclareOwnedVariant;
     use wz_session_core_test_support::*;
 
     use crate::lease::LeaseCheckOutcome;
@@ -222,7 +225,7 @@ mod tests {
     #[test]
     fn liveliness_empty_registry_dispatch_is_noop() {
         let mut reg = LivelinessRegistry::new();
-        let body = DeclareVariant::CodecZenohDeclToken(decl_token(7, 0, Some("liveliness/x")));
+        let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token(7, 0, Some("liveliness/x")));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(reg.on_decl_len(), 0);
         assert_eq!(reg.on_undecl_len(), 0);
@@ -239,8 +242,11 @@ mod tests {
                 .unwrap()
                 .push((decl.id, resolved.to_string()));
         });
-        let body =
-            DeclareVariant::CodecZenohDeclToken(decl_token(11, 0, Some("liveliness/device42")));
+        let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token(
+            11,
+            0,
+            Some("liveliness/device42"),
+        ));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(
             *captured.lock().unwrap(),
@@ -256,7 +262,7 @@ mod tests {
         reg.on_token_undeclared(move |u| {
             captured_for_cb.lock().unwrap().push(u.id);
         });
-        let body = DeclareVariant::CodecZenohUndeclToken(undecl_token(11));
+        let body = DeclareOwnedVariant::CodecZenohUndeclToken(undecl_token(11));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(*captured.lock().unwrap(), vec![11]);
     }
@@ -269,7 +275,7 @@ mod tests {
         reg.on_token_declared(move |_d, _r| {
             fired_for_cb.fetch_add(1, Ordering::SeqCst);
         });
-        let body = DeclareVariant::CodecZenohDeclToken(decl_token(1, 55, None));
+        let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token(1, 55, None));
         reg.dispatch_declare(&body, &HashMap::new());
         assert_eq!(fired.load(Ordering::SeqCst), 0);
     }

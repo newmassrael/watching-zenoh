@@ -106,7 +106,7 @@ fn layer3_scout_with_zid() {
     let wz_bytes = Scout {
         version,
         cbyte,
-        zid: Some(zid_bytes.clone()),
+        zid: Some(&zid_bytes),
     }
     .encode_to_vec();
 
@@ -125,7 +125,7 @@ fn layer3_scout_max_zid_16_bytes() {
     let wz_bytes = Scout {
         version,
         cbyte,
-        zid: Some(zid_bytes.clone()),
+        zid: Some(&zid_bytes),
     }
     .encode_to_vec();
 

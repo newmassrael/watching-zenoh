@@ -139,7 +139,7 @@ fn layer3_init_body_s0_a0() {
     let wz = InitBody {
         version: input.version,
         cbyte,
-        zid: input.zid.to_vec(),
+        zid: input.zid,
         sn_res: None,
         batch_size: None,
         cookie_len: None,
@@ -171,7 +171,7 @@ fn layer3_init_body_s1_a0() {
     let wz = InitBody {
         version: input.version,
         cbyte,
-        zid: input.zid.to_vec(),
+        zid: input.zid,
         sn_res: Some(sn_res),
         batch_size: Some(input.batch_size),
         cookie_len: None,
@@ -203,11 +203,11 @@ fn layer3_init_body_s0_a1() {
     let wz = InitBody {
         version: input.version,
         cbyte,
-        zid: input.zid.to_vec(),
+        zid: input.zid,
         sn_res: None,
         batch_size: None,
         cookie_len: Some(cookie.len() as u64),
-        cookie: Some(cookie.clone()),
+        cookie: Some(&cookie),
     }
     .encode_to_vec(
         ((input.parent_flags) >> 6) & 1,
@@ -236,11 +236,11 @@ fn layer3_init_body_s1_a1() {
     let wz = InitBody {
         version: input.version,
         cbyte,
-        zid: input.zid.to_vec(),
+        zid: input.zid,
         sn_res: Some(sn_res),
         batch_size: Some(input.batch_size),
         cookie_len: Some(cookie.len() as u64),
-        cookie: Some(cookie.clone()),
+        cookie: Some(&cookie),
     }
     .encode_to_vec(
         ((input.parent_flags) >> 6) & 1,

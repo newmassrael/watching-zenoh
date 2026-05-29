@@ -363,18 +363,21 @@ mod tests {
     use crate::session_glue::{DriverLoopOutcome, NetworkMessage};
     use portable_atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    // Fixtures build the borrowed codec views (borrowing the `&str` /
+    // `&[u8]` params) then `.into_owned()` at the boundary — the
+    // `NetworkMessage` carriers store the lifetime-free `*Owned` mirrors.
     use wz_codecs::decl_subscriber::DeclSubscriber;
-    use wz_codecs::declare::{Declare, DeclareVariant};
-    use wz_codecs::push::Push;
+    use wz_codecs::declare::{Declare, DeclareOwned, DeclareVariant};
+    use wz_codecs::push::{Push, PushOwned};
     use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
-    fn push_literal(suffix: &str, payload: &[u8]) -> Push {
+    fn push_literal(suffix: &str, payload: &[u8]) -> PushOwned {
         let keyexpr = Wireexpr {
             body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix.to_string()),
+                suffix: Some(suffix),
             }),
         };
         let mut push = Push {
@@ -384,17 +387,17 @@ mod tests {
         // Set the inner MsgPut body's payload to the test bytes.
         if let wz_codecs::push::PushVariant::CodecZenohMsgPut(ref mut put) = push.body {
             put.payload_len = payload.len() as u64;
-            put.payload = payload.to_vec();
+            put.payload = payload;
         }
-        push
+        push.into_owned()
     }
 
-    fn declare_decl_subscriber(id: u64, suffix: &str) -> Declare {
+    fn declare_decl_subscriber(id: u64, suffix: &str) -> DeclareOwned {
         let keyexpr = Wireexpr {
             body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix.to_string()),
+                suffix: Some(suffix),
             }),
         };
         let decl = DeclSubscriber {
@@ -406,6 +409,7 @@ mod tests {
             body: DeclareVariant::CodecZenohDeclSubscriber(decl),
             ..Declare::default()
         }
+        .into_owned()
     }
 
     fn make_outcome(messages: Vec<NetworkMessage>) -> DriverLoopOutcome {
@@ -523,7 +527,7 @@ mod tests {
                     body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                         id: 0,
                         suffix_len: Some(1),
-                        suffix: Some("y".to_string()),
+                        suffix: Some("y"),
                     }),
                 };
                 Declare {
@@ -536,13 +540,14 @@ mod tests {
                     ),
                     ..Declare::default()
                 }
+                .into_owned()
             })),
             NetworkMessage::Declare(Box::new({
                 let keyexpr = Wireexpr {
                     body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                         id: 0,
                         suffix_len: Some(1),
-                        suffix: Some("z".to_string()),
+                        suffix: Some("z"),
                     }),
                 };
                 Declare {
@@ -553,6 +558,7 @@ mod tests {
                     }),
                     ..Declare::default()
                 }
+                .into_owned()
             })),
         ]);
         observer.dispatch_event(IterationEvent::Poll(&outcome));
@@ -603,7 +609,7 @@ mod tests {
             body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix.to_string()),
+                suffix: Some(suffix),
             }),
         };
         let request = Request {
@@ -611,7 +617,8 @@ mod tests {
             keyexpr,
             body: RequestVariant::CodecZenohQuery(Query::default()),
             ..Request::default()
-        };
+        }
+        .into_owned();
         let outcome = make_outcome(vec![NetworkMessage::Request(Box::new(request))]);
         observer.dispatch_event(IterationEvent::Poll(&outcome));
 

@@ -116,7 +116,7 @@ fn layer3_join_s0_basic() {
     let wz = Join {
         version: input.version,
         cbyte,
-        zid: input.zid.to_vec(),
+        zid: input.zid,
         sn_res: None,
         batch_size: None,
         lease: input.lease,
@@ -147,7 +147,7 @@ fn layer3_join_s1_with_size_negotiation() {
     let wz = Join {
         version: input.version,
         cbyte,
-        zid: input.zid.to_vec(),
+        zid: input.zid,
         sn_res: Some(sn_res),
         batch_size: Some(input.batch_size),
         lease: input.lease,
@@ -189,7 +189,7 @@ fn layer3_join_vle_boundaries_on_sn() {
         let wz = Join {
             version: input.version,
             cbyte,
-            zid: input.zid.to_vec(),
+            zid: input.zid,
             sn_res: None,
             batch_size: None,
             lease,

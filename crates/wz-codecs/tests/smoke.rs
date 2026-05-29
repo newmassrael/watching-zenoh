@@ -154,7 +154,7 @@ fn stream_envelope_wire_bytes_match_zenoh_pico_reference() {
     for (i, (payload, expected_wire)) in cases.iter().enumerate() {
         let env = StreamEnvelope {
             payload_len: payload.len() as u16,
-            payload: payload.to_vec(),
+            payload,
         };
         let wire = env.encode_to_vec();
         assert_eq!(
@@ -182,8 +182,7 @@ fn stream_envelope_wire_bytes_match_zenoh_pico_reference() {
             "case {i}: decoded payload byte count mismatch"
         );
         assert_eq!(
-            &decoded.payload[..],
-            *payload,
+            decoded.payload, *payload,
             "case {i}: decoded payload bytes mismatch"
         );
     }

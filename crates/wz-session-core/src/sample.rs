@@ -57,7 +57,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+#[cfg(test)]
 use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
+use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 
 /// Application-level mirror of [`wz_codecs::timestamp::Timestamp`].
 ///
@@ -83,7 +85,7 @@ pub struct TimestampHint {
 impl TimestampHint {
     /// Project a decoded codec [`wz_codecs::timestamp::Timestamp`]
     /// into a wz-owned [`TimestampHint`].
-    pub fn from_codec(ts: &wz_codecs::timestamp::Timestamp) -> Self {
+    pub fn from_codec(ts: &wz_codecs::timestamp::TimestampOwned) -> Self {
         Self {
             time: ts.time,
             zid: ts.zid.clone(),
@@ -95,11 +97,11 @@ impl TimestampHint {
     /// the publish wire branch can attach a caller-set timestamp to
     /// an outbound `MsgPut`/`MsgDel`. Mirrors the same byte-level
     /// shape (NTP64 `time` word + variable-length `zid` prefix).
-    pub fn to_codec(&self) -> wz_codecs::timestamp::Timestamp {
+    pub fn to_codec(&self) -> wz_codecs::timestamp::Timestamp<'_> {
         wz_codecs::timestamp::Timestamp {
             time: self.time,
             zid_len: self.zid.len() as u64,
-            zid: self.zid.clone(),
+            zid: &self.zid,
         }
     }
 }
@@ -126,7 +128,7 @@ pub struct EncodingHint {
 impl EncodingHint {
     /// Project a decoded codec [`wz_codecs::encoding::Encoding`] into
     /// a wz-owned [`EncodingHint`].
-    pub fn from_codec(encoding: &wz_codecs::encoding::Encoding) -> Self {
+    pub fn from_codec(encoding: &wz_codecs::encoding::EncodingOwned) -> Self {
         Self {
             packed_id: encoding.packed_id,
             schema: encoding.schema.clone(),
@@ -139,12 +141,12 @@ impl EncodingHint {
     /// outbound `MsgPut`. The codec `Encoding` decides whether to
     /// emit a schema string based on `packed_id & 0x1` and a
     /// non-empty `schema`; the hint preserves both fields verbatim.
-    pub fn to_codec(&self) -> wz_codecs::encoding::Encoding {
+    pub fn to_codec(&self) -> wz_codecs::encoding::Encoding<'_> {
         let schema_len = self.schema.as_ref().map(|s| s.len() as u64);
         wz_codecs::encoding::Encoding {
             packed_id: self.packed_id,
             schema_len,
-            schema: self.schema.clone(),
+            schema: self.schema.as_deref(),
         }
     }
 }
@@ -425,12 +427,12 @@ impl Sample {
 /// `(ext_id, enc)` combination, or when the matching extension's body
 /// variant is unexpectedly not `ExtZint` (which the wire decoder
 /// would only produce if the upstream catalog drifted).
-pub fn extract_qos(extensions: &[ExtEntry]) -> Option<QosLevel> {
+pub fn extract_qos(extensions: &[ExtEntryOwned]) -> Option<QosLevel> {
     const QOS_EXT_ID: u8 = 0x01;
     const ENC_ZINT: u8 = 0x01;
     for ext in extensions {
         if ext.ext_id() == QOS_EXT_ID && ext.enc() == ENC_ZINT {
-            if let ExtEntryVariant::CodecZenohExtZint(z) = &ext.body {
+            if let ExtEntryOwnedVariant::CodecZenohExtZint(z) = &ext.body {
                 return Some(QosLevel::from_raw(z.value as u8));
             }
         }
@@ -443,12 +445,12 @@ pub fn extract_qos(extensions: &[ExtEntry]) -> Option<QosLevel> {
 /// `_z_push_body_decode_extensions` (`vendor/zenoh-pico/src/protocol/
 /// codec/message.c` 314-322): `ext_id == 0x03` AND
 /// `enc == ENC_ZBUF (0b10)`.
-pub fn extract_attachment(extensions: &[ExtEntry]) -> Option<Vec<u8>> {
+pub fn extract_attachment(extensions: &[ExtEntryOwned]) -> Option<Vec<u8>> {
     const ATTACHMENT_EXT_ID: u8 = 0x03;
     const ENC_ZBUF: u8 = 0x02;
     for ext in extensions {
         if ext.ext_id() == ATTACHMENT_EXT_ID && ext.enc() == ENC_ZBUF {
-            if let ExtEntryVariant::CodecZenohExtZbuf(z) = &ext.body {
+            if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body {
                 return Some(z.value.clone());
             }
         }
@@ -472,12 +474,12 @@ pub fn extract_attachment(extensions: &[ExtEntry]) -> Option<Vec<u8>> {
 /// Returns `None` on missing extension, on a non-`ExtZbuf` body
 /// variant for the matching tuple, or on any parse failure (truncation
 /// / overflow / impossible `zidlen`).
-pub fn extract_source_info(extensions: &[ExtEntry]) -> Option<SourceInfo> {
+pub fn extract_source_info(extensions: &[ExtEntryOwned]) -> Option<SourceInfo> {
     const SOURCE_INFO_EXT_ID: u8 = 0x01;
     const ENC_ZBUF: u8 = 0x02;
     for ext in extensions {
         if ext.ext_id() == SOURCE_INFO_EXT_ID && ext.enc() == ENC_ZBUF {
-            if let ExtEntryVariant::CodecZenohExtZbuf(z) = &ext.body {
+            if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body {
                 return decode_source_info_payload(&z.value);
             }
         }
@@ -701,7 +703,7 @@ mod tests {
 
     #[test]
     fn timestamp_hint_from_codec_round_trips_fields() {
-        let codec = wz_codecs::timestamp::Timestamp {
+        let codec = wz_codecs::timestamp::TimestampOwned {
             time: 0xDEAD_BEEF,
             zid_len: 4,
             zid: vec![1, 2, 3, 4],
@@ -713,7 +715,7 @@ mod tests {
 
     #[test]
     fn encoding_hint_from_codec_round_trips_fields() {
-        let codec = wz_codecs::encoding::Encoding {
+        let codec = wz_codecs::encoding::EncodingOwned {
             packed_id: 0x1234,
             schema_len: Some(4),
             schema: Some("text".into()),
@@ -725,7 +727,7 @@ mod tests {
 
     #[test]
     fn encoding_hint_from_codec_preserves_absent_schema() {
-        let codec = wz_codecs::encoding::Encoding {
+        let codec = wz_codecs::encoding::EncodingOwned {
             packed_id: 0x4000,
             schema_len: None,
             schema: None,
@@ -774,7 +776,7 @@ mod tests {
         if let ExtEntryVariant::CodecZenohExtZint(z) = &mut ext.body {
             z.value = 0xCC;
         }
-        assert!(extract_qos(&[ext]).is_none());
+        assert!(extract_qos(&[ext.into_owned()]).is_none());
     }
 
     #[test]
@@ -783,7 +785,7 @@ mod tests {
         ext.set_ext_id(0x01);
         ext.set_enc(0x01);
         ext.body = ExtEntryVariant::CodecZenohExtZint(wz_codecs::ext_zint::ExtZint { value: 0xBE });
-        let qos = extract_qos(&[ext]).unwrap();
+        let qos = extract_qos(&[ext.into_owned()]).unwrap();
         assert_eq!(qos.raw, 0xBE);
     }
 
@@ -802,9 +804,9 @@ mod tests {
         let payload = b"attach-payload".to_vec();
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
             value_len: payload.len() as u64,
-            value: payload.clone(),
+            value: &payload,
         });
-        let bytes = extract_attachment(&[ext]).unwrap();
+        let bytes = extract_attachment(&[ext.into_owned()]).unwrap();
         assert_eq!(bytes, payload);
     }
 
@@ -816,9 +818,9 @@ mod tests {
         ext.set_enc(0x02);
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
             value_len: 1,
-            value: vec![0x00],
+            value: &[0x00],
         });
-        assert!(extract_attachment(&[ext]).is_none());
+        assert!(extract_attachment(&[ext.into_owned()]).is_none());
     }
 
     // ─── extract_source_info ───────────────────────────────────────
@@ -837,9 +839,9 @@ mod tests {
         ext.set_enc(0x02);
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
             value_len: payload.len() as u64,
-            value: payload,
+            value: &payload,
         });
-        let si = extract_source_info(&[ext]).unwrap();
+        let si = extract_source_info(&[ext.into_owned()]).unwrap();
         let mut expected_zid = [0u8; 16];
         expected_zid[..5].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
         assert_eq!(si.zid, expected_zid);
@@ -858,9 +860,9 @@ mod tests {
         // header says zidlen 16, but payload only has 1 byte.
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
             value_len: 1,
-            value: vec![0xF0u8],
+            value: &[0xF0u8],
         });
-        assert!(extract_source_info(&[ext]).is_none());
+        assert!(extract_source_info(&[ext.into_owned()]).is_none());
     }
 
     #[test]
@@ -870,9 +872,9 @@ mod tests {
         ext.set_enc(0x02);
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
             value_len: 0,
-            value: Vec::new(),
+            value: &[],
         });
-        assert!(extract_source_info(&[ext]).is_none());
+        assert!(extract_source_info(&[ext.into_owned()]).is_none());
     }
 
     #[test]
@@ -890,9 +892,9 @@ mod tests {
         ext.set_enc(0x02);
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
             value_len: payload.len() as u64,
-            value: payload,
+            value: &payload,
         });
-        let si = extract_source_info(&[ext]).unwrap();
+        let si = extract_source_info(&[ext.into_owned()]).unwrap();
         let mut expected_zid = [0u8; 16];
         expected_zid[0] = 0x99;
         assert_eq!(si.zid, expected_zid);

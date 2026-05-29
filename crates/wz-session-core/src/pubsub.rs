@@ -72,17 +72,19 @@
 //! variant) without taking ownership.
 
 use alloc::boxed::Box;
-use alloc::string::{String, ToString};
+use alloc::string::String;
+#[cfg(any(feature = "codec-push", feature = "codec-declare"))]
+use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use hashbrown::HashMap;
 
 #[cfg(feature = "codec-declare")]
-use wz_codecs::declare::DeclareVariant;
+use wz_codecs::declare::DeclareOwnedVariant;
 #[cfg(feature = "codec-push")]
-use wz_codecs::push::{Push, PushVariant};
+use wz_codecs::push::{PushOwned, PushOwnedVariant};
 #[cfg(feature = "codec-declare")]
-use wz_codecs::wireexpr::WireexprVariant;
+use wz_codecs::wireexpr::WireexprOwnedVariant;
 
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 use crate::network_message::NetworkMessage;
@@ -458,15 +460,15 @@ impl SubscriberRegistry {
     /// `_z_handle_network_message` with a wz-equivalent
     /// `is_remote = false` semantic).
     #[cfg(feature = "codec-push")]
-    fn dispatch_push(&mut self, push: &Push, reliability: Reliability, is_remote: bool) {
+    fn dispatch_push(&mut self, push: &PushOwned, reliability: Reliability, is_remote: bool) {
         // R125c2: keyexpr is now a tagged-union (B5-ν parent-tag
         // variant dispatch on parent.M); extract id + suffix from
         // whichever arm the dispatcher selected. Both arms carry the
         // same id + Option<suffix> fields — the variant is a type-
         // level mapping-context refinement, not a wire-shape split.
         let (id, suffix_opt) = match &push.keyexpr.body {
-            WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
-            WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
+            WireexprOwnedVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
+            WireexprOwnedVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
         };
         // R121d — resolve the Push's keyexpr against the peer
         // mapping table. The composition rule is:
@@ -538,8 +540,8 @@ impl SubscriberRegistry {
         let (kind, payload, body_timestamp, body_encoding, body_attachment, body_source_info) =
             match &push.body {
                 #[cfg(feature = "pubsub-put")]
-                PushVariant::CodecZenohMsgPut(put) => {
-                    let body_exts: &[wz_codecs::ext_entry::ExtEntry] =
+                PushOwnedVariant::CodecZenohMsgPut(put) => {
+                    let body_exts: &[wz_codecs::ext_entry::ExtEntryOwned] =
                         put.extensions.as_deref().unwrap_or(&[]);
                     #[cfg(feature = "pubsub-timestamp")]
                     let body_timestamp = put.timestamp.as_ref().map(TimestampHint::from_codec);
@@ -562,8 +564,8 @@ impl SubscriberRegistry {
                     )
                 }
                 #[cfg(feature = "pubsub-delete")]
-                PushVariant::CodecZenohMsgDel(del) => {
-                    let body_exts: &[wz_codecs::ext_entry::ExtEntry] =
+                PushOwnedVariant::CodecZenohMsgDel(del) => {
+                    let body_exts: &[wz_codecs::ext_entry::ExtEntryOwned] =
                         del.extensions.as_deref().unwrap_or(&[]);
                     #[cfg(feature = "pubsub-timestamp")]
                     let body_timestamp = del.timestamp.as_ref().map(TimestampHint::from_codec);
@@ -587,7 +589,7 @@ impl SubscriberRegistry {
                 }
                 _ => return,
             };
-        let outer_exts: &[wz_codecs::ext_entry::ExtEntry] =
+        let outer_exts: &[wz_codecs::ext_entry::ExtEntryOwned] =
             push.extensions.as_deref().unwrap_or(&[]);
         let qos = extract_qos(outer_exts);
         // R311di-4 — Sample lives in wz-session-core (non_exhaustive)
@@ -744,9 +746,9 @@ impl SubscriberRegistry {
     /// miss. The intentional no-op arms cite the dedicated
     /// registry that owns each Declare sub-type.
     #[cfg(feature = "codec-declare")]
-    fn absorb_declare(&mut self, body: &DeclareVariant) {
+    fn absorb_declare(&mut self, body: &DeclareOwnedVariant) {
         match body {
-            DeclareVariant::CodecZenohDeclKexpr(d) => {
+            DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
                 // Resolve the declared keyexpr to a literal string,
                 // following the same composition rule as Push
                 // resolution (id==0 → suffix verbatim; id!=0 →
@@ -757,37 +759,38 @@ impl SubscriberRegistry {
                     self.peer_keyexpr_table.insert(d.id, literal);
                 }
             }
-            DeclareVariant::CodecZenohUndeclKexpr(u) => {
+            DeclareOwnedVariant::CodecZenohUndeclKexpr(u) => {
                 self.peer_keyexpr_table.remove(&u.id);
             }
             // DeclSubscriber / UndeclSubscriber are observed by
             // `crate::declare::subscriber::DeclSubscriberRegistry`
             // so the runtime can fire user callbacks on peer
             // subscriber lifecycle — not a keyexpr-table concern.
-            DeclareVariant::CodecZenohDeclSubscriber(_)
-            | DeclareVariant::CodecZenohUndeclSubscriber(_) => {}
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(_)
+            | DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {}
             // DeclQueryable / UndeclQueryable are observed by
             // `crate::declare::queryable::QueryableRegistry` so
             // the runtime can fire user callbacks on peer
             // queryable lifecycle — not a keyexpr-table concern.
-            DeclareVariant::CodecZenohDeclQueryable(_)
-            | DeclareVariant::CodecZenohUndeclQueryable(_) => {}
+            DeclareOwnedVariant::CodecZenohDeclQueryable(_)
+            | DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {}
             // DeclToken / UndeclToken are observed by
             // `crate::declare::liveliness::TokenRegistry` for the
             // peer liveliness layer — not a keyexpr-table concern.
-            DeclareVariant::CodecZenohDeclToken(_) | DeclareVariant::CodecZenohUndeclToken(_) => {}
+            DeclareOwnedVariant::CodecZenohDeclToken(_)
+            | DeclareOwnedVariant::CodecZenohUndeclToken(_) => {}
             // DeclFinal is the terminator marker zenoh emits after
             // an initial declaration burst. No side effects in
             // this registry — the runtime's session glue tracks
             // the marker separately if it cares about burst
             // completion.
-            DeclareVariant::CodecZenohDeclFinal(_) => {}
+            DeclareOwnedVariant::CodecZenohDeclFinal(_) => {}
             // Default arm preserves an unknown wire tag for
             // forward compatibility (codegen generates this for
             // every variant-dispatch enum). The peer keyexpr
             // table is by definition not affected by an unknown
             // Declare sub-type.
-            DeclareVariant::Default { .. } => {}
+            DeclareOwnedVariant::Default { .. } => {}
         }
     }
 
@@ -797,10 +800,10 @@ impl SubscriberRegistry {
     /// declared yet (or when it is the empty `(id=0, suffix=None)`
     /// form, which carries no resolution).
     #[cfg(feature = "codec-declare")]
-    fn resolve_wireexpr(&self, body: &WireexprVariant) -> Option<String> {
+    fn resolve_wireexpr(&self, body: &WireexprOwnedVariant) -> Option<String> {
         let (id, suffix_opt) = match body {
-            WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
-            WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
+            WireexprOwnedVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
+            WireexprOwnedVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
         };
         if id == 0 {
             suffix_opt.map(str::to_string)
@@ -849,11 +852,14 @@ mod tests {
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-    use wz_codecs::wireexpr::Wireexpr;
+    // Fixtures build the borrowed codec views then `.into_owned()` at the
+    // dispatch boundary (`NetworkMessage::*` carriers store `*Owned`).
+    use wz_codecs::push::Push;
+    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
     use wz_codecs::wireexpr_local::WireexprLocal;
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
-    fn push_with_keyexpr(suffix: &str) -> Push {
+    fn push_with_keyexpr(suffix: &str) -> PushOwned {
         // R125c2: wireexpr is now a tagged-union (Local default arm at
         // M=1; mirrors zenoh-pico's `_z_wireexpr_t` zero-init mapping=
         // LOCAL → is_local=true → encoder OR's M=1). Construct the
@@ -865,11 +871,12 @@ mod tests {
                 body: WireexprVariant::WireexprLocal(WireexprLocal {
                     id: 0,
                     suffix_len: Some(suffix.len() as u64),
-                    suffix: Some(suffix.into()),
+                    suffix: Some(suffix),
                 }),
             },
             ..Push::default()
         }
+        .into_owned()
     }
 
     #[test]
@@ -963,7 +970,8 @@ mod tests {
                 }),
             },
             ..Push::default()
-        };
+        }
+        .into_owned();
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(
@@ -1052,7 +1060,7 @@ mod tests {
         // subscriber callback.
         use wz_codecs::response_final::ResponseFinal;
         registry.dispatch(
-            &NetworkMessage::ResponseFinal(ResponseFinal::default()),
+            &NetworkMessage::ResponseFinal(ResponseFinal::default().into_owned()),
             Reliability::Reliable,
         );
 
@@ -1762,19 +1770,19 @@ mod tests {
 
     // ── R222 Push -> Sample projection behaviour ──
 
-    fn push_with_payload(keyexpr: &str, payload: &[u8]) -> Push {
+    fn push_with_payload(keyexpr: &str, payload: &[u8]) -> PushOwned {
         let mut push = push_with_keyexpr(keyexpr);
-        if let wz_codecs::push::PushVariant::CodecZenohMsgPut(ref mut put) = push.body {
+        if let PushOwnedVariant::CodecZenohMsgPut(ref mut put) = push.body {
             put.payload_len = payload.len() as u64;
             put.payload = payload.to_vec();
         }
         push
     }
 
-    fn push_with_del_body(keyexpr: &str) -> Push {
+    fn push_with_del_body(keyexpr: &str) -> PushOwned {
         let mut push = push_with_keyexpr(keyexpr);
         push.body =
-            wz_codecs::push::PushVariant::CodecZenohMsgDel(wz_codecs::msg_del::MsgDel::default());
+            PushOwnedVariant::CodecZenohMsgDel(wz_codecs::msg_del::MsgDel::default().into_owned());
         push
     }
 
@@ -1925,7 +1933,7 @@ mod tests {
     /// `id` to the literal keyexpr suffix `s`. Models the wire
     /// shape zenoh-pico emits on `z_declare_keyexpr` when the
     /// argument is a string (no prefix mapping).
-    fn declare_kexpr_literal(mapping_id: u64, s: &str) -> wz_codecs::declare::Declare {
+    fn declare_kexpr_literal(mapping_id: u64, s: &str) -> wz_codecs::declare::DeclareOwned {
         wz_codecs::declare::Declare {
             body: wz_codecs::declare::DeclareVariant::CodecZenohDeclKexpr(
                 wz_codecs::decl_kexpr::DeclKexpr {
@@ -1935,7 +1943,7 @@ mod tests {
                             wz_codecs::wireexpr_local::WireexprLocal {
                                 id: 0,
                                 suffix_len: Some(s.len() as u64),
-                                suffix: Some(s.into()),
+                                suffix: Some(s),
                             },
                         ),
                     },
@@ -1944,9 +1952,10 @@ mod tests {
             ),
             ..Default::default()
         }
+        .into_owned()
     }
 
-    fn undeclare_kexpr(mapping_id: u64) -> wz_codecs::declare::Declare {
+    fn undeclare_kexpr(mapping_id: u64) -> wz_codecs::declare::DeclareOwned {
         wz_codecs::declare::Declare {
             body: wz_codecs::declare::DeclareVariant::CodecZenohUndeclKexpr(
                 wz_codecs::undecl_kexpr::UndeclKexpr {
@@ -1956,19 +1965,21 @@ mod tests {
             ),
             ..Default::default()
         }
+        .into_owned()
     }
 
-    fn push_with_mapping_id(mapping_id: u64, inline_suffix: Option<&str>) -> Push {
+    fn push_with_mapping_id(mapping_id: u64, inline_suffix: Option<&str>) -> PushOwned {
         Push {
             keyexpr: wz_codecs::wireexpr::Wireexpr {
                 body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
                     id: mapping_id,
                     suffix_len: inline_suffix.map(|s| s.len() as u64),
-                    suffix: inline_suffix.map(str::to_string),
+                    suffix: inline_suffix,
                 }),
             },
             ..Push::default()
         }
+        .into_owned()
     }
 
     #[test]
@@ -2166,6 +2177,7 @@ mod tests {
         use wz_codecs::decl_queryable::DeclQueryable;
         use wz_codecs::decl_subscriber::DeclSubscriber;
         use wz_codecs::decl_token::DeclToken;
+        use wz_codecs::declare::DeclareVariant;
         use wz_codecs::undecl_queryable::UndeclQueryable;
         use wz_codecs::undecl_subscriber::UndeclSubscriber;
         use wz_codecs::undecl_token::UndeclToken;
@@ -2210,6 +2222,9 @@ mod tests {
 
         for (name, body) in arms {
             let mut registry = SubscriberRegistry::new();
+            // `absorb_declare` takes the owned variant; deep-copy the
+            // borrowed test arm at the boundary.
+            let body = body.into_owned();
             registry.absorb_declare(&body);
             assert!(
                 registry.peer_keyexpr_table().is_empty(),
@@ -2531,7 +2546,7 @@ mod tests {
     /// wire-form source_info payload mirrors
     /// `session_glue::encode_source_info_ext_body`: header byte
     /// `(zidlen-1) << 4`, raw zid bytes, then VLE eid + sn.
-    fn push_put_literal_with_source_info(keyexpr: &str, source_zid: &[u8]) -> Push {
+    fn push_put_literal_with_source_info(keyexpr: &str, source_zid: &[u8]) -> PushOwned {
         assert!(
             (1..=16).contains(&source_zid.len()),
             "test helper: source_zid len must be 1..=16"
@@ -2546,24 +2561,26 @@ mod tests {
         ext.body = wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZbuf(
             wz_codecs::ext_zbuf::ExtZbuf {
                 value_len: payload.len() as u64,
-                value: payload,
+                value: &payload,
             },
         );
-        let put = wz_codecs::msg_put::MsgPut {
-            extensions: Some(vec![ext]),
-            ..wz_codecs::msg_put::MsgPut::default()
-        };
-        Push {
+        // The owned `MsgPut` carries an alloc `Vec<ExtEntryOwned>` (vs the
+        // borrowed heapless `Vec<_, 4>`); deep-copy the borrowed ext in.
+        let mut put = wz_codecs::msg_put::MsgPut::default().into_owned();
+        put.extensions = Some(vec![ext.into_owned()]);
+        let mut push = Push {
             keyexpr: wz_codecs::wireexpr::Wireexpr {
                 body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
                     id: 0,
                     suffix_len: Some(keyexpr.len() as u64),
-                    suffix: Some(keyexpr.to_string()),
+                    suffix: Some(keyexpr),
                 }),
             },
-            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(put),
             ..Push::default()
         }
+        .into_owned();
+        push.body = PushOwnedVariant::CodecZenohMsgPut(put);
+        push
     }
 
     #[test]
@@ -2637,14 +2654,15 @@ mod tests {
                 body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
                     id: 0,
                     suffix_len: Some("demo/temp".len() as u64),
-                    suffix: Some("demo/temp".to_string()),
+                    suffix: Some("demo/temp"),
                 }),
             },
             body: wz_codecs::push::PushVariant::CodecZenohMsgPut(
                 wz_codecs::msg_put::MsgPut::default(),
             ),
             ..Push::default()
-        };
+        }
+        .into_owned();
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(

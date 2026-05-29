@@ -73,10 +73,14 @@
 
 use hashbrown::HashMap;
 
-#[cfg(any(feature = "query-attachment", test))]
-use wz_codecs::ext_entry::ExtEntryVariant;
-use wz_codecs::query::Query;
-use wz_codecs::request::{Request, RequestVariant};
+// SCE owned-view absorb — decoded inbound Query / Request bodies are
+// held / dispatched as the lifetime-free `*Owned` mirrors; the reply
+// builders return `ResponseOwned`. The borrowed views are pulled in
+// test-locally for fixture construction (`..Foo::default().into_owned()`).
+#[cfg(feature = "query-attachment")]
+use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+use wz_codecs::query::QueryOwned;
+use wz_codecs::request::{RequestOwned, RequestOwnedVariant};
 // R311r — `Response` + the `ResponseReplyBuilder` / `ResponseErrBuilder`
 // pair (from session_glue) gate on `codec-response`. `QueryReply::into_response`
 // is the only use site for these symbols inside this module, so the
@@ -85,11 +89,11 @@ use wz_codecs::request::{Request, RequestVariant};
 // `Vec<QueryReply>` and do not need codec-response, so the module body
 // otherwise compiles unconditionally once `lib.rs` ungates `pub mod query`.
 #[cfg(feature = "codec-response")]
-use wz_codecs::response::Response;
-use wz_codecs::wireexpr::WireexprVariant;
+use wz_codecs::response::ResponseOwned;
+use wz_codecs::wireexpr::WireexprOwnedVariant;
 
 #[cfg(feature = "codec-response-final")]
-use wz_codecs::response_final::ResponseFinal;
+use wz_codecs::response_final::{ResponseFinal, ResponseFinalOwned};
 
 use crate::pubsub::keyexpr_pattern_matches;
 use crate::query_event::{QueryEvent, ReplyEmitter};
@@ -135,7 +139,7 @@ pub type QueryableCallback =
 // extraction. cfg-off: callback always observes attachment=None.
 // Signature stable (returns Option), behavior change is the early
 // short-circuit at the function entry.
-fn extract_query_attachment(query: &Query) -> Option<&[u8]> {
+fn extract_query_attachment(query: &QueryOwned) -> Option<&[u8]> {
     #[cfg(not(feature = "query-attachment"))]
     {
         let _ = query;
@@ -146,7 +150,7 @@ fn extract_query_attachment(query: &Query) -> Option<&[u8]> {
         let exts = query.extensions.as_ref()?;
         for ext in exts {
             if ext.ext_id() == 0x05 {
-                if let ExtEntryVariant::CodecZenohExtZbuf(zbuf) = &ext.body {
+                if let ExtEntryOwnedVariant::CodecZenohExtZbuf(zbuf) = &ext.body {
                     return Some(zbuf.value.as_slice());
                 }
             }
@@ -277,7 +281,7 @@ impl QueryReply {
     /// `Response`, which is the textbook honest shape: no codec ⇒ no
     /// wire frame to compose.
     #[cfg(feature = "codec-response")]
-    pub fn into_response(self) -> Response {
+    pub fn into_response(self) -> ResponseOwned {
         match self {
             QueryReply::Reply {
                 rid,
@@ -585,20 +589,20 @@ impl QueryableRegistry {
     ///   Response frame on the wire (R121j-5c).
     pub fn dispatch_request(
         &mut self,
-        request: &Request,
+        request: &RequestOwned,
         peer_keyexpr_table: &HashMap<u64, String>,
         replies: &mut Vec<QueryReply>,
     ) {
         // Only the Query body arm triggers application-visible
         // dispatch — see scope note above.
         let query = match &request.body {
-            RequestVariant::CodecZenohQuery(q) => q,
+            RequestOwnedVariant::CodecZenohQuery(q) => q,
             _ => return,
         };
 
         let (id, suffix_opt) = match &request.keyexpr.body {
-            WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
-            WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
+            WireexprOwnedVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
+            WireexprOwnedVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
         };
         let resolved: String = if id == 0 {
             match suffix_opt {
@@ -673,7 +677,7 @@ impl QueryableRegistry {
         &mut self,
         rid: u64,
         keyexpr: &str,
-        query: &Query,
+        query: &QueryOwned,
         replies: &mut Vec<QueryReply>,
     ) {
         self.fire_matching_queryables(rid, keyexpr, query, replies, /* is_remote = */ false);
@@ -696,7 +700,7 @@ impl QueryableRegistry {
         &mut self,
         rid: u64,
         keyexpr: &str,
-        query: &Query,
+        query: &QueryOwned,
         replies: &mut Vec<QueryReply>,
         is_remote: bool,
     ) {
@@ -863,7 +867,7 @@ impl QueryableRegistry {
 /// will land via a separate setter (none exist on the wire today —
 /// zenoh-pico's `_z_response_final_encode` emits only header + rid).
 #[cfg(feature = "codec-response-final")]
-pub fn response_final_for(rid: u64) -> ResponseFinal {
+pub fn response_final_for(rid: u64) -> ResponseFinalOwned {
     ResponseFinal {
         request_id: rid,
         // header = 0x1a (_Z_MID_N_RESPONSE_FINAL) and extensions =
@@ -873,6 +877,10 @@ pub fn response_final_for(rid: u64) -> ResponseFinal {
         // that land with sensible defaults.
         ..ResponseFinal::default()
     }
+    // `ResponseFinalOwned` has no `Default` (the owned mirrors derive
+    // only Debug/Clone/PartialEq), so build the borrowed view via the
+    // spread default and deep-copy into the owned form at the boundary.
+    .into_owned()
 }
 
 #[cfg(test)]
@@ -882,14 +890,19 @@ mod tests {
     use std::sync::Arc;
 
     use crate::sync::Mutex;
-    use wz_codecs::ext_entry::ExtEntry;
+    // Fixtures build the borrowed codec views (`..::default()` lives on
+    // the borrowed type) then `.into_owned()` at the dispatch boundary,
+    // which now takes the lifetime-free `*Owned` mirrors.
+    use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
     use wz_codecs::ext_zbuf::ExtZbuf;
     use wz_codecs::msg_put::MsgPut;
+    use wz_codecs::query::Query;
+    use wz_codecs::request::{Request, RequestVariant};
     use wz_codecs::wireexpr::Wireexpr;
     use wz_codecs::wireexpr_local::WireexprLocal;
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
-    fn request_query(rid: u64, mapping_id: u64, suffix: Option<&str>) -> Request {
+    fn request_query(rid: u64, mapping_id: u64, suffix: Option<&str>) -> RequestOwned {
         // Construct a minimal Request whose body is a default Query.
         // The Local arm (zero-init mapping = LOCAL on the zenoh-pico
         // side, mirrored by push_with_keyexpr at pubsub.rs:398-415) is
@@ -897,13 +910,12 @@ mod tests {
         // identically through dispatch's WireexprVariant match
         // (pubsub.rs:292-294), so the test only needs one arm to
         // exercise the dispatch logic.
-        let suffix_owned = suffix.map(str::to_string);
         let suffix_len = suffix.map(|s| s.len() as u64);
         let keyexpr = Wireexpr {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: mapping_id,
                 suffix_len,
-                suffix: suffix_owned,
+                suffix,
             }),
         };
         Request {
@@ -913,6 +925,7 @@ mod tests {
             extensions: None,
             body: RequestVariant::CodecZenohQuery(Query::default()),
         }
+        .into_owned()
     }
 
     /// R311v test helper — construct an inbound Query whose
@@ -923,43 +936,51 @@ mod tests {
     /// through `Query::decode` would surface the extensions vec; the
     /// dispatch path only reads `query.extensions` directly so the
     /// flag is purely for authoring fidelity.
-    fn request_query_with_attachment(rid: u64, suffix: Option<&str>, attachment: &[u8]) -> Request {
-        let suffix_owned = suffix.map(str::to_string);
+    fn request_query_with_attachment(
+        rid: u64,
+        suffix: Option<&str>,
+        attachment: &[u8],
+    ) -> RequestOwned {
         let suffix_len = suffix.map(|s| s.len() as u64);
         let keyexpr = Wireexpr {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
                 id: 0,
                 suffix_len,
-                suffix: suffix_owned,
+                suffix,
             }),
         };
+        // Build the attachment ext on the borrowed view (the `set_*`
+        // helpers + the borrowed `&[u8]` value) then deep-copy into the
+        // owned mirror; the owned `Query` carries an alloc `Vec` of
+        // `ExtEntryOwned` (vs the borrowed heapless `Vec<_, 8>`).
         let mut ext = ExtEntry::default();
         ext.set_ext_id(0x05);
         ext.set_enc(2);
         ext.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
             value_len: attachment.len() as u64,
-            value: attachment.to_vec(),
+            value: attachment,
         });
-        let query = Query {
-            header: Query::default().header | 0x80,
-            extensions: Some(vec![ext]),
-            ..Query::default()
-        };
-        Request {
+        let mut query = Query::default().into_owned();
+        query.header |= 0x80;
+        query.extensions = Some(vec![ext.into_owned()]);
+        let mut request = Request {
             header: 0x1c,
             rid,
             keyexpr,
             extensions: None,
-            body: RequestVariant::CodecZenohQuery(query),
+            body: RequestVariant::CodecZenohQuery(Query::default()),
         }
+        .into_owned();
+        request.body = RequestOwnedVariant::CodecZenohQuery(query);
+        request
     }
 
-    fn request_put(rid: u64, suffix: &str) -> Request {
+    fn request_put(rid: u64, suffix: &str) -> RequestOwned {
         let keyexpr = Wireexpr {
             body: wz_codecs::wireexpr::WireexprVariant::WireexprNonlocal(WireexprNonlocal {
                 id: 0,
                 suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix.to_string()),
+                suffix: Some(suffix),
             }),
         };
         Request {
@@ -969,6 +990,7 @@ mod tests {
             extensions: None,
             body: RequestVariant::CodecZenohMsgPut(MsgPut::default()),
         }
+        .into_owned()
     }
 
     #[test]
@@ -1445,10 +1467,18 @@ mod tests {
         );
 
         assert_eq!(replies.len(), 1);
-        let via_chain = replies.pop().unwrap().into_response().encode_to_vec();
+        let via_chain = replies
+            .pop()
+            .unwrap()
+            .into_response()
+            .try_as_borrowed()
+            .expect("test fixture: <=N exts by construction")
+            .encode_to_vec();
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"hello")
             .responder(&[0xBB; 1], 1)
             .build()
+            .try_as_borrowed()
+            .expect("test fixture: <=N exts by construction")
             .encode_to_vec();
         assert_eq!(
             via_chain, via_builder,
@@ -1470,9 +1500,14 @@ mod tests {
         // ResponseReplyBuilder direct path with the same args.
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"hello")
             .build()
+            .try_as_borrowed()
+            .expect("test fixture: <=N exts by construction")
             .encode_to_vec();
         assert_eq!(
-            response.encode_to_vec(),
+            response
+                .try_as_borrowed()
+                .expect("test fixture: <=N exts by construction")
+                .encode_to_vec(),
             via_builder,
             "QueryReply::into_response (Put) must match the direct builder path byte-for-byte"
         );
@@ -1490,9 +1525,14 @@ mod tests {
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("clear/me"), &[])
             .reply_del()
             .build()
+            .try_as_borrowed()
+            .expect("test fixture: <=N exts by construction")
             .encode_to_vec();
         assert_eq!(
-            response.encode_to_vec(),
+            response
+                .try_as_borrowed()
+                .expect("test fixture: <=N exts by construction")
+                .encode_to_vec(),
             via_builder,
             "QueryReply::into_response (Del) must match builder.reply_del path"
         );
@@ -1511,9 +1551,14 @@ mod tests {
         let via_builder = ResponseErrBuilder::new(42, 0, Some("error/path"), b"oops")
             .encoding(4, Some("schema_v1"))
             .build()
+            .try_as_borrowed()
+            .expect("test fixture: <=N exts by construction")
             .encode_to_vec();
         assert_eq!(
-            response.encode_to_vec(),
+            response
+                .try_as_borrowed()
+                .expect("test fixture: <=N exts by construction")
+                .encode_to_vec(),
             via_builder,
             "QueryReply::into_response (Err) must match the builder path with the same encoding tuple"
         );
@@ -1668,7 +1713,7 @@ mod tests {
         });
 
         let mut replies = Vec::new();
-        let query = Query::default();
+        let query = Query::default().into_owned();
         reg.local_query(/*rid=*/ 7, "home/temp", &query, &mut replies);
 
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
@@ -1708,7 +1753,7 @@ mod tests {
         });
 
         let mut replies = Vec::new();
-        let query = Query::default();
+        let query = Query::default().into_owned();
         reg.local_query(1, "home/temp", &query, &mut replies);
 
         assert_eq!(
@@ -1736,7 +1781,7 @@ mod tests {
         });
 
         let mut replies = Vec::new();
-        let query = Query::default();
+        let query = Query::default().into_owned();
         reg.local_query(1, "home/temp", &query, &mut replies);
 
         assert_eq!(
@@ -1761,7 +1806,7 @@ mod tests {
         });
 
         let mut replies = Vec::new();
-        let query = Query::default();
+        let query = Query::default().into_owned();
         reg.local_query(1, "home/humid", &query, &mut replies);
 
         assert_eq!(invocations.load(Ordering::SeqCst), 0);

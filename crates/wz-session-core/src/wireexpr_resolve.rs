@@ -15,7 +15,7 @@ use alloc::string::{String, ToString};
 
 use hashbrown::HashMap;
 
-use wz_codecs::wireexpr::WireexprVariant;
+use wz_codecs::wireexpr::WireexprOwnedVariant;
 
 /// Resolve a `Wireexpr` to its literal keyexpr string using a peer
 /// mapping table.
@@ -31,10 +31,13 @@ use wz_codecs::wireexpr::WireexprVariant;
 /// caller decides whether to skip the dispatch (preferred, the
 /// declaration is incomplete) or surface the half-truth (currently
 /// no caller does the latter).
-pub fn resolve_wireexpr(body: &WireexprVariant, table: &HashMap<u64, String>) -> Option<String> {
+pub fn resolve_wireexpr(
+    body: &WireexprOwnedVariant,
+    table: &HashMap<u64, String>,
+) -> Option<String> {
     let (id, suffix_opt) = match body {
-        WireexprVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
-        WireexprVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
+        WireexprOwnedVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
+        WireexprOwnedVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
     };
     if id == 0 {
         suffix_opt.map(str::to_string)
