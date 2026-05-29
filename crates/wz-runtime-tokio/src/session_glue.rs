@@ -397,22 +397,13 @@ pub struct SessionInitParams {
 // configured source), and the fixture stays behind the test-support
 // crate boundary.
 
-/// Discrete close-reason discriminator. Mirrors the four close-reason
-/// mutator actions emitted by `session_fsm_unicast.scxml`
-/// (`set_close_reason_generic / invalid / expired / unresponsive`).
-/// Encoded as a single byte in the Close codec body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CloseReason {
-    /// Default close (set via `session.close` transition).
-    #[default]
-    Generic = 0,
-    /// Framing error close.
-    Invalid = 1,
-    /// Lease expired close.
-    Expired = 2,
-    /// TX congestion / peer unresponsive close.
-    Unresponsive = 3,
-}
+// R311ed — CloseReason moved to wz-session-core::close_reason (a
+// runtime-agnostic byte-valued discriminator, sibling of Reliability /
+// qos). Re-exported so the `crate::session_glue::CloseReason` callsites
+// (SessionLinkActions::send_close_with_reason, the Close codec tests,
+// and wz-ap-demo::teardown) resolve unchanged. The wire encode
+// (`reason as u8`) stays below next to the Close codec path. DP3 leaf.
+pub use wz_session_core::close_reason::CloseReason;
 
 /// Counters + last-wire-bytes snapshot the integration tests inspect
 /// to verify the script-action dispatch reached this side AND the
