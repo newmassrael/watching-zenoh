@@ -233,6 +233,18 @@ jobs:
         # so coverage cannot silently drop if those defaults change.
         run: bash scripts/run-ci.sh --layer C1f
 
+      - name: Layer C1g — cargo test -p wz-session-core (observer dispatch plane)
+        # R311dz — same shape as C1f. The migrated ApplicationLayerObserver
+        # test module gates on the full fan-out union (codec-push +
+        # codec-declare + query-queryable + liveliness-token +
+        # liveliness-subscriber + declare-subscriber + declare-queryable +
+        # codec-response-final + pubsub-put/delete). The lane also adds a
+        # composability build of the codec-declare-on / query-queryable-off
+        # subset, which composes the observer with the queryable slot
+        # elided — the arbitrary-subset class the maximal-preset C1c-f
+        # tests never exercise.
+        run: bash scripts/run-ci.sh --layer C1g
+
       - name: Layer C2 — cargo clippy --deny warnings
         run: bash scripts/run-ci.sh --layer C2
 

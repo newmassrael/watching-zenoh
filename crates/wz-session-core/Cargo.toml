@@ -88,6 +88,21 @@ query-attachment = []
 query-selector-parameters = []
 query-reply-err = []
 
+# R311dz — observer-domain gate-only features for the migrated
+# `ApplicationLayerObserver` (`wz-session-core::observer`). Each gates
+# one of the observer's per-domain registry fields (and the matching
+# `dispatch_iteration_event` fan-out arm) so an arbitrary feature subset
+# composes the observer with only the registries it actually wires. They
+# are standalone (no wz-codecs forward — the underlying registries gate
+# on `codec-declare` at the module level; these are the application-layer
+# consumer gates one level up). The wz-runtime-tokio side forwards its
+# same-named features here, mirroring the `query-queryable` forward, so
+# the gated observer fields compile consistently across the workspace.
+declare-subscriber = []
+declare-queryable = []
+liveliness-token = []
+liveliness-subscriber = []
+
 [dependencies]
 wz-runtime-core = { path = "../wz-runtime-core" }
 # R311di-4 — wz-codecs needed by sample.rs for `wz_codecs::ext_entry`

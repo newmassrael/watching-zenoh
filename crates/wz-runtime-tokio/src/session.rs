@@ -3076,9 +3076,16 @@ impl<R: Runtime, T: TimeSource> Queryable<R, T> {
     /// [`Subscriber::undeclare`].
     pub fn undeclare(self) -> bool {
         // R311df — observer access via R::with_mutex_mut closure form.
+        // R311dz — the observer's `queryables` field gates on
+        // `query-queryable`. A build without it never constructs a
+        // Queryable (declare_queryable returns Err(FeatureDisabled)), so
+        // this off-branch is unreachable at runtime but must compile.
+        #[cfg(feature = "query-queryable")]
         let removed = R::with_mutex_mut(&self.session.observer, |observer| {
             observer.queryables.unregister(self.id)
         });
+        #[cfg(not(feature = "query-queryable"))]
+        let removed = false;
         std::mem::forget(self);
         removed
     }
@@ -3091,6 +3098,10 @@ impl<R: Runtime, T: TimeSource> Drop for Queryable<R, T> {
         // panic-free (boolean return), so the worst-case observable
         // outcome on a corrupted observer is "queryable stays
         // registered" — caller can manually re-call undeclare.
+        // R311dz — gated on `query-queryable` (the observer's queryables
+        // field). Unreachable at runtime when off (no Queryable is ever
+        // constructed) but must compile.
+        #[cfg(feature = "query-queryable")]
         R::with_mutex_mut(&self.session.observer, |obs| {
             let _ = obs.queryables.unregister(self.id);
         });

@@ -478,6 +478,7 @@
     "feature-inventory--composable-framework-atomic--preset-catalog": {
       "title": "Feature inventory — composable framework atomic + preset catalog",
       "parent_doc": "docs/feature_inventory.md",
+      "decision_status": "active",
       "intent": "First-pass composable-framework feature catalog: 19 domains, ~140 atomic features, 6 semver presets. Naming + 3-test verdicts; emission mechanism deferred to R302+.",
       "rationale_bullets": [
         "Names + 3-test verdicts for atomic features; named contracts for presets; mechanism R302+ defer.",
@@ -503,8 +504,7 @@
         "Naming contract, not mechanism contract.",
         "R311a-recanon: codec-init-syn/-ack/-open-syn/-ack collapsed to codec-init-body+codec-open-body.",
         "Reason: single-SCXML emit per body; runtime is_ack flag chooses arm (Footprint test fail at 4-way)."
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/1-purpose": {
       "title": "§1 Purpose",
@@ -570,6 +570,7 @@
       "title": "§5.1 Transport",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Transport domain catalog: 16 atomic features (5 active wired in wz-runtime-tokio, 11 reserved declaration-only) covering link kinds + session topology + envelope behaviors.",
       "rationale_bullets": [
         "Composable framework lens (R267-R299): each transport capability is one atomic feature toggle.",
@@ -599,13 +600,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness": {
       "title": "§5.10 Liveliness",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Liveliness domain catalog: 5 atomic features (2 active wired liveliness-token + liveliness-subscriber per pre-R311, 3 reserved -get/-history/-historical-samples).",
       "rationale_bullets": [
         "Composable framework lens: each liveliness capability is one atomic feature toggle.",
@@ -627,13 +628,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage": {
       "title": "§5.11 Storage",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Storage domain catalog: 4 atomic features all reserved (storage backend / history / replication / aligner — server-side persistence not yet implemented).",
       "caveats_bullets": [
         "R311ci audit: 0 source cfg sites; storage backend is router-side feature beyond AP MVP scope."
@@ -641,13 +642,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec": {
       "title": "§5.12 Codec",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Codec domain catalog: 14 atomic features, 10 active wired (body codecs + envelope), 3 forward-only (scout/hello/join), 1 partial (fragment wz-codecs gate only).",
       "rationale_bullets": [
         "Codec features gate wire-level encode/decode + envelope handling.",
@@ -677,13 +678,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime": {
       "title": "§5.13 Runtime",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Runtime domain catalog: 6 atomic features (2 active runtime-tokio + runtime-lwip via dep: gates, 4 reserved alternative impls).",
       "rationale_bullets": [
         "Runtime axis is mutually exclusive: pick exactly one runtime per binary deploy.",
@@ -705,13 +706,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform": {
       "title": "§5.14 Platform",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Platform domain catalog: 7 atomic features (0 active / 7 reserved) — presentation-layer labels routed by Rust target_os cfg, not Cargo features.",
       "rationale_bullets": [
         "Platform identity is governed by Rust `target_os` cfg axis, not Cargo `[features]`.",
@@ -733,13 +734,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing": {
       "title": "§5.15 Routing",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Routing domain catalog: 6 atomic features all reserved (wz-runtime-tokio is unicast client-only; peer/router/failover/routes future cascade).",
       "caveats_bullets": [
         "R311ci audit: 0 source cfg sites; routing mode dispatch not yet implemented in wz-runtime-tokio."
@@ -747,13 +748,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control": {
       "title": "§5.16 Access control",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Access control domain catalog: 6 atomic features all reserved (ACL / downsampling / extauth / quota — application policy layer not yet implemented).",
       "caveats_bullets": [
         "R311ci audit: 0 source cfg sites; access control is application-policy layer above wire spec."
@@ -761,13 +762,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-17-attachment": {
       "title": "§5.17 Attachment",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Attachment domain catalog: 2 atomic features all reserved (attachment-bytes raw + attachment-encoding-aware MIME-typed; populator gating handled by sibling domains).",
       "caveats_bullets": [
         "attachment-bytes implies population by pubsub-attachment + query-attachment (cross-domain dep)."
@@ -775,13 +776,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time": {
       "title": "§5.18 Time",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Time domain catalog: 4 atomic features all reserved (Sample timestamp gated by pubsub-timestamp; HLC clock / source selection future cascade).",
       "caveats_bullets": [
         "R311ci audit: 0 source cfg sites; wire timestamp gate lives in pubsub-timestamp (R311cc)."
@@ -789,13 +790,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding": {
       "title": "§5.19 Encoding",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Encoding domain catalog: 7 atomic features (0 active / 7 reserved per R311cg audit) — encoding is application-level schema string, no source dispatch.",
       "rationale_bullets": [
         "Encoding wire type is generic: `{packed_id, schema_len, schema}` with free-form MIME-like string.",
@@ -817,13 +818,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator": {
       "title": "§5.2 Locator",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Locator domain catalog: 9 atomic features (0 active / 9 reserved per R311ce audit) covering URI scheme variants for connection endpoint addressing.",
       "rationale_bullets": [
         "Locator URI parser maps scheme:// addresses to LinkDriver instantiation.",
@@ -845,13 +846,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting": {
       "title": "§5.3 Scouting",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Scouting domain catalog: 6 atomic features all reserved (Scout/Hello session-level flow not yet implemented; codec-scout / codec-hello forwards exist but unused).",
       "caveats_bullets": [
         "R311ci audit: 0 source cfg sites; session-level scout loop is a future cascade."
@@ -859,13 +860,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session": {
       "title": "§5.4 Session",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Session domain catalog: 9 atomic features (2 active wired in wz-runtime-tokio open-side / accept-side SCXML script-action bindings, 7 reserved declaration-only).",
       "rationale_bullets": [
         "Composable framework lens: each session capability is one atomic feature toggle (R267-R299).",
@@ -892,13 +893,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link": {
       "title": "§5.5 Link",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Link domain catalog: 5 atomic features all reserved (transport-* already gates batching/fragmentation; link-* is routing-layer abstraction not yet wired).",
       "caveats_bullets": [
         "R311ci audit: link-* overlaps transport-* (RFC §5.C link tier is higher abstraction)."
@@ -906,13 +907,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr": {
       "title": "§5.6 Keyexpr",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Keyexpr domain catalog: 8 atomic features (1 active wired keyexpr-canon module gate, 7 cluster-deferred for per-site wire-up).",
       "rationale_bullets": [
         "Keyexpr is a cluster-wide concern: matchers + canonicalize + mapping table all touch many files.",
@@ -936,13 +937,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow": {
       "title": "§5.7 Declare flow",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Declare-flow domain catalog: 7 atomic features all active wired (declare-keyexpr / -subscriber / -queryable / -token / -interest / -undeclare / -final).",
       "rationale_bullets": [
         "Declare flow gates consumer-side declare/undeclare wire surface.",
@@ -965,13 +966,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub": {
       "title": "§5.8 Pubsub",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Pubsub domain catalog: 11 atomic features (5 active wired in wz-runtime-tokio msg body + Sample projection + loopback, 6 reserved declaration-only).",
       "rationale_bullets": [
         "Composable framework lens: each pubsub capability is one atomic feature toggle (R267-R299).",
@@ -999,13 +1000,13 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query": {
       "title": "§5.9 Query",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
       "intent": "Query domain catalog: 10 atomic features (9 active wired in wz-runtime-tokio, 1 reserved query-source-info).",
       "rationale_bullets": [
         "Composable framework lens: each query capability is one atomic feature toggle.",
@@ -1029,8 +1030,7 @@
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/6-presets": {
       "title": "§6 Presets",
@@ -1042,6 +1042,7 @@
       "title": "§6.1 preset-mcu-minimal v0.1.0",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "decision_status": "active",
       "intent": "Smallest viable MCU deployment — zenoh-pico client-mode parity at minimum footprint (bare-metal + lwIP + UDP + minimal pubsub). 35 atomic features.",
       "outputs_bullets": [
         "`platform-bare-metal`",
@@ -1083,13 +1084,13 @@
       "caveats_bullets": [
         "R311bq Cargo preset-mcu-minimal에 runtime-lwip 추가 (atomic store §6.1 body의 runtime-lwip 항목과 일치)",
         "R311bq microbit Q.2 PASS spawn-less sync-only path + slim LwipUdpSocket&lt;128,2&gt;"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-2-preset-mcu-extended": {
       "title": "§6.2 preset-mcu-extended v0.1.0",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "decision_status": "active",
       "intent": "preset-mcu-minimal scope + query + liveliness + wildcards + active scouting — extended MCU deployment for richer pubsub/query workflows on bare-metal targets. 57 atomic features.",
       "outputs_bullets": [
         "`platform-bare-metal`",
@@ -1153,13 +1154,13 @@
       "caveats_bullets": [
         "R311bu body transcribed from Cargo preset-mcu-extended ground truth (line 644-702)",
         "R311bu Cargo inconsistency: runtime-lwip omitted (mcu-minimal has it); R311ca audit"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-3-preset-ap-client": {
       "title": "§6.3 preset-ap-client v0.1.0",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "decision_status": "active",
       "intent": "Linux AP deploying in client mode. Tokio executor, full pubsub + query + liveliness, TCP + UDP transports, no router-side features. 65 atomic features.",
       "outputs_bullets": [
         "`platform-linux`",
@@ -1233,13 +1234,13 @@
         "R311bv outputs aligned to Cargo preset-ap-client 65 features (line 706-772 exact order)",
         "R311bv 3 divergence: -codec-join +scouting-static +time-timestamp-source (Cargo ground truth)",
         "R311bv caveat[0] trailing artifact `&lt;/bullet&gt;&lt;/invoke&gt;` blocked by Mnemosyne API gap"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-4-preset-ap-router": {
       "title": "§6.4 preset-ap-router v0.1.0",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "decision_status": "active",
       "intent": "preset-ap-client scope + router topology + gossip + multicast — Linux AP router deploy. 78 atomic features.",
       "outputs_bullets": [
         "`platform-linux`",
@@ -1323,13 +1324,13 @@
       ],
       "caveats_bullets": [
         "R311bw body transcribed from Cargo preset-ap-router 78 features (line 776-855)"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full": {
       "title": "§6.5 preset-ap-full v0.1.0",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "decision_status": "active",
       "intent": "Kitchen-sink Linux deploy — all transport links, auth methods, encodings, storage, session extensions, attachment, advanced QoS. 131 atomic features.",
       "outputs_bullets": [
         "`platform-linux`",
@@ -1466,13 +1467,13 @@
       ],
       "caveats_bullets": [
         "R311bx body transcribed from Cargo preset-ap-full 131 features (line 861-993)"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-6-preset-zenoh-cpp": {
       "title": "§6.6 preset-zenoh-cpp v0.1.0",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "decision_status": "active",
       "intent": "Cross-feature consistency anchor matching zenoh-cpp public API. Functionally equivalent to preset-ap-full at v0.1.0; reserved as distinct preset for future API drift tracking. 119 atomic features.",
       "outputs_bullets": [
         "`platform-linux`",
@@ -1597,13 +1598,13 @@
       ],
       "caveats_bullets": [
         "R311by body transcribed from Cargo preset-zenoh-cpp 119 features (line 999-1119)"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default": {
       "title": "§6.7 preset-cortex-m4-default v0.1.0",
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/6-presets",
+      "decision_status": "active",
       "intent": "First production-shape MCU preset for Cortex-M4F (thumbv7em-none-eabihf): wz-runtime-lwip + LwipTime + full wz-codecs catalog. Composable-framework first MCU deploy contract.",
       "rationale_bullets": [
         "platform-bare-metal",
@@ -1737,8 +1738,7 @@
         "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
-      ],
-      "decision_status": "active"
+      ]
     },
     "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism": {
       "title": "§7 Cargo feature emission mechanism",
@@ -2633,6 +2633,7 @@
       "title": "§5.I.0 — Tier definitions",
       "parent_doc": "docs/rfc-sce-protocol-synthesis.md",
       "parent_section": "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
+      "decision_status": "active",
       "intent": "Spec-authoritative two-tier classification (Architectural / Peripheral) of §5.I primitives so future ratify requests auto-classify rather than relying on implicit SCE maintainer judgment.",
       "rationale_bullets": [
         "Inclusion criterion currently lives in SCE source (intrinsic_registry.rs:258), not RFC body.",
@@ -2675,8 +2676,7 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
         "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation",
         "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
-      ],
-      "decision_status": "active"
+      ]
     },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage": {
       "intent": "Codegen backend = 3-tuple (language, OS, runtime_crate); parity invariant for new kinds across six backends; statechart no_std variant.",
@@ -3008,6 +3008,7 @@
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier": {
       "title": "§5.P — Runtime services tier (wz-runtime-core)",
       "parent_doc": "docs/rfc-sce-protocol-synthesis.md",
+      "decision_status": "active",
       "intent": "High-level runtime services tier (task/mutex/time/alloc) above SCE-emitted code so wz upper layers compile against tokio (AP) and lwIP (MCU) unchanged.",
       "rationale_bullets": [
         "R227-R229 Session bundle binds std::sync::Mutex + tokio::spawn directly; lwip path blocked.",
@@ -3080,8 +3081,7 @@
         "runtime-crate--sce_link_runtime_tokio",
         "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
         "architecture--watching-zenoh"
-      ],
-      "decision_status": "active"
+      ]
     },
     "runtime-crate--sce_link_runtime_lwip-c11-header-shape": {
       "intent": "C11 runtime crate sce_link_runtime_lwip; canonical header for MCU bare_metal lwIP-driver bindings, Phase A blocker.",
@@ -3956,6 +3956,7 @@
       "title": "Build and verify",
       "parent_doc": "README.md",
       "parent_section": "watching-zenoh",
+      "decision_status": "active",
       "intent": "Build the SCE codegen binary and run six-backend Layer 1 / Layer 2 verification on SCXML sources.",
       "inputs_bullets": [
         "scripts/build-sce.sh — builds the SCE binary from the vendored submodule",
@@ -3968,26 +3969,26 @@
       "caveats_bullets": [
         "Layer 2 normalizes RFC traceability anchors (source-hash + SCE-MAP + generated-at) before body diff",
         "vendor/sce/ must be initialized via git submodule update before the first build"
-      ],
-      "decision_status": "active"
+      ]
     },
     "watching-zenoh/contributing": {
       "title": "Contributing",
       "parent_doc": "README.md",
       "parent_section": "watching-zenoh",
+      "decision_status": "active",
       "intent": "Governance rules apply equally to human and AI contributors via CLAUDE.md.",
       "caveats_bullets": [
         "Decisions land as atomic changelog Round entries",
         "Activity notes live in notes/NEXT_SESSION.md",
         "SSOT contract + atomic-store lifecycle + SPDX header policy are core to the project",
         "R275 correction: notes/NEXT_SESSION.md removed at R58; same R274 finding for current-status"
-      ],
-      "decision_status": "active"
+      ]
     },
     "watching-zenoh/current-status": {
       "title": "Current status",
       "parent_doc": "README.md",
       "parent_section": "watching-zenoh",
+      "decision_status": "active",
       "intent": "Snapshot at Round 271 (2026-05-22) of Phase A (algorithms) / B (codecs) / C (session FSM + AP runtime) / W (lwIP runtime) progress, with atomic-changelog pointer for per-round delta.",
       "rationale_bullets": [
         "Phase A (algorithm SCXML): CLOSED — 9 algorithms verified across six backends",
@@ -4000,13 +4001,13 @@
         "Per-round decisions live in docs/.atomic/workspace.atomic.json",
         "Activity log lives in notes/NEXT_SESSION.md",
         "R274 correction: notes/NEXT_SESSION.md removed at R58; activity log moved to atomic changelog"
-      ],
-      "decision_status": "active"
+      ]
     },
     "watching-zenoh/directory-layout": {
       "title": "Directory layout",
       "parent_doc": "README.md",
       "parent_section": "watching-zenoh",
+      "decision_status": "active",
       "intent": "Path-to-role map for the repository covering 5 top-level dirs (docs/, sources/, scripts/, vendor/sce/, deploy/) plus 7 crates under crates/.",
       "outputs_bullets": [
         "ARCHITECTURE.md — design entry point",
@@ -4025,26 +4026,26 @@
         "vendor/sce/ — SCE submodule, vendor pin",
         ".githooks/ — pre-commit / commit-msg / pre-push gates",
         "deploy/ — deploy.yaml skeletons (ap_standalone / mcu_target / ap_mcu_pair)"
-      ],
-      "decision_status": "active"
+      ]
     },
     "watching-zenoh/external-references": {
       "title": "External references",
       "parent_doc": "README.md",
       "parent_section": "watching-zenoh",
+      "decision_status": "active",
       "intent": "Pointers to upstream and sister projects.",
       "outputs_bullets": [
         "SCE build infrastructure: scxml-core-engine",
         "Mnemosyne atomic-store + GENERATED.md lifecycle",
         "zenoh upstream",
         "zenoh-pico upstream"
-      ],
-      "decision_status": "active"
+      ]
     },
     "watching-zenoh/license": {
       "title": "License",
       "parent_doc": "README.md",
       "parent_section": "watching-zenoh",
+      "decision_status": "active",
       "intent": "Dual-license tier overview plus SPDX header policy for author-side and generated files.",
       "rationale_bullets": [
         "LGPL-3.0-or-later for the free tier with anti-tivoization",
@@ -4060,13 +4061,13 @@
           "alternative": "Single-license",
           "reason": "rejected for upstream-stewardship and commercial flexibility"
         }
-      ],
-      "decision_status": "active"
+      ]
     },
     "watching-zenoh/local-ci-gates": {
       "title": "Local CI gates",
       "parent_doc": "README.md",
       "parent_section": "watching-zenoh",
+      "decision_status": "active",
       "intent": "Three githooks enforce validate-workspace, commit message format, and push-time re-validate via mnemosyne-cli.",
       "outputs_bullets": [
         "pre-commit — mnemosyne-cli validate-workspace (cross-ref orphan + round-trip + ledger drift gates)",
@@ -4076,20 +4077,19 @@
       "caveats_bullets": [
         "pre-commit and pre-push require mnemosyne-cli on PATH (cargo install ...)",
         "Install hooks once via git config core.hooksPath .githooks"
-      ],
-      "decision_status": "active"
+      ]
     },
     "watching-zenoh/what-it-does": {
       "title": "What it does",
       "parent_doc": "README.md",
       "parent_section": "watching-zenoh",
+      "decision_status": "active",
       "intent": "Twin output: a wire-spec subset interoperable with zenoh-pico 1.x and zenoh 1.x, plus a single-source six-backend codegen (Rust no_std / C11 / C++ / Kotlin / Go / Python) from shared SCXML.",
       "rationale_bullets": [
         "Wire subset scope pinned in docs/wire-spec-subset.md; interops with zenoh-pico 1.x + zenoh 1.x peers",
         "Same SCXML in sources/ generates Rust no_std / C11 / C++ / Kotlin / Go / Python via SCE Forge",
         "Design SSoT entry is ARCHITECTURE.md; 12 spec docs under docs/ governed by Mnemosyne lifecycle"
-      ],
-      "decision_status": "active"
+      ]
     },
     "wire-spec-subset--watching-zenoh-mvp": {
       "intent": "Enumeration of Zenoh 1.x wire-protocol types into MVP/Deferred/Permanent classes mapped to RFC sec 5 SCE kinds.",
@@ -25667,6 +25667,50 @@
         "Query-migration cascade final leg: R311dz observer.rs ApplicationLayerObserver -> wz-session-core (combines the six per-domain registries -- subscribers / queryables / remote_subscribers / remote_queryables / liveliness / replies -- plus the queryable pending-reply / pending-final staging). Then a shell-collapse round if any double-hops remain.",
         "wz-runtime-tokio arbitrary-composition residual unchanged: session.rs + observer.rs still unconditionally compile + import codec-gated types; closes as observer/session migrate (observer is R311dz).",
         "DP1/DP2/DP3 user calls unchanged (--no-default-features/SCE alloc-off gap; facade thin-vs-full removal; session_glue.rs + session.rs monster-file split)."
+      ]
+    },
+    "Round 311dz": {
+      "decision_summary": "R311dz moves ApplicationLayerObserver into wz-session-core; the queryables field now gates on query-queryable, so a codec-declare-on/query-queryable-off subset composes the observer.",
+      "changes_bullets": [
+        "observer.rs (650 LOC) lifted from wz-runtime-tokio to wz-session-core::observer; wz-runtime-tokio/src/observer.rs reduced to a re-export shell (ApplicationLayerObserver). Module gated on all(alloc, codec-declare) since the liveliness_subscribers field type lives under the codec-declare-gated declare module. Import rewrites: crate::declare::* -> crate::declare::{liveliness,subscriber,queryable,liveliness_subscriber}; crate::session_glue::IterationEvent -> crate::driver_loop; wz_session_core::response_sink -> crate::response_sink; module-body alloc::vec::Vec.",
+        "queryables field + new() init + import gated on query-queryable (pre-R311dz the AP crate left it type-ungated, which forced codec-request). The AP query-reply gate on the reply-dispatch arm + peer_table union retranslates to any(codec-response, codec-response-final) since ReplyRegistry::dispatch_iteration_event is always-compiled and no-ops without the response codec.",
+        "session.rs Queryable::undeclare + Drop observer.queryables.unregister access gated on query-queryable (off-branch returns false / no-op; declare_queryable already returns Err(FeatureDisabled) when off so no Queryable is ever constructed). Observer test-module declare imports gated on declare-subscriber so the C1d pubsub lane build stays unused-import clean.",
+        "New wz-session-core gate-only features declare-subscriber / declare-queryable / liveliness-token / liveliness-subscriber (standalone, mirror the existing query-queryable shape); wz-runtime-tokio forwards its same-named features to them.",
+        "New Layer C1g (scripts/run-ci.sh + .github/workflows/ci.yml + header docs) runs the migrated observer test module under the full fan-out union AND adds a composability build of the codec-declare-on/query-queryable-off subset (queryable slot elided) -- the arbitrary-subset class the maximal-preset C1c-f tests never exercise."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b/C1c/C1d/C1e/C1f/C1g/C2/C3/D/E); C1g runs 6 migrated observer tests green plus builds the codec-declare-on/query-queryable-off composability subset. Layer G MCU cross-compile pass across all 7 thumb targets (G.1-G.6 OK each).",
+        "New composability subset proven impossible-before-now: cargo build -p wz-session-core --no-default-features with codec-declare on but query-queryable off = 0 errors (observer composes with the queryables slot elided); the pre-move AP observer had an ungated QueryableRegistry import that forced codec-request.",
+        "AP-preset composability guard held: cargo build -p wz --no-default-features --features preset-ap-client = 0 errors (C3). cargo fmt --check clean; wz-runtime-tokio default build resolves the observer shell; wz-ap-demo (the observer.dispatch caller) builds clean."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "Query-migration cascade observer leg COMPLETE (query R311dx / reply R311dy / observer R311dz all hosted in wz-session-core). The still-owed arbitrary-subset CI lane is now seeded by C1g's codec-declare-on/query-queryable-off build; extend to further coherent subsets next.",
+        "wz-runtime-tokio arbitrary-composition residual now isolated to session.rs + session_glue.rs (the unmigrated tokio actions monster): they still unconditionally compile + import codec-gated types; closes if/when SessionLinkActions migrates (DP3 territory).",
+        "DP1/DP2/DP3 user calls unchanged (--no-default-features / SCE alloc-off gap; facade thin-vs-full removal; session_glue.rs + session.rs monster-file split)."
+      ],
+      "publishable_decision_summary": "R311dz moves ApplicationLayerObserver into wz-session-core; the queryables field now gates on query-queryable, so a codec-declare-on/query-queryable-off subset composes the observer.",
+      "publishable_changes_bullets": [
+        "observer.rs (650 LOC) lifted from wz-runtime-tokio to wz-session-core::observer; wz-runtime-tokio/src/observer.rs reduced to a re-export shell (ApplicationLayerObserver). Module gated on all(alloc, codec-declare) since the liveliness_subscribers field type lives under the codec-declare-gated declare module. Import rewrites: crate::declare::* -> crate::declare::{liveliness,subscriber,queryable,liveliness_subscriber}; crate::session_glue::IterationEvent -> crate::driver_loop; wz_session_core::response_sink -> crate::response_sink; module-body alloc::vec::Vec.",
+        "queryables field + new() init + import gated on query-queryable (pre-R311dz the AP crate left it type-ungated, which forced codec-request). The AP query-reply gate on the reply-dispatch arm + peer_table union retranslates to any(codec-response, codec-response-final) since ReplyRegistry::dispatch_iteration_event is always-compiled and no-ops without the response codec.",
+        "session.rs Queryable::undeclare + Drop observer.queryables.unregister access gated on query-queryable (off-branch returns false / no-op; declare_queryable already returns Err(FeatureDisabled) when off so no Queryable is ever constructed). Observer test-module declare imports gated on declare-subscriber so the C1d pubsub lane build stays unused-import clean.",
+        "New wz-session-core gate-only features declare-subscriber / declare-queryable / liveliness-token / liveliness-subscriber (standalone, mirror the existing query-queryable shape); wz-runtime-tokio forwards its same-named features to them.",
+        "New Layer C1g (scripts/run-ci.sh + .github/workflows/ci.yml + header docs) runs the migrated observer test module under the full fan-out union AND adds a composability build of the codec-declare-on/query-queryable-off subset (queryable slot elided) -- the arbitrary-subset class the maximal-preset C1c-f tests never exercise."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b/C1c/C1d/C1e/C1f/C1g/C2/C3/D/E); C1g runs 6 migrated observer tests green plus builds the codec-declare-on/query-queryable-off composability subset. Layer G MCU cross-compile pass across all 7 thumb targets (G.1-G.6 OK each).",
+        "New composability subset proven impossible-before-now: cargo build -p wz-session-core --no-default-features with codec-declare on but query-queryable off = 0 errors (observer composes with the queryables slot elided); the pre-move AP observer had an ungated QueryableRegistry import that forced codec-request.",
+        "AP-preset composability guard held: cargo build -p wz --no-default-features --features preset-ap-client = 0 errors (C3). cargo fmt --check clean; wz-runtime-tokio default build resolves the observer shell; wz-ap-demo (the observer.dispatch caller) builds clean."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Query-migration cascade observer leg COMPLETE (query R311dx / reply R311dy / observer R311dz all hosted in wz-session-core). The still-owed arbitrary-subset CI lane is now seeded by C1g's codec-declare-on/query-queryable-off build; extend to further coherent subsets next.",
+        "wz-runtime-tokio arbitrary-composition residual now isolated to session.rs + session_glue.rs (the unmigrated tokio actions monster): they still unconditionally compile + import codec-gated types; closes if/when SessionLinkActions migrates (DP3 territory).",
+        "DP1/DP2/DP3 user calls unchanged (--no-default-features / SCE alloc-off gap; facade thin-vs-full removal; session_glue.rs + session.rs monster-file split)."
       ]
     },
     "Round 311dz-pre": {
