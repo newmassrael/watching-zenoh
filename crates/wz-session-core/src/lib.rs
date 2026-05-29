@@ -172,3 +172,18 @@ pub mod query;
 /// alloc-bound `crate::query::QueryResponder`.
 #[cfg(feature = "alloc")]
 pub mod query_event;
+
+/// R311dy — application-layer reply registry (`ReplyRegistry` +
+/// `InboundReply` / `InboundReplyBody` / `ReplyHandle` / `ReplyCallback`
+/// / `FinalCallback`): the z_get-side mirror of `query`, routing inbound
+/// `Response(Reply|Err)` + `ResponseFinal` records to per-rid callbacks.
+/// Lifted from `wz-runtime-tokio::reply`. Unlike the queryable registry,
+/// `ReplyRegistry` stays always-compiled (alloc-gated): its loopback
+/// delivery (`deliver_local_reply` / `deliver_local_final`) + timeout
+/// sweep (`sweep_timed_out`) are codec-agnostic, so only the wire
+/// dispatch (`dispatch_response` / `resolve_wireexpr`) gates on
+/// `codec-response` (and `dispatch_response_final` on
+/// `codec-response-final`); the `From<QueryReply>` loopback bridge gates
+/// on `query-queryable`. Mirrors the `SubscriberRegistry` shape.
+#[cfg(feature = "alloc")]
+pub mod reply;
