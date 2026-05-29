@@ -25888,6 +25888,44 @@
         "DP1/DP2/DP3 user calls unchanged."
       ]
     },
+    "Round 311ec": {
+      "decision_summary": "R311ec extracts QoS value types Priority + CongestionControl from session_glue to wz-session-core::qos (no_std/no_alloc) -- first DP3 leaf out of session_glue.rs.",
+      "changes_bullets": [
+        "New wz-session-core::qos module (unconditional, no_std + no_alloc; mirrors reliability): Priority (8-level z_priority_t mirror, const wire_byte) + CongestionControl (z_congestion_control_t mirror, const wire_bit). The pure-enum wire-value test moved with the types.",
+        "session_glue.rs Priority/CongestionControl definitions (the only two QoS packed-byte enums not already migrated, alongside Reliability/ConsolidationMode) replaced by pub use wz_session_core::qos::{CongestionControl, Priority}; the RequestQueryBuilder::request_qos_typed callsite + its builder-composition test stay and resolve via the re-export.",
+        "First DP3 leaf: begins the session_glue.rs runtime-agnostic extraction (the SessionLinkActions/session split frontier). session_glue is ~11k LOC but only ~16 tokio/await sites, so the bulk is movable leaf-first; this round takes the smallest pure-value-type leaf."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b..C1h/C2/C3/C4/D/E) EXIT 0; Layer G MCU cross-compile pass (all 7 thumb targets) EXIT 0 -- qos is no_std/no_alloc so it cross-compiles into every MCU profile.",
+        "wz-session-core qos test (priority/congestion wire values) green under the base test run; runtime-tokio default build + the RequestQueryBuilder qos-composition test resolve Priority/CongestionControl via the re-export unchanged."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "DP3 cascade started (R311ec = first leaf). Next session_glue leaves to scout: SigningKey/SigningKeyTooShort, CloseReason, ExtChainRole, SessionInitParams, PeerInitCaps, RequestQueryBuilder (builder cluster, like response_build). SessionLinkActions + the Lua/tokio glue + install_session_actions stay in wz-runtime-tokio (AP-only by spec).",
+        "The tokio-coupling is thin (~16 await sites) -- confirm per-leaf that a candidate is runtime-agnostic before moving (some touch tokio channels/Runtime/std::io).",
+        "DP1/DP2 user calls unchanged."
+      ],
+      "publishable_decision_summary": "R311ec extracts QoS value types Priority + CongestionControl from session_glue to wz-session-core::qos (no_std/no_alloc) -- first DP3 leaf out of session_glue.rs.",
+      "publishable_changes_bullets": [
+        "New wz-session-core::qos module (unconditional, no_std + no_alloc; mirrors reliability): Priority (8-level z_priority_t mirror, const wire_byte) + CongestionControl (z_congestion_control_t mirror, const wire_bit). The pure-enum wire-value test moved with the types.",
+        "session_glue.rs Priority/CongestionControl definitions (the only two QoS packed-byte enums not already migrated, alongside Reliability/ConsolidationMode) replaced by pub use wz_session_core::qos::{CongestionControl, Priority}; the RequestQueryBuilder::request_qos_typed callsite + its builder-composition test stay and resolve via the re-export.",
+        "First DP3 leaf: begins the session_glue.rs runtime-agnostic extraction (the SessionLinkActions/session split frontier). session_glue is ~11k LOC but only ~16 tokio/await sites, so the bulk is movable leaf-first; this round takes the smallest pure-value-type leaf."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b..C1h/C2/C3/C4/D/E) EXIT 0; Layer G MCU cross-compile pass (all 7 thumb targets) EXIT 0 -- qos is no_std/no_alloc so it cross-compiles into every MCU profile.",
+        "wz-session-core qos test (priority/congestion wire values) green under the base test run; runtime-tokio default build + the RequestQueryBuilder qos-composition test resolve Priority/CongestionControl via the re-export unchanged."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "DP3 cascade started (R311ec = first leaf). Next session_glue leaves to scout: SigningKey/SigningKeyTooShort, CloseReason, ExtChainRole, SessionInitParams, PeerInitCaps, RequestQueryBuilder (builder cluster, like response_build). SessionLinkActions + the Lua/tokio glue + install_session_actions stay in wz-runtime-tokio (AP-only by spec).",
+        "The tokio-coupling is thin (~16 await sites) -- confirm per-leaf that a candidate is runtime-agnostic before moving (some touch tokio channels/Runtime/std::io).",
+        "DP1/DP2 user calls unchanged."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [
