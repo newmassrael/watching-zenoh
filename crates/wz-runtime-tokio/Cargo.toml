@@ -297,7 +297,11 @@ transport-link-tcp = []
 transport-link-udp = []
 transport-unicast = []
 transport-keepalive = []
-transport-batching = []
+# R311eg — forward to the wz-session-core same-named gate so the migrated
+# PeerInitCaps::from_init_syn decoder honors the peer-advertised batch_size
+# consistently (off clamps to full MTU). The min(peer, local) reduction at
+# the OpenAck arm stays gated in this crate.
+transport-batching = ["wz-session-core/transport-batching"]
 # R311cc — pubsub domain wire-up. 5 atomic features that have real
 # source behavior in this crate (Cargo.toml authoring intent: "11
 # atomic, 5 active / 6 reserved"). Each gates a concrete cfg site:

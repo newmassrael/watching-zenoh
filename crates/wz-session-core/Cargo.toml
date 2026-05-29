@@ -103,6 +103,14 @@ declare-queryable = []
 liveliness-token = []
 liveliness-subscriber = []
 
+# R311eg — transport-batching gate for the migrated PeerInitCaps decoder
+# (`wz-session-core::peer_init_caps`). Standalone gate-only (no wz-codecs
+# forward): off forces `from_init_syn` to clamp the peer-advertised
+# batch_size to the full MTU (65535) instead of honoring it. The
+# wz-runtime-tokio side forwards its same-named feature here so the INIT
+# handshake batch-size negotiation semantics stay consistent workspace-wide.
+transport-batching = []
+
 [dependencies]
 wz-runtime-core = { path = "../wz-runtime-core" }
 # R311di-4 — wz-codecs needed by sample.rs for `wz_codecs::ext_entry`

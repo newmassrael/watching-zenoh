@@ -81,6 +81,14 @@ pub mod ext_chain_role;
 /// slot + the `trace_snapshot` accessor stay in the tokio crate.
 pub mod action_trace;
 
+/// R311eg — peer-advertised InitSyn capability snapshot (`PeerInitCaps`,
+/// three integer fields + a `from_init_syn` decoder). Pure no_std +
+/// no_alloc; unconditional. DP3 leaf lifted from
+/// `wz-runtime-tokio::session_glue`; the decoder's `transport-batching`
+/// gate moves here (the live `R::Mutex<Option<PeerInitCaps>>` slot stays
+/// in the tokio crate).
+pub mod peer_init_caps;
+
 /// Link-layer value types (TxFrame / RxFrame / LinkEvent / LostCause).
 /// RxFrame carries Vec<u8> so the module is alloc-gated. The
 /// LinkDriver trait + concrete TcpDriver/UdpDriver impls remain in
