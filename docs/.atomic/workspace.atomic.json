@@ -25669,6 +25669,48 @@
         "DP1/DP2/DP3 user calls unchanged (--no-default-features/SCE alloc-off gap; facade thin-vs-full removal; session_glue.rs + session.rs monster-file split)."
       ]
     },
+    "Round 311dz-pre": {
+      "decision_summary": "R311dz-pre adds a ResponseSink IoC trait in wz-session-core; SessionLinkActions impls it and the observer flush_pending/dispatch go generic over it, decoupling the observer from the tokio session_glue actions.",
+      "changes_bullets": [
+        "New wz-session-core::response_sink module: ResponseSink trait (always-nameable; send_response gated codec-response, send_response_final gated codec-response-final) + blanket impls for &S and alloc::sync::Arc<S> (smart-pointer transparency so Arc-shared / borrowed actions satisfy the bound without unwrapping). lib.rs gates the module on alloc.",
+        "wz-runtime-tokio::session_glue: impl<R: Runtime, T: TimeSource> ResponseSink for SessionLinkActions<R, T> delegating to the existing inherent send_response / send_response_final (inherent shadows trait in method-call resolution, so no recursion).",
+        "wz-runtime-tokio::observer: ApplicationLayerObserver::flush_pending + dispatch reparametrised from <R: Runtime, T: TimeSource>(&SessionLinkActions<R, T>) to <S: ResponseSink>(&S); now-unused SessionLinkActions / Runtime / TimeSource imports dropped. This inverts the observer's only hard dependency on session_glue, the precursor to migrating the observer into wz-session-core (R311dz), which is otherwise blocked because SessionLinkActions lives in the unmigrated 10912-LOC session_glue.rs.",
+        "Call sites unchanged: wz-ap-demo runner.rs observer.dispatch(event, &actions) resolves S via the Arc blanket impl by inference."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b/C1c/C1d/C1e/C1f/C2/C3/D/E); Layer E TCP-loopback integration exercises the observer.dispatch -> ResponseSink::send_response -> inherent delegation path (no recursion). Layer G MCU cross-compile pass (G.6 riscv32 cross-real SKIP).",
+        "6 observer unit tests + 2 session_glue send_response tests pass; wz-ap-demo (the deref-coercion-dependent caller) builds clean after the Arc blanket impl. session-core response_sink subsets (alloc / +codec-response / +codec-response-final) build with zero deny-warnings.",
+        "AP-preset composability guard held: cargo build -p wz --no-default-features --features preset-ap-client = 0 errors. cargo fmt --check clean."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311dz proper: now that the observer depends only on the ResponseSink trait (not the concrete SessionLinkActions), migrate ApplicationLayerObserver into wz-session-core. Requires gating the observer struct fields per their registry gates -- notably queryables: QueryableRegistry must gate on codec-request (R311dx made QueryableRegistry codec-request-gated) -- plus the declare-* / liveliness-* / query-* dispatch arm gates already present. Leave a re-export shell in wz-runtime-tokio.",
+        "Eventual session_glue.rs migration (DP3 territory) can later move SessionLinkActions itself into a runtime-agnostic home; ResponseSink stays the observer-facing contract regardless.",
+        "DP1/DP2/DP3 user calls unchanged."
+      ],
+      "publishable_decision_summary": "R311dz-pre adds a ResponseSink IoC trait in wz-session-core; SessionLinkActions impls it and the observer flush_pending/dispatch go generic over it, decoupling the observer from the tokio session_glue actions.",
+      "publishable_changes_bullets": [
+        "New wz-session-core::response_sink module: ResponseSink trait (always-nameable; send_response gated codec-response, send_response_final gated codec-response-final) + blanket impls for &S and alloc::sync::Arc<S> (smart-pointer transparency so Arc-shared / borrowed actions satisfy the bound without unwrapping). lib.rs gates the module on alloc.",
+        "wz-runtime-tokio::session_glue: impl<R: Runtime, T: TimeSource> ResponseSink for SessionLinkActions<R, T> delegating to the existing inherent send_response / send_response_final (inherent shadows trait in method-call resolution, so no recursion).",
+        "wz-runtime-tokio::observer: ApplicationLayerObserver::flush_pending + dispatch reparametrised from <R: Runtime, T: TimeSource>(&SessionLinkActions<R, T>) to <S: ResponseSink>(&S); now-unused SessionLinkActions / Runtime / TimeSource imports dropped. This inverts the observer's only hard dependency on session_glue, the precursor to migrating the observer into wz-session-core (R311dz), which is otherwise blocked because SessionLinkActions lives in the unmigrated 10912-LOC session_glue.rs.",
+        "Call sites unchanged: wz-ap-demo runner.rs observer.dispatch(event, &actions) resolves S via the Arc blanket impl by inference."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b/C1c/C1d/C1e/C1f/C2/C3/D/E); Layer E TCP-loopback integration exercises the observer.dispatch -> ResponseSink::send_response -> inherent delegation path (no recursion). Layer G MCU cross-compile pass (G.6 riscv32 cross-real SKIP).",
+        "6 observer unit tests + 2 session_glue send_response tests pass; wz-ap-demo (the deref-coercion-dependent caller) builds clean after the Arc blanket impl. session-core response_sink subsets (alloc / +codec-response / +codec-response-final) build with zero deny-warnings.",
+        "AP-preset composability guard held: cargo build -p wz --no-default-features --features preset-ap-client = 0 errors. cargo fmt --check clean."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311dz proper: now that the observer depends only on the ResponseSink trait (not the concrete SessionLinkActions), migrate ApplicationLayerObserver into wz-session-core. Requires gating the observer struct fields per their registry gates -- notably queryables: QueryableRegistry must gate on codec-request (R311dx made QueryableRegistry codec-request-gated) -- plus the declare-* / liveliness-* / query-* dispatch arm gates already present. Leave a re-export shell in wz-runtime-tokio.",
+        "Eventual session_glue.rs migration (DP3 territory) can later move SessionLinkActions itself into a runtime-agnostic home; ResponseSink stays the observer-facing contract regardless.",
+        "DP1/DP2/DP3 user calls unchanged."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [

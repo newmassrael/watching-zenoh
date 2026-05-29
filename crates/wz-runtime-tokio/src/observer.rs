@@ -120,8 +120,16 @@ use crate::query::{QueryReply, QueryableRegistry};
 // path are the z_get callbacks, which only exist when the get-side
 // codec features are in).
 use crate::reply::ReplyRegistry;
-use crate::session_glue::{IterationEvent, SessionLinkActions};
-use wz_runtime_core::{Runtime, TimeSource};
+use crate::session_glue::IterationEvent;
+// R311dz-pre — the actions-drain phase (`flush_pending` / `dispatch`) is
+// now generic over the `ResponseSink` IoC trait rather than the concrete
+// tokio `SessionLinkActions<R, T>`. This decouples the observer from the
+// tokio actions layer (`session_glue`), the precursor to migrating the
+// observer itself into wz-session-core. `SessionLinkActions` impls
+// `ResponseSink` so existing call sites (`observer.dispatch(event,
+// &actions)`) resolve `S = SessionLinkActions<R, T>` by inference,
+// unchanged.
+use wz_session_core::response_sink::ResponseSink;
 
 /// Six-registry application-layer dispatch bundle. See module-level
 /// docs for the rationale and dispatch flow.
@@ -302,7 +310,7 @@ impl ApplicationLayerObserver {
     /// enqueue synchronously onto the OutboundWriteDriver mpsc
     /// channel, so the wire order mirrors enqueue order: every
     /// Reply for rid R precedes the matching ResponseFinal for R.
-    pub fn flush_pending<R: Runtime, T: TimeSource>(&mut self, actions: &SessionLinkActions<R, T>) {
+    pub fn flush_pending<S: ResponseSink>(&mut self, actions: &S) {
         #[cfg(feature = "query-queryable")]
         {
             for reply in self.pending_replies.drain(..) {
@@ -327,11 +335,7 @@ impl ApplicationLayerObserver {
     /// inside the `drive_session_until_terminal` observer closure.
     /// Equivalent to `dispatch_event(event)` followed by
     /// `flush_pending(actions)`.
-    pub fn dispatch<R: Runtime, T: TimeSource>(
-        &mut self,
-        event: IterationEvent<'_>,
-        actions: &SessionLinkActions<R, T>,
-    ) {
+    pub fn dispatch<S: ResponseSink>(&mut self, event: IterationEvent<'_>, actions: &S) {
         self.dispatch_event(event);
         self.flush_pending(actions);
     }
