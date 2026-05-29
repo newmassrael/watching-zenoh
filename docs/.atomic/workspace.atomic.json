@@ -25627,6 +25627,48 @@
         "DP1/DP2/DP3 user calls unchanged (--no-default-features/SCE alloc-off gap; facade thin-vs-full removal; session_glue.rs + session.rs monster-file split)."
       ]
     },
+    "Round 311dy": {
+      "decision_summary": "R311dy lifts ReplyRegistry to wz-session-core; the registry stays always-compiled (codec-agnostic loopback), only the wire dispatch gates on codec-response / codec-response-final.",
+      "changes_bullets": [
+        "reply.rs (1608 LOC) lifted from wz-runtime-tokio to wz-session-core::reply; wz-runtime-tokio/src/reply.rs reduced to a re-export shell (FinalCallback / InboundReply / InboundReplyBody / ReplyCallback / ReplyHandle / ReplyRegistry). Import rewrites: crate::session_glue -> crate::{driver_loop,network_message}; module-body alloc prelude (Box/String/Vec; ToString gated codec-response).",
+        "ReplyRegistry stays always-compiled (alloc) -- mirror of SubscriberRegistry, since deliver_local_reply / deliver_local_final / sweep_timed_out are codec-agnostic loopback paths that keep the Pending fields alive. Only dispatch_response + the local resolve_wireexpr gate on codec-response, dispatch_response_final on codec-response-final, the From<QueryReply> bridge on query-queryable. No new wz-session-core features needed (all five already exist).",
+        "Subset-composability fixes exposed by session-core arbitrary-build linting: wz_codecs::reply::ReplyOwnedVariant import regated to all(codec-response, any(pubsub-put,pubsub-delete)) (named only by the Put/Del body arms); dispatch_messages peer_keyexpr_table silencer regated to not(codec-response) and the dispatch loop gated on any(codec-response,codec-response-final) so a neither-codec build is a clean no-op (no clippy single-pattern match), signature unchanged (R311g1).",
+        "New Layer C1f (scripts/run-ci.sh + .github/workflows/ci.yml) runs the migrated reply test module under the reply dispatch union (codec-push + codec-response + codec-response-final + pubsub-put + pubsub-delete + query-queryable); codec-push pairs with pubsub-put/delete for the pubsub dispatch path. Mirrors the C1c/C1d/C1e explicit-coverage precedent."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b/C1c/C1d/C1e/C1f/C2/C3/D/E); C1f runs 31 migrated reply tests green (incl the 3 query-queryable From<QueryReply> loopback tests). Layer G MCU cross-compile pass across thumbv8m.base/main/main-eabihf + riscv32imac (G.6 riscv32 cross-real SKIP, host gcc absent).",
+        "wz-session-core reply subset sweep clean under [workspace.lints] deny-warnings: alloc-only / codec-response / codec-response-final / full reply union all build with zero warnings (codec-response-OFF subset keeps the loopback-only registry). cargo clippy -p wz-session-core --all-targets (reply union) clean.",
+        "AP-preset composability guard held: cargo build -p wz --no-default-features --features preset-ap-client = 0 errors. cargo fmt --check clean; wz-runtime-tokio default build resolves the reply shell."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "Query-migration cascade final leg: R311dz observer.rs ApplicationLayerObserver -> wz-session-core (combines the six per-domain registries -- subscribers / queryables / remote_subscribers / remote_queryables / liveliness / replies -- plus the queryable pending-reply / pending-final staging). Then a shell-collapse round if any double-hops remain.",
+        "wz-runtime-tokio arbitrary-composition residual unchanged: session.rs + observer.rs still unconditionally compile + import codec-gated types; closes as observer/session migrate (observer is R311dz).",
+        "DP1/DP2/DP3 user calls unchanged (--no-default-features/SCE alloc-off gap; facade thin-vs-full removal; session_glue.rs + session.rs monster-file split)."
+      ],
+      "publishable_decision_summary": "R311dy lifts ReplyRegistry to wz-session-core; the registry stays always-compiled (codec-agnostic loopback), only the wire dispatch gates on codec-response / codec-response-final.",
+      "publishable_changes_bullets": [
+        "reply.rs (1608 LOC) lifted from wz-runtime-tokio to wz-session-core::reply; wz-runtime-tokio/src/reply.rs reduced to a re-export shell (FinalCallback / InboundReply / InboundReplyBody / ReplyCallback / ReplyHandle / ReplyRegistry). Import rewrites: crate::session_glue -> crate::{driver_loop,network_message}; module-body alloc prelude (Box/String/Vec; ToString gated codec-response).",
+        "ReplyRegistry stays always-compiled (alloc) -- mirror of SubscriberRegistry, since deliver_local_reply / deliver_local_final / sweep_timed_out are codec-agnostic loopback paths that keep the Pending fields alive. Only dispatch_response + the local resolve_wireexpr gate on codec-response, dispatch_response_final on codec-response-final, the From<QueryReply> bridge on query-queryable. No new wz-session-core features needed (all five already exist).",
+        "Subset-composability fixes exposed by session-core arbitrary-build linting: wz_codecs::reply::ReplyOwnedVariant import regated to all(codec-response, any(pubsub-put,pubsub-delete)) (named only by the Put/Del body arms); dispatch_messages peer_keyexpr_table silencer regated to not(codec-response) and the dispatch loop gated on any(codec-response,codec-response-final) so a neither-codec build is a clean no-op (no clippy single-pattern match), signature unchanged (R311g1).",
+        "New Layer C1f (scripts/run-ci.sh + .github/workflows/ci.yml) runs the migrated reply test module under the reply dispatch union (codec-push + codec-response + codec-response-final + pubsub-put + pubsub-delete + query-queryable); codec-push pairs with pubsub-put/delete for the pubsub dispatch path. Mirrors the C1c/C1d/C1e explicit-coverage precedent."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b/C1c/C1d/C1e/C1f/C2/C3/D/E); C1f runs 31 migrated reply tests green (incl the 3 query-queryable From<QueryReply> loopback tests). Layer G MCU cross-compile pass across thumbv8m.base/main/main-eabihf + riscv32imac (G.6 riscv32 cross-real SKIP, host gcc absent).",
+        "wz-session-core reply subset sweep clean under [workspace.lints] deny-warnings: alloc-only / codec-response / codec-response-final / full reply union all build with zero warnings (codec-response-OFF subset keeps the loopback-only registry). cargo clippy -p wz-session-core --all-targets (reply union) clean.",
+        "AP-preset composability guard held: cargo build -p wz --no-default-features --features preset-ap-client = 0 errors. cargo fmt --check clean; wz-runtime-tokio default build resolves the reply shell."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Query-migration cascade final leg: R311dz observer.rs ApplicationLayerObserver -> wz-session-core (combines the six per-domain registries -- subscribers / queryables / remote_subscribers / remote_queryables / liveliness / replies -- plus the queryable pending-reply / pending-final staging). Then a shell-collapse round if any double-hops remain.",
+        "wz-runtime-tokio arbitrary-composition residual unchanged: session.rs + observer.rs still unconditionally compile + import codec-gated types; closes as observer/session migrate (observer is R311dz).",
+        "DP1/DP2/DP3 user calls unchanged (--no-default-features/SCE alloc-off gap; facade thin-vs-full removal; session_glue.rs + session.rs monster-file split)."
+      ]
+    },
     "Round 311e": {
       "decision_summary": "R311e codec-response-final cascade — wz-codecs gate + 9 session_glue cfg sites (import, N_MID, NetworkMessage variant, parse arm, encode_frame_with_*, send/build helpers, tests).",
       "changes_bullets": [
