@@ -66,6 +66,14 @@ pub mod qos;
 /// tokio crate next to the rest of the Close path.
 pub mod close_reason;
 
+/// R311ee — per-role ext-chain dispatch discriminator (`ExtChainRole`,
+/// a four-variant `Copy` enum for the InitSyn/InitAck/OpenSyn/OpenAck
+/// negotiation frames). Pure no_std + no_alloc; unconditional. DP3 leaf
+/// lifted from `wz-runtime-tokio::session_glue`; the per-role slot
+/// storage + encoder read path stay in the tokio crate (they hold an
+/// `R::Mutex`).
+pub mod ext_chain_role;
+
 /// Link-layer value types (TxFrame / RxFrame / LinkEvent / LostCause).
 /// RxFrame carries Vec<u8> so the module is alloc-gated. The
 /// LinkDriver trait + concrete TcpDriver/UdpDriver impls remain in

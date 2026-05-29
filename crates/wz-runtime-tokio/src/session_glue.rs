@@ -502,21 +502,8 @@ impl<D: LinkDriver + Send + 'static> BoxedLinkDriver for TokioLinkDriverAdapter<
     }
 }
 
-/// Outbound transport-message variant for ext-chain dispatch.
-///
-/// R68b plumbing: 4 negotiation-relevant frame roles each carry
-/// their own ext chain (session-fsm §7 — QoS / QoSLink / Auth /
-/// MultiLink / LowLatency). The encoder reads the appropriate
-/// slot via `SessionLinkActions::ext_chain_for` so per-deploy
-/// negotiation policy can stage distinct chains per role without
-/// growing the `SessionInitParams` struct.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExtChainRole {
-    InitSyn,
-    InitAck,
-    OpenSyn,
-    OpenAck,
-}
+// R311ee — ExtChainRole moved to wz-session-core::ext_chain_role.
+pub use wz_session_core::ext_chain_role::ExtChainRole;
 
 // R311di-10 — SendDeclareError moved to wz-session-core::send_declare_error.
 pub use wz_session_core::send_declare_error::SendDeclareError;
