@@ -34,11 +34,15 @@
 
 ### 3. Body
 - One blank line after subject
-- Bullet points (- prefix) only
-- **1-3 items** - focus on key changes (fewer is better)
-- **One bullet = one line, max 72 characters total (incl. "- " prefix)**
+- Bullet points (`- ` prefix) only — no prose lead paragraph
+- Bullets must be **contiguous** — no blank line between bullets
+- **1-3 items** — focus on key changes (fewer is better)
+- The `commit-msg` hook enforces bullet-only + contiguity + the 1-3
+  cap (a prose body line, a blank line between bullets, or a 4th
+  bullet is rejected, not just discouraged)
+- **One bullet = one line, max 72 bytes total (incl. `- ` prefix)**
   - No continuation / indented wrap lines. If a bullet does not fit in
-    72 chars, rewrite it tighter or split into a separate bullet.
+    72 bytes, rewrite it tighter or split into a separate bullet.
   - Verify with: `git log -1 --format=%B | awk '{print length, $0}'`
 - Be specific and technical
 - Reference RFC sections in `§N.M` form (e.g., §5.O, §6.2.6, §5.J.2)
@@ -46,7 +50,19 @@
 - Reference SCE land via 8-char commit SHA when catching up upstream
 
 ### 4. Style
-- **No emojis**
+- **English only** — subject and body must be written in English so the
+  log stays accessible to every collaborator. ASCII printable (U+0020 to
+  U+007E) plus the typographic whitelist below are the only permitted
+  code points; any character outside this set (Hangul, Kana, CJK
+  ideographs, Cyrillic, Greek, etc.) is rejected by the commit-msg hook.
+  - Typographic whitelist: `§` (U+00A7), `–` (en-dash U+2013), `—`
+    (em-dash U+2014), `•` (bullet U+2022), `…` (ellipsis U+2026), `→`
+    (rightwards arrow U+2192). These are the only non-ASCII code points
+    the hook lets through.
+  - Korean round summaries / progress notes belong in auto-memory under
+    `memory/` or the project's narrative docs, never in the commit message.
+- **No emojis** (Unicode pictograph ranges U+1F300-U+1FAFF and
+  U+1F1E6-U+1F1FF are rejected; the typographic symbols above are allowed)
 - **No "Generated with Claude Code"**
 - **No "Co-Authored-By" tags**
 - Professional and technical tone
