@@ -3705,6 +3705,11 @@
         "accept_rate_window (1s) / accepting_inactivity_timeout (1s)",
         "cookie_hmac_lifetime (30s) / cookie_hmac_key_rotation (1h, old key honored one extra lifetime)"
       ],
+      "caveats_bullets": [
+        "R311fa: handshake send-delay timers fire only when the open loop pumps Engine::tick (50ms cadence).",
+        "R311fa: per-phase timeout transitions are child-scoped; SCE never auto-cancels a stale delayed send.",
+        "R311fa: pre-Established Closing(generic) maps to OpenError::HandshakeTimeout (peer Close count 0)."
+      ],
       "impact_scope": [
         "session-fsm--prose-level-sketch",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
@@ -26924,6 +26929,52 @@
         "Future R-fragment-reassembly: when wz starts emitting/decoding multi-Frame fragment chains, add the session_glue.rs cfg sites (InboundFrame::Fragment variant, parse arm, reassembly state machine).",
         "Architectural carries unchanged: R267 Session<R,T> reparam, R284 uniform Established gate, R283 peer Interest bilateral, R301 §8 SCE cross-repo, Q_B/Q_E codec slots, Phase W full lwIP, R299 #2/#3, R300, R301 §7, R304, keyexpr_canon proptest filter.",
         "R311 carry: facade graceful-close + send_query/declare/get wrapper API hoist into wz facade. 2-3R."
+      ]
+    },
+    "Round 311fa": {
+      "decision_summary": "R311fa session open-deadline: the open loop ticks the SCE scheduler so the SCXML handshake timers fire, and the per-phase timeout transitions are child-scoped to remove the stale-timer hazard.",
+      "changes_bullets": [
+        "session_fsm_unicast.scxml: move init_ack.timeout / open_ack.timeout transitions from the Opening parent into the SentInitSyn / GotInitAck child states (staleness fix; SCE does not auto-cancel a delayed send on state exit, W3C SCXML 6.2). build.rs regenerates the FSM.",
+        "session_open.rs: connect_and_open_session races poll_and_dispatch_one against clock.sleep(tick_interval_ms) + engine.tick() in tokio::select!, so an elapsed handshake timer fires its Closing transition instead of hanging on a silent peer; poll_and_dispatch_one is cancel-safe via TcpReadDriver ReadState.",
+        "session_open.rs: new OpenError::HandshakeTimeout mapped at the pre-Established terminal via set_close_reason_count >= 1 && close_reason == Generic; new pub const DEFAULT_OPEN_TICK_MS = 50; tick_interval_ms threaded through open_session_at / open_session_static; runner.rs + 3 test files updated.",
+        "tests: new session_fsm_handshake_timeout.rs (3 deterministic FSM tests incl. the stale-init_ack.timeout-discarded regression guard); connect_and_open_session.rs gains a silent-peer #[ignore] real-time test asserting OpenError::HandshakeTimeout."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh ALL LANES PASS (validate-workspace, codec codegen L1-L3, workspace tests, feature-subset lanes, Layer G 7-MCU cross-compile, Q).",
+        "wz-runtime-tokio: session_fsm_handshake_timeout 3/3, connect_and_open_session 1/1 + ignored real-time 2.1s, static_scout_open 6/6, scouting_multicast_loopback unaffected.",
+        "cargo fmt --all --check clean; cargo clippy --workspace --tests -D warnings clean; SCXML codegen regenerates and compiles."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets",
+        "session-fsm--prose-level-sketch/2-4-close-paths"
+      ],
+      "carry_forward_bullets": [
+        "Carry #2: accept-side has no wall-clock open-deadline yet (accept_and_open_session deferred; accepting.inactivity_timeout is declared but armed by no send). Initiator path is now bounded, acceptor path is not.",
+        "Carry #3: udp-off standalone build still inherits the keyexpr-canon non-composability (north-star arbitrary-composition gap).",
+        "Steady-state lease stays manual-injection (check_lease_deadline), not tick-driven: the lease window is a runtime deploy value (params.lease), not a static SCXML send delay, so the two timer mechanisms are intentionally distinct."
+      ],
+      "publishable_decision_summary": "R311fa session open-deadline: the open loop ticks the SCE scheduler so the SCXML handshake timers fire, and the per-phase timeout transitions are child-scoped to remove the stale-timer hazard.",
+      "publishable_changes_bullets": [
+        "session_fsm_unicast.scxml: move init_ack.timeout / open_ack.timeout transitions from the Opening parent into the SentInitSyn / GotInitAck child states (staleness fix; SCE does not auto-cancel a delayed send on state exit, W3C SCXML 6.2). build.rs regenerates the FSM.",
+        "session_open.rs: connect_and_open_session races poll_and_dispatch_one against clock.sleep(tick_interval_ms) + engine.tick() in tokio::select!, so an elapsed handshake timer fires its Closing transition instead of hanging on a silent peer; poll_and_dispatch_one is cancel-safe via TcpReadDriver ReadState.",
+        "session_open.rs: new OpenError::HandshakeTimeout mapped at the pre-Established terminal via set_close_reason_count >= 1 && close_reason == Generic; new pub const DEFAULT_OPEN_TICK_MS = 50; tick_interval_ms threaded through open_session_at / open_session_static; runner.rs + 3 test files updated.",
+        "tests: new session_fsm_handshake_timeout.rs (3 deterministic FSM tests incl. the stale-init_ack.timeout-discarded regression guard); connect_and_open_session.rs gains a silent-peer #[ignore] real-time test asserting OpenError::HandshakeTimeout."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh ALL LANES PASS (validate-workspace, codec codegen L1-L3, workspace tests, feature-subset lanes, Layer G 7-MCU cross-compile, Q).",
+        "wz-runtime-tokio: session_fsm_handshake_timeout 3/3, connect_and_open_session 1/1 + ignored real-time 2.1s, static_scout_open 6/6, scouting_multicast_loopback unaffected.",
+        "cargo fmt --all --check clean; cargo clippy --workspace --tests -D warnings clean; SCXML codegen regenerates and compiles."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets",
+        "session-fsm--prose-level-sketch/2-4-close-paths"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carry #2: accept-side has no wall-clock open-deadline yet (accept_and_open_session deferred; accepting.inactivity_timeout is declared but armed by no send). Initiator path is now bounded, acceptor path is not.",
+        "Carry #3: udp-off standalone build still inherits the keyexpr-canon non-composability (north-star arbitrary-composition gap).",
+        "Steady-state lease stays manual-injection (check_lease_deadline), not tick-driven: the lease window is a runtime deploy value (params.lease), not a static SCXML send delay, so the two timer mechanisms are intentionally distinct."
       ]
     },
     "Round 311g": {

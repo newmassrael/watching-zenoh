@@ -153,7 +153,7 @@ mod round2 {
         install_session_actions, poll_and_dispatch_one, DriverLoopOutcome, SessionInitParams,
         SessionLinkActions,
     };
-    use wz_runtime_tokio::session_open::open_session_at;
+    use wz_runtime_tokio::session_open::{open_session_at, DEFAULT_OPEN_TICK_MS};
     use wz_runtime_tokio::UdpDriver;
     use wz_runtime_tokio_test_support::fixture_session_init_params;
     use wz_session_core::scout_params::ScoutParams;

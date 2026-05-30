@@ -40,7 +40,9 @@ use wz_runtime_tokio::session_glue::{
     install_session_actions, poll_and_dispatch_one, DriverLoopOutcome, SessionInitParams,
     SessionLinkActions,
 };
-use wz_runtime_tokio::session_open::{open_session_at, open_session_static, OpenError};
+use wz_runtime_tokio::session_open::{
+    open_session_at, open_session_static, OpenError, DEFAULT_OPEN_TICK_MS,
+};
 use wz_runtime_tokio::udp_pipeline::wire_udp_socket;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 
@@ -98,7 +100,13 @@ async fn open_session_at_tcp_reaches_established() {
     let addr = listener.local_addr().expect("addr");
     let acceptor = drive_acceptor_to_established(listener);
     let loc = format!("tcp/{addr}");
-    let initiator = open_session_at(&loc, initiator_params(), TokioTime::new(), Some(ITER_CAP));
+    let initiator = open_session_at(
+        &loc,
+        initiator_params(),
+        TokioTime::new(),
+        Some(ITER_CAP),
+        DEFAULT_OPEN_TICK_MS,
+    );
     let ((acc_est, _w), opened) = tokio::join!(acceptor, initiator);
     assert!(
         opened
@@ -168,7 +176,13 @@ async fn open_session_at_udp_reaches_established() {
     let addr = acc_socket.local_addr().expect("acceptor addr");
     let acceptor = drive_udp_acceptor_to_established(acc_socket);
     let loc = format!("udp/{addr}");
-    let initiator = open_session_at(&loc, initiator_params(), TokioTime::new(), Some(ITER_CAP));
+    let initiator = open_session_at(
+        &loc,
+        initiator_params(),
+        TokioTime::new(),
+        Some(ITER_CAP),
+        DEFAULT_OPEN_TICK_MS,
+    );
     let ((acc_est, _w), opened) = tokio::join!(acceptor, initiator);
     assert!(
         opened
@@ -189,6 +203,7 @@ async fn open_session_at_malformed_is_bad_locator() {
         initiator_params(),
         TokioTime::new(),
         Some(4),
+        DEFAULT_OPEN_TICK_MS,
     )
     .await;
     let Err(err) = result else {
@@ -217,6 +232,7 @@ async fn open_session_static_skips_unreachable_to_first_reachable() {
         initiator_params(),
         TokioTime::new(),
         Some(ITER_CAP),
+        DEFAULT_OPEN_TICK_MS,
     );
 
     let ((acc_est, _w), opened) = tokio::join!(acceptor, initiator);
@@ -234,7 +250,14 @@ async fn open_session_static_skips_unreachable_to_first_reachable() {
 
 #[tokio::test]
 async fn open_session_static_empty_is_no_reachable() {
-    let result = open_session_static(&[], initiator_params(), TokioTime::new(), Some(4)).await;
+    let result = open_session_static(
+        &[],
+        initiator_params(),
+        TokioTime::new(),
+        Some(4),
+        DEFAULT_OPEN_TICK_MS,
+    )
+    .await;
     let Err(err) = result else {
         panic!("expected empty connect list to error, got Ok");
     };
@@ -258,7 +281,14 @@ async fn open_session_static_all_unreachable_is_no_reachable() {
     drop(probe_a);
     drop(probe_b);
     let connect = vec![format!("tcp/{dead_a}"), format!("tcp/{dead_b}")];
-    let result = open_session_static(&connect, initiator_params(), TokioTime::new(), Some(4)).await;
+    let result = open_session_static(
+        &connect,
+        initiator_params(),
+        TokioTime::new(),
+        Some(4),
+        DEFAULT_OPEN_TICK_MS,
+    )
+    .await;
     let Err(err) = result else {
         panic!("expected all-unreachable connect list to error, got Ok");
     };
