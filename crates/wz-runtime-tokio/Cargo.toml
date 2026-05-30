@@ -370,13 +370,21 @@ pubsub-express = ["wz-session-core/pubsub-express"]
 # resumable, stateless-accept) stay declaration-only at wz facade.
 session-unicast-open = []
 session-unicast-accept = []
-# R311cf — keyexpr domain wire-up. 1 atomic feature initially gated
-# at the wz-runtime-tokio level (Cargo authoring intent "all active"
-# updated to "8 atomic, 1 active / 7 cluster-deferred" per R311cf
-# audit). Other 7 keyexpr-* features are cluster-wide behaviors with
-# no single anchor cfg site — follow-up cascade per-site wire-up.
-#   keyexpr-canon — `pub mod keyexpr_canon` (structural canonicalize
-#                   mirror of zenoh-pico `_z_keyexpr_canonize`).
+# R311cf/R311fd — keyexpr domain. The other 7 keyexpr-* features are
+# cluster-wide behaviors with no single anchor cfg site (follow-up
+# cascade per-site wire-up).
+#   keyexpr-canon — FOUNDATIONAL, not an excludable atomic. R311cf
+#     intended this to gate `pub mod keyexpr_canon` (structural
+#     canonicalize mirror of zenoh-pico `_z_keyexpr_canonize`), but the
+#     R311o type-ungating cascade made `OutboundKeyexprError` (hence
+#     `LivelinessAliasError::InvalidKeyexpr`) unconditional, and the dep
+#     on `wz-session-core/alloc` is unconditional, so the module + its
+#     consumers are always present. The re-export gate (lib.rs) was thus
+#     a phantom that broke every keyexpr-canon-OFF subset (carry #3);
+#     R311fd made the re-export unconditional. This feature is retained
+#     as a no-op compatibility marker so presets / domain-keyexpr /
+#     facade forwards that list it keep resolving; toggling it changes
+#     nothing. Genuine exclusion is blocked by signature-stability.
 keyexpr-canon = []
 # R311cj — query domain 3 additional wire-ups (6 active -> 9 active):
 #   query-attachment            — Query inbound attachment ext extraction.
