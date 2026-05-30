@@ -103,14 +103,23 @@ use crate::network_message::NetworkMessage;
 use crate::sample::extract_attachment;
 #[cfg(all(
     any(feature = "pubsub-put", feature = "pubsub-delete"),
+    any(
+        feature = "pubsub-priority",
+        feature = "pubsub-congestion-control",
+        feature = "pubsub-express"
+    )
+))]
+use crate::sample::extract_qos;
+#[cfg(all(
+    any(feature = "pubsub-put", feature = "pubsub-delete"),
     feature = "pubsub-source-info"
 ))]
 use crate::sample::extract_source_info;
 #[cfg(feature = "pubsub-put")]
 use crate::sample::EncodingHint;
-#[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
-use crate::sample::{extract_qos, SampleKind, TimestampHint};
 use crate::sample::{Reliability, Sample};
+#[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+use crate::sample::{SampleKind, TimestampHint};
 
 /// Boxed callback invoked when a Push message's keyexpr matches a
 /// registered subscriber. R222 — receives `&Sample` (resolved
@@ -631,7 +640,27 @@ impl SubscriberRegistry {
             };
         let outer_exts: &[wz_codecs::ext_entry::ExtEntryOwned] =
             push.extensions.as_deref().unwrap_or(&[]);
+        // R311em — the outer QoS extension is a single packed byte
+        // (priority / congestion-control / express are bit views of the
+        // same _z_qos_t._val). The subscriber-side projection therefore
+        // gates on `any` of the three QoS-byte consumers; with all three
+        // off the build never decodes the QoS ext and Sample.qos stays
+        // None (field declared for signature stability, R311g1).
+        #[cfg(any(
+            feature = "pubsub-priority",
+            feature = "pubsub-congestion-control",
+            feature = "pubsub-express"
+        ))]
         let qos = extract_qos(outer_exts);
+        #[cfg(not(any(
+            feature = "pubsub-priority",
+            feature = "pubsub-congestion-control",
+            feature = "pubsub-express"
+        )))]
+        let qos: Option<crate::sample::QosLevel> = {
+            let _ = outer_exts;
+            None
+        };
         // R311di-4 — Sample lives in wz-session-core (non_exhaustive)
         // so wz-runtime-tokio composes via the constructor + with_*
         // chain. The build order mirrors the prior struct-literal

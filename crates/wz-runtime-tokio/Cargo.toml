@@ -125,6 +125,9 @@ default = [
     "pubsub-attachment",
     "pubsub-timestamp",
     "pubsub-source-info",
+    "pubsub-priority",
+    "pubsub-congestion-control",
+    "pubsub-express",
     "session-unicast-open",
     "session-unicast-accept",
     "keyexpr-canon",
@@ -303,9 +306,9 @@ transport-keepalive = []
 # consistently (off clamps to full MTU). The min(peer, local) reduction at
 # the OpenAck arm stays gated in this crate.
 transport-batching = ["wz-session-core/transport-batching"]
-# R311cc — pubsub domain wire-up. 5 atomic features that have real
+# R311cc — pubsub domain wire-up. 9 atomic features that have real
 # source behavior in this crate (Cargo.toml authoring intent: "11
-# atomic, 5 active / 6 reserved"). Each gates a concrete cfg site:
+# atomic, 9 active / 2 reserved"). Each gates a concrete cfg site:
 #   pubsub-put         — MsgPut import in query.rs + SampleKind::Put
 #                        emission at the Push consumer in pubsub.rs.
 #                        Feature-off elides the Put body branch.
@@ -329,8 +332,14 @@ transport-batching = ["wz-session-core/transport-batching"]
 #                        Feature-off also disables R231 self-echo dedup
 #                        (no decoded source_info to match) — the
 #                        dispatch cautious-fires instead.
-# 5 reserved (encoding, priority, congestion-control, express, sample)
-# stay declaration-only at the wz facade level.
+#   pubsub-priority    — `extract_qos` Push projection into Sample.qos.
+#   pubsub-congestion-control — same projection (shared QoS byte).
+#   pubsub-express     — same projection (shared QoS byte). The three
+#                        are bit views of one _z_qos_t._val, so the
+#                        subscriber projection gates on `any` of them;
+#                        all-off elides extract_qos, Sample.qos = None.
+# 2 reserved (encoding, sample) stay declaration-only at the wz facade
+# level.
 # R311du — forward to wz-session-core: the pub/sub dispatch arms moved
 # there with SubscriberRegistry, so the AP-side feature must enable the
 # session-core gate (3-stage shape mirrors the codec-* forwarders).
@@ -342,6 +351,9 @@ pubsub-allow-loop = []
 pubsub-attachment = ["wz-session-core/pubsub-attachment"]
 pubsub-timestamp = ["wz-session-core/pubsub-timestamp"]
 pubsub-source-info = ["wz-session-core/pubsub-source-info"]
+pubsub-priority = ["wz-session-core/pubsub-priority"]
+pubsub-congestion-control = ["wz-session-core/pubsub-congestion-control"]
+pubsub-express = ["wz-session-core/pubsub-express"]
 # R311cd — session domain wire-up. 2 atomic features that have real
 # source behavior (Cargo.toml authoring intent: "9 atomic, 2 active /
 # 7 reserved"):
