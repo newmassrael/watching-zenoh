@@ -14,7 +14,7 @@
 // composes the existing wz-codecs `Push` + `Frame` envelopes via
 // `wz::runtime_tokio::session_glue::{build_push_literal,
 // encode_frame_with_push}` and dispatches through the same
-// `OutboundWriteDriver` mpsc channel that the FSM script-actions
+// `TcpWriteDriver` mpsc channel that the FSM script-actions
 // use for the handshake outbound — no nested `block_on` (R121d
 // constraint preserved).
 //
@@ -64,40 +64,23 @@
 //   `drive_session_until_terminal` borrows the inbound driver as
 //   `&mut LinkDriver` while `SessionLinkActions` holds the outbound
 //   driver as `Arc<dyn BoxedLinkDriver>`. A single TcpStream cannot
-//   satisfy both shapes simultaneously, so the demo splits the
-//   accepted TcpStream into owned read + write halves (Tokio's
-//   `TcpStream::into_split`) and threads them as two cooperating
-//   drivers:
+//   satisfy both shapes simultaneously, so the connection is split
+//   into owned read + write halves (Tokio's `TcpStream::into_split`)
+//   threaded as two cooperating drivers — a `TcpReadDriver`
+//   (`LinkDriver`; codec-decodes one Zenoh stream envelope per
+//   `poll_event`) and a `TcpWriteDriver` (`BoxedLinkDriver`;
+//   `send_blocking` is a non-blocking enqueue onto an mpsc channel
+//   drained by a dedicated writer task that frames each payload via
+//   the `StreamEnvelope` codec). The channel decouples the sync
+//   script-action / async-runtime boundary so no nested
+//   `Handle::block_on` is needed (the reentrancy panic the R121d
+//   constraint guards against).
 //
-//     InboundReadDriver { reader: OwnedReadHalf }
-//       impls `LinkDriver` — `poll_event` reads one Zenoh stream
-//       envelope (u16 LE length prefix + payload), `send`/`open`/
-//       `close` are no-ops (the inbound side never emits outbound
-//       bytes).
-//
-//     OutboundWriteDriver { tx: mpsc::UnboundedSender<Vec<u8>> }
-//       impls `BoxedLinkDriver` — `send_blocking` enqueues the
-//       transport-message bytes onto an unbounded mpsc channel.
-//       A dedicated async **writer task** (spawned in
-//       `run_demo`) owns the `OwnedWriteHalf` and drains the
-//       channel, writing the Zenoh stream envelope (u16 LE length
-//       prefix + payload) for each enqueued frame. This avoids
-//       the `Handle::block_on` reentrancy panic that would fire if
-//       `send_blocking` blocked on async TCP writes from a future
-//       being driven by the same runtime — `drive_session_until_
-//       terminal` polls inbound asynchronously, then the FSM's
-//       script-action handlers (e.g. `send_init_ack_with_cookie`)
-//       fire synchronously on the same task; nested `block_on` is
-//       not permitted. The channel is the textbook decoupling.
-//       Channel-send is sync + non-blocking; the writer task
-//       handles flush + ordering. Frame ordering is preserved
-//       because there is exactly one writer task per outbound
-//       channel.
-//
-//   Both halves wrap the same TcpStream so peer reads see what we
-//   send and peer writes reach our poll_event. The split lets each
-//   side own its half exclusively, satisfying both the `&mut
-//   LinkDriver` and `Arc<dyn BoxedLinkDriver>` shape constraints.
+//   R311ev — this split pipeline lives in the library as
+//   `wz::runtime_tokio::link_pipeline::wire_tcp_stream` (lifted from
+//   the demo's former local `link_driver` module at R311et). The demo
+//   consumes it directly; see that module's doc for the full
+//   read/write-split rationale.
 
 use std::env;
 use std::process::ExitCode;
@@ -105,7 +88,6 @@ use std::process::ExitCode;
 use wz::runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe;
 
 mod args;
-mod link_driver;
 mod runner;
 mod shutdown;
 mod tasks;
@@ -433,10 +415,12 @@ fn main() -> ExitCode {
         log::info!("on-query-final-log = true");
     }
 
-    // Build the multi-thread runtime explicitly — OutboundWriteDriver
-    // (mirroring TokioLinkDriverAdapter's contract) requires this
-    // flavor so block_on doesn't deadlock on the current-thread
-    // worker.
+    // Build the multi-thread runtime explicitly so the spawned
+    // writer task (link_pipeline) + the background publisher / query /
+    // declare tasks run on worker threads alongside the drive_session
+    // poll loop. The outbound `TcpWriteDriver` is a non-blocking channel
+    // enqueue (no `block_on`), so this flavor is for task concurrency,
+    // not a block_on-deadlock workaround.
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_io()
