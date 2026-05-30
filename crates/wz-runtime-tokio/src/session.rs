@@ -3046,7 +3046,21 @@ impl QueryableOptions {
 // by construction; Drop is generic via R::with_mutex_mut.
 #[non_exhaustive]
 pub struct Queryable<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
+    // R311ek — `session` is read only by the `query-queryable`-gated
+    // observer-unregister in `undeclare` / `Drop`; the handle is only
+    // ever constructed inside the same gate (`declare_queryable` returns
+    // `Err(FeatureDisabled)` otherwise), so a `query-queryable`-off build
+    // would carry this field unread. Gating it on the feature keeps the
+    // struct dead-code-clean under `deny(warnings)` without an `#[allow]`.
+    #[cfg(feature = "query-queryable")]
     session: Session<R, T>,
+    // R311ek — `query-queryable`-OFF `PhantomData` arm keeps the `R` / `T`
+    // type parameters live (their only field-level carrier is the gated
+    // `session` above). Mirrors the `ReplyEmitter` marker arm in
+    // `wz-session-core::query_event`. PhantomData fields are exempt from
+    // the dead-code lint, so this composes under `deny(warnings)`.
+    #[cfg(not(feature = "query-queryable"))]
+    _marker: core::marker::PhantomData<(R, T)>,
     id: QueryableId,
     keyexpr: String,
     options: QueryableOptions,
@@ -3549,11 +3563,24 @@ impl<R: Runtime, T: TimeSource> LivelinessSubscriber<R, T> {
         // `.unwrap_or(false)` arm. The closure form propagates the
         // recovered guard so the inner closure always sees an exclusive
         // `&mut ApplicationLayerObserver` borrow.
-        R::with_mutex_mut(&self.session.observer, |observer| {
-            observer
-                .liveliness_subscribers
-                .history_complete(self.interest_id)
-        })
+        //
+        // R311ek — the `observer.liveliness_subscribers` slot exists only
+        // under `liveliness-subscriber`; on the feature-OFF build the
+        // handle can never be constructed (`declare_liveliness_subscriber`
+        // returns `Err(FeatureDisabled)`), so this dead-but-compiled path
+        // returns the `false` default (signature-stability).
+        #[cfg(feature = "liveliness-subscriber")]
+        {
+            R::with_mutex_mut(&self.session.observer, |observer| {
+                observer
+                    .liveliness_subscribers
+                    .history_complete(self.interest_id)
+            })
+        }
+        #[cfg(not(feature = "liveliness-subscriber"))]
+        {
+            false
+        }
     }
 
     /// Explicitly retract this liveliness subscriber. Emits
@@ -3568,6 +3595,11 @@ impl<R: Runtime, T: TimeSource> LivelinessSubscriber<R, T> {
         // poison branch is replaced by the trait-mediated closure whose
         // per-profile impl handles poison recovery (tokio:
         // PoisonError::into_inner, MCU: no poison concept).
+        // R311ek — the registry slot exists only under
+        // `liveliness-subscriber`; gate the unregister on it. The
+        // `send_interest_final` action below is signature-stable so the
+        // wire-retract path stays unconditional.
+        #[cfg(feature = "liveliness-subscriber")]
         R::with_mutex_mut(&self.session.observer, |observer| {
             observer.liveliness_subscribers.unregister(self.interest_id);
         });
@@ -3583,6 +3615,10 @@ impl<R: Runtime, T: TimeSource> Drop for LivelinessSubscriber<R, T> {
         // Interest(Final) so the peer drops its end of the
         // subscription. Per-profile poison-recovery lives inside the
         // R::with_mutex_mut impl.
+        // R311ek — registry slot gated on `liveliness-subscriber`; the
+        // Interest(Final) wire-retract stays unconditional (signature-
+        // stable action).
+        #[cfg(feature = "liveliness-subscriber")]
         R::with_mutex_mut(&self.session.observer, |observer| {
             observer.liveliness_subscribers.unregister(self.interest_id);
         });

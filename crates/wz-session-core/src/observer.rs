@@ -108,16 +108,19 @@
 // module after the R311do-dq registry migration.
 #[cfg(feature = "liveliness-token")]
 use crate::declare::liveliness::LivelinessRegistry;
-// R311q — `LivelinessSubscriberRegistry` is type-ungated; the
-// `observer.liveliness_subscribers` field is unconditional so the
+// R311ek — `LivelinessSubscriberRegistry` consumes `DeclareOwnedVariant`
+// and lives under the `codec-declare`-gated `declare` module, so the
+// `liveliness_subscribers` field + this import gate on
+// `liveliness-subscriber` (which now implies `codec-declare`). With the
+// observer no longer `codec-declare`-gated as a whole (R311ek), the
+// previously-unconditional field would otherwise reference a type that
+// does not exist in a `codec-declare`-off subset. The codec-agnostic
+// callback surface (`LivelinessSample` etc.) lives in the always-present
+// `declare::liveliness_sample` module so the
 // `Session::declare_liveliness_subscriber{_aliased}` Result-form
-// surface and the `LivelinessSubscriber::Drop` field access compile
-// regardless of feature state. The dispatch call site at
-// [`ApplicationLayerObserver::dispatch_event`] stays cfg-gated so a
-// feature-OFF build still elides the dispatch path. The type itself
-// lives under the `codec-declare`-gated `declare` module, which is why
-// the whole observer module is `codec-declare`-gated (see the lib.rs
-// `pub mod observer` gate).
+// signatures still compile regardless of feature state; only the
+// registry slot (and its dispatch / Drop access) follow the feature.
+#[cfg(feature = "liveliness-subscriber")]
 use crate::declare::liveliness_subscriber::LivelinessSubscriberRegistry;
 // R310 — peer-side declare observer registries gate on the matching
 // application-layer declare-* feature. Without the feature the
@@ -210,14 +213,17 @@ pub struct ApplicationLayerObserver {
     /// same `IterationEvent` from [`Self::dispatch_event`]; they are
     /// independent fan-out paths.
     ///
-    /// R311q — type-ungated. The struct is always present so the
+    /// R311ek — gated on `liveliness-subscriber`. The registry type
+    /// consumes `DeclareOwnedVariant`, so it only exists under
+    /// `codec-declare` (implied by the feature); a subset without the
+    /// feature composes the observer with this slot elided. The
     /// `Session::declare_liveliness_subscriber{_aliased}` Result-form
-    /// surface compiles regardless of the `liveliness-subscriber`
-    /// feature; the feature-OFF branch on each declare entry point
-    /// returns `Err(FeatureDisabled)` without touching this field.
-    /// The dispatch fan-out in [`Self::dispatch_event`] stays
-    /// cfg-gated so a feature-OFF build elides the dispatch call
-    /// path entirely.
+    /// surface still compiles regardless because its callback parameter
+    /// binds the codec-agnostic [`crate::declare::liveliness_sample`]
+    /// types and its feature-OFF branch returns `Err(FeatureDisabled)`
+    /// without touching this field. The dispatch fan-out in
+    /// [`Self::dispatch_event`] is gated on the same feature.
+    #[cfg(feature = "liveliness-subscriber")]
     pub liveliness_subscribers: LivelinessSubscriberRegistry,
     /// Initiator-side `Response(Reply|Err)` + `ResponseFinal`
     /// callbacks (`z_get` consumer). Pending entries auto-unregister
@@ -265,11 +271,13 @@ impl ApplicationLayerObserver {
             remote_queryables: RemoteQueryableRegistry::new(),
             #[cfg(feature = "liveliness-token")]
             liveliness: LivelinessRegistry::new(),
-            // R311q — field is type-ungated; the registry is always
-            // constructed so the LivelinessSubscriber RAII handle's
-            // observer-side lookups (history_complete, unregister on
-            // Drop) compile unconditionally even though feature-OFF
-            // never reaches the construction path.
+            // R311ek — field gated on `liveliness-subscriber`; the
+            // registry is constructed only when that feature is in. The
+            // LivelinessSubscriber RAII handle's observer-side lookups
+            // (history_complete, unregister on Drop) are gated on the
+            // same feature so a feature-OFF build never references the
+            // absent field.
+            #[cfg(feature = "liveliness-subscriber")]
             liveliness_subscribers: LivelinessSubscriberRegistry::new(),
             // R311s — replies field is type-ungated; the registry is
             // always constructed (empty) so the type-ungated query

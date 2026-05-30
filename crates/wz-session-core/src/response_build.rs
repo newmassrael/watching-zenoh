@@ -35,6 +35,11 @@ use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 use wz_codecs::wireexpr_local::WireexprLocalOwned;
 
 use crate::query_mode::ConsolidationMode;
+// R311ek — the source_info ext encoder + the shared VLE primitive moved
+// to the codec-feature-agnostic `source_info_ext` module so the
+// `codec-push` body-extension path can reach the encoder too; the
+// responder encoder below keeps borrowing the VLE helper from there.
+use crate::source_info_ext::{encode_source_info_ext_body, encode_vle_u64_into};
 
 /// R121j-3 — build a `Response(Reply(MsgPut))` network-message in
 /// the minimal AP MVP shape (no Response-level exts, no Reply-level
@@ -688,39 +693,6 @@ impl ResponseErrBuilder {
 ///   [VLE u64]            `eid`.
 ///   [VLE u64]            `sn`.
 ///
-/// Panics if `zid.len()` is outside `1..=16` (the caller's setter
-/// guards this; the inner assertion is defence-in-depth).
-#[cfg(feature = "codec-response")]
-pub fn encode_source_info_ext_body(zid: &[u8], eid: u32, sn: u32) -> Vec<u8> {
-    assert!(
-        (1..=16).contains(&zid.len()),
-        "source_info zid length must be 1..=16 (zenoh-pico ZenohId wire constraint)"
-    );
-    // Capacity = 1 leading byte + zid + VLE(u32) worst-case (5 bytes) ×2.
-    let mut out = Vec::with_capacity(1 + zid.len() + 5 + 5);
-    out.push(((zid.len() as u8) - 1) << 4);
-    out.extend_from_slice(zid);
-    encode_vle_u64_into(&mut out, eid as u64);
-    encode_vle_u64_into(&mut out, sn as u64);
-    out
-}
-
-/// R121j-4b — base-128 VLE u64 emit into a `Vec<u8>`. Mirrors the
-/// inline loop in `encode_frame_envelope` and zenoh-pico's
-/// `_z_zsize_encode` at
-/// `vendor/zenoh-pico/src/protocol/codec/core.c`. Free-function shape
-/// because source_info ext-body construction happens before any
-/// `SceSink` is in scope — the ext body lives inside `ExtZbuf.value`
-/// and the surrounding codec sink only sees the already-built `Vec`.
-#[cfg(feature = "codec-response")]
-fn encode_vle_u64_into(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push((v as u8 & 0x7F) | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
-
 /// R121j-3c — encode the value bytes of a `responder` extension per
 /// zenoh-pico's `_z_response_encode` at
 /// `vendor/zenoh-pico/src/protocol/codec/network.c:281-291`.
