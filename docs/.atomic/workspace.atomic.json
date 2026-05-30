@@ -932,7 +932,8 @@
       ],
       "caveats_bullets": [
         "keyexpr-canon cfg-off: callers must pre-canonicalize keyexpr strings (no module access).",
-        "7 cluster-deferred features have source behavior but no single cfg anchor (R311 carry)."
+        "7 cluster-deferred features have source behavior but no single cfg anchor (R311 carry).",
+        "R311fd: keyexpr-canon foundational/always-on (R311o ungated its types); feature is a no-op marker."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -27073,6 +27074,48 @@
         "Carry #2 (open-deadline) now fully closed: both the lib helpers (R311fb) and the wz-ap-demo binary (R311fc) bound the handshake; no unbounded open path remains.",
         "Carry #3: udp-off standalone build still inherits the keyexpr-canon non-composability (north-star arbitrary-composition gap).",
         "Enhancement: a reset-on-activity accept inactivity timer would need a distinct event name per phase to stay staleness-safe; §2.5 names one timer so the whole-accept single deadline stays the MVP shape."
+      ]
+    },
+    "Round 311fd": {
+      "decision_summary": "R311fd keyexpr-canon composability fix: keyexpr_canon re-export made unconditional so keyexpr-canon-OFF coherent subsets build (carry #3); feature reclassified foundational always-on (R311o ungated its types).",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/lib.rs: the `pub use wz_session_core::keyexpr_canon` re-export is now UNCONDITIONAL (removed R311cf's `#[cfg(feature = \"keyexpr-canon\")]`). Root cause: R311o's type-ungating made OutboundKeyexprError foundational (wrapped by the unconditional LivelinessAliasError::InvalidKeyexpr and imported unconditionally in session.rs:134), and the wz-session-core/alloc dep is unconditional, so the module + its consumers are always present — the gate was a phantom that broke every keyexpr-canon-OFF build.",
+        "wz-runtime-tokio/Cargo.toml + wz/Cargo.toml: keyexpr-canon documented as FOUNDATIONAL (always-on), retained as a no-op compatibility marker so presets / domain-keyexpr rollup / facade forwards keep resolving; toggling it changes nothing. Genuine exclusion is blocked by the signature-stability principle (cannot gate OutboundKeyexprError / LivelinessAliasError::InvalidKeyexpr).",
+        "Empirical gap: a coherent subset (full declare/query/pubsub/session over TCP, udp OFF, keyexpr-canon OFF) failed with 2 keyexpr_canon errors (session.rs:134 OutboundKeyexprError + session_glue.rs:206 check_outbound_keyexpr_pico_safe) before the fix and builds clean after."
+      ],
+      "verification_bullets": [
+        "BEFORE: cargo build -p wz-runtime-tokio --no-default-features --features <default minus keyexpr-canon minus transport-link-udp> = 2 errors (E0432 unresolved import crate::keyexpr_canon). AFTER: builds clean.",
+        "scripts/run-ci.sh all required lanes pass (incl C1h wz-session-core arbitrary-subset matrix + C4 7-preset matrix) + Layer G 7-MCU cross-compile all 48 targets OK.",
+        "cargo fmt --all --check + cargo clippy -p wz-runtime-tokio -p wz --all-targets -D warnings clean; default build unaffected (keyexpr-canon ON => unconditional re-export is identical behaviour, zero regression)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "Carry #3 keyexpr-canon thread CLOSED: keyexpr-canon-OFF coherent subsets now compile. The remaining udp-off non-composability is the SEPARATE wz-runtime-tokio --no-default-features track (session_fsm_unicast / transport-unicast gating, codec-init/open-body cascade, ExtEntry unused) — the larger internal arbitrary-subset item the composability audit flags for user steer.",
+        "No arbitrary-subset BEHAVIORAL CI guard yet: a wz-runtime-tokio keyexpr-canon-OFF build lane would guard this fix from regression (the lib.rs comment is the current protection); deferred to the broader composability-CI track.",
+        "Full removal of the now-foundational keyexpr-canon feature label from the catalog / presets is a follow-up catalog-cleanup; kept as a no-op marker this round to avoid touching the C4 preset matrix."
+      ],
+      "publishable_decision_summary": "R311fd keyexpr-canon composability fix: keyexpr_canon re-export made unconditional so keyexpr-canon-OFF coherent subsets build (carry #3); feature reclassified foundational always-on (R311o ungated its types).",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/lib.rs: the `pub use wz_session_core::keyexpr_canon` re-export is now UNCONDITIONAL (removed R311cf's `#[cfg(feature = \"keyexpr-canon\")]`). Root cause: R311o's type-ungating made OutboundKeyexprError foundational (wrapped by the unconditional LivelinessAliasError::InvalidKeyexpr and imported unconditionally in session.rs:134), and the wz-session-core/alloc dep is unconditional, so the module + its consumers are always present — the gate was a phantom that broke every keyexpr-canon-OFF build.",
+        "wz-runtime-tokio/Cargo.toml + wz/Cargo.toml: keyexpr-canon documented as FOUNDATIONAL (always-on), retained as a no-op compatibility marker so presets / domain-keyexpr rollup / facade forwards keep resolving; toggling it changes nothing. Genuine exclusion is blocked by the signature-stability principle (cannot gate OutboundKeyexprError / LivelinessAliasError::InvalidKeyexpr).",
+        "Empirical gap: a coherent subset (full declare/query/pubsub/session over TCP, udp OFF, keyexpr-canon OFF) failed with 2 keyexpr_canon errors (session.rs:134 OutboundKeyexprError + session_glue.rs:206 check_outbound_keyexpr_pico_safe) before the fix and builds clean after."
+      ],
+      "publishable_verification_bullets": [
+        "BEFORE: cargo build -p wz-runtime-tokio --no-default-features --features <default minus keyexpr-canon minus transport-link-udp> = 2 errors (E0432 unresolved import crate::keyexpr_canon). AFTER: builds clean.",
+        "scripts/run-ci.sh all required lanes pass (incl C1h wz-session-core arbitrary-subset matrix + C4 7-preset matrix) + Layer G 7-MCU cross-compile all 48 targets OK.",
+        "cargo fmt --all --check + cargo clippy -p wz-runtime-tokio -p wz --all-targets -D warnings clean; default build unaffected (keyexpr-canon ON => unconditional re-export is identical behaviour, zero regression)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carry #3 keyexpr-canon thread CLOSED: keyexpr-canon-OFF coherent subsets now compile. The remaining udp-off non-composability is the SEPARATE wz-runtime-tokio --no-default-features track (session_fsm_unicast / transport-unicast gating, codec-init/open-body cascade, ExtEntry unused) — the larger internal arbitrary-subset item the composability audit flags for user steer.",
+        "No arbitrary-subset BEHAVIORAL CI guard yet: a wz-runtime-tokio keyexpr-canon-OFF build lane would guard this fix from regression (the lib.rs comment is the current protection); deferred to the broader composability-CI track.",
+        "Full removal of the now-foundational keyexpr-canon feature label from the catalog / presets is a follow-up catalog-cleanup; kept as a no-op marker this round to avoid touching the C4 preset matrix."
       ]
     },
     "Round 311g": {

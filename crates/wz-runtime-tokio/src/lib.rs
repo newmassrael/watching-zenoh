@@ -49,17 +49,28 @@ mod script_bind;
 /// registrations store the canonical form a peer would emit on the
 /// wire. See `keyexpr_canon` module doc comment for the scope (no
 /// lowercase / no NFC — pure structural) and the call-site wiring.
-// R311cf — keyexpr-canon gates the structural canonicalization mirror
-// (mirrors zenoh-pico's `_z_keyexpr_canonize`). cfg-off: the module
-// is unavailable; callers that need canonical form must construct
-// keyexprs already in canonical shape. The other 7 keyexpr-* features
-// (-literal, -mapping, -intersect, -includes, -wildcard-*, -dollar-star)
-// are cluster-wide behaviors with no single anchor site — carried for
-// per-site wire-up in a follow-up cascade.
 // R311di-2 — keyexpr_canon moved to wz-session-core; re-export keeps
 // `crate::keyexpr_canon::*` callsites verbatim across the wz-runtime-tokio
 // surface (query.rs / pubsub.rs / session.rs / session_glue.rs).
-#[cfg(feature = "keyexpr-canon")]
+//
+// R311fd — the re-export is UNCONDITIONAL (was `#[cfg(feature =
+// "keyexpr-canon")]` per R311cf's intent to gate the canonicalization
+// mirror). That gate became inconsistent and broke composability: the
+// R311o type-ungating cascade made `OutboundKeyexprError` unconditional
+// (it is wrapped by the always-present `LivelinessAliasError::Invalid
+// Keyexpr` variant, and `session.rs` imports it unconditionally), so the
+// keyexpr_canon *types* are foundational by signature-stability. The
+// backing module is also always present: wz-runtime-tokio enables
+// `wz-session-core/alloc` unconditionally (Cargo.toml — tokio is AP-only,
+// always-alloc), and wz-session-core gates `keyexpr_canon` on `alloc`.
+// So a build that turned `keyexpr-canon` OFF had a phantom-gated re-export
+// while the module + unconditional consumers were still present — every
+// such subset failed to compile (carry #3: udp-off / keyexpr-canon-off
+// coherent subsets). Making the re-export unconditional aligns the gate
+// with reality. `keyexpr-canon` is therefore a FOUNDATIONAL feature, not
+// an excludable atomic; the Cargo feature is retained as a no-op
+// compatibility marker (see the manifests). Genuine exclusion is
+// impossible without reverting R311o's signature-stability ungating.
 pub use wz_session_core::keyexpr_canon;
 
 /// R223 — zenoh-style locality filter for subscribers and queryables.

@@ -208,12 +208,16 @@ encoding-mime = []
 encoding-protobuf = []
 encoding-utf8 = []
 
-# ----- domain: keyexpr (8 atomic, 1 active / 7 cluster-deferred) -----
-# R311cf — keyexpr-canon forwards the keyexpr_canon module gate;
-# remaining 7 features (-literal, -mapping, -intersect, -includes,
-# -wildcard-single, -wildcard-double, -dollar-star) are cluster-wide
-# behaviors with no single anchor cfg site. Per-site wire-up lands in
-# a follow-up cascade. "all active" comment corrected to mark the gap.
+# ----- domain: keyexpr (8 atomic; keyexpr-canon foundational, 7 deferred) -----
+# R311cf/R311fd — keyexpr-canon is FOUNDATIONAL (always-on), not an
+# excludable atomic: R311o made `OutboundKeyexprError` unconditional, so
+# the keyexpr_canon module + its consumers are always present and the
+# wz-runtime-tokio re-export gate was removed (R311fd) — toggling this
+# feature is a no-op, retained only so this forward + presets keep
+# resolving. The remaining 7 features (-literal, -mapping, -intersect,
+# -includes, -wildcard-single, -wildcard-double, -dollar-star) are
+# cluster-wide behaviors with no single anchor cfg site (follow-up
+# cascade per-site wire-up).
 keyexpr-canon = ["wz-runtime-tokio?/keyexpr-canon"]
 keyexpr-dollar-star = []
 keyexpr-includes = []
