@@ -73,7 +73,6 @@
 //! it here keeps the cross-registry coupling at zero and matches
 //! zenoh-pico's `_z_session_t._remote_tokens` table sized per session.
 
-use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -86,53 +85,14 @@ use crate::keyexpr_match::keyexpr_pattern_matches;
 use crate::network_message::NetworkMessage;
 use crate::wireexpr_resolve::resolve_wireexpr;
 
-/// Liveliness sample dispatched into a [`LivelinessSampleCallback`].
-/// Mirrors zenoh-pico's `z_sample_t` projection for the liveliness
-/// path: a `DeclToken` arrival surfaces as `Put`, an `UndeclToken`
-/// arrival as `Delete` (per `z_liveliness_declare_token`'s
-/// doc-comment, `vendor/zenoh-pico/include/zenoh-pico/api/liveliness.h`).
-///
-/// The lifetime borrow ties the keyexpr `&str` to the dispatch call
-/// stack so the callback can read it without cloning. Callers that
-/// want to retain the keyexpr beyond the callback body must
-/// `.to_string()` it.
-#[derive(Debug, Clone, Copy)]
-pub struct LivelinessSample<'a> {
-    /// Discriminator: `Put` for `DeclToken`, `Delete` for `UndeclToken`.
-    pub kind: LivelinessSampleKind,
-    /// Resolved keyexpr — either the literal carried inline on the
-    /// `DeclToken` or the peer-table lookup result for an aliased
-    /// declaration. For an `UndeclToken` this is the keyexpr the
-    /// matching `DeclToken` resolved to (looked up from the
-    /// registry's [`peer_token_table`](LivelinessSubscriberRegistry)).
-    pub keyexpr: &'a str,
-    /// Peer-side token id from the originating `DeclToken`. Stable
-    /// across the matching `UndeclToken` so consumers can correlate
-    /// `Put` / `Delete` pairs without keyexpr comparisons.
-    pub token_id: u64,
-}
-
-/// Liveliness sample kind discriminator. Mirrors the
-/// `Z_SAMPLE_KIND_PUT` / `Z_SAMPLE_KIND_DELETE` pair that
-/// `z_liveliness_declare_token`'s doc-comment commits to:
-/// "subscribers on an intersecting key expression will receive a PUT
-/// sample when connectivity is achieved, and a DELETE sample if it's
-/// lost".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LivelinessSampleKind {
-    /// Inbound `DeclToken` — a peer just brought a liveliness token
-    /// alive on a matching keyexpr.
-    Put,
-    /// Inbound `UndeclToken` — a peer just retracted a liveliness
-    /// token whose prior `DeclToken` matched.
-    Delete,
-}
-
-/// Boxed callback fired for each [`LivelinessSample`] whose keyexpr
-/// matches a subscriber's pattern. `Send + 'static` so the registry
-/// can be shared across tasks under `Arc<Mutex<...>>` (matching the
-/// other application-layer registries' threading contract).
-pub type LivelinessSampleCallback = Box<dyn FnMut(LivelinessSample<'_>) + Send + 'static>;
+// R311ek — the pure-data sample types moved to the codec-agnostic
+// sibling module `liveliness_sample` so they compose in a
+// `codec-declare`-off subset; this registry (which consumes
+// `DeclareOwnedVariant`) stays `codec-declare`-gated and re-imports
+// them.
+pub use crate::declare::liveliness_sample::{
+    LivelinessSample, LivelinessSampleCallback, LivelinessSampleKind,
+};
 
 /// Per-subscriber slot. Private to this module; consumers interact
 /// through [`LivelinessSubscriberRegistry::register`] /

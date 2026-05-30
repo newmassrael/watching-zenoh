@@ -80,15 +80,20 @@
 pub use wz_session_core::declare::liveliness::{
     DeclTokenCallback, LivelinessRegistry, UndeclTokenCallback,
 };
-// R311q — the liveliness_subscriber surface is type-ungated: the
-// LivelinessSubscriberRegistry + LivelinessSample + LivelinessSampleKind
-// + LivelinessSampleCallback types are always re-exported so
-// `observer.liveliness_subscribers` and the Result-form
-// `Session::declare_liveliness_subscriber{_aliased}` signatures compile
-// unconditionally.
-pub use wz_session_core::declare::liveliness_subscriber::{
-    LivelinessSample, LivelinessSampleCallback, LivelinessSampleKind, LivelinessSubscriberRegistry,
+// R311ek — the codec-agnostic liveliness sample types are always
+// re-exported (they live in the always-present
+// `declare::liveliness_sample` module) so the Result-form
+// `Session::declare_liveliness_subscriber{_aliased}` signatures and
+// their `LivelinessSample` callback parameter compile in any subset.
+pub use wz_session_core::declare::liveliness_sample::{
+    LivelinessSample, LivelinessSampleCallback, LivelinessSampleKind,
 };
+// R311ek — `LivelinessSubscriberRegistry` consumes `DeclareOwnedVariant`
+// (`codec-declare`-gated module) and is only wired via
+// `observer.liveliness_subscribers`, which the observer now gates on
+// `liveliness-subscriber`; the re-export follows the same gate.
+#[cfg(feature = "liveliness-subscriber")]
+pub use wz_session_core::declare::liveliness_subscriber::LivelinessSubscriberRegistry;
 #[cfg(feature = "declare-queryable")]
 pub use wz_session_core::declare::queryable::{
     DeclQueryableCallback, RemoteQueryableRegistry, UndeclQueryableCallback,

@@ -82,6 +82,11 @@
 #              wz-runtime-lwip default sync-only + wz-runtime-lwip
 #              with `--features alloc`. Five sub-lanes total; any
 #              failure short-circuits the whole layer.
+#   Layer C4b — wz facade arbitrary-incomplete-subset matrix (R311ek;
+#              cargo-builds the facade under deliberately-incomplete
+#              coherent consumer subsets — pubsub-only / queryable-only /
+#              zget-reply-only / declare-observer — the facade-level
+#              analog of C1h that the named-preset C4 lane does not cover.)
 #   Layer C4 — wz facade preset composability matrix (R311eb; cargo-
 #              builds the facade under all 7 named presets — mcu-minimal/
 #              -extended, ap-client/-router/-full, zenoh-cpp, cortex-m4-
@@ -750,6 +755,44 @@ layer_c4_preset_matrix() {
     done
 }
 
+# ─── Layer C4b — wz facade arbitrary-incomplete-subset matrix ────────
+#
+# R311ek: C4 builds the 7 named presets, each a COMPLETE coherent
+# profile. C1h builds wz-session-core under incomplete subsets — but the
+# session-core subset can pass while the FACADE (wz -> wz-runtime-tokio
+# -> wz-session-core) fails, because the runtime-tokio glue
+# (`session.rs` / `session_glue.rs`) imports gated session-core items
+# (observer / liveliness_subscriber / the source_info ext encoder) under
+# conditions broader than their use sites. The default-feature CI never
+# exercises a codec-push-only / queryable-only facade, so that regression
+# class passed invisibly (it is exactly what R311ek fixed). This lane is
+# the facade-level analog of C1h: it `cargo build`s the wz facade under
+# several deliberately-incomplete coherent consumer subsets — each a real
+# user shape that selects ONE consumer plane — so `deny(warnings)` turns
+# any over-broad import / dead-field / unused-type-param in the
+# runtime-tokio glue into a hard error. Host typecheck only; the no_std
+# footing stays Layer G's job.
+layer_c4b_facade_subset_matrix() {
+    local base="runtime-tokio,transport-unicast,transport-link-udp,transport-keepalive,session-unicast-open,session-unicast-accept,codec-frame,codec-keep-alive,codec-init-body,codec-open-body,codec-close,keyexpr-literal,keyexpr-canon"
+    # name : extra consumer-plane features layered on $base
+    local subsets=(
+        "pubsub-only:codec-push,pubsub-put,pubsub-delete"
+        "queryable-only:codec-request,codec-response,query-queryable,query-reply-err"
+        "zget-reply-only:codec-response,codec-response-final,query-get,query-reply"
+        "declare-observer:codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber"
+    )
+    local entry name extra
+    for entry in "${subsets[@]}"; do
+        name="${entry%%:*}"
+        extra="${entry#*:}"
+        if ! (cd crates && cargo build -p wz --no-default-features --features "$base,$extra" --quiet); then
+            echo "  C4b FAIL: wz facade subset $name did not build"
+            return 1
+        fi
+        echo "  C4b wz subset $name OK"
+    done
+}
+
 # ─── Layer D — deploy yaml schema validate ──────────────────────────
 layer_d_validate_deploy() {
     if ! python3 -c 'import yaml' >/dev/null 2>&1; then
@@ -1216,6 +1259,7 @@ run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer C4 layer_c4_preset_matrix || overall=1
+run_layer C4b layer_c4b_facade_subset_matrix || overall=1
 run_layer D layer_d_validate_deploy || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer F layer_f_codec_footprint || overall=1

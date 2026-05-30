@@ -148,19 +148,21 @@ use wz_codecs::decl_token::DeclTokenOwned;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::{DeclareOwned, DeclareOwnedVariant};
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
-#[cfg(any(
-    feature = "codec-push",
-    feature = "codec-response",
-    feature = "codec-request"
-))]
+// R311ek — `codec-push` only. The `codec-response` / `codec-request`
+// arms were the response/request-builder use sites that R311dv /
+// R311eh lifted into wz-session-core (`response_build` / `request_build`);
+// in session_glue these owned codec types are now consumed solely by the
+// `codec-push` body-extension + MsgPut/MsgDel builders, so the wider
+// `any(...)` gate left them unused (deny) in a `codec-push`-off subset.
+#[cfg(feature = "codec-push")]
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 #[cfg(feature = "codec-init-body")]
 use wz_codecs::init_body::InitBodyOwned;
 use wz_codecs::interest::InterestOwned;
 use wz_codecs::interest_body::InterestBodyOwned;
-#[cfg(any(feature = "codec-push", feature = "codec-response"))]
+#[cfg(feature = "codec-push")]
 use wz_codecs::msg_del::MsgDelOwned;
-#[cfg(any(feature = "codec-push", feature = "codec-response"))]
+#[cfg(feature = "codec-push")]
 use wz_codecs::msg_put::MsgPutOwned;
 #[cfg(feature = "codec-open-body")]
 use wz_codecs::open_body::OpenBodyOwned;
@@ -3844,9 +3846,17 @@ pub use wz_session_core::query_mode::ConsolidationMode;
 #[cfg(feature = "codec-response")]
 pub use wz_session_core::response_build::{
     build_response_err_aliased, build_response_err_literal, build_response_reply_aliased,
-    build_response_reply_literal, encode_responder_ext_body, encode_source_info_ext_body,
-    ResponseErrBuilder, ResponseReplyBuilder,
+    build_response_reply_literal, encode_responder_ext_body, ResponseErrBuilder,
+    ResponseReplyBuilder,
 };
+// R311ek — `encode_source_info_ext_body` is also consumed by the
+// `codec-push` body-extension path (`build_body_extensions`), so it
+// re-exports from the codec-feature-agnostic `source_info_ext` module
+// under the union gate rather than from the `codec-response`-only
+// `response_build` cluster above. This is what unblocks a
+// `codec-push`-only subset (north-star arbitrary-composition mechanism ①).
+#[cfg(any(feature = "codec-push", feature = "codec-response"))]
+pub use wz_session_core::source_info_ext::encode_source_info_ext_body;
 
 // R311di-8 — QueryTarget moved to wz-session-core::query_mode.
 pub use wz_session_core::query_mode::QueryTarget;

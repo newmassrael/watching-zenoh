@@ -194,6 +194,17 @@ pub mod declare;
 #[cfg(feature = "alloc")]
 pub mod pubsub;
 
+/// R311ek — shared `source_info` extension-body encoder
+/// (`encode_source_info_ext_body` + the `pub(crate)` VLE primitive it
+/// shares with `response_build`'s responder encoder). Alloc-only, no
+/// codec-feature gate: the encoder is consumed by both the `codec-push`
+/// body-extension path and the `codec-response` responder path, so it
+/// must be reachable in a `codec-push`-only subset. Relocated out of the
+/// `codec-response`-gated `response_build` module to close the
+/// arbitrary-composition gap (north-star mechanism ①).
+#[cfg(feature = "alloc")]
+pub mod source_info_ext;
+
 /// R311dv — Response-builder cluster (`build_response_{reply,err}_*`
 /// + `ResponseReplyBuilder` / `ResponseErrBuilder`): pure value
 /// construction of a `Response(Reply|Err)` wire record from a
@@ -277,10 +288,16 @@ pub mod response_sink;
 /// single [`observer::ApplicationLayerObserver::dispatch`] call per
 /// `IterationEvent`. Migrated from `wz-runtime-tokio::observer`; the move
 /// was unblocked by R311dz-pre's `ResponseSink` IoC trait (the drain's
-/// only dependency on the tokio actions layer). Gated on `codec-declare`
-/// because its `liveliness_subscribers` field's type lives under the
-/// `codec-declare`-gated `declare` module; the `queryables` field
-/// additionally gates on `query-queryable`. Runtime-agnostic so the same
-/// bundle serves the tokio (AP) and lwIP (MCU) profiles.
-#[cfg(all(feature = "alloc", feature = "codec-declare"))]
+/// only dependency on the tokio actions layer). R311ek — gated on
+/// `alloc` alone (was `all(alloc, codec-declare)`): the bundle holds the
+/// always-compiled `subscribers` (pub/sub) + `replies` registries, so a
+/// `codec-push`-only subset needs the observer to route Push samples —
+/// gating the whole bundle on `codec-declare` made pub/sub-only
+/// composition impossible. Every codec-coupled field
+/// (`queryables`/`remote_*`/`liveliness`/`liveliness_subscribers`) is now
+/// individually feature-gated, so the struct composes down to just the
+/// always-compiled registries when no declare/query codec is selected.
+/// Runtime-agnostic so the same bundle serves the tokio (AP) and lwIP
+/// (MCU) profiles.
+#[cfg(feature = "alloc")]
 pub mod observer;

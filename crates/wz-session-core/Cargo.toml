@@ -98,10 +98,18 @@ query-reply-err = []
 # consumer gates one level up). The wz-runtime-tokio side forwards its
 # same-named features here, mirroring the `query-queryable` forward, so
 # the gated observer fields compile consistently across the workspace.
-declare-subscriber = []
-declare-queryable = []
-liveliness-token = []
-liveliness-subscriber = []
+# R311ek — each implies `codec-declare`. With the observer no longer
+# `codec-declare`-gated as a whole (so a pub/sub-only subset can compose
+# it), each consumer field's registry type still lives under the
+# `codec-declare`-gated `declare` module; making the consumer feature
+# imply the codec mechanically guarantees the field type exists whenever
+# the field (and its session-side access) is gated in. Semantically
+# sound: an application cannot observe peer declarations without the
+# declare codec.
+declare-subscriber = ["codec-declare"]
+declare-queryable = ["codec-declare"]
+liveliness-token = ["codec-declare"]
+liveliness-subscriber = ["codec-declare"]
 
 # R311eg — transport-batching gate for the migrated PeerInitCaps decoder
 # (`wz-session-core::peer_init_caps`). Standalone gate-only (no wz-codecs

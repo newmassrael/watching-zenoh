@@ -48,6 +48,15 @@ pub mod subscriber;
 #[cfg(feature = "codec-declare")]
 pub mod queryable;
 
+// R311ek — the pure-data liveliness sample types (`LivelinessSample` /
+// `LivelinessSampleKind` / `LivelinessSampleCallback`) split out of the
+// `codec-declare`-gated `liveliness_subscriber` module so the
+// codec-agnostic callback surface composes in any subset; only the
+// `DeclareOwnedVariant`-consuming `LivelinessSubscriberRegistry` stays
+// `codec-declare`-gated below. Alloc-only (the callback is a `Box`).
+#[cfg(feature = "alloc")]
+pub mod liveliness_sample;
+
 #[cfg(feature = "codec-declare")]
 pub mod liveliness_subscriber;
 

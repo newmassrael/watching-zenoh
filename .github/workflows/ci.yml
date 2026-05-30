@@ -268,6 +268,17 @@ jobs:
         # no_std footing of the MCU presets stays Layer G's cross-compile.
         run: bash scripts/run-ci.sh --layer C4
 
+      - name: Layer C4b — wz facade arbitrary-incomplete-subset matrix
+        # R311ek — cargo-builds the wz facade under deliberately-incomplete
+        # coherent consumer subsets (pubsub-only / queryable-only /
+        # zget-reply-only / declare-observer). The named-preset C4 lane
+        # only covers COMPLETE profiles, and C1h only covers the
+        # wz-session-core layer; this lane is the facade-level analog of
+        # C1h that locks the runtime-tokio glue's over-broad-gating
+        # regression class (observer / liveliness_subscriber / source_info
+        # ext encoder) the default-feature CI never exercises.
+        run: bash scripts/run-ci.sh --layer C4b
+
       - name: Install python3-yaml (Layer D dep)
         # Layer D's run-ci.sh path no-ops gracefully when python3-yaml
         # is missing; on CI we install it explicitly so the lane
