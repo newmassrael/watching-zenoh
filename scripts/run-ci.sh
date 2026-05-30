@@ -72,6 +72,13 @@
 #              hard error, so this is the mechanical guard that each
 #              migrated registry composes under arbitrary feature
 #              selection — the class the maximal-union C1c-g lanes miss.)
+#   Layer C1i — wz-runtime-tokio scouting-active glue unit tests
+#              (R311ep; scouting-active is off by default so Layer C1
+#              never builds the scouting glue. Builds + runs the
+#              deterministic scout_emit / record_hello_and_emit /
+#              scout-timeout unit tests under --features scouting-active
+#              + deny-warnings. The socket-bound multicast e2e is the
+#              opt-in Layer M.)
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
 #   Layer C3 — per-package isolated `cargo clippy ... --all-targets`
 #              sub-lanes (R311cv; per-package isolated feature
@@ -192,6 +199,16 @@
 #              queue + LwipJoinHandle::abort + wz-link-lwip UDP raw
 #              API + lwip-sys cross-real C build, all in one
 #              binary).
+#   Layer M  — active-scouting multicast loopback e2e (R311ep). Opt-in
+#              via `--layer M` or `WZ_RUN_LAYER_M=1`. Binds a real UDP
+#              multicast scouting link (UdpDriver::bind_multicast_v4),
+#              emits a Scout, and resolves a peer locator from a Hello
+#              sent on the group. Opt-in because multicast routing is
+#              environment-dependent (a container without a multicast
+#              route drops the IGMP join) — keeping it out of the
+#              default gate honors the no-flaky rule. The deterministic
+#              FSM + encode/decode logic is covered socket-free by
+#              Layer C1i, so SKIP loses only the real-socket leg.
 #
 # Exit codes:
 #   0  every required layer passed
@@ -667,6 +684,23 @@ layer_c1h_arbitrary_subset_matrix() {
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber --quiet \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-declare --quiet \
         && cargo build -p wz-session-core --no-default-features --features alloc,transport-batching --quiet)
+}
+
+# ─── Layer C1i — cargo test -p wz-runtime-tokio --features scouting-active ─
+#
+# R311ep: scouting-active is off by default (scouting is opt-in per
+# deploy.scouting.mode), so Layer C1's `cargo test --workspace` never
+# builds the scouting glue. This lane builds + runs the deterministic
+# scouting unit tests (scout_emit Scout framing, record_hello_and_emit
+# locator extraction, scout-timeout path) under `--features
+# scouting-active`, which the `[workspace.lints] warnings = "deny"`
+# policy compiles with no dead-code/unused tolerance. The socket-bound
+# multicast e2e is the separate opt-in Layer M (multicast routing is
+# environment-dependent). `--lib` scopes the run to the in-crate unit
+# tests; the `scouting_multicast_loopback` integration test is `#[ignore]`
+# and only runs under Layer M.
+layer_c1i_cargo_test_scouting() {
+    (cd crates && cargo test -p wz-runtime-tokio --features scouting-active --lib scouting_glue --quiet)
 }
 
 # ─── Layer C2 — cargo clippy --deny warnings ────────────────────────
@@ -1254,6 +1288,28 @@ layer_q_qemu_mcu_e2e() {
     return $fail
 }
 
+# ─── Layer M — active-scouting multicast loopback e2e ──────────────
+#
+# R311ep: opt-in via `--layer M` or `WZ_RUN_LAYER_M=1`. Runs the
+# `scouting_multicast_loopback` integration test, which binds a real
+# UDP multicast scouting link (UdpDriver::bind_multicast_v4), emits a
+# Scout, and resolves a peer locator from a Hello sent on the group.
+# Opt-in (not a default gate) because multicast routing is
+# environment-dependent: a CI container without a multicast route on
+# the default interface drops the IGMP join, which would make the test
+# env-flaky — forbidden as a required gate (no-flaky rule). The
+# deterministic FSM + encode/decode logic is covered without a socket
+# by Layer C1i's `scouting_glue` unit tests, so disabling Layer M loses
+# no logic coverage, only the real-socket transport leg.
+layer_m_scouting_multicast() {
+    if [[ "$ONLY_LAYER" != "M" && "${WZ_RUN_LAYER_M:-0}" -ne 1 ]]; then
+        echo "Layer M SKIP (opt-in: --layer M or WZ_RUN_LAYER_M=1)"
+        return 0
+    fi
+    (cd crates && cargo test -p wz-runtime-tokio --features scouting-active \
+        --test scouting_multicast_loopback -- --ignored --quiet)
+}
+
 # ─── dispatch ──────────────────────────────────────────────────────
 overall=0
 run_layer 0 layer_0_preflight_lints || overall=1
@@ -1269,6 +1325,7 @@ run_layer C1e layer_c1e_cargo_test_query || overall=1
 run_layer C1f layer_c1f_cargo_test_reply || overall=1
 run_layer C1g layer_c1g_cargo_test_observer || overall=1
 run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
+run_layer C1i layer_c1i_cargo_test_scouting || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer C4 layer_c4_preset_matrix || overall=1
@@ -1278,6 +1335,7 @@ run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1
+run_layer M layer_m_scouting_multicast || overall=1
 
 if [[ $overall -eq 0 ]]; then
     echo ""

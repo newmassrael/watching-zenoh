@@ -411,7 +411,13 @@ query-reply-err = ["wz-session-core/query-reply-err"]
 # compiled in. Without the imply, `--no-default-features --features
 # scouting-active` would gate the multicast constructor out and the
 # scout link would have no transport.
-scouting-active = ["transport-link-udp"]
+#
+# R311ep — also implies codec-scout + codec-hello: scout_emit encodes a
+# Scout frame and record_hello_and_emit decodes a Hello frame, so the
+# scouting glue cannot compose without both body codecs. The S_MID_SCOUT
+# / S_MID_HELLO wire_const header bytes are gated on the same two codec
+# features in wz-codecs.
+scouting-active = ["transport-link-udp", "codec-scout", "codec-hello"]
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }
