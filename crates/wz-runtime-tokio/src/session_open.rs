@@ -369,7 +369,32 @@ pub async fn connect_and_open_session(
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let dialed = dial_locator(locator).await.map_err(OpenError::Dial)?;
-    let (inbound, outbound, writer_handle) = wire_dialed_link(dialed);
+    initiate_and_open_session(dialed, params, clock, max_iters, tick_interval_ms).await
+}
+
+/// Bring up a session in the Initiator role from an already-connected
+/// transport — the dialed-link half of [`connect_and_open_session`], split out
+/// so a caller that already holds a connected stream (e.g. wz-ap-demo's
+/// `establish_link`, which dials its own `TcpStream`) opens without re-dialing.
+/// Symmetric to [`accept_and_open_session`]: both take a [`DialedLink`] and
+/// differ only in the role-start activation; [`connect_and_open_session`] is
+/// the `dial_locator` + this convenience wrapper for callers that start from a
+/// locator string (scouting / static).
+///
+/// Activates the FSM in the Initiator role (`outbound.start` -> LinkOpening;
+/// the `link_driver_open` action is a no-op since the transport is already
+/// connected, then `link.opened` -> SentInitSyn fires `send_init_syn`, the
+/// first wire byte) and drives the inbound handshake (peer InitAck -> OpenSyn
+/// -> peer OpenAck) to Established. Wall-clock bounded by the FSM's handshake
+/// timers exactly as [`connect_and_open_session`] (see [`drive_open_loop`]).
+pub async fn initiate_and_open_session(
+    connected: DialedLink,
+    params: SessionInitParams,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(connected);
     let (actions, mut engine) = wire_session_engine(outbound, params, clock);
 
     // Initiator activation -> SentInitSyn (send_init_syn enqueues InitSyn).

@@ -22,7 +22,8 @@ use tokio::net::{TcpListener, TcpStream};
 
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_open::{
-    accept_and_open_session, connect_and_open_session, DialedLink, OpenError, DEFAULT_OPEN_TICK_MS,
+    accept_and_open_session, connect_and_open_session, initiate_and_open_session, DialedLink,
+    OpenError, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::locator::parse_locator;
@@ -74,6 +75,63 @@ async fn accept_and_open_reaches_established_against_wz_initiator() {
     assert!(
         opened.actions.trace_snapshot().record_established_at >= 1,
         "initiator OpenedSession is Established"
+    );
+}
+
+/// R311fc — `initiate_and_open_session` opens the Initiator role from an
+/// already-connected stream (no re-dial), the dialed-link entry point the
+/// wz-ap-demo runner consumes. Both sides here take the `DialedLink` entry:
+/// the acceptor `accept_and_open_session`, the initiator
+/// `initiate_and_open_session` over a stream it `TcpStream::connect`ed itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initiate_and_open_from_connected_stream_reaches_established() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+
+    let acceptor_fut = async move {
+        let (stream, _peer) = listener.accept().await.expect("accept");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4];
+        accept_and_open_session(
+            DialedLink::Tcp(stream),
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+    };
+
+    let initiator_fut = async move {
+        let stream = TcpStream::connect(addr).await.expect("connect");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x01; 4];
+        initiate_and_open_session(
+            DialedLink::Tcp(stream),
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+    };
+
+    let (accepted, opened) = tokio::join!(acceptor_fut, initiator_fut);
+    assert!(
+        accepted
+            .expect("acceptor reaches Established")
+            .actions
+            .trace_snapshot()
+            .record_established_at
+            >= 1
+    );
+    assert!(
+        opened
+            .expect("initiator reaches Established")
+            .actions
+            .trace_snapshot()
+            .record_established_at
+            >= 1
     );
 }
 
