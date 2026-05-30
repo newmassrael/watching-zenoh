@@ -3741,6 +3741,9 @@
         "Three caps chain in series; silent drop on cap denial (no Close frame, anti-amplification)",
         "deploy.yaml emits all three as bounded-collection checks + token-bucket guard at Init→Accepting"
       ],
+      "caveats_bullets": [
+        "R311fb: accepting.inactivity_timeout armed 1s (AwaitingInitSyn onentry); whole-accept silent drop."
+      ],
       "impact_scope": [
         "session-fsm--prose-level-sketch",
         "session-fsm--prose-level-sketch/2-6-trust-class-interaction",
@@ -26975,6 +26978,56 @@
         "Carry #2: accept-side has no wall-clock open-deadline yet (accept_and_open_session deferred; accepting.inactivity_timeout is declared but armed by no send). Initiator path is now bounded, acceptor path is not.",
         "Carry #3: udp-off standalone build still inherits the keyexpr-canon non-composability (north-star arbitrary-composition gap).",
         "Steady-state lease stays manual-injection (check_lease_deadline), not tick-driven: the lease window is a runtime deploy value (params.lease), not a static SCXML send delay, so the two timer mechanisms are intentionally distinct."
+      ]
+    },
+    "Round 311fb": {
+      "decision_summary": "R311fb accept-side open-deadline: arm accepting.inactivity_timeout (1s) on AwaitingInitSyn entry; add accept_and_open_session so a silent accepted peer is bounded not hung (R311fa carry #2).",
+      "changes_bullets": [
+        "session_fsm_unicast.scxml: AwaitingInitSyn.onentry now arms `<send event=\"accepting.inactivity_timeout\" delay=\"1s\"/>`; the parent Accepting transition (already present) catches it and drops to Closed. build.rs regenerates the FSM (schedule_event(AcceptingInactivityTimeout, 1000ms)).",
+        "Single whole-accept deadline, armed once on accept entry: parent-scope is staleness-safe here because only one timer of this event name is ever in flight, unlike R311fa's per-phase init_ack/open_ack timers that needed child-scoping. Target is Closed not Closing (silent drop, no Close frame; §2.7 anti-amplification).",
+        "session_open.rs: extracted wire_session_engine + drive_open_loop (shared engine setup + tick-pump race + role-agnostic terminal mapping) out of connect_and_open_session; the Initiator path behaviour is unchanged.",
+        "session_open.rs: new accept_and_open_session(accepted: DialedLink, ...) mirrors connect but activates via InboundStart; accept pre-Established terminals fold into OpenError::Terminal (a timed-out accept is indistinguishable from a peer close by design — the silent drop spends no reply on a possibly-spoofed peer)."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh required lanes all pass (validate-workspace, codec codegen L1-L3, workspace tests, feature-subset lanes, deploy schema, Layer E); Layer G 7-MCU cross-compile lane all targets OK.",
+        "New tests: accept_and_open_session.rs (in-process wz<->wz accept<->connect e2e to Established + silent-peer #[ignore] real-time ~1.0s -> OpenError::Terminal); session_fsm_handshake_timeout.rs accept-inactivity FSM test; session_fsm_accepting_path.rs post-Established stale-timer-discarded guard.",
+        "cargo fmt --all --check clean; cargo clippy -p wz-runtime-tokio --tests -D warnings clean; connect_and_open_session + static_scout_open regression-free after the loop extraction; SCXML codegen regenerates and compiles."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "Carry #2 (open-deadline) now closed at the lib-helper layer for both roles; the wz-ap-demo runner still drives accept inline via drive_session_until_terminal (no tick pump), so rewiring the demo onto connect_/accept_and_open_session is the remaining integration step.",
+        "Carry #3: udp-off standalone build still inherits the keyexpr-canon non-composability (north-star arbitrary-composition gap).",
+        "accepting.inactivity_timeout is a single whole-accept deadline (1s total), not reset-on-activity; a true per-phase inactivity reset would need a distinct event name per phase to stay staleness-safe (§2.5 names one timer, so this is deferred as an enhancement).",
+        "Steady-state lease stays manual-injection (check_lease_deadline), distinct from the static SCXML send-delay timers (deploy runtime value, not a codegen delay)."
+      ],
+      "publishable_decision_summary": "R311fb accept-side open-deadline: arm accepting.inactivity_timeout (1s) on AwaitingInitSyn entry; add accept_and_open_session so a silent accepted peer is bounded not hung (R311fa carry #2).",
+      "publishable_changes_bullets": [
+        "session_fsm_unicast.scxml: AwaitingInitSyn.onentry now arms `<send event=\"accepting.inactivity_timeout\" delay=\"1s\"/>`; the parent Accepting transition (already present) catches it and drops to Closed. build.rs regenerates the FSM (schedule_event(AcceptingInactivityTimeout, 1000ms)).",
+        "Single whole-accept deadline, armed once on accept entry: parent-scope is staleness-safe here because only one timer of this event name is ever in flight, unlike R311fa's per-phase init_ack/open_ack timers that needed child-scoping. Target is Closed not Closing (silent drop, no Close frame; §2.7 anti-amplification).",
+        "session_open.rs: extracted wire_session_engine + drive_open_loop (shared engine setup + tick-pump race + role-agnostic terminal mapping) out of connect_and_open_session; the Initiator path behaviour is unchanged.",
+        "session_open.rs: new accept_and_open_session(accepted: DialedLink, ...) mirrors connect but activates via InboundStart; accept pre-Established terminals fold into OpenError::Terminal (a timed-out accept is indistinguishable from a peer close by design — the silent drop spends no reply on a possibly-spoofed peer)."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh required lanes all pass (validate-workspace, codec codegen L1-L3, workspace tests, feature-subset lanes, deploy schema, Layer E); Layer G 7-MCU cross-compile lane all targets OK.",
+        "New tests: accept_and_open_session.rs (in-process wz<->wz accept<->connect e2e to Established + silent-peer #[ignore] real-time ~1.0s -> OpenError::Terminal); session_fsm_handshake_timeout.rs accept-inactivity FSM test; session_fsm_accepting_path.rs post-Established stale-timer-discarded guard.",
+        "cargo fmt --all --check clean; cargo clippy -p wz-runtime-tokio --tests -D warnings clean; connect_and_open_session + static_scout_open regression-free after the loop extraction; SCXML codegen regenerates and compiles."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions",
+        "session-fsm--prose-level-sketch/2-5-timeouts-and-budgets",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carry #2 (open-deadline) now closed at the lib-helper layer for both roles; the wz-ap-demo runner still drives accept inline via drive_session_until_terminal (no tick pump), so rewiring the demo onto connect_/accept_and_open_session is the remaining integration step.",
+        "Carry #3: udp-off standalone build still inherits the keyexpr-canon non-composability (north-star arbitrary-composition gap).",
+        "accepting.inactivity_timeout is a single whole-accept deadline (1s total), not reset-on-activity; a true per-phase inactivity reset would need a distinct event name per phase to stay staleness-safe (§2.5 names one timer, so this is deferred as an enhancement).",
+        "Steady-state lease stays manual-injection (check_lease_deadline), distinct from the static SCXML send-delay timers (deploy runtime value, not a codegen delay)."
       ]
     },
     "Round 311g": {
