@@ -556,18 +556,20 @@ layer_c1c_cargo_test_codec_declare() {
 # This lane enumerates the union explicitly so the pubsub tests cannot
 # silently drop out of CI if wz-runtime-tokio's defaults change.
 #
-# R311el: two invocations gate both cfg arms of the pubsub-source-info
-# wire-up. The first omits pubsub-source-info — it builds the cfg-off
-# populator (body_source_info = None) under deny-warnings and runs the
-# cautious-fire dedup tests that hold with source_info absent. The second
-# adds pubsub-source-info — it builds the extract_source_info path and
-# runs the self-echo suppression tests that only engage when the wire
+# R311el/R311em: two invocations gate both cfg arms of the metadata-
+# projection wire-ups. The first omits pubsub-source-info AND the three
+# QoS-byte features (pubsub-priority/-congestion-control/-express) — it
+# builds the cfg-off populators (body_source_info = None, qos = None)
+# under deny-warnings and runs the cautious-fire dedup tests that hold
+# with source_info absent. The second adds pubsub-source-info + all three
+# QoS features — it builds the extract_source_info + extract_qos paths
+# and runs the self-echo suppression tests that only engage when the wire
 # source_info is decoded. The maximal-preset lanes never build the
-# source-info-off subset, so the off arm would otherwise escape CI.
+# metadata-off subset, so the off arms would otherwise escape CI.
 layer_c1d_cargo_test_pubsub() {
     (cd crates \
         && cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --quiet \
-        && cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,pubsub-source-info --quiet)
+        && cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,pubsub-source-info,pubsub-priority,pubsub-congestion-control,pubsub-express --quiet)
 }
 
 # ─── Layer C1e — cargo test -p wz-session-core (query dispatch plane) ──

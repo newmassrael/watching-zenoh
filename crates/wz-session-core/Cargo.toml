@@ -75,6 +75,9 @@ pubsub-delete = []
 pubsub-attachment = []
 pubsub-timestamp = []
 pubsub-source-info = []
+pubsub-priority = []
+pubsub-congestion-control = []
+pubsub-express = []
 
 # R311dx — query-side dispatch gates for the migrated QueryableRegistry
 # (`wz-session-core::query`). `query-queryable` forwards to the

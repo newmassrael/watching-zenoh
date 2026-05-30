@@ -26302,6 +26302,46 @@
         "R311el is LOCAL only; push pending explicit user consent (CLAUDE.md global push rule)."
       ]
     },
+    "Round 311em": {
+      "decision_summary": "R311em wires the QoS-byte trio pubsub-priority/-congestion-control/-express: gates the subscriber-side extract_qos projection (the three share one _z_qos_t byte, hence an any() gate).",
+      "changes_bullets": [
+        "crates/wz-session-core/src/pubsub.rs: the extract_qos import + the dispatch-path qos extraction now gate on any(pubsub-priority, pubsub-congestion-control, pubsub-express). The three are bit views of one packed _z_qos_t byte (priority 3-bit / congestion-control 1-bit / express 1-bit) so the subscriber projection is indivisible -- it gates on any consumer. cfg-off (all three) elides extract_qos; Sample.qos stays declared, populated None (signature stability, R311g1).",
+        "Forward chain (3 features, 3-stage mirror of pubsub-source-info): wz-session-core declares pubsub-priority/-congestion-control/-express = [] (gate-only); wz-runtime-tokio forwards each + adds all three to its default set; the wz facade forwards each (pubsub-priority keeps its existing session-extqos dep). Cargo authoring-intent comments updated (pubsub domain 5 active/6 reserved -> 9 active/2 reserved).",
+        "scripts/run-ci.sh Layer C1d: the on-arm test invocation gains pubsub-priority/-congestion-control/-express so both cfg arms of the QoS projection compile under deny-warnings (off arm = first invocation, qos = None + outer_exts silenced; on arm = second, extract_qos path). ci.yml unchanged."
+      ],
+      "verification_bullets": [
+        "5 cfg-combo deny-warnings builds (qos all-off; each of priority/congestion-control/express alone; all-on + attachment + source-info) compile clean; C1d off-arm 209 wz-session-core lib tests, on-arm 211.",
+        "runtime-tokio default build enables the three QoS features, so the existing session/session_glue QoS round-trip + is_express tests run with extract_qos active (8 qos tests pass) -- no runtime-tokio test regresses.",
+        "full scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b..C1h/C2/C3/C4/C4b/D/E) EXIT 0; Layer G MCU 7-target cross-compile pass (G.6 riscv32imac SKIP -- toolchain absent)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "wire-up gap a continues. class-3 mechanical candidate remaining on the subscriber projection cluster: query-source-info (query-path source_info, mirror of R311el). The QoS byte trio is now wired; the per-bit typed accessors (Priority/CongestionControl enums in qos.rs) remain a request-builder-side concern, not a dispatch projection.",
+        "class-2 monolithic (keyexpr_match.rs wildcard tiers) and class-1 unimplemented labels (transport quic/serial/ws/multicast/shm/compression + locator/platform/routing/scouting/storage/access domains at 0% wired) are unchanged = feature-implementation long tail, NOT mechanical wire-up.",
+        "R311em is LOCAL only; push pending explicit user consent (CLAUDE.md global push rule)."
+      ],
+      "publishable_decision_summary": "R311em wires the QoS-byte trio pubsub-priority/-congestion-control/-express: gates the subscriber-side extract_qos projection (the three share one _z_qos_t byte, hence an any() gate).",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/pubsub.rs: the extract_qos import + the dispatch-path qos extraction now gate on any(pubsub-priority, pubsub-congestion-control, pubsub-express). The three are bit views of one packed _z_qos_t byte (priority 3-bit / congestion-control 1-bit / express 1-bit) so the subscriber projection is indivisible -- it gates on any consumer. cfg-off (all three) elides extract_qos; Sample.qos stays declared, populated None (signature stability, R311g1).",
+        "Forward chain (3 features, 3-stage mirror of pubsub-source-info): wz-session-core declares pubsub-priority/-congestion-control/-express = [] (gate-only); wz-runtime-tokio forwards each + adds all three to its default set; the wz facade forwards each (pubsub-priority keeps its existing session-extqos dep). Cargo authoring-intent comments updated (pubsub domain 5 active/6 reserved -> 9 active/2 reserved).",
+        "scripts/run-ci.sh Layer C1d: the on-arm test invocation gains pubsub-priority/-congestion-control/-express so both cfg arms of the QoS projection compile under deny-warnings (off arm = first invocation, qos = None + outer_exts silenced; on arm = second, extract_qos path). ci.yml unchanged."
+      ],
+      "publishable_verification_bullets": [
+        "5 cfg-combo deny-warnings builds (qos all-off; each of priority/congestion-control/express alone; all-on + attachment + source-info) compile clean; C1d off-arm 209 wz-session-core lib tests, on-arm 211.",
+        "runtime-tokio default build enables the three QoS features, so the existing session/session_glue QoS round-trip + is_express tests run with extract_qos active (8 qos tests pass) -- no runtime-tokio test regresses.",
+        "full scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b..C1h/C2/C3/C4/C4b/D/E) EXIT 0; Layer G MCU 7-target cross-compile pass (G.6 riscv32imac SKIP -- toolchain absent)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "wire-up gap a continues. class-3 mechanical candidate remaining on the subscriber projection cluster: query-source-info (query-path source_info, mirror of R311el). The QoS byte trio is now wired; the per-bit typed accessors (Priority/CongestionControl enums in qos.rs) remain a request-builder-side concern, not a dispatch projection.",
+        "class-2 monolithic (keyexpr_match.rs wildcard tiers) and class-1 unimplemented labels (transport quic/serial/ws/multicast/shm/compression + locator/platform/routing/scouting/storage/access domains at 0% wired) are unchanged = feature-implementation long tail, NOT mechanical wire-up.",
+        "R311em is LOCAL only; push pending explicit user consent (CLAUDE.md global push rule)."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [
