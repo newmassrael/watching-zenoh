@@ -73,6 +73,11 @@ use portable_atomic::{AtomicU64, Ordering};
 
 use crate::sync::Mutex;
 
+// R311eo — bind_unit / bind_guard extracted to the neutral `script_bind`
+// module and generalised over the deps type; the session FSM keeps using
+// them here for `Arc<SessionLinkActions>`.
+use crate::script_bind::{bind_guard, bind_unit};
+
 // R311ei — the HMAC-SHA256 cookie primitive + SigningKey newtype moved
 // to wz-session-core::signing_key; only the OS-entropy constructor stays
 // here (as a free fn), so this crate keeps just the `Zeroizing` wrapper +
@@ -4792,18 +4797,8 @@ fn pack_sn_res(seq_num_res: u8, req_id_res: u8) -> u8 {
 
 // ─────────────────────────── helpers ───────────────────────────
 
-fn bind_unit<F>(lua: &dyn IScriptEngine, name: &str, actions: &Arc<SessionLinkActions>, body: F)
-where
-    F: Fn(&Arc<SessionLinkActions>) + Send + Sync + 'static,
-{
-    let captured = actions.clone();
-    let cb: NativeMethod = Box::new(move |_args: &[ScriptValue]| -> ScriptValue {
-        body(&captured);
-        ScriptValue::Null
-    });
-    let ok = lua.register_global_function(name, cb);
-    assert!(ok, "register_global_function failed for {name}");
-}
+// R311eo — `bind_unit` moved to `crate::script_bind` (generalised over
+// the deps type `A`). Imported at the top of this module.
 
 fn bind_close_reason(
     lua: &dyn IScriptEngine,
@@ -4829,23 +4824,10 @@ fn bind_bool(lua: &dyn IScriptEngine, name: &str, value: bool) {
     assert!(ok, "register_global_function failed for {name}");
 }
 
-/// R89 — dynamic boolean guard binding. The closure receives the
-/// captured `Arc<SessionLinkActions>` and returns a `bool` verdict
-/// per invocation; sibling to `bind_unit` (which returns Null) and
-/// `bind_bool` (which returns a constant). Used by `cookie_valid()`
-/// to re-HMAC peer_zid against the inbound OpenSyn cookie at guard
-/// evaluation time rather than at registration time.
-fn bind_guard<F>(lua: &dyn IScriptEngine, name: &str, actions: &Arc<SessionLinkActions>, body: F)
-where
-    F: Fn(&Arc<SessionLinkActions>) -> bool + Send + Sync + 'static,
-{
-    let captured = actions.clone();
-    let cb: NativeMethod = Box::new(move |_args: &[ScriptValue]| -> ScriptValue {
-        ScriptValue::Bool(body(&captured))
-    });
-    let ok = lua.register_global_function(name, cb);
-    assert!(ok, "register_global_function failed for {name}");
-}
+// R311eo — `bind_guard` (R89 dynamic boolean guard binding) moved to
+// `crate::script_bind`, generalised over the deps type `A`. Used here by
+// `cookie_valid()` to re-HMAC peer_zid against the inbound OpenSyn cookie
+// at guard evaluation time rather than at registration time.
 
 // R71 — the former `dispatch_script` test shim moved to the
 // `wz-runtime-tokio-test-support` sibling crate. Production callers

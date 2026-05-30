@@ -38,6 +38,11 @@ use wz_codecs::stream_envelope::StreamEnvelope;
 
 pub mod session_glue;
 
+// R311eo — generic SCXML script-action binders (bind_unit / bind_guard),
+// extracted from session_glue and generalised over the deps type so the
+// scouting FSM glue reuses them. Neutral module: depends on neither glue.
+mod script_bind;
+
 /// R221 — zenoh keyexpr canonicalization mirror. Mirrors the
 /// structural-only canonicalization performed by zenoh-pico's
 /// `_z_keyexpr_canonize` so wz-side subscriber / queryable
