@@ -320,6 +320,15 @@ pub use wz_session_core::link::{LinkEvent, LostCause, RxFrame, TxFrame};
 #[cfg(feature = "transport-link-tcp")]
 pub mod link_pipeline;
 
+/// R311eu — mode-agnostic session-open orchestration over the R311et
+/// [`link_pipeline`]. `dial_locator` dispatches a `ParsedLocator`'s protocol
+/// to a raw transport; `connect_and_open_session` dials, splits into the
+/// pipeline, wires the Initiator FSM, and drives the handshake to
+/// Established. Gated on `transport-unicast` too because it drives the
+/// `session_fsm_unicast` FSM.
+#[cfg(all(feature = "transport-link-tcp", feature = "transport-unicast"))]
+pub mod session_open;
+
 /// The 4-method `LinkDriver` trait. Matches
 /// docs/runtime-crate-tokio.md §2.1. Trust-class flavored variants
 /// (untrusted / session_arming / established_session) deferred to
