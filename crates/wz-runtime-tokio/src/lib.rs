@@ -670,6 +670,7 @@ impl UdpDriver {
     ///   3. `set_multicast_loop_v4(true)` — let a same-host peer (and
     ///      the loopback smoke test) observe the traffic; off by default
     ///      on some platforms.
+    ///
     /// `peer` is set to `group:port` so `LinkDriver::send` writes the
     /// Scout datagram to the group.
     ///
