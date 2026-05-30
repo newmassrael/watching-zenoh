@@ -26646,6 +26646,50 @@
         "connect_and_open_session is Initiator-only; the paired acceptor-side open helper (accept_and_open_session) lands in R311ev when the demo de-dups — the e2e assembles the acceptor inline until then."
       ]
     },
+    "Round 311ev": {
+      "decision_summary": "R311ev de-dups wz-ap-demo onto link_pipeline::wire_tcp_stream and deletes the demo-local split-link driver copies (InboundReadDriver/OutboundWriteDriver/writer_task).",
+      "changes_bullets": [
+        "wz-ap-demo/src/runner.rs: the demo-local wire_link_pipeline split replaced by wz::runtime_tokio::link_pipeline::wire_tcp_stream; dropped the now-unused mpsc import; doc comments redirected to the lib pipeline.",
+        "wz-ap-demo/src/link_driver.rs: deleted — InboundReadDriver / OutboundWriteDriver / writer_task were duplicates of the R311et-lifted TcpReadDriver / TcpWriteDriver / writer_task, and the local copies bypassed the StreamEnvelope codec (the lib forms are codec-routed both ways).",
+        "wz-ap-demo/src/main.rs: removed `mod link_driver;`; rewrote the bidirectional-wiring doc block to point at link_pipeline; corrected the multi_thread-runtime comment (TcpWriteDriver is a non-blocking channel enqueue, not a block_on path).",
+        "Scope note: full connect_and_open_session adoption in runner.rs is deferred — the inline observer / Session / background-task / teardown coupling is a larger refactor; this round is the link-layer de-dup only (carry)."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh required layers incl Layer E (wz-ap-demo binary round-trip e2e): all pass (exit 0) — the de-dup is behaviour-preserving on the wire.",
+        "cargo build + clippy -p wz-ap-demo --all-targets: clean, 0 warnings; rustfmt --check clean.",
+        "Layer G (MCU cross-compile) N/A — wz-ap-demo is an AP-only std binary."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "runtime-crate--sce_link_runtime_tokio/2-1-two-primitive-link-contract"
+      ],
+      "carry_forward_bullets": [
+        "Full connect_and_open_session adoption in runner.rs (replacing the inline observer / Session / engine / teardown assembly) + a paired accept_and_open_session helper remain a larger refactor deferred beyond this link-layer de-dup; runner.rs still assembles the session orchestration inline.",
+        "R311ew+: UDP session-open uniform pipeline (dial_locator Udp arm) + scouting ScoutOutcome::Discovered -> parse_locator -> dial_locator -> connect_and_open_session wiring (north-star arbitrary-composition seam).",
+        "TokioLinkDriverAdapter (block_on path) stays a transport-emit test scaffold only; the split pipeline is now the sole production session-open link model across both the lib and the demo."
+      ],
+      "publishable_decision_summary": "R311ev de-dups wz-ap-demo onto link_pipeline::wire_tcp_stream and deletes the demo-local split-link driver copies (InboundReadDriver/OutboundWriteDriver/writer_task).",
+      "publishable_changes_bullets": [
+        "wz-ap-demo/src/runner.rs: the demo-local wire_link_pipeline split replaced by wz::runtime_tokio::link_pipeline::wire_tcp_stream; dropped the now-unused mpsc import; doc comments redirected to the lib pipeline.",
+        "wz-ap-demo/src/link_driver.rs: deleted — InboundReadDriver / OutboundWriteDriver / writer_task were duplicates of the R311et-lifted TcpReadDriver / TcpWriteDriver / writer_task, and the local copies bypassed the StreamEnvelope codec (the lib forms are codec-routed both ways).",
+        "wz-ap-demo/src/main.rs: removed `mod link_driver;`; rewrote the bidirectional-wiring doc block to point at link_pipeline; corrected the multi_thread-runtime comment (TcpWriteDriver is a non-blocking channel enqueue, not a block_on path).",
+        "Scope note: full connect_and_open_session adoption in runner.rs is deferred — the inline observer / Session / background-task / teardown coupling is a larger refactor; this round is the link-layer de-dup only (carry)."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh required layers incl Layer E (wz-ap-demo binary round-trip e2e): all pass (exit 0) — the de-dup is behaviour-preserving on the wire.",
+        "cargo build + clippy -p wz-ap-demo --all-targets: clean, 0 warnings; rustfmt --check clean.",
+        "Layer G (MCU cross-compile) N/A — wz-ap-demo is an AP-only std binary."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "runtime-crate--sce_link_runtime_tokio/2-1-two-primitive-link-contract"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Full connect_and_open_session adoption in runner.rs (replacing the inline observer / Session / engine / teardown assembly) + a paired accept_and_open_session helper remain a larger refactor deferred beyond this link-layer de-dup; runner.rs still assembles the session orchestration inline.",
+        "R311ew+: UDP session-open uniform pipeline (dial_locator Udp arm) + scouting ScoutOutcome::Discovered -> parse_locator -> dial_locator -> connect_and_open_session wiring (north-star arbitrary-composition seam).",
+        "TokioLinkDriverAdapter (block_on path) stays a transport-emit test scaffold only; the split pipeline is now the sole production session-open link model across both the lib and the demo."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [

@@ -11,8 +11,10 @@
 //
 //   * `establish_link` — TCP setup; Acceptor binds + accepts,
 //     Initiator dials.
-//   * `wire_link_pipeline` — stream split + writer task spawn +
-//     `InboundReadDriver` / `OutboundWriteDriver` construction.
+//   * `link_pipeline::wire_tcp_stream` (R311ev) — stream split +
+//     writer task spawn + `TcpReadDriver` / `TcpWriteDriver`
+//     construction, consumed from the library (was the demo-local
+//     `wire_link_pipeline` before R311ev lifted it into wz-runtime-tokio).
 //   * `install_observer_callbacks` — remote-* registry + reply
 //     registry installs that run before drive_session starts.
 //   * `install_session_handles` — local subscriber / queryable /
@@ -41,7 +43,7 @@ use std::io;
 use std::sync::Arc;
 
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 // R311at — JoinHandle types migrate from raw `tokio::task::JoinHandle`
 // to wz's [`TokioJoinHandle`], the trait-wrapped form returned by
 // `<TokioRuntime as Runtime>::spawn`. The wrapper exposes the same
@@ -78,10 +80,10 @@ use crate::args::{
     demo_session_init_params, DeclareEmitSpec, PushOperation, QueryRoleSpec, RemoteLogSpec,
     ReplyConsumerSpec, Role,
 };
-use crate::link_driver::{writer_task, InboundReadDriver, OutboundWriteDriver};
 use crate::shutdown::shutdown_signal;
 use crate::tasks::{declare_task, publisher_task, query_task, QUERY_RID};
 use crate::teardown;
+use wz::runtime_tokio::link_pipeline::wire_tcp_stream;
 
 /// RAII keepers for the local Session-level declarations
 /// ([`Subscriber`], [`LivelinessSubscriber`], [`Queryable`]). Held
@@ -136,35 +138,6 @@ async fn establish_link(role: &Role) -> io::Result<TcpStream> {
             Ok(stream)
         }
     }
-}
-
-/// Step 2 — split the `TcpStream` into owned read + write halves +
-/// spawn a dedicated writer task so the FSM's sync script-action
-/// handlers can enqueue outbound frames without nesting `block_on`
-/// inside the runtime that is driving the inbound poll loop. The
-/// writer task owns the `OwnedWriteHalf`; the FSM-facing
-/// [`OutboundWriteDriver`] holds only the sender.
-///
-/// Returns the triple of `(inbound driver, outbound driver Arc,
-/// writer task handle)`. The Arc lets the FSM's
-/// `SessionLinkActions` keep the outbound side alive while the
-/// writer task drains the channel; the JoinHandle is awaited (with
-/// a small timeout) during run_demo teardown so any tail frame the
-/// FSM enqueued during its final transition still reaches the
-/// peer.
-fn wire_link_pipeline(
-    stream: TcpStream,
-) -> (
-    InboundReadDriver,
-    Arc<OutboundWriteDriver>,
-    TokioJoinHandle<()>,
-) {
-    let (reader, writer) = stream.into_split();
-    let inbound = InboundReadDriver::new(reader);
-    let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let writer_handle = TokioRuntime.spawn(writer_task(writer, outbound_rx));
-    let outbound = Arc::new(OutboundWriteDriver::new(outbound_tx));
-    (inbound, outbound, writer_handle)
 }
 
 /// Step 3 — install the observer-side callbacks that run BEFORE
@@ -505,7 +478,7 @@ fn spawn_background_tasks(
 ///
 /// R121f initiator path: `OutboundStart` lands the FSM in
 /// `LinkOpening` (fires `link_driver_open` which is a no-op on the
-/// `OutboundWriteDriver` since TCP is already connected); then
+/// `TcpWriteDriver` since TCP is already connected); then
 /// `LinkOpened` lands it in `SentInitSyn` which fires
 /// `send_init_syn` — our first wire byte goes out here. Mirrors the
 /// pattern asserted by
@@ -566,7 +539,12 @@ pub(crate) async fn run_demo(
     let stream = establish_link(&role).await?;
 
     // ── Step 2: stream split + writer task + driver wiring.
-    let (inbound, outbound, writer_handle) = wire_link_pipeline(stream);
+    //
+    // R311ev — the split-link pipeline (TcpReadDriver + TcpWriteDriver +
+    // writer_task) was lifted into the library at R311et; the demo now
+    // consumes `link_pipeline::wire_tcp_stream` rather than its own
+    // duplicated copy. Identical wire behaviour, codec-routed both ways.
+    let (inbound, outbound, writer_handle) = wire_tcp_stream(stream);
 
     // ── Step 3: observer-side registry callbacks.
     //
@@ -680,7 +658,7 @@ pub(crate) async fn run_demo(
     // `drive_session_until_terminal`. The sweep runs here rather
     // than inside the drive_session loop because
     // `poll_and_dispatch_one` is NOT cancel-safe for length-prefixed
-    // link drivers such as the `InboundReadDriver` above
+    // link drivers such as the `TcpReadDriver` from `link_pipeline`
     // (cancellation between the u16 length read and the payload
     // read drops captured bytes). Clamping the drive_session loop's
     // sleep arm to the sweep cadence would cancel the in-flight
