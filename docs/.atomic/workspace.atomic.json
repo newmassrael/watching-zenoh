@@ -26490,6 +26490,58 @@
         "non-tcp/udp transports (serial/ws/quic/unixsock) extend Proto as those link drivers land."
       ]
     },
+    "Round 311es": {
+      "decision_summary": "R311es adds TcpDriver::connect / UdpDriver::connect: the dial half of the scouting locator seam, turning a ParsedLocator endpoint into a connected Initiator-side link driver.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/lib.rs: TcpDriver::connect(addr) -> io::Result<Self> — TcpStream::connect then from_stream; the Initiator-side counterpart to the acceptor-side from_stream, fulfilling the standing open() doc note ('outbound dial flow lands when the Initiator path is wired').",
+        "wz-runtime-tokio/src/lib.rs: UdpDriver::connect(peer) -> io::Result<Self> — bind an ephemeral local socket (bind address family mirrors peer so an IPv6 locator binds an IPv6 socket) targeting peer for unicast send; distinct from bind_multicast_v4 which joins a scouting group.",
+        "Widened the std::net::SocketAddr import cfg from transport-link-udp to any(transport-link-tcp, transport-link-udp) so the tcp connect signature can name the type.",
+        "Both constructors consume the numeric endpoint a wz_session_core::locator::ParsedLocator carries: the parse half landed R311er, this is the dial half. The mode-agnostic dispatcher + read/write-split orchestration stay for the next round.",
+        "wz-runtime-tokio/tests/outbound_dial.rs: 2 loopback integration tests (tcp frame round-trips the streamed-link envelope to an accepting from_stream driver; udp datagram reaches a plain bound receiver socket)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test outbound_dial: 2/2 pass.",
+        "cargo clippy -p wz-runtime-tokio --all-targets -D warnings + cargo fmt --check: clean.",
+        "full scripts/run-ci.sh required layers (0/A/B/C0/C1/C1b..C1i/C2/C3/C4/D/E) EXIT 0; zero regression.",
+        "Layer G (MCU cross-compile) not applicable — change confined to the std-only wz-runtime-tokio crate, outside the no_std MCU set."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "scouting-fsm--prose-sketch/2-4-1-active",
+        "scouting-fsm--prose-sketch/2-4-3-static"
+      ],
+      "carry_forward_bullets": [
+        "Orchestration round (next): the mode-agnostic dial_locator(ParsedLocator) dispatcher + drive-to-Established + lifting wz-ap-demo runner.rs's open path into a reusable connect_and_open_session lib API. Output shape is coupled to the read/write-split decision: TCP session-open splits the stream (concurrent block_on send + async poll) while UDP is unified, so the uniform driver/consumption shape resolves there, not at the dial constructors.",
+        "DNS hostname resolution + locator metadata suffix parsing remain deferred (R311er carry), surfaced as ParsedLocator BadAddress.",
+        "non-tcp/udp transports (serial/ws/quic/unixsock) extend Proto + add matching connect constructors as those link drivers land."
+      ],
+      "publishable_decision_summary": "R311es adds TcpDriver::connect / UdpDriver::connect: the dial half of the scouting locator seam, turning a ParsedLocator endpoint into a connected Initiator-side link driver.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/lib.rs: TcpDriver::connect(addr) -> io::Result<Self> — TcpStream::connect then from_stream; the Initiator-side counterpart to the acceptor-side from_stream, fulfilling the standing open() doc note ('outbound dial flow lands when the Initiator path is wired').",
+        "wz-runtime-tokio/src/lib.rs: UdpDriver::connect(peer) -> io::Result<Self> — bind an ephemeral local socket (bind address family mirrors peer so an IPv6 locator binds an IPv6 socket) targeting peer for unicast send; distinct from bind_multicast_v4 which joins a scouting group.",
+        "Widened the std::net::SocketAddr import cfg from transport-link-udp to any(transport-link-tcp, transport-link-udp) so the tcp connect signature can name the type.",
+        "Both constructors consume the numeric endpoint a wz_session_core::locator::ParsedLocator carries: the parse half landed R311er, this is the dial half. The mode-agnostic dispatcher + read/write-split orchestration stay for the next round.",
+        "wz-runtime-tokio/tests/outbound_dial.rs: 2 loopback integration tests (tcp frame round-trips the streamed-link envelope to an accepting from_stream driver; udp datagram reaches a plain bound receiver socket)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test outbound_dial: 2/2 pass.",
+        "cargo clippy -p wz-runtime-tokio --all-targets -D warnings + cargo fmt --check: clean.",
+        "full scripts/run-ci.sh required layers (0/A/B/C0/C1/C1b..C1i/C2/C3/C4/D/E) EXIT 0; zero regression.",
+        "Layer G (MCU cross-compile) not applicable — change confined to the std-only wz-runtime-tokio crate, outside the no_std MCU set."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "scouting-fsm--prose-sketch/2-4-1-active",
+        "scouting-fsm--prose-sketch/2-4-3-static"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Orchestration round (next): the mode-agnostic dial_locator(ParsedLocator) dispatcher + drive-to-Established + lifting wz-ap-demo runner.rs's open path into a reusable connect_and_open_session lib API. Output shape is coupled to the read/write-split decision: TCP session-open splits the stream (concurrent block_on send + async poll) while UDP is unified, so the uniform driver/consumption shape resolves there, not at the dial constructors.",
+        "DNS hostname resolution + locator metadata suffix parsing remain deferred (R311er carry), surfaced as ParsedLocator BadAddress.",
+        "non-tcp/udp transports (serial/ws/quic/unixsock) extend Proto + add matching connect constructors as those link drivers land."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [
