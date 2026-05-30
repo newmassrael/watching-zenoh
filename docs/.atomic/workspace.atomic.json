@@ -26400,6 +26400,50 @@
         "next missing subsystem per project_north_star (transport-link-tls or routing) is the following round."
       ]
     },
+    "Round 311eq": {
+      "decision_summary": "R311eq adds static scouting mode: ScoutingMode{Active,Static} discriminator + synth_static_locators returning the deploy.connect[] locators verbatim (scouting FSM bypass; no codec/socket/FSM, not scouting-active gated).",
+      "changes_bullets": [
+        "wz-session-core: new scout_static module — ScoutingMode {Active, Static} discriminator + from_deploy_str (passive -> PassiveDeferred err, unknown -> Unknown(s); no silent fallback) + synth_static_locators(&[String]) -> Vec<String> returning the deploy.connect[] locators verbatim (trimmed, blank entries dropped).",
+        "Static mode is the scouting-FSM bypass (docs/scouting-fsm.md §2.4.3): no scout codec / link / FSM. The module is NOT gated on scouting-active (which gates the active FSM in wz-runtime-tokio) — a static-only deploy compiles the active FSM out and reaches session-open through synth_static_locators alone. Pure alloc value transform placed in wz-session-core (MCU static-deploy usable), the wz analog of zenoh-pico _z_locators_by_config.",
+        "6 unit tests cover the mode parse (active / static / passive-deferred / unknown) and synth (verbatim in deploy order / whitespace-trim + blank-drop / empty connect)."
+      ],
+      "verification_bullets": [
+        "wz-session-core builds clean; the 6 scout_static unit tests pass under Layer C1 (cargo test --workspace runs wz-session-core with its default alloc feature, which gates the module + tests).",
+        "full scripts/run-ci.sh 0/A/A2/B/C0/C1/C1b..C1i/C2/C3/C4/C4b/D/E EXIT 0 (Layer F/G/Q/M opt-in SKIP).",
+        "Layer G MCU 7-target cross-compile pass — scout_static is alloc-pure (no codec/socket/FSM) so it compiles on every Phase W target (G.6 riscv32imac SKIP, toolchain absent)."
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/2-4-3-static",
+        "scouting-fsm--prose-sketch/1-4-three-modes-and-zenoh-pico-mapping",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "carry_forward_bullets": [
+        "deploy schema connect[] field + a scouting.mode: static example are not yet authored (all three deploys use mode: active); synth_static_locators takes &[String] so the eventual deploy->config parser supplies the list. Parser is still unbuilt (same status as the active mode's already-authored deploy.scouting block).",
+        "session-open consumer that dials the synthesized locators (and the active mode's discovered locator) is not yet wired — both scouting modes now produce a locator handoff awaiting the unified session-open integration (the next scouting-domain step).",
+        "passive mode stays Phase D+ (OQ-W23); from_deploy_str surfaces it as PassiveDeferred rather than accepting it."
+      ],
+      "publishable_decision_summary": "R311eq adds static scouting mode: ScoutingMode{Active,Static} discriminator + synth_static_locators returning the deploy.connect[] locators verbatim (scouting FSM bypass; no codec/socket/FSM, not scouting-active gated).",
+      "publishable_changes_bullets": [
+        "wz-session-core: new scout_static module — ScoutingMode {Active, Static} discriminator + from_deploy_str (passive -> PassiveDeferred err, unknown -> Unknown(s); no silent fallback) + synth_static_locators(&[String]) -> Vec<String> returning the deploy.connect[] locators verbatim (trimmed, blank entries dropped).",
+        "Static mode is the scouting-FSM bypass (docs/scouting-fsm.md §2.4.3): no scout codec / link / FSM. The module is NOT gated on scouting-active (which gates the active FSM in wz-runtime-tokio) — a static-only deploy compiles the active FSM out and reaches session-open through synth_static_locators alone. Pure alloc value transform placed in wz-session-core (MCU static-deploy usable), the wz analog of zenoh-pico _z_locators_by_config.",
+        "6 unit tests cover the mode parse (active / static / passive-deferred / unknown) and synth (verbatim in deploy order / whitespace-trim + blank-drop / empty connect)."
+      ],
+      "publishable_verification_bullets": [
+        "wz-session-core builds clean; the 6 scout_static unit tests pass under Layer C1 (cargo test --workspace runs wz-session-core with its default alloc feature, which gates the module + tests).",
+        "full scripts/run-ci.sh 0/A/A2/B/C0/C1/C1b..C1i/C2/C3/C4/C4b/D/E EXIT 0 (Layer F/G/Q/M opt-in SKIP).",
+        "Layer G MCU 7-target cross-compile pass — scout_static is alloc-pure (no codec/socket/FSM) so it compiles on every Phase W target (G.6 riscv32imac SKIP, toolchain absent)."
+      ],
+      "publishable_impact_refs": [
+        "scouting-fsm--prose-sketch/2-4-3-static",
+        "scouting-fsm--prose-sketch/1-4-three-modes-and-zenoh-pico-mapping",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "publishable_carry_forward_bullets": [
+        "deploy schema connect[] field + a scouting.mode: static example are not yet authored (all three deploys use mode: active); synth_static_locators takes &[String] so the eventual deploy->config parser supplies the list. Parser is still unbuilt (same status as the active mode's already-authored deploy.scouting block).",
+        "session-open consumer that dials the synthesized locators (and the active mode's discovered locator) is not yet wired — both scouting modes now produce a locator handoff awaiting the unified session-open integration (the next scouting-domain step).",
+        "passive mode stays Phase D+ (OQ-W23); from_deploy_str surfaces it as PassiveDeferred rather than accepting it."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [
