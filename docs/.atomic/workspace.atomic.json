@@ -26342,6 +26342,64 @@
         "R311em is LOCAL only; push pending explicit user consent (CLAUDE.md global push rule)."
       ]
     },
+    "Round 311ep": {
+      "decision_summary": "R311ep wires scouting active mode end-to-end: scout_emit encodes a Scout, the drive loop multicasts it and resolves a peer locator from a Hello via record_hello_and_emit (scouting 0/6 -> active 1).",
+      "changes_bullets": [
+        "wz-session-core: new scout_trace::ScoutTrace (4 u32 dispatch counters) + scout_params::ScoutParams (version/what/zid); pure value-type siblings of action_trace/session_init_params, kept out of the session bundle (scouting is a pre-session subsystem).",
+        "wz-codecs/src/lib.rs wire_const: S_MID_SCOUT (0x01) / S_MID_HELLO (0x02) / FLAG_S_HELLO_L (0x20) scouting-message header bytes, gated codec-scout/codec-hello; disjoint MID namespace from T_MID_*/N_MID_* (scout link vs session link).",
+        "wz-runtime-tokio/src/scouting_glue.rs (new, scouting-active): ScoutingActions deps bundle + install_scouting_actions + register_scout_fns binding the four scouting.scxml actions as pure encode/decode+stash (scout_emit / record_hello_and_emit / emit_scout_timeout / diag_scout_tx_failed) + async drive_scouting_until_resolved loop (loop owns all socket IO; SCXML <send delay> serviced via Engine::tick) + new_scouting_engine.",
+        "wz-runtime-tokio/src/script_bind.rs (R311eo): bind_unit/bind_guard extracted from session_glue and generalised over the deps type so the scouting glue reuses them (no scouting->session module edge).",
+        "scouting-active feature now implies codec-scout + codec-hello (scout_emit/record_hello need both body codecs).",
+        "scripts/run-ci.sh + ci.yml: Layer C1i (required deterministic scouting-active unit tests) + Layer M (opt-in multicast loopback e2e, default SKIP per no-flaky)."
+      ],
+      "verification_bullets": [
+        "default + --features scouting-active builds both compile with 0 warnings under the workspace deny-warnings policy.",
+        "3 scouting_glue unit tests pass (Scout datagram framing / Hello first-locator extraction / scout-timeout leaves no locator); existing 321 wz-runtime-tokio lib tests preserved.",
+        "Layer M multicast loopback e2e PASS 5/5 runs (real UdpDriver::bind_multicast_v4 scout -> Hello roundtrip, discovered udp/127.0.0.1:7447, scout_emit=1 record_hello=1 tx_failed=0); default full-run SKIP confirmed.",
+        "full scripts/run-ci.sh 0/A/A2/B/C0/C1/C1b..C1i/C2/C3/C4/C4b/D/E EXIT 0 (Layer F/G/Q/M opt-in SKIP); Layer G MCU 7-target cross-compile pass (G.6 riscv32imac SKIP, toolchain absent)."
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/2-4-1-active",
+        "scouting-fsm--prose-sketch/10-next-step-scaffolding",
+        "scouting-fsm--prose-sketch/1-2-scout-hello-wire-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "carry_forward_bullets": [
+        "passive mode + multi-peer accumulation (HelloPeerTable) deferred to Phase D+ (OQ-W23); deploy.scouting.hello_max_peers is the reserved bound for it. Active MVP is exit-on-first (single discovered locator).",
+        "static mode host locator-synth from deploy.connect[] (no FSM instantiation, scouting-fsm.md 2.4.3) still pending.",
+        "scout window timeout_ms is SCXML-baked (AwaitingHello <send delay=1000ms>); deploy-configurability is a follow-up that threads it through codegen, not the runtime.",
+        "tx_failed arm is wired (loop feeds LinkTxFailed on send error) but not exercised by the infallible-UDP MVP send; a fallible link surface would exercise it.",
+        "next missing subsystem per project_north_star (transport-link-tls or routing) is the following round."
+      ],
+      "publishable_decision_summary": "R311ep wires scouting active mode end-to-end: scout_emit encodes a Scout, the drive loop multicasts it and resolves a peer locator from a Hello via record_hello_and_emit (scouting 0/6 -> active 1).",
+      "publishable_changes_bullets": [
+        "wz-session-core: new scout_trace::ScoutTrace (4 u32 dispatch counters) + scout_params::ScoutParams (version/what/zid); pure value-type siblings of action_trace/session_init_params, kept out of the session bundle (scouting is a pre-session subsystem).",
+        "wz-codecs/src/lib.rs wire_const: S_MID_SCOUT (0x01) / S_MID_HELLO (0x02) / FLAG_S_HELLO_L (0x20) scouting-message header bytes, gated codec-scout/codec-hello; disjoint MID namespace from T_MID_*/N_MID_* (scout link vs session link).",
+        "wz-runtime-tokio/src/scouting_glue.rs (new, scouting-active): ScoutingActions deps bundle + install_scouting_actions + register_scout_fns binding the four scouting.scxml actions as pure encode/decode+stash (scout_emit / record_hello_and_emit / emit_scout_timeout / diag_scout_tx_failed) + async drive_scouting_until_resolved loop (loop owns all socket IO; SCXML <send delay> serviced via Engine::tick) + new_scouting_engine.",
+        "wz-runtime-tokio/src/script_bind.rs (R311eo): bind_unit/bind_guard extracted from session_glue and generalised over the deps type so the scouting glue reuses them (no scouting->session module edge).",
+        "scouting-active feature now implies codec-scout + codec-hello (scout_emit/record_hello need both body codecs).",
+        "scripts/run-ci.sh + ci.yml: Layer C1i (required deterministic scouting-active unit tests) + Layer M (opt-in multicast loopback e2e, default SKIP per no-flaky)."
+      ],
+      "publishable_verification_bullets": [
+        "default + --features scouting-active builds both compile with 0 warnings under the workspace deny-warnings policy.",
+        "3 scouting_glue unit tests pass (Scout datagram framing / Hello first-locator extraction / scout-timeout leaves no locator); existing 321 wz-runtime-tokio lib tests preserved.",
+        "Layer M multicast loopback e2e PASS 5/5 runs (real UdpDriver::bind_multicast_v4 scout -> Hello roundtrip, discovered udp/127.0.0.1:7447, scout_emit=1 record_hello=1 tx_failed=0); default full-run SKIP confirmed.",
+        "full scripts/run-ci.sh 0/A/A2/B/C0/C1/C1b..C1i/C2/C3/C4/C4b/D/E EXIT 0 (Layer F/G/Q/M opt-in SKIP); Layer G MCU 7-target cross-compile pass (G.6 riscv32imac SKIP, toolchain absent)."
+      ],
+      "publishable_impact_refs": [
+        "scouting-fsm--prose-sketch/2-4-1-active",
+        "scouting-fsm--prose-sketch/10-next-step-scaffolding",
+        "scouting-fsm--prose-sketch/1-2-scout-hello-wire-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "publishable_carry_forward_bullets": [
+        "passive mode + multi-peer accumulation (HelloPeerTable) deferred to Phase D+ (OQ-W23); deploy.scouting.hello_max_peers is the reserved bound for it. Active MVP is exit-on-first (single discovered locator).",
+        "static mode host locator-synth from deploy.connect[] (no FSM instantiation, scouting-fsm.md 2.4.3) still pending.",
+        "scout window timeout_ms is SCXML-baked (AwaitingHello <send delay=1000ms>); deploy-configurability is a follow-up that threads it through codegen, not the runtime.",
+        "tx_failed arm is wired (loop feeds LinkTxFailed on send error) but not exercised by the infallible-UDP MVP send; a fallible link surface would exercise it.",
+        "next missing subsystem per project_north_star (transport-link-tls or routing) is the following round."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [

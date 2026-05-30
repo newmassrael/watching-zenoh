@@ -281,6 +281,11 @@ pub mod scouting_fsm {
     include!(concat!(env!("OUT_DIR"), "/scouting_sm.rs"));
 }
 
+// R311ep — scouting FSM <-> multicast-link glue (active mode): the four
+// scouting.scxml script actions + the async scout->hello drive loop.
+#[cfg(feature = "scouting-active")]
+pub mod scouting_glue;
+
 // R311di-4 — Reliability moved to wz-session-core::reliability; the
 // re-export keeps every `wz_runtime_tokio::Reliability` external
 // callsite (9 caller files across tests / wz-integration-tests /

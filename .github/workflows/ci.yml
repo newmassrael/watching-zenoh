@@ -255,6 +255,16 @@ jobs:
         # subset-specific unused-import / dead-code into a hard error.
         run: bash scripts/run-ci.sh --layer C1h
 
+      - name: Layer C1i — scouting-active glue unit tests
+        # R311ep — scouting-active is off by default, so Layer C1's
+        # `cargo test --workspace` never builds the scouting glue. This
+        # lane builds + runs the deterministic scouting unit tests
+        # (Scout framing / Hello-locator extraction / scout-timeout)
+        # under --features scouting-active + deny-warnings. The
+        # socket-bound multicast e2e is the opt-in Layer M (multicast
+        # routing is environment-dependent; not a default gate).
+        run: bash scripts/run-ci.sh --layer C1i
+
       - name: Layer C2 — cargo clippy --deny warnings
         run: bash scripts/run-ci.sh --layer C2
 

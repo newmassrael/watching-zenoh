@@ -81,6 +81,19 @@ pub mod ext_chain_role;
 /// slot + the `trace_snapshot` accessor stay in the tokio crate.
 pub mod action_trace;
 
+/// R311ep — scouting script-action dispatch trace counters (`ScoutTrace`,
+/// four `u32` counters). Pure no_std + no_alloc; unconditional. The
+/// scouting-side sibling of [`action_trace`]; the live
+/// `R::Mutex<ScoutTrace>` slot stays in `wz-runtime-tokio::scouting_glue`.
+pub mod scout_trace;
+
+/// R311ep — per-deploy active-scouting parameters (`ScoutParams`:
+/// version / what / zid). Pure owned value type; alloc-gated (Vec zid).
+/// The scouting-side sibling of [`session_init_params`]; drives the
+/// active-mode Scout frame emit (docs/scouting-fsm.md §2.4.1).
+#[cfg(feature = "alloc")]
+pub mod scout_params;
+
 /// R311eg — peer-advertised InitSyn capability snapshot (`PeerInitCaps`,
 /// three integer fields + a `from_init_syn` decoder). Pure no_std +
 /// no_alloc; unconditional. DP3 leaf lifted from

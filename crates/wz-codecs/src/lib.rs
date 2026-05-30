@@ -370,6 +370,31 @@ pub mod wire_const {
     /// DECLARE envelope MID (network.h:34). Gated on `codec-declare`.
     #[cfg(feature = "codec-declare")]
     pub const N_MID_DECLARE: u8 = 0x1E;
+
+    /// Scouting-message SCOUT MID (transport.h:28 `_Z_MID_SCOUT`). The
+    /// scouting MID namespace is disjoint from the transport (`T_MID_*`)
+    /// and network (`N_MID_*`) namespaces: scouting frames travel on the
+    /// pre-session multicast link, transport/network frames on the
+    /// session link, so the byte value 0x01 is context-disambiguated by
+    /// which link decoded it (no collision with `T_MID_INIT`). The
+    /// scout/hello body codecs carry no header byte (`_z_scout_encode`
+    /// ignores it); the scouting-message envelope prepends this MID —
+    /// the wz glue prepends it the same way session_glue prepends
+    /// `T_MID_INIT`. Gated on `codec-scout`.
+    #[cfg(feature = "codec-scout")]
+    pub const S_MID_SCOUT: u8 = 0x01;
+    /// Scouting-message HELLO MID (transport.h:29 `_Z_MID_HELLO`). See
+    /// [`S_MID_SCOUT`] for the disjoint-namespace rationale. Gated on
+    /// `codec-hello`.
+    #[cfg(feature = "codec-hello")]
+    pub const S_MID_HELLO: u8 = 0x02;
+    /// Scouting HELLO locators-present flag (`_Z_FLAG_T_HELLO_L`, bit 5).
+    /// Set on the HELLO header byte when the Hello body carries a
+    /// locator list; the `hello` body codec projects it to its
+    /// single-bit `l` flag-input via `(header >> 5) & 1`. Gated on
+    /// `codec-hello`.
+    #[cfg(feature = "codec-hello")]
+    pub const FLAG_S_HELLO_L: u8 = 0x20;
 }
 
 #[cfg(test)]
