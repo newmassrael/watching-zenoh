@@ -26742,6 +26742,82 @@
         "Multi-peer static mesh (open a session to EACH connect[] peer, not just the first reachable) is Phase D+."
       ]
     },
+    "Round 311ex": {
+      "decision_summary": "R311ew round 2: a Layer M e2e wires the active scouting -> session-open seam — a multicast SCOUT/HELLO discovers a peer locator, then open_session_at dials it to Established.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/tests/scouting_multicast_loopback.rs: new round2::active_scout_then_open_reaches_established — multicast SCOUT/HELLO discovers a tcp/ session locator -> ScoutOutcome::Discovered -> open_session_at -> Established vs an inline wz TCP acceptor.",
+        "Round-2 test in a cfg(all(transport-link-tcp, transport-unicast)) submodule (it opens a real session) reusing the parent craft_hello_datagram; GROUP port 7448 distinct from the discovery-only test (7446) so the two #[ignore] tests do not contend under --ignored.",
+        "No seam API change: open_session_at was already active-mode-ready (active feeds it the discovered string), so this is wiring + a multicast fixture (R311ew carry)."
+      ],
+      "verification_bullets": [
+        "Layer M lane (cargo test -p wz-runtime-tokio --features scouting-active --test scouting_multicast_loopback -- --ignored): 2/2 pass; round2 stable 8/8 consecutive runs (multicast no-flaky guard).",
+        "RUSTFLAGS=-D warnings build clean; rustfmt --check clean; clippy clean for the test (the sole lint is a pre-existing lib doc_lazy_continuation at lib.rs:673 under --features scouting-active, not caught by any required CI lane, out of scope).",
+        "--no-default-features --features scouting-active builds with round2 gated out; default lib 323 tests pass; required CI clippy lane (C2 workspace + preset-ap-client) rc=0 — zero regression."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "UDP datagram session-open (dial_locator Udp arm + datagram pipeline) still deferred; UDP static locators skip with Dial(Unsupported) until a deploy needs UDP unicast sessions.",
+        "Full connect_and_open_session adoption in runner.rs + accept_and_open_session pairing (deferred from R311ev) remains a larger refactor.",
+        "Multi-peer static mesh (a session to EACH connect[] peer, not just first reachable) is Phase D+."
+      ],
+      "publishable_decision_summary": "R311ew round 2: a Layer M e2e wires the active scouting -> session-open seam — a multicast SCOUT/HELLO discovers a peer locator, then open_session_at dials it to Established.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/tests/scouting_multicast_loopback.rs: new round2::active_scout_then_open_reaches_established — multicast SCOUT/HELLO discovers a tcp/ session locator -> ScoutOutcome::Discovered -> open_session_at -> Established vs an inline wz TCP acceptor.",
+        "Round-2 test in a cfg(all(transport-link-tcp, transport-unicast)) submodule (it opens a real session) reusing the parent craft_hello_datagram; GROUP port 7448 distinct from the discovery-only test (7446) so the two #[ignore] tests do not contend under --ignored.",
+        "No seam API change: open_session_at was already active-mode-ready (active feeds it the discovered string), so this is wiring + a multicast fixture (R311ew carry)."
+      ],
+      "publishable_verification_bullets": [
+        "Layer M lane (cargo test -p wz-runtime-tokio --features scouting-active --test scouting_multicast_loopback -- --ignored): 2/2 pass; round2 stable 8/8 consecutive runs (multicast no-flaky guard).",
+        "RUSTFLAGS=-D warnings build clean; rustfmt --check clean; clippy clean for the test (the sole lint is a pre-existing lib doc_lazy_continuation at lib.rs:673 under --features scouting-active, not caught by any required CI lane, out of scope).",
+        "--no-default-features --features scouting-active builds with round2 gated out; default lib 323 tests pass; required CI clippy lane (C2 workspace + preset-ap-client) rc=0 — zero regression."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "UDP datagram session-open (dial_locator Udp arm + datagram pipeline) still deferred; UDP static locators skip with Dial(Unsupported) until a deploy needs UDP unicast sessions.",
+        "Full connect_and_open_session adoption in runner.rs + accept_and_open_session pairing (deferred from R311ev) remains a larger refactor.",
+        "Multi-peer static mesh (a session to EACH connect[] peer, not just first reachable) is Phase D+."
+      ]
+    },
+    "Round 311ey": {
+      "decision_summary": "R311ey clears 2 pre-existing clippy doc_lazy_continuation errors in UdpDriver::bind_multicast_v4 doc (latent under --features scouting-active); doc-comment only, no behaviour change.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs: insert a blank doc line before the \"peer is set to group:port\" sentence in UdpDriver::bind_multicast_v4 doc, so it is its own paragraph rather than an unindented continuation of numbered list item 3.",
+        "Clears 2 pre-existing clippy::doc_lazy_continuation errors (lib.rs:673-674) that only surfaced under -p wz-runtime-tokio --features scouting-active; no behaviour change (doc comment only)."
+      ],
+      "verification_bullets": [
+        "cargo clippy -p wz-runtime-tokio --features scouting-active --tests -- -D warnings: clean (was 2 doc_lazy_continuation errors, now 0).",
+        "cargo fmt -p wz-runtime-tokio --check clean; required CI clippy lane C2 (cargo clippy --workspace --all-targets -- -D warnings) clean.",
+        "Default lib 323 tests pass; Layer M lane 2/2 pass — zero regression."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "No new carry. R311ex carry list unchanged (UDP datagram session-open deferred; runner.rs connect_and_open_session adoption + accept_and_open_session pairing; multi-peer static mesh Phase D+)."
+      ],
+      "publishable_decision_summary": "R311ey clears 2 pre-existing clippy doc_lazy_continuation errors in UdpDriver::bind_multicast_v4 doc (latent under --features scouting-active); doc-comment only, no behaviour change.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/lib.rs: insert a blank doc line before the \"peer is set to group:port\" sentence in UdpDriver::bind_multicast_v4 doc, so it is its own paragraph rather than an unindented continuation of numbered list item 3.",
+        "Clears 2 pre-existing clippy::doc_lazy_continuation errors (lib.rs:673-674) that only surfaced under -p wz-runtime-tokio --features scouting-active; no behaviour change (doc comment only)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo clippy -p wz-runtime-tokio --features scouting-active --tests -- -D warnings: clean (was 2 doc_lazy_continuation errors, now 0).",
+        "cargo fmt -p wz-runtime-tokio --check clean; required CI clippy lane C2 (cargo clippy --workspace --all-targets -- -D warnings) clean.",
+        "Default lib 323 tests pass; Layer M lane 2/2 pass — zero regression."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "No new carry. R311ex carry list unchanged (UDP datagram session-open deferred; runner.rs connect_and_open_session adoption + accept_and_open_session pairing; multi-peer static mesh Phase D+)."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [
