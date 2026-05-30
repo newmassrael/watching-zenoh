@@ -123,8 +123,36 @@
     <transition event="link.lost" target="Closed"/>
   </state>
 
+  <!--
+    Accept-side open-deadline (R311fb, carry #2 of R311fa):
+    The accept handshake is bounded by a SINGLE inactivity deadline
+    (`accepting.inactivity_timeout`, 1s per §2.5) armed once on accept entry
+    (AwaitingInitSyn.onentry — the initial child, entered exactly when
+    Accepting is entered). The handler is the parent Accepting transition
+    below, so the timer is caught from whichever child is current when it
+    fires: if the 4-way handshake has not reached Established within the
+    window the session is dropped, and once Established is reached (Accepting
+    is exited) the stale timer has no handler in scope and is discarded.
+
+    Why parent-scope is correct here (unlike the per-phase init_ack /
+    open_ack timers, which R311fa had to child-scope): there is exactly ONE
+    timer of this event name in flight (armed once, never re-armed per phase),
+    so the R311fa staleness hazard — a stale sibling timer firing the wrong
+    phase's handler — cannot arise. A single deadline + a single parent
+    handler is the staleness-safe shape for a whole-handshake bound.
+
+    The transition targets Closed, NOT Closing: an accept that times out
+    drops silently with no Close frame (§2.7 anti-amplification — the peer
+    may be spoofed / malicious, so we do not spend a reply on it). A true
+    reset-on-activity inactivity timer (re-arm per phase) would need a
+    distinct event name per phase to stay staleness-safe; §2.5 names one
+    timer, so the conservative whole-accept deadline is the MVP shape.
+  -->
   <state id="Accepting" initial="AwaitingInitSyn">
     <state id="AwaitingInitSyn">
+      <onentry>
+        <send event="accepting.inactivity_timeout" delay="1s"/>
+      </onentry>
       <transition event="init_syn.received"
                   cond="half_open_cap_available() &amp;&amp; accept_rate_token()"
                   target="SentInitAck"/>

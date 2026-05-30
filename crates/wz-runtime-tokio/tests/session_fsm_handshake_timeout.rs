@@ -168,3 +168,42 @@ fn stale_init_ack_timeout_in_got_init_ack_is_discarded() {
         "Established.onentry must run record_established_at"
     );
 }
+
+/// Accepting activation through to AwaitingInitSyn — the state whose onentry
+/// arms `accepting.inactivity_timeout` (R311fb): InboundStart -> Accepting
+/// (initial child AwaitingInitSyn).
+fn drive_to_awaiting_init_syn(engine: &mut Engine<SessionFsmUnicastPolicy>) {
+    engine.process_event(E::InboundStart);
+    assert_eq!(engine.get_current_state(), S::AwaitingInitSyn);
+}
+
+// ── R311fb accept-side open-deadline: a peer that opens the link but never
+//    sends InitSyn. accepting.inactivity_timeout fires while still in
+//    AwaitingInitSyn -> Closed. The drop is SILENT (transition targets Closed,
+//    not Closing — §2.7 anti-amplification spends no Close frame on a
+//    possibly-spoofed peer), so NO close-reason action runs. That count == 0
+//    is exactly why `drive_open_loop` maps this terminal to
+//    `OpenError::Terminal`, not `HandshakeTimeout` (the Initiator timeout goes
+//    through Closing/set_close_reason_generic and is distinguishable).
+#[test]
+fn accept_inactivity_timeout_in_awaiting_init_syn_drives_closed_silently() {
+    let (actions, mut engine) = fresh_setup();
+    drive_to_awaiting_init_syn(&mut engine);
+
+    engine.process_event(E::AcceptingInactivityTimeout);
+
+    assert!(
+        engine.is_in_final_state(),
+        "accepting.inactivity_timeout in AwaitingInitSyn must drive -> Closed (final)"
+    );
+    let trace = actions.trace_snapshot();
+    assert_eq!(
+        trace.set_close_reason_count, 0,
+        "the accept timeout is a silent drop (target Closed, no Close frame); \
+         no close-reason action runs"
+    );
+    assert_eq!(
+        trace.record_established_at, 0,
+        "a timed-out accept must never have passed through Established"
+    );
+}

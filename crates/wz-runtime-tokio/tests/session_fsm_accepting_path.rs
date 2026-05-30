@@ -427,6 +427,53 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
     );
 }
 
+// ── R311fb staleness guard: once the accept handshake reaches Established,
+//    a stale accepting.inactivity_timeout (armed on AwaitingInitSyn entry,
+//    delivered after Established) must be discarded. Established is outside
+//    the Accepting state that handles the event, so the single armed timer
+//    has no handler in scope and cannot kill a healthy session. The
+//    single-arm parent-scoped design needs no per-phase child-scoping (unlike
+//    R311fa's init_ack/open_ack timers) precisely because there is only ever
+//    one timer of this event name in flight.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn r311fb_stale_accept_inactivity_timeout_after_established_is_discarded() {
+    let (actions, mut engine) = fresh_setup();
+    engine.process_event(E::InboundStart);
+    assert_eq!(engine.get_current_state(), S::AwaitingInitSyn);
+
+    // Walk the crafted handshake to Established (same wires as r78).
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
+        bytes: craft_initsyn_wire(),
+    })]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::SentInitAck);
+
+    let cookie = wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256(
+        &fixture_session_init_params().cookie_signing_key,
+        &[0xB0, 0xB1, 0xB2, 0xB3],
+    );
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame {
+        bytes: craft_opensyn_wire(&cookie),
+    })]);
+    let _ = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert_eq!(engine.get_current_state(), S::Established);
+
+    // Deliver the now-stale accept inactivity timer.
+    engine.process_event(E::AcceptingInactivityTimeout);
+
+    assert_eq!(
+        engine.get_current_state(),
+        S::Established,
+        "a stale accepting.inactivity_timeout after Established must be \
+         discarded (no handler in scope), leaving the session healthy"
+    );
+    assert_eq!(
+        actions.trace_snapshot().set_close_reason_count,
+        0,
+        "the discarded stale timer must not run any close-reason action"
+    );
+}
+
 // ───────────── R121d peer-caps negotiation unit tests ──────────────
 
 #[test]

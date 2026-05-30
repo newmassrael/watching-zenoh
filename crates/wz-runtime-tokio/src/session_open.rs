@@ -222,6 +222,106 @@ pub enum OpenError {
     NoReachableLocator,
 }
 
+/// Build the session action layer + SCE engine for an open path, ready for
+/// role activation. Shared by [`connect_and_open_session`] (Initiator) and
+/// [`accept_and_open_session`] (Accepting): both wire the same
+/// [`SessionLinkActions`] + Lua-bound [`SessionFsmUnicastPolicy`] engine and
+/// differ only in the role-start event they dispatch afterwards.
+fn wire_session_engine(
+    outbound: Arc<dyn BoxedLinkDriver>,
+    params: SessionInitParams,
+    clock: TokioTime,
+) -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
+    let actions = SessionLinkActions::new(outbound, params, clock);
+    let script_engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
+    install_session_actions(actions.clone(), &script_engine);
+    let mut engine: Engine<SessionFsmUnicastPolicy> =
+        Engine::new(SessionFsmUnicastPolicy::new(script_engine));
+    engine.initialize();
+    (actions, engine)
+}
+
+/// Drive an already-activated session FSM to Established, bounded by the
+/// FSM's own handshake timers (R311fa). The role-agnostic open loop shared by
+/// both open paths: the caller wires the link + engine and dispatches the
+/// role-start event, then this races the cancel-safe inbound poll against a
+/// `tick_interval_ms` cadence that pumps `Engine::tick` so an elapsed SCXML
+/// `<send delay>` fires its transition — the Initiator's `init_ack.timeout` /
+/// `open_ack.timeout` (2s) / `link.open_timeout` (5s), and the Accepting
+/// side's `accepting.inactivity_timeout` (1s, R311fb). A frame that arrives
+/// first resolves the handshake without waiting for the next tick; the losing
+/// `select!` branch is cancelled, safe because `poll_and_dispatch_one`'s only
+/// await is `poll_event`, whose partial-read state lives in the driver's
+/// `ReadState`.
+///
+/// Terminal mapping is role-agnostic. A pre-Established terminal reached via a
+/// timeout transition that ran `set_close_reason_generic` (the Initiator's
+/// Closing path) surfaces as [`OpenError::HandshakeTimeout`]; every other
+/// pre-Established terminal surfaces as [`OpenError::Terminal`] — a peer
+/// Close, a link loss to Closed, and the Accepting side's
+/// `accepting.inactivity_timeout` -> Closed (which runs no close-reason action
+/// per §2.7 anti-amplification). So a timed-out accept is reported as
+/// `Terminal`, intentionally indistinguishable from a peer close: the silent
+/// drop spends no Close frame on a possibly-spoofed peer.
+async fn drive_open_loop(
+    mut inbound: InboundLink,
+    actions: Arc<SessionLinkActions>,
+    mut engine: Engine<SessionFsmUnicastPolicy>,
+    writer_handle: TokioJoinHandle<()>,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let mut iter: usize = 0;
+    loop {
+        let trace = actions.trace_snapshot();
+        if trace.record_established_at >= 1 {
+            return Ok(OpenedSession {
+                engine,
+                actions,
+                inbound,
+                writer_handle,
+                clock,
+            });
+        }
+        if engine.is_in_final_state() {
+            // Pre-Established terminal. A handshake-timer transition on the
+            // Initiator path ran `set_close_reason_generic` (count >= 1,
+            // reason Generic); a peer Close / link loss / the silent accept
+            // inactivity timeout reaches Closed without a close-reason action
+            // (count == 0), so the Initiator timeout is distinguishable while
+            // the accept timeout folds into Terminal (silent-drop by design).
+            return Err(
+                if trace.set_close_reason_count >= 1 && trace.close_reason == CloseReason::Generic {
+                    OpenError::HandshakeTimeout
+                } else {
+                    OpenError::Terminal
+                },
+            );
+        }
+        if let Some(limit) = max_iters {
+            if iter >= limit {
+                return Err(OpenError::IterationLimit);
+            }
+            iter += 1;
+        }
+        // R311fa — race the cancel-safe inbound poll against a clock tick that
+        // pumps the SCE scheduler so an elapsed handshake `<send delay>` fires
+        // its FSM transition; a frame that arrives first resolves without
+        // waiting for the next tick.
+        tokio::select! {
+            outcome = poll_and_dispatch_one(&mut inbound, &actions, &mut engine) => {
+                if let DriverLoopOutcome::LinkLost(cause) = outcome {
+                    return Err(OpenError::LinkLost(cause));
+                }
+            }
+            _ = clock.sleep(tick_interval_ms) => {
+                engine.tick();
+            }
+        }
+    }
+}
+
 /// Dial `locator`, wire the connection into the link pipeline ([`DialedLink`]
 /// -> [`wire_dialed_link`]: a stream splits into read/write halves, a
 /// datagram socket is shared), wire the unicast session FSM in the Initiator
@@ -269,69 +369,74 @@ pub async fn connect_and_open_session(
     tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let dialed = dial_locator(locator).await.map_err(OpenError::Dial)?;
-    let (mut inbound, outbound, writer_handle) = wire_dialed_link(dialed);
-
-    let actions = SessionLinkActions::new(outbound, params, clock);
-    let script_engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
-    install_session_actions(actions.clone(), &script_engine);
-    let mut engine: Engine<SessionFsmUnicastPolicy> =
-        Engine::new(SessionFsmUnicastPolicy::new(script_engine));
-    engine.initialize();
+    let (inbound, outbound, writer_handle) = wire_dialed_link(dialed);
+    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
 
     // Initiator activation -> SentInitSyn (send_init_syn enqueues InitSyn).
     engine.process_event(E::OutboundStart);
     engine.process_event(E::LinkOpened);
 
-    let mut iter: usize = 0;
-    loop {
-        let trace = actions.trace_snapshot();
-        if trace.record_established_at >= 1 {
-            return Ok(OpenedSession {
-                engine,
-                actions,
-                inbound,
-                writer_handle,
-                clock,
-            });
-        }
-        if engine.is_in_final_state() {
-            // Pre-Established terminal. A handshake-timer transition ran
-            // `set_close_reason_generic` (count >= 1, reason Generic); a
-            // peer Close / link loss reaches Closed without a close-reason
-            // action (count == 0), so the two outcomes are distinguishable.
-            return Err(
-                if trace.set_close_reason_count >= 1 && trace.close_reason == CloseReason::Generic {
-                    OpenError::HandshakeTimeout
-                } else {
-                    OpenError::Terminal
-                },
-            );
-        }
-        if let Some(limit) = max_iters {
-            if iter >= limit {
-                return Err(OpenError::IterationLimit);
-            }
-            iter += 1;
-        }
-        // R311fa — race the cancel-safe inbound poll against a clock tick.
-        // The tick pumps the SCE scheduler so an elapsed handshake timer
-        // (link.open_timeout / init_ack.timeout / open_ack.timeout, and once
-        // in Closing the closing.timeout) fires its FSM transition; a frame
-        // that arrives first resolves the handshake without waiting for the
-        // next tick. The losing branch is cancelled — safe because
-        // `poll_and_dispatch_one`'s only await is `poll_event`, whose
-        // partial-read state is retained in `TcpReadDriver::ReadState`.
-        tokio::select! {
-            outcome = poll_and_dispatch_one(&mut inbound, &actions, &mut engine) => {
-                if let DriverLoopOutcome::LinkLost(cause) = outcome {
-                    return Err(OpenError::LinkLost(cause));
-                }
-            }
-            _ = clock.sleep(tick_interval_ms) => {
-                engine.tick();
-            }
-        }
-    }
+    drive_open_loop(
+        inbound,
+        actions,
+        engine,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
+}
+
+/// Bring up a session in the Accepting role from an already-accepted transport
+/// — the listener half, symmetric to [`connect_and_open_session`]'s dial half.
+///
+/// The caller owns the listener and hands the accepted connection in as a
+/// [`DialedLink`] (`DialedLink::Tcp(stream)` from a `TcpListener::accept`
+/// result; the datagram acceptor is test-only). This wires it through the same
+/// [`wire_dialed_link`] -> [`wire_session_engine`] path the dial side uses,
+/// activates the FSM in the Accepting role (`inbound.start` ->
+/// `Accepting.AwaitingInitSyn`), and drives the 4-way handshake (peer InitSyn
+/// -> our InitAck -> peer OpenSyn -> our OpenAck) to Established.
+///
+/// Wall-clock bounded by the accept-side open-deadline (R311fb): the
+/// `accepting.inactivity_timeout` armed on `AwaitingInitSyn` entry (1s, §2.5)
+/// fires through the same `Engine::tick` pump as the Initiator timers, so a
+/// peer that connects then goes silent no longer hangs the loop (closing the
+/// R311fa carry #2 — the Initiator path was bounded, the acceptor was not).
+/// The drop is silent (the transition targets `Closed`, no Close frame —
+/// §2.7 anti-amplification) and therefore surfaces as [`OpenError::Terminal`],
+/// not a distinct timeout variant: a timed-out accept is intentionally
+/// indistinguishable from a peer close (no reply is spent on a possibly-spoofed
+/// peer). See [`drive_open_loop`] for the shared terminal mapping.
+///
+/// `max_iters` / `tick_interval_ms` carry the same meaning as on
+/// [`connect_and_open_session`] (test-determinism poll bound + SCE-scheduler
+/// pump cadence; production passes `None` + [`DEFAULT_OPEN_TICK_MS`]).
+pub async fn accept_and_open_session(
+    accepted: DialedLink,
+    params: SessionInitParams,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+    tick_interval_ms: u64,
+) -> Result<OpenedSession, OpenError> {
+    let (inbound, outbound, writer_handle) = wire_dialed_link(accepted);
+    let (actions, mut engine) = wire_session_engine(outbound, params, clock);
+
+    // Accepting activation -> AwaitingInitSyn, whose onentry arms
+    // `accepting.inactivity_timeout` (the open-deadline this path enforces).
+    engine.process_event(E::InboundStart);
+
+    drive_open_loop(
+        inbound,
+        actions,
+        engine,
+        writer_handle,
+        clock,
+        max_iters,
+        tick_interval_ms,
+    )
+    .await
 }
 
 /// Open a session to a locator discovered by scouting — the mode-agnostic
