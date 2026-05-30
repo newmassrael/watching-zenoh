@@ -26542,6 +26542,60 @@
         "non-tcp/udp transports (serial/ws/quic/unixsock) extend Proto + add matching connect constructors as those link drivers land."
       ]
     },
+    "Round 311et": {
+      "decision_summary": "R311et lifts the split-link session-open pipeline into wz-runtime-tokio::link_pipeline and unifies the TCP framing state machine, the first step of the link-model unification.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/lib.rs: extracted the cancel-safe framing read into a shared `poll_framed<S: AsyncRead + Unpin>` free fn; TcpDriver::poll_event delegates to it (single framing state machine, no duplicated copy).",
+        "wz-runtime-tokio/src/lib.rs: ReadState promoted to pub(crate) so the split read half reuses it; behaviour byte-identical (StreamEnvelope codec-routed decode).",
+        "wz-runtime-tokio/src/link_pipeline.rs: new transport-link-tcp module — dial_tcp raw-dial, wire_tcp_stream split, TcpReadDriver (LinkDriver via poll_framed), TcpWriteDriver (BoxedLinkDriver non-blocking enqueue), writer_task (StreamEnvelope codec-routed encode).",
+        "wz-runtime-tokio/src/lib.rs: TcpDriver::connect realigned onto link_pipeline::dial_tcp so the unified driver and the split pipeline share one connect path (raw-dial seam decision).",
+        "wz-runtime-tokio/tests/link_pipeline.rs: integration test round-trips both directions against a unified TcpDriver peer (codec-consistent wire shape across both link models); 2 unit tests cover dial error + oversize drop."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib --test link_pipeline --test tcp_driver_cancel_safety --test echo_demo --test outbound_dial --test session_fsm_real_tcp: 323 lib + all integration pass, 0 fail (poll_framed extraction behaviour-preserving).",
+        "cargo clippy -p wz-runtime-tokio --all-targets + cargo fmt --check: clean, 0 warnings.",
+        "scripts/run-ci.sh required layers 0/A/B/C0/C1/C1b..C1i/C2/C3/C4/D/E: all pass, zero regression.",
+        "Layer G (MCU cross-compile) N/A — change confined to the std-only transport-link-tcp path; wz-session-core / wz-codecs untouched."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "runtime-crate--sce_link_runtime_tokio/2-1-two-primitive-link-contract",
+        "scouting-fsm--prose-sketch/2-4-1-active"
+      ],
+      "carry_forward_bullets": [
+        "R311eu: mode-agnostic dial_locator(ParsedLocator) proto dispatcher + connect_and_open_session (TCP) driving Init->Established + 2-peer e2e; UDP arm surfaces a typed unsupported error until R311ew.",
+        "R311ev: demo de-dup — wz-ap-demo runner.rs/link_driver.rs consume link_pipeline, delete the duplicated InboundReadDriver/OutboundWriteDriver/writer_task; confirm Layer E e2e unchanged.",
+        "R311ew+: UDP session-open (uniform pipeline for the datagram transport) + scouting->parse_locator->dial_locator->connect_and_open_session wiring (north-star arbitrary-composition seam).",
+        "TokioLinkDriverAdapter (block_on path) stays a transport-emit test scaffold only; retire-or-document-as-non-production is a later decision once the split pipeline subsumes every session path."
+      ],
+      "publishable_decision_summary": "R311et lifts the split-link session-open pipeline into wz-runtime-tokio::link_pipeline and unifies the TCP framing state machine, the first step of the link-model unification.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/lib.rs: extracted the cancel-safe framing read into a shared `poll_framed<S: AsyncRead + Unpin>` free fn; TcpDriver::poll_event delegates to it (single framing state machine, no duplicated copy).",
+        "wz-runtime-tokio/src/lib.rs: ReadState promoted to pub(crate) so the split read half reuses it; behaviour byte-identical (StreamEnvelope codec-routed decode).",
+        "wz-runtime-tokio/src/link_pipeline.rs: new transport-link-tcp module — dial_tcp raw-dial, wire_tcp_stream split, TcpReadDriver (LinkDriver via poll_framed), TcpWriteDriver (BoxedLinkDriver non-blocking enqueue), writer_task (StreamEnvelope codec-routed encode).",
+        "wz-runtime-tokio/src/lib.rs: TcpDriver::connect realigned onto link_pipeline::dial_tcp so the unified driver and the split pipeline share one connect path (raw-dial seam decision).",
+        "wz-runtime-tokio/tests/link_pipeline.rs: integration test round-trips both directions against a unified TcpDriver peer (codec-consistent wire shape across both link models); 2 unit tests cover dial error + oversize drop."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --lib --test link_pipeline --test tcp_driver_cancel_safety --test echo_demo --test outbound_dial --test session_fsm_real_tcp: 323 lib + all integration pass, 0 fail (poll_framed extraction behaviour-preserving).",
+        "cargo clippy -p wz-runtime-tokio --all-targets + cargo fmt --check: clean, 0 warnings.",
+        "scripts/run-ci.sh required layers 0/A/B/C0/C1/C1b..C1i/C2/C3/C4/D/E: all pass, zero regression.",
+        "Layer G (MCU cross-compile) N/A — change confined to the std-only transport-link-tcp path; wz-session-core / wz-codecs untouched."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "runtime-crate--sce_link_runtime_tokio/2-1-two-primitive-link-contract",
+        "scouting-fsm--prose-sketch/2-4-1-active"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311eu: mode-agnostic dial_locator(ParsedLocator) proto dispatcher + connect_and_open_session (TCP) driving Init->Established + 2-peer e2e; UDP arm surfaces a typed unsupported error until R311ew.",
+        "R311ev: demo de-dup — wz-ap-demo runner.rs/link_driver.rs consume link_pipeline, delete the duplicated InboundReadDriver/OutboundWriteDriver/writer_task; confirm Layer E e2e unchanged.",
+        "R311ew+: UDP session-open (uniform pipeline for the datagram transport) + scouting->parse_locator->dial_locator->connect_and_open_session wiring (north-star arbitrary-composition seam).",
+        "TokioLinkDriverAdapter (block_on path) stays a transport-emit test scaffold only; retire-or-document-as-non-production is a later decision once the split pipeline subsumes every session path."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [
