@@ -101,10 +101,15 @@ use crate::network_message::NetworkMessage;
     feature = "pubsub-attachment"
 ))]
 use crate::sample::extract_attachment;
+#[cfg(all(
+    any(feature = "pubsub-put", feature = "pubsub-delete"),
+    feature = "pubsub-source-info"
+))]
+use crate::sample::extract_source_info;
 #[cfg(feature = "pubsub-put")]
 use crate::sample::EncodingHint;
 #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
-use crate::sample::{extract_qos, extract_source_info, SampleKind, TimestampHint};
+use crate::sample::{extract_qos, SampleKind, TimestampHint};
 use crate::sample::{Reliability, Sample};
 
 /// Boxed callback invoked when a Push message's keyexpr matches a
@@ -551,9 +556,13 @@ impl SubscriberRegistry {
         // Put / Del body branches. cfg-off routes the corresponding
         // variant to the silent-drop `_ =>` fall-through, matching the
         // PushVariant::Default behavior (subscriber callback not fired).
-        // pubsub-attachment / pubsub-timestamp gate the per-arm
-        // projection helpers — fields stay declared on Sample for
-        // signature stability (R311g1); cfg-off populator returns None.
+        // pubsub-attachment / pubsub-timestamp / pubsub-source-info gate
+        // the per-arm projection helpers — fields stay declared on Sample
+        // for signature stability (R311g1); cfg-off populator returns None.
+        // With pubsub-source-info off the subscriber never decodes the
+        // source_info ext, so self-echo dedup (R231) cannot engage and the
+        // dispatch falls back to the cautious-fire default — the same
+        // behaviour as a wire sample that simply carries no source_info.
         let (kind, payload, body_timestamp, body_encoding, body_attachment, body_source_info) =
             match &push.body {
                 #[cfg(feature = "pubsub-put")]
@@ -571,13 +580,20 @@ impl SubscriberRegistry {
                         let _ = body_exts;
                         None
                     };
+                    #[cfg(feature = "pubsub-source-info")]
+                    let body_source_info = extract_source_info(body_exts);
+                    #[cfg(not(feature = "pubsub-source-info"))]
+                    let body_source_info: Option<crate::sample::SourceInfo> = {
+                        let _ = body_exts;
+                        None
+                    };
                     (
                         SampleKind::Put,
                         put.payload.clone(),
                         body_timestamp,
                         put.encoding.as_ref().map(EncodingHint::from_codec),
                         body_attachment,
-                        extract_source_info(body_exts),
+                        body_source_info,
                     )
                 }
                 #[cfg(feature = "pubsub-delete")]
@@ -595,13 +611,20 @@ impl SubscriberRegistry {
                         let _ = body_exts;
                         None
                     };
+                    #[cfg(feature = "pubsub-source-info")]
+                    let body_source_info = extract_source_info(body_exts);
+                    #[cfg(not(feature = "pubsub-source-info"))]
+                    let body_source_info: Option<crate::sample::SourceInfo> = {
+                        let _ = body_exts;
+                        None
+                    };
                     (
                         SampleKind::Del,
                         Vec::new(),
                         body_timestamp,
                         None,
                         body_attachment,
-                        extract_source_info(body_exts),
+                        body_source_info,
                     )
                 }
                 _ => return,
@@ -2600,6 +2623,12 @@ mod tests {
         push
     }
 
+    // Requires pubsub-source-info: the suppression assertion only holds
+    // when the subscriber decodes the wire source_info to recognise the
+    // self-echo. With the feature off the dispatch cautious-fires (see
+    // dispatch_push_fires_when_source_zid_differs_from_own, which holds
+    // in both configurations).
+    #[cfg(feature = "pubsub-source-info")]
     #[test]
     fn dispatch_push_suppresses_self_echo_when_zid_matches() {
         // Self-publish via Locality::Any fires the loopback path; the
@@ -2792,6 +2821,10 @@ mod tests {
         assert_eq!(registry.own_zid(), Some(&[0u8; 16][..]));
     }
 
+    // Requires pubsub-source-info: the first dispatch asserts a
+    // suppressed self-echo, which only engages when source_info is
+    // decoded from the wire (see the sibling suppress test).
+    #[cfg(feature = "pubsub-source-info")]
     #[test]
     fn clear_own_zid_reenables_callback_fire() {
         // After clear_own_zid a wire-arrived push that would

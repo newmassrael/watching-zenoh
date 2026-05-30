@@ -124,6 +124,7 @@ default = [
     "pubsub-allow-loop",
     "pubsub-attachment",
     "pubsub-timestamp",
+    "pubsub-source-info",
     "session-unicast-open",
     "session-unicast-accept",
     "keyexpr-canon",
@@ -322,8 +323,14 @@ transport-batching = ["wz-session-core/transport-batching"]
 #   pubsub-timestamp   — `Sample::with_timestamp` setter + Push
 #                        consumer timestamp projection. Same shape
 #                        as -attachment: field stays, populator gates.
-# 6 reserved (encoding, source-info, priority, congestion-control,
-# express, sample) stay declaration-only at the wz facade level.
+#   pubsub-source-info — `extract_source_info` Push projection into
+#                        `Sample::source_info`. Same shape as
+#                        -attachment: field stays, populator gates.
+#                        Feature-off also disables R231 self-echo dedup
+#                        (no decoded source_info to match) — the
+#                        dispatch cautious-fires instead.
+# 5 reserved (encoding, priority, congestion-control, express, sample)
+# stay declaration-only at the wz facade level.
 # R311du — forward to wz-session-core: the pub/sub dispatch arms moved
 # there with SubscriberRegistry, so the AP-side feature must enable the
 # session-core gate (3-stage shape mirrors the codec-* forwarders).
@@ -334,6 +341,7 @@ pubsub-delete = ["wz-session-core/pubsub-delete"]
 pubsub-allow-loop = []
 pubsub-attachment = ["wz-session-core/pubsub-attachment"]
 pubsub-timestamp = ["wz-session-core/pubsub-timestamp"]
+pubsub-source-info = ["wz-session-core/pubsub-source-info"]
 # R311cd — session domain wire-up. 2 atomic features that have real
 # source behavior (Cargo.toml authoring intent: "9 atomic, 2 active /
 # 7 reserved"):
