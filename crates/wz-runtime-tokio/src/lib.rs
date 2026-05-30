@@ -25,7 +25,7 @@
 #[cfg(feature = "transport-link-tcp")]
 use sce_forge_runtime::codec::SceCursor;
 use std::io;
-#[cfg(feature = "transport-link-udp")]
+#[cfg(any(feature = "transport-link-tcp", feature = "transport-link-udp"))]
 use std::net::SocketAddr;
 #[cfg(feature = "transport-link-tcp")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -399,6 +399,22 @@ impl TcpDriver {
             read_state: ReadState::Idle,
         }
     }
+
+    /// R311es — dial an outbound TCP connection to `addr` and wrap the
+    /// resulting stream (Initiator side). This is the dial half of the
+    /// scouting locator seam: a [`wz_session_core::locator::ParsedLocator`]
+    /// with `proto = Tcp` carries the numeric `addr` this constructor
+    /// connects to, mirroring [`from_stream`] for the acceptor side.
+    ///
+    /// `open()` is a no-op afterwards because the stream is already
+    /// connected — same post-condition as `from_stream`. Connect-timeout
+    /// / retry tuning is the caller's concern (compose a
+    /// `tokio::time::timeout` around this); the kernel default applies
+    /// otherwise, matching `wz-ap-demo`'s `establish_link` (runner.rs).
+    pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
+        let stream = TcpStream::connect(addr).await?;
+        Ok(Self::from_stream(stream))
+    }
 }
 
 #[cfg(feature = "transport-link-tcp")]
@@ -563,6 +579,26 @@ impl UdpDriver {
             socket: Some(socket),
             peer: Some(peer),
         }
+    }
+
+    /// R311es — bind an ephemeral local UDP socket and target `peer`
+    /// for unicast `send()` (Initiator side). This is the UDP dial half
+    /// of the scouting locator seam: a
+    /// [`wz_session_core::locator::ParsedLocator`] with `proto = Udp`
+    /// carries the numeric `peer` this constructor targets, mirroring
+    /// [`TcpDriver::connect`] for the datagram transport.
+    ///
+    /// Distinct from [`bind_multicast_v4`], which joins a scouting group;
+    /// this dials a single already-discovered unicast peer. The local
+    /// bind address family mirrors `peer` so an IPv6 locator binds an
+    /// IPv6 socket (a v4-bound socket cannot reach a v6 peer).
+    pub async fn connect(peer: SocketAddr) -> io::Result<Self> {
+        let bind_addr: SocketAddr = match peer {
+            SocketAddr::V4(_) => (std::net::Ipv4Addr::UNSPECIFIED, 0).into(),
+            SocketAddr::V6(_) => (std::net::Ipv6Addr::UNSPECIFIED, 0).into(),
+        };
+        let socket = UdpSocket::bind(bind_addr).await?;
+        Ok(Self::from_socket(socket, peer))
     }
 
     /// R311en — bind a UDP socket on a multicast group and join it,
