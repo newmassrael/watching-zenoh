@@ -26690,6 +26690,58 @@
         "TokioLinkDriverAdapter (block_on path) stays a transport-emit test scaffold only; the split pipeline is now the sole production session-open link model across both the lib and the demo."
       ]
     },
+    "Round 311ew": {
+      "decision_summary": "R311ew wires the scouting -> session-open seam: open_session_at parses a discovered locator and opens; open_session_static dials a static deploy.connect[] list, first Established wins (TCP).",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/session_open.rs: open_session_at(&str) — the mode-agnostic per-locator seam (parse_locator + connect_and_open_session) that BOTH scouting modes feed: active ScoutOutcome::Discovered(String) + static synth_static_locators entries are the same locator-string handoff.",
+        "open_session_static(&[String]) — static-mode path (docs/scouting-fsm.md §2.4.3): synth_static_locators (deploy.connect[] verbatim, order-preserving) then try each via open_session_at, first Established wins; per-locator failures logged (no silent skip); NoReachableLocator when all fail. MVP single-session (multi-peer mesh Phase D+).",
+        "OpenError gains BadLocator(LocatorParseError) + NoReachableLocator.",
+        "wz-runtime-tokio/tests/static_scout_open.rs: in-process seam tests — tcp locator reaches Established vs an inline acceptor, static skip-unreachable -> first-reachable, udp locator surfaces Dial(Unsupported) (datagram session-open deferred), malformed -> BadLocator, empty / all-udp -> NoReachableLocator."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test static_scout_open: 6/6 pass incl static skip-to-reachable; 323 lib tests pass.",
+        "cargo clippy -p wz-runtime-tokio --all-targets + rustfmt --check: clean, 0 warnings.",
+        "scripts/run-ci.sh required layers 0/A/B/C0/C1/C1b..C1i/C2/C3/C4/D/E: all pass (exit 0), zero regression.",
+        "Layer G (MCU cross-compile) N/A — change confined to the std-only transport-link-tcp + transport-unicast path; synth_static_locators is the unchanged no_std/alloc wz-session-core transform."
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/2-4-3-static",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "R311ew round 2: active multicast scout -> open e2e (drive_scouting_until_resolved -> ScoutOutcome::Discovered -> open_session_at) as a Layer M opt-in test; open_session_at is already active-mode-ready (active feeds it the discovered string), so this is wiring + a multicast fixture, not new seam API.",
+        "UDP datagram session-open (dial_locator Udp arm + a datagram read/write pipeline) still deferred — UDP static locators currently skip with Dial(Unsupported); only land it if a deploy needs UDP unicast sessions (the common path is scouting-UDP-multicast -> discovers a tcp/ session locator).",
+        "Full connect_and_open_session adoption in runner.rs + the accept_and_open_session pairing (deferred from R311ev) remains a larger refactor.",
+        "Multi-peer static mesh (open a session to EACH connect[] peer, not just the first reachable) is Phase D+."
+      ],
+      "publishable_decision_summary": "R311ew wires the scouting -> session-open seam: open_session_at parses a discovered locator and opens; open_session_static dials a static deploy.connect[] list, first Established wins (TCP).",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/session_open.rs: open_session_at(&str) — the mode-agnostic per-locator seam (parse_locator + connect_and_open_session) that BOTH scouting modes feed: active ScoutOutcome::Discovered(String) + static synth_static_locators entries are the same locator-string handoff.",
+        "open_session_static(&[String]) — static-mode path (docs/scouting-fsm.md §2.4.3): synth_static_locators (deploy.connect[] verbatim, order-preserving) then try each via open_session_at, first Established wins; per-locator failures logged (no silent skip); NoReachableLocator when all fail. MVP single-session (multi-peer mesh Phase D+).",
+        "OpenError gains BadLocator(LocatorParseError) + NoReachableLocator.",
+        "wz-runtime-tokio/tests/static_scout_open.rs: in-process seam tests — tcp locator reaches Established vs an inline acceptor, static skip-unreachable -> first-reachable, udp locator surfaces Dial(Unsupported) (datagram session-open deferred), malformed -> BadLocator, empty / all-udp -> NoReachableLocator."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test static_scout_open: 6/6 pass incl static skip-to-reachable; 323 lib tests pass.",
+        "cargo clippy -p wz-runtime-tokio --all-targets + rustfmt --check: clean, 0 warnings.",
+        "scripts/run-ci.sh required layers 0/A/B/C0/C1/C1b..C1i/C2/C3/C4/D/E: all pass (exit 0), zero regression.",
+        "Layer G (MCU cross-compile) N/A — change confined to the std-only transport-link-tcp + transport-unicast path; synth_static_locators is the unchanged no_std/alloc wz-session-core transform."
+      ],
+      "publishable_impact_refs": [
+        "scouting-fsm--prose-sketch/2-4-3-static",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ew round 2: active multicast scout -> open e2e (drive_scouting_until_resolved -> ScoutOutcome::Discovered -> open_session_at) as a Layer M opt-in test; open_session_at is already active-mode-ready (active feeds it the discovered string), so this is wiring + a multicast fixture, not new seam API.",
+        "UDP datagram session-open (dial_locator Udp arm + a datagram read/write pipeline) still deferred — UDP static locators currently skip with Dial(Unsupported); only land it if a deploy needs UDP unicast sessions (the common path is scouting-UDP-multicast -> discovers a tcp/ session locator).",
+        "Full connect_and_open_session adoption in runner.rs + the accept_and_open_session pairing (deferred from R311ev) remains a larger refactor.",
+        "Multi-peer static mesh (open a session to EACH connect[] peer, not just the first reachable) is Phase D+."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [
