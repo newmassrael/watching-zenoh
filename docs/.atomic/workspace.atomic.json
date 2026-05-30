@@ -26596,6 +26596,56 @@
         "TokioLinkDriverAdapter (block_on path) stays a transport-emit test scaffold only; retire-or-document-as-non-production is a later decision once the split pipeline subsumes every session path."
       ]
     },
+    "Round 311eu": {
+      "decision_summary": "R311eu adds connect_and_open_session + the mode-agnostic dial_locator dispatcher: dial a ParsedLocator, split into the R311et pipeline, drive the Initiator handshake to Established (TCP).",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/session_open.rs: new module (transport-link-tcp + transport-unicast gated) — dial_locator(ParsedLocator) proto dispatcher (Tcp -> dial_tcp; Udp -> typed Unsupported err until R311ew) + connect_and_open_session + OpenedSession / OpenError.",
+        "connect_and_open_session: dial -> wire_tcp_stream -> SessionLinkActions + Lua engine + Initiator activation (OutboundStart+LinkOpened) -> poll_and_dispatch_one loop until record_established_at, returning live OpenedSession handles.",
+        "wz-runtime-tokio/src/lib.rs: pub mod session_open registration (all(transport-link-tcp, transport-unicast) gate).",
+        "wz-runtime-tokio/tests/connect_and_open_session.rs: first IN-PROCESS wz<->wz handshake-to-Established e2e — initiator via the helper, acceptor inline from production pieces; both engines !Send so driven via tokio::join! (internal writer_tasks on workers); iteration-bounded."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test connect_and_open_session: initiator + acceptor both reach Established (record_established_at >= 1); 323 lib tests pass.",
+        "cargo clippy -p wz-runtime-tokio --all-targets + rustfmt --check: clean (async_yields_async avoided by returning the writer handle inside a tuple, not bare).",
+        "scripts/run-ci.sh required layers 0/A/B/C0/C1/C1b..C1i/C2/C3/C4/D/E: all pass (exit 0), zero regression.",
+        "Layer G (MCU cross-compile) N/A — change confined to the std-only transport-link-tcp + transport-unicast path; wz-session-core / wz-codecs untouched."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "runtime-crate--sce_link_runtime_tokio/2-1-two-primitive-link-contract",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions"
+      ],
+      "carry_forward_bullets": [
+        "R311ev: demo de-dup — wz-ap-demo runner.rs consumes connect_and_open_session (Initiator) + a sibling accept_and_open_session for the acceptor role; delete the duplicated InboundReadDriver/OutboundWriteDriver/writer_task; confirm Layer E e2e unchanged.",
+        "R311ew+: UDP session-open (dial_locator Udp arm + uniform datagram pipeline; dial_locator return type generalises to a transport union) + scouting ScoutOutcome::Discovered -> parse_locator -> connect_and_open_session wiring (north-star arbitrary-composition seam).",
+        "connect_and_open_session is Initiator-only; the paired acceptor-side open helper (accept_and_open_session) lands in R311ev when the demo de-dups — the e2e assembles the acceptor inline until then."
+      ],
+      "publishable_decision_summary": "R311eu adds connect_and_open_session + the mode-agnostic dial_locator dispatcher: dial a ParsedLocator, split into the R311et pipeline, drive the Initiator handshake to Established (TCP).",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/session_open.rs: new module (transport-link-tcp + transport-unicast gated) — dial_locator(ParsedLocator) proto dispatcher (Tcp -> dial_tcp; Udp -> typed Unsupported err until R311ew) + connect_and_open_session + OpenedSession / OpenError.",
+        "connect_and_open_session: dial -> wire_tcp_stream -> SessionLinkActions + Lua engine + Initiator activation (OutboundStart+LinkOpened) -> poll_and_dispatch_one loop until record_established_at, returning live OpenedSession handles.",
+        "wz-runtime-tokio/src/lib.rs: pub mod session_open registration (all(transport-link-tcp, transport-unicast) gate).",
+        "wz-runtime-tokio/tests/connect_and_open_session.rs: first IN-PROCESS wz<->wz handshake-to-Established e2e — initiator via the helper, acceptor inline from production pieces; both engines !Send so driven via tokio::join! (internal writer_tasks on workers); iteration-bounded."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test connect_and_open_session: initiator + acceptor both reach Established (record_established_at >= 1); 323 lib tests pass.",
+        "cargo clippy -p wz-runtime-tokio --all-targets + rustfmt --check: clean (async_yields_async avoided by returning the writer handle inside a tuple, not bare).",
+        "scripts/run-ci.sh required layers 0/A/B/C0/C1/C1b..C1i/C2/C3/C4/D/E: all pass (exit 0), zero regression.",
+        "Layer G (MCU cross-compile) N/A — change confined to the std-only transport-link-tcp + transport-unicast path; wz-session-core / wz-codecs untouched."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "runtime-crate--sce_link_runtime_tokio/2-1-two-primitive-link-contract",
+        "session-fsm--prose-level-sketch/2-2-unicast-transitions"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ev: demo de-dup — wz-ap-demo runner.rs consumes connect_and_open_session (Initiator) + a sibling accept_and_open_session for the acceptor role; delete the duplicated InboundReadDriver/OutboundWriteDriver/writer_task; confirm Layer E e2e unchanged.",
+        "R311ew+: UDP session-open (dial_locator Udp arm + uniform datagram pipeline; dial_locator return type generalises to a transport union) + scouting ScoutOutcome::Discovered -> parse_locator -> connect_and_open_session wiring (north-star arbitrary-composition seam).",
+        "connect_and_open_session is Initiator-only; the paired acceptor-side open helper (accept_and_open_session) lands in R311ev when the demo de-dups — the e2e assembles the acceptor inline until then."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [
