@@ -15,8 +15,10 @@
 //!
 //! This is the reusable lib form of the open path wz-ap-demo's `runner.rs`
 //! assembles inline; R311ev makes the demo consume it (removing the
-//! duplication). UDP session-open + the scouting -> parse -> dial -> open
-//! wiring land in R311ew.
+//! duplication). R311ew wired the static scouting -> parse -> dial -> open
+//! seam; R311ez generalises the dial to a transport union so a `udp/...`
+//! locator opens a datagram session ([`crate::udp_pipeline`]) the same way
+//! a `tcp/...` locator opens a stream session.
 
 use std::io;
 use std::sync::Arc;
@@ -33,29 +35,127 @@ use crate::link_pipeline::{dial_tcp, wire_tcp_stream, TcpReadDriver};
 use crate::runtime_impl::{TokioJoinHandle, TokioTime};
 use crate::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy};
 use crate::session_glue::{
-    install_session_actions, poll_and_dispatch_one, DriverLoopOutcome, SessionInitParams,
-    SessionLinkActions,
+    install_session_actions, poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome,
+    SessionInitParams, SessionLinkActions,
 };
-use crate::LostCause;
+use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
+
+#[cfg(feature = "transport-link-udp")]
+use crate::udp_pipeline::{dial_udp, wire_udp_socket, UdpReadDriver};
+#[cfg(feature = "transport-link-udp")]
+use std::net::SocketAddr;
+#[cfg(feature = "transport-link-udp")]
+use tokio::net::UdpSocket;
+
+/// A dialed raw transport — the mode-agnostic dial seam's output, a union
+/// spanning both protocols (R311ez). [`wire_dialed_link`] consumes it into
+/// the uniform `(InboundLink, Arc<dyn BoxedLinkDriver>, writer-handle)`
+/// triple regardless of which arm it carries, so [`connect_and_open_session`]
+/// drives a TCP stream session and a UDP datagram session through one code
+/// path.
+pub enum DialedLink {
+    /// A connected stream, split downstream via [`wire_tcp_stream`].
+    Tcp(TcpStream),
+    /// A bound datagram socket + its unicast peer, shared downstream via
+    /// [`wire_udp_socket`].
+    #[cfg(feature = "transport-link-udp")]
+    Udp { socket: UdpSocket, peer: SocketAddr },
+}
 
 /// Dial a parsed locator to its raw transport — the mode-agnostic dial seam.
 ///
-/// `Proto::Tcp` returns the connected [`TcpStream`] (split downstream by
-/// [`connect_and_open_session`] via [`wire_tcp_stream`], per the R311et
-/// raw-dial decision: the stream is dialed once and the split shape is
-/// chosen by the consumer, not buried inside a unified driver).
+/// `Proto::Tcp` returns a connected [`TcpStream`] (split downstream by
+/// [`wire_dialed_link`] via [`wire_tcp_stream`], per the R311et raw-dial
+/// decision: the stream is dialed once and the split shape is chosen by the
+/// consumer, not buried inside a unified driver).
 ///
-/// `Proto::Udp` is not yet wired for session-open and surfaces a typed
-/// `Unsupported` error rather than silently mis-dialing. Datagram
-/// session-open lands in R311ew, where the return type generalises to a
-/// transport union spanning both protocols.
-pub async fn dial_locator(locator: ParsedLocator) -> io::Result<TcpStream> {
+/// `Proto::Udp` binds an ephemeral local socket targeting the locator's peer
+/// ([`dial_udp`]) when the `transport-link-udp` feature is compiled in;
+/// downstream [`wire_udp_socket`] shares it into the read/write drivers. With
+/// the feature off, a `udp/...` locator surfaces a typed `Unsupported` error
+/// rather than silently mis-dialing.
+pub async fn dial_locator(locator: ParsedLocator) -> io::Result<DialedLink> {
     match locator.proto {
-        Proto::Tcp => dial_tcp(locator.addr).await,
+        Proto::Tcp => Ok(DialedLink::Tcp(dial_tcp(locator.addr).await?)),
+        #[cfg(feature = "transport-link-udp")]
+        Proto::Udp => Ok(DialedLink::Udp {
+            socket: dial_udp(locator.addr).await?,
+            peer: locator.addr,
+        }),
+        #[cfg(not(feature = "transport-link-udp"))]
         Proto::Udp => Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "udp session-open dial not yet wired (R311ew); tcp only this round",
+            "udp session-open requires the transport-link-udp feature",
         )),
+    }
+}
+
+/// Inbound read driver of a dialed link — the transport union on the read
+/// side, so [`OpenedSession`] carries one concrete type whether the locator
+/// dialed a stream or a datagram socket (the `LinkDriver` trait uses
+/// `async fn`, which is not dyn-compatible, so the union is an enum rather
+/// than a `Box<dyn LinkDriver>`). [`poll_and_dispatch_one`] drives it
+/// generically via the [`LinkDriver`] impl, which forwards each method to the
+/// inner driver.
+pub enum InboundLink {
+    Tcp(TcpReadDriver),
+    #[cfg(feature = "transport-link-udp")]
+    Udp(UdpReadDriver),
+}
+
+impl LinkDriver for InboundLink {
+    async fn open(&mut self) -> io::Result<()> {
+        match self {
+            InboundLink::Tcp(d) => d.open().await,
+            #[cfg(feature = "transport-link-udp")]
+            InboundLink::Udp(d) => d.open().await,
+        }
+    }
+
+    async fn send(&mut self, frame: &TxFrame<'_>, reliability: Reliability) -> io::Result<()> {
+        match self {
+            InboundLink::Tcp(d) => d.send(frame, reliability).await,
+            #[cfg(feature = "transport-link-udp")]
+            InboundLink::Udp(d) => d.send(frame, reliability).await,
+        }
+    }
+
+    async fn close(&mut self) -> io::Result<()> {
+        match self {
+            InboundLink::Tcp(d) => d.close().await,
+            #[cfg(feature = "transport-link-udp")]
+            InboundLink::Udp(d) => d.close().await,
+        }
+    }
+
+    async fn poll_event(&mut self) -> LinkEvent {
+        match self {
+            InboundLink::Tcp(d) => d.poll_event().await,
+            #[cfg(feature = "transport-link-udp")]
+            InboundLink::Udp(d) => d.poll_event().await,
+        }
+    }
+}
+
+/// Wire a [`DialedLink`] into the cooperating drivers the session FSM
+/// consumes — the per-transport branch that converges on one shape: an
+/// inbound [`InboundLink`] (`&mut LinkDriver` for the poll loop), an outbound
+/// `Arc<dyn BoxedLinkDriver>` (`send_blocking` for the Lua actions), and the
+/// writer-task join handle. TCP splits the stream ([`wire_tcp_stream`]); UDP
+/// shares the socket ([`wire_udp_socket`]).
+pub fn wire_dialed_link(
+    dialed: DialedLink,
+) -> (InboundLink, Arc<dyn BoxedLinkDriver>, TokioJoinHandle<()>) {
+    match dialed {
+        DialedLink::Tcp(stream) => {
+            let (inbound, outbound, handle) = wire_tcp_stream(stream);
+            (InboundLink::Tcp(inbound), outbound, handle)
+        }
+        #[cfg(feature = "transport-link-udp")]
+        DialedLink::Udp { socket, peer } => {
+            let (inbound, outbound, handle) = wire_udp_socket(socket, peer);
+            (InboundLink::Udp(inbound), outbound, handle)
+        }
     }
 }
 
@@ -70,7 +170,7 @@ pub async fn dial_locator(locator: ParsedLocator) -> io::Result<TcpStream> {
 pub struct OpenedSession {
     pub engine: Engine<SessionFsmUnicastPolicy>,
     pub actions: Arc<SessionLinkActions>,
-    pub inbound: TcpReadDriver,
+    pub inbound: InboundLink,
     pub writer_handle: TokioJoinHandle<()>,
     pub clock: TokioTime,
 }
@@ -82,8 +182,9 @@ pub enum OpenError {
     /// surfaced by [`open_session_at`] / [`open_session_static`] when a
     /// scouting-supplied or configured locator is malformed).
     BadLocator(LocatorParseError),
-    /// Dial failed, or the locator protocol is not yet wired for
-    /// session-open (UDP this round).
+    /// Dial failed (TCP connect refused, socket bind error), or the locator
+    /// protocol is not compiled in (a `udp/...` locator with the
+    /// `transport-link-udp` feature off surfaces a typed `Unsupported` here).
     Dial(io::Error),
     /// The link was lost mid-handshake (peer closed before OpenAck).
     LinkLost(LostCause),
@@ -100,10 +201,21 @@ pub enum OpenError {
     NoReachableLocator,
 }
 
-/// Dial `locator`, split the connection into the R311et link pipeline, wire
-/// the unicast session FSM in the Initiator role, and drive the inbound
-/// handshake (peer InitAck -> OpenSyn -> peer OpenAck) until the FSM records
-/// Established.
+/// Dial `locator`, wire the connection into the link pipeline ([`DialedLink`]
+/// -> [`wire_dialed_link`]: a stream splits into read/write halves, a
+/// datagram socket is shared), wire the unicast session FSM in the Initiator
+/// role, and drive the inbound handshake (peer InitAck -> OpenSyn -> peer
+/// OpenAck) until the FSM records Established.
+///
+/// The handshake messages are transport-uniform — the only difference is
+/// framing: TCP length-prefixes each through `StreamEnvelope`, UDP sends
+/// one message per datagram (boundary == frame), and both decode through the
+/// same `handle_inbound` path.
+///
+/// Bounded only by `max_iters` (poll count), not wall clock: a peer that
+/// never answers the handshake hangs the loop. `dial_tcp` fails fast on a
+/// refused port, but `dial_udp` only binds locally, so an unreachable UDP
+/// peer is the case to avoid until an open-deadline lands.
 ///
 /// The Initiator activation is `OutboundStart` (-> LinkOpening; the
 /// `link_driver_open` action is a no-op since the stream is already
@@ -123,8 +235,8 @@ pub async fn connect_and_open_session(
     clock: TokioTime,
     max_iters: Option<usize>,
 ) -> Result<OpenedSession, OpenError> {
-    let stream = dial_locator(locator).await.map_err(OpenError::Dial)?;
-    let (mut inbound, outbound, writer_handle) = wire_tcp_stream(stream);
+    let dialed = dial_locator(locator).await.map_err(OpenError::Dial)?;
+    let (mut inbound, outbound, writer_handle) = wire_dialed_link(dialed);
 
     let actions = SessionLinkActions::new(outbound, params, clock);
     let script_engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());

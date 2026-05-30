@@ -320,6 +320,17 @@ pub use wz_session_core::link::{LinkEvent, LostCause, RxFrame, TxFrame};
 #[cfg(feature = "transport-link-tcp")]
 pub mod link_pipeline;
 
+/// R311ez — datagram sibling of [`link_pipeline`] (UDP). A UDP socket is
+/// not split into owned read/write halves; the one socket is shared via
+/// `Arc` to back the inbound [`udp_pipeline::UdpReadDriver`] and the
+/// outbound [`udp_pipeline::udp_writer_task`]. `dial_udp` binds an
+/// ephemeral local socket; `wire_udp_socket` shares it into the
+/// read-driver / write-driver / writer-task triple the session FSM
+/// consumes. One datagram is exactly one wire message (no length-prefix
+/// envelope — UDP preserves boundaries).
+#[cfg(feature = "transport-link-udp")]
+pub mod udp_pipeline;
+
 /// R311eu — mode-agnostic session-open orchestration over the R311et
 /// [`link_pipeline`]. `dial_locator` dispatches a `ParsedLocator`'s protocol
 /// to a raw transport; `connect_and_open_session` dials, splits into the

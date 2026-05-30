@@ -26818,6 +26818,58 @@
         "No new carry. R311ex carry list unchanged (UDP datagram session-open deferred; runner.rs connect_and_open_session adoption + accept_and_open_session pairing; multi-peer static mesh Phase D+)."
       ]
     },
+    "Round 311ez": {
+      "decision_summary": "R311ez dials udp/... locators to a datagram session: dial_locator returns a transport union, dial_udp + wire_udp_socket (shared socket, no envelope) reach Established the same as TCP.",
+      "changes_bullets": [
+        "wz-runtime-tokio/src/udp_pipeline.rs (new): datagram sibling of link_pipeline — dial_udp (ephemeral local bind, address family mirrors peer) + wire_udp_socket sharing one Arc<UdpSocket> into UdpReadDriver + UdpWriteDriver + udp_writer_task. One datagram = one wire message (no StreamEnvelope length prefix — UDP preserves boundaries). transport-link-udp gated.",
+        "wz-runtime-tokio/src/session_open.rs: dial_locator now returns a DialedLink transport union (Tcp | Udp{socket,peer}); the Udp arm dials via dial_udp instead of the R311ew Unsupported defer. New InboundLink enum with a LinkDriver forwarding impl (an enum, not Box<dyn LinkDriver>, because LinkDriver uses async fn and is not dyn-compatible) + wire_dialed_link. OpenedSession.inbound TcpReadDriver -> InboundLink. transport-link-udp OFF keeps the typed Unsupported error.",
+        "wz-runtime-tokio/src/lib.rs: pub mod udp_pipeline (transport-link-udp gated).",
+        "wz-runtime-tokio/tests/static_scout_open.rs: open_session_at_udp_is_unsupported replaced by open_session_at_udp_reaches_established (in-process datagram e2e; the acceptor learns the Initiator ephemeral src via peek_from, then drives InboundStart to Established); all_unsupported test rewritten to all_unreachable using fail-fast dead-TCP ports (a UDP black hole would hang the unbounded open loop)."
+      ],
+      "verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test static_scout_open: 6/6 pass incl the udp e2e; udp e2e 12/12 stable sweep; udp_pipeline unit 3/3; lib 326 pass (+3 vs R311ex 323).",
+        "Layer M (scouting-active, opt-in): 2/2 pass — the active multicast scout -> open e2e consumes open_session_at through the new InboundLink union with no regression.",
+        "cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings + cargo fmt --check: clean, 0 warnings.",
+        "scripts/run-ci.sh required layers 0/A/B/C0/C1/C1b..C1i/C2/C3/C4/D/E: all pass (exit 0), zero regression. Layer G (MCU) N/A — change confined to the std-only tokio runtime crate."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "runtime-crate--sce_link_runtime_tokio/2-1-two-primitive-link-contract"
+      ],
+      "carry_forward_bullets": [
+        "Open-deadline gap: connect_and_open_session is bounded only by max_iters (poll count), not wall clock — a peer that accepts the link but never answers the handshake hangs the loop (transport-agnostic; UDP makes it reachable because dial_udp only binds locally). The principled fix races the poll against a tokio sleep like drive_session_until_terminal's lease deadline; needs a timeout-policy / SSOT decision before landing.",
+        "UDP session-open is Initiator-only this round: the datagram acceptor learning its peer from the first datagram src is test-harness-only; accept_and_open_session for a datagram server stays deferred (pairs with the TCP accept_and_open_session carry from R311ev).",
+        "udp-off isolated build inherits wz-runtime-tokio's pre-existing non-composability (the keyexpr-canon re-export breaks every --no-default-features build of this crate); independent udp-off composability is part of the north-star arbitrary-composition track, not closed here.",
+        "Full connect_and_open_session adoption in runner.rs + multi-peer static mesh (open a session to EACH connect[] peer) remain deferred (carry from R311ew)."
+      ],
+      "publishable_decision_summary": "R311ez dials udp/... locators to a datagram session: dial_locator returns a transport union, dial_udp + wire_udp_socket (shared socket, no envelope) reach Established the same as TCP.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio/src/udp_pipeline.rs (new): datagram sibling of link_pipeline — dial_udp (ephemeral local bind, address family mirrors peer) + wire_udp_socket sharing one Arc<UdpSocket> into UdpReadDriver + UdpWriteDriver + udp_writer_task. One datagram = one wire message (no StreamEnvelope length prefix — UDP preserves boundaries). transport-link-udp gated.",
+        "wz-runtime-tokio/src/session_open.rs: dial_locator now returns a DialedLink transport union (Tcp | Udp{socket,peer}); the Udp arm dials via dial_udp instead of the R311ew Unsupported defer. New InboundLink enum with a LinkDriver forwarding impl (an enum, not Box<dyn LinkDriver>, because LinkDriver uses async fn and is not dyn-compatible) + wire_dialed_link. OpenedSession.inbound TcpReadDriver -> InboundLink. transport-link-udp OFF keeps the typed Unsupported error.",
+        "wz-runtime-tokio/src/lib.rs: pub mod udp_pipeline (transport-link-udp gated).",
+        "wz-runtime-tokio/tests/static_scout_open.rs: open_session_at_udp_is_unsupported replaced by open_session_at_udp_reaches_established (in-process datagram e2e; the acceptor learns the Initiator ephemeral src via peek_from, then drives InboundStart to Established); all_unsupported test rewritten to all_unreachable using fail-fast dead-TCP ports (a UDP black hole would hang the unbounded open loop)."
+      ],
+      "publishable_verification_bullets": [
+        "cargo test -p wz-runtime-tokio --test static_scout_open: 6/6 pass incl the udp e2e; udp e2e 12/12 stable sweep; udp_pipeline unit 3/3; lib 326 pass (+3 vs R311ex 323).",
+        "Layer M (scouting-active, opt-in): 2/2 pass — the active multicast scout -> open e2e consumes open_session_at through the new InboundLink union with no regression.",
+        "cargo clippy -p wz-runtime-tokio --all-targets -- -D warnings + cargo fmt --check: clean, 0 warnings.",
+        "scripts/run-ci.sh required layers 0/A/B/C0/C1/C1b..C1i/C2/C3/C4/D/E: all pass (exit 0), zero regression. Layer G (MCU) N/A — change confined to the std-only tokio runtime crate."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "runtime-crate--sce_link_runtime_tokio/2-1-two-primitive-link-contract"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Open-deadline gap: connect_and_open_session is bounded only by max_iters (poll count), not wall clock — a peer that accepts the link but never answers the handshake hangs the loop (transport-agnostic; UDP makes it reachable because dial_udp only binds locally). The principled fix races the poll against a tokio sleep like drive_session_until_terminal's lease deadline; needs a timeout-policy / SSOT decision before landing.",
+        "UDP session-open is Initiator-only this round: the datagram acceptor learning its peer from the first datagram src is test-harness-only; accept_and_open_session for a datagram server stays deferred (pairs with the TCP accept_and_open_session carry from R311ev).",
+        "udp-off isolated build inherits wz-runtime-tokio's pre-existing non-composability (the keyexpr-canon re-export breaks every --no-default-features build of this crate); independent udp-off composability is part of the north-star arbitrary-composition track, not closed here.",
+        "Full connect_and_open_session adoption in runner.rs + multi-peer static mesh (open a session to EACH connect[] peer) remain deferred (carry from R311ew)."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [
