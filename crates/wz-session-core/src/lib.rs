@@ -102,6 +102,14 @@ pub mod scout_params;
 #[cfg(feature = "alloc")]
 pub mod scout_static;
 
+/// R311er — mode-agnostic locator parsing (`proto/addr:port` ->
+/// `ParsedLocator{Proto, SocketAddr}`, docs/scouting-fsm.md §1.2). The
+/// single seam both scouting modes' locator strings (active discovered +
+/// static synth) flow through before a link dial. Pure core::net + alloc;
+/// distinct from wz-codecs::locator (the wire codec).
+#[cfg(feature = "alloc")]
+pub mod locator;
+
 /// R311eg — peer-advertised InitSyn capability snapshot (`PeerInitCaps`,
 /// three integer fields + a `from_init_syn` decoder). Pure no_std +
 /// no_alloc; unconditional. DP3 leaf lifted from

@@ -26444,6 +26444,52 @@
         "passive mode stays Phase D+ (OQ-W23); from_deploy_str surfaces it as PassiveDeferred rather than accepting it."
       ]
     },
+    "Round 311er": {
+      "decision_summary": "R311er adds wz-session-core::locator parse_locator: the mode-agnostic seam turning active-discovered + static-synth locator strings into a typed ParsedLocator{Proto, SocketAddr} via core::net (MCU + AP).",
+      "changes_bullets": [
+        "wz-session-core: new locator module — Proto{Tcp,Udp} + ParsedLocator{proto, addr: core::net::SocketAddr} + parse_locator(&str) -> Result<ParsedLocator, LocatorParseError{MissingProtoSeparator|UnknownProto(s)|BadAddress(s)}>.",
+        "The mode-agnostic seam: active mode's ScoutOutcome::Discovered(String) and static mode's synth_static_locators(..)->Vec<String> both produce zenoh locator strings; parse_locator turns either into the typed endpoint a link dial consumes, enforcing \"a discovered locator is a discovered locator regardless of mode\" in one runtime-agnostic place.",
+        "Pure core::net + alloc (no std, no socket, no FSM) so it cross-compiles on the MCU static-deploy profile; distinct from wz-codecs::locator (the wire codec). MVP scope = numeric tcp/udp SocketAddr (IPv4/IPv6); DNS / metadata-suffix / other transports surface as parse errors (deferred, not silently mis-parsed).",
+        "8 unit tests (tcp/udp ipv4, ipv6 bracketed, missing-separator, unknown-proto, DNS-as-BadAddress, metadata-as-BadAddress, out-of-range-port)."
+      ],
+      "verification_bullets": [
+        "wz-session-core builds clean; 8 locator unit tests pass under Layer C1 (cargo test --workspace, wz-session-core default alloc gates the module + tests).",
+        "full scripts/run-ci.sh 0/A/A2/B/C0/C1/C1b..C1i/C2/C3/C4/C4b/D/E EXIT 0.",
+        "Layer G MCU 7-target cross-compile pass — core::net::SocketAddr is no_std (Rust 1.77+, MSRV 1.81), so wz-session-core (and the facade that re-exports it) cross-compile on every Phase W target (G.2 facade + G.5 runtime-lwip OK on all triples)."
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/1-2-scout-hello-wire-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "carry_forward_bullets": [
+        "parse_locator is the parse half of scouting -> session-open; the dial half (ParsedLocator -> connected TcpDriver/UdpDriver) + the drive-to-Established orchestration are the next step. They are AP-bound (TcpStream::connect / split read+write halves) and reuse the existing drive_session_until_terminal; lifting the demo runner.rs open path into a reusable connect_and_open_session lib API is the bigger follow-on (user-scoped: this round was parser-only).",
+        "DNS hostname resolution + locator metadata suffix (#iface=..) parsing are deferred (AP std concern / config tail), surfaced as BadAddress for now.",
+        "non-tcp/udp transports (serial/ws/quic/unixsock) extend Proto as those link drivers land."
+      ],
+      "publishable_decision_summary": "R311er adds wz-session-core::locator parse_locator: the mode-agnostic seam turning active-discovered + static-synth locator strings into a typed ParsedLocator{Proto, SocketAddr} via core::net (MCU + AP).",
+      "publishable_changes_bullets": [
+        "wz-session-core: new locator module — Proto{Tcp,Udp} + ParsedLocator{proto, addr: core::net::SocketAddr} + parse_locator(&str) -> Result<ParsedLocator, LocatorParseError{MissingProtoSeparator|UnknownProto(s)|BadAddress(s)}>.",
+        "The mode-agnostic seam: active mode's ScoutOutcome::Discovered(String) and static mode's synth_static_locators(..)->Vec<String> both produce zenoh locator strings; parse_locator turns either into the typed endpoint a link dial consumes, enforcing \"a discovered locator is a discovered locator regardless of mode\" in one runtime-agnostic place.",
+        "Pure core::net + alloc (no std, no socket, no FSM) so it cross-compiles on the MCU static-deploy profile; distinct from wz-codecs::locator (the wire codec). MVP scope = numeric tcp/udp SocketAddr (IPv4/IPv6); DNS / metadata-suffix / other transports surface as parse errors (deferred, not silently mis-parsed).",
+        "8 unit tests (tcp/udp ipv4, ipv6 bracketed, missing-separator, unknown-proto, DNS-as-BadAddress, metadata-as-BadAddress, out-of-range-port)."
+      ],
+      "publishable_verification_bullets": [
+        "wz-session-core builds clean; 8 locator unit tests pass under Layer C1 (cargo test --workspace, wz-session-core default alloc gates the module + tests).",
+        "full scripts/run-ci.sh 0/A/A2/B/C0/C1/C1b..C1i/C2/C3/C4/C4b/D/E EXIT 0.",
+        "Layer G MCU 7-target cross-compile pass — core::net::SocketAddr is no_std (Rust 1.77+, MSRV 1.81), so wz-session-core (and the facade that re-exports it) cross-compile on every Phase W target (G.2 facade + G.5 runtime-lwip OK on all triples)."
+      ],
+      "publishable_impact_refs": [
+        "scouting-fsm--prose-sketch/1-2-scout-hello-wire-shape",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting"
+      ],
+      "publishable_carry_forward_bullets": [
+        "parse_locator is the parse half of scouting -> session-open; the dial half (ParsedLocator -> connected TcpDriver/UdpDriver) + the drive-to-Established orchestration are the next step. They are AP-bound (TcpStream::connect / split read+write halves) and reuse the existing drive_session_until_terminal; lifting the demo runner.rs open path into a reusable connect_and_open_session lib API is the bigger follow-on (user-scoped: this round was parser-only).",
+        "DNS hostname resolution + locator metadata suffix (#iface=..) parsing are deferred (AP std concern / config tail), surfaced as BadAddress for now.",
+        "non-tcp/udp transports (serial/ws/quic/unixsock) extend Proto as those link drivers land."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [
