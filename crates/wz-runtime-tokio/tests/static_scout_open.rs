@@ -11,20 +11,27 @@
 //!
 //! These tests exercise the static path end-to-end IN-PROCESS (no multicast):
 //!   - a `tcp/...` locator reaches Established against an inline wz acceptor;
-//!   - a `udp/...` locator surfaces the typed `Dial(Unsupported)` (datagram
-//!     session-open is deferred — UDP locators are skipped, not mis-dialed);
+//!   - a `udp/...` locator reaches Established against an inline wz datagram
+//!     acceptor (R311ez — datagram session-open, no length-prefix envelope);
 //!   - a malformed locator surfaces `BadLocator`;
 //!   - `open_session_static` skips an unreachable locator to the first
 //!     reachable one, and reports `NoReachableLocator` when none work.
 //!
 //! The active multicast scout -> open e2e is the Layer M follow-up.
+//!
+//! Note: the open loop is bounded only by `max_iters` (poll count), not wall
+//! clock — a peer that accepts the link but never answers the handshake hangs
+//! the loop (transport-agnostic; a silent-but-connected TCP peer hangs the
+//! same way). UDP makes this reachable because `dial_udp` only binds locally,
+//! so these tests only ever point UDP at a responsive acceptor; the
+//! unreachable-exhaustion case uses dead TCP ports, which fail fast at dial.
 
 use std::sync::Arc;
 
 use sce_rust_lua::LuaEngine;
 use sce_rust_runtime::scripting::IScriptEngine;
 use sce_rust_runtime::Engine;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UdpSocket};
 
 use wz_runtime_tokio::link_pipeline::wire_tcp_stream;
 use wz_runtime_tokio::runtime_impl::{TokioJoinHandle, TokioTime};
@@ -34,6 +41,7 @@ use wz_runtime_tokio::session_glue::{
     SessionLinkActions,
 };
 use wz_runtime_tokio::session_open::{open_session_at, open_session_static, OpenError};
+use wz_runtime_tokio::udp_pipeline::wire_udp_socket;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 
 const ITER_CAP: usize = 64;
@@ -104,25 +112,74 @@ async fn open_session_at_tcp_reaches_established() {
     assert!(acc_est >= 1, "acceptor established");
 }
 
-#[tokio::test]
-async fn open_session_at_udp_is_unsupported() {
-    // UDP datagram session-open is deferred; dial_locator surfaces a typed
-    // Unsupported before any socket work. (OpenedSession is not Debug, so
-    // match instead of expect_err.)
-    let result = open_session_at(
-        "udp/127.0.0.1:9",
-        initiator_params(),
-        TokioTime::new(),
-        Some(4),
+/// Inline wz datagram acceptor (R311ez). A UDP server cannot pre-know the
+/// Initiator's ephemeral port, so it learns the peer from the first
+/// datagram's source via `peek_from` (MSG_PEEK leaves the datagram queued, so
+/// the first `poll_event` re-reads it). Then it wires the socket and drives
+/// the InboundStart handshake to Established, mirroring the TCP acceptor.
+async fn drive_udp_acceptor_to_established(socket: UdpSocket) -> (u32, TokioJoinHandle<()>) {
+    let mut probe = [0u8; 64];
+    let (_n, src) = socket
+        .peek_from(&mut probe)
+        .await
+        .expect("peek first datagram");
+    let (mut inbound, outbound, writer_handle) = wire_udp_socket(socket, src);
+
+    let mut params = fixture_session_init_params();
+    params.zid = vec![0x02; 4]; // distinct zid from the initiator
+    let actions = SessionLinkActions::new(outbound, params, TokioTime::new());
+    let script_engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
+    install_session_actions(actions.clone(), &script_engine);
+    let mut engine: Engine<SessionFsmUnicastPolicy> =
+        Engine::new(SessionFsmUnicastPolicy::new(script_engine));
+    engine.initialize();
+    engine.process_event(E::InboundStart);
+
+    let mut iter = 0usize;
+    while actions.trace_snapshot().record_established_at < 1 {
+        assert!(
+            !engine.is_in_final_state(),
+            "udp acceptor terminal before Established"
+        );
+        assert!(
+            iter < ITER_CAP,
+            "udp acceptor did not reach Established in budget"
+        );
+        iter += 1;
+        if let DriverLoopOutcome::LinkLost(cause) =
+            poll_and_dispatch_one(&mut inbound, &actions, &mut engine).await
+        {
+            panic!("udp acceptor link lost mid-handshake: {cause:?}");
+        }
+    }
+    (
+        actions.trace_snapshot().record_established_at,
+        writer_handle,
     )
-    .await;
-    let Err(err) = result else {
-        panic!("expected udp session-open to be unsupported, got Ok");
-    };
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_session_at_udp_reaches_established() {
+    // R311ez — a `udp/...` locator opens a datagram session the same way a
+    // `tcp/...` locator opens a stream session: dial_locator binds an
+    // ephemeral local socket, wire_dialed_link shares it, and the Initiator
+    // handshake reaches Established against the inline datagram acceptor.
+    let acc_socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind acceptor");
+    let addr = acc_socket.local_addr().expect("acceptor addr");
+    let acceptor = drive_udp_acceptor_to_established(acc_socket);
+    let loc = format!("udp/{addr}");
+    let initiator = open_session_at(&loc, initiator_params(), TokioTime::new(), Some(ITER_CAP));
+    let ((acc_est, _w), opened) = tokio::join!(acceptor, initiator);
     assert!(
-        matches!(&err, OpenError::Dial(e) if e.kind() == std::io::ErrorKind::Unsupported),
-        "expected Dial(Unsupported), got {err:?}"
+        opened
+            .expect("Established")
+            .actions
+            .trace_snapshot()
+            .record_established_at
+            >= 1,
+        "initiator established via open_session_at on a udp locator"
     );
+    assert!(acc_est >= 1, "udp acceptor established");
 }
 
 #[tokio::test]
@@ -187,13 +244,23 @@ async fn open_session_static_empty_is_no_reachable() {
     );
 }
 
-#[tokio::test]
-async fn open_session_static_all_unsupported_is_no_reachable() {
-    // A udp-only static list exhausts (each Udp arm is Unsupported this round).
-    let connect = vec!["udp/127.0.0.1:9".to_string()];
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn open_session_static_all_unreachable_is_no_reachable() {
+    // A list of dead loopback ports exhausts — each fails fast at dial
+    // (connection refused), so open_session_static reports NoReachableLocator
+    // without ever blocking on a handshake. (Dead TCP, not a UDP black hole:
+    // dial_udp binds locally and would hang the open loop awaiting a datagram
+    // that never comes — see the module note on the open-loop time bound.)
+    let probe_a = TcpListener::bind("127.0.0.1:0").await.expect("probe a");
+    let dead_a = probe_a.local_addr().expect("dead a");
+    let probe_b = TcpListener::bind("127.0.0.1:0").await.expect("probe b");
+    let dead_b = probe_b.local_addr().expect("dead b");
+    drop(probe_a);
+    drop(probe_b);
+    let connect = vec![format!("tcp/{dead_a}"), format!("tcp/{dead_b}")];
     let result = open_session_static(&connect, initiator_params(), TokioTime::new(), Some(4)).await;
     let Err(err) = result else {
-        panic!("expected all-udp connect list to error, got Ok");
+        panic!("expected all-unreachable connect list to error, got Ok");
     };
     assert!(
         matches!(err, OpenError::NoReachableLocator),
