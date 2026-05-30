@@ -94,6 +94,14 @@ pub mod scout_trace;
 #[cfg(feature = "alloc")]
 pub mod scout_params;
 
+/// R311eq — static scouting mode: `ScoutingMode` discriminator +
+/// `synth_static_locators` (host-side locator synthesis from
+/// `deploy.connect[]`, docs/scouting-fsm.md §2.4.3). Pure alloc value
+/// transform, NOT gated on `scouting-active` — static mode is the FSM
+/// bypass path used when the active FSM is compiled out.
+#[cfg(feature = "alloc")]
+pub mod scout_static;
+
 /// R311eg — peer-advertised InitSyn capability snapshot (`PeerInitCaps`,
 /// three integer fields + a `from_init_syn` decoder). Pure no_std +
 /// no_alloc; unconditional. DP3 leaf lifted from
