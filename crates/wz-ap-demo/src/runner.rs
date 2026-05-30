@@ -68,13 +68,14 @@ use wz::runtime_tokio::session::{
     LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken, Queryable,
     QueryableOptions, Session, SubscribeOptions, Subscriber,
 };
-use wz::runtime_tokio::session_fsm_unicast::{SessionFsmUnicastEvent, SessionFsmUnicastPolicy};
 use wz::runtime_tokio::session_glue::{
-    drive_session_until_terminal, install_session_actions, IterationEvent, SessionLinkActions,
+    drive_session_until_terminal, IterationEvent, SessionLinkActions,
+};
+use wz::runtime_tokio::session_open::{
+    accept_and_open_session, initiate_and_open_session, DialedLink, OpenedSession,
+    DEFAULT_OPEN_TICK_MS,
 };
 use wz::runtime_tokio::sync::Mutex;
-use wz::script::LuaEngine;
-use wz::script::{Engine, IScriptEngine};
 
 use crate::args::{
     demo_session_init_params, DeclareEmitSpec, PushOperation, QueryRoleSpec, RemoteLogSpec,
@@ -83,7 +84,6 @@ use crate::args::{
 use crate::shutdown::shutdown_signal;
 use crate::tasks::{declare_task, publisher_task, query_task, QUERY_RID};
 use crate::teardown;
-use wz::runtime_tokio::link_pipeline::wire_tcp_stream;
 
 /// RAII keepers for the local Session-level declarations
 /// ([`Subscriber`], [`LivelinessSubscriber`], [`Queryable`]). Held
@@ -462,40 +462,6 @@ fn spawn_background_tasks(
     }
 }
 
-/// Step 4b — activate the session FSM role. The
-/// `session_fsm_unicast.scxml` starts in `Init` and offers two
-/// role-selection transitions (`outbound.start` → `LinkOpening`,
-/// `inbound.start` → `Accepting`); the driver loop does NOT
-/// synthesize either side — this function dispatches the relevant
-/// role event after the socket is established. Without this
-/// dispatch the FSM stays in `Init` and silently drops the first
-/// inbound frame.
-///
-/// R121d acceptor path: `InboundStart` lands the FSM in
-/// `Accepting.AwaitingInitSyn` before the first inbound `InitSyn`
-/// frame arrives. Mirrors the pattern asserted by
-/// `session_fsm_accepting_path.rs::r78_*`.
-///
-/// R121f initiator path: `OutboundStart` lands the FSM in
-/// `LinkOpening` (fires `link_driver_open` which is a no-op on the
-/// `TcpWriteDriver` since TCP is already connected); then
-/// `LinkOpened` lands it in `SentInitSyn` which fires
-/// `send_init_syn` — our first wire byte goes out here. Mirrors the
-/// pattern asserted by
-/// `session_fsm_real_tcp.rs::r60_fsm_drives_real_tcp_loopback`
-/// (`OutboundStart` + `LinkOpened` in sequence).
-fn activate_role(engine: &mut Engine<SessionFsmUnicastPolicy>, role: &Role) {
-    match role {
-        Role::Acceptor { .. } => {
-            engine.process_event(SessionFsmUnicastEvent::InboundStart);
-        }
-        Role::Initiator { .. } => {
-            engine.process_event(SessionFsmUnicastEvent::OutboundStart);
-            engine.process_event(SessionFsmUnicastEvent::LinkOpened);
-        }
-    }
-}
-
 /// Demo orchestration entry point. Invoked by `fn main` after argv
 /// parsing has been validated and the spec bundles
 /// ([`DeclareEmitSpec`], [`RemoteLogSpec`], [`ReplyConsumerSpec`],
@@ -535,38 +501,76 @@ pub(crate) async fn run_demo(
         query: query_spec,
     } = query_role_spec;
 
-    // ── Step 1: TCP setup.
+    // ── Step 1: TCP setup (Acceptor binds + accepts, Initiator dials).
     let stream = establish_link(&role).await?;
 
-    // ── Step 2: stream split + writer task + driver wiring.
+    // ── Step 2: open the session to Established via the library open
+    //          helpers (R311fc). The handshake phase is wall-clock bounded
+    //          by the SCXML handshake timers — Initiator init_ack/open_ack
+    //          (2s) + link.open_timeout (5s); Acceptor
+    //          accepting.inactivity_timeout (1s) — so a peer that connects
+    //          then stalls no longer hangs the binary: the helper's tick pump
+    //          fires the deadline and returns an OpenError instead of looping
+    //          forever (the pre-R311fc inline drive had no tick pump on the
+    //          handshake). Production wall-clock path: `None` iteration cap +
+    //          DEFAULT_OPEN_TICK_MS. The returned OpenedSession owns the same
+    //          wiring the demo previously built inline (split link pipeline +
+    //          Lua-bound FSM engine + actions); steps 3-5 thread its fields
+    //          into the steady-state machinery instead of constructing them.
     //
-    // R311ev — the split-link pipeline (TcpReadDriver + TcpWriteDriver +
-    // writer_task) was lifted into the library at R311et; the demo now
-    // consumes `link_pipeline::wire_tcp_stream` rather than its own
-    // duplicated copy. Identical wire behaviour, codec-routed both ways.
-    let (inbound, outbound, writer_handle) = wire_tcp_stream(stream);
-
-    // ── Step 3: observer-side registry callbacks.
-    //
-    // R121k-7-refactor: the six per-domain registries
-    // (subscribers / queryables / remote_subscribers /
-    // remote_queryables / liveliness / replies) plus the queryable
-    // side's pending-reply + pending-final staging buffers are now
-    // wrapped in a single ApplicationLayerObserver. Application
-    // code registers callbacks on each contained registry directly
-    // and a single observer.dispatch call inside the drive_session
-    // loop fans the IterationEvent into every registry + drains the
-    // staged outbound records through the action layer.
-    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
-    // R263 — single TokioTime instance shared across declare_task /
-    // query_task / publisher_task / drive_session_until_terminal /
-    // the QUERY_RID ReplyRegistry register call + the R264
-    // sweep_task. TokioTime is Copy + Clone, so each call site
-    // receives a value-copy that preserves the original epoch
-    // field. The shared epoch is load-bearing for register-time
-    // deadline_ms vs sweep-time now_ms comparison (R261 deadline
-    // contract + R264 sweep_task pairing).
+    // R294/R263 — `session_clock` is the single shared monotonic epoch passed
+    // into the open helper (which threads it into SessionLinkActions),
+    // install_observer_callbacks, Session::new, drive_session_until_terminal,
+    // and sweep_task. TokioTime is Copy, so the OpenedSession's returned clock
+    // is the same epoch; the demo keeps using its own `session_clock` binding
+    // (clock: _) — load-bearing for the R261 register-time deadline_ms vs
+    // sweep-time now_ms comparison.
     let session_clock = TokioTime::new();
+    let params = demo_session_init_params(&role);
+    let OpenedSession {
+        mut engine,
+        actions,
+        inbound,
+        writer_handle,
+        clock: _,
+    } = match &role {
+        Role::Acceptor { .. } => {
+            accept_and_open_session(
+                DialedLink::Tcp(stream),
+                params,
+                session_clock,
+                None,
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+        }
+        Role::Initiator { .. } => {
+            initiate_and_open_session(
+                DialedLink::Tcp(stream),
+                params,
+                session_clock,
+                None,
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+        }
+    }
+    .map_err(|e| io::Error::other(format!("wz-ap-demo: session open failed: {e:?}")))?;
+    log::info!("wz-ap-demo: session Established; entering steady state");
+
+    // ── Step 3: observer-side registry callbacks. The handshake exchanged no
+    //          application frames, so wiring the observer here — after
+    //          Established — drops nothing.
+    //
+    // R121k-7-refactor: the six per-domain registries (subscribers /
+    // queryables / remote_subscribers / remote_queryables / liveliness /
+    // replies) plus the queryable side's pending-reply + pending-final
+    // staging buffers are wrapped in a single ApplicationLayerObserver. A
+    // single observer.dispatch call inside the drive_session loop fans each
+    // IterationEvent into every registry + drains staged outbound records.
+    // R235 — `observer` is `Arc<Mutex<ApplicationLayerObserver>>`; the drive
+    // loop and any background `Session::publish` take the lock per dispatch.
+    let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
     install_observer_callbacks(
         &observer,
         query_spec.as_deref(),
@@ -575,42 +579,13 @@ pub(crate) async fn run_demo(
         session_clock,
     );
 
-    // ── Step 4: session FSM + Lua engine + actions. Production
-    //          callers MUST source SessionInitParams from
-    //          deploy.yaml; the demo uses fixed MVP values per the
-    //          `demo_session_init_params()` constant block.
-    let params = demo_session_init_params(&role);
-    // R294 — pass `session_clock` so SessionLinkActions records its
-    // keepalive / established timestamps on the same monotonic epoch
-    // that drive_session_until_terminal's lease comparator uses (the
-    // same `session_clock` value is threaded into drive_session +
-    // sweep_task + the background spawn helpers by SpawnedTasks).
-    let actions = SessionLinkActions::new(outbound, params, session_clock);
-    let script_engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
-    install_session_actions(actions.clone(), &script_engine);
-
-    let mut engine: Engine<SessionFsmUnicastPolicy> =
-        Engine::new(SessionFsmUnicastPolicy::new(script_engine));
-    engine.initialize();
-
-    // R235 — bundle the outbound actions handle and the inbound
-    // observer into a single `Session`. Background tasks (publisher,
-    // declare emitter, query emitter) take their own cheap clone of
-    // the bundle; each clone shares the same `Arc<SessionLinkActions>`
-    // and the same `Arc<Mutex<ApplicationLayerObserver>>`, so
-    // `session.publish` / `publish_aliased_auto` from any task fans
-    // through to the loopback subscriber registry while the
-    // drive_session loop's `observer.dispatch` is observing inbound
-    // wire frames on the same registry.
-    // R311cw — Session::new now takes a third `clock: Arc<T>` argument
-    // (T fold-in lifted the per-call `clock: &T` parameter into a
-    // Session-owned `Arc<T>` field). The runner threads the same
-    // `session_clock` epoch through `SessionLinkActions::new` (line 610)
-    // and `drive_session_until_terminal` (later) so the wrapped
-    // `Arc::new(session_clock)` here keeps the monotonic epoch
-    // load-bearing for R261 register-time deadline_ms vs sweep-time
-    // now_ms comparison. TokioTime is Copy so the Arc::new construction
-    // simply value-copies the same epoch field.
+    // ── Step 4: bundle actions + observer into a Session and spawn the
+    //          Established-gated background tasks. Each task polls
+    //          `record_established_at` (already > 0 here) then emits, so
+    //          spawning post-Established simply skips the gate wait.
+    // R311cw — Session::new takes `Arc<T>` clock; wrapping the shared
+    // `session_clock` keeps the monotonic epoch load-bearing for the R261
+    // register-time deadline_ms vs sweep-time now_ms comparison.
     let session = Session::new(actions.clone(), observer.clone(), Arc::new(session_clock));
 
     let _handles = install_session_handles(
@@ -634,19 +609,15 @@ pub(crate) async fn run_demo(
         session_clock,
     );
 
-    // ── Step 4b: activate the session FSM role.
-    activate_role(&mut engine, &role);
-
-    // ── Step 5: drive the session FSM until terminal.
+    // ── Step 5: drive the session FSM through the steady state until
+    //          terminal. The open helper already reached Established; this
+    //          continues from there, dispatching inbound application frames.
     //
-    // R235 — observer is `Arc<Mutex<ApplicationLayerObserver>>` so
-    // each iteration relocks per dispatch. A `Session::publish`
-    // callback that fires synchronously from a subscriber (loopback
-    // re-publish) does NOT deadlock because `local_publish` releases
-    // the registry borrow before invoking the user callback —
-    // contention is therefore only between this loop and background
-    // task `Session::publish` calls, which serialize naturally on
-    // the mutex without livelock.
+    // R235 — observer relocks per dispatch; a loopback `Session::publish`
+    // callback does NOT deadlock because `local_publish` releases the
+    // registry borrow before invoking the user callback, so contention is
+    // only between this loop and background `Session::publish` calls, which
+    // serialize naturally on the mutex without livelock.
     log::info!("wz-ap-demo: driving session FSM");
     let mut driver = inbound;
     let observer_for_dispatch = observer.clone();

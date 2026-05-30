@@ -3214,7 +3214,8 @@
       ],
       "caveats_bullets": [
         "Pre-implementation prose, design-only during Phase A-C (MCU-first invariant per RFC sec 7).",
-        "Non-outputs: Rust source, QNX runtime, SCXML authoring (Phase D.1+ blocks on Phase A)."
+        "Non-outputs: Rust source, QNX runtime, SCXML authoring (Phase D.1+ blocks on Phase A).",
+        "R311fc: wz-ap-demo opens via initiate_/accept_and_open_session; demo handshake now tick-bounded."
       ],
       "impact_scope": [
         "session-fsm--prose-level-sketch/6-link-layer-interaction",
@@ -27028,6 +27029,50 @@
         "Carry #3: udp-off standalone build still inherits the keyexpr-canon non-composability (north-star arbitrary-composition gap).",
         "accepting.inactivity_timeout is a single whole-accept deadline (1s total), not reset-on-activity; a true per-phase inactivity reset would need a distinct event name per phase to stay staleness-safe (§2.5 names one timer, so this is deferred as an enhancement).",
         "Steady-state lease stays manual-injection (check_lease_deadline), distinct from the static SCXML send-delay timers (deploy runtime value, not a codegen delay)."
+      ]
+    },
+    "Round 311fc": {
+      "decision_summary": "R311fc wz-ap-demo runner rewire onto lib open helpers: run_demo opens via accept_/initiate_and_open_session so the demo handshake is wall-clock bounded; activate_role + inline wire/engine removed.",
+      "changes_bullets": [
+        "session_open.rs: new initiate_and_open_session(connected: DialedLink, ...) = the Initiator dialed-link half (OutboundStart + LinkOpened activation), symmetric to accept_and_open_session; connect_and_open_session refactored to dial_locator + initiate_and_open_session (locator path still dials, no behaviour change).",
+        "wz-ap-demo runner.rs: run_demo step 2 now opens via accept_and_open_session (Acceptor) / initiate_and_open_session (Initiator) from establish_link's stream wrapped as DialedLink::Tcp; the returned OpenedSession's engine/actions/inbound/writer_handle/clock thread into the existing observer/session/background/drive/teardown machinery.",
+        "Removed activate_role + the inline wire_tcp_stream + SessionLinkActions::new + LuaEngine/install_session_actions/Engine::new from run_demo (now internal to the open helpers). observer/session/background-task setup moved after Established; background tasks are record_established_at-gated so post-Established spawn just skips the gate wait.",
+        "Effect: the demo handshake is now tick-pump bounded (it was the only unbounded open path left after R311fb wired the deadline into the lib helpers but not the demo, which still drove accept inline via drive_session_until_terminal without a tick pump)."
+      ],
+      "verification_bullets": [
+        "scripts/run-ci.sh all required lanes pass + Layer G 7-MCU cross-compile all targets OK; Layer E (wz-ap-demo binary e2e vs zenoh-pico + wz peers) pass, 12/12 flake-sweep clean.",
+        "New tests/accept_and_open_session.rs::initiate_and_open_from_connected_stream_reaches_established (both sides open from DialedLink; Initiator via the new entry point); connect_and_open_session + accept_and_open_session unaffected by the dial/initiate split.",
+        "cargo fmt --all --check clean; cargo clippy -p wz-ap-demo --all-targets -D warnings clean; demo builds with zero warnings."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail"
+      ],
+      "carry_forward_bullets": [
+        "Carry #2 (open-deadline) now fully closed: both the lib helpers (R311fb) and the wz-ap-demo binary (R311fc) bound the handshake; no unbounded open path remains.",
+        "Carry #3: udp-off standalone build still inherits the keyexpr-canon non-composability (north-star arbitrary-composition gap).",
+        "Enhancement: a reset-on-activity accept inactivity timer would need a distinct event name per phase to stay staleness-safe; §2.5 names one timer so the whole-accept single deadline stays the MVP shape."
+      ],
+      "publishable_decision_summary": "R311fc wz-ap-demo runner rewire onto lib open helpers: run_demo opens via accept_/initiate_and_open_session so the demo handshake is wall-clock bounded; activate_role + inline wire/engine removed.",
+      "publishable_changes_bullets": [
+        "session_open.rs: new initiate_and_open_session(connected: DialedLink, ...) = the Initiator dialed-link half (OutboundStart + LinkOpened activation), symmetric to accept_and_open_session; connect_and_open_session refactored to dial_locator + initiate_and_open_session (locator path still dials, no behaviour change).",
+        "wz-ap-demo runner.rs: run_demo step 2 now opens via accept_and_open_session (Acceptor) / initiate_and_open_session (Initiator) from establish_link's stream wrapped as DialedLink::Tcp; the returned OpenedSession's engine/actions/inbound/writer_handle/clock thread into the existing observer/session/background/drive/teardown machinery.",
+        "Removed activate_role + the inline wire_tcp_stream + SessionLinkActions::new + LuaEngine/install_session_actions/Engine::new from run_demo (now internal to the open helpers). observer/session/background-task setup moved after Established; background tasks are record_established_at-gated so post-Established spawn just skips the gate wait.",
+        "Effect: the demo handshake is now tick-pump bounded (it was the only unbounded open path left after R311fb wired the deadline into the lib helpers but not the demo, which still drove accept inline via drive_session_until_terminal without a tick pump)."
+      ],
+      "publishable_verification_bullets": [
+        "scripts/run-ci.sh all required lanes pass + Layer G 7-MCU cross-compile all targets OK; Layer E (wz-ap-demo binary e2e vs zenoh-pico + wz peers) pass, 12/12 flake-sweep clean.",
+        "New tests/accept_and_open_session.rs::initiate_and_open_from_connected_stream_reaches_established (both sides open from DialedLink; Initiator via the new entry point); connect_and_open_session + accept_and_open_session unaffected by the dial/initiate split.",
+        "cargo fmt --all --check clean; cargo clippy -p wz-ap-demo --all-targets -D warnings clean; demo builds with zero warnings."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carry #2 (open-deadline) now fully closed: both the lib helpers (R311fb) and the wz-ap-demo binary (R311fc) bound the handshake; no unbounded open path remains.",
+        "Carry #3: udp-off standalone build still inherits the keyexpr-canon non-composability (north-star arbitrary-composition gap).",
+        "Enhancement: a reset-on-activity accept inactivity timer would need a distinct event name per phase to stay staleness-safe; §2.5 names one timer so the whole-accept single deadline stays the MVP shape."
       ]
     },
     "Round 311g": {
