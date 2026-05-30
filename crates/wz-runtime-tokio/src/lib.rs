@@ -240,6 +240,42 @@ pub mod session_fsm_unicast {
     include!(concat!(env!("OUT_DIR"), "/session_fsm_unicast_sm.rs"));
 }
 
+/// R311en — SCE-generated scouting FSM (active mode) per
+/// docs/scouting-fsm.md §10. Same statechart pipeline as
+/// `session_fsm_unicast`: build.rs shells out to `sce-codegen generate`
+/// for `sources/session/scouting.scxml` and strips the inner-attribute
+/// header; this wrapping module restores the lint allows as outer
+/// attributes. The generated code is self-contained (state enum +
+/// transition table + Lua-bound script dispatch). The host registration
+/// of the scout_emit / record_hello_and_emit / emit_scout_timeout /
+/// diag_scout_tx_failed actions + the UDP-multicast scouting link wiring
+/// land in the R311en cascade body round; this milestone confirms the
+/// SCXML -> sce-codegen statechart path.
+// The allow set mirrors the inner-attribute suppression budget the SCE
+// codegen self-declares at the head of scouting_sm.rs (the "audited
+// 2026-04-15 against the W3C suite" block). build.rs strips those `#![..]`
+// inner attrs so the file is include!()-able mid-module; this wrapper
+// restores them as OUTER attrs, exactly as documented in build.rs
+// emit_one. `unused_imports` covers the generated `use core::time::Duration`
+// that the fully-qualified `core::time::Duration::from_millis` call site
+// leaves unused; the rest cover the StatePolicy trait-shape fields the
+// scouting fixture does not exercise.
+#[cfg(feature = "scouting-active")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(unused_assignments)]
+#[allow(clippy::style)]
+#[allow(clippy::complexity)]
+pub mod scouting_fsm {
+    include!(concat!(env!("OUT_DIR"), "/scouting_sm.rs"));
+}
+
 // R311di-4 — Reliability moved to wz-session-core::reliability; the
 // re-export keeps every `wz_runtime_tokio::Reliability` external
 // callsite (9 caller files across tests / wz-integration-tests /
@@ -517,6 +553,48 @@ impl UdpDriver {
             socket: Some(socket),
             peer: Some(peer),
         }
+    }
+
+    /// R311en — bind a UDP socket on a multicast group and join it,
+    /// returning a driver whose `send()` multicasts to the group. This
+    /// is the scouting link transport (docs/scouting-fsm.md §1.2): the
+    /// default zenoh scout group is `224.0.0.224:7446`
+    /// (`Z_CONFIG_MULTICAST_LOCATOR_DEFAULT`).
+    ///
+    /// The three setup steps must stay consistent, which is why they are
+    /// folded into one constructor rather than left to the caller as
+    /// `from_socket` does:
+    ///   1. bind `0.0.0.0:port` (INADDR_ANY) — a socket bound to a
+    ///      unicast address cannot receive datagrams addressed to the
+    ///      group.
+    ///   2. `join_multicast_v4(group, INADDR_ANY)` — subscribe on the
+    ///      default interface; without the join the kernel drops group
+    ///      datagrams even with the matching bind port.
+    ///   3. `set_multicast_loop_v4(true)` — let a same-host peer (and
+    ///      the loopback smoke test) observe the traffic; off by default
+    ///      on some platforms.
+    /// `peer` is set to `group:port` so `LinkDriver::send` writes the
+    /// Scout datagram to the group.
+    ///
+    /// `tokio::net::UdpSocket` exposes the multicast setsockopt wrappers
+    /// directly (it wraps `std::net::UdpSocket`), so no `socket2`
+    /// dependency is pulled. SO_REUSEADDR is intentionally NOT set here:
+    /// the single-receiver scouting deploy does not need multiple
+    /// binders on the group port, and adding it would require dropping
+    /// to `socket2`. Multi-listener support (if a future deploy needs
+    /// two scouting consumers on one host) is the point where socket2
+    /// would enter — flagged here so that decision is explicit, not
+    /// silent.
+    #[cfg(feature = "scouting-active")]
+    pub async fn bind_multicast_v4(group: std::net::Ipv4Addr, port: u16) -> io::Result<Self> {
+        let socket = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?;
+        socket.join_multicast_v4(group, std::net::Ipv4Addr::UNSPECIFIED)?;
+        socket.set_multicast_loop_v4(true)?;
+        let peer = SocketAddr::from((group, port));
+        Ok(Self {
+            socket: Some(socket),
+            peer: Some(peer),
+        })
     }
 }
 
