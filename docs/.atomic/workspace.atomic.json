@@ -26262,6 +26262,46 @@
         "Next architectural decision points await user direction: DP1 (--no-default-features / SCE alloc-off gap) and DP2 (facade removal); wire-up gap a (130 unwired atomic features, ~80%) remains the largest-value multi-week track."
       ]
     },
+    "Round 311el": {
+      "decision_summary": "R311el wires the pubsub-source-info atomic feature: gates the subscriber-side source_info Push projection (mirror of pubsub-attachment), the first wire-up-gap-a mechanical close.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/pubsub.rs: the extract_source_info import + the Put/Del dispatch-arm body_source_info populator now gate on pubsub-source-info (exact mirror of the existing pubsub-attachment cfg pattern in the same fn). cfg-off returns None; the Sample.source_info field stays declared for signature stability (R311g1).",
+        "crates/wz-session-core/src/pubsub.rs: the two self-echo dedup tests that assert suppression (dispatch_push_suppresses_self_echo_when_zid_matches, clear_own_zid_reenables_callback_fire) gate on pubsub-source-info, since suppression only engages when the wire source_info is decoded; the sibling cautious-fire tests stay ungated (they hold in both configs).",
+        "Forward chain (3-stage mirror of pubsub-attachment): wz-session-core declares pubsub-source-info = [] (gate-only); wz-runtime-tokio forwards wz-session-core/pubsub-source-info and adds it to its default feature set; the wz facade forwards wz-runtime-tokio?/pubsub-source-info. Cargo reserved-feature comments updated (6 reserved -> 5 reserved).",
+        "scripts/run-ci.sh Layer C1d: a second cargo test invocation adds pubsub-source-info so both cfg arms get test coverage -- the existing call exercises the cfg-off populator (cautious-fire dedup), the new call the cfg-on extract path (self-echo suppression). ci.yml unchanged (it delegates --layer C1 to the lane fn)."
+      ],
+      "verification_bullets": [
+        "4 cfg-combo deny-warnings builds (pubsub-source-info x pubsub-attachment, on/off) compile clean; C1d off-arm runs 209 wz-session-core lib tests, on-arm 211 (the +2 = the two gated suppression tests).",
+        "full scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b..C1h/C2/C3/C4/C4b/D/E) EXIT 0; Layer G MCU 7-target cross-compile pass (G.6 riscv32imac SKIP -- riscv toolchain absent on host).",
+        "wire-up sub-audit (R311cb scope): transport domain measured 5 wired / 11 unwired (the unwired mostly unimplemented capability labels); pubsub-source-info classified class-3 (code exists, gate missing) -- the first truthful mechanical wire-up of wire-up-gap-a."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "wire-up gap a continues. class-3 mechanical candidates remaining: pubsub-priority/congestion-control (extract_qos is still ungated in pubsub.rs), query-source-info. class-2 monolithic: keyexpr_match.rs wildcard tiers (keyexpr-wildcard-single/double/dollar-star/literal) need a literal-only fallback + behavioural tests, not a bare cfg gate. class-1 unimplemented labels (transport quic/serial/ws/multicast/shm/compression, plus the locator/platform/routing/scouting/storage/access domains at 0% wired) = feature-implementation long tail, NOT mechanical wire-up.",
+        "R311el is LOCAL only; push pending explicit user consent (CLAUDE.md global push rule)."
+      ],
+      "publishable_decision_summary": "R311el wires the pubsub-source-info atomic feature: gates the subscriber-side source_info Push projection (mirror of pubsub-attachment), the first wire-up-gap-a mechanical close.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/pubsub.rs: the extract_source_info import + the Put/Del dispatch-arm body_source_info populator now gate on pubsub-source-info (exact mirror of the existing pubsub-attachment cfg pattern in the same fn). cfg-off returns None; the Sample.source_info field stays declared for signature stability (R311g1).",
+        "crates/wz-session-core/src/pubsub.rs: the two self-echo dedup tests that assert suppression (dispatch_push_suppresses_self_echo_when_zid_matches, clear_own_zid_reenables_callback_fire) gate on pubsub-source-info, since suppression only engages when the wire source_info is decoded; the sibling cautious-fire tests stay ungated (they hold in both configs).",
+        "Forward chain (3-stage mirror of pubsub-attachment): wz-session-core declares pubsub-source-info = [] (gate-only); wz-runtime-tokio forwards wz-session-core/pubsub-source-info and adds it to its default feature set; the wz facade forwards wz-runtime-tokio?/pubsub-source-info. Cargo reserved-feature comments updated (6 reserved -> 5 reserved).",
+        "scripts/run-ci.sh Layer C1d: a second cargo test invocation adds pubsub-source-info so both cfg arms get test coverage -- the existing call exercises the cfg-off populator (cautious-fire dedup), the new call the cfg-on extract path (self-echo suppression). ci.yml unchanged (it delegates --layer C1 to the lane fn)."
+      ],
+      "publishable_verification_bullets": [
+        "4 cfg-combo deny-warnings builds (pubsub-source-info x pubsub-attachment, on/off) compile clean; C1d off-arm runs 209 wz-session-core lib tests, on-arm 211 (the +2 = the two gated suppression tests).",
+        "full scripts/run-ci.sh all required layers pass (0/A/A2/B/C0/C1/C1b..C1h/C2/C3/C4/C4b/D/E) EXIT 0; Layer G MCU 7-target cross-compile pass (G.6 riscv32imac SKIP -- riscv toolchain absent on host).",
+        "wire-up sub-audit (R311cb scope): transport domain measured 5 wired / 11 unwired (the unwired mostly unimplemented capability labels); pubsub-source-info classified class-3 (code exists, gate missing) -- the first truthful mechanical wire-up of wire-up-gap-a."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "wire-up gap a continues. class-3 mechanical candidates remaining: pubsub-priority/congestion-control (extract_qos is still ungated in pubsub.rs), query-source-info. class-2 monolithic: keyexpr_match.rs wildcard tiers (keyexpr-wildcard-single/double/dollar-star/literal) need a literal-only fallback + behavioural tests, not a bare cfg gate. class-1 unimplemented labels (transport quic/serial/ws/multicast/shm/compression, plus the locator/platform/routing/scouting/storage/access domains at 0% wired) = feature-implementation long tail, NOT mechanical wire-up.",
+        "R311el is LOCAL only; push pending explicit user consent (CLAUDE.md global push rule)."
+      ]
+    },
     "Round 311f": {
       "decision_summary": "R311f codec-fragment wz-codecs-level cascade — session_glue does not import Fragment types so gate stays at SCXML codegen + pub mod level. Same shape as R311d batch.",
       "changes_bullets": [
