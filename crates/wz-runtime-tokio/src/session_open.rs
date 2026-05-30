@@ -26,7 +26,8 @@ use sce_rust_runtime::scripting::IScriptEngine;
 use sce_rust_runtime::Engine;
 use tokio::net::TcpStream;
 
-use wz_session_core::locator::{ParsedLocator, Proto};
+use wz_session_core::locator::{parse_locator, LocatorParseError, ParsedLocator, Proto};
+use wz_session_core::scout_static::synth_static_locators;
 
 use crate::link_pipeline::{dial_tcp, wire_tcp_stream, TcpReadDriver};
 use crate::runtime_impl::{TokioJoinHandle, TokioTime};
@@ -77,6 +78,10 @@ pub struct OpenedSession {
 /// Why a session did not reach Established.
 #[derive(Debug)]
 pub enum OpenError {
+    /// The locator string did not parse into a typed endpoint (R311ew —
+    /// surfaced by [`open_session_at`] / [`open_session_static`] when a
+    /// scouting-supplied or configured locator is malformed).
+    BadLocator(LocatorParseError),
     /// Dial failed, or the locator protocol is not yet wired for
     /// session-open (UDP this round).
     Dial(io::Error),
@@ -88,6 +93,11 @@ pub enum OpenError {
     /// The bounded iteration budget elapsed before Established (test guard;
     /// production passes `None`).
     IterationLimit,
+    /// Every configured static locator failed (parse / dial / handshake) —
+    /// the static-mode "configured locators are wrong / unreachable"
+    /// diagnostic (docs/scouting-fsm.md §2.4.3 reason #1). Only returned by
+    /// [`open_session_static`].
+    NoReachableLocator,
 }
 
 /// Dial `locator`, split the connection into the R311et link pipeline, wire
@@ -153,4 +163,62 @@ pub async fn connect_and_open_session(
             return Err(OpenError::LinkLost(cause));
         }
     }
+}
+
+/// Open a session to a locator discovered by scouting — the mode-agnostic
+/// per-locator seam (R311ew).
+///
+/// Both scouting modes feed this the same way, which is the whole point of
+/// the seam: active mode's `ScoutOutcome::Discovered(String)`
+/// (wz-runtime-tokio::scouting_glue) and static mode's
+/// [`synth_static_locators`] entries are both zenoh locator strings. This
+/// parses one via [`wz_session_core::locator::parse_locator`] and hands the
+/// typed endpoint to [`connect_and_open_session`] — "a discovered locator
+/// opens the same way regardless of how scouting found it" (the contract the
+/// `locator` module doc states from the parse side).
+pub async fn open_session_at(
+    locator: &str,
+    params: SessionInitParams,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+) -> Result<OpenedSession, OpenError> {
+    let parsed = parse_locator(locator).map_err(OpenError::BadLocator)?;
+    connect_and_open_session(parsed, params, clock, max_iters).await
+}
+
+/// Open a session to the first reachable peer in a static `deploy.connect[]`
+/// list — the static scouting mode (docs/scouting-fsm.md §2.4.3, scouting
+/// expressed as *absent*: no FSM, the locators come from config verbatim).
+///
+/// [`synth_static_locators`] normalises the configured locators in deploy
+/// order; each is tried via [`open_session_at`] and the first that reaches
+/// Established wins. Per-locator failures are logged (no silent skip) so the
+/// diagnostic trail survives; the call returns [`OpenError::NoReachableLocator`]
+/// only when every configured locator failed — the static-mode "configured
+/// locators are wrong / unreachable" diagnostic (§2.4.3 reason #1).
+///
+/// MVP single-session: zenoh-pico opens the first peer then `_z_new_peer`s
+/// the rest (session.c:157-189); the multi-peer mesh is Phase D+, so this
+/// opens exactly one session to the first reachable peer.
+pub async fn open_session_static(
+    connect: &[String],
+    params: SessionInitParams,
+    clock: TokioTime,
+    max_iters: Option<usize>,
+) -> Result<OpenedSession, OpenError> {
+    let locators = synth_static_locators(connect);
+    if locators.is_empty() {
+        return Err(OpenError::NoReachableLocator);
+    }
+    for locator in &locators {
+        match open_session_at(locator, params.clone(), clock, max_iters).await {
+            Ok(opened) => return Ok(opened),
+            Err(e) => {
+                log::warn!(
+                    "wz session-open: static locator {locator:?} failed: {e:?}; trying next"
+                );
+            }
+        }
+    }
+    Err(OpenError::NoReachableLocator)
 }
