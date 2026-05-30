@@ -391,6 +391,27 @@ keyexpr-canon = []
 query-attachment = ["wz-session-core/query-attachment"]
 query-selector-parameters = ["wz-session-core/query-selector-parameters"]
 query-reply-err = ["wz-session-core/query-reply-err"]
+# R311en — scouting domain wire-up (active mode). First of the
+# scouting 0/6 -> active transition (north-star missing-subsystem
+# track). `scouting-active` gates:
+#   - build.rs codegen of sources/session/scouting.scxml (the
+#     pre-session Scout/Hello discovery FSM, docs/scouting-fsm.md §10).
+#   - the `pub mod scouting_fsm` include + the host ScoutingActions
+#     impl that binds the FSM actions to the UDP-multicast scouting
+#     link (multicast driver lands in the R311en cascade body round).
+# Off by default: scouting is opt-in per deploy.scouting.mode. The
+# static mode (docs/scouting-fsm.md §2.4.3) never instantiates this
+# FSM, so it is not gated by this feature. passive is Phase D+
+# (OQ-W23). Forwarded from the wz facade `scouting-active`.
+#
+# Implies transport-link-udp: the scouting link is UDP multicast
+# (docs/scouting-fsm.md §1.2 — 224.0.0.224:7446), so the UdpDriver +
+# its multicast constructor (UdpDriver::bind_multicast_v4, gated on
+# scouting-active inside the transport-link-udp UdpDriver impl) must be
+# compiled in. Without the imply, `--no-default-features --features
+# scouting-active` would gate the multicast constructor out and the
+# scout link would have no transport.
+scouting-active = ["transport-link-udp"]
 
 [build-dependencies]
 sce-build = { path = "../../vendor/sce/sce-build" }
