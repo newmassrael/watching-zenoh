@@ -299,6 +299,27 @@ pub use wz_session_core::reliability::Reliability;
 // LinkEvent, LostCause}`) verbatim across the migration.
 pub use wz_session_core::link::{LinkEvent, LostCause, RxFrame, TxFrame};
 
+/// R311et — canonical split-link session-open transport pipeline. Lifts the
+/// read/write-split + writer-task idiom (originally `wz-ap-demo`'s
+/// `link_driver.rs`) into the library so the production session-open path
+/// has a single home, parameterised by transport.
+///
+/// The session FSM needs the link in two shapes at once — an async
+/// `&mut LinkDriver` for the inbound poll loop
+/// ([`session_glue::drive_session_until_terminal`]) and a sync
+/// `Arc<dyn BoxedLinkDriver>` for the outbound `send_blocking` fired from
+/// Lua script-action handlers. A single `TcpStream` cannot satisfy both, so
+/// this module splits it into an [`link_pipeline::TcpReadDriver`] (owns the
+/// read half) plus an [`link_pipeline::TcpWriteDriver`] (a non-blocking
+/// channel enqueue) drained by a dedicated [`link_pipeline::writer_task`].
+/// The channel decouples the sync-action / async-runtime boundary WITHOUT
+/// `Handle::block_on` (the [`session_glue::TokioLinkDriverAdapter`] path
+/// carries a documented current-thread-runtime deadlock hazard and has
+/// never driven a full bidirectional session); this split is the model the
+/// production AP path actually uses.
+#[cfg(feature = "transport-link-tcp")]
+pub mod link_pipeline;
+
 /// The 4-method `LinkDriver` trait. Matches
 /// docs/runtime-crate-tokio.md §2.1. Trust-class flavored variants
 /// (untrusted / session_arming / established_session) deferred to
@@ -369,7 +390,7 @@ pub struct TcpDriver {
 /// captured offset / buffer intact for the next invocation.
 #[cfg(feature = "transport-link-tcp")]
 #[derive(Default)]
-enum ReadState {
+pub(crate) enum ReadState {
     /// No partial read in flight. Next `poll_event` enters
     /// `Length` and begins reading the 2-byte prefix.
     #[default]
@@ -387,6 +408,95 @@ enum ReadState {
     /// the state machine emits a `LinkEvent::Rx` + transitions
     /// back to `Idle` on the next iteration.
     Payload { frame: Vec<u8>, offset: usize },
+}
+
+/// R311et — shared cancel-safe framing read used by both [`TcpDriver`]
+/// (the unified acceptor/adapter-path driver) and
+/// [`link_pipeline::TcpReadDriver`] (the split read half on the production
+/// session-open path). Reads one length-prefixed [`StreamEnvelope`] frame
+/// from `src`, advancing `read_state` across `tokio::select!` cancellations
+/// (each `.await` is a single cancel-safe `.read()` syscall), and returns
+/// the codec-decoded payload as [`LinkEvent::Rx`] — or [`LinkEvent::Lost`]
+/// on EOF / IO / codec error, resetting `read_state` to `Idle` so a retry
+/// path does not inherit a partial buffer.
+///
+/// Extracted from the pre-R311et `TcpDriver::poll_event` body verbatim so
+/// the framing state machine has a single home. `wz-ap-demo`'s duplicated
+/// `InboundReadDriver` copy retires when the demo consumes `link_pipeline`
+/// (R311ev); the wire shape stays codec-routed (the [`StreamEnvelope`]
+/// decode is the single source of truth, not a hand-rolled prefix strip).
+#[cfg(feature = "transport-link-tcp")]
+pub(crate) async fn poll_framed<S>(read_state: &mut ReadState, src: &mut S) -> LinkEvent
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    loop {
+        match read_state {
+            ReadState::Idle => {
+                *read_state = ReadState::Length {
+                    prefix: [0u8; 2],
+                    offset: 0,
+                };
+            }
+            ReadState::Length { prefix, offset } => match src.read(&mut prefix[*offset..]).await {
+                Ok(0) => {
+                    *read_state = ReadState::Idle;
+                    return LinkEvent::Lost {
+                        cause: LostCause::PeerClosed,
+                    };
+                }
+                Ok(n) => {
+                    *offset += n;
+                    if *offset == 2 {
+                        let payload_len = u16::from_le_bytes(*prefix) as usize;
+                        let mut frame = vec![0u8; 2 + payload_len];
+                        frame[..2].copy_from_slice(prefix);
+                        *read_state = ReadState::Payload { frame, offset: 2 };
+                    }
+                }
+                Err(_) => {
+                    *read_state = ReadState::Idle;
+                    return LinkEvent::Lost {
+                        cause: LostCause::OsError,
+                    };
+                }
+            },
+            ReadState::Payload { frame, offset } => {
+                if *offset == frame.len() {
+                    // Frame complete. Take the buffer out before decoding
+                    // so the state reset is visible if the codec rejects.
+                    let bytes = std::mem::take(frame);
+                    *read_state = ReadState::Idle;
+                    let mut cursor = SceCursor::new(&bytes);
+                    return match StreamEnvelope::decode(&mut cursor) {
+                        Ok(env) => LinkEvent::Rx(RxFrame {
+                            bytes: env.payload.to_vec(),
+                        }),
+                        Err(_) => LinkEvent::Lost {
+                            cause: LostCause::PeerClosed,
+                        },
+                    };
+                }
+                match src.read(&mut frame[*offset..]).await {
+                    Ok(0) => {
+                        *read_state = ReadState::Idle;
+                        return LinkEvent::Lost {
+                            cause: LostCause::PeerClosed,
+                        };
+                    }
+                    Ok(n) => {
+                        *offset += n;
+                    }
+                    Err(_) => {
+                        *read_state = ReadState::Idle;
+                        return LinkEvent::Lost {
+                            cause: LostCause::OsError,
+                        };
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(feature = "transport-link-tcp")]
@@ -411,9 +521,17 @@ impl TcpDriver {
     /// / retry tuning is the caller's concern (compose a
     /// `tokio::time::timeout` around this); the kernel default applies
     /// otherwise, matching `wz-ap-demo`'s `establish_link` (runner.rs).
+    ///
+    /// R311et — the actual socket dial routes through the single raw-dial
+    /// primitive [`link_pipeline::dial_tcp`], so this unified-driver
+    /// constructor and the split session-open pipeline
+    /// ([`link_pipeline::wire_tcp_stream`]) share one connect path. The
+    /// mode-agnostic `dial_locator(ParsedLocator)` dispatcher (R311eu)
+    /// dispatches a `Proto::Tcp` endpoint to `dial_tcp` and then splits the
+    /// stream for the FSM, rather than burying the stream inside this
+    /// driver — hence the raw-dial seam lives in `link_pipeline`.
     pub async fn connect(addr: SocketAddr) -> io::Result<Self> {
-        let stream = TcpStream::connect(addr).await?;
-        Ok(Self::from_stream(stream))
+        Ok(Self::from_stream(link_pipeline::dial_tcp(addr).await?))
     }
 }
 
@@ -464,93 +582,17 @@ impl LinkDriver for TcpDriver {
     }
 
     async fn poll_event(&mut self) -> LinkEvent {
-        let stream = match self.stream.as_mut() {
-            Some(s) => s,
-            None => {
-                return LinkEvent::Lost {
-                    cause: LostCause::PeerClosed,
-                }
-            }
-        };
-        // R265 — cancel-safe state machine. Each `.await` is a
-        // single `.read()` syscall (cancel-safe per tokio
-        // contract); the buffered partial read survives across
-        // `tokio::select!` drops in `self.read_state`. See the
-        // `ReadState` doc-comment for the cancellation rationale.
-        // Frame-complete branch is the only exit path that emits
-        // `LinkEvent::Rx`; error / EOF branches reset
-        // `self.read_state` to `Idle` so a future open()+retry
-        // path does not inherit a partial buffer from the lost
-        // connection.
-        loop {
-            match &mut self.read_state {
-                ReadState::Idle => {
-                    self.read_state = ReadState::Length {
-                        prefix: [0u8; 2],
-                        offset: 0,
-                    };
-                }
-                ReadState::Length { prefix, offset } => {
-                    match stream.read(&mut prefix[*offset..]).await {
-                        Ok(0) => {
-                            self.read_state = ReadState::Idle;
-                            return LinkEvent::Lost {
-                                cause: LostCause::PeerClosed,
-                            };
-                        }
-                        Ok(n) => {
-                            *offset += n;
-                            if *offset == 2 {
-                                let payload_len = u16::from_le_bytes(*prefix) as usize;
-                                let mut frame = vec![0u8; 2 + payload_len];
-                                frame[..2].copy_from_slice(prefix);
-                                self.read_state = ReadState::Payload { frame, offset: 2 };
-                            }
-                        }
-                        Err(_) => {
-                            self.read_state = ReadState::Idle;
-                            return LinkEvent::Lost {
-                                cause: LostCause::OsError,
-                            };
-                        }
-                    }
-                }
-                ReadState::Payload { frame, offset } => {
-                    if *offset == frame.len() {
-                        // Frame complete. Take the buffer out
-                        // before decoding so the state reset is
-                        // visible if the codec rejects.
-                        let bytes = std::mem::take(frame);
-                        self.read_state = ReadState::Idle;
-                        let mut cursor = SceCursor::new(&bytes);
-                        return match StreamEnvelope::decode(&mut cursor) {
-                            Ok(env) => LinkEvent::Rx(RxFrame {
-                                bytes: env.payload.to_vec(),
-                            }),
-                            Err(_) => LinkEvent::Lost {
-                                cause: LostCause::PeerClosed,
-                            },
-                        };
-                    }
-                    match stream.read(&mut frame[*offset..]).await {
-                        Ok(0) => {
-                            self.read_state = ReadState::Idle;
-                            return LinkEvent::Lost {
-                                cause: LostCause::PeerClosed,
-                            };
-                        }
-                        Ok(n) => {
-                            *offset += n;
-                        }
-                        Err(_) => {
-                            self.read_state = ReadState::Idle;
-                            return LinkEvent::Lost {
-                                cause: LostCause::OsError,
-                            };
-                        }
-                    }
-                }
-            }
+        // R311et — the cancel-safe framing state machine lives in the
+        // shared [`poll_framed`] free fn so the split read half
+        // ([`link_pipeline::TcpReadDriver`]) decodes identical wire
+        // bytes. The `stream.is_none()` (closed) guard stays here because
+        // it is `TcpDriver`-specific (the split read half always owns its
+        // `OwnedReadHalf`).
+        match self.stream.as_mut() {
+            Some(stream) => poll_framed(&mut self.read_state, stream).await,
+            None => LinkEvent::Lost {
+                cause: LostCause::PeerClosed,
+            },
         }
     }
 }
