@@ -28,6 +28,7 @@ use sce_rust_runtime::scripting::IScriptEngine;
 use sce_rust_runtime::Engine;
 use tokio::net::TcpStream;
 
+use wz_runtime_core::TimeSource;
 use wz_session_core::locator::{parse_locator, LocatorParseError, ParsedLocator, Proto};
 use wz_session_core::scout_static::synth_static_locators;
 
@@ -35,8 +36,8 @@ use crate::link_pipeline::{dial_tcp, wire_tcp_stream, TcpReadDriver};
 use crate::runtime_impl::{TokioJoinHandle, TokioTime};
 use crate::session_fsm_unicast::{SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy};
 use crate::session_glue::{
-    install_session_actions, poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome,
-    SessionInitParams, SessionLinkActions,
+    install_session_actions, poll_and_dispatch_one, BoxedLinkDriver, CloseReason,
+    DriverLoopOutcome, SessionInitParams, SessionLinkActions,
 };
 use crate::{LinkDriver, LinkEvent, LostCause, Reliability, TxFrame};
 
@@ -46,6 +47,16 @@ use crate::udp_pipeline::{dial_udp, wire_udp_socket, UdpReadDriver};
 use std::net::SocketAddr;
 #[cfg(feature = "transport-link-udp")]
 use tokio::net::UdpSocket;
+
+/// Default cadence at which [`connect_and_open_session`] pumps the SCE
+/// scheduler (`Engine::tick`) while waiting on the handshake. It bounds
+/// only the *precision* of the open-deadline (a handshake timer fires
+/// within `[delay, delay + DEFAULT_OPEN_TICK_MS]`), never the deadline
+/// itself — the window durations are the SCXML's single source of truth
+/// (`link.open_timeout` / `init_ack.timeout` / `open_ack.timeout`). 50ms
+/// keeps the 2s/5s windows accurate to <3% while the inbound `poll_event`
+/// races the tick so a frame still resolves the instant it arrives.
+pub const DEFAULT_OPEN_TICK_MS: u64 = 50;
 
 /// A dialed raw transport — the mode-agnostic dial seam's output, a union
 /// spanning both protocols (R311ez). [`wire_dialed_link`] consumes it into
@@ -191,6 +202,16 @@ pub enum OpenError {
     /// The FSM reached a terminal state before Established — e.g. a peer
     /// Close during the handshake.
     Terminal,
+    /// A handshake timer fired before Established: the peer did not complete
+    /// the handshake within the SCXML-declared window (`init_ack.timeout` /
+    /// `open_ack.timeout`, 2s each; `link.open_timeout` 5s). The SCE
+    /// scheduler fires the timer once [`connect_and_open_session`]'s tick
+    /// pump advances past the deadline, driving the FSM to `Closing`.
+    /// Distinguished from [`Self::Terminal`] via the close-reason trace: a
+    /// timeout transition runs `set_close_reason_generic` (so
+    /// `set_close_reason_count >= 1` with `CloseReason::Generic`), whereas a
+    /// peer Close / link loss reaches `Closed` without a close-reason action.
+    HandshakeTimeout,
     /// The bounded iteration budget elapsed before Established (test guard;
     /// production passes `None`).
     IterationLimit,
@@ -212,10 +233,19 @@ pub enum OpenError {
 /// one message per datagram (boundary == frame), and both decode through the
 /// same `handle_inbound` path.
 ///
-/// Bounded only by `max_iters` (poll count), not wall clock: a peer that
-/// never answers the handshake hangs the loop. `dial_tcp` fails fast on a
-/// refused port, but `dial_udp` only binds locally, so an unreachable UDP
-/// peer is the case to avoid until an open-deadline lands.
+/// Wall-clock bounded by the FSM's own handshake timers (R311fa). The
+/// inbound poll is raced in a `tokio::select!` against a `tick_interval_ms`
+/// cadence that calls `Engine::tick`; once the SCE scheduler passes a
+/// `<send delay>` deadline armed by the current handshake state
+/// (`init_ack.timeout` / `open_ack.timeout`, 2s; `link.open_timeout`, 5s),
+/// it fires the timer and the FSM transitions to `Closing` — surfaced here
+/// as [`OpenError::HandshakeTimeout`]. So a peer that never answers no
+/// longer hangs the loop (the prior `max_iters`-only bound was a test
+/// guard, not a wall-clock deadline). The window durations are the SCXML's
+/// single source of truth; `tick_interval_ms` only sets how finely the host
+/// pumps the clock (see [`DEFAULT_OPEN_TICK_MS`]). `poll_and_dispatch_one`
+/// is cancel-safe (partial reads live in `TcpReadDriver`'s `ReadState`), so
+/// the tick branch can cancel an in-flight read without losing wire bytes.
 ///
 /// The Initiator activation is `OutboundStart` (-> LinkOpening; the
 /// `link_driver_open` action is a no-op since the stream is already
@@ -228,12 +258,15 @@ pub enum OpenError {
 /// helper does not depend on the generated FSM state-enum shape.
 ///
 /// `max_iters` bounds the inbound poll loop for test determinism;
-/// production passes `None`.
+/// production passes `None` and relies on the handshake-timer deadline
+/// above. `tick_interval_ms` is the SCE-scheduler pump cadence
+/// ([`DEFAULT_OPEN_TICK_MS`] for production).
 pub async fn connect_and_open_session(
     locator: ParsedLocator,
     params: SessionInitParams,
     clock: TokioTime,
     max_iters: Option<usize>,
+    tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let dialed = dial_locator(locator).await.map_err(OpenError::Dial)?;
     let (mut inbound, outbound, writer_handle) = wire_dialed_link(dialed);
@@ -251,7 +284,8 @@ pub async fn connect_and_open_session(
 
     let mut iter: usize = 0;
     loop {
-        if actions.trace_snapshot().record_established_at >= 1 {
+        let trace = actions.trace_snapshot();
+        if trace.record_established_at >= 1 {
             return Ok(OpenedSession {
                 engine,
                 actions,
@@ -261,7 +295,17 @@ pub async fn connect_and_open_session(
             });
         }
         if engine.is_in_final_state() {
-            return Err(OpenError::Terminal);
+            // Pre-Established terminal. A handshake-timer transition ran
+            // `set_close_reason_generic` (count >= 1, reason Generic); a
+            // peer Close / link loss reaches Closed without a close-reason
+            // action (count == 0), so the two outcomes are distinguishable.
+            return Err(
+                if trace.set_close_reason_count >= 1 && trace.close_reason == CloseReason::Generic {
+                    OpenError::HandshakeTimeout
+                } else {
+                    OpenError::Terminal
+                },
+            );
         }
         if let Some(limit) = max_iters {
             if iter >= limit {
@@ -269,10 +313,23 @@ pub async fn connect_and_open_session(
             }
             iter += 1;
         }
-        if let DriverLoopOutcome::LinkLost(cause) =
-            poll_and_dispatch_one(&mut inbound, &actions, &mut engine).await
-        {
-            return Err(OpenError::LinkLost(cause));
+        // R311fa — race the cancel-safe inbound poll against a clock tick.
+        // The tick pumps the SCE scheduler so an elapsed handshake timer
+        // (link.open_timeout / init_ack.timeout / open_ack.timeout, and once
+        // in Closing the closing.timeout) fires its FSM transition; a frame
+        // that arrives first resolves the handshake without waiting for the
+        // next tick. The losing branch is cancelled — safe because
+        // `poll_and_dispatch_one`'s only await is `poll_event`, whose
+        // partial-read state is retained in `TcpReadDriver::ReadState`.
+        tokio::select! {
+            outcome = poll_and_dispatch_one(&mut inbound, &actions, &mut engine) => {
+                if let DriverLoopOutcome::LinkLost(cause) = outcome {
+                    return Err(OpenError::LinkLost(cause));
+                }
+            }
+            _ = clock.sleep(tick_interval_ms) => {
+                engine.tick();
+            }
         }
     }
 }
@@ -293,9 +350,10 @@ pub async fn open_session_at(
     params: SessionInitParams,
     clock: TokioTime,
     max_iters: Option<usize>,
+    tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let parsed = parse_locator(locator).map_err(OpenError::BadLocator)?;
-    connect_and_open_session(parsed, params, clock, max_iters).await
+    connect_and_open_session(parsed, params, clock, max_iters, tick_interval_ms).await
 }
 
 /// Open a session to the first reachable peer in a static `deploy.connect[]`
@@ -317,13 +375,14 @@ pub async fn open_session_static(
     params: SessionInitParams,
     clock: TokioTime,
     max_iters: Option<usize>,
+    tick_interval_ms: u64,
 ) -> Result<OpenedSession, OpenError> {
     let locators = synth_static_locators(connect);
     if locators.is_empty() {
         return Err(OpenError::NoReachableLocator);
     }
     for locator in &locators {
-        match open_session_at(locator, params.clone(), clock, max_iters).await {
+        match open_session_at(locator, params.clone(), clock, max_iters, tick_interval_ms).await {
             Ok(opened) => return Ok(opened),
             Err(e) => {
                 log::warn!(

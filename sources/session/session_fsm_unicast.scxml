@@ -82,6 +82,19 @@
     <transition event="link.lost" target="Closed"/>
   </state>
 
+  <!--
+    Handshake-timeout staleness (R311fa):
+    A delayed <send> is NOT auto-cancelled when its arming state is
+    exited (W3C SCXML 6.2; SCE's PullScheduler holds the entry until it
+    fires). So a per-phase timeout transition must live in the SAME state
+    that arms it — otherwise a stale timer fires in a later sibling and
+    handles there. With the handlers on the parent Opening, `init_ack.timeout`
+    armed in SentInitSyn would still be live after init_ack.received moved
+    the config to GotInitAck, and the parent would wrongly drive an
+    OpenAck-awaiting session to Closing. Each timeout is therefore handled
+    in its arming child: a stale timer arriving in the sibling has no
+    handler in scope and is discarded.
+  -->
   <state id="Opening" initial="SentInitSyn">
     <state id="SentInitSyn">
       <onentry>
@@ -89,6 +102,9 @@
         <send event="init_ack.timeout" delay="2s"/>
       </onentry>
       <transition event="init_ack.received" target="GotInitAck"/>
+      <transition event="init_ack.timeout" target="Closing">
+        <script>set_close_reason_generic()</script>
+      </transition>
     </state>
     <state id="GotInitAck">
       <onentry>
@@ -96,13 +112,10 @@
         <send event="open_ack.timeout" delay="2s"/>
       </onentry>
       <transition event="open_ack.received" target="Established"/>
+      <transition event="open_ack.timeout" target="Closing">
+        <script>set_close_reason_generic()</script>
+      </transition>
     </state>
-    <transition event="init_ack.timeout" target="Closing">
-      <script>set_close_reason_generic()</script>
-    </transition>
-    <transition event="open_ack.timeout" target="Closing">
-      <script>set_close_reason_generic()</script>
-    </transition>
     <transition event="framing.error" target="Closing">
       <script>set_close_reason_invalid()</script>
     </transition>
