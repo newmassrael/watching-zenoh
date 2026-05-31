@@ -22,6 +22,13 @@
 //! mirror those Layer 3 tests' input choices so the byte sequences
 //! are directly cross-referenceable.
 
+// R311fr — the single test here dispatches the start_keepalive_worker /
+// stop_keepalive_worker script actions (glue_dispatch.rs:109/113), which
+// only exist when transport-keepalive is on. The whole file (recording
+// driver + helpers + imports) exists solely to support this test, so
+// gate at file scope.
+#![cfg(feature = "transport-keepalive")]
+
 use std::sync::Arc;
 use std::sync::Mutex;
 

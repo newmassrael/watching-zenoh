@@ -36,8 +36,13 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome, PeerInitCaps, SessionLinkActions,
+    poll_and_dispatch_one, BoxedLinkDriver, PeerInitCaps, SessionLinkActions,
 };
+// R311fr — DriverLoopOutcome is referenced only by the
+// transport-keepalive-gated r78 handshake test; gate the import to match
+// so a transport-keepalive-off subset does not see an unused import.
+#[cfg(feature = "transport-keepalive")]
+use wz_runtime_tokio::session_glue::DriverLoopOutcome;
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_runtime_tokio_test_support::{
     fixture_session_init_params, install_session_actions_for_test,
@@ -157,6 +162,10 @@ fn fresh_setup() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
     (actions, engine)
 }
 
+// R311fr — Established.onentry starts the keepalive worker only under
+// `transport-keepalive`; the SSOT consumer-plane subsets omit it, so this
+// handshake-termination test asserts that behaviour only where it exists.
+#[cfg(feature = "transport-keepalive")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r78_accepting_path_handshake_terminates_at_established() {
     let (actions, mut engine) = fresh_setup();
@@ -491,6 +500,10 @@ fn r121d_peer_init_caps_from_init_syn_uses_defaults_when_s_bit_clear() {
     assert_eq!(caps.batch_size, 65535);
 }
 
+// R311fr — PeerInitCaps decode is `transport-batching`-gated; the SSOT
+// consumer-plane subsets omit transport-batching, so this caps-behaviour
+// test runs only where the caps decoder is compiled in.
+#[cfg(feature = "transport-batching")]
 #[test]
 fn r121d_peer_init_caps_decodes_packed_sn_res_byte() {
     // The InitSyn `sn_res` byte is packed
@@ -504,6 +517,8 @@ fn r121d_peer_init_caps_decodes_packed_sn_res_byte() {
     assert_eq!(caps.batch_size, 1024);
 }
 
+// R311fr — InitAck caps negotiation is `transport-batching` behaviour.
+#[cfg(feature = "transport-batching")]
 #[test]
 fn r121d_init_ack_params_caps_to_peer_when_peer_lower() {
     // The wire-spec invariant `InitAck.size <= InitSyn.size`

@@ -86,6 +86,9 @@ fn drive_to_established(engine: &mut Engine<SessionFsmUnicastPolicy>) {
 
 // ── 1. Listener path: Init → AwaitingInitSyn → SentInitAck
 //                     → SentOpenAck → Established
+// R311fr — asserts start_keepalive_worker == 1 at Established.onentry;
+// that action only exists when transport-keepalive is on.
+#[cfg(feature = "transport-keepalive")]
 #[test]
 fn r61_listener_path_inbound_to_established() {
     use wz_runtime_tokio::session_glue::generate_cookie_hmac_sha256;
@@ -205,6 +208,9 @@ fn r61_opening_open_ack_timeout_to_closing() {
 }
 
 // ── 7. Established -> lease.expired -> Closing (Expired)
+// R311fr — asserts stop_keepalive_worker == 1 at Established.onexit;
+// that action only exists when transport-keepalive is on.
+#[cfg(feature = "transport-keepalive")]
 #[test]
 fn r61_established_lease_expired_to_closing_expired() {
     let (actions, mut engine) = fresh_engine();

@@ -4932,9 +4932,23 @@ mod tests {
     // encode directly get a pass-through impl. The `.expect()` is sound
     // by construction — wz builders emit far fewer than the heapless ext
     // cap N.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-declare",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final"
+    ))]
     trait TestWire {
         fn wire(&self) -> Vec<u8>;
     }
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-declare",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final"
+    ))]
     macro_rules! impl_test_wire_owned {
         ($($owned:ty),+ $(,)?) => {
             $(impl TestWire for $owned {
@@ -4956,6 +4970,7 @@ mod tests {
     impl_test_wire_owned!(ResponseOwned);
     #[cfg(feature = "codec-response-final")]
     impl_test_wire_owned!(ResponseFinalOwned);
+    #[cfg(feature = "codec-declare")]
     impl_test_wire_owned!(InterestOwned);
 
     // R311dv — the Response-builder cluster moved to
@@ -5030,6 +5045,7 @@ mod tests {
     /// `N_MID_PUSH | N_flag` in the header (M derives at encode),
     /// `WireexprLocal { id=0, suffix=Some(s) }` for the literal
     /// keyexpr, and `MsgPut` with the supplied payload bytes.
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_literal_shapes_struct_for_literal_keyexpr() {
         let push = build_push_literal("demo/test", b"hello");
@@ -5094,6 +5110,7 @@ mod tests {
     /// header byte (T_MID_FRAME | parent_flags) with the
     /// `Frame.wire()` body (VLE(sn) + payload). With reliable=true
     /// the FLAG_T_FRAME_R bit appears in the header byte.
+    #[cfg(feature = "codec-push")]
     #[test]
     fn encode_frame_with_push_emits_transport_header_plus_frame_body() {
         // Empty-payload Push at sn=0 keeps the assertion focused on
@@ -5134,6 +5151,7 @@ mod tests {
     /// recover the original sn. The Frame.encode body's VLE writer
     /// is shared with layer3_frame.rs's byte-equiv coverage; this
     /// test pins the transport-envelope wrapper around it.
+    #[cfg(feature = "codec-push")]
     #[test]
     fn encode_frame_with_push_carries_vle_sn_across_widths() {
         for sn in [0u64, 1, 127, 128, 16383, 16384, 1_000_000] {
@@ -5183,6 +5201,7 @@ mod tests {
     /// produces id=0 + inline suffix. The aliased Push is the
     /// efficient repeated-keyexpr shape that follows a peer-side
     /// `DeclKexpr` registration.
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_aliased_carries_non_zero_id_with_optional_suffix() {
         let pure = build_push_aliased(7, None, b"hello");
@@ -5216,6 +5235,7 @@ mod tests {
     /// R121g — `build_push_aliased` rejects `mapping_id == 0` so a
     /// caller cannot silently produce a literal-keyexpr Push via
     /// the aliased entry point.
+    #[cfg(feature = "codec-push")]
     #[test]
     #[should_panic(expected = "build_push_aliased requires a non-zero mapping id")]
     fn build_push_aliased_rejects_zero_mapping_id() {
@@ -5226,6 +5246,7 @@ mod tests {
     /// Push whose body is the `MsgDel` arm (inner header 0x02,
     /// no payload, no timestamp / extensions). The outer Push
     /// header + WireexprLocal shape match the Put literal path.
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_del_literal_shapes_struct_for_literal_keyexpr() {
         let push = build_push_del_literal("demo/test");
@@ -5283,6 +5304,7 @@ mod tests {
     /// (suffix=None) and composite-aliased (suffix=Some) shapes are
     /// exercised so the N-flag derivation matches the Put aliased
     /// path. The MsgDel body content is identical across shapes.
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_del_aliased_carries_non_zero_id_with_optional_suffix() {
         let pure = build_push_del_aliased(7, None);
@@ -5331,6 +5353,7 @@ mod tests {
     /// R219 — `build_push_del_aliased` rejects `mapping_id == 0` so
     /// a caller cannot silently produce a literal-keyexpr Del Push
     /// via the aliased entry point.
+    #[cfg(feature = "codec-push")]
     #[test]
     #[should_panic(expected = "build_push_del_aliased requires a non-zero mapping id")]
     fn build_push_del_aliased_rejects_zero_mapping_id() {
@@ -5345,6 +5368,7 @@ mod tests {
     /// test — z_sub's printout cannot distinguish Del from
     /// empty-Put, so the codec-level round-trip is the definitive
     /// proof that the wz-side encoder emits the Del MID.
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_del_literal_round_trips_through_frame_decode_as_msg_del() {
         let push = build_push_del_literal("demo/test");
@@ -5391,6 +5415,7 @@ mod tests {
     /// keyexpr lives in the local mapping table); DeclKexpr's
     /// `<sce:import>` site omits `<sce:variant-dispatch>` so no
     /// parent derive bit is emitted at bit 6.
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_declare_kexpr_wraps_decl_kexpr_with_literal_suffix() {
         let declare = build_declare_kexpr(7, "demo/test");
@@ -5448,6 +5473,7 @@ mod tests {
     ///   - VLE(id=7) = `0x07`
     ///   - wireexpr.id VLE(0) = `0x00`
     ///   - wireexpr.suffix string = VLE(9) + 9 bytes of "demo/test"
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_declare_kexpr_emits_zenoh_pico_compatible_wire_bytes() {
         let declare = build_declare_kexpr(7, "demo/test");
@@ -5474,6 +5500,7 @@ mod tests {
 
     /// R121g — `build_declare_kexpr` rejects `mapping_id == 0` to
     /// keep the literal-keyexpr sentinel out of the DECLARE table.
+    #[cfg(feature = "codec-declare")]
     #[test]
     #[should_panic(expected = "build_declare_kexpr requires a non-zero mapping id")]
     fn build_declare_kexpr_rejects_zero_mapping_id() {
@@ -5485,6 +5512,7 @@ mod tests {
     /// as `encode_frame_with_push`, with `Declare.wire()` as the
     /// inner payload bytes. Reliable / best-effort header flag
     /// behaviour mirrors the Push variant.
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn encode_frame_with_declare_wraps_declare_in_frame_envelope() {
         let declare = build_declare_kexpr(7, "demo/test");
@@ -5518,6 +5546,7 @@ mod tests {
     /// M flag (codegen-derived from parent.M dispatch). Three shapes
     /// exercise the three semantic cases: pure-alias (id=N + None),
     /// composite (id=N + Some), and literal (id=0 + Some).
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_declare_subscriber_wraps_decl_subscriber_in_declare_envelope() {
         // Case 1 — pure alias to a peer-declared mapping (suffix=None).
@@ -5594,6 +5623,7 @@ mod tests {
     /// composite / literal) so a future codegen regression on either
     /// header derivation, wireexpr arm choice, or the M-bit emit
     /// path fires immediately.
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_declare_subscriber_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — pure alias (subscriber_id=5, mapping_id=7, no
@@ -5663,6 +5693,7 @@ mod tests {
     /// DeclSubscriber structural test, with MID swap 0x02 → 0x04 and
     /// the `WireexprLocal` arm preserved (M-bit codegen-derivation
     /// path identical).
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_declare_queryable_wraps_decl_queryable_in_declare_envelope() {
         // Case 1 — pure alias to a peer-declared mapping (suffix=None).
@@ -5739,6 +5770,7 @@ mod tests {
     /// identical — these three vectors lock the same alias /
     /// composite / literal trio. The `has_info_ext = true` variant
     /// (future ExtQueryableInfo tail) is out of scope for this round.
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_declare_queryable_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — pure alias (queryable_id=9, mapping_id=7, no
@@ -5800,6 +5832,7 @@ mod tests {
     /// R121i-b — `build_declare_token` produces a Declare envelope
     /// carrying a `DeclToken` inner body. Mirror of the DeclSubscriber
     /// / DeclQueryable structural test, with MID swap to 0x06.
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_declare_token_wraps_decl_token_in_declare_envelope() {
         // Case 1 — pure alias.
@@ -5864,6 +5897,7 @@ mod tests {
     /// false)` wrapper — no extension surface at all. The three
     /// vectors lock the alias / composite / literal trio with MID
     /// 0x06.
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_declare_token_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — pure alias (token_id=11, mapping_id=7, no suffix).
@@ -5918,6 +5952,7 @@ mod tests {
     /// VLE boundary cases (literal id=0 is rejected by the builder so
     /// is exercised in the `_rejects_zero_mapping_id` panic test
     /// below, not here).
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_declare_subscriber_nonlocal_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — pure alias to peer's mapping 7 (no suffix).
@@ -5987,6 +6022,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "codec-declare")]
     #[test]
     #[should_panic(expected = "build_declare_subscriber_nonlocal requires a non-zero mapping id")]
     fn build_declare_subscriber_nonlocal_rejects_zero_mapping_id() {
@@ -6000,6 +6036,7 @@ mod tests {
     /// `_z_queryable_infos_t`); a future round adding `complete` /
     /// `distance` will introduce a separate
     /// `build_declare_queryable_nonlocal_with_info` byte-compare.
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_declare_queryable_nonlocal_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — pure alias.
@@ -6057,6 +6094,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "codec-declare")]
     #[test]
     #[should_panic(expected = "build_declare_queryable_nonlocal requires a non-zero mapping id")]
     fn build_declare_queryable_nonlocal_rejects_zero_mapping_id() {
@@ -6068,6 +6106,7 @@ mod tests {
     /// compare with MID swap to 0x06 and the M-bit OR flipped to 0x00.
     /// DeclToken has no extension surface — emit is byte-stable for
     /// every `(id, mapping, suffix)` input in either arm.
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_declare_token_nonlocal_emits_zenoh_pico_compatible_wire_bytes() {
         let alias = build_declare_token_nonlocal(11, 7, None);
@@ -6122,6 +6161,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "codec-declare")]
     #[test]
     #[should_panic(expected = "build_declare_token_nonlocal requires a non-zero mapping id")]
     fn build_declare_token_nonlocal_rejects_zero_mapping_id() {
@@ -6136,6 +6176,7 @@ mod tests {
     /// `_z_undecl_kexpr_encode` at declarations.c:86-89 —
     /// `[header(_Z_UNDECL_KEXPR_MID=0x01), VLE(id)]`, no Z ext, no
     /// wireexpr body.
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_undeclare_kexpr_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — single-byte VLE id (id=42 fits in 7 bits).
@@ -6184,6 +6225,7 @@ mod tests {
     /// at declarations.c:90-103. The wz UndeclSubscriber codec does
     /// not model the optional ext_keyexpr tail; this contract is
     /// locked by the two vectors below.
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_undeclare_subscriber_emits_zenoh_pico_compatible_wire_bytes() {
         let small = build_undeclare_subscriber(42);
@@ -6219,6 +6261,7 @@ mod tests {
     /// envelope carrying an `UndeclQueryable` body in the no-ext
     /// shape. MID = 0x05 (_Z_UNDECL_QUERYABLE_MID); rest matches
     /// `_z_undecl_encode` shape from declarations.c:120-122.
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_undeclare_queryable_emits_zenoh_pico_compatible_wire_bytes() {
         let small = build_undeclare_queryable(42);
@@ -6252,6 +6295,7 @@ mod tests {
     /// envelope carrying an `UndeclToken` body in the no-ext shape.
     /// MID = 0x07 (_Z_UNDECL_TOKEN_MID); rest matches the
     /// `_z_undecl_encode` shape from declarations.c:128-130.
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_undeclare_token_emits_zenoh_pico_compatible_wire_bytes() {
         let small = build_undeclare_token(42);
@@ -6287,6 +6331,7 @@ mod tests {
     /// `[header(_Z_DECL_FINAL_MID=0x1A)]`, no body, no id, no ext.
     /// The full wire is exactly 2 bytes (`N_MID_DECLARE` outer +
     /// `DeclFinal.header` inner); the byte-compare locks both.
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_declare_final_emits_two_byte_marker() {
         let declare = build_declare_final();
@@ -6322,6 +6367,7 @@ mod tests {
     /// literal-current, alias, composite) so a future codegen
     /// regression on either the outer C/F gate, the body N/M
     /// derivation, or the wireexpr arm choice fires immediately.
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_interest_liveliness_subscriber_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — literal keyexpr, history=false (FUTURE only).
@@ -6445,6 +6491,7 @@ mod tests {
     /// wire reduces to `[N_MID_INTEREST, VLE(interest_id)]` — no inner
     /// body (the `_Z_INTEREST_NOT_FINAL_MASK` gate at interest.h:35 is
     /// clear so the body embed is suppressed) and no extensions.
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn build_interest_final_emits_two_byte_marker() {
         let small = build_interest_final(7);
@@ -6478,6 +6525,7 @@ mod tests {
     /// the DECLARE builders, but using `_Z_MID_N_REQUEST (0x1C)` for
     /// the outer header and `_Z_MID_Z_QUERY (0x03)` for the inner
     /// Query header.
+    #[cfg(feature = "codec-request")]
     #[test]
     fn build_request_query_wraps_query_in_request_envelope() {
         // Case 1 — pure alias.
@@ -6558,6 +6606,7 @@ mod tests {
     ///     — emits `[header | C | P | Z]` then optional consolidation /
     ///     params / exts. In the minimal shape only the header byte
     ///     (0x03) is emitted.
+    #[cfg(feature = "codec-request")]
     #[test]
     fn build_request_query_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — pure alias (rid=42, mapping_id=7, no suffix).
@@ -6624,6 +6673,7 @@ mod tests {
     /// the three transmitted modes (NONE / MONOTONIC / LATEST); the
     /// AUTO/DEFAULT case stays the responsibility of plain
     /// [`build_request_query`] (no Q_C, no extra byte).
+    #[cfg(feature = "codec-request")]
     #[test]
     fn build_request_query_with_consolidation_emits_zenoh_pico_compatible_wire_bytes() {
         // Baseline shape derived from build_request_query alias case
@@ -6681,6 +6731,7 @@ mod tests {
     /// dedicated test guards the mapping independently of the encode
     /// path so a refactor that touches the `wire_byte` method without
     /// touching the encoder gets caught.
+    #[cfg(feature = "codec-request")]
     #[test]
     fn consolidation_mode_wire_byte_matches_zenoh_pico_enum_values() {
         assert_eq!(ConsolidationMode::None.wire_byte(), 0u8);
@@ -6695,6 +6746,7 @@ mod tests {
     /// params, multi-byte VLE boundary, and max-size (256) cases.
     /// The Q_C bit (0x20) stays clear because this helper does not
     /// layer consolidation (separate concern).
+    #[cfg(feature = "codec-request")]
     #[test]
     fn build_request_query_with_parameters_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — small params (alias case, rid=42, mapping_id=7,
@@ -6763,12 +6815,14 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     #[should_panic(expected = "RequestQueryBuilder::parameters requires a non-empty params slice")]
     fn build_request_query_with_parameters_rejects_empty_slice() {
         let _ = build_request_query_with_parameters(42, 7, None, b"");
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     #[should_panic(expected = "exceeds wz Query codec's max-size (256)")]
     fn build_request_query_with_parameters_rejects_over_max_size() {
@@ -6785,6 +6839,7 @@ mod tests {
     /// max-size 32, but small-vs-byte-256 differs in single-byte
     /// VLE only here), and at-max (32-byte) cases. The Q_C / Q_P
     /// bits stay clear because this helper is attachment-only.
+    #[cfg(feature = "codec-request")]
     #[test]
     fn build_request_query_with_attachment_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — small attachment (alias case, rid=42, mapping_id=7,
@@ -6857,6 +6912,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     #[should_panic(
         expected = "RequestQueryBuilder::query_attachment requires a non-empty attachment slice"
@@ -6865,6 +6921,7 @@ mod tests {
         let _ = build_request_query_with_attachment(42, 7, None, b"");
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     #[should_panic(expected = "exceeds wz ExtZbuf codec's max-size (32)")]
     fn build_request_query_with_attachment_rejects_over_max_size() {
@@ -6883,6 +6940,7 @@ mod tests {
     /// Request-level exts — mirrors the zenoh-pico encoder order
     /// (network.c:122-167: header / rid / wireexpr / exts loop /
     /// body switch).
+    #[cfg(feature = "codec-request")]
     #[test]
     fn build_request_query_with_timeout_ms_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — single-byte VLE timeout (50ms fits in 7 bits).
@@ -6965,6 +7023,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     #[should_panic(
         expected = "RequestQueryBuilder::request_timeout_ms requires a non-zero timeout"
@@ -6981,6 +7040,7 @@ mod tests {
     /// BEST_MATCHING (0) is not representable in [`QueryTarget`] —
     /// the encoder predicate clears the ext on default, so absence
     /// of this helper's wire bytes is the BEST_MATCHING signal.
+    #[cfg(feature = "codec-request")]
     #[test]
     fn build_request_query_with_target_emits_zenoh_pico_compatible_wire_bytes() {
         // Alias case rid=42, mapping_id=7, no suffix. For both target
@@ -7036,6 +7096,7 @@ mod tests {
     /// mapping mirrors zenoh-pico's `z_query_target_t` enum integer
     /// values (constants.h:263-264). BEST_MATCHING (0) is absent by
     /// design (the encoder predicate clears the ext on default).
+    #[cfg(feature = "codec-request")]
     #[test]
     fn query_target_wire_byte_matches_zenoh_pico_enum_values() {
         assert_eq!(QueryTarget::All.wire_byte(), 1u8);
@@ -7047,6 +7108,7 @@ mod tests {
     /// wire bytes consistent with both layers. The two-layer shape
     /// is what the old one-shot helpers CANNOT produce because each
     /// resets the Query body's optional fields.
+    #[cfg(feature = "codec-request")]
     #[test]
     fn request_query_builder_composes_consolidation_and_parameters() {
         // rid=42, mapping_id=7, no suffix.
@@ -7088,6 +7150,7 @@ mod tests {
     /// (Q_C / Q_P / Q_Z) set together, (4) the attachment ext sits at
     /// the Query level (after Query.consolidation + parameters), not
     /// at the Request level.
+    #[cfg(feature = "codec-request")]
     #[test]
     fn request_query_builder_composes_all_five_layers() {
         // rid=42, mapping_id=7, no suffix.
@@ -7165,6 +7228,7 @@ mod tests {
     /// Request-level ext at the head of the chain (qos → tstamp →
     /// target → budget → timeout) with header ENC_ZINT(0x20) |
     /// id_qos(0x01) and no M flag (qos is informational).
+    #[cfg(feature = "codec-request")]
     #[test]
     fn request_query_builder_request_qos_emits_first_ext_with_no_m_flag() {
         let request = RequestQueryBuilder::new(42, 7, None)
@@ -7200,6 +7264,7 @@ mod tests {
     /// request_timeout_ms in the correct zenoh-pico encode order:
     /// qos comes first (with Z-chain continuation), target next
     /// (with Z-chain continuation), timeout last (no Z).
+    #[cfg(feature = "codec-request")]
     #[test]
     fn request_query_builder_request_qos_target_timeout_chain_order_matches_zenoh_pico() {
         let request = RequestQueryBuilder::new(42, 7, None)
@@ -7236,6 +7301,7 @@ mod tests {
     /// Request-level ext between target and timeout (per zenoh-pico
     /// _z_request_encode order) with header ENC_ZINT(0x20) |
     /// id_budget(0x05) and no M flag.
+    #[cfg(feature = "codec-request")]
     #[test]
     fn request_query_builder_request_budget_emits_ext_between_target_and_timeout() {
         // Solo case: only budget set. Ext at index 0 (chain head), no
@@ -7302,6 +7368,7 @@ mod tests {
     /// R121j-1g — request_budget rejects zero (mirrors zenoh-pico's
     /// ext_budget = budget != 0 encoder predicate at
     /// vendor/zenoh-pico/src/protocol/definitions/network.c:26).
+    #[cfg(feature = "codec-request")]
     #[test]
     #[should_panic(expected = "RequestQueryBuilder::request_budget requires a non-zero budget")]
     fn request_query_builder_budget_rejects_zero() {
@@ -7315,6 +7382,7 @@ mod tests {
     /// budget → timeout) with header ENC_ZBUF(0x40) | id_tstamp(0x02)
     /// and NO M flag. The ext body is an ExtZbuf carrying the
     /// `Timestamp::encode_to_vec()` output verbatim.
+    #[cfg(feature = "codec-request")]
     #[test]
     fn request_query_builder_request_tstamp_solo_emits_ext_with_no_m_flag() {
         // Solo case: only tstamp set. time=42, zid=[0xab, 0xcd] keeps
@@ -7360,6 +7428,7 @@ mod tests {
     /// Z chain-continuation on indices 0..=3 and Z clear on index 4.
     /// The five-ext sequence pins the entire Request-level ext chain
     /// against `_z_request_encode` at network.c:126-155.
+    #[cfg(feature = "codec-request")]
     #[test]
     fn request_query_builder_full_chain_emits_zenoh_pico_encode_order() {
         let request = RequestQueryBuilder::new(42, 7, None)
@@ -7408,6 +7477,7 @@ mod tests {
     /// R121j-tstamp — request_tstamp rejects an empty zid (mirrors
     /// zenoh-pico's `_z_id_encode_as_slice` at message.c:58-70 which
     /// returns `_Z_ERR_MESSAGE_ZENOH_UNKNOWN` on len=0).
+    #[cfg(feature = "codec-request")]
     #[test]
     #[should_panic(expected = "RequestQueryBuilder::request_tstamp requires a non-empty zid")]
     fn request_query_builder_tstamp_rejects_empty_zid() {
@@ -7419,6 +7489,7 @@ mod tests {
     /// R121j-tstamp — request_tstamp rejects zid longer than the
     /// zenoh `_z_id_t` 16-byte capacity (`_Z_ID_LENGTH = 16` at
     /// vendor/zenoh-pico/include/zenoh-pico/protocol/core.h).
+    #[cfg(feature = "codec-request")]
     #[test]
     #[should_panic(expected = "exceeds zenoh _Z_ID_LENGTH (16)")]
     fn request_query_builder_tstamp_rejects_zid_over_16_bytes() {
@@ -7434,6 +7505,7 @@ mod tests {
     /// then delegates to the same storage as request_qos so the chain
     /// emit path stays uniform — same Z chain-continuation / index
     /// semantics as the raw setter.
+    #[cfg(feature = "codec-request")]
     #[test]
     fn request_qos_typed_packs_per_zenoh_pico_z_n_qos_create_layout() {
         // Drop + Background priority + no express: priority=7 → low 3
@@ -7492,6 +7564,7 @@ mod tests {
     /// request_timeout_ms identically to the raw request_qos setter
     /// (Z chain-continuation bits, ext order). Pins that the typed
     /// wrapper is purely a packing convenience over the raw setter.
+    #[cfg(feature = "codec-request")]
     #[test]
     fn request_qos_typed_composes_with_chain_identically_to_raw_qos() {
         let typed = RequestQueryBuilder::new(42, 7, None)
@@ -7514,6 +7587,7 @@ mod tests {
     /// R121j-2a — Per-setter validation flows through to the builder.
     /// Mirrors the one-shot helper rejection tests; the builder is
     /// where the panic actually fires now.
+    #[cfg(feature = "codec-request")]
     #[test]
     #[should_panic(expected = "RequestQueryBuilder::parameters")]
     fn request_query_builder_parameters_rejects_empty() {
@@ -7522,6 +7596,7 @@ mod tests {
             .build();
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     #[should_panic(expected = "RequestQueryBuilder::request_timeout_ms")]
     fn request_query_builder_timeout_rejects_zero() {
@@ -7621,6 +7696,7 @@ mod tests {
     /// Response-level exts, no Reply-level consolidation/exts, no
     /// MsgPut timestamp/encoding/exts. Two vectors lock the alias
     /// rid + small payload and the multi-byte VLE boundary (rid=200).
+    #[cfg(feature = "codec-response")]
     #[test]
     fn build_response_reply_literal_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — small request_id (42), literal keyexpr "demo/test",
@@ -7690,6 +7766,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "codec-response")]
     #[test]
     #[should_panic(expected = "build_response_reply_literal requires a non-empty keyexpr suffix")]
     fn build_response_reply_literal_rejects_empty_suffix() {
@@ -7699,6 +7776,7 @@ mod tests {
     /// R121j-3 — Wire-byte regression gate for
     /// `build_response_reply_aliased`. Three vectors lock the
     /// aliased / composite / aliased-large-VLE shapes.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn build_response_reply_aliased_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — pure alias (rid=42, mapping_id=7, no suffix,
@@ -7761,6 +7839,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "codec-response")]
     #[test]
     #[should_panic(expected = "build_response_reply_aliased requires a non-zero mapping id")]
     fn build_response_reply_aliased_rejects_zero_mapping_id() {
@@ -7774,6 +7853,7 @@ mod tests {
     /// MsgPut which itself has a MID byte before payload_len).
     /// Two vectors lock the small rid + literal keyexpr and the
     /// multi-byte VLE boundary.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn build_response_err_literal_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — rid=42, literal "k", payload "fail".
@@ -7828,6 +7908,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "codec-response")]
     #[test]
     #[should_panic(expected = "build_response_err_literal requires a non-empty keyexpr suffix")]
     fn build_response_err_literal_rejects_empty_suffix() {
@@ -7837,6 +7918,7 @@ mod tests {
     /// R121j-4 — Wire-byte regression gate for
     /// `build_response_err_aliased`. Mirror of the Reply aliased
     /// byte-compare with inner body MID swap.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn build_response_err_aliased_emits_zenoh_pico_compatible_wire_bytes() {
         // Pure alias: rid=42, mapping_id=7, no suffix, payload "e".
@@ -7874,6 +7956,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "codec-response")]
     #[test]
     #[should_panic(expected = "build_response_err_aliased requires a non-zero mapping id")]
     fn build_response_err_aliased_rejects_zero_mapping_id() {
@@ -7884,6 +7967,7 @@ mod tests {
     /// `[parent_flags | T_MID_FRAME]` + `Frame.wire()` wrapping as
     /// the other helpers, with `Response.wire()` as the inner
     /// payload bytes. Reply data delivery defaults to reliable.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn encode_frame_with_response_wraps_response_in_frame_envelope() {
         let response = build_response_reply_literal(42, "k", b"v");
@@ -7912,6 +7996,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     fn encode_frame_with_request_wraps_request_in_frame_envelope() {
         let request = build_request_query(42, 7, None);
@@ -7944,6 +8029,7 @@ mod tests {
     /// `encode_frame_with_response` helper with the SN drawn from
     /// `next_outbound_frame_sn`. The action layer must not silently
     /// transform the Response between the builder and the wire.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn send_response_emits_reliable_frame_with_seeded_sn() {
         use crate::sync::Mutex;
@@ -8106,6 +8192,7 @@ mod tests {
     /// reliable channel (zenoh-pico SN-window ordering depends on
     /// this; a Reply that races ahead of the Final out-of-order would
     /// stall the requester's z_get future).
+    #[cfg(feature = "codec-response")]
     #[test]
     fn send_response_and_final_share_sn_counter() {
         use crate::sync::Mutex;
@@ -8200,6 +8287,7 @@ mod tests {
     /// exact same wire bytes as the baseline aliased helper. The
     /// builder is a strictly additive surface; it cannot silently
     /// change the minimal-shape output.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn response_reply_builder_no_setters_matches_aliased_baseline() {
         let direct = build_response_reply_aliased(42, 7, None, b"hello").wire();
@@ -8216,6 +8304,7 @@ mod tests {
     /// `_Z_FLAG_Z_R_C(0x20)` bit on `Reply.header` and emits the 1-byte
     /// consolidation immediately after the header. Mirrors zenoh-pico
     /// `_z_reply_encode` at vendor/zenoh-pico/src/protocol/codec/message.c.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn response_reply_builder_consolidation_sets_r_c_flag_and_byte() {
         let baseline = build_response_reply_aliased(42, 7, None, b"hello").wire();
@@ -8256,6 +8345,7 @@ mod tests {
 
     /// R121j-2b — ResponseErrBuilder with no setters must emit the
     /// exact same wire bytes as the baseline aliased helper.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_no_setters_matches_aliased_baseline() {
         let direct = build_response_err_aliased(42, 7, None, b"oops").wire();
@@ -8269,6 +8359,7 @@ mod tests {
     /// R121j-2b — ResponseErrBuilder.encoding without schema sets the
     /// `_Z_FLAG_Z_E(0x40)` bit on `Err.header` and emits packed_id =
     /// (id << 1) | 0 with no schema_len / schema bytes.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_encoding_no_schema_packs_id_left_shift_one() {
         let with_enc = ResponseErrBuilder::new(42, 7, None, b"oops")
@@ -8292,6 +8383,7 @@ mod tests {
 
     /// R121j-2b — ResponseErrBuilder.encoding with schema sets E,
     /// packs LSB=1, and emits the VLE schema_len + schema bytes.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_encoding_with_schema_sets_lsb_and_emits_suffix() {
         let with_enc = ResponseErrBuilder::new(42, 7, None, b"oops")
@@ -8323,6 +8415,7 @@ mod tests {
     /// R121j-2b — ResponseReplyBuilder literal path requires a
     /// non-empty keyexpr_suffix; (mapping_id=0, suffix=None) panics
     /// with the builder's diagnostic message at build() time.
+    #[cfg(feature = "codec-response")]
     #[test]
     #[should_panic(
         expected = "ResponseReplyBuilder literal path (mapping_id=0) requires a non-empty keyexpr_suffix"
@@ -8333,6 +8426,7 @@ mod tests {
 
     /// R121j-2b — ResponseErrBuilder literal path requires a
     /// non-empty keyexpr_suffix.
+    #[cfg(feature = "codec-response")]
     #[test]
     #[should_panic(
         expected = "ResponseErrBuilder literal path (mapping_id=0) requires a non-empty keyexpr_suffix"
@@ -8347,6 +8441,7 @@ mod tests {
     /// `[(zid_len-1)<<4, zid..., VLE(eid), VLE(sn)]` per zenoh-pico
     /// `_z_source_info_encode_ext` at `vendor/zenoh-pico/src/protocol/
     /// codec/message.c:243-254`.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_source_info_emits_zbuf_ext_entry() {
         let wire = ResponseErrBuilder::new(42, 7, None, b"oops")
@@ -8407,6 +8502,7 @@ mod tests {
     /// bits (E + Z) set, the encoded `Encoding` field sits between the
     /// header and the ext chain (Err::encode order at
     /// `wz-codecs/.../out/err.rs:171-200`).
+    #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_source_info_composes_with_encoding() {
         let wire = ResponseErrBuilder::new(42, 7, None, b"oops")
@@ -8448,6 +8544,7 @@ mod tests {
 
     /// R121j-4b — source_info rejects zid lengths outside the
     /// zenoh-pico ZenohId wire constraint (1..=16, transport.h:31-37).
+    #[cfg(feature = "codec-response")]
     #[test]
     #[should_panic(expected = "ResponseErrBuilder::source_info requires zid length 1..=16")]
     fn response_err_builder_source_info_rejects_zid_too_long() {
@@ -8455,6 +8552,7 @@ mod tests {
     }
 
     /// R121j-4b — empty zid is also rejected (lower bound of 1..=16).
+    #[cfg(feature = "codec-response")]
     #[test]
     #[should_panic(expected = "ResponseErrBuilder::source_info requires zid length 1..=16")]
     fn response_err_builder_source_info_rejects_empty_zid() {
@@ -8469,6 +8567,7 @@ mod tests {
     /// `vendor/zenoh-pico/src/protocol/codec/network.c:281-291`. The
     /// Reply inner body is unaffected — envelope ext is orthogonal to
     /// body bits.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn response_reply_builder_responder_emits_envelope_zbuf_ext_entry() {
         let baseline = ResponseReplyBuilder::new(42, 7, None, b"hello")
@@ -8516,6 +8615,7 @@ mod tests {
     /// Response.header, C on Reply.header — so the two setters are
     /// orthogonal and may be applied in either order with the same
     /// wire result.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn response_reply_builder_responder_composes_with_consolidation() {
         let wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
@@ -8558,6 +8658,7 @@ mod tests {
     /// envelope-level Z(0x80) + single ExtEntry on Response.extensions.
     /// The Err inner body (header.E / header.Z for source_info) is
     /// independent of the envelope ext.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_responder_emits_envelope_zbuf_ext_entry() {
         let baseline = ResponseErrBuilder::new(42, 7, None, b"oops").build().wire();
@@ -8593,6 +8694,7 @@ mod tests {
     /// R121j-3c — Err.responder (envelope) + Err.source_info (Err body)
     /// compose: envelope-level Z lands on Response.header, body-level
     /// Z lands on Err.header. Separate bytes, separate ext chains.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_responder_composes_with_source_info() {
         let wire = ResponseErrBuilder::new(42, 7, None, b"oops")
@@ -8632,6 +8734,7 @@ mod tests {
     /// R121j-3c — responder rejects zid lengths outside 1..=16 on
     /// both Reply and Err builders (zenoh-pico ZenohId wire constraint,
     /// transport.h:31-37).
+    #[cfg(feature = "codec-response")]
     #[test]
     #[should_panic(expected = "ResponseReplyBuilder::responder requires zid length 1..=16")]
     fn response_reply_builder_responder_rejects_zid_too_long() {
@@ -8640,6 +8743,7 @@ mod tests {
 
     /// R121j-3c — ResponseErrBuilder.responder shares the same wire
     /// constraint.
+    #[cfg(feature = "codec-response")]
     #[test]
     #[should_panic(expected = "ResponseErrBuilder::responder requires zid length 1..=16")]
     fn response_err_builder_responder_rejects_empty_zid() {
@@ -8649,6 +8753,7 @@ mod tests {
     /// R121j-3c — direct check on the helper that builds the
     /// responder ext-body bytes. Distinct from source_info in that no
     /// `sn` trailer is emitted.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn encode_responder_ext_body_matches_zenoh_pico_layout() {
         // zid_len=3 → leading byte = (3-1)<<4 = 0x20
@@ -8675,6 +8780,7 @@ mod tests {
     /// source_info ext-body bytes. Locks the wire shape independently
     /// of the builder so future helpers (Push.source_info, Query
     /// source_info) can re-use the helper with the same guarantees.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn encode_source_info_ext_body_matches_zenoh_pico_layout() {
         // zid_len=2 → leading byte = (2-1)<<4 = 0x10
@@ -8715,6 +8821,7 @@ mod tests {
     /// Wire-level effect: inner MID byte flips from 0x01 (Put) to
     /// 0x02 (Del); the payload bytes the constructor received are
     /// dropped (MsgDel has no payload).
+    #[cfg(feature = "codec-response")]
     #[test]
     fn response_reply_builder_reply_del_swaps_inner_arm_to_msgdel() {
         let put_wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
@@ -8749,6 +8856,7 @@ mod tests {
     /// Reply.header.C bit must still be set when MsgDel + consolidation
     /// are combined; the consolidation byte sits between Reply.header
     /// and the MsgDel inner MID, not between Put header and payload.
+    #[cfg(feature = "codec-response")]
     #[test]
     fn response_reply_builder_reply_del_composes_with_consolidation() {
         let wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
@@ -8774,8 +8882,10 @@ mod tests {
 
     // ── R233 wire encoder for PublishOptions metadata ──
 
+    #[cfg(feature = "codec-push")]
     use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn push_metadata_is_empty_returns_true_only_when_all_fields_none() {
         let empty = PushMetadata::default();
@@ -8794,6 +8904,7 @@ mod tests {
         assert!(!with_qos.is_empty());
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_msg_put_with_meta_sets_timestamp_field_and_t_flag() {
         let ts = TimestampHint {
@@ -8809,6 +8920,7 @@ mod tests {
         assert!(!put.z(), "Z flag must remain clear without body extensions");
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_msg_put_with_meta_sets_encoding_field_and_e_flag() {
         let enc = EncodingHint {
@@ -8834,6 +8946,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_msg_put_with_meta_attaches_source_info_ext_and_sets_z_flag() {
         let si = SourceInfo::new(&[0x11, 0x22, 0x33, 0x44], 7, 42);
@@ -8856,6 +8969,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_msg_put_with_meta_attaches_attachment_ext_after_source_info() {
         // Both source_info + attachment together — order matters: pico's
@@ -8875,6 +8989,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_msg_put_with_meta_leaves_extensions_none_on_empty_inputs() {
         let put = build_msg_put_with_meta(b"payload", None, None, None, None);
@@ -8884,6 +8999,7 @@ mod tests {
         assert!(!put.e(), "E flag clear with no encoding");
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_msg_del_with_meta_carries_timestamp_but_not_encoding_param() {
         // The MsgDel builder's parameter list intentionally has no
@@ -8900,6 +9016,7 @@ mod tests {
         assert!(!del.z(), "Z flag clear with no extensions");
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_outer_extensions_emits_qos_with_zint_body() {
         let exts = build_push_outer_extensions(Some(QosLevel::from_raw(0b0001_1010)))
@@ -8914,11 +9031,13 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_outer_extensions_returns_none_without_qos() {
         assert!(build_push_outer_extensions(None).is_none());
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_literal_with_meta_sets_push_header_z_bit_when_qos_attached() {
         let meta = PushMetadata {
@@ -8939,6 +9058,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_literal_with_meta_round_trips_through_codec_encode_decode() {
         // End-to-end: build → encode_to_vec → decode → field equality.
@@ -9007,6 +9127,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_del_literal_with_meta_round_trips_metadata_minus_encoding() {
         // Del path: timestamp + source_info + attachment + qos must
@@ -9047,6 +9168,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn send_push_with_meta_literal_dispatches_metadata_frame_to_driver() {
         // End-to-end via the action surface + recording driver: the
@@ -9085,6 +9207,11 @@ mod tests {
         );
     }
 
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-declare",
+        feature = "codec-request"
+    ))]
     fn publish_meta_fixture_params() -> SessionInitParams {
         SessionInitParams {
             version: 0x09,
@@ -9105,9 +9232,19 @@ mod tests {
     /// Minimal recording driver for R233 wire-side tests. Captures
     /// every send_blocking frame so the per-test asserts can compare
     /// against a re-encoded standalone Push.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-declare",
+        feature = "codec-request"
+    ))]
     pub(super) struct CaptureDriver {
         frames: std::sync::Mutex<Vec<(Vec<u8>, Reliability)>>,
     }
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-declare",
+        feature = "codec-request"
+    ))]
     impl CaptureDriver {
         fn new() -> Self {
             Self {
@@ -9115,6 +9252,11 @@ mod tests {
             }
         }
     }
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-declare",
+        feature = "codec-request"
+    ))]
     impl BoxedLinkDriver for CaptureDriver {
         fn send_blocking(&self, bytes: &[u8], r: Reliability) {
             self.frames.lock().unwrap().push((bytes.to_vec(), r));
@@ -9125,6 +9267,7 @@ mod tests {
 
     // ── R234 outbound mapping table ──
 
+    #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_populates_outbound_mapping_table() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
@@ -9160,6 +9303,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_overwrites_existing_mapping_for_same_id() {
         // zenoh-pico's _z_register_resource OVERWRITES on
@@ -9186,6 +9330,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
     #[test]
     fn send_undeclare_kexpr_removes_mapping_from_table() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
@@ -9206,6 +9351,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "codec-declare")]
     #[test]
     fn send_undeclare_kexpr_idempotent_on_unknown_id() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
@@ -9222,6 +9368,7 @@ mod tests {
 
     // ── R300 — outbound DECLARE-side gate ─────────────────────
 
+    #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_rejects_reserved_mapping_id_zero() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
@@ -9244,6 +9391,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_rejects_pico_bug_three_pattern() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
@@ -9271,6 +9419,7 @@ mod tests {
         assert!(actions.resolve_outbound_mapping(7).is_none());
     }
 
+    #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_rejects_structurally_invalid() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
@@ -9295,6 +9444,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_subscriber_rejects_missing_keyexpr() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
@@ -9311,6 +9461,7 @@ mod tests {
         assert!(driver.frames.lock().unwrap().is_empty());
     }
 
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_subscriber_rejects_unknown_mapping_id() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
@@ -9327,6 +9478,7 @@ mod tests {
         assert!(driver.frames.lock().unwrap().is_empty());
     }
 
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_subscriber_rejects_cross_boundary_bug_three() {
         // This is the gate's raison d'etre: prefix=`**` registered
@@ -9366,6 +9518,7 @@ mod tests {
         assert_eq!(driver.frames.lock().unwrap().len(), 1);
     }
 
+    #[cfg(all(feature = "declare-subscriber", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_subscriber_accepts_safe_alias_form() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
@@ -9391,6 +9544,7 @@ mod tests {
             .expect("literal-mode safe keyexpr");
     }
 
+    #[cfg(all(feature = "declare-queryable", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_queryable_inherits_gate() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
@@ -9412,6 +9566,7 @@ mod tests {
         assert!(driver.frames.lock().unwrap().is_empty());
     }
 
+    #[cfg(all(feature = "declare-token", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_token_inherits_gate() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
@@ -9432,6 +9587,7 @@ mod tests {
         assert!(driver.frames.lock().unwrap().is_empty());
     }
 
+    #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn reconstruct_outbound_keyexpr_shape_table() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
@@ -9476,6 +9632,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn resolve_outbound_mapping_returns_owned_string_independent_of_table() {
         // The returned String must be a clone — a caller holding it
@@ -9499,12 +9656,14 @@ mod tests {
 
     // ── R240 wire-side QueryOptions propagation ──
 
+    #[cfg(feature = "codec-request")]
     #[test]
     fn query_metadata_default_is_empty() {
         let meta = QueryMetadata::default();
         assert!(meta.is_empty());
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     fn query_metadata_with_target_is_not_empty() {
         let meta = QueryMetadata {
@@ -9514,6 +9673,7 @@ mod tests {
         assert!(!meta.is_empty());
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     fn query_metadata_with_consolidation_is_not_empty() {
         let meta = QueryMetadata {
@@ -9523,6 +9683,7 @@ mod tests {
         assert!(!meta.is_empty());
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     fn query_metadata_with_attachment_is_not_empty() {
         let meta = QueryMetadata {
@@ -9532,6 +9693,7 @@ mod tests {
         assert!(!meta.is_empty());
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     fn query_metadata_with_timeout_ms_nonzero_is_not_empty() {
         let meta = QueryMetadata {
@@ -9541,6 +9703,7 @@ mod tests {
         assert!(!meta.is_empty());
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     fn send_request_query_with_meta_empty_emits_same_bytes_as_no_meta() {
         // R240 short-circuit invariant: empty QueryMetadata MUST
@@ -9572,6 +9735,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     fn send_request_query_with_meta_target_emits_request_with_target_ext() {
         // build_request_query_with_target standalone re-encode
@@ -9603,6 +9767,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     fn send_request_query_with_meta_consolidation_emits_query_with_q_c_flag() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
@@ -9633,6 +9798,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     fn send_request_query_with_meta_attachment_emits_query_with_attachment_ext() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
@@ -9658,6 +9824,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     fn send_request_query_with_meta_empty_attachment_slice_skips_ext_without_panic() {
         // QueryOptions::with_attachment(empty Vec) → meta.attachment
@@ -9693,6 +9860,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "codec-request")]
     #[test]
     fn send_request_query_with_meta_timeout_ms_emits_request_with_timeout_ext() {
         let driver = std::sync::Arc::new(CaptureDriver::new());

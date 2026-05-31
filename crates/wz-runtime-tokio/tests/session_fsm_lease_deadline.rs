@@ -233,6 +233,9 @@ fn r77_within_lease_when_stamp_recent() {
 //                → Expired, FSM Established -> Closing, close_reason
 //                = Expired, trace surfaces Established.onexit +
 //                Closing.onentry side effects
+// R311fr — asserts Established.onexit stops the keepalive worker
+// (count == 1); that action only exists when transport-keepalive is on.
+#[cfg(feature = "transport-keepalive")]
 #[test]
 fn r77_expired_drives_established_to_closing() {
     let (actions, mut engine) = fresh_setup();

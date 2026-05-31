@@ -40,6 +40,12 @@
 //! injection in `sce_rust_runtime` is documented at
 //! `sce_rust_runtime::StdHal`).
 
+// R311fr — the single test here asserts start_keepalive_worker == 1 at
+// Established.onentry (full_path.rs:158); that action only exists when
+// transport-keepalive is on. The whole file (driver + impl + imports)
+// exists solely to support this test, so gate at file scope.
+#![cfg(feature = "transport-keepalive")]
+
 use std::sync::Arc;
 use std::sync::Mutex;
 

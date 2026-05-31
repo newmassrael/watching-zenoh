@@ -17,12 +17,18 @@
 
 use sce_forge_runtime::codec::SceCursor;
 use std::time::Duration;
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+#[cfg(feature = "transport-link-udp")]
+use tokio::net::UdpSocket;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use wz_codecs::msg_del::MsgDel;
+#[cfg(feature = "transport-link-udp")]
 use wz_codecs::msg_put::MsgPut;
-use wz_runtime_tokio::{LinkDriver, LinkEvent, Reliability, TcpDriver, TxFrame, UdpDriver};
+#[cfg(feature = "transport-link-udp")]
+use wz_runtime_tokio::UdpDriver;
+use wz_runtime_tokio::{LinkDriver, LinkEvent, Reliability, TcpDriver, TxFrame};
 
+#[cfg(feature = "transport-link-udp")]
 const MID_Z_PUT: u8 = 0x01;
 const MID_Z_DEL: u8 = 0x02;
 
@@ -76,6 +82,7 @@ async fn echo_msg_del_tcp_round_trip() {
     assert!(received.timestamp.is_none() && received.extensions.is_none());
 }
 
+#[cfg(feature = "transport-link-udp")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn echo_msg_put_udp_round_trip() {
     // Bind subscriber socket first to capture port.

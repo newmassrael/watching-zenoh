@@ -11,8 +11,12 @@
 //! through the dialed driver reaches that peer, proving the connect
 //! path establishes a usable link (not just a constructed value).
 
-use tokio::net::{TcpListener, UdpSocket};
-use wz_runtime_tokio::{LinkDriver, LinkEvent, Reliability, TcpDriver, TxFrame, UdpDriver};
+use tokio::net::TcpListener;
+#[cfg(feature = "transport-link-udp")]
+use tokio::net::UdpSocket;
+#[cfg(feature = "transport-link-udp")]
+use wz_runtime_tokio::UdpDriver;
+use wz_runtime_tokio::{LinkDriver, LinkEvent, Reliability, TcpDriver, TxFrame};
 
 #[tokio::test]
 async fn tcp_connect_dials_a_usable_loopback_link() {
@@ -43,6 +47,7 @@ async fn tcp_connect_dials_a_usable_loopback_link() {
     }
 }
 
+#[cfg(feature = "transport-link-udp")]
 #[tokio::test]
 async fn udp_connect_dials_a_usable_loopback_peer() {
     // Receiver side: a plain bound socket whose address the dialer

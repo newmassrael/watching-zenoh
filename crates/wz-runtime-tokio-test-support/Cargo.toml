@@ -44,7 +44,30 @@ name = "wz_runtime_tokio_test_support"
 path = "src/lib.rs"
 
 [dependencies]
-wz-runtime-tokio = { path = "../wz-runtime-tokio" }
+# R311fr — `default-features = false` so this dev-dep does NOT force
+# wz-runtime-tokio's DEFAULT feature set (every plane) into the
+# crate-under-test. Before R311fr the bare path dep pulled defaults,
+# and cargo feature-unification re-enabled them during `cargo test
+# -p wz-runtime-tokio --features <subset>` — silently defeating the
+# Layer C1j isolation matrix (every named subset actually compiled +
+# ran the full default feature set). We forward ONLY the foundational
+# session-handshake base the fixtures touch (install_session_actions /
+# SessionLinkActions / SessionInitParams); the base is a subset of
+# every C1j coherent subset, so forwarding it adds nothing the subset
+# under test did not already select — the test invocation's feature
+# set is now preserved verbatim.
+wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, features = [
+    "transport-unicast",
+    "transport-link-tcp",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "keyexpr-canon",
+] }
 sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
 sce-rust-lua = { path = "../../vendor/sce/sce-rust-lua" }
 

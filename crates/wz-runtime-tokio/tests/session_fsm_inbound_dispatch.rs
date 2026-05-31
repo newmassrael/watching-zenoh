@@ -367,6 +367,13 @@ fn parse_frame_payload_empty_returns_empty_batch() {
     );
 }
 
+#[cfg(all(
+    feature = "codec-request",
+    feature = "codec-push",
+    feature = "codec-response-final",
+    feature = "codec-response",
+    feature = "codec-declare"
+))]
 #[test]
 fn parse_frame_payload_unknown_mid_absorbs_remainder() {
     use wz_runtime_tokio::session_glue::{parse_frame_payload, NetworkMessage};
@@ -402,6 +409,7 @@ fn parse_frame_payload_unknown_mid_absorbs_remainder() {
     }
 }
 
+#[cfg(feature = "codec-request")]
 #[test]
 fn parse_frame_payload_dispatches_request_mid_to_request_decoder() {
     use wz_codecs::request::Request;
@@ -443,6 +451,13 @@ fn parse_frame_payload_dispatches_request_mid_to_request_decoder() {
     );
 }
 
+#[cfg(all(
+    feature = "codec-request",
+    feature = "codec-push",
+    feature = "codec-response-final",
+    feature = "codec-response",
+    feature = "codec-declare"
+))]
 #[test]
 fn parse_frame_payload_decodes_request_then_unknown_chain() {
     use wz_codecs::request::Request;
@@ -491,6 +506,7 @@ fn parse_frame_payload_decodes_request_then_unknown_chain() {
     }
 }
 
+#[cfg(feature = "codec-push")]
 #[test]
 fn parse_frame_payload_dispatches_push_mid_to_push_decoder() {
     use wz_codecs::push::Push;
@@ -521,6 +537,7 @@ fn parse_frame_payload_dispatches_push_mid_to_push_decoder() {
     );
 }
 
+#[cfg(all(feature = "codec-push", feature = "codec-request"))]
 #[test]
 fn parse_frame_payload_decodes_push_then_request_chain() {
     use wz_codecs::push::Push;
@@ -546,6 +563,7 @@ fn parse_frame_payload_decodes_push_then_request_chain() {
     assert!(matches!(parsed[1], NetworkMessage::Request(_)));
 }
 
+#[cfg(feature = "codec-response-final")]
 #[test]
 fn parse_frame_payload_dispatches_response_final_mid_to_response_final_decoder() {
     use wz_codecs::response_final::ResponseFinal;
@@ -637,6 +655,7 @@ fn parse_frame_payload_dispatches_interest_mid_to_interest_decoder() {
     );
 }
 
+#[cfg(feature = "codec-response")]
 #[test]
 fn parse_frame_payload_dispatches_response_mid_to_response_decoder() {
     use wz_codecs::response::Response;
@@ -722,6 +741,9 @@ fn parse_frame_payload_dispatches_non_final_interest_with_body_byte() {
     }
 }
 
+// R311fr — expects parse_frame_payload to reject a truncated Request
+// body; that rejection only happens when the Request codec is present.
+#[cfg(feature = "codec-request")]
 #[test]
 fn parse_frame_payload_truncated_request_returns_codec_error() {
     use wz_runtime_tokio::session_glue::parse_frame_payload;
