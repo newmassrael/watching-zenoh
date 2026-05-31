@@ -1451,43 +1451,50 @@ dependencies = [
 ]
 
 [[package]]
-name = "wz-e2e-liveliness"
+name = "wz-e2e-harness"
 version = "0.1.0"
 dependencies = [
  "env_logger",
  "log",
  "tokio",
  "wz",
+]
+
+[[package]]
+name = "wz-e2e-liveliness"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "wz",
+ "wz-e2e-harness",
 ]
 
 [[package]]
 name = "wz-e2e-liveliness-token"
 version = "0.1.0"
 dependencies = [
- "env_logger",
  "log",
- "tokio",
  "wz",
+ "wz-e2e-harness",
 ]
 
 [[package]]
 name = "wz-e2e-pubsub"
 version = "0.1.0"
 dependencies = [
- "env_logger",
  "log",
  "tokio",
  "wz",
+ "wz-e2e-harness",
 ]
 
 [[package]]
 name = "wz-e2e-queryable"
 version = "0.1.0"
 dependencies = [
- "env_logger",
  "log",
- "tokio",
  "wz",
+ "wz-e2e-harness",
 ]
 
 [[package]]

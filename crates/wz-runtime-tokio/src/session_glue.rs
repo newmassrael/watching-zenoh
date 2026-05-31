@@ -3163,7 +3163,7 @@ pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> DeclareOwned {
             // workaround (used to suppress the codegen's spurious
             // 0x40 OR under the leaf-owned `tag="parent.M"` regime)
             // has retired with this pin bump.
-            header: 0x20, // _Z_DECL_KEXPR_FLAG_N
+            header: wire_const::D_MID_KEXPR | wire_const::FLAG_D_N, // DeclKexpr MID(0x00) + N
             id: mapping_id,
             keyexpr: WireexprOwned {
                 body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
@@ -3240,7 +3240,7 @@ pub fn build_declare_subscriber(
         body: DeclareOwnedVariant::CodecZenohDeclSubscriber(DeclSubscriberOwned {
             // MID 0x02 (decl_subscriber) + N gate; M is codegen-
             // derived (see fn-level doc comment).
-            header: 0x02 | n_flag,
+            header: wire_const::D_MID_SUBSCRIBER | n_flag,
             id: subscriber_id,
             keyexpr: WireexprOwned {
                 body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
@@ -3319,7 +3319,7 @@ pub fn build_declare_queryable(
             // MID 0x04 (_Z_DECL_QUERYABLE_MID per
             // vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/declarations.h:32)
             // + N gate; M is codegen-derived.
-            header: 0x04 | n_flag,
+            header: wire_const::D_MID_QUERYABLE | n_flag,
             id: queryable_id,
             keyexpr: WireexprOwned {
                 body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
@@ -3385,7 +3385,7 @@ pub fn build_declare_token(
             // MID 0x06 (_Z_DECL_TOKEN_MID per
             // vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/declarations.h:34)
             // + N gate; M is codegen-derived.
-            header: 0x06 | n_flag,
+            header: wire_const::D_MID_TOKEN | n_flag,
             id: token_id,
             keyexpr: WireexprOwned {
                 body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
@@ -3493,7 +3493,7 @@ pub fn build_declare_subscriber_nonlocal(
         interest_id: None,
         extensions: None,
         body: DeclareOwnedVariant::CodecZenohDeclSubscriber(DeclSubscriberOwned {
-            header: 0x02 | n_flag,
+            header: wire_const::D_MID_SUBSCRIBER | n_flag,
             id: subscriber_id,
             keyexpr: WireexprOwned {
                 body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
@@ -3537,7 +3537,7 @@ pub fn build_declare_queryable_nonlocal(
         interest_id: None,
         extensions: None,
         body: DeclareOwnedVariant::CodecZenohDeclQueryable(DeclQueryableOwned {
-            header: 0x04 | n_flag,
+            header: wire_const::D_MID_QUERYABLE | n_flag,
             id: queryable_id,
             keyexpr: WireexprOwned {
                 body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
@@ -3578,7 +3578,7 @@ pub fn build_declare_token_nonlocal(
         interest_id: None,
         extensions: None,
         body: DeclareOwnedVariant::CodecZenohDeclToken(DeclTokenOwned {
-            header: 0x06 | n_flag,
+            header: wire_const::D_MID_TOKEN | n_flag,
             id: token_id,
             keyexpr: WireexprOwned {
                 body: WireexprOwnedVariant::WireexprNonlocal(WireexprNonlocalOwned {
@@ -3616,7 +3616,7 @@ pub fn build_undeclare_kexpr(mapping_id: u64) -> DeclareOwned {
         interest_id: None,
         extensions: None,
         body: DeclareOwnedVariant::CodecZenohUndeclKexpr(UndeclKexpr {
-            header: 0x01, // _Z_UNDECL_KEXPR_MID
+            header: wire_const::D_MID_UNDECL_KEXPR,
             id: mapping_id,
         }),
     }
@@ -3651,7 +3651,7 @@ pub fn build_undeclare_subscriber(subscriber_id: u64) -> DeclareOwned {
         interest_id: None,
         extensions: None,
         body: DeclareOwnedVariant::CodecZenohUndeclSubscriber(UndeclSubscriber {
-            header: 0x03, // _Z_UNDECL_SUBSCRIBER_MID
+            header: wire_const::D_MID_UNDECL_SUBSCRIBER,
             id: subscriber_id,
         }),
     }
@@ -3677,7 +3677,7 @@ pub fn build_undeclare_queryable(queryable_id: u64) -> DeclareOwned {
         interest_id: None,
         extensions: None,
         body: DeclareOwnedVariant::CodecZenohUndeclQueryable(UndeclQueryable {
-            header: 0x05, // _Z_UNDECL_QUERYABLE_MID
+            header: wire_const::D_MID_UNDECL_QUERYABLE,
             id: queryable_id,
         }),
     }
@@ -3703,7 +3703,7 @@ pub fn build_undeclare_token(token_id: u64) -> DeclareOwned {
         interest_id: None,
         extensions: None,
         body: DeclareOwnedVariant::CodecZenohUndeclToken(UndeclToken {
-            header: 0x07, // _Z_UNDECL_TOKEN_MID
+            header: wire_const::D_MID_UNDECL_TOKEN,
             id: token_id,
         }),
     }
@@ -3731,7 +3731,7 @@ pub fn build_declare_final() -> DeclareOwned {
         interest_id: None,
         extensions: None,
         body: DeclareOwnedVariant::CodecZenohDeclFinal(DeclFinal {
-            header: 0x1A, // _Z_DECL_FINAL_MID
+            header: wire_const::D_MID_FINAL,
         }),
     }
 }

@@ -53,27 +53,13 @@ use crate::keyexpr_match::keyexpr_intersect_patterns;
 use crate::network_message::NetworkMessage;
 use crate::wireexpr_resolve::resolve_wireexpr;
 
-/// The `I` flag on the outer `Declare` header: when set, the decoder
-/// reads an `interest_id` VLE after the header (declare codec
-/// `header & 0x20` gate). Set on every interest-response declaration so
-/// zenoh-pico routes it to the matching pending liveliness query rather
-/// than treating it as an unsolicited remote-token declare.
-const DECLARE_I_FLAG: u8 = 0x20;
-/// `_Z_DECL_TOKEN_MID` (zenoh-pico declarations.h:34) — the inner
-/// declaration MID for a `DeclToken` body.
-const DECL_TOKEN_MID: u8 = 0x06;
-/// The `N` flag on a `DeclToken` body header: an inline keyexpr suffix
-/// follows. wz's own tokens always carry their literal keyexpr inline
-/// (mapping_id 0), so this is always set on an interest-response token.
-const DECL_TOKEN_N_FLAG: u8 = 0x20;
-/// `_Z_DECL_FINAL_MID` (zenoh-pico declarations.c:131) — the single-byte
-/// `DeclFinal` body marker.
-const DECL_FINAL_MID: u8 = 0x1A;
 /// Outer Interest header `C | F` mask: a non-zero result means the
 /// Interest is non-final (CURRENT and/or FUTURE), i.e. a real request
 /// rather than an `InterestFinal` terminator. Mirrors the
 /// `(header & 0x60) == 0` final test in
-/// [`crate::declare::liveliness_subscriber`].
+/// [`crate::declare::liveliness_subscriber`]. (An Interest-flag mask, not
+/// a declaration MID, so it stays local rather than in `wire_const`'s
+/// declaration-MID block.)
 const INTEREST_NOT_FINAL_MASK: u8 = 0x60;
 
 /// DECLARER-side registry of wz's own held `LivelinessToken`s.
@@ -234,11 +220,11 @@ impl LocalTokenRegistry {
 /// `build_declare_token` in wz-runtime-tokio, with the interest_id set.
 fn build_decl_token_reply(token_id: u64, keyexpr: &str, interest_id: u64) -> DeclareOwned {
     DeclareOwned {
-        header: wire_const::N_MID_DECLARE | DECLARE_I_FLAG,
+        header: wire_const::N_MID_DECLARE | wire_const::FLAG_N_DECLARE_I,
         interest_id: Some(interest_id),
         extensions: None,
         body: DeclareOwnedVariant::CodecZenohDeclToken(DeclTokenOwned {
-            header: DECL_TOKEN_MID | DECL_TOKEN_N_FLAG,
+            header: wire_const::D_MID_TOKEN | wire_const::FLAG_D_N,
             id: token_id,
             keyexpr: WireexprOwned {
                 body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
@@ -256,11 +242,11 @@ fn build_decl_token_reply(token_id: u64, keyexpr: &str, interest_id: u64) -> Dec
 /// `build_declare_final` in wz-runtime-tokio, with the interest_id set.
 fn build_decl_final_reply(interest_id: u64) -> DeclareOwned {
     DeclareOwned {
-        header: wire_const::N_MID_DECLARE | DECLARE_I_FLAG,
+        header: wire_const::N_MID_DECLARE | wire_const::FLAG_N_DECLARE_I,
         interest_id: Some(interest_id),
         extensions: None,
         body: DeclareOwnedVariant::CodecZenohDeclFinal(DeclFinal {
-            header: DECL_FINAL_MID,
+            header: wire_const::D_MID_FINAL,
         }),
     }
 }

@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-e2e-harness — shared scaffolding for the single-purpose wz-e2e-*
+# facade-subset e2e binaries (wz-e2e-pubsub / -queryable / -liveliness /
+# -liveliness-token).
+#
+# Each wz-e2e-* binary is a SEPARATE crate so it can pin EXACTLY its
+# plane's interop-coherent facade subset in its own Cargo.toml (a Cargo
+# feature subset cannot be pinned per-[[bin]]). But the ACCEPTOR
+# scaffolding every one of them runs — bind + accept one peer, open the
+# session to Established, run a plane-specific setup, drive the FSM until
+# terminal / SIGTERM, tear down — is identical. This lib holds that
+# scaffolding so the binaries carry ONLY their plane-specific setup
+# closure (publish burst / declare_queryable / declare_liveliness_
+# subscriber / declare_token), not 150 lines of copy-pasted boilerplate
+# each.
+#
+# Subset-pinning is preserved: this lib depends on `wz` with ONLY the
+# handshake-core features that ALL four binaries already pin (the
+# intersection of their subsets). Cargo feature unification then resolves
+# `wz` in each binary's build graph to (core ∪ that binary's plane), so
+# the harness adds nothing a binary did not already select — each binary
+# still composes under exactly its own minimal subset. The harness source
+# itself only uses the handshake-core API surface (accept_and_open_session
+# / Session::new / drive_session_until_terminal / the observer), never a
+# plane method, so it compiles under the core alone.
+
+[package]
+name = "wz-e2e-harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Shared acceptor scaffolding for the wz-e2e-* facade-subset e2e binaries."
+
+[dependencies]
+# The handshake-core subset that is the INTERSECTION of all wz-e2e-*
+# binaries' pinned subsets — no plane features (codec-push / query-* /
+# pubsub-* / liveliness-*). Feature unification re-adds each binary's
+# plane in that binary's build graph; this dep never widens a binary's
+# subset because every binary already pins this exact core.
+wz = { path = "../wz", default-features = false, features = [
+    "runtime-tokio",
+    "transport-unicast",
+    "transport-link-tcp",
+    "transport-keepalive",
+    "transport-batching",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "keyexpr-literal",
+    "keyexpr-canon",
+] }
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal"] }
+log = "0.4"
+env_logger = "0.11"
+
+[lints]
+workspace = true
