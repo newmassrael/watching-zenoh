@@ -107,3 +107,58 @@ impl QueryMetadata {
             && self.timeout_ms == 0
     }
 }
+
+// R311fs — QueryMetadata is_empty() tests, relocated from
+// wz-runtime-tokio::session_glue to their SSOT home (this struct lives
+// here). Dedup of the cross-crate duplicates.
+#[cfg(all(test, feature = "codec-request"))]
+mod tests {
+    use super::*;
+
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn query_metadata_default_is_empty() {
+        let meta = QueryMetadata::default();
+        assert!(meta.is_empty());
+    }
+
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn query_metadata_with_target_is_not_empty() {
+        let meta = QueryMetadata {
+            target: Some(QueryTarget::All),
+            ..Default::default()
+        };
+        assert!(!meta.is_empty());
+    }
+
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn query_metadata_with_consolidation_is_not_empty() {
+        let meta = QueryMetadata {
+            consolidation: Some(ConsolidationMode::Latest),
+            ..Default::default()
+        };
+        assert!(!meta.is_empty());
+    }
+
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn query_metadata_with_attachment_is_not_empty() {
+        let meta = QueryMetadata {
+            attachment: Some(b"q-att".to_vec()),
+            ..Default::default()
+        };
+        assert!(!meta.is_empty());
+    }
+
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn query_metadata_with_timeout_ms_nonzero_is_not_empty() {
+        let meta = QueryMetadata {
+            timeout_ms: 5_000,
+            ..Default::default()
+        };
+        assert!(!meta.is_empty());
+    }
+}
