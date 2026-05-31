@@ -118,6 +118,12 @@
 #              (FOUNDATIONAL: sole session FSM, like keyexpr-canon). The
 #              BUILD half; C1j is the BEHAVIOUR twin over the same SSOT
 #              subset list, so the two matrices cannot drift.)
+#   Layer C4d — wz-runtime-tokio arbitrary-subset CLIPPY matrix (R311fi;
+#              `cargo clippy -D warnings` over the same SSOT subsets C4c
+#              builds. Catches clippy lints that only fire in a
+#              feature-OFF arm — invisible to C2 `clippy --workspace`
+#              which runs the all-on feature union. CLIPPY third of the
+#              build/behaviour/lint runtime-crate composability triad.)
 #   Layer D  — deploy/*.yaml schema validate
 #   Layer E  — binary-dep e2e suite via `cargo test ... -- --ignored`
 #              (auto-includes every #[ignore]-marked test in the
@@ -947,6 +953,35 @@ layer_c1j_runtime_tokio_subset_behavior() {
     done < <(_wz_runtime_tokio_coherent_subsets)
 }
 
+# ─── Layer C4d — wz-runtime-tokio arbitrary-subset CLIPPY ────────────
+#
+# R311fi: the clippy twin of C4c (build) / C1j (behaviour) over the same
+# SSOT subsets. C4c's `cargo build` + workspace `deny(warnings)` catches
+# rustc warnings (dead import / unused field), but clippy lints are a
+# distinct surface that `cargo build` does NOT evaluate. The default
+# clippy lane (C2 `cargo clippy --workspace`) runs under the unified
+# all-on feature set, so a clippy lint that only fires in a feature-OFF
+# arm escapes it. R311fg/R311fh surfaced exactly that: under any
+# query-get-OFF subset the signature-stability methods Session::query /
+# query_aliased / query_aliased_auto had a `cfg(not(query-get))` arm
+# whose `return Err(FeatureDisabled)` became the function tail →
+# clippy::needless_return, invisible to C2 (query-get is ON in the
+# workspace union via wz-ap-demo). R311fi resolved those three sites to
+# tail-expression form (per feedback_signature_stability: cfg
+# tail-expr, not #[allow]) and adds this lane so the regression class
+# is guarded going forward. `cargo clippy` over each SSOT subset with
+# `-D warnings` turns any subset-specific clippy lint into a hard error.
+layer_c4d_runtime_tokio_subset_clippy() {
+    local name feats
+    while IFS=$'\t' read -r name feats; do
+        if ! (cd crates && cargo clippy -p wz-runtime-tokio --no-default-features --features "$feats" --quiet -- -D warnings); then
+            echo "  C4d FAIL: wz-runtime-tokio subset $name clippy not clean"
+            return 1
+        fi
+        echo "  C4d wz-runtime-tokio subset $name clippy OK"
+    done < <(_wz_runtime_tokio_coherent_subsets)
+}
+
 # ─── Layer D — deploy yaml schema validate ──────────────────────────
 layer_d_validate_deploy() {
     if ! python3 -c 'import yaml' >/dev/null 2>&1; then
@@ -1487,6 +1522,7 @@ run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer C4 layer_c4_preset_matrix || overall=1
 run_layer C4b layer_c4b_facade_subset_matrix || overall=1
 run_layer C4c layer_c4c_runtime_tokio_subset_matrix || overall=1
+run_layer C4d layer_c4d_runtime_tokio_subset_clippy || overall=1
 run_layer D layer_d_validate_deploy || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer E2 layer_e2_facade_subset_e2e || overall=1

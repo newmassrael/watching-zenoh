@@ -1178,7 +1178,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
         #[cfg(not(feature = "query-get"))]
         {
             let _ = (keyexpr, opts, on_reply, on_final);
-            return Err(QueryAliasError::FeatureDisabled);
+            Err(QueryAliasError::FeatureDisabled)
         }
         #[cfg(feature = "query-get")]
         {
@@ -1328,7 +1328,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                 on_reply,
                 on_final,
             );
-            return Err(QueryAliasError::FeatureDisabled);
+            Err(QueryAliasError::FeatureDisabled)
         }
         #[cfg(feature = "query-get")]
         {
@@ -1430,7 +1430,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
         #[cfg(not(feature = "query-get"))]
         {
             let _ = (mapping_id, inline_suffix, opts, on_reply, on_final);
-            return Err(QueryAliasError::FeatureDisabled);
+            Err(QueryAliasError::FeatureDisabled)
         }
         #[cfg(feature = "query-get")]
         {

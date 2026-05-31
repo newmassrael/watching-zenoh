@@ -27316,6 +27316,48 @@
         "FINDING generalisation holds: each consumer plane's foreign-interop-coherent subset can exceed its build-coherent one by a different feature; only an e2e-vs-foreign-peer guard surfaces which. Audit remaining build-coherent subsets as the wz-e2e-* family grows."
       ]
     },
+    "Round 311fi": {
+      "decision_summary": "R311fi: query-get-OFF needless_return at Session::query/query_aliased/query_aliased_auto resolved to tail-expr; new Layer C4d subset-isolated clippy guard over the C4c SSOT subsets closes the R311fg/fh clippy carry.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session::query / query_aliased / query_aliased_auto (L1178/1321/1430) — the cfg(not(feature=\"query-get\")) arm's `return Err(QueryAliasError::FeatureDisabled);` rewritten to tail-expression `Err(QueryAliasError::FeatureDisabled)`. cfg-stripping runs before typecheck so under any query-get-OFF subset the arm is the function-body tail (no needless_return); under query-get ON the arm is cfg-elided and the real impl block stays the tail (unchanged). Per feedback_signature_stability: cfg tail-expr, not #[allow].",
+        "scripts/run-ci.sh: new Layer C4d (layer_c4d_runtime_tokio_subset_clippy) runs `cargo clippy -p wz-runtime-tokio --no-default-features --features <subset> -- -D warnings` over the same _wz_runtime_tokio_coherent_subsets SSOT helper that C4c (build) and C1j (behaviour) consume — the CLIPPY third of the build/behaviour/lint runtime-crate composability triad. Header layer-list doc + run_layer dispatch updated."
+      ],
+      "verification_bullets": [
+        "BEFORE: `cargo clippy -p wz-e2e-queryable -- -D warnings` (compiles wz-runtime-tokio under the query-get-OFF queryable subset) failed with clippy::needless_return at session.rs:1181/1331/1433. AFTER the tail-expr fix: Layer C4d clippy-clean over all 5 SSOT subsets (handshake-only / pubsub-only / queryable-only / zget-reply-only / declare-observer).",
+        "query-get-ON path intact: cargo build -p wz-runtime-tokio (default) clean; full run-ci Layer C2 (clippy --workspace, all-on feature union) clean — the tail-expr change is invisible to the ON config (OFF arm cfg-elided, real impl block stays the body tail).",
+        "full scripts/run-ci.sh EXIT 0 with the new Layer C4d included (all required lanes pass) + Layer G 7-MCU cross-compile OK (G.6 riscv SKIP env-only). No workspace-doc mutation beyond this changelog entry."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "R311fg/R311fh's subset-isolated-clippy follow-up carry is now CLOSED: the three query-get-OFF signature-stability sites (Session::query / query_aliased / query_aliased_auto) are resolved to tail-expr and the regression class is permanently guarded by Layer C4d over the wz-runtime-tokio SSOT subsets.",
+        "Scope note: C4d guards wz-runtime-tokio only. The wz facade (C4b) and wz-session-core (C1h) subset matrices remain BUILD-only; a clippy twin for those is a future extension if a facade/session-core feature-OFF clippy lint ever surfaces (none currently known).",
+        "Next sibling unchanged: wz-e2e-liveliness (3rd facade-subset e2e, declare/liveliness plane) vs zenoh-pico z_liveliness_*. Open decision (R311fg/fh) unchanged: whether the C4b BUILD subsets should list their interop-only deltas (transport-batching for pubsub, codec-response-final for queryable) or stay build-coherent with the e2e binaries pinning the interop superset."
+      ],
+      "publishable_decision_summary": "R311fi: query-get-OFF needless_return at Session::query/query_aliased/query_aliased_auto resolved to tail-expr; new Layer C4d subset-isolated clippy guard over the C4c SSOT subsets closes the R311fg/fh clippy carry.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session.rs: Session::query / query_aliased / query_aliased_auto (L1178/1321/1430) — the cfg(not(feature=\"query-get\")) arm's `return Err(QueryAliasError::FeatureDisabled);` rewritten to tail-expression `Err(QueryAliasError::FeatureDisabled)`. cfg-stripping runs before typecheck so under any query-get-OFF subset the arm is the function-body tail (no needless_return); under query-get ON the arm is cfg-elided and the real impl block stays the tail (unchanged). Per feedback_signature_stability: cfg tail-expr, not #[allow].",
+        "scripts/run-ci.sh: new Layer C4d (layer_c4d_runtime_tokio_subset_clippy) runs `cargo clippy -p wz-runtime-tokio --no-default-features --features <subset> -- -D warnings` over the same _wz_runtime_tokio_coherent_subsets SSOT helper that C4c (build) and C1j (behaviour) consume — the CLIPPY third of the build/behaviour/lint runtime-crate composability triad. Header layer-list doc + run_layer dispatch updated."
+      ],
+      "publishable_verification_bullets": [
+        "BEFORE: `cargo clippy -p wz-e2e-queryable -- -D warnings` (compiles wz-runtime-tokio under the query-get-OFF queryable subset) failed with clippy::needless_return at session.rs:1181/1331/1433. AFTER the tail-expr fix: Layer C4d clippy-clean over all 5 SSOT subsets (handshake-only / pubsub-only / queryable-only / zget-reply-only / declare-observer).",
+        "query-get-ON path intact: cargo build -p wz-runtime-tokio (default) clean; full run-ci Layer C2 (clippy --workspace, all-on feature union) clean — the tail-expr change is invisible to the ON config (OFF arm cfg-elided, real impl block stays the body tail).",
+        "full scripts/run-ci.sh EXIT 0 with the new Layer C4d included (all required lanes pass) + Layer G 7-MCU cross-compile OK (G.6 riscv SKIP env-only). No workspace-doc mutation beyond this changelog entry."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311fg/R311fh's subset-isolated-clippy follow-up carry is now CLOSED: the three query-get-OFF signature-stability sites (Session::query / query_aliased / query_aliased_auto) are resolved to tail-expr and the regression class is permanently guarded by Layer C4d over the wz-runtime-tokio SSOT subsets.",
+        "Scope note: C4d guards wz-runtime-tokio only. The wz facade (C4b) and wz-session-core (C1h) subset matrices remain BUILD-only; a clippy twin for those is a future extension if a facade/session-core feature-OFF clippy lint ever surfaces (none currently known).",
+        "Next sibling unchanged: wz-e2e-liveliness (3rd facade-subset e2e, declare/liveliness plane) vs zenoh-pico z_liveliness_*. Open decision (R311fg/fh) unchanged: whether the C4b BUILD subsets should list their interop-only deltas (transport-batching for pubsub, codec-response-final for queryable) or stay build-coherent with the e2e binaries pinning the interop superset."
+      ]
+    },
     "Round 311g": {
       "decision_summary": "R311g send_close_with_reason signature stability + codec-frame envelope inbound cascade — Frame decode gated, +27.7KB elision; ap-demo codec-close mirror retired.",
       "changes_bullets": [
