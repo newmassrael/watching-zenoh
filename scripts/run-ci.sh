@@ -854,6 +854,48 @@ layer_c4_preset_matrix() {
     done
 }
 
+# ─── consumer-plane subset SSOT (R311fp) ────────────────────────────
+#
+# The SINGLE canonical plane->extras map. Each row is one deliberately-
+# incomplete coherent consumer plane (the features layered on a handshake
+# core to select ONE plane). Every arbitrary-subset lane consumes this
+# one map, each prepending its own crate-appropriate base:
+#   * C4b  — wz facade BUILD            (facade base + plane)
+#   * C4c  — wz-runtime-tokio BUILD     (crate base + plane)
+#   * C1j  — wz-runtime-tokio BEHAVIOUR (crate base + plane)
+#   * C4d  — wz-runtime-tokio CLIPPY    (crate base + plane)
+# Before R311fp the facade matrix (C4b) carried its OWN copy of the 4
+# overlapping plane strings while C4c/C1j/C4d shared a second copy — two
+# sources of truth for "what is a pubsub-only / queryable-only plane",
+# free to drift. This is the SSOT they now both consume.
+#
+# R311fp naming ruling — "queryable-only" build = the FULL queryable
+# plane (codec-response-final INCLUDED), consistent with declare-observer
+# already being its full bundle. Previously the build matrices listed
+# query-reply-err but NOT codec-response-final, while wz-e2e-queryable
+# (interop) pinned the reverse — one name, two feature sets. Now build
+# extras superset interop extras for EVERY plane, so the sole
+# build-vs-interop delta is transport-batching: a uniform transport/base
+# feature (R311fg foreign handshake), NOT a per-plane one. That collapses
+# the 3 historical deltas (transport-batching R311fg, codec-response-final
+# R311fh, query-reply R311fm) into ONE uniform base delta, carried by
+# Layer E2's wz-e2e-* binaries (which add transport-batching + tcp). It
+# also closes the R311fh gap at the BUILD layer: the queryable build now
+# includes the terminating Final.
+#
+# handshake-only = empty extras (bare session core, no consumer plane).
+# transport-unicast / keyexpr-canon are FOUNDATIONAL and live in each
+# lane's base, not here (a subset that drops them does not type-check).
+_wz_consumer_plane_subsets() {
+    printf '%s\t%s\n' "handshake-only"        ""
+    printf '%s\t%s\n' "pubsub-only"           "codec-push,pubsub-put,pubsub-delete"
+    printf '%s\t%s\n' "queryable-only"        "codec-request,codec-response,codec-response-final,query-queryable,query-reply-err"
+    printf '%s\t%s\n' "zget-reply-only"       "codec-response,codec-response-final,query-get,query-reply"
+    printf '%s\t%s\n' "liveliness-sub-only"   "codec-declare,declare-interest,liveliness-subscriber"
+    printf '%s\t%s\n' "liveliness-token-only" "liveliness-token"
+    printf '%s\t%s\n' "declare-observer"      "codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber"
+}
+
 # ─── Layer C4b — wz facade arbitrary-incomplete-subset matrix ────────
 #
 # R311ek: C4 builds the 7 named presets, each a COMPLETE coherent
@@ -871,58 +913,68 @@ layer_c4_preset_matrix() {
 # any over-broad import / dead-field / unused-type-param in the
 # runtime-tokio glue into a hard error. Host typecheck only; the no_std
 # footing stays Layer G's job.
+#
+# R311fp ruling — C4b stays BUILD-minimal; it does NOT pin interop
+# supersets. R311fo asked whether C4b should layer the interop deltas
+# (transport-batching / codec-response-final / query-reply) into its
+# subsets. Ruling: NO. C4b and Layer E2 are different guards. C4b's value
+# is testing the MINIMAL incomplete shape (a smaller feature set is a
+# STRONGER over-broad-import guard); pinning a superset would (1) stop
+# exercising the superset-OFF facade build two wz peers legitimately use
+# (transport-batching OFF → both force 65535), (2) duplicate the build
+# each wz-e2e-* binary already performs under its interop superset
+# (Layer E2), and (3) erase the build-vs-interop distinction that is the
+# reason Layer E2 exists. Interop supersets live with the wz-e2e-* binaries
+# + Layer E2; the per-plane deltas were since collapsed to the single
+# uniform transport-batching delta (see the SSOT block above). This closes
+# the C4b-ruling carry.
+#
+# R311fp SSOT — C4b consumes _wz_consumer_plane_subsets (the one plane map
+# shared with C4c/C1j/C4d) instead of its own copy. It prepends the FACADE
+# base, which differs from the crate base by exactly `runtime-tokio` (the
+# facade must SELECT a runtime; the crate IS one) plus the facade-only
+# forwarding markers `keyexpr-literal` / `transport-keepalive`. Link is
+# transport-link-tcp, matching the crate base + every wz-e2e-* binary
+# (the prior transport-link-udp here was unexplained drift, not a UDP
+# requirement — the facade builds identically on either link feature).
+# handshake-only (empty extras) is now build-guarded at the facade too.
 layer_c4b_facade_subset_matrix() {
-    local base="runtime-tokio,transport-unicast,transport-link-udp,transport-keepalive,session-unicast-open,session-unicast-accept,codec-frame,codec-keep-alive,codec-init-body,codec-open-body,codec-close,keyexpr-literal,keyexpr-canon"
-    # name : extra consumer-plane features layered on $base
-    local subsets=(
-        "pubsub-only:codec-push,pubsub-put,pubsub-delete"
-        "queryable-only:codec-request,codec-response,query-queryable,query-reply-err"
-        "zget-reply-only:codec-response,codec-response-final,query-get,query-reply"
-        "declare-observer:codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber"
-    )
-    local entry name extra
-    for entry in "${subsets[@]}"; do
-        name="${entry%%:*}"
-        extra="${entry#*:}"
-        if ! (cd crates && cargo build -p wz --no-default-features --features "$base,$extra" --quiet); then
+    local base="runtime-tokio,transport-unicast,transport-link-tcp,transport-keepalive,session-unicast-open,session-unicast-accept,codec-frame,codec-keep-alive,codec-init-body,codec-open-body,codec-close,keyexpr-literal,keyexpr-canon"
+    local name extra feats
+    while IFS=$'\t' read -r name extra; do
+        feats="$base${extra:+,$extra}"
+        if ! (cd crates && cargo build -p wz --no-default-features --features "$feats" --quiet); then
             echo "  C4b FAIL: wz facade subset $name did not build"
             return 1
         fi
         echo "  C4b wz subset $name OK"
-    done
+    done < <(_wz_consumer_plane_subsets)
 }
 
-# ─── wz-runtime-tokio coherent-subset SSOT ──────────────────────────
+# ─── wz-runtime-tokio coherent-subset wrapper ───────────────────────
 #
-# R311ff: the single canonical list of deliberately-incomplete but
-# coherent wz-runtime-tokio feature subsets. Consumed by BOTH the
-# build-composability guard (C4c, `cargo build`) and the behavioural
-# guard (C1j, `cargo test`) so the two matrices can never drift apart —
-# every subset that is build-guarded is also behaviour-guarded, and vice
-# versa. Each emitted line is `name<TAB>full-feature-string`.
+# R311ff introduced this as the SSOT for C4c/C1j/C4d. R311fp lifted the
+# plane->extras map up to _wz_consumer_plane_subsets (now shared with the
+# facade lane C4b too); this is the thin crate-base wrapper that prepends
+# the wz-runtime-tokio base to each shared plane row. Consumed by the
+# build (C4c), behaviour (C1j) and clippy (C4d) guards so all three can
+# never drift from each other OR from the facade lane. Each emitted line
+# is `name<TAB>full-feature-string`.
 #
 # transport-unicast is pinned ON in every subset: it is FOUNDATIONAL
 # (the sole session FSM; transport-multicast stays reserved with no
 # consumer), so a transport-unicast-OFF subset does not type-check and
 # is not a coherent shape to guard — same status as keyexpr-canon. The
-# subsets guard the composability that IS real: each consumer plane
-# (pubsub / queryable / zget-reply / liveliness-sub / liveliness-token /
-# declare-observer) layered on the handshake core, plus the bare
-# handshake-only core itself. liveliness-sub-only is the narrow
-# single-plane liveliness SUBSCRIBER (declare-interest + codec-declare),
-# liveliness-token-only the narrow single-plane liveliness DECLARER (the
-# R283 inbound-Interest responder) — both distinct from the broader
-# declare-observer bundle. They guard that each liveliness side composes
-# in ISOLATION (the wz-e2e-liveliness / wz-e2e-liveliness-token subsets).
+# crate base differs from the facade base (C4b) by exactly `runtime-tokio`
+# (the facade selects a runtime; this crate IS one) and the facade-only
+# forwarding markers keyexpr-literal / transport-keepalive — the plane
+# extras are identical because they come from the shared map.
 _wz_runtime_tokio_coherent_subsets() {
     local base="transport-unicast,transport-link-tcp,session-unicast-open,session-unicast-accept,codec-frame,codec-keep-alive,codec-init-body,codec-open-body,codec-close,keyexpr-canon"
-    printf '%s\t%s\n' "handshake-only"   "$base"
-    printf '%s\t%s\n' "pubsub-only"      "$base,codec-push,pubsub-put,pubsub-delete"
-    printf '%s\t%s\n' "queryable-only"   "$base,codec-request,codec-response,query-queryable,query-reply-err"
-    printf '%s\t%s\n' "zget-reply-only"  "$base,codec-response,codec-response-final,query-get,query-reply"
-    printf '%s\t%s\n' "liveliness-sub-only" "$base,codec-declare,declare-interest,liveliness-subscriber"
-    printf '%s\t%s\n' "liveliness-token-only" "$base,liveliness-token"
-    printf '%s\t%s\n' "declare-observer" "$base,codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber"
+    local name extra
+    while IFS=$'\t' read -r name extra; do
+        printf '%s\t%s\n' "$name" "$base${extra:+,$extra}"
+    done < <(_wz_consumer_plane_subsets)
 }
 
 # ─── Layer C4c — wz-runtime-tokio arbitrary-subset BUILD composability ─
