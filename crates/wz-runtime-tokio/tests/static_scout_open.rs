@@ -31,7 +31,9 @@ use std::sync::Arc;
 use sce_rust_lua::LuaEngine;
 use sce_rust_runtime::scripting::IScriptEngine;
 use sce_rust_runtime::Engine;
-use tokio::net::{TcpListener, UdpSocket};
+use tokio::net::TcpListener;
+#[cfg(feature = "transport-link-udp")]
+use tokio::net::UdpSocket;
 
 use wz_runtime_tokio::link_pipeline::wire_tcp_stream;
 use wz_runtime_tokio::runtime_impl::{TokioJoinHandle, TokioTime};
@@ -43,6 +45,7 @@ use wz_runtime_tokio::session_glue::{
 use wz_runtime_tokio::session_open::{
     open_session_at, open_session_static, OpenError, DEFAULT_OPEN_TICK_MS,
 };
+#[cfg(feature = "transport-link-udp")]
 use wz_runtime_tokio::udp_pipeline::wire_udp_socket;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 
@@ -125,6 +128,7 @@ async fn open_session_at_tcp_reaches_established() {
 /// datagram's source via `peek_from` (MSG_PEEK leaves the datagram queued, so
 /// the first `poll_event` re-reads it). Then it wires the socket and drives
 /// the InboundStart handshake to Established, mirroring the TCP acceptor.
+#[cfg(feature = "transport-link-udp")]
 async fn drive_udp_acceptor_to_established(socket: UdpSocket) -> (u32, TokioJoinHandle<()>) {
     let mut probe = [0u8; 64];
     let (_n, src) = socket
@@ -166,6 +170,7 @@ async fn drive_udp_acceptor_to_established(socket: UdpSocket) -> (u32, TokioJoin
     )
 }
 
+#[cfg(feature = "transport-link-udp")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn open_session_at_udp_reaches_established() {
     // R311ez — a `udp/...` locator opens a datagram session the same way a

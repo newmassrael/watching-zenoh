@@ -416,6 +416,7 @@ async fn r83_observer_reads_framepayload_messages_through_reference() {
 //        its filter. End-to-end coverage of the AP MVP path:
 //          link bytes → parse_inbound → Frame → parse_frame_payload
 //          → NetworkMessage::Push → SubscriberRegistry → callback.
+#[cfg(feature = "codec-push")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r99_subscriber_registry_routes_framepayload_push_to_callback() {
     use std::sync::atomic::{AtomicUsize, Ordering};

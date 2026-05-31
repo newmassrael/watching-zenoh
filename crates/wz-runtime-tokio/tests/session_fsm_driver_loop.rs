@@ -29,8 +29,15 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{
-    poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome, NetworkMessage, SessionLinkActions,
+    poll_and_dispatch_one, BoxedLinkDriver, DriverLoopOutcome, SessionLinkActions,
 };
+// `NetworkMessage` is referenced only by the two codec-decode tests
+// below: `r74_rx_frame_unknown_network_mid_absorbs_as_unknown`
+// (all five typed-codec features) and
+// `r90_rx_frame_push_payload_decodes_via_push_codec` (codec-push).
+// Both require codec-push, so this import follows codec-push.
+#[cfg(feature = "codec-push")]
+use wz_runtime_tokio::session_glue::NetworkMessage;
 use wz_runtime_tokio::{LinkDriver, LinkEvent, LostCause, Reliability, RxFrame, TxFrame};
 use wz_runtime_tokio_test_support::{
     fixture_session_init_params, install_session_actions_for_test,
@@ -275,6 +282,13 @@ async fn r74_rx_frame_with_empty_payload_surfaces_framepayload() {
 
 // ── R74 Scenario B: Rx(Frame) with payload carrying a single
 //                    Unknown MID → FramePayload with Unknown record
+#[cfg(all(
+    feature = "codec-request",
+    feature = "codec-push",
+    feature = "codec-response-final",
+    feature = "codec-response",
+    feature = "codec-declare"
+))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
     let (actions, mut engine) = fresh_setup();
@@ -326,6 +340,7 @@ async fn r74_rx_frame_unknown_network_mid_absorbs_as_unknown() {
 
 // ── R90 Scenario: Rx(Frame) with PUSH payload → FramePayload
 //                  containing Push variant decoded via wz_codecs::push
+#[cfg(feature = "codec-push")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r90_rx_frame_push_payload_decodes_via_push_codec() {
     use wz_codecs::push::Push;
@@ -375,6 +390,10 @@ async fn r90_rx_frame_push_payload_decodes_via_push_codec() {
 
 // ── R74 Scenario C: Rx(Frame) with malformed payload (Request MID
 //                    but truncated body) → ParseError + FramingError
+// R311fr — surfaces a ParseError only when the Request codec rejects the
+// truncated body; with codec-request off the MID decodes as Unknown and
+// no ParseError is raised. Gate on codec-request.
+#[cfg(feature = "codec-request")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn r74_rx_frame_malformed_request_payload_surfaces_parse_error() {
     let (actions, mut engine) = fresh_setup();

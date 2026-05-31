@@ -3849,6 +3849,7 @@ fn build_loopback_sample(keyexpr: &str, payload: &[u8], opts: &PublishOptions) -
 mod tests {
     use super::*;
     use crate::observer::ApplicationLayerObserver;
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     use crate::reply::InboundReplyBody;
     use crate::runtime_impl::TokioTime;
     use crate::session_glue::{BoxedLinkDriver, SessionInitParams, SigningKey};
@@ -3891,6 +3892,7 @@ mod tests {
             self.frames.lock().unwrap().len()
         }
 
+        #[cfg(any(feature = "codec-push", feature = "liveliness-token"))]
         fn frame_reliability(&self, idx: usize) -> Reliability {
             self.frames.lock().unwrap()[idx].1
         }
@@ -3963,6 +3965,7 @@ mod tests {
         assert_eq!(opts.kind, SampleKind::Del);
     }
 
+    #[cfg(all(feature = "codec-push", feature = "pubsub-allow-loop"))]
     #[test]
     fn publish_locality_any_fires_wire_and_loopback() {
         let (session, driver) = build_session();
@@ -3987,6 +3990,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn publish_locality_remote_fires_wire_only() {
         let (session, driver) = build_session();
@@ -4015,6 +4019,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_locality_session_local_fires_loopback_only() {
         let (session, driver) = build_session();
@@ -4040,6 +4045,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_loopback_sample_carries_options_reliability_and_kind() {
         let (session, _driver) = build_session();
@@ -4070,6 +4076,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_del_kind_routes_to_del_loopback_with_empty_payload() {
         let (session, _driver) = build_session();
@@ -4094,6 +4101,7 @@ mod tests {
         assert!(payload.is_empty(), "Del Sample carries no payload");
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn publish_reliability_propagates_to_wire_frame_flag() {
         let (session, driver) = build_session();
@@ -4150,6 +4158,7 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 0);
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_returns_multi_subscriber_fired_count() {
         let (session, _driver) = build_session();
@@ -4185,6 +4194,7 @@ mod tests {
         assert_eq!(hits_b.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_locality_session_local_skips_remote_subscribers() {
         // Mixed locality on the same keyexpr — Session::publish with
@@ -4248,6 +4258,7 @@ mod tests {
 
     // ── R229 publish_aliased (mapping-id keyexpr) ──
 
+    #[cfg(all(feature = "codec-push", feature = "pubsub-allow-loop"))]
     #[test]
     fn publish_aliased_locality_any_fires_wire_and_loopback() {
         let (session, driver) = build_session();
@@ -4276,6 +4287,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn publish_aliased_locality_remote_fires_wire_only() {
         let (session, driver) = build_session();
@@ -4297,6 +4309,7 @@ mod tests {
         assert_eq!(driver.frame_count(), 1);
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_aliased_locality_session_local_fires_loopback_only() {
         let (session, driver) = build_session();
@@ -4322,6 +4335,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "codec-push", feature = "pubsub-allow-loop"))]
     #[test]
     fn publish_aliased_del_kind_routes_to_del_aliased_with_empty_payload() {
         let (session, driver) = build_session();
@@ -4347,6 +4361,7 @@ mod tests {
         assert_eq!(driver.frame_count(), 1, "send_push_del_aliased fired once");
     }
 
+    #[cfg(all(feature = "codec-push", feature = "pubsub-allow-loop"))]
     #[test]
     fn publish_aliased_reliability_propagates_to_wire_and_sample() {
         let (session, driver) = build_session();
@@ -4377,6 +4392,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "codec-push", feature = "pubsub-allow-loop"))]
     #[test]
     fn publish_aliased_inline_suffix_passes_through_to_wire() {
         // The wire builder appends the inline suffix to the
@@ -4423,6 +4439,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_aliased_loopback_independent_of_wire_keyexpr_form() {
         // Pathological-but-instructive contract assertion: the
@@ -4455,6 +4472,7 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_aliased_mixed_locality_isolation_matches_publish_literal() {
         // Symmetric to publish_locality_session_local_skips_remote_subscribers:
@@ -4732,6 +4750,7 @@ mod tests {
         assert_eq!(opts.qos.unwrap().raw, 0b0001_1010);
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_loopback_propagates_timestamp_to_sample() {
         let (session, _driver) = build_session();
@@ -4752,6 +4771,7 @@ mod tests {
         assert_eq!(ts.zid, vec![1, 2, 3]);
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_loopback_propagates_encoding_to_put_sample() {
         let (session, _driver) = build_session();
@@ -4771,6 +4791,7 @@ mod tests {
         assert_eq!(enc.schema.as_deref(), Some("text/plain"));
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_loopback_omits_encoding_for_del_kind_even_when_opts_supplied() {
         // Mirror zenoh-pico's wire constraint: _z_msg_del_t has no
@@ -4797,6 +4818,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_loopback_propagates_source_info_to_sample() {
         let (session, _driver) = build_session();
@@ -4816,6 +4838,7 @@ mod tests {
         assert_eq!(got.sn, 42);
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_loopback_propagates_attachment_to_sample() {
         let (session, _driver) = build_session();
@@ -4830,6 +4853,7 @@ mod tests {
         assert_eq!(s[0].attachment.as_deref(), Some(&b"attach-payload"[..]));
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_loopback_propagates_qos_to_sample() {
         let (session, _driver) = build_session();
@@ -4848,6 +4872,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_loopback_propagates_all_metadata_in_one_chain() {
         // Composition: every R232 metadata field set together must
@@ -4888,6 +4913,12 @@ mod tests {
 
     // ── R234 publish_aliased_auto (outbound mapping table) ──
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "codec-push",
+        feature = "declare-keyexpr",
+        feature = "pubsub-allow-loop"
+    ))]
     #[test]
     fn publish_aliased_auto_resolves_loopback_from_outbound_table() {
         let (session, driver) = build_session();
@@ -4914,6 +4945,12 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "codec-push",
+        feature = "declare-keyexpr",
+        feature = "pubsub-allow-loop"
+    ))]
     #[test]
     fn publish_aliased_auto_composes_inline_suffix_with_table_base() {
         // Composition rule: declared prefix + inline_suffix forms the
@@ -4959,6 +4996,13 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "codec-push",
+        feature = "declare-keyexpr",
+        feature = "declare-undeclare",
+        feature = "pubsub-allow-loop"
+    ))]
     #[test]
     fn publish_aliased_auto_returns_unknown_mapping_after_undeclare() {
         // The error path fires whether the id was never declared OR
@@ -5001,6 +5045,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_aliased_loopback_propagates_metadata_to_sample() {
         // Parity check: publish_aliased's loopback branch shares the
@@ -5049,6 +5094,13 @@ mod tests {
         assert_eq!(get.consolidation, dflt.consolidation);
     }
 
+    #[cfg(all(
+        feature = "query-attachment",
+        feature = "query-consolidation",
+        feature = "query-get",
+        feature = "query-target",
+        feature = "query-timeout"
+    ))]
     #[test]
     fn query_options_with_setters_chain() {
         let opts = QueryOptions::get()
@@ -5066,6 +5118,7 @@ mod tests {
         assert_eq!(opts.timeout_ms, 5_000);
     }
 
+    #[cfg(feature = "query-get")]
     #[test]
     fn query_options_expected_finals_matches_locality() {
         assert_eq!(
@@ -5091,6 +5144,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     #[test]
     fn query_locality_session_local_fires_loopback_only_and_completes_inline() {
         let (session, driver) = build_session();
@@ -5160,6 +5214,7 @@ mod tests {
     /// binary (Layer E2, 0 query-queryable nodes) — a query-queryable-
     /// OFF UNIT run is blocked until the test-support dev-dep stops
     /// force-enabling default features (the C1j isolation carry).
+    #[cfg(feature = "query-get")]
     #[test]
     fn query_session_local_with_no_queryable_finalises_inline_with_zero_replies() {
         let (session, driver) = build_session();
@@ -5201,6 +5256,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     #[test]
     fn query_locality_remote_fires_wire_only_and_keeps_pending_until_wire_final() {
         let (session, driver) = build_session();
@@ -5254,6 +5310,11 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-response-final",
+        feature = "query-get",
+        feature = "query-queryable"
+    ))]
     #[test]
     fn query_locality_any_fires_both_branches_and_waits_for_wire_final() {
         let (session, driver) = build_session();
@@ -5328,6 +5389,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "query-get")]
     #[test]
     fn query_handle_carries_rid_zero_for_first_call_then_monotonic() {
         let (session, _driver) = build_session();
@@ -5355,6 +5417,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     #[test]
     fn query_loopback_propagates_del_body() {
         let (session, _driver) = build_session();
@@ -5390,6 +5453,11 @@ mod tests {
         assert_eq!(got.keyexpr_literal, "clear/me");
     }
 
+    #[cfg(all(
+        feature = "query-get",
+        feature = "query-queryable",
+        feature = "query-reply-err"
+    ))]
     #[test]
     fn query_loopback_propagates_err_body_with_encoding_tuple() {
         let (session, _driver) = build_session();
@@ -5431,6 +5499,7 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     #[test]
     fn query_with_no_matching_queryable_completes_loopback_with_zero_replies() {
         let (session, _driver) = build_session();
@@ -5473,6 +5542,7 @@ mod tests {
         assert!(session.observer().lock().unwrap().replies.is_empty());
     }
 
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     #[test]
     fn query_session_local_skips_remote_only_queryable() {
         // A Locality::Remote-only queryable must NOT fire on a
@@ -5521,6 +5591,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     #[test]
     fn query_session_local_with_session_local_queryable_fires() {
         // SessionLocal queryable on SessionLocal query: both
@@ -5556,6 +5627,7 @@ mod tests {
         assert_eq!(reply_count.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     #[test]
     fn query_locality_remote_alone_skips_local_queryable() {
         // A local Locality::Any queryable does fire on its own
@@ -5608,6 +5680,13 @@ mod tests {
 
     // ── R240 wire-side QueryOptions propagation ──
 
+    #[cfg(all(
+        feature = "query-attachment",
+        feature = "query-consolidation",
+        feature = "query-get",
+        feature = "query-target",
+        feature = "query-timeout"
+    ))]
     #[test]
     fn query_options_query_metadata_extracts_wire_fields() {
         // R240 — QueryOptions::query_metadata must surface the
@@ -5633,6 +5712,7 @@ mod tests {
         assert_eq!(meta.timeout_ms, 5_000);
     }
 
+    #[cfg(feature = "query-get")]
     #[test]
     fn query_options_default_query_metadata_is_empty() {
         let meta = QueryOptions::default().query_metadata();
@@ -5642,6 +5722,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "query-get")]
     #[test]
     fn query_wire_branch_with_empty_meta_emits_no_meta_fast_path_frame() {
         // Session::query with default options (Locality::Any, no
@@ -5678,6 +5759,11 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-request",
+        feature = "query-get",
+        feature = "query-target"
+    ))]
     #[test]
     fn query_wire_branch_with_target_threads_target_through_with_meta() {
         // QueryOptions::with_target lands on the outbound Request via
@@ -5715,6 +5801,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "query-get")]
     #[test]
     fn query_wire_branch_with_attachment_threads_attachment_through_with_meta() {
         let (session, driver) = build_session();
@@ -5744,6 +5831,11 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-request",
+        feature = "query-consolidation",
+        feature = "query-get"
+    ))]
     #[test]
     fn query_wire_branch_with_consolidation_threads_consolidation_through_with_meta() {
         let (session, driver) = build_session();
@@ -5778,6 +5870,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "query-get")]
     #[test]
     fn query_session_local_with_any_metadata_skips_wire_branch_entirely() {
         // R240 invariance: even with non-empty QueryMetadata, a
@@ -5806,6 +5899,7 @@ mod tests {
 
     // ── R241 query_aliased + query_aliased_auto ──
 
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     #[test]
     fn query_aliased_locality_session_local_fires_loopback_only() {
         let (session, driver) = build_session();
@@ -5843,6 +5937,7 @@ mod tests {
         assert_eq!(driver.frame_count(), 0, "SessionLocal skips wire");
     }
 
+    #[cfg(feature = "query-get")]
     #[test]
     fn query_aliased_locality_remote_fires_wire_with_mapping_id() {
         let (session, driver) = build_session();
@@ -5875,6 +5970,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     #[test]
     fn query_aliased_locality_any_fires_both_branches() {
         let (session, driver) = build_session();
@@ -5916,6 +6012,7 @@ mod tests {
         assert_eq!(driver.frame_count(), 1, "wire branch also fires");
     }
 
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     #[test]
     fn query_aliased_inline_suffix_passes_through_to_wire_and_loopback() {
         let (session, driver) = build_session();
@@ -5957,6 +6054,12 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "query-get",
+        feature = "query-queryable"
+    ))]
     #[test]
     fn query_aliased_auto_resolves_loopback_from_outbound_mapping_table() {
         let (session, driver) = build_session();
@@ -5999,6 +6102,7 @@ mod tests {
         assert_eq!(driver.frame_count(), 2);
     }
 
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     #[test]
     fn query_aliased_auto_unknown_mapping_returns_err_and_skips_both_branches() {
         let (session, driver) = build_session();
@@ -6023,6 +6127,12 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "query-get",
+        feature = "query-queryable"
+    ))]
     #[test]
     fn query_aliased_auto_with_inline_suffix_concatenates_for_loopback() {
         let (session, _driver) = build_session();
@@ -6060,6 +6170,7 @@ mod tests {
         assert_eq!(got.keyexpr_literal, "home/temp/kitchen");
     }
 
+    #[cfg(feature = "query-get")]
     #[test]
     fn query_aliased_with_meta_threads_attachment_through_wire() {
         let (session, driver) = build_session();
@@ -6135,6 +6246,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     #[test]
     fn querier_get_fires_loopback_through_session_query_session_local() {
         let (session, driver) = build_session();
@@ -6172,6 +6284,7 @@ mod tests {
         assert_eq!(driver.frame_count(), 0, "SessionLocal skips wire");
     }
 
+    #[cfg(feature = "query-get")]
     #[test]
     fn querier_get_called_twice_allocates_independent_rids() {
         let (session, _driver) = build_session();
@@ -6198,6 +6311,11 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-request",
+        feature = "query-get",
+        feature = "query-target"
+    ))]
     #[test]
     fn querier_get_threads_target_option_into_wire() {
         // Single-knob verification: declare with target=All, observe
@@ -6233,6 +6351,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "query-get")]
     #[test]
     fn querier_clone_shares_session_and_options() {
         let (session, _driver) = build_session();
@@ -6266,6 +6385,7 @@ mod tests {
     /// record builders (those return the unwrapped `DeclQueryable`
     /// and take a separate `mapping_id`), so the 1-arg wrapper stays
     /// inline here rather than threading the lower-level builders.
+    #[cfg(feature = "declare-queryable")]
     fn make_decl_queryable(
         id: u64,
         keyexpr_literal: &str,
@@ -6291,6 +6411,7 @@ mod tests {
         .into_owned()
     }
 
+    #[cfg(feature = "declare-queryable")]
     fn make_undecl_queryable(id: u64) -> wz_codecs::declare::DeclareOwnedVariant {
         use wz_codecs::undecl_queryable::UndeclQueryable;
         wz_codecs::declare::DeclareVariant::CodecZenohUndeclQueryable(UndeclQueryable {
@@ -6311,6 +6432,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "declare-queryable")]
     #[test]
     fn querier_get_matching_status_true_after_peer_decl_with_matching_keyexpr() {
         use hashbrown::HashMap;
@@ -6332,6 +6454,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "declare-queryable")]
     #[test]
     fn querier_get_matching_status_true_when_peer_pattern_covers_querier_literal() {
         use hashbrown::HashMap;
@@ -6350,6 +6473,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "declare-queryable")]
     #[test]
     fn querier_get_matching_status_true_when_querier_pattern_covers_peer_literal() {
         use hashbrown::HashMap;
@@ -6368,6 +6492,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "declare-queryable")]
     #[test]
     fn querier_get_matching_status_false_after_peer_undeclare() {
         use hashbrown::HashMap;
@@ -6397,6 +6522,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "declare-queryable")]
     #[test]
     fn querier_get_matching_status_false_with_non_matching_peer_keyexpr() {
         use hashbrown::HashMap;
@@ -6415,6 +6541,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "declare-queryable")]
     #[test]
     fn querier_get_matching_status_true_when_any_of_many_peer_decls_matches() {
         use hashbrown::HashMap;
@@ -6436,6 +6563,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "declare-queryable")]
     #[test]
     fn querier_clone_shares_matching_status_view() {
         use hashbrown::HashMap;
@@ -6490,6 +6618,12 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "query-get",
+        feature = "query-queryable"
+    ))]
     #[test]
     fn querier_aliased_get_resolves_loopback_through_outbound_mapping_table() {
         let (session, driver) = build_session();
@@ -6533,6 +6667,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     #[test]
     fn querier_aliased_get_unknown_mapping_returns_err_and_skips_both_branches() {
         let (session, driver) = build_session();
@@ -6554,6 +6689,12 @@ mod tests {
         assert_eq!(driver.frame_count(), 0);
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "query-get",
+        feature = "query-queryable"
+    ))]
     #[test]
     fn querier_aliased_get_threads_inline_suffix_into_composite_literal() {
         let (session, _driver) = build_session();
@@ -6592,6 +6733,11 @@ mod tests {
         assert_eq!(got.keyexpr_literal, "home/temp/kitchen");
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "query-get"
+    ))]
     #[test]
     fn querier_aliased_get_twice_allocates_independent_rids() {
         let (session, _driver) = build_session();
@@ -6610,6 +6756,11 @@ mod tests {
         assert_eq!(h1.rid(), 1);
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "query-get"
+    ))]
     #[test]
     fn querier_aliased_clone_shares_session_and_options() {
         let (session, _driver) = build_session();
@@ -6645,6 +6796,11 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "declare-queryable"
+    ))]
     #[test]
     fn querier_aliased_get_matching_status_false_after_declare_with_no_peer() {
         let (session, _driver) = build_session();
@@ -6660,6 +6816,11 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "declare-queryable"
+    ))]
     #[test]
     fn querier_aliased_get_matching_status_true_when_peer_decl_matches_base_literal() {
         use hashbrown::HashMap;
@@ -6682,6 +6843,11 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "declare-queryable"
+    ))]
     #[test]
     fn querier_aliased_get_matching_status_threads_inline_suffix_into_consult() {
         use hashbrown::HashMap;
@@ -6732,6 +6898,12 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "declare-queryable",
+        feature = "declare-undeclare"
+    ))]
     #[test]
     fn querier_aliased_get_matching_status_false_after_undeclared_mapping_drop() {
         use hashbrown::HashMap;
@@ -6787,6 +6959,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publisher_put_fires_loopback_subscriber() {
         let (session, _driver) = build_session();
@@ -6810,6 +6983,7 @@ mod tests {
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publisher_delete_routes_to_del_kind_and_drops_payload() {
         let (session, _driver) = build_session();
@@ -6832,6 +7006,7 @@ mod tests {
         assert_eq!(*kind_seen.lock().unwrap(), Some(SampleKind::Del));
     }
 
+    #[cfg(feature = "codec-push")]
     #[test]
     fn publisher_clone_shares_session_and_driver() {
         let (session, driver) = build_session();
@@ -6863,6 +7038,12 @@ mod tests {
         assert_eq!(driver.frame_count(), 0);
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "codec-push",
+        feature = "declare-keyexpr",
+        feature = "pubsub-allow-loop"
+    ))]
     #[test]
     fn publisher_aliased_put_resolves_loopback_through_outbound_table() {
         let (session, driver) = build_session();
@@ -6918,6 +7099,12 @@ mod tests {
         assert_eq!(driver.frame_count(), 0);
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "codec-push",
+        feature = "declare-keyexpr",
+        feature = "pubsub-allow-loop"
+    ))]
     #[test]
     fn publisher_aliased_delete_routes_to_del_kind() {
         let (session, _driver) = build_session();
@@ -6952,6 +7139,7 @@ mod tests {
     /// make_undecl_queryable helpers; returns a ready `DeclareVariant`
     /// body from a single keyexpr literal, distinct ergonomics from
     /// the `wz-session-core-test-support` record builders.
+    #[cfg(feature = "declare-subscriber")]
     fn make_decl_subscriber(
         id: u64,
         keyexpr_literal: &str,
@@ -6975,6 +7163,7 @@ mod tests {
         .into_owned()
     }
 
+    #[cfg(feature = "declare-subscriber")]
     fn make_undecl_subscriber(id: u64) -> wz_codecs::declare::DeclareOwnedVariant {
         use wz_codecs::undecl_subscriber::UndeclSubscriber;
         wz_codecs::declare::DeclareVariant::CodecZenohUndeclSubscriber(UndeclSubscriber {
@@ -6995,6 +7184,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "declare-subscriber")]
     #[test]
     fn publisher_get_matching_status_true_after_peer_decl_with_matching_keyexpr() {
         use hashbrown::HashMap;
@@ -7013,6 +7203,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "declare-subscriber")]
     #[test]
     fn publisher_get_matching_status_true_when_peer_pattern_covers_publisher_literal() {
         use hashbrown::HashMap;
@@ -7031,6 +7222,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "declare-subscriber")]
     #[test]
     fn publisher_get_matching_status_false_after_peer_undeclare() {
         use hashbrown::HashMap;
@@ -7059,6 +7251,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "declare-subscriber")]
     #[test]
     fn publisher_get_matching_status_false_with_non_matching_peer_keyexpr() {
         use hashbrown::HashMap;
@@ -7087,6 +7280,11 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber"
+    ))]
     #[test]
     fn publisher_aliased_get_matching_status_threads_inline_suffix_into_consult() {
         use hashbrown::HashMap;
@@ -7109,6 +7307,12 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-undeclare"
+    ))]
     #[test]
     fn publisher_aliased_get_matching_status_false_after_undeclared_mapping_drop() {
         use hashbrown::HashMap;
@@ -7173,6 +7377,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "declare-subscriber", feature = "pubsub-allow-loop"))]
     #[test]
     fn declared_subscriber_fires_on_loopback_publish() {
         let (session, _driver) = build_session();
@@ -7191,6 +7396,7 @@ mod tests {
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(all(feature = "codec-push", feature = "pubsub-allow-loop"))]
     #[test]
     fn subscriber_drop_auto_unregisters() {
         let (session, _driver) = build_session();
@@ -7261,6 +7467,13 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "codec-push",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "pubsub-allow-loop"
+    ))]
     #[test]
     fn declare_subscriber_aliased_resolves_literal_at_declare_time() {
         let (session, _driver) = build_session();
@@ -7290,6 +7503,11 @@ mod tests {
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber"
+    ))]
     #[test]
     fn declare_subscriber_aliased_with_inline_suffix_composes_literal() {
         let (session, _driver) = build_session();
@@ -7319,6 +7537,14 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "codec-push",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-undeclare",
+        feature = "pubsub-allow-loop"
+    ))]
     #[test]
     fn declare_subscriber_aliased_survives_mapping_retract_after_declare() {
         // Mapping resolved at declare time; later send_undeclare_kexpr
@@ -7372,6 +7598,7 @@ mod tests {
         assert_eq!(opts.allowed_origin, Locality::SessionLocal);
     }
 
+    #[cfg(feature = "query-queryable")]
     #[test]
     fn declare_queryable_returns_handle_with_keyexpr_and_options() {
         let (session, _driver) = build_session();
@@ -7393,6 +7620,11 @@ mod tests {
         assert_eq!(driver.frame_count(), 0);
     }
 
+    #[cfg(all(
+        feature = "declare-queryable",
+        feature = "query-get",
+        feature = "query-queryable"
+    ))]
     #[test]
     fn declared_queryable_fires_on_loopback_query() {
         let (session, _driver) = build_session();
@@ -7424,6 +7656,7 @@ mod tests {
         assert_eq!(replies.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     #[test]
     fn queryable_drop_auto_unregisters() {
         let (session, _driver) = build_session();
@@ -7465,6 +7698,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "query-queryable")]
     #[test]
     fn queryable_undeclare_returns_true_and_skips_drop() {
         let (session, _driver) = build_session();
@@ -7474,6 +7708,7 @@ mod tests {
         assert!(q.undeclare(), "first undeclare returns true");
     }
 
+    #[cfg(feature = "query-get")]
     #[test]
     fn declare_queryable_with_locality_remote_skips_loopback_query() {
         let (session, _driver) = build_session();
@@ -7502,6 +7737,12 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "query-get",
+        feature = "query-queryable"
+    ))]
     #[test]
     fn declare_queryable_aliased_resolves_literal_at_declare_time() {
         let (session, _driver) = build_session();
@@ -7535,6 +7776,11 @@ mod tests {
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "query-queryable"
+    ))]
     #[test]
     fn declare_queryable_aliased_with_inline_suffix_composes_literal() {
         let (session, _driver) = build_session();
@@ -7553,6 +7799,7 @@ mod tests {
         assert_eq!(q.keyexpr(), "home/temp/kitchen");
     }
 
+    #[cfg(feature = "query-queryable")]
     #[test]
     fn declare_queryable_aliased_unknown_mapping_returns_err() {
         let (session, _driver) = build_session();
@@ -7590,6 +7837,7 @@ mod tests {
         assert_eq!(format!("{a:?}"), format!("{b:?}"));
     }
 
+    #[cfg(feature = "liveliness-token")]
     #[test]
     fn declare_token_returns_handle_with_keyexpr_and_id_zero() {
         let (session, _driver) = build_session();
@@ -7606,6 +7854,7 @@ mod tests {
         let _: &LivelinessOptions = token.options();
     }
 
+    #[cfg(feature = "liveliness-token")]
     #[test]
     fn declare_token_emits_exactly_one_reliable_wire_frame() {
         let (session, driver) = build_session();
@@ -7627,6 +7876,7 @@ mod tests {
         std::mem::forget(_token);
     }
 
+    #[cfg(feature = "liveliness-token")]
     #[test]
     fn declare_token_wire_frame_contains_decl_token_bytes() {
         use crate::session_glue::build_declare_token;
@@ -7649,6 +7899,7 @@ mod tests {
         std::mem::forget(_token);
     }
 
+    #[cfg(feature = "liveliness-token")]
     #[test]
     fn declare_token_assigns_monotonic_ids_per_session() {
         let (session, _driver) = build_session();
@@ -7668,6 +7919,7 @@ mod tests {
         std::mem::forget(t2);
     }
 
+    #[cfg(feature = "liveliness-token")]
     #[test]
     fn liveliness_token_drop_emits_undeclare_wire_frame() {
         let (session, driver) = build_session();
@@ -7685,6 +7937,7 @@ mod tests {
         assert_eq!(driver.frame_reliability(1), Reliability::Reliable);
     }
 
+    #[cfg(feature = "liveliness-token")]
     #[test]
     fn liveliness_token_drop_wire_frame_contains_undecl_token_bytes() {
         use crate::session_glue::build_undeclare_token;
@@ -7706,6 +7959,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "liveliness-token")]
     #[test]
     fn liveliness_token_undeclare_consumes_handle_and_does_not_double_emit() {
         let (session, driver) = build_session();
@@ -7729,6 +7983,11 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "liveliness-token"
+    ))]
     #[test]
     fn declare_token_aliased_resolves_literal_at_declare_time() {
         let (session, _driver) = build_session();
@@ -7747,6 +8006,11 @@ mod tests {
         std::mem::forget(token);
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "liveliness-token"
+    ))]
     #[test]
     fn declare_token_aliased_with_inline_suffix_composes_literal() {
         let (session, _driver) = build_session();
@@ -7761,6 +8025,7 @@ mod tests {
         std::mem::forget(token);
     }
 
+    #[cfg(feature = "liveliness-token")]
     #[test]
     fn declare_token_aliased_unknown_mapping_returns_err_without_wire_emit() {
         let (session, driver) = build_session();
@@ -7776,6 +8041,11 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "liveliness-token"
+    ))]
     #[test]
     fn declare_token_aliased_wire_frame_uses_alias_form() {
         // Aliased declare emits the bandwidth-efficient alias-form
@@ -7832,6 +8102,11 @@ mod tests {
     // test patterns: resolve-at-declare-time, alias-form wire emit,
     // mapping-retract survival, and error-shape Display. ───────────
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "liveliness-subscriber"
+    ))]
     #[test]
     fn declare_liveliness_subscriber_aliased_resolves_literal_at_declare_time() {
         let (session, _driver) = build_session();
@@ -7867,6 +8142,11 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "liveliness-subscriber"
+    ))]
     #[test]
     fn declare_liveliness_subscriber_aliased_with_inline_suffix_composes_literal() {
         let (session, _driver) = build_session();
@@ -7895,6 +8175,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "liveliness-subscriber")]
     #[test]
     fn declare_liveliness_subscriber_aliased_unknown_mapping_returns_err_without_wire_emit() {
         let (session, driver) = build_session();
@@ -7925,6 +8206,11 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "liveliness-subscriber"
+    ))]
     #[test]
     fn declare_liveliness_subscriber_aliased_wire_frame_uses_alias_form() {
         // Aliased declare emits the bandwidth-efficient alias-form
@@ -7975,6 +8261,11 @@ mod tests {
         );
     }
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "liveliness-subscriber"
+    ))]
     #[test]
     fn declare_liveliness_subscriber_aliased_survives_mapping_retract_after_declare() {
         // Mapping resolved at declare time; later send_undeclare_kexpr
@@ -8017,6 +8308,11 @@ mod tests {
     // rule (UnknownMapping precedes NotEstablished), and predicate
     // behavior. ────────────────────────────────────────────────────
 
+    #[cfg(all(
+        feature = "codec-declare",
+        feature = "declare-keyexpr",
+        feature = "liveliness-subscriber"
+    ))]
     #[test]
     fn declare_liveliness_subscriber_aliased_pre_established_returns_err_without_wire_emit() {
         // Session-FSM has not yet entered Established. The Interest
@@ -8059,6 +8355,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "liveliness-subscriber")]
     #[test]
     fn declare_liveliness_subscriber_aliased_unknown_mapping_takes_precedence_over_not_established()
     {
@@ -8126,6 +8423,7 @@ mod tests {
         assert!(msg.contains("is_established"));
     }
 
+    #[cfg(feature = "liveliness-token")]
     #[test]
     fn liveliness_token_id_counter_independent_of_request_id() {
         // Token id space is a separate AtomicU64 from the request id

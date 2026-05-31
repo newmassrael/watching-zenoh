@@ -87,10 +87,29 @@
 #              SSOT coherent subsets C4c builds — handshake-only /
 #              pubsub-only / queryable-only / zget-reply-only /
 #              declare-observer. The behavioural twin of C4c: C4c proves
-#              each subset BUILDS, C1j proves each one BEHAVES (400+
-#              tests per subset). Runtime-crate analog of the session-
-#              core behavioural lanes C1d-g. Before R311ff the runtime
-#              crate's tests ran only under default all-on features.)
+#              each subset BUILDS, C1j proves each one BEHAVES.
+#              Runtime-crate analog of the session-core behavioural
+#              lanes C1d-g. Before R311ff the runtime crate's tests ran
+#              only under default all-on features.
+#              R311fr — this lane was SILENTLY contaminated until now:
+#              the wz-runtime-tokio-test-support dev-dependency declared
+#              wz-runtime-tokio WITHOUT default-features=false, so cargo
+#              feature-unification re-enabled the crate's DEFAULT feature
+#              set during `cargo test`, and every named subset actually
+#              compiled+ran the full ~420-test default suite (false
+#              isolation for ALL subsets). R311fr fixes the dev-dep to
+#              default-features=false (forwarding only the foundational
+#              session-handshake base) AND gates the entire per-plane
+#              test surface (lib + integration) on the feature each test
+#              exercises — including behaviour tests of signature-stable
+#              methods whose bodies no-op when their codec/plane is off
+#              (R311g1). Each subset now runs ONLY its applicable tests
+#              and they all pass; the differing run-counts (handshake
+#              ~142 .. zget-reply ~233 vs ~420 default) are the proof of
+#              genuine isolation. Transport-orthogonal tests (keepalive /
+#              batching / lease) gate on transport-keepalive /
+#              transport-batching and so run only in the default lane,
+#              not in the consumer-plane subsets.)
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
 #   Layer C3 — per-package isolated `cargo clippy ... --all-targets`
 #              sub-lanes (R311cv; per-package isolated feature
