@@ -328,38 +328,31 @@ transport-keepalive = []
 # consistently (off clamps to full MTU). The min(peer, local) reduction at
 # the OpenAck arm stays gated in this crate.
 transport-batching = ["wz-session-core/transport-batching"]
-# R311cc — pubsub domain wire-up. 9 atomic features that have real
-# source behavior in this crate (Cargo.toml authoring intent: "11
-# atomic, 9 active / 2 reserved"). Each gates a concrete cfg site:
-#   pubsub-put         — MsgPut import in query.rs + SampleKind::Put
-#                        emission at the Push consumer in pubsub.rs.
-#                        Feature-off elides the Put body branch.
-#   pubsub-delete      — MsgDel import + Delete branch in query.rs;
-#                        SampleKind::Delete fan-out path. Feature-off
-#                        leaves only Put-shaped samples observable.
-#   pubsub-allow-loop  — local_publish loopback registry call in
-#                        session.rs (Session::publish-self path).
-#                        Feature-off short-circuits the loopback so
-#                        only remote inbound triggers subscribers.
-#   pubsub-attachment  — `Sample::with_attachment` setter in sample.rs
-#                        + the Push consumer attachment projection.
-#                        Feature-off keeps the Option field but never
-#                        populates it (signature stability).
-#   pubsub-timestamp   — `Sample::with_timestamp` setter + Push
-#                        consumer timestamp projection. Same shape
-#                        as -attachment: field stays, populator gates.
-#   pubsub-source-info — `extract_source_info` Push projection into
-#                        `Sample::source_info`. Same shape as
-#                        -attachment: field stays, populator gates.
-#                        Feature-off also disables R231 self-echo dedup
-#                        (no decoded source_info to match) — the
-#                        dispatch cautious-fires instead.
-#   pubsub-priority    — `extract_qos` Push projection into Sample.qos.
-#   pubsub-congestion-control — same projection (shared QoS byte).
-#   pubsub-express     — same projection (shared QoS byte). The three
-#                        are bit views of one _z_qos_t._val, so the
-#                        subscriber projection gates on `any` of them;
-#                        all-off elides extract_qos, Sample.qos = None.
+# R311cc — pubsub domain wire-up. 9 atomic features (Cargo.toml
+# authoring intent: "11 atomic, 9 active / 2 reserved"). After the
+# R311du SubscriberRegistry move + R311fv attachment SSOT, only TWO
+# have cfg sites in THIS crate; the other seven are pure forwards to
+# wz-session-core, where the dispatch + Sample receive-side projection
+# now live (their per-feature receive semantics are documented at the
+# wz-session-core Cargo.toml):
+#   pubsub-allow-loop  — local-only (no session-core gate). Gates the
+#                        self-publish loopback registry call in
+#                        session.rs (Session::publish / publish-aliased
+#                        self-path). Feature-off short-circuits the
+#                        loopback so only remote inbound triggers
+#                        subscribers.
+#   pubsub-attachment  — BOTH sides. Forwards to wz-session-core for the
+#                        inbound decode (R311fv attachment-bytes SSOT)
+#                        AND gates the local SEND vertical:
+#                        `PublishOptions::with_attachment` setter
+#                        (session.rs) + the Push attachment-ext encode
+#                        in session_glue.rs (build_body_extensions ->
+#                        encode_attachment_ext). Feature-off: nothing is
+#                        set on PublishOptions nor written to the wire.
+#   pubsub-put / pubsub-delete / pubsub-timestamp / pubsub-source-info /
+#   pubsub-priority / pubsub-congestion-control / pubsub-express — pure
+#   forwards to the matching wz-session-core gate (receive-side Sample
+#   projection + dispatch arm).
 # 2 reserved (encoding, sample) stay declaration-only at the wz facade
 # level.
 # R311du — forward to wz-session-core: the pub/sub dispatch arms moved
