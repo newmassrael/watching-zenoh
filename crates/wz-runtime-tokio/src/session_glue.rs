@@ -663,6 +663,14 @@ impl<R: Runtime, T: TimeSource> ResponseSink for SessionLinkActions<R, T> {
     fn send_response_final(&self, request_id: u64) {
         self.send_response_final(request_id);
     }
+    // R283 — drain target for the declarer-side interest-response. The
+    // inherent `Self::send_declare` (below) does the encode + enqueue;
+    // inherent-method resolution shadows the trait method here, mirroring
+    // the `send_response` shape.
+    #[cfg(feature = "liveliness-token")]
+    fn send_declare(&self, declare: DeclareOwned) {
+        self.send_declare(declare);
+    }
 }
 
 impl<T: TimeSource> SessionLinkActions<TokioRuntime, T> {
@@ -1453,6 +1461,28 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             let _ = (token_id, keyexpr_mapping_id, keyexpr_suffix);
             Err(SendDeclareError::FeatureDisabled)
         }
+    }
+
+    /// R283 — encode + dispatch a pre-built `Declare(...)` envelope on
+    /// the reliable outbound link. The declarer-side liveliness-token
+    /// registry (`wz-session-core::declare::local_token`) builds the
+    /// interest-response declarations (`Declare(DeclToken)` per matching
+    /// held token, `Declare(DeclFinal)` terminator — each carrying the
+    /// inbound `interest_id`) and the observer drains them through the
+    /// `ResponseSink::send_declare` trait method, which resolves to this
+    /// inherent method. Unlike `send_declare_token` (which builds the
+    /// envelope from primitives + runs the R300 outbound-keyexpr gate),
+    /// this takes a ready `DeclareOwned`: the registry already resolved
+    /// the keyexpr from wz's own held-token state, which passed the
+    /// outbound gate at `declare_token` time. Gated on `liveliness-token`
+    /// (the only feature that stages outbound `Declare` through the
+    /// sink); that feature transitively enables `codec-declare`, so
+    /// `encode_frame_with_declare` is in scope.
+    #[cfg(feature = "liveliness-token")]
+    pub fn send_declare(&self, declare: DeclareOwned) {
+        let sn = self.next_outbound_frame_sn();
+        let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
+        self.driver.send_blocking(&wire, Reliability::Reliable);
     }
 
     /// R121i-c — encode + dispatch a `Declare(UndeclKexpr)` on the

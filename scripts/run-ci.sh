@@ -885,12 +885,14 @@ layer_c4b_facade_subset_matrix() {
 # consumer), so a transport-unicast-OFF subset does not type-check and
 # is not a coherent shape to guard — same status as keyexpr-canon. The
 # subsets guard the composability that IS real: each consumer plane
-# (pubsub / queryable / zget-reply / liveliness-sub / declare-observer)
-# layered on the handshake core, plus the bare handshake-only core
-# itself. liveliness-sub-only is the narrow single-plane liveliness
-# subscriber (declare-interest + codec-declare only), distinct from the
-# broader declare-observer bundle — it guards that the liveliness
-# subscriber composes in ISOLATION (the wz-e2e-liveliness e2e subset).
+# (pubsub / queryable / zget-reply / liveliness-sub / liveliness-token /
+# declare-observer) layered on the handshake core, plus the bare
+# handshake-only core itself. liveliness-sub-only is the narrow
+# single-plane liveliness SUBSCRIBER (declare-interest + codec-declare),
+# liveliness-token-only the narrow single-plane liveliness DECLARER (the
+# R283 inbound-Interest responder) — both distinct from the broader
+# declare-observer bundle. They guard that each liveliness side composes
+# in ISOLATION (the wz-e2e-liveliness / wz-e2e-liveliness-token subsets).
 _wz_runtime_tokio_coherent_subsets() {
     local base="transport-unicast,transport-link-tcp,session-unicast-open,session-unicast-accept,codec-frame,codec-keep-alive,codec-init-body,codec-open-body,codec-close,keyexpr-canon"
     printf '%s\t%s\n' "handshake-only"   "$base"
@@ -898,6 +900,7 @@ _wz_runtime_tokio_coherent_subsets() {
     printf '%s\t%s\n' "queryable-only"   "$base,codec-request,codec-response,query-queryable,query-reply-err"
     printf '%s\t%s\n' "zget-reply-only"  "$base,codec-response,codec-response-final,query-get,query-reply"
     printf '%s\t%s\n' "liveliness-sub-only" "$base,codec-declare,declare-interest,liveliness-subscriber"
+    printf '%s\t%s\n' "liveliness-token-only" "$base,liveliness-token"
     printf '%s\t%s\n' "declare-observer" "$base,codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber"
 }
 
@@ -1102,10 +1105,14 @@ layer_e_ap_demo_round_trip() {
 #                        (catch: codec-response-final is load-bearing for
 #                        z_get's terminating Final — see its Cargo.toml).
 #   * wz-e2e-liveliness — liveliness-subscriber-only, wz OBSERVES a token
-#                        vs z_liveliness declarer (deliberately wz=sink:
-#                        wz's declarer lacks peer-side Interest-response,
-#                        R283 — see its Cargo.toml). Witness is on the wz
-#                        side, so no foreign-stdout capture race.
+#                        vs z_liveliness declarer (wz=sink). Witness is on
+#                        the wz side, so no foreign-stdout capture race.
+#   * wz-e2e-liveliness-token — liveliness-token DECLARER, wz ANSWERS a
+#                        liveliness query vs z_get_liveliness (R283
+#                        interest-response). z_get_liveliness is a one-shot
+#                        CURRENT get with no future subscription, so only
+#                        the R283 reply can satisfy it — it isolates the
+#                        interest-response from the proactive declare.
 #
 # Same prereq-SKIP discipline as Layer E: the subset binaries + the
 # zenoh-pico CLI must be prebuilt (CI builds them; a bare local run
@@ -1113,7 +1120,8 @@ layer_e_ap_demo_round_trip() {
 # Layer E skips, so no test runs twice.
 layer_e2_facade_subset_e2e() {
     if [[ ! -x target/zenoh-pico-cli/z_sub || ! -x target/zenoh-pico-cli/z_get \
-          || ! -x target/zenoh-pico-cli/z_liveliness ]]; then
+          || ! -x target/zenoh-pico-cli/z_liveliness \
+          || ! -x target/zenoh-pico-cli/z_get_liveliness ]]; then
         echo "Layer E2 SKIP (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
         return 0
     fi
@@ -1132,10 +1140,17 @@ layer_e2_facade_subset_e2e() {
         echo "Layer E2 SKIP (wz-e2e-liveliness not built; run: cd crates && cargo build -p wz-e2e-liveliness)"
         return 0
     fi
+    # liveliness-token declarer subset (R283) — wz answers a liveliness
+    # query vs z_get_liveliness.
+    if [[ ! -x crates/target/debug/wz-e2e-liveliness-token && ! -x crates/target/release/wz-e2e-liveliness-token ]]; then
+        echo "Layer E2 SKIP (wz-e2e-liveliness-token not built; run: cd crates && cargo build -p wz-e2e-liveliness-token)"
+        return 0
+    fi
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_e2e_pubsub_to_zsub \
         --test wz_e2e_queryable_to_zget \
         --test wz_e2e_liveliness_to_zliveliness \
+        --test wz_e2e_liveliness_token_to_zget_liveliness \
         --quiet -- --ignored)
 }
 

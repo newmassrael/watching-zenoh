@@ -1,0 +1,83 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-e2e-liveliness-token — minimal single-purpose e2e consumer binary
+# that pins EXACTLY the liveliness-token-DECLARER subset and proves the
+# R283 inbound-Interest response interoperates end-to-end against a
+# foreign zenoh-pico z_get_liveliness querier.
+#
+# Symmetric sibling of wz-e2e-liveliness (the SUBSCRIBER side). Where
+# that binary observes a foreign declarer's token, this one IS the
+# declarer: it declares a LivelinessToken and answers a foreign
+# subscriber's / querier's inbound liveliness Interest with that token
+# (R283). Same single-purpose-crate rationale as the rest of the
+# wz-e2e-* family — its source uses ONLY the liveliness-token declare
+# surface, so it compiles under the declarer subset with ZERO cfg.
+#
+# Why a DEDICATED declarer binary rather than reusing wz-ap-demo
+# --declare-token for the R283 e2e: wz-ap-demo declares its token in a
+# background task gated on Established, which races a foreign querier's
+# inbound Interest. A one-shot CURRENT querier (z_get_liveliness, no
+# future subscription) only learns the token via the R283 reply, so if
+# the Interest is processed before the background declare registers the
+# token the query resolves empty. This binary declares its token
+# SYNCHRONOUSLY right after the session reaches Established and BEFORE it
+# enters the drive loop, so the token is always registered before any
+# inbound Interest is processed — a deterministic R283 proof.
+#
+# Layer E2 (scripts/run-ci.sh) builds this under its pinned subset and
+# drives the liveliness query/response round-trip against z_get_liveliness.
+
+[package]
+name = "wz-e2e-liveliness-token"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Minimal liveliness-token-declarer facade-subset e2e consumer — proves the R283 interest-response interoperates with zenoh-pico z_get_liveliness on the wire."
+
+[[bin]]
+name = "wz-e2e-liveliness-token"
+path = "src/main.rs"
+
+[dependencies]
+# The smallest coherent facade subset that DECLARES a liveliness token
+# AND answers an inbound liveliness Interest (R283), default-features off
+# so no other plane leaks in.
+#
+# Composition: the shared handshake core (incl. transport-batching, the
+# load-bearing foreign-handshake feature every wz-e2e-* binary pins per
+# the R311fg finding) + `liveliness-token`. The declarer needs NO
+# `declare-interest` (that is the SUBSCRIBER's outbound-Interest feature);
+# it RECEIVES the inbound Interest (always-decoded, ungated) and REPLIES
+# via `codec-declare`, which `liveliness-token` transitively pulls
+# (liveliness-token -> declare-token -> codec-declare). No pubsub /
+# query / subscriber planes — this binary only declares + responds.
+wz = { path = "../wz", default-features = false, features = [
+    "runtime-tokio",
+    "transport-unicast",
+    "transport-link-tcp",
+    "transport-keepalive",
+    "transport-batching",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "liveliness-token",
+] }
+# Multi-thread runtime + signal handling are binary-shaped uses outside
+# the wz framework boundary, mirroring the sibling wz-e2e-* binaries.
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal"] }
+log = "0.4"
+env_logger = "0.11"
+
+[lints]
+workspace = true

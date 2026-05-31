@@ -43,6 +43,7 @@ members = [
     "wz-e2e-pubsub",
     "wz-e2e-queryable",
     "wz-e2e-liveliness",
+    "wz-e2e-liveliness-token",
     "wz-runtime-lwip",
     "lwip-sys",
     "wz-link-lwip",

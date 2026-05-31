@@ -9,12 +9,12 @@
 # The watching-zenoh AP MVP demo (wz-ap-demo) exercises its codec +
 # session FSM against an external, foreign-implementation peer.
 # Using the upstream zenoh-pico CLI binaries (z_put / z_get /
-# z_queryable / z_sub / z_liveliness) — built from the same submodule
-# revision that zenoh-pico-sys binds against — gives that "external
-# peer" without duplicating the vendor tree and without depending on a
-# system zenoh-pico install.
+# z_queryable / z_sub / z_liveliness / z_get_liveliness) — built from the
+# same submodule revision that zenoh-pico-sys binds against — gives that
+# "external peer" without duplicating the vendor tree and without
+# depending on a system zenoh-pico install.
 #
-# Output: target/zenoh-pico-cli/{z_put,z_sub,z_get,z_queryable,z_liveliness}
+# Output: target/zenoh-pico-cli/{z_put,z_sub,z_get,z_queryable,z_liveliness,z_get_liveliness}
 #
 # Re-runs are idempotent: CMake's incremental build skips unchanged
 # work, and the install step uses `install -m 0755` (overwrite
@@ -39,7 +39,7 @@ INSTALL_DIR="$ROOT/target/zenoh-pico-cli"
 # only a few extra add_dependencies(examples ...) targets in the
 # CMake build; the wz-codec coverage matrix decides which round
 # adopts each new external CLI.
-TARGETS=(z_put z_sub z_get z_queryable z_liveliness)
+TARGETS=(z_put z_sub z_get z_queryable z_liveliness z_get_liveliness)
 
 if [[ ! -e "$VENDOR_DIR/.git" && ! -f "$VENDOR_DIR/CMakeLists.txt" ]]; then
     echo "build-zenoh-pico-cli: vendor/zenoh-pico/ not initialized." >&2

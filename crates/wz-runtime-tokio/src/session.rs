@@ -1842,6 +1842,17 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                          {other:?} unexpectedly"
                     ),
                 })?;
+            // R283 — register the held token in the declarer-side registry
+            // so an inbound non-final liveliness Interest can reply with
+            // it. The proactive send_declare_token above covers peers
+            // already subscribed; this registration is the CURRENT-replay
+            // state that lets a peer which subscribes LATER still learn the
+            // token via its Interest. Removed by LivelinessToken::Drop.
+            R::with_mutex_mut(&self.observer, |observer| {
+                observer
+                    .local_tokens
+                    .register(token_id, keyexpr_string.clone());
+            });
             Ok(LivelinessToken {
                 session: self.clone(),
                 id: token_id,
@@ -3314,6 +3325,13 @@ impl<R: Runtime, T: TimeSource> LivelinessToken<R, T> {
     /// across the wz handle family.
     pub fn undeclare(self) {
         self.session.actions.send_undeclare_token(self.id);
+        // R283 — same declarer-side unregister as Drop; the explicit
+        // undeclare path retracts the held-token registration too so a
+        // later inbound Interest does not reply with it.
+        #[cfg(feature = "liveliness-token")]
+        R::with_mutex_mut(&self.session.observer, |obs| {
+            obs.local_tokens.unregister(self.id);
+        });
         std::mem::forget(self);
     }
 }
@@ -3333,6 +3351,14 @@ impl<R: Runtime, T: TimeSource> Drop for LivelinessToken<R, T> {
         // Err(FeatureDisabled) so no LivelinessToken instance can
         // exist on this build, and this Drop never runs.
         self.session.actions.send_undeclare_token(self.id);
+        // R283 — drop the declarer-side registration so a subsequent
+        // inbound liveliness Interest no longer replies with this
+        // now-undeclared token. Mirrors the Queryable Drop unregister;
+        // gated on `liveliness-token` (the observer's local_tokens field).
+        #[cfg(feature = "liveliness-token")]
+        R::with_mutex_mut(&self.session.observer, |obs| {
+            obs.local_tokens.unregister(self.id);
+        });
     }
 }
 

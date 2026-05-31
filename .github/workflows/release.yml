@@ -135,6 +135,9 @@ jobs:
       - name: Build wz-e2e-liveliness binary (Layer E2 dep)
         run: (cd crates && cargo build -p wz-e2e-liveliness)
 
+      - name: Build wz-e2e-liveliness-token binary (Layer E2 dep)
+        run: (cd crates && cargo build -p wz-e2e-liveliness-token)
+
       - name: Layer E — wz-ap-demo round-trip vs zenoh-pico z_put
         run: bash scripts/run-ci.sh --layer E
 
