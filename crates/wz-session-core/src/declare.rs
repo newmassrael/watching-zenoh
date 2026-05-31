@@ -60,6 +60,14 @@ pub mod liveliness_sample;
 #[cfg(feature = "codec-declare")]
 pub mod liveliness_subscriber;
 
+// R283 — DECLARER-side registry of wz's own held LivelinessTokens + the
+// inbound-Interest responder. Gated on `liveliness-token` (the declarer
+// feature, which implies `codec-declare`) rather than bare
+// `codec-declare`: a build that decodes peer declares but never declares
+// its OWN tokens has no local-token state to reply with.
+#[cfg(feature = "liveliness-token")]
+pub mod local_token;
+
 // R311ds — cross-registry composability tests (R311dr-wider-tests
 // carry closure). Gated on `codec-declare` as well as `test` because
 // it references all three registries, which compile only under

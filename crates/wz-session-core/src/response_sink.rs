@@ -25,6 +25,9 @@
 #[cfg(feature = "codec-response")]
 use wz_codecs::response::ResponseOwned;
 
+#[cfg(feature = "liveliness-token")]
+use wz_codecs::declare::DeclareOwned;
+
 /// Outbound sink for queryable replies + reply-chain terminals. The
 /// application-layer observer drains its staged `QueryReply` records
 /// through this trait so it is decoupled from any concrete runtime
@@ -40,6 +43,18 @@ pub trait ResponseSink {
     /// `SessionLinkActions::send_response_final`.
     #[cfg(feature = "codec-response-final")]
     fn send_response_final(&self, request_id: u64);
+
+    /// R283 — encode + enqueue one outbound `Declare(...)` frame. The
+    /// declarer-side liveliness-token registry drains its staged
+    /// interest-response declarations (an interest_id-tagged
+    /// `Declare(DeclToken)` per matching held token, then a
+    /// `Declare(DeclFinal)` terminating the pending query) through this
+    /// method. Gated on `liveliness-token`: it is the only registry that
+    /// stages outbound `Declare` frames, and that feature transitively
+    /// pulls `codec-declare` (the encode path). Mirrors
+    /// `SessionLinkActions::send_declare`.
+    #[cfg(feature = "liveliness-token")]
+    fn send_declare(&self, declare: DeclareOwned);
 }
 
 // Smart-pointer / reference transparency: an `Arc`-shared or borrowed
@@ -59,6 +74,10 @@ impl<S: ResponseSink + ?Sized> ResponseSink for &S {
     fn send_response_final(&self, request_id: u64) {
         (**self).send_response_final(request_id)
     }
+    #[cfg(feature = "liveliness-token")]
+    fn send_declare(&self, declare: DeclareOwned) {
+        (**self).send_declare(declare)
+    }
 }
 
 impl<S: ResponseSink + ?Sized> ResponseSink for alloc::sync::Arc<S> {
@@ -69,5 +88,9 @@ impl<S: ResponseSink + ?Sized> ResponseSink for alloc::sync::Arc<S> {
     #[cfg(feature = "codec-response-final")]
     fn send_response_final(&self, request_id: u64) {
         (**self).send_response_final(request_id)
+    }
+    #[cfg(feature = "liveliness-token")]
+    fn send_declare(&self, declare: DeclareOwned) {
+        (**self).send_declare(declare)
     }
 }

@@ -201,6 +201,28 @@ pub mod common {
         );
     }
 
+    /// Locate the `wz-e2e-liveliness-token` binary — the minimal
+    /// liveliness-token-DECLARER facade-subset e2e consumer (R283;
+    /// symmetric sibling of [`wz_e2e_liveliness_binary`]). Same
+    /// debug/release lookup shape; the Layer E2 lane builds it under its
+    /// pinned subset before the e2e test drives it.
+    pub fn wz_e2e_liveliness_token_binary() -> PathBuf {
+        let crates_dir = project_root().join("crates");
+        let candidates = [
+            crates_dir.join("target/debug/wz-e2e-liveliness-token"),
+            crates_dir.join("target/release/wz-e2e-liveliness-token"),
+        ];
+        for c in &candidates {
+            if c.is_file() {
+                return c.clone();
+            }
+        }
+        panic!(
+            "wz-e2e-liveliness-token binary not found in {candidates:?}; \
+             run `cargo build -p wz-e2e-liveliness-token` first"
+        );
+    }
+
     /// Locate a zenoh-pico CLI binary under `target/zenoh-pico-cli/`.
     /// `scripts/build-zenoh-pico-cli.sh` produces `z_put`, `z_sub`,
     /// `z_get`, `z_queryable`; pass the bare name and this helper

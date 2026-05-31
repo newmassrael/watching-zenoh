@@ -108,6 +108,14 @@
 // module after the R311do-dq registry migration.
 #[cfg(feature = "liveliness-token")]
 use crate::declare::liveliness::LivelinessRegistry;
+// R283 — declarer-side held-token registry + the inbound-Interest
+// responder. Gated on `liveliness-token` (the declarer feature) alongside
+// the peer-side `LivelinessRegistry`. The `DeclareOwned` it stages into
+// `pending_declares` only exists under `codec-declare` (implied).
+#[cfg(feature = "liveliness-token")]
+use crate::declare::local_token::LocalTokenRegistry;
+#[cfg(feature = "liveliness-token")]
+use wz_codecs::declare::DeclareOwned;
 // R311ek — `LivelinessSubscriberRegistry` consumes `DeclareOwnedVariant`
 // and lives under the `codec-declare`-gated `declare` module, so the
 // `liveliness_subscribers` field + this import gate on
@@ -204,6 +212,17 @@ pub struct ApplicationLayerObserver {
     /// liveliness signal layer.
     #[cfg(feature = "liveliness-token")]
     pub liveliness: LivelinessRegistry,
+    /// R283 — DECLARER-side registry of wz's own held
+    /// `LivelinessToken`s. Populated by `Session::declare_token` and
+    /// emptied by `LivelinessToken::Drop`. Consulted only when an inbound
+    /// non-final liveliness Interest arrives, to stage the
+    /// interest-response (`Declare(DeclToken)` per matching held token +
+    /// a terminating `Declare(DeclFinal)`) into [`Self::pending_declares`]
+    /// during the fan phase; the drain phase flushes it through the sink.
+    /// The declarer-side mirror of [`Self::liveliness`] (which tracks the
+    /// PEER's tokens).
+    #[cfg(feature = "liveliness-token")]
+    pub local_tokens: LocalTokenRegistry,
     /// R280 — local liveliness subscribers declared by
     /// `Session::declare_liveliness_subscriber`. A keyexpr-filtered
     /// counterpart to [`Self::liveliness`]: the generic-observer
@@ -242,6 +261,15 @@ pub struct ApplicationLayerObserver {
     /// dispatch path is in.
     pending_replies: Vec<QueryReply>,
     pending_final_rids: Vec<u64>,
+    /// R283 — staging buffer for the declarer-side interest-response
+    /// (`Declare(DeclToken)` + `Declare(DeclFinal)`). Populated by
+    /// `local_tokens` during the fan phase, drained through
+    /// `ResponseSink::send_declare` during [`Self::flush_pending`]. Gated
+    /// on `liveliness-token` (unlike the unconditional reply buffers)
+    /// because only the declarer registry — itself feature-gated — ever
+    /// stages into it.
+    #[cfg(feature = "liveliness-token")]
+    pending_declares: Vec<DeclareOwned>,
 }
 
 impl Default for ApplicationLayerObserver {
@@ -271,6 +299,11 @@ impl ApplicationLayerObserver {
             remote_queryables: RemoteQueryableRegistry::new(),
             #[cfg(feature = "liveliness-token")]
             liveliness: LivelinessRegistry::new(),
+            // R283 — declarer-side held-token registry constructed only
+            // under `liveliness-token`. Empty until `Session::declare_token`
+            // registers wz's first held token.
+            #[cfg(feature = "liveliness-token")]
+            local_tokens: LocalTokenRegistry::new(),
             // R311ek — field gated on `liveliness-subscriber`; the
             // registry is constructed only when that feature is in. The
             // LivelinessSubscriber RAII handle's observer-side lookups
@@ -288,6 +321,10 @@ impl ApplicationLayerObserver {
             // flush_pending stays cfg-gated on query-queryable.
             pending_replies: Vec::new(),
             pending_final_rids: Vec::new(),
+            // R283 — declarer interest-response staging buffer, gated on
+            // `liveliness-token` like its producer registry.
+            #[cfg(feature = "liveliness-token")]
+            pending_declares: Vec::new(),
         }
     }
 
@@ -350,6 +387,13 @@ impl ApplicationLayerObserver {
             .dispatch_iteration_event(event, peer_table);
         #[cfg(feature = "liveliness-token")]
         self.liveliness.dispatch_iteration_event(event, peer_table);
+        // R283 — declarer-side: stage an interest-response for each
+        // inbound non-final liveliness Interest. Reads peer_table for the
+        // Interest keyexpr resolution; stages into pending_declares (the
+        // drain phase flushes them through the sink).
+        #[cfg(feature = "liveliness-token")]
+        self.local_tokens
+            .dispatch_iteration_event(event, peer_table, &mut self.pending_declares);
         #[cfg(feature = "liveliness-subscriber")]
         self.liveliness_subscribers
             .dispatch_iteration_event(event, peer_table);
@@ -375,11 +419,20 @@ impl ApplicationLayerObserver {
             #[cfg(not(feature = "codec-response-final"))]
             self.pending_final_rids.clear();
         }
-        // R307 — without `query-queryable` the staging buffers do not
-        // exist; `actions` is then unused in this branch but the
-        // method signature stays stable so callers (`Self::dispatch`)
-        // can wire it unconditionally.
-        #[cfg(not(feature = "query-queryable"))]
+        // R283 — drain the declarer-side interest-response staging buffer
+        // through the sink. Every staged `Declare` (DeclToken or
+        // DeclFinal) is emitted in stage order, so each interest-response
+        // batch's DeclTokens precede its terminating DeclFinal.
+        #[cfg(feature = "liveliness-token")]
+        for declare in self.pending_declares.drain(..) {
+            actions.send_declare(declare);
+        }
+        // R307 — without `query-queryable` (and, R283, without
+        // `liveliness-token`) the staging buffers do not exist; `actions`
+        // is then unused in this branch but the method signature stays
+        // stable so callers (`Self::dispatch`) can wire it
+        // unconditionally.
+        #[cfg(not(any(feature = "query-queryable", feature = "liveliness-token")))]
         let _ = actions;
     }
 
