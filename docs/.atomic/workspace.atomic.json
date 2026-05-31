@@ -27570,6 +27570,50 @@
         "Audit other consumer planes for the same publisher-marker coupling (does liveliness sample/reply decode gate on an unrelated plane's feature?)."
       ]
     },
+    "Round 311fn": {
+      "decision_summary": "R311fn — self-review of R311fm found the new query-reply reply-decode arm had ZERO unit coverage: the reply.rs test module required pubsub-put+pubsub-delete, so the pure-getter arm was guarded only by the heavy wz-e2e-zget e2e and a revert to _=>return would keep unit CI green. Widened the test-module gate to the same any(pubsub,query-reply) decode-capability predicate and added a query-reply-only Layer C1f invocation; mutation-tested that the regression is now caught at the unit layer.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/reply.rs: widened the test-module cfg gate from requiring pubsub-put+pubsub-delete to any(pubsub-put,query-reply) AND any(pubsub-delete,query-reply) — the same predicate as the R311fm reply-body decode arms. The dispatch_response Put/Del/Err decode tests now compile + run under the pure getter subset (query-reply, pub/sub OFF), the exact path R311fm fixed.",
+        "scripts/run-ci.sh: Layer C1f gains a second invocation — cargo test -p wz-session-core --no-default-features --features alloc,codec-response,codec-response-final,query-reply — the behavioural twin of the zget-reply-only BUILD subset (C4b/C4c/C1h/C1j build it; C1f now runs its reply-decode tests). Doc header updated."
+      ],
+      "verification_bullets": [
+        "Proof the getter arm is now unit-covered: cargo test under query-reply-only ran the 3 dispatch_response decode tests (3 passed) where pre-R311fn it was 0 passed; 81 filtered out (module compiled away).",
+        "Mutation test (the guard is real): reverting the R311fm Put arm to cfg(pubsub-put)-only made Layer C1f FAIL — 5 reply tests panicked on the getter-only invocation (expected Put, got...), while the pub/sub invocation stayed green; restoring the any(...) arm returned C1f to green. Before R311fn that same regression left C1f green (only wz-e2e-zget e2e caught it).",
+        "Full run-ci.sh + WZ_RUN_LAYER_G=1 EXIT0: all 16 required layers pass (C1f 116+109 tests, Layer E2 5 e2e, Layer G 7 MCU x G.1-G.6). cargo fmt --check clean."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "push the R311fn commit (user consent required).",
+        "Audit-on-pattern (carried from R311fm): other consumer planes may have the same publisher-marker coupling — check whether liveliness sample/reply decode or any other arm gates on an unrelated plane's feature, and whether their test modules compile under the isolated subset.",
+        "Remaining facade-subset e2e gap: declare-observer plane (wz observes a foreign peer's declares) — the last build-subset matrix entry without a behavioural e2e twin.",
+        "C4b ruling: 3 interop deltas now documented (transport-batching R311fg, codec-response-final R311fh, query-reply reply-decode R311fm) — decide whether C4b should pin interop supersets."
+      ],
+      "publishable_decision_summary": "R311fn — self-review of R311fm found the new query-reply reply-decode arm had ZERO unit coverage: the reply.rs test module required pubsub-put+pubsub-delete, so the pure-getter arm was guarded only by the heavy wz-e2e-zget e2e and a revert to _=>return would keep unit CI green. Widened the test-module gate to the same any(pubsub,query-reply) decode-capability predicate and added a query-reply-only Layer C1f invocation; mutation-tested that the regression is now caught at the unit layer.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/reply.rs: widened the test-module cfg gate from requiring pubsub-put+pubsub-delete to any(pubsub-put,query-reply) AND any(pubsub-delete,query-reply) — the same predicate as the R311fm reply-body decode arms. The dispatch_response Put/Del/Err decode tests now compile + run under the pure getter subset (query-reply, pub/sub OFF), the exact path R311fm fixed.",
+        "scripts/run-ci.sh: Layer C1f gains a second invocation — cargo test -p wz-session-core --no-default-features --features alloc,codec-response,codec-response-final,query-reply — the behavioural twin of the zget-reply-only BUILD subset (C4b/C4c/C1h/C1j build it; C1f now runs its reply-decode tests). Doc header updated."
+      ],
+      "publishable_verification_bullets": [
+        "Proof the getter arm is now unit-covered: cargo test under query-reply-only ran the 3 dispatch_response decode tests (3 passed) where pre-R311fn it was 0 passed; 81 filtered out (module compiled away).",
+        "Mutation test (the guard is real): reverting the R311fm Put arm to cfg(pubsub-put)-only made Layer C1f FAIL — 5 reply tests panicked on the getter-only invocation (expected Put, got...), while the pub/sub invocation stayed green; restoring the any(...) arm returned C1f to green. Before R311fn that same regression left C1f green (only wz-e2e-zget e2e caught it).",
+        "Full run-ci.sh + WZ_RUN_LAYER_G=1 EXIT0: all 16 required layers pass (C1f 116+109 tests, Layer E2 5 e2e, Layer G 7 MCU x G.1-G.6). cargo fmt --check clean."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "push the R311fn commit (user consent required).",
+        "Audit-on-pattern (carried from R311fm): other consumer planes may have the same publisher-marker coupling — check whether liveliness sample/reply decode or any other arm gates on an unrelated plane's feature, and whether their test modules compile under the isolated subset.",
+        "Remaining facade-subset e2e gap: declare-observer plane (wz observes a foreign peer's declares) — the last build-subset matrix entry without a behavioural e2e twin.",
+        "C4b ruling: 3 interop deltas now documented (transport-batching R311fg, codec-response-final R311fh, query-reply reply-decode R311fm) — decide whether C4b should pin interop supersets."
+      ]
+    },
     "Round 311g": {
       "decision_summary": "R311g send_close_with_reason signature stability + codec-frame envelope inbound cascade — Frame decode gated, +27.7KB elision; ap-demo codec-close mirror retired.",
       "changes_bullets": [

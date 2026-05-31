@@ -741,12 +741,25 @@ fn resolve_wireexpr(
 // explicitly (C1c/C1d/C1e precedent). The three `From<QueryReply>`
 // loopback-projection tests carry an additional inner
 // `#[cfg(feature = "query-queryable")]` gate.
+// R311fn — the test-module gate is the reply-DECODE-capability predicate,
+// not the pub/sub publisher markers. The fixtures + dispatch tests exercise
+// the inbound `Response(Reply)` Put / Del body arms, which (post-R311fm)
+// gate on `any(pubsub-put, query-reply)` / `any(pubsub-delete, query-reply)`.
+// Gating the test module on the same `any(...)` predicate means the suite
+// compiles — and the put/del decode tests RUN — under the pure getter
+// subset (`query-reply`, pub/sub OFF), the exact path R311fm fixed. Before
+// R311fn the module required `pubsub-put` + `pubsub-delete`, so the getter
+// arm had ZERO unit coverage (only the wz-e2e-zget e2e guarded it); a
+// revert of the `query-reply` arm to `_ => return` would have kept this
+// unit suite green. The pub-bearing lanes (C1d/C1f) still satisfy both
+// `any(...)` clauses via the publisher markers, so they are unchanged; the
+// new query-reply-only lane in C1f exercises the getter arm.
 #[cfg(all(
     test,
     feature = "codec-response",
     feature = "codec-response-final",
-    feature = "pubsub-put",
-    feature = "pubsub-delete"
+    any(feature = "pubsub-put", feature = "query-reply"),
+    any(feature = "pubsub-delete", feature = "query-reply")
 ))]
 mod tests {
     use super::*;
