@@ -27670,6 +27670,56 @@
         "C4b ruling: 3 interop deltas documented (transport-batching R311fg, codec-response-final R311fh, query-reply reply-decode R311fm) — decide whether C4b should pin interop supersets. declare-observer added NO new delta (it composes cleanly), itself evidence the inbound-declare plane is well-isolated."
       ]
     },
+    "Round 311fp": {
+      "decision_summary": "R311fp C4b ruling = DECLINE pinning interop supersets (C4b stays BUILD-minimal; interop supersets live with the wz-e2e-* binaries + Layer E2) + consumer-plane subset SSOT: a single _wz_consumer_plane_subsets map now feeds the facade build lane (C4b) and the crate build/behaviour/clippy lanes (C4c/C1j/C4d), killing the duplicated plane map; queryable-only build promoted to the full plane (codec-response-final), resolving the build-vs-interop name collision and collapsing the 3 historical deltas to one uniform transport-batching base delta.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: new _wz_consumer_plane_subsets() SSOT — the single plane->extras map (7 rows: handshake-only, pubsub-only, queryable-only, zget-reply-only, liveliness-sub-only, liveliness-token-only, declare-observer). Before R311fp the facade lane C4b held its OWN copy of the 4 overlapping plane strings while C4c/C1j/C4d shared a second copy = two sources of truth free to drift; now both consume this one map.",
+        "C4b (facade BUILD) rewritten to iterate the SSOT, prepending the facade base. Broadened 4->7 planes: handshake-only + liveliness-sub-only + liveliness-token-only are now facade-build-guarded too (previously only the crate lanes guarded them).",
+        "C4b base transport-link-udp -> transport-link-tcp: matches the crate base + every wz-e2e-* binary; the prior udp was unexplained drift, not a UDP requirement (facade builds identically on either link feature). Facade base now differs from crate base by exactly runtime-tokio (facade selects a runtime; the crate IS one) + the facade-only forwarding markers keyexpr-literal / transport-keepalive.",
+        "queryable-only BUILD extras now include codec-response-final (was query-reply-err only). The name now uniformly means the FULL queryable plane (consistent with declare-observer already being its full bundle); resolves the collision where C4b/C4c said queryable-only=query-reply-err while wz-e2e-queryable interop pinned the reverse. Closes the R311fh codec-response-final gap at the BUILD layer.",
+        "_wz_runtime_tokio_coherent_subsets() reduced to a thin wrapper that prepends the crate base to the shared SSOT rows (was the second hardcoded copy). C4c/C1j/C4d unchanged in behaviour, now drift-proof against the facade lane too.",
+        "DECLINE ruling (comment): C4b stays BUILD-minimal, does NOT pin interop supersets. C4b and Layer E2 are different guards; pinning a superset would weaken the over-broad-import guard, duplicate the wz-e2e-* builds, and erase the build-vs-interop distinction E2 exists to show. The 3 historical per-plane deltas (transport-batching R311fg, codec-response-final R311fh, query-reply R311fm) collapse to ONE uniform transport-batching base delta, carried by Layer E2."
+      ],
+      "verification_bullets": [
+        "bash -n scripts/run-ci.sh clean. SSOT dump verified: _wz_consumer_plane_subsets emits 7 planes; _wz_runtime_tokio_coherent_subsets emits the same 7 rows with the crate base prepended (plane extras byte-identical to the facade map).",
+        "Full scripts/run-ci.sh with WZ_RUN_LAYER_G=1: EXIT 0, all required layers pass. Every subset lane now 7/7 on the shared SSOT: C4b 7/7 (broadened from 4), C4c 7/7, C1j 7/7, C4d 7/7 — incl the new queryable-only codec-response-final and the added handshake-only / liveliness-sub-only / liveliness-token-only facade builds.",
+        "Layer E2 pass (6 facade-subset e2e binaries unchanged), Layer G pass (7 MCU targets). Change is CI-harness + comment only; zero behaviour change to product code (no crate source touched).",
+        "queryable-only build now type-checks WITH codec-response-final, proving the full queryable plane composes at build time (the R311fh interop delta is now also a build-layer guarantee, not only an e2e one)."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "carry_forward_bullets": [
+        "push the R311fp commit (user consent required).",
+        "C4b-ruling carry CLOSED; the arbitrary-subset matrices (C4b facade + C4c/C1j/C4d crate) now share one plane SSOT and cannot drift.",
+        "Remaining north-star carries: audit-on-pattern (R311fm/fn — other consumer planes may gate a decode arm on an unrelated plane's feature; check isolated-subset test compilation), and reserved domains access / attachment / storage still 0% wired (~55% of the catalog reserved)."
+      ],
+      "publishable_decision_summary": "R311fp C4b ruling = DECLINE pinning interop supersets (C4b stays BUILD-minimal; interop supersets live with the wz-e2e-* binaries + Layer E2) + consumer-plane subset SSOT: a single _wz_consumer_plane_subsets map now feeds the facade build lane (C4b) and the crate build/behaviour/clippy lanes (C4c/C1j/C4d), killing the duplicated plane map; queryable-only build promoted to the full plane (codec-response-final), resolving the build-vs-interop name collision and collapsing the 3 historical deltas to one uniform transport-batching base delta.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: new _wz_consumer_plane_subsets() SSOT — the single plane->extras map (7 rows: handshake-only, pubsub-only, queryable-only, zget-reply-only, liveliness-sub-only, liveliness-token-only, declare-observer). Before R311fp the facade lane C4b held its OWN copy of the 4 overlapping plane strings while C4c/C1j/C4d shared a second copy = two sources of truth free to drift; now both consume this one map.",
+        "C4b (facade BUILD) rewritten to iterate the SSOT, prepending the facade base. Broadened 4->7 planes: handshake-only + liveliness-sub-only + liveliness-token-only are now facade-build-guarded too (previously only the crate lanes guarded them).",
+        "C4b base transport-link-udp -> transport-link-tcp: matches the crate base + every wz-e2e-* binary; the prior udp was unexplained drift, not a UDP requirement (facade builds identically on either link feature). Facade base now differs from crate base by exactly runtime-tokio (facade selects a runtime; the crate IS one) + the facade-only forwarding markers keyexpr-literal / transport-keepalive.",
+        "queryable-only BUILD extras now include codec-response-final (was query-reply-err only). The name now uniformly means the FULL queryable plane (consistent with declare-observer already being its full bundle); resolves the collision where C4b/C4c said queryable-only=query-reply-err while wz-e2e-queryable interop pinned the reverse. Closes the R311fh codec-response-final gap at the BUILD layer.",
+        "_wz_runtime_tokio_coherent_subsets() reduced to a thin wrapper that prepends the crate base to the shared SSOT rows (was the second hardcoded copy). C4c/C1j/C4d unchanged in behaviour, now drift-proof against the facade lane too.",
+        "DECLINE ruling (comment): C4b stays BUILD-minimal, does NOT pin interop supersets. C4b and Layer E2 are different guards; pinning a superset would weaken the over-broad-import guard, duplicate the wz-e2e-* builds, and erase the build-vs-interop distinction E2 exists to show. The 3 historical per-plane deltas (transport-batching R311fg, codec-response-final R311fh, query-reply R311fm) collapse to ONE uniform transport-batching base delta, carried by Layer E2."
+      ],
+      "publishable_verification_bullets": [
+        "bash -n scripts/run-ci.sh clean. SSOT dump verified: _wz_consumer_plane_subsets emits 7 planes; _wz_runtime_tokio_coherent_subsets emits the same 7 rows with the crate base prepended (plane extras byte-identical to the facade map).",
+        "Full scripts/run-ci.sh with WZ_RUN_LAYER_G=1: EXIT 0, all required layers pass. Every subset lane now 7/7 on the shared SSOT: C4b 7/7 (broadened from 4), C4c 7/7, C1j 7/7, C4d 7/7 — incl the new queryable-only codec-response-final and the added handshake-only / liveliness-sub-only / liveliness-token-only facade builds.",
+        "Layer E2 pass (6 facade-subset e2e binaries unchanged), Layer G pass (7 MCU targets). Change is CI-harness + comment only; zero behaviour change to product code (no crate source touched).",
+        "queryable-only build now type-checks WITH codec-response-final, proving the full queryable plane composes at build time (the R311fh interop delta is now also a build-layer guarantee, not only an e2e one)."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "publishable_carry_forward_bullets": [
+        "push the R311fp commit (user consent required).",
+        "C4b-ruling carry CLOSED; the arbitrary-subset matrices (C4b facade + C4c/C1j/C4d crate) now share one plane SSOT and cannot drift.",
+        "Remaining north-star carries: audit-on-pattern (R311fm/fn — other consumer planes may gate a decode arm on an unrelated plane's feature; check isolated-subset test compilation), and reserved domains access / attachment / storage still 0% wired (~55% of the catalog reserved)."
+      ]
+    },
     "Round 311g": {
       "decision_summary": "R311g send_close_with_reason signature stability + codec-frame envelope inbound cascade — Frame decode gated, +27.7KB elision; ap-demo codec-close mirror retired.",
       "changes_bullets": [
