@@ -126,8 +126,14 @@ jobs:
       - name: Build wz-ap-demo binary (Layer E dep)
         run: (cd crates && cargo build -p wz-ap-demo)
 
+      - name: Build wz-e2e-pubsub binary (Layer E2 dep)
+        run: (cd crates && cargo build -p wz-e2e-pubsub)
+
       - name: Layer E — wz-ap-demo round-trip vs zenoh-pico z_put
         run: bash scripts/run-ci.sh --layer E
+
+      - name: Layer E2 — facade-subset e2e vs zenoh-pico
+        run: bash scripts/run-ci.sh --layer E2
 
       # Cargo packaging dry-run — surfaces .crate tarball errors
       # (size > 10 MiB, missing required metadata, files outside

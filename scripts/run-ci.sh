@@ -121,8 +121,15 @@
 #   Layer D  — deploy/*.yaml schema validate
 #   Layer E  — binary-dep e2e suite via `cargo test ... -- --ignored`
 #              (auto-includes every #[ignore]-marked test in the
-#              wz-integration-tests crate; wz-ap-demo + zenoh-pico CLI
-#              must be built first or the lane SKIPs gracefully)
+#              wz-integration-tests crate EXCEPT the `wz_e2e_*`
+#              facade-subset family, which Layer E2 owns; wz-ap-demo +
+#              zenoh-pico CLI must be built first or the lane SKIPs)
+#   Layer E2 — facade-subset behavioural e2e (R311fg). Drives the
+#              single-purpose subset-pinned `wz-e2e-*` binaries (e.g.
+#              wz-e2e-pubsub) against zenoh-pico — the behavioural
+#              counterpart of the C4b facade BUILD subset matrix. Proves
+#              a subset INTEROPERATES on the wire, not just type-checks.
+#              SKIPs if the subset binaries / zenoh-pico CLI are absent.
 #   Layer 0  — preflight lints: cargo fmt --check (mandatory) +
 #              actionlint (optional, SKIPs if not installed). The
 #              fmt gate is mandatory because R285–R287 wz-ap-demo
@@ -1029,7 +1036,42 @@ layer_e_ap_demo_round_trip() {
     # five-test bundle is preserved in spirit — `--ignored` runs the
     # superset (every binary-dep test in the crate) which matches
     # the e2e gate intent.
-    (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored)
+    # R311fg — exclude the `wz_e2e_*` facade-subset behavioural e2e
+    # family; those run in the dedicated Layer E2 lane against their
+    # own subset-pinned binaries (wz-e2e-pubsub etc.), not the full
+    # preset-ap-client wz-ap-demo this lane drives. The `--skip` is a
+    # test-name substring filter, so the `wz_e2e_` prefix convention
+    # keeps every future subset e2e out of this sweep with one pattern.
+    (cd crates && cargo test -p wz-integration-tests --quiet -- --ignored --skip wz_e2e_)
+}
+
+# ─── Layer E2 — facade-subset behavioural e2e vs zenoh-pico ──────────
+#
+# R311fg: the behavioural counterpart of the C4b facade BUILD subset
+# matrix. C4b proves each coherent facade subset type-checks; Layer E2
+# proves a subset INTEROPERATES on the wire with a foreign zenoh-pico
+# peer. It drives the single-purpose subset-pinned binaries (the
+# `wz-e2e-*` crate family — currently wz-e2e-pubsub, which pins the
+# pubsub-only foreign-interop subset) rather than the full
+# preset-ap-client wz-ap-demo, so a feature that is load-bearing for
+# foreign interop but invisible to a build check or an in-process
+# wz<->wz test is caught here. (R311fg's first catch: transport-batching
+# — see crates/wz-e2e-pubsub/Cargo.toml.)
+#
+# Same prereq-SKIP discipline as Layer E: the subset binaries + the
+# zenoh-pico CLI must be prebuilt (CI builds them; a bare local run
+# SKIPs with the build hint). Runs only the `wz_e2e_*` family that
+# Layer E skips, so no test runs twice.
+layer_e2_facade_subset_e2e() {
+    if [[ ! -x crates/target/debug/wz-e2e-pubsub && ! -x crates/target/release/wz-e2e-pubsub ]]; then
+        echo "Layer E2 SKIP (wz-e2e-pubsub not built; run: cd crates && cargo build -p wz-e2e-pubsub)"
+        return 0
+    fi
+    if [[ ! -x target/zenoh-pico-cli/z_sub ]]; then
+        echo "Layer E2 SKIP (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
+        return 0
+    fi
+    (cd crates && cargo test -p wz-integration-tests --test wz_e2e_pubsub_to_zsub --quiet -- --ignored)
 }
 
 # ─── Layer F — codec-footprint catalog truthfulness gate (R311n) ───
@@ -1434,6 +1476,7 @@ run_layer C4b layer_c4b_facade_subset_matrix || overall=1
 run_layer C4c layer_c4c_runtime_tokio_subset_matrix || overall=1
 run_layer D layer_d_validate_deploy || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
+run_layer E2 layer_e2_facade_subset_e2e || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1

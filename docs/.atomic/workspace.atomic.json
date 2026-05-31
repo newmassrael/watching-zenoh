@@ -27210,6 +27210,56 @@
         "The C1j SSOT subset list is currently 5 representative coherent shapes; widening to multi-plane combinations is a future enrichment if a concrete regression class motivates it (YAGNI until then)."
       ]
     },
+    "Round 311fg": {
+      "decision_summary": "R311fg facade-subset BEHAVIOURAL e2e guard: new single-purpose wz-e2e-pubsub crate pins the pubsub-only foreign-interop subset and a new Layer E2 drives it against zenoh-pico; the e2e surfaced that transport-batching is load-bearing for the foreign handshake (build-coherent != interop-coherent).",
+      "changes_bullets": [
+        "New crate crates/wz-e2e-pubsub (Cargo.toml + src/main.rs): a minimal single-purpose e2e consumer binary that pins the pubsub-only foreign-interop facade subset (wz dep default-features off + explicit subset list). Acceptor + literal-keyexpr Put burst + drive-until-terminal/SIGTERM + minimal teardown, using ONLY the public facade pub/sub surface so it compiles under the subset with zero #[cfg]. Textbook single-responsibility — the alternative (cfg-gating the wz-ap-demo monolith for subset builds) is a ~70-site cfg-soup the project rejects. Registered as a workspace member in crates/Cargo.toml.",
+        "crates/wz-integration-tests: new wz_e2e_pubsub_to_zsub.rs e2e test (mirrors wz_publisher_to_zsub.rs but drives the subset binary against zenoh-pico z_sub) + wz_e2e_pubsub_binary() locator in the common lib.",
+        "scripts/run-ci.sh: new Layer E2 (facade-subset behavioural e2e) drives the wz-e2e-* subset-pinned binaries vs zenoh-pico — the behavioural counterpart of the C4b facade BUILD subset matrix. Layer E now runs `--ignored --skip wz_e2e_` so the subset family runs ONLY in E2 (no test runs twice); header layer-list + run_layer dispatch updated.",
+        ".github/workflows/release.yml: build wz-e2e-pubsub (Layer E2 dep) + run Layer E2 steps added after the existing Layer E flow."
+      ],
+      "verification_bullets": [
+        "Layer E2 e2e PASS 10/10 consecutive (no-flaky-ever sweep): the wz-e2e-pubsub acceptor's literal-keyexpr Put burst reaches zenoh-pico z_sub's subscriber callback (witnessed by \">> [Subscriber] Received\" + the keyexpr + the value substrings).",
+        "FINDING — transport-batching is load-bearing for FOREIGN interop: with it off the pubsub subset BUILDS (C4b passes) and two wz peers interoperate (both force batch_size 65535) but zenoh-pico's z_sub rejects the InitAck (FSM closes SentInitAck -> Closed; z_sub logs \"Unable to open session!\"). Adding transport-batching to the pinned subset fixed the handshake. Only an e2e-vs-foreign-peer guard surfaces this; the build guard (C4b) and the in-process behavioural guard (C1j) both pass without it.",
+        "wz-e2e-pubsub builds clean (0 warnings under deny-warnings) under its isolated, feature-unification-free pinned subset (cargo build -p wz-e2e-pubsub).",
+        "full run-ci EXIT 0: all required lanes pass, including Layer E (full preset-ap-client demo suite, now run with --skip wz_e2e_) and the new Layer E2 (facade-subset e2e). fmt + clippy clean (the new crate + test; an earlier draft's fmt drift + a doc_lazy_continuation in the test doc were fixed before this run)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "First facade-subset behavioural e2e guard lands (pubsub). Sibling subset binaries (wz-e2e-queryable / wz-e2e-liveliness) follow the same single-purpose-crate shape when their planes need foreign-interop coverage; each pins its own foreign-interop-coherent subset and adds a wz_e2e_* test that Layer E2 picks up.",
+        "FINDING generalisation: the foreign-interop-coherent subset is strictly larger than the build-coherent one (pubsub needs transport-batching for the zenoh-pico handshake). The other C4b/C4c/C1j build-coherent subsets may carry latent foreign-interop gaps that only an e2e-vs-foreign-peer guard surfaces — worth auditing as the wz-e2e-* family grows.",
+        "FOLLOW-UP (uncaught latent): an isolated `cargo clippy -p wz-e2e-pubsub` (the clippy analog of C3 for subset binaries) surfaces clippy::needless_return at session.rs:1181/1331/1433 — the signature-stability query-get methods whose `cfg(not(query-get))` arm's `return Err(FeatureDisabled)` becomes the function tail under the subset. No current CI lane clips wz-runtime-tokio under query-get OFF, so this is pre-existing + latent, not an R311fg regression. Adding a subset-isolated clippy guard requires resolving these per feedback_signature_stability (prefer cfg over #[allow]) first — coupled follow-up.",
+        "Open decision: whether C4b's pubsub-only BUILD subset should also list transport-batching for catalog consistency (build-coherent without it, interop-coherent only with it). Left as-is pending a ruling on whether C4b models build- or interop-coherence; the e2e binary pins the interop-coherent superset regardless."
+      ],
+      "publishable_decision_summary": "R311fg facade-subset BEHAVIOURAL e2e guard: new single-purpose wz-e2e-pubsub crate pins the pubsub-only foreign-interop subset and a new Layer E2 drives it against zenoh-pico; the e2e surfaced that transport-batching is load-bearing for the foreign handshake (build-coherent != interop-coherent).",
+      "publishable_changes_bullets": [
+        "New crate crates/wz-e2e-pubsub (Cargo.toml + src/main.rs): a minimal single-purpose e2e consumer binary that pins the pubsub-only foreign-interop facade subset (wz dep default-features off + explicit subset list). Acceptor + literal-keyexpr Put burst + drive-until-terminal/SIGTERM + minimal teardown, using ONLY the public facade pub/sub surface so it compiles under the subset with zero #[cfg]. Textbook single-responsibility — the alternative (cfg-gating the wz-ap-demo monolith for subset builds) is a ~70-site cfg-soup the project rejects. Registered as a workspace member in crates/Cargo.toml.",
+        "crates/wz-integration-tests: new wz_e2e_pubsub_to_zsub.rs e2e test (mirrors wz_publisher_to_zsub.rs but drives the subset binary against zenoh-pico z_sub) + wz_e2e_pubsub_binary() locator in the common lib.",
+        "scripts/run-ci.sh: new Layer E2 (facade-subset behavioural e2e) drives the wz-e2e-* subset-pinned binaries vs zenoh-pico — the behavioural counterpart of the C4b facade BUILD subset matrix. Layer E now runs `--ignored --skip wz_e2e_` so the subset family runs ONLY in E2 (no test runs twice); header layer-list + run_layer dispatch updated.",
+        ".github/workflows/release.yml: build wz-e2e-pubsub (Layer E2 dep) + run Layer E2 steps added after the existing Layer E flow."
+      ],
+      "publishable_verification_bullets": [
+        "Layer E2 e2e PASS 10/10 consecutive (no-flaky-ever sweep): the wz-e2e-pubsub acceptor's literal-keyexpr Put burst reaches zenoh-pico z_sub's subscriber callback (witnessed by \">> [Subscriber] Received\" + the keyexpr + the value substrings).",
+        "FINDING — transport-batching is load-bearing for FOREIGN interop: with it off the pubsub subset BUILDS (C4b passes) and two wz peers interoperate (both force batch_size 65535) but zenoh-pico's z_sub rejects the InitAck (FSM closes SentInitAck -> Closed; z_sub logs \"Unable to open session!\"). Adding transport-batching to the pinned subset fixed the handshake. Only an e2e-vs-foreign-peer guard surfaces this; the build guard (C4b) and the in-process behavioural guard (C1j) both pass without it.",
+        "wz-e2e-pubsub builds clean (0 warnings under deny-warnings) under its isolated, feature-unification-free pinned subset (cargo build -p wz-e2e-pubsub).",
+        "full run-ci EXIT 0: all required lanes pass, including Layer E (full preset-ap-client demo suite, now run with --skip wz_e2e_) and the new Layer E2 (facade-subset e2e). fmt + clippy clean (the new crate + test; an earlier draft's fmt drift + a doc_lazy_continuation in the test doc were fixed before this run)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "First facade-subset behavioural e2e guard lands (pubsub). Sibling subset binaries (wz-e2e-queryable / wz-e2e-liveliness) follow the same single-purpose-crate shape when their planes need foreign-interop coverage; each pins its own foreign-interop-coherent subset and adds a wz_e2e_* test that Layer E2 picks up.",
+        "FINDING generalisation: the foreign-interop-coherent subset is strictly larger than the build-coherent one (pubsub needs transport-batching for the zenoh-pico handshake). The other C4b/C4c/C1j build-coherent subsets may carry latent foreign-interop gaps that only an e2e-vs-foreign-peer guard surfaces — worth auditing as the wz-e2e-* family grows.",
+        "FOLLOW-UP (uncaught latent): an isolated `cargo clippy -p wz-e2e-pubsub` (the clippy analog of C3 for subset binaries) surfaces clippy::needless_return at session.rs:1181/1331/1433 — the signature-stability query-get methods whose `cfg(not(query-get))` arm's `return Err(FeatureDisabled)` becomes the function tail under the subset. No current CI lane clips wz-runtime-tokio under query-get OFF, so this is pre-existing + latent, not an R311fg regression. Adding a subset-isolated clippy guard requires resolving these per feedback_signature_stability (prefer cfg over #[allow]) first — coupled follow-up.",
+        "Open decision: whether C4b's pubsub-only BUILD subset should also list transport-batching for catalog consistency (build-coherent without it, interop-coherent only with it). Left as-is pending a ruling on whether C4b models build- or interop-coherence; the e2e binary pins the interop-coherent superset regardless."
+      ]
+    },
     "Round 311g": {
       "decision_summary": "R311g send_close_with_reason signature stability + codec-frame envelope inbound cascade — Frame decode gated, +27.7KB elision; ap-demo codec-close mirror retired.",
       "changes_bullets": [
