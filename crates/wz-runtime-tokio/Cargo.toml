@@ -273,13 +273,23 @@ codec-response = ["wz-codecs/codec-response", "codec-frame", "wz-session-core/co
 #                            tokio::net::TcpStream import (lib.rs ~315).
 #   transport-link-udp     — UdpDriver struct + LinkDriver impl + the
 #                            tokio::net::UdpSocket import (lib.rs ~517).
-#   transport-unicast      — pub mod session_fsm_unicast (lib.rs ~203);
-#                            the entire session_glue.rs depends on the
-#                            SessionFsmUnicast{Event,Policy} types so
-#                            feature-off is intentionally not buildable
-#                            until transport-multicast (currently
-#                            reserved) introduces an alternate FSM.
-#                            Default-on so the AP path keeps compiling.
+#   transport-unicast      — FOUNDATIONAL, not an excludable atomic
+#                            (R311fe, same class as keyexpr-canon). It
+#                            gates `pub mod session_fsm_unicast` (lib.rs
+#                            ~203) and the entire session_glue.rs depends
+#                            on the SessionFsmUnicast{Event,Policy} types,
+#                            so feature-off does not type-check — and
+#                            there is no alternate FSM to fall back to
+#                            (transport-multicast stays reserved with no
+#                            consumer; introducing a stub FSM purely to
+#                            make the OFF subset build would be a
+#                            speculative YAGNI fork). Genuine exclusion is
+#                            blocked until a second FSM genuinely lands;
+#                            until then this is a default-on toggle that
+#                            the arbitrary-subset CI lane (C4c,
+#                            scripts/run-ci.sh) pins ON. The other
+#                            transport atomics below ARE independently
+#                            composable on top of it.
 #   transport-keepalive    — start_keepalive_worker / stop_keepalive_worker
 #                            action bindings + the worker spawn body in
 #                            session_glue.rs. R311g1 silent no-op when

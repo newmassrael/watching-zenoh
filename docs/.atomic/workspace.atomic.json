@@ -27118,6 +27118,52 @@
         "Full removal of the now-foundational keyexpr-canon feature label from the catalog / presets is a follow-up catalog-cleanup; kept as a no-op marker this round to avoid touching the C4 preset matrix."
       ]
     },
+    "Round 311fe": {
+      "decision_summary": "R311fe wz-runtime-tokio arbitrary-subset composability: ExtEntry import cfg-gated to its decode_ext_chain use-site, transport-unicast documented FOUNDATIONAL, and a new C4c CI lane guards the runtime crate under incomplete coherent subsets (carry #3 residual bounded + guarded).",
+      "changes_bullets": [
+        "session_glue.rs:113 — `use wz_codecs::ext_entry::ExtEntry;` now gated on cfg(any(codec-init-body, codec-open-body, codec-close, codec-keep-alive, codec-frame)), mirroring the `decode_ext_chain` definition gate (its sole consumer). Bare --no-default-features previously surfaced this import as a dead `use` under deny(warnings) — the one genuine subset-lint bug inside the carry #3 residual.",
+        "wz-runtime-tokio/Cargo.toml — transport-unicast reclassified FOUNDATIONAL (sole session FSM; transport-multicast stays reserved with no consumer, so OFF does not type-check and a stub FSM purely to make OFF build would be speculative YAGNI). Same status as keyexpr-canon (R311fd); documented as a default-on toggle that the C4c lane pins ON.",
+        "scripts/run-ci.sh — new Layer C4c (layer_c4c_runtime_tokio_subset_matrix): cargo build -p wz-runtime-tokio --no-default-features under 5 coherent subsets (handshake-only / pubsub-only / queryable-only / zget-reply-only / declare-observer), the runtime-crate analog of C1h (session-core) and C4b (facade). Registered in the run_layer dispatch + header layer list."
+      ],
+      "verification_bullets": [
+        "BEFORE: cargo check -p wz-runtime-tokio --no-default-features = 8 errors (7 designed `crate::session_fsm_unicast` from transport-unicast OFF + 1 ExtEntry dead `use`). AFTER the import gate: ExtEntry error gone; only the 7 foundational session_fsm_unicast errors remain (transport-unicast OFF intentionally not buildable, no alternate FSM).",
+        "scripts/run-ci.sh full run EXIT 0: all required lanes pass incl the new C4c (5 subsets all OK); C1h + C4 7-preset + C4b facade-subset composability matrices unaffected.",
+        "Layer G 7-MCU cross-compile EXIT 0, 48 targets OK — change is AP-only (wz-runtime-tokio; MCU uses wz-runtime-lwip), zero cross-compile regression.",
+        "cargo fmt -p wz-runtime-tokio --check clean; default build unchanged (codec-init-body on by default keeps the ExtEntry import active, identical behaviour)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "Carry #3 residual now BOUNDED + CI-guarded: the only genuine wz-runtime-tokio non-composability (the ExtEntry import) is fixed, and the C4c lane prevents regression of the runtime-crate subset composability. transport-unicast OFF is documented FOUNDATIONAL (no alternate FSM exists to fall back to).",
+        "The 'broad' track (gate session_glue.rs / session_fsm_unicast so bare --no-default-features yields a no-FSM session) stays deferred as speculative YAGNI until transport-multicast gains a real consumer that needs a second FSM.",
+        "Full removal of the now-foundational transport-unicast + keyexpr-canon labels from the catalog / presets is a follow-up catalog-cleanup; kept as no-op default-on markers this round to avoid churning the C4 preset matrix.",
+        "Arbitrary-subset BEHAVIORAL CI guard (vs build-only) still absent across all crates — the broader composability-behavior-CI track the audit flags."
+      ],
+      "publishable_decision_summary": "R311fe wz-runtime-tokio arbitrary-subset composability: ExtEntry import cfg-gated to its decode_ext_chain use-site, transport-unicast documented FOUNDATIONAL, and a new C4c CI lane guards the runtime crate under incomplete coherent subsets (carry #3 residual bounded + guarded).",
+      "publishable_changes_bullets": [
+        "session_glue.rs:113 — `use wz_codecs::ext_entry::ExtEntry;` now gated on cfg(any(codec-init-body, codec-open-body, codec-close, codec-keep-alive, codec-frame)), mirroring the `decode_ext_chain` definition gate (its sole consumer). Bare --no-default-features previously surfaced this import as a dead `use` under deny(warnings) — the one genuine subset-lint bug inside the carry #3 residual.",
+        "wz-runtime-tokio/Cargo.toml — transport-unicast reclassified FOUNDATIONAL (sole session FSM; transport-multicast stays reserved with no consumer, so OFF does not type-check and a stub FSM purely to make OFF build would be speculative YAGNI). Same status as keyexpr-canon (R311fd); documented as a default-on toggle that the C4c lane pins ON.",
+        "scripts/run-ci.sh — new Layer C4c (layer_c4c_runtime_tokio_subset_matrix): cargo build -p wz-runtime-tokio --no-default-features under 5 coherent subsets (handshake-only / pubsub-only / queryable-only / zget-reply-only / declare-observer), the runtime-crate analog of C1h (session-core) and C4b (facade). Registered in the run_layer dispatch + header layer list."
+      ],
+      "publishable_verification_bullets": [
+        "BEFORE: cargo check -p wz-runtime-tokio --no-default-features = 8 errors (7 designed `crate::session_fsm_unicast` from transport-unicast OFF + 1 ExtEntry dead `use`). AFTER the import gate: ExtEntry error gone; only the 7 foundational session_fsm_unicast errors remain (transport-unicast OFF intentionally not buildable, no alternate FSM).",
+        "scripts/run-ci.sh full run EXIT 0: all required lanes pass incl the new C4c (5 subsets all OK); C1h + C4 7-preset + C4b facade-subset composability matrices unaffected.",
+        "Layer G 7-MCU cross-compile EXIT 0, 48 targets OK — change is AP-only (wz-runtime-tokio; MCU uses wz-runtime-lwip), zero cross-compile regression.",
+        "cargo fmt -p wz-runtime-tokio --check clean; default build unchanged (codec-init-body on by default keeps the ExtEntry import active, identical behaviour)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Carry #3 residual now BOUNDED + CI-guarded: the only genuine wz-runtime-tokio non-composability (the ExtEntry import) is fixed, and the C4c lane prevents regression of the runtime-crate subset composability. transport-unicast OFF is documented FOUNDATIONAL (no alternate FSM exists to fall back to).",
+        "The 'broad' track (gate session_glue.rs / session_fsm_unicast so bare --no-default-features yields a no-FSM session) stays deferred as speculative YAGNI until transport-multicast gains a real consumer that needs a second FSM.",
+        "Full removal of the now-foundational transport-unicast + keyexpr-canon labels from the catalog / presets is a follow-up catalog-cleanup; kept as no-op default-on markers this round to avoid churning the C4 preset matrix.",
+        "Arbitrary-subset BEHAVIORAL CI guard (vs build-only) still absent across all crates — the broader composability-behavior-CI track the audit flags."
+      ]
+    },
     "Round 311g": {
       "decision_summary": "R311g send_close_with_reason signature stability + codec-frame envelope inbound cascade — Frame decode gated, +27.7KB elision; ap-demo codec-close mirror retired.",
       "changes_bullets": [

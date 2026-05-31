@@ -100,6 +100,13 @@
 #              default — so a preset feature-list drift or incoherent
 #              combo cannot pass CI invisibly. Facade-level analog of
 #              C1h; no_std footing stays Layer G's cross-compile job.)
+#   Layer C4c — wz-runtime-tokio arbitrary-subset matrix (R311fe;
+#              cargo-builds the runtime crate DIRECTLY under
+#              --no-default-features + incomplete coherent consumer
+#              subsets — handshake-only / pubsub-only / queryable-only /
+#              zget-reply-only / declare-observer — the runtime-crate
+#              analog of C1h / C4b. transport-unicast pinned ON
+#              (FOUNDATIONAL: sole session FSM, like keyexpr-canon).)
 #   Layer D  — deploy/*.yaml schema validate
 #   Layer E  — binary-dep e2e suite via `cargo test ... -- --ignored`
 #              (auto-includes every #[ignore]-marked test in the
@@ -840,6 +847,52 @@ layer_c4b_facade_subset_matrix() {
     done
 }
 
+# ─── Layer C4c — wz-runtime-tokio arbitrary-subset composability ─────
+#
+# R311fe: C1h guards wz-session-core subsets, C4b guards the wz facade.
+# Neither builds wz-runtime-tokio DIRECTLY under an incomplete subset —
+# the facade always selects a coherent preset bundle, so a regression in
+# the runtime crate's own cfg gating (an over-broad `use` whose only call
+# site is feature-gated, a dead field under a one-plane build) can pass
+# C4b invisibly when the facade default pulls the missing feature back in.
+# That is exactly the class R311fe fixed (the `wz_codecs::ext_entry::
+# ExtEntry` import was unconditional while its sole consumer
+# `decode_ext_chain` is gated on the codec union). This lane is the
+# runtime-crate analog of C1h / C4b: it `cargo build`s wz-runtime-tokio
+# under `--no-default-features` plus several deliberately-incomplete
+# coherent consumer subsets so `deny(warnings)` turns any subset-specific
+# dead import / unused field into a hard error.
+#
+# transport-unicast is pinned ON in $base: it is FOUNDATIONAL (the sole
+# session FSM; transport-multicast is reserved with no consumer), so a
+# transport-unicast-OFF subset does not type-check and is not a coherent
+# shape to guard — same status as keyexpr-canon. The lane guards the
+# composability that IS real: every consumer plane on top of the
+# handshake core.
+layer_c4c_runtime_tokio_subset_matrix() {
+    local base="transport-unicast,transport-link-tcp,session-unicast-open,session-unicast-accept,codec-frame,codec-keep-alive,codec-init-body,codec-open-body,codec-close,keyexpr-canon"
+    # name : extra consumer-plane features layered on $base (empty = the
+    # handshake-only core build, no data/query/declare plane).
+    local subsets=(
+        "handshake-only:"
+        "pubsub-only:codec-push,pubsub-put,pubsub-delete"
+        "queryable-only:codec-request,codec-response,query-queryable,query-reply-err"
+        "zget-reply-only:codec-response,codec-response-final,query-get,query-reply"
+        "declare-observer:codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber"
+    )
+    local entry name extra feats
+    for entry in "${subsets[@]}"; do
+        name="${entry%%:*}"
+        extra="${entry#*:}"
+        if [ -n "$extra" ]; then feats="$base,$extra"; else feats="$base"; fi
+        if ! (cd crates && cargo build -p wz-runtime-tokio --no-default-features --features "$feats" --quiet); then
+            echo "  C4c FAIL: wz-runtime-tokio subset $name did not build"
+            return 1
+        fi
+        echo "  C4c wz-runtime-tokio subset $name OK"
+    done
+}
+
 # ─── Layer D — deploy yaml schema validate ──────────────────────────
 layer_d_validate_deploy() {
     if ! python3 -c 'import yaml' >/dev/null 2>&1; then
@@ -1330,6 +1383,7 @@ run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer C4 layer_c4_preset_matrix || overall=1
 run_layer C4b layer_c4b_facade_subset_matrix || overall=1
+run_layer C4c layer_c4c_runtime_tokio_subset_matrix || overall=1
 run_layer D layer_d_validate_deploy || overall=1
 run_layer E layer_e_ap_demo_round_trip || overall=1
 run_layer F layer_f_codec_footprint || overall=1
