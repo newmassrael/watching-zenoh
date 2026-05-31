@@ -169,7 +169,7 @@ query-get = ["query-reply", "query-queryable", "codec-request"]
 # Response surface compiles whenever the high-level query reply
 # capability is on.
 query-queryable = ["codec-request", "codec-response", "wz-session-core/query-queryable"]
-query-reply = ["codec-request", "codec-response"]
+query-reply = ["codec-request", "codec-response", "wz-session-core/query-reply"]
 query-target = ["query-get"]
 query-timeout = ["query-get"]
 query-consolidation = ["query-get"]

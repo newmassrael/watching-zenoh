@@ -1498,6 +1498,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-e2e-zget"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "tokio",
+ "wz",
+ "wz-e2e-harness",
+]
+
+[[package]]
 name = "wz-integration-tests"
 version = "0.1.0"
 dependencies = [

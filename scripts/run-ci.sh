@@ -1104,6 +1104,9 @@ layer_e_ap_demo_round_trip() {
 #   * wz-e2e-queryable — queryable-only, wz answers queries vs z_get
 #                        (catch: codec-response-final is load-bearing for
 #                        z_get's terminating Final — see its Cargo.toml).
+#   * wz-e2e-zget      — zget-reply-only, wz issues queries vs
+#                        z_queryable (initiator mirror of wz-e2e-
+#                        queryable; consumes the reply + Final chain).
 #   * wz-e2e-liveliness — liveliness-subscriber-only, wz OBSERVES a token
 #                        vs z_liveliness declarer (wz=sink). Witness is on
 #                        the wz side, so no foreign-stdout capture race.
@@ -1120,6 +1123,7 @@ layer_e_ap_demo_round_trip() {
 # Layer E skips, so no test runs twice.
 layer_e2_facade_subset_e2e() {
     if [[ ! -x target/zenoh-pico-cli/z_sub || ! -x target/zenoh-pico-cli/z_get \
+          || ! -x target/zenoh-pico-cli/z_queryable \
           || ! -x target/zenoh-pico-cli/z_liveliness \
           || ! -x target/zenoh-pico-cli/z_get_liveliness ]]; then
         echo "Layer E2 SKIP (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
@@ -1133,6 +1137,11 @@ layer_e2_facade_subset_e2e() {
     # queryable-only subset — wz answers queries vs zenoh-pico z_get.
     if [[ ! -x crates/target/debug/wz-e2e-queryable && ! -x crates/target/release/wz-e2e-queryable ]]; then
         echo "Layer E2 SKIP (wz-e2e-queryable not built; run: cd crates && cargo build -p wz-e2e-queryable)"
+        return 0
+    fi
+    # zget-reply-only subset — wz issues queries vs zenoh-pico z_queryable.
+    if [[ ! -x crates/target/debug/wz-e2e-zget && ! -x crates/target/release/wz-e2e-zget ]]; then
+        echo "Layer E2 SKIP (wz-e2e-zget not built; run: cd crates && cargo build -p wz-e2e-zget)"
         return 0
     fi
     # liveliness-subscriber-only subset — wz observes a token vs z_liveliness.
@@ -1149,6 +1158,7 @@ layer_e2_facade_subset_e2e() {
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_e2e_pubsub_to_zsub \
         --test wz_e2e_queryable_to_zget \
+        --test wz_e2e_zget_to_zqueryable \
         --test wz_e2e_liveliness_to_zliveliness \
         --test wz_e2e_liveliness_token_to_zget_liveliness \
         --quiet -- --ignored)
