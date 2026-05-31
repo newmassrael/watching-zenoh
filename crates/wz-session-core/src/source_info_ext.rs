@@ -65,3 +65,51 @@ pub(crate) fn encode_vle_u64_into(out: &mut Vec<u8>, mut v: u64) {
     }
     out.push(v as u8);
 }
+
+// R311fs — encode_source_info_ext_body wire-layout test, relocated
+// from wz-runtime-tokio::session_glue to its SSOT home (R311ek moved
+// the encoder here). Dedup of the cross-crate duplicate.
+#[cfg(all(test, feature = "codec-response"))]
+mod tests {
+    use super::*;
+
+    /// R121j-4b — direct check on the helper that builds the
+    /// source_info ext-body bytes. Locks the wire shape independently
+    /// of the builder so future helpers (Push.source_info, Query
+    /// source_info) can re-use the helper with the same guarantees.
+    #[cfg(feature = "codec-response")]
+    #[test]
+    fn encode_source_info_ext_body_matches_zenoh_pico_layout() {
+        // zid_len=2 → leading byte = (2-1)<<4 = 0x10
+        let bytes = encode_source_info_ext_body(&[0xDE, 0xAD], 0x80, 0x4000);
+        // Expected: [0x10, 0xDE, 0xAD, VLE(0x80)..., VLE(0x4000)...]
+        // VLE(0x80): 0x80 needs 2 bytes (first 0x80|0x00=0x80, second 0x01)
+        // VLE(0x4000): 0x4000 needs 3 bytes (0x80, 0x80, 0x01)
+        assert_eq!(
+            bytes[0], 0x10,
+            "leading byte packs zid_len-1 in high nibble"
+        );
+        assert_eq!(
+            &bytes[1..3],
+            &[0xDE, 0xAD],
+            "raw zid follows the leading byte"
+        );
+        // VLE(128) = 0x80, 0x01 (continuation bit on first byte, value 1 in second)
+        assert_eq!(
+            &bytes[3..5],
+            &[0x80, 0x01],
+            "VLE(eid=128) = 0x80 0x01 (2 bytes)"
+        );
+        // VLE(16384) = 0x80, 0x80, 0x01
+        assert_eq!(
+            &bytes[5..8],
+            &[0x80, 0x80, 0x01],
+            "VLE(sn=16384) = 0x80 0x80 0x01 (3 bytes)"
+        );
+        assert_eq!(
+            bytes.len(),
+            8,
+            "total = 1 leading + 2 zid + 2 VLE(eid) + 3 VLE(sn) = 8"
+        );
+    }
+}

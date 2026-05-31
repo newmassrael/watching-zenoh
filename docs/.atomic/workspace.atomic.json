@@ -27820,6 +27820,52 @@
         "reserved domains access / attachment / storage still 0% wired (~55% of the catalog reserved)."
       ]
     },
+    "Round 311fs": {
+      "decision_summary": "R311fs cross-crate test dedup: 62 byte-stable builder wire tests relocated from wz-runtime-tokio session_glue to their 5 wz-session-core SSOT module homes (R311dv/eh/ek/di moves).",
+      "changes_bullets": [
+        "No twins existed in session-core: the builders moved byte-exact in R311dv/eh but their tests stayed in session_glue, so the carry's delete-against-twins premise was a misdiagnosis -- this is a MOVE (delete would lose the only coverage of the migrated builders), not a delete.",
+        "wz-session-core test homes added (each a #[cfg(all(test, codec-*))] mod tests with a local TestWire owned->wire helper, bodies byte-identical to the originals): request_build.rs +26, response_build.rs +28, query_mode.rs +2, source_info_ext.rs +1, metadata.rs +5.",
+        "wz-runtime-tokio/src/session_glue.rs: 4 contiguous ranges deleted (lib #[test] 139 -> 77); runtime-local tests kept untouched (encode_frame_with_*, build_response_final, send_*, push/declare builders).",
+        "session_glue test-mod imports reconciled: removed now-unused RequestOwnedVariant / ReplyOwnedVariant / ResponseOwnedVariant; restored the codec-push use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint} import that physically sat inside a deleted range but serves the kept push-metadata tests."
+      ],
+      "verification_bullets": [
+        "Count preserved net-zero: wz-runtime-tokio lib 327 -> 265 (-62); wz-session-core lib +62 (143 under codec-request+codec-response, 81 under alloc-only default). All 62 relocated tests pass in their new homes.",
+        "CI coverage retained: Layer C1e (query-queryable implies codec-request+codec-response) executes all 62 relocated tests (session-core lib 174 passed).",
+        "Full scripts/run-ci.sh: all required layers pass incl. Layer C1j 7-subset isolation; Layer G WZ_RUN_LAYER_G=1 EXIT 0 (49 MCU cross-compile, G.6 KNOWN_SKIP no riscv gcc). cargo fmt --all --check clean; RUSTFLAGS=-D warnings clean both crates.",
+        "Product code unchanged -- test-module relocation only; default lanes green."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "push the R311fs commit (user consent required).",
+        "migrated-builder duplicate-test dedup carry (opened R311fr) CLOSED: builders had no session-core twins, so the 62 byte-stable tests were relocated (not deleted) to their SSOT homes; coverage retained via Layer C1e.",
+        "reserved domains access / attachment / storage still 0% wired (~55% of the catalog reserved)."
+      ],
+      "publishable_decision_summary": "R311fs cross-crate test dedup: 62 byte-stable builder wire tests relocated from wz-runtime-tokio session_glue to their 5 wz-session-core SSOT module homes (R311dv/eh/ek/di moves).",
+      "publishable_changes_bullets": [
+        "No twins existed in session-core: the builders moved byte-exact in R311dv/eh but their tests stayed in session_glue, so the carry's delete-against-twins premise was a misdiagnosis -- this is a MOVE (delete would lose the only coverage of the migrated builders), not a delete.",
+        "wz-session-core test homes added (each a #[cfg(all(test, codec-*))] mod tests with a local TestWire owned->wire helper, bodies byte-identical to the originals): request_build.rs +26, response_build.rs +28, query_mode.rs +2, source_info_ext.rs +1, metadata.rs +5.",
+        "wz-runtime-tokio/src/session_glue.rs: 4 contiguous ranges deleted (lib #[test] 139 -> 77); runtime-local tests kept untouched (encode_frame_with_*, build_response_final, send_*, push/declare builders).",
+        "session_glue test-mod imports reconciled: removed now-unused RequestOwnedVariant / ReplyOwnedVariant / ResponseOwnedVariant; restored the codec-push use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint} import that physically sat inside a deleted range but serves the kept push-metadata tests."
+      ],
+      "publishable_verification_bullets": [
+        "Count preserved net-zero: wz-runtime-tokio lib 327 -> 265 (-62); wz-session-core lib +62 (143 under codec-request+codec-response, 81 under alloc-only default). All 62 relocated tests pass in their new homes.",
+        "CI coverage retained: Layer C1e (query-queryable implies codec-request+codec-response) executes all 62 relocated tests (session-core lib 174 passed).",
+        "Full scripts/run-ci.sh: all required layers pass incl. Layer C1j 7-subset isolation; Layer G WZ_RUN_LAYER_G=1 EXIT 0 (49 MCU cross-compile, G.6 KNOWN_SKIP no riscv gcc). cargo fmt --all --check clean; RUSTFLAGS=-D warnings clean both crates.",
+        "Product code unchanged -- test-module relocation only; default lanes green."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "push the R311fs commit (user consent required).",
+        "migrated-builder duplicate-test dedup carry (opened R311fr) CLOSED: builders had no session-core twins, so the 62 byte-stable tests were relocated (not deleted) to their SSOT homes; coverage retained via Layer C1e.",
+        "reserved domains access / attachment / storage still 0% wired (~55% of the catalog reserved)."
+      ]
+    },
     "Round 311g": {
       "decision_summary": "R311g send_close_with_reason signature stability + codec-frame envelope inbound cascade — Frame decode gated, +27.7KB elision; ap-demo codec-close mirror retired.",
       "changes_bullets": [

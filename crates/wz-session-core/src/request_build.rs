@@ -778,3 +778,1091 @@ pub fn build_request_query_with_target(
         .request_target(target)
         .build()
 }
+
+// R311fs — the byte-stable RequestQueryBuilder / build_request_query
+// regression tests, relocated from wz-runtime-tokio::session_glue to
+// their SSOT home now that the production code lives here (R311eh).
+// The builders are re-exported by session_glue, so the runtime crate
+// kept duplicate copies of these tests after the move; this is the
+// dedup. TestWire mirrors the session_glue owned->wire projection.
+#[cfg(all(test, feature = "codec-request"))]
+mod tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    // owned -> wire bytes via the borrowed encode (encode lives on the
+    // borrowed view); the `.expect()` is sound by construction since wz
+    // builders emit far fewer than the heapless ext cap N.
+    trait TestWire {
+        fn wire(&self) -> Vec<u8>;
+    }
+    impl TestWire for RequestOwned {
+        fn wire(&self) -> Vec<u8> {
+            self.try_as_borrowed()
+                .expect("test: <=N exts by construction")
+                .encode_to_vec()
+        }
+    }
+
+    /// R121j-1 — `build_request_query` produces a Request envelope
+    /// carrying a `Query` inner body in the minimal AP MVP shape (no
+    /// consolidation, no params, no exts at either level). Three
+    /// vectors lock the alias / composite / literal trio mirroring
+    /// the DECLARE builders, but using `_Z_MID_N_REQUEST (0x1C)` for
+    /// the outer header and `_Z_MID_Z_QUERY (0x03)` for the inner
+    /// Query header.
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn build_request_query_wraps_query_in_request_envelope() {
+        // Case 1 — pure alias.
+        let alias = build_request_query(42, 7, None);
+        assert_eq!(
+            alias.header, 0x1C,
+            "Request header carries MID 0x1C only (no N since no suffix); \
+             M is codegen-derived from the Local wireexpr arm at encode",
+        );
+        assert_eq!(alias.rid, 42, "Request.rid must equal the requested rid");
+        match &alias.keyexpr.body {
+            WireexprOwnedVariant::WireexprLocal(w) => {
+                assert_eq!(w.id, 7);
+                assert!(w.suffix.is_none());
+            }
+            _ => panic!("Request.keyexpr must use WireexprLocal arm"),
+        }
+        assert!(
+            alias.extensions.is_none(),
+            "minimal shape: no Request-level exts"
+        );
+        match &alias.body {
+            RequestOwnedVariant::CodecZenohQuery(q) => {
+                assert_eq!(
+                    q.header, 0x03,
+                    "Query.header is MID 0x03 only — no C / P / Z flags in minimal shape"
+                );
+                assert!(q.consolidation.is_none());
+                assert!(q.parameters_len.is_none());
+                assert!(q.parameters.is_none());
+                assert!(q.extensions.is_none());
+            }
+            _ => panic!("Request.body must use CodecZenohQuery arm"),
+        }
+
+        // Case 2 — composite (id=7 + tail "tail").
+        let composite = build_request_query(42, 7, Some("tail"));
+        assert_eq!(
+            composite.header, 0x3C,
+            "Request header carries MID 0x1C | N(0x20) = 0x3C when suffix present",
+        );
+        match &composite.keyexpr.body {
+            WireexprOwnedVariant::WireexprLocal(w) => {
+                assert_eq!(w.id, 7);
+                assert_eq!(w.suffix.as_deref(), Some("tail"));
+                assert_eq!(w.suffix_len, Some(4));
+            }
+            _ => panic!(),
+        }
+
+        // Case 3 — literal (id=0 sentinel + suffix carries the keyexpr).
+        let literal = build_request_query(42, 0, Some("demo/test"));
+        assert_eq!(
+            literal.header, 0x3C,
+            "literal case still sets N (suffix present)"
+        );
+        match &literal.keyexpr.body {
+            WireexprOwnedVariant::WireexprLocal(w) => {
+                assert_eq!(w.id, 0, "literal sentinel id=0");
+                assert_eq!(w.suffix.as_deref(), Some("demo/test"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    /// R121j-1 — Wire-byte regression gate: the bytes emitted by
+    /// `build_request_query(...).wire()` must equal zenoh-pico's
+    /// `_z_request_encode` + `_z_query_encode` output for the
+    /// minimal-shape inputs (no consolidation, no params, no exts at
+    /// either level). Three vectors lock the alias / composite /
+    /// literal trio:
+    ///
+    /// References:
+    ///   - `_z_request_encode` (vendor/zenoh-pico/src/protocol/codec/network.c:114-169)
+    ///     — emits `[header | N | M | Z=0]`, `VLE(rid)`, `wireexpr.encode`,
+    ///     and switches into `_z_query_encode` for `_Z_REQUEST_QUERY`.
+    ///   - `_z_query_encode` (vendor/zenoh-pico/src/protocol/codec/message.c:394-451)
+    ///     — emits `[header | C | P | Z]` then optional consolidation /
+    ///     params / exts. In the minimal shape only the header byte
+    ///     (0x03) is emitted.
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn build_request_query_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — pure alias (rid=42, mapping_id=7, no suffix).
+        // Wire shape:
+        //   Request.header = MID(0x1C) | M(0x40) = 0x5C
+        //   VLE(rid=42)     = 0x2A
+        //   wireexpr.id VLE(7) = 0x07
+        //   Query.header   = MID(0x03)
+        let alias = build_request_query(42, 7, None);
+        let alias_wire = alias.wire();
+        let alias_expected = vec![
+            0x5C, // Request: MID 0x1C | M 0x40
+            0x2A, // VLE(rid=42)
+            0x07, // wireexpr.id VLE(7)
+            0x03, // Query: MID _Z_MID_Z_QUERY only
+        ];
+        assert_eq!(
+            alias_wire, alias_expected,
+            "Request(Query) alias-case wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 2 — composite (rid=42, id=7 + suffix "abc"):
+        //   Request.header = MID | N | M = 0x7C
+        //   VLE(42) = 0x2A
+        //   wireexpr.id VLE(7) = 0x07
+        //   wireexpr.suffix_len VLE(3) = 0x03
+        //   wireexpr.suffix bytes = "abc"
+        //   Query.header = 0x03
+        let composite = build_request_query(42, 7, Some("abc"));
+        let composite_wire = composite.wire();
+        let mut composite_expected = vec![
+            0x7C, // MID | N | M
+            0x2A, 0x07, 0x03,
+        ];
+        composite_expected.extend_from_slice(b"abc");
+        composite_expected.push(0x03); // Query MID
+        assert_eq!(
+            composite_wire, composite_expected,
+            "Request(Query) composite-case wire bytes must match zenoh-pico reference"
+        );
+
+        // Case 3 — literal (rid=42, id=0 + suffix "demo/test"):
+        //   Request.header = MID | N | M = 0x7C
+        //   VLE(42) = 0x2A
+        //   wireexpr.id VLE(0) = 0x00
+        //   wireexpr.suffix_len VLE(9) = 0x09
+        //   wireexpr.suffix bytes = "demo/test"
+        //   Query.header = 0x03
+        let literal = build_request_query(42, 0, Some("demo/test"));
+        let literal_wire = literal.wire();
+        let mut literal_expected = vec![0x7C, 0x2A, 0x00, 0x09];
+        literal_expected.extend_from_slice(b"demo/test");
+        literal_expected.push(0x03); // Query MID
+        assert_eq!(
+            literal_wire, literal_expected,
+            "Request(Query) literal-case wire bytes must match zenoh-pico reference"
+        );
+    }
+
+    /// R121j-1a — Wire-byte regression gate for
+    /// `build_request_query_with_consolidation`. The layered helper
+    /// flips Q_C(0x20) on the Query header and appends a 1-byte
+    /// consolidation value after the header byte. Three vectors lock
+    /// the three transmitted modes (NONE / MONOTONIC / LATEST); the
+    /// AUTO/DEFAULT case stays the responsibility of plain
+    /// [`build_request_query`] (no Q_C, no extra byte).
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn build_request_query_with_consolidation_emits_zenoh_pico_compatible_wire_bytes() {
+        // Baseline shape derived from build_request_query alias case
+        // (rid=42, mapping_id=7, no suffix): Request prefix bytes are
+        // [0x5C, 0x2A, 0x07] (MID|M, VLE(42), VLE(7)). The Query
+        // header changes from 0x03 to 0x23 (Q_C set) and the
+        // consolidation byte follows.
+        let cases: [(ConsolidationMode, u8); 3] = [
+            (ConsolidationMode::None, 0x00),
+            (ConsolidationMode::Monotonic, 0x01),
+            (ConsolidationMode::Latest, 0x02),
+        ];
+        for (mode, expected_byte) in cases {
+            let request = build_request_query_with_consolidation(42, 7, None, mode);
+            let wire = request.wire();
+            let expected = vec![
+                0x5C,          // Request: MID 0x1C | M 0x40
+                0x2A,          // VLE(rid=42)
+                0x07,          // wireexpr.id VLE(7)
+                0x23,          // Query: MID 0x03 | Q_C 0x20
+                expected_byte, // consolidation byte
+            ];
+            assert_eq!(
+                wire, expected,
+                "Request(Query+consolidation) wire bytes for mode {mode:?} \
+                 must match zenoh-pico reference (msg.c:402-413)",
+            );
+        }
+
+        // Inner-arm sanity: Query.header carries Q_C set + consolidation
+        // is Some(wire_byte) — matches the Optional-field shape that
+        // the codegen produces from query.scxml's `sce:present-if`.
+        let r = build_request_query_with_consolidation(42, 7, None, ConsolidationMode::Monotonic);
+        match &r.body {
+            RequestOwnedVariant::CodecZenohQuery(q) => {
+                assert_eq!(
+                    q.header, 0x23,
+                    "Query.header must carry MID(0x03) | Q_C(0x20)"
+                );
+                assert_eq!(q.consolidation, Some(0x01));
+                assert!(
+                    q.parameters_len.is_none() && q.parameters.is_none() && q.extensions.is_none(),
+                    "consolidation-only layered helper must not set \
+                     params or exts (those are separate helpers)",
+                );
+            }
+            _ => panic!("expected CodecZenohQuery"),
+        }
+    }
+
+    /// R121j-1b — Wire-byte regression gate for
+    /// `build_request_query_with_parameters`. The layered helper
+    /// flips Q_P(0x40) on the Query header and appends VLE(len) +
+    /// bytes after the header byte. Three vectors lock the small-
+    /// params, multi-byte VLE boundary, and max-size (256) cases.
+    /// The Q_C bit (0x20) stays clear because this helper does not
+    /// layer consolidation (separate concern).
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn build_request_query_with_parameters_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — small params (alias case, rid=42, mapping_id=7,
+        // no suffix; params="k=v"). Wire:
+        //   Request: [0x5C, 0x2A, 0x07]      (MID|M, VLE(42), VLE(7))
+        //   Query:   [0x43, 0x03, b'k', b'=', b'v']
+        //              (MID(0x03) | Q_P(0x40), VLE(len=3), 3 bytes)
+        let small = build_request_query_with_parameters(42, 7, None, b"k=v");
+        let small_wire = small.wire();
+        let mut small_expected = vec![
+            0x5C, // Request: MID 0x1C | M 0x40
+            0x2A, // VLE(rid=42)
+            0x07, // wireexpr.id VLE(7)
+            0x43, // Query: MID(0x03) | Q_P(0x40)
+            0x03, // VLE(params_len=3)
+        ];
+        small_expected.extend_from_slice(b"k=v");
+        assert_eq!(
+            small_wire, small_expected,
+            "Request(Query+params) small-params wire bytes must match \
+             zenoh-pico reference (msg.c:398-401, 426-428)",
+        );
+
+        // Case 2 — multi-byte VLE boundary on params_len (params
+        // length=128 crosses the 7-bit VLE boundary; first byte =
+        // 0x80, second byte = 0x01). Lock the VLE writer regression
+        // on the parameters_len field specifically.
+        let mid_params: Vec<u8> = (0u8..128).collect();
+        let mid = build_request_query_with_parameters(42, 7, None, &mid_params);
+        let mid_wire = mid.wire();
+        let mut mid_expected = vec![
+            0x5C, 0x2A, 0x07, 0x43, 0x80, // VLE(128) low 7 + cont bit
+            0x01, // VLE(128) high byte
+        ];
+        mid_expected.extend_from_slice(&mid_params);
+        assert_eq!(
+            mid_wire, mid_expected,
+            "Request(Query+params) multi-byte VLE params_len wire bytes \
+             must match zenoh-pico reference",
+        );
+
+        // Case 3 — at max-size (256 bytes). VLE(256) = 0x80 0x02.
+        let max_params: Vec<u8> = (0..256).map(|i| (i % 251) as u8).collect();
+        let max = build_request_query_with_parameters(42, 7, None, &max_params);
+        let max_wire = max.wire();
+        let mut max_expected = vec![0x5C, 0x2A, 0x07, 0x43, 0x80, 0x02];
+        max_expected.extend_from_slice(&max_params);
+        assert_eq!(
+            max_wire, max_expected,
+            "Request(Query+params) max-size params wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        // Inner-arm sanity check.
+        match &small.body {
+            RequestOwnedVariant::CodecZenohQuery(q) => {
+                assert_eq!(q.header, 0x43, "Query.header MID | Q_P");
+                assert_eq!(q.parameters_len, Some(3));
+                assert_eq!(q.parameters.as_deref(), Some(b"k=v".as_slice()));
+                assert!(
+                    q.consolidation.is_none() && q.extensions.is_none(),
+                    "parameters-only helper must not set consolidation or exts",
+                );
+            }
+            _ => panic!("expected CodecZenohQuery"),
+        }
+    }
+
+    #[cfg(feature = "codec-request")]
+    #[test]
+    #[should_panic(expected = "RequestQueryBuilder::parameters requires a non-empty params slice")]
+    fn build_request_query_with_parameters_rejects_empty_slice() {
+        let _ = build_request_query_with_parameters(42, 7, None, b"");
+    }
+
+    #[cfg(feature = "codec-request")]
+    #[test]
+    #[should_panic(expected = "exceeds wz Query codec's max-size (256)")]
+    fn build_request_query_with_parameters_rejects_over_max_size() {
+        let over: Vec<u8> = vec![0u8; REQUEST_QUERY_PARAMETERS_MAX_LEN + 1];
+        let _ = build_request_query_with_parameters(42, 7, None, &over);
+    }
+
+    /// R121j-1c — Wire-byte regression gate for
+    /// `build_request_query_with_attachment`. The layered helper
+    /// flips Q_Z(0x80) on the Query header and appends a single
+    /// ext_entry with header 0x45 (ENC_ZBUF | ext_id=0x05) and an
+    /// ExtZbuf body carrying VLE(len) + bytes. Three vectors lock
+    /// the small-attachment, multi-byte VLE boundary (won't hit at
+    /// max-size 32, but small-vs-byte-256 differs in single-byte
+    /// VLE only here), and at-max (32-byte) cases. The Q_C / Q_P
+    /// bits stay clear because this helper is attachment-only.
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn build_request_query_with_attachment_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — small attachment (alias case, rid=42, mapping_id=7,
+        // no suffix; attachment = b"hi").
+        //   Request: [0x5C, 0x2A, 0x07]      (MID|M, VLE(42), VLE(7))
+        //   Query:   [0x83]                  (MID(0x03) | Q_Z(0x80))
+        //   ExtEntry header: [0x45]          (ENC_ZBUF(0x40) | id(0x05))
+        //   ExtZbuf: [0x02, b'h', b'i']      (VLE(2), bytes)
+        let small = build_request_query_with_attachment(42, 7, None, b"hi");
+        let small_wire = small.wire();
+        let mut small_expected = vec![
+            0x5C, // Request: MID 0x1C | M 0x40
+            0x2A, // VLE(rid=42)
+            0x07, // wireexpr.id VLE(7)
+            0x83, // Query: MID(0x03) | Q_Z(0x80)
+            0x45, // ExtEntry: ENC_ZBUF | id_attachment
+            0x02, // ExtZbuf.value_len VLE(2)
+        ];
+        small_expected.extend_from_slice(b"hi");
+        assert_eq!(
+            small_wire, small_expected,
+            "Request(Query+attachment) small-attachment wire bytes must \
+             match zenoh-pico reference (msg.c:446-448)",
+        );
+
+        // Case 2 — at-max attachment (32 bytes, all-distinct sequence
+        // 0..32). VLE(32) = 0x20 (single byte, fits in 7 bits).
+        let max_attach: Vec<u8> = (0u8..32).collect();
+        let max = build_request_query_with_attachment(42, 7, None, &max_attach);
+        let max_wire = max.wire();
+        let mut max_expected = vec![
+            0x5C, 0x2A, 0x07, 0x83, // Query header with Q_Z
+            0x45, // ExtEntry header
+            0x20, // VLE(32) single byte
+        ];
+        max_expected.extend_from_slice(&max_attach);
+        assert_eq!(
+            max_wire, max_expected,
+            "Request(Query+attachment) max-size (32-byte) attachment wire \
+             bytes must match zenoh-pico reference",
+        );
+
+        // Inner-arm sanity: Query.header carries Q_Z; extensions vec
+        // has exactly one entry with the expected ext_id + ZBuf body.
+        match &small.body {
+            RequestOwnedVariant::CodecZenohQuery(q) => {
+                assert_eq!(q.header, 0x83, "Query.header MID(0x03) | Q_Z(0x80)");
+                let exts = q
+                    .extensions
+                    .as_ref()
+                    .expect("Q_Z set → extensions vec must be Some");
+                assert_eq!(exts.len(), 1, "single attachment ext only");
+                assert_eq!(
+                    exts[0].header, 0x45,
+                    "ExtEntry.header = ENC_ZBUF(0x40) | id_attachment(0x05)"
+                );
+                match &exts[0].body {
+                    ExtEntryOwnedVariant::CodecZenohExtZbuf(zb) => {
+                        assert_eq!(zb.value_len, 2);
+                        assert_eq!(zb.value.as_slice(), b"hi".as_slice());
+                    }
+                    _ => panic!("attachment ext body must be CodecZenohExtZbuf"),
+                }
+                assert!(
+                    q.consolidation.is_none() && q.parameters.is_none(),
+                    "attachment-only helper must not set consolidation or params",
+                );
+            }
+            _ => panic!("expected CodecZenohQuery"),
+        }
+    }
+
+    #[cfg(feature = "codec-request")]
+    #[test]
+    #[should_panic(
+        expected = "RequestQueryBuilder::query_attachment requires a non-empty attachment slice"
+    )]
+    fn build_request_query_with_attachment_rejects_empty_slice() {
+        let _ = build_request_query_with_attachment(42, 7, None, b"");
+    }
+
+    #[cfg(feature = "codec-request")]
+    #[test]
+    #[should_panic(expected = "exceeds wz ExtZbuf codec's max-size (32)")]
+    fn build_request_query_with_attachment_rejects_over_max_size() {
+        let over: Vec<u8> = vec![0u8; QUERY_EXT_ZBUF_MAX_LEN + 1];
+        let _ = build_request_query_with_attachment(42, 7, None, &over);
+    }
+
+    /// R121j-1d — Wire-byte regression gate for
+    /// `build_request_query_with_timeout_ms`. The Request-level Z bit
+    /// (0x80) on the outer header signals the Request.extensions
+    /// chain follows the wireexpr; the ExtEntry header (0x26 =
+    /// ENC_ZINT | id_timeout) precedes the Query body. Three vectors
+    /// lock single-byte VLE timeout (50ms), multi-byte VLE boundary
+    /// (1000ms = 0xE8 0x07), and large VLE (2^32 ms = 5-byte VLE).
+    /// The Query body's MID byte (0x03) stays at the tail, after the
+    /// Request-level exts — mirrors the zenoh-pico encoder order
+    /// (network.c:122-167: header / rid / wireexpr / exts loop /
+    /// body switch).
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn build_request_query_with_timeout_ms_emits_zenoh_pico_compatible_wire_bytes() {
+        // Case 1 — single-byte VLE timeout (50ms fits in 7 bits).
+        // Alias case rid=42, mapping_id=7, no suffix.
+        //   Request.header = MID(0x1C) | M(0x40) | N_Z(0x80) = 0xDC
+        //   VLE(rid=42) = 0x2A
+        //   wireexpr.id VLE(7) = 0x07
+        //   ExtEntry.header = ENC_ZINT(0x20) | id_timeout(0x06) = 0x26
+        //   ExtZint.value VLE(50) = 0x32
+        //   Query.header = 0x03
+        let small = build_request_query_with_timeout_ms(42, 7, None, 50);
+        let small_wire = small.wire();
+        assert_eq!(
+            small_wire,
+            vec![
+                0xDC, // Request: MID | M | N_Z
+                0x2A, // VLE(rid=42)
+                0x07, // wireexpr.id VLE(7)
+                0x26, // ExtEntry: ENC_ZINT | id_timeout
+                0x32, // ExtZint VLE(50)
+                0x03, // Query.header (minimal)
+            ],
+            "Request(timeout=50ms,Query) wire bytes must match \
+             zenoh-pico reference (network.c:122-167)",
+        );
+
+        // Case 2 — multi-byte VLE boundary (1000ms = 0xE8 0x07).
+        let mid = build_request_query_with_timeout_ms(42, 7, None, 1000);
+        let mid_wire = mid.wire();
+        assert_eq!(
+            mid_wire,
+            vec![
+                0xDC, 0x2A, 0x07, 0x26, 0xE8, // VLE(1000) low 7 + cont
+                0x07, // VLE(1000) high
+                0x03,
+            ],
+            "Request(timeout=1000ms,Query) wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        // Case 3 — large VLE (2^32 = 0x1_0000_0000 = 5-byte VLE in
+        // base-128: 0x80 0x80 0x80 0x80 0x10).
+        let large = build_request_query_with_timeout_ms(42, 7, None, 1u64 << 32);
+        let large_wire = large.wire();
+        assert_eq!(
+            large_wire,
+            vec![
+                0xDC, 0x2A, 0x07, 0x26, 0x80, 0x80, 0x80, 0x80, 0x10, // VLE(2^32)
+                0x03,
+            ],
+            "Request(timeout=2^32 ms,Query) wire bytes must match \
+             zenoh-pico reference",
+        );
+
+        // Inner-arm sanity: Request.extensions has 1 entry with ZInt
+        // body; Query body is minimal-shape (no Q_C / Q_P / Q_Z).
+        match &small.body {
+            RequestOwnedVariant::CodecZenohQuery(q) => {
+                assert_eq!(q.header, 0x03, "Query.header minimal (no Q flags)");
+                assert!(q.consolidation.is_none());
+                assert!(q.parameters.is_none());
+                assert!(q.extensions.is_none(), "no Q-level exts");
+            }
+            _ => panic!("expected CodecZenohQuery"),
+        }
+        let req_exts = small
+            .extensions
+            .as_ref()
+            .expect("N_Z set → Request.extensions must be Some");
+        assert_eq!(req_exts.len(), 1, "single Request-level ext");
+        assert_eq!(
+            req_exts[0].header, 0x26,
+            "Request ExtEntry.header = ENC_ZINT(0x20) | id_timeout(0x06)"
+        );
+        match &req_exts[0].body {
+            ExtEntryOwnedVariant::CodecZenohExtZint(zi) => {
+                assert_eq!(zi.value, 50);
+            }
+            _ => panic!("timeout ext body must be CodecZenohExtZint"),
+        }
+    }
+
+    #[cfg(feature = "codec-request")]
+    #[test]
+    #[should_panic(
+        expected = "RequestQueryBuilder::request_timeout_ms requires a non-zero timeout"
+    )]
+    fn build_request_query_with_timeout_ms_rejects_zero() {
+        let _ = build_request_query_with_timeout_ms(42, 7, None, 0);
+    }
+
+    /// R121j-1e — Wire-byte regression gate for
+    /// `build_request_query_with_target`. The target ext sets M=1
+    /// (mandatory marker) on the ExtEntry.header, distinct from
+    /// timeout / qos / budget which leave M clear. Two vectors lock
+    /// the two transmitted target values (All=1 / AllComplete=2);
+    /// BEST_MATCHING (0) is not representable in [`QueryTarget`] —
+    /// the encoder predicate clears the ext on default, so absence
+    /// of this helper's wire bytes is the BEST_MATCHING signal.
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn build_request_query_with_target_emits_zenoh_pico_compatible_wire_bytes() {
+        // Alias case rid=42, mapping_id=7, no suffix. For both target
+        // values the wire shape differs only in the ExtZint body
+        // (1 byte) since target ∈ {1, 2} both fit in single-byte VLE.
+        //   Request.header = MID(0x1C) | M(0x40) | N_Z(0x80) = 0xDC
+        //   ExtEntry.header = ENC_ZINT(0x20) | M(0x10) | id_target(0x04) = 0x34
+        let cases: [(QueryTarget, u8); 2] =
+            [(QueryTarget::All, 0x01), (QueryTarget::AllComplete, 0x02)];
+        for (target, target_byte) in cases {
+            let request = build_request_query_with_target(42, 7, None, target);
+            let wire = request.wire();
+            assert_eq!(
+                wire,
+                vec![
+                    0xDC,        // Request: MID | M | N_Z
+                    0x2A,        // VLE(rid=42)
+                    0x07,        // wireexpr.id VLE(7)
+                    0x34,        // ExtEntry: ENC_ZINT | M | id_target
+                    target_byte, // VLE(target_enum_value)
+                    0x03,        // Query.header (minimal)
+                ],
+                "Request(target={target:?},Query) wire bytes must match \
+                 zenoh-pico reference (network.c:138-143)",
+            );
+        }
+
+        // Inner-arm sanity check on the All case.
+        let r = build_request_query_with_target(42, 7, None, QueryTarget::All);
+        let req_exts = r
+            .extensions
+            .as_ref()
+            .expect("N_Z set → Request.extensions must be Some");
+        assert_eq!(req_exts.len(), 1);
+        assert_eq!(
+            req_exts[0].header, 0x34,
+            "Request ExtEntry.header = ENC_ZINT(0x20) | M(0x10) | id_target(0x04)"
+        );
+        assert!(
+            (req_exts[0].header & 0x10) != 0,
+            "target ext MUST set the mandatory marker bit (M=1, 0x10) — peers \
+             without target awareness reject the frame on unknown M-bit exts"
+        );
+        match &req_exts[0].body {
+            ExtEntryOwnedVariant::CodecZenohExtZint(zi) => {
+                assert_eq!(zi.value, 1);
+            }
+            _ => panic!("target ext body must be CodecZenohExtZint"),
+        }
+    }
+
+    /// R121j-2a — Composition smoke test: two Query-layer settings
+    /// (consolidation + parameters) applied via the builder produce
+    /// wire bytes consistent with both layers. The two-layer shape
+    /// is what the old one-shot helpers CANNOT produce because each
+    /// resets the Query body's optional fields.
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn request_query_builder_composes_consolidation_and_parameters() {
+        // rid=42, mapping_id=7, no suffix.
+        // Layers: consolidation=Monotonic, params=b"k=v".
+        //   Request.header = MID(0x1C) | M(0x40) = 0x5C  (no N, no N_Z)
+        //   VLE(rid=42) = 0x2A
+        //   wireexpr Local: id=7 → 0x07
+        //   Query.header = MID(0x03) | Q_C(0x20) | Q_P(0x40) = 0x63
+        //   consolidation byte = 0x01 (Monotonic)
+        //   parameters_len VLE = 0x03
+        //   "k=v" 3 bytes
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .consolidation(ConsolidationMode::Monotonic)
+            .parameters(b"k=v")
+            .build();
+        let wire = request.wire();
+        let mut expected = vec![
+            0x5C, // Request: MID | M
+            0x2A, // VLE(rid=42)
+            0x07, // wireexpr.id VLE(7)
+            0x63, // Query: MID | Q_C | Q_P
+            0x01, // consolidation = Monotonic
+            0x03, // parameters_len VLE(3)
+        ];
+        expected.extend_from_slice(b"k=v");
+        assert_eq!(
+            wire, expected,
+            "Composed (consolidation + parameters) wire must carry both \
+             layers — the regression that pre-R121j-2a one-shot \
+             helpers couldn't express",
+        );
+    }
+
+    /// R121j-2a — Composition full-stack: all 5 currently-exposed
+    /// builder layers applied together. Verifies (1) Request-level
+    /// ext ordering (target first, then timeout per zenoh-pico
+    /// network.c:122-167), (2) Z chain-continuation bit on the
+    /// intermediate target ext, (3) all three Query-layer flag bits
+    /// (Q_C / Q_P / Q_Z) set together, (4) the attachment ext sits at
+    /// the Query level (after Query.consolidation + parameters), not
+    /// at the Request level.
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn request_query_builder_composes_all_five_layers() {
+        // rid=42, mapping_id=7, no suffix.
+        // Layers: consolidation=Latest, params=b"k=v", q_attachment=b"at",
+        //         req_target=All, req_timeout_ms=1000.
+        //   Request.header = MID(0x1C) | M(0x40) | N_Z(0x80) = 0xDC
+        //   VLE(rid=42) = 0x2A
+        //   wireexpr Local: id=7 → 0x07
+        //   Request ext 1: target (ENC_ZINT|M|id_target=0x34) | Z(0x80) = 0xB4
+        //   ExtZint VLE(All=1) = 0x01
+        //   Request ext 2: timeout (ENC_ZINT|id_timeout=0x26), no Z = 0x26
+        //   ExtZint VLE(1000) = 0xE8 0x07
+        //   Query.header = MID(0x03) | Q_C(0x20) | Q_P(0x40) | Q_Z(0x80) = 0xE3
+        //   consolidation = Latest = 0x02
+        //   parameters_len VLE(3) = 0x03
+        //   "k=v"
+        //   Q-attachment ext: header (ENC_ZBUF|id_attachment=0x45), no Z = 0x45
+        //   ExtZbuf VLE(2) = 0x02
+        //   "at"
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .consolidation(ConsolidationMode::Latest)
+            .parameters(b"k=v")
+            .query_attachment(b"at")
+            .request_target(QueryTarget::All)
+            .request_timeout_ms(1000)
+            .build();
+        let wire = request.wire();
+        let mut expected = vec![
+            0xDC, // Request: MID | M | N_Z
+            0x2A, // VLE(rid=42)
+            0x07, // wireexpr.id VLE(7)
+            // Request-level ext chain: target(Z=1) → timeout(last)
+            0xB4, // ENC_ZINT | M | id_target | Z(chain)
+            0x01, // VLE(target=All=1)
+            0x26, // ENC_ZINT | id_timeout, Z=0 (last)
+            0xE8, 0x07, // VLE(timeout_ms=1000)
+            // Query body
+            0xE3, // Query: MID | Q_C | Q_P | Q_Z
+            0x02, // consolidation = Latest
+            0x03, // parameters_len VLE(3)
+        ];
+        expected.extend_from_slice(b"k=v");
+        expected.extend_from_slice(&[
+            0x45, // Q-attachment ext: ENC_ZBUF | id_attachment, Z=0
+            0x02, // VLE(attachment_len=2)
+        ]);
+        expected.extend_from_slice(b"at");
+        assert_eq!(
+            wire, expected,
+            "Five-layer composed wire must carry all settings — \
+             verifies Request-level ext ordering + Z chain bit on \
+             intermediate entry + all three Q-flag bits + Q-attachment \
+             positioning",
+        );
+
+        // Inner-arm sanity.
+        let req_exts = request
+            .extensions
+            .as_ref()
+            .expect("N_Z set → Request.extensions must be Some");
+        assert_eq!(req_exts.len(), 2, "target + timeout exts");
+        assert_eq!(
+            req_exts[0].header & 0x80,
+            0x80,
+            "target ext must carry Z chain-continuation bit (more follows)",
+        );
+        assert_eq!(
+            req_exts[1].header & 0x80,
+            0x00,
+            "timeout ext must NOT carry Z (it is the last entry)",
+        );
+    }
+
+    /// R121j-1f — RequestQueryBuilder.request_qos emits a single
+    /// Request-level ext at the head of the chain (qos → tstamp →
+    /// target → budget → timeout) with header ENC_ZINT(0x20) |
+    /// id_qos(0x01) and no M flag (qos is informational).
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn request_query_builder_request_qos_emits_first_ext_with_no_m_flag() {
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_qos(0x05) // priority=5, no nodrop, no express
+            .build();
+        let req_exts = request
+            .extensions
+            .as_ref()
+            .expect("N_Z set → Request.extensions must be Some");
+        assert_eq!(req_exts.len(), 1, "only qos ext was set");
+        assert_eq!(
+            req_exts[0].header,
+            0x20 | 0x01,
+            "qos ext header = ENC_ZINT(0x20) | id_qos(0x01); no M, no Z (last)",
+        );
+        match &req_exts[0].body {
+            ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
+                assert_eq!(
+                    zint.value, 0x05,
+                    "qos packed byte 0x05 lifts into ZINT VLE value verbatim"
+                );
+            }
+            _ => panic!("qos ext body must be CodecZenohExtZint"),
+        }
+        assert_eq!(
+            request.header & 0x80,
+            0x80,
+            "qos setter must flip N_Z(0x80) on Request.header (exts present)",
+        );
+    }
+
+    /// R121j-1f — request_qos composes with request_target +
+    /// request_timeout_ms in the correct zenoh-pico encode order:
+    /// qos comes first (with Z-chain continuation), target next
+    /// (with Z-chain continuation), timeout last (no Z).
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn request_query_builder_request_qos_target_timeout_chain_order_matches_zenoh_pico() {
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_qos(0x05)
+            .request_target(QueryTarget::All)
+            .request_timeout_ms(1000)
+            .build();
+        let req_exts = request
+            .extensions
+            .as_ref()
+            .expect("3 Request-level exts set → extensions must be Some");
+        assert_eq!(req_exts.len(), 3, "qos + target + timeout");
+        // qos first: ENC_ZINT | id_qos(1), Z continuation set
+        assert_eq!(
+            req_exts[0].header,
+            0x80 | 0x20 | 0x01,
+            "qos ext at index 0 must carry Z continuation (more follows)"
+        );
+        // target second: ENC_ZINT | M | id_target(4), Z continuation set
+        assert_eq!(
+            req_exts[1].header,
+            0x80 | 0x20 | 0x10 | 0x04,
+            "target ext at index 1 must carry M(0x10) + Z continuation"
+        );
+        // timeout last: ENC_ZINT | id_timeout(6), no Z
+        assert_eq!(
+            req_exts[2].header,
+            0x20 | 0x06,
+            "timeout ext at index 2 (last) must NOT carry Z"
+        );
+    }
+
+    /// R121j-1g — RequestQueryBuilder.request_budget emits a single
+    /// Request-level ext between target and timeout (per zenoh-pico
+    /// _z_request_encode order) with header ENC_ZINT(0x20) |
+    /// id_budget(0x05) and no M flag.
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn request_query_builder_request_budget_emits_ext_between_target_and_timeout() {
+        // Solo case: only budget set. Ext at index 0 (chain head), no
+        // Z (it is the only ext, hence the last).
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_budget(0x1234_5678)
+            .build();
+        let req_exts = request
+            .extensions
+            .as_ref()
+            .expect("budget setter must populate exts");
+        assert_eq!(req_exts.len(), 1, "only budget ext was set");
+        assert_eq!(
+            req_exts[0].header,
+            0x20 | 0x05,
+            "budget ext header = ENC_ZINT(0x20) | id_budget(0x05); no M, no Z (last)",
+        );
+        match &req_exts[0].body {
+            ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
+                assert_eq!(
+                    zint.value, 0x1234_5678,
+                    "budget u32 widens into u64 ZINT value verbatim"
+                );
+            }
+            _ => panic!("budget ext body must be CodecZenohExtZint"),
+        }
+
+        // Chain-order case: qos + target + budget + timeout. Position
+        // must be qos[0]->target[1]->budget[2]->timeout[3] per
+        // zenoh-pico _z_request_encode at network.c:126-155. Z
+        // continuation set on indices 0/1/2, clear on index 3.
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_qos(0x05)
+            .request_target(QueryTarget::All)
+            .request_budget(100)
+            .request_timeout_ms(1000)
+            .build();
+        let req_exts = request.extensions.as_ref().expect("4 exts set");
+        assert_eq!(req_exts.len(), 4, "qos + target + budget + timeout");
+        assert_eq!(req_exts[0].header & 0x07, 0x01, "index 0: qos id");
+        assert_eq!(req_exts[1].header & 0x07, 0x04, "index 1: target id");
+        assert_eq!(
+            req_exts[2].header & 0x07,
+            0x05,
+            "index 2: budget id (between target and timeout)"
+        );
+        assert_eq!(
+            req_exts[3].header & 0x07,
+            0x06,
+            "index 3: timeout id (last)"
+        );
+        assert_eq!(
+            req_exts[3].header & 0x80,
+            0x00,
+            "timeout last → Z must be clear"
+        );
+        assert_eq!(
+            req_exts[2].header & 0x80,
+            0x80,
+            "budget at index 2 → Z must be set (timeout follows)"
+        );
+    }
+
+    /// R121j-1g — request_budget rejects zero (mirrors zenoh-pico's
+    /// ext_budget = budget != 0 encoder predicate at
+    /// vendor/zenoh-pico/src/protocol/definitions/network.c:26).
+    #[cfg(feature = "codec-request")]
+    #[test]
+    #[should_panic(expected = "RequestQueryBuilder::request_budget requires a non-zero budget")]
+    fn request_query_builder_budget_rejects_zero() {
+        let _ = RequestQueryBuilder::new(42, 7, None)
+            .request_budget(0)
+            .build();
+    }
+
+    /// R121j-tstamp — request_tstamp emits one Request-level ext at
+    /// the position between qos and target (qos → tstamp → target →
+    /// budget → timeout) with header ENC_ZBUF(0x40) | id_tstamp(0x02)
+    /// and NO M flag. The ext body is an ExtZbuf carrying the
+    /// `Timestamp::encode_to_vec()` output verbatim.
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn request_query_builder_request_tstamp_solo_emits_ext_with_no_m_flag() {
+        // Solo case: only tstamp set. time=42, zid=[0xab, 0xcd] keeps
+        // both VLE fields single-byte so the body bytes are auditable
+        // without an online VLE encoder: [VLE(42), VLE(2), 0xab, 0xcd]
+        // = [0x2a, 0x02, 0xab, 0xcd], len=4.
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_tstamp(42, &[0xab, 0xcd])
+            .build();
+        let req_exts = request
+            .extensions
+            .as_ref()
+            .expect("N_Z set → Request.extensions must be Some");
+        assert_eq!(req_exts.len(), 1, "only tstamp ext was set");
+        assert_eq!(
+            req_exts[0].header,
+            0x40 | 0x02,
+            "tstamp ext header = ENC_ZBUF(0x40) | id_tstamp(0x02); no M, no Z (last)",
+        );
+        match &req_exts[0].body {
+            ExtEntryOwnedVariant::CodecZenohExtZbuf(zbuf) => {
+                assert_eq!(
+                    zbuf.value_len, 4,
+                    "Timestamp encode = VLE(42)+VLE(2)+zid[2] = 4 bytes"
+                );
+                assert_eq!(
+                    zbuf.value,
+                    vec![0x2a, 0x02, 0xab, 0xcd],
+                    "Timestamp body: VLE(time=42)=0x2a, VLE(zid_len=2)=0x02, zid=[0xab,0xcd]",
+                );
+            }
+            _ => panic!("tstamp ext body must be CodecZenohExtZbuf"),
+        }
+        assert_eq!(
+            request.header & 0x80,
+            0x80,
+            "tstamp setter must flip N_Z(0x80) on Request.header (exts present)",
+        );
+    }
+
+    /// R121j-tstamp — chain position vs zenoh-pico encode order:
+    /// qos[0] → tstamp[1] → target[2] → budget[3] → timeout[4], with
+    /// Z chain-continuation on indices 0..=3 and Z clear on index 4.
+    /// The five-ext sequence pins the entire Request-level ext chain
+    /// against `_z_request_encode` at network.c:126-155.
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn request_query_builder_full_chain_emits_zenoh_pico_encode_order() {
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_qos(0x05)
+            .request_tstamp(7, &[0x01])
+            .request_target(QueryTarget::All)
+            .request_budget(100)
+            .request_timeout_ms(1000)
+            .build();
+        let req_exts = request.extensions.as_ref().expect("5 exts set");
+        assert_eq!(
+            req_exts.len(),
+            5,
+            "qos + tstamp + target + budget + timeout"
+        );
+        assert_eq!(req_exts[0].header & 0x07, 0x01, "index 0: qos id");
+        assert_eq!(req_exts[1].header & 0x07, 0x02, "index 1: tstamp id");
+        assert_eq!(req_exts[2].header & 0x07, 0x04, "index 2: target id");
+        assert_eq!(req_exts[3].header & 0x07, 0x05, "index 3: budget id");
+        assert_eq!(req_exts[4].header & 0x07, 0x06, "index 4: timeout id");
+        // Encoding kind bits (bits 5-6: 0x20 = ZINT, 0x40 = ZBUF).
+        assert_eq!(req_exts[0].header & 0x60, 0x20, "qos uses ENC_ZINT");
+        assert_eq!(req_exts[1].header & 0x60, 0x40, "tstamp uses ENC_ZBUF");
+        assert_eq!(req_exts[2].header & 0x60, 0x20, "target uses ENC_ZINT");
+        assert_eq!(req_exts[3].header & 0x60, 0x20, "budget uses ENC_ZINT");
+        assert_eq!(req_exts[4].header & 0x60, 0x20, "timeout uses ENC_ZINT");
+        // M flag (bit 4): set on target only (M=1 per zenoh-pico),
+        // clear on qos / tstamp / budget / timeout.
+        assert_eq!(req_exts[0].header & 0x10, 0x00, "qos: M clear");
+        assert_eq!(
+            req_exts[1].header & 0x10,
+            0x00,
+            "tstamp: M clear (non-mandatory per zenoh-pico)"
+        );
+        assert_eq!(req_exts[2].header & 0x10, 0x10, "target: M set");
+        assert_eq!(req_exts[3].header & 0x10, 0x00, "budget: M clear");
+        assert_eq!(req_exts[4].header & 0x10, 0x00, "timeout: M clear");
+        // Z chain-continuation: set on 0..=3, clear on 4.
+        assert_eq!(req_exts[0].header & 0x80, 0x80, "qos: Z set (more follows)");
+        assert_eq!(req_exts[1].header & 0x80, 0x80, "tstamp: Z set");
+        assert_eq!(req_exts[2].header & 0x80, 0x80, "target: Z set");
+        assert_eq!(req_exts[3].header & 0x80, 0x80, "budget: Z set");
+        assert_eq!(req_exts[4].header & 0x80, 0x00, "timeout: Z clear (last)");
+    }
+
+    /// R121j-tstamp — request_tstamp rejects an empty zid (mirrors
+    /// zenoh-pico's `_z_id_encode_as_slice` at message.c:58-70 which
+    /// returns `_Z_ERR_MESSAGE_ZENOH_UNKNOWN` on len=0).
+    #[cfg(feature = "codec-request")]
+    #[test]
+    #[should_panic(expected = "RequestQueryBuilder::request_tstamp requires a non-empty zid")]
+    fn request_query_builder_tstamp_rejects_empty_zid() {
+        let _ = RequestQueryBuilder::new(42, 7, None)
+            .request_tstamp(0, &[])
+            .build();
+    }
+
+    /// R121j-tstamp — request_tstamp rejects zid longer than the
+    /// zenoh `_z_id_t` 16-byte capacity (`_Z_ID_LENGTH = 16` at
+    /// vendor/zenoh-pico/include/zenoh-pico/protocol/core.h).
+    #[cfg(feature = "codec-request")]
+    #[test]
+    #[should_panic(expected = "exceeds zenoh _Z_ID_LENGTH (16)")]
+    fn request_query_builder_tstamp_rejects_zid_over_16_bytes() {
+        let _ = RequestQueryBuilder::new(42, 7, None)
+            .request_tstamp(0, &[0u8; 17])
+            .build();
+    }
+
+    /// R121j-1h — request_qos_typed packs `(Priority, CongestionControl,
+    /// express)` into the wire byte exactly as zenoh-pico's
+    /// `_z_n_qos_create` at network.h:84-89 produces:
+    /// `(express << 4) | (nodrop << 3) | priority`. Verifies the byte
+    /// then delegates to the same storage as request_qos so the chain
+    /// emit path stays uniform — same Z chain-continuation / index
+    /// semantics as the raw setter.
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn request_qos_typed_packs_per_zenoh_pico_z_n_qos_create_layout() {
+        // Drop + Background priority + no express: priority=7 → low 3
+        // bits = 0b111; congestion Drop → nodrop=0; express=false →
+        // bit4=0. Expected packed byte = 0x07.
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_qos_typed(Priority::Background, CongestionControl::Drop, false)
+            .build();
+        let req_exts = request.extensions.as_ref().expect("qos ext present");
+        match &req_exts[0].body {
+            ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
+                assert_eq!(zint.value, 0x07, "Background(7) + Drop + !express = 0x07");
+            }
+            _ => panic!("qos body must be ExtZint"),
+        }
+
+        // Block + RealTime + express: priority=1 (bits 0-2 = 0b001),
+        // nodrop=1 (bit 3 = 0b1000), express=1 (bit 4 = 0b10000).
+        // Expected packed byte = 0x10 | 0x08 | 0x01 = 0x19.
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_qos_typed(Priority::RealTime, CongestionControl::Block, true)
+            .build();
+        let req_exts = request.extensions.as_ref().expect("qos ext present");
+        match &req_exts[0].body {
+            ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
+                assert_eq!(
+                    zint.value, 0x19,
+                    "RealTime(1) + Block + express = 0x10|0x08|0x01"
+                );
+            }
+            _ => panic!("qos body must be ExtZint"),
+        }
+
+        // Default (Data priority, Drop, !express): priority=5
+        // (0b101), nodrop=0, express=0 → 0x05. Sanity check that the
+        // default-aligned values produce a clean low-bits byte.
+        let request = RequestQueryBuilder::new(42, 7, None)
+            .request_qos_typed(Priority::Data, CongestionControl::Drop, false)
+            .build();
+        let req_exts = request.extensions.as_ref().expect("qos ext present");
+        match &req_exts[0].body {
+            ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
+                assert_eq!(zint.value, 0x05, "Data(5) + Drop + !express = 0x05");
+            }
+            _ => panic!("qos body must be ExtZint"),
+        }
+    }
+
+    // R311ec — the pure Priority::wire_byte / CongestionControl::wire_bit
+    // test moved to wz-session-core::qos alongside the migrated types
+    // (the session-core base test run covers it). The
+    // RequestQueryBuilder qos-composition tests stay here — they
+    // exercise the builder, not the enums, and use the re-exported types.
+
+    /// R121j-1h — request_qos_typed composes with request_target +
+    /// request_timeout_ms identically to the raw request_qos setter
+    /// (Z chain-continuation bits, ext order). Pins that the typed
+    /// wrapper is purely a packing convenience over the raw setter.
+    #[cfg(feature = "codec-request")]
+    #[test]
+    fn request_qos_typed_composes_with_chain_identically_to_raw_qos() {
+        let typed = RequestQueryBuilder::new(42, 7, None)
+            .request_qos_typed(Priority::RealTime, CongestionControl::Block, true)
+            .request_target(QueryTarget::All)
+            .request_timeout_ms(1000)
+            .build();
+        let raw = RequestQueryBuilder::new(42, 7, None)
+            .request_qos(0x19) // same packed byte as the typed call
+            .request_target(QueryTarget::All)
+            .request_timeout_ms(1000)
+            .build();
+        assert_eq!(
+            typed.wire(),
+            raw.wire(),
+            "typed and raw qos setters must produce byte-identical wire emit",
+        );
+    }
+
+    /// R121j-2a — Per-setter validation flows through to the builder.
+    /// Mirrors the one-shot helper rejection tests; the builder is
+    /// where the panic actually fires now.
+    #[cfg(feature = "codec-request")]
+    #[test]
+    #[should_panic(expected = "RequestQueryBuilder::parameters")]
+    fn request_query_builder_parameters_rejects_empty() {
+        let _ = RequestQueryBuilder::new(42, 7, None)
+            .parameters(b"")
+            .build();
+    }
+
+    #[cfg(feature = "codec-request")]
+    #[test]
+    #[should_panic(expected = "RequestQueryBuilder::request_timeout_ms")]
+    fn request_query_builder_timeout_rejects_zero() {
+        let _ = RequestQueryBuilder::new(42, 7, None)
+            .request_timeout_ms(0)
+            .build();
+    }
+}
