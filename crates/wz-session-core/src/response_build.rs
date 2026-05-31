@@ -736,18 +736,13 @@ pub fn encode_responder_ext_body(zid: &[u8], eid: u32) -> Vec<u8> {
 mod tests {
     use super::*;
     use alloc::vec;
-    use alloc::vec::Vec;
 
-    trait TestWire {
-        fn wire(&self) -> Vec<u8>;
-    }
-    impl TestWire for ResponseOwned {
-        fn wire(&self) -> Vec<u8> {
-            self.try_as_borrowed()
-                .expect("test: <=N exts by construction")
-                .encode_to_vec()
-        }
-    }
+    // R311fu — the owned->wire `TestWire` projection moved to the
+    // wz-codecs-tier `wz-codecs-test-support` sibling (SSOT). This
+    // module compiles only under `codec-response`, which forwards
+    // `wz-codecs-test-support/codec-response`, so the `ResponseOwned`
+    // impl is in scope.
+    use wz_codecs_test_support::TestWire;
 
     /// R121j-3 — Wire-byte regression gate for
     /// `build_response_reply_literal`. The minimal Response(Reply(MsgPut))
