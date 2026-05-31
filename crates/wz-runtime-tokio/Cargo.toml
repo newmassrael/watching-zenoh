@@ -349,10 +349,16 @@ transport-batching = ["wz-session-core/transport-batching"]
 #                        in session_glue.rs (build_body_extensions ->
 #                        encode_attachment_ext). Feature-off: nothing is
 #                        set on PublishOptions nor written to the wire.
-#   pubsub-put / pubsub-delete / pubsub-timestamp / pubsub-source-info /
-#   pubsub-priority / pubsub-congestion-control / pubsub-express — pure
-#   forwards to the matching wz-session-core gate (receive-side Sample
-#   projection + dispatch arm).
+#   pubsub-timestamp   — BOTH sides (R311fx). Forwards to wz-session-core
+#                        for the inbound Sample.timestamp projection AND
+#                        gates the local SEND vertical: `PublishOptions::
+#                        with_timestamp` setter (session.rs) + the inline
+#                        timestamp field + `_Z_FLAG_Z_*_T` header bit in
+#                        build_msg_put/del_with_meta (session_glue).
+#   pubsub-put / pubsub-delete / pubsub-source-info / pubsub-priority /
+#   pubsub-congestion-control / pubsub-express — pure forwards to the
+#   matching wz-session-core gate (receive-side Sample projection +
+#   dispatch arm).
 # 2 reserved (encoding, sample) stay declaration-only at the wz facade
 # level.
 # R311du — forward to wz-session-core: the pub/sub dispatch arms moved

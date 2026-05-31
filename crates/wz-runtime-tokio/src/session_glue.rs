@@ -2894,6 +2894,30 @@ fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<V
     Some(exts)
 }
 
+/// R311fx — SSOT for the `pubsub-timestamp` send-side gate. The inline
+/// `MsgPut` / `MsgDel` timestamp field is the single place a caller-set
+/// timestamp reaches the wire, so the "is a timestamp emitted" policy
+/// lives here once rather than being re-stated at each Put/Del builder
+/// (sibling of [`build_body_extensions`], which is the one gate-point
+/// for the ext-based metadata). When `pubsub-timestamp` is off the
+/// result is forced `None` so the `_Z_FLAG_Z_*_T` (0x20) header bit the
+/// builders OR in stays clear and no timestamp is serialised. The param
+/// keeps the builders' signatures stable across the toggle.
+#[cfg(feature = "codec-push")]
+fn gated_timestamp_field(
+    timestamp: Option<&crate::sample::TimestampHint>,
+) -> Option<wz_codecs::timestamp::TimestampOwned> {
+    #[cfg(feature = "pubsub-timestamp")]
+    {
+        timestamp.map(|t| t.to_codec().into_owned())
+    }
+    #[cfg(not(feature = "pubsub-timestamp"))]
+    {
+        let _ = timestamp;
+        None
+    }
+}
+
 /// R233 — build a `MsgPut` body carrying caller-set metadata
 /// (timestamp, encoding, source_info, attachment). Sets the
 /// `_Z_FLAG_Z_P_T` (0x20) and `_Z_FLAG_Z_P_E` (0x40) header bits to
@@ -2915,7 +2939,7 @@ fn build_msg_put_with_meta(
     let extensions = build_body_extensions(source_info, attachment);
     let mut put = MsgPutOwned {
         header: 0x01,
-        timestamp: timestamp.map(|t| t.to_codec().into_owned()),
+        timestamp: gated_timestamp_field(timestamp),
         encoding: encoding.map(|e| e.to_codec().into_owned()),
         extensions,
         payload_len,
@@ -2954,7 +2978,7 @@ fn build_msg_del_with_meta(
     let extensions = build_body_extensions(source_info, attachment);
     let mut del = MsgDelOwned {
         header: 0x02,
-        timestamp: timestamp.map(|t| t.to_codec().into_owned()),
+        timestamp: gated_timestamp_field(timestamp),
         extensions,
     };
     // `MsgDelOwned` is read-only; OR the header flag bits directly
@@ -6907,7 +6931,7 @@ mod tests {
         assert!(!with_qos.is_empty());
     }
 
-    #[cfg(feature = "codec-push")]
+    #[cfg(all(feature = "codec-push", feature = "pubsub-timestamp"))]
     #[test]
     fn build_msg_put_with_meta_sets_timestamp_field_and_t_flag() {
         let ts = TimestampHint {
@@ -7002,7 +7026,7 @@ mod tests {
         assert!(!put.e(), "E flag clear with no encoding");
     }
 
-    #[cfg(feature = "codec-push")]
+    #[cfg(all(feature = "codec-push", feature = "pubsub-timestamp"))]
     #[test]
     fn build_msg_del_with_meta_carries_timestamp_but_not_encoding_param() {
         // The MsgDel builder's parameter list intentionally has no
@@ -7061,7 +7085,11 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "codec-push", feature = "pubsub-attachment"))]
+    #[cfg(all(
+        feature = "codec-push",
+        feature = "pubsub-attachment",
+        feature = "pubsub-timestamp"
+    ))]
     #[test]
     fn build_push_literal_with_meta_round_trips_through_codec_encode_decode() {
         // End-to-end: build → encode_to_vec → decode → field equality.
@@ -7134,7 +7162,11 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "codec-push", feature = "pubsub-attachment"))]
+    #[cfg(all(
+        feature = "codec-push",
+        feature = "pubsub-attachment",
+        feature = "pubsub-timestamp"
+    ))]
     #[test]
     fn build_push_del_literal_with_meta_round_trips_metadata_minus_encoding() {
         // Del path: timestamp + source_info + attachment + qos must

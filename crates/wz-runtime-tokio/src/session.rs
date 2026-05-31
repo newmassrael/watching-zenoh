@@ -279,6 +279,12 @@ impl PublishOptions {
     /// R232 — attach a body-level timestamp. The loopback branch
     /// propagates this into `Sample.timestamp` for the subscriber
     /// callback. Wire-side propagation lands in R233.
+    // R311fx — gated on `pubsub-timestamp` (wire-data helper, mirrors
+    // `with_attachment`): the send-side encode elides the timestamp when
+    // the feature is off, so offering the setter would silently drop it.
+    // The `timestamp` field stays (struct stability); only the populator
+    // gates.
+    #[cfg(feature = "pubsub-timestamp")]
     pub fn with_timestamp(mut self, timestamp: TimestampHint) -> Self {
         self.timestamp = Some(timestamp);
         self
@@ -4727,7 +4733,7 @@ mod tests {
         captured
     }
 
-    #[cfg(feature = "pubsub-attachment")]
+    #[cfg(all(feature = "pubsub-attachment", feature = "pubsub-timestamp"))]
     #[test]
     fn publish_options_with_metadata_setters_chain() {
         // Builder ergonomics: every R232 with_* setter is chainable
@@ -4759,7 +4765,7 @@ mod tests {
         assert_eq!(opts.qos.unwrap().raw, 0b0001_1010);
     }
 
-    #[cfg(feature = "pubsub-allow-loop")]
+    #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-timestamp"))]
     #[test]
     fn publish_loopback_propagates_timestamp_to_sample() {
         let (session, _driver) = build_session();
@@ -4881,7 +4887,11 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-attachment"))]
+    #[cfg(all(
+        feature = "pubsub-allow-loop",
+        feature = "pubsub-attachment",
+        feature = "pubsub-timestamp"
+    ))]
     #[test]
     fn publish_loopback_propagates_all_metadata_in_one_chain() {
         // Composition: every R232 metadata field set together must
@@ -5054,7 +5064,11 @@ mod tests {
         );
     }
 
-    #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-attachment"))]
+    #[cfg(all(
+        feature = "pubsub-allow-loop",
+        feature = "pubsub-attachment",
+        feature = "pubsub-timestamp"
+    ))]
     #[test]
     fn publish_aliased_loopback_propagates_metadata_to_sample() {
         // Parity check: publish_aliased's loopback branch shares the
