@@ -27358,6 +27358,58 @@
         "Next sibling unchanged: wz-e2e-liveliness (3rd facade-subset e2e, declare/liveliness plane) vs zenoh-pico z_liveliness_*. Open decision (R311fg/fh) unchanged: whether the C4b BUILD subsets should list their interop-only deltas (transport-batching for pubsub, codec-response-final for queryable) or stay build-coherent with the e2e binaries pinning the interop superset."
       ]
     },
+    "Round 311fj": {
+      "decision_summary": "R311fj wz-e2e-liveliness: 3rd facade-subset e2e (liveliness-subscriber-only, deliberately wz=subscriber vs zenoh-pico z_liveliness; declarer lacks Interest-response R283) + new liveliness-sub-only SSOT subset completing the runtime-crate C4c/C1j/C4d triad coverage.",
+      "changes_bullets": [
+        "New crate crates/wz-e2e-liveliness (Cargo.toml + src/main.rs): single-purpose liveliness-subscriber-only e2e binary (acceptor + declare_liveliness_subscriber, ZERO #[cfg]); third sibling of wz-e2e-pubsub / wz-e2e-queryable. Workspace member. Pinned subset = the shared handshake core (incl transport-batching) + liveliness-subscriber + declare-interest + codec-declare.",
+        "DIRECTION: deliberately wz=SUBSCRIBER (sink), zenoh-pico z_liveliness=client token DECLARER — unlike pubsub/queryable where wz is the data SOURCE. Structural reason: wz's liveliness DECLARER (declare_task) emits Declare(DeclareToken) proactively with NO peer-side Interest-response path (R283 carry), so a wz=declarer / foreign=subscriber topology would be fragile (a foreign subscriber connecting after wz's proactive declare can miss the token). wz's subscriber side is the wz<->wz-proven mature path; zenoh-pico is a robust reference declarer.",
+        "scripts/build-zenoh-pico-cli.sh: z_liveliness added to TARGETS (+ header doc updated).",
+        "crates/wz-integration-tests: new tests/wz_e2e_liveliness_to_zliveliness.rs (witness is on the WZ env_logger stderr — a single-writer stream, structurally immune to the multi-thread foreign-stdout capture race that R311fh's queryable test had to gate around) + wz_e2e_liveliness_binary() locator in src/lib.rs::common.",
+        "scripts/run-ci.sh: Layer E2 extended (z_liveliness prereq + wz-e2e-liveliness binary guard + 3rd test). NEW SSOT subset liveliness-sub-only added to _wz_runtime_tokio_coherent_subsets so C4c (build) + C1j (behaviour) + C4d (clippy) now guard the liveliness-subscriber plane in ISOLATION (distinct from the broader declare-observer bundle which bundles declare-subscriber/-queryable/liveliness-token too). .github/workflows/release.yml adds a Build wz-e2e-liveliness step."
+      ],
+      "verification_bullets": [
+        "e2e PASS: z_liveliness (client) declares token 'group1/zenoh-pico' -> wz logs \"LIVELINESS SAMPLE PUT filter='group1/**' keyexpr='group1/zenoh-pico' token_id=1\" through the production poll loop (drive_session_until_terminal -> observer -> liveliness-subscriber registry -> callback) under the liveliness-subscriber-only subset against a foreign reference declarer.",
+        "no-flaky-ever: 50/50 consecutive PASS, no fix needed. The witness is on the WZ side (single-writer env_logger stderr), structurally immune to the multi-thread foreign-stdout capture race that R311fh's queryable test diagnosed + gated around (z_get's main + reply-callback threads racing the shared tempfile offset).",
+        "liveliness-sub-only SSOT subset: C4c build OK, C1j behaviour tests OK, C4d clippy OK across all 6 subsets; cargo build + clippy -p wz-e2e-liveliness clean (0 warnings, deny-warnings) under the isolated subset.",
+        "full scripts/run-ci.sh EXIT 0: all required lanes pass incl. the now-6-subset C1j/C4c/C4d matrices and Layer E2 driving all three wz-e2e-* binaries (pubsub vs z_sub, queryable vs z_get, liveliness vs z_liveliness). Layer G 7-MCU cross-compile OK (G.6 riscv SKIP env-only). entries 523->524."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "NORTH-STAR FINDING (honest gap, tracked not hidden): wz's liveliness DECLARER lacks peer-side Interest-response (R283 carry) — declare_task emits Declare(DeclareToken) proactively only. A wz=declarer / foreign-subscriber liveliness e2e is therefore fragile (a foreign subscriber connecting after the proactive declare misses the token), which is why wz-e2e-liveliness is deliberately wz=subscriber. Closing R283 (respond to an inbound liveliness Interest with current tokens) would enable a symmetric wz-e2e-liveliness-declarer guard vs z_sub_liveliness; until then the subscriber direction is the interop-coherent one.",
+        "The wz-e2e-* family now covers 3 major planes (pubsub / queryable / liveliness-subscriber), each with a 1:1 SSOT subset (pubsub-only / queryable-only / liveliness-sub-only) guarded by the runtime-crate build/behaviour/clippy triad (C4c/C1j/C4d). Remaining planes for foreign-interop e2e coverage: remote-declare observe (declare-subscriber/-queryable inbound), liveliness-get (query-based liveliness), and the wz=querier requester-side inbound reply dispatch (the R121j-6 z_get-adapter carry).",
+        "C4b interop-only-delta ruling still open (transport-batching for pubsub, codec-response-final for queryable; liveliness adds NO new delta — the handshake transport-batching is the only foreign requirement, no liveliness-specific interop feature beyond the build-coherent subset)."
+      ],
+      "publishable_decision_summary": "R311fj wz-e2e-liveliness: 3rd facade-subset e2e (liveliness-subscriber-only, deliberately wz=subscriber vs zenoh-pico z_liveliness; declarer lacks Interest-response R283) + new liveliness-sub-only SSOT subset completing the runtime-crate C4c/C1j/C4d triad coverage.",
+      "publishable_changes_bullets": [
+        "New crate crates/wz-e2e-liveliness (Cargo.toml + src/main.rs): single-purpose liveliness-subscriber-only e2e binary (acceptor + declare_liveliness_subscriber, ZERO #[cfg]); third sibling of wz-e2e-pubsub / wz-e2e-queryable. Workspace member. Pinned subset = the shared handshake core (incl transport-batching) + liveliness-subscriber + declare-interest + codec-declare.",
+        "DIRECTION: deliberately wz=SUBSCRIBER (sink), zenoh-pico z_liveliness=client token DECLARER — unlike pubsub/queryable where wz is the data SOURCE. Structural reason: wz's liveliness DECLARER (declare_task) emits Declare(DeclareToken) proactively with NO peer-side Interest-response path (R283 carry), so a wz=declarer / foreign=subscriber topology would be fragile (a foreign subscriber connecting after wz's proactive declare can miss the token). wz's subscriber side is the wz<->wz-proven mature path; zenoh-pico is a robust reference declarer.",
+        "scripts/build-zenoh-pico-cli.sh: z_liveliness added to TARGETS (+ header doc updated).",
+        "crates/wz-integration-tests: new tests/wz_e2e_liveliness_to_zliveliness.rs (witness is on the WZ env_logger stderr — a single-writer stream, structurally immune to the multi-thread foreign-stdout capture race that R311fh's queryable test had to gate around) + wz_e2e_liveliness_binary() locator in src/lib.rs::common.",
+        "scripts/run-ci.sh: Layer E2 extended (z_liveliness prereq + wz-e2e-liveliness binary guard + 3rd test). NEW SSOT subset liveliness-sub-only added to _wz_runtime_tokio_coherent_subsets so C4c (build) + C1j (behaviour) + C4d (clippy) now guard the liveliness-subscriber plane in ISOLATION (distinct from the broader declare-observer bundle which bundles declare-subscriber/-queryable/liveliness-token too). .github/workflows/release.yml adds a Build wz-e2e-liveliness step."
+      ],
+      "publishable_verification_bullets": [
+        "e2e PASS: z_liveliness (client) declares token 'group1/zenoh-pico' -> wz logs \"LIVELINESS SAMPLE PUT filter='group1/**' keyexpr='group1/zenoh-pico' token_id=1\" through the production poll loop (drive_session_until_terminal -> observer -> liveliness-subscriber registry -> callback) under the liveliness-subscriber-only subset against a foreign reference declarer.",
+        "no-flaky-ever: 50/50 consecutive PASS, no fix needed. The witness is on the WZ side (single-writer env_logger stderr), structurally immune to the multi-thread foreign-stdout capture race that R311fh's queryable test diagnosed + gated around (z_get's main + reply-callback threads racing the shared tempfile offset).",
+        "liveliness-sub-only SSOT subset: C4c build OK, C1j behaviour tests OK, C4d clippy OK across all 6 subsets; cargo build + clippy -p wz-e2e-liveliness clean (0 warnings, deny-warnings) under the isolated subset.",
+        "full scripts/run-ci.sh EXIT 0: all required lanes pass incl. the now-6-subset C1j/C4c/C4d matrices and Layer E2 driving all three wz-e2e-* binaries (pubsub vs z_sub, queryable vs z_get, liveliness vs z_liveliness). Layer G 7-MCU cross-compile OK (G.6 riscv SKIP env-only). entries 523->524."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "NORTH-STAR FINDING (honest gap, tracked not hidden): wz's liveliness DECLARER lacks peer-side Interest-response (R283 carry) — declare_task emits Declare(DeclareToken) proactively only. A wz=declarer / foreign-subscriber liveliness e2e is therefore fragile (a foreign subscriber connecting after the proactive declare misses the token), which is why wz-e2e-liveliness is deliberately wz=subscriber. Closing R283 (respond to an inbound liveliness Interest with current tokens) would enable a symmetric wz-e2e-liveliness-declarer guard vs z_sub_liveliness; until then the subscriber direction is the interop-coherent one.",
+        "The wz-e2e-* family now covers 3 major planes (pubsub / queryable / liveliness-subscriber), each with a 1:1 SSOT subset (pubsub-only / queryable-only / liveliness-sub-only) guarded by the runtime-crate build/behaviour/clippy triad (C4c/C1j/C4d). Remaining planes for foreign-interop e2e coverage: remote-declare observe (declare-subscriber/-queryable inbound), liveliness-get (query-based liveliness), and the wz=querier requester-side inbound reply dispatch (the R121j-6 z_get-adapter carry).",
+        "C4b interop-only-delta ruling still open (transport-batching for pubsub, codec-response-final for queryable; liveliness adds NO new delta — the handshake transport-batching is the only foreign requirement, no liveliness-specific interop feature beyond the build-coherent subset)."
+      ]
+    },
     "Round 311g": {
       "decision_summary": "R311g send_close_with_reason signature stability + codec-frame envelope inbound cascade — Frame decode gated, +27.7KB elision; ap-demo codec-close mirror retired.",
       "changes_bullets": [

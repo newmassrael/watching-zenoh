@@ -42,6 +42,7 @@ members = [
     "wz-ap-demo",
     "wz-e2e-pubsub",
     "wz-e2e-queryable",
+    "wz-e2e-liveliness",
     "wz-runtime-lwip",
     "lwip-sys",
     "wz-link-lwip",

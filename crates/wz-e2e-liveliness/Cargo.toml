@@ -1,0 +1,96 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-e2e-liveliness — minimal single-purpose e2e consumer binary that
+# pins EXACTLY the liveliness-subscriber-only facade subset and proves
+# that subset composes end-to-end against a foreign zenoh-pico
+# z_liveliness token declarer.
+#
+# Sibling of wz-e2e-pubsub (R311fg) / wz-e2e-queryable (R311fh). Same
+# rationale: wz-ap-demo is the full preset-ap-client reference consumer;
+# feature-subsetting it would require cfg-gating ~70 plane call-sites
+# (the cfg-soup anti-pattern the project rejects), and a Cargo feature
+# subset cannot be pinned per-[[bin]]. The textbook shape is a separate,
+# intrinsically single-plane binary: this one uses ONLY the liveliness-
+# subscriber surface (declare_liveliness_subscriber + LivelinessSample),
+# so it compiles cleanly under the liveliness-subscriber-only subset with
+# ZERO cfg, and its manifest pins that subset verbatim.
+#
+# DIRECTION (deliberate, see crates/wz-e2e-liveliness/src/main.rs):
+# unlike pubsub / queryable where wz is the data SOURCE, this binary is
+# the liveliness SUBSCRIBER (sink) and zenoh-pico's z_liveliness is the
+# token DECLARER. The reason is structural, not incidental: wz's
+# liveliness DECLARER (declare_task) emits Declare(DeclareToken)
+# proactively after Established and has no peer-side Interest-response
+# path (the R283 carry), so a wz=declarer / foreign=subscriber topology
+# would be fragile (a foreign subscriber connecting after wz's proactive
+# declare can miss the token). wz's SUBSCRIBER side is the mature,
+# wz<->wz-proven path (wz_liveliness_subscriber_round_trip), and
+# zenoh-pico is a robust reference declarer — so this is the
+# interop-coherent direction. The declarer-side Interest-response gap is
+# tracked as a north-star finding, not hidden behind a flaky guard.
+#
+# Layer E2 (scripts/run-ci.sh) builds this under its pinned subset and
+# drives the liveliness round-trip against zenoh-pico's z_liveliness: the
+# behavioural counterpart of the C4b facade BUILD subset matrix's
+# declare/liveliness plane.
+
+[package]
+name = "wz-e2e-liveliness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Minimal liveliness-subscriber-only facade-subset e2e consumer — proves the liveliness-subscriber subset interoperates with zenoh-pico z_liveliness on the wire."
+
+[[bin]]
+name = "wz-e2e-liveliness"
+path = "src/main.rs"
+
+[dependencies]
+# The smallest coherent facade subset that SUBSCRIBES to liveliness
+# tokens AND interoperates on the wire with a foreign zenoh-pico
+# z_liveliness declarer, default-features off so no other plane leaks in.
+#
+# Composition (vs the C4b `declare-observer` BUILD subset, which bundles
+# declare-subscriber / declare-queryable / liveliness-token /
+# liveliness-subscriber together): this binary pins ONLY the liveliness-
+# subscriber plane — `liveliness-subscriber` (implies declare-interest +
+# declare-final), plus `declare-interest` + `codec-declare` listed
+# explicitly for manifest legibility (the outbound liveliness Interest
+# emit + the inbound Declare(Token/UndeclToken) decode the subscriber
+# registry dispatches). `transport-batching` is the same load-bearing
+# foreign-handshake feature every wz-e2e-* binary pins (R311fg finding).
+# No codec-push / query-* / pubsub-* — this binary neither publishes nor
+# queries; it only observes liveliness samples.
+wz = { path = "../wz", default-features = false, features = [
+    "runtime-tokio",
+    "transport-unicast",
+    "transport-link-tcp",
+    "transport-keepalive",
+    "transport-batching",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "codec-declare",
+    "declare-interest",
+    "liveliness-subscriber",
+] }
+# Multi-thread runtime + signal handling are binary-shaped uses outside
+# the wz framework boundary (the writer task spawn + SIGTERM teardown),
+# mirroring the sibling wz-e2e-* binaries' explicit tokio dep.
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal"] }
+log = "0.4"
+env_logger = "0.11"
+
+[lints]
+workspace = true
