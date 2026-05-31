@@ -1,0 +1,107 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-e2e-queryable — minimal single-purpose e2e consumer binary that
+# pins EXACTLY the queryable-only facade subset and proves that subset
+# composes end-to-end against a foreign zenoh-pico z_get peer.
+#
+# Sibling of wz-e2e-pubsub (R311fg). Same rationale: wz-ap-demo is the
+# full preset-ap-client reference consumer; feature-subsetting it would
+# require cfg-gating ~70 plane call-sites (the cfg-soup anti-pattern the
+# project rejects), and a Cargo feature subset cannot be pinned
+# per-[[bin]]. The textbook shape is a separate, intrinsically
+# single-plane binary: this one uses ONLY the queryable surface
+# (declare_queryable + ReplyEmitter), so it compiles cleanly under the
+# queryable-only subset with ZERO cfg, and its manifest pins that subset
+# verbatim.
+#
+# Layer E2 (scripts/run-ci.sh) builds this under its pinned subset and
+# drives the query/reply round-trip against zenoh-pico's z_get: the
+# behavioural counterpart of the C4b facade BUILD subset matrix's
+# `queryable-only` entry — it proves the queryable subset not only
+# type-checks but interoperates on the wire with a foreign implementation.
+
+[package]
+name = "wz-e2e-queryable"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Minimal queryable-only facade-subset e2e consumer — proves the queryable subset interoperates with zenoh-pico z_get on the wire."
+
+[[bin]]
+name = "wz-e2e-queryable"
+path = "src/main.rs"
+
+[dependencies]
+# The whole point of this crate: pin the smallest coherent facade
+# subset that ANSWERS queries AND interoperates on the wire with a
+# foreign zenoh-pico z_get peer, default-features off so no other plane
+# leaks in.
+#
+# Composition of this subset (vs the C4b `queryable-only` BUILD subset
+# `codec-request,codec-response,query-queryable,query-reply-err`):
+#
+#   * transport-batching — load-bearing for the FOREIGN handshake, not
+#     the queryable data plane. Identical finding to wz-e2e-pubsub
+#     (R311fg): `PeerInitCaps::from_init_syn` ignores the peer's
+#     advertised batch_size and forces 65535 when it is off, so
+#     zenoh-pico rejects the resulting InitAck (SentInitAck -> Closed,
+#     "Unable to open session!"). The handshake is plane-independent, so
+#     every wz-e2e-* binary that completes a session with zenoh-pico
+#     pins it. It builds fine without it (C4b passes) and two wz peers
+#     interoperate without it (both force 65535) — the divergence is
+#     specifically the foreign-peer handshake.
+#   * codec-response-final — the queryable terminates its reply chain
+#     with one ResponseFinal (R121j-5c Final scheduling). zenoh-pico
+#     z_get prints ">> Received query final notification" on it and
+#     stops waiting; without it the reply still arrives but z_get falls
+#     back to its query timeout. query-queryable does NOT imply
+#     codec-response-final (it implies only codec-request + codec-
+#     response, the Reply emit), so the C4b `queryable-only` BUILD
+#     subset omits it. This is the same shape as R311fg's transport-
+#     batching finding generalised to the queryable plane: the
+#     foreign-interop-coherent subset is strictly larger than the
+#     build-coherent one — a clean Final is part of interop-correct
+#     queryable behaviour but invisible to a type-check.
+#   * keyexpr-literal/-canon, the handshake codec quartet, keepalive,
+#     and the unicast open/accept session features are the same shared
+#     core every wz-e2e-* binary pins.
+#
+# query-reply-err is intentionally NOT pinned: this binary emits only a
+# Put-form reply (ReplyEmitter::reply), never the Err-form variant, so
+# the smallest subset that exercises THIS binary omits it. (The C4b
+# `queryable-only` BUILD subset lists it because that matrix guards the
+# full queryable plane's type-checking, not one binary's wire path.)
+wz = { path = "../wz", default-features = false, features = [
+    "runtime-tokio",
+    "transport-unicast",
+    "transport-link-tcp",
+    "transport-keepalive",
+    "transport-batching",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "codec-request",
+    "codec-response",
+    "codec-response-final",
+    "query-queryable",
+] }
+# Multi-thread runtime + signal handling are binary-shaped uses outside
+# the wz framework boundary (the writer task spawn + SIGTERM teardown),
+# mirroring wz-e2e-pubsub's explicit tokio dep.
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal"] }
+log = "0.4"
+env_logger = "0.11"
+
+[lints]
+workspace = true

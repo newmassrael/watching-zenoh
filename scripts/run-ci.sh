@@ -1051,27 +1051,40 @@ layer_e_ap_demo_round_trip() {
 # matrix. C4b proves each coherent facade subset type-checks; Layer E2
 # proves a subset INTEROPERATES on the wire with a foreign zenoh-pico
 # peer. It drives the single-purpose subset-pinned binaries (the
-# `wz-e2e-*` crate family — currently wz-e2e-pubsub, which pins the
-# pubsub-only foreign-interop subset) rather than the full
-# preset-ap-client wz-ap-demo, so a feature that is load-bearing for
-# foreign interop but invisible to a build check or an in-process
-# wz<->wz test is caught here. (R311fg's first catch: transport-batching
-# — see crates/wz-e2e-pubsub/Cargo.toml.)
+# `wz-e2e-*` crate family) rather than the full preset-ap-client
+# wz-ap-demo, so a feature that is load-bearing for foreign interop but
+# invisible to a build check or an in-process wz<->wz test is caught
+# here. Each binary pins ONE consumer plane's interop-coherent subset:
+#   * wz-e2e-pubsub    — pubsub-only,    wz publishes vs z_sub
+#                        (R311fg catch: transport-batching is load-bearing
+#                        for the foreign handshake — see its Cargo.toml).
+#   * wz-e2e-queryable — queryable-only, wz answers queries vs z_get
+#                        (catch: codec-response-final is load-bearing for
+#                        z_get's terminating Final — see its Cargo.toml).
 #
 # Same prereq-SKIP discipline as Layer E: the subset binaries + the
 # zenoh-pico CLI must be prebuilt (CI builds them; a bare local run
 # SKIPs with the build hint). Runs only the `wz_e2e_*` family that
 # Layer E skips, so no test runs twice.
 layer_e2_facade_subset_e2e() {
+    if [[ ! -x target/zenoh-pico-cli/z_sub || ! -x target/zenoh-pico-cli/z_get ]]; then
+        echo "Layer E2 SKIP (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
+        return 0
+    fi
+    # pubsub-only subset (R311fg) — wz publishes vs zenoh-pico z_sub.
     if [[ ! -x crates/target/debug/wz-e2e-pubsub && ! -x crates/target/release/wz-e2e-pubsub ]]; then
         echo "Layer E2 SKIP (wz-e2e-pubsub not built; run: cd crates && cargo build -p wz-e2e-pubsub)"
         return 0
     fi
-    if [[ ! -x target/zenoh-pico-cli/z_sub ]]; then
-        echo "Layer E2 SKIP (zenoh-pico CLI not built; run: bash scripts/build-zenoh-pico-cli.sh)"
+    # queryable-only subset — wz answers queries vs zenoh-pico z_get.
+    if [[ ! -x crates/target/debug/wz-e2e-queryable && ! -x crates/target/release/wz-e2e-queryable ]]; then
+        echo "Layer E2 SKIP (wz-e2e-queryable not built; run: cd crates && cargo build -p wz-e2e-queryable)"
         return 0
     fi
-    (cd crates && cargo test -p wz-integration-tests --test wz_e2e_pubsub_to_zsub --quiet -- --ignored)
+    (cd crates && cargo test -p wz-integration-tests \
+        --test wz_e2e_pubsub_to_zsub \
+        --test wz_e2e_queryable_to_zget \
+        --quiet -- --ignored)
 }
 
 # ─── Layer F — codec-footprint catalog truthfulness gate (R311n) ───

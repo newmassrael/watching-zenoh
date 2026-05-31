@@ -129,6 +129,9 @@ jobs:
       - name: Build wz-e2e-pubsub binary (Layer E2 dep)
         run: (cd crates && cargo build -p wz-e2e-pubsub)
 
+      - name: Build wz-e2e-queryable binary (Layer E2 dep)
+        run: (cd crates && cargo build -p wz-e2e-queryable)
+
       - name: Layer E — wz-ap-demo round-trip vs zenoh-pico z_put
         run: bash scripts/run-ci.sh --layer E
 
