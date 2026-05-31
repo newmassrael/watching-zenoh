@@ -791,19 +791,13 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    // owned -> wire bytes via the borrowed encode (encode lives on the
-    // borrowed view); the `.expect()` is sound by construction since wz
-    // builders emit far fewer than the heapless ext cap N.
-    trait TestWire {
-        fn wire(&self) -> Vec<u8>;
-    }
-    impl TestWire for RequestOwned {
-        fn wire(&self) -> Vec<u8> {
-            self.try_as_borrowed()
-                .expect("test: <=N exts by construction")
-                .encode_to_vec()
-        }
-    }
+    // owned -> wire bytes via the borrowed encode view; R311fu moved
+    // the trait + its impls to the wz-codecs-tier `wz-codecs-test-support`
+    // sibling (SSOT across the request / response / query byte-compare
+    // tests). This module already compiles only under `codec-request`,
+    // which forwards `wz-codecs-test-support/codec-request`, so the
+    // `RequestOwned` impl is in scope.
+    use wz_codecs_test_support::TestWire;
 
     /// R121j-1 — `build_request_query` produces a Request envelope
     /// carrying a `Query` inner body in the minimal AP MVP shape (no

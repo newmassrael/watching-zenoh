@@ -27908,6 +27908,58 @@
         "reserved domains access / attachment / storage still 0% wired (~55% of the catalog reserved)."
       ]
     },
+    "Round 311fu": {
+      "decision_summary": "R311fu TestWire owned->wire SSOT: new wz-codecs-tier sibling pairs trait+impls (orphan rule forces colocation), dedups 4 copies (session_glue/request_build/response_build/query).",
+      "changes_bullets": [
+        "New crate wz-codecs-test-support (wz-codecs tier): pub trait TestWire + impl_test_wire_owned! macro; six impls (Push/Declare/Interest/Request/Response/ResponseFinal Owned) each behind a codec-* feature forwarding to wz-codecs/codec-*. Registered in crates/Cargo.toml members.",
+        "Coherence forced colocation: the projected *Owned types are wz-codecs types, so a consumer-side impl of a foreign TestWire trait violates the orphan rule -- the reason the prior three copies each defined a local trait. The wz-codecs-tier sibling pairs trait+impls so both consumers just `use wz_codecs_test_support::TestWire`.",
+        "wz-runtime-tokio/src/session_glue.rs: deleted local trait + macro + six impls (~46 lines), replaced with one cfg(any(codec-*)) `use TestWire`.",
+        "wz-session-core/src/{request_build,response_build}.rs: deleted the two R311fs-added local trait+impl copies, replaced with `use`; dropped the now-unused `use alloc::vec::Vec` in response_build.",
+        "wz-session-core/src/query.rs: the eight inline try_as_borrowed().expect().encode_to_vec() chains collapsed to .wire() + a test-module `use`.",
+        "Cargo: wz-session-core dev-deps the sibling + forwards codec-request/codec-response to it; wz-runtime-tokio dev-deps it + forwards all five codec-*. Dev-dep feature forwarding empirically verified inert in non-test builds and active in test builds (compile_error tripwire probe).",
+        "Corrected the memory carry premise: recommended home wz-session-core-test-support rested on a falsified claim that wz-runtime-tokio also dev-dep'd it (R311ds removed that edge) -- the textbook home is the wz-codecs tier where the types live."
+      ],
+      "verification_bullets": [
+        "Test counts unchanged: wz-session-core default lib 89, wz-runtime-tokio default lib 265; codec-on session-core green incl. the eight query .wire() byte-compares. No test lost; product code untouched (test-only relocation).",
+        "New crate builds RUSTFLAGS=-D warnings + clippy clean across --no-default-features / codec-push / codec-declare / --all-features.",
+        "Full scripts/run-ci.sh WZ_RUN_LAYER_G=1 EXIT0: isolation guards intact -- C1j 7/7, C4b 7/7, C4c 7/7, C4d clippy; the codec-response-only zget-reply-only subset built without leaking codec-request/push/declare (feature-forward isolation holds). C1e + Layer E2 6 e2e green. Layer G 49 MCU (G.6 riscv32 KNOWN_SKIP no gcc).",
+        "cargo fmt --check clean; net -32 lines (session_glue -46, query -44, request/response -20/-17, offset by the new crate)."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "push the R311fu commit (user consent required).",
+        "TestWire SSOT smell from R311ft CLOSED via the wz-codecs-tier sibling; orphan-rule analysis ratified the colocation as the only coherent shape.",
+        "reserved domains access / attachment / storage still 0% wired (~55% of the catalog reserved)."
+      ],
+      "publishable_decision_summary": "R311fu TestWire owned->wire SSOT: new wz-codecs-tier sibling pairs trait+impls (orphan rule forces colocation), dedups 4 copies (session_glue/request_build/response_build/query).",
+      "publishable_changes_bullets": [
+        "New crate wz-codecs-test-support (wz-codecs tier): pub trait TestWire + impl_test_wire_owned! macro; six impls (Push/Declare/Interest/Request/Response/ResponseFinal Owned) each behind a codec-* feature forwarding to wz-codecs/codec-*. Registered in crates/Cargo.toml members.",
+        "Coherence forced colocation: the projected *Owned types are wz-codecs types, so a consumer-side impl of a foreign TestWire trait violates the orphan rule -- the reason the prior three copies each defined a local trait. The wz-codecs-tier sibling pairs trait+impls so both consumers just `use wz_codecs_test_support::TestWire`.",
+        "wz-runtime-tokio/src/session_glue.rs: deleted local trait + macro + six impls (~46 lines), replaced with one cfg(any(codec-*)) `use TestWire`.",
+        "wz-session-core/src/{request_build,response_build}.rs: deleted the two R311fs-added local trait+impl copies, replaced with `use`; dropped the now-unused `use alloc::vec::Vec` in response_build.",
+        "wz-session-core/src/query.rs: the eight inline try_as_borrowed().expect().encode_to_vec() chains collapsed to .wire() + a test-module `use`.",
+        "Cargo: wz-session-core dev-deps the sibling + forwards codec-request/codec-response to it; wz-runtime-tokio dev-deps it + forwards all five codec-*. Dev-dep feature forwarding empirically verified inert in non-test builds and active in test builds (compile_error tripwire probe).",
+        "Corrected the memory carry premise: recommended home wz-session-core-test-support rested on a falsified claim that wz-runtime-tokio also dev-dep'd it (R311ds removed that edge) -- the textbook home is the wz-codecs tier where the types live."
+      ],
+      "publishable_verification_bullets": [
+        "Test counts unchanged: wz-session-core default lib 89, wz-runtime-tokio default lib 265; codec-on session-core green incl. the eight query .wire() byte-compares. No test lost; product code untouched (test-only relocation).",
+        "New crate builds RUSTFLAGS=-D warnings + clippy clean across --no-default-features / codec-push / codec-declare / --all-features.",
+        "Full scripts/run-ci.sh WZ_RUN_LAYER_G=1 EXIT0: isolation guards intact -- C1j 7/7, C4b 7/7, C4c 7/7, C4d clippy; the codec-response-only zget-reply-only subset built without leaking codec-request/push/declare (feature-forward isolation holds). C1e + Layer E2 6 e2e green. Layer G 49 MCU (G.6 riscv32 KNOWN_SKIP no gcc).",
+        "cargo fmt --check clean; net -32 lines (session_glue -46, query -44, request/response -20/-17, offset by the new crate)."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "push the R311fu commit (user consent required).",
+        "TestWire SSOT smell from R311ft CLOSED via the wz-codecs-tier sibling; orphan-rule analysis ratified the colocation as the only coherent shape.",
+        "reserved domains access / attachment / storage still 0% wired (~55% of the catalog reserved)."
+      ]
+    },
     "Round 311g": {
       "decision_summary": "R311g send_close_with_reason signature stability + codec-frame envelope inbound cascade — Frame decode gated, +27.7KB elision; ap-demo codec-close mirror retired.",
       "changes_bullets": [

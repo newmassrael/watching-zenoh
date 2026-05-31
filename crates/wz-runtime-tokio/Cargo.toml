@@ -211,7 +211,7 @@ codec-join = ["wz-codecs/codec-join"]
 # session_glue.rs send/build/encode_frame_with/NetworkMessage variant/
 # parse arm cluster. Feature-off: queryable can't emit the terminator;
 # requesting peer's z_get hangs until per-call timeout fires.
-codec-response-final = ["wz-codecs/codec-response-final", "wz-session-core/codec-response-final"]
+codec-response-final = ["wz-codecs/codec-response-final", "wz-session-core/codec-response-final", "wz-codecs-test-support/codec-response-final"]
 # R311f — codec-fragment forwards wz-codecs. session_glue.rs doesn't
 # import Fragment types; gate stays at wz-codecs level only.
 codec-fragment = ["wz-codecs/codec-fragment"]
@@ -244,7 +244,7 @@ codec-frame = ["wz-codecs/codec-frame", "wz-session-core/codec-frame"]
 # closes the first body-codec handshake-only-deploy contract slot
 # (codec-frame OFF now requires codec-push OFF; R311i/j/k will extend
 # the same imply to declare/request/response).
-codec-push = ["wz-codecs/codec-push", "codec-frame", "wz-session-core/codec-push"]
+codec-push = ["wz-codecs/codec-push", "codec-frame", "wz-session-core/codec-push", "wz-codecs-test-support/codec-push"]
 # R311i — codec-declare gates wz-runtime-tokio's Declare wire surface
 # in session_glue.rs: Declare/DeclareVariant/Decl*/Undecl* imports,
 # N_MID_DECLARE const, 8 build_declare_* + 4 build_undeclare_* +
@@ -256,7 +256,7 @@ codec-push = ["wz-codecs/codec-push", "codec-frame", "wz-session-core/codec-push
 # subscriber/queryable/liveliness/liveliness_subscriber modules
 # + pubsub.rs absorb_declare stay always-on at this round per the
 # R311m architectural deferral.
-codec-declare = ["wz-codecs/codec-declare", "codec-frame", "wz-session-core/codec-declare"]
+codec-declare = ["wz-codecs/codec-declare", "codec-frame", "wz-session-core/codec-declare", "wz-codecs-test-support/codec-declare"]
 # R311j — codec-request gates the wz-runtime-tokio Request wire surface
 # in session_glue.rs: Request/RequestVariant/Query imports, N_MID_REQUEST
 # const, build_request_query + build_request_query_with_meta +
@@ -265,7 +265,7 @@ codec-declare = ["wz-codecs/codec-declare", "codec-frame", "wz-session-core/code
 # body-codec-implies-envelope edge. query-get / query-queryable imply
 # codec-request so the wire path is mechanically available whenever
 # the high-level query surface is on.
-codec-request = ["wz-codecs/codec-request", "codec-frame", "wz-session-core/codec-request"]
+codec-request = ["wz-codecs/codec-request", "codec-frame", "wz-session-core/codec-request", "wz-codecs-test-support/codec-request"]
 # R311k — codec-response gates the wz-runtime-tokio Response wire
 # surface in session_glue.rs: Response/ResponseVariant/Reply/Err
 # imports, N_MID_RESPONSE const, 4 build_response_* builders,
@@ -276,7 +276,7 @@ codec-request = ["wz-codecs/codec-request", "codec-frame", "wz-session-core/code
 # deploy contract (Init / Open / Close + KeepAlive only). query-reply
 # and query-queryable imply codec-response (the reply emit path on
 # the queryable side).
-codec-response = ["wz-codecs/codec-response", "codec-frame", "wz-session-core/codec-response"]
+codec-response = ["wz-codecs/codec-response", "codec-frame", "wz-session-core/codec-response", "wz-codecs-test-support/codec-response"]
 # R311cb — transport domain wire-up. 5 atomic features that have real
 # source behavior in this crate (Cargo.toml authoring intent: "16
 # atomic, 5 active / 11 reserved"). Each gates a concrete cfg site:
@@ -532,6 +532,14 @@ wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
 # wz-session-core: the declare/* shells no longer host the behavioural
 # tests (they migrated to wz-session-core next to the registry code),
 # so this crate no longer consumes the four-registry fixture builders.
+# R311fu — the owned->wire `TestWire` projection SSOT (used by the
+# session_glue byte-compare tests for all five emitted message
+# mirrors). Distinct from the removed session-core dev-dep above: this
+# is the wz-codecs-tier sibling, dev-dep'd symmetrically by both
+# consumers, and its `codec-*` features forward from this crate's own
+# (see [features]) so an isolated subset pulls neither the wz-codecs
+# codec nor the corresponding impl.
+wz-codecs-test-support = { path = "../wz-codecs-test-support" }
 
 [lints]
 workspace = true

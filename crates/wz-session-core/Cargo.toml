@@ -59,8 +59,8 @@ alloc = []
 # decision to keep the body codec independently selectable.
 codec-frame = ["wz-codecs/codec-frame"]
 codec-push = ["codec-frame", "wz-codecs/codec-push"]
-codec-request = ["codec-frame", "wz-codecs/codec-request"]
-codec-response = ["codec-frame", "wz-codecs/codec-response"]
+codec-request = ["codec-frame", "wz-codecs/codec-request", "wz-codecs-test-support/codec-request"]
+codec-response = ["codec-frame", "wz-codecs/codec-response", "wz-codecs-test-support/codec-response"]
 codec-response-final = ["wz-codecs/codec-response-final"]
 codec-declare = ["codec-frame", "wz-codecs/codec-declare"]
 
@@ -186,6 +186,13 @@ zeroize = { version = "1", default-features = false, features = ["alloc"] }
 # path-dep boundary keeps zero test-only code in the production
 # artifact regardless of workspace-level Cargo feature unification.
 wz-session-core-test-support = { path = "../wz-session-core-test-support" }
+# R311fu — owned->wire `TestWire` projection SSOT for the request/
+# response builder byte-compare tests (request_build / response_build /
+# query). This crate's `codec-request` / `codec-response` features
+# forward to the matching `wz-codecs-test-support` features (above) so
+# an isolated subset excluding a codec gets neither the wz-codecs codec
+# nor the TestWire impl; the dev-dep edge is inert in non-test builds.
+wz-codecs-test-support = { path = "../wz-codecs-test-support" }
 
 [lints]
 workspace = true

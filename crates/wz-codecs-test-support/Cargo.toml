@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-codecs-test-support — SSOT for the test-only `owned -> wire bytes`
+# projection shared by the wz-session-core and wz-runtime-tokio test
+# suites.
+#
+# R311fu entry. The byte-compare regression tests across both crates
+# project a decoded `*Owned` codec mirror back to wire bytes via the
+# borrowed encode view (`owned.try_as_borrowed().encode_to_vec()`).
+# Before this crate that three-line projection was duplicated four
+# ways: a `trait TestWire` + macro + six impls in
+# wz-runtime-tokio/src/session_glue.rs, a second local `trait TestWire`
+# in each of wz-session-core/src/{request_build,response_build}.rs
+# (R311fs), and eight inline `try_as_borrowed()` chains in
+# wz-session-core/src/query.rs.
+#
+# It could not be centralised as a feature-gated `pub mod` inside
+# either production crate (R71 / [[feedback_test_fixtures_sibling_crate]]
+# anti-pattern) nor expressed as a macro the consumers invoke under
+# their own cfg: the projected types (`PushOwned`, `RequestOwned`, ...)
+# are wz-codecs types and the `TestWire` trait would be foreign to the
+# consumer, so a consumer-side `impl TestWire for RequestOwned` violates
+# the orphan rule. The coherent home is therefore a sibling crate at the
+# wz-codecs tier that pairs the trait with its impls; both consumers
+# `use wz_codecs_test_support::TestWire` and call `.wire()`.
+#
+# Why a third sibling (not folded into wz-session-core-test-support):
+# the projection lives a tier below — it reaches only wz-codecs types,
+# while wz-session-core-test-support hard-requires codec-declare for the
+# declare/* registry fixtures and is, post-R311ds, dev-dep'd only by
+# wz-session-core. Folding TestWire there would force wz-runtime-tokio
+# to re-add the dev-dep edge R311ds removed and drag codec-declare into
+# every runtime-tokio test build. A wz-codecs-tier sibling matches the
+# production-tier separation (wz-codecs <- {wz-session-core,
+# wz-runtime-tokio}) and is consumed symmetrically by both.
+#
+# Isolation: each `impl` is behind a `codec-*` feature that forwards to
+# the matching wz-codecs feature, and each consumer forwards its own
+# `codec-*` feature to this crate's. Under the C1j arbitrary-subset
+# guard a subset that excludes a codec gets neither the wz-codecs codec
+# nor the corresponding TestWire impl, so no impl references a type that
+# was configured out.
+
+[package]
+name = "wz-codecs-test-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Test-only owned->wire projection (TestWire) SSOT for the wz-codecs message mirrors (R311fu sibling, R71 path-dep pattern)."
+publish = false
+
+[lib]
+name = "wz_codecs_test_support"
+path = "src/lib.rs"
+
+[dependencies]
+# Only the codec types + their inherent `try_as_borrowed` /
+# `encode_to_vec` are needed; `alloc` supplies the `Vec<u8>` wire
+# buffer. `default-features = false` keeps the codec surface minimal so
+# the per-consumer feature forwarding stays the sole switch that pulls
+# a given `*Owned` mirror in (isolation preservation).
+wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc"] }
+
+[features]
+# Each feature gates the `impl TestWire` for the matching owned mirror
+# and forwards to the wz-codecs feature that defines that mirror.
+codec-push = ["wz-codecs/codec-push"]
+codec-declare = ["wz-codecs/codec-declare"]
+codec-request = ["wz-codecs/codec-request"]
+codec-response = ["wz-codecs/codec-response"]
+codec-response-final = ["wz-codecs/codec-response-final"]
+
+[lints]
+workspace = true

@@ -1451,6 +1451,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-codecs-test-support"
+version = "0.1.0"
+dependencies = [
+ "wz-codecs",
+]
+
+[[package]]
 name = "wz-e2e-declare-observer"
 version = "0.1.0"
 dependencies = [
@@ -1566,6 +1573,7 @@ dependencies = [
  "sce-rust-runtime",
  "tokio",
  "wz-codecs",
+ "wz-codecs-test-support",
  "wz-runtime-core",
  "wz-runtime-tokio-test-support",
  "wz-session-core",
@@ -1591,6 +1599,7 @@ dependencies = [
  "sce-forge-runtime",
  "sha2",
  "wz-codecs",
+ "wz-codecs-test-support",
  "wz-runtime-core",
  "wz-session-core-test-support",
  "zeroize",

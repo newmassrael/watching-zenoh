@@ -985,6 +985,12 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::sync::Mutex;
+    // R311fu — owned->wire projection SSOT (the eight `into_response()`
+    // / builder byte-compares below read `.wire()` uniformly). In scope
+    // because the test-module cfg requires `query-queryable`, which
+    // implies `codec-response` and forwards
+    // `wz-codecs-test-support/codec-response`.
+    use wz_codecs_test_support::TestWire;
     // Fixtures build the borrowed codec views (`..::default()` lives on
     // the borrowed type) then `.into_owned()` at the dispatch boundary,
     // which now takes the lifetime-free `*Owned` mirrors.
@@ -1562,19 +1568,11 @@ mod tests {
         );
 
         assert_eq!(replies.len(), 1);
-        let via_chain = replies
-            .pop()
-            .unwrap()
-            .into_response()
-            .try_as_borrowed()
-            .expect("test fixture: <=N exts by construction")
-            .encode_to_vec();
+        let via_chain = replies.pop().unwrap().into_response().wire();
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"hello")
             .responder(&[0xBB; 1], 1)
             .build()
-            .try_as_borrowed()
-            .expect("test fixture: <=N exts by construction")
-            .encode_to_vec();
+            .wire();
         assert_eq!(
             via_chain, via_builder,
             "QueryResponder.with_responder → send_reply → into_response must equal the direct \
@@ -1595,14 +1593,9 @@ mod tests {
         // ResponseReplyBuilder direct path with the same args.
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"hello")
             .build()
-            .try_as_borrowed()
-            .expect("test fixture: <=N exts by construction")
-            .encode_to_vec();
+            .wire();
         assert_eq!(
-            response
-                .try_as_borrowed()
-                .expect("test fixture: <=N exts by construction")
-                .encode_to_vec(),
+            response.wire(),
             via_builder,
             "QueryReply::into_response (Put) must match the direct builder path byte-for-byte"
         );
@@ -1620,14 +1613,9 @@ mod tests {
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("clear/me"), &[])
             .reply_del()
             .build()
-            .try_as_borrowed()
-            .expect("test fixture: <=N exts by construction")
-            .encode_to_vec();
+            .wire();
         assert_eq!(
-            response
-                .try_as_borrowed()
-                .expect("test fixture: <=N exts by construction")
-                .encode_to_vec(),
+            response.wire(),
             via_builder,
             "QueryReply::into_response (Del) must match builder.reply_del path"
         );
@@ -1646,14 +1634,10 @@ mod tests {
         let via_builder = ResponseErrBuilder::new(42, 0, Some("error/path"), b"oops")
             .encoding(4, Some("schema_v1"))
             .build()
-            .try_as_borrowed()
-            .expect("test fixture: <=N exts by construction")
-            .encode_to_vec();
+            .wire();
         assert_eq!(
             response
-                .try_as_borrowed()
-                .expect("test fixture: <=N exts by construction")
-                .encode_to_vec(),
+                .wire(),
             via_builder,
             "QueryReply::into_response (Err) must match the builder path with the same encoding tuple"
         );

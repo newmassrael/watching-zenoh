@@ -4920,13 +4920,15 @@ mod tests {
     use super::*;
 
     // SCE owned-view absorb test helper. The `build_*` fixtures + reply
-    // builders now return the lifetime-free `*Owned` mirrors, whose wire
+    // builders return the lifetime-free `*Owned` mirrors, whose wire
     // bytes come via `try_as_borrowed()` (encode lives on the borrowed
     // view). `.wire()` centralises that projection so the byte-compare
-    // tests read `built.wire()` uniformly; borrowed codecs that tests
-    // encode directly get a pass-through impl. The `.expect()` is sound
-    // by construction — wz builders emit far fewer than the heapless ext
-    // cap N.
+    // tests read `built.wire()` uniformly. R311fu moved the trait + its
+    // six impls to the wz-codecs-tier `wz-codecs-test-support` sibling
+    // (the projected types are wz-codecs types, so a local trait was
+    // the only coherent shape before — see that crate's lib.rs); each
+    // impl is gated by the matching `codec-*` feature, which this
+    // crate's `codec-*` features forward to.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-declare",
@@ -4934,39 +4936,7 @@ mod tests {
         feature = "codec-response",
         feature = "codec-response-final"
     ))]
-    trait TestWire {
-        fn wire(&self) -> Vec<u8>;
-    }
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-declare",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final"
-    ))]
-    macro_rules! impl_test_wire_owned {
-        ($($owned:ty),+ $(,)?) => {
-            $(impl TestWire for $owned {
-                fn wire(&self) -> Vec<u8> {
-                    self.try_as_borrowed()
-                        .expect("test: <=N exts by construction")
-                        .encode_to_vec()
-                }
-            })+
-        };
-    }
-    #[cfg(feature = "codec-push")]
-    impl_test_wire_owned!(PushOwned);
-    #[cfg(feature = "codec-declare")]
-    impl_test_wire_owned!(DeclareOwned);
-    #[cfg(feature = "codec-request")]
-    impl_test_wire_owned!(RequestOwned);
-    #[cfg(feature = "codec-response")]
-    impl_test_wire_owned!(ResponseOwned);
-    #[cfg(feature = "codec-response-final")]
-    impl_test_wire_owned!(ResponseFinalOwned);
-    #[cfg(feature = "codec-declare")]
-    impl_test_wire_owned!(InterestOwned);
+    use wz_codecs_test_support::TestWire;
 
     /// R69 / R311ei — `signing_key_from_os_entropy` yields a 32-byte
     /// key (satisfies the >= 32 invariant by construction) and two
