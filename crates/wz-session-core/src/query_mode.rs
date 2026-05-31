@@ -88,9 +88,12 @@ impl QueryTarget {
 
 // R311fs — ConsolidationMode / QueryTarget wire-byte mapping tests,
 // relocated from wz-runtime-tokio::session_glue to their SSOT home
-// (these enums live here). Dedup of the cross-crate duplicates left
-// after the type move.
-#[cfg(all(test, feature = "codec-request"))]
+// (these enums live here). The enums + `wire_byte` are unconditionally
+// compiled (no codec gate on this module), and ConsolidationMode is
+// consumed by codec-response too, so the tests are `#[cfg(test)]`-only:
+// the old session_glue `codec-request` gate was incidental to that
+// cluster's location, not to these types' compilation domain.
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -101,7 +104,6 @@ mod tests {
     /// dedicated test guards the mapping independently of the encode
     /// path so a refactor that touches the `wire_byte` method without
     /// touching the encoder gets caught.
-    #[cfg(feature = "codec-request")]
     #[test]
     fn consolidation_mode_wire_byte_matches_zenoh_pico_enum_values() {
         assert_eq!(ConsolidationMode::None.wire_byte(), 0u8);
@@ -113,7 +115,6 @@ mod tests {
     /// mapping mirrors zenoh-pico's `z_query_target_t` enum integer
     /// values (constants.h:263-264). BEST_MATCHING (0) is absent by
     /// design (the encoder predicate clears the ext on default).
-    #[cfg(feature = "codec-request")]
     #[test]
     fn query_target_wire_byte_matches_zenoh_pico_enum_values() {
         assert_eq!(QueryTarget::All.wire_byte(), 1u8);

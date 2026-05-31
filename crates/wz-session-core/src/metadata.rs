@@ -110,19 +110,20 @@ impl QueryMetadata {
 
 // R311fs — QueryMetadata is_empty() tests, relocated from
 // wz-runtime-tokio::session_glue to their SSOT home (this struct lives
-// here). Dedup of the cross-crate duplicates.
-#[cfg(all(test, feature = "codec-request"))]
+// here). QueryMetadata + its query_mode field types are unconditionally
+// compiled (no codec gate on this module), so the tests are
+// `#[cfg(test)]`-only: the old session_glue `codec-request` gate was
+// incidental to that cluster's location, not to this type's domain.
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(feature = "codec-request")]
     #[test]
     fn query_metadata_default_is_empty() {
         let meta = QueryMetadata::default();
         assert!(meta.is_empty());
     }
 
-    #[cfg(feature = "codec-request")]
     #[test]
     fn query_metadata_with_target_is_not_empty() {
         let meta = QueryMetadata {
@@ -132,7 +133,6 @@ mod tests {
         assert!(!meta.is_empty());
     }
 
-    #[cfg(feature = "codec-request")]
     #[test]
     fn query_metadata_with_consolidation_is_not_empty() {
         let meta = QueryMetadata {
@@ -142,7 +142,6 @@ mod tests {
         assert!(!meta.is_empty());
     }
 
-    #[cfg(feature = "codec-request")]
     #[test]
     fn query_metadata_with_attachment_is_not_empty() {
         let meta = QueryMetadata {
@@ -152,7 +151,6 @@ mod tests {
         assert!(!meta.is_empty());
     }
 
-    #[cfg(feature = "codec-request")]
     #[test]
     fn query_metadata_with_timeout_ms_nonzero_is_not_empty() {
         let meta = QueryMetadata {

@@ -68,8 +68,13 @@ pub(crate) fn encode_vle_u64_into(out: &mut Vec<u8>, mut v: u64) {
 
 // R311fs — encode_source_info_ext_body wire-layout test, relocated
 // from wz-runtime-tokio::session_glue to its SSOT home (R311ek moved
-// the encoder here). Dedup of the cross-crate duplicate.
-#[cfg(all(test, feature = "codec-response"))]
+// the encoder here). This module is `#[cfg(feature = "alloc")]` and
+// codec-agnostic (R311ek lifted the encoder out of codec-response
+// gating precisely so the codec-push body-extension path can reach it),
+// so the test is `#[cfg(test)]`-only — gating it on `codec-response`
+// would reintroduce, on the test side, the asymmetry R311ek removed
+// (codec-push-only builds would exercise the encoder untested).
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -77,7 +82,6 @@ mod tests {
     /// source_info ext-body bytes. Locks the wire shape independently
     /// of the builder so future helpers (Push.source_info, Query
     /// source_info) can re-use the helper with the same guarantees.
-    #[cfg(feature = "codec-response")]
     #[test]
     fn encode_source_info_ext_body_matches_zenoh_pico_layout() {
         // zid_len=2 → leading byte = (2-1)<<4 = 0x10
