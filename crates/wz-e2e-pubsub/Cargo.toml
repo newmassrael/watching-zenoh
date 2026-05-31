@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-e2e-pubsub — minimal single-purpose e2e consumer binary that
+# pins EXACTLY the pubsub-only facade subset and proves that subset
+# composes end-to-end against a foreign zenoh-pico peer.
+#
+# Why a dedicated crate (R311fg): wz-ap-demo is the full
+# preset-ap-client reference consumer. Feature-subsetting it would
+# require cfg-gating ~70 plane call-sites across its source, turning
+# the demo into a cfg-soup (the anti-pattern the project rejects). A
+# Cargo feature subset cannot be pinned per-[[bin]] either — bins in
+# one crate share the crate's feature resolution. The textbook shape
+# is therefore a separate, intrinsically single-plane binary: its
+# source uses only the pub/sub surface, so it compiles cleanly under
+# the pubsub-only subset with ZERO cfg, and its manifest pins that
+# subset verbatim. Future planes (queryable / liveliness) get sibling
+# crates of the same shape — single responsibility per e2e binary.
+#
+# Layer E2 (scripts/run-ci.sh) builds this under its pinned subset and
+# runs the pub/sub round-trip against zenoh-pico's z_sub: the
+# behavioural counterpart of the C4b facade BUILD subset matrix — it
+# proves the pubsub subset not only type-checks but interoperates on
+# the wire with a foreign implementation.
+
+[package]
+name = "wz-e2e-pubsub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Minimal pubsub-only facade-subset e2e consumer — proves the pub/sub subset interoperates with zenoh-pico on the wire."
+
+[[bin]]
+name = "wz-e2e-pubsub"
+path = "src/main.rs"
+
+[dependencies]
+# The whole point of this crate: pin the smallest coherent facade
+# subset that PUBLISHES pub/sub data AND interoperates on the wire with
+# a foreign zenoh-pico peer, default-features off so no other plane
+# leaks in.
+#
+# R311fg finding — this is the C4b `pubsub-only` BUILD subset PLUS
+# `transport-batching`. The Layer E2 e2e proved transport-batching is
+# load-bearing for FOREIGN interop: with it off, `PeerInitCaps::
+# from_init_syn` ignores the peer's advertised batch_size and forces
+# 65535, and zenoh-pico's z_sub rejects the resulting InitAck
+# (handshake closes at SentInitAck -> Closed, "Unable to open
+# session!"). It builds fine without it (C4b passes) and two wz peers
+# interoperate without it (both force 65535, so they agree) — the
+# divergence is specifically the foreign-peer handshake, which is
+# exactly what only an e2e-vs-zenoh-pico guard can catch. So the
+# foreign-interop-coherent pubsub subset is strictly larger than the
+# build-coherent one; this manifest pins the former.
+wz = { path = "../wz", default-features = false, features = [
+    "runtime-tokio",
+    "transport-unicast",
+    "transport-link-tcp",
+    "transport-keepalive",
+    "transport-batching",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "codec-push",
+    "pubsub-put",
+    "pubsub-delete",
+] }
+# Multi-thread runtime + signal handling are binary-shaped uses outside
+# the wz framework boundary (the writer task spawn + SIGTERM teardown),
+# mirroring wz-ap-demo's explicit tokio dep.
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal"] }
+log = "0.4"
+env_logger = "0.11"
+
+[lints]
+workspace = true

@@ -40,6 +40,7 @@ members = [
     "wz-runtime-tokio",
     "wz-runtime-tokio-test-support",
     "wz-ap-demo",
+    "wz-e2e-pubsub",
     "wz-runtime-lwip",
     "lwip-sys",
     "wz-link-lwip",
