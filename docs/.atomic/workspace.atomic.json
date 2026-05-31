@@ -27614,6 +27614,62 @@
         "C4b ruling: 3 interop deltas now documented (transport-batching R311fg, codec-response-final R311fh, query-reply reply-decode R311fm) — decide whether C4b should pin interop supersets."
       ]
     },
+    "Round 311fo": {
+      "decision_summary": "R311fo wz-e2e-declare-observer: the declare-observer facade subset gains its behavioural e2e twin — wz passively OBSERVES a foreign zenoh-pico z_sub's proactive DeclSubscriber on the wire, completing the wz-e2e-* facade-subset e2e family.",
+      "changes_bullets": [
+        "crates/wz-e2e-declare-observer/ (new crate): single-purpose e2e binary pinning the C4b/C4c declare-observer subset VERBATIM (codec-declare, declare-subscriber, declare-queryable, liveliness-token, liveliness-subscriber + shared handshake core + transport-batching); setup registers one remote-subscriber callback on session.observer().lock().remote_subscribers.on_subscriber_declared and returns () — a PURE observer that emits nothing on the wire. Direction wz=ACCEPTOR+OBSERVER (sink), zenoh-pico z_sub (client)=DECLARER.",
+        "Reuses wz-e2e-harness scaffolding; binary carries only --listen/--observe CLI + the observer-registration closure. Zero #[cfg]: callback param types (&DeclSubscriberOwned, &str) inferred, so no wz_codecs import; source compiles verbatim under the pinned subset.",
+        "Composability fact exercised: inbound DeclSubscriber dispatch in wz-session-core declare/subscriber.rs:174 fires on_subscriber_declared UNCONDITIONALLY (resolve keyexpr -> insert -> fire) — NOT gated on a prior outbound declare-interest, unlike the liveliness-subscriber plane which DOES emit an Interest; wz observes the proactive declare with no outbound traffic.",
+        "crates/wz-integration-tests/tests/wz_e2e_declare_observer_to_zsub.rs (new): drives the binary vs zenoh-pico z_sub -m client; gates on wz's REMOTE SUBSCRIBER DECLARED stderr witness + asserts the resolved keyexpr literal echoes what z_sub declared. Witness is wz-side (single long-running process), so no foreign-CLI-stdout capture race (same property as wz-e2e-liveliness).",
+        "crates/wz-integration-tests/src/lib.rs: new wz_e2e_declare_observer_binary() helper (hand-written, debug-first/release-fallback, matching the one-per-binary convention). crates/Cargo.toml: crate added to [workspace] members.",
+        "scripts/run-ci.sh: Layer E2 gains the prereq-build check + the wz_e2e_declare_observer_to_zsub invocation; lane doc-block documents the new binary as the declare-observer behavioural twin."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-e2e-declare-observer OK under the pinned subset (default-features off); cargo fmt --all --check clean; cargo clippy -p wz-e2e-declare-observer --all-targets -- -D warnings clean.",
+        "e2e PASS vs zenoh-pico z_sub: test wz_e2e_declare_observer_round_trip_against_zenoh_pico_z_sub ... ok (REMOTE SUBSCRIBER DECLARED witnessed, resolved keyexpr matches the declared literal).",
+        "No-flaky sweep: 20/20 consecutive e2e runs PASS, 0 fail (no-flaky-ever standard — sustained passes, not a single run).",
+        "Full scripts/run-ci.sh with WZ_RUN_LAYER_G=1: EXIT 0, all required layers pass — Layer 0 fmt, C4b/C4c/C1j/C4d declare-observer subset OK, Layer E2 pass (6 facade-subset e2e binaries), Layer G pass (7 MCU targets G.1-G.6; riscv32 G.6 host-tool SKIP).",
+        "The declare-observer subset was already build-proven (C4b/C4c), behaviour-proven in-process (C1j + observer dispatch tests), clippy-clean (C4d); R311fo adds the missing wire-interop proof against a foreign implementation."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "push the R311fo commit (user consent required).",
+        "wz-e2e-* facade-subset e2e family now COMPLETE: pubsub / queryable / zget / liveliness / liveliness-token / declare-observer — every C4b/C4c coherent subset has a behavioural wire-interop twin vs zenoh-pico.",
+        "Audit-on-pattern (from R311fm/fn): other consumer planes may still have publisher-marker feature coupling — check whether any decode arm gates on an unrelated plane's feature and whether its test module compiles under the isolated subset.",
+        "C4b ruling: 3 interop deltas documented (transport-batching R311fg, codec-response-final R311fh, query-reply reply-decode R311fm) — decide whether C4b should pin interop supersets. declare-observer added NO new delta (it composes cleanly), itself evidence the inbound-declare plane is well-isolated."
+      ],
+      "publishable_decision_summary": "R311fo wz-e2e-declare-observer: the declare-observer facade subset gains its behavioural e2e twin — wz passively OBSERVES a foreign zenoh-pico z_sub's proactive DeclSubscriber on the wire, completing the wz-e2e-* facade-subset e2e family.",
+      "publishable_changes_bullets": [
+        "crates/wz-e2e-declare-observer/ (new crate): single-purpose e2e binary pinning the C4b/C4c declare-observer subset VERBATIM (codec-declare, declare-subscriber, declare-queryable, liveliness-token, liveliness-subscriber + shared handshake core + transport-batching); setup registers one remote-subscriber callback on session.observer().lock().remote_subscribers.on_subscriber_declared and returns () — a PURE observer that emits nothing on the wire. Direction wz=ACCEPTOR+OBSERVER (sink), zenoh-pico z_sub (client)=DECLARER.",
+        "Reuses wz-e2e-harness scaffolding; binary carries only --listen/--observe CLI + the observer-registration closure. Zero #[cfg]: callback param types (&DeclSubscriberOwned, &str) inferred, so no wz_codecs import; source compiles verbatim under the pinned subset.",
+        "Composability fact exercised: inbound DeclSubscriber dispatch in wz-session-core declare/subscriber.rs:174 fires on_subscriber_declared UNCONDITIONALLY (resolve keyexpr -> insert -> fire) — NOT gated on a prior outbound declare-interest, unlike the liveliness-subscriber plane which DOES emit an Interest; wz observes the proactive declare with no outbound traffic.",
+        "crates/wz-integration-tests/tests/wz_e2e_declare_observer_to_zsub.rs (new): drives the binary vs zenoh-pico z_sub -m client; gates on wz's REMOTE SUBSCRIBER DECLARED stderr witness + asserts the resolved keyexpr literal echoes what z_sub declared. Witness is wz-side (single long-running process), so no foreign-CLI-stdout capture race (same property as wz-e2e-liveliness).",
+        "crates/wz-integration-tests/src/lib.rs: new wz_e2e_declare_observer_binary() helper (hand-written, debug-first/release-fallback, matching the one-per-binary convention). crates/Cargo.toml: crate added to [workspace] members.",
+        "scripts/run-ci.sh: Layer E2 gains the prereq-build check + the wz_e2e_declare_observer_to_zsub invocation; lane doc-block documents the new binary as the declare-observer behavioural twin."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-e2e-declare-observer OK under the pinned subset (default-features off); cargo fmt --all --check clean; cargo clippy -p wz-e2e-declare-observer --all-targets -- -D warnings clean.",
+        "e2e PASS vs zenoh-pico z_sub: test wz_e2e_declare_observer_round_trip_against_zenoh_pico_z_sub ... ok (REMOTE SUBSCRIBER DECLARED witnessed, resolved keyexpr matches the declared literal).",
+        "No-flaky sweep: 20/20 consecutive e2e runs PASS, 0 fail (no-flaky-ever standard — sustained passes, not a single run).",
+        "Full scripts/run-ci.sh with WZ_RUN_LAYER_G=1: EXIT 0, all required layers pass — Layer 0 fmt, C4b/C4c/C1j/C4d declare-observer subset OK, Layer E2 pass (6 facade-subset e2e binaries), Layer G pass (7 MCU targets G.1-G.6; riscv32 G.6 host-tool SKIP).",
+        "The declare-observer subset was already build-proven (C4b/C4c), behaviour-proven in-process (C1j + observer dispatch tests), clippy-clean (C4d); R311fo adds the missing wire-interop proof against a foreign implementation."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "push the R311fo commit (user consent required).",
+        "wz-e2e-* facade-subset e2e family now COMPLETE: pubsub / queryable / zget / liveliness / liveliness-token / declare-observer — every C4b/C4c coherent subset has a behavioural wire-interop twin vs zenoh-pico.",
+        "Audit-on-pattern (from R311fm/fn): other consumer planes may still have publisher-marker feature coupling — check whether any decode arm gates on an unrelated plane's feature and whether its test module compiles under the isolated subset.",
+        "C4b ruling: 3 interop deltas documented (transport-batching R311fg, codec-response-final R311fh, query-reply reply-decode R311fm) — decide whether C4b should pin interop supersets. declare-observer added NO new delta (it composes cleanly), itself evidence the inbound-declare plane is well-isolated."
+      ]
+    },
     "Round 311g": {
       "decision_summary": "R311g send_close_with_reason signature stability + codec-frame envelope inbound cascade — Frame decode gated, +27.7KB elision; ap-demo codec-close mirror retired.",
       "changes_bullets": [

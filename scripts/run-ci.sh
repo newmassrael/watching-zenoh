@@ -1137,6 +1137,12 @@ layer_e_ap_demo_round_trip() {
 #                        CURRENT get with no future subscription, so only
 #                        the R283 reply can satisfy it — it isolates the
 #                        interest-response from the proactive declare.
+#   * wz-e2e-declare-observer — declare-observer, wz passively OBSERVES a
+#                        foreign z_sub's proactive Declare(DeclSubscriber)
+#                        (wz=sink, emits nothing; no Interest needed).
+#                        Witness is on the wz side, so no foreign-stdout
+#                        capture race. The LAST C4b/C4c build-subset entry
+#                        to gain a behavioural e2e twin (R311fo).
 #
 # Same prereq-SKIP discipline as Layer E: the subset binaries + the
 # zenoh-pico CLI must be prebuilt (CI builds them; a bare local run
@@ -1176,12 +1182,19 @@ layer_e2_facade_subset_e2e() {
         echo "Layer E2 SKIP (wz-e2e-liveliness-token not built; run: cd crates && cargo build -p wz-e2e-liveliness-token)"
         return 0
     fi
+    # declare-observer subset (R311fo) — wz observes a foreign z_sub's
+    # proactive DeclSubscriber.
+    if [[ ! -x crates/target/debug/wz-e2e-declare-observer && ! -x crates/target/release/wz-e2e-declare-observer ]]; then
+        echo "Layer E2 SKIP (wz-e2e-declare-observer not built; run: cd crates && cargo build -p wz-e2e-declare-observer)"
+        return 0
+    fi
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_e2e_pubsub_to_zsub \
         --test wz_e2e_queryable_to_zget \
         --test wz_e2e_zget_to_zqueryable \
         --test wz_e2e_liveliness_to_zliveliness \
         --test wz_e2e_liveliness_token_to_zget_liveliness \
+        --test wz_e2e_declare_observer_to_zsub \
         --quiet -- --ignored)
 }
 

@@ -1,0 +1,124 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-e2e-declare-observer — minimal single-purpose e2e consumer binary
+# that pins EXACTLY the `declare-observer` facade subset and proves that
+# subset composes end-to-end against a foreign zenoh-pico peer that
+# proactively DECLARES a subscriber on connect (z_sub).
+#
+# Sibling of wz-e2e-pubsub (R311fg) / wz-e2e-queryable (R311fh) /
+# wz-e2e-zget (R311fm) / wz-e2e-liveliness (R311fj). Same rationale:
+# wz-ap-demo is the full preset-ap-client reference consumer;
+# feature-subsetting it would require cfg-gating ~70 plane call-sites
+# (the cfg-soup anti-pattern the project rejects), and a Cargo feature
+# subset cannot be pinned per-[[bin]]. The textbook shape is a separate,
+# intrinsically single-plane binary: this one uses ONLY the remote-
+# declare OBSERVER surface (`observer().remote_subscribers.
+# on_subscriber_declared`), so it compiles cleanly under the
+# declare-observer subset with ZERO cfg, and its manifest pins that
+# subset verbatim.
+#
+# DIRECTION (deliberate): wz is the passive OBSERVER (sink) and
+# zenoh-pico's z_sub is the active DECLARER. wz accepts the session,
+# registers a remote-subscriber callback, and waits; z_sub (client mode)
+# emits its `Declare(DeclSubscriber)` proactively the instant the session
+# is Established, with NO Interest required from wz — the inbound-Declare
+# dispatch in wz-session-core `declare/subscriber.rs` routes any
+# DeclSubscriber into the registry and fires the callback unconditionally
+# (it is NOT gated on a prior outbound declare-interest, unlike the
+# liveliness-subscriber plane which DOES emit an Interest). So this
+# binary's setup emits nothing on the wire — it is a pure observer. The
+# witness is therefore on the wz side (the callback's log line), so
+# unlike the queryable / zget tests there is no foreign-CLI-stdout
+# capture race to design around (same property as wz-e2e-liveliness).
+#
+# This is the LAST C4b / C4c / C1j / C4d build-subset matrix entry to
+# gain a behavioural e2e twin: declare-observer is build-proven (C4b /
+# C4c), behaviour-proven in-process (C1j + wz-session-core dispatch
+# tests), and clippy-clean (C4d), but until now had no wire-interop
+# proof against a foreign implementation. Layer E2 (scripts/run-ci.sh)
+# builds this under its pinned subset and drives the observation against
+# zenoh-pico's z_sub.
+#
+# WHY THE FULL declare-observer BUNDLE (not a narrower remote-subscriber-
+# only subset): the carry this binary closes is "the declare-observer
+# C4b matrix entry has no behavioural e2e twin". To be that twin it must
+# pin the SAME subset C4b names — `codec-declare, declare-subscriber,
+# declare-queryable, liveliness-token, liveliness-subscriber` — so the
+# behavioural lane and the build lane guard byte-identical feature sets.
+# This binary EXERCISES the remote-subscriber arm of that bundle on the
+# wire (z_sub is the textbook proactive declarer); the queryable / token
+# arms of the same bundle are build-proven by C4b and behaviour-proven
+# in-process (observer dispatch tests), so the wire e2e need not drive a
+# second foreign peer to keep the bundle's interop honest — one observed
+# inbound Declare proves the inbound-declare decode path interoperates.
+
+[package]
+name = "wz-e2e-declare-observer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Minimal declare-observer facade-subset e2e consumer — proves the declare-observer subset observes a foreign zenoh-pico z_sub's DeclSubscriber on the wire."
+
+[[bin]]
+name = "wz-e2e-declare-observer"
+path = "src/main.rs"
+
+[dependencies]
+# Pin the C4b / C4c `declare-observer` subset VERBATIM, default-features
+# off so no other plane leaks in. The named bundle is
+# `codec-declare, declare-subscriber, declare-queryable, liveliness-token,
+# liveliness-subscriber` layered on the shared handshake core:
+#
+#   * codec-declare — decode inbound `Declare(*)` frames (the envelope
+#     every remote-declare observation rides on).
+#   * declare-subscriber — the observer field this binary uses:
+#     `remote_subscribers.on_subscriber_declared`. Decodes the peer's
+#     `DeclSubscriber` / `UndeclSubscriber` and fires the callback.
+#   * declare-queryable / liveliness-token / liveliness-subscriber —
+#     the rest of the declare-observer bundle. Pinned so the subset is
+#     byte-identical to the C4b matrix entry whose behavioural twin this
+#     binary is; their arms are build-proven by C4b and behaviour-proven
+#     in-process, this e2e exercises the subscriber arm on the wire.
+#   * transport-batching — load-bearing for the FOREIGN handshake, not
+#     the declare plane. Same finding as every other wz-e2e-* binary
+#     (R311fg): `PeerInitCaps::from_init_syn` forces batch_size 65535
+#     when it is off, so zenoh-pico rejects the InitAck. The handshake is
+#     plane-independent, so every binary that completes a session with
+#     zenoh-pico pins it.
+#   * keyexpr-literal/-canon, the handshake codec quartet, keepalive, and
+#     the unicast open/accept session features are the shared core every
+#     wz-e2e-* binary pins (the wz-e2e-harness intersection).
+wz = { path = "../wz", default-features = false, features = [
+    "runtime-tokio",
+    "transport-unicast",
+    "transport-link-tcp",
+    "transport-keepalive",
+    "transport-batching",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "codec-declare",
+    "declare-subscriber",
+    "declare-queryable",
+    "liveliness-token",
+    "liveliness-subscriber",
+] }
+# The shared acceptor scaffolding (bind/accept/open/drive/teardown +
+# env_logger + tokio runtime). This binary carries only its CLI parsing
+# and the remote-subscriber-observer setup closure.
+wz-e2e-harness = { path = "../wz-e2e-harness" }
+log = "0.4"
+
+[lints]
+workspace = true
