@@ -27164,6 +27164,52 @@
         "Arbitrary-subset BEHAVIORAL CI guard (vs build-only) still absent across all crates — the broader composability-behavior-CI track the audit flags."
       ]
     },
+    "Round 311ff": {
+      "decision_summary": "R311ff arbitrary-subset BEHAVIOURAL CI guard for wz-runtime-tokio: new Layer C1j cargo-tests the runtime crate under each coherent subset (behavioural twin of C4c's build matrix), with the subset list extracted into a single SSOT helper both lanes consume so they cannot drift.",
+      "changes_bullets": [
+        "scripts/run-ci.sh — extracted the coherent wz-runtime-tokio subset list into a single SSOT helper `_wz_runtime_tokio_coherent_subsets()` (emits name<TAB>full-feature-string). Both the build guard (C4c) and the new behavioural guard (C1j) consume it, so the two matrices can never drift — every build-guarded subset is also behaviour-guarded.",
+        "scripts/run-ci.sh — new Layer C1j (layer_c1j_runtime_tokio_subset_behavior): `cargo test -p wz-runtime-tokio --no-default-features` under each SSOT subset. The behavioural twin of C4c and the runtime-crate analog of the wz-session-core behavioural plane lanes C1d-g. Registered in the C1 dispatch group + header layer list.",
+        "scripts/run-ci.sh — C4c refactored from its R311fe inline subset array to the shared SSOT helper (build-guard coverage unchanged); header + comments updated to frame C4c as the BUILD half and C1j as the BEHAVIOUR half of one composability guard.",
+        "wz-runtime-tokio/Cargo.toml — transport-unicast FOUNDATIONAL comment updated: the always-on pin is now enforced by both C4c (build) and C1j (behaviour) lanes."
+      ],
+      "verification_bullets": [
+        "bash -n scripts/run-ci.sh clean; SSOT tab-parse smoke confirms name/features split.",
+        "Layer C1j pass: all 5 subsets (handshake-only / pubsub-only / queryable-only / zget-reply-only / declare-observer) cargo test OK — 419+ lib + integration tests per subset, 0 failed.",
+        "Layer C4c (refactored to the SSOT helper) pass: all 5 subsets cargo build OK — no coverage regression vs the R311fe inline list.",
+        "scripts/run-ci.sh full run EXIT 0: all required lanes pass incl the new C1j; no Rust source / feature-graph change this round (CI script + a Cargo.toml comment only), so the Layer G cross-compile footing is unaffected."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "wz-runtime-tokio now has BOTH a build (C4c) and a behavioural (C1j) arbitrary-subset guard, mirroring the wz-session-core C1h (build) + C1d-g (behaviour) split; the two runtime-crate matrices share one SSOT helper so they cannot drift.",
+        "Remaining behavioural-subset gap: the wz FACADE end-to-end path (Layer E ap-demo vs zenoh-pico) still runs only under default features. A facade-level behavioural-subset guard is the next item, but Layer E spawns external zenoh-pico processes (flake-prone vs the in-process C1j tests), so it needs a careful no-flaky-ever design before adding subset variants.",
+        "The C1j SSOT subset list is currently 5 representative coherent shapes; widening to multi-plane combinations is a future enrichment if a concrete regression class motivates it (YAGNI until then)."
+      ],
+      "publishable_decision_summary": "R311ff arbitrary-subset BEHAVIOURAL CI guard for wz-runtime-tokio: new Layer C1j cargo-tests the runtime crate under each coherent subset (behavioural twin of C4c's build matrix), with the subset list extracted into a single SSOT helper both lanes consume so they cannot drift.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh — extracted the coherent wz-runtime-tokio subset list into a single SSOT helper `_wz_runtime_tokio_coherent_subsets()` (emits name<TAB>full-feature-string). Both the build guard (C4c) and the new behavioural guard (C1j) consume it, so the two matrices can never drift — every build-guarded subset is also behaviour-guarded.",
+        "scripts/run-ci.sh — new Layer C1j (layer_c1j_runtime_tokio_subset_behavior): `cargo test -p wz-runtime-tokio --no-default-features` under each SSOT subset. The behavioural twin of C4c and the runtime-crate analog of the wz-session-core behavioural plane lanes C1d-g. Registered in the C1 dispatch group + header layer list.",
+        "scripts/run-ci.sh — C4c refactored from its R311fe inline subset array to the shared SSOT helper (build-guard coverage unchanged); header + comments updated to frame C4c as the BUILD half and C1j as the BEHAVIOUR half of one composability guard.",
+        "wz-runtime-tokio/Cargo.toml — transport-unicast FOUNDATIONAL comment updated: the always-on pin is now enforced by both C4c (build) and C1j (behaviour) lanes."
+      ],
+      "publishable_verification_bullets": [
+        "bash -n scripts/run-ci.sh clean; SSOT tab-parse smoke confirms name/features split.",
+        "Layer C1j pass: all 5 subsets (handshake-only / pubsub-only / queryable-only / zget-reply-only / declare-observer) cargo test OK — 419+ lib + integration tests per subset, 0 failed.",
+        "Layer C4c (refactored to the SSOT helper) pass: all 5 subsets cargo build OK — no coverage regression vs the R311fe inline list.",
+        "scripts/run-ci.sh full run EXIT 0: all required lanes pass incl the new C1j; no Rust source / feature-graph change this round (CI script + a Cargo.toml comment only), so the Layer G cross-compile footing is unaffected."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "wz-runtime-tokio now has BOTH a build (C4c) and a behavioural (C1j) arbitrary-subset guard, mirroring the wz-session-core C1h (build) + C1d-g (behaviour) split; the two runtime-crate matrices share one SSOT helper so they cannot drift.",
+        "Remaining behavioural-subset gap: the wz FACADE end-to-end path (Layer E ap-demo vs zenoh-pico) still runs only under default features. A facade-level behavioural-subset guard is the next item, but Layer E spawns external zenoh-pico processes (flake-prone vs the in-process C1j tests), so it needs a careful no-flaky-ever design before adding subset variants.",
+        "The C1j SSOT subset list is currently 5 representative coherent shapes; widening to multi-plane combinations is a future enrichment if a concrete regression class motivates it (YAGNI until then)."
+      ]
+    },
     "Round 311g": {
       "decision_summary": "R311g send_close_with_reason signature stability + codec-frame envelope inbound cascade — Frame decode gated, +27.7KB elision; ap-demo codec-close mirror retired.",
       "changes_bullets": [

@@ -286,8 +286,9 @@ codec-response = ["wz-codecs/codec-response", "codec-frame", "wz-session-core/co
 #                            speculative YAGNI fork). Genuine exclusion is
 #                            blocked until a second FSM genuinely lands;
 #                            until then this is a default-on toggle that
-#                            the arbitrary-subset CI lane (C4c,
-#                            scripts/run-ci.sh) pins ON. The other
+#                            the arbitrary-subset CI lanes (C4c build +
+#                            C1j behaviour, scripts/run-ci.sh) pin ON.
+#                            The other
 #                            transport atomics below ARE independently
 #                            composable on top of it.
 #   transport-keepalive    — start_keepalive_worker / stop_keepalive_worker

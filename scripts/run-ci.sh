@@ -79,6 +79,15 @@
 #              scout-timeout unit tests under --features scouting-active
 #              + deny-warnings. The socket-bound multicast e2e is the
 #              opt-in Layer M.)
+#   Layer C1j — wz-runtime-tokio arbitrary-subset BEHAVIOUR matrix
+#              (R311ff; `cargo test`s the runtime crate under the same
+#              SSOT coherent subsets C4c builds — handshake-only /
+#              pubsub-only / queryable-only / zget-reply-only /
+#              declare-observer. The behavioural twin of C4c: C4c proves
+#              each subset BUILDS, C1j proves each one BEHAVES (400+
+#              tests per subset). Runtime-crate analog of the session-
+#              core behavioural lanes C1d-g. Before R311ff the runtime
+#              crate's tests ran only under default all-on features.)
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
 #   Layer C3 — per-package isolated `cargo clippy ... --all-targets`
 #              sub-lanes (R311cv; per-package isolated feature
@@ -100,13 +109,15 @@
 #              default — so a preset feature-list drift or incoherent
 #              combo cannot pass CI invisibly. Facade-level analog of
 #              C1h; no_std footing stays Layer G's cross-compile job.)
-#   Layer C4c — wz-runtime-tokio arbitrary-subset matrix (R311fe;
+#   Layer C4c — wz-runtime-tokio arbitrary-subset BUILD matrix (R311fe;
 #              cargo-builds the runtime crate DIRECTLY under
 #              --no-default-features + incomplete coherent consumer
 #              subsets — handshake-only / pubsub-only / queryable-only /
 #              zget-reply-only / declare-observer — the runtime-crate
 #              analog of C1h / C4b. transport-unicast pinned ON
-#              (FOUNDATIONAL: sole session FSM, like keyexpr-canon).)
+#              (FOUNDATIONAL: sole session FSM, like keyexpr-canon). The
+#              BUILD half; C1j is the BEHAVIOUR twin over the same SSOT
+#              subset list, so the two matrices cannot drift.)
 #   Layer D  — deploy/*.yaml schema validate
 #   Layer E  — binary-dep e2e suite via `cargo test ... -- --ignored`
 #              (auto-includes every #[ignore]-marked test in the
@@ -847,50 +858,86 @@ layer_c4b_facade_subset_matrix() {
     done
 }
 
-# ─── Layer C4c — wz-runtime-tokio arbitrary-subset composability ─────
+# ─── wz-runtime-tokio coherent-subset SSOT ──────────────────────────
 #
-# R311fe: C1h guards wz-session-core subsets, C4b guards the wz facade.
-# Neither builds wz-runtime-tokio DIRECTLY under an incomplete subset —
-# the facade always selects a coherent preset bundle, so a regression in
-# the runtime crate's own cfg gating (an over-broad `use` whose only call
-# site is feature-gated, a dead field under a one-plane build) can pass
-# C4b invisibly when the facade default pulls the missing feature back in.
-# That is exactly the class R311fe fixed (the `wz_codecs::ext_entry::
-# ExtEntry` import was unconditional while its sole consumer
-# `decode_ext_chain` is gated on the codec union). This lane is the
-# runtime-crate analog of C1h / C4b: it `cargo build`s wz-runtime-tokio
-# under `--no-default-features` plus several deliberately-incomplete
-# coherent consumer subsets so `deny(warnings)` turns any subset-specific
-# dead import / unused field into a hard error.
+# R311ff: the single canonical list of deliberately-incomplete but
+# coherent wz-runtime-tokio feature subsets. Consumed by BOTH the
+# build-composability guard (C4c, `cargo build`) and the behavioural
+# guard (C1j, `cargo test`) so the two matrices can never drift apart —
+# every subset that is build-guarded is also behaviour-guarded, and vice
+# versa. Each emitted line is `name<TAB>full-feature-string`.
 #
-# transport-unicast is pinned ON in $base: it is FOUNDATIONAL (the sole
-# session FSM; transport-multicast is reserved with no consumer), so a
-# transport-unicast-OFF subset does not type-check and is not a coherent
-# shape to guard — same status as keyexpr-canon. The lane guards the
-# composability that IS real: every consumer plane on top of the
-# handshake core.
-layer_c4c_runtime_tokio_subset_matrix() {
+# transport-unicast is pinned ON in every subset: it is FOUNDATIONAL
+# (the sole session FSM; transport-multicast stays reserved with no
+# consumer), so a transport-unicast-OFF subset does not type-check and
+# is not a coherent shape to guard — same status as keyexpr-canon. The
+# subsets guard the composability that IS real: each consumer plane
+# (pubsub / queryable / zget-reply / declare-observer) layered on the
+# handshake core, plus the bare handshake-only core itself.
+_wz_runtime_tokio_coherent_subsets() {
     local base="transport-unicast,transport-link-tcp,session-unicast-open,session-unicast-accept,codec-frame,codec-keep-alive,codec-init-body,codec-open-body,codec-close,keyexpr-canon"
-    # name : extra consumer-plane features layered on $base (empty = the
-    # handshake-only core build, no data/query/declare plane).
-    local subsets=(
-        "handshake-only:"
-        "pubsub-only:codec-push,pubsub-put,pubsub-delete"
-        "queryable-only:codec-request,codec-response,query-queryable,query-reply-err"
-        "zget-reply-only:codec-response,codec-response-final,query-get,query-reply"
-        "declare-observer:codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber"
-    )
-    local entry name extra feats
-    for entry in "${subsets[@]}"; do
-        name="${entry%%:*}"
-        extra="${entry#*:}"
-        if [ -n "$extra" ]; then feats="$base,$extra"; else feats="$base"; fi
+    printf '%s\t%s\n' "handshake-only"   "$base"
+    printf '%s\t%s\n' "pubsub-only"      "$base,codec-push,pubsub-put,pubsub-delete"
+    printf '%s\t%s\n' "queryable-only"   "$base,codec-request,codec-response,query-queryable,query-reply-err"
+    printf '%s\t%s\n' "zget-reply-only"  "$base,codec-response,codec-response-final,query-get,query-reply"
+    printf '%s\t%s\n' "declare-observer" "$base,codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber"
+}
+
+# ─── Layer C4c — wz-runtime-tokio arbitrary-subset BUILD composability ─
+#
+# R311fe/R311ff: C1h guards wz-session-core subsets (build), C4b guards
+# the wz facade (build). Neither builds wz-runtime-tokio DIRECTLY under
+# an incomplete subset — the facade always selects a coherent preset
+# bundle, so a regression in the runtime crate's own cfg gating (an
+# over-broad `use` whose only call site is feature-gated, a dead field
+# under a one-plane build) can pass C4b invisibly when the facade default
+# pulls the missing feature back in. That is exactly the class R311fe
+# fixed (the `wz_codecs::ext_entry::ExtEntry` import was unconditional
+# while its sole consumer `decode_ext_chain` is gated on the codec
+# union). This lane `cargo build`s the runtime crate under each SSOT
+# subset so `deny(warnings)` turns any subset-specific dead import /
+# unused field into a hard error.
+#
+# This is the BUILD half of the runtime-crate composability guard; the
+# BEHAVIOURAL half is C1j (`cargo test` over the same SSOT subsets). The
+# two are kept as separate lanes on purpose: "does it type-check +
+# lint-clean?" and "does it run correctly?" are distinct questions that
+# must localise distinctly, even though `cargo test` mechanically
+# subsumes the `cargo build` step.
+layer_c4c_runtime_tokio_subset_matrix() {
+    local name feats
+    while IFS=$'\t' read -r name feats; do
         if ! (cd crates && cargo build -p wz-runtime-tokio --no-default-features --features "$feats" --quiet); then
             echo "  C4c FAIL: wz-runtime-tokio subset $name did not build"
             return 1
         fi
         echo "  C4c wz-runtime-tokio subset $name OK"
-    done
+    done < <(_wz_runtime_tokio_coherent_subsets)
+}
+
+# ─── Layer C1j — wz-runtime-tokio arbitrary-subset BEHAVIOUR ─────────
+#
+# R311ff: the behavioural twin of C4c. C4c proves each coherent subset
+# BUILDS; C1j proves each one BEHAVES — it `cargo test`s wz-runtime-tokio
+# under the same SSOT subsets, so a feature-off code path that compiles
+# but mis-dispatches / panics / drops a message is caught by whichever
+# tests stay cfg-active in that subset (each subset runs 400+ lib +
+# integration tests). This is the runtime-crate analog of the
+# wz-session-core behavioural plane lanes C1d–g, which are likewise kept
+# separate from the session-core BUILD matrix C1h. Behavioural coverage
+# under reduced features previously existed only for wz-session-core; the
+# runtime crate's own tests ran solely under default (all-on) features
+# via Layer C1's `cargo test --workspace`, so a subset-specific runtime
+# behaviour regression had no guard.
+layer_c1j_runtime_tokio_subset_behavior() {
+    local name feats
+    while IFS=$'\t' read -r name feats; do
+        if ! (cd crates && cargo test -p wz-runtime-tokio --no-default-features --features "$feats" --quiet); then
+            echo "  C1j FAIL: wz-runtime-tokio subset $name behaviour tests failed"
+            return 1
+        fi
+        echo "  C1j wz-runtime-tokio subset $name tests OK"
+    done < <(_wz_runtime_tokio_coherent_subsets)
 }
 
 # ─── Layer D — deploy yaml schema validate ──────────────────────────
@@ -1379,6 +1426,7 @@ run_layer C1f layer_c1f_cargo_test_reply || overall=1
 run_layer C1g layer_c1g_cargo_test_observer || overall=1
 run_layer C1h layer_c1h_arbitrary_subset_matrix || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1
+run_layer C1j layer_c1j_runtime_tokio_subset_behavior || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer C4 layer_c4_preset_matrix || overall=1
