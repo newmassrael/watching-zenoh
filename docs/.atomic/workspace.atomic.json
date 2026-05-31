@@ -27866,6 +27866,48 @@
         "reserved domains access / attachment / storage still 0% wired (~55% of the catalog reserved)."
       ]
     },
+    "Round 311ft": {
+      "decision_summary": "R311ft self-review gate fix: re-gate 8 R311fs-relocated tests (query_mode/metadata/source_info_ext) from incidental codec-* to #[cfg(test)], matching their unconditional SSOT-home compilation domain; closes the coverage gap R311fs left.",
+      "changes_bullets": [
+        "query_mode.rs / metadata.rs test mods: #[cfg(all(test, codec-request))] -> #[cfg(test)] and per-fn codec-request cfgs removed. ConsolidationMode/QueryTarget/QueryMetadata are unconditionally compiled (no codec gate on the module) and ConsolidationMode is consumed by codec-response too, so the codec-request gate was incidental to the old session_glue cluster location, not these types' compilation domain.",
+        "source_info_ext.rs test mod: #[cfg(all(test, codec-response))] -> #[cfg(test)]. R311ek lifted encode_source_info_ext_body out of codec-response gating so the codec-push body-extension path can reach it; the codec-response test gate reintroduced that asymmetry on the test side (codec-push-only builds exercised the encoder untested).",
+        "request_build.rs / response_build.rs test gates LEFT as codec-request / codec-response: correct -- those modules ARE #[cfg(codec-request)] / #[cfg(codec-response)] at lib.rs, and their redundant per-fn cfgs match the files' existing production convention (kept for in-file consistency, not a new smell)."
+      ],
+      "verification_bullets": [
+        "Coverage gap closed: wz-session-core default alloc-only lib 81 -> 89 (+8) -- the re-gated tests now run wherever their unconditional subjects compile, not only under codec-request/codec-response. codec-on lib unchanged at 143 (no double count).",
+        "Full scripts/run-ci.sh WZ_RUN_LAYER_G=1: all required layers pass (incl. C1c-h session-core lanes now exercising the widened tests, C1j 7/7); cargo fmt --all --check clean; RUSTFLAGS=-D warnings clean.",
+        "Test bodies unchanged; only the #[cfg] gates widened to match each test's SSOT-home compilation domain."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "push the R311ft commit (user consent required).",
+        "TestWire test-projection helper (owned.try_as_borrowed().expect().encode_to_vec()) has no SSOT: duplicated in session_glue (macro), request_build, response_build, while query.rs inlines it. Consolidating into wz-session-core-test-support is the textbook SSOT but spans pre-existing inconsistency -- a focused follow-up round.",
+        "reserved domains access / attachment / storage still 0% wired (~55% of the catalog reserved)."
+      ],
+      "publishable_decision_summary": "R311ft self-review gate fix: re-gate 8 R311fs-relocated tests (query_mode/metadata/source_info_ext) from incidental codec-* to #[cfg(test)], matching their unconditional SSOT-home compilation domain; closes the coverage gap R311fs left.",
+      "publishable_changes_bullets": [
+        "query_mode.rs / metadata.rs test mods: #[cfg(all(test, codec-request))] -> #[cfg(test)] and per-fn codec-request cfgs removed. ConsolidationMode/QueryTarget/QueryMetadata are unconditionally compiled (no codec gate on the module) and ConsolidationMode is consumed by codec-response too, so the codec-request gate was incidental to the old session_glue cluster location, not these types' compilation domain.",
+        "source_info_ext.rs test mod: #[cfg(all(test, codec-response))] -> #[cfg(test)]. R311ek lifted encode_source_info_ext_body out of codec-response gating so the codec-push body-extension path can reach it; the codec-response test gate reintroduced that asymmetry on the test side (codec-push-only builds exercised the encoder untested).",
+        "request_build.rs / response_build.rs test gates LEFT as codec-request / codec-response: correct -- those modules ARE #[cfg(codec-request)] / #[cfg(codec-response)] at lib.rs, and their redundant per-fn cfgs match the files' existing production convention (kept for in-file consistency, not a new smell)."
+      ],
+      "publishable_verification_bullets": [
+        "Coverage gap closed: wz-session-core default alloc-only lib 81 -> 89 (+8) -- the re-gated tests now run wherever their unconditional subjects compile, not only under codec-request/codec-response. codec-on lib unchanged at 143 (no double count).",
+        "Full scripts/run-ci.sh WZ_RUN_LAYER_G=1: all required layers pass (incl. C1c-h session-core lanes now exercising the widened tests, C1j 7/7); cargo fmt --all --check clean; RUSTFLAGS=-D warnings clean.",
+        "Test bodies unchanged; only the #[cfg] gates widened to match each test's SSOT-home compilation domain."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "push the R311ft commit (user consent required).",
+        "TestWire test-projection helper (owned.try_as_borrowed().expect().encode_to_vec()) has no SSOT: duplicated in session_glue (macro), request_build, response_build, while query.rs inlines it. Consolidating into wz-session-core-test-support is the textbook SSOT but spans pre-existing inconsistency -- a focused follow-up round.",
+        "reserved domains access / attachment / storage still 0% wired (~55% of the catalog reserved)."
+      ]
+    },
     "Round 311g": {
       "decision_summary": "R311g send_close_with_reason signature stability + codec-frame envelope inbound cascade — Frame decode gated, +27.7KB elision; ap-demo codec-close mirror retired.",
       "changes_bullets": [
