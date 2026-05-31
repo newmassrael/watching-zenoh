@@ -1461,6 +1461,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-e2e-queryable"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "log",
+ "tokio",
+ "wz",
+]
+
+[[package]]
 name = "wz-integration-tests"
 version = "0.1.0"
 dependencies = [

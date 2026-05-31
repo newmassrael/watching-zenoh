@@ -27260,6 +27260,62 @@
         "Open decision: whether C4b's pubsub-only BUILD subset should also list transport-batching for catalog consistency (build-coherent without it, interop-coherent only with it). Left as-is pending a ruling on whether C4b models build- or interop-coherence; the e2e binary pins the interop-coherent superset regardless."
       ]
     },
+    "Round 311fh": {
+      "decision_summary": "R311fh wz-e2e-queryable: second facade-subset e2e binary pins the queryable-only interop subset vs zenoh-pico z_get; codec-response-final surfaced as load-bearing for z_get's terminating Final.",
+      "changes_bullets": [
+        "New crate crates/wz-e2e-queryable (Cargo.toml + src/main.rs): single-purpose queryable-only facade-subset e2e binary (acceptor + queryable, ZERO #[cfg]); sibling of wz-e2e-pubsub. Registered as a workspace member in crates/Cargo.toml.",
+        "Pinned interop-coherent subset = the shared handshake core (transport-unicast/link-tcp/keepalive/batching + session open/accept + the init/open/close/keepalive/frame codec quintet + keyexpr-literal/-canon) PLUS query-queryable (implies codec-request + codec-response) PLUS codec-response-final; query-reply-err omitted because this binary emits only the Put-form reply.",
+        "crates/wz-integration-tests: new tests/wz_e2e_queryable_to_zget.rs e2e (wz queryable acceptor vs zenoh-pico z_get) + wz_e2e_queryable_binary() locator in src/lib.rs::common.",
+        "scripts/run-ci.sh Layer E2 extended: prereq guards now require z_sub + z_get and both subset binaries, and the lane runs both wz_e2e_pubsub_to_zsub + wz_e2e_queryable_to_zget; header doc updated. .github/workflows/release.yml adds a Build wz-e2e-queryable step before Layer E2.",
+        "The new test gates ONLY on z_get's \">> Received\" witness, not its earlier \"Opening session\" line: z_get's main thread + reply-callback thread race on the shared non-O_APPEND tempfile offset and clobber the EARLIEST captured lines; the late witness lines survive. The two value/keyexpr substring asserts run on the full capture so line reordering is tolerated."
+      ],
+      "verification_bullets": [
+        "e2e PASS: z_get logs \">> Received PUT ('demo/test': 'hello-from-wz-queryable-subset')\" + \">> Received query final notification\"; wz logs \"QUERYABLE FIRED ... rid=1 keyexpr='demo/test'\" — full inbound-Request(Query) -> QueryableRegistry -> Reply + ResponseFinal round-trip under the queryable-only subset against a foreign peer.",
+        "FINDING (queryable-plane analog of R311fg transport-batching): codec-response-final is load-bearing for FOREIGN interop. query-queryable implies only codec-request + codec-response (the Reply emit), so the C4b 'queryable-only' BUILD subset omits codec-response-final; without it the reply still arrives but z_get gets no terminating Final and falls back to its query timeout. The foreign-interop-coherent subset is strictly larger than the build-coherent one.",
+        "no-flaky-ever: 50/50 consecutive PASS after the capture-race fix. Mechanical root cause = z_get concurrent-thread tempfile-offset corruption of the earliest lines (1/30 reproduced, 'Opening session...' clobbered while '>> Received' survived); removed by gating on the corruption-resistant witness rather than the redundant early line.",
+        "cargo build -p wz-e2e-queryable clean (0 warnings under deny-warnings) in its isolated, feature-unification-free pinned subset.",
+        "full scripts/run-ci.sh EXIT 0: all required lanes pass incl. C0 ignore-discipline, clippy --workspace (default features), C1h/C1j/C4b/C4c subset matrices, Layer E (--skip wz_e2e_) and Layer E2 (both subset binaries). Layer G 7-MCU cross-compile OK (G.6 riscv SKIP env-only)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "FOLLOW-UP (now confirmed on a 2nd plane): `cargo clippy -p wz-e2e-queryable` surfaces clippy::needless_return at session.rs:1181/1331/1433 — the signature-stability query-get methods whose cfg(not(query-get)) arm's `return Err(QueryAliasError::FeatureDisabled)` becomes the fn tail under any query-get-OFF subset. Pre-existing + latent (R311fg carry #3); full clippy --workspace runs with query-get ON (wz-ap-demo feature unification) so CI stays green. A subset-isolated clippy guard needs these resolved first per feedback_signature_stability (cfg tail-expr, not #[allow]); the blocker now gates BOTH the pubsub and queryable subset-clippy.",
+        "Next sibling: wz-e2e-liveliness (declare / liveliness plane) follows the same single-purpose-crate shape vs zenoh-pico's z_liveliness_* examples when that plane needs foreign-interop coverage; pins its own interop-coherent subset + a wz_e2e_* test Layer E2 picks up.",
+        "Open decision (R311fg, unchanged): whether the C4b BUILD subsets should list their interop-only deltas (transport-batching for pubsub, codec-response-final for queryable) for catalog consistency, or stay build-coherent with the e2e binaries pinning the interop superset. Two such deltas now recorded — worth a ruling on what C4b models.",
+        "FINDING generalisation holds: each consumer plane's foreign-interop-coherent subset can exceed its build-coherent one by a different feature; only an e2e-vs-foreign-peer guard surfaces which. Audit remaining build-coherent subsets as the wz-e2e-* family grows."
+      ],
+      "publishable_decision_summary": "R311fh wz-e2e-queryable: second facade-subset e2e binary pins the queryable-only interop subset vs zenoh-pico z_get; codec-response-final surfaced as load-bearing for z_get's terminating Final.",
+      "publishable_changes_bullets": [
+        "New crate crates/wz-e2e-queryable (Cargo.toml + src/main.rs): single-purpose queryable-only facade-subset e2e binary (acceptor + queryable, ZERO #[cfg]); sibling of wz-e2e-pubsub. Registered as a workspace member in crates/Cargo.toml.",
+        "Pinned interop-coherent subset = the shared handshake core (transport-unicast/link-tcp/keepalive/batching + session open/accept + the init/open/close/keepalive/frame codec quintet + keyexpr-literal/-canon) PLUS query-queryable (implies codec-request + codec-response) PLUS codec-response-final; query-reply-err omitted because this binary emits only the Put-form reply.",
+        "crates/wz-integration-tests: new tests/wz_e2e_queryable_to_zget.rs e2e (wz queryable acceptor vs zenoh-pico z_get) + wz_e2e_queryable_binary() locator in src/lib.rs::common.",
+        "scripts/run-ci.sh Layer E2 extended: prereq guards now require z_sub + z_get and both subset binaries, and the lane runs both wz_e2e_pubsub_to_zsub + wz_e2e_queryable_to_zget; header doc updated. .github/workflows/release.yml adds a Build wz-e2e-queryable step before Layer E2.",
+        "The new test gates ONLY on z_get's \">> Received\" witness, not its earlier \"Opening session\" line: z_get's main thread + reply-callback thread race on the shared non-O_APPEND tempfile offset and clobber the EARLIEST captured lines; the late witness lines survive. The two value/keyexpr substring asserts run on the full capture so line reordering is tolerated."
+      ],
+      "publishable_verification_bullets": [
+        "e2e PASS: z_get logs \">> Received PUT ('demo/test': 'hello-from-wz-queryable-subset')\" + \">> Received query final notification\"; wz logs \"QUERYABLE FIRED ... rid=1 keyexpr='demo/test'\" — full inbound-Request(Query) -> QueryableRegistry -> Reply + ResponseFinal round-trip under the queryable-only subset against a foreign peer.",
+        "FINDING (queryable-plane analog of R311fg transport-batching): codec-response-final is load-bearing for FOREIGN interop. query-queryable implies only codec-request + codec-response (the Reply emit), so the C4b 'queryable-only' BUILD subset omits codec-response-final; without it the reply still arrives but z_get gets no terminating Final and falls back to its query timeout. The foreign-interop-coherent subset is strictly larger than the build-coherent one.",
+        "no-flaky-ever: 50/50 consecutive PASS after the capture-race fix. Mechanical root cause = z_get concurrent-thread tempfile-offset corruption of the earliest lines (1/30 reproduced, 'Opening session...' clobbered while '>> Received' survived); removed by gating on the corruption-resistant witness rather than the redundant early line.",
+        "cargo build -p wz-e2e-queryable clean (0 warnings under deny-warnings) in its isolated, feature-unification-free pinned subset.",
+        "full scripts/run-ci.sh EXIT 0: all required lanes pass incl. C0 ignore-discipline, clippy --workspace (default features), C1h/C1j/C4b/C4c subset matrices, Layer E (--skip wz_e2e_) and Layer E2 (both subset binaries). Layer G 7-MCU cross-compile OK (G.6 riscv SKIP env-only)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "FOLLOW-UP (now confirmed on a 2nd plane): `cargo clippy -p wz-e2e-queryable` surfaces clippy::needless_return at session.rs:1181/1331/1433 — the signature-stability query-get methods whose cfg(not(query-get)) arm's `return Err(QueryAliasError::FeatureDisabled)` becomes the fn tail under any query-get-OFF subset. Pre-existing + latent (R311fg carry #3); full clippy --workspace runs with query-get ON (wz-ap-demo feature unification) so CI stays green. A subset-isolated clippy guard needs these resolved first per feedback_signature_stability (cfg tail-expr, not #[allow]); the blocker now gates BOTH the pubsub and queryable subset-clippy.",
+        "Next sibling: wz-e2e-liveliness (declare / liveliness plane) follows the same single-purpose-crate shape vs zenoh-pico's z_liveliness_* examples when that plane needs foreign-interop coverage; pins its own interop-coherent subset + a wz_e2e_* test Layer E2 picks up.",
+        "Open decision (R311fg, unchanged): whether the C4b BUILD subsets should list their interop-only deltas (transport-batching for pubsub, codec-response-final for queryable) for catalog consistency, or stay build-coherent with the e2e binaries pinning the interop superset. Two such deltas now recorded — worth a ruling on what C4b models.",
+        "FINDING generalisation holds: each consumer plane's foreign-interop-coherent subset can exceed its build-coherent one by a different feature; only an e2e-vs-foreign-peer guard surfaces which. Audit remaining build-coherent subsets as the wz-e2e-* family grows."
+      ]
+    },
     "Round 311g": {
       "decision_summary": "R311g send_close_with_reason signature stability + codec-frame envelope inbound cascade — Frame decode gated, +27.7KB elision; ap-demo codec-close mirror retired.",
       "changes_bullets": [
