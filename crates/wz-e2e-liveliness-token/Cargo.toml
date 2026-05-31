@@ -73,11 +73,13 @@ wz = { path = "../wz", default-features = false, features = [
     "keyexpr-canon",
     "liveliness-token",
 ] }
-# Multi-thread runtime + signal handling are binary-shaped uses outside
-# the wz framework boundary, mirroring the sibling wz-e2e-* binaries.
-tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal"] }
+# The shared acceptor scaffolding (bind/accept/open/drive/teardown +
+# env_logger + tokio runtime). This binary carries only its CLI parsing
+# and the declare_token setup closure. The harness's setup-before-drive
+# ordering gives the deterministic R283 ordering this binary needs (the
+# token is registered before any inbound Interest is processed).
+wz-e2e-harness = { path = "../wz-e2e-harness" }
 log = "0.4"
-env_logger = "0.11"
 
 [lints]
 workspace = true

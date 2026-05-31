@@ -75,12 +75,14 @@ wz = { path = "../wz", default-features = false, features = [
     "pubsub-put",
     "pubsub-delete",
 ] }
-# Multi-thread runtime + signal handling are binary-shaped uses outside
-# the wz framework boundary (the writer task spawn + SIGTERM teardown),
-# mirroring wz-ap-demo's explicit tokio dep.
-tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time", "signal"] }
+# The shared acceptor scaffolding (bind/accept/open/drive/teardown +
+# env_logger + tokio runtime). This binary carries its CLI parsing + the
+# publish-burst setup closure.
+wz-e2e-harness = { path = "../wz-e2e-harness" }
+# tokio::spawn for the background publish-burst task is a binary-shaped
+# use; the rest of the runtime/signal scaffolding lives in the harness.
+tokio = { version = "1", features = ["rt", "macros"] }
 log = "0.4"
-env_logger = "0.11"
 
 [lints]
 workspace = true

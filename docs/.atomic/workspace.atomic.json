@@ -27468,6 +27468,58 @@
         "C4b interop-only-delta ruling still open; R283 adds NO new delta (the declarer subset needs only the handshake transport-batching, no liveliness-specific interop feature beyond the build-coherent subset)."
       ]
     },
+    "Round 311fl": {
+      "decision_summary": "R311fl review-driven textbook cleanup (no behaviour change): extract wz-e2e-harness lib (4 e2e binaries 977->379 lines, boilerplate dedup, subset-pinning preserved) + centralise inner declaration MIDs in the wz_codecs::wire_const SSOT (byte-identical wire output).",
+      "changes_bullets": [
+        "New crate crates/wz-e2e-harness: shared acceptor scaffolding for the wz-e2e-* family — run_main (env_logger + multi-thread tokio runtime + block_on + ExitCode wrapper), run_acceptor_e2e (bind/accept/open/drive/teardown), OpenedE2e (the {session, clock} surface a setup registers into), AbortOnDrop (publish-task stop), session_init_params, shutdown_signal. Each binary now carries ONLY its CLI parse + a plane-specific setup closure (publish burst / declare_queryable / declare_liveliness_subscriber / declare_token). The 4 binaries' main.rs shrank 977 -> 379 lines (+239 harness); session_init_params + shutdown_signal had been byte-identical 4x.",
+        "Subset-pinning preserved: the harness pins ONLY the handshake-core intersection of all four binaries' subsets, so Cargo feature unification resolves each binary's wz to (core ∪ that binary's plane) — the harness adds nothing a binary did not already pin, and its source uses only core APIs so it compiles under the core alone. Each binary still builds + is clippy-clean (deny-warnings) under its isolated pinned subset.",
+        "Teardown ordering preserved in the harness: the setup's returned hold is dropped FIRST (RAII unregister / LivelinessToken Drop's UndeclToken emit / pubsub AbortOnDrop) before the action senders close the writer channel — so the R283 liveliness-token UndeclToken-before-writer-close and the pubsub burst-abort semantics are unchanged. The declarer's declare-before-drive-loop determinism is now a structural property of run_acceptor_e2e (setup runs before the loop).",
+        "wire_const SSOT: the inner declaration-body MIDs are centralised in wz_codecs::wire_const (gated codec-declare): D_MID_KEXPR/SUBSCRIBER/QUERYABLE/TOKEN (0x00/02/04/06), D_MID_UNDECL_* (01/03/05/07), D_MID_FINAL (0x1A), FLAG_D_N (inline-suffix N), FLAG_N_DECLARE_I (outer Declare interest_id-present I). The 12 session_glue build_declare_* / build_undeclare_* literals and the R283 wz-session-core::declare::local_token builders now reference them.",
+        "The context-dependent 0x20 N-flag COMPUTATIONS (wireexpr-N vs declare-N vs interest-C all share the bit) deliberately stay local — DRY applies to the disjoint MID enum, not to a coincidentally-shared bit; forcing them to one const would conflate distinct flags.",
+        "Builder unification (#3 of the review) deliberately NOT done: after the wire_const SSOT the proactive build_declare_token and the interest-response build_decl_token_reply share the constants; the two are legitimately different shapes (mapping-id + WireexprNonlocal sibling + interest_id None vs literal-only + interest_id Some), and collapsing them into one over-parameterised cross-crate function would be the wrong abstraction."
+      ],
+      "verification_bullets": [
+        "Pure refactor, no wire / behaviour change. The layer3_declare (1) + layer3_inbound_declare (3) wire-byte tests — which pin exact declare bytes — pass, proving the wz_codecs::wire_const consts produce BYTE-IDENTICAL declare output vs the prior per-site literals. The 7 wz-session-core local_token unit tests pass.",
+        "All four wz-e2e-* e2e tests pass via the harness (Layer E2). Flake sweeps after the refactor: 20 x 2 on the trickiest two (liveliness-token determinism + pubsub teardown) and 10 x 4 on all four = 0 failures — the harness's hold-dropped-first teardown and setup-before-drive-loop ordering preserve the determinism and the UndeclToken-before-writer-close semantics.",
+        "Each of the four binaries builds + is clippy-clean (deny-warnings) under its own isolated pinned subset; the harness builds under the handshake-core subset alone (no plane features).",
+        "full scripts/run-ci.sh EXIT 0: all required lanes incl. the C4c/C1j/C4d 7-subset matrices, Layer E (wz-ap-demo suite, which exercises the rewired session_glue declare builders), Layer E2 (4 harness-backed binaries), and the layer3 wire-byte tests. Layer G 7-MCU cross-compile OK (the rewired wz-codecs wire_const + session_glue cross-compile clean; G.6 riscv SKIP env-only). entries 525->526."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Review-driven cleanup of the 2026-05-31 session's smells (R311fh-fk self-review): #1 (wz-e2e-* binary boilerplate duplication, ~600 lines across 4 binaries) CLOSED via the wz-e2e-harness lib; #2 (inner declare MID literals scattered across session_glue + local_token) CLOSED via the wz_codecs::wire_const SSOT. #3 (builder unification) assessed and deliberately DECLINED as a wrong-abstraction once #2 shared the constants.",
+        "Future wz-e2e-* planes reuse the harness: a new binary = its Cargo.toml subset pin + a ~40-line main (CLI parse + setup closure), zero scaffolding boilerplate. This lowers the cost of the remaining foreign-interop e2e gaps (remote-declare observe; wz=querier requester-side reply dispatch / R121j-6).",
+        "C4b interop-only-delta ruling still open (unchanged by this refactor)."
+      ],
+      "publishable_decision_summary": "R311fl review-driven textbook cleanup (no behaviour change): extract wz-e2e-harness lib (4 e2e binaries 977->379 lines, boilerplate dedup, subset-pinning preserved) + centralise inner declaration MIDs in the wz_codecs::wire_const SSOT (byte-identical wire output).",
+      "publishable_changes_bullets": [
+        "New crate crates/wz-e2e-harness: shared acceptor scaffolding for the wz-e2e-* family — run_main (env_logger + multi-thread tokio runtime + block_on + ExitCode wrapper), run_acceptor_e2e (bind/accept/open/drive/teardown), OpenedE2e (the {session, clock} surface a setup registers into), AbortOnDrop (publish-task stop), session_init_params, shutdown_signal. Each binary now carries ONLY its CLI parse + a plane-specific setup closure (publish burst / declare_queryable / declare_liveliness_subscriber / declare_token). The 4 binaries' main.rs shrank 977 -> 379 lines (+239 harness); session_init_params + shutdown_signal had been byte-identical 4x.",
+        "Subset-pinning preserved: the harness pins ONLY the handshake-core intersection of all four binaries' subsets, so Cargo feature unification resolves each binary's wz to (core ∪ that binary's plane) — the harness adds nothing a binary did not already pin, and its source uses only core APIs so it compiles under the core alone. Each binary still builds + is clippy-clean (deny-warnings) under its isolated pinned subset.",
+        "Teardown ordering preserved in the harness: the setup's returned hold is dropped FIRST (RAII unregister / LivelinessToken Drop's UndeclToken emit / pubsub AbortOnDrop) before the action senders close the writer channel — so the R283 liveliness-token UndeclToken-before-writer-close and the pubsub burst-abort semantics are unchanged. The declarer's declare-before-drive-loop determinism is now a structural property of run_acceptor_e2e (setup runs before the loop).",
+        "wire_const SSOT: the inner declaration-body MIDs are centralised in wz_codecs::wire_const (gated codec-declare): D_MID_KEXPR/SUBSCRIBER/QUERYABLE/TOKEN (0x00/02/04/06), D_MID_UNDECL_* (01/03/05/07), D_MID_FINAL (0x1A), FLAG_D_N (inline-suffix N), FLAG_N_DECLARE_I (outer Declare interest_id-present I). The 12 session_glue build_declare_* / build_undeclare_* literals and the R283 wz-session-core::declare::local_token builders now reference them.",
+        "The context-dependent 0x20 N-flag COMPUTATIONS (wireexpr-N vs declare-N vs interest-C all share the bit) deliberately stay local — DRY applies to the disjoint MID enum, not to a coincidentally-shared bit; forcing them to one const would conflate distinct flags.",
+        "Builder unification (#3 of the review) deliberately NOT done: after the wire_const SSOT the proactive build_declare_token and the interest-response build_decl_token_reply share the constants; the two are legitimately different shapes (mapping-id + WireexprNonlocal sibling + interest_id None vs literal-only + interest_id Some), and collapsing them into one over-parameterised cross-crate function would be the wrong abstraction."
+      ],
+      "publishable_verification_bullets": [
+        "Pure refactor, no wire / behaviour change. The layer3_declare (1) + layer3_inbound_declare (3) wire-byte tests — which pin exact declare bytes — pass, proving the wz_codecs::wire_const consts produce BYTE-IDENTICAL declare output vs the prior per-site literals. The 7 wz-session-core local_token unit tests pass.",
+        "All four wz-e2e-* e2e tests pass via the harness (Layer E2). Flake sweeps after the refactor: 20 x 2 on the trickiest two (liveliness-token determinism + pubsub teardown) and 10 x 4 on all four = 0 failures — the harness's hold-dropped-first teardown and setup-before-drive-loop ordering preserve the determinism and the UndeclToken-before-writer-close semantics.",
+        "Each of the four binaries builds + is clippy-clean (deny-warnings) under its own isolated pinned subset; the harness builds under the handshake-core subset alone (no plane features).",
+        "full scripts/run-ci.sh EXIT 0: all required lanes incl. the C4c/C1j/C4d 7-subset matrices, Layer E (wz-ap-demo suite, which exercises the rewired session_glue declare builders), Layer E2 (4 harness-backed binaries), and the layer3 wire-byte tests. Layer G 7-MCU cross-compile OK (the rewired wz-codecs wire_const + session_glue cross-compile clean; G.6 riscv SKIP env-only). entries 525->526."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "wire-spec-subset--watching-zenoh-mvp/5-1-declare-sub-variants",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Review-driven cleanup of the 2026-05-31 session's smells (R311fh-fk self-review): #1 (wz-e2e-* binary boilerplate duplication, ~600 lines across 4 binaries) CLOSED via the wz-e2e-harness lib; #2 (inner declare MID literals scattered across session_glue + local_token) CLOSED via the wz_codecs::wire_const SSOT. #3 (builder unification) assessed and deliberately DECLINED as a wrong-abstraction once #2 shared the constants.",
+        "Future wz-e2e-* planes reuse the harness: a new binary = its Cargo.toml subset pin + a ~40-line main (CLI parse + setup closure), zero scaffolding boilerplate. This lowers the cost of the remaining foreign-interop e2e gaps (remote-declare observe; wz=querier requester-side reply dispatch / R121j-6).",
+        "C4b interop-only-delta ruling still open (unchanged by this refactor)."
+      ]
+    },
     "Round 311g": {
       "decision_summary": "R311g send_close_with_reason signature stability + codec-frame envelope inbound cascade — Frame decode gated, +27.7KB elision; ap-demo codec-close mirror retired.",
       "changes_bullets": [

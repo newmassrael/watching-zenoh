@@ -370,6 +370,54 @@ pub mod wire_const {
     /// DECLARE envelope MID (network.h:34). Gated on `codec-declare`.
     #[cfg(feature = "codec-declare")]
     pub const N_MID_DECLARE: u8 = 0x1E;
+    /// `I` flag on the outer DECLARE header (network.h:62 `_Z_DECLARE_ID`):
+    /// when set, an `interest_id` VLE follows the header — the DECLARE is a
+    /// reply to a pending Interest (R283 liveliness-query reply) rather
+    /// than an unsolicited declaration. Gated on `codec-declare`.
+    #[cfg(feature = "codec-declare")]
+    pub const FLAG_N_DECLARE_I: u8 = 0x20;
+
+    // ─── inner declaration-body MIDs (declarations.h:30-39) ───
+    //
+    // The body kind of a DECLARE(0x1E) message. Disjoint sub-namespace
+    // from the outer T_/N_/S_ MIDs — disambiguated by being read after the
+    // DECLARE envelope header. Centralised here so every `build_declare_*`
+    // / `build_undeclare_*` constructor (and the R283 interest-response
+    // builder in wz-session-core::declare::local_token) references one
+    // source instead of a per-site literal.
+    /// `_Z_DECL_KEXPR_MID` — declare a keyexpr-id mapping.
+    #[cfg(feature = "codec-declare")]
+    pub const D_MID_KEXPR: u8 = 0x00;
+    /// `_Z_UNDECL_KEXPR_MID` — retract a keyexpr-id mapping.
+    #[cfg(feature = "codec-declare")]
+    pub const D_MID_UNDECL_KEXPR: u8 = 0x01;
+    /// `_Z_DECL_SUBSCRIBER_MID`.
+    #[cfg(feature = "codec-declare")]
+    pub const D_MID_SUBSCRIBER: u8 = 0x02;
+    /// `_Z_UNDECL_SUBSCRIBER_MID`.
+    #[cfg(feature = "codec-declare")]
+    pub const D_MID_UNDECL_SUBSCRIBER: u8 = 0x03;
+    /// `_Z_DECL_QUERYABLE_MID`.
+    #[cfg(feature = "codec-declare")]
+    pub const D_MID_QUERYABLE: u8 = 0x04;
+    /// `_Z_UNDECL_QUERYABLE_MID`.
+    #[cfg(feature = "codec-declare")]
+    pub const D_MID_UNDECL_QUERYABLE: u8 = 0x05;
+    /// `_Z_DECL_TOKEN_MID`.
+    #[cfg(feature = "codec-declare")]
+    pub const D_MID_TOKEN: u8 = 0x06;
+    /// `_Z_UNDECL_TOKEN_MID`.
+    #[cfg(feature = "codec-declare")]
+    pub const D_MID_UNDECL_TOKEN: u8 = 0x07;
+    /// `_Z_DECL_FINAL_MID` (declarations.c:131) — single-byte terminator
+    /// of an Interest-driven declaration batch.
+    #[cfg(feature = "codec-declare")]
+    pub const D_MID_FINAL: u8 = 0x1A;
+    /// `N` flag on a declaration-body header (declarations.h) — an inline
+    /// keyexpr suffix follows. Same bit value as several other `*_N`
+    /// flags but named per its declaration-body context.
+    #[cfg(feature = "codec-declare")]
+    pub const FLAG_D_N: u8 = 0x20;
 
     /// Scouting-message SCOUT MID (transport.h:28 `_Z_MID_SCOUT`). The
     /// scouting MID namespace is disjoint from the transport (`T_MID_*`)

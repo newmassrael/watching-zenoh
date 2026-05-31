@@ -40,6 +40,7 @@ members = [
     "wz-runtime-tokio",
     "wz-runtime-tokio-test-support",
     "wz-ap-demo",
+    "wz-e2e-harness",
     "wz-e2e-pubsub",
     "wz-e2e-queryable",
     "wz-e2e-liveliness",
