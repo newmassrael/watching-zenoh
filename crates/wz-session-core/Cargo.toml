@@ -91,6 +91,22 @@ query-queryable = ["codec-request", "codec-response"]
 query-attachment = []
 query-selector-parameters = []
 query-reply-err = []
+# R311fm — the z_get consumer's reply-body decode plane. Gates the
+# inbound `Response(Reply)` Put / Del body arms in `reply.rs`
+# `dispatch_response` (the projection to `InboundReplyBody::Put` /
+# `::Del`). Before R311fm those arms were gated ONLY on the pubsub
+# publisher's `pubsub-put` / `pubsub-delete` markers — a reply consumer
+# that pinned the named `zget-reply-only` subset (codec-response,
+# codec-response-final, query-get, query-reply) type-checked but
+# DECODED NO reply body, because the Put arm collapsed to `_ => return`
+# without `pubsub-put`. Decoding a query reply must not require the
+# unrelated pub/sub data plane (which also pulls `codec-push`); this
+# feature is the query-side enabler so the getter plane is independently
+# composable. Implies `codec-response` (the reply decoder it gates lives
+# behind that codec). The Put / Del arms now gate on
+# `any(pubsub-{put,delete}, query-reply)` so existing pub-bearing presets
+# are unchanged and a pure getter composes standalone.
+query-reply = ["codec-response"]
 
 # R311dz — observer-domain gate-only features for the migrated
 # `ApplicationLayerObserver` (`wz-session-core::observer`). Each gates

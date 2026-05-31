@@ -99,9 +99,18 @@ use hashbrown::HashMap;
 // Put / Del body arms inside `dispatch_response`; with neither arm the
 // inner match collapses to the `_ => return` default, so the import gate
 // requires `codec-response` AND at least one body-arm feature.
+// R311fm — `query-reply` joins the gate: the z_get consumer's reply-body
+// decode plane needs `ReplyOwnedVariant` to project a `Response(Reply)`
+// Put / Del body into `InboundReplyBody`, independent of the pub/sub
+// publisher markers. `query-reply` implies `codec-response`, so the
+// outer `codec-response` requirement holds in every arm of the `any`.
 #[cfg(all(
     feature = "codec-response",
-    any(feature = "pubsub-put", feature = "pubsub-delete")
+    any(
+        feature = "pubsub-put",
+        feature = "pubsub-delete",
+        feature = "query-reply"
+    )
 ))]
 use wz_codecs::reply::ReplyOwnedVariant;
 #[cfg(feature = "codec-response")]
@@ -434,11 +443,20 @@ impl ReplyRegistry {
         // query-side dispatcher mirror of pubsub.rs PushVariant arms).
         let body = match &response.body {
             ResponseOwnedVariant::CodecZenohReply(reply) => match &reply.body {
-                #[cfg(feature = "pubsub-put")]
+                // R311fm — `query-reply` joins `pubsub-put` / `pubsub-delete`
+                // on the reply-body decode arms: a z_get consumer that pins
+                // the getter plane (no pub/sub data plane) must still project
+                // an inbound `Response(Reply)` Put / Del body into
+                // `InboundReplyBody`. Before R311fm these arms gated ONLY on
+                // the publisher markers, so the named `zget-reply-only` subset
+                // type-checked but dropped every reply (`_ => return`). The
+                // pub-bearing presets keep the `pubsub-*` arm; a pure getter
+                // composes on `query-reply` alone.
+                #[cfg(any(feature = "pubsub-put", feature = "query-reply"))]
                 ReplyOwnedVariant::CodecZenohMsgPut(put) => InboundReplyBody::Put {
                     payload: put.payload.clone(),
                 },
-                #[cfg(feature = "pubsub-delete")]
+                #[cfg(any(feature = "pubsub-delete", feature = "query-reply"))]
                 ReplyOwnedVariant::CodecZenohMsgDel(_) => InboundReplyBody::Del,
                 // Default arm carries a runtime tag whose MID falls
                 // outside {MsgPut, MsgDel}. zenoh-pico's inner-body

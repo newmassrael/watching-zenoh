@@ -27520,6 +27520,56 @@
         "C4b interop-only-delta ruling still open (unchanged by this refactor)."
       ]
     },
+    "Round 311fm": {
+      "decision_summary": "R311fm — new wz-e2e-zget facade-subset e2e (z_get initiator vs zenoh-pico z_queryable) surfaced a feature-graph coupling bug: the inbound Response(Reply) Put/Del body decode in wz-session-core reply.rs gated ONLY on pubsub publisher markers pubsub-put/pubsub-delete, so the named zget-reply-only subset type-checked but silently dropped every reply; split the gate so query-reply enables its own reply-body decode, making the getter plane independently composable.",
+      "changes_bullets": [
+        "crates/wz-e2e-zget/ NEW crate: minimal z_get-initiator facade-subset e2e binary (initiator mirror of wz-e2e-queryable). Pins zget-reply-only subset (codec-response,codec-response-final,query-get,query-reply) + transport-batching verbatim, ZERO pubsub feature. GET-burst setup on the shared wz-e2e-harness acceptor; on_reply/on_final log ZGET REPLY/FINAL RECEIVED.",
+        "crates/wz-session-core/src/reply.rs: dispatch_response reply-body arms re-gated from cfg(pubsub-put)/cfg(pubsub-delete) to cfg(any(pubsub-put,query-reply))/cfg(any(pubsub-delete,query-reply)); ReplyOwnedVariant import gate gains query-reply. A pure getter now decodes replies without pinning a publisher feature (which also pulled codec-push).",
+        "crates/wz-session-core/Cargo.toml: new query-reply=[codec-response] feature. crates/wz-runtime-tokio/Cargo.toml: query-reply forwards wz-session-core/query-reply.",
+        "crates/wz-integration-tests/tests/wz_e2e_zget_to_zqueryable.rs NEW Layer E2 e2e + lib.rs wz_e2e_zget_binary() helper; crates/Cargo.toml member; scripts/run-ci.sh Layer E2 wires it; .github/workflows/release.yml build step."
+      ],
+      "verification_bullets": [
+        "e2e PASS 20/20 no-flaky sweep (post-fmt) + Layer E2 lane all 5 e2e PASS (pubsub/queryable/zget/liveliness/liveliness-token).",
+        "Pre-fix reproduced the bug deterministically 15/15: z_queryable received+replied but wz logged ZGET FINAL RECEIVED (codec-response-final path) and NEVER ZGET REPLY RECEIVED (Put-body arm collapsed to _=>return without pubsub-put).",
+        "Full run-ci.sh + WZ_RUN_LAYER_G=1 EXIT0: Layer B wire-byte (2 pre-existing audit-traced KNOWN_DIVERGENCE unchanged), C4b/C4c/C1j arbitrary-subset matrices PASS (zget-reply-only now decodes), Layer G 7 MCU targets x G.1-G.6 OK. cargo fmt --check clean."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "push the R311fm commit (user consent required).",
+        "Remaining facade-subset e2e gap: declare-observer plane (wz observes a foreign peer's declares) — the last build-subset matrix entry without a behavioural e2e twin.",
+        "C4b ruling: now 3 interop deltas (transport-batching R311fg, codec-response-final R311fh, query-reply reply-decode R311fm) — build-coherent subset consistently smaller than interop-coherent; consider whether C4b should pin interop supersets.",
+        "Audit other consumer planes for the same publisher-marker coupling (does liveliness sample/reply decode gate on an unrelated plane's feature?)."
+      ],
+      "publishable_decision_summary": "R311fm — new wz-e2e-zget facade-subset e2e (z_get initiator vs zenoh-pico z_queryable) surfaced a feature-graph coupling bug: the inbound Response(Reply) Put/Del body decode in wz-session-core reply.rs gated ONLY on pubsub publisher markers pubsub-put/pubsub-delete, so the named zget-reply-only subset type-checked but silently dropped every reply; split the gate so query-reply enables its own reply-body decode, making the getter plane independently composable.",
+      "publishable_changes_bullets": [
+        "crates/wz-e2e-zget/ NEW crate: minimal z_get-initiator facade-subset e2e binary (initiator mirror of wz-e2e-queryable). Pins zget-reply-only subset (codec-response,codec-response-final,query-get,query-reply) + transport-batching verbatim, ZERO pubsub feature. GET-burst setup on the shared wz-e2e-harness acceptor; on_reply/on_final log ZGET REPLY/FINAL RECEIVED.",
+        "crates/wz-session-core/src/reply.rs: dispatch_response reply-body arms re-gated from cfg(pubsub-put)/cfg(pubsub-delete) to cfg(any(pubsub-put,query-reply))/cfg(any(pubsub-delete,query-reply)); ReplyOwnedVariant import gate gains query-reply. A pure getter now decodes replies without pinning a publisher feature (which also pulled codec-push).",
+        "crates/wz-session-core/Cargo.toml: new query-reply=[codec-response] feature. crates/wz-runtime-tokio/Cargo.toml: query-reply forwards wz-session-core/query-reply.",
+        "crates/wz-integration-tests/tests/wz_e2e_zget_to_zqueryable.rs NEW Layer E2 e2e + lib.rs wz_e2e_zget_binary() helper; crates/Cargo.toml member; scripts/run-ci.sh Layer E2 wires it; .github/workflows/release.yml build step."
+      ],
+      "publishable_verification_bullets": [
+        "e2e PASS 20/20 no-flaky sweep (post-fmt) + Layer E2 lane all 5 e2e PASS (pubsub/queryable/zget/liveliness/liveliness-token).",
+        "Pre-fix reproduced the bug deterministically 15/15: z_queryable received+replied but wz logged ZGET FINAL RECEIVED (codec-response-final path) and NEVER ZGET REPLY RECEIVED (Put-body arm collapsed to _=>return without pubsub-put).",
+        "Full run-ci.sh + WZ_RUN_LAYER_G=1 EXIT0: Layer B wire-byte (2 pre-existing audit-traced KNOWN_DIVERGENCE unchanged), C4b/C4c/C1j arbitrary-subset matrices PASS (zget-reply-only now decodes), Layer G 7 MCU targets x G.1-G.6 OK. cargo fmt --check clean."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "wire-spec-subset--watching-zenoh-mvp/6-3-responsebody-variants",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "push the R311fm commit (user consent required).",
+        "Remaining facade-subset e2e gap: declare-observer plane (wz observes a foreign peer's declares) — the last build-subset matrix entry without a behavioural e2e twin.",
+        "C4b ruling: now 3 interop deltas (transport-batching R311fg, codec-response-final R311fh, query-reply reply-decode R311fm) — build-coherent subset consistently smaller than interop-coherent; consider whether C4b should pin interop supersets.",
+        "Audit other consumer planes for the same publisher-marker coupling (does liveliness sample/reply decode gate on an unrelated plane's feature?)."
+      ]
+    },
     "Round 311g": {
       "decision_summary": "R311g send_close_with_reason signature stability + codec-frame envelope inbound cascade — Frame decode gated, +27.7KB elision; ap-demo codec-close mirror retired.",
       "changes_bullets": [

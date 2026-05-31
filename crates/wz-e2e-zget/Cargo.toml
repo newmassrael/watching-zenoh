@@ -1,0 +1,135 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-e2e-zget — minimal single-purpose e2e consumer binary that pins
+# EXACTLY the z_get-initiator ("zget-reply-only") facade subset and
+# proves that subset composes end-to-end against a foreign zenoh-pico
+# z_queryable peer.
+#
+# Initiator-side MIRROR of wz-e2e-queryable: where wz-e2e-queryable is
+# the queryable that ANSWERS a foreign z_get, this binary is the getter
+# that ISSUES a query and INTAKES the replies a foreign z_queryable
+# emits. Together the two binaries cover the query/reply plane in BOTH
+# directions on the wire. The in-process twin (both ends wz) is
+# wz-integration-tests/tests/wz_query_reply_round_trip.rs (R121j-6).
+#
+# Same single-plane rationale as the sibling subset binaries: wz-ap-demo
+# is the full preset-ap-client reference consumer; feature-subsetting it
+# would require cfg-gating ~70 plane call-sites (the cfg-soup the project
+# rejects), and a Cargo feature subset cannot be pinned per-[[bin]]. The
+# textbook shape is a separate, intrinsically single-plane binary: this
+# one uses ONLY the getter surface (Session::query + ReplyEvent), so it
+# compiles cleanly under the zget-reply-only subset with ZERO cfg, and
+# its manifest pins that subset verbatim.
+#
+# Layer E2 (scripts/run-ci.sh) builds this under its pinned subset and
+# drives the query/reply round-trip against zenoh-pico's z_queryable: the
+# behavioural counterpart of the C4b / C4c / C1h `zget-reply-only` BUILD
+# subset entry — it proves the getter subset not only type-checks but
+# interoperates on the wire with a foreign implementation.
+
+[package]
+name = "wz-e2e-zget"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Minimal z_get-initiator facade-subset e2e consumer — proves the zget-reply-only subset interoperates with zenoh-pico z_queryable on the wire."
+
+[[bin]]
+name = "wz-e2e-zget"
+path = "src/main.rs"
+
+[dependencies]
+# The whole point of this crate: pin the smallest coherent facade subset
+# that ISSUES gets AND interoperates on the wire with a foreign
+# zenoh-pico z_queryable peer, default-features off so no other plane
+# leaks in.
+#
+# Composition of this subset (vs the C4b / C4c / C1h `zget-reply-only`
+# BUILD subset `codec-response,codec-response-final,query-get,query-reply`):
+#
+#   * query-get — the initiator plane: Session::query + the outbound
+#     Request(Query) encoder + the pending-query reply intake. It IMPLIES
+#     codec-request (to ENCODE the outbound query) and codec-response (to
+#     DECODE inbound replies), so neither is listed separately here.
+#   * query-reply — the z_get-side reply-routing AND reply-body decode
+#     plane. Implies codec-response. Decodes the inbound
+#     `Response(Reply)` Put / Del body into `InboundReplyBody`
+#     (`reply.rs` `dispatch_response`). R311fm made this arm gate on
+#     `query-reply` (previously only the pub/sub publisher markers
+#     `pubsub-put` / `pubsub-delete` gated it, so a pure getter subset
+#     type-checked but silently dropped every reply); pinned because this
+#     binary reads the reply payload.
+#   * codec-response-final — the terminating Final the responder sends
+#     after its last reply. query-get does NOT imply it (the getter works
+#     without a clean Final — it just falls back to a local timeout), so
+#     the C4b subset lists it explicitly and so do we: a clean Final is
+#     part of interop-correct getter behaviour. Symmetric to why
+#     wz-e2e-queryable pins codec-response-final on the answerer side.
+# R311fm composability finding (this binary's reason to exist): before
+# R311fm the named `zget-reply-only` subset (codec-response,
+# codec-response-final, query-get, query-reply — the C4b / C4c / C1h /
+# C1j matrix entry) type-checked but DECODED NO reply. The inbound
+# `Response(Reply)` Put-body arm in `reply.rs` `dispatch_response` was
+# gated ONLY on the pub/sub publisher marker `pubsub-put`, so a pure
+# getter (which has no reason to pin a *publisher* feature) saw the arm
+# collapse to `_ => return` at compile time — every reply silently
+# dropped, on_reply never firing, while the separate codec-response-final
+# path still delivered the terminating Final. That is a feature-graph
+# coupling bug, not merely a "interop subset > build subset" gap: reading
+# a query reply must not require the unrelated pub/sub data plane (which
+# also pulls `codec-push`). R311fm splits the gate so `query-reply`
+# enables its own reply-body decode; this binary therefore pins the
+# build-subset verbatim with NO pubsub feature. The behavioural wire test
+# against a foreign z_queryable is what surfaced the silent-drop — the
+# same role wz-e2e-pubsub (transport-batching) and wz-e2e-queryable
+# (codec-response-final) play for their planes.
+#
+#   * transport-batching — load-bearing for the FOREIGN handshake, not
+#     the query data plane. Identical finding to wz-e2e-pubsub (R311fg) /
+#     wz-e2e-queryable (R311fh): `PeerInitCaps::from_init_syn` forces
+#     batch_size 65535 when it is off, so zenoh-pico rejects the InitAck.
+#     The handshake is plane-independent, so every wz-e2e-* binary that
+#     completes a session with zenoh-pico pins it. It builds fine without
+#     it (C4c passes) and two wz peers interoperate without it (both
+#     force 65535) — the divergence is specifically the foreign handshake.
+#   * keyexpr-literal/-canon, the handshake codec quartet, keepalive, and
+#     the unicast open/accept session features are the same shared core
+#     every wz-e2e-* binary pins (the wz-e2e-harness intersection).
+wz = { path = "../wz", default-features = false, features = [
+    "runtime-tokio",
+    "transport-unicast",
+    "transport-link-tcp",
+    "transport-keepalive",
+    "transport-batching",
+    "session-unicast-open",
+    "session-unicast-accept",
+    "codec-frame",
+    "codec-keep-alive",
+    "codec-init-body",
+    "codec-open-body",
+    "codec-close",
+    "keyexpr-literal",
+    "keyexpr-canon",
+    "query-get",
+    "query-reply",
+    "codec-response-final",
+] }
+# The shared acceptor scaffolding (bind/accept/open/drive/teardown +
+# env_logger + tokio runtime). This binary carries only its CLI parsing
+# and the query-burst setup closure.
+wz-e2e-harness = { path = "../wz-e2e-harness" }
+# The GET burst runs as a background task concurrent with the harness's
+# drive loop (so the loop can dispatch inbound replies while the burst
+# retries), so this binary spawns directly — `rt` is the only tokio
+# feature it needs of its own (the multi-thread runtime + signal/net are
+# the harness's concern).
+tokio = { version = "1", features = ["rt"] }
+log = "0.4"
+
+[lints]
+workspace = true
