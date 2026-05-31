@@ -51,12 +51,22 @@ silently drifts structure.
   exits 1. If an explicit user override is granted (e.g. revert after
   a demo), follow the direct edit with `mnemosyne-cli generate-docs`
   to restore `GENERATED.md=sync`.
-- **Changelog entries** for `rfc-open-questions-log.md::Change log` →
-  use `append_changelog_entry_v2`. New entries must use the configured
-  `entry_id_prefix = "Round "` (the date-based legacy entries remain as
-  prose under the section heading; do not retrofit them to `Round N`
-  form — frozen-ledger spirit applies even though they predate the
-  atomic store).
+- **Changelog entries** (atomic-store audit ledger + the
+  `rfc-open-questions-log.md::Change log`) → append via the CLI:
+  `mnemosyne-cli append-changelog-entry --entry-id "Round N"
+  --decision <text> --changes-file <path> --verification-file <path>
+  --impact §A,§B --carry-file <path>`. Do NOT use the MCP
+  `append_changelog_entry_v2` tool: it shells to an
+  `append-changelog-entry-v2` subcommand the installed `mnemosyne-cli`
+  does not ship (it exposes only `append-changelog-entry`), so the MCP
+  call fails `unknown command`. Use the CLI directly until the MCP
+  server and CLI binaries are version-aligned. (The other MCP mutate
+  primitives — `set_section_*`, `set_inventory_status`, etc. — are
+  CLI-aligned and remain the preferred path.) New entries must use the
+  configured `entry_id_prefix = "Round "` (the date-based legacy entries
+  remain as prose under the section heading; do not retrofit them to
+  `Round N` form — frozen-ledger spirit applies even though they predate
+  the atomic store).
 - **After every mutation** → `validate_workspace`. Confirm orphan delta
   = 0 (no new orphans), round-trip mandatory still N/N, T3 warn count
   not increased, atomic ledger drift consistent with the mutation

@@ -64,15 +64,25 @@ codec-response = ["codec-frame", "wz-codecs/codec-response", "wz-codecs-test-sup
 codec-response-final = ["wz-codecs/codec-response-final"]
 codec-declare = ["codec-frame", "wz-codecs/codec-declare"]
 
+# attachment domain primitive: gates the `attachment` SSOT module (the
+# one attachment-ext encode/decode pair). Selected by the
+# `pubsub-attachment` / `query-attachment` consumer features below — a
+# kconfig primitive, not forced on by any codec, so a subset that wires
+# neither attachment consumer elides the module entirely. Standalone (the
+# module builds wz-codecs ExtZbuf records; no wz-codecs forward needed).
+attachment-bytes = []
+
 # R311du — pub/sub data-plane gates for the migrated SubscriberRegistry
 # dispatch arms (Put / Del payload handling + attachment / timestamp ext
 # extraction). Standalone (no wz-codecs forward — the gating is at the
 # wz-session-core dispatch level, not the codec level); the
 # wz-runtime-tokio side forwards its same-named features here so the
 # gated production arms compile consistently across the workspace.
+# pubsub-attachment selects attachment-bytes (the attachment ext codec it
+# consumes on both the Push encode and decode side).
 pubsub-put = []
 pubsub-delete = []
-pubsub-attachment = []
+pubsub-attachment = ["attachment-bytes"]
 pubsub-timestamp = []
 pubsub-source-info = []
 pubsub-priority = []
@@ -88,7 +98,9 @@ pubsub-express = []
 # reply emit); the wz-runtime-tokio side forwards its same-named features
 # here so the gated production arms compile consistently workspace-wide.
 query-queryable = ["codec-request", "codec-response"]
-query-attachment = []
+# query-attachment selects attachment-bytes (the attachment ext codec it
+# consumes on both the Query encode and decode side).
+query-attachment = ["attachment-bytes"]
 query-selector-parameters = []
 query-reply-err = []
 # R311fm — the z_get consumer's reply-body decode plane. Gates the

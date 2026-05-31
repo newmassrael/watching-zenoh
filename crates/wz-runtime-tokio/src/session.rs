@@ -301,7 +301,12 @@ impl PublishOptions {
         self
     }
 
-    /// R232 — attach a body-level attachment blob.
+    /// R232 — attach a body-level attachment blob. Gated on
+    /// `pubsub-attachment` (wire-data helper): without it the wire +
+    /// loopback encode paths carry no attachment, so offering the setter
+    /// would silently drop the blob. The `attachment` field itself stays
+    /// (struct stability); only the populator gates.
+    #[cfg(feature = "pubsub-attachment")]
     pub fn with_attachment(mut self, attachment: Vec<u8>) -> Self {
         self.attachment = Some(attachment);
         self
@@ -499,8 +504,11 @@ impl QueryOptions {
         self
     }
 
-    /// Attach a Query-level attachment blob. Wire + loopback
-    /// propagation lands in a follow-up round.
+    /// Attach a Query-level attachment blob. Gated on `query-attachment`
+    /// (wire-data helper): the get path threads this into the Query
+    /// attachment ext only when query-attachment is composed, so the
+    /// setter gates with it. The field stays (struct stability).
+    #[cfg(feature = "query-attachment")]
     pub fn with_attachment(mut self, attachment: Vec<u8>) -> Self {
         self.attachment = Some(attachment);
         self
@@ -4719,6 +4727,7 @@ mod tests {
         captured
     }
 
+    #[cfg(feature = "pubsub-attachment")]
     #[test]
     fn publish_options_with_metadata_setters_chain() {
         // Builder ergonomics: every R232 with_* setter is chainable
@@ -4838,7 +4847,7 @@ mod tests {
         assert_eq!(got.sn, 42);
     }
 
-    #[cfg(feature = "pubsub-allow-loop")]
+    #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-attachment"))]
     #[test]
     fn publish_loopback_propagates_attachment_to_sample() {
         let (session, _driver) = build_session();
@@ -4872,7 +4881,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "pubsub-allow-loop")]
+    #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-attachment"))]
     #[test]
     fn publish_loopback_propagates_all_metadata_in_one_chain() {
         // Composition: every R232 metadata field set together must
@@ -5045,7 +5054,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "pubsub-allow-loop")]
+    #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-attachment"))]
     #[test]
     fn publish_aliased_loopback_propagates_metadata_to_sample() {
         // Parity check: publish_aliased's loopback branch shares the
@@ -5687,6 +5696,7 @@ mod tests {
         feature = "query-target",
         feature = "query-timeout"
     ))]
+    #[cfg(feature = "query-attachment")]
     #[test]
     fn query_options_query_metadata_extracts_wire_fields() {
         // R240 — QueryOptions::query_metadata must surface the
@@ -5801,7 +5811,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "query-get")]
+    #[cfg(all(feature = "query-get", feature = "query-attachment"))]
     #[test]
     fn query_wire_branch_with_attachment_threads_attachment_through_with_meta() {
         let (session, driver) = build_session();
@@ -5870,7 +5880,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "query-get")]
+    #[cfg(all(feature = "query-get", feature = "query-attachment"))]
     #[test]
     fn query_session_local_with_any_metadata_skips_wire_branch_entirely() {
         // R240 invariance: even with non-empty QueryMetadata, a
@@ -6170,7 +6180,7 @@ mod tests {
         assert_eq!(got.keyexpr_literal, "home/temp/kitchen");
     }
 
-    #[cfg(feature = "query-get")]
+    #[cfg(all(feature = "query-get", feature = "query-attachment"))]
     #[test]
     fn query_aliased_with_meta_threads_attachment_through_wire() {
         let (session, driver) = build_session();

@@ -108,8 +108,6 @@ use hashbrown::HashMap;
 // `extract_query_attachment`) gate out cleanly in a `codec-request`-OFF
 // subset — the same wire-data-helper exemption as
 // `SubscriberRegistry::dispatch_push` (R311g1 signature stability).
-#[cfg(all(feature = "query-attachment", feature = "codec-request"))]
-use wz_codecs::ext_entry::ExtEntryOwnedVariant;
 #[cfg(feature = "codec-request")]
 use wz_codecs::query::QueryOwned;
 #[cfg(feature = "codec-request")]
@@ -186,15 +184,8 @@ fn extract_query_attachment(query: &QueryOwned) -> Option<&[u8]> {
     }
     #[cfg(feature = "query-attachment")]
     {
-        let exts = query.extensions.as_ref()?;
-        for ext in exts {
-            if ext.ext_id() == 0x05 {
-                if let ExtEntryOwnedVariant::CodecZenohExtZbuf(zbuf) = &ext.body {
-                    return Some(zbuf.value.as_slice());
-                }
-            }
-        }
-        None
+        let exts = query.extensions.as_deref()?;
+        crate::attachment::decode_attachment_ext(exts, crate::attachment::ATTACHMENT_EXT_ID_QUERY)
     }
 }
 

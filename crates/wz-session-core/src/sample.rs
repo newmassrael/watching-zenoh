@@ -440,23 +440,10 @@ pub fn extract_qos(extensions: &[ExtEntryOwned]) -> Option<QosLevel> {
     None
 }
 
-/// Walk an ExtEntry chain and project the first attachment ext into a
-/// raw byte vector. Predicate mirrors zenoh-pico's
-/// `_z_push_body_decode_extensions` (`vendor/zenoh-pico/src/protocol/
-/// codec/message.c` 314-322): `ext_id == 0x03` AND
-/// `enc == ENC_ZBUF (0b10)`.
-pub fn extract_attachment(extensions: &[ExtEntryOwned]) -> Option<Vec<u8>> {
-    const ATTACHMENT_EXT_ID: u8 = 0x03;
-    const ENC_ZBUF: u8 = 0x02;
-    for ext in extensions {
-        if ext.ext_id() == ATTACHMENT_EXT_ID && ext.enc() == ENC_ZBUF {
-            if let ExtEntryOwnedVariant::CodecZenohExtZbuf(z) = &ext.body {
-                return Some(z.value.clone());
-            }
-        }
-    }
-    None
-}
+// The attachment ext-chain predicate moved to the `crate::attachment`
+// SSOT module (`decode_attachment_ext`) so the Push (this module) and
+// Query (`crate::query`) decode paths share one wire predicate. The Push
+// dispatch in `crate::pubsub` calls `decode_attachment_ext(.., PUSH)`.
 
 /// Walk an ExtEntry chain and project the first source-info ext into a
 /// [`SourceInfo`]. Predicate mirrors zenoh-pico's
@@ -789,39 +776,8 @@ mod tests {
         assert_eq!(qos.raw, 0xBE);
     }
 
-    // ─── extract_attachment ─────────────────────────────────────────
-
-    #[test]
-    fn extract_attachment_returns_none_on_empty_chain() {
-        assert!(extract_attachment(&[]).is_none());
-    }
-
-    #[test]
-    fn extract_attachment_returns_bytes_on_matching_zbuf() {
-        let mut ext = ExtEntry::new();
-        ext.set_ext_id(0x03);
-        ext.set_enc(0x02);
-        let payload = b"attach-payload".to_vec();
-        ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
-            value_len: payload.len() as u64,
-            value: &payload,
-        });
-        let bytes = extract_attachment(&[ext.into_owned()]).unwrap();
-        assert_eq!(bytes, payload);
-    }
-
-    #[test]
-    fn extract_attachment_skips_non_matching_ext_id() {
-        let mut ext = ExtEntry::new();
-        // ext_id=1 with enc=ZBuf is source_info, not attachment.
-        ext.set_ext_id(0x01);
-        ext.set_enc(0x02);
-        ext.body = ExtEntryVariant::CodecZenohExtZbuf(wz_codecs::ext_zbuf::ExtZbuf {
-            value_len: 1,
-            value: &[0x00],
-        });
-        assert!(extract_attachment(&[ext.into_owned()]).is_none());
-    }
+    // attachment decode predicate tests moved with the helper to
+    // `crate::attachment` (push/query round-trip + carrier discrimination).
 
     // ─── extract_source_info ───────────────────────────────────────
 

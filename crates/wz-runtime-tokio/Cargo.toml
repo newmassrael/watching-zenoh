@@ -367,6 +367,12 @@ transport-batching = ["wz-session-core/transport-batching"]
 # session-core gate (3-stage shape mirrors the codec-* forwarders).
 # pubsub-allow-loop stays AP-only (no session-core dispatch arm gates on
 # it — it governs the wz-runtime-tokio self-publish loopback path).
+# attachment domain primitive forward: gates the wz-session-core
+# `attachment` SSOT module. Selected transitively by pubsub-attachment /
+# query-attachment (via their wz-session-core forwards); declared here as
+# a standalone feature so the wz facade can forward `?/attachment-bytes`
+# and so the primitive can be enabled independently.
+attachment-bytes = ["wz-session-core/attachment-bytes"]
 pubsub-put = ["wz-session-core/pubsub-put"]
 pubsub-delete = ["wz-session-core/pubsub-delete"]
 pubsub-allow-loop = []

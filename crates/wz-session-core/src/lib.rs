@@ -234,6 +234,14 @@ pub mod pubsub;
 #[cfg(feature = "alloc")]
 pub mod source_info_ext;
 
+/// SSOT for the attachment extension wire shape. Gated on the
+/// `attachment-bytes` catalog primitive that the `pubsub-attachment` /
+/// `query-attachment` consumer features select; owns the one encode /
+/// decode pair the Push / Query × encode / decode sites previously each
+/// re-derived. Sibling of `source_info_ext`.
+#[cfg(all(feature = "alloc", feature = "attachment-bytes"))]
+pub mod attachment;
+
 /// R311dv — Response-builder cluster (`build_response_{reply,err}_*`
 /// + `ResponseReplyBuilder` / `ResponseErrBuilder`): pure value
 /// construction of a `Response(Reply|Err)` wire record from a

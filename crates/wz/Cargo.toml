@@ -112,8 +112,13 @@ access-extauth-pubkey = ["session-extauth"]
 access-extauth-usrpwd = ["session-extauth"]
 access-quota = []
 
-# ----- domain: attachment (2 atomic, all reserved) -----
-attachment-bytes = []
+# ----- domain: attachment (2 atomic) -----
+# attachment-bytes: the attachment-ext codec primitive (wz-session-core
+# `attachment` SSOT module). Selected by pubsub-attachment /
+# query-attachment; forwards to wz-runtime-tokio when that runtime is in
+# the build. attachment-encoding-aware (tag-typed attachment view) stays
+# reserved — genuinely unimplemented, builds on attachment-bytes.
+attachment-bytes = ["wz-runtime-tokio?/attachment-bytes"]
 attachment-encoding-aware = ["attachment-bytes"]
 
 # ----- domain: codec (14 atomic, all active) -----
@@ -312,10 +317,14 @@ pubsub-timestamp = ["wz-runtime-tokio?/pubsub-timestamp"]
 # `wz-runtime-tokio/Cargo.toml::[features]` (e.g. `query-get =
 # ["query-reply"]`); the facade does not re-declare them so a future
 # alternative runtime can implement its own dependency shape without
-# the facade pre-committing to tokio-side semantics. `query-reply-err`
-# / `query-selector-parameters` / `query-source-info` /
-# `query-attachment` stay reserved (no source-level gate yet); they
-# remain pure feature-labels until their runtime impls land.
+# the facade pre-committing to tokio-side semantics. Only
+# `query-source-info` stays reserved (no source-level gate yet — its
+# `build_request_query_with_source_info` impl has not landed). The R307
+# comment that listed query-reply-err / query-selector-parameters /
+# query-attachment as "reserved" was superseded by R311cj (which wired
+# all three); the attachment composability round additionally selects
+# attachment-bytes so query-attachment gates a real attachment-ext
+# encode/decode vertical, not a bare label.
 query-attachment = ["attachment-bytes", "wz-runtime-tokio?/query-attachment"]
 query-consolidation = ["wz-runtime-tokio?/query-consolidation"]
 query-get = ["wz-runtime-tokio?/query-get"]

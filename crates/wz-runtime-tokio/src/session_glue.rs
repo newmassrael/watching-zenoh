@@ -1914,6 +1914,9 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             if let Some(consolidation) = meta.consolidation {
                 builder = builder.consolidation(consolidation);
             }
+            // Query attachment ext threading — gated on `query-attachment`
+            // (the builder's `query_attachment` setter gates with it).
+            #[cfg(feature = "query-attachment")]
             if let Some(attachment) = meta.attachment.as_deref() {
                 // RequestQueryBuilder::query_attachment panics on
                 // empty input (zenoh-pico's
@@ -2819,21 +2822,21 @@ fn build_body_extensions(
             });
         }
     }
+    // Push attachment ext (id 0x03) — gated on `pubsub-attachment` so a
+    // codec-push subset that does not compose attachments carries no
+    // attachment encode path. The ext wire shape lives in the
+    // wz-session-core `attachment` SSOT module (selected by
+    // pubsub-attachment). M flag stays clear (informational); Z chain bit
+    // applied below.
+    #[cfg(feature = "pubsub-attachment")]
     if let Some(bytes) = attachment {
-        let owned = bytes.to_vec();
-        exts.push(ExtEntryOwned {
-            // ENC_ZBUF(0x40) | id_attachment(0x03). Attachment is
-            // informational; M flag stays clear (zenoh-pico
-            // `_z_push_body_encode_extensions` at message.c emits
-            // the attachment ext without M). Z chain bit applied
-            // below.
-            header: 0x40 | 0x03,
-            body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
-                value_len: owned.len() as u64,
-                value: owned,
-            }),
-        });
+        exts.push(wz_session_core::attachment::encode_attachment_ext(
+            wz_session_core::attachment::ATTACHMENT_EXT_ID_PUSH,
+            bytes.to_vec(),
+        ));
     }
+    #[cfg(not(feature = "pubsub-attachment"))]
+    let _ = attachment;
     if exts.is_empty() {
         return None;
     }
@@ -3870,11 +3873,16 @@ pub fn build_interest_final(interest_id: u64) -> InterestOwned {
 // resolve unchanged across the reorg.
 #[cfg(feature = "codec-request")]
 pub use wz_session_core::request_build::{
-    build_request_query, build_request_query_with_attachment,
-    build_request_query_with_consolidation, build_request_query_with_parameters,
-    build_request_query_with_target, build_request_query_with_timeout_ms, RequestQueryBuilder,
-    QUERY_EXT_ZBUF_MAX_LEN, REQUEST_QUERY_PARAMETERS_MAX_LEN,
+    build_request_query, build_request_query_with_consolidation,
+    build_request_query_with_parameters, build_request_query_with_target,
+    build_request_query_with_timeout_ms, RequestQueryBuilder, QUERY_EXT_ZBUF_MAX_LEN,
+    REQUEST_QUERY_PARAMETERS_MAX_LEN,
 };
+// build_request_query_with_attachment + the RequestQueryBuilder::query_attachment
+// setter gate on query-attachment (the Query attachment encode vertical), so the
+// re-export of the helper is split out under that combined gate.
+#[cfg(all(feature = "codec-request", feature = "query-attachment"))]
+pub use wz_session_core::request_build::build_request_query_with_attachment;
 
 // R311ec — Priority + CongestionControl moved to wz-session-core::qos
 // (the QoS packed-byte value types, runtime-agnostic siblings of
@@ -6964,7 +6972,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "codec-push")]
+    #[cfg(all(feature = "codec-push", feature = "pubsub-attachment"))]
     #[test]
     fn build_msg_put_with_meta_attaches_attachment_ext_after_source_info() {
         // Both source_info + attachment together — order matters: pico's
@@ -7053,7 +7061,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "codec-push")]
+    #[cfg(all(feature = "codec-push", feature = "pubsub-attachment"))]
     #[test]
     fn build_push_literal_with_meta_round_trips_through_codec_encode_decode() {
         // End-to-end: build → encode_to_vec → decode → field equality.
@@ -7114,15 +7122,19 @@ mod tests {
             assert_eq!(si.zid_prefix(), &[0x01, 0x02, 0x03, 0x04][..]);
             assert_eq!(si.eid, 7);
             assert_eq!(si.sn, 42);
-            let att = crate::sample::extract_attachment(body_exts)
-                .expect("attachment round-trips through wire");
+            let att = wz_session_core::attachment::decode_attachment_ext(
+                body_exts,
+                wz_session_core::attachment::ATTACHMENT_EXT_ID_PUSH,
+            )
+            .map(<[u8]>::to_vec)
+            .expect("attachment round-trips through wire");
             assert_eq!(att, b"attach");
         } else {
             panic!("CodecZenohMsgPut variant expected");
         }
     }
 
-    #[cfg(feature = "codec-push")]
+    #[cfg(all(feature = "codec-push", feature = "pubsub-attachment"))]
     #[test]
     fn build_push_del_literal_with_meta_round_trips_metadata_minus_encoding() {
         // Del path: timestamp + source_info + attachment + qos must
@@ -7156,7 +7168,12 @@ mod tests {
             let si = crate::sample::extract_source_info(body_exts).unwrap();
             assert_eq!(si.eid, 1);
             assert_eq!(si.sn, 2);
-            let att = crate::sample::extract_attachment(body_exts).unwrap();
+            let att = wz_session_core::attachment::decode_attachment_ext(
+                body_exts,
+                wz_session_core::attachment::ATTACHMENT_EXT_ID_PUSH,
+            )
+            .map(<[u8]>::to_vec)
+            .unwrap();
             assert_eq!(att, b"del-att");
         } else {
             panic!("CodecZenohMsgDel variant expected");
@@ -7746,7 +7763,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "codec-request")]
+    #[cfg(all(feature = "codec-request", feature = "query-attachment"))]
     #[test]
     fn send_request_query_with_meta_attachment_emits_query_with_attachment_ext() {
         let driver = std::sync::Arc::new(CaptureDriver::new());
@@ -7772,7 +7789,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "codec-request")]
+    #[cfg(all(feature = "codec-request", feature = "query-attachment"))]
     #[test]
     fn send_request_query_with_meta_empty_attachment_slice_skips_ext_without_panic() {
         // QueryOptions::with_attachment(empty Vec) → meta.attachment

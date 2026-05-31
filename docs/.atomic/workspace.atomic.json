@@ -27960,6 +27960,60 @@
         "reserved domains access / attachment / storage still 0% wired (~55% of the catalog reserved)."
       ]
     },
+    "Round 311fv": {
+      "decision_summary": "R311fv attachment composability - attachment-bytes is now the SSOT ext-codec module (kconfig primitive); pubsub/query-attachment select it and gate the full encode/decode/setter vertical.",
+      "changes_bullets": [
+        "New SSOT crates/wz-session-core/src/attachment.rs gated all(alloc, attachment-bytes): ATTACHMENT_EXT_ID_PUSH=0x03 / ATTACHMENT_EXT_ID_QUERY=0x05 + encode_attachment_ext + decode_attachment_ext. Dedups the (ext_id, ENC_ZBUF 0x40, ExtZbuf body) shape previously re-derived at 4 sites (sample.rs decode, query.rs decode, request_build.rs encode, session_glue.rs encode). Mirrors the source_info_ext precedent.",
+        "Cargo: wz-session-core attachment-bytes=[] (primitive); pubsub-attachment / query-attachment now SELECT attachment-bytes. wz-runtime-tokio + wz facade forward attachment-bytes. No codec forces it - a subset wiring neither consumer elides the module (kconfig primitive vs the rejected phantom-label option A and codec-coupled option B).",
+        "Re-gated the full attachment vertical onto consumer features: push decode (pubsub.rs) + query decode (query.rs extract_query_attachment) delegate to decode_attachment_ext; query encode (request_build field/init/method/build-branch/build_request_query_with_attachment + tests, gated query-attachment) and push encode (session_glue build_body_extensions, gated pubsub-attachment) call encode_attachment_ext. Removed the duplicate sample::extract_attachment.",
+        "Send-side setters gated to prevent silent wire data-loss: PublishOptions::with_attachment (pubsub-attachment) + QueryOptions::with_attachment + send_request_query_with_meta threading (query-attachment); metadata FIELDS stay (struct stability per the documented field-stays-populator-gates pattern). Sample::with_attachment stays ungated (receive repr, no data-loss hazard).",
+        "Fixed the self-contradictory R307 comment block in wz/Cargo.toml that still listed query-attachment as reserved after R311cj wired it. Inventory drift corrected: attachment-bytes / pubsub-attachment / query-attachment reserved->active; attachment-encoding-aware stays reserved (tag-typed view unimplemented).",
+        "Updated CLAUDE.md changelog-append guidance to the working CLI append-changelog-entry (the MCP append_changelog_entry_v2 tool shells to a nonexistent append-changelog-entry-v2 subcommand on the installed mnemosyne-cli)."
+      ],
+      "verification_bullets": [
+        "Subset elision proven with RUSTFLAGS=-D warnings + --tests: pubsub-only (codec-push, no pubsub-attachment) / queryable-only / zget-reply-only all build with attachment fully compiled out; default build + clippy --all-targets + cargo fmt clean.",
+        "Tests pass: wz-runtime-tokio 265 lib; wz-session-core query lane 175 (incl attachment SSOT round-trip + dispatch_threads_attachment + build_request_query_with_attachment zenoh-pico wire-compat) + pubsub lane 232.",
+        "Full scripts/run-ci.sh WZ_RUN_LAYER_G=1 EXIT 0: codegen verify, isolation matrices C1j/C4b/C4c/C4d, Layer E e2e, Layer G 7 MCU targets x crates (riscv32 G.6 KNOWN_SKIP no gcc).",
+        "validate_workspace after inventory edits: docs=13/13, T1=0, round-trip 13/13, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-17-attachment",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "Metadata-composability cascade continues: apply the same full-vertical gating to the PublishOptions siblings timestamp / encoding / source_info / qos so the metadata family is uniform (currently only attachment is gated - intentional domain-by-domain rollout; the always-on-encode state of the siblings is pre-existing composability debt, not canon).",
+        "attachment-encoding-aware stays reserved (tag-typed attachment view genuinely unimplemented; builds on attachment-bytes).",
+        "Phase 1 committed locally; push pending explicit user consent."
+      ],
+      "publishable_decision_summary": "R311fv attachment composability - attachment-bytes is now the SSOT ext-codec module (kconfig primitive); pubsub/query-attachment select it and gate the full encode/decode/setter vertical.",
+      "publishable_changes_bullets": [
+        "New SSOT crates/wz-session-core/src/attachment.rs gated all(alloc, attachment-bytes): ATTACHMENT_EXT_ID_PUSH=0x03 / ATTACHMENT_EXT_ID_QUERY=0x05 + encode_attachment_ext + decode_attachment_ext. Dedups the (ext_id, ENC_ZBUF 0x40, ExtZbuf body) shape previously re-derived at 4 sites (sample.rs decode, query.rs decode, request_build.rs encode, session_glue.rs encode). Mirrors the source_info_ext precedent.",
+        "Cargo: wz-session-core attachment-bytes=[] (primitive); pubsub-attachment / query-attachment now SELECT attachment-bytes. wz-runtime-tokio + wz facade forward attachment-bytes. No codec forces it - a subset wiring neither consumer elides the module (kconfig primitive vs the rejected phantom-label option A and codec-coupled option B).",
+        "Re-gated the full attachment vertical onto consumer features: push decode (pubsub.rs) + query decode (query.rs extract_query_attachment) delegate to decode_attachment_ext; query encode (request_build field/init/method/build-branch/build_request_query_with_attachment + tests, gated query-attachment) and push encode (session_glue build_body_extensions, gated pubsub-attachment) call encode_attachment_ext. Removed the duplicate sample::extract_attachment.",
+        "Send-side setters gated to prevent silent wire data-loss: PublishOptions::with_attachment (pubsub-attachment) + QueryOptions::with_attachment + send_request_query_with_meta threading (query-attachment); metadata FIELDS stay (struct stability per the documented field-stays-populator-gates pattern). Sample::with_attachment stays ungated (receive repr, no data-loss hazard).",
+        "Fixed the self-contradictory R307 comment block in wz/Cargo.toml that still listed query-attachment as reserved after R311cj wired it. Inventory drift corrected: attachment-bytes / pubsub-attachment / query-attachment reserved->active; attachment-encoding-aware stays reserved (tag-typed view unimplemented).",
+        "Updated CLAUDE.md changelog-append guidance to the working CLI append-changelog-entry (the MCP append_changelog_entry_v2 tool shells to a nonexistent append-changelog-entry-v2 subcommand on the installed mnemosyne-cli)."
+      ],
+      "publishable_verification_bullets": [
+        "Subset elision proven with RUSTFLAGS=-D warnings + --tests: pubsub-only (codec-push, no pubsub-attachment) / queryable-only / zget-reply-only all build with attachment fully compiled out; default build + clippy --all-targets + cargo fmt clean.",
+        "Tests pass: wz-runtime-tokio 265 lib; wz-session-core query lane 175 (incl attachment SSOT round-trip + dispatch_threads_attachment + build_request_query_with_attachment zenoh-pico wire-compat) + pubsub lane 232.",
+        "Full scripts/run-ci.sh WZ_RUN_LAYER_G=1 EXIT 0: codegen verify, isolation matrices C1j/C4b/C4c/C4d, Layer E e2e, Layer G 7 MCU targets x crates (riscv32 G.6 KNOWN_SKIP no gcc).",
+        "validate_workspace after inventory edits: docs=13/13, T1=0, round-trip 13/13, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-17-attachment",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Metadata-composability cascade continues: apply the same full-vertical gating to the PublishOptions siblings timestamp / encoding / source_info / qos so the metadata family is uniform (currently only attachment is gated - intentional domain-by-domain rollout; the always-on-encode state of the siblings is pre-existing composability debt, not canon).",
+        "attachment-encoding-aware stays reserved (tag-typed attachment view genuinely unimplemented; builds on attachment-bytes).",
+        "Phase 1 committed locally; push pending explicit user consent."
+      ]
+    },
     "Round 311g": {
       "decision_summary": "R311g send_close_with_reason signature stability + codec-frame envelope inbound cascade — Frame decode gated, +27.7KB elision; ap-demo codec-close mirror retired.",
       "changes_bullets": [
@@ -33848,7 +33902,7 @@
       "reason": "F=quota accounting; P=zenoh; C=opt-in policy"
     },
     "attachment-bytes": {
-      "status": "reserved",
+      "status": "active",
       "source": "zenoh sample/query attachment opaque bytes",
       "reason": "F=attachment field codec; P=zenoh attachment; C=opt-in metadata, enables pubsub-attachment + query-attachment"
     },
@@ -34203,7 +34257,7 @@
       "reason": "F=local-loop dispatch; P=zenoh; C=opt-in same-process delivery"
     },
     "pubsub-attachment": {
-      "status": "reserved",
+      "status": "active",
       "source": "zenoh sample attachment field",
       "reason": "F=attachment bytes; P=zenoh; C=opt-in metadata, requires attachment-bytes"
     },
@@ -34253,7 +34307,7 @@
       "reason": "F=Timestamp field codec; P=zenoh Timestamp; C=opt-in sample metadata"
     },
     "query-attachment": {
-      "status": "reserved",
+      "status": "active",
       "source": "zenoh query attachment field",
       "reason": "F=attachment in query; P=zenoh; C=opt-in metadata, requires attachment-bytes"
     },

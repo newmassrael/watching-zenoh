@@ -94,13 +94,13 @@ use wz_codecs::push::{PushOwned, PushOwnedVariant};
 ))]
 use wz_codecs::wireexpr::WireexprOwnedVariant;
 
-use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
-use crate::network_message::NetworkMessage;
 #[cfg(all(
     any(feature = "pubsub-put", feature = "pubsub-delete"),
     feature = "pubsub-attachment"
 ))]
-use crate::sample::extract_attachment;
+use crate::attachment::{decode_attachment_ext, ATTACHMENT_EXT_ID_PUSH};
+use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+use crate::network_message::NetworkMessage;
 #[cfg(all(
     any(feature = "pubsub-put", feature = "pubsub-delete"),
     any(
@@ -583,7 +583,8 @@ impl SubscriberRegistry {
                     #[cfg(not(feature = "pubsub-timestamp"))]
                     let body_timestamp: Option<TimestampHint> = None;
                     #[cfg(feature = "pubsub-attachment")]
-                    let body_attachment = extract_attachment(body_exts);
+                    let body_attachment = decode_attachment_ext(body_exts, ATTACHMENT_EXT_ID_PUSH)
+                        .map(<[u8]>::to_vec);
                     #[cfg(not(feature = "pubsub-attachment"))]
                     let body_attachment: Option<Vec<u8>> = {
                         let _ = body_exts;
@@ -614,7 +615,8 @@ impl SubscriberRegistry {
                     #[cfg(not(feature = "pubsub-timestamp"))]
                     let body_timestamp: Option<TimestampHint> = None;
                     #[cfg(feature = "pubsub-attachment")]
-                    let body_attachment = extract_attachment(body_exts);
+                    let body_attachment = decode_attachment_ext(body_exts, ATTACHMENT_EXT_ID_PUSH)
+                        .map(<[u8]>::to_vec);
                     #[cfg(not(feature = "pubsub-attachment"))]
                     let body_attachment: Option<Vec<u8>> = {
                         let _ = body_exts;

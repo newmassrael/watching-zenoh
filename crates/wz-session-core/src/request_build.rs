@@ -24,6 +24,13 @@
 //! wire frame to build, and the builders allocate owned codec buffers.
 
 use alloc::string::{String, ToString};
+// `alloc::vec` backs the one `vec![..]` expression in this module: the
+// query-attachment encode branch in `build`. The test module's many
+// `vec![..]` uses are macro invocations that need no `use` under edition
+// 2021, so the import is gated to exactly `query-attachment` — every other
+// subset (codec-request without query-attachment, and the codec-request-OFF
+// reply / observer lanes) would otherwise flag it unused under `-D warnings`.
+#[cfg(feature = "query-attachment")]
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -167,6 +174,7 @@ pub struct RequestQueryBuilder {
     // Query-layer settings.
     consolidation: Option<ConsolidationMode>,
     parameters: Option<Vec<u8>>,
+    #[cfg(feature = "query-attachment")]
     query_attachment: Option<Vec<u8>>,
     // Request-layer ext settings.
     request_qos: Option<u8>,
@@ -189,6 +197,7 @@ impl RequestQueryBuilder {
             keyexpr_suffix: keyexpr_suffix.map(str::to_string),
             consolidation: None,
             parameters: None,
+            #[cfg(feature = "query-attachment")]
             query_attachment: None,
             request_qos: None,
             request_tstamp: None,
@@ -326,7 +335,11 @@ impl RequestQueryBuilder {
     }
 
     /// Set the Query-level attachment extension payload. Panics on
-    /// empty and on `len > QUERY_EXT_ZBUF_MAX_LEN`.
+    /// empty and on `len > QUERY_EXT_ZBUF_MAX_LEN`. Gated on
+    /// `query-attachment` (wire-data helper) so a `codec-request` subset
+    /// that does not compose query attachments carries no attachment
+    /// encode path.
+    #[cfg(feature = "query-attachment")]
     pub fn query_attachment(mut self, attachment: &[u8]) -> Self {
         assert!(
             !attachment.is_empty(),
@@ -404,15 +417,13 @@ impl RequestQueryBuilder {
                 query.parameters_len = Some(params.len() as u64);
                 query.parameters = Some(params);
             }
+            #[cfg(feature = "query-attachment")]
             if let Some(attachment) = self.query_attachment {
                 query.header |= 0x80;
-                query.extensions = Some(vec![ExtEntryOwned {
-                    header: 0x40 | 0x05, // ENC_ZBUF | id_attachment
-                    body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
-                        value_len: attachment.len() as u64,
-                        value: attachment,
-                    }),
-                }]);
+                query.extensions = Some(vec![crate::attachment::encode_attachment_ext(
+                    crate::attachment::ATTACHMENT_EXT_ID_QUERY,
+                    attachment,
+                )]);
             }
         } else {
             unreachable!(
@@ -661,7 +672,7 @@ pub const QUERY_EXT_ZBUF_MAX_LEN: usize = 32;
 /// the Value codec encoding+payload pair). Future
 /// `build_request_query_with_source_info` /
 /// `_with_body_value` / `_with_full_exts` helpers layer those.
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "codec-request", feature = "query-attachment"))]
 pub fn build_request_query_with_attachment(
     rid: u64,
     keyexpr_mapping_id: u64,
@@ -1105,7 +1116,7 @@ mod tests {
     /// max-size 32, but small-vs-byte-256 differs in single-byte
     /// VLE only here), and at-max (32-byte) cases. The Q_C / Q_P
     /// bits stay clear because this helper is attachment-only.
-    #[cfg(feature = "codec-request")]
+    #[cfg(all(feature = "codec-request", feature = "query-attachment"))]
     #[test]
     fn build_request_query_with_attachment_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — small attachment (alias case, rid=42, mapping_id=7,
@@ -1178,7 +1189,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "codec-request")]
+    #[cfg(all(feature = "codec-request", feature = "query-attachment"))]
     #[test]
     #[should_panic(
         expected = "RequestQueryBuilder::query_attachment requires a non-empty attachment slice"
@@ -1187,7 +1198,7 @@ mod tests {
         let _ = build_request_query_with_attachment(42, 7, None, b"");
     }
 
-    #[cfg(feature = "codec-request")]
+    #[cfg(all(feature = "codec-request", feature = "query-attachment"))]
     #[test]
     #[should_panic(expected = "exceeds wz ExtZbuf codec's max-size (32)")]
     fn build_request_query_with_attachment_rejects_over_max_size() {
@@ -1405,7 +1416,7 @@ mod tests {
     /// (Q_C / Q_P / Q_Z) set together, (4) the attachment ext sits at
     /// the Query level (after Query.consolidation + parameters), not
     /// at the Request level.
-    #[cfg(feature = "codec-request")]
+    #[cfg(all(feature = "codec-request", feature = "query-attachment"))]
     #[test]
     fn request_query_builder_composes_all_five_layers() {
         // rid=42, mapping_id=7, no suffix.
