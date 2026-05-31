@@ -46,6 +46,7 @@ members = [
     "wz-e2e-zget",
     "wz-e2e-liveliness",
     "wz-e2e-liveliness-token",
+    "wz-e2e-declare-observer",
     "wz-runtime-lwip",
     "lwip-sys",
     "wz-link-lwip",

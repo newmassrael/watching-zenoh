@@ -1451,6 +1451,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-e2e-declare-observer"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "wz",
+ "wz-e2e-harness",
+]
+
+[[package]]
 name = "wz-e2e-harness"
 version = "0.1.0"
 dependencies = [
