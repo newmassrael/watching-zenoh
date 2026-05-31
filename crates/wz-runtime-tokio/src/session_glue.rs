@@ -110,6 +110,21 @@ use wz_codecs::close::Close;
 use wz_codecs::decl_final::DeclFinal;
 #[cfg(feature = "codec-declare")]
 use wz_codecs::declare::Declare;
+// R311fe — the borrowed `ExtEntry` is consumed solely by
+// `decode_ext_chain` (the inbound transport-message ext decoder), which
+// is itself gated on the union of codec features whose `parse_inbound`
+// arms call into it. Mirror that exact predicate so an arbitrary subset
+// with every one of those codecs OFF (e.g. bare `--no-default-features`)
+// does not surface a dead `use` under `deny(warnings)`. Same
+// signature-stability shape as the `decode_ext_chain` definition gate
+// (feedback_signature_stability: explicit cfg over `#[allow]`).
+#[cfg(any(
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-keep-alive",
+    feature = "codec-frame"
+))]
 use wz_codecs::ext_entry::ExtEntry;
 use wz_codecs::ext_zint::ExtZint;
 #[cfg(feature = "codec-init-body")]
