@@ -45,7 +45,10 @@
 #              query-attachment + query-selector-parameters +
 #              query-reply-err + codec-response-final; enumerated so the
 #              query tests cannot silently drop out of CI)
-#   Layer C1f — cargo test -p wz-session-core (reply dispatch plane)
+#   Layer C1f — cargo test -p wz-session-core (reply dispatch plane;
+#              R311fn adds a pure-getter query-reply-only invocation so
+#              the reply-DECODE arms are unit-guarded under the
+#              zget-reply-only subset, not just the pub/sub union)
 #              (R311dy; same shape as C1e. The migrated ReplyRegistry
 #              test module gates on the reply dispatch union
 #              codec-response + codec-response-final + pubsub-put +
@@ -647,8 +650,26 @@ layer_c1e_cargo_test_query() {
 # drive the wz-session-core::pubsub dispatch path, which references the
 # codec-push Push type. Enumerated explicitly so the reply tests cannot
 # silently drop out of CI on a wz-runtime-tokio defaults change.
+#
+# R311fn — second invocation: the PURE GETTER subset (query-reply ON,
+# pub/sub OFF). This is the behavioural twin of the `zget-reply-only`
+# BUILD subset that C4b / C4c / C1h / C1j compile — those prove it builds,
+# this proves the inbound Reply Put/Del DECODE actually fires. R311fm
+# split the reply-body decode arms off the pub/sub publisher markers onto
+# `any(pubsub-{put,delete}, query-reply)`; before R311fn the reply test
+# module itself required pubsub-put+pubsub-delete, so the getter arm had
+# ZERO unit coverage (a revert to `_ => return` kept this suite green and
+# only the heavier wz-e2e-zget e2e caught it). With the module gate now
+# `any(pubsub-put, query-reply)` ∧ `any(pubsub-delete, query-reply)`, this
+# invocation runs the dispatch_response Put/Del/Err decode tests under the
+# exact subset a foreign-interop z_get consumer pins. --no-default-features
+# keeps pub/sub genuinely OFF (default would pull nothing extra here, but
+# the explicit form documents the getter-only intent and guards against a
+# future default change re-enabling a publisher feature).
 layer_c1f_cargo_test_reply() {
-    (cd crates && cargo test -p wz-session-core --features codec-push,codec-response,codec-response-final,pubsub-put,pubsub-delete,query-queryable --quiet)
+    (cd crates \
+        && cargo test -p wz-session-core --features codec-push,codec-response,codec-response-final,pubsub-put,pubsub-delete,query-queryable --quiet \
+        && cargo test -p wz-session-core --no-default-features --features alloc,codec-response,codec-response-final,query-reply --quiet)
 }
 
 # ─── Layer C1g — cargo test -p wz-session-core (observer dispatch plane) ─
