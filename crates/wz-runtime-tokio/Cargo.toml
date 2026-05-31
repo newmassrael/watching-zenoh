@@ -152,18 +152,29 @@ declare-queryable = ["codec-declare", "wz-session-core/declare-queryable"]
 declare-subscriber = ["codec-declare", "wz-session-core/declare-subscriber"]
 declare-token = ["codec-declare"]
 declare-undeclare = ["codec-declare"]
-# `query-get` implies BOTH `query-reply` (the get-side ReplyRegistry
-# tracks pending entries) AND `query-queryable` (the loopback path
-# inside `Session::query` fans into the in-process QueryableRegistry
-# and converts emitted `QueryReply` to `InboundReply` via the
-# `From` adapter that lives in `reply.rs`). A pure wire-only get
-# without the loopback path is a future-round refinement; the R307
-# baseline keeps the loopback path universally available so the AP
-# MVP integration tests + ap-demo continue to exercise both branches.
-# R311j — query-* features imply codec-request because the wire-emit
-# path (send_request_query) builds on Request/Query types gated by
-# codec-request.
-query-get = ["query-reply", "query-queryable", "codec-request"]
+# `query-get` implies `query-reply` (the get-side ReplyRegistry tracks
+# pending entries) + `codec-request` (R311j — the wire-emit path
+# `send_request_query` builds on Request/Query types gated by
+# codec-request; `query-reply` itself pulls in `codec-response`).
+#
+# R311fq — `query-get` no longer implies `query-queryable`. The R307
+# baseline welded the two so the in-process loopback fan inside
+# `Session::query` (`observer.queryables.local_query` → `QueryReply` →
+# `InboundReply`) always compiled, but that fused two ORTHOGONAL
+# consumer planes — "I issue gets" (requester/client) vs "I answer
+# queries" (queryable/responder) — into one forced edge, and made the
+# SSOT `zget-reply-only` composability subset a misnomer (it silently
+# pulled the queryable responder in). The loopback is now an EMERGENT
+# capability of a process that selects BOTH planes: the fan is
+# `#[cfg(feature = "query-queryable")]`-gated inside `Session::query`
+# (the `observer.queryables` field is already query-queryable-gated),
+# while the synthetic loopback Final stays under `query-get` so a pure
+# wire-only getter (query-queryable OFF) finalises a SessionLocal/Any
+# get immediately with zero local replies — the semantically correct
+# shape (no queryable capability ⇒ no local queryable to answer).
+# ap-demo + the AP MVP tests select both planes so they exercise the
+# loopback exactly as before.
+query-get = ["query-reply", "codec-request"]
 # R311k — query-queryable (queryable-side reply emit) + query-reply
 # (z_get-side reply consume) both imply codec-response so the wire
 # Response surface compiles whenever the high-level query reply

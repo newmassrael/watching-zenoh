@@ -97,10 +97,11 @@ use crate::sync::Mutex;
 // R307 — `wz_codecs::query::Query` is referenced bare only by the
 // loopback fan inside `Session::query` (`Query::default()`); the
 // `declare_queryable` callback signature uses the fully-qualified
-// path so it does not consume this `use`. The import therefore
-// follows the `query-get` gate, matching its sole bare-name call
-// site.
-#[cfg(feature = "query-get")]
+// path so it does not consume this `use`.
+// R311fq — the loopback fan is now `query-queryable`-gated (decoupled
+// from `query-get`), so this import follows `all(query-get,
+// query-queryable)` — its sole call site.
+#[cfg(all(feature = "query-get", feature = "query-queryable"))]
 use wz_codecs::query::Query;
 // R311s — `TimeSource` is the generic-parameter bound on the
 // type-ungated `Session::query` + `Querier::get` + `QuerierAliased::get`
@@ -140,8 +141,9 @@ use crate::pubsub::SubscriptionId;
 // internal type that the R311r ReplyEmitter wraps; it stays imported
 // here for the body of `Session::query`'s loopback fan (R246).
 // `QueryReply` is only referenced from `Session::query`'s loopback
-// fan; it stays gated on `query-get` to match that sole call site.
-#[cfg(feature = "query-get")]
+// fan; R311fq gated that fan on `query-queryable`, so this import now
+// follows `all(query-get, query-queryable)` to match the sole call site.
+#[cfg(all(feature = "query-get", feature = "query-queryable"))]
 use crate::query::QueryReply;
 use crate::query::QueryableId;
 // R311r — consumer-facing wrappers introduced to decouple the
@@ -1216,17 +1218,26 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                     on_final,
                 );
                 if allows_local {
-                    let mut replies: Vec<QueryReply> = Vec::new();
-                    // `QueryOwned` has no `Default`; build the borrowed
-                    // default and deep-copy into the owned form the
-                    // loopback dispatch path (`local_query`) now takes.
-                    let query = Query::default().into_owned();
-                    observer
-                        .queryables
-                        .local_query(rid, keyexpr, &query, &mut replies);
-                    for reply in replies.drain(..) {
-                        let inbound: InboundReply = reply.into();
-                        observer.replies.deliver_local_reply(&inbound);
+                    // R311fq — the in-process queryable fan is gated on
+                    // `query-queryable`: `observer.queryables` only exists
+                    // when this process selected the queryable responder
+                    // plane. A pure getter (query-queryable OFF) has no
+                    // local queryable to answer, so the loopback yields
+                    // zero replies and only the synthetic Final fires.
+                    #[cfg(feature = "query-queryable")]
+                    {
+                        let mut replies: Vec<QueryReply> = Vec::new();
+                        // `QueryOwned` has no `Default`; build the borrowed
+                        // default and deep-copy into the owned form the
+                        // loopback dispatch path (`local_query`) now takes.
+                        let query = Query::default().into_owned();
+                        observer
+                            .queryables
+                            .local_query(rid, keyexpr, &query, &mut replies);
+                        for reply in replies.drain(..) {
+                            let inbound: InboundReply = reply.into();
+                            observer.replies.deliver_local_reply(&inbound);
+                        }
                     }
                     // Synthetic Final closes the loopback half of the
                     // pending entry's `remaining_finals` counter so a
@@ -1234,7 +1245,10 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                     // Locality::Any z_get still needs the peer Final to
                     // finalise (matching zenoh-pico
                     // `_z_session_deliver_query_locally`'s emit-final
-                    // step at the tail of the local deliver path).
+                    // step at the tail of the local deliver path). Stays
+                    // under `query-get` (ReplyRegistry is query-reply-gated)
+                    // so the wire-only getter finalises the loopback half
+                    // even with no queryable plane (R311fq).
                     observer.replies.deliver_local_final(rid);
                 }
                 handle
@@ -1355,18 +1369,34 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                     on_reply,
                     on_final,
                 );
+                // R311fq — `loopback_keyexpr` feeds only the
+                // query-queryable loopback fan; the wire branch routes by
+                // (mapping_id, inline_suffix). Under a wire-only getter
+                // (query-queryable OFF) the param is otherwise unused.
+                #[cfg(not(feature = "query-queryable"))]
+                let _ = loopback_keyexpr;
                 if allows_local {
-                    let mut replies: Vec<QueryReply> = Vec::new();
-                    // `QueryOwned` has no `Default`; build the borrowed
-                    // default and deep-copy into the owned form the
-                    // loopback dispatch path (`local_query`) now takes.
-                    let query = Query::default().into_owned();
-                    observer
-                        .queryables
-                        .local_query(rid, loopback_keyexpr, &query, &mut replies);
-                    for reply in replies.drain(..) {
-                        let inbound: InboundReply = reply.into();
-                        observer.replies.deliver_local_reply(&inbound);
+                    // R311fq — see `Session::query`: in-process queryable
+                    // fan gated on `query-queryable`; synthetic Final stays
+                    // under `query-get` so a wire-only getter still closes
+                    // the loopback half of the pending entry.
+                    #[cfg(feature = "query-queryable")]
+                    {
+                        let mut replies: Vec<QueryReply> = Vec::new();
+                        // `QueryOwned` has no `Default`; build the borrowed
+                        // default and deep-copy into the owned form the
+                        // loopback dispatch path (`local_query`) now takes.
+                        let query = Query::default().into_owned();
+                        observer.queryables.local_query(
+                            rid,
+                            loopback_keyexpr,
+                            &query,
+                            &mut replies,
+                        );
+                        for reply in replies.drain(..) {
+                            let inbound: InboundReply = reply.into();
+                            observer.replies.deliver_local_reply(&inbound);
+                        }
                     }
                     observer.replies.deliver_local_final(rid);
                 }
@@ -5105,6 +5135,60 @@ mod tests {
             final_count.load(Ordering::SeqCst),
             1,
             "SessionLocal final completes inline"
+        );
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "SessionLocal must NOT touch the wire"
+        );
+        assert!(
+            session.observer().lock().unwrap().replies.is_empty(),
+            "expected_finals=1 closes the pending entry on the loopback final"
+        );
+    }
+
+    /// R311fq — a SessionLocal get with NO matching local queryable
+    /// still finalises inline with zero replies. This guards the
+    /// invariant the `query-get` / `query-queryable` decoupling relies
+    /// on: the synthetic loopback Final (`deliver_local_final`) lives
+    /// OUTSIDE the `#[cfg(feature = "query-queryable")]` queryable-fan
+    /// block, so a wire-only getter (query-queryable compiled out)
+    /// finalises a SessionLocal get rather than hanging on a Final that
+    /// never fires. Registering no queryable here reproduces the
+    /// zero-reply shape a query-queryable-OFF build always exhibits;
+    /// the OFF-build behavioural twin is the isolated `wz-e2e-zget`
+    /// binary (Layer E2, 0 query-queryable nodes) — a query-queryable-
+    /// OFF UNIT run is blocked until the test-support dev-dep stops
+    /// force-enabling default features (the C1j isolation carry).
+    #[test]
+    fn query_session_local_with_no_queryable_finalises_inline_with_zero_replies() {
+        let (session, driver) = build_session();
+        let reply_count = Arc::new(AtomicUsize::new(0));
+        let final_count = Arc::new(AtomicUsize::new(0));
+
+        let r = reply_count.clone();
+        let f = final_count.clone();
+        let _handle = session.query(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+            move |_reply| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
+            move |_rid| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+
+        assert_eq!(
+            reply_count.load(Ordering::SeqCst),
+            0,
+            "no registered queryable ⇒ zero loopback replies"
+        );
+        assert_eq!(
+            final_count.load(Ordering::SeqCst),
+            1,
+            "synthetic loopback final still fires inline (deliver_local_final \
+             is outside the query-queryable cfg gate)"
         );
         assert_eq!(
             driver.frame_count(),
