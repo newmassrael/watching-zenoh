@@ -14,31 +14,18 @@
 //! directly — no extension-trait split (R311dn-pre lift made this
 //! possible).
 
-use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use hashbrown::HashMap;
 
-use wz_codecs::decl_subscriber::DeclSubscriberOwned;
 use wz_codecs::declare::DeclareOwnedVariant;
-use wz_codecs::undecl_subscriber::UndeclSubscriber;
 
+use crate::decl_sink::{BorrowedDecl, BoxedDeclSink, BoxedUndeclSink, DeclSink, UndeclSink};
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 use crate::keyexpr_match::keyexpr_intersect_patterns;
 use crate::network_message::NetworkMessage;
 use crate::wireexpr_resolve::resolve_wireexpr;
-
-/// Boxed callback invoked when an inbound
-/// `Declare(DeclSubscriber)` is decoded and its keyexpr resolves to a
-/// literal. The callback receives the codec record + the resolved
-/// keyexpr literal so consumers don't have to re-resolve.
-pub type DeclSubscriberCallback = Box<dyn FnMut(&DeclSubscriberOwned, &str) + Send + 'static>;
-
-/// Boxed callback invoked when an inbound
-/// `Declare(UndeclSubscriber)` is decoded. The undeclare body has no
-/// keyexpr field; the peer identifies the prior subscription by `id`.
-pub type UndeclSubscriberCallback = Box<dyn FnMut(&UndeclSubscriber) + Send + 'static>;
 
 /// Application-layer registry tracking the peer's outbound
 /// `DeclSubscriber` / `UndeclSubscriber` records. `!Sync` by
@@ -50,9 +37,13 @@ pub type UndeclSubscriberCallback = Box<dyn FnMut(&UndeclSubscriber) + Send + 's
 /// `on_subscriber_declared` and / or `on_subscriber_undeclared`
 /// callback once at startup; every matching inbound declare fires
 /// every installed callback in registration order.
-pub struct RemoteSubscriberRegistry {
-    on_decl: Vec<DeclSubscriberCallback>,
-    on_undecl: Vec<UndeclSubscriberCallback>,
+pub struct RemoteSubscriberRegistry<D: DeclSink = BoxedDeclSink, U: UndeclSink = BoxedUndeclSink> {
+    /// R311gb-3d — declaration observers (DIP seam). `D = BoxedDeclSink`
+    /// on AP (heap closures), a consumer-supplied closed `enum` on MCU.
+    on_decl: Vec<D>,
+    /// R311gb-3d — undeclaration observers. `U = BoxedUndeclSink` on AP,
+    /// a consumer-supplied closed `enum` on MCU.
+    on_undecl: Vec<U>,
     /// R290 — peer-declared subscribers tracked by `{id -> resolved
     /// keyexpr}`. Pub-side analogue of the `declared` map landed on
     /// [`crate::declare::queryable::RemoteQueryableRegistry`] in R288.
@@ -69,16 +60,23 @@ pub struct RemoteSubscriberRegistry {
     declared: HashMap<u64, String>,
 }
 
-impl Default for RemoteSubscriberRegistry {
+impl<D: DeclSink, U: UndeclSink> Default for RemoteSubscriberRegistry<D, U> {
     fn default() -> Self {
-        Self::new()
+        Self::with_sink_backing()
     }
 }
 
-impl RemoteSubscriberRegistry {
-    /// New empty registry. Both callback lists start empty; an empty
-    /// registry processes inbound `Declare(Decl*)` records as no-ops.
-    pub fn new() -> Self {
+impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
+    /// New empty registry over explicit sink backings `D` / `U`. Both
+    /// observer lists start empty; an empty registry processes inbound
+    /// `Declare(Decl*)` records as no-ops.
+    ///
+    /// R311gb-3d — the generic constructor (the no-`alloc` / MCU entry
+    /// point, paired with [`on_subscriber_declared_sink`](Self::on_subscriber_declared_sink)
+    /// / [`on_subscriber_undeclared_sink`](Self::on_subscriber_undeclared_sink)).
+    /// AP callers use the inferring [`new`](RemoteSubscriberRegistry::new)
+    /// shorthand, which fixes `D = BoxedDeclSink` / `U = BoxedUndeclSink`.
+    pub fn with_sink_backing() -> Self {
         Self {
             on_decl: Vec::new(),
             on_undecl: Vec::new(),
@@ -86,27 +84,22 @@ impl RemoteSubscriberRegistry {
         }
     }
 
-    /// Install a callback fired on every inbound
-    /// `Declare(DeclSubscriber)` whose keyexpr resolves through the
-    /// peer keyexpr table. Duplicate callbacks are explicitly allowed
-    /// (e.g. one for metrics, one for route-table maintenance);
+    /// R311gb-3d — install an explicit [`DeclSink`] observer (the
+    /// seam-native entry point; works on every profile). The `alloc`-only
+    /// [`on_subscriber_declared`](RemoteSubscriberRegistry::on_subscriber_declared)
+    /// convenience wrapper funnels through here after wrapping a closure
+    /// in a [`BoxedDeclSink`]. Duplicate sinks are explicitly allowed;
     /// dispatch fires them in registration order.
-    pub fn on_subscriber_declared(
-        &mut self,
-        callback: impl FnMut(&DeclSubscriberOwned, &str) + Send + 'static,
-    ) {
-        self.on_decl.push(Box::new(callback));
+    pub fn on_subscriber_declared_sink(&mut self, sink: D) {
+        self.on_decl.push(sink);
     }
 
-    /// Install a callback fired on every inbound
-    /// `Declare(UndeclSubscriber)`. Same registration-order +
-    /// duplicates-allowed contract as
-    /// [`Self::on_subscriber_declared`].
-    pub fn on_subscriber_undeclared(
-        &mut self,
-        callback: impl FnMut(&UndeclSubscriber) + Send + 'static,
-    ) {
-        self.on_undecl.push(Box::new(callback));
+    /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
+    /// `alloc`-only
+    /// [`on_subscriber_undeclared`](RemoteSubscriberRegistry::on_subscriber_undeclared)
+    /// convenience wrapper funnels through here.
+    pub fn on_subscriber_undeclared_sink(&mut self, sink: U) {
+        self.on_undecl.push(sink);
     }
 
     /// Number of installed `on_subscriber_declared` callbacks.
@@ -181,8 +174,15 @@ impl RemoteSubscriberRegistry {
                 // Q-side registry: same-id-replaces semantic, no
                 // explicit conflict surfacing.
                 self.declared.insert(decl.id, resolved.clone());
-                for cb in &mut self.on_decl {
-                    cb(decl, &resolved);
+                // R311gb-3d — fan through the DeclSink seam: build the
+                // `(id, resolved-keyexpr)` view once and hand each
+                // observer `&dyn DeclView`.
+                let view = BorrowedDecl {
+                    id: decl.id,
+                    keyexpr: &resolved,
+                };
+                for sink in &mut self.on_decl {
+                    sink.on_declared(&view);
                 }
             }
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl) => {
@@ -191,8 +191,9 @@ impl RemoteSubscriberRegistry {
                 // on_undecl callback chain observes the post-
                 // undeclare state.
                 self.declared.remove(&undecl.id);
-                for cb in &mut self.on_undecl {
-                    cb(undecl);
+                // R311gb-3d — the undeclaration carries only the id.
+                for sink in &mut self.on_undecl {
+                    sink.on_undeclared(undecl.id);
                 }
             }
             // Other sub-variants do not reach this registry.
@@ -230,6 +231,54 @@ impl RemoteSubscriberRegistry {
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
             self.dispatch_messages(messages, peer_keyexpr_table);
         }
+    }
+}
+
+/// R311gb-3d — AP / `alloc`-profile convenience constructors. The
+/// closure-taking `on_subscriber_declared` / `on_subscriber_undeclared`
+/// wrappers live here (on the `BoxedDeclSink` / `BoxedUndeclSink`
+/// instantiation only) because they heap-box the closures; the no-`alloc`
+/// profile installs consumer-supplied sinks through the generic
+/// [`on_subscriber_declared_sink`](RemoteSubscriberRegistry::on_subscriber_declared_sink)
+/// / [`on_subscriber_undeclared_sink`](RemoteSubscriberRegistry::on_subscriber_undeclared_sink)
+/// instead. The whole `declare` module is `codec-declare`-gated; the
+/// `alloc` gate is module-redundant but kept explicit for symmetry with
+/// the sibling seam adapters.
+#[cfg(feature = "alloc")]
+impl RemoteSubscriberRegistry<BoxedDeclSink, BoxedUndeclSink> {
+    /// New empty AP registry backed by heap-boxed closures. The inferring
+    /// shorthand for
+    /// [`with_sink_backing`](RemoteSubscriberRegistry::with_sink_backing):
+    /// `RemoteSubscriberRegistry::new()` fixes `D = BoxedDeclSink` /
+    /// `U = BoxedUndeclSink` so the closure-taking wrappers are in reach
+    /// without a turbofish.
+    pub fn new() -> Self {
+        Self::with_sink_backing()
+    }
+
+    /// Install a closure fired on every inbound `Declare(DeclSubscriber)`
+    /// whose keyexpr resolves through the peer keyexpr table. The closure
+    /// receives `&dyn DeclView` (the peer-declared `id` + resolved
+    /// keyexpr) — the R311gb-3d seam contract replaces the prior
+    /// `(&DeclSubscriberOwned, &str)`; this is the
+    /// [`feedback_signature_stability`] wire-data principled exemption.
+    /// Duplicate callbacks are allowed; dispatch fires them in
+    /// registration order. The closure is heap-boxed via [`BoxedDeclSink`].
+    pub fn on_subscriber_declared(
+        &mut self,
+        callback: impl FnMut(&dyn crate::decl_sink::DeclView) + Send + 'static,
+    ) {
+        self.on_subscriber_declared_sink(BoxedDeclSink::new(callback));
+    }
+
+    /// Install a closure fired on every inbound
+    /// `Declare(UndeclSubscriber)`. The closure receives the bare `id`
+    /// (`u64`) — the undeclaration carries no keyexpr. Same registration-
+    /// order + duplicates-allowed contract as
+    /// [`Self::on_subscriber_declared`]. The closure is heap-boxed via
+    /// [`BoxedUndeclSink`].
+    pub fn on_subscriber_undeclared(&mut self, callback: impl FnMut(u64) + Send + 'static) {
+        self.on_subscriber_undeclared_sink(BoxedUndeclSink::new(callback));
     }
 }
 
@@ -271,11 +320,11 @@ mod tests {
         let mut reg = RemoteSubscriberRegistry::new();
         let captured: Arc<Mutex<Vec<(u64, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_cb = captured.clone();
-        reg.on_subscriber_declared(move |decl, resolved| {
+        reg.on_subscriber_declared(move |decl| {
             captured_for_cb
                 .lock()
                 .unwrap()
-                .push((decl.id, resolved.to_string()));
+                .push((decl.id(), decl.keyexpr().to_string()));
         });
 
         let body =
@@ -292,8 +341,11 @@ mod tests {
         let mut reg = RemoteSubscriberRegistry::new();
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_cb = captured.clone();
-        reg.on_subscriber_declared(move |_decl, resolved| {
-            captured_for_cb.lock().unwrap().push(resolved.to_string());
+        reg.on_subscriber_declared(move |decl| {
+            captured_for_cb
+                .lock()
+                .unwrap()
+                .push(decl.keyexpr().to_string());
         });
 
         let mut peer_table = HashMap::new();
@@ -319,7 +371,7 @@ mod tests {
         let mut reg = RemoteSubscriberRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_for_cb = fired.clone();
-        reg.on_subscriber_declared(move |_decl, _resolved| {
+        reg.on_subscriber_declared(move |_decl| {
             fired_for_cb.fetch_add(1, Ordering::SeqCst);
         });
 
@@ -338,8 +390,8 @@ mod tests {
         let mut reg = RemoteSubscriberRegistry::new();
         let captured: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_cb = captured.clone();
-        reg.on_subscriber_undeclared(move |u| {
-            captured_for_cb.lock().unwrap().push(u.id);
+        reg.on_subscriber_undeclared(move |id| {
+            captured_for_cb.lock().unwrap().push(id);
         });
 
         let body = DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl_subscriber(42));
@@ -355,8 +407,8 @@ mod tests {
         let order: Arc<Mutex<Vec<u32>>> = Arc::new(Mutex::new(Vec::new()));
         let order_a = order.clone();
         let order_b = order.clone();
-        reg.on_subscriber_declared(move |_d, _r| order_a.lock().unwrap().push(1));
-        reg.on_subscriber_declared(move |_d, _r| order_b.lock().unwrap().push(2));
+        reg.on_subscriber_declared(move |_d| order_a.lock().unwrap().push(1));
+        reg.on_subscriber_declared(move |_d| order_b.lock().unwrap().push(2));
         assert_eq!(reg.on_decl_len(), 2);
 
         let body =
@@ -371,8 +423,11 @@ mod tests {
         let mut reg = RemoteSubscriberRegistry::new();
         let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_cb = captured.clone();
-        reg.on_subscriber_declared(move |_d, r| {
-            captured_for_cb.lock().unwrap().push(r.to_string())
+        reg.on_subscriber_declared(move |d| {
+            captured_for_cb
+                .lock()
+                .unwrap()
+                .push(d.keyexpr().to_string())
         });
 
         let body = DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber_nonlocal(
@@ -391,7 +446,7 @@ mod tests {
         let mut reg = RemoteSubscriberRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_for_cb = fired.clone();
-        reg.on_subscriber_declared(move |_d, _r| {
+        reg.on_subscriber_declared(move |_d| {
             fired_for_cb.fetch_add(1, Ordering::SeqCst);
         });
 
@@ -414,7 +469,7 @@ mod tests {
         let mut reg = RemoteSubscriberRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_for_cb = counter.clone();
-        reg.on_subscriber_declared(move |_d, _r| {
+        reg.on_subscriber_declared(move |_d| {
             counter_for_cb.fetch_add(1, Ordering::SeqCst);
         });
 
@@ -438,7 +493,7 @@ mod tests {
         let undecl_count = Arc::new(AtomicUsize::new(0));
         let d = decl_count.clone();
         let u = undecl_count.clone();
-        reg.on_subscriber_declared(move |_d, _r| {
+        reg.on_subscriber_declared(move |_d| {
             d.fetch_add(1, Ordering::SeqCst);
         });
         reg.on_subscriber_undeclared(move |_u| {

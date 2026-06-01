@@ -122,6 +122,16 @@ pub use wz_session_core::query_sink;
 /// owned `&InboundReply`).
 pub use wz_session_core::reply_sink;
 
+/// R311gb-3d — declare-event observer seam: the `DeclView` accessor
+/// contract, the `DeclSink` / `UndeclSink` DIP traits, and the `alloc`
+/// `BoxedDeclSink` / `BoxedUndeclSink` closure adapters. Re-exported so AP
+/// consumers name `crate::decl_sink::DeclView` in the
+/// `on_subscriber_declared` / `on_queryable_declared` / `on_token_declared`
+/// closures (the registries now hand the observer a `&dyn DeclView`
+/// rather than the owned `(&DeclXOwned, &str)`; the undeclare observer
+/// gets the bare `id`).
+pub use wz_session_core::decl_sink;
+
 /// R98 — application-layer subscriber registry. Routes decoded
 /// `NetworkMessage::Push` records to user-registered callbacks
 /// filtered by literal keyexpr. See `pubsub::SubscriberRegistry`

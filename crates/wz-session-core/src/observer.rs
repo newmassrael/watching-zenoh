@@ -600,9 +600,9 @@ mod tests {
         let fired_cb = fired.clone();
         observer
             .remote_subscribers
-            .on_subscriber_declared(move |decl, resolved| {
-                assert_eq!(decl.id, 7);
-                assert_eq!(resolved, "peer/sensor");
+            .on_subscriber_declared(move |decl| {
+                assert_eq!(decl.id(), 7);
+                assert_eq!(decl.keyexpr(), "peer/sensor");
                 fired_cb.fetch_add(1, Ordering::SeqCst);
             });
 
@@ -642,7 +642,7 @@ mod tests {
         let rs = r_sub_fired.clone();
         observer
             .remote_subscribers
-            .on_subscriber_declared(move |_d, _r| {
+            .on_subscriber_declared(move |_d| {
                 rs.fetch_add(1, Ordering::SeqCst);
             });
         let rq = r_q_fired.clone();

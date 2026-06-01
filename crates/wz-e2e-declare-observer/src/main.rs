@@ -80,13 +80,13 @@ fn main() -> ExitCode {
                 .lock()
                 .expect("observer mutex poisoned")
                 .remote_subscribers
-                .on_subscriber_declared(move |decl, resolved| {
+                .on_subscriber_declared(move |decl| {
                     log::info!(
                         "{BINARY}: REMOTE SUBSCRIBER DECLARED observe='{}' \
                          keyexpr='{}' sub_id={}",
                         observe_for_callback,
-                        resolved,
-                        decl.id,
+                        decl.keyexpr(),
+                        decl.id(),
                     );
                 });
             // No RAII handle / wire-emitting Drop: a pure observer holds

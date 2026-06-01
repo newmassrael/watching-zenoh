@@ -99,6 +99,4 @@ pub use wz_session_core::declare::queryable::{
     DeclQueryableCallback, RemoteQueryableRegistry, UndeclQueryableCallback,
 };
 #[cfg(feature = "declare-subscriber")]
-pub use wz_session_core::declare::subscriber::{
-    DeclSubscriberCallback, RemoteSubscriberRegistry, UndeclSubscriberCallback,
-};
+pub use wz_session_core::declare::subscriber::RemoteSubscriberRegistry;

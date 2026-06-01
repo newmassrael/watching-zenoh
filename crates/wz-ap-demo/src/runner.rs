@@ -189,17 +189,17 @@ fn install_observer_callbacks(
     if remote_log_spec.on_remote_subscriber {
         observer_lock
             .remote_subscribers
-            .on_subscriber_declared(|decl, resolved| {
+            .on_subscriber_declared(|decl| {
                 log::info!(
                     "wz-ap-demo: REMOTE SUBSCRIBER DECLARED id={} keyexpr='{}'",
-                    decl.id,
-                    resolved,
+                    decl.id(),
+                    decl.keyexpr(),
                 );
             });
         observer_lock
             .remote_subscribers
-            .on_subscriber_undeclared(|undecl| {
-                log::info!("wz-ap-demo: REMOTE SUBSCRIBER UNDECLARED id={}", undecl.id);
+            .on_subscriber_undeclared(|id| {
+                log::info!("wz-ap-demo: REMOTE SUBSCRIBER UNDECLARED id={id}");
             });
     }
     if remote_log_spec.on_remote_queryable {
