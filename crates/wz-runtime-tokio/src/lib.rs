@@ -98,6 +98,13 @@ pub use wz_session_core::locality;
 // verbatim across the wz-runtime-tokio surface.
 pub use wz_session_core::sample;
 
+/// R311gb-2b — sample-delivery seam (`SampleView` accessor contract +
+/// `SampleSink` DIP trait + the `alloc` `BoxedSink` closure adapter).
+/// Re-exported so AP consumers name `crate::sink::SampleView` in the
+/// `declare_subscriber` closure (the registry now delivers
+/// `&dyn SampleView` rather than the owned `&Sample`).
+pub use wz_session_core::sink;
+
 /// R98 — application-layer subscriber registry. Routes decoded
 /// `NetworkMessage::Push` records to user-registered callbacks
 /// filtered by literal keyexpr. See `pubsub::SubscriberRegistry`

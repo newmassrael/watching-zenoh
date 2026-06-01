@@ -10,6 +10,5 @@
 //! drives the registry with `wz_codecs::push::Push` records).
 
 pub use wz_session_core::pubsub::{
-    keyexpr_intersect_patterns, keyexpr_pattern_matches, SubscriberCallback, SubscriberRegistry,
-    SubscriptionId,
+    keyexpr_intersect_patterns, keyexpr_pattern_matches, SubscriberRegistry, SubscriptionId,
 };

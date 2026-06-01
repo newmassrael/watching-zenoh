@@ -342,9 +342,50 @@ impl crate::sink::SampleView for Sample {
     fn reliability(&self) -> Reliability {
         self.reliability
     }
+    // R311gb-2b — AP keeps full-fidelity field access through the seam:
+    // override every `alloc`-gated rich accessor so a subscriber reading
+    // `&dyn SampleView` sees the same QoS / attachment / timestamp /
+    // encoding / source-info the owned `Sample` projection carries.
+    fn qos(&self) -> Option<QosLevel> {
+        self.qos
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        self.attachment.as_deref()
+    }
+    fn timestamp(&self) -> Option<&TimestampHint> {
+        self.timestamp.as_ref()
+    }
+    fn encoding(&self) -> Option<&EncodingHint> {
+        self.encoding.as_ref()
+    }
+    fn source_info(&self) -> Option<&SourceInfo> {
+        self.source_info.as_ref()
+    }
 }
 
 impl Sample {
+    /// R311gb-2b — materialize a borrowed [`SampleView`](crate::sink::SampleView)
+    /// into an owned retention `Sample` (the AP retention form). Copies
+    /// every field the view exposes; a view carrying no rich metadata
+    /// (the loose-bytes / loopback [`BorrowedSample`](crate::sink::BorrowedSample))
+    /// yields `None` for the optional fields via the trait's default
+    /// accessors. The inverse of dispatching `&Sample as &dyn SampleView`:
+    /// use it when a subscriber must own the sample past the delivery
+    /// call (buffering, deferred processing) rather than read-and-drop.
+    pub fn from_view(view: &dyn crate::sink::SampleView) -> Self {
+        let mut sample = match view.kind() {
+            SampleKind::Put => Self::new_put(view.keyexpr(), view.payload().to_vec()),
+            SampleKind::Del => Self::new_del(view.keyexpr()),
+        };
+        sample.reliability = view.reliability();
+        sample.timestamp = view.timestamp().cloned();
+        sample.encoding = view.encoding().cloned();
+        sample.qos = view.qos();
+        sample.attachment = view.attachment().map(<[u8]>::to_vec);
+        sample.source_info = view.source_info().cloned();
+        sample
+    }
+
     /// Construct a `Sample` carrying Put-kind data with default
     /// (`None` / `Reliable`) metadata fields. Chain `with_*` setters to
     /// attach decoded extension values.

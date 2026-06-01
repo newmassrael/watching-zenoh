@@ -136,6 +136,9 @@ use crate::keyexpr_canon::OutboundKeyexprError;
 use crate::locality::Locality;
 use crate::observer::ApplicationLayerObserver;
 use crate::pubsub::SubscriptionId;
+// R311gb-2b — the subscriber registry now delivers `&dyn SampleView`
+// (the sink seam accessor contract) rather than the owned `&Sample`.
+use crate::sink::SampleView;
 // R311r — `crate::query` is type-ungated; `QueryableId` follows the
 // same shape (always available). `QueryResponder` is the legacy
 // internal type that the R311r ReplyEmitter wraps; it stays imported
@@ -160,9 +163,14 @@ use crate::query_event::{QueryEvent, ReplyEmitter};
 // fall-through). Both signatures stay type-ungated so the imports
 // remain unconditional.
 use crate::reply::{InboundReply, ReplyHandle};
-use crate::sample::{
-    EncodingHint, QosLevel, Reliability, Sample, SampleKind, SourceInfo, TimestampHint,
-};
+use crate::sample::{EncodingHint, QosLevel, Reliability, SampleKind, SourceInfo, TimestampHint};
+// R311gb-2b — `declare_subscriber` no longer names `Sample` (it now
+// takes `impl FnMut(&dyn SampleView)`), so the only remaining uses of
+// the owned `Sample` type are the `pubsub-allow-loop` loopback assembly
+// (`build_loopback_sample`) and the test module. Gate the import to
+// match, keeping a feature-restricted lib build warning-clean.
+#[cfg(any(test, feature = "pubsub-allow-loop"))]
+use crate::sample::Sample;
 #[cfg(feature = "liveliness-token")]
 use crate::session_glue::SendDeclareError;
 use crate::session_glue::{PushMetadata, SessionLinkActions};
@@ -1640,7 +1648,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
         &self,
         keyexpr: impl Into<String>,
         options: SubscribeOptions,
-        callback: impl FnMut(&Sample) + Send + 'static,
+        callback: impl FnMut(&dyn SampleView) + Send + 'static,
     ) -> Subscriber<R, T> {
         let keyexpr_string = keyexpr.into();
         // R311de — observer access via R::with_mutex_mut closure form.
@@ -1685,7 +1693,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
         mapping_id: u64,
         inline_suffix: Option<&str>,
         options: SubscribeOptions,
-        callback: impl FnMut(&Sample) + Send + 'static,
+        callback: impl FnMut(&dyn SampleView) + Send + 'static,
     ) -> Result<Subscriber<R, T>, SubscribeAliasError> {
         let base = self
             .actions
@@ -4071,7 +4079,7 @@ mod tests {
             .unwrap()
             .subscribers
             .register("home/temp", move |sample| {
-                *captured_clone.lock().unwrap() = Some(sample.clone());
+                *captured_clone.lock().unwrap() = Some(Sample::from_view(sample));
             });
 
         let opts = PublishOptions::put()
@@ -4102,7 +4110,7 @@ mod tests {
             .unwrap()
             .subscribers
             .register("home/temp", move |sample| {
-                *captured_clone.lock().unwrap() = Some((sample.kind, sample.payload.clone()));
+                *captured_clone.lock().unwrap() = Some((sample.kind(), sample.payload().to_vec()));
             });
 
         let opts = PublishOptions::del().with_locality(Locality::SessionLocal);
@@ -4361,8 +4369,11 @@ mod tests {
             .unwrap()
             .subscribers
             .register("home/temp", move |sample| {
-                *captured_clone.lock().unwrap() =
-                    Some((sample.kind, sample.payload.clone(), sample.keyexpr.clone()));
+                *captured_clone.lock().unwrap() = Some((
+                    sample.kind(),
+                    sample.payload().to_vec(),
+                    sample.keyexpr().to_string(),
+                ));
             });
 
         let opts = PublishOptions::del();
@@ -4387,7 +4398,7 @@ mod tests {
             .unwrap()
             .subscribers
             .register("home/temp", move |sample| {
-                *captured_clone.lock().unwrap() = Some(sample.reliability);
+                *captured_clone.lock().unwrap() = Some(sample.reliability());
             });
 
         let opts = PublishOptions::put().with_reliability(Reliability::BestEffort);
@@ -4420,7 +4431,7 @@ mod tests {
         session.observer().lock().unwrap().subscribers.register(
             "home/temp/kitchen",
             move |sample| {
-                *captured_clone.lock().unwrap() = Some(sample.keyexpr.clone());
+                *captured_clone.lock().unwrap() = Some(sample.keyexpr().to_string());
             },
         );
 
@@ -4728,7 +4739,7 @@ mod tests {
             .unwrap()
             .subscribers
             .register(pattern, move |s| {
-                captured_clone.lock().unwrap().push(s.clone());
+                captured_clone.lock().unwrap().push(Sample::from_view(s));
             });
         captured
     }
@@ -7019,7 +7030,7 @@ mod tests {
             .unwrap()
             .subscribers
             .register("clear/me", move |sample| {
-                *kind_cb.lock().unwrap() = Some(sample.kind);
+                *kind_cb.lock().unwrap() = Some(sample.kind());
             });
 
         let pubr = session.declare_publisher(
@@ -7144,7 +7155,7 @@ mod tests {
             .unwrap()
             .subscribers
             .register("clear/me", move |sample| {
-                *kind_cb.lock().unwrap() = Some(sample.kind);
+                *kind_cb.lock().unwrap() = Some(sample.kind());
             });
 
         let pa = session.declare_publisher_aliased(

@@ -59,19 +59,31 @@
 //! registry single-owner avoids paying mutex overhead on the hot
 //! dispatch path when no sharing is needed.
 //!
-//! ## Callback lifetime
+//! ## Sample-delivery seam (R311gb-2b — model B)
 //!
-//! Callbacks are `Box<dyn FnMut(&Push) + Send + 'static>` so the
-//! registry can outlive any reference the callback captures
-//! (callbacks must own or `Arc`-share their captured state). `FnMut`
-//! permits closures that mutate captured state (typical counter /
-//! buffer accumulation patterns); `Send` permits the registry to
-//! cross task boundaries when wrapped in `Arc<Mutex<…>>`. The
-//! callback receives the decoded `Push` by reference so the
-//! application can inspect `Push.body` (msg_put / msg_del peek-byte
-//! variant) without taking ownership.
+//! The registry is generic over `C: SampleSink` (the [`crate::sink`]
+//! Dependency-Inversion seam) rather than storing a hard-coded
+//! `Box<dyn FnMut>`, so one registry implementation backs both
+//! profiles (ARCHITECTURE.md §2.4 static-first, dynamic-opt-in):
+//!
+//! - **AP / `alloc` on** — `C = BoxedSink` (the default type param):
+//!   [`register`](SubscriberRegistry::register) wraps an arbitrary
+//!   capturing closure in a heap `Box`, type-erasing differently-
+//!   captured closures behind a homogeneous sink list (the dynamic-
+//!   opt-in side). The closure receives `&dyn SampleView` — the
+//!   accessor contract, a borrowed fat pointer with no heap and no
+//!   copy — so it inspects the resolved keyexpr / kind / payload /
+//!   reliability without taking ownership.
+//! - **MCU / `alloc` off** — the consumer supplies a closed `enum`
+//!   that impls [`SampleSink`] with no heap, registered through the
+//!   generic [`register_sink`](SubscriberRegistry::register_sink).
+//!
+//! Dispatch passes the projected owned [`Sample`] directly as
+//! `&dyn SampleView` (`Sample: SampleView`), so there is no
+//! intermediate projection step. `BoxedSink` is `Send`; callers that
+//! need cross-task sharing wrap the registry in `Arc<Mutex<…>>` as
+//! before.
 
-use alloc::boxed::Box;
 use alloc::string::String;
 #[cfg(any(
     feature = "pubsub-put",
@@ -120,12 +132,14 @@ use crate::sample::EncodingHint;
 use crate::sample::{Reliability, Sample};
 #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
 use crate::sample::{SampleKind, TimestampHint};
-
-/// Boxed callback invoked when a Push message's keyexpr matches a
-/// registered subscriber. R222 — receives `&Sample` (resolved
-/// keyexpr + SampleKind + payload bytes), no longer the raw `&Push`.
-/// See module-level docs for the lifetime and thread-safety contract.
-pub type SubscriberCallback = Box<dyn FnMut(&Sample) + Send + 'static>;
+use crate::sink::{SampleSink, SampleView};
+// R311gb-2b — `BoxedSink` is the default sink type (the AP closure
+// adapter); only needed by the `alloc`-gated `register` /
+// `register_with_locality` convenience wrappers. The whole `pubsub`
+// module is `alloc`-gated, but the import is scoped to the `alloc`
+// feature for symmetry with `sink::BoxedSink`'s own gate.
+#[cfg(feature = "alloc")]
+use crate::sink::BoxedSink;
 
 /// Stable handle returned by `register` so the caller can later
 /// unregister the subscriber without holding a string-typed key
@@ -145,7 +159,7 @@ impl SubscriptionId {
     }
 }
 
-struct Subscriber {
+struct Subscriber<C: SampleSink> {
     id: SubscriptionId,
     /// Pre-split pattern chunks. Empty literal chunks are preserved
     /// so a pattern like `a//b` (which canonical zenoh treats as a
@@ -153,12 +167,14 @@ struct Subscriber {
     /// `*` and `**` appear as single-char chunk entries; matching is
     /// performed by [`keyexpr_pattern_matches`].
     pattern_chunks: Vec<String>,
-    /// R223 — locality filter applied before the callback fires.
+    /// R223 — locality filter applied before the sink fires.
     /// See [`crate::locality`] for the semantics and the wz
     /// dispatch invariant (every inbound Push is treated as remote
     /// until self-publish loopback lands in a future round).
     allowed_origin: crate::locality::Locality,
-    callback: SubscriberCallback,
+    /// R311gb-2b — the delivery sink (DIP seam). `C = BoxedSink` on AP
+    /// (heap closure), a consumer-supplied closed `enum` on MCU.
+    sink: C,
 }
 
 /// R311dn / di-15-pre — keyexpr glob + intersection matchers moved
@@ -174,8 +190,8 @@ pub use crate::keyexpr_match::{keyexpr_intersect_patterns, keyexpr_pattern_match
 /// See module-level docs for scope (Push + DECLARE resolver, R121d).
 /// `!Sync` by construction (no shared mutable state); callers that
 /// need cross-task sharing wrap in `Arc<Mutex<…>>`.
-pub struct SubscriberRegistry {
-    subscribers: Vec<Subscriber>,
+pub struct SubscriberRegistry<C: SampleSink = BoxedSink> {
+    subscribers: Vec<Subscriber<C>>,
     next_id: u64,
     /// R121d — peer-side keyexpr alias table. Populated from
     /// inbound `Declare(DeclKexpr)` records; cleared per-id by
@@ -212,17 +228,25 @@ pub struct SubscriberRegistry {
     own_zid: Option<Vec<u8>>,
 }
 
-impl Default for SubscriberRegistry {
+impl<C: SampleSink> Default for SubscriberRegistry<C> {
     fn default() -> Self {
-        Self::new()
+        Self::with_sink_backing()
     }
 }
 
-impl SubscriberRegistry {
-    /// New empty registry. Subscriber ids start at 1 so 0 stays
-    /// available as a sentinel "no subscription" value for any
-    /// caller-side wrapper that needs one.
-    pub fn new() -> Self {
+impl<C: SampleSink> SubscriberRegistry<C> {
+    /// New empty registry over an explicit sink backing `C`. Subscriber
+    /// ids start at 1 so 0 stays available as a sentinel "no
+    /// subscription" value for any caller-side wrapper that needs one.
+    ///
+    /// R311gb-2b — the generic constructor (the no-`alloc` / MCU entry
+    /// point, paired with [`register_sink`](Self::register_sink)). AP
+    /// callers use the inferring [`new`](SubscriberRegistry::new)
+    /// shorthand, which fixes `C = BoxedSink`; this mirrors the std
+    /// `HashMap::new` (default hasher) vs `with_hasher` split, so a bare
+    /// `SubscriberRegistry::new()` resolves its type parameter without a
+    /// turbofish.
+    pub fn with_sink_backing() -> Self {
         Self {
             subscribers: Vec::new(),
             next_id: 1,
@@ -271,15 +295,23 @@ impl SubscriberRegistry {
         self.own_zid.as_deref()
     }
 
-    /// Register a subscriber for a keyexpr pattern. Pattern syntax
-    /// matches zenoh chunk wildcards: `/`-separated chunks where
-    /// each chunk is a literal, `*` (single chunk), `**` (zero or
-    /// more chunks), or contains the `$*` intra-chunk substring
-    /// wildcard (R220). The returned `SubscriptionId` is stable
-    /// until [`unregister`](Self::unregister) is called. Duplicate
-    /// patterns are allowed and produce distinct subscriptions —
-    /// `dispatch` fires every matching callback in registration
-    /// order.
+    /// R311gb-2b — register an explicit [`SampleSink`] for a keyexpr
+    /// pattern. The seam-native registration entry point: works on
+    /// every profile (`C = BoxedSink` heap closure on AP, a consumer-
+    /// supplied closed `enum` on MCU). The `alloc`-only
+    /// [`register`](Self::register) /
+    /// [`register_with_locality`](Self::register_with_locality)
+    /// convenience wrappers funnel through here after wrapping a
+    /// closure in a [`BoxedSink`].
+    ///
+    /// Pattern syntax matches zenoh chunk wildcards: `/`-separated
+    /// chunks where each chunk is a literal, `*` (single chunk), `**`
+    /// (zero or more chunks), or contains the `$*` intra-chunk
+    /// substring wildcard (R220). The returned `SubscriptionId` is
+    /// stable until [`unregister`](Self::unregister) is called.
+    /// Duplicate patterns are allowed and produce distinct
+    /// subscriptions — `dispatch` fires every matching sink in
+    /// registration order.
     ///
     /// R221 — the pattern is canonicalized via
     /// [`canonize_keyexpr`](crate::keyexpr_canon::canonize_keyexpr)
@@ -290,35 +322,11 @@ impl SubscriberRegistry {
     /// is stored unchanged and a `log::warn!` is emitted — this is
     /// non-breaking with prior callers; promotion to a Result-
     /// returning signature is deferred to the cluster API rewrite.
-    ///
-    /// R223 — defaults [`Locality::Any`](crate::locality::Locality)
-    /// so both session-local and remote-origin samples fire the
-    /// callback. Use [`register_with_locality`](Self::register_with_locality)
-    /// to restrict to one origin class.
-    pub fn register(
-        &mut self,
-        keyexpr_pattern: impl Into<String>,
-        callback: impl FnMut(&Sample) + Send + 'static,
-    ) -> SubscriptionId {
-        self.register_with_locality(keyexpr_pattern, crate::locality::Locality::Any, callback)
-    }
-
-    /// R223 — variant of [`register`](Self::register) that pins the
-    /// locality filter explicitly. Stores `allowed_origin` on the
-    /// subscriber record; [`dispatch_push`](Self::dispatch_push)
-    /// consults the filter before firing the callback.
-    ///
-    /// wz today treats every Push reaching `dispatch_push` as
-    /// remote (no self-publish loopback). So a
-    /// [`Locality::SessionLocal`](crate::locality::Locality)
-    /// subscription registered now will not fire until a future
-    /// round wires up loopback; this is the correct
-    /// surface-mirrors-zenoh-pico shape, not a bug.
-    pub fn register_with_locality(
+    pub fn register_sink(
         &mut self,
         keyexpr_pattern: impl Into<String>,
         allowed_origin: crate::locality::Locality,
-        callback: impl FnMut(&Sample) + Send + 'static,
+        sink: C,
     ) -> SubscriptionId {
         let id = SubscriptionId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
@@ -339,7 +347,7 @@ impl SubscriberRegistry {
             id,
             pattern_chunks,
             allowed_origin,
-            callback: Box::new(callback),
+            sink,
         });
         id
     }
@@ -761,7 +769,10 @@ impl SubscriberRegistry {
                 .map(String::as_str)
                 .collect();
             if keyexpr_pattern_matches(&chunks, &sample.keyexpr) {
-                (subscriber.callback)(sample);
+                // R311gb-2b — deliver via the DIP seam. The owned
+                // `Sample` impls `SampleView`, so `&Sample` coerces to
+                // `&dyn SampleView` with no projection step.
+                subscriber.sink.deliver(sample);
                 fired = fired.saturating_add(1);
             }
         }
@@ -889,6 +900,66 @@ impl SubscriberRegistry {
                 None => base,
             })
         }
+    }
+}
+
+/// R311gb-2b — AP / `alloc`-profile convenience constructors. The
+/// closure-taking `register` / `register_with_locality` wrappers live
+/// here (on the `BoxedSink` instantiation only) because they heap-box
+/// the closure via [`BoxedSink`]; the no-`alloc` profile registers a
+/// consumer-supplied sink through the generic
+/// [`register_sink`](SubscriberRegistry::register_sink) instead.
+#[cfg(feature = "alloc")]
+impl SubscriberRegistry<BoxedSink> {
+    /// New empty AP registry backed by heap-boxed closures
+    /// ([`BoxedSink`]). The inferring shorthand for
+    /// [`with_sink_backing`](SubscriberRegistry::with_sink_backing):
+    /// `SubscriberRegistry::new()` fixes `C = BoxedSink` so the
+    /// closure-taking [`register`](Self::register) /
+    /// [`register_with_locality`](Self::register_with_locality) wrappers
+    /// are in reach without a turbofish.
+    pub fn new() -> Self {
+        Self::with_sink_backing()
+    }
+
+    /// Register a subscriber closure for a keyexpr pattern. The
+    /// closure receives `&dyn SampleView` — the resolved keyexpr,
+    /// SampleKind, payload bytes, and reliability (R311gb-2b: the seam
+    /// accessor contract replaces the prior owned `&Sample`; this is
+    /// the [`feedback_signature_stability`] wire-data principled
+    /// exemption, taken so one registry backs both heap and no-heap
+    /// profiles). The closure is heap-boxed via [`BoxedSink`].
+    ///
+    /// R223 — defaults [`Locality::Any`](crate::locality::Locality)
+    /// so both session-local and remote-origin samples fire the
+    /// closure. Use [`register_with_locality`](Self::register_with_locality)
+    /// to restrict to one origin class.
+    pub fn register(
+        &mut self,
+        keyexpr_pattern: impl Into<String>,
+        callback: impl FnMut(&dyn SampleView) + Send + 'static,
+    ) -> SubscriptionId {
+        self.register_with_locality(keyexpr_pattern, crate::locality::Locality::Any, callback)
+    }
+
+    /// R223 — variant of [`register`](Self::register) that pins the
+    /// locality filter explicitly. Stores `allowed_origin` on the
+    /// subscriber record; [`dispatch_push`](Self::dispatch_push)
+    /// consults the filter before firing the closure.
+    ///
+    /// wz today treats every Push reaching `dispatch_push` as
+    /// remote (no self-publish loopback). So a
+    /// [`Locality::SessionLocal`](crate::locality::Locality)
+    /// subscription registered now will not fire until a future
+    /// round wires up loopback; this is the correct
+    /// surface-mirrors-zenoh-pico shape, not a bug.
+    pub fn register_with_locality(
+        &mut self,
+        keyexpr_pattern: impl Into<String>,
+        allowed_origin: crate::locality::Locality,
+        callback: impl FnMut(&dyn SampleView) + Send + 'static,
+    ) -> SubscriptionId {
+        self.register_sink(keyexpr_pattern, allowed_origin, BoxedSink::new(callback))
     }
 }
 
@@ -1060,7 +1131,7 @@ mod tests {
         let captured = Arc::new(std::sync::Mutex::new(None::<Reliability>));
         let captured_clone = captured.clone();
         registry.register("topic/a", move |sample| {
-            *captured_clone.lock().unwrap() = Some(sample.reliability);
+            *captured_clone.lock().unwrap() = Some(sample.reliability());
         });
         let push = push_with_keyexpr("topic/a");
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
@@ -1073,7 +1144,7 @@ mod tests {
         let captured = Arc::new(std::sync::Mutex::new(None::<Reliability>));
         let captured_clone = captured.clone();
         registry.register("topic/a", move |sample| {
-            *captured_clone.lock().unwrap() = Some(sample.reliability);
+            *captured_clone.lock().unwrap() = Some(sample.reliability());
         });
         let push = push_with_keyexpr("topic/a");
         registry.dispatch(
@@ -1090,7 +1161,7 @@ mod tests {
         let captured = Arc::new(std::sync::Mutex::new(None::<Reliability>));
         let captured_clone = captured.clone();
         registry.register("topic/a", move |sample| {
-            *captured_clone.lock().unwrap() = Some(sample.reliability);
+            *captured_clone.lock().unwrap() = Some(sample.reliability());
         });
         let push = push_with_keyexpr("topic/a");
         let outcome = DriverLoopOutcome::FramePayload {
@@ -1865,7 +1936,7 @@ mod tests {
         let captured = Arc::new(Mutex::new(None::<crate::sample::Sample>));
         let captured_clone = captured.clone();
         registry.register("home/temp", move |sample| {
-            *captured_clone.lock().unwrap() = Some(sample.clone());
+            *captured_clone.lock().unwrap() = Some(Sample::from_view(sample));
         });
 
         let push = push_with_payload("home/temp", b"23.5");
@@ -1885,7 +1956,7 @@ mod tests {
         let captured = Arc::new(Mutex::new(None::<crate::sample::Sample>));
         let captured_clone = captured.clone();
         registry.register("clear/me", move |sample| {
-            *captured_clone.lock().unwrap() = Some(sample.clone());
+            *captured_clone.lock().unwrap() = Some(Sample::from_view(sample));
         });
 
         let push = push_with_del_body("clear/me");
@@ -1911,7 +1982,7 @@ mod tests {
         let captured = Arc::new(Mutex::new(None::<String>));
         let captured_clone = captured.clone();
         registry.register("sensors/**", move |sample| {
-            *captured_clone.lock().unwrap() = Some(sample.keyexpr.clone());
+            *captured_clone.lock().unwrap() = Some(sample.keyexpr().to_string());
         });
 
         registry.dispatch(
@@ -2542,7 +2613,7 @@ mod tests {
         let observed = Arc::new(std::sync::Mutex::new(None::<Sample>));
         let observed_clone = observed.clone();
         registry.register("home/temp", move |sample| {
-            *observed_clone.lock().unwrap() = Some(sample.clone());
+            *observed_clone.lock().unwrap() = Some(Sample::from_view(sample));
         });
 
         let sample = Sample::new_put("home/temp", b"payload".to_vec())
@@ -2575,8 +2646,8 @@ mod tests {
         let observed = Arc::new(std::sync::Mutex::new(None::<SampleKind>));
         let observed_clone = observed.clone();
         registry.register("home/temp", move |sample| {
-            *observed_clone.lock().unwrap() = Some(sample.kind);
-            assert!(sample.payload.is_empty(), "Del Sample carries no payload");
+            *observed_clone.lock().unwrap() = Some(sample.kind());
+            assert!(sample.payload().is_empty(), "Del Sample carries no payload");
         });
 
         let sample = Sample::new_del("home/temp");

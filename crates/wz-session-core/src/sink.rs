@@ -54,10 +54,16 @@ use crate::sample_kind::SampleKind;
 /// return borrows tied to the source, so delivery stays heap-free and
 /// copy-free.
 ///
-/// Carries the routing-essential accessors only (resolved keyexpr
-/// literal, payload bytes); richer `Copy` accessors (sample kind,
-/// timestamp / encoding hints) join this contract — and every impl in
-/// lockstep — as the registry migration wires them.
+/// The four routing-essential accessors (resolved keyexpr literal,
+/// payload bytes, Put/Del kind, link-layer reliability) are
+/// unconditional — every profile reads them. The five richer
+/// metadata accessors (QoS, attachment, timestamp, encoding,
+/// source-info) are `alloc`-gated provided methods that default to
+/// `None`: their return types live in the `alloc`-gated
+/// [`crate::sample`] module, and a no-`alloc` MCU profile carries no
+/// such metadata. The AP [`crate::sample::Sample`] overrides all five
+/// so an AP subscriber keeps full-fidelity field access through the
+/// seam; the loose-bytes [`BorrowedSample`] keeps the `None` defaults.
 pub trait SampleView {
     /// Resolved keyexpr literal (peer DECLARE table lookup already applied).
     fn keyexpr(&self) -> &str;
@@ -67,6 +73,35 @@ pub trait SampleView {
     fn kind(&self) -> SampleKind;
     /// Link-layer reliability classification of the carrying frame.
     fn reliability(&self) -> Reliability;
+
+    /// QoS level decoded from the Push outer extension chain, if any.
+    /// `alloc`-only (the type lives in the `alloc`-gated `sample`
+    /// module); defaults to `None` for views carrying no QoS.
+    #[cfg(feature = "alloc")]
+    fn qos(&self) -> Option<crate::sample::QosLevel> {
+        None
+    }
+    /// Body-level attachment blob, if present. Defaults to `None`.
+    #[cfg(feature = "alloc")]
+    fn attachment(&self) -> Option<&[u8]> {
+        None
+    }
+    /// Body-level timestamp hint, if present. Defaults to `None`.
+    #[cfg(feature = "alloc")]
+    fn timestamp(&self) -> Option<&crate::sample::TimestampHint> {
+        None
+    }
+    /// Body-level encoding hint (Put-only on the wire), if present.
+    /// Defaults to `None`.
+    #[cfg(feature = "alloc")]
+    fn encoding(&self) -> Option<&crate::sample::EncodingHint> {
+        None
+    }
+    /// Body-level source identification, if present. Defaults to `None`.
+    #[cfg(feature = "alloc")]
+    fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
+        None
+    }
 }
 
 /// A [`SampleView`] over loose borrowed bytes — the canonical impl for a

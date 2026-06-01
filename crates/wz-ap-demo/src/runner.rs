@@ -314,16 +314,17 @@ fn install_session_handles(
     let subscriber = key.map(|filter| {
         let key_for_callback = filter.clone();
         session.declare_subscriber(filter, SubscribeOptions::default(), move |sample| {
-            // R222 — Sample carries the resolved keyexpr literal +
-            // the SampleKind discriminant + payload bytes directly,
-            // so the prior `match push.keyexpr.body` + tagged-union
-            // arm extraction is no longer required at the call site.
+            // R311gb-2b — the registry delivers `&dyn SampleView` (the
+            // sink seam accessor contract); read keyexpr / kind /
+            // payload through the accessor methods. R222 had already
+            // collapsed the prior `match push.keyexpr.body` tagged-union
+            // arm extraction, so the call site stays a flat read.
             log::info!(
                 "wz-ap-demo: SUBSCRIBER FIRED filter='{}' keyexpr='{}' kind={:?} payload_len={}",
                 key_for_callback,
-                sample.keyexpr,
-                sample.kind,
-                sample.payload.len(),
+                sample.keyexpr(),
+                sample.kind(),
+                sample.payload().len(),
             );
         })
     });
