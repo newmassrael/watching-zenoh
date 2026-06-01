@@ -646,13 +646,11 @@ mod tests {
                 rs.fetch_add(1, Ordering::SeqCst);
             });
         let rq = r_q_fired.clone();
-        observer
-            .remote_queryables
-            .on_queryable_declared(move |_d, _r| {
-                rq.fetch_add(1, Ordering::SeqCst);
-            });
+        observer.remote_queryables.on_queryable_declared(move |_d| {
+            rq.fetch_add(1, Ordering::SeqCst);
+        });
         let l = l_fired.clone();
-        observer.liveliness.on_token_declared(move |_d, _r| {
+        observer.liveliness.on_token_declared(move |_d| {
             l.fetch_add(1, Ordering::SeqCst);
         });
 

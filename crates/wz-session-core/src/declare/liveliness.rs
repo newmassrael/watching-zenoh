@@ -7,34 +7,17 @@
 //! (`_z_liveliness_process_token_declare` /
 //! `_z_liveliness_process_token_undeclare` upstream).
 
-use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use hashbrown::HashMap;
 
-use wz_codecs::decl_token::DeclTokenOwned;
 use wz_codecs::declare::DeclareOwnedVariant;
-use wz_codecs::undecl_token::UndeclToken;
 
+use crate::decl_sink::{BorrowedDecl, BoxedDeclSink, BoxedUndeclSink, DeclSink, UndeclSink};
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 use crate::network_message::NetworkMessage;
 use crate::wireexpr_resolve::resolve_wireexpr;
-
-/// Boxed callback invoked when an inbound `Declare(DeclToken)` is
-/// decoded and its keyexpr resolves to a literal. Liveliness signal —
-/// "an entity (process / device / sub-system) just declared itself
-/// alive on keyexpr X". Consumers wire this into watchdog or
-/// presence-detection logic, e.g. a UI that surfaces "online" badges.
-pub type DeclTokenCallback = Box<dyn FnMut(&DeclTokenOwned, &str) + Send + 'static>;
-
-/// Boxed callback invoked when an inbound `Declare(UndeclToken)` is
-/// decoded. The undeclare body carries only `id: u64`; the peer
-/// identifies the prior liveliness token by the same id used in its
-/// earlier `DeclToken`. Liveliness signal — "the entity that was
-/// alive on keyexpr X is now gone (graceful undeclare; lease-based
-/// expiry surfaces separately through the session FSM)".
-pub type UndeclTokenCallback = Box<dyn FnMut(&UndeclToken) + Send + 'static>;
 
 /// Application-layer registry tracking the peer's outbound
 /// `DeclToken` / `UndeclToken` records — the liveliness layer in
@@ -48,43 +31,50 @@ pub type UndeclTokenCallback = Box<dyn FnMut(&UndeclToken) + Send + 'static>;
 /// "process X just subscribed to Y". Keeping the registries split
 /// matches zenoh-pico's structural separation and lets consumers
 /// reason about each surface independently.
-pub struct LivelinessRegistry {
-    on_decl: Vec<DeclTokenCallback>,
-    on_undecl: Vec<UndeclTokenCallback>,
+pub struct LivelinessRegistry<D: DeclSink = BoxedDeclSink, U: UndeclSink = BoxedUndeclSink> {
+    /// R311gb-3d — token-declaration observers (DIP seam); `D =
+    /// BoxedDeclSink` on AP, a consumer-supplied closed `enum` on MCU.
+    on_decl: Vec<D>,
+    /// R311gb-3d — token-undeclaration observers; `U = BoxedUndeclSink`
+    /// on AP.
+    on_undecl: Vec<U>,
 }
 
-impl Default for LivelinessRegistry {
+impl<D: DeclSink, U: UndeclSink> Default for LivelinessRegistry<D, U> {
     fn default() -> Self {
-        Self::new()
+        Self::with_sink_backing()
     }
 }
 
-impl LivelinessRegistry {
-    /// New empty registry. Both callback lists start empty; an empty
-    /// registry processes inbound `Declare(Decl*Token)` records as
-    /// no-ops.
-    pub fn new() -> Self {
+impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
+    /// New empty registry over explicit sink backings `D` / `U`. Both
+    /// observer lists start empty; an empty registry processes inbound
+    /// `Declare(Decl*Token)` records as no-ops.
+    ///
+    /// R311gb-3d — the generic constructor (no-`alloc` / MCU entry point,
+    /// paired with the `*_sink` installers). AP callers use the inferring
+    /// [`new`](LivelinessRegistry::new) shorthand.
+    pub fn with_sink_backing() -> Self {
         Self {
             on_decl: Vec::new(),
             on_undecl: Vec::new(),
         }
     }
 
-    /// Install a callback fired on every inbound
-    /// `Declare(DeclToken)` whose keyexpr resolves through the peer
-    /// keyexpr table. Duplicate callbacks allowed; dispatch fires
-    /// them in registration order.
-    pub fn on_token_declared(
-        &mut self,
-        callback: impl FnMut(&DeclTokenOwned, &str) + Send + 'static,
-    ) {
-        self.on_decl.push(Box::new(callback));
+    /// R311gb-3d — install an explicit [`DeclSink`] observer (the
+    /// seam-native entry point). The `alloc`-only
+    /// [`on_token_declared`](LivelinessRegistry::on_token_declared)
+    /// convenience wrapper funnels through here.
+    pub fn on_token_declared_sink(&mut self, sink: D) {
+        self.on_decl.push(sink);
     }
 
-    /// Install a callback fired on every inbound
-    /// `Declare(UndeclToken)`.
-    pub fn on_token_undeclared(&mut self, callback: impl FnMut(&UndeclToken) + Send + 'static) {
-        self.on_undecl.push(Box::new(callback));
+    /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
+    /// `alloc`-only
+    /// [`on_token_undeclared`](LivelinessRegistry::on_token_undeclared)
+    /// convenience wrapper funnels through here.
+    pub fn on_token_undeclared_sink(&mut self, sink: U) {
+        self.on_undecl.push(sink);
     }
 
     /// Number of installed `on_token_declared` callbacks.
@@ -112,13 +102,19 @@ impl LivelinessRegistry {
                     Some(s) => s,
                     None => return,
                 };
-                for cb in &mut self.on_decl {
-                    cb(decl, &resolved);
+                // R311gb-3d — fan through the DeclSink seam.
+                let view = BorrowedDecl {
+                    id: decl.id,
+                    keyexpr: &resolved,
+                };
+                for sink in &mut self.on_decl {
+                    sink.on_declared(&view);
                 }
             }
             DeclareOwnedVariant::CodecZenohUndeclToken(undecl) => {
-                for cb in &mut self.on_undecl {
-                    cb(undecl);
+                // R311gb-3d — the undeclaration carries only the id.
+                for sink in &mut self.on_undecl {
+                    sink.on_undeclared(undecl.id);
                 }
             }
             // Other sub-variants do not reach this registry.
@@ -148,6 +144,40 @@ impl LivelinessRegistry {
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
             self.dispatch_messages(messages, peer_keyexpr_table);
         }
+    }
+}
+
+/// R311gb-3d — AP / `alloc`-profile convenience constructors (the
+/// `BoxedDeclSink` / `BoxedUndeclSink` instantiation only). Mirror of the
+/// subscriber / queryable blocks; the no-`alloc` profile installs
+/// consumer-supplied sinks through the generic `*_sink` installers.
+#[cfg(feature = "alloc")]
+impl LivelinessRegistry<BoxedDeclSink, BoxedUndeclSink> {
+    /// New empty AP registry backed by heap-boxed closures. Inferring
+    /// shorthand for
+    /// [`with_sink_backing`](LivelinessRegistry::with_sink_backing).
+    pub fn new() -> Self {
+        Self::with_sink_backing()
+    }
+
+    /// Install a closure fired on every inbound `Declare(DeclToken)` whose
+    /// keyexpr resolves. The closure receives `&dyn DeclView` (the peer-
+    /// declared `id` + resolved keyexpr) — the R311gb-3d seam contract
+    /// replaces the prior `(&DeclTokenOwned, &str)`
+    /// ([`feedback_signature_stability`] wire-data exemption). Heap-boxed
+    /// via [`BoxedDeclSink`].
+    pub fn on_token_declared(
+        &mut self,
+        callback: impl FnMut(&dyn crate::decl_sink::DeclView) + Send + 'static,
+    ) {
+        self.on_token_declared_sink(BoxedDeclSink::new(callback));
+    }
+
+    /// Install a closure fired on every inbound `Declare(UndeclToken)`.
+    /// The closure receives the bare `id` (`u64`). Heap-boxed via
+    /// [`BoxedUndeclSink`].
+    pub fn on_token_undeclared(&mut self, callback: impl FnMut(u64) + Send + 'static) {
+        self.on_token_undeclared_sink(BoxedUndeclSink::new(callback));
     }
 }
 
@@ -193,8 +223,8 @@ mod tests {
     #[test]
     fn on_token_declared_increments_declare_count() {
         let mut reg = LivelinessRegistry::new();
-        reg.on_token_declared(|_d, _r| {});
-        reg.on_token_declared(|_d, _r| {});
+        reg.on_token_declared(|_d| {});
+        reg.on_token_declared(|_d| {});
         assert_eq!(reg.on_decl_len(), 2);
         assert_eq!(reg.on_undecl_len(), 0);
     }
@@ -236,11 +266,11 @@ mod tests {
         let mut reg = LivelinessRegistry::new();
         let captured: Arc<Mutex<Vec<(u64, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_cb = captured.clone();
-        reg.on_token_declared(move |decl, resolved| {
+        reg.on_token_declared(move |decl| {
             captured_for_cb
                 .lock()
                 .unwrap()
-                .push((decl.id, resolved.to_string()));
+                .push((decl.id(), decl.keyexpr().to_string()));
         });
         let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token(
             11,
@@ -259,8 +289,8 @@ mod tests {
         let mut reg = LivelinessRegistry::new();
         let captured: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_cb = captured.clone();
-        reg.on_token_undeclared(move |u| {
-            captured_for_cb.lock().unwrap().push(u.id);
+        reg.on_token_undeclared(move |id| {
+            captured_for_cb.lock().unwrap().push(id);
         });
         let body = DeclareOwnedVariant::CodecZenohUndeclToken(undecl_token(11));
         reg.dispatch_declare(&body, &HashMap::new());
@@ -272,7 +302,7 @@ mod tests {
         let mut reg = LivelinessRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_for_cb = fired.clone();
-        reg.on_token_declared(move |_d, _r| {
+        reg.on_token_declared(move |_d| {
             fired_for_cb.fetch_add(1, Ordering::SeqCst);
         });
         let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token(1, 55, None));
@@ -291,7 +321,7 @@ mod tests {
         let undecl_count = Arc::new(AtomicUsize::new(0));
         let d = decl_count.clone();
         let u = undecl_count.clone();
-        reg.on_token_declared(move |_d, _r| {
+        reg.on_token_declared(move |_d| {
             d.fetch_add(1, Ordering::SeqCst);
         });
         reg.on_token_undeclared(move |_u| {
@@ -321,7 +351,7 @@ mod tests {
         let mut reg = LivelinessRegistry::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_for_cb = counter.clone();
-        reg.on_token_declared(move |_d, _r| {
+        reg.on_token_declared(move |_d| {
             counter_for_cb.fetch_add(1, Ordering::SeqCst);
         });
 

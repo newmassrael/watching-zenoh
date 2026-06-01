@@ -205,17 +205,17 @@ fn install_observer_callbacks(
     if remote_log_spec.on_remote_queryable {
         observer_lock
             .remote_queryables
-            .on_queryable_declared(|decl, resolved| {
+            .on_queryable_declared(|decl| {
                 log::info!(
                     "wz-ap-demo: REMOTE QUERYABLE DECLARED id={} keyexpr='{}'",
-                    decl.id,
-                    resolved,
+                    decl.id(),
+                    decl.keyexpr(),
                 );
             });
         observer_lock
             .remote_queryables
-            .on_queryable_undeclared(|undecl| {
-                log::info!("wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={}", undecl.id);
+            .on_queryable_undeclared(|id| {
+                log::info!("wz-ap-demo: REMOTE QUERYABLE UNDECLARED id={id}");
             });
     }
     if query_spec.is_some() && (reply_log_spec.on_query_reply || reply_log_spec.on_query_final) {
@@ -262,17 +262,15 @@ fn install_observer_callbacks(
         );
     }
     if remote_log_spec.on_remote_liveliness {
-        observer_lock
-            .liveliness
-            .on_token_declared(|decl, resolved| {
-                log::info!(
-                    "wz-ap-demo: REMOTE TOKEN DECLARED id={} keyexpr='{}'",
-                    decl.id,
-                    resolved,
-                );
-            });
-        observer_lock.liveliness.on_token_undeclared(|undecl| {
-            log::info!("wz-ap-demo: REMOTE TOKEN UNDECLARED id={}", undecl.id);
+        observer_lock.liveliness.on_token_declared(|decl| {
+            log::info!(
+                "wz-ap-demo: REMOTE TOKEN DECLARED id={} keyexpr='{}'",
+                decl.id(),
+                decl.keyexpr(),
+            );
+        });
+        observer_lock.liveliness.on_token_undeclared(|id| {
+            log::info!("wz-ap-demo: REMOTE TOKEN UNDECLARED id={id}");
         });
     }
     // observer_lock drops here; subsequent users (drive_session

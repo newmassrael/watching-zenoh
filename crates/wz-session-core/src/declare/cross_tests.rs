@@ -50,7 +50,7 @@ fn subscriber_and_queryable_registries_share_a_message_stream() {
     sub_reg.on_subscriber_declared(move |_d| {
         s.fetch_add(1, Ordering::SeqCst);
     });
-    q_reg.on_queryable_declared(move |_d, _r| {
+    q_reg.on_queryable_declared(move |_d| {
         q.fetch_add(1, Ordering::SeqCst);
     });
 
@@ -96,10 +96,10 @@ fn three_registries_share_a_message_stream_independently() {
     sub_reg.on_subscriber_declared(move |_d| {
         s_cb.fetch_add(1, Ordering::SeqCst);
     });
-    q_reg.on_queryable_declared(move |_d, _r| {
+    q_reg.on_queryable_declared(move |_d| {
         q_cb.fetch_add(1, Ordering::SeqCst);
     });
-    l_reg.on_token_declared(move |_d, _r| {
+    l_reg.on_token_declared(move |_d| {
         l_cb.fetch_add(1, Ordering::SeqCst);
     });
 

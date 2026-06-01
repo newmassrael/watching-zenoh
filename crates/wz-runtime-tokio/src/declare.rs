@@ -77,9 +77,7 @@
 // behaviour the `#[cfg] mod X;` gate provided before (R310).
 
 #[cfg(feature = "liveliness-token")]
-pub use wz_session_core::declare::liveliness::{
-    DeclTokenCallback, LivelinessRegistry, UndeclTokenCallback,
-};
+pub use wz_session_core::declare::liveliness::LivelinessRegistry;
 // R311ek — the codec-agnostic liveliness sample types are always
 // re-exported (they live in the always-present
 // `declare::liveliness_sample` module) so the Result-form
@@ -95,8 +93,6 @@ pub use wz_session_core::declare::liveliness_sample::{
 #[cfg(feature = "liveliness-subscriber")]
 pub use wz_session_core::declare::liveliness_subscriber::LivelinessSubscriberRegistry;
 #[cfg(feature = "declare-queryable")]
-pub use wz_session_core::declare::queryable::{
-    DeclQueryableCallback, RemoteQueryableRegistry, UndeclQueryableCallback,
-};
+pub use wz_session_core::declare::queryable::RemoteQueryableRegistry;
 #[cfg(feature = "declare-subscriber")]
 pub use wz_session_core::declare::subscriber::RemoteSubscriberRegistry;

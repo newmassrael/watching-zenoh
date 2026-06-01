@@ -12,35 +12,18 @@
 //! [`crate::keyexpr_match::keyexpr_intersect_patterns`] directly —
 //! no extension-trait split (R311dn-pre lift made this possible).
 
-use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use hashbrown::HashMap;
 
-use wz_codecs::decl_queryable::DeclQueryableOwned;
 use wz_codecs::declare::DeclareOwnedVariant;
-use wz_codecs::undecl_queryable::UndeclQueryable;
 
+use crate::decl_sink::{BorrowedDecl, BoxedDeclSink, BoxedUndeclSink, DeclSink, UndeclSink};
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 use crate::keyexpr_match::keyexpr_intersect_patterns;
 use crate::network_message::NetworkMessage;
 use crate::wireexpr_resolve::resolve_wireexpr;
-
-/// Boxed callback invoked when an inbound
-/// `Declare(DeclQueryable)` is decoded and its keyexpr resolves to a
-/// literal. Same shape as the subscriber-side callback — the codec
-/// records carry identical field layout (header / id / keyexpr) and
-/// the application-level "peer declared a queryable on this keyexpr"
-/// signal mirrors the subscriber surface; consumers may install a
-/// queryable-side counterpart of every subscriber-side hook (metrics,
-/// route table, debug log).
-pub type DeclQueryableCallback = Box<dyn FnMut(&DeclQueryableOwned, &str) + Send + 'static>;
-
-/// Boxed callback invoked when an inbound
-/// `Declare(UndeclQueryable)` is decoded. The undeclare body has no
-/// keyexpr field; the peer identifies the prior queryable by `id`.
-pub type UndeclQueryableCallback = Box<dyn FnMut(&UndeclQueryable) + Send + 'static>;
 
 /// Application-layer registry tracking the peer's outbound
 /// `DeclQueryable` / `UndeclQueryable` records. Q-side mirror of
@@ -58,9 +41,12 @@ pub type UndeclQueryableCallback = Box<dyn FnMut(&UndeclQueryable) + Send + 'sta
 /// boundary that matches zenoh-pico's
 /// `Z_FEATURE_SUBSCRIPTION` vs `Z_FEATURE_QUERYABLE` compile-time
 /// feature split.
-pub struct RemoteQueryableRegistry {
-    on_decl: Vec<DeclQueryableCallback>,
-    on_undecl: Vec<UndeclQueryableCallback>,
+pub struct RemoteQueryableRegistry<D: DeclSink = BoxedDeclSink, U: UndeclSink = BoxedUndeclSink> {
+    /// R311gb-3d — declaration observers (DIP seam); `D = BoxedDeclSink`
+    /// on AP, a consumer-supplied closed `enum` on MCU.
+    on_decl: Vec<D>,
+    /// R311gb-3d — undeclaration observers; `U = BoxedUndeclSink` on AP.
+    on_undecl: Vec<U>,
     /// R288 — peer-declared queryables tracked by `{id -> resolved
     /// keyexpr}`. Populated on every inbound `DeclQueryable` whose
     /// keyexpr resolves through `peer_keyexpr_table`, and entries
@@ -77,17 +63,22 @@ pub struct RemoteQueryableRegistry {
     declared: HashMap<u64, String>,
 }
 
-impl Default for RemoteQueryableRegistry {
+impl<D: DeclSink, U: UndeclSink> Default for RemoteQueryableRegistry<D, U> {
     fn default() -> Self {
-        Self::new()
+        Self::with_sink_backing()
     }
 }
 
-impl RemoteQueryableRegistry {
-    /// New empty registry. Both callback lists start empty; an empty
-    /// registry processes inbound `Declare(Decl*Queryable)` records
-    /// as no-ops.
-    pub fn new() -> Self {
+impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
+    /// New empty registry over explicit sink backings `D` / `U`. Both
+    /// observer lists start empty; an empty registry processes inbound
+    /// `Declare(Decl*Queryable)` records as no-ops.
+    ///
+    /// R311gb-3d — the generic constructor (no-`alloc` / MCU entry point,
+    /// paired with the `*_sink` installers). AP callers use the inferring
+    /// [`new`](RemoteQueryableRegistry::new) shorthand, which fixes
+    /// `D = BoxedDeclSink` / `U = BoxedUndeclSink`.
+    pub fn with_sink_backing() -> Self {
         Self {
             on_decl: Vec::new(),
             on_undecl: Vec::new(),
@@ -95,24 +86,21 @@ impl RemoteQueryableRegistry {
         }
     }
 
-    /// Install a callback fired on every inbound
-    /// `Declare(DeclQueryable)` whose keyexpr resolves through the
-    /// peer keyexpr table. Duplicate callbacks allowed; dispatch
-    /// fires them in registration order.
-    pub fn on_queryable_declared(
-        &mut self,
-        callback: impl FnMut(&DeclQueryableOwned, &str) + Send + 'static,
-    ) {
-        self.on_decl.push(Box::new(callback));
+    /// R311gb-3d — install an explicit [`DeclSink`] observer (the
+    /// seam-native entry point; works on every profile). The `alloc`-only
+    /// [`on_queryable_declared`](RemoteQueryableRegistry::on_queryable_declared)
+    /// convenience wrapper funnels through here. Duplicate sinks allowed;
+    /// dispatch fires them in registration order.
+    pub fn on_queryable_declared_sink(&mut self, sink: D) {
+        self.on_decl.push(sink);
     }
 
-    /// Install a callback fired on every inbound
-    /// `Declare(UndeclQueryable)`.
-    pub fn on_queryable_undeclared(
-        &mut self,
-        callback: impl FnMut(&UndeclQueryable) + Send + 'static,
-    ) {
-        self.on_undecl.push(Box::new(callback));
+    /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
+    /// `alloc`-only
+    /// [`on_queryable_undeclared`](RemoteQueryableRegistry::on_queryable_undeclared)
+    /// convenience wrapper funnels through here.
+    pub fn on_queryable_undeclared_sink(&mut self, sink: U) {
+        self.on_undecl.push(sink);
     }
 
     /// Number of installed `on_queryable_declared` callbacks.
@@ -206,8 +194,13 @@ impl RemoteQueryableRegistry {
                 // the prior entry (peer renamed the keyexpr), which
                 // matches zenoh-pico's same-id-replaces behaviour.
                 self.declared.insert(decl.id, resolved.clone());
-                for cb in &mut self.on_decl {
-                    cb(decl, &resolved);
+                // R311gb-3d — fan through the DeclSink seam.
+                let view = BorrowedDecl {
+                    id: decl.id,
+                    keyexpr: &resolved,
+                };
+                for sink in &mut self.on_decl {
+                    sink.on_declared(&view);
                 }
             }
             DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl) => {
@@ -219,8 +212,9 @@ impl RemoteQueryableRegistry {
                 // saw a DeclQueryable for; this is a peer-side
                 // contract violation we do not surface here).
                 self.declared.remove(&undecl.id);
-                for cb in &mut self.on_undecl {
-                    cb(undecl);
+                // R311gb-3d — the undeclaration carries only the id.
+                for sink in &mut self.on_undecl {
+                    sink.on_undeclared(undecl.id);
                 }
             }
             // Other sub-variants do not reach this registry.
@@ -251,6 +245,40 @@ impl RemoteQueryableRegistry {
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
             self.dispatch_messages(messages, peer_keyexpr_table);
         }
+    }
+}
+
+/// R311gb-3d — AP / `alloc`-profile convenience constructors (the
+/// `BoxedDeclSink` / `BoxedUndeclSink` instantiation only). Mirror of the
+/// subscriber-side block; the no-`alloc` profile installs consumer-
+/// supplied sinks through the generic `*_sink` installers.
+#[cfg(feature = "alloc")]
+impl RemoteQueryableRegistry<BoxedDeclSink, BoxedUndeclSink> {
+    /// New empty AP registry backed by heap-boxed closures. Inferring
+    /// shorthand for
+    /// [`with_sink_backing`](RemoteQueryableRegistry::with_sink_backing).
+    pub fn new() -> Self {
+        Self::with_sink_backing()
+    }
+
+    /// Install a closure fired on every inbound `Declare(DeclQueryable)`
+    /// whose keyexpr resolves. The closure receives `&dyn DeclView` (the
+    /// peer-declared `id` + resolved keyexpr) — the R311gb-3d seam
+    /// contract replaces the prior `(&DeclQueryableOwned, &str)`
+    /// ([`feedback_signature_stability`] wire-data exemption). Heap-boxed
+    /// via [`BoxedDeclSink`].
+    pub fn on_queryable_declared(
+        &mut self,
+        callback: impl FnMut(&dyn crate::decl_sink::DeclView) + Send + 'static,
+    ) {
+        self.on_queryable_declared_sink(BoxedDeclSink::new(callback));
+    }
+
+    /// Install a closure fired on every inbound `Declare(UndeclQueryable)`.
+    /// The closure receives the bare `id` (`u64`). Heap-boxed via
+    /// [`BoxedUndeclSink`].
+    pub fn on_queryable_undeclared(&mut self, callback: impl FnMut(u64) + Send + 'static) {
+        self.on_queryable_undeclared_sink(BoxedUndeclSink::new(callback));
     }
 }
 
@@ -290,11 +318,11 @@ mod tests {
         let mut reg = RemoteQueryableRegistry::new();
         let captured: Arc<Mutex<Vec<(u64, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_cb = captured.clone();
-        reg.on_queryable_declared(move |decl, resolved| {
+        reg.on_queryable_declared(move |decl| {
             captured_for_cb
                 .lock()
                 .unwrap()
-                .push((decl.id, resolved.to_string()));
+                .push((decl.id(), decl.keyexpr().to_string()));
         });
         let body =
             DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(8, 0, Some("home/door")));
@@ -310,7 +338,7 @@ mod tests {
         let mut reg = RemoteQueryableRegistry::new();
         let fired = Arc::new(AtomicUsize::new(0));
         let fired_for_cb = fired.clone();
-        reg.on_queryable_declared(move |_d, _r| {
+        reg.on_queryable_declared(move |_d| {
             fired_for_cb.fetch_add(1, Ordering::SeqCst);
         });
         let body = DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(1, 77, None));
@@ -323,8 +351,8 @@ mod tests {
         let mut reg = RemoteQueryableRegistry::new();
         let captured: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_cb = captured.clone();
-        reg.on_queryable_undeclared(move |u| {
-            captured_for_cb.lock().unwrap().push(u.id);
+        reg.on_queryable_undeclared(move |id| {
+            captured_for_cb.lock().unwrap().push(id);
         });
         let body = DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl_queryable(99));
         reg.dispatch_declare(&body, &HashMap::new());
@@ -491,7 +519,7 @@ mod tests {
         let undecl_count = Arc::new(AtomicUsize::new(0));
         let d = decl_count.clone();
         let u = undecl_count.clone();
-        reg.on_queryable_declared(move |_d, _r| {
+        reg.on_queryable_declared(move |_d| {
             d.fetch_add(1, Ordering::SeqCst);
         });
         reg.on_queryable_undeclared(move |_u| {
