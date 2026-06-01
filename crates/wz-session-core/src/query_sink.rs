@@ -10,7 +10,7 @@
 //! request/response sibling of the one-way data-plane [`crate::sink`]
 //! seam: a queryable registry dispatches a matched inbound query
 //! through a Dependency-Inversion seam rather than a hard-coded
-//! `Box<dyn FnMut(&QueryEvent, &mut ReplyEmitter)>`, so one registry
+//! `Box<dyn FnMut(..)>` over the wire-codec query types, so one registry
 //! implementation backs both profiles (ARCHITECTURE.md §2.4 static-first,
 //! dynamic-opt-in):
 //!
@@ -33,10 +33,10 @@
 //! (`&dyn QueryView`, `&mut dyn ReplyOut`) so dispatch stays heap-free
 //! and copy-free and the handler depends on the two contracts rather
 //! than on `wz_codecs::query::Query` / the alloc-bound
-//! `crate::query::QueryResponder`. The existing [`crate::query_event`]
-//! wrappers (`QueryEvent` / `ReplyEmitter`) `impl` these contracts in a
-//! later sub-round (the registry generic-over-`C: QuerySink` rewrite);
-//! wz-session-core defines only the traits + the AP adapter here.
+//! `crate::query::QueryResponder`. On the wire-dispatch path the reply
+//! accumulator [`crate::query::QueryResponder`] `impl`s [`ReplyOut`]
+//! directly and the dispatch builds a [`BorrowedQuery`] for the inbound
+//! [`QueryView`], so no intermediate wrapper sits on the seam.
 
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
@@ -44,9 +44,9 @@ use alloc::boxed::Box;
 /// Read-only accessor contract for an inbound query handed to a
 /// [`QuerySink`]. The query side of the delivery currency (passed as
 /// `&dyn QueryView`); a contract rather than a new data representation,
-/// so the existing [`crate::query_event::QueryEvent`] projection and any
-/// borrowed link-runtime query each `impl` it instead of being
-/// re-projected into a third struct (DIP + ISP).
+/// so the dispatch's [`BorrowedQuery`] and any borrowed link-runtime
+/// query each `impl` it instead of being re-projected into a third
+/// struct (DIP + ISP).
 ///
 /// All four accessors are unconditional plain types — every profile
 /// reads the resolved keyexpr, the optional URL-style parameters, the
@@ -73,8 +73,8 @@ pub trait QueryView {
 /// output half of the §3-a queryable seam, injected as `&mut dyn
 /// ReplyOut` so the no-`alloc` MCU handler stays decoupled from the
 /// alloc-bound `crate::query::QueryResponder`. Object-safe; the
-/// concrete `ReplyEmitter` / `QueryResponder` `impl` it in a later
-/// sub-round.
+/// concrete `crate::query::QueryResponder` (the reply accumulator)
+/// `impl`s it on the wire-dispatch path.
 ///
 /// The emit surface mirrors `QueryResponder`'s reply-staging methods.
 /// `reply` / `reply_del` / `reply_err` accumulate per-call reply records;

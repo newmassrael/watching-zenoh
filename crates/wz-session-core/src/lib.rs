@@ -74,9 +74,11 @@ pub mod sink;
 /// dispatch a matched inbound query through one backing-agnostic seam
 /// (model B: AP stores `BoxedQuerySink` heap closures, MCU stores a
 /// consumer-supplied closed `enum`, §2.4 static-first dynamic-opt-in).
-/// First step of the queryable model-B migration; the registry
-/// generic-over-`C: QuerySink` rewrite + the `QueryEvent`/`ReplyEmitter`
-/// contract impls land in subsequent sub-rounds.
+/// The queryable model-B seam: the registry is generic-over-`C: QuerySink`
+/// (R311gb-3b), the reply accumulator `query::QueryResponder` impls
+/// `ReplyOut` directly, and the dispatch builds a `BorrowedQuery` for the
+/// inbound `QueryView` (R311gb-3b-cleanup retired the prior
+/// `QueryEvent`/`ReplyEmitter` wrapper module).
 pub mod query_sink;
 
 /// R223 — zenoh-style locality filter (no_std + no_alloc; pure enum + helpers).
@@ -321,17 +323,6 @@ pub mod request_build;
 /// Runtime-agnostic (`FnMut + Send`, no async).
 #[cfg(feature = "alloc")]
 pub mod query;
-
-/// R311dx — consumer-facing query callback wrappers (`QueryEvent` +
-/// `ReplyEmitter`) lifted from `wz-runtime-tokio::query_event`. They
-/// decouple the application callback signature from the wz-codecs wire
-/// types; both are always-nameable (a `query-queryable`-OFF
-/// `PhantomData` arm keeps the structs well-formed) so the type-ungated
-/// `Session::declare_queryable{_aliased}` signatures compile in every
-/// feature subset. Alloc-gated because `ReplyEmitter` borrows the
-/// alloc-bound `crate::query::QueryResponder`.
-#[cfg(feature = "alloc")]
-pub mod query_event;
 
 /// R311dy — application-layer reply registry (`ReplyRegistry` +
 /// `InboundReply` / `InboundReplyBody` / `ReplyHandle` / `ReplyCallback`

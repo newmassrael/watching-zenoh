@@ -141,21 +141,20 @@ use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 use crate::network_message::NetworkMessage;
 #[cfg(feature = "codec-request")]
 use crate::pubsub::keyexpr_pattern_matches;
-// R311gb-3b — `QueryEvent` / `ReplyEmitter` are now consumed only by the
-// `codec-request`-gated `fire_matching_queryables` dispatch body (the
-// prior unconditional `QueryableCallback` type alias that named them was
-// retired by the `QuerySink` seam), so the import follows the same gate.
+// R311gb-3b-cleanup — the query seam contracts are now the sole query
+// callback surface (`QueryEvent` / `ReplyEmitter` retired with their
+// `query_event` module): `QuerySink` is the bound on the `Queryable<C>` /
+// `QueryableRegistry<C>` store; `ReplyOut` is implemented directly by
+// `QueryResponder` (the reply accumulator), so `fire_matching_queryables`
+// hands the handler `&mut responder`; `BorrowedQuery` is the loose
+// `QueryView` the dispatch builds for the inbound side; `BoxedQuerySink`
+// is the default sink type (AP closure adapter) named by the registry's
+// default type parameter + the convenience `register` wrappers. All are
+// consumed only by the `codec-request`-gated registry/dispatch, so they
+// share that gate (the `query` module is `alloc`-gated, so `codec-request`
+// here implies `alloc` and `BoxedQuerySink` is always in scope).
 #[cfg(feature = "codec-request")]
-use crate::query_event::{QueryEvent, ReplyEmitter};
-// `QuerySink` is the bound on the `codec-request`-gated `Queryable<C>` /
-// `QueryableRegistry<C>`; `BoxedQuerySink` is the default sink type (AP
-// closure adapter) named by the registry's default type parameter + the
-// convenience `register` wrappers. Both are unused in a `codec-request`-
-// OFF subset (the registry is elided), so they share that gate. The
-// `query` module is `alloc`-gated, so `codec-request` here implies
-// `alloc` and `BoxedQuerySink` (itself `alloc`-gated) is always in scope.
-#[cfg(feature = "codec-request")]
-use crate::query_sink::{BoxedQuerySink, QuerySink};
+use crate::query_sink::{BorrowedQuery, BoxedQuerySink, QuerySink, ReplyOut};
 #[cfg(feature = "codec-response")]
 use crate::response_build::{ResponseErrBuilder, ResponseReplyBuilder};
 
@@ -219,8 +218,8 @@ impl QueryableId {
 // `SubscriberRegistry`, whose loopback (`local_publish`) takes a
 // codec-agnostic `Sample` and so stays always-compiled. The
 // codec-agnostic accumulator + handle types (`QueryReply` / `ReplyBody`
-// / `QueryableId` / `QueryEvent` / `ReplyEmitter`) stay always-compiled
-// above so the type-ungated `Session::declare_queryable` surface and the
+// / `QueryableId`) stay always-compiled above so the type-ungated
+// `Session::declare_queryable` surface and the
 // `Vec<QueryReply>` staging path compile in every subset.
 #[cfg(feature = "codec-request")]
 struct Queryable<C: QuerySink> {
@@ -508,6 +507,54 @@ impl<'a> QueryResponder<'a> {
     }
 }
 
+/// R311gb-3b-cleanup — `QueryResponder` is the reply accumulator the
+/// queryable dispatch hands the handler as `&mut dyn ReplyOut`; it impls
+/// the seam's outbound emit contract directly. The R311r `ReplyEmitter`
+/// wrapper that previously bridged the closure to `QueryResponder` was
+/// retired with its whole `query_event` module — the unconditional
+/// `ReplyOut` trait now provides the feature-subset-stable surface the
+/// wrapper's `PhantomData` scaffolding used to, so the indirection (and
+/// its scaffolding) is gone.
+///
+/// `reply_err` keeps the `query-reply-err` gate: it is that feature's
+/// sole production enforcement point — an Err-form reply must not be
+/// emitted in a build without it, and the `codec-response`-gated
+/// `into_response` encode stage carries no such gate. The Put / Del /
+/// responder-identity methods stay unconditional under `codec-request`:
+/// a constructed `QueryResponder` only accumulates into a
+/// `Vec<QueryReply>` that the `codec-response`-gated `into_response`
+/// drains, so any further feature gate there would be wire-invisible (the
+/// prior `query-queryable` no-op on the `ReplyEmitter` wrapper was
+/// PhantomData scaffolding, not a semantic gate, mirroring how
+/// `SubscriberRegistry` leaves `SampleSink::deliver` ungated and gates
+/// only the `codec-push` wire arms).
+#[cfg(feature = "codec-request")]
+impl ReplyOut for QueryResponder<'_> {
+    fn reply(&mut self, payload: &[u8]) {
+        self.send_reply(payload);
+    }
+    fn reply_del(&mut self) {
+        self.send_reply_del();
+    }
+    fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]) {
+        #[cfg(feature = "query-reply-err")]
+        self.send_err(encoding_id, schema, payload);
+        #[cfg(not(feature = "query-reply-err"))]
+        {
+            let _ = (encoding_id, schema, payload);
+        }
+    }
+    fn with_responder(&mut self, zid: &[u8], eid: u32) {
+        QueryResponder::with_responder(self, zid, eid);
+    }
+    fn clear_responder(&mut self) {
+        QueryResponder::clear_responder(self);
+    }
+    fn responder(&self) -> Option<(&[u8], u32)> {
+        QueryResponder::responder(self)
+    }
+}
+
 /// Queryable table backing the inbound `Request(Query)` → callback
 /// dispatch. `!Sync` by construction; cross-task sharing goes
 /// through `Arc<Mutex<…>>`. See module-level docs for scope.
@@ -779,10 +826,11 @@ impl<C: QuerySink> QueryableRegistry<C> {
         replies: &mut Vec<QueryReply>,
         is_remote: bool,
     ) {
-        // R311r — build the consumer-facing [`QueryEvent`] projection
-        // ONCE per matched queryable (the parameters byte slice and
-        // attachment view are stable across all matched callbacks for
-        // a single inbound query). The keyexpr field re-borrows the
+        // R311gb-3b-cleanup — extract the projection inputs ONCE per
+        // matched queryable (the parameters byte slice and attachment
+        // view are stable across all matched handlers for a single
+        // inbound query); each match builds a `BorrowedQuery` from them.
+        // The keyexpr field re-borrows the
         // dispatcher's `keyexpr` argument; the parameters field
         // borrows directly from `Query.parameters`; the attachment
         // view is extracted from the inbound extensions chain at R311v
@@ -815,28 +863,22 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     replies,
                     responder: None,
                 };
-                // R311r — wrap the internal QueryResponder in the
-                // consumer-facing ReplyEmitter so the callback sees
-                // the wrapper-level API surface. The wrapper holds a
-                // mutable borrow of `responder` for the duration of
-                // the callback call; the borrow ends when the
-                // emitter is dropped at the end of this scope.
-                let event = QueryEvent {
+                // R311gb-3b-cleanup — dispatch through the QuerySink seam
+                // with no intermediate wrapper: `QueryResponder` impls
+                // `ReplyOut` directly, and the inbound view is a
+                // `BorrowedQuery` (the seam's own loose `QueryView`). Both
+                // unsize at the call (`handle` names the trait objects),
+                // so there is no projection and no third sample/query
+                // struct. The borrow of `replies` lives in `responder`
+                // and ends when it drops at the end of this block, so the
+                // loop can re-borrow for the next match.
+                let query_view = BorrowedQuery {
                     keyexpr,
                     parameters: parameters_view,
                     attachment: attachment_view,
                     rid,
                 };
-                {
-                    let mut emitter = ReplyEmitter::from_responder(&mut responder);
-                    // R311gb-3b — dispatch through the QuerySink seam:
-                    // `&event` unsizes to `&dyn QueryView`, `&mut emitter`
-                    // to `&mut dyn ReplyOut` (no projection, the param
-                    // types name the trait objects).
-                    queryable.sink.handle(&event, &mut emitter);
-                }
-                // Responder dropped here; the borrow of `replies`
-                // ends so the loop can re-borrow for the next match.
+                queryable.sink.handle(&query_view, &mut responder);
             }
         }
     }
@@ -1294,8 +1336,8 @@ mod tests {
     #[test]
     fn dispatch_threads_attachment_into_query_event_callback() {
         // R311v — attachment-bearing Query must surface its payload
-        // through QueryEvent.attachment on the consumer-facing
-        // callback. Pins the extract_query_attachment helper against
+        // through the handler's `QueryView::attachment()` accessor.
+        // Pins the extract_query_attachment helper against
         // the zenoh-pico wire shape (ext_id=0x05, enc=ExtZbuf).
         let mut reg = QueryableRegistry::new();
         let captured: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
@@ -1336,7 +1378,7 @@ mod tests {
         assert_eq!(
             *captured.lock().unwrap(),
             None,
-            "no-attachment Query must yield QueryEvent.attachment = None"
+            "no-attachment Query must yield QueryView::attachment() = None"
         );
     }
 

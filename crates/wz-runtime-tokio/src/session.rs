@@ -140,23 +140,22 @@ use crate::pubsub::SubscriptionId;
 // (the sink seam accessor contract) rather than the owned `&Sample`.
 use crate::sink::SampleView;
 // R311r — `crate::query` is type-ungated; `QueryableId` follows the
-// same shape (always available). `QueryResponder` is the legacy
-// internal type that the R311r ReplyEmitter wraps; it stays imported
-// here for the body of `Session::query`'s loopback fan (R246).
-// `QueryReply` is only referenced from `Session::query`'s loopback
-// fan; R311fq gated that fan on `query-queryable`, so this import now
-// follows `all(query-get, query-queryable)` to match the sole call site.
+// same shape (always available). `QueryReply` is only referenced from
+// `Session::query`'s loopback fan; R311fq gated that fan on
+// `query-queryable`, so this import now follows
+// `all(query-get, query-queryable)` to match the sole call site.
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
 use crate::query::QueryReply;
 use crate::query::QueryableId;
 // R311gb-3b — the queryable callback signature dispatches through the
 // model-B query seam contracts (`QueryView` inbound accessor +
-// `ReplyOut` outbound emit), not the owned `QueryEvent` / `ReplyEmitter`
-// wrappers directly. Both traits are unconditional so the type-ungated
-// `Session::declare_queryable{_aliased}` Result-form signatures compile
-// in any consumer-feature subset; the registry hands the handler
-// `&dyn QueryView` + `&mut dyn ReplyOut` (the wrappers `impl` the
-// contracts in `wz-session-core::query_event`).
+// `ReplyOut` outbound emit). Both traits are unconditional so the
+// type-ungated `Session::declare_queryable{_aliased}` Result-form
+// signatures compile in any consumer-feature subset; the registry hands
+// the handler `&dyn QueryView` + `&mut dyn ReplyOut` (the reply
+// accumulator `QueryResponder` impls `ReplyOut` directly, and the
+// dispatch builds a `BorrowedQuery` for the `QueryView` —
+// R311gb-3b-cleanup).
 use crate::query_sink::{QueryView, ReplyOut};
 // R311s — `crate::reply` is type-ungated; `InboundReply` flows into
 // the z_get caller's callback and `ReplyHandle` is the inner success
@@ -1730,10 +1729,10 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
     ///
     /// R311r — signature switched to
     /// `Result<Queryable, QueryableAliasError>` for surface parity
-    /// with [`Self::declare_queryable_aliased`]; callback signature
-    /// switched to `FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>)`
-    /// (R311r wrapper types) so the application callback no longer
-    /// directly references the wz-codecs wire types. The new Err
+    /// with [`Self::declare_queryable_aliased`]; the handler signature is
+    /// `FnMut(&dyn QueryView, &mut dyn ReplyOut)` (R311gb-3b model-B seam
+    /// contracts) so the application handler depends on the two narrow
+    /// contracts rather than the wz-codecs wire types. The new Err
     /// variant a caller sees on this method (over the prior `->
     /// Queryable` form) is `QueryableAliasError::FeatureDisabled`
     /// when the build elides `query-queryable`; default-feature
@@ -3121,9 +3120,8 @@ pub struct Queryable<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
     session: Session<R, T>,
     // R311ek — `query-queryable`-OFF `PhantomData` arm keeps the `R` / `T`
     // type parameters live (their only field-level carrier is the gated
-    // `session` above). Mirrors the `ReplyEmitter` marker arm in
-    // `wz-session-core::query_event`. PhantomData fields are exempt from
-    // the dead-code lint, so this composes under `deny(warnings)`.
+    // `session` above). PhantomData fields are exempt from the dead-code
+    // lint, so this composes under `deny(warnings)`.
     #[cfg(not(feature = "query-queryable"))]
     _marker: core::marker::PhantomData<(R, T)>,
     id: QueryableId,

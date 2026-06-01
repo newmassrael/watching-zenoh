@@ -144,24 +144,16 @@ pub mod pubsub;
 /// R311r — module is type-ungated. The `QueryableRegistry` struct,
 /// the `QueryResponder` internal type, the `QueryReply` accumulator
 /// enum, and the supporting types are always defined regardless of
-/// the `query-queryable` feature so that
-/// [`crate::query_event::QueryEvent`] / [`crate::query_event::ReplyEmitter`]
-/// (the consumer-facing wrappers) and the type-ungated
-/// `Session::declare_queryable{_aliased}` Result-form signatures
-/// compile unconditionally. The wire-emit terminal step
-/// (`QueryReply::into_response`) remains cfg-gated on `codec-response`
-/// — the dispatch / loopback / staging paths stage `QueryReply`
-/// records into a `Vec` without needing `codec-response`, so the
-/// module body compiles cleanly under any consumer-feature subset.
+/// the `query-queryable` feature so that the model-B query seam
+/// contracts ([`query_sink::QueryView`] / [`query_sink::ReplyOut`])
+/// and the type-ungated `Session::declare_queryable{_aliased}`
+/// Result-form signatures compile unconditionally. The wire-emit
+/// terminal step (`QueryReply::into_response`) remains cfg-gated on
+/// `codec-response` — the dispatch / loopback / staging paths stage
+/// `QueryReply` records into a `Vec` without needing `codec-response`,
+/// so the module body compiles cleanly under any consumer-feature
+/// subset.
 pub mod query;
-
-/// R311r — application-visible query callback wrappers. Always
-/// compiled regardless of `query-queryable` feature state so the
-/// type-ungated `Session::declare_queryable{_aliased}` signatures
-/// have a valid parameter type in every build. See the module's own
-/// doc-comment for the wrapper design rationale + the no-op
-/// fall-through on the `query-queryable`-OFF build.
-pub mod query_event;
 
 /// R121k-2 — application-layer remote-declaration registries. Route
 /// decoded `Declare(Decl*|Undecl*)` records to user-registered

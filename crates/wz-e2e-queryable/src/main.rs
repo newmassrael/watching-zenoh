@@ -10,7 +10,7 @@
 //! shared harness's drive loop) emits the terminating ResponseFinal.
 //!
 //! Direction is wz = data SOURCE (the queryable answers). Deliberately
-//! uses ONLY the queryable surface (`declare_queryable` + `ReplyEmitter`)
+//! uses ONLY the queryable surface (`declare_queryable` + `ReplyOut`)
 //! so the source compiles under the pinned subset with zero `#[cfg]`. The
 //! acceptor scaffolding (bind / accept / open / drive / teardown) lives
 //! in [`wz_e2e_harness`]; this binary is just its CLI + setup closure.
