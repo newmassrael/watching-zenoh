@@ -28220,6 +28220,54 @@
         "Update project_no_alloc_gating_load_trigger memory: R311gc design pinned (ACL switchboard over <sce:inbound>, SCE change 0)."
       ]
     },
+    "Round 311gd": {
+      "decision_summary": "vendor/sce bump f224941a6->31c188afe lands external_ingress_events; corrects R311gc switchboard validation basis from <sce:inbound> to this app-layer set; mechanical, wz 0",
+      "changes_bullets": [
+        "vendor/sce submodule f224941a6 -> 31c188afe (+57 commits).",
+        "wz-surface delta = external_ingress_events feature only (3 files, +125/-0): forge-ast.v1.schema.json:1809 field + analyzer.rs compute_external_ingress_events + model.rs field. sce-rust-runtime / sce-link-runtime / codec surface unchanged.",
+        "external_ingress_events = (transition trigger event set) minus engine-reserved families (error.* / done.invoke* / done.state* / cancel.invoke / wildcard sentinels / empty token); SCE-owned per analyzer::add_system_events, published as one derived set so wz validates against it instead of re-deriving the platform-event taxonomy.",
+        "remaining 56 commits = SCE-internal W3C spec-citation reassignments + Mnemosyne citation-gate tooling; no wz-consumed surface touched.",
+        "corrects Round 311gc: the switchboard validation basis is this app-layer external_ingress_events, NOT <sce:inbound> (which is the session-protocol link-codec layer, sce:kind=link + framer-decoded when= predicate) -- a layer scope error in the Round 311gc decision."
+      ],
+      "verification_bullets": [
+        "cargo check --workspace clean from crates/ (wz call-site impact 0; mechanical bump per the R52.1+ template-side-only pattern).",
+        "external_ingress_events field present at forge-ast.v1.schema.json:1809 with the transport-switchboard validation-contract description (raise_external_by_name target accepted iff member, per W3C SCXML 3.12.1).",
+        "full run-ci.sh (no --skip-codegen): codegen Layer B + Layer C tests + Layer E + Layer G 7 MCU, exit 0 -- codec goldens stable, no codegen drift from the bump.",
+        "G.6 riscv32imac lwip-sys known SKIP (riscv32-unknown-elf-gcc absent on host); Layer Q/M opt-in SKIP."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "R311gc-3 unblocked: the switchboard generator validates keyexpr->event targets against the per-machine external_ingress_events set (forge-ast.v1 export), fail-fast on drift; no wz-side taxonomy duplication.",
+        "R311gc-2 (engine bridge: EventInjector impl over sce-rust-runtime Engine::raise_external_by_name) still pending and orthogonal to this bump.",
+        "update sce-vendor-pin-state memory to pin 31c188afe."
+      ],
+      "publishable_decision_summary": "vendor/sce bump f224941a6->31c188afe lands external_ingress_events; corrects R311gc switchboard validation basis from <sce:inbound> to this app-layer set; mechanical, wz 0",
+      "publishable_changes_bullets": [
+        "vendor/sce submodule f224941a6 -> 31c188afe (+57 commits).",
+        "wz-surface delta = external_ingress_events feature only (3 files, +125/-0): forge-ast.v1.schema.json:1809 field + analyzer.rs compute_external_ingress_events + model.rs field. sce-rust-runtime / sce-link-runtime / codec surface unchanged.",
+        "external_ingress_events = (transition trigger event set) minus engine-reserved families (error.* / done.invoke* / done.state* / cancel.invoke / wildcard sentinels / empty token); SCE-owned per analyzer::add_system_events, published as one derived set so wz validates against it instead of re-deriving the platform-event taxonomy.",
+        "remaining 56 commits = SCE-internal W3C spec-citation reassignments + Mnemosyne citation-gate tooling; no wz-consumed surface touched.",
+        "corrects Round 311gc: the switchboard validation basis is this app-layer external_ingress_events, NOT <sce:inbound> (which is the session-protocol link-codec layer, sce:kind=link + framer-decoded when= predicate) -- a layer scope error in the Round 311gc decision."
+      ],
+      "publishable_verification_bullets": [
+        "cargo check --workspace clean from crates/ (wz call-site impact 0; mechanical bump per the R52.1+ template-side-only pattern).",
+        "external_ingress_events field present at forge-ast.v1.schema.json:1809 with the transport-switchboard validation-contract description (raise_external_by_name target accepted iff member, per W3C SCXML 3.12.1).",
+        "full run-ci.sh (no --skip-codegen): codegen Layer B + Layer C tests + Layer E + Layer G 7 MCU, exit 0 -- codec goldens stable, no codegen drift from the bump.",
+        "G.6 riscv32imac lwip-sys known SKIP (riscv32-unknown-elf-gcc absent on host); Layer Q/M opt-in SKIP."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311gc-3 unblocked: the switchboard generator validates keyexpr->event targets against the per-machine external_ingress_events set (forge-ast.v1 export), fail-fast on drift; no wz-side taxonomy duplication.",
+        "R311gc-2 (engine bridge: EventInjector impl over sce-rust-runtime Engine::raise_external_by_name) still pending and orthogonal to this bump.",
+        "update sce-vendor-pin-state memory to pin 31c188afe."
+      ]
+    },
     "Round 311h": {
       "decision_summary": "R311h codec-push wire-layer cascade — wz-codecs gate + Cargo edges + session_glue.rs Push surface; pubsub.rs consumer cascade deferred to R311m.",
       "changes_bullets": [
