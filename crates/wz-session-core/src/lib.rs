@@ -67,6 +67,17 @@ pub mod bounded;
 /// `WorkerSink`/`StatechartSink` adapters land in subsequent sub-rounds.
 pub mod sink;
 
+/// R311gc — statechart-injection seam (`EventInjector` DIP trait over the
+/// SCE engine's `raise_external_by_name` ingress + the `StatechartSink`
+/// [`sink::SampleSink`] adapter). The Anti-Corruption-Layer translation
+/// point of the switchboard: wz owns zenoh keyexpr demux, then injects a
+/// *domain* event into the statechart so the SCXML core stays decoupled
+/// from the vendor wire naming (R311gc routing-model ratify, ledger
+/// Round 311gc). Unconditional + no-`alloc` (trait + `&'static str` event
+/// name); the engine-bridge `EventInjector` impl and the build-time
+/// `<sce:inbound>` cross-check land with the generator in later sub-rounds.
+pub mod statechart_sink;
+
 /// R311gb-3 — query-dispatch seam (`QueryView` inbound accessor contract
 /// + `ReplyOut` outbound emit contract + `QuerySink` DIP trait + the
 /// `alloc`-only `BoxedQuerySink` closure adapter). The request/response
