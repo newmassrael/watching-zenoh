@@ -56,6 +56,17 @@ pub mod keyexpr_match;
 /// the seam the 25 currently alloc-gated modules migrate onto.
 pub mod bounded;
 
+/// R311gb — sample-delivery seam (`SampleView` accessor contract +
+/// `SampleSink` DIP trait + the `alloc`-only `BoxedSink` closure
+/// adapter). Unconditional — the traits exist in every profile so
+/// the subscriber registry dispatches through one backing-agnostic seam
+/// (model B: AP stores `BoxedSink` heap closures, MCU stores a
+/// consumer-supplied closed `enum` of codegen'd Worker/statechart sinks,
+/// §2.4 static-first dynamic-opt-in). First step of the model-B callback
+/// migration; the registry generic-over-`C: SampleSink` rewrite + the
+/// `WorkerSink`/`StatechartSink` adapters land in subsequent sub-rounds.
+pub mod sink;
+
 /// R223 — zenoh-style locality filter (no_std + no_alloc; pure enum + helpers).
 /// Mirrors zenoh-pico's `z_locality_t` and `_z_locality_allows_{local,remote}`.
 /// Available unconditionally because the type carries no allocations.
