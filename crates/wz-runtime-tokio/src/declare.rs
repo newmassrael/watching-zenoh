@@ -84,7 +84,7 @@ pub use wz_session_core::declare::liveliness::LivelinessRegistry;
 // `Session::declare_liveliness_subscriber{_aliased}` signatures and
 // their `LivelinessSample` callback parameter compile in any subset.
 pub use wz_session_core::declare::liveliness_sample::{
-    LivelinessSample, LivelinessSampleCallback, LivelinessSampleKind,
+    BoxedLivelinessSampleSink, LivelinessSample, LivelinessSampleKind, LivelinessSampleSink,
 };
 // R311ek — `LivelinessSubscriberRegistry` consumes `DeclareOwnedVariant`
 // (`codec-declare`-gated module) and is only wired via

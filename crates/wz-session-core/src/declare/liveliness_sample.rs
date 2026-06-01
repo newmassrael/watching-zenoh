@@ -6,7 +6,7 @@
 //! module.
 //!
 //! [`LivelinessSample`] / [`LivelinessSampleKind`] /
-//! [`LivelinessSampleCallback`] carry no `wz_codecs` wire types — they
+//! [`LivelinessSampleSink`] carry no `wz_codecs` wire types — they
 //! are the codec-agnostic callback surface the
 //! `Session::declare_liveliness_subscriber{_aliased}` Result-form
 //! signatures bind regardless of feature state (R311q type-ungating).
@@ -18,9 +18,10 @@
 //! gate — keeps the registry gated while the sample surface composes in
 //! any subset (north-star arbitrary-composition mechanism ①).
 
+#[cfg(feature = "alloc")]
 use alloc::boxed::Box;
 
-/// Liveliness sample dispatched into a [`LivelinessSampleCallback`].
+/// Liveliness sample dispatched into a [`LivelinessSampleSink`].
 /// Mirrors zenoh-pico's `z_sample_t` projection for the liveliness
 /// path: a `DeclToken` arrival surfaces as `Put`, an `UndeclToken`
 /// arrival as `Delete` (per `z_liveliness_declare_token`'s
@@ -62,8 +63,50 @@ pub enum LivelinessSampleKind {
     Delete,
 }
 
-/// Boxed callback fired for each [`LivelinessSample`] whose keyexpr
-/// matches a subscriber's pattern. `Send + 'static` so the registry
-/// can be shared across tasks under `Arc<Mutex<...>>` (matching the
-/// other application-layer registries' threading contract).
-pub type LivelinessSampleCallback = Box<dyn FnMut(LivelinessSample<'_>) + Send + 'static>;
+/// R311gb-3d — liveliness-sample delivery seam: the Dependency-Inversion
+/// sink a [`crate::declare::liveliness_subscriber::LivelinessSubscriberRegistry`]
+/// dispatches each keyexpr-matched [`LivelinessSample`] through (model B).
+/// Unlike the peer-declaration [`crate::decl_sink`] seam, no separate
+/// accessor contract is needed: [`LivelinessSample`] is already a borrowed
+/// `Copy` projection (kind + resolved keyexpr + token id, no owned /
+/// wire-codec coupling), so it is the delivery currency itself — passed
+/// by value. AP stores [`BoxedLivelinessSampleSink`] (a heap closure);
+/// MCU stores a consumer-supplied closed `enum` impl with no heap.
+pub trait LivelinessSampleSink {
+    /// Deliver one matched liveliness sample (`Put` on `DeclToken`,
+    /// `Delete` on `UndeclToken`). The borrow in [`LivelinessSample`] is
+    /// valid for the duration of the call only.
+    fn on_sample(&mut self, sample: LivelinessSample<'_>);
+}
+
+/// Heap closure type backing [`BoxedLivelinessSampleSink`].
+#[cfg(feature = "alloc")]
+type BoxedLivelinessSampleFn = Box<dyn FnMut(LivelinessSample<'_>) + Send + 'static>;
+
+/// AP / `alloc`-profile adapter wrapping a liveliness-sample closure on
+/// the heap, type-erasing it so a subscriber slot stores a homogeneous
+/// sink. `Send + 'static` so the registry can be shared across tasks
+/// under `Arc<Mutex<...>>` (matching the other registries' threading
+/// contract). No MCU counterpart — the no-heap profile uses a consumer-
+/// supplied closed `enum` instead.
+#[cfg(feature = "alloc")]
+pub struct BoxedLivelinessSampleSink {
+    inner: BoxedLivelinessSampleFn,
+}
+
+#[cfg(feature = "alloc")]
+impl BoxedLivelinessSampleSink {
+    /// Wrap a capturing liveliness-sample observer as a heap-stored sink.
+    pub fn new(callback: impl FnMut(LivelinessSample<'_>) + Send + 'static) -> Self {
+        Self {
+            inner: Box::new(callback),
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl LivelinessSampleSink for BoxedLivelinessSampleSink {
+    fn on_sample(&mut self, sample: LivelinessSample<'_>) {
+        (self.inner)(sample)
+    }
+}

@@ -120,14 +120,14 @@ use crate::runtime_impl::TokioTime;
 
 // R311q — `LivelinessSample` is type-ungated because the unconditional
 // `Session::declare_liveliness_subscriber{_aliased}` Result-form
-// signatures bind it as the callback parameter type. The
-// `LivelinessSampleCallback` boxed-trait alias is only referenced
-// inside the cfg-gated body of those methods (the `Box::new(...) as
-// LivelinessSampleCallback` cast), so it follows the body gate; the
-// split prevents an `unused import` lint on the feature-OFF build.
-use crate::declare::LivelinessSample;
+// signatures bind it as the callback parameter type. R311gb-3d — the
+// `BoxedLivelinessSampleSink` seam adapter is only referenced inside the
+// cfg-gated body of those methods (it wraps the `impl FnMut(LivelinessSample)`
+// closure before the registry `register` call), so it follows the body
+// gate; the split prevents an `unused import` lint on the feature-OFF build.
 #[cfg(feature = "liveliness-subscriber")]
-use crate::declare::LivelinessSampleCallback;
+use crate::declare::BoxedLivelinessSampleSink;
+use crate::declare::LivelinessSample;
 // R311o — `OutboundKeyexprError` is wrapped by
 // `LivelinessAliasError::InvalidKeyexpr` which is itself unconditional
 // after the R311o type-ungating cascade; the import must therefore be
@@ -2020,7 +2020,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
     }
 
     /// R280 — declare a liveliness subscriber on a literal `keyexpr`
-    /// pattern, registering a [`LivelinessSampleCallback`] that fires
+    /// pattern, registering a [`LivelinessSampleSink`] that fires
     /// for every peer `Decl*Token` whose resolved keyexpr matches the
     /// pattern. Returns a [`LivelinessSubscriber`] RAII handle whose
     /// `Drop` emits `Interest(Final)` on the outbound link and
@@ -2123,7 +2123,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                     interest_id,
                     keyexpr_string.clone(),
                     options.history,
-                    Box::new(callback) as LivelinessSampleCallback,
+                    BoxedLivelinessSampleSink::new(callback),
                 );
             });
             self.actions.send_interest_liveliness_subscriber(
@@ -2258,7 +2258,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                     interest_id,
                     resolved.clone(),
                     options.history,
-                    Box::new(callback) as LivelinessSampleCallback,
+                    BoxedLivelinessSampleSink::new(callback),
                 );
             });
             // Wire emit carries the alias form so the peer pays the

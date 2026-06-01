@@ -41,7 +41,7 @@
 //!   `keyexpr_pattern_matches` runs at dispatch with zero per-event
 //!   allocation beyond the `Vec<&str>` borrow conversion);
 //! * the original keyexpr string (for introspection / debug logging);
-//! * the user-supplied [`LivelinessSampleCallback`];
+//! * the user-supplied [`LivelinessSampleSink`];
 //! * `history` flag — `true` when the subscriber requested current +
 //!   future replay (CURRENT bit on the outbound Interest); the
 //!   inbound `InterestFinal` flips `history_complete` to `true`
@@ -91,14 +91,14 @@ use crate::wireexpr_resolve::resolve_wireexpr;
 // `DeclareOwnedVariant`) stays `codec-declare`-gated and re-imports
 // them.
 pub use crate::declare::liveliness_sample::{
-    LivelinessSample, LivelinessSampleCallback, LivelinessSampleKind,
+    BoxedLivelinessSampleSink, LivelinessSample, LivelinessSampleKind, LivelinessSampleSink,
 };
 
 /// Per-subscriber slot. Private to this module; consumers interact
 /// through [`LivelinessSubscriberRegistry::register`] /
 /// [`LivelinessSubscriberRegistry::unregister`] and the RAII handle
 /// at the [`crate::session::LivelinessSubscriber`] layer.
-struct LivelinessSubscriberSlot {
+struct LivelinessSubscriberSlot<C: LivelinessSampleSink> {
     /// Pre-split keyexpr chunks for [`keyexpr_pattern_matches`]. Same
     /// chunk-preserving split as [`crate::pubsub::SubscriberRegistry`]:
     /// empty literal chunks are kept so `a//b` is distinguishable
@@ -108,9 +108,11 @@ struct LivelinessSubscriberSlot {
     /// (`debug` logs, status surfaces) — the matching engine uses
     /// `pattern_chunks` directly.
     keyexpr: String,
-    /// User callback. Fired in registration order if multiple
-    /// subscribers are declared on overlapping patterns.
-    callback: LivelinessSampleCallback,
+    /// R311gb-3d — the delivery sink (DIP seam). Fired in registration
+    /// order if multiple subscribers are declared on overlapping
+    /// patterns. `C = BoxedLivelinessSampleSink` on AP, a consumer-
+    /// supplied closed `enum` on MCU.
+    sink: C,
     /// `true` when the subscriber requested CURRENT replay (the
     /// `history` flag on the outbound Interest sets the C bit).
     history: bool,
@@ -130,8 +132,8 @@ struct LivelinessSubscriberSlot {
 /// `Decl*Token` records to their keyexpr-matched callbacks. See
 /// module-level docs for the dispatch contract and the
 /// `peer_token_table` keyexpr-resolution mechanism.
-pub struct LivelinessSubscriberRegistry {
-    slots: HashMap<u64, LivelinessSubscriberSlot>,
+pub struct LivelinessSubscriberRegistry<C: LivelinessSampleSink = BoxedLivelinessSampleSink> {
+    slots: HashMap<u64, LivelinessSubscriberSlot<C>>,
     /// Peer-side token table: maps a `DeclToken.id` to the keyexpr it
     /// resolved to at `DeclToken` arrival time. Populated by
     /// [`Self::dispatch_declare`] on `DeclToken` reception and
@@ -142,15 +144,21 @@ pub struct LivelinessSubscriberRegistry {
     peer_token_table: HashMap<u64, String>,
 }
 
-impl Default for LivelinessSubscriberRegistry {
+impl<C: LivelinessSampleSink> Default for LivelinessSubscriberRegistry<C> {
     fn default() -> Self {
-        Self::new()
+        Self::with_sink_backing()
     }
 }
 
-impl LivelinessSubscriberRegistry {
-    /// New empty registry. No slots, empty peer-token table.
-    pub fn new() -> Self {
+impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
+    /// New empty registry over an explicit sink backing `C`. No slots,
+    /// empty peer-token table.
+    ///
+    /// R311gb-3d — the generic constructor (no-`alloc` / MCU entry point,
+    /// paired with [`register`](Self::register) taking an explicit sink).
+    /// AP callers use the inferring [`new`](LivelinessSubscriberRegistry::new)
+    /// shorthand, which fixes `C = BoxedLivelinessSampleSink`.
+    pub fn with_sink_backing() -> Self {
         Self {
             slots: HashMap::new(),
             peer_token_table: HashMap::new(),
@@ -171,19 +179,25 @@ impl LivelinessSubscriberRegistry {
     /// bit on the outbound Interest); the flag is consumed by
     /// [`Self::history_complete`] queries and by the R281+
     /// `InterestFinal` arm of [`Self::dispatch_messages`].
+    ///
+    /// R311gb-3d — takes an explicit [`LivelinessSampleSink`] (the DIP
+    /// seam; `C = BoxedLivelinessSampleSink` on AP, a consumer-supplied
+    /// closed `enum` on MCU). The `Session::declare_liveliness_subscriber`
+    /// surface keeps its `impl FnMut(LivelinessSample)` closure shape and
+    /// wraps it in a [`BoxedLivelinessSampleSink`] before calling here.
     pub fn register(
         &mut self,
         interest_id: u64,
         keyexpr: impl Into<String>,
         history: bool,
-        callback: LivelinessSampleCallback,
+        sink: C,
     ) -> bool {
         let keyexpr_string = keyexpr.into();
         let pattern_chunks: Vec<String> = keyexpr_string.split('/').map(str::to_string).collect();
         let slot = LivelinessSubscriberSlot {
             pattern_chunks,
             keyexpr: keyexpr_string,
-            callback,
+            sink,
             history,
             history_complete: false,
         };
@@ -301,7 +315,8 @@ impl LivelinessSubscriberRegistry {
         for slot in self.slots.values_mut() {
             let chunks: Vec<&str> = slot.pattern_chunks.iter().map(String::as_str).collect();
             if keyexpr_pattern_matches(&chunks, resolved) {
-                (slot.callback)(LivelinessSample {
+                // R311gb-3d — deliver through the LivelinessSampleSink seam.
+                slot.sink.on_sample(LivelinessSample {
                     kind,
                     keyexpr: resolved,
                     token_id,
@@ -380,6 +395,22 @@ impl LivelinessSubscriberRegistry {
     }
 }
 
+/// R311gb-3d — AP / `alloc`-profile convenience constructor (the
+/// `BoxedLivelinessSampleSink` instantiation only). The no-`alloc`
+/// profile uses [`with_sink_backing`](LivelinessSubscriberRegistry::with_sink_backing)
+/// + a consumer-supplied sink.
+#[cfg(feature = "alloc")]
+impl LivelinessSubscriberRegistry<BoxedLivelinessSampleSink> {
+    /// New empty AP registry backed by heap-boxed closures. The inferring
+    /// shorthand for
+    /// [`with_sink_backing`](LivelinessSubscriberRegistry::with_sink_backing):
+    /// `LivelinessSubscriberRegistry::new()` fixes
+    /// `C = BoxedLivelinessSampleSink`.
+    pub fn new() -> Self {
+        Self::with_sink_backing()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! R311ds — behavioural tests migrated here from the
@@ -410,12 +441,14 @@ mod tests {
     use crate::network_message::NetworkMessage;
 
     fn make_subscriber(
-        sink: Arc<Mutex<Vec<(LivelinessSampleKind, String, u64)>>>,
-    ) -> LivelinessSampleCallback {
-        Box::new(move |sample: LivelinessSample<'_>| {
-            sink.lock()
-                .unwrap()
-                .push((sample.kind, sample.keyexpr.to_string(), sample.token_id));
+        capture: Arc<Mutex<Vec<(LivelinessSampleKind, String, u64)>>>,
+    ) -> BoxedLivelinessSampleSink {
+        BoxedLivelinessSampleSink::new(move |sample: LivelinessSample<'_>| {
+            capture.lock().unwrap().push((
+                sample.kind,
+                sample.keyexpr.to_string(),
+                sample.token_id,
+            ));
         })
     }
 
@@ -528,7 +561,7 @@ mod tests {
             1,
             "**",
             false,
-            Box::new(move |_| {
+            BoxedLivelinessSampleSink::new(move |_| {
                 fired_for_cb.fetch_add(1, Ordering::SeqCst);
             }),
         );

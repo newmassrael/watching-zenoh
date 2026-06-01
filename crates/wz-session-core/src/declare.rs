@@ -49,7 +49,7 @@ pub mod subscriber;
 pub mod queryable;
 
 // R311ek — the pure-data liveliness sample types (`LivelinessSample` /
-// `LivelinessSampleKind` / `LivelinessSampleCallback`) split out of the
+// `LivelinessSampleKind` / `LivelinessSampleSink`) split out of the
 // `codec-declare`-gated `liveliness_subscriber` module so the
 // codec-agnostic callback surface composes in any subset; only the
 // `DeclareOwnedVariant`-consuming `LivelinessSubscriberRegistry` stays
