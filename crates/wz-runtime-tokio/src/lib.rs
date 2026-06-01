@@ -105,6 +105,15 @@ pub use wz_session_core::sample;
 /// `&dyn SampleView` rather than the owned `&Sample`).
 pub use wz_session_core::sink;
 
+/// R311gb-3b — query-dispatch seam: the `QueryView` inbound accessor
+/// contract, the `ReplyOut` outbound emit contract, the `QuerySink` DIP
+/// trait, and the `alloc` `BoxedQuerySink` closure adapter. Re-exported
+/// so AP consumers name `crate::query_sink::{QueryView, ReplyOut}` in the
+/// `declare_queryable` closure (the registry now hands the handler a
+/// `&dyn QueryView` and a `&mut dyn ReplyOut`, replacing the owned
+/// `&QueryEvent` and `&mut ReplyEmitter`).
+pub use wz_session_core::query_sink;
+
 /// R98 — application-layer subscriber registry. Routes decoded
 /// `NetworkMessage::Push` records to user-registered callbacks
 /// filtered by literal keyexpr. See `pubsub::SubscriberRegistry`

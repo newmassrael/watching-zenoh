@@ -308,9 +308,9 @@ pub mod response_build;
 pub mod request_build;
 
 /// R311dx — application-layer queryable registry (`QueryableRegistry`
-/// + `QueryReply` / `ReplyBody` / `QueryResponder` / `QueryableId` /
-/// `QueryableCallback`): routes inbound `Request(Query)` records to
-/// user-registered on_query callbacks, accumulating Reply / Err
+/// + `QueryReply` / `ReplyBody` / `QueryResponder` / `QueryableId`):
+/// routes inbound `Request(Query)` records to user-registered on_query
+/// sinks (R311gb-3b: the `QuerySink` seam), accumulating Reply / Err
 /// records into a caller-owned `Vec<QueryReply>`. Lifted from
 /// `wz-runtime-tokio::query`. The codec-agnostic accumulator + handle
 /// types are always-compiled (alloc-gated); the wire-dispatch entry

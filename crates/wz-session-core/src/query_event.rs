@@ -41,6 +41,8 @@
 #[cfg(not(feature = "query-queryable"))]
 use core::marker::PhantomData;
 
+use crate::query_sink::{QueryView, ReplyOut};
+
 /// R311r — application-visible projection of an inbound query that
 /// triggered a queryable callback. Replaces direct exposure of
 /// `&wz_codecs::query::Query` in the callback signature.
@@ -215,5 +217,54 @@ impl<'a> ReplyEmitter<'a> {
         return self.inner.responder();
         #[cfg(not(feature = "query-queryable"))]
         return None;
+    }
+}
+
+/// R311gb-3b — connect the consumer-facing [`QueryEvent`] projection to
+/// the [`QueryView`] inbound accessor contract so the queryable registry
+/// dispatches through the `&dyn QueryView` seam (model B). Field-for-
+/// field forwarding; `QueryEvent` already carries the four unconditional
+/// plain-typed accessors the contract names.
+impl QueryView for QueryEvent<'_> {
+    fn keyexpr(&self) -> &str {
+        self.keyexpr
+    }
+    fn parameters(&self) -> Option<&[u8]> {
+        self.parameters
+    }
+    fn attachment(&self) -> Option<&[u8]> {
+        self.attachment
+    }
+    fn rid(&self) -> u64 {
+        self.rid
+    }
+}
+
+/// R311gb-3b — connect [`ReplyEmitter`] to the [`ReplyOut`] outbound emit
+/// contract so the queryable handler writes replies through the
+/// `&mut dyn ReplyOut` seam. Forwards to the inherent methods (which
+/// carry the internal `query-queryable` / `query-reply-err` gating), so
+/// the trait surface stays stable while a feature-OFF build lowers each
+/// emit to the same no-op the inherent method already compiles to. The
+/// inherent `with_responder` returns `&mut Self` for builder chaining;
+/// the contract method discards it (object-safe `()` return).
+impl ReplyOut for ReplyEmitter<'_> {
+    fn reply(&mut self, payload: &[u8]) {
+        ReplyEmitter::reply(self, payload);
+    }
+    fn reply_del(&mut self) {
+        ReplyEmitter::reply_del(self);
+    }
+    fn reply_err(&mut self, encoding_id: Option<u32>, schema: Option<&str>, payload: &[u8]) {
+        ReplyEmitter::reply_err(self, encoding_id, schema, payload);
+    }
+    fn with_responder(&mut self, zid: &[u8], eid: u32) {
+        ReplyEmitter::with_responder(self, zid, eid);
+    }
+    fn clear_responder(&mut self) {
+        ReplyEmitter::clear_responder(self);
+    }
+    fn responder(&self) -> Option<(&[u8], u32)> {
+        ReplyEmitter::responder(self)
     }
 }

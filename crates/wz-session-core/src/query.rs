@@ -71,16 +71,24 @@
 //! Callers that need cross-task sharing wrap in `Arc<Mutex<…>>` or
 //! `Arc<tokio::sync::Mutex<…>>`.
 
-// no_std module-body alloc prelude: the core prelude lacks Box / String
-// / Vec / ToString, so the alloc-provided forms are imported explicitly
+// no_std module-body alloc prelude: the core prelude lacks String / Vec
+// / ToString, so the alloc-provided forms are imported explicitly
 // (mirrors the wz-session-core::pubsub convention). The production
-// artifact stays `#![no_std]`; alloc is the gate for every owned
-// callback / String keyexpr / Vec<QueryReply> store in this module.
-use alloc::boxed::Box;
+// artifact stays `#![no_std]`; alloc is the gate for the String keyexpr
+// / Vec<QueryReply> store in this module.
+//
+// R311gb-3b — `Box` is no longer imported at module level: the queryable
+// callback store migrated from `Box<dyn FnMut>` (`QueryableCallback`) to
+// the generic `Queryable<C: QuerySink>` sink seam, so production code no
+// longer heap-boxes a handler here (`BoxedQuerySink` owns that on the AP
+// convenience path, in `query_sink`). The only remaining `Box::new(..)`
+// uses are the test module's `NetworkMessage::Request` fixtures, so the
+// import lives inside `mod tests` (under that module's full-query-feature
+// gate) rather than here.
 use alloc::string::String;
 // `ToString` (`.to_string()`) is only reached from the `codec-request`
-// dispatch / responder path; `String` / `Box` / `Vec` back the
-// always-compiled `QueryReply` accumulator + `QueryableCallback` type.
+// dispatch / responder path; `String` / `Vec` back the always-compiled
+// `QueryReply` accumulator.
 #[cfg(feature = "codec-request")]
 use alloc::string::ToString;
 use alloc::vec::Vec;
@@ -133,28 +141,23 @@ use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 use crate::network_message::NetworkMessage;
 #[cfg(feature = "codec-request")]
 use crate::pubsub::keyexpr_pattern_matches;
+// R311gb-3b — `QueryEvent` / `ReplyEmitter` are now consumed only by the
+// `codec-request`-gated `fire_matching_queryables` dispatch body (the
+// prior unconditional `QueryableCallback` type alias that named them was
+// retired by the `QuerySink` seam), so the import follows the same gate.
+#[cfg(feature = "codec-request")]
 use crate::query_event::{QueryEvent, ReplyEmitter};
+// `QuerySink` is the bound on the `codec-request`-gated `Queryable<C>` /
+// `QueryableRegistry<C>`; `BoxedQuerySink` is the default sink type (AP
+// closure adapter) named by the registry's default type parameter + the
+// convenience `register` wrappers. Both are unused in a `codec-request`-
+// OFF subset (the registry is elided), so they share that gate. The
+// `query` module is `alloc`-gated, so `codec-request` here implies
+// `alloc` and `BoxedQuerySink` (itself `alloc`-gated) is always in scope.
+#[cfg(feature = "codec-request")]
+use crate::query_sink::{BoxedQuerySink, QuerySink};
 #[cfg(feature = "codec-response")]
 use crate::response_build::{ResponseErrBuilder, ResponseReplyBuilder};
-
-/// Boxed callback invoked when an inbound `Request(Query)`'s
-/// keyexpr matches a registered queryable. The callback receives a
-/// [`QueryEvent`] projection of the inbound query (resolved keyexpr +
-/// raw parameters + attachment + rid) and a [`ReplyEmitter`] for
-/// emitting zero or more Replies / Errs.
-///
-/// R311r — signature switched from
-/// `FnMut(&wz_codecs::query::Query, &mut QueryResponder<'_>)` to
-/// `FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>)` so the application
-/// callback no longer directly references the wz-codecs wire types.
-/// The wrappers are unconditional even in `query-queryable`-OFF
-/// builds (the signature lives on a type-ungated
-/// `Session::declare_queryable` whose OFF branch returns
-/// `Err(QueryableAliasError::FeatureDisabled)` before any callback is
-/// reached); see [`crate::query_event`] for the wrapper design
-/// rationale and the no-op fall-through on the OFF build.
-pub type QueryableCallback =
-    Box<dyn FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>) + Send + 'static>;
 
 /// R311v — extract the attachment payload view from an inbound
 /// [`Query`]'s extensions chain.
@@ -220,7 +223,7 @@ impl QueryableId {
 // above so the type-ungated `Session::declare_queryable` surface and the
 // `Vec<QueryReply>` staging path compile in every subset.
 #[cfg(feature = "codec-request")]
-struct Queryable {
+struct Queryable<C: QuerySink> {
     id: QueryableId,
     /// Pre-split pattern chunks. Same shape as
     /// [`crate::pubsub::SubscriberRegistry`]: literal chunks (incl.
@@ -235,7 +238,9 @@ struct Queryable {
     /// `dispatch_request` consults `allows_remote()` since every
     /// Request reaching it has been parsed off the wire.
     allowed_origin: crate::locality::Locality,
-    callback: QueryableCallback,
+    /// R311gb-3b — the query-dispatch sink (DIP seam). `C = BoxedQuerySink`
+    /// on AP (heap closure), a consumer-supplied closed `enum` on MCU.
+    sink: C,
 }
 
 /// Body arm for a `QueryReply::Reply` — mirrors zenoh-pico's
@@ -512,39 +517,56 @@ impl<'a> QueryResponder<'a> {
 /// the `Query`-codec dispatch / loopback paths, so the whole table gates
 /// with `codec-request`.
 #[cfg(feature = "codec-request")]
-pub struct QueryableRegistry {
-    queryables: Vec<Queryable>,
+pub struct QueryableRegistry<C: QuerySink = BoxedQuerySink> {
+    queryables: Vec<Queryable<C>>,
     next_id: u64,
 }
 
 #[cfg(feature = "codec-request")]
-impl Default for QueryableRegistry {
+impl<C: QuerySink> Default for QueryableRegistry<C> {
     fn default() -> Self {
-        Self::new()
+        Self::with_sink_backing()
     }
 }
 
 #[cfg(feature = "codec-request")]
-impl QueryableRegistry {
-    /// New empty registry. Queryable ids start at 1 so 0 stays
-    /// available as a sentinel "no queryable" value for any caller-
-    /// side wrapper that needs one.
-    pub fn new() -> Self {
+impl<C: QuerySink> QueryableRegistry<C> {
+    /// New empty registry over an explicit sink backing `C`. Queryable
+    /// ids start at 1 so 0 stays available as a sentinel "no queryable"
+    /// value for any caller-side wrapper that needs one.
+    ///
+    /// R311gb-3b — the generic constructor (the no-`alloc` / MCU entry
+    /// point, paired with [`register_sink`](Self::register_sink)). AP
+    /// callers use the inferring [`new`](QueryableRegistry::new)
+    /// shorthand, which fixes `C = BoxedQuerySink`; this mirrors the std
+    /// `HashMap::new` / `with_hasher` split (and
+    /// [`crate::pubsub::SubscriberRegistry::with_sink_backing`]), so a
+    /// bare `QueryableRegistry::new()` resolves its type parameter
+    /// without a turbofish.
+    pub fn with_sink_backing() -> Self {
         Self {
             queryables: Vec::new(),
             next_id: 1,
         }
     }
 
-    /// Register a queryable for a keyexpr pattern. Pattern syntax
-    /// matches zenoh chunk wildcards (same as
-    /// [`crate::pubsub::SubscriberRegistry::register`]): `/`-separated
-    /// chunks where each chunk is a literal, `*` (single chunk), `**`
-    /// (zero or more chunks), or contains the `$*` intra-chunk
-    /// substring wildcard (R220). The returned [`QueryableId`] is
-    /// stable until [`Self::unregister`] is called. Duplicate
-    /// patterns produce distinct queryables — `dispatch_request`
-    /// fires every matching callback in registration order.
+    /// R311gb-3b — register an explicit [`QuerySink`] for a keyexpr
+    /// pattern. The seam-native registration entry point: works on
+    /// every profile (`C = BoxedQuerySink` heap closure on AP, a
+    /// consumer-supplied closed `enum` on MCU). The `alloc`-only
+    /// [`register`](QueryableRegistry::register) /
+    /// [`register_with_locality`](QueryableRegistry::register_with_locality)
+    /// convenience wrappers funnel through here after wrapping a closure
+    /// in a [`BoxedQuerySink`].
+    ///
+    /// Pattern syntax matches zenoh chunk wildcards (same as
+    /// [`crate::pubsub::SubscriberRegistry::register_sink`]): `/`-
+    /// separated chunks where each chunk is a literal, `*` (single
+    /// chunk), `**` (zero or more chunks), or contains the `$*` intra-
+    /// chunk substring wildcard (R220). The returned [`QueryableId`] is
+    /// stable until [`Self::unregister`] is called. Duplicate patterns
+    /// produce distinct queryables — `dispatch_request` fires every
+    /// matching sink in registration order.
     ///
     /// R221 — the pattern is canonicalized via
     /// [`canonize_keyexpr`](crate::keyexpr_canon::canonize_keyexpr)
@@ -552,28 +574,11 @@ impl QueryableRegistry {
     /// byte-for-byte with the canonical wire form. Structurally
     /// invalid patterns fall back to the raw form (non-breaking)
     /// with a `log::warn!` notice.
-    ///
-    /// R223 — defaults [`Locality::Any`](crate::locality::Locality);
-    /// use [`register_with_locality`](Self::register_with_locality)
-    /// to restrict to one origin class.
-    pub fn register(
-        &mut self,
-        keyexpr_pattern: impl Into<String>,
-        callback: impl FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>) + Send + 'static,
-    ) -> QueryableId {
-        self.register_with_locality(keyexpr_pattern, crate::locality::Locality::Any, callback)
-    }
-
-    /// R223 — variant of [`register`](Self::register) that pins the
-    /// locality filter explicitly. See
-    /// [`crate::pubsub::SubscriberRegistry::register_with_locality`]
-    /// for the dispatch-invariant rationale (every inbound Request
-    /// is remote until self-publish loopback lands).
-    pub fn register_with_locality(
+    pub fn register_sink(
         &mut self,
         keyexpr_pattern: impl Into<String>,
         allowed_origin: crate::locality::Locality,
-        callback: impl FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>) + Send + 'static,
+        sink: C,
     ) -> QueryableId {
         let id = QueryableId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
@@ -593,7 +598,7 @@ impl QueryableRegistry {
             id,
             pattern_chunks,
             allowed_origin,
-            callback: Box::new(callback),
+            sink,
         });
         id
     }
@@ -824,7 +829,11 @@ impl QueryableRegistry {
                 };
                 {
                     let mut emitter = ReplyEmitter::from_responder(&mut responder);
-                    (queryable.callback)(&event, &mut emitter);
+                    // R311gb-3b — dispatch through the QuerySink seam:
+                    // `&event` unsizes to `&dyn QueryView`, `&mut emitter`
+                    // to `&mut dyn ReplyOut` (no projection, the param
+                    // types name the trait objects).
+                    queryable.sink.handle(&event, &mut emitter);
                 }
                 // Responder dropped here; the borrow of `replies`
                 // ends so the loop can re-borrow for the next match.
@@ -917,6 +926,71 @@ impl QueryableRegistry {
     }
 }
 
+/// R311gb-3b — AP / `alloc`-profile convenience constructors. The
+/// closure-taking `register` / `register_with_locality` wrappers live
+/// here (on the `BoxedQuerySink` instantiation only) because they heap-
+/// box the closure via [`BoxedQuerySink`]; the no-`alloc` profile
+/// registers a consumer-supplied sink through the generic
+/// [`register_sink`](QueryableRegistry::register_sink) instead. Mirror of
+/// [`crate::pubsub::SubscriberRegistry`]'s `BoxedSink` convenience block.
+/// The `alloc` gate is module-redundant (the whole `query` module is
+/// `alloc`-gated) but kept explicit for symmetry with the `pubsub` side.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+impl QueryableRegistry<BoxedQuerySink> {
+    /// New empty AP registry backed by heap-boxed closures
+    /// ([`BoxedQuerySink`]). The inferring shorthand for
+    /// [`with_sink_backing`](QueryableRegistry::with_sink_backing):
+    /// `QueryableRegistry::new()` fixes `C = BoxedQuerySink` so the
+    /// closure-taking [`register`](Self::register) /
+    /// [`register_with_locality`](Self::register_with_locality) wrappers
+    /// are in reach without a turbofish.
+    pub fn new() -> Self {
+        Self::with_sink_backing()
+    }
+
+    /// Register a queryable closure for a keyexpr pattern. The closure
+    /// receives `&dyn QueryView` (resolved keyexpr / parameters /
+    /// attachment / rid) and `&mut dyn ReplyOut` (the reply-emit
+    /// surface) — the R311gb-3b seam contracts replace the prior owned
+    /// `&QueryEvent` + `&mut ReplyEmitter`; this is the
+    /// [`feedback_signature_stability`] wire-data principled exemption,
+    /// taken so one registry backs both heap and no-heap profiles. The
+    /// closure is heap-boxed via [`BoxedQuerySink`].
+    ///
+    /// R223 — defaults [`Locality::Any`](crate::locality::Locality);
+    /// use [`register_with_locality`](Self::register_with_locality)
+    /// to restrict to one origin class.
+    pub fn register(
+        &mut self,
+        keyexpr_pattern: impl Into<String>,
+        handler: impl FnMut(&dyn crate::query_sink::QueryView, &mut dyn crate::query_sink::ReplyOut)
+            + Send
+            + 'static,
+    ) -> QueryableId {
+        self.register_with_locality(keyexpr_pattern, crate::locality::Locality::Any, handler)
+    }
+
+    /// R223 — variant of [`register`](Self::register) that pins the
+    /// locality filter explicitly. See
+    /// [`crate::pubsub::SubscriberRegistry::register_with_locality`]
+    /// for the dispatch-invariant rationale (every inbound Request
+    /// is remote until self-publish loopback lands).
+    pub fn register_with_locality(
+        &mut self,
+        keyexpr_pattern: impl Into<String>,
+        allowed_origin: crate::locality::Locality,
+        handler: impl FnMut(&dyn crate::query_sink::QueryView, &mut dyn crate::query_sink::ReplyOut)
+            + Send
+            + 'static,
+    ) -> QueryableId {
+        self.register_sink(
+            keyexpr_pattern,
+            allowed_origin,
+            BoxedQuerySink::new(handler),
+        )
+    }
+}
+
 /// R121j-5c — build the wire-form [`ResponseFinal`] envelope that
 /// terminates a Reply chain for `rid`. zenoh-pico semantics require
 /// exactly one Final per inbound Query whose dispatch produced at
@@ -965,6 +1039,11 @@ pub fn response_final_for(rid: u64) -> ResponseFinalOwned {
 ))]
 mod tests {
     use super::*;
+    // R311gb-3b — `Box` lives here (not at module level): its only uses
+    // are the `NetworkMessage::Request(Box::new(..))` fixtures below, and
+    // this module's gate is exactly the full query feature set, so the
+    // import never goes unused in a partial-feature subset build.
+    use alloc::boxed::Box;
     // no_std test prelude: the std prelude (String / Vec / vec!) is
     // absent under `#![no_std]`, so the alloc forms are imported
     // explicitly; the host-run callback-capture cells use `std::sync`
@@ -1222,7 +1301,7 @@ mod tests {
         let captured: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
         let cap_cb = captured.clone();
         reg.register("home/temp", move |event, _responder| {
-            *cap_cb.lock().unwrap() = event.attachment.map(<[u8]>::to_vec);
+            *cap_cb.lock().unwrap() = event.attachment().map(<[u8]>::to_vec);
         });
 
         let req = request_query_with_attachment(11, Some("home/temp"), b"hello-att");
@@ -1247,7 +1326,7 @@ mod tests {
         let captured: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(Some(b"dirty".to_vec())));
         let cap_cb = captured.clone();
         reg.register("home/temp", move |event, _responder| {
-            *cap_cb.lock().unwrap() = event.attachment.map(<[u8]>::to_vec);
+            *cap_cb.lock().unwrap() = event.attachment().map(<[u8]>::to_vec);
         });
 
         let req = request_query(7, 0, Some("home/temp"));

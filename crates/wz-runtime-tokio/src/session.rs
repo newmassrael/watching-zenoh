@@ -149,13 +149,15 @@ use crate::sink::SampleView;
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
 use crate::query::QueryReply;
 use crate::query::QueryableId;
-// R311r — consumer-facing wrappers introduced to decouple the
-// queryable callback signature from wz-codecs wire types. The
-// signature uses [`QueryEvent`] + [`ReplyEmitter`] regardless of
-// `query-queryable` feature state; both types are unconditional so
-// the type-ungated `Session::declare_queryable{_aliased}` Result-form
-// signatures compile in any consumer-feature subset.
-use crate::query_event::{QueryEvent, ReplyEmitter};
+// R311gb-3b — the queryable callback signature dispatches through the
+// model-B query seam contracts (`QueryView` inbound accessor +
+// `ReplyOut` outbound emit), not the owned `QueryEvent` / `ReplyEmitter`
+// wrappers directly. Both traits are unconditional so the type-ungated
+// `Session::declare_queryable{_aliased}` Result-form signatures compile
+// in any consumer-feature subset; the registry hands the handler
+// `&dyn QueryView` + `&mut dyn ReplyOut` (the wrappers `impl` the
+// contracts in `wz-session-core::query_event`).
+use crate::query_sink::{QueryView, ReplyOut};
 // R311s — `crate::reply` is type-ungated; `InboundReply` flows into
 // the z_get caller's callback and `ReplyHandle` is the inner success
 // value of [`Session::query`]'s `Result<ReplyHandle, QueryAliasError>`
@@ -1741,7 +1743,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
         &self,
         keyexpr: impl Into<String>,
         options: QueryableOptions,
-        callback: impl FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>) + Send + 'static,
+        callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
     ) -> Result<Queryable<R, T>, QueryableAliasError> {
         #[cfg(feature = "query-queryable")]
         {
@@ -1786,7 +1788,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
         mapping_id: u64,
         inline_suffix: Option<&str>,
         options: QueryableOptions,
-        callback: impl FnMut(&QueryEvent<'_>, &mut ReplyEmitter<'_>) + Send + 'static,
+        callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
     ) -> Result<Queryable<R, T>, QueryableAliasError> {
         #[cfg(feature = "query-queryable")]
         {

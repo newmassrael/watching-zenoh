@@ -47,13 +47,13 @@ fn main() -> ExitCode {
                 .declare_queryable(
                     queryable_key,
                     QueryableOptions::default(),
-                    move |_event, responder| {
+                    move |query, responder| {
                         responder.reply(reply.as_bytes());
                         log::info!(
                             "{BINARY}: QUERYABLE FIRED pattern='{}' rid={} keyexpr='{}' reply='{}'",
                             pattern_for_callback,
-                            responder.rid(),
-                            responder.keyexpr_literal(),
+                            query.rid(),
+                            query.keyexpr(),
                             reply,
                         );
                     },
