@@ -2,11 +2,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! R311dy — the application-layer reply registry (`ReplyRegistry` +
-//! `InboundReply` / `InboundReplyBody` / `ReplyHandle` / `ReplyCallback`
-//! / `FinalCallback`) migrated to `wz-session-core::reply`. This file is
-//! the AP-side re-export shell: it re-exports the public surface so
-//! consumers continue to write `wz_runtime_tokio::reply::ReplyRegistry`
-//! etc. across the reorg.
+//! `InboundReply` / `InboundReplyBody` / `ReplyHandle`) migrated to
+//! `wz-session-core::reply`. This file is the AP-side re-export shell: it
+//! re-exports the public surface so consumers continue to write
+//! `wz_runtime_tokio::reply::ReplyRegistry` etc. across the reorg.
+//! R311gb-3c — the per-pending `(on_reply, on_final)` closures migrated to
+//! the `ReplySink` seam (`wz-session-core::reply_sink`), so the
+//! `ReplyCallback` / `FinalCallback` boxed-closure aliases were retired.
 //!
 //! The whole public surface is always-compiled (alloc-bound) — unlike
 //! the queryable registry, `ReplyRegistry` keeps its codec-agnostic
@@ -19,6 +21,4 @@
 //! (gated on the reply dispatch feature union in wz-session-core; the
 //! C1f lane runs it).
 
-pub use wz_session_core::reply::{
-    FinalCallback, InboundReply, InboundReplyBody, ReplyCallback, ReplyHandle, ReplyRegistry,
-};
+pub use wz_session_core::reply::{InboundReply, InboundReplyBody, ReplyHandle, ReplyRegistry};

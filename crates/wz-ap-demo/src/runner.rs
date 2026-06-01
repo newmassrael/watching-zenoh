@@ -61,7 +61,7 @@ use wz::runtime_core::Runtime;
 use wz::runtime_core::TimeSource;
 use wz::runtime_tokio::declare::{LivelinessSample, LivelinessSampleKind};
 use wz::runtime_tokio::observer::ApplicationLayerObserver;
-use wz::runtime_tokio::reply::InboundReplyBody;
+use wz::runtime_tokio::reply_sink::ReplyKind;
 use wz::runtime_tokio::runtime_impl::TokioTime;
 use wz::runtime_tokio::runtime_impl::{TokioJoinHandle, TokioRuntime};
 use wz::runtime_tokio::session::{
@@ -235,21 +235,21 @@ fn install_observer_callbacks(
                 if !on_reply {
                     return;
                 }
-                let body_text = match &reply.body {
-                    InboundReplyBody::Put { payload } => {
-                        format!("Put payload={:?}", String::from_utf8_lossy(payload))
+                let body_text = match reply.kind() {
+                    ReplyKind::Put => {
+                        format!("Put payload={:?}", String::from_utf8_lossy(reply.payload()))
                     }
-                    InboundReplyBody::Del => "Del".to_string(),
-                    InboundReplyBody::Err { encoding, payload } => format!(
+                    ReplyKind::Del => "Del".to_string(),
+                    ReplyKind::Err => format!(
                         "Err encoding={:?} payload={:?}",
-                        encoding,
-                        String::from_utf8_lossy(payload),
+                        reply.err_encoding(),
+                        String::from_utf8_lossy(reply.payload()),
                     ),
                 };
                 log::info!(
                     "wz-ap-demo: REPLY RECEIVED rid={} keyexpr='{}' body={}",
-                    reply.rid,
-                    reply.keyexpr_literal,
+                    reply.rid(),
+                    reply.keyexpr(),
                     body_text,
                 );
             },

@@ -157,13 +157,20 @@ use crate::query::QueryableId;
 // dispatch builds a `BorrowedQuery` for the `QueryView` —
 // R311gb-3b-cleanup).
 use crate::query_sink::{QueryView, ReplyOut};
-// R311s — `crate::reply` is type-ungated; `InboundReply` flows into
-// the z_get caller's callback and `ReplyHandle` is the inner success
-// value of [`Session::query`]'s `Result<ReplyHandle, QueryAliasError>`
-// (R311t Result-form transition replaced the R311s stub-form
-// fall-through). Both signatures stay type-ungated so the imports
-// remain unconditional.
-use crate::reply::{InboundReply, ReplyHandle};
+// R311s — `crate::reply` is type-ungated; `ReplyHandle` is the inner
+// success value of [`Session::query`]'s `Result<ReplyHandle, ...>` and is
+// used unconditionally. R311gb-3c — the z_get `on_reply` callback now
+// dispatches through the `ReplyView` accessor contract (`&dyn ReplyView`,
+// also unconditional — the signatures are type-ungated), not the owned
+// `&InboundReply`. `InboundReply` is now named only on the
+// `query-queryable` loopback path (the `QueryReply -> InboundReply`
+// projection fed into `deliver_local_reply`) + its tests, so the import
+// follows that gate; a `query-queryable`-OFF subset (e.g. handshake-only)
+// would otherwise see it unused.
+#[cfg(all(feature = "query-get", feature = "query-queryable"))]
+use crate::reply::InboundReply;
+use crate::reply::ReplyHandle;
+use crate::reply_sink::ReplyView;
 use crate::sample::{EncodingHint, QosLevel, Reliability, SampleKind, SourceInfo, TimestampHint};
 // R311gb-2b — `declare_subscriber` no longer names `Sample` (it now
 // takes `impl FnMut(&dyn SampleView)`), so the only remaining uses of
@@ -1197,7 +1204,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
         &self,
         keyexpr: &str,
         opts: QueryOptions,
-        on_reply: impl FnMut(&InboundReply) + Send + 'static,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         #[cfg(not(feature = "query-get"))]
@@ -1352,7 +1359,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
         inline_suffix: Option<&str>,
         loopback_keyexpr: &str,
         opts: QueryOptions,
-        on_reply: impl FnMut(&InboundReply) + Send + 'static,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         #[cfg(not(feature = "query-get"))]
@@ -1477,7 +1484,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
         mapping_id: u64,
         inline_suffix: Option<&str>,
         opts: QueryOptions,
-        on_reply: impl FnMut(&InboundReply) + Send + 'static,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         #[cfg(not(feature = "query-get"))]
@@ -2425,7 +2432,7 @@ impl<R: Runtime, T: TimeSource> Querier<R, T> {
     /// `_z_query(&sess_rc, _z_optional_id_make_some(querier->_id), ...)`).
     pub fn get(
         &self,
-        on_reply: impl FnMut(&InboundReply) + Send + 'static,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         // R311cw — clock fold-in: `Session::query` now reads the Session-
@@ -2584,7 +2591,7 @@ impl<R: Runtime, T: TimeSource> QuerierAliased<R, T> {
     /// [`crate::reply::ReplyRegistry`].
     pub fn get(
         &self,
-        on_reply: impl FnMut(&InboundReply) + Send + 'static,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
         // R311cw — clock fold-in: delegate path no longer threads
@@ -3873,6 +3880,8 @@ mod tests {
     use crate::observer::ApplicationLayerObserver;
     #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     use crate::reply::InboundReplyBody;
+    #[cfg(all(feature = "query-get", feature = "query-queryable"))]
+    use crate::reply_sink::ReplyKind;
     use crate::runtime_impl::TokioTime;
     use crate::session_glue::{BoxedLinkDriver, SessionInitParams, SigningKey};
     use portable_atomic::{AtomicUsize, Ordering};
@@ -5201,13 +5210,9 @@ mod tests {
             QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
             move |reply| {
                 r.fetch_add(1, Ordering::SeqCst);
-                assert_eq!(reply.keyexpr_literal, "home/temp");
-                assert_eq!(
-                    reply.body,
-                    InboundReplyBody::Put {
-                        payload: b"22.5".to_vec()
-                    }
-                );
+                assert_eq!(reply.keyexpr(), "home/temp");
+                assert_eq!(reply.kind(), ReplyKind::Put);
+                assert_eq!(reply.payload(), b"22.5");
             },
             move |_rid| {
                 f.fetch_add(1, Ordering::SeqCst);
@@ -5472,7 +5477,7 @@ mod tests {
                 "clear/me",
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
                 move |reply| {
-                    *cap_cb.lock().unwrap() = Some(reply.clone());
+                    *cap_cb.lock().unwrap() = Some(InboundReply::from_view(reply));
                 },
                 |_| {},
             )
@@ -5512,7 +5517,7 @@ mod tests {
                 "error/path",
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
                 move |reply| {
-                    *cap_cb.lock().unwrap() = Some(reply.clone());
+                    *cap_cb.lock().unwrap() = Some(InboundReply::from_view(reply));
                 },
                 |_| {},
             )
@@ -6070,7 +6075,7 @@ mod tests {
                 "home/temp/kitchen",
                 QueryOptions::get(),
                 move |reply| {
-                    *cap_cb.lock().unwrap() = Some(reply.clone());
+                    *cap_cb.lock().unwrap() = Some(InboundReply::from_view(reply));
                 },
                 |_| {},
             )
@@ -6120,7 +6125,7 @@ mod tests {
                 None,
                 QueryOptions::get(),
                 move |reply| {
-                    *cap_cb.lock().unwrap() = Some(reply.clone());
+                    *cap_cb.lock().unwrap() = Some(InboundReply::from_view(reply));
                 },
                 |_| {},
             )
@@ -6191,7 +6196,7 @@ mod tests {
                 Some("/kitchen"),
                 QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
                 move |reply| {
-                    *cap_cb.lock().unwrap() = Some(reply.clone());
+                    *cap_cb.lock().unwrap() = Some(InboundReply::from_view(reply));
                 },
                 |_| {},
             )
@@ -6686,7 +6691,7 @@ mod tests {
         let handle = qa
             .get(
                 move |reply| {
-                    *cap_cb.lock().unwrap() = Some(reply.clone());
+                    *cap_cb.lock().unwrap() = Some(InboundReply::from_view(reply));
                 },
                 |_| {},
             )
@@ -6754,7 +6759,7 @@ mod tests {
         );
         qa.get(
             move |reply| {
-                *cap_cb.lock().unwrap() = Some(reply.clone());
+                *cap_cb.lock().unwrap() = Some(InboundReply::from_view(reply));
             },
             |_| {},
         )

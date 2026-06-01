@@ -52,7 +52,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use wz::runtime_core::TimeSource;
-use wz::runtime_tokio::reply::InboundReplyBody;
+use wz::runtime_tokio::reply_sink::ReplyKind;
 use wz::runtime_tokio::session::QueryOptions;
 use wz_e2e_harness::{run_acceptor_e2e, run_main, AbortOnDrop};
 
@@ -105,20 +105,22 @@ fn main() -> ExitCode {
                             // + the responder's payload both surfaced through
                             // the wire dispatch (Response -> ReplyRegistry ->
                             // on_reply) under the zget-reply-only subset.
-                            let body_text = match &reply.body {
-                                InboundReplyBody::Put { payload } => {
-                                    format!("Put payload={:?}", String::from_utf8_lossy(payload))
-                                }
-                                InboundReplyBody::Del => "Del".to_string(),
-                                InboundReplyBody::Err { encoding, payload } => format!(
-                                    "Err encoding={encoding:?} payload={:?}",
-                                    String::from_utf8_lossy(payload)
+                            let body_text = match reply.kind() {
+                                ReplyKind::Put => format!(
+                                    "Put payload={:?}",
+                                    String::from_utf8_lossy(reply.payload())
+                                ),
+                                ReplyKind::Del => "Del".to_string(),
+                                ReplyKind::Err => format!(
+                                    "Err encoding={:?} payload={:?}",
+                                    reply.err_encoding(),
+                                    String::from_utf8_lossy(reply.payload())
                                 ),
                             };
                             log::info!(
                                 "{BINARY}: ZGET REPLY RECEIVED rid={} keyexpr='{}' body={}",
-                                reply.rid,
-                                reply.keyexpr_literal,
+                                reply.rid(),
+                                reply.keyexpr(),
                                 body_text
                             );
                         },

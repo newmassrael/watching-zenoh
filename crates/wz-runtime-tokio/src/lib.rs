@@ -114,6 +114,14 @@ pub use wz_session_core::sink;
 /// `&QueryEvent` and `&mut ReplyEmitter`).
 pub use wz_session_core::query_sink;
 
+/// R311gb-3c — reply-delivery seam (`ReplyKind` + `ReplyView` accessor
+/// contract + `ReplySink` DIP trait + the `alloc` `BoxedReplySink`
+/// closure adapter). Re-exported so AP consumers name
+/// `crate::reply_sink::ReplyView` in the z_get `on_reply` closure (the
+/// registry now hands the handler a `&dyn ReplyView` rather than the
+/// owned `&InboundReply`).
+pub use wz_session_core::reply_sink;
+
 /// R98 — application-layer subscriber registry. Routes decoded
 /// `NetworkMessage::Push` records to user-registered callbacks
 /// filtered by literal keyexpr. See `pubsub::SubscriberRegistry`

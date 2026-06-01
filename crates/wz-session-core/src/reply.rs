@@ -75,12 +75,18 @@
 //! needed there.
 
 // no_std module-body alloc prelude (mirrors wz-session-core::pubsub):
-// `String` / `Box` / `Vec` back the always-compiled InboundReply +
-// callback-type + Pending surface; `ToString` (`str::to_string`) is
-// only reached from the `codec-response` keyexpr-resolution path.
-use alloc::boxed::Box;
+// `String` / `Vec` back the always-compiled InboundReply + Pending
+// surface. R311gb-3c — `Box` is no longer imported at module level: the
+// per-pending `(on_reply, on_final)` closures migrated from
+// `Box<dyn FnMut>` (`ReplyCallback` / `FinalCallback`) to the generic
+// `Pending<C: ReplySink>` sink seam, so production code no longer
+// heap-boxes a callback here (`BoxedReplySink` owns that, in
+// `reply_sink`). The test module imports `Box` itself.
 use alloc::string::String;
-#[cfg(feature = "codec-response")]
+// R311gb-3c — `ToString` is now unconditional: the always-compiled
+// `InboundReply::from_view` constructor (the reply-plane `Sample::from_view`
+// analogue) copies the view's keyexpr via `str::to_string`. The
+// `codec-response` keyexpr-resolution path also uses it.
 use alloc::string::ToString;
 use alloc::vec::Vec;
 
@@ -132,6 +138,16 @@ use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 use crate::network_message::NetworkMessage;
 #[cfg(feature = "query-queryable")]
 use crate::query::{QueryReply, ReplyBody};
+// R311gb-3c — the model-B reply seam: `ReplySink` is the bound on the
+// generic `ReplyRegistry<C>` pending store; `ReplyView` is the accessor
+// contract `InboundReply` impls so the dispatch hands the sink a
+// `&dyn ReplyView`; `BoxedReplySink` is the default sink type (AP closure
+// adapter) named by the registry's default type parameter + the
+// convenience `register` wrapper; `ReplyKind` is the Put/Del/Err
+// discriminant the `ReplyView::kind` accessor returns. The whole `reply`
+// module is `alloc`-gated, so `BoxedReplySink` (itself `alloc`-gated) is
+// always in scope here.
+use crate::reply_sink::{BoxedReplySink, ReplyKind, ReplySink, ReplyView};
 
 /// Body arm of an inbound reply record. Mirrors the producer-side
 /// [`QueryReply`](crate::query::QueryReply) enum but inverted for
@@ -185,6 +201,73 @@ pub struct InboundReply {
     pub keyexpr_literal: String,
     /// Inbound reply body arm (Put / Del / Err).
     pub body: InboundReplyBody,
+}
+
+/// R311gb-3c — connect the owned [`InboundReply`] (the AP retention form)
+/// to the [`ReplyView`] accessor contract so the reply registry
+/// dispatches through the `&dyn ReplyView` seam (model B). The owned
+/// `InboundReplyBody` enum is projected to the flat accessor surface:
+/// `kind` reads the discriminant, `payload` borrows the body bytes (empty
+/// for Del), `err_encoding` borrows the Err encoding hint (None for
+/// Put / Del).
+impl ReplyView for InboundReply {
+    fn rid(&self) -> u64 {
+        self.rid
+    }
+    fn keyexpr(&self) -> &str {
+        &self.keyexpr_literal
+    }
+    fn kind(&self) -> ReplyKind {
+        match &self.body {
+            InboundReplyBody::Put { .. } => ReplyKind::Put,
+            InboundReplyBody::Del => ReplyKind::Del,
+            InboundReplyBody::Err { .. } => ReplyKind::Err,
+        }
+    }
+    fn payload(&self) -> &[u8] {
+        match &self.body {
+            InboundReplyBody::Put { payload } => payload,
+            InboundReplyBody::Del => &[],
+            InboundReplyBody::Err { payload, .. } => payload,
+        }
+    }
+    fn err_encoding(&self) -> Option<(u32, Option<&str>)> {
+        match &self.body {
+            InboundReplyBody::Err { encoding, .. } => encoding
+                .as_ref()
+                .map(|(id, schema)| (*id, schema.as_deref())),
+            _ => None,
+        }
+    }
+}
+
+impl InboundReply {
+    /// R311gb-3c — materialise an owned `InboundReply` from any
+    /// [`ReplyView`] (the retention form of the borrowed delivery
+    /// currency). The `Sample::from_view` analogue on the reply plane:
+    /// the seam delivers `&dyn ReplyView`, so a consumer (or a test) that
+    /// needs to keep a reply past the `on_reply` call copies it out
+    /// through this constructor. AP-only (it allocates the owned payload /
+    /// keyexpr); an MCU sink retains nothing or uses a pool slot instead.
+    pub fn from_view(view: &dyn ReplyView) -> Self {
+        let body = match view.kind() {
+            ReplyKind::Put => InboundReplyBody::Put {
+                payload: view.payload().to_vec(),
+            },
+            ReplyKind::Del => InboundReplyBody::Del,
+            ReplyKind::Err => InboundReplyBody::Err {
+                encoding: view
+                    .err_encoding()
+                    .map(|(id, schema)| (id, schema.map(String::from))),
+                payload: view.payload().to_vec(),
+            },
+        };
+        Self {
+            rid: view.rid(),
+            keyexpr_literal: view.keyexpr().to_string(),
+            body,
+        }
+    }
 }
 
 /// R239 — in-process loopback adapter: project a producer-side
@@ -243,24 +326,6 @@ impl From<QueryReply> for InboundReply {
     }
 }
 
-/// Boxed callback invoked on each inbound `Response(Reply|Err)` whose
-/// `request_id` matches a registered pending z_get. Fires multiple
-/// times per registration (zenoh-pico "many Reply" semantics). The
-/// callback receives `&InboundReply` by reference so the registry
-/// can fan to multiple registrations sharing the same rid without
-/// cloning the payload — duplicate-rid registration is explicitly
-/// supported (the registry assigns no uniqueness constraint on rid;
-/// multiple pending entries fire in registration order).
-pub type ReplyCallback = Box<dyn FnMut(&InboundReply) + Send + 'static>;
-
-/// Boxed callback invoked exactly once per pending z_get when the
-/// matching `ResponseFinal` arrives. After firing, the pending entry
-/// is auto-removed from the registry — subsequent stray
-/// `Response(Reply|Err)` records for the same rid (which would be a
-/// peer-protocol violation per zenoh-pico's "exactly one Final
-/// terminates the chain") drop silently because the lookup misses.
-pub type FinalCallback = Box<dyn FnMut(u64) + Send + 'static>;
-
 /// Stable handle returned by [`ReplyRegistry::register`]. Carries
 /// the rid the registration was bound to so the caller can later
 /// [`ReplyRegistry::unregister`] before the Final arrives. The
@@ -276,7 +341,7 @@ impl ReplyHandle {
     }
 }
 
-struct Pending {
+struct Pending<C: ReplySink> {
     rid: u64,
     /// R239 — number of `Final` records this pending entry expects
     /// before it fires `on_final` and drops from the table. Mirrors
@@ -307,42 +372,52 @@ struct Pending {
     /// `now_ms >= d`. The deadline uses absolute ms so the sweep call
     /// only needs to compare without re-reading the clock per entry.
     deadline_ms: Option<u64>,
-    on_reply: ReplyCallback,
-    on_final: FinalCallback,
+    /// R311gb-3c — the reply-delivery sink (DIP seam). `C = BoxedReplySink`
+    /// on AP (heap `on_reply` + `on_final` closures), a consumer-supplied
+    /// closed `enum` on MCU. The per-pending `(on_reply, on_final)` pair
+    /// the registration carried is now the sink's two methods.
+    sink: C,
 }
 
 /// Reply table backing the inbound `Response(Reply|Err)` and
 /// `ResponseFinal` → callback dispatch. `!Sync` by construction;
 /// cross-task sharing goes through `Arc<Mutex<…>>`. See module-level
 /// docs for scope.
-pub struct ReplyRegistry {
-    pending: Vec<Pending>,
+pub struct ReplyRegistry<C: ReplySink = BoxedReplySink> {
+    pending: Vec<Pending<C>>,
 }
 
-impl Default for ReplyRegistry {
+impl<C: ReplySink> Default for ReplyRegistry<C> {
     fn default() -> Self {
-        Self::new()
+        Self::with_sink_backing()
     }
 }
 
-impl ReplyRegistry {
-    /// New empty registry. Pending entries are stored in a `Vec` so
-    /// duplicate-rid registrations (an application registering two
-    /// independent z_gets that happen to share the same rid via a
-    /// careless rid allocator) fire in registration order; the
-    /// registry imposes no uniqueness on rid. Callers that need
-    /// unique rids manage that at the rid-allocator layer.
-    pub fn new() -> Self {
+impl<C: ReplySink> ReplyRegistry<C> {
+    /// New empty registry over an explicit sink backing `C`. Pending
+    /// entries are stored in a `Vec` so duplicate-rid registrations (an
+    /// application registering two independent z_gets that happen to
+    /// share the same rid via a careless rid allocator) fire in
+    /// registration order; the registry imposes no uniqueness on rid.
+    ///
+    /// R311gb-3c — the generic constructor (the no-`alloc` / MCU entry
+    /// point, paired with [`register_sink`](Self::register_sink)). AP
+    /// callers use the inferring [`new`](ReplyRegistry::new) shorthand,
+    /// which fixes `C = BoxedReplySink`; mirrors
+    /// [`crate::pubsub::SubscriberRegistry::with_sink_backing`].
+    pub fn with_sink_backing() -> Self {
         Self {
             pending: Vec::new(),
         }
     }
 
-    /// Register a pending z_get. The `on_reply` callback fires once
-    /// per inbound `Response(Reply|Err)` whose `request_id == rid`;
-    /// the `on_final` callback fires exactly once — when the entry's
-    /// `expected_finals` counter reaches zero. At that point the
-    /// entry is auto-unregistered.
+    /// R311gb-3c — register a pending z_get with an explicit
+    /// [`ReplySink`]. The seam-native registration entry point: works on
+    /// every profile (`C = BoxedReplySink` heap closures on AP, a
+    /// consumer-supplied closed `enum` on MCU). The `alloc`-only
+    /// [`register`](ReplyRegistry::register) convenience wrapper funnels
+    /// through here after wrapping the `on_reply` + `on_final` closures in
+    /// a [`BoxedReplySink`].
     ///
     /// `expected_finals` mirrors zenoh-pico's
     /// `_z_pending_query_t._remaining_finals` slot
@@ -352,28 +427,24 @@ impl ReplyRegistry {
     /// (`Locality::SessionLocal`) z_get expecting one synthetic
     /// final from [`Self::deliver_local_final`]; two for a
     /// `Locality::Any` z_get with at least one local queryable AND a
-    /// wire branch. Producers feeding this registry know which case
-    /// they are in at register-time because they own the
-    /// `allowed_destination` predicate.
+    /// wire branch.
     ///
     /// The returned [`ReplyHandle`] is the rid wrapped — exposed so
     /// callers that allocate rids opaquely (e.g. a future
     /// `z_get_builder` adapter) can carry the rid without leaking
     /// the integer all the way back to user code.
-    pub fn register(
+    pub fn register_sink(
         &mut self,
         rid: u64,
         expected_finals: u32,
         deadline_ms: Option<u64>,
-        on_reply: impl FnMut(&InboundReply) + Send + 'static,
-        on_final: impl FnMut(u64) + Send + 'static,
+        sink: C,
     ) -> ReplyHandle {
         self.pending.push(Pending {
             rid,
             remaining_finals: expected_finals,
             deadline_ms,
-            on_reply: Box::new(on_reply),
-            on_final: Box::new(on_final),
+            sink,
         });
         ReplyHandle(rid)
     }
@@ -561,8 +632,8 @@ impl ReplyRegistry {
         // ensures a panicking on_final does NOT leave half-swept entries
         // in the registry — every fired entry has already been removed
         // from self.pending by the time its callback runs.
-        let mut fired: Vec<Pending> = Vec::new();
-        let mut keep: Vec<Pending> = Vec::with_capacity(self.pending.len());
+        let mut fired: Vec<Pending<C>> = Vec::new();
+        let mut keep: Vec<Pending<C>> = Vec::with_capacity(self.pending.len());
         for entry in self.pending.drain(..) {
             let expired = matches!(entry.deadline_ms, Some(d) if d <= now_ms);
             if expired {
@@ -575,7 +646,7 @@ impl ReplyRegistry {
         let swept = fired.len();
         for mut entry in fired {
             let rid = entry.rid;
-            (entry.on_final)(rid);
+            entry.sink.on_final(rid);
         }
         swept
     }
@@ -589,7 +660,7 @@ impl ReplyRegistry {
     fn fire_replies_for(&mut self, inbound: &InboundReply) {
         for pending in &mut self.pending {
             if pending.rid == inbound.rid {
-                (pending.on_reply)(inbound);
+                pending.sink.on_reply(inbound);
             }
         }
     }
@@ -620,8 +691,8 @@ impl ReplyRegistry {
         // need to call `(on_final)(rid)` which requires `&mut Pending`);
         // we instead drain the matches into a stash and fire after the
         // retain-pass releases the &mut self.pending borrow.
-        let mut fired: Vec<Pending> = Vec::new();
-        let mut keep: Vec<Pending> = Vec::with_capacity(self.pending.len());
+        let mut fired: Vec<Pending<C>> = Vec::new();
+        let mut keep: Vec<Pending<C>> = Vec::with_capacity(self.pending.len());
         for mut entry in self.pending.drain(..) {
             if entry.rid == rid && entry.remaining_finals > 0 {
                 entry.remaining_finals -= 1;
@@ -634,7 +705,7 @@ impl ReplyRegistry {
         }
         self.pending = keep;
         for mut entry in fired {
-            (entry.on_final)(rid);
+            entry.sink.on_final(rid);
         }
     }
 
@@ -693,6 +764,59 @@ impl ReplyRegistry {
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
             self.dispatch_messages(messages, peer_keyexpr_table);
         }
+    }
+}
+
+/// R311gb-3c — AP / `alloc`-profile convenience constructors. The
+/// closure-taking `register` wrapper lives here (on the `BoxedReplySink`
+/// instantiation only) because it heap-boxes the `on_reply` + `on_final`
+/// closures via [`BoxedReplySink`]; the no-`alloc` profile registers a
+/// consumer-supplied sink through the generic
+/// [`register_sink`](ReplyRegistry::register_sink) instead. Mirror of
+/// [`crate::pubsub::SubscriberRegistry`]'s `BoxedSink` convenience block.
+/// The `alloc` gate is module-redundant (the whole `reply` module is
+/// `alloc`-gated) but kept explicit for symmetry with the `pubsub` side.
+#[cfg(feature = "alloc")]
+impl ReplyRegistry<BoxedReplySink> {
+    /// New empty AP registry backed by heap-boxed closures
+    /// ([`BoxedReplySink`]). The inferring shorthand for
+    /// [`with_sink_backing`](ReplyRegistry::with_sink_backing):
+    /// `ReplyRegistry::new()` fixes `C = BoxedReplySink` so the
+    /// closure-taking [`register`](Self::register) wrapper is in reach
+    /// without a turbofish.
+    pub fn new() -> Self {
+        Self::with_sink_backing()
+    }
+
+    /// Register a pending z_get with `on_reply` + `on_final` closures.
+    /// The `on_reply` closure receives `&dyn ReplyView` (resolved
+    /// keyexpr / kind / payload / err-encoding) — the R311gb-3c seam
+    /// contract replaces the prior owned `&InboundReply`; this is the
+    /// [`feedback_signature_stability`] wire-data principled exemption,
+    /// taken so one registry backs both heap and no-heap profiles. The
+    /// `on_final` closure receives the bare `rid`. Both are heap-boxed
+    /// via [`BoxedReplySink`].
+    ///
+    /// `on_reply` fires once per inbound `Response(Reply|Err)` whose
+    /// `request_id == rid`; `on_final` fires exactly once — when the
+    /// entry's `expected_finals` counter reaches zero, after which the
+    /// entry is auto-unregistered. See
+    /// [`register_sink`](Self::register_sink) for the `expected_finals`
+    /// semantics.
+    pub fn register(
+        &mut self,
+        rid: u64,
+        expected_finals: u32,
+        deadline_ms: Option<u64>,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
+        on_final: impl FnMut(u64) + Send + 'static,
+    ) -> ReplyHandle {
+        self.register_sink(
+            rid,
+            expected_finals,
+            deadline_ms,
+            BoxedReplySink::new(on_reply, on_final),
+        )
     }
 }
 
@@ -925,7 +1049,12 @@ mod tests {
             42,
             1,
             None,
-            move |reply| captured_cb.lock().unwrap().push(reply.clone()),
+            move |reply| {
+                captured_cb
+                    .lock()
+                    .unwrap()
+                    .push(InboundReply::from_view(reply))
+            },
             |_| {},
         );
 
@@ -954,7 +1083,7 @@ mod tests {
             None,
             move |reply| {
                 count_cb.fetch_add(1, Ordering::SeqCst);
-                assert_eq!(reply.body, InboundReplyBody::Del, "expected Del body");
+                assert_eq!(reply.kind(), ReplyKind::Del, "expected Del kind");
             },
             |_| {},
         );
@@ -973,7 +1102,7 @@ mod tests {
             5,
             1,
             None,
-            move |reply| *captured_cb.lock().unwrap() = Some(reply.clone()),
+            move |reply| *captured_cb.lock().unwrap() = Some(InboundReply::from_view(reply)),
             |_| {},
         );
 
@@ -1079,7 +1208,7 @@ mod tests {
             1,
             1,
             None,
-            move |reply| *captured_cb.lock().unwrap() = Some(reply.keyexpr_literal.clone()),
+            move |reply| *captured_cb.lock().unwrap() = Some(reply.keyexpr().to_string()),
             |_| {},
         );
 
@@ -1261,7 +1390,12 @@ mod tests {
             7,
             1,
             None,
-            move |reply| captured_cb.lock().unwrap().push(reply.clone()),
+            move |reply| {
+                captured_cb
+                    .lock()
+                    .unwrap()
+                    .push(InboundReply::from_view(reply))
+            },
             |_| {},
         );
 
