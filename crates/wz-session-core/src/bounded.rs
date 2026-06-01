@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `BoundedVec<T, N>` — the single capacity-generic backing seam for
-//! the application-layer registries.
+//! Capacity-generic backing seams (`BoundedVec<T, N>` +
+//! `BoundedString<N>`) for the application-layer registries and the
+//! owned-output value modules.
 //!
 //! ARCHITECTURE.md §2.4 mandates `static-first, dynamic-opt-in`: one
 //! registry implementation that backs onto a heap-free bounded buffer
@@ -29,6 +30,8 @@
 //! lands with the first registry migration; this module only fixes the
 //! container contract).
 
+#[cfg(feature = "alloc")]
+use alloc::string::String;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
@@ -152,6 +155,135 @@ impl<T, const N: usize> DerefMut for BoundedVec<T, N> {
     }
 }
 
+/// Capacity-generic owned UTF-8 string — the string-shaped sibling of
+/// [`BoundedVec`], for the owned-output value modules (canonicalized
+/// keyexprs, locator addresses, diagnostic chunks). Same backing
+/// contract as [`BoundedVec`]:
+///
+/// - **`alloc` on (AP)** — backed by `alloc::string::String`;
+///   [`push_str`](BoundedString::push_str) never fails, `N` is
+///   advisory.
+/// - **`alloc` off (MCU)** — backed by `heapless::String<N>`;
+///   [`push_str`](BoundedString::push_str) returns [`CapacityFull`]
+///   when the append would exceed the declared `N` *bytes*, leaving
+///   the buffer unchanged (heapless append is atomic — no partial
+///   write). The caller decides; never a silent truncation.
+///
+/// Implements [`core::fmt::Write`] on both backings, so the value
+/// modules can build output with `write!` / `core::fmt` machinery and
+/// get the same capacity-failure surface (`fmt::Error` on overflow).
+#[cfg(feature = "alloc")]
+pub struct BoundedString<const N: usize> {
+    inner: String,
+}
+
+/// Capacity-generic owned UTF-8 string. See the type docs for the AP
+/// (`alloc`) vs MCU (no-alloc) backing contract.
+#[cfg(not(feature = "alloc"))]
+pub struct BoundedString<const N: usize> {
+    inner: heapless::String<N>,
+}
+
+impl<const N: usize> BoundedString<N> {
+    /// Construct an empty string. `const` on both backings.
+    #[cfg(feature = "alloc")]
+    pub const fn new() -> Self {
+        Self {
+            inner: String::new(),
+        }
+    }
+
+    /// Construct an empty string. `const` on both backings.
+    #[cfg(not(feature = "alloc"))]
+    pub const fn new() -> Self {
+        Self {
+            inner: heapless::String::new(),
+        }
+    }
+
+    /// The declared logical byte capacity `N`. Advisory on the `alloc`
+    /// backing; the hard byte limit `push_str` / `push` enforce on the
+    /// no-alloc backing.
+    pub const fn capacity(&self) -> usize {
+        N
+    }
+
+    /// Append a string slice. `Ok(())` always on the `alloc` backing;
+    /// `Err(CapacityFull(()))` on the no-alloc backing when the append
+    /// would exceed `N` bytes (buffer left unchanged).
+    #[cfg(feature = "alloc")]
+    pub fn push_str(&mut self, s: &str) -> Result<(), CapacityFull<()>> {
+        self.inner.push_str(s);
+        Ok(())
+    }
+
+    /// Append a string slice. `Ok(())` always on the `alloc` backing;
+    /// `Err(CapacityFull(()))` on the no-alloc backing when the append
+    /// would exceed `N` bytes (buffer left unchanged).
+    #[cfg(not(feature = "alloc"))]
+    pub fn push_str(&mut self, s: &str) -> Result<(), CapacityFull<()>> {
+        self.inner.push_str(s).map_err(|_| CapacityFull(()))
+    }
+
+    /// Append one `char`. Capacity semantics mirror [`push_str`].
+    #[cfg(feature = "alloc")]
+    pub fn push(&mut self, c: char) -> Result<(), CapacityFull<char>> {
+        self.inner.push(c);
+        Ok(())
+    }
+
+    /// Append one `char`. Capacity semantics mirror [`push_str`].
+    #[cfg(not(feature = "alloc"))]
+    pub fn push(&mut self, c: char) -> Result<(), CapacityFull<char>> {
+        self.inner.push(c).map_err(|_| CapacityFull(c))
+    }
+
+    /// Borrow the contents as a `&str`.
+    pub fn as_str(&self) -> &str {
+        &self.inner
+    }
+
+    /// Remove all bytes, keeping the allocated/declared capacity.
+    pub fn clear(&mut self) {
+        self.inner.clear();
+    }
+}
+
+impl<const N: usize> Default for BoundedString<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> Deref for BoundedString<N> {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.inner
+    }
+}
+
+impl<const N: usize> fmt::Display for BoundedString<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.inner)
+    }
+}
+
+impl<const N: usize> fmt::Debug for BoundedString<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.inner.as_str(), f)
+    }
+}
+
+// `fmt::Write` lets the owned-output modules build a BoundedString with
+// `write!` / `core::fmt`; the no-alloc backing surfaces a full buffer
+// as `fmt::Error`, the standard `core::fmt` capacity-failure channel.
+impl<const N: usize> fmt::Write for BoundedString<N> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.push_str(s).map_err(|_| fmt::Error)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +334,39 @@ mod tests {
         }
         assert_eq!(v.len(), 8);
         assert_eq!(v.capacity(), 2);
+    }
+
+    #[test]
+    fn string_push_within_capacity() {
+        use core::fmt::Write;
+        let mut s: BoundedString<16> = BoundedString::new();
+        assert!(s.is_empty());
+        assert!(s.push_str("home").is_ok());
+        assert!(s.push('/').is_ok());
+        write!(s, "temp").unwrap();
+        assert_eq!(s.as_str(), "home/temp");
+        assert_eq!(&*s, "home/temp");
+    }
+
+    // No-alloc backing enforces the byte cap atomically (no partial
+    // write). Gated off the alloc backing, which grows past `N`.
+    #[cfg(not(feature = "alloc"))]
+    #[test]
+    fn string_push_past_capacity_rejects_atomically_no_alloc() {
+        let mut s: BoundedString<4> = BoundedString::new();
+        assert!(s.push_str("abcd").is_ok());
+        assert!(s.push_str("e").is_err());
+        assert!(s.push('x').is_err());
+        // Buffer unchanged by the rejected appends.
+        assert_eq!(s.as_str(), "abcd");
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn string_grows_past_declared_capacity_on_alloc() {
+        let mut s: BoundedString<4> = BoundedString::new();
+        assert!(s.push_str("abcdefgh").is_ok());
+        assert_eq!(s.as_str(), "abcdefgh");
+        assert_eq!(s.capacity(), 4);
     }
 }
