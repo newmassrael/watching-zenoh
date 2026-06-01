@@ -20,7 +20,18 @@
 //! now under the R311dn-tests carry; their identity-via-re-export
 //! callsite checks the moved bodies).
 
-use alloc::vec::Vec;
+use crate::bounded::BoundedVec;
+
+/// Maximum number of `/`-separated chunks a target keyexpr is split
+/// into for the backtracking matcher. On the MCU no-heap profile this
+/// is the hard declared bound (`BoundedVec`'s no-alloc backing); a
+/// target deeper than this is conservatively treated as no-match (the
+/// §2.1 bounded-declared-table philosophy — MCU keyexprs are
+/// deploy-bounded). On the AP profile the `BoundedVec` `alloc` backing
+/// grows past it, so AP behaviour is unbounded and identical to the
+/// prior `Vec` form. Mirrors the `parse_error::MAX_EXT_CHAIN_DEPTH`
+/// declared-bound precedent.
+pub const MAX_KEYEXPR_CHUNKS: usize = 32;
 
 /// Match a `/`-separated zenoh keyexpr `target` (Push's suffix) against
 /// a pattern split into chunks. Pattern chunks are:
@@ -47,7 +58,15 @@ use alloc::vec::Vec;
 /// pathological inputs (the productive zenoh-style patterns
 /// `home/**` / `sensors/*/temp` stay linear).
 pub fn keyexpr_pattern_matches(pattern_chunks: &[&str], target: &str) -> bool {
-    let target_chunks: Vec<&str> = target.split('/').collect();
+    let mut target_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+    for chunk in target.split('/') {
+        // No-alloc backing: a target deeper than the declared bound
+        // cannot be represented, so it is conservatively no-match. The
+        // alloc backing never takes this arm (push is infallible).
+        if target_chunks.push(chunk).is_err() {
+            return false;
+        }
+    }
     matches_chunks(pattern_chunks, &target_chunks)
 }
 
@@ -127,16 +146,24 @@ fn chunk_matches(pattern: &str, target: &str) -> bool {
 /// as no-ops so the matcher remains equivalent to the canonical
 /// form `$*`.
 fn chunk_matches_with_dsl(pattern: &str, target: &str) -> bool {
-    let parts: Vec<&str> = pattern.split("$*").collect();
     debug_assert!(
-        parts.len() >= 2,
+        pattern.contains("$*"),
         "chunk_matches_with_dsl invoked on a pattern without `$*` — caller routing bug",
     );
 
-    let n = parts.len();
+    // Allocation-free `$*`-split walk: a peekable iterator replaces the
+    // former `Vec<&str> = split("$*").collect()`. The first item is the
+    // leading anchor, the last item (peek == None) is the trailing
+    // anchor, and every item in between is an ordered middle sub-part.
+    // Behaviour is byte-for-byte identical to the prior indexed form
+    // (`parts[0]` / `parts[1..n-1]` / `parts[n-1]`). Since `pattern`
+    // contains `$*`, `split` yields at least two items, so the loop
+    // always reaches the trailing-anchor arm and the `unreachable!`
+    // tail is never executed.
+    let mut parts = pattern.split("$*").peekable();
     let mut remaining = target;
 
-    let leading = parts[0];
+    let leading = parts.next().unwrap_or("");
     if !leading.is_empty() {
         match remaining.strip_prefix(leading) {
             Some(rest) => remaining = rest,
@@ -144,7 +171,20 @@ fn chunk_matches_with_dsl(pattern: &str, target: &str) -> bool {
         }
     }
 
-    for &part in &parts[1..n - 1] {
+    loop {
+        let part = match parts.next() {
+            Some(p) => p,
+            None => unreachable!("`$*` guarantees >= 2 parts; trailing arm consumes the last"),
+        };
+        if parts.peek().is_none() {
+            // Trailing anchor.
+            return if part.is_empty() {
+                true
+            } else {
+                remaining.ends_with(part) && remaining.len() >= part.len()
+            };
+        }
+        // Middle sub-part.
         if part.is_empty() {
             continue;
         }
@@ -152,13 +192,6 @@ fn chunk_matches_with_dsl(pattern: &str, target: &str) -> bool {
             Some(pos) => remaining = &remaining[pos + part.len()..],
             None => return false,
         }
-    }
-
-    let trailing = parts[n - 1];
-    if trailing.is_empty() {
-        true
-    } else {
-        remaining.ends_with(trailing) && remaining.len() >= trailing.len()
     }
 }
 
@@ -293,15 +326,88 @@ fn chunk_intersects(a: &str, b: &str) -> bool {
             // accepts both matchers). R293 originally labelled this
             // "over-approximation"; R296 closure: the algorithm is
             // exact for intersects mode in the two-side `$*` case.
-            let a_parts: Vec<&str> = a.split("$*").collect();
-            let b_parts: Vec<&str> = b.split("$*").collect();
-            let a_lead = a_parts[0];
-            let a_trail = a_parts[a_parts.len() - 1];
-            let b_lead = b_parts[0];
-            let b_trail = b_parts[b_parts.len() - 1];
+            // Only the leading and trailing anchors are needed, so the
+            // former `Vec<&str> = split("$*").collect()` is replaced by
+            // a head/tail extraction: `split` head is `parts[0]`,
+            // `rsplit` head is `parts[len - 1]`. Both sides contain
+            // `$*` here, so `next()` is always `Some`.
+            let a_lead = a.split("$*").next().unwrap_or("");
+            let a_trail = a.rsplit("$*").next().unwrap_or("");
+            let b_lead = b.split("$*").next().unwrap_or("");
+            let b_trail = b.rsplit("$*").next().unwrap_or("");
             let lead_compat = a_lead.starts_with(b_lead) || b_lead.starts_with(a_lead);
             let trail_compat = a_trail.ends_with(b_trail) || b_trail.ends_with(a_trail);
             lead_compat && trail_compat
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Profile-agnostic behaviour guard. The exhaustive R220/R293/R296
+    // ratchet cases live in the alloc-gated `pubsub.rs`; these run in
+    // BOTH the alloc and the no-alloc build so the BoundedVec /
+    // peekable rewrites are covered on the MCU profile too.
+
+    #[test]
+    fn literal_and_single_wildcard() {
+        assert!(keyexpr_pattern_matches(&["home", "temp"], "home/temp"));
+        assert!(!keyexpr_pattern_matches(&["home", "temp"], "home/humid"));
+        assert!(keyexpr_pattern_matches(&["home", "*"], "home/temp"));
+        assert!(!keyexpr_pattern_matches(&["home", "*"], "home/a/b"));
+    }
+
+    #[test]
+    fn double_wildcard() {
+        assert!(keyexpr_pattern_matches(&["home", "**"], "home/a/b/c"));
+        assert!(keyexpr_pattern_matches(&["home", "**"], "home"));
+        assert!(keyexpr_pattern_matches(&["**", "temp"], "a/b/temp"));
+    }
+
+    #[test]
+    fn intra_chunk_dsl() {
+        // peekable rewrite of chunk_matches_with_dsl
+        assert!(keyexpr_pattern_matches(&["sensor$*"], "sensor42"));
+        assert!(keyexpr_pattern_matches(&["$*temp"], "room_temp"));
+        assert!(keyexpr_pattern_matches(&["a$*b$*c"], "axxbyyc"));
+        assert!(!keyexpr_pattern_matches(&["a$*c"], "axxb"));
+    }
+
+    #[test]
+    fn intersection_two_sided_dsl() {
+        // split/rsplit head-tail extraction of the (true,true) arm
+        assert!(keyexpr_intersect_patterns(&["pre$*post"], &["pre$*post"]));
+        assert!(keyexpr_intersect_patterns(&["a$*"], &["$*b"]));
+        assert!(!keyexpr_intersect_patterns(&["x$*"], &["y$*"]));
+    }
+
+    // No-alloc backing only: a target deeper than MAX_KEYEXPR_CHUNKS is
+    // conservatively no-match. On the alloc backing the BoundedVec grows
+    // past the declared bound, so this assertion is gated off it.
+    #[cfg(not(feature = "alloc"))]
+    #[test]
+    fn over_depth_target_is_conservative_no_match_no_alloc() {
+        // MAX_KEYEXPR_CHUNKS + 1 chunks, all matched by `**`.
+        let deep = {
+            // build "0/1/2/.../N" without alloc: a fixed worst-case &str
+            // is simplest — use a static over-depth literal.
+            "a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a"
+        };
+        // 33 chunks > MAX_KEYEXPR_CHUNKS (32): cannot be represented on
+        // the no-alloc backing, so `**` (which would otherwise match)
+        // returns false.
+        assert_eq!(deep.split('/').count(), MAX_KEYEXPR_CHUNKS + 1);
+        assert!(!keyexpr_pattern_matches(&["**"], deep));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn over_depth_target_matches_on_alloc() {
+        let deep = "a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a/a";
+        assert_eq!(deep.split('/').count(), MAX_KEYEXPR_CHUNKS + 1);
+        // AP backing grows past the declared bound -> `**` still matches.
+        assert!(keyexpr_pattern_matches(&["**"], deep));
     }
 }

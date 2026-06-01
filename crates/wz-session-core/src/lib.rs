@@ -39,7 +39,12 @@ pub mod keyexpr_canon;
 /// the future inherent `has_matching` methods on
 /// `Remote{Subscriber,Queryable}Registry` (R311do / R311dp) once
 /// those registries migrate into wz-session-core.
-#[cfg(feature = "alloc")]
+///
+/// R311fz — un-gated from `alloc`: the matcher now backs its one
+/// indexed buffer onto `bounded::BoundedVec<&str, MAX_KEYEXPR_CHUNKS>`
+/// (the `$*`-split paths became allocation-free peekable / head-tail
+/// walks), so keyexpr matching exists on the MCU no-heap profile. The
+/// alloc-gated callers (`pubsub` / `query` / `declare`) are unaffected.
 pub mod keyexpr_match;
 
 /// Capacity-generic backing store (`BoundedVec<T, N>`) for the
