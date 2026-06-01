@@ -93,6 +93,20 @@ pub mod query_sink;
 /// land in the apply sub-round.
 pub mod reply_sink;
 
+/// R311gb-3d — declare-event delivery seam (`DeclView` accessor contract
+/// + `DeclSink` / `UndeclSink` DIP traits + the `alloc`-only
+/// `BoxedDeclSink` / `BoxedUndeclSink` closure adapters). The
+/// control-plane sibling of [`sink`]: unconditional so the peer-
+/// declaration observer registries (subscriber / queryable /
+/// liveliness-token) fan inbound `Declare(DeclX|UndeclX)` records through
+/// one backing-agnostic seam (model B: AP stores `BoxedDeclSink` heap
+/// closures, MCU stores consumer-supplied closed `enum`s). One shared
+/// `DeclView` since the three peer-declaration wire records are field-
+/// identical `(id, keyexpr)`; the matching undeclaration is a bare `u64`
+/// scalar. First step of the declare model-B migration; the registry
+/// generic-over-sink rewrites land in the apply sub-rounds.
+pub mod decl_sink;
+
 /// R223 — zenoh-style locality filter (no_std + no_alloc; pure enum + helpers).
 /// Mirrors zenoh-pico's `z_locality_t` and `_z_locality_allows_{local,remote}`.
 /// Available unconditionally because the type carries no allocations.
