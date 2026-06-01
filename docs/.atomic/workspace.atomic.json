@@ -28162,6 +28162,64 @@
         "Signature-stability principle audit — R311g1 closed the SessionLinkActions impl block scope; remaining cfg-on-signature sites all sit behind type-gated arg or return types (session.rs API surface / build_response_final / encode_*_with_role principled exemption). No further per-cascade signature-deletion permitted — feedback_signature_stability MEMORY anchor governs."
       ]
     },
+    "Round 311gc": {
+      "decision_summary": "R311gc switchboard arch ratified: keyexpr demux=wz (ACL/Hexagonal), SCE on-sample=socket-granular; wz maps keyexpr->semantic event, build-validated vs <sce:inbound> contract; SCE change 0",
+      "changes_bullets": [
+        "Routing model ratified (a)-refined: two layers joining at the semantic event name. SCE on-sample = transport-socket-granular signal; zenoh keyexpr demux = wz switchboard (ACL / Ports-and-Adapters).",
+        "keyexpr semantics (** / $* / DECLARE table) permanently wz-owned per Axis 1 vendor-domain; SCE SampleMeta.key_expr is 0-knowledge pass-through (sce-link-runtime/src/lib.rs:172).",
+        "switchboard validation basis = <sce:inbound> / LinkInboundEvent contract (forge-ast.v1.schema.json:3996, exported per-link at :2801); coarse SCXMLModel.events rejected as ingress+egress+system kitchen-sink (false-accept trap).",
+        "semantic-event injection via public Engine::raise_external_by_name (sce-rust-runtime/src/engine.rs:766); value-carrying payload via Worker inbox of decoded struct, empty external event when signal-only.",
+        "option (c) logical-keyexpr-link rejected: would couple the SCXML core to the vendor wire protocol (coupling debt, anti-ACL).",
+        "SCE change 0 — no new kind / schema / sce:* element; the ingress contract is already published in forge-ast.v1."
+      ],
+      "verification_bullets": [
+        "SCE on-sample emit boundary confirmed: rust/state_machine.rs.jinja2:1010-1135 emits per-link deliver_link_X_sample<M:SampleMeta> + LinkRx trait/impl only; no LinkId enum, no unified dispatch, no keyexpr table.",
+        "SCE link is a byte-stream socket (forge/rust/link.rs.jinja2; RFC 5.C): bind/framer/pools fields, no keyexpr field.",
+        "SampleMeta universal field is key_expr only (sce-link-runtime/src/lib.rs:156,172); Q-Sample-4 defers the rest, SCE has 0 knowledge.",
+        "<sce:inbound>/LinkInboundEvent verified: schema:3996 (event + optional when predicate), exported as <sce:events> rows per link at schema:2801.",
+        "raise_external_by_name is public and graceful-ignores unknown events (engine.rs:766-771), so a build-time subset check is required (switchboard targets must be a subset of the link inbound set).",
+        "coarse-events trap proven structurally: LinkOutboundEvent (egress) coexists in the same events set (schema:4012)."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "R311gc implementation: wz switchboard = keyexpr->inbound-event mapping + build-time <sce:inbound> contract cross-check (fail-fast on drift) + raise_external_by_name injection.",
+        "MCU profile: generated closed keyexpr->event match (no-alloc, static-first); AP profile: dynamic registry coexists.",
+        "Optional non-blocking nicety: SCE could expose a single derived ingress-event-set field to DRY N consumers; data is already published so not required.",
+        "Update project_no_alloc_gating_load_trigger memory: R311gc design pinned (ACL switchboard over <sce:inbound>, SCE change 0)."
+      ],
+      "publishable_decision_summary": "R311gc switchboard arch ratified: keyexpr demux=wz (ACL/Hexagonal), SCE on-sample=socket-granular; wz maps keyexpr->semantic event, build-validated vs <sce:inbound> contract; SCE change 0",
+      "publishable_changes_bullets": [
+        "Routing model ratified (a)-refined: two layers joining at the semantic event name. SCE on-sample = transport-socket-granular signal; zenoh keyexpr demux = wz switchboard (ACL / Ports-and-Adapters).",
+        "keyexpr semantics (** / $* / DECLARE table) permanently wz-owned per Axis 1 vendor-domain; SCE SampleMeta.key_expr is 0-knowledge pass-through (sce-link-runtime/src/lib.rs:172).",
+        "switchboard validation basis = <sce:inbound> / LinkInboundEvent contract (forge-ast.v1.schema.json:3996, exported per-link at :2801); coarse SCXMLModel.events rejected as ingress+egress+system kitchen-sink (false-accept trap).",
+        "semantic-event injection via public Engine::raise_external_by_name (sce-rust-runtime/src/engine.rs:766); value-carrying payload via Worker inbox of decoded struct, empty external event when signal-only.",
+        "option (c) logical-keyexpr-link rejected: would couple the SCXML core to the vendor wire protocol (coupling debt, anti-ACL).",
+        "SCE change 0 — no new kind / schema / sce:* element; the ingress contract is already published in forge-ast.v1."
+      ],
+      "publishable_verification_bullets": [
+        "SCE on-sample emit boundary confirmed: rust/state_machine.rs.jinja2:1010-1135 emits per-link deliver_link_X_sample<M:SampleMeta> + LinkRx trait/impl only; no LinkId enum, no unified dispatch, no keyexpr table.",
+        "SCE link is a byte-stream socket (forge/rust/link.rs.jinja2; RFC 5.C): bind/framer/pools fields, no keyexpr field.",
+        "SampleMeta universal field is key_expr only (sce-link-runtime/src/lib.rs:156,172); Q-Sample-4 defers the rest, SCE has 0 knowledge.",
+        "<sce:inbound>/LinkInboundEvent verified: schema:3996 (event + optional when predicate), exported as <sce:events> rows per link at schema:2801.",
+        "raise_external_by_name is public and graceful-ignores unknown events (engine.rs:766-771), so a build-time subset check is required (switchboard targets must be a subset of the link inbound set).",
+        "coarse-events trap proven structurally: LinkOutboundEvent (egress) coexists in the same events set (schema:4012)."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311gc implementation: wz switchboard = keyexpr->inbound-event mapping + build-time <sce:inbound> contract cross-check (fail-fast on drift) + raise_external_by_name injection.",
+        "MCU profile: generated closed keyexpr->event match (no-alloc, static-first); AP profile: dynamic registry coexists.",
+        "Optional non-blocking nicety: SCE could expose a single derived ingress-event-set field to DRY N consumers; data is already published so not required.",
+        "Update project_no_alloc_gating_load_trigger memory: R311gc design pinned (ACL switchboard over <sce:inbound>, SCE change 0)."
+      ]
+    },
     "Round 311h": {
       "decision_summary": "R311h codec-push wire-layer cascade — wz-codecs gate + Cargo edges + session_glue.rs Push surface; pubsub.rs consumer cascade deferred to R311m.",
       "changes_bullets": [
@@ -34612,5 +34670,5 @@
       "reason": "F=~3KLOC wz session module; P=zenoh transport/unicast module; C=standalone session shape, multicast independent"
     }
   },
-  "schema_version": 4
+  "schema_version": 5
 }
