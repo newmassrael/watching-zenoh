@@ -151,24 +151,11 @@ impl EncodingHint {
     }
 }
 
-/// Sample kind discriminant. Numeric values match zenoh-pico's
-/// `z_sample_kind_t` (`vendor/zenoh-pico/include/zenoh-pico/api/constants.h`
-/// lines 165-167) so any future wire-side extension that carries the
-/// kind byte can serialize via `as u8` without translation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[repr(u8)]
-pub enum SampleKind {
-    /// The sample carries data — the publisher called Put. zenoh-pico:
-    /// `Z_SAMPLE_KIND_PUT`. R232 — designated `#[default]` so
-    /// containers that derive `Default` and embed a `SampleKind` (e.g.
-    /// `PublishOptions`) initialise the publish-the-common-case shape
-    /// without a manual `impl Default`.
-    #[default]
-    Put = 0,
-    /// The sample marks a key deletion — the publisher called Delete.
-    /// zenoh-pico: `Z_SAMPLE_KIND_DELETE`.
-    Del = 1,
-}
+// R311gb-2 — `SampleKind` hoisted to the unconditional `crate::sample_kind`
+// module so the no-alloc `sink::SampleView` accessor contract can name it on
+// every profile. Re-exported here so existing `crate::sample::SampleKind`
+// paths (and this module's `Sample` field type) are unaffected.
+pub use crate::sample_kind::SampleKind;
 
 /// QoS metadata extracted from the Push outer extension chain.
 ///
@@ -336,6 +323,25 @@ pub struct Sample {
     /// `Z_RELIABILITY_DEFAULT`); transport-context wire-up is an
     /// R226+ follow-up.
     pub reliability: Reliability,
+}
+
+// R311gb-2 — `Sample` is the AP (`alloc`) projection of the
+// `sink::SampleView` delivery contract. The subscriber registry dispatches
+// an owned `Sample` to a `SampleSink` as `&self as &dyn SampleView`, so the
+// borrowed-accessor reads cost nothing (no copy, no third sample type).
+impl crate::sink::SampleView for Sample {
+    fn keyexpr(&self) -> &str {
+        &self.keyexpr
+    }
+    fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+    fn kind(&self) -> SampleKind {
+        self.kind
+    }
+    fn reliability(&self) -> Reliability {
+        self.reliability
+    }
 }
 
 impl Sample {

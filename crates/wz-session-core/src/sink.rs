@@ -44,6 +44,9 @@
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
 
+use crate::reliability::Reliability;
+use crate::sample_kind::SampleKind;
+
 /// Read-only accessor contract for an inbound sample handed to a
 /// [`SampleSink`]. This is the delivery currency (passed as
 /// `&dyn SampleView`); see the [module docs](self) for why it is a
@@ -60,6 +63,10 @@ pub trait SampleView {
     fn keyexpr(&self) -> &str;
     /// Payload bytes. Empty for a Del sample.
     fn payload(&self) -> &[u8];
+    /// Put vs Del discriminant.
+    fn kind(&self) -> SampleKind;
+    /// Link-layer reliability classification of the carrying frame.
+    fn reliability(&self) -> Reliability;
 }
 
 /// A [`SampleView`] over loose borrowed bytes — the canonical impl for a
@@ -72,6 +79,10 @@ pub struct BorrowedSample<'a> {
     pub keyexpr: &'a str,
     /// Payload bytes. Empty for a Del sample.
     pub payload: &'a [u8],
+    /// Put vs Del discriminant.
+    pub kind: SampleKind,
+    /// Link-layer reliability classification.
+    pub reliability: Reliability,
 }
 
 impl SampleView for BorrowedSample<'_> {
@@ -80,6 +91,12 @@ impl SampleView for BorrowedSample<'_> {
     }
     fn payload(&self) -> &[u8] {
         self.payload
+    }
+    fn kind(&self) -> SampleKind {
+        self.kind
+    }
+    fn reliability(&self) -> Reliability {
+        self.reliability
     }
 }
 
@@ -138,6 +155,7 @@ mod tests {
         calls: u32,
         last_len: usize,
         last_key_len: usize,
+        last_kind: SampleKind,
     }
 
     impl SampleSink for CountingSink {
@@ -145,6 +163,7 @@ mod tests {
             self.calls += 1;
             self.last_len = sample.payload().len();
             self.last_key_len = sample.keyexpr().len();
+            self.last_kind = sample.kind();
         }
     }
 
@@ -154,10 +173,13 @@ mod tests {
         sink.deliver(&BorrowedSample {
             keyexpr: "home/temp",
             payload: b"21.5",
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
         });
         assert_eq!(sink.calls, 1);
         assert_eq!(sink.last_len, 4);
         assert_eq!(sink.last_key_len, 9);
+        assert_eq!(sink.last_kind, SampleKind::Put);
     }
 
     #[cfg(feature = "alloc")]
@@ -176,10 +198,14 @@ mod tests {
         sink.deliver(&BorrowedSample {
             keyexpr: "a/b",
             payload: b"",
+            kind: SampleKind::Del,
+            reliability: Reliability::Reliable,
         });
         sink.deliver(&BorrowedSample {
             keyexpr: "c/d",
             payload: b"x",
+            kind: SampleKind::Put,
+            reliability: Reliability::BestEffort,
         });
 
         let got = seen.lock().unwrap();
