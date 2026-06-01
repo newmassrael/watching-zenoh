@@ -67,6 +67,18 @@ pub mod bounded;
 /// `WorkerSink`/`StatechartSink` adapters land in subsequent sub-rounds.
 pub mod sink;
 
+/// R311gb-3 — query-dispatch seam (`QueryView` inbound accessor contract
+/// + `ReplyOut` outbound emit contract + `QuerySink` DIP trait + the
+/// `alloc`-only `BoxedQuerySink` closure adapter). The request/response
+/// sibling of [`sink`]: unconditional so the queryable registry can
+/// dispatch a matched inbound query through one backing-agnostic seam
+/// (model B: AP stores `BoxedQuerySink` heap closures, MCU stores a
+/// consumer-supplied closed `enum`, §2.4 static-first dynamic-opt-in).
+/// First step of the queryable model-B migration; the registry
+/// generic-over-`C: QuerySink` rewrite + the `QueryEvent`/`ReplyEmitter`
+/// contract impls land in subsequent sub-rounds.
+pub mod query_sink;
+
 /// R223 — zenoh-style locality filter (no_std + no_alloc; pure enum + helpers).
 /// Mirrors zenoh-pico's `z_locality_t` and `_z_locality_allows_{local,remote}`.
 /// Available unconditionally because the type carries no allocations.
