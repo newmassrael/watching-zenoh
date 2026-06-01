@@ -81,6 +81,18 @@ pub mod sink;
 /// `QueryEvent`/`ReplyEmitter` wrapper module).
 pub mod query_sink;
 
+/// R311gb-3c — reply-delivery seam (`ReplyKind` discriminant + `ReplyView`
+/// accessor contract + `ReplySink` DIP trait with `on_reply` / `on_final`
+/// + the `alloc`-only `BoxedReplySink` closure adapter). The response-plane
+/// sibling of [`sink`]: unconditional so the reply registry can route a
+/// pending z_get's inbound replies through one backing-agnostic seam
+/// (model B: AP stores `BoxedReplySink` heap closures, MCU stores a
+/// consumer-supplied closed `enum`, §2.4 static-first dynamic-opt-in).
+/// First step of the reply model-B migration; the registry
+/// generic-over-`C: ReplySink` rewrite + `impl ReplyView for InboundReply`
+/// land in the apply sub-round.
+pub mod reply_sink;
+
 /// R223 — zenoh-style locality filter (no_std + no_alloc; pure enum + helpers).
 /// Mirrors zenoh-pico's `z_locality_t` and `_z_locality_allows_{local,remote}`.
 /// Available unconditionally because the type carries no allocations.
