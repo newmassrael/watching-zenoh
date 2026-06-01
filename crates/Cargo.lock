@@ -1594,6 +1594,7 @@ name = "wz-session-core"
 version = "0.1.0"
 dependencies = [
  "hashbrown 0.15.5",
+ "heapless",
  "hmac",
  "log",
  "sce-forge-runtime",

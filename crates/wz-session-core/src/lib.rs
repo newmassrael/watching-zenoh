@@ -42,6 +42,15 @@ pub mod keyexpr_canon;
 #[cfg(feature = "alloc")]
 pub mod keyexpr_match;
 
+/// Capacity-generic backing store (`BoundedVec<T, N>`) for the
+/// application-layer registries: `alloc::Vec` on the AP profile,
+/// `heapless::Vec<T, N>` on the MCU no-heap profile (§2.3 / §2.4).
+/// Unconditional — the type exists in every profile so registry code
+/// names one backing-agnostic container regardless of the `alloc`
+/// feature. First step of the session-core no-alloc gating: provides
+/// the seam the 25 currently alloc-gated modules migrate onto.
+pub mod bounded;
+
 /// R223 — zenoh-style locality filter (no_std + no_alloc; pure enum + helpers).
 /// Mirrors zenoh-pico's `z_locality_t` and `_z_locality_allows_{local,remote}`.
 /// Available unconditionally because the type carries no allocations.

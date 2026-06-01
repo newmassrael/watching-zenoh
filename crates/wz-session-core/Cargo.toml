@@ -188,6 +188,12 @@ log = "0.4"
 hmac = { version = "0.12", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc"] }
+# no-alloc backing store for the application-layer registries. When the
+# `alloc` feature is off (MCU no-heap profile, §2.3) `BoundedVec<T, N>`
+# (src/bounded.rs) wraps `heapless::Vec<T, N>`; when on it wraps
+# `alloc::Vec<T>`. heapless 0.8 mirrors the wz-link-lwip pin so the two
+# heapless consumers stay version-aligned across the no_std tier.
+heapless = { version = "0.8", default-features = false }
 
 [dev-dependencies]
 # R311ds — the four declare/* registries' wider behavioural tests
