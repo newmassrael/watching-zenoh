@@ -913,6 +913,12 @@ _wz_consumer_plane_subsets() {
     printf '%s\t%s\n' "liveliness-sub-only"   "codec-declare,declare-interest,liveliness-subscriber"
     printf '%s\t%s\n' "liveliness-token-only" "liveliness-token"
     printf '%s\t%s\n' "declare-observer"      "codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber"
+    # R311gi gc-2c — statechart switchboard plane (keyexpr -> SCXML
+    # domain-event injection). `switchboard` implies codec-push (it reacts
+    # to inbound Push); it is the first subset with codec-push ON but
+    # pubsub-put OFF, which guards that the data-callback projection and
+    # the switchboard injection stay independently composable.
+    printf '%s\t%s\n' "switchboard-only"      "switchboard"
 }
 
 # ─── Layer C4b — wz facade arbitrary-incomplete-subset matrix ────────

@@ -307,6 +307,10 @@ pubsub-sample = []
 pubsub-source-info = ["wz-runtime-tokio?/pubsub-source-info"]
 pubsub-timestamp = ["wz-runtime-tokio?/pubsub-timestamp"]
 
+# R311gi gc-2c — statechart switchboard facade forward (the AP dynamic
+# keyexpr -> SCXML domain-event inbound adapter; ⇒ codec-push).
+switchboard = ["wz-runtime-tokio?/switchboard"]
+
 # ----- domain: query (10 atomic, 9 active / 1 reserved) -----
 # R311cj — query-attachment + -selector-parameters + -reply-err wire-up;
 # query-source-info stays reserved (build_request_query_with_source_info
