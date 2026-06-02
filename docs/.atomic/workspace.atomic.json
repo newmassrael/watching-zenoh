@@ -28488,6 +28488,44 @@
         "gc-3 next: wz-switchboard.yaml -> generated closed keyexpr->event match (MCU static) + build-time validation (signal subset external_ingress_events, value subset EventSchema)."
       ]
     },
+    "Round 311gj": {
+      "decision_summary": "R311gj corrects R311gi: the switchboard injects into the APP statechart engine (built in the app on_event closure), not the session FSM engine drive_session owns. drive_session UNCHANGED, no on_event ripple.",
+      "changes_bullets": [
+        "R311gi Decision 2 conflated two engines: drive_session owns the SESSION FSM (LinkOpened/Close); the switchboard targets the APP SCXML statechart (temp_update), a distinct engine the app owns.",
+        "Correction: the app on_event closure captures &mut app_engine, builds EngineInjector, calls observer.dispatch_switchboard. drive_session keeps FnMut(IterationEvent) -- no signature change.",
+        "Unaffected: gc-2c-1 observer fan-out + dispatch_iteration_event + the gc-2b EngineInjector are correct as landed; only WHO builds the injector changes (the app, not the runtime loop).",
+        "Live wz-ap-demo wiring needs an example app SCXML engine that does not exist yet -> deferred to gc-3. gc-2c proves the path via an Observer + EngineInjector-over-real-Engine test."
+      ],
+      "verification_bullets": [
+        "Code read confirms the only AP engines threaded are SessionFsmUnicastPolicy (drive_session) + ScoutingPolicy; no application statechart engine exists in the current demo path.",
+        "raise_external_by_name graceful-ignores unknown names, so injecting an app event into the session FSM would silently no-op -- the latent wrong-target bug the correction avoids."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "gc-2c-2 (corrected): wz-runtime-tokio switchboard feature forward + bridge dep + an Observer/EngineInjector real-engine test; wz facade + preset forward. drive_session untouched.",
+        "gc-3: generator + example app SCXML machine + live wz-ap-demo wiring (app on_event closure builds EngineInjector over the app engine)."
+      ],
+      "publishable_decision_summary": "R311gj corrects R311gi: the switchboard injects into the APP statechart engine (built in the app on_event closure), not the session FSM engine drive_session owns. drive_session UNCHANGED, no on_event ripple.",
+      "publishable_changes_bullets": [
+        "R311gi Decision 2 conflated two engines: drive_session owns the SESSION FSM (LinkOpened/Close); the switchboard targets the APP SCXML statechart (temp_update), a distinct engine the app owns.",
+        "Correction: the app on_event closure captures &mut app_engine, builds EngineInjector, calls observer.dispatch_switchboard. drive_session keeps FnMut(IterationEvent) -- no signature change.",
+        "Unaffected: gc-2c-1 observer fan-out + dispatch_iteration_event + the gc-2b EngineInjector are correct as landed; only WHO builds the injector changes (the app, not the runtime loop).",
+        "Live wz-ap-demo wiring needs an example app SCXML engine that does not exist yet -> deferred to gc-3. gc-2c proves the path via an Observer + EngineInjector-over-real-Engine test."
+      ],
+      "publishable_verification_bullets": [
+        "Code read confirms the only AP engines threaded are SessionFsmUnicastPolicy (drive_session) + ScoutingPolicy; no application statechart engine exists in the current demo path.",
+        "raise_external_by_name graceful-ignores unknown names, so injecting an app event into the session FSM would silently no-op -- the latent wrong-target bug the correction avoids."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "gc-2c-2 (corrected): wz-runtime-tokio switchboard feature forward + bridge dep + an Observer/EngineInjector real-engine test; wz facade + preset forward. drive_session untouched.",
+        "gc-3: generator + example app SCXML machine + live wz-ap-demo wiring (app on_event closure builds EngineInjector over the app engine)."
+      ]
+    },
     "Round 311h": {
       "decision_summary": "R311h codec-push wire-layer cascade — wz-codecs gate + Cargo edges + session_glue.rs Push surface; pubsub.rs consumer cascade deferred to R311m.",
       "changes_bullets": [
