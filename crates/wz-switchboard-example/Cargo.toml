@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-switchboard-example — gc-3c.
+#
+# The first real consumer of the gc-3a/gc-3b switchboard generator: a tiny
+# end-to-end example wiring an inbound zenoh payload into an SCXML statechart
+# via the typed value path. build.rs runs sce-codegen over the three source
+# documents (sensor_monitor statechart + temp_update EventSchema + temp_payload
+# codec), then wz-switchboard-codegen over wz-switchboard.yaml + the emitted
+# forge-asts, and the generated dispatch is `include!`d here. The smoke tests
+# are the first REAL compile + run of a value-path dispatch (the gc-3b golden
+# only asserted the emitted string).
+#
+# Example crate: host std only, not published.
+
+[package]
+name = "wz-switchboard-example"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "gc-3c — end-to-end switchboard value-path example (statechart + EventSchema + codec wired by build.rs)."
+
+[features]
+# The generated temp_payload codec gates its heap-backed encode facade
+# (VecSink / encode_to_vec) on `feature = "alloc"`; this host example is
+# always std, so alloc is on by default and forwards to sce-forge-runtime
+# (mirrors wz-codecs). The codec's primary sink-based decode path the
+# dispatch uses needs no allocator.
+default = ["alloc"]
+alloc = ["sce-forge-runtime/alloc"]
+
+[dependencies]
+# keyexpr_pattern_matches (un-gated) — the generated dispatch's matcher.
+wz-session-core = { path = "../wz-session-core" }
+# Engine<SensorMonitorPolicy> + the generated SensorMonitorInject seam.
+sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
+# SceCursor / codec runtime for the generated temp_payload decoder + encoder.
+sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
+
+[build-dependencies]
+# The wz-switchboard.yaml model SSOT + the pure generator.
+wz-switchboard-schema = { path = "../wz-switchboard-schema" }
+wz-switchboard-codegen = { path = "../wz-switchboard-codegen" }
+# YAML backend chosen at this consumer's I/O boundary (the schema crate
+# pins none). serde_yaml_ng is the maintained serde_yaml successor.
+serde_yaml_ng = "0.9"
+
+[lints]
+workspace = true

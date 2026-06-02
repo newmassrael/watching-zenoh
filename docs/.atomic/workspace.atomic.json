@@ -878,7 +878,8 @@
         "EngineInjector concrete impl lives in the sibling no_std wz-statechart-bridge crate.",
         "gc-3a: generator lib landed (wz-switchboard-{schema,codegen}); not yet wired into a build (gc-3c).",
         "gc-3b: generator value path landed (typed_inject_events gate + EventSchema/codec join).",
-        "gc-3b emits typed raise_<event> via generated <Machine>Inject over Engine<P>; consumer wiring gc-3c."
+        "gc-3b emits typed raise_<event> via generated <Machine>Inject over Engine<P>; consumer wiring gc-3c.",
+        "gc-3c: wired into wz-switchboard-example build.rs; value path verified e2e (decode->raise->guard)."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -28883,6 +28884,54 @@
         "AP dynamic value path: the runtime SwitchboardRegistry (wz-runtime-tokio) is still signal-only; its value path should also decode -> raise_external_typed so AP and MCU share one guard semantics (SSOT across profiles).",
         "String/Bytes payload fields: native-eligible EventSchemas allow String/Bytes (only Enum is excluded); the gc-3b golden targets primitive-numeric fields. String/Bytes field moves + codec borrowed views (lifetimes on the decoded struct) need a follow-up pass before those bindings work.",
         "dispatch signature: a value-bearing switchboard takes &mut Engine<{Machine}Policy> concrete (the typed path cannot go through the type-erased dyn port); confirm this composes with the gc-2 ApplicationLayerObserver fan-out when wired at gc-3c."
+      ]
+    },
+    "Round 311gr": {
+      "decision_summary": "R311gr gc-3c: switchboard value path wired e2e in wz-switchboard-example -- build.rs runs sce-codegen (statechart+schema+codec) then the generator; first real compile + runtime smoke of the typed value path.",
+      "changes_bullets": [
+        "New example crate wz-switchboard-example -- the first consumer of the gc-3a/gc-3b generator, wiring the value path end to end. sources/: sensor_monitor.scxml (statechart with a native typed guard `_event.data.celsius_centi > 3000` + `<sce:import kind=\"event-schema\">`), temp_update_schema.scxml (EventSchema, celsius_centi uint16), temp_payload.scxml (codec, big-endian uint16). wz-switchboard.yaml: a temp_update VALUE binding (codec=temp_payload) + a reset SIGNAL binding.",
+        "build.rs orchestrates: shell-out `sce-codegen -l rust --emit-ast` over the three docs (mirrors wz-runtime-tokio/build.rs, the documented public path) -> sensor_monitor_sm.rs + temp_payload.rs + three forge-ast JSONs; strip_inner_attrs makes the _sm.rs / codec.rs include!-able; parse_machine_facts / parse_event_schema_facts / parse_codec_facts + serde_yaml_ng read of the sidecar; wz_switchboard_codegen::generate(GenInput) -> dispatch_switchboard.rs in OUT_DIR.",
+        "lib.rs: pub mod sensor_monitor + pub mod temp_payload (include! + outer #[allow] restoring the generator's stripped inner-attr budget, per wz-runtime-tokio) + crate-root include! of the dispatch (so its sensor_monitor:: / temp_payload:: refs resolve). New `alloc` feature forwards to sce-forge-runtime/alloc (the codec gates its heap encode facade on feature=alloc). Added to crates/Cargo.toml workspace members.",
+        "feature-inventory §5.20: caveat appended recording gc-3c wired the generator into a build with the value path verified e2e."
+      ],
+      "verification_bullets": [
+        "cargo build -p wz-switchboard-example green = the FIRST real compile of a value-path dispatch -- the generated `engine.raise_temp_update(SensorMonitorTempUpdatePayload { celsius_centi: decoded.celsius_centi })` type-checks against SCE's actual Engine<SensorMonitorPolicy> + SensorMonitorTempUpdatePayload + temp_payload::TempPayload (the gc-3b golden asserted only the emitted string).",
+        "4 smoke tests pass (runtime end to end): hot (wire 3500 -> codec decode -> raise_temp_update -> native `_event.data.celsius_centi > 3000` guard fires -> Hot), cold (2000 -> guard misses -> Idle), reset (signal binding -> raise_external_by_name with empty data -> Idle), unmatched keyexpr -> 0 injected.",
+        "cargo clippy --all-targets -D warnings clean; cargo fmt --check clean; cargo build --workspace green (the new member integrates; build.rs reuses the existing sce-codegen binary the wz-runtime-tokio build already requires).",
+        "Probe-confirmed before wiring (direct sce-codegen runs): standalone event-schema emit-ast yields kind/event_name/fields; the statechart AST carries typed_inject_events=['temp_update'] + external_ingress=['reset','temp_update']; the generated SensorMonitorInject / raise_temp_update / SensorMonitorTempUpdatePayload names match the gc-3b to_pascal_case / to_snake_case mirrors exactly.",
+        "validate_workspace: §5.20 caveat added; sections 257 unchanged, entries 551->552, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "AP dynamic value path: the runtime SwitchboardRegistry (wz-runtime-tokio) is still signal-only; extend it to decode -> raise_external_typed so AP and MCU share one guard semantics (SSOT across profiles). The gc-3c example proves the static/MCU shape; the dynamic shape is the remaining half.",
+        "String/Bytes payload fields: the gc-3c example uses a primitive uint16; native-eligible EventSchemas also allow String/Bytes, whose codec decode produces borrowed views (lifetimes on the decoded struct) -- the field-move emission + a borrowed-codec example are a follow-up.",
+        "Live demo: the example is a unit-level smoke (hand-laid wire bytes + a directly-driven Engine). A full wz-ap-demo wiring -- a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the switchboard -- is the next composability milestone.",
+        "Multi-codec switchboards: generate() handles N value bindings over N codecs; the example exercises one value + one signal row. A multi-event example would exercise the join over several EventSchema + codec docs."
+      ],
+      "publishable_decision_summary": "R311gr gc-3c: switchboard value path wired e2e in wz-switchboard-example -- build.rs runs sce-codegen (statechart+schema+codec) then the generator; first real compile + runtime smoke of the typed value path.",
+      "publishable_changes_bullets": [
+        "New example crate wz-switchboard-example -- the first consumer of the gc-3a/gc-3b generator, wiring the value path end to end. sources/: sensor_monitor.scxml (statechart with a native typed guard `_event.data.celsius_centi > 3000` + `<sce:import kind=\"event-schema\">`), temp_update_schema.scxml (EventSchema, celsius_centi uint16), temp_payload.scxml (codec, big-endian uint16). wz-switchboard.yaml: a temp_update VALUE binding (codec=temp_payload) + a reset SIGNAL binding.",
+        "build.rs orchestrates: shell-out `sce-codegen -l rust --emit-ast` over the three docs (mirrors wz-runtime-tokio/build.rs, the documented public path) -> sensor_monitor_sm.rs + temp_payload.rs + three forge-ast JSONs; strip_inner_attrs makes the _sm.rs / codec.rs include!-able; parse_machine_facts / parse_event_schema_facts / parse_codec_facts + serde_yaml_ng read of the sidecar; wz_switchboard_codegen::generate(GenInput) -> dispatch_switchboard.rs in OUT_DIR.",
+        "lib.rs: pub mod sensor_monitor + pub mod temp_payload (include! + outer #[allow] restoring the generator's stripped inner-attr budget, per wz-runtime-tokio) + crate-root include! of the dispatch (so its sensor_monitor:: / temp_payload:: refs resolve). New `alloc` feature forwards to sce-forge-runtime/alloc (the codec gates its heap encode facade on feature=alloc). Added to crates/Cargo.toml workspace members.",
+        "feature-inventory §5.20: caveat appended recording gc-3c wired the generator into a build with the value path verified e2e."
+      ],
+      "publishable_verification_bullets": [
+        "cargo build -p wz-switchboard-example green = the FIRST real compile of a value-path dispatch -- the generated `engine.raise_temp_update(SensorMonitorTempUpdatePayload { celsius_centi: decoded.celsius_centi })` type-checks against SCE's actual Engine<SensorMonitorPolicy> + SensorMonitorTempUpdatePayload + temp_payload::TempPayload (the gc-3b golden asserted only the emitted string).",
+        "4 smoke tests pass (runtime end to end): hot (wire 3500 -> codec decode -> raise_temp_update -> native `_event.data.celsius_centi > 3000` guard fires -> Hot), cold (2000 -> guard misses -> Idle), reset (signal binding -> raise_external_by_name with empty data -> Idle), unmatched keyexpr -> 0 injected.",
+        "cargo clippy --all-targets -D warnings clean; cargo fmt --check clean; cargo build --workspace green (the new member integrates; build.rs reuses the existing sce-codegen binary the wz-runtime-tokio build already requires).",
+        "Probe-confirmed before wiring (direct sce-codegen runs): standalone event-schema emit-ast yields kind/event_name/fields; the statechart AST carries typed_inject_events=['temp_update'] + external_ingress=['reset','temp_update']; the generated SensorMonitorInject / raise_temp_update / SensorMonitorTempUpdatePayload names match the gc-3b to_pascal_case / to_snake_case mirrors exactly.",
+        "validate_workspace: §5.20 caveat added; sections 257 unchanged, entries 551->552, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "AP dynamic value path: the runtime SwitchboardRegistry (wz-runtime-tokio) is still signal-only; extend it to decode -> raise_external_typed so AP and MCU share one guard semantics (SSOT across profiles). The gc-3c example proves the static/MCU shape; the dynamic shape is the remaining half.",
+        "String/Bytes payload fields: the gc-3c example uses a primitive uint16; native-eligible EventSchemas also allow String/Bytes, whose codec decode produces borrowed views (lifetimes on the decoded struct) -- the field-move emission + a borrowed-codec example are a follow-up.",
+        "Live demo: the example is a unit-level smoke (hand-laid wire bytes + a directly-driven Engine). A full wz-ap-demo wiring -- a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the switchboard -- is the next composability milestone.",
+        "Multi-codec switchboards: generate() handles N value bindings over N codecs; the example exercises one value + one signal row. A multi-event example would exercise the join over several EventSchema + codec docs."
       ]
     },
     "Round 311h": {

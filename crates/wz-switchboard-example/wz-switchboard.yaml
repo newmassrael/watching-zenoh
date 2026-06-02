@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# gc-3c example switchboard sidecar: maps zenoh keyexprs to sensor_monitor
+# SCXML domain events. The temp row is a VALUE binding (it names a codec),
+# so an inbound sample's payload is decoded into the typed _event.data; the
+# door row is a SIGNAL binding (no codec), injected with an empty _event.data.
+machine: sensor_monitor
+bindings:
+  - keyexpr: home/*/temp
+    event: temp_update
+    codec: temp_payload
+  - keyexpr: home/*/reset
+    event: reset

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- gc-3c example wire codec: decodes a published temperature sample's
+     payload bytes into `{ celsius_centi: u16 }`. The single big-endian
+     uint16 field matches the temp_update EventSchema field by id + type, so
+     the switchboard generator's codec-fields-superset-of-schema cross-check
+     passes and emits `SensorMonitorTempUpdatePayload { celsius_centi:
+     decoded.celsius_centi }`. This is the wire-format SSOT (a publisher
+     encodes the same codec); the EventSchema is the datamodel-view SSOT. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec"
+       sce:default-endian="big"
+       name="temp_payload">
+  <datamodel>
+    <sce:field id="celsius_centi" sce:type="uint16" sce:byte="0" sce:bit-size="16"/>
+  </datamodel>
+</scxml>

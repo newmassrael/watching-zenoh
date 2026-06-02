@@ -1635,6 +1635,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-switchboard-example"
+version = "0.1.0"
+dependencies = [
+ "sce-forge-runtime",
+ "sce-rust-runtime",
+ "serde_yaml_ng",
+ "wz-session-core",
+ "wz-switchboard-codegen",
+ "wz-switchboard-schema",
+]
+
+[[package]]
 name = "wz-switchboard-schema"
 version = "0.1.0"
 dependencies = [
