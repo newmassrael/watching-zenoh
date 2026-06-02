@@ -62,21 +62,28 @@ pub mod bounded;
 /// the subscriber registry dispatches through one backing-agnostic seam
 /// (model B: AP stores `BoxedSink` heap closures, MCU stores a
 /// consumer-supplied closed `enum` of codegen'd Worker/statechart sinks,
-/// §2.4 static-first dynamic-opt-in). First step of the model-B callback
-/// migration; the registry generic-over-`C: SampleSink` rewrite + the
-/// `WorkerSink`/`StatechartSink` adapters land in subsequent sub-rounds.
+/// §2.4 static-first dynamic-opt-in). The registry generic-over-`C:
+/// SampleSink` rewrite landed (R311gb-2b); statechart injection is NOT a
+/// `SampleSink` but a port-threading inbound adapter (see [`switchboard`],
+/// R311gh).
 pub mod sink;
 
-/// R311gc — statechart-injection seam (`EventInjector` DIP trait over the
-/// SCE engine's `raise_external_by_name` ingress + the `StatechartSink`
-/// [`sink::SampleSink`] adapter). The Anti-Corruption-Layer translation
-/// point of the switchboard: wz owns zenoh keyexpr demux, then injects a
-/// *domain* event into the statechart so the SCXML core stays decoupled
-/// from the vendor wire naming (R311gc routing-model ratify, ledger
-/// Round 311gc). Unconditional + no-`alloc` (trait + `&'static str` event
-/// name); the engine-bridge `EventInjector` impl and the build-time
-/// `<sce:inbound>` cross-check land with the generator in later sub-rounds.
-pub mod statechart_sink;
+/// R311gh — the switchboard: a zenoh-keyexpr -> SCXML-domain-event inbound
+/// adapter (`EventInjector` DIP port over the SCE engine's
+/// `raise_external_by_name` ingress + the AP dynamic `SwitchboardRegistry`).
+/// The Anti-Corruption-Layer translation point: wz owns zenoh keyexpr
+/// demux, then injects a *domain* event into the statechart so the SCXML
+/// core stays decoupled from the vendor wire naming. Unlike a
+/// [`sink::SampleSink`] the registry *threads* the [`switchboard::EventInjector`]
+/// port through `dispatch` rather than storing an engine handle, so the
+/// AP dynamic table and the MCU generated static `match` share one ingress
+/// shape (R311gh gc-2 structure ratify, ledger Round 311gh; supersedes the
+/// gc-1 `StatechartSink`-as-`SampleSink` adapter). The `EventInjector`
+/// trait is unconditional + no-`alloc`; `SwitchboardRegistry` is
+/// `alloc`-gated (AP dynamic). The engine-bridge `EventInjector` impl
+/// (`wz-statechart-bridge`) and the build-time `external_ingress_events`
+/// cross-check land in later sub-rounds (gc-2b / gc-3).
+pub mod switchboard;
 
 /// R311gb-3 — query-dispatch seam (`QueryView` inbound accessor contract
 /// + `ReplyOut` outbound emit contract + `QuerySink` DIP trait + the

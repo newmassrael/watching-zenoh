@@ -37,9 +37,11 @@
 //!
 //! SCE-generated code never impls [`SampleSink`] directly either: a wz
 //! adapter wraps the SCE-owned ingress handle and impls the trait over
-//! it. [`BoxedSink`] is the first such adapter (the closure case); the
-//! `WorkerSink` / `StatechartSink` adapters land with the SCE ingress
-//! wiring in a later sub-round.
+//! it. [`BoxedSink`] (the closure case) is such an adapter. Statechart
+//! injection, by contrast, does NOT go through a `SampleSink`: it is a
+//! distinct inbound adapter that threads the engine ingress port rather
+//! than storing an engine handle — see [`crate::switchboard`] (R311gh
+//! supersedes the gc-1 `StatechartSink`-as-`SampleSink` shape).
 
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
