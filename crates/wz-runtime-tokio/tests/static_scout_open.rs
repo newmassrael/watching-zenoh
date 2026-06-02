@@ -26,7 +26,10 @@
 //! so these tests only ever point UDP at a responsive acceptor; the
 //! unreachable-exhaustion case uses dead TCP ports, which fail fast at dial.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
+
+use socket2::{Domain, Socket, Type};
 
 use sce_rust_lua::LuaEngine;
 use sce_rust_runtime::scripting::IScriptEngine;
@@ -55,6 +58,33 @@ fn initiator_params() -> SessionInitParams {
     let mut p = fixture_session_init_params();
     p.zid = vec![0x01; 4];
     p
+}
+
+/// A loopback TCP address that is *deterministically* connection-refused.
+///
+/// The returned `Socket` is bound to an ephemeral port but never `listen()`s,
+/// so for as long as the caller holds the guard alive: (1) no other process
+/// can rebind that port (the bind reservation stands), and (2) a connect to it
+/// gets an RST → `ECONNREFUSED` (a bound socket not in `LISTEN` does not accept).
+///
+/// This replaces the earlier `bind -> local_addr -> drop` pattern, whose freed
+/// ephemeral port the OS could recycle to an unrelated live listener under the
+/// concurrent-process load of a full CI run (a TOCTOU race). When that happened
+/// a "dead" locator turned into either a foreign listener that accepts but
+/// never speaks the wz handshake (hanging the open loop) or a false
+/// Established — surfacing as the flaky `NoReachableLocator` / `got Ok` results.
+/// `std::net::TcpListener::bind` always calls `listen()`, so socket2 is used to
+/// bind without listening.
+fn refused_locator() -> (Socket, SocketAddr) {
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None).expect("socket");
+    let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse bind addr");
+    socket.bind(&bind.into()).expect("bind without listen");
+    let addr = socket
+        .local_addr()
+        .expect("local_addr")
+        .as_socket()
+        .expect("ipv4 socket addr");
+    (socket, addr)
 }
 
 /// Inline wz acceptor: accept -> wire -> InboundStart -> drive to Established.
@@ -222,10 +252,9 @@ async fn open_session_at_malformed_is_bad_locator() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn open_session_static_skips_unreachable_to_first_reachable() {
-    // A freed loopback port (nothing listening -> connection refused).
-    let probe = TcpListener::bind("127.0.0.1:0").await.expect("probe bind");
-    let dead = probe.local_addr().expect("dead addr");
-    drop(probe);
+    // A deterministically connection-refused loopback port (bound, not
+    // listening; the guard holds the port so it cannot be recycled mid-test).
+    let (_dead_guard, dead) = refused_locator();
     // The reachable peer.
     let good_listener = TcpListener::bind("127.0.0.1:0").await.expect("good bind");
     let good = good_listener.local_addr().expect("good addr");
@@ -279,12 +308,8 @@ async fn open_session_static_all_unreachable_is_no_reachable() {
     // without ever blocking on a handshake. (Dead TCP, not a UDP black hole:
     // dial_udp binds locally and would hang the open loop awaiting a datagram
     // that never comes — see the module note on the open-loop time bound.)
-    let probe_a = TcpListener::bind("127.0.0.1:0").await.expect("probe a");
-    let dead_a = probe_a.local_addr().expect("dead a");
-    let probe_b = TcpListener::bind("127.0.0.1:0").await.expect("probe b");
-    let dead_b = probe_b.local_addr().expect("dead b");
-    drop(probe_a);
-    drop(probe_b);
+    let (_dead_guard_a, dead_a) = refused_locator();
+    let (_dead_guard_b, dead_b) = refused_locator();
     let connect = vec![format!("tcp/{dead_a}"), format!("tcp/{dead_b}")];
     let result = open_session_static(
         &connect,

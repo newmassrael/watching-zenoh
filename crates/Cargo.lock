@@ -1571,6 +1571,7 @@ dependencies = [
  "sce-forge-runtime",
  "sce-rust-lua",
  "sce-rust-runtime",
+ "socket2",
  "tokio",
  "wz-codecs",
  "wz-codecs-test-support",

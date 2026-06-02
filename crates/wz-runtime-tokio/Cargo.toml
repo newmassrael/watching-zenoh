@@ -526,6 +526,12 @@ portable-atomic = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+# R311gg — tests/static_scout_open.rs holds a bound-but-not-listening
+# loopback socket to synthesize a deterministically connection-refused
+# locator. std's TcpListener always `listen()`s; socket2 is the portable
+# way to bind without listening (already in the tree transitively via
+# tokio). Dev-only: never compiled into the lib or the no_std targets.
+socket2 = "0.6"
 # R71 — test fixtures + rebind shims moved to a separate sibling crate
 # so the production compile units of this crate carry zero test-only
 # code paths. Previously these helpers lived behind a `_test_support`
