@@ -48,31 +48,58 @@
 //!    no heap), the event names validated at build time against the
 //!    machine's `external_ingress_events` set (forge-ast.v1).
 //!
-//! Only the **signal** path (empty `_event.data`) is wired here. The
-//! value path (`inject(name, serialize(decode(sample)))`, validated
-//! against the EventSchema field contract) lands with the typed-payload
-//! decode round — the value-serialization SSOT was deferred to gc-3
-//! (ledger Round 311gh carry).
+//! Both the **signal** path (empty `_event.data`, [`EventInjector::inject`])
+//! and the **value** path (typed `_event.data` decoded from the sample bytes,
+//! [`EventInjector::inject_value`]) flow through the one [`EventInjector`]
+//! port. The signal path is engine-agnostic (any `&mut Engine<P>` view via the
+//! bridge `EngineInjector`); the value path needs the machine's codec ↔
+//! `EventSchema` field map, so its concrete impl is *generated* per machine by
+//! `wz-switchboard-codegen` (the same decode + `raise_<event>` logic the MCU
+//! static `dispatch_switchboard` emits — one SSOT, two profiles).
 
 /// Dependency-Inversion seam over the statechart engine's external-event
-/// ingress. Mirrors the SCE-generated `Engine::raise_external_by_name`
-/// (a `&str` event name + `&str` event data, W3C SCXML 6.4.6); the
-/// concrete impl wrapping a real engine lives in the `wz-statechart-bridge`
-/// crate so this crate stays free of an `sce-rust-runtime` dependency. See
-/// the [module docs](self) for the Anti-Corruption-Layer rationale.
+/// ingress. Mirrors the SCE-generated typed-inject seams; the concrete impls
+/// wrapping a real engine live outside this crate (the generic signal-only
+/// `EngineInjector` in `wz-statechart-bridge`, the per-machine value injector
+/// emitted by `wz-switchboard-codegen`) so this crate stays free of an
+/// `sce-rust-runtime` dependency. See the [module docs](self) for the
+/// Anti-Corruption-Layer rationale.
+///
+/// One cohesive port, two shapes — *not* two ports. The statechart's external
+/// ingress is a single responsibility, and the signal/value methods are two
+/// shapes of it; a value injector necessarily also owns the one `&mut Engine`
+/// borrow the signal path would need, so the borrow checker forbids splitting
+/// them across two simultaneously-held objects. A signal-only injector takes
+/// the defaulted [`inject_value`](EventInjector::inject_value) (no value
+/// bindings → nothing to decode), so adding the value shape ripples no existing
+/// impl.
 ///
 /// Unconditional and `alloc`-free: the trait is the ingress contract both
 /// the AP [`SwitchboardRegistry`] and the MCU generated `match` call, and
 /// the no-heap profile must be able to name it.
 pub trait EventInjector {
-    /// Inject a named external SCXML event. `event_data` is the W3C
-    /// `_event.data` payload string (empty for the signal path the
-    /// switchboard drives today; the value path passes the serialized
-    /// sample value). An unknown name is the engine's concern to ignore
-    /// (`raise_external_by_name` graceful-ignores names not in the event
+    /// Inject a named external SCXML event on the **signal** path: empty W3C
+    /// `_event.data` (`raise_external_by_name`). An unknown name is the
+    /// engine's concern to ignore (it graceful-ignores names not in the event
     /// enum); the switchboard's build-time `external_ingress_events`
     /// cross-check is what keeps an unknown name from ever reaching here.
     fn inject(&mut self, event_name: &str, event_data: &str);
+
+    /// Inject a named external SCXML event on the **value** path: decode
+    /// `payload` per the machine's build-time codec ↔ `EventSchema` binding for
+    /// `event_name` and raise the typed `_event.data`
+    /// (`raise_external_typed`, via the generated `<Machine>Inject` seam).
+    /// Returns `true` iff an event was injected (the name has a value binding
+    /// *and* the wire bytes decoded).
+    ///
+    /// Defaulted to `false`: a signal-only injector (e.g. the generic
+    /// `EngineInjector`) carries no codec knowledge, so it has no value
+    /// bindings to honour. Only the per-machine generated injector overrides
+    /// this — keeping the codec/payload-union machinery encapsulated where the
+    /// ACL puts it, never in this SCE-free port.
+    fn inject_value(&mut self, _event_name: &str, _payload: &[u8]) -> bool {
+        false
+    }
 }
 
 // Reference transparency: a `&mut` to an injector is still an injector, so
@@ -82,6 +109,10 @@ pub trait EventInjector {
 impl<I: EventInjector + ?Sized> EventInjector for &mut I {
     fn inject(&mut self, event_name: &str, event_data: &str) {
         (**self).inject(event_name, event_data)
+    }
+
+    fn inject_value(&mut self, event_name: &str, payload: &[u8]) -> bool {
+        (**self).inject_value(event_name, payload)
     }
 }
 
@@ -117,6 +148,13 @@ mod alloc_impl {
         /// The SCXML domain event injected when an inbound sample's
         /// resolved keyexpr matches `pattern_chunks`.
         event_name: String,
+        /// Routing kind, mirroring the `wz-switchboard.yaml` `Binding.codec`
+        /// presence: a **value** row decodes the sample payload into a typed
+        /// `_event.data` ([`EventInjector::inject_value`]); a **signal** row
+        /// injects an empty `_event.data` ([`EventInjector::inject`]). The
+        /// registry stores only the *kind* — the codec ↔ event binding lives
+        /// in the generated value injector (ACL boundary), never here.
+        is_value: bool,
     }
 
     /// AP / dynamic switchboard table: `keyexpr-pattern -> domain-event`
@@ -137,12 +175,12 @@ mod alloc_impl {
             Self::default()
         }
 
-        /// Map a keyexpr pattern to a domain event. Pattern syntax matches
-        /// zenoh chunk wildcards (`*` single chunk, `**` zero-or-more
-        /// chunks, `$*` intra-chunk substring); the pattern is
-        /// canonicalized (so the stored chunks agree with the wire form a
-        /// peer emits) before being split. A structurally invalid pattern
-        /// is stored raw with a `log::warn!`, matching
+        /// Map a keyexpr pattern to a **signal** domain event (empty
+        /// `_event.data`). Pattern syntax matches zenoh chunk wildcards (`*`
+        /// single chunk, `**` zero-or-more chunks, `$*` intra-chunk substring);
+        /// the pattern is canonicalized (so the stored chunks agree with the
+        /// wire form a peer emits) before being split. A structurally invalid
+        /// pattern is stored raw with a `log::warn!`, matching
         /// [`crate::pubsub::SubscriberRegistry::register_sink`] — the
         /// matcher still operates, the build-time cross-check is the
         /// authoritative guard.
@@ -150,6 +188,32 @@ mod alloc_impl {
             &mut self,
             keyexpr_pattern: impl Into<String>,
             event_name: impl Into<String>,
+        ) {
+            self.push_entry(keyexpr_pattern, event_name, false);
+        }
+
+        /// Map a keyexpr pattern to a **value** domain event: a matched
+        /// sample's payload is decoded into the typed `_event.data` via
+        /// [`EventInjector::inject_value`]. Mirrors a `wz-switchboard.yaml`
+        /// `Binding` carrying a `codec`. Same canonicalization and
+        /// raw-fallback semantics as [`register`](Self::register); the
+        /// codec ↔ event binding the decode needs lives in the generated
+        /// value injector, not the registry.
+        pub fn register_value(
+            &mut self,
+            keyexpr_pattern: impl Into<String>,
+            event_name: impl Into<String>,
+        ) {
+            self.push_entry(keyexpr_pattern, event_name, true);
+        }
+
+        /// Shared row constructor: canonicalize (raw-fallback with a warn),
+        /// split into chunks, push with the routing `is_value` kind.
+        fn push_entry(
+            &mut self,
+            keyexpr_pattern: impl Into<String>,
+            event_name: impl Into<String>,
+            is_value: bool,
         ) {
             let raw = keyexpr_pattern.into();
             let canonical = match crate::keyexpr_canon::canonize_keyexpr(&raw) {
@@ -167,6 +231,7 @@ mod alloc_impl {
             self.entries.push(SwitchboardEntry {
                 pattern_chunks,
                 event_name: event_name.into(),
+                is_value,
             });
         }
 
@@ -186,15 +251,26 @@ mod alloc_impl {
         ///
         /// The Engine is *not* stored: the caller (the session driver,
         /// which owns the Engine) threads `injector` in — the same shape
-        /// the MCU generated `match` uses. Signal path only: the event
-        /// carries empty `_event.data` (the value path is the
-        /// typed-payload decode round, gc-3).
+        /// the MCU generated `match` uses. A **signal** row injects an empty
+        /// `_event.data` ([`EventInjector::inject`], always counted); a
+        /// **value** row decodes `sample.payload()` into the typed
+        /// `_event.data` ([`EventInjector::inject_value`]) and counts only on
+        /// a successful decode — byte-for-byte the static
+        /// `dispatch_switchboard`'s per-arm semantics, so the AP dynamic and
+        /// MCU static paths agree (one guard semantics across profiles).
         pub fn dispatch(&self, sample: &dyn SampleView, injector: &mut dyn EventInjector) -> usize {
             let target = sample.keyexpr();
             let mut injected: usize = 0;
             for entry in &self.entries {
                 let chunks: Vec<&str> = entry.pattern_chunks.iter().map(String::as_str).collect();
-                if keyexpr_pattern_matches(&chunks, target) {
+                if !keyexpr_pattern_matches(&chunks, target) {
+                    continue;
+                }
+                if entry.is_value {
+                    if injector.inject_value(&entry.event_name, sample.payload()) {
+                        injected = injected.saturating_add(1);
+                    }
+                } else {
                     injector.inject(&entry.event_name, "");
                     injected = injected.saturating_add(1);
                 }
@@ -236,10 +312,10 @@ mod alloc_impl {
                 let Some(resolved) = resolve_wireexpr(&push.keyexpr.body, peer_table) else {
                     continue;
                 };
-                // kind + payload are extracted faithfully even though the
-                // signal path reads only the keyexpr: the value path (gc-3)
-                // injects the payload, so the SampleView must already carry
-                // it. Mirrors SubscriberRegistry::dispatch_push's body arm.
+                // kind + payload are extracted faithfully: a signal row reads
+                // only the keyexpr, but a value row decodes the payload into a
+                // typed `_event.data`, so the SampleView must already carry it.
+                // Mirrors SubscriberRegistry::dispatch_push's body arm.
                 let (kind, payload): (SampleKind, &[u8]) = match &push.body {
                     PushOwnedVariant::CodecZenohMsgPut(put) => {
                         (SampleKind::Put, put.payload.as_slice())
@@ -283,6 +359,27 @@ mod tests {
         fn inject(&mut self, event_name: &str, event_data: &str) {
             self.calls
                 .push((event_name.to_string(), event_data.to_string()));
+        }
+    }
+
+    // A value-capable injector standing in for the per-machine generated one:
+    // `inject_value` records (event_name, payload) and reports success via
+    // `decode_ok` (the generated impl returns false on a decode miss; here we
+    // toggle it to exercise the registry's count-on-success-only semantics).
+    // Signal `inject` falls through to the same `calls` log with a "" payload.
+    struct ValueRecordingInjector {
+        calls: Vec<(String, Vec<u8>)>,
+        decode_ok: bool,
+    }
+
+    impl EventInjector for ValueRecordingInjector {
+        fn inject(&mut self, event_name: &str, _event_data: &str) {
+            self.calls.push((event_name.to_string(), Vec::new()));
+        }
+
+        fn inject_value(&mut self, event_name: &str, payload: &[u8]) -> bool {
+            self.calls.push((event_name.to_string(), payload.to_vec()));
+            self.decode_ok
         }
     }
 
@@ -367,6 +464,80 @@ mod tests {
         }
         assert_eq!(inj.calls.len(), 1);
         assert_eq!(inj.calls[0].0, "evt");
+    }
+
+    #[test]
+    fn value_row_routes_payload_to_inject_value() {
+        let mut board = SwitchboardRegistry::new();
+        board.register_value("home/livingroom/temp", "temp_update");
+        let mut inj = ValueRecordingInjector {
+            calls: Vec::new(),
+            decode_ok: true,
+        };
+
+        let fired = board.dispatch(&sample("home/livingroom/temp"), &mut inj);
+
+        assert_eq!(fired, 1);
+        assert_eq!(inj.calls.len(), 1);
+        // Value path: the typed decoder receives the raw sample bytes, not "".
+        assert_eq!(inj.calls[0].0, "temp_update");
+        assert_eq!(inj.calls[0].1, b"22.0".to_vec());
+    }
+
+    #[test]
+    fn value_row_decode_miss_is_not_counted() {
+        let mut board = SwitchboardRegistry::new();
+        board.register_value("home/livingroom/temp", "temp_update");
+        // The generated injector returns false when the wire bytes do not
+        // decode; the registry must not count such a row (mirrors the static
+        // arm's `if let Ok(decoded)` guard).
+        let mut inj = ValueRecordingInjector {
+            calls: Vec::new(),
+            decode_ok: false,
+        };
+
+        let fired = board.dispatch(&sample("home/livingroom/temp"), &mut inj);
+
+        assert_eq!(fired, 0, "a decode miss injects nothing");
+        assert_eq!(inj.calls.len(), 1, "but inject_value was still attempted");
+    }
+
+    #[test]
+    fn mixed_signal_and_value_rows_route_to_the_right_seam() {
+        let mut board = SwitchboardRegistry::new();
+        board.register_value("home/*/temp", "temp_update");
+        board.register("home/*/reset", "reset");
+        let mut inj = ValueRecordingInjector {
+            calls: Vec::new(),
+            decode_ok: true,
+        };
+
+        // A temp sample fires the value row only.
+        assert_eq!(board.dispatch(&sample("home/livingroom/temp"), &mut inj), 1);
+        // A reset sample fires the signal row only (empty payload recorded).
+        assert_eq!(
+            board.dispatch(&sample("home/livingroom/reset"), &mut inj),
+            1
+        );
+
+        assert_eq!(inj.calls.len(), 2);
+        assert_eq!(inj.calls[0], ("temp_update".to_string(), b"22.0".to_vec()));
+        assert_eq!(inj.calls[1], ("reset".to_string(), Vec::new()));
+    }
+
+    // A signal-only injector inherits the defaulted `inject_value` (false), so
+    // a value row dispatched at it injects nothing — the no-codec-knowledge
+    // contract the default encodes.
+    #[test]
+    fn signal_only_injector_default_inject_value_is_inert() {
+        let mut board = SwitchboardRegistry::new();
+        board.register_value("home/livingroom/temp", "temp_update");
+        let mut inj = RecordingInjector::default();
+
+        let fired = board.dispatch(&sample("home/livingroom/temp"), &mut inj);
+
+        assert_eq!(fired, 0);
+        assert!(inj.calls.is_empty(), "default inject_value records nothing");
     }
 
     // Build a wire-inbound Put Push carrying a literal keyexpr (id=0 ⇒

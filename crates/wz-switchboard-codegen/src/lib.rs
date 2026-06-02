@@ -592,6 +592,14 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
     let machine_module = input.machine_module;
 
     let mut arms = String::new();
+    // Per-value-event SSOT: the decode + typed `raise_<event>` body is emitted
+    // ONCE as a free helper `inject_<event>`, shared by the static
+    // `dispatch_switchboard` arms (MCU) and the generated `{Machine}Injector`
+    // value seam (AP dynamic registry). `seen_value_events` dedups it across
+    // multiple keyexpr bindings that target the same value event.
+    let mut value_helpers = String::new();
+    let mut injector_value_arms = String::new();
+    let mut seen_value_events: BTreeSet<String> = BTreeSet::new();
     for binding in &spec.bindings {
         // Every binding's event must be accepted as external input (W3C 3.12.1).
         let accepted = facts
@@ -693,35 +701,72 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
                 }
 
                 let variant = to_pascal_case(&binding.event);
-                let method = format!("raise_{}", to_snake_case(&binding.event));
+                let snake = to_snake_case(&binding.event);
+                let method = format!("raise_{snake}");
+                let helper = format!("inject_{snake}");
                 let codec_struct =
                     format!("{}::{}", codec.module_path, to_pascal_case(&codec.name));
-                // Field moves in schema declaration order (each on its own
-                // line at 16-space indent inside the struct literal).
-                let field_moves = schema
-                    .fields
-                    .iter()
-                    .map(|f| format!("\n                {id}: decoded.{id},", id = f.id))
-                    .collect::<String>();
+                // The static-match arm is now a call to the shared per-event
+                // helper (so the decode body lives in exactly one place — see
+                // `value_helpers` below). `&&` short-circuits: the helper (which
+                // decodes + injects) runs only on a keyexpr match, and the row
+                // counts only when the bytes decode.
                 arms.push_str(&format!(
                     "\n    // {canonical} -> {event} (value via {codec})\n    \
-                     if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[{chunks}], target_keyexpr) {{\n        \
-                     let mut cursor = ::sce_forge_runtime::codec::SceCursor::new(payload);\n        \
-                     if let Ok(decoded) = {codec_struct}::decode(&mut cursor) {{\n            \
-                     engine.{method}({machine_module}::{machine_pascal}{variant}Payload {{{field_moves}\n            \
-                     }});\n            \
-                     injected += 1;\n        }}\n    }}\n",
+                     if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[{chunks}], target_keyexpr)\n        \
+                     && {helper}(payload, engine)\n    {{\n        \
+                     injected += 1;\n    }}\n",
                     canonical = canonical,
                     event = binding.event,
                     codec = codec.name,
                     chunks = chunks,
-                    codec_struct = codec_struct,
-                    method = method,
-                    machine_module = machine_module,
-                    machine_pascal = machine_pascal,
-                    variant = variant,
-                    field_moves = field_moves,
+                    helper = helper,
                 ));
+
+                // Emit the helper + injector value arm once per unique event.
+                if seen_value_events.insert(binding.event.clone()) {
+                    // Field moves in schema declaration order (each on its own
+                    // line at 12-space indent inside the struct literal).
+                    let field_moves = schema
+                        .fields
+                        .iter()
+                        .map(|f| format!("\n            {id}: decoded.{id},", id = f.id))
+                        .collect::<String>();
+                    value_helpers.push_str(&format!(
+                        "\n/// Decode the wire payload for `{event}` with the `{codec}` forge codec\n\
+                         /// and inject the typed `_event.data` via the generated\n\
+                         /// `{machine_pascal}Inject::{method}` seam. Returns whether the bytes decoded.\n\
+                         /// Shared SSOT for the static `dispatch_switchboard` arm and the\n\
+                         /// `{machine_pascal}Injector` value seam (one decode body, both profiles).\n\
+                         fn {helper}(\n    \
+                         payload: &[u8],\n    \
+                         engine: &mut ::sce_rust_runtime::Engine<{machine_module}::{machine_pascal}Policy>,\n\
+                         ) -> bool {{\n    \
+                         let mut cursor = ::sce_forge_runtime::codec::SceCursor::new(payload);\n    \
+                         if let Ok(decoded) = {codec_struct}::decode(&mut cursor) {{\n        \
+                         engine.{method}({machine_module}::{machine_pascal}{variant}Payload {{{field_moves}\n        \
+                         }});\n        \
+                         true\n    \
+                         }} else {{\n        \
+                         false\n    \
+                         }}\n\
+                         }}\n",
+                        event = binding.event,
+                        codec = codec.name,
+                        helper = helper,
+                        method = method,
+                        machine_module = machine_module,
+                        machine_pascal = machine_pascal,
+                        variant = variant,
+                        codec_struct = codec_struct,
+                        field_moves = field_moves,
+                    ));
+                    injector_value_arms.push_str(&format!(
+                        "            {event} => {helper}(payload, self.engine),\n",
+                        event = rust_string_literal(&binding.event),
+                        helper = helper,
+                    ));
+                }
             }
         }
     }
@@ -730,14 +775,53 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
         Ok(format!(
             "// @generated by wz-switchboard-codegen (gc-3b) -- DO NOT EDIT.\n\
              //\n\
-             // Static keyexpr -> SCXML domain-event switchboard for machine\n\
-             // {machine:?}. Closed match, no heap over the shared no-alloc matcher.\n\
-             // Signal rows inject an empty _event.data (Engine::raise_external_by_name);\n\
-             // value rows decode the wire payload with a forge codec and inject the\n\
-             // typed _event.data via the generated <Machine>Inject::raise_<event> seam.\n\
+             // Static + dynamic keyexpr -> SCXML domain-event switchboard for machine\n\
+             // {machine:?}. Signal rows inject an empty _event.data\n\
+             // (Engine::raise_external_by_name); value rows decode the wire payload with\n\
+             // a forge codec and inject the typed _event.data via the generated\n\
+             // <Machine>Inject::raise_<event> seam. The per-event decode body is emitted\n\
+             // ONCE as an `inject_<event>` helper, shared by:\n\
+             //   - `dispatch_switchboard` -- the closed no-heap MCU static match;\n\
+             //   - `{machine_pascal}Injector` -- the EventInjector the AP dynamic\n\
+             //     SwitchboardRegistry threads (one guard semantics across profiles).\n\
              // Regenerate by editing the source wz-switchboard.yaml and rebuilding.\n\
              \n\
              use {machine_module}::{machine_pascal}Inject;\n\
+             {value_helpers}\n\
+             /// Per-machine value-capable [`EventInjector`] for the AP dynamic\n\
+             /// [`SwitchboardRegistry`]: a transient `&mut Engine` view (constructed\n\
+             /// at the dispatch site, mirroring the bridge `EngineInjector`) that\n\
+             /// resolves a value event's codec ↔ payload binding the registry's\n\
+             /// type-erased rows cannot carry. Signal rows fall through to\n\
+             /// `raise_external_by_name`.\n\
+             ///\n\
+             /// [`EventInjector`]: wz_session_core::switchboard::EventInjector\n\
+             /// [`SwitchboardRegistry`]: wz_session_core::switchboard::SwitchboardRegistry\n\
+             pub struct {machine_pascal}Injector<'e> {{\n    \
+             engine: &'e mut ::sce_rust_runtime::Engine<{machine_module}::{machine_pascal}Policy>,\n\
+             }}\n\
+             \n\
+             impl<'e> {machine_pascal}Injector<'e> {{\n    \
+             /// Wrap a borrowed engine as the value-capable injector port.\n    \
+             pub fn new(\n        \
+             engine: &'e mut ::sce_rust_runtime::Engine<{machine_module}::{machine_pascal}Policy>,\n    \
+             ) -> Self {{\n        \
+             Self {{ engine }}\n    \
+             }}\n\
+             }}\n\
+             \n\
+             impl wz_session_core::switchboard::EventInjector for {machine_pascal}Injector<'_> {{\n    \
+             fn inject(&mut self, event_name: &str, event_data: &str) {{\n        \
+             self.engine.raise_external_by_name(event_name, event_data);\n    \
+             }}\n\
+             \n    \
+             fn inject_value(&mut self, event_name: &str, payload: &[u8]) -> bool {{\n        \
+             match event_name {{\n\
+             {injector_value_arms}            \
+             _ => false,\n        \
+             }}\n    \
+             }}\n\
+             }}\n\
              \n\
              /// Dispatch a resolved inbound keyexpr against the static switchboard\n\
              /// for machine {machine:?}, injecting each matched domain event in\n\
@@ -755,6 +839,8 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
             machine = spec.machine,
             machine_module = machine_module,
             machine_pascal = machine_pascal,
+            value_helpers = value_helpers,
+            injector_value_arms = injector_value_arms,
             arms = arms,
         ))
     } else {
@@ -1183,14 +1269,73 @@ pub fn dispatch_switchboard(
         let expected = "\
 // @generated by wz-switchboard-codegen (gc-3b) -- DO NOT EDIT.
 //
-// Static keyexpr -> SCXML domain-event switchboard for machine
-// \"sensor_monitor\". Closed match, no heap over the shared no-alloc matcher.
-// Signal rows inject an empty _event.data (Engine::raise_external_by_name);
-// value rows decode the wire payload with a forge codec and inject the
-// typed _event.data via the generated <Machine>Inject::raise_<event> seam.
+// Static + dynamic keyexpr -> SCXML domain-event switchboard for machine
+// \"sensor_monitor\". Signal rows inject an empty _event.data
+// (Engine::raise_external_by_name); value rows decode the wire payload with
+// a forge codec and inject the typed _event.data via the generated
+// <Machine>Inject::raise_<event> seam. The per-event decode body is emitted
+// ONCE as an `inject_<event>` helper, shared by:
+//   - `dispatch_switchboard` -- the closed no-heap MCU static match;
+//   - `SensorMonitorInjector` -- the EventInjector the AP dynamic
+//     SwitchboardRegistry threads (one guard semantics across profiles).
 // Regenerate by editing the source wz-switchboard.yaml and rebuilding.
 
 use sensor_monitor::SensorMonitorInject;
+
+/// Decode the wire payload for `temp_update` with the `temp_payload` forge codec
+/// and inject the typed `_event.data` via the generated
+/// `SensorMonitorInject::raise_temp_update` seam. Returns whether the bytes decoded.
+/// Shared SSOT for the static `dispatch_switchboard` arm and the
+/// `SensorMonitorInjector` value seam (one decode body, both profiles).
+fn inject_temp_update(
+    payload: &[u8],
+    engine: &mut ::sce_rust_runtime::Engine<sensor_monitor::SensorMonitorPolicy>,
+) -> bool {
+    let mut cursor = ::sce_forge_runtime::codec::SceCursor::new(payload);
+    if let Ok(decoded) = temp_payload::TempPayload::decode(&mut cursor) {
+        engine.raise_temp_update(sensor_monitor::SensorMonitorTempUpdatePayload {
+            temperature: decoded.temperature,
+        });
+        true
+    } else {
+        false
+    }
+}
+
+/// Per-machine value-capable [`EventInjector`] for the AP dynamic
+/// [`SwitchboardRegistry`]: a transient `&mut Engine` view (constructed
+/// at the dispatch site, mirroring the bridge `EngineInjector`) that
+/// resolves a value event's codec ↔ payload binding the registry's
+/// type-erased rows cannot carry. Signal rows fall through to
+/// `raise_external_by_name`.
+///
+/// [`EventInjector`]: wz_session_core::switchboard::EventInjector
+/// [`SwitchboardRegistry`]: wz_session_core::switchboard::SwitchboardRegistry
+pub struct SensorMonitorInjector<'e> {
+    engine: &'e mut ::sce_rust_runtime::Engine<sensor_monitor::SensorMonitorPolicy>,
+}
+
+impl<'e> SensorMonitorInjector<'e> {
+    /// Wrap a borrowed engine as the value-capable injector port.
+    pub fn new(
+        engine: &'e mut ::sce_rust_runtime::Engine<sensor_monitor::SensorMonitorPolicy>,
+    ) -> Self {
+        Self { engine }
+    }
+}
+
+impl wz_session_core::switchboard::EventInjector for SensorMonitorInjector<'_> {
+    fn inject(&mut self, event_name: &str, event_data: &str) {
+        self.engine.raise_external_by_name(event_name, event_data);
+    }
+
+    fn inject_value(&mut self, event_name: &str, payload: &[u8]) -> bool {
+        match event_name {
+            \"temp_update\" => inject_temp_update(payload, self.engine),
+            _ => false,
+        }
+    }
+}
 
 /// Dispatch a resolved inbound keyexpr against the static switchboard
 /// for machine \"sensor_monitor\", injecting each matched domain event in
@@ -1204,14 +1349,10 @@ pub fn dispatch_switchboard(
     let mut injected = 0usize;
 
     // home/*/temp -> temp_update (value via temp_payload)
-    if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[\"home\", \"*\", \"temp\"], target_keyexpr) {
-        let mut cursor = ::sce_forge_runtime::codec::SceCursor::new(payload);
-        if let Ok(decoded) = temp_payload::TempPayload::decode(&mut cursor) {
-            engine.raise_temp_update(sensor_monitor::SensorMonitorTempUpdatePayload {
-                temperature: decoded.temperature,
-            });
-            injected += 1;
-        }
+    if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[\"home\", \"*\", \"temp\"], target_keyexpr)
+        && inject_temp_update(payload, engine)
+    {
+        injected += 1;
     }
 
     // home/door -> door_opened (signal)
@@ -1223,6 +1364,81 @@ pub fn dispatch_switchboard(
 }
 ";
         assert_eq!(out, expected);
+    }
+
+    // ---- generate: value injector emission + helper dedup (SSOT) ----
+
+    #[test]
+    fn value_switchboard_emits_injector_and_helper() {
+        let facts = parse_machine_facts(&facts_json_typed("m", &["temp_update"], &["temp_update"]))
+            .unwrap();
+        let s = spec(
+            "m",
+            vec![value_binding("home/temp", "temp_update", "temp_payload")],
+        );
+        let schemas =
+            [parse_event_schema_facts(&schema_json("temp_update", &[("t", "float64")])).unwrap()];
+        let codecs = [parse_codec_facts(
+            &codec_json("temp_payload", &[("t", "float64")]),
+            "temp_payload",
+        )
+        .unwrap()];
+        let out = generate(&value_input(&s, &facts, &schemas, &codecs)).expect("generate");
+
+        // The per-machine injector the AP dynamic registry threads.
+        assert!(out.contains("pub struct MInjector<'e>"));
+        assert!(out.contains("impl wz_session_core::switchboard::EventInjector for MInjector<'_>"));
+        // Signal seam delegates to raise_external_by_name.
+        assert!(out.contains("self.engine.raise_external_by_name(event_name, event_data);"));
+        // Value seam matches event name to the shared helper.
+        assert!(out.contains("\"temp_update\" => inject_temp_update(payload, self.engine),"));
+        // The shared decode helper is emitted (one body, both profiles).
+        assert!(out.contains("fn inject_temp_update(\n"));
+        // The static arm calls the same helper (no inline decode duplicated).
+        assert!(out.contains("&& inject_temp_update(payload, engine)\n"));
+        assert!(!out.contains("SceCursor::new(payload);\n        if let Ok(decoded)"));
+    }
+
+    #[test]
+    fn two_value_bindings_same_event_share_one_helper() {
+        // Two keyexprs route to the SAME value event: the decode helper and the
+        // injector match arm are emitted ONCE (dedup), but each keyexpr keeps
+        // its own static dispatch arm.
+        let facts = parse_machine_facts(&facts_json_typed("m", &["temp_update"], &["temp_update"]))
+            .unwrap();
+        let s = spec(
+            "m",
+            vec![
+                value_binding("home/*/temp", "temp_update", "temp_payload"),
+                value_binding("office/temp", "temp_update", "temp_payload"),
+            ],
+        );
+        let schemas =
+            [parse_event_schema_facts(&schema_json("temp_update", &[("t", "float64")])).unwrap()];
+        let codecs = [parse_codec_facts(
+            &codec_json("temp_payload", &[("t", "float64")]),
+            "temp_payload",
+        )
+        .unwrap()];
+        let out = generate(&value_input(&s, &facts, &schemas, &codecs)).expect("generate");
+
+        assert_eq!(
+            out.matches("fn inject_temp_update(\n").count(),
+            1,
+            "one helper"
+        );
+        assert_eq!(
+            out.matches("\"temp_update\" => inject_temp_update(payload, self.engine),")
+                .count(),
+            1,
+            "one injector arm"
+        );
+        assert_eq!(
+            out.matches("&& inject_temp_update(payload, engine)\n")
+                .count(),
+            2,
+            "two static dispatch arms (one per keyexpr)"
+        );
     }
 
     // ---- generate: value-path validation rejections ----

@@ -879,7 +879,8 @@
         "gc-3a: generator lib landed (wz-switchboard-{schema,codegen}); not yet wired into a build (gc-3c).",
         "gc-3b: generator value path landed (typed_inject_events gate + EventSchema/codec join).",
         "gc-3b emits typed raise_<event> via generated <Machine>Inject over Engine<P>; consumer wiring gc-3c.",
-        "gc-3c: wired into wz-switchboard-example build.rs; value path verified e2e (decode->raise->guard)."
+        "gc-3c: wired into wz-switchboard-example build.rs; value path verified e2e (decode->raise->guard).",
+        "R311gs: AP dynamic value path via generated injector->raise_external_typed; cross-profile SSOT."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -28932,6 +28933,56 @@
         "String/Bytes payload fields: the gc-3c example uses a primitive uint16; native-eligible EventSchemas also allow String/Bytes, whose codec decode produces borrowed views (lifetimes on the decoded struct) -- the field-move emission + a borrowed-codec example are a follow-up.",
         "Live demo: the example is a unit-level smoke (hand-laid wire bytes + a directly-driven Engine). A full wz-ap-demo wiring -- a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the switchboard -- is the next composability milestone.",
         "Multi-codec switchboards: generate() handles N value bindings over N codecs; the example exercises one value + one signal row. A multi-event example would exercise the join over several EventSchema + codec docs."
+      ]
+    },
+    "Round 311gs": {
+      "decision_summary": "R311gs: AP dynamic switchboard value path -- registry value rows route to a generated per-machine injector via a defaulted EventInjector::inject_value; one guard semantics across AP+MCU.",
+      "changes_bullets": [
+        "wz-session-core `switchboard::EventInjector` gains a defaulted `inject_value(event_name, payload) -> bool` (the value shape of the same cohesive, SCE-free ingress port -- not a second port: a value injector necessarily owns the one `&mut Engine` borrow the signal path needs, so the borrow checker forbids splitting them). Signal-only impls inherit the `false` default, so the bridge `EngineInjector` and every gc-2c consumer ripple zero.",
+        "`SwitchboardEntry` gains a value/signal routing kind; `register_value()` mirrors a yaml `Binding` carrying a `codec`; `dispatch` routes value rows to `injector.inject_value(name, sample.payload())` (counting only on a successful decode -- byte-for-byte the static arm's `if let Ok(decoded)` semantics) and signal rows to `inject(name, \"\")`.",
+        "wz-switchboard-codegen refactors the value-arm decode+raise into a generated per-event `inject_<event>` helper (one decode body, deduped across keyexprs targeting the same event) shared by BOTH the static `dispatch_switchboard` arms (MCU) and a NEW generated `{Machine}Injector` newtype that impls `EventInjector` (signal via `raise_external_by_name`, `inject_value` matching `event_name` -> helper). The codec/payload-union mangling stays encapsulated in the generated injector (ACL); the static arm collapses to `if match && inject_<event>(payload, engine)`.",
+        "wz-switchboard-example enables `wz-session-core/switchboard` and adds 4 AP-dynamic smoke tests that drive the SAME machine through a runtime-populated `SwitchboardRegistry` + the generated `SensorMonitorInjector`, asserting state outcomes identical to the static `dispatch_switchboard` tests.",
+        "Structure note: the registry stays type-erased + non-generic (no `StatePolicy` leak into the SCE-free session-core tier); genericity over the machine lives behind the port in the generated injector. This refines R311gr's carry premise (which framed the registry itself decoding) -- the textbook split keeps the ACL/DIP boundary intact while the value path still reaches `raise_external_typed`."
+      ],
+      "verification_bullets": [
+        "wz-session-core: 11 switchboard tests incl 4 new value-path (value_row routes payload to inject_value; decode-miss not counted; mixed signal/value routing; signal-only default inject_value inert); cargo clippy --features alloc,switchboard --all-targets clean.",
+        "wz-switchboard-codegen: 20 tests incl golden_mixed updated to the helper+injector emission + value_switchboard_emits_injector_and_helper + two_value_bindings_same_event_share_one_helper (one helper / one injector arm / two static arms = dedup SSOT); clippy clean.",
+        "wz-switchboard-example: 8 tests = 4 static (dispatch_switchboard) + 4 AP-dynamic (SwitchboardRegistry + generated SensorMonitorInjector), with byte-identical state outcomes (hot->Hot, cold->Idle, reset signal->Idle, unmatched->0) = one guard semantics across the AP/dynamic and MCU/static profiles; the example is the first real compile of the generated injector against SCE's Engine<SensorMonitorPolicy>.",
+        "gc-2c consumers unaffected (signal-only path byte-identical): wz-statechart-bridge builds; wz-runtime-tokio switchboard_inject 2 integration tests pass (EngineInjector inherits the false inject_value default).",
+        "Full host run-ci (WZ_RUN_LAYER_G=1) all required layers green incl Layer G MCU no_std cross-compile (the defaulted inject_value holds no_std) + Layer M; cargo fmt --check clean.",
+        "validate_workspace: §5.20 caveat appended; sections 257 unchanged, entries 552->553, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "String/Bytes payload fields: the example still uses a primitive uint16; native-eligible EventSchemas also allow String/Bytes, whose codec decode yields borrowed views (lifetimes on the decoded struct) -- the field-move emission + a borrowed-codec example remain a follow-up.",
+        "Live wz-ap-demo wiring: a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the registry (the smoke here still hand-lays wire bytes + drives the Engine directly). The AP dynamic injector now exists; the demo confirms it composes with the gc-2c observer fan-out end to end.",
+        "Multi-codec switchboards: generate() handles N value bindings over N codecs; both the static and the new injector emission dedup per event, but the example exercises one value + one signal row -- a multi-event example would exercise the join over several EventSchema + codec docs."
+      ],
+      "publishable_decision_summary": "R311gs: AP dynamic switchboard value path -- registry value rows route to a generated per-machine injector via a defaulted EventInjector::inject_value; one guard semantics across AP+MCU.",
+      "publishable_changes_bullets": [
+        "wz-session-core `switchboard::EventInjector` gains a defaulted `inject_value(event_name, payload) -> bool` (the value shape of the same cohesive, SCE-free ingress port -- not a second port: a value injector necessarily owns the one `&mut Engine` borrow the signal path needs, so the borrow checker forbids splitting them). Signal-only impls inherit the `false` default, so the bridge `EngineInjector` and every gc-2c consumer ripple zero.",
+        "`SwitchboardEntry` gains a value/signal routing kind; `register_value()` mirrors a yaml `Binding` carrying a `codec`; `dispatch` routes value rows to `injector.inject_value(name, sample.payload())` (counting only on a successful decode -- byte-for-byte the static arm's `if let Ok(decoded)` semantics) and signal rows to `inject(name, \"\")`.",
+        "wz-switchboard-codegen refactors the value-arm decode+raise into a generated per-event `inject_<event>` helper (one decode body, deduped across keyexprs targeting the same event) shared by BOTH the static `dispatch_switchboard` arms (MCU) and a NEW generated `{Machine}Injector` newtype that impls `EventInjector` (signal via `raise_external_by_name`, `inject_value` matching `event_name` -> helper). The codec/payload-union mangling stays encapsulated in the generated injector (ACL); the static arm collapses to `if match && inject_<event>(payload, engine)`.",
+        "wz-switchboard-example enables `wz-session-core/switchboard` and adds 4 AP-dynamic smoke tests that drive the SAME machine through a runtime-populated `SwitchboardRegistry` + the generated `SensorMonitorInjector`, asserting state outcomes identical to the static `dispatch_switchboard` tests.",
+        "Structure note: the registry stays type-erased + non-generic (no `StatePolicy` leak into the SCE-free session-core tier); genericity over the machine lives behind the port in the generated injector. This refines R311gr's carry premise (which framed the registry itself decoding) -- the textbook split keeps the ACL/DIP boundary intact while the value path still reaches `raise_external_typed`."
+      ],
+      "publishable_verification_bullets": [
+        "wz-session-core: 11 switchboard tests incl 4 new value-path (value_row routes payload to inject_value; decode-miss not counted; mixed signal/value routing; signal-only default inject_value inert); cargo clippy --features alloc,switchboard --all-targets clean.",
+        "wz-switchboard-codegen: 20 tests incl golden_mixed updated to the helper+injector emission + value_switchboard_emits_injector_and_helper + two_value_bindings_same_event_share_one_helper (one helper / one injector arm / two static arms = dedup SSOT); clippy clean.",
+        "wz-switchboard-example: 8 tests = 4 static (dispatch_switchboard) + 4 AP-dynamic (SwitchboardRegistry + generated SensorMonitorInjector), with byte-identical state outcomes (hot->Hot, cold->Idle, reset signal->Idle, unmatched->0) = one guard semantics across the AP/dynamic and MCU/static profiles; the example is the first real compile of the generated injector against SCE's Engine<SensorMonitorPolicy>.",
+        "gc-2c consumers unaffected (signal-only path byte-identical): wz-statechart-bridge builds; wz-runtime-tokio switchboard_inject 2 integration tests pass (EngineInjector inherits the false inject_value default).",
+        "Full host run-ci (WZ_RUN_LAYER_G=1) all required layers green incl Layer G MCU no_std cross-compile (the defaulted inject_value holds no_std) + Layer M; cargo fmt --check clean.",
+        "validate_workspace: §5.20 caveat appended; sections 257 unchanged, entries 552->553, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "String/Bytes payload fields: the example still uses a primitive uint16; native-eligible EventSchemas also allow String/Bytes, whose codec decode yields borrowed views (lifetimes on the decoded struct) -- the field-move emission + a borrowed-codec example remain a follow-up.",
+        "Live wz-ap-demo wiring: a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the registry (the smoke here still hand-lays wire bytes + drives the Engine directly). The AP dynamic injector now exists; the demo confirms it composes with the gc-2c observer fan-out end to end.",
+        "Multi-codec switchboards: generate() handles N value bindings over N codecs; both the static and the new injector emission dedup per event, but the example exercises one value + one signal row -- a multi-event example would exercise the join over several EventSchema + codec docs."
       ]
     },
     "Round 311h": {
