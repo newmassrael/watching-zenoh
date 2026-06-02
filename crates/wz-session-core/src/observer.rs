@@ -514,153 +514,13 @@ impl ApplicationLayerObserver {
 #[cfg(all(test, feature = "codec-push"))]
 mod tests {
     use super::*;
-    // DriverLoopOutcome + NetworkMessage are used only by `make_outcome`
-    // (and its callers), so they share its consumer-feature union.
-    #[cfg(any(
-        feature = "pubsub-put",
-        feature = "declare-subscriber",
-        feature = "query-queryable"
-    ))]
-    use crate::driver_loop::DriverLoopOutcome;
-    #[cfg(any(
-        feature = "pubsub-put",
-        feature = "declare-subscriber",
-        feature = "query-queryable"
-    ))]
-    use crate::network_message::NetworkMessage;
-    // R311gi — gated on the union of consumer features whose dispatch
-    // tests build a `FramePayload` of boxed `NetworkMessage`s. The
-    // `switchboard` feature (⇒ codec-push, no consumer) is the first
-    // combo that compiles this module without any of them, under which
-    // these would be unused.
-    #[cfg(any(
-        feature = "pubsub-put",
-        feature = "declare-subscriber",
-        feature = "query-queryable"
-    ))]
-    use alloc::boxed::Box;
-    #[cfg(any(
-        feature = "pubsub-put",
-        feature = "declare-subscriber",
-        feature = "query-queryable"
-    ))]
-    use alloc::vec;
-    #[cfg(any(
-        feature = "pubsub-put",
-        feature = "declare-subscriber",
-        feature = "query-queryable"
-    ))]
-    use alloc::vec::Vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-    // Fixtures build the borrowed codec views (borrowing the `&str` /
-    // `&[u8]` params) then `.into_owned()` at the boundary — the
-    // `NetworkMessage` carriers store the lifetime-free `*Owned` mirrors.
-    // R311dz — the Declare-record imports are used only by the
-    // `declare-subscriber`-gated fixture + cross-talk test, so gate them
-    // on `declare-subscriber` (the cross-talk test requires it too); the
-    // C1d pubsub lane builds the observer with codec-declare on but
-    // declare-subscriber off, where an unconditional import is unused
-    // (deny). The Push / Wireexpr imports stay unconditional — the
-    // always-present subscriber Push test uses them.
-    #[cfg(feature = "declare-subscriber")]
-    use wz_codecs::decl_subscriber::DeclSubscriber;
-    #[cfg(feature = "declare-subscriber")]
-    use wz_codecs::declare::{Declare, DeclareOwned, DeclareVariant};
-    // push_literal (and these Push types) are used only by the Put-push
-    // dispatch tests: test1 (pubsub-put) + the cross-talk test (which
-    // needs ALL of declare-subscriber + declare-queryable +
-    // liveliness-token). Other consumers (query) build a Request, not a
-    // Push. So gate on the exact push-test union, not a looser one.
-    #[cfg(any(
-        feature = "pubsub-put",
-        all(
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "liveliness-token"
-        )
-    ))]
-    use wz_codecs::push::{Push, PushOwned};
-    #[cfg(any(
-        feature = "pubsub-put",
-        feature = "declare-subscriber",
-        feature = "query-queryable"
-    ))]
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    #[cfg(any(
-        feature = "pubsub-put",
-        feature = "declare-subscriber",
-        feature = "query-queryable"
-    ))]
-    use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
-    #[cfg(any(
-        feature = "pubsub-put",
-        all(
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "liveliness-token"
-        )
-    ))]
-    fn push_literal(suffix: &str, payload: &[u8]) -> PushOwned {
-        let keyexpr = Wireexpr {
-            body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
-                id: 0,
-                suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix),
-            }),
-        };
-        let mut push = Push {
-            keyexpr,
-            ..Push::default()
-        };
-        // Set the inner MsgPut body's payload to the test bytes.
-        if let wz_codecs::push::PushVariant::CodecZenohMsgPut(ref mut put) = push.body {
-            put.payload_len = payload.len() as u64;
-            put.payload = payload;
-        }
-        push.into_owned()
-    }
-
-    // R311dz — only the declare-subscriber-gated tests reference this
-    // fixture (a peer DeclSubscriber record); gate it on the same
-    // feature so a `codec-declare`-on / `declare-subscriber`-off test
-    // build does not carry an unused-fn deny-warning.
-    #[cfg(feature = "declare-subscriber")]
-    fn declare_decl_subscriber(id: u64, suffix: &str) -> DeclareOwned {
-        let keyexpr = Wireexpr {
-            body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
-                id: 0,
-                suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix),
-            }),
-        };
-        let decl = DeclSubscriber {
-            id,
-            keyexpr,
-            ..DeclSubscriber::default()
-        };
-        Declare {
-            body: DeclareVariant::CodecZenohDeclSubscriber(decl),
-            ..Declare::default()
-        }
-        .into_owned()
-    }
-
-    #[cfg(any(
-        feature = "pubsub-put",
-        feature = "declare-subscriber",
-        feature = "query-queryable"
-    ))]
-    fn make_outcome(messages: Vec<NetworkMessage>) -> DriverLoopOutcome {
-        DriverLoopOutcome::FramePayload {
-            reliable: true,
-            sn: 0,
-            messages,
-            has_ext: false,
-            extensions: Vec::new(),
-        }
-    }
+    // ── Unconditional tests ──────────────────────────────────────────
+    // Exercise the always-compiled observer surface (the subscriber +
+    // replies registries) and need no consumer feature. Per-domain slot
+    // assertions gate on the feature that owns the slot.
 
     // R307 / R311dz — assertions over each per-domain slot gate on the
     // feature that owns that slot; the subscriber + replies assertions
@@ -685,146 +545,6 @@ mod tests {
         assert_eq!(observer.pending_final_count(), 0);
     }
 
-    // Asserts the subscriber callback FIRES, which is the `pubsub-put`
-    // projection arm (dispatch_push fires only under any(pubsub-put,
-    // pubsub-delete)). The enclosing module gates on `codec-push` for the
-    // `NetworkMessage::Push` type; firing additionally needs the data
-    // plane. R311gi exposed this: `switchboard = ["codec-push"]` is the
-    // first combo with codec-push ON but pubsub-put OFF.
-    #[cfg(feature = "pubsub-put")]
-    #[test]
-    fn dispatch_event_routes_push_to_subscriber_registry() {
-        let mut observer = ApplicationLayerObserver::new();
-        let fired = Arc::new(AtomicUsize::new(0));
-        let fired_cb = fired.clone();
-        observer.subscribers.register("home/temp", move |_push| {
-            fired_cb.fetch_add(1, Ordering::SeqCst);
-        });
-
-        let outcome = make_outcome(vec![NetworkMessage::Push(Box::new(push_literal(
-            "home/temp",
-            b"21.0",
-        )))]);
-        observer.dispatch_event(IterationEvent::Poll(&outcome));
-        assert_eq!(fired.load(Ordering::SeqCst), 1);
-    }
-
-    // R311dz — references `observer.remote_subscribers`
-    // (declare-subscriber slot) + the DeclSubscriber fixture, so gate on
-    // `declare-subscriber` rather than relying on the workspace default.
-    #[cfg(feature = "declare-subscriber")]
-    #[test]
-    fn dispatch_event_routes_decl_subscriber_to_remote_subscriber_registry() {
-        let mut observer = ApplicationLayerObserver::new();
-        let fired = Arc::new(AtomicUsize::new(0));
-        let fired_cb = fired.clone();
-        observer
-            .remote_subscribers
-            .on_subscriber_declared(move |decl| {
-                assert_eq!(decl.id(), 7);
-                assert_eq!(decl.keyexpr(), "peer/sensor");
-                fired_cb.fetch_add(1, Ordering::SeqCst);
-            });
-
-        let outcome = make_outcome(vec![NetworkMessage::Declare(Box::new(
-            declare_decl_subscriber(7, "peer/sensor"),
-        ))]);
-        observer.dispatch_event(IterationEvent::Poll(&outcome));
-        assert_eq!(fired.load(Ordering::SeqCst), 1);
-    }
-
-    // R311dz — exercises subscribers + remote_subscribers +
-    // remote_queryables + liveliness, so gate on the conjunction of the
-    // three peer-declare features it touches (the original
-    // `liveliness-token`-only gate implicitly relied on the workspace
-    // default having declare-subscriber / declare-queryable on too).
-    #[cfg(all(
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "liveliness-token"
-    ))]
-    #[test]
-    fn dispatch_event_routes_event_into_all_consumer_registries_without_cross_talk() {
-        // Each registry sees only the arm it is wired for; the
-        // single dispatch call fans the same IterationEvent into all
-        // five consumer registries (+ subscribers absorbing
-        // DeclKexpr / Push) without any cross-talk.
-        let mut observer = ApplicationLayerObserver::new();
-        let sub_fired = Arc::new(AtomicUsize::new(0));
-        let r_sub_fired = Arc::new(AtomicUsize::new(0));
-        let r_q_fired = Arc::new(AtomicUsize::new(0));
-        let l_fired = Arc::new(AtomicUsize::new(0));
-
-        let s = sub_fired.clone();
-        observer.subscribers.register("a", move |_p| {
-            s.fetch_add(1, Ordering::SeqCst);
-        });
-        let rs = r_sub_fired.clone();
-        observer
-            .remote_subscribers
-            .on_subscriber_declared(move |_d| {
-                rs.fetch_add(1, Ordering::SeqCst);
-            });
-        let rq = r_q_fired.clone();
-        observer.remote_queryables.on_queryable_declared(move |_d| {
-            rq.fetch_add(1, Ordering::SeqCst);
-        });
-        let l = l_fired.clone();
-        observer.liveliness.on_token_declared(move |_d| {
-            l.fetch_add(1, Ordering::SeqCst);
-        });
-
-        // Frame carrying a Push + 3 different Declare arms.
-        let outcome = make_outcome(vec![
-            NetworkMessage::Push(Box::new(push_literal("a", b"v"))),
-            NetworkMessage::Declare(Box::new(declare_decl_subscriber(1, "x"))),
-            NetworkMessage::Declare(Box::new({
-                let keyexpr = Wireexpr {
-                    body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
-                        id: 0,
-                        suffix_len: Some(1),
-                        suffix: Some("y"),
-                    }),
-                };
-                Declare {
-                    body: DeclareVariant::CodecZenohDeclQueryable(
-                        wz_codecs::decl_queryable::DeclQueryable {
-                            id: 2,
-                            keyexpr,
-                            ..wz_codecs::decl_queryable::DeclQueryable::default()
-                        },
-                    ),
-                    ..Declare::default()
-                }
-                .into_owned()
-            })),
-            NetworkMessage::Declare(Box::new({
-                let keyexpr = Wireexpr {
-                    body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
-                        id: 0,
-                        suffix_len: Some(1),
-                        suffix: Some("z"),
-                    }),
-                };
-                Declare {
-                    body: DeclareVariant::CodecZenohDeclToken(wz_codecs::decl_token::DeclToken {
-                        id: 3,
-                        keyexpr,
-                        ..wz_codecs::decl_token::DeclToken::default()
-                    }),
-                    ..Declare::default()
-                }
-                .into_owned()
-            })),
-        ]);
-        observer.dispatch_event(IterationEvent::Poll(&outcome));
-
-        assert_eq!(sub_fired.load(Ordering::SeqCst), 1);
-        assert_eq!(r_sub_fired.load(Ordering::SeqCst), 1);
-        assert_eq!(r_q_fired.load(Ordering::SeqCst), 1);
-        assert_eq!(l_fired.load(Ordering::SeqCst), 1);
-    }
-
     #[test]
     fn dispatch_event_lease_variant_is_silent_noop() {
         let mut observer = ApplicationLayerObserver::new();
@@ -839,64 +559,364 @@ mod tests {
         assert_eq!(fired.load(Ordering::SeqCst), 0);
     }
 
-    #[cfg(feature = "query-queryable")]
-    #[test]
-    fn flush_pending_clears_queryable_staged_buffers() {
-        // Register a queryable that emits one Reply on match; absent
-        // a real wire dispatch, we cannot call the action layer in a
-        // unit test (no ResponseSink stand-in is wired here). What
-        // we CAN verify is that dispatch_event populates the pending
-        // bufs and subsequent dispatch (or explicit flush) drains
-        // them. Here we simulate by hand: after dispatch_event,
-        // pending_reply_count > 0; we then manually clear and confirm
-        // the helper's accessor goes back to 0.
-        let mut observer = ApplicationLayerObserver::new();
-        observer
-            .queryables
-            .register("home/temp", |_query, responder| {
-                responder.reply(b"21.0");
+    // ── Shared fixtures ──────────────────────────────────────────────
+    // R311gk CLEANUP-1 — the consumer dispatch tests below live in
+    // per-consumer `#[cfg]` sub-modules so each test's gate is its own
+    // single consumer feature. Fixtures shared by more than one consumer
+    // live here, each in a sub-module whose gate (the genuine consumer
+    // union) is written exactly ONCE as the module gate — replacing the
+    // prior per-item `cfg(any(...))` unions hand-copied across every
+    // shared import.
+
+    // `make_outcome` wraps a message batch in a FramePayload outcome; it
+    // is used by every consumer dispatch test (push / decl-subscriber /
+    // cross-talk / query). Its gate is the union of those consumers'
+    // features — `switchboard` (⇒ codec-push, no consumer) is the first
+    // combo that compiles this module with none of them on.
+    #[cfg(any(
+        feature = "pubsub-put",
+        feature = "declare-subscriber",
+        feature = "query-queryable"
+    ))]
+    mod fixtures {
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::network_message::NetworkMessage;
+        use alloc::vec::Vec;
+
+        // Fixtures build the borrowed codec views (borrowing the `&str`
+        // / `&[u8]` params) then `.into_owned()` at the boundary — the
+        // `NetworkMessage` carriers store the lifetime-free `*Owned`
+        // mirrors.
+        pub(super) fn make_outcome(messages: Vec<NetworkMessage>) -> DriverLoopOutcome {
+            DriverLoopOutcome::FramePayload {
+                reliable: true,
+                sn: 0,
+                messages,
+                has_ext: false,
+                extensions: Vec::new(),
+            }
+        }
+    }
+
+    // `push_literal` builds an owned Push carrying an inline keyexpr
+    // suffix + payload. Used by the pubsub-put dispatch test AND the
+    // cross-talk test (which drives all peer-declare arms), so its gate
+    // is exactly that two-consumer union.
+    #[cfg(any(
+        feature = "pubsub-put",
+        all(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        )
+    ))]
+    mod push_fixtures {
+        use wz_codecs::push::{Push, PushOwned};
+        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+        use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+
+        pub(super) fn push_literal(suffix: &str, payload: &[u8]) -> PushOwned {
+            let keyexpr = Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                    id: 0,
+                    suffix_len: Some(suffix.len() as u64),
+                    suffix: Some(suffix),
+                }),
+            };
+            let mut push = Push {
+                keyexpr,
+                ..Push::default()
+            };
+            // Set the inner MsgPut body's payload to the test bytes.
+            if let wz_codecs::push::PushVariant::CodecZenohMsgPut(ref mut put) = push.body {
+                put.payload_len = payload.len() as u64;
+                put.payload = payload;
+            }
+            push.into_owned()
+        }
+    }
+
+    // `declare_decl_subscriber` builds an owned peer DeclSubscriber
+    // record. Used by the declare-subscriber dispatch test AND the
+    // cross-talk test; both require `declare-subscriber`, so that single
+    // feature is the gate.
+    #[cfg(feature = "declare-subscriber")]
+    mod decl_fixtures {
+        use wz_codecs::decl_subscriber::DeclSubscriber;
+        use wz_codecs::declare::{Declare, DeclareOwned, DeclareVariant};
+        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+        use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+
+        pub(super) fn declare_decl_subscriber(id: u64, suffix: &str) -> DeclareOwned {
+            let keyexpr = Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                    id: 0,
+                    suffix_len: Some(suffix.len() as u64),
+                    suffix: Some(suffix),
+                }),
+            };
+            let decl = DeclSubscriber {
+                id,
+                keyexpr,
+                ..DeclSubscriber::default()
+            };
+            Declare {
+                body: DeclareVariant::CodecZenohDeclSubscriber(decl),
+                ..Declare::default()
+            }
+            .into_owned()
+        }
+    }
+
+    // ── Per-consumer dispatch tests ──────────────────────────────────
+
+    // Asserts the subscriber callback FIRES, which is the `pubsub-put`
+    // projection arm (dispatch_push fires only under any(pubsub-put,
+    // pubsub-delete)). The enclosing module gates on `codec-push` for
+    // the `NetworkMessage::Push` type; firing additionally needs the
+    // data plane. R311gi exposed this: `switchboard = ["codec-push"]` is
+    // the first combo with codec-push ON but pubsub-put OFF.
+    #[cfg(feature = "pubsub-put")]
+    mod pubsub_put {
+        use super::super::ApplicationLayerObserver;
+        use super::fixtures::make_outcome;
+        use super::push_fixtures::push_literal;
+        use crate::driver_loop::IterationEvent;
+        use crate::network_message::NetworkMessage;
+        use alloc::{boxed::Box, vec};
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        #[test]
+        fn dispatch_event_routes_push_to_subscriber_registry() {
+            let mut observer = ApplicationLayerObserver::new();
+            let fired = Arc::new(AtomicUsize::new(0));
+            let fired_cb = fired.clone();
+            observer.subscribers.register("home/temp", move |_push| {
+                fired_cb.fetch_add(1, Ordering::SeqCst);
             });
 
-        // Synthesize an inbound Query for "home/temp".
-        use wz_codecs::query::Query;
-        use wz_codecs::request::{Request, RequestVariant};
-        let suffix = "home/temp";
-        let keyexpr = Wireexpr {
-            body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
-                id: 0,
-                suffix_len: Some(suffix.len() as u64),
-                suffix: Some(suffix),
-            }),
-        };
-        let request = Request {
-            rid: 42,
-            keyexpr,
-            body: RequestVariant::CodecZenohQuery(Query::default()),
-            ..Request::default()
+            let outcome = make_outcome(vec![NetworkMessage::Push(Box::new(push_literal(
+                "home/temp",
+                b"21.0",
+            )))]);
+            observer.dispatch_event(IterationEvent::Poll(&outcome));
+            assert_eq!(fired.load(Ordering::SeqCst), 1);
         }
-        .into_owned();
-        let outcome = make_outcome(vec![NetworkMessage::Request(Box::new(request))]);
-        observer.dispatch_event(IterationEvent::Poll(&outcome));
+    }
 
-        assert_eq!(
-            observer.pending_reply_count(),
-            1,
-            "one matched query staged one Reply"
-        );
-        assert_eq!(
-            observer.pending_final_count(),
-            1,
-            "matched query staged one Final"
-        );
+    // R311dz — references `observer.remote_subscribers`
+    // (declare-subscriber slot) + the DeclSubscriber fixture, so gate on
+    // `declare-subscriber` rather than relying on the workspace default.
+    #[cfg(feature = "declare-subscriber")]
+    mod declare_subscriber {
+        use super::super::ApplicationLayerObserver;
+        use super::decl_fixtures::declare_decl_subscriber;
+        use super::fixtures::make_outcome;
+        use crate::driver_loop::IterationEvent;
+        use crate::network_message::NetworkMessage;
+        use alloc::{boxed::Box, vec};
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
 
-        // Bypass the ResponseSink drain (no test stand-in here) and
-        // simulate the flush by clearing manually. Production code
-        // calls flush_pending(&actions) which drains through the
-        // outbound link; the integration tests cover that path
-        // end-to-end. Here we exercise just the accessor lifecycle.
-        observer.pending_replies.clear();
-        observer.pending_final_rids.clear();
-        assert_eq!(observer.pending_reply_count(), 0);
-        assert_eq!(observer.pending_final_count(), 0);
+        #[test]
+        fn dispatch_event_routes_decl_subscriber_to_remote_subscriber_registry() {
+            let mut observer = ApplicationLayerObserver::new();
+            let fired = Arc::new(AtomicUsize::new(0));
+            let fired_cb = fired.clone();
+            observer
+                .remote_subscribers
+                .on_subscriber_declared(move |decl| {
+                    assert_eq!(decl.id(), 7);
+                    assert_eq!(decl.keyexpr(), "peer/sensor");
+                    fired_cb.fetch_add(1, Ordering::SeqCst);
+                });
+
+            let outcome = make_outcome(vec![NetworkMessage::Declare(Box::new(
+                declare_decl_subscriber(7, "peer/sensor"),
+            ))]);
+            observer.dispatch_event(IterationEvent::Poll(&outcome));
+            assert_eq!(fired.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    // R311dz — exercises subscribers + remote_subscribers +
+    // remote_queryables + liveliness, so gate on the conjunction of the
+    // three peer-declare features it touches (the original
+    // `liveliness-token`-only gate implicitly relied on the workspace
+    // default having declare-subscriber / declare-queryable on too).
+    #[cfg(all(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-token"
+    ))]
+    mod cross_talk {
+        use super::super::ApplicationLayerObserver;
+        use super::decl_fixtures::declare_decl_subscriber;
+        use super::fixtures::make_outcome;
+        use super::push_fixtures::push_literal;
+        use crate::driver_loop::IterationEvent;
+        use crate::network_message::NetworkMessage;
+        use alloc::{boxed::Box, vec};
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use wz_codecs::declare::{Declare, DeclareVariant};
+        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+        use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+
+        #[test]
+        fn dispatch_event_routes_event_into_all_consumer_registries_without_cross_talk() {
+            // Each registry sees only the arm it is wired for; the
+            // single dispatch call fans the same IterationEvent into all
+            // five consumer registries (+ subscribers absorbing
+            // DeclKexpr / Push) without any cross-talk.
+            let mut observer = ApplicationLayerObserver::new();
+            let sub_fired = Arc::new(AtomicUsize::new(0));
+            let r_sub_fired = Arc::new(AtomicUsize::new(0));
+            let r_q_fired = Arc::new(AtomicUsize::new(0));
+            let l_fired = Arc::new(AtomicUsize::new(0));
+
+            let s = sub_fired.clone();
+            observer.subscribers.register("a", move |_p| {
+                s.fetch_add(1, Ordering::SeqCst);
+            });
+            let rs = r_sub_fired.clone();
+            observer
+                .remote_subscribers
+                .on_subscriber_declared(move |_d| {
+                    rs.fetch_add(1, Ordering::SeqCst);
+                });
+            let rq = r_q_fired.clone();
+            observer.remote_queryables.on_queryable_declared(move |_d| {
+                rq.fetch_add(1, Ordering::SeqCst);
+            });
+            let l = l_fired.clone();
+            observer.liveliness.on_token_declared(move |_d| {
+                l.fetch_add(1, Ordering::SeqCst);
+            });
+
+            // Frame carrying a Push + 3 different Declare arms.
+            let outcome = make_outcome(vec![
+                NetworkMessage::Push(Box::new(push_literal("a", b"v"))),
+                NetworkMessage::Declare(Box::new(declare_decl_subscriber(1, "x"))),
+                NetworkMessage::Declare(Box::new({
+                    let keyexpr = Wireexpr {
+                        body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                            id: 0,
+                            suffix_len: Some(1),
+                            suffix: Some("y"),
+                        }),
+                    };
+                    Declare {
+                        body: DeclareVariant::CodecZenohDeclQueryable(
+                            wz_codecs::decl_queryable::DeclQueryable {
+                                id: 2,
+                                keyexpr,
+                                ..wz_codecs::decl_queryable::DeclQueryable::default()
+                            },
+                        ),
+                        ..Declare::default()
+                    }
+                    .into_owned()
+                })),
+                NetworkMessage::Declare(Box::new({
+                    let keyexpr = Wireexpr {
+                        body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                            id: 0,
+                            suffix_len: Some(1),
+                            suffix: Some("z"),
+                        }),
+                    };
+                    Declare {
+                        body: DeclareVariant::CodecZenohDeclToken(
+                            wz_codecs::decl_token::DeclToken {
+                                id: 3,
+                                keyexpr,
+                                ..wz_codecs::decl_token::DeclToken::default()
+                            },
+                        ),
+                        ..Declare::default()
+                    }
+                    .into_owned()
+                })),
+            ]);
+            observer.dispatch_event(IterationEvent::Poll(&outcome));
+
+            assert_eq!(sub_fired.load(Ordering::SeqCst), 1);
+            assert_eq!(r_sub_fired.load(Ordering::SeqCst), 1);
+            assert_eq!(r_q_fired.load(Ordering::SeqCst), 1);
+            assert_eq!(l_fired.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[cfg(feature = "query-queryable")]
+    mod query_queryable {
+        use super::super::ApplicationLayerObserver;
+        use super::fixtures::make_outcome;
+        use crate::driver_loop::IterationEvent;
+        use crate::network_message::NetworkMessage;
+        use alloc::{boxed::Box, vec};
+        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+        use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
+
+        #[test]
+        fn flush_pending_clears_queryable_staged_buffers() {
+            // Register a queryable that emits one Reply on match; absent
+            // a real wire dispatch, we cannot call the action layer in a
+            // unit test (no ResponseSink stand-in is wired here). What
+            // we CAN verify is that dispatch_event populates the pending
+            // bufs and subsequent dispatch (or explicit flush) drains
+            // them. Here we simulate by hand: after dispatch_event,
+            // pending_reply_count > 0; we then manually clear and confirm
+            // the helper's accessor goes back to 0.
+            let mut observer = ApplicationLayerObserver::new();
+            observer
+                .queryables
+                .register("home/temp", |_query, responder| {
+                    responder.reply(b"21.0");
+                });
+
+            // Synthesize an inbound Query for "home/temp".
+            use wz_codecs::query::Query;
+            use wz_codecs::request::{Request, RequestVariant};
+            let suffix = "home/temp";
+            let keyexpr = Wireexpr {
+                body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
+                    id: 0,
+                    suffix_len: Some(suffix.len() as u64),
+                    suffix: Some(suffix),
+                }),
+            };
+            let request = Request {
+                rid: 42,
+                keyexpr,
+                body: RequestVariant::CodecZenohQuery(Query::default()),
+                ..Request::default()
+            }
+            .into_owned();
+            let outcome = make_outcome(vec![NetworkMessage::Request(Box::new(request))]);
+            observer.dispatch_event(IterationEvent::Poll(&outcome));
+
+            assert_eq!(
+                observer.pending_reply_count(),
+                1,
+                "one matched query staged one Reply"
+            );
+            assert_eq!(
+                observer.pending_final_count(),
+                1,
+                "matched query staged one Final"
+            );
+
+            // Bypass the ResponseSink drain (no test stand-in here) and
+            // simulate the flush by clearing manually. Production code
+            // calls flush_pending(&actions) which drains through the
+            // outbound link; the integration tests cover that path
+            // end-to-end. Here we exercise just the accessor lifecycle.
+            observer.pending_replies.clear();
+            observer.pending_final_rids.clear();
+            assert_eq!(observer.pending_reply_count(), 0);
+            assert_eq!(observer.pending_final_count(), 0);
+        }
     }
 }

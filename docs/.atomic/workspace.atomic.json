@@ -28564,6 +28564,52 @@
         "THEN gc-3: generator (wz-switchboard.yaml -> MCU closed match + build-time validation) + value path + example app SCXML machine."
       ]
     },
+    "Round 311gl": {
+      "decision_summary": "R311gl CLEANUP-1: observer.rs test module split into per-consumer #[cfg] sub-modules; per-item cfg(any) fixture unions collapsed to one module gate each. Behaviour unchanged.",
+      "changes_bullets": [
+        "observer.rs `mod tests`: the 2 unconditional tests (new_observer_starts_empty, dispatch_event_lease_variant_is_silent_noop) stay at top level; the 4 consumer dispatch tests each move into a per-consumer sub-module gated on a single feature (pubsub_put / declare_subscriber / cross_talk / query_queryable).",
+        "Shared fixtures grouped into 3 sub-modules whose gate (the genuine consumer union) is written exactly ONCE as the module gate: `fixtures` (make_outcome, gate any(pubsub-put,declare-subscriber,query-queryable)), `push_fixtures` (push_literal, gate any(pubsub-put, all(declare-subscriber,declare-queryable,liveliness-token))), `decl_fixtures` (declare_decl_subscriber, gate declare-subscriber).",
+        "Eliminates the per-item cfg(any) unions hand-copied across every shared import (8x fixtures union + 2x push union + 3x declare-subscriber gate); each gate now has a single SSOT site, so adding a consumer no longer requires editing every shared import.",
+        "r99 helper in wz-runtime-tokio session_fsm_drive_session.rs left as-is: already a single cleanly-gated test (all(codec-push,pubsub-put)) with fn-local imports, no per-helper union present."
+      ],
+      "verification_bullets": [
+        "C1g full-union cargo test -p wz-session-core (codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete): 260 lib + 2 doctest pass, count unchanged.",
+        "5 subset compiles clean under deny(warnings): switchboard-only (codec-push ON, no consumer -> all fixture+consumer sub-modules elide, only the 2 unconditional tests build), pubsub-put, declare-subscriber-only (confirms push_fixtures elides when unreferenced), cross_talk union, query-only.",
+        "cargo clippy --all-targets clean on full union + switchboard-only.",
+        "full scripts/run-ci.sh host lanes 0..E2 green (incl C1g/C1h/C1j observer+subset + C2 clippy); Layer F/G/Q/M opt-in not run -- a test-only change does not reach the no_std cross-compile surface (cfg(test) off there)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "CLEANUP-2 resolution SSOT: pubsub.rs dispatch_push (~524-537) inlines id==0/table[id]+suffix duplicating resolve_wireexpr; unify the subscriber path onto the free-fn SSOT.",
+        "CLEANUP-3 catalog prose: feature-inventory §5 lacks a statechart/switchboard domain; decide new 5-20 vs existing + add prose (inventory entry already registered R311gk).",
+        "THEN gc-3: generator (wz-switchboard.yaml -> MCU closed match + build-time validation) + value path + example app SCXML machine.",
+        "Track2 no-alloc (24-module bounded backing flip) remains a separate follow-up."
+      ],
+      "publishable_decision_summary": "R311gl CLEANUP-1: observer.rs test module split into per-consumer #[cfg] sub-modules; per-item cfg(any) fixture unions collapsed to one module gate each. Behaviour unchanged.",
+      "publishable_changes_bullets": [
+        "observer.rs `mod tests`: the 2 unconditional tests (new_observer_starts_empty, dispatch_event_lease_variant_is_silent_noop) stay at top level; the 4 consumer dispatch tests each move into a per-consumer sub-module gated on a single feature (pubsub_put / declare_subscriber / cross_talk / query_queryable).",
+        "Shared fixtures grouped into 3 sub-modules whose gate (the genuine consumer union) is written exactly ONCE as the module gate: `fixtures` (make_outcome, gate any(pubsub-put,declare-subscriber,query-queryable)), `push_fixtures` (push_literal, gate any(pubsub-put, all(declare-subscriber,declare-queryable,liveliness-token))), `decl_fixtures` (declare_decl_subscriber, gate declare-subscriber).",
+        "Eliminates the per-item cfg(any) unions hand-copied across every shared import (8x fixtures union + 2x push union + 3x declare-subscriber gate); each gate now has a single SSOT site, so adding a consumer no longer requires editing every shared import.",
+        "r99 helper in wz-runtime-tokio session_fsm_drive_session.rs left as-is: already a single cleanly-gated test (all(codec-push,pubsub-put)) with fn-local imports, no per-helper union present."
+      ],
+      "publishable_verification_bullets": [
+        "C1g full-union cargo test -p wz-session-core (codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete): 260 lib + 2 doctest pass, count unchanged.",
+        "5 subset compiles clean under deny(warnings): switchboard-only (codec-push ON, no consumer -> all fixture+consumer sub-modules elide, only the 2 unconditional tests build), pubsub-put, declare-subscriber-only (confirms push_fixtures elides when unreferenced), cross_talk union, query-only.",
+        "cargo clippy --all-targets clean on full union + switchboard-only.",
+        "full scripts/run-ci.sh host lanes 0..E2 green (incl C1g/C1h/C1j observer+subset + C2 clippy); Layer F/G/Q/M opt-in not run -- a test-only change does not reach the no_std cross-compile surface (cfg(test) off there)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "CLEANUP-2 resolution SSOT: pubsub.rs dispatch_push (~524-537) inlines id==0/table[id]+suffix duplicating resolve_wireexpr; unify the subscriber path onto the free-fn SSOT.",
+        "CLEANUP-3 catalog prose: feature-inventory §5 lacks a statechart/switchboard domain; decide new 5-20 vs existing + add prose (inventory entry already registered R311gk).",
+        "THEN gc-3: generator (wz-switchboard.yaml -> MCU closed match + build-time validation) + value path + example app SCXML machine.",
+        "Track2 no-alloc (24-module bounded backing flip) remains a separate follow-up."
+      ]
+    },
     "Round 311h": {
       "decision_summary": "R311h codec-push wire-layer cascade — wz-codecs gate + Cargo edges + session_glue.rs Push surface; pubsub.rs consumer cascade deferred to R311m.",
       "changes_bullets": [
