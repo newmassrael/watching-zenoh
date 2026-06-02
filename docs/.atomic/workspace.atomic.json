@@ -28268,6 +28268,52 @@
         "update sce-vendor-pin-state memory to pin 31c188afe."
       ]
     },
+    "Round 311ge": {
+      "decision_summary": "vendor/sce bump 31c188afe->f82cf4b16 lands RFC#6 answer (StatePolicy::Payload channel + native Rust/C11 _event.data guard lowering) = MCU value-path unblock; mechanical, codegen rebuild required",
+      "changes_bullets": [
+        "vendor/sce submodule 31c188afe -> f82cf4b16 (+4 commits, all the RFC#6 answer).",
+        "4cdcf5538 StatePolicy::Payload typed-payload channel (sce-rust-runtime); d0bea9faa lower EventSchema typed _event.data guards to native Rust; f82cf4b16 same for native C11; c0e06697a reject mixed typed guards from native lowering.",
+        "effect: no_std MCU value path unblocked -- typed _event.data.<field> now lowers to native Rust/C11 (no ECMAScript datamodel needed), StatePolicy::Payload is the typed inject channel. RFC#6 Q1/Q2 resolved by SCE codegen, no wz-side taxonomy work.",
+        "wz-surface = sce-rust-runtime (engine/event/policy/event_metadata) + sce-build (generator/parser/event_schema_check/expr) + rust+c11 templates; mechanical for wz (cargo check --workspace clean, zero wz call-site change)."
+      ],
+      "verification_bullets": [
+        "BUILD ERROR encountered + resolved: new templates use the native_payload_guard jinja filter (vendor/sce/sce-build/src/generator.rs:315,500); the prebuilt sce-codegen binary was stale -> wz-runtime-tokio/build.rs panic (unknown filter). ROOT CAUSE = codegen binary not rebuilt after the template-touching bump. FIX = scripts/build-sce.sh rebuild (pin f82cf4b16, 1m23s). Not a wz call-site break, not an SCE bug.",
+        "cargo check --workspace clean after the rebuild (wz call-site impact 0; mechanical bump).",
+        "full run-ci.sh (no --skip-codegen): codegen Layer B + Layer C tests + Layer E + Layer G 7 MCU, exit 0 -- codec goldens stable.",
+        "G.6 riscv32imac lwip-sys known SKIP (riscv32-unknown-elf-gcc absent); Layer Q/M opt-in SKIP."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "value-path integration design now closeable: signal = inject(event,\"\") / value = inject(event, payload) on the one EventInjector seam (R311gc-1); validation signal->external_ingress_events, value->EventSchema; the no_std MCU value path is now supported by StatePolicy::Payload + native _event.data guard lowering (this bump). The R311gc <sce:inbound> validation-basis error stays corrected (R311gd) -> signal=external_ingress_events, value=EventSchema.",
+        "bump-procedure lesson: scripts/build-sce.sh rebuild is MANDATORY when a bump touches tools/codegen/templates/ (new filters/macros), else the stale sce-codegen binary panics wz build.rs. record in sce-vendor-pin-state bump procedure.",
+        "update sce-vendor-pin-state memory pin to f82cf4b16."
+      ],
+      "publishable_decision_summary": "vendor/sce bump 31c188afe->f82cf4b16 lands RFC#6 answer (StatePolicy::Payload channel + native Rust/C11 _event.data guard lowering) = MCU value-path unblock; mechanical, codegen rebuild required",
+      "publishable_changes_bullets": [
+        "vendor/sce submodule 31c188afe -> f82cf4b16 (+4 commits, all the RFC#6 answer).",
+        "4cdcf5538 StatePolicy::Payload typed-payload channel (sce-rust-runtime); d0bea9faa lower EventSchema typed _event.data guards to native Rust; f82cf4b16 same for native C11; c0e06697a reject mixed typed guards from native lowering.",
+        "effect: no_std MCU value path unblocked -- typed _event.data.<field> now lowers to native Rust/C11 (no ECMAScript datamodel needed), StatePolicy::Payload is the typed inject channel. RFC#6 Q1/Q2 resolved by SCE codegen, no wz-side taxonomy work.",
+        "wz-surface = sce-rust-runtime (engine/event/policy/event_metadata) + sce-build (generator/parser/event_schema_check/expr) + rust+c11 templates; mechanical for wz (cargo check --workspace clean, zero wz call-site change)."
+      ],
+      "publishable_verification_bullets": [
+        "BUILD ERROR encountered + resolved: new templates use the native_payload_guard jinja filter (vendor/sce/sce-build/src/generator.rs:315,500); the prebuilt sce-codegen binary was stale -> wz-runtime-tokio/build.rs panic (unknown filter). ROOT CAUSE = codegen binary not rebuilt after the template-touching bump. FIX = scripts/build-sce.sh rebuild (pin f82cf4b16, 1m23s). Not a wz call-site break, not an SCE bug.",
+        "cargo check --workspace clean after the rebuild (wz call-site impact 0; mechanical bump).",
+        "full run-ci.sh (no --skip-codegen): codegen Layer B + Layer C tests + Layer E + Layer G 7 MCU, exit 0 -- codec goldens stable.",
+        "G.6 riscv32imac lwip-sys known SKIP (riscv32-unknown-elf-gcc absent); Layer Q/M opt-in SKIP."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "value-path integration design now closeable: signal = inject(event,\"\") / value = inject(event, payload) on the one EventInjector seam (R311gc-1); validation signal->external_ingress_events, value->EventSchema; the no_std MCU value path is now supported by StatePolicy::Payload + native _event.data guard lowering (this bump). The R311gc <sce:inbound> validation-basis error stays corrected (R311gd) -> signal=external_ingress_events, value=EventSchema.",
+        "bump-procedure lesson: scripts/build-sce.sh rebuild is MANDATORY when a bump touches tools/codegen/templates/ (new filters/macros), else the stale sce-codegen binary panics wz build.rs. record in sce-vendor-pin-state bump procedure.",
+        "update sce-vendor-pin-state memory pin to f82cf4b16."
+      ]
+    },
     "Round 311h": {
       "decision_summary": "R311h codec-push wire-layer cascade — wz-codecs gate + Cargo edges + session_glue.rs Push surface; pubsub.rs consumer cascade deferred to R311m.",
       "changes_bullets": [
@@ -34718,5 +34764,5 @@
       "reason": "F=~3KLOC wz session module; P=zenoh transport/unicast module; C=standalone session shape, multicast independent"
     }
   },
-  "schema_version": 5
+  "schema_version": 6
 }
