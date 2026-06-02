@@ -85,16 +85,23 @@ impl<I: EventInjector + ?Sized> EventInjector for &mut I {
     }
 }
 
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", feature = "switchboard"))]
 pub use alloc_impl::{SwitchboardEntry, SwitchboardRegistry};
 
-#[cfg(feature = "alloc")]
+#[cfg(all(feature = "alloc", feature = "switchboard"))]
 mod alloc_impl {
     use super::EventInjector;
+    use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
     use crate::keyexpr_match::keyexpr_pattern_matches;
-    use crate::sink::SampleView;
+    use crate::network_message::NetworkMessage;
+    use crate::reliability::Reliability;
+    use crate::sample_kind::SampleKind;
+    use crate::sink::{BorrowedSample, SampleView};
+    use crate::wireexpr_resolve::resolve_wireexpr;
     use alloc::string::String;
     use alloc::vec::Vec;
+    use hashbrown::HashMap;
+    use wz_codecs::push::PushOwnedVariant;
 
     /// One `keyexpr-pattern -> domain-event` row of the AP dynamic
     /// switchboard. `event_name` is an owned `String` (not `&'static str`)
@@ -194,10 +201,68 @@ mod alloc_impl {
             }
             injected
         }
+
+        /// Fan an [`IterationEvent`] into the switchboard: for each inbound
+        /// `FramePayload` Push, resolve its keyexpr against `peer_table`
+        /// (the shared [`resolve_wireexpr`] SSOT — the same resolver the
+        /// data-callback / declare consumer registries use), then
+        /// [`dispatch`](Self::dispatch) the resulting sample through
+        /// `injector`. Returns the number of events injected.
+        ///
+        /// `peer_table` is the subscribers' single peer keyexpr table,
+        /// passed in by the [`ApplicationLayerObserver`](crate::observer)
+        /// fan-out so resolution is never duplicated. Only `FramePayload`
+        /// Push messages drive injection; every other `IterationEvent`
+        /// (Lease, non-Push records) is a no-op. This is the wire-inbound
+        /// (ACL = wire -> domain) path; local self-publishes do not inject.
+        pub fn dispatch_iteration_event(
+            &self,
+            event: IterationEvent<'_>,
+            peer_table: &HashMap<u64, String>,
+            injector: &mut dyn EventInjector,
+        ) -> usize {
+            let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+                messages, reliable, ..
+            }) = event
+            else {
+                return 0;
+            };
+            let reliability = Reliability::from_reliable_bool(*reliable);
+            let mut injected: usize = 0;
+            for message in messages {
+                let NetworkMessage::Push(push) = message else {
+                    continue;
+                };
+                let Some(resolved) = resolve_wireexpr(&push.keyexpr.body, peer_table) else {
+                    continue;
+                };
+                // kind + payload are extracted faithfully even though the
+                // signal path reads only the keyexpr: the value path (gc-3)
+                // injects the payload, so the SampleView must already carry
+                // it. Mirrors SubscriberRegistry::dispatch_push's body arm.
+                let (kind, payload): (SampleKind, &[u8]) = match &push.body {
+                    PushOwnedVariant::CodecZenohMsgPut(put) => {
+                        (SampleKind::Put, put.payload.as_slice())
+                    }
+                    PushOwnedVariant::CodecZenohMsgDel(_) => (SampleKind::Del, &[]),
+                    // Unknown/Default body tag: neither a confirmed Put nor
+                    // Del — drop rather than inject on an ambiguous sample.
+                    _ => continue,
+                };
+                let sample = BorrowedSample {
+                    keyexpr: resolved.as_str(),
+                    payload,
+                    kind,
+                    reliability,
+                };
+                injected = injected.saturating_add(self.dispatch(&sample, injector));
+            }
+            injected
+        }
     }
 }
 
-#[cfg(all(test, feature = "alloc"))]
+#[cfg(all(test, feature = "alloc", feature = "switchboard"))]
 mod tests {
     use super::*;
     use crate::reliability::Reliability;
@@ -302,5 +367,81 @@ mod tests {
         }
         assert_eq!(inj.calls.len(), 1);
         assert_eq!(inj.calls[0].0, "evt");
+    }
+
+    // Build a wire-inbound Put Push carrying a literal keyexpr (id=0 ⇒
+    // resolve_wireexpr returns the suffix verbatim, no table lookup).
+    fn put_push(keyexpr: &str, payload: &[u8]) -> wz_codecs::push::PushOwned {
+        use wz_codecs::push::{Push, PushOwnedVariant};
+        use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+        use wz_codecs::wireexpr_local::WireexprLocal;
+        let mut push = Push {
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(keyexpr.len() as u64),
+                    suffix: Some(keyexpr),
+                }),
+            },
+            ..Push::default()
+        }
+        .into_owned();
+        if let PushOwnedVariant::CodecZenohMsgPut(ref mut put) = push.body {
+            put.payload_len = payload.len() as u64;
+            put.payload = payload.to_vec();
+        }
+        push
+    }
+
+    fn frame_event(push: wz_codecs::push::PushOwned) -> crate::driver_loop::DriverLoopOutcome {
+        use crate::network_message::NetworkMessage;
+        use std::boxed::Box;
+        use std::vec;
+        crate::driver_loop::DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Push(Box::new(push))],
+            has_ext: false,
+            extensions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn wire_inbound_push_injects_mapped_event() {
+        use crate::driver_loop::IterationEvent;
+        use hashbrown::HashMap;
+
+        let mut board = SwitchboardRegistry::new();
+        board.register("home/livingroom/temp", "temp_update");
+        let mut inj = RecordingInjector::default();
+        let table: HashMap<u64, String> = HashMap::new();
+
+        let outcome = frame_event(put_push("home/livingroom/temp", b"22.0"));
+        let fired =
+            board.dispatch_iteration_event(IterationEvent::Poll(&outcome), &table, &mut inj);
+
+        assert_eq!(fired, 1);
+        assert_eq!(inj.calls.len(), 1);
+        assert_eq!(inj.calls[0].0, "temp_update");
+        // signal path: empty `_event.data` regardless of the Put payload.
+        assert_eq!(inj.calls[0].1, "");
+    }
+
+    #[test]
+    fn wire_inbound_push_non_matching_injects_nothing() {
+        use crate::driver_loop::IterationEvent;
+        use hashbrown::HashMap;
+
+        let mut board = SwitchboardRegistry::new();
+        board.register("home/livingroom/temp", "temp_update");
+        let mut inj = RecordingInjector::default();
+        let table: HashMap<u64, String> = HashMap::new();
+
+        let outcome = frame_event(put_push("home/kitchen/humidity", b"55"));
+        let fired =
+            board.dispatch_iteration_event(IterationEvent::Poll(&outcome), &table, &mut inj);
+
+        assert_eq!(fired, 0);
+        assert!(inj.calls.is_empty());
     }
 }

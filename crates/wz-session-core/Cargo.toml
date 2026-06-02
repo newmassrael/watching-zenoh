@@ -89,6 +89,17 @@ pubsub-priority = []
 pubsub-congestion-control = []
 pubsub-express = []
 
+# R311gi gc-2c — statechart switchboard (the AP dynamic
+# keyexpr -> SCXML-domain-event inbound adapter). Gates the
+# `switchboard::SwitchboardRegistry` (the table + its
+# `dispatch_iteration_event`) and the `ApplicationLayerObserver`
+# `switchboard` field + `dispatch_switchboard` fan-out arm. Implies
+# `codec-push`: the switchboard reacts to inbound Push samples, so the
+# Push wire codec must be present. The `switchboard::EventInjector` port
+# itself stays UNCONDITIONAL (the MCU generated static match names it
+# without this feature; the AP dynamic registry is what this gates).
+switchboard = ["codec-push"]
+
 # R311dx — query-side dispatch gates for the migrated QueryableRegistry
 # (`wz-session-core::query`). `query-queryable` forwards to the
 # codec-request (Request/Query dispatch) + codec-response (reply-build)

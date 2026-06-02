@@ -142,6 +142,8 @@ use crate::declare::queryable::RemoteQueryableRegistry;
 use crate::declare::subscriber::RemoteSubscriberRegistry;
 use crate::driver_loop::IterationEvent;
 use crate::pubsub::SubscriberRegistry;
+#[cfg(feature = "switchboard")]
+use crate::switchboard::{EventInjector, SwitchboardRegistry};
 // R311r — `QueryReply` is the codec-agnostic accumulator (always
 // compiled, alloc-bound); it backs the `pending_replies` staging buffer
 // + the `pending_reply_count` accessor regardless of feature state. The
@@ -179,6 +181,16 @@ pub struct ApplicationLayerObserver {
     /// populated by inbound `Declare(DeclKexpr|UndeclKexpr)` records
     /// and shared by every consumer registry for keyexpr resolution).
     pub subscribers: SubscriberRegistry,
+    /// R311gi gc-2c — the statechart switchboard: the keyexpr -> SCXML
+    /// domain-event injection table. A SEPARATE inbound adapter from the
+    /// data-callback `subscribers` (gc-2a): its
+    /// [`dispatch_switchboard`](Self::dispatch_switchboard) fan-out
+    /// threads the engine ingress port (`EventInjector`) rather than
+    /// storing a callback, so statechart injection stays decoupled from
+    /// the data-callback path. Gated on `switchboard` (⇒ `codec-push`,
+    /// since it reacts to inbound Push samples).
+    #[cfg(feature = "switchboard")]
+    pub switchboard: SwitchboardRegistry,
     /// Inbound `Request(Query)` → responder callbacks (acceptor /
     /// queryable side). The `pending_replies` / `pending_final_rids`
     /// buffers below stage outbound records this registry emits
@@ -286,6 +298,11 @@ impl ApplicationLayerObserver {
     pub fn new() -> Self {
         Self {
             subscribers: SubscriberRegistry::new(),
+            // R311gi gc-2c — switchboard table constructed only under the
+            // `switchboard` feature; empty until the app registers its
+            // keyexpr -> event rows (from wz-switchboard.yaml on AP).
+            #[cfg(feature = "switchboard")]
+            switchboard: SwitchboardRegistry::new(),
             // R311dz — field gated on `query-queryable`; the registry is
             // constructed only when the queryable dispatch path is in.
             // The Queryable RAII handle's observer-side unregister-on-Drop
@@ -401,6 +418,34 @@ impl ApplicationLayerObserver {
         self.replies.dispatch_iteration_event(event, peer_table);
     }
 
+    /// R311gi gc-2c — fan an [`IterationEvent`] into the statechart
+    /// switchboard, injecting the mapped SCXML domain event through
+    /// `injector` for each inbound `FramePayload` Push whose resolved
+    /// keyexpr matches a registered row. Returns the number of events
+    /// injected.
+    ///
+    /// Kept SEPARATE from [`dispatch_event`](Self::dispatch_event): the
+    /// data-callback / declare consumers are injector-free, whereas
+    /// statechart injection threads the engine ingress port — the gc-2a
+    /// separation of the two inbound adapters, preserved at the fan-out
+    /// layer. The production driver closure calls this AFTER
+    /// [`dispatch`](Self::dispatch) so the switchboard resolves keyexprs
+    /// against the peer mapping table the `subscribers` registry just
+    /// refreshed on this same iteration (the single
+    /// `peer_keyexpr_table` SSOT, never a second copy).
+    #[cfg(feature = "switchboard")]
+    pub fn dispatch_switchboard(
+        &self,
+        event: IterationEvent<'_>,
+        injector: &mut dyn EventInjector,
+    ) -> usize {
+        self.switchboard.dispatch_iteration_event(
+            event,
+            self.subscribers.peer_keyexpr_table(),
+            injector,
+        )
+    }
+
     /// Phase 2 — drain the pending reply / final buffers through the
     /// action layer. `send_response` and `send_response_final`
     /// enqueue synchronously onto the OutboundWriteDriver mpsc
@@ -469,10 +514,42 @@ impl ApplicationLayerObserver {
 #[cfg(all(test, feature = "codec-push"))]
 mod tests {
     use super::*;
+    // DriverLoopOutcome + NetworkMessage are used only by `make_outcome`
+    // (and its callers), so they share its consumer-feature union.
+    #[cfg(any(
+        feature = "pubsub-put",
+        feature = "declare-subscriber",
+        feature = "query-queryable"
+    ))]
     use crate::driver_loop::DriverLoopOutcome;
+    #[cfg(any(
+        feature = "pubsub-put",
+        feature = "declare-subscriber",
+        feature = "query-queryable"
+    ))]
     use crate::network_message::NetworkMessage;
+    // R311gi — gated on the union of consumer features whose dispatch
+    // tests build a `FramePayload` of boxed `NetworkMessage`s. The
+    // `switchboard` feature (⇒ codec-push, no consumer) is the first
+    // combo that compiles this module without any of them, under which
+    // these would be unused.
+    #[cfg(any(
+        feature = "pubsub-put",
+        feature = "declare-subscriber",
+        feature = "query-queryable"
+    ))]
     use alloc::boxed::Box;
+    #[cfg(any(
+        feature = "pubsub-put",
+        feature = "declare-subscriber",
+        feature = "query-queryable"
+    ))]
     use alloc::vec;
+    #[cfg(any(
+        feature = "pubsub-put",
+        feature = "declare-subscriber",
+        feature = "query-queryable"
+    ))]
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -490,10 +567,41 @@ mod tests {
     use wz_codecs::decl_subscriber::DeclSubscriber;
     #[cfg(feature = "declare-subscriber")]
     use wz_codecs::declare::{Declare, DeclareOwned, DeclareVariant};
+    // push_literal (and these Push types) are used only by the Put-push
+    // dispatch tests: test1 (pubsub-put) + the cross-talk test (which
+    // needs ALL of declare-subscriber + declare-queryable +
+    // liveliness-token). Other consumers (query) build a Request, not a
+    // Push. So gate on the exact push-test union, not a looser one.
+    #[cfg(any(
+        feature = "pubsub-put",
+        all(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        )
+    ))]
     use wz_codecs::push::{Push, PushOwned};
+    #[cfg(any(
+        feature = "pubsub-put",
+        feature = "declare-subscriber",
+        feature = "query-queryable"
+    ))]
     use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+    #[cfg(any(
+        feature = "pubsub-put",
+        feature = "declare-subscriber",
+        feature = "query-queryable"
+    ))]
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
 
+    #[cfg(any(
+        feature = "pubsub-put",
+        all(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        )
+    ))]
     fn push_literal(suffix: &str, payload: &[u8]) -> PushOwned {
         let keyexpr = Wireexpr {
             body: WireexprVariant::WireexprNonlocal(WireexprNonlocal {
@@ -539,6 +647,11 @@ mod tests {
         .into_owned()
     }
 
+    #[cfg(any(
+        feature = "pubsub-put",
+        feature = "declare-subscriber",
+        feature = "query-queryable"
+    ))]
     fn make_outcome(messages: Vec<NetworkMessage>) -> DriverLoopOutcome {
         DriverLoopOutcome::FramePayload {
             reliable: true,
@@ -572,6 +685,13 @@ mod tests {
         assert_eq!(observer.pending_final_count(), 0);
     }
 
+    // Asserts the subscriber callback FIRES, which is the `pubsub-put`
+    // projection arm (dispatch_push fires only under any(pubsub-put,
+    // pubsub-delete)). The enclosing module gates on `codec-push` for the
+    // `NetworkMessage::Push` type; firing additionally needs the data
+    // plane. R311gi exposed this: `switchboard = ["codec-push"]` is the
+    // first combo with codec-push ON but pubsub-put OFF.
+    #[cfg(feature = "pubsub-put")]
     #[test]
     fn dispatch_event_routes_push_to_subscriber_registry() {
         let mut observer = ApplicationLayerObserver::new();
