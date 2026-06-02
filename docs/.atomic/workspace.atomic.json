@@ -28446,6 +28446,48 @@
         "gc-3 build-time validation: signal event subset external_ingress_events (forge-ast.v1); value event subset EventSchema fields (pin f82cf4b16); sidecar = wz-switchboard.yaml per machine."
       ]
     },
+    "Round 311gi": {
+      "decision_summary": "R311gi gc-2c wire-in: switchboard joins Observer consumer-registry fan-out (peer_table + resolve_wireexpr SSOT, no alias-table move); injector threaded via on_event(event, &mut dyn EventInjector); feature-gated.",
+      "changes_bullets": [
+        "Observer gains switchboard: SwitchboardRegistry field (feature switchboard); dispatch_event gains injector: &mut dyn EventInjector, fanning the resolved Push to it after the subscribers.",
+        "switchboard.dispatch_iteration_event(event, peer_table, injector): pulls FramePayload Push, resolves keyexpr via the shared resolve_wireexpr SSOT, matches, injects.",
+        "drive_session_until_terminal on_event becomes FnMut(IterationEvent, &mut dyn EventInjector); loop passes &mut EngineInjector::new(engine); wz-runtime-tokio deps the bridge; ~21 callers.",
+        "feature switchboard gates SwitchboardRegistry + the Observer field/dispatch arm; EventInjector trait + on_event injector param stay unconditional (signature stability)."
+      ],
+      "verification_bullets": [
+        "SSOT: resolution reuses resolve_wireexpr (byte-identical to dispatch_push inline: id==0->suffix else table[id]+suffix) over the subscribers' single peer_keyexpr_table -- no second table.",
+        "Decoupling: switchboard is a separate Observer consumer registry, never coupled into SubscriberRegistry -- the gc-2a injection/data-callback separation holds end to end.",
+        "Control flow: driver owns engine -> threads EngineInjector via on_event -> Observer fans to switchboard; same shape as the MCU generated match. Behavioural test + run-ci host lanes + Layer G."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "gc-2c wires the signal path only; the value path (typed EventSchema decode -> _event.data) stays gc-3.",
+        "switchboard fires on FramePayload Push (wire inbound) only, not local_publish -- ACL = wire -> domain.",
+        "gc-3 next: wz-switchboard.yaml -> generated closed keyexpr->event match (MCU static) + build-time validation (signal subset external_ingress_events, value subset EventSchema)."
+      ],
+      "publishable_decision_summary": "R311gi gc-2c wire-in: switchboard joins Observer consumer-registry fan-out (peer_table + resolve_wireexpr SSOT, no alias-table move); injector threaded via on_event(event, &mut dyn EventInjector); feature-gated.",
+      "publishable_changes_bullets": [
+        "Observer gains switchboard: SwitchboardRegistry field (feature switchboard); dispatch_event gains injector: &mut dyn EventInjector, fanning the resolved Push to it after the subscribers.",
+        "switchboard.dispatch_iteration_event(event, peer_table, injector): pulls FramePayload Push, resolves keyexpr via the shared resolve_wireexpr SSOT, matches, injects.",
+        "drive_session_until_terminal on_event becomes FnMut(IterationEvent, &mut dyn EventInjector); loop passes &mut EngineInjector::new(engine); wz-runtime-tokio deps the bridge; ~21 callers.",
+        "feature switchboard gates SwitchboardRegistry + the Observer field/dispatch arm; EventInjector trait + on_event injector param stay unconditional (signature stability)."
+      ],
+      "publishable_verification_bullets": [
+        "SSOT: resolution reuses resolve_wireexpr (byte-identical to dispatch_push inline: id==0->suffix else table[id]+suffix) over the subscribers' single peer_keyexpr_table -- no second table.",
+        "Decoupling: switchboard is a separate Observer consumer registry, never coupled into SubscriberRegistry -- the gc-2a injection/data-callback separation holds end to end.",
+        "Control flow: driver owns engine -> threads EngineInjector via on_event -> Observer fans to switchboard; same shape as the MCU generated match. Behavioural test + run-ci host lanes + Layer G."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "gc-2c wires the signal path only; the value path (typed EventSchema decode -> _event.data) stays gc-3.",
+        "switchboard fires on FramePayload Push (wire inbound) only, not local_publish -- ACL = wire -> domain.",
+        "gc-3 next: wz-switchboard.yaml -> generated closed keyexpr->event match (MCU static) + build-time validation (signal subset external_ingress_events, value subset EventSchema)."
+      ]
+    },
     "Round 311h": {
       "decision_summary": "R311h codec-push wire-layer cascade — wz-codecs gate + Cargo edges + session_glue.rs Push surface; pubsub.rs consumer cascade deferred to R311m.",
       "changes_bullets": [
