@@ -28314,6 +28314,56 @@
         "update sce-vendor-pin-state memory pin to f82cf4b16."
       ]
     },
+    "Round 311gf": {
+      "decision_summary": "R311gc switchboard 통합설계 CLOSED: 신호+값 단일 EventInjector seam(inject name,data); 검증 신호->external_ingress_events / 값->EventSchema; Worker 직교; gc-1 무변경; MCU 값경로 지원(f82cf4b16); gc-2/gc-3 구현 ready",
+      "changes_bullets": [
+        "통합 설계 확정 (RFC#5/#6 해소 후): 신호 경로와 값 경로가 단일 seam = gc-1 EventInjector::inject(event_name, event_data: &str) + StatechartSink. 신호 = data \"\" / 값 = data = serialize(decode(sample)). raise_external_by_name(engine.rs:766)을 미러 (no_std SceString 운반).",
+        "검증 기준 2종 (빌드타임 fail-fast, 둘 다 forge-ast.v1 export 소비, wz taxonomy 재유도 0): 신호 event 는 external_ingress_events 의 멤버(forge-ast.v1:1809, pin 31c188afe); 값 event 는 EventSchema 필드 계약(event-schema kind, EventSchemaModel, pin f82cf4b16).",
+        "Worker(<sce:kind=worker> + inbox)는 값 vehicle 아님 = 직교, 사용 안 함 (RFC#6 category mismatch 3중 deviation: producer link-rx 결합 / E framer 결합 / 값이 worker 본문 잔류).",
+        "프로파일: MCU = 생성된 닫힌 keyexpr->event match(no-alloc, static-first; StatePolicy::Payload + native Rust/C11 _event.data guard lowering, f82cf4b16) / AP = 동적 SubscriberRegistry + BoxedSink 공존.",
+        "검증기준 정정 트레일: R311gc(<sce:inbound>, 세션-레이어 scope error) -> R311gd(external_ingress_events, 신호) -> R311ge(EventSchema, 값). 본 엔트리가 닫힌 통합 형태로 종합."
+      ],
+      "verification_bullets": [
+        "gc-1 (StatechartSink/EventInjector) LANDED (commit 70856ef): inject(name, data: &str) seam이 값 경로에도 그대로 맞음 -- engine.rs:766 raise_external_by_name(name, event_data: &str)와 동일 시그니처, 신호 경로에 둔 data 파라미터가 값 경로 vehicle로 재확인.",
+        "external_ingress_events (forge-ast.v1:1809) + EventSchema (event-schema kind, EventSchemaModel: event_name + typed <data> 리스트, receive-side _event.data.<field> typecheck) 둘 다 forge-ast.v1 export 확인.",
+        "no_std MCU 값 경로: StatePolicy::Payload typed-payload 채널 + EventSchema typed _event.data guards를 native Rust/C11 lower (ECMAScript datamodel 불요), pin f82cf4b16; full run-ci(codegen Layer B + 7 MCU) exit 0.",
+        "Worker category mismatch 3중 deviation 직접 확인 (worker.rs.jinja2 + forge-ast schema:2956 WorkerModel link_rx required)."
+      ],
+      "impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "NEXT (다음 세션 /load 구현 착수): gc-2 engine bridge = sce-rust-runtime Engine 에 EventInjector impl (raise_external_by_name 위임). wz가 sce-rust-runtime 을 처음 직접 의존하는 지점 -- bridge 크레이트 경계 먼저 설계(어느 크레이트가 SCE Engine 타입을 보는지). gc-3 생성기 = wz 사이드카(keyexpr->event, kind=signal|value) 소비 -> 닫힌 SampleSink enum emit + 빌드타임 대조(signal event ⊆ external_ingress_events, value event ⊆ EventSchema 필드). 사이드카 스키마 = wz-switchboard.yaml(per machine).",
+        "로컬 커밋 4개 PUSHED 대기: f4c748b(R311gc ratify) / 70856ef(gc-1 seam) / a49ee8a(pin 31c188afe) / ff0e33e(pin f82cf4b16). origin HEAD b65d55e 대비.",
+        "Track2(no-alloc gating: 24모듈 bounded backing -> alloc-off full-surface compile)는 여전히 별도 SOLE-FOCUS 부채, switchboard와 직교. 사용자 결정사항.",
+        "현 세션 MCP 도구는 구 프로세스(schema<=5)라 실패; 재빌드된 mnemosyne-mcp(schema 6)는 다음 세션부터 정렬. 이번 세션은 CLI 가 권위."
+      ],
+      "publishable_decision_summary": "R311gc switchboard 통합설계 CLOSED: 신호+값 단일 EventInjector seam(inject name,data); 검증 신호->external_ingress_events / 값->EventSchema; Worker 직교; gc-1 무변경; MCU 값경로 지원(f82cf4b16); gc-2/gc-3 구현 ready",
+      "publishable_changes_bullets": [
+        "통합 설계 확정 (RFC#5/#6 해소 후): 신호 경로와 값 경로가 단일 seam = gc-1 EventInjector::inject(event_name, event_data: &str) + StatechartSink. 신호 = data \"\" / 값 = data = serialize(decode(sample)). raise_external_by_name(engine.rs:766)을 미러 (no_std SceString 운반).",
+        "검증 기준 2종 (빌드타임 fail-fast, 둘 다 forge-ast.v1 export 소비, wz taxonomy 재유도 0): 신호 event 는 external_ingress_events 의 멤버(forge-ast.v1:1809, pin 31c188afe); 값 event 는 EventSchema 필드 계약(event-schema kind, EventSchemaModel, pin f82cf4b16).",
+        "Worker(<sce:kind=worker> + inbox)는 값 vehicle 아님 = 직교, 사용 안 함 (RFC#6 category mismatch 3중 deviation: producer link-rx 결합 / E framer 결합 / 값이 worker 본문 잔류).",
+        "프로파일: MCU = 생성된 닫힌 keyexpr->event match(no-alloc, static-first; StatePolicy::Payload + native Rust/C11 _event.data guard lowering, f82cf4b16) / AP = 동적 SubscriberRegistry + BoxedSink 공존.",
+        "검증기준 정정 트레일: R311gc(<sce:inbound>, 세션-레이어 scope error) -> R311gd(external_ingress_events, 신호) -> R311ge(EventSchema, 값). 본 엔트리가 닫힌 통합 형태로 종합."
+      ],
+      "publishable_verification_bullets": [
+        "gc-1 (StatechartSink/EventInjector) LANDED (commit 70856ef): inject(name, data: &str) seam이 값 경로에도 그대로 맞음 -- engine.rs:766 raise_external_by_name(name, event_data: &str)와 동일 시그니처, 신호 경로에 둔 data 파라미터가 값 경로 vehicle로 재확인.",
+        "external_ingress_events (forge-ast.v1:1809) + EventSchema (event-schema kind, EventSchemaModel: event_name + typed <data> 리스트, receive-side _event.data.<field> typecheck) 둘 다 forge-ast.v1 export 확인.",
+        "no_std MCU 값 경로: StatePolicy::Payload typed-payload 채널 + EventSchema typed _event.data guards를 native Rust/C11 lower (ECMAScript datamodel 불요), pin f82cf4b16; full run-ci(codegen Layer B + 7 MCU) exit 0.",
+        "Worker category mismatch 3중 deviation 직접 확인 (worker.rs.jinja2 + forge-ast schema:2956 WorkerModel link_rx required)."
+      ],
+      "publishable_impact_refs": [
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "NEXT (다음 세션 /load 구현 착수): gc-2 engine bridge = sce-rust-runtime Engine 에 EventInjector impl (raise_external_by_name 위임). wz가 sce-rust-runtime 을 처음 직접 의존하는 지점 -- bridge 크레이트 경계 먼저 설계(어느 크레이트가 SCE Engine 타입을 보는지). gc-3 생성기 = wz 사이드카(keyexpr->event, kind=signal|value) 소비 -> 닫힌 SampleSink enum emit + 빌드타임 대조(signal event ⊆ external_ingress_events, value event ⊆ EventSchema 필드). 사이드카 스키마 = wz-switchboard.yaml(per machine).",
+        "로컬 커밋 4개 PUSHED 대기: f4c748b(R311gc ratify) / 70856ef(gc-1 seam) / a49ee8a(pin 31c188afe) / ff0e33e(pin f82cf4b16). origin HEAD b65d55e 대비.",
+        "Track2(no-alloc gating: 24모듈 bounded backing -> alloc-off full-surface compile)는 여전히 별도 SOLE-FOCUS 부채, switchboard와 직교. 사용자 결정사항.",
+        "현 세션 MCP 도구는 구 프로세스(schema<=5)라 실패; 재빌드된 mnemosyne-mcp(schema 6)는 다음 세션부터 정렬. 이번 세션은 CLI 가 권위."
+      ]
+    },
     "Round 311h": {
       "decision_summary": "R311h codec-push wire-layer cascade — wz-codecs gate + Cargo edges + session_glue.rs Push surface; pubsub.rs consumer cascade deferred to R311m.",
       "changes_bullets": [
