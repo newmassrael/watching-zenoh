@@ -28526,6 +28526,44 @@
         "gc-3: generator + example app SCXML machine + live wz-ap-demo wiring (app on_event closure builds EngineInjector over the app engine)."
       ]
     },
+    "Round 311gk": {
+      "decision_summary": "R311gk gc-2 review fix: register switchboard in the feature-inventory SSOT (north-star catalog gap from gc-2c). Carry: next /load does cleanup (test-gating, resolution SSOT, catalog prose) before gc-3.",
+      "changes_bullets": [
+        "Registered `switchboard` in the feature-inventory SSOT (active, source=switchboard.rs). gc-2c added the Cargo feature + CI lane but missed the Mnemosyne catalog the north-star treats as SSOT.",
+        "Session review (textbook standard): runtime mechanism clean (ports/adapters, SSOT reuse, AP=MCU symmetry, orphan-rule bridge); 3 edge debts carried for next session before gc-3."
+      ],
+      "verification_bullets": [
+        "validate_workspace green: inventory 148->149, T1=0, round-trip 13/13, GENERATED.md=sync; query --inventory switchboard resolves with its F/P/C reason + source."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
+      "carry_forward_bullets": [
+        "NEXT /load: do CLEANUP first, THEN gc-3. Branch off main.",
+        "CLEANUP-1 test-gating: observer.rs + r99 helpers use fragile per-helper cfg unions. Textbook = split observer test module into per-consumer #[cfg] sub-modules; drop the unions.",
+        "CLEANUP-2 resolution SSOT: pubsub.rs dispatch_push (~524-537) inlines id==0/table[id]+suffix duplicating resolve_wireexpr. Unify subscriber path onto the free-fn SSOT.",
+        "CLEANUP-3 catalog prose: feature-inventory §5 prose lacks a statechart/switchboard domain; decide new 5-20 vs existing + add prose (inventory entry already registered).",
+        "THEN gc-3: generator (wz-switchboard.yaml -> MCU closed match + build-time validation) + value path + example app SCXML machine."
+      ],
+      "publishable_decision_summary": "R311gk gc-2 review fix: register switchboard in the feature-inventory SSOT (north-star catalog gap from gc-2c). Carry: next /load does cleanup (test-gating, resolution SSOT, catalog prose) before gc-3.",
+      "publishable_changes_bullets": [
+        "Registered `switchboard` in the feature-inventory SSOT (active, source=switchboard.rs). gc-2c added the Cargo feature + CI lane but missed the Mnemosyne catalog the north-star treats as SSOT.",
+        "Session review (textbook standard): runtime mechanism clean (ports/adapters, SSOT reuse, AP=MCU symmetry, orphan-rule bridge); 3 edge debts carried for next session before gc-3."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace green: inventory 148->149, T1=0, round-trip 13/13, GENERATED.md=sync; query --inventory switchboard resolves with its F/P/C reason + source."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ],
+      "publishable_carry_forward_bullets": [
+        "NEXT /load: do CLEANUP first, THEN gc-3. Branch off main.",
+        "CLEANUP-1 test-gating: observer.rs + r99 helpers use fragile per-helper cfg unions. Textbook = split observer test module into per-consumer #[cfg] sub-modules; drop the unions.",
+        "CLEANUP-2 resolution SSOT: pubsub.rs dispatch_push (~524-537) inlines id==0/table[id]+suffix duplicating resolve_wireexpr. Unify subscriber path onto the free-fn SSOT.",
+        "CLEANUP-3 catalog prose: feature-inventory §5 prose lacks a statechart/switchboard domain; decide new 5-20 vs existing + add prose (inventory entry already registered).",
+        "THEN gc-3: generator (wz-switchboard.yaml -> MCU closed match + build-time validation) + value path + example app SCXML machine."
+      ]
+    },
     "Round 311h": {
       "decision_summary": "R311h codec-push wire-layer cascade — wz-codecs gate + Cargo edges + session_glue.rs Push surface; pubsub.rs consumer cascade deferred to R311m.",
       "changes_bullets": [
@@ -34874,6 +34912,11 @@
       "status": "reserved",
       "source": "zenoh storage replication protocol",
       "reason": "F=replication FSM; P=zenoh storage-replication; C=opt-in on top of storage-backend"
+    },
+    "switchboard": {
+      "status": "active",
+      "source": "crates/wz-session-core/src/switchboard.rs",
+      "reason": "F=keyexpr->SCXML event injection (SwitchboardRegistry + EventInjector port); P=no zenoh equiv, wz SCE statechart ACL ingress; C=implies codec-push, indep of pubsub-put, MCU=generated match"
     },
     "time-hlc": {
       "status": "reserved",
