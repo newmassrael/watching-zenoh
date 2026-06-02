@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! R311gp gc-3a — the MCU static switchboard generator (pure library).
+//! gc-3a/gc-3b — the MCU static switchboard generator (pure library).
 //!
 //! Turns a [`SwitchboardSpec`] (parsed `wz-switchboard.yaml`) plus a
 //! machine's forge-ast.v1 facts into the source of a closed, no-heap
-//! `keyexpr -> SCXML domain-event` dispatch function. Two responsibilities,
-//! both performed against the facts the SCE compiler already derived:
+//! `keyexpr -> SCXML domain-event` dispatch function. A binding is either a
+//! **signal** row (no `codec`; injects an empty `_event.data`) or a **value**
+//! row (a `codec` names the wire decoder; injects a typed `_event.data` via
+//! the machine's generated `<Machine>Inject::raise_<event>` seam). Two
+//! responsibilities, both performed against the facts the SCE compiler
+//! already derived:
 //!
 //! 1. **Validation.** Every [`Binding::event`] must be an event the target
 //!    machine actually accepts from outside. SCE publishes that closed set
@@ -28,8 +32,13 @@
 //!    then emitted as a `&'static str` chunk literal matched by the shared
 //!    no-alloc [`wz_session_core::keyexpr_match::keyexpr_pattern_matches`].
 //!    The emitted function mirrors `SwitchboardRegistry::dispatch`:
-//!    every matching row fires in declaration order; the signal path
-//!    injects an empty `_event.data` (the typed value path is gc-3b).
+//!    every matching row fires in declaration order. A signal row injects an
+//!    empty `_event.data`; a value row decodes the wire payload with its
+//!    forge codec and calls the typed `<Machine>Inject::raise_<event>` seam,
+//!    gated on the machine's `typed_inject_events` set and cross-checked so
+//!    the codec's decoded fields are a superset of the event's `EventSchema`.
+//!    A switchboard with any value row dispatches over `&mut Engine<P>`; a
+//!    signal-only switchboard keeps the `&mut dyn EventInjector` port.
 //!
 //! [`SwitchboardSpec`]: wz_switchboard_schema::SwitchboardSpec
 //! [`Binding::event`]: wz_switchboard_schema::Binding::event
@@ -58,6 +67,15 @@ pub struct MachineFacts {
     /// descriptors the machine accepts as external input, reserved
     /// families (`error.*`, `done.*`, …) already filtered out by SCE.
     pub external_ingress_events: BTreeSet<String>,
+    /// `ast.document.typed_inject_events` — the subset of
+    /// [`Self::external_ingress_events`] whose events carry a generated
+    /// `<Machine>Inject::raise_<event>(payload)` typed value-inject seam
+    /// (their transition guard lowered to a native typed `_event.data`
+    /// comparison; primitive-only schema, no script engine). A switchboard
+    /// **value** binding's event MUST be a member — an event absent here has
+    /// no typed value path (only the signal path), so the generator gates on
+    /// this set rather than re-deriving SCE's native-lowering eligibility.
+    pub typed_inject_events: BTreeSet<String>,
 }
 
 // ---- forge-ast.v1 deserialization (statechart subset) --------------------
@@ -86,6 +104,12 @@ struct Document {
     // skip_serializing_if = "BTreeSet::is_empty"), so default to empty.
     #[serde(default)]
     external_ingress_events: BTreeSet<String>,
+    // forge-ast.v1 (pin c16811a9b): the subset of external_ingress_events
+    // whose events have a generated `<Machine>Inject::raise_<event>` typed
+    // value-inject seam (guard lowered to native `_event.data.<field>`).
+    // Omitted when empty (skip_serializing_if), so default to empty.
+    #[serde(default)]
+    typed_inject_events: BTreeSet<String>,
 }
 
 /// Errors the generator can return. All are build-time failures the
@@ -127,6 +151,48 @@ pub enum CodegenError {
         /// The canonicalizer's diagnostic.
         reason: String,
     },
+    /// A value binding (one carrying a `codec`) targets an event the machine
+    /// has no typed value-inject seam for: the event is accepted as external
+    /// input but its `_event.data` stays on the dynamic baseline (not in
+    /// `typed_inject_events`). Such a binding can only be a signal binding —
+    /// drop its `codec` or give the machine a native typed guard.
+    EventNotTypedInject {
+        /// The offending [`Binding::event`].
+        event: String,
+        /// The machine whose contract rejected it.
+        machine: String,
+        /// The machine's typed-inject events (sorted), for the fix hint.
+        available: Vec<String>,
+    },
+    /// A value binding's event has no imported `EventSchema` among the facts
+    /// supplied to [`generate`] — its typed payload shape is unknown, so the
+    /// decoded value cannot be field-mapped. (The consumer build must emit
+    /// the EventSchema document's forge-ast and pass it in.)
+    MissingEventSchema {
+        /// The [`Binding::event`] whose schema was not supplied.
+        event: String,
+    },
+    /// A value binding names a `codec` with no matching [`CodecFacts`] among
+    /// the facts supplied to [`generate`] — the wire decoder is unknown.
+    CodecNotFound {
+        /// The [`Binding::codec`] name that was not supplied.
+        codec: String,
+        /// The value binding's event, for the fix hint.
+        event: String,
+    },
+    /// The named codec does not decode a field the event's `EventSchema`
+    /// declares (by id + SCE type) — the wire format and the `_event.data`
+    /// view disagree, so the typed payload cannot be populated. wz owns this
+    /// pairing; fix the codec or the EventSchema so the codec's decoded
+    /// fields are a superset of the schema's.
+    SchemaFieldNotInCodec {
+        /// The value binding's event.
+        event: String,
+        /// The codec that was expected to cover the field.
+        codec: String,
+        /// The EventSchema field id absent (or type-mismatched) in the codec.
+        field: String,
+    },
 }
 
 impl fmt::Display for CodegenError {
@@ -163,6 +229,39 @@ impl fmt::Display for CodegenError {
                 f,
                 "switchboard keyexpr `{keyexpr}` is not canonicalizable: {reason}"
             ),
+            CodegenError::EventNotTypedInject {
+                event,
+                machine,
+                available,
+            } => write!(
+                f,
+                "switchboard value binding event `{event}` has no typed value-inject \
+                 seam on machine `{machine}` (not in typed_inject_events — its \
+                 `_event.data` stays on the dynamic baseline). Make it a signal \
+                 binding (drop `codec`) or give the machine a native typed guard. \
+                 Machine's typed-inject events: [{}]",
+                available.join(", ")
+            ),
+            CodegenError::MissingEventSchema { event } => write!(
+                f,
+                "switchboard value binding event `{event}` has no imported EventSchema \
+                 among the supplied facts — its typed payload shape is unknown"
+            ),
+            CodegenError::CodecNotFound { codec, event } => write!(
+                f,
+                "switchboard value binding for event `{event}` names codec `{codec}` \
+                 but no such codec was supplied to the generator"
+            ),
+            CodegenError::SchemaFieldNotInCodec {
+                event,
+                codec,
+                field,
+            } => write!(
+                f,
+                "switchboard value binding event `{event}`: codec `{codec}` does not \
+                 decode EventSchema field `{field}` (by id + SCE type) — the wire \
+                 format and the `_event.data` view disagree"
+            ),
         }
     }
 }
@@ -193,6 +292,7 @@ pub fn parse_machine_facts(forge_ast_json: &str) -> Result<MachineFacts, Codegen
     Ok(MachineFacts {
         name: document.name,
         external_ingress_events: document.external_ingress_events,
+        typed_inject_events: document.typed_inject_events,
     })
 }
 
@@ -234,16 +334,252 @@ fn rust_string_literal(s: &str) -> String {
     out
 }
 
-/// Generate the closed `dispatch_switchboard` function source for `spec`,
-/// validated against `facts`.
+/// Canonical SCE type of a field as it appears in forge-ast `sce_type`.
 ///
-/// Validation order per binding: machine pairing first (whole-spec), then
-/// for each binding the event is checked against the machine's
-/// `external_ingress_events` (W3C 3.12.1), then the keyexpr is
-/// canonicalized. Any failure aborts with a [`CodegenError`]; on success
-/// the returned `String` is ready to `include!` from a consumer build's
+/// A primitive (`uint8`…`float64`/`bool`/`string`/`bytes`) serializes as a
+/// lowercase string; an enum-typed field is a non-primitive object. A
+/// native-eligible EventSchema (the only kind reachable on the value path)
+/// has primitive-only fields, so [`SceType::NonPrimitive`] only ever shows up
+/// on a codec field and is unequal to any schema field — which the
+/// field-superset cross-check surfaces as a mismatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SceType {
+    /// A primitive, by its canonical lowercase name (`"float64"`, `"bool"`…).
+    Primitive(String),
+    /// Any non-primitive (e.g. `enum:<alias>`) — opaque to the value path.
+    NonPrimitive,
+}
+
+/// One field of an EventSchema or a codec document: its id and SCE type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldFact {
+    /// The field id (`_event.data.<id>` on the schema side; the decoded
+    /// struct field name on the codec side — the two must agree by name).
+    pub id: String,
+    /// The canonical SCE type, for the codec-superset-of-schema cross-check.
+    pub sce_type: SceType,
+}
+
+/// The facts a [`generate`] value binding needs about one imported
+/// `EventSchema`: the event it constrains and its typed `_event.data` fields.
+/// Parsed from the EventSchema forge-ast document (`kind = "event-schema"`)
+/// the consumer build emits alongside the statechart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventSchemaFacts {
+    /// The SCXML event this schema constrains (matches [`Binding::event`]).
+    pub event_name: String,
+    /// The typed fields exposed via `_event.data.<field>`, in declaration
+    /// order (the order the generated payload struct literal emits).
+    pub fields: Vec<FieldFact>,
+}
+
+/// The facts a [`generate`] value binding needs about its wire `codec`: the
+/// codec kind name, the Rust module path the consumer generated it under, and
+/// its decoded fields (for the superset cross-check). Parsed from the codec
+/// forge-ast document (`kind = "codec"`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodecFacts {
+    /// The codec kind name (matches [`Binding::codec`]).
+    pub name: String,
+    /// Rust path to the module the consumer's build generated this codec
+    /// into (e.g. `"temp_payload"` for a sibling `mod temp_payload`). The
+    /// decoded struct is `{module_path}::{PascalCase(name)}`.
+    pub module_path: String,
+    /// The codec's decoded struct fields (must be a superset of the event's
+    /// EventSchema fields by id + SCE type).
+    pub fields: Vec<FieldFact>,
+}
+
+// ---- forge-ast field deserialization (shared by EventSchema + codec) ------
+
+#[derive(Deserialize)]
+struct FieldEnvelope {
+    v: u32,
+    ast: FieldAst,
+}
+
+#[derive(Deserialize)]
+struct FieldAst {
+    document: FieldDocument,
+}
+
+#[derive(Deserialize)]
+struct FieldDocument {
+    kind: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    event_name: String,
+    #[serde(default)]
+    fields: Vec<ForgeFieldRepr>,
+}
+
+#[derive(Deserialize)]
+struct ForgeFieldRepr {
+    id: String,
+    // A primitive `sce_type` is a bare JSON string (`"float64"`); an
+    // enum-typed field is an object. We only distinguish the two.
+    sce_type: serde_json::Value,
+}
+
+impl ForgeFieldRepr {
+    fn into_fact(self) -> FieldFact {
+        let sce_type = match self.sce_type {
+            serde_json::Value::String(s) => SceType::Primitive(s),
+            _ => SceType::NonPrimitive,
+        };
+        FieldFact {
+            id: self.id,
+            sce_type,
+        }
+    }
+}
+
+fn parse_field_doc(json: &str, expect_kind: &str) -> Result<FieldDocument, CodegenError> {
+    let envelope: FieldEnvelope = serde_json::from_str(json).map_err(CodegenError::Json)?;
+    if envelope.v != SUPPORTED_FORGE_AST_VERSION {
+        return Err(CodegenError::UnsupportedAstVersion(envelope.v));
+    }
+    let document = envelope.ast.document;
+    if document.kind != expect_kind {
+        return Err(CodegenError::NotStatechart(document.kind));
+    }
+    Ok(document)
+}
+
+/// Parse an `EventSchema` forge-ast document into the facts the value path
+/// needs. Rejects a non-v1 envelope or a non-`event-schema` document.
+pub fn parse_event_schema_facts(forge_ast_json: &str) -> Result<EventSchemaFacts, CodegenError> {
+    let document = parse_field_doc(forge_ast_json, "event-schema")?;
+    Ok(EventSchemaFacts {
+        event_name: document.event_name,
+        fields: document
+            .fields
+            .into_iter()
+            .map(ForgeFieldRepr::into_fact)
+            .collect(),
+    })
+}
+
+/// Parse a `codec` forge-ast document into the facts the value path needs.
+/// `module_path` is the Rust module the consumer's build generated the codec
+/// under (a layout choice not carried in the AST). Rejects a non-v1 envelope
+/// or a non-`codec` document.
+pub fn parse_codec_facts(
+    forge_ast_json: &str,
+    module_path: impl Into<String>,
+) -> Result<CodecFacts, CodegenError> {
+    let document = parse_field_doc(forge_ast_json, "codec")?;
+    Ok(CodecFacts {
+        name: document.name,
+        module_path: module_path.into(),
+        fields: document
+            .fields
+            .into_iter()
+            .map(ForgeFieldRepr::into_fact)
+            .collect(),
+    })
+}
+
+// ---- SCE naming-filter mirrors (gc-3b SCE-converged design) ---------------
+//
+// forge-ast.v1 is language-neutral: it publishes the *set* of typed-inject
+// events (`typed_inject_events`) but NOT the Rust codegen identifiers, which
+// SCE derives from two published naming filters (sce-build/src/filters.rs).
+// We mirror those two filters here so the generated `raise_<event>` call and
+// `<Machine><Variant>Payload` struct name match SCE's emission byte-for-byte.
+// A drift in either filter surfaces as a loud wz compile error (an undefined
+// method / type), never a silent mis-inject — and the unit tests below pin
+// the contract. (Mirroring two standard case transforms is contract
+// consumption, not the Event/Payload-union mangling the switchboard ACL
+// exists to prevent — that stays encapsulated in SCE's `<Machine>Inject`.)
+
+/// Mirror of SCE `to_pascal_case`: split on `.` / `_` / `-`, capitalize the
+/// first char of each part (rest verbatim), concat. Names the event-enum
+/// variant and the `{machine}{Variant}Payload` struct.
+fn to_pascal_case(name: &str) -> String {
+    if name.is_empty() {
+        return "Empty".to_string();
+    }
+    name.split(['.', '_', '-'])
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect()
+}
+
+/// Mirror of SCE `to_snake_case`: `.`/`-` -> `_`, insert `_` before an
+/// uppercase preceded by a lowercase/digit, then lowercase. Names the
+/// generated inject method `raise_<event>`.
+fn to_snake_case(name: &str) -> String {
+    if name.is_empty() {
+        return "empty".to_string();
+    }
+    let replaced: String = name
+        .chars()
+        .map(|c| if c == '.' || c == '-' { '_' } else { c })
+        .collect();
+    let chars: Vec<char> = replaced.chars().collect();
+    let mut result = String::with_capacity(replaced.len() + 4);
+    for (i, &ch) in chars.iter().enumerate() {
+        if i > 0 && ch.is_ascii_uppercase() {
+            let prev = chars[i - 1];
+            if prev.is_ascii_lowercase() || prev.is_ascii_digit() {
+                result.push('_');
+            }
+        }
+        result.push(ch);
+    }
+    result.to_lowercase()
+}
+
+/// Inputs to [`generate`]: the switchboard spec, the target machine's facts,
+/// and — for value bindings — the imported EventSchemas, the wire codecs, and
+/// the Rust module path the consumer generated the machine under.
+pub struct GenInput<'a> {
+    /// The parsed `wz-switchboard.yaml`.
+    pub spec: &'a SwitchboardSpec,
+    /// The target machine's forge-ast facts (incl. `typed_inject_events`).
+    pub facts: &'a MachineFacts,
+    /// EventSchema facts for the value bindings' events (looked up by
+    /// `event_name`). Empty for a signal-only switchboard.
+    pub schemas: &'a [EventSchemaFacts],
+    /// Codec facts for the value bindings' codecs (looked up by `name`).
+    /// Empty for a signal-only switchboard.
+    pub codecs: &'a [CodecFacts],
+    /// Rust path to the SCE-generated machine module (holds `{Machine}Policy`,
+    /// `{Machine}{Variant}Payload`, the `{Machine}Inject` trait). Unused by a
+    /// signal-only switchboard, which never names the machine's types.
+    pub machine_module: &'a str,
+}
+
+/// Generate the closed `dispatch_switchboard` function source for the spec in
+/// `input`, validated against the machine + schema + codec facts.
+///
+/// The switchboard has two row kinds, chosen per [`Binding::codec`]:
+///  - **signal** (no codec) — injects the event with an empty `_event.data`.
+///  - **value** (codec present) — decodes the wire payload and injects a typed
+///    `_event.data` via the machine's generated `<Machine>Inject` seam.
+///
+/// A switchboard with at least one value row emits a dispatch over
+/// `&mut Engine<{Machine}Policy>` (the typed path needs the concrete engine);
+/// a signal-only switchboard keeps the `&mut dyn EventInjector` port (no SCE
+/// runtime dependency), byte-identical to the gc-3a shape.
+///
+/// Validation per binding: machine pairing (whole-spec); event accepted as
+/// external input (W3C 3.12.1); for a value row additionally — event in
+/// `typed_inject_events`, an EventSchema supplied, the codec supplied, and the
+/// codec's decoded fields a superset of the schema's (id + SCE type); then the
+/// keyexpr canonicalizes. Any failure aborts with a [`CodegenError`]; on
+/// success the returned `String` is ready to `include!` from a consumer's
 /// `OUT_DIR`.
-pub fn generate(spec: &SwitchboardSpec, facts: &MachineFacts) -> Result<String, CodegenError> {
+pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
+    let spec = input.spec;
+    let facts = input.facts;
     if spec.machine != facts.name {
         return Err(CodegenError::MachineMismatch {
             spec: spec.machine.clone(),
@@ -251,9 +587,13 @@ pub fn generate(spec: &SwitchboardSpec, facts: &MachineFacts) -> Result<String, 
         });
     }
 
+    let has_value = spec.bindings.iter().any(|b| b.codec.is_some());
+    let machine_pascal = to_pascal_case(&facts.name);
+    let machine_module = input.machine_module;
+
     let mut arms = String::new();
     for binding in &spec.bindings {
-        // 1. Event must be accepted by the machine's external-ingress contract.
+        // Every binding's event must be accepted as external input (W3C 3.12.1).
         let accepted = facts
             .external_ingress_events
             .iter()
@@ -266,53 +606,184 @@ pub fn generate(spec: &SwitchboardSpec, facts: &MachineFacts) -> Result<String, 
             });
         }
 
-        // 2. Canonicalize the keyexpr with the runtime's own canonicalizer
-        //    (shared SSOT) so the static chunks match the wire form.
+        // Canonicalize the keyexpr with the runtime's own canonicalizer
+        // (shared SSOT) so the static chunks match the wire form.
         let canonical = wz_session_core::keyexpr_canon::canonize_keyexpr(&binding.keyexpr)
             .map_err(|e| CodegenError::Keyexpr {
                 keyexpr: binding.keyexpr.clone(),
                 reason: e.to_string(),
             })?;
+        let chunks = canonical
+            .split('/')
+            .map(rust_string_literal)
+            .collect::<Vec<_>>()
+            .join(", ");
 
-        // 3. Emit the match arm. &'static str chunk literal -> no heap.
-        let chunk_literals: Vec<String> = canonical.split('/').map(rust_string_literal).collect();
-        let event_literal = rust_string_literal(&binding.event);
-        arms.push_str(&format!(
-            "\n    // {canonical} -> {event}\n    \
-             if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[{chunks}], target_keyexpr) {{\n        \
-             injector.inject({event_literal}, \"\");\n        \
-             injected += 1;\n    }}\n",
-            canonical = canonical,
-            event = binding.event,
-            chunks = chunk_literals.join(", "),
-            event_literal = event_literal,
-        ));
+        match &binding.codec {
+            // ---- signal row ------------------------------------------------
+            None => {
+                let inject = if has_value {
+                    // Value-bearing dispatch threads the concrete engine.
+                    format!(
+                        "engine.raise_external_by_name({}, \"\");",
+                        rust_string_literal(&binding.event)
+                    )
+                } else {
+                    format!(
+                        "injector.inject({}, \"\");",
+                        rust_string_literal(&binding.event)
+                    )
+                };
+                arms.push_str(&format!(
+                    "\n    // {canonical} -> {event} (signal)\n    \
+                     if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[{chunks}], target_keyexpr) {{\n        \
+                     {inject}\n        \
+                     injected += 1;\n    }}\n",
+                    canonical = canonical,
+                    event = binding.event,
+                    chunks = chunks,
+                    inject = inject,
+                ));
+            }
+            // ---- value row -------------------------------------------------
+            Some(codec_name) => {
+                // Gate on the machine's typed-inject seam set (SSOT for
+                // native-lowering eligibility — never re-derived here).
+                let typed = facts
+                    .typed_inject_events
+                    .iter()
+                    .any(|descriptor| event_descriptor_matches(descriptor, &binding.event));
+                if !typed {
+                    return Err(CodegenError::EventNotTypedInject {
+                        event: binding.event.clone(),
+                        machine: facts.name.clone(),
+                        available: facts.typed_inject_events.iter().cloned().collect(),
+                    });
+                }
+                let schema = input
+                    .schemas
+                    .iter()
+                    .find(|s| s.event_name == binding.event)
+                    .ok_or_else(|| CodegenError::MissingEventSchema {
+                        event: binding.event.clone(),
+                    })?;
+                let codec = input
+                    .codecs
+                    .iter()
+                    .find(|c| &c.name == codec_name)
+                    .ok_or_else(|| CodegenError::CodecNotFound {
+                        codec: codec_name.clone(),
+                        event: binding.event.clone(),
+                    })?;
+                // wz owns the codec<->schema pairing: every schema field must
+                // be decoded by the codec under the same id + SCE type, so the
+                // wire format and the `_event.data` view cannot drift.
+                for sf in &schema.fields {
+                    let covered = codec
+                        .fields
+                        .iter()
+                        .any(|cf| cf.id == sf.id && cf.sce_type == sf.sce_type);
+                    if !covered {
+                        return Err(CodegenError::SchemaFieldNotInCodec {
+                            event: binding.event.clone(),
+                            codec: codec.name.clone(),
+                            field: sf.id.clone(),
+                        });
+                    }
+                }
+
+                let variant = to_pascal_case(&binding.event);
+                let method = format!("raise_{}", to_snake_case(&binding.event));
+                let codec_struct =
+                    format!("{}::{}", codec.module_path, to_pascal_case(&codec.name));
+                // Field moves in schema declaration order (each on its own
+                // line at 16-space indent inside the struct literal).
+                let field_moves = schema
+                    .fields
+                    .iter()
+                    .map(|f| format!("\n                {id}: decoded.{id},", id = f.id))
+                    .collect::<String>();
+                arms.push_str(&format!(
+                    "\n    // {canonical} -> {event} (value via {codec})\n    \
+                     if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[{chunks}], target_keyexpr) {{\n        \
+                     let mut cursor = ::sce_forge_runtime::codec::SceCursor::new(payload);\n        \
+                     if let Ok(decoded) = {codec_struct}::decode(&mut cursor) {{\n            \
+                     engine.{method}({machine_module}::{machine_pascal}{variant}Payload {{{field_moves}\n            \
+                     }});\n            \
+                     injected += 1;\n        }}\n    }}\n",
+                    canonical = canonical,
+                    event = binding.event,
+                    codec = codec.name,
+                    chunks = chunks,
+                    codec_struct = codec_struct,
+                    method = method,
+                    machine_module = machine_module,
+                    machine_pascal = machine_pascal,
+                    variant = variant,
+                    field_moves = field_moves,
+                ));
+            }
+        }
     }
 
-    Ok(format!(
-        "// @generated by wz-switchboard-codegen (R311gp gc-3a) -- DO NOT EDIT.\n\
-         //\n\
-         // Static keyexpr -> SCXML domain-event switchboard for machine\n\
-         // {machine:?}. Closed match, no heap: &'static str chunk literals over\n\
-         // the shared no-alloc matcher. Signal path only (empty _event.data;\n\
-         // the typed value path is gc-3b). Regenerate by editing the source\n\
-         // wz-switchboard.yaml and rebuilding.\n\
-         \n\
-         /// Dispatch a resolved inbound keyexpr against the static switchboard\n\
-         /// for machine {machine:?}, injecting each matched domain event in\n\
-         /// declaration order. Returns the number of events injected. Mirrors\n\
-         /// `wz_session_core::switchboard::SwitchboardRegistry::dispatch`.\n\
-         pub fn dispatch_switchboard(\n    \
-         target_keyexpr: &str,\n    \
-         injector: &mut dyn wz_session_core::switchboard::EventInjector,\n\
-         ) -> usize {{\n    \
-         let mut injected = 0usize;\n\
-         {arms}    \
-         injected\n\
-         }}\n",
-        machine = spec.machine,
-        arms = arms,
-    ))
+    if has_value {
+        Ok(format!(
+            "// @generated by wz-switchboard-codegen (gc-3b) -- DO NOT EDIT.\n\
+             //\n\
+             // Static keyexpr -> SCXML domain-event switchboard for machine\n\
+             // {machine:?}. Closed match, no heap over the shared no-alloc matcher.\n\
+             // Signal rows inject an empty _event.data (Engine::raise_external_by_name);\n\
+             // value rows decode the wire payload with a forge codec and inject the\n\
+             // typed _event.data via the generated <Machine>Inject::raise_<event> seam.\n\
+             // Regenerate by editing the source wz-switchboard.yaml and rebuilding.\n\
+             \n\
+             use {machine_module}::{machine_pascal}Inject;\n\
+             \n\
+             /// Dispatch a resolved inbound keyexpr against the static switchboard\n\
+             /// for machine {machine:?}, injecting each matched domain event in\n\
+             /// declaration order. Returns the number of events injected. `payload`\n\
+             /// is the inbound sample's wire bytes (read only by value rows).\n\
+             pub fn dispatch_switchboard(\n    \
+             target_keyexpr: &str,\n    \
+             payload: &[u8],\n    \
+             engine: &mut ::sce_rust_runtime::Engine<{machine_module}::{machine_pascal}Policy>,\n\
+             ) -> usize {{\n    \
+             let mut injected = 0usize;\n\
+             {arms}    \
+             injected\n\
+             }}\n",
+            machine = spec.machine,
+            machine_module = machine_module,
+            machine_pascal = machine_pascal,
+            arms = arms,
+        ))
+    } else {
+        Ok(format!(
+            "// @generated by wz-switchboard-codegen (gc-3b) -- DO NOT EDIT.\n\
+             //\n\
+             // Static keyexpr -> SCXML domain-event switchboard for machine\n\
+             // {machine:?}. Closed match, no heap: &'static str chunk literals over\n\
+             // the shared no-alloc matcher. Signal path only (empty _event.data) —\n\
+             // this switchboard declares no value bindings, so it keeps the\n\
+             // dyn EventInjector port. Regenerate by editing the source\n\
+             // wz-switchboard.yaml and rebuilding.\n\
+             \n\
+             /// Dispatch a resolved inbound keyexpr against the static switchboard\n\
+             /// for machine {machine:?}, injecting each matched domain event in\n\
+             /// declaration order. Returns the number of events injected. Mirrors\n\
+             /// `wz_session_core::switchboard::SwitchboardRegistry::dispatch`.\n\
+             pub fn dispatch_switchboard(\n    \
+             target_keyexpr: &str,\n    \
+             injector: &mut dyn wz_session_core::switchboard::EventInjector,\n\
+             ) -> usize {{\n    \
+             let mut injected = 0usize;\n\
+             {arms}    \
+             injected\n\
+             }}\n",
+            machine = spec.machine,
+            arms = arms,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -360,6 +831,7 @@ mod tests {
         Binding {
             keyexpr: keyexpr.to_string(),
             event: event.to_string(),
+            codec: None,
         }
     }
 
@@ -368,6 +840,82 @@ mod tests {
             machine: machine.to_string(),
             bindings,
         }
+    }
+
+    // A statechart envelope that also carries `typed_inject_events` (the
+    // typed value-inject seam subset, pin c16811a9b). `typed` ⊆ `ingress`.
+    fn facts_json_typed(name: &str, ingress: &[&str], typed: &[&str]) -> String {
+        let arr = |xs: &[&str]| {
+            xs.iter()
+                .map(|e| format!("{e:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let events = if ingress.is_empty() {
+            "\"error.execution\"".to_string()
+        } else {
+            format!("\"error.execution\", {}", arr(ingress))
+        };
+        format!(
+            r#"{{
+                "v": 1,
+                "ast": {{
+                    "document": {{
+                        "kind": "statechart",
+                        "name": "{name}",
+                        "events": [{events}],
+                        "external_ingress_events": [{ingress}],
+                        "typed_inject_events": [{typed}]
+                    }}
+                }}
+            }}"#,
+            ingress = arr(ingress),
+            typed = arr(typed),
+        )
+    }
+
+    // An EventSchema forge-ast document carrying just the fields the value
+    // path reads (`event_name` + `fields[{id, sce_type}]`).
+    fn schema_json(event_name: &str, fields: &[(&str, &str)]) -> String {
+        let fields_arr = fields
+            .iter()
+            .map(|(id, ty)| format!(r#"{{"id":"{id}","sce_type":"{ty}","direction":"in"}}"#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            r#"{{"v":1,"ast":{{"document":{{"kind":"event-schema","name":"{event_name}_schema","event_name":"{event_name}","fields":[{fields_arr}]}}}}}}"#
+        )
+    }
+
+    // A codec forge-ast document with the same field shape.
+    fn codec_json(name: &str, fields: &[(&str, &str)]) -> String {
+        let fields_arr = fields
+            .iter()
+            .map(|(id, ty)| format!(r#"{{"id":"{id}","sce_type":"{ty}","direction":"in"}}"#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            r#"{{"v":1,"ast":{{"document":{{"kind":"codec","name":"{name}","fields":[{fields_arr}]}}}}}}"#
+        )
+    }
+
+    fn value_binding(keyexpr: &str, event: &str, codec: &str) -> Binding {
+        Binding {
+            keyexpr: keyexpr.to_string(),
+            event: event.to_string(),
+            codec: Some(codec.to_string()),
+        }
+    }
+
+    // Signal-only generate (gc-3a shape): empty schema/codec facts.
+    fn gen_signal(spec: &SwitchboardSpec, facts: &MachineFacts) -> Result<String, CodegenError> {
+        generate(&GenInput {
+            spec,
+            facts,
+            schemas: &[],
+            codecs: &[],
+            machine_module: "machine",
+        })
     }
 
     // ---- parse_machine_facts ----
@@ -433,7 +981,7 @@ mod tests {
         let facts = parse_machine_facts(&facts_json("real_machine", &["go"])).unwrap();
         let s = spec("wrong_machine", vec![binding("a/b", "go")]);
         assert!(matches!(
-            generate(&s, &facts),
+            gen_signal(&s, &facts),
             Err(CodegenError::MachineMismatch { .. })
         ));
     }
@@ -442,7 +990,7 @@ mod tests {
     fn rejects_event_not_in_external_ingress() {
         let facts = parse_machine_facts(&facts_json("m", &["temp_update"])).unwrap();
         let s = spec("m", vec![binding("home/temp", "not_an_event")]);
-        match generate(&s, &facts) {
+        match gen_signal(&s, &facts) {
             Err(CodegenError::UnknownEvent {
                 event,
                 machine,
@@ -462,7 +1010,7 @@ mod tests {
         // a binding injecting the concrete `sensor.temp` is accepted.
         let facts = parse_machine_facts(&facts_json("m", &["sensor"])).unwrap();
         let s = spec("m", vec![binding("home/temp", "sensor.temp")]);
-        let out = generate(&s, &facts).expect("generate");
+        let out = gen_signal(&s, &facts).expect("generate");
         assert!(out.contains("injector.inject(\"sensor.temp\", \"\");"));
     }
 
@@ -472,7 +1020,7 @@ mod tests {
         // An empty chunk (`a//b`) is not canonicalizable.
         let s = spec("m", vec![binding("a//b", "go")]);
         assert!(matches!(
-            generate(&s, &facts),
+            gen_signal(&s, &facts),
             Err(CodegenError::Keyexpr { .. })
         ));
     }
@@ -494,15 +1042,16 @@ mod tests {
             ],
         );
 
-        let out = generate(&s, &facts).expect("generate");
+        let out = gen_signal(&s, &facts).expect("generate");
 
         let expected = "\
-// @generated by wz-switchboard-codegen (R311gp gc-3a) -- DO NOT EDIT.
+// @generated by wz-switchboard-codegen (gc-3b) -- DO NOT EDIT.
 //
 // Static keyexpr -> SCXML domain-event switchboard for machine
 // \"sensor_monitor\". Closed match, no heap: &'static str chunk literals over
-// the shared no-alloc matcher. Signal path only (empty _event.data;
-// the typed value path is gc-3b). Regenerate by editing the source
+// the shared no-alloc matcher. Signal path only (empty _event.data) —
+// this switchboard declares no value bindings, so it keeps the
+// dyn EventInjector port. Regenerate by editing the source
 // wz-switchboard.yaml and rebuilding.
 
 /// Dispatch a resolved inbound keyexpr against the static switchboard
@@ -515,13 +1064,13 @@ pub fn dispatch_switchboard(
 ) -> usize {
     let mut injected = 0usize;
 
-    // home/*/temp -> temp_update
+    // home/*/temp -> temp_update (signal)
     if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[\"home\", \"*\", \"temp\"], target_keyexpr) {
         injector.inject(\"temp_update\", \"\");
         injected += 1;
     }
 
-    // home/livingroom/humidity -> humidity_update
+    // home/livingroom/humidity -> humidity_update (signal)
     if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[\"home\", \"livingroom\", \"humidity\"], target_keyexpr) {
         injector.inject(\"humidity_update\", \"\");
         injected += 1;
@@ -535,10 +1084,254 @@ pub fn dispatch_switchboard(
     #[test]
     fn empty_switchboard_emits_constant_zero_dispatch() {
         let facts = parse_machine_facts(&facts_json("m", &[])).unwrap();
-        let out = generate(&spec("m", vec![]), &facts).expect("generate");
+        let out = gen_signal(&spec("m", vec![]), &facts).expect("generate");
         assert!(out.contains("pub fn dispatch_switchboard("));
         assert!(out.contains("let mut injected = 0usize;"));
         // No arms emitted.
         assert!(!out.contains("keyexpr_pattern_matches"));
+    }
+
+    // ---- naming-filter mirrors (pin the SCE contract) ----
+
+    #[test]
+    fn naming_filters_match_sce_emission() {
+        // These outputs must equal SCE's to_pascal_case / to_snake_case
+        // (sce-build/src/filters.rs) — a drift is a loud wz compile error.
+        assert_eq!(to_pascal_case("temp_update"), "TempUpdate");
+        assert_eq!(to_pascal_case("job.completed"), "JobCompleted");
+        assert_eq!(to_pascal_case("sensor_monitor"), "SensorMonitor");
+        assert_eq!(to_pascal_case("door-opened"), "DoorOpened");
+        assert_eq!(to_snake_case("temp_update"), "temp_update");
+        assert_eq!(to_snake_case("job.completed"), "job_completed");
+        assert_eq!(to_snake_case("door-opened"), "door_opened");
+    }
+
+    // ---- parse_event_schema_facts / parse_codec_facts ----
+
+    #[test]
+    fn parses_event_schema_and_codec_facts() {
+        let s =
+            parse_event_schema_facts(&schema_json("temp_update", &[("temperature", "float64")]))
+                .expect("schema");
+        assert_eq!(s.event_name, "temp_update");
+        assert_eq!(
+            s.fields,
+            vec![FieldFact {
+                id: "temperature".to_string(),
+                sce_type: SceType::Primitive("float64".to_string()),
+            }]
+        );
+
+        let c = parse_codec_facts(
+            &codec_json(
+                "temp_payload",
+                &[("temperature", "float64"), ("seq", "uint32")],
+            ),
+            "temp_payload",
+        )
+        .expect("codec");
+        assert_eq!(c.name, "temp_payload");
+        assert_eq!(c.module_path, "temp_payload");
+        assert_eq!(c.fields.len(), 2);
+
+        // A non-`event-schema` document is rejected on the schema parse path.
+        assert!(matches!(
+            parse_event_schema_facts(&codec_json("x", &[])),
+            Err(CodegenError::NotStatechart(k)) if k == "codec"
+        ));
+    }
+
+    // ---- generate: value-path golden ----
+
+    #[test]
+    fn golden_mixed_value_and_signal_switchboard() {
+        let facts = parse_machine_facts(&facts_json_typed(
+            "sensor_monitor",
+            &["temp_update", "door_opened"],
+            &["temp_update"],
+        ))
+        .unwrap();
+        let schema =
+            parse_event_schema_facts(&schema_json("temp_update", &[("temperature", "float64")]))
+                .unwrap();
+        // Codec decodes a superset: the schema field plus an extra wire field.
+        let codec = parse_codec_facts(
+            &codec_json(
+                "temp_payload",
+                &[("temperature", "float64"), ("seq", "uint32")],
+            ),
+            "temp_payload",
+        )
+        .unwrap();
+        let s = spec(
+            "sensor_monitor",
+            vec![
+                value_binding("home/*/temp", "temp_update", "temp_payload"),
+                binding("home/door", "door_opened"),
+            ],
+        );
+
+        let out = generate(&GenInput {
+            spec: &s,
+            facts: &facts,
+            schemas: &[schema],
+            codecs: &[codec],
+            machine_module: "sensor_monitor",
+        })
+        .expect("generate");
+
+        let expected = "\
+// @generated by wz-switchboard-codegen (gc-3b) -- DO NOT EDIT.
+//
+// Static keyexpr -> SCXML domain-event switchboard for machine
+// \"sensor_monitor\". Closed match, no heap over the shared no-alloc matcher.
+// Signal rows inject an empty _event.data (Engine::raise_external_by_name);
+// value rows decode the wire payload with a forge codec and inject the
+// typed _event.data via the generated <Machine>Inject::raise_<event> seam.
+// Regenerate by editing the source wz-switchboard.yaml and rebuilding.
+
+use sensor_monitor::SensorMonitorInject;
+
+/// Dispatch a resolved inbound keyexpr against the static switchboard
+/// for machine \"sensor_monitor\", injecting each matched domain event in
+/// declaration order. Returns the number of events injected. `payload`
+/// is the inbound sample's wire bytes (read only by value rows).
+pub fn dispatch_switchboard(
+    target_keyexpr: &str,
+    payload: &[u8],
+    engine: &mut ::sce_rust_runtime::Engine<sensor_monitor::SensorMonitorPolicy>,
+) -> usize {
+    let mut injected = 0usize;
+
+    // home/*/temp -> temp_update (value via temp_payload)
+    if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[\"home\", \"*\", \"temp\"], target_keyexpr) {
+        let mut cursor = ::sce_forge_runtime::codec::SceCursor::new(payload);
+        if let Ok(decoded) = temp_payload::TempPayload::decode(&mut cursor) {
+            engine.raise_temp_update(sensor_monitor::SensorMonitorTempUpdatePayload {
+                temperature: decoded.temperature,
+            });
+            injected += 1;
+        }
+    }
+
+    // home/door -> door_opened (signal)
+    if wz_session_core::keyexpr_match::keyexpr_pattern_matches(&[\"home\", \"door\"], target_keyexpr) {
+        engine.raise_external_by_name(\"door_opened\", \"\");
+        injected += 1;
+    }
+    injected
+}
+";
+        assert_eq!(out, expected);
+    }
+
+    // ---- generate: value-path validation rejections ----
+
+    fn value_input<'a>(
+        spec: &'a SwitchboardSpec,
+        facts: &'a MachineFacts,
+        schemas: &'a [EventSchemaFacts],
+        codecs: &'a [CodecFacts],
+    ) -> GenInput<'a> {
+        GenInput {
+            spec,
+            facts,
+            schemas,
+            codecs,
+            machine_module: "m",
+        }
+    }
+
+    #[test]
+    fn value_event_not_in_typed_inject_is_rejected() {
+        // Event is external-ingress but NOT a typed-inject seam.
+        let facts = parse_machine_facts(&facts_json_typed("m", &["temp_update"], &[])).unwrap();
+        let s = spec(
+            "m",
+            vec![value_binding("home/temp", "temp_update", "temp_payload")],
+        );
+        let schemas =
+            [parse_event_schema_facts(&schema_json("temp_update", &[("t", "float64")])).unwrap()];
+        let codecs = [parse_codec_facts(
+            &codec_json("temp_payload", &[("t", "float64")]),
+            "temp_payload",
+        )
+        .unwrap()];
+        assert!(matches!(
+            generate(&value_input(&s, &facts, &schemas, &codecs)),
+            Err(CodegenError::EventNotTypedInject { .. })
+        ));
+    }
+
+    #[test]
+    fn value_missing_event_schema_is_rejected() {
+        let facts = parse_machine_facts(&facts_json_typed("m", &["temp_update"], &["temp_update"]))
+            .unwrap();
+        let s = spec(
+            "m",
+            vec![value_binding("home/temp", "temp_update", "temp_payload")],
+        );
+        let codecs = [parse_codec_facts(
+            &codec_json("temp_payload", &[("t", "float64")]),
+            "temp_payload",
+        )
+        .unwrap()];
+        assert!(matches!(
+            generate(&value_input(&s, &facts, &[], &codecs)),
+            Err(CodegenError::MissingEventSchema { .. })
+        ));
+    }
+
+    #[test]
+    fn value_codec_not_found_is_rejected() {
+        let facts = parse_machine_facts(&facts_json_typed("m", &["temp_update"], &["temp_update"]))
+            .unwrap();
+        let s = spec(
+            "m",
+            vec![value_binding("home/temp", "temp_update", "temp_payload")],
+        );
+        let schemas =
+            [parse_event_schema_facts(&schema_json("temp_update", &[("t", "float64")])).unwrap()];
+        assert!(matches!(
+            generate(&value_input(&s, &facts, &schemas, &[])),
+            Err(CodegenError::CodecNotFound { .. })
+        ));
+    }
+
+    #[test]
+    fn value_codec_missing_schema_field_is_rejected() {
+        let facts = parse_machine_facts(&facts_json_typed("m", &["temp_update"], &["temp_update"]))
+            .unwrap();
+        let s = spec(
+            "m",
+            vec![value_binding("home/temp", "temp_update", "temp_payload")],
+        );
+        // Schema needs `temperature: float64`; codec decodes a differently-named
+        // (or differently-typed) field -> superset check fails.
+        let schemas =
+            [
+                parse_event_schema_facts(&schema_json(
+                    "temp_update",
+                    &[("temperature", "float64")],
+                ))
+                .unwrap(),
+            ];
+        let codecs = [parse_codec_facts(
+            &codec_json("temp_payload", &[("temperature", "int32")]),
+            "temp_payload",
+        )
+        .unwrap()];
+        match generate(&value_input(&s, &facts, &schemas, &codecs)) {
+            Err(CodegenError::SchemaFieldNotInCodec {
+                event,
+                codec,
+                field,
+            }) => {
+                assert_eq!(event, "temp_update");
+                assert_eq!(codec, "temp_payload");
+                assert_eq!(field, "temperature");
+            }
+            other => panic!("expected SchemaFieldNotInCodec, got {other:?}"),
+        }
     }
 }

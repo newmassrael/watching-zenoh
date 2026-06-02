@@ -876,7 +876,9 @@
         "Only the signal path (empty _event.data) is wired; value path is gc-3-deferred.",
         "MCU static match (gc-3) not yet generated; AP dynamic registry is today's only impl.",
         "EngineInjector concrete impl lives in the sibling no_std wz-statechart-bridge crate.",
-        "gc-3a: generator lib landed (wz-switchboard-{schema,codegen}); not yet wired into a build (gc-3c)."
+        "gc-3a: generator lib landed (wz-switchboard-{schema,codegen}); not yet wired into a build (gc-3c).",
+        "gc-3b: generator value path landed (typed_inject_events gate + EventSchema/codec join).",
+        "gc-3b emits typed raise_<event> via generated <Machine>Inject over Engine<P>; consumer wiring gc-3c."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -28831,6 +28833,56 @@
         "A future AP dynamic loader (wz-runtime-tokio, std) deserializes wz-switchboard.yaml via wz-switchboard-schema to populate SwitchboardRegistry -- the schema crate is the shared SSOT, ready for it.",
         "Long-term-ideal surfaced (non-blocking, SCE-owner decision): SCE exposing the statechart codegen+forge-ast pipeline in-process would remove the build.rs shell-out; the pure-lib boundary is designed so that change would touch only the I/O layer.",
         "Track2 no-alloc (24-module bounded backing flip) remains a separate follow-up."
+      ]
+    },
+    "Round 311gq": {
+      "decision_summary": "R311gq gc-3b: switchboard generator value path -- typed raise_<event> via generated <Machine>Inject; typed_inject_events gate + EventSchema/codec multi-doc join + codec-superset cross-check; pin c16811a9b.",
+      "changes_bullets": [
+        "wz-switchboard-schema: Binding gains an optional `codec` field -- None = signal binding (empty _event.data, gc-3a behaviour); Some(name) = value binding naming the wire forge codec. skip_serializing_if so existing signal-only sidecars stay byte-stable. Value round-trip test added.",
+        "wz-switchboard-codegen: MachineFacts + parse_machine_facts gain `typed_inject_events` (forge-ast.v1 pin c16811a9b) -- the eligibility SSOT. A value binding gates on event-in-set rather than re-deriving SCE's native-lowering rule (primitive-only schema + guard-read); the absent-event case is a build error (EventNotTypedInject).",
+        "wz-switchboard-codegen: new EventSchemaFacts + CodecFacts + parse_event_schema_facts / parse_codec_facts -- the multi-doc join the consumer feeds (each imported EventSchema doc + each codec doc forge-ast). Fields parsed as id + SceType (primitive string vs non-primitive opaque). forge-ast does NOT carry imported_event_schemas (serde-skip), so the join is wz-side.",
+        "wz-switchboard-codegen: generate() reworked to take GenInput {spec, facts, schemas, codecs, machine_module}. Branches signal-only (gc-3a `&mut dyn EventInjector` shape, byte-identical sans marker) vs value-bearing (`&mut Engine<{Machine}Policy>` + `use {Machine}Inject;`). Value row: decode payload via `SceCursor::new` + `{codec}::decode`, field-map into `{Machine}{Variant}Payload`, call `engine.raise_<event>(payload)`. wz-owned codec-fields-superset-of-schema cross-check (SchemaFieldNotInCodec) so the wire format and the _event.data view cannot drift.",
+        "wz-switchboard-codegen: SCE naming filters to_pascal_case / to_snake_case mirrored (forge-ast stays language-neutral; the two published filters are the contract, loud-fail-backstopped, unit-pinned). 4 new CodegenError variants (EventNotTypedInject / MissingEventSchema / CodecNotFound / SchemaFieldNotInCodec). Crate module doc updated (gc-3a/gc-3b, signal+value).",
+        "feature-inventory §5.20 Statechart: 2 caveats appended recording the gc-3b generator value-path landing (typed_inject_events gate + EventSchema/codec join + typed raise_<event> emission); consumer wiring stays gc-3c."
+      ],
+      "verification_bullets": [
+        "wz-switchboard-codegen 18 tests (was 11): + byte-exact value golden (mixed value+signal switchboard), + 4 value rejects (EventNotTypedInject / MissingEventSchema / CodecNotFound / SchemaFieldNotInCodec), + naming-filter contract pins (to_pascal_case / to_snake_case vs SCE), + EventSchema/codec parse tests. wz-switchboard-schema 4 tests (was 3): + value-binding round-trip (codec carried; signal omits the key).",
+        "cargo clippy --all-targets on both crates clean under workspace deny(warnings); cargo fmt --check clean; cargo build --workspace green (purely additive to the two pure-lib crates, no runtime consumer yet).",
+        "Emitted runtime paths verified by direct read against the vendored pin c16811a9b: the typed seam <Machine>Inject::raise_<event> -> raise_external_typed (sce-rust-runtime/src/engine.rs:775 + sce-build/src/forge/generator.rs:1812-1864); SceCursor::new takes &[u8] (matches the existing decode caller wz-session-core/src/network_message.rs:179); cursor + CodecError from sce_forge_runtime::codec.",
+        "validate_workspace: §5.20 caveats added; sections 257 unchanged, entries 550->551, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "gc-3c (next): wire the generator into a consumer build.rs -- emit forge-ast for the statechart + each imported EventSchema doc + each payload codec doc; author an example SCXML app machine + payload codec + a wz-switchboard.yaml value binding; OUT_DIR include. This is the FIRST real compile of the value-path emission (gc-3b golden asserts the string; gc-3c compiles it against the generated machine + codec types). Flips the §5.20 not-yet-wired caveat.",
+        "AP dynamic value path: the runtime SwitchboardRegistry (wz-runtime-tokio) is still signal-only; its value path should also decode -> raise_external_typed so AP and MCU share one guard semantics (SSOT across profiles).",
+        "String/Bytes payload fields: native-eligible EventSchemas allow String/Bytes (only Enum is excluded); the gc-3b golden targets primitive-numeric fields. String/Bytes field moves + codec borrowed views (lifetimes on the decoded struct) need a follow-up pass before those bindings work.",
+        "dispatch signature: a value-bearing switchboard takes &mut Engine<{Machine}Policy> concrete (the typed path cannot go through the type-erased dyn port); confirm this composes with the gc-2 ApplicationLayerObserver fan-out when wired at gc-3c."
+      ],
+      "publishable_decision_summary": "R311gq gc-3b: switchboard generator value path -- typed raise_<event> via generated <Machine>Inject; typed_inject_events gate + EventSchema/codec multi-doc join + codec-superset cross-check; pin c16811a9b.",
+      "publishable_changes_bullets": [
+        "wz-switchboard-schema: Binding gains an optional `codec` field -- None = signal binding (empty _event.data, gc-3a behaviour); Some(name) = value binding naming the wire forge codec. skip_serializing_if so existing signal-only sidecars stay byte-stable. Value round-trip test added.",
+        "wz-switchboard-codegen: MachineFacts + parse_machine_facts gain `typed_inject_events` (forge-ast.v1 pin c16811a9b) -- the eligibility SSOT. A value binding gates on event-in-set rather than re-deriving SCE's native-lowering rule (primitive-only schema + guard-read); the absent-event case is a build error (EventNotTypedInject).",
+        "wz-switchboard-codegen: new EventSchemaFacts + CodecFacts + parse_event_schema_facts / parse_codec_facts -- the multi-doc join the consumer feeds (each imported EventSchema doc + each codec doc forge-ast). Fields parsed as id + SceType (primitive string vs non-primitive opaque). forge-ast does NOT carry imported_event_schemas (serde-skip), so the join is wz-side.",
+        "wz-switchboard-codegen: generate() reworked to take GenInput {spec, facts, schemas, codecs, machine_module}. Branches signal-only (gc-3a `&mut dyn EventInjector` shape, byte-identical sans marker) vs value-bearing (`&mut Engine<{Machine}Policy>` + `use {Machine}Inject;`). Value row: decode payload via `SceCursor::new` + `{codec}::decode`, field-map into `{Machine}{Variant}Payload`, call `engine.raise_<event>(payload)`. wz-owned codec-fields-superset-of-schema cross-check (SchemaFieldNotInCodec) so the wire format and the _event.data view cannot drift.",
+        "wz-switchboard-codegen: SCE naming filters to_pascal_case / to_snake_case mirrored (forge-ast stays language-neutral; the two published filters are the contract, loud-fail-backstopped, unit-pinned). 4 new CodegenError variants (EventNotTypedInject / MissingEventSchema / CodecNotFound / SchemaFieldNotInCodec). Crate module doc updated (gc-3a/gc-3b, signal+value).",
+        "feature-inventory §5.20 Statechart: 2 caveats appended recording the gc-3b generator value-path landing (typed_inject_events gate + EventSchema/codec join + typed raise_<event> emission); consumer wiring stays gc-3c."
+      ],
+      "publishable_verification_bullets": [
+        "wz-switchboard-codegen 18 tests (was 11): + byte-exact value golden (mixed value+signal switchboard), + 4 value rejects (EventNotTypedInject / MissingEventSchema / CodecNotFound / SchemaFieldNotInCodec), + naming-filter contract pins (to_pascal_case / to_snake_case vs SCE), + EventSchema/codec parse tests. wz-switchboard-schema 4 tests (was 3): + value-binding round-trip (codec carried; signal omits the key).",
+        "cargo clippy --all-targets on both crates clean under workspace deny(warnings); cargo fmt --check clean; cargo build --workspace green (purely additive to the two pure-lib crates, no runtime consumer yet).",
+        "Emitted runtime paths verified by direct read against the vendored pin c16811a9b: the typed seam <Machine>Inject::raise_<event> -> raise_external_typed (sce-rust-runtime/src/engine.rs:775 + sce-build/src/forge/generator.rs:1812-1864); SceCursor::new takes &[u8] (matches the existing decode caller wz-session-core/src/network_message.rs:179); cursor + CodecError from sce_forge_runtime::codec.",
+        "validate_workspace: §5.20 caveats added; sections 257 unchanged, entries 550->551, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "gc-3c (next): wire the generator into a consumer build.rs -- emit forge-ast for the statechart + each imported EventSchema doc + each payload codec doc; author an example SCXML app machine + payload codec + a wz-switchboard.yaml value binding; OUT_DIR include. This is the FIRST real compile of the value-path emission (gc-3b golden asserts the string; gc-3c compiles it against the generated machine + codec types). Flips the §5.20 not-yet-wired caveat.",
+        "AP dynamic value path: the runtime SwitchboardRegistry (wz-runtime-tokio) is still signal-only; its value path should also decode -> raise_external_typed so AP and MCU share one guard semantics (SSOT across profiles).",
+        "String/Bytes payload fields: native-eligible EventSchemas allow String/Bytes (only Enum is excluded); the gc-3b golden targets primitive-numeric fields. String/Bytes field moves + codec borrowed views (lifetimes on the decoded struct) need a follow-up pass before those bindings work.",
+        "dispatch signature: a value-bearing switchboard takes &mut Engine<{Machine}Policy> concrete (the typed path cannot go through the type-erased dyn port); confirm this composes with the gc-2 ApplicationLayerObserver fan-out when wired at gc-3c."
       ]
     },
     "Round 311h": {

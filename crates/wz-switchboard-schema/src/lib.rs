@@ -64,6 +64,21 @@ pub struct SwitchboardSpec {
 }
 
 /// One keyexpr-pattern -> domain-event row.
+///
+/// The presence of [`Binding::codec`] selects the path:
+///  - **absent (signal)** — the matched sample injects `event` with an
+///    empty `_event.data` via the [`EventInjector`] port
+///    (`Engine::raise_external_by_name`). The wire payload is ignored.
+///  - **present (value)** — the matched sample's payload bytes are decoded
+///    by the named forge codec into the machine's typed
+///    `<Machine><Variant>Payload` struct and injected via the generated
+///    `<Machine>Inject::raise_<event>(payload)` seam (SCE
+///    `Engine::raise_external_typed`), so a no_std MCU transition guard
+///    reads `_event.data.<field>` natively. The generator cross-checks the
+///    codec's decoded fields against the event's `EventSchema` and gates
+///    the value path on the machine's `typed_inject_events` set.
+///
+/// [`EventInjector`]: wz_session_core::switchboard
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
@@ -74,13 +89,27 @@ pub struct Binding {
     /// canonicalizer the runtime registry uses), so the stored chunks
     /// agree byte-for-byte with the wire form a peer emits.
     pub keyexpr: String,
-    /// The SCXML domain event injected (with empty `_event.data` on the
-    /// signal path) when an inbound sample's resolved keyexpr matches
-    /// [`Binding::keyexpr`]. Cross-checked at build time against the
-    /// machine's `external_ingress_events` per W3C SCXML 3.12.1
-    /// event-descriptor matching; an event the machine never accepts is a
-    /// build error.
+    /// The SCXML domain event injected when an inbound sample's resolved
+    /// keyexpr matches [`Binding::keyexpr`]. Cross-checked at build time
+    /// against the machine's `external_ingress_events` per W3C SCXML
+    /// 3.12.1 event-descriptor matching; an event the machine never
+    /// accepts is a build error. For a value binding (see
+    /// [`Binding::codec`]) it must additionally be a member of the
+    /// machine's `typed_inject_events` set (an event with a generated
+    /// `raise_<event>` typed-inject seam).
     pub event: String,
+    /// The forge codec kind that decodes the wire payload into the event's
+    /// typed `_event.data` (a `sce:kind="codec"` document, compiled by the
+    /// consumer's build the same way the zenoh wire codecs are). `None`
+    /// makes this a **signal** binding (empty `_event.data`); `Some(name)`
+    /// makes it a **value** binding whose decoded struct is field-mapped
+    /// into `<Machine><Variant>Payload`. The generator verifies the codec's
+    /// decoded fields are a superset of the event's `EventSchema` fields
+    /// (name + type), so the wire format and the datamodel view cannot
+    /// drift — wz owns this pairing (SCE pairs neither: codec and
+    /// EventSchema are independent forge kinds).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
 }
 
 #[cfg(test)]
@@ -102,10 +131,12 @@ mod tests {
                 Binding {
                     keyexpr: "home/*/temp".to_string(),
                     event: "temp_update".to_string(),
+                    codec: None,
                 },
                 Binding {
                     keyexpr: "home/livingroom/humidity".to_string(),
                     event: "humidity_update".to_string(),
+                    codec: None,
                 },
             ],
         };
@@ -113,6 +144,39 @@ mod tests {
         let json = serde_json::to_string(&spec).expect("serialize");
         let back: SwitchboardSpec = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(spec, back);
+    }
+
+    // A value binding carries a `codec`; round-trips through serde and the
+    // signal binding (no `codec`) omits the field entirely
+    // (skip_serializing_if), so existing signal-only sidecars stay
+    // byte-stable.
+    #[test]
+    fn value_binding_round_trips_and_signal_omits_codec() {
+        let spec = SwitchboardSpec {
+            machine: "sensor_monitor".to_string(),
+            bindings: vec![
+                Binding {
+                    keyexpr: "home/*/temp".to_string(),
+                    event: "temp_update".to_string(),
+                    codec: Some("temp_payload".to_string()),
+                },
+                Binding {
+                    keyexpr: "home/door".to_string(),
+                    event: "door_opened".to_string(),
+                    codec: None,
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&spec).expect("serialize");
+        // signal binding omits the codec key; value binding carries it.
+        assert!(json.contains(r#""codec":"temp_payload""#));
+        assert_eq!(json.matches(r#""codec""#).count(), 1);
+
+        let back: SwitchboardSpec = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(spec, back);
+        assert_eq!(back.bindings[0].codec.as_deref(), Some("temp_payload"));
+        assert_eq!(back.bindings[1].codec, None);
     }
 
     #[test]
