@@ -110,6 +110,8 @@ use hashbrown::HashMap;
 // Put / Del body into `InboundReplyBody`, independent of the pub/sub
 // publisher markers. `query-reply` implies `codec-response`, so the
 // outer `codec-response` requirement holds in every arm of the `any`.
+#[cfg(feature = "codec-response")]
+use crate::wireexpr_resolve::resolve_wireexpr;
 #[cfg(all(
     feature = "codec-response",
     any(
@@ -123,8 +125,6 @@ use wz_codecs::reply::ReplyOwnedVariant;
 use wz_codecs::response::{ResponseOwned, ResponseOwnedVariant};
 #[cfg(feature = "codec-response-final")]
 use wz_codecs::response_final::ResponseFinalOwned;
-#[cfg(feature = "codec-response")]
-use wz_codecs::wireexpr::WireexprOwnedVariant;
 
 // R307 — `query-queryable` gates the producer-side `QueryReply` enum
 // because it lives in `crate::query`, which is gated on the same
@@ -820,42 +820,10 @@ impl ReplyRegistry<BoxedReplySink> {
     }
 }
 
-/// Shared keyexpr resolution helper. Mirrors the canonical
-/// [`crate::wireexpr_resolve::resolve_wireexpr`] SSOT (the same rule
-/// [`crate::query::QueryableRegistry::dispatch_request`] resolves
-/// inline): when `id == 0` the suffix is used verbatim; when
-/// `id != 0` the result is `table[id]` concatenated with the
-/// optional suffix. Returns `None` when the wire-form references a
-/// mapping id the peer never declared (or for the empty
-/// `(id=0, suffix=None)` form). The caller drops the dispatch on
-/// `None` so a partial keyexpr never reaches a user callback.
-///
-/// R311dy — `codec-response`-gated: only [`ReplyRegistry::dispatch_response`]
-/// (the wire path) consumes it; the codec-agnostic loopback path supplies
-/// an already-resolved literal in the [`InboundReply`].
-#[cfg(feature = "codec-response")]
-fn resolve_wireexpr(
-    body: &WireexprOwnedVariant,
-    peer_keyexpr_table: &HashMap<u64, String>,
-) -> Option<String> {
-    let (id, suffix_opt) = match body {
-        WireexprOwnedVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
-        WireexprOwnedVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
-    };
-    if id == 0 {
-        suffix_opt.map(str::to_string)
-    } else {
-        let base = peer_keyexpr_table.get(&id)?.clone();
-        match suffix_opt {
-            Some(s) => {
-                let mut out = base;
-                out.push_str(s);
-                Some(out)
-            }
-            None => Some(base),
-        }
-    }
-}
+// R311gn-follow — the reply/zget wire path now resolves keyexprs through
+// the shared `crate::wireexpr_resolve::resolve_wireexpr` SSOT (imported
+// above, codec-response-gated). The prior private copy was deleted; the
+// `dispatch_response` caller already matches the free fn's signature.
 
 // R311dy — the behavioural reply tests build Response / ResponseFinal
 // fixtures (codec-response + codec-response-final) and exercise the

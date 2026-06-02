@@ -28734,6 +28734,52 @@
         "Track2 no-alloc (24-module bounded backing flip) remains a separate follow-up."
       ]
     },
+    "Round 311go": {
+      "decision_summary": "R311go CLEANUP-2 follow: extend resolve_wireexpr SSOT to the reply + query wire paths; delete reply.rs private resolve_wireexpr copy + query.rs dispatch_request inline; all keyexpr resolution now routes one free fn.",
+      "changes_bullets": [
+        "query.rs dispatch_request: inline id==0/table[id]+suffix resolution replaced by resolve_wireexpr(&request.keyexpr.body, peer_keyexpr_table) free-fn call; WireexprOwnedVariant import dropped (only the inline used it; ToString retained -- still used by keyexpr.to_string() in the responder build).",
+        "reply.rs: the private codec-response-gated `fn resolve_wireexpr` (a 3rd inline copy) deleted; dispatch_response's existing call already matches the free fn's signature, now bound to the resolve_wireexpr imported at the top; WireexprOwnedVariant import dropped (ToString retained -- InboundReply::from_view view.keyexpr().to_string()).",
+        "With pubsub.rs (R311gm) + these two, all four wz-session-core keyexpr resolution sites route the single crate::wireexpr_resolve::resolve_wireexpr SSOT; that free fn is now the only definition left.",
+        "Imports swapped in place under the existing codec-request (query) / codec-response (reply) gates -- no gate change, just item substitution."
+      ],
+      "verification_bullets": [
+        "C1e query maximal union (query-queryable,query-attachment,query-selector-parameters,query-reply-err,codec-response-final): 197 lib + 2 doctest pass.",
+        "C1f reply: 193 lib pass (codec-push,codec-response,codec-response-final,pubsub-put,pubsub-delete,query-queryable) + 164 lib pass (no-default-features alloc,codec-response,codec-response-final,query-reply). Counts unchanged.",
+        "3 subset builds clean under deny(warnings): switchboard-only (both wire paths + their imports elide), queryable-only (codec-request path), zget-reply-only (codec-response path).",
+        "full scripts/run-ci.sh host lanes 0..E2 green (incl C1e/C1f/C1h + C2 clippy); Layer F/G/Q/M opt-in not run (host/behaviour-scoped change)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "resolve_wireexpr duplication now eliminated workspace-wide: pubsub (R311gm) + reply/query (R311go) all route the single crate::wireexpr_resolve::resolve_wireexpr free fn; no inline copies remain.",
+        "gc-2 session-review cleanup carry fully cleared (CLEANUP-1 R311gl + CLEANUP-2 R311gm + CLEANUP-3b R311gn + this SSOT follow-up R311go).",
+        "THEN gc-3: generator (wz-switchboard.yaml -> MCU closed match + build-time validation) + value path (typed EventSchema decode -> _event.data) + example app SCXML machine in wz-ap-demo.",
+        "Track2 no-alloc (24-module bounded backing flip) remains a separate follow-up."
+      ],
+      "publishable_decision_summary": "R311go CLEANUP-2 follow: extend resolve_wireexpr SSOT to the reply + query wire paths; delete reply.rs private resolve_wireexpr copy + query.rs dispatch_request inline; all keyexpr resolution now routes one free fn.",
+      "publishable_changes_bullets": [
+        "query.rs dispatch_request: inline id==0/table[id]+suffix resolution replaced by resolve_wireexpr(&request.keyexpr.body, peer_keyexpr_table) free-fn call; WireexprOwnedVariant import dropped (only the inline used it; ToString retained -- still used by keyexpr.to_string() in the responder build).",
+        "reply.rs: the private codec-response-gated `fn resolve_wireexpr` (a 3rd inline copy) deleted; dispatch_response's existing call already matches the free fn's signature, now bound to the resolve_wireexpr imported at the top; WireexprOwnedVariant import dropped (ToString retained -- InboundReply::from_view view.keyexpr().to_string()).",
+        "With pubsub.rs (R311gm) + these two, all four wz-session-core keyexpr resolution sites route the single crate::wireexpr_resolve::resolve_wireexpr SSOT; that free fn is now the only definition left.",
+        "Imports swapped in place under the existing codec-request (query) / codec-response (reply) gates -- no gate change, just item substitution."
+      ],
+      "publishable_verification_bullets": [
+        "C1e query maximal union (query-queryable,query-attachment,query-selector-parameters,query-reply-err,codec-response-final): 197 lib + 2 doctest pass.",
+        "C1f reply: 193 lib pass (codec-push,codec-response,codec-response-final,pubsub-put,pubsub-delete,query-queryable) + 164 lib pass (no-default-features alloc,codec-response,codec-response-final,query-reply). Counts unchanged.",
+        "3 subset builds clean under deny(warnings): switchboard-only (both wire paths + their imports elide), queryable-only (codec-request path), zget-reply-only (codec-response path).",
+        "full scripts/run-ci.sh host lanes 0..E2 green (incl C1e/C1f/C1h + C2 clippy); Layer F/G/Q/M opt-in not run (host/behaviour-scoped change)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "resolve_wireexpr duplication now eliminated workspace-wide: pubsub (R311gm) + reply/query (R311go) all route the single crate::wireexpr_resolve::resolve_wireexpr free fn; no inline copies remain.",
+        "gc-2 session-review cleanup carry fully cleared (CLEANUP-1 R311gl + CLEANUP-2 R311gm + CLEANUP-3b R311gn + this SSOT follow-up R311go).",
+        "THEN gc-3: generator (wz-switchboard.yaml -> MCU closed match + build-time validation) + value path (typed EventSchema decode -> _event.data) + example app SCXML machine in wz-ap-demo.",
+        "Track2 no-alloc (24-module bounded backing flip) remains a separate follow-up."
+      ]
+    },
     "Round 311h": {
       "decision_summary": "R311h codec-push wire-layer cascade — wz-codecs gate + Cargo edges + session_glue.rs Push surface; pubsub.rs consumer cascade deferred to R311m.",
       "changes_bullets": [

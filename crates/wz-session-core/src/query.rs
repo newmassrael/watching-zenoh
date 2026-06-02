@@ -127,10 +127,10 @@ use wz_codecs::request::{RequestOwned, RequestOwnedVariant};
 // method's `#[cfg]` below). The dispatch / loopback / registration paths
 // only stage entries into `Vec<QueryReply>` and do not need
 // codec-response.
+#[cfg(feature = "codec-request")]
+use crate::wireexpr_resolve::resolve_wireexpr;
 #[cfg(feature = "codec-response")]
 use wz_codecs::response::ResponseOwned;
-#[cfg(feature = "codec-request")]
-use wz_codecs::wireexpr::WireexprOwnedVariant;
 
 #[cfg(feature = "codec-response-final")]
 use wz_codecs::response_final::{ResponseFinal, ResponseFinalOwned};
@@ -715,28 +715,12 @@ impl<C: QuerySink> QueryableRegistry<C> {
             _ => return,
         };
 
-        let (id, suffix_opt) = match &request.keyexpr.body {
-            WireexprOwnedVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
-            WireexprOwnedVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
-        };
-        let resolved: String = if id == 0 {
-            match suffix_opt {
-                Some(s) => s.to_string(),
-                None => return,
-            }
-        } else {
-            let base = match peer_keyexpr_table.get(&id) {
-                Some(s) => s.clone(),
-                None => return,
-            };
-            match suffix_opt {
-                Some(s) => {
-                    let mut out = base;
-                    out.push_str(s);
-                    out
-                }
-                None => base,
-            }
+        // R311gn-follow — resolve via the shared resolve_wireexpr SSOT
+        // (id==0 -> suffix verbatim; id!=0 -> table[id] + optional suffix;
+        // None -> drop, covering the empty form + an undeclared id).
+        let resolved: String = match resolve_wireexpr(&request.keyexpr.body, peer_keyexpr_table) {
+            Some(r) => r,
+            None => return,
         };
 
         // R223 — every Request reaching dispatch_request has been
