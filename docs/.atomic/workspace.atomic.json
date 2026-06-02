@@ -28364,6 +28364,44 @@
         "현 세션 MCP 도구는 구 프로세스(schema<=5)라 실패; 재빌드된 mnemosyne-mcp(schema 6)는 다음 세션부터 정렬. 이번 세션은 CLI 가 권위."
       ]
     },
+    "Round 311gg": {
+      "decision_summary": "R311gg push-blocker fix: two host-lane CI breaks R311gf subset-verify missed -- StatePolicy::Payload fixture lag (SCE f82cf4b16) + static_scout_open dead-port TOCTOU deflake.",
+      "changes_bullets": [
+        "hal_timer_routing.rs: add `type Payload = ();` to TimerProbePolicy; SCE pin f82cf4b16 added StatePolicy::Payload assoc type, generated SMs emit (). Commit a5407d5.",
+        "static_scout_open.rs + Cargo.toml: refused_locator() holds a bound-not-listening socket2 socket vs bind->local_addr->drop; socket2=0.6 dev-dep + Cargo.lock. Commit c842497."
+      ],
+      "verification_bullets": [
+        "hal_timer_routing: cargo test 6/6 + clippy -D warnings clean; host C1/C2/E lanes unblocked.",
+        "static_scout_open: single-thread 5/5; 10x parallel under background ephemeral-port churn = 0 failures (was 2/5 under full-CI load).",
+        "root cause: R311gf carry 'full run-ci exit 0' was codegen Layer B + 7 MCU only, not host C1/C2/E; pre-push gate caught both."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "VERIFICATION DISCIPLINE: 'full run-ci' claims must run scripts/run-ci.sh ALL host lanes (C1/C2/E), not just codegen+MCU subset.",
+        "SCE pin bumps that add trait items break hand-written StatePolicy fixtures invisibly to subset runs -- grep hand-written impls after bump.",
+        "next: gc-2/gc-3 switchboard impl OR Track2 no-alloc gating (user fork; unchanged by this remediation)."
+      ],
+      "publishable_decision_summary": "R311gg push-blocker fix: two host-lane CI breaks R311gf subset-verify missed -- StatePolicy::Payload fixture lag (SCE f82cf4b16) + static_scout_open dead-port TOCTOU deflake.",
+      "publishable_changes_bullets": [
+        "hal_timer_routing.rs: add `type Payload = ();` to TimerProbePolicy; SCE pin f82cf4b16 added StatePolicy::Payload assoc type, generated SMs emit (). Commit a5407d5.",
+        "static_scout_open.rs + Cargo.toml: refused_locator() holds a bound-not-listening socket2 socket vs bind->local_addr->drop; socket2=0.6 dev-dep + Cargo.lock. Commit c842497."
+      ],
+      "publishable_verification_bullets": [
+        "hal_timer_routing: cargo test 6/6 + clippy -D warnings clean; host C1/C2/E lanes unblocked.",
+        "static_scout_open: single-thread 5/5; 10x parallel under background ephemeral-port churn = 0 failures (was 2/5 under full-CI load).",
+        "root cause: R311gf carry 'full run-ci exit 0' was codegen Layer B + 7 MCU only, not host C1/C2/E; pre-push gate caught both."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "VERIFICATION DISCIPLINE: 'full run-ci' claims must run scripts/run-ci.sh ALL host lanes (C1/C2/E), not just codegen+MCU subset.",
+        "SCE pin bumps that add trait items break hand-written StatePolicy fixtures invisibly to subset runs -- grep hand-written impls after bump.",
+        "next: gc-2/gc-3 switchboard impl OR Track2 no-alloc gating (user fork; unchanged by this remediation)."
+      ]
+    },
     "Round 311h": {
       "decision_summary": "R311h codec-push wire-layer cascade — wz-codecs gate + Cargo edges + session_glue.rs Push surface; pubsub.rs consumer cascade deferred to R311m.",
       "changes_bullets": [
