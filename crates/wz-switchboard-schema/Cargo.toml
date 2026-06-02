@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-switchboard-schema — R311gp gc-3a.
+#
+# The serde model of `wz-switchboard.yaml`: the keyexpr -> SCXML
+# domain-event binding table. This crate is the SINGLE SOURCE OF TRUTH
+# for the sidecar's on-disk shape; it is deliberately a leaf data crate
+# (no logic, no I/O, no format backend) so the two consumers that bind
+# to the format share one definition and cannot drift:
+#   - the MCU static generator (`wz-switchboard-codegen`, build-time),
+#   - the AP dynamic loader (a future wz-runtime-tokio seam that
+#     populates `wz_session_core::switchboard::SwitchboardRegistry`).
+#
+# Keeping the model here — rather than inside `wz-switchboard-codegen` —
+# means the AP runtime loader never has to depend on the build-tooling
+# crate just to name the struct (a runtime-depends-on-build-codegen
+# edge would be the wrong direction).
+#
+# `#![no_std]` + `alloc`: the model is `String` / `Vec` data only, so it
+# carries no std assumption. No real MCU consumer parses YAML at runtime
+# (the MCU path is the build-time-baked static match), but the no_std
+# discipline keeps this leaf from accidentally pulling std into the
+# no_std-aware workspace.
+
+[package]
+name = "wz-switchboard-schema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "R311gp gc-3a — serde model of wz-switchboard.yaml (keyexpr -> SCXML domain-event binding table SSOT)."
+
+[dependencies]
+# Format-agnostic by design: the model derives serde traits but does NOT
+# pull a format backend (serde_yaml / serde_json). Each consumer selects
+# its own backend at the I/O boundary — the generator's build.rs reads
+# YAML, a test may round-trip via JSON. `alloc` feature brings the
+# derive's String/Vec handling into no_std scope.
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+
+[dev-dependencies]
+# Format-agnostic round-trip proof for the derive (the real YAML backend
+# is selected by the consumer, not pinned here). serde_json is the
+# lightest already-in-tree backend for a structural round-trip test.
+serde_json = "1"
+
+[lints]
+workspace = true

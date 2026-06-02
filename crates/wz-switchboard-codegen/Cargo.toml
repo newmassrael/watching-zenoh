@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-switchboard-codegen — R311gp gc-3a.
+#
+# The MCU static switchboard generator, as a PURE transformation library:
+#
+#     (forge-ast.v1 machine facts JSON, SwitchboardSpec)
+#         -> Result<Rust source string, CodegenError>
+#
+# No process spawning, no filesystem, no environment. The consumer's
+# build.rs owns the I/O — it invokes `sce-codegen ... --emit-ast=<json>`
+# (the same shell-out `wz-runtime-tokio/build.rs` already uses for the
+# session-FSM statechart), reads the emitted forge-ast.v1 JSON + the
+# `wz-switchboard.yaml` sidecar, calls [`generate`], and writes the
+# returned source into `OUT_DIR`. Keeping every decision (forge-ast
+# parse, W3C 3.12.1 event validation, keyexpr canonicalization, closed-
+# match emission) inside this pure library is what makes the validation
+# + emission unit-testable with golden and rejection-case tests — logic
+# buried in a build.rs cannot be.
+#
+# Build-tooling crate: host std only (it never cross-compiles to MCU; the
+# *emitted* code does). Not a workspace runtime member's dependency at
+# run time — consumers depend on it as a `[build-dependencies]` edge.
+
+[package]
+name = "wz-switchboard-codegen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "R311gp gc-3a — pure generator: wz-switchboard.yaml + forge-ast.v1 -> closed no-heap keyexpr->event match (build-time validated)."
+
+[dependencies]
+# The yaml model SSOT — generate() consumes an already-parsed
+# SwitchboardSpec (the build.rs does the YAML read).
+wz-switchboard-schema = { path = "../wz-switchboard-schema" }
+# Reused at BUILD TIME for keyexpr canonicalization: the generator
+# canonicalizes each binding's keyexpr with the SAME canonicalizer the
+# runtime SwitchboardRegistry uses, so static (MCU) and dynamic (AP)
+# stored chunks cannot diverge. Default features (alloc) suffice; no
+# codec features pulled.
+wz-session-core = { path = "../wz-session-core" }
+# forge-ast.v1 envelope is a Serialize-only producer contract on the SCE
+# side (apis/forge-ast.v1.schema.json, docs/SCE_FORGE_AST.md); consumers
+# deserialize the JSON per schema. We deserialize only the statechart
+# subset we need (kind / name / external_ingress_events).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[lints]
+workspace = true

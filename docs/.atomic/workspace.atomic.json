@@ -875,7 +875,8 @@
         "Inbound Push still flows to the data-callback path (switchboard is independent).",
         "Only the signal path (empty _event.data) is wired; value path is gc-3-deferred.",
         "MCU static match (gc-3) not yet generated; AP dynamic registry is today's only impl.",
-        "EngineInjector concrete impl lives in the sibling no_std wz-statechart-bridge crate."
+        "EngineInjector concrete impl lives in the sibling no_std wz-statechart-bridge crate.",
+        "gc-3a: generator lib landed (wz-switchboard-{schema,codegen}); not yet wired into a build (gc-3c)."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -28777,6 +28778,58 @@
         "resolve_wireexpr duplication now eliminated workspace-wide: pubsub (R311gm) + reply/query (R311go) all route the single crate::wireexpr_resolve::resolve_wireexpr free fn; no inline copies remain.",
         "gc-2 session-review cleanup carry fully cleared (CLEANUP-1 R311gl + CLEANUP-2 R311gm + CLEANUP-3b R311gn + this SSOT follow-up R311go).",
         "THEN gc-3: generator (wz-switchboard.yaml -> MCU closed match + build-time validation) + value path (typed EventSchema decode -> _event.data) + example app SCXML machine in wz-ap-demo.",
+        "Track2 no-alloc (24-module bounded backing flip) remains a separate follow-up."
+      ]
+    },
+    "Round 311gp": {
+      "decision_summary": "R311gp gc-3a: switchboard static generator foundation -- wz-switchboard-schema + wz-switchboard-codegen pure lib (forge-ast.v1 ingress events -> closed no-heap match, build-validated).",
+      "changes_bullets": [
+        "New crate wz-switchboard-schema: no_std+alloc serde model of wz-switchboard.yaml (SwitchboardSpec{machine, bindings:[Binding{keyexpr,event}]}) -- the single shape both the AP dynamic SwitchboardRegistry loader and the MCU static generator bind to. Leaf data crate, no format backend pinned (YAML/JSON chosen at each consumer's I/O boundary), deny_unknown_fields.",
+        "New crate wz-switchboard-codegen: PURE transformation lib (no process/IO) -- generate(SwitchboardSpec, MachineFacts) -> Rust source for a closed no-heap dispatch_switchboard match; parse_machine_facts deserializes only the forge-ast.v1 statechart subset (v / kind / name / external_ingress_events) per docs/SCE_FORGE_AST.md + apis/forge-ast.v1.schema.json. Logic in a pure lib (not a build.rs) so validation + emission are unit+golden testable.",
+        "Validation = W3C SCXML 3.12.1 event-descriptor matching of each Binding.event against the machine's external_ingress_events (SCE's documented event-injection contract, drift-proof: SCE owns the reserved-family filter). Build errors: UnknownEvent, MachineMismatch, non-canonical Keyexpr, NotStatechart, UnsupportedAstVersion -- never a silent runtime no-op.",
+        "Emission reuses wz-session-core SSOT: canonize_keyexpr at build time (strict-reject where the runtime registry merely warns) + keyexpr_match::keyexpr_pattern_matches (no-alloc, BoundedVec-backed) over &'static str chunk literals. Mirrors SwitchboardRegistry::dispatch (every matching row fires in declaration order; signal path injects empty _event.data). No canonicalization/matching reimplemented.",
+        "Both crates added to crates/Cargo.toml workspace members (grouped with wz-statechart-bridge in the statechart domain). build.rs orchestration (shell-out sce-codegen --emit-ast + OUT_DIR include) and a real example machine deferred to gc-3c; the pure-lib boundary means that wiring -- and any future SCE in-process statechart API -- only changes the thin I/O layer, not the validated logic."
+      ],
+      "verification_bullets": [
+        "wz-switchboard-codegen: 11 unit+golden tests pass -- parse_machine_facts (v1/kind/empty-ingress), W3C 3.12.1 descriptor matching (exact / token-boundary prefix / trailing .* / non-match / reverse), generate happy-path byte-exact golden, plus UnknownEvent / MachineMismatch / non-canonical-keyexpr rejects, prefix-descriptor accept, empty-switchboard constant-zero emit.",
+        "wz-switchboard-schema: 3 tests pass (serde round-trip, deny_unknown_fields reject of a typo'd key, keyexpr/event field-name contract).",
+        "cargo clippy --all-targets on both crates clean under workspace deny(warnings); cargo build --workspace green -- no regression to the existing 22 crates (purely additive members).",
+        "Empirically confirmed sce-codegen --emit-ast on a real statechart (sources/session/session_fsm_unicast.scxml) emits ast.document.external_ingress_events as an 18-event closed set with error.* filtered -- the generator's input contract is verified against SCE, not assumed.",
+        "validate_workspace: §5.20 caveat added; sections 257 unchanged, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "gc-3b (next): value path -- extend wz-switchboard-schema with an optional payload-decode field + wz-switchboard-codegen to emit a typed EventSchema decode -> _event.data (forge-ast.v1 imported_event_schemas). This is the serialization SSOT deferred from gc-2; deserves its own round of design care.",
+        "gc-3c: wire the generator into a consumer build.rs (mcu-qemu-demo / wz-ap-demo) -- shell-out sce-codegen --emit-ast + OUT_DIR include -- against a real example SCXML application machine; this flips the §5.20 \"MCU static match not yet generated\" caveat.",
+        "A future AP dynamic loader (wz-runtime-tokio, std) deserializes wz-switchboard.yaml via wz-switchboard-schema to populate SwitchboardRegistry -- the schema crate is the shared SSOT, ready for it.",
+        "Long-term-ideal surfaced (non-blocking, SCE-owner decision): SCE exposing the statechart codegen+forge-ast pipeline in-process would remove the build.rs shell-out; the pure-lib boundary is designed so that change would touch only the I/O layer.",
+        "Track2 no-alloc (24-module bounded backing flip) remains a separate follow-up."
+      ],
+      "publishable_decision_summary": "R311gp gc-3a: switchboard static generator foundation -- wz-switchboard-schema + wz-switchboard-codegen pure lib (forge-ast.v1 ingress events -> closed no-heap match, build-validated).",
+      "publishable_changes_bullets": [
+        "New crate wz-switchboard-schema: no_std+alloc serde model of wz-switchboard.yaml (SwitchboardSpec{machine, bindings:[Binding{keyexpr,event}]}) -- the single shape both the AP dynamic SwitchboardRegistry loader and the MCU static generator bind to. Leaf data crate, no format backend pinned (YAML/JSON chosen at each consumer's I/O boundary), deny_unknown_fields.",
+        "New crate wz-switchboard-codegen: PURE transformation lib (no process/IO) -- generate(SwitchboardSpec, MachineFacts) -> Rust source for a closed no-heap dispatch_switchboard match; parse_machine_facts deserializes only the forge-ast.v1 statechart subset (v / kind / name / external_ingress_events) per docs/SCE_FORGE_AST.md + apis/forge-ast.v1.schema.json. Logic in a pure lib (not a build.rs) so validation + emission are unit+golden testable.",
+        "Validation = W3C SCXML 3.12.1 event-descriptor matching of each Binding.event against the machine's external_ingress_events (SCE's documented event-injection contract, drift-proof: SCE owns the reserved-family filter). Build errors: UnknownEvent, MachineMismatch, non-canonical Keyexpr, NotStatechart, UnsupportedAstVersion -- never a silent runtime no-op.",
+        "Emission reuses wz-session-core SSOT: canonize_keyexpr at build time (strict-reject where the runtime registry merely warns) + keyexpr_match::keyexpr_pattern_matches (no-alloc, BoundedVec-backed) over &'static str chunk literals. Mirrors SwitchboardRegistry::dispatch (every matching row fires in declaration order; signal path injects empty _event.data). No canonicalization/matching reimplemented.",
+        "Both crates added to crates/Cargo.toml workspace members (grouped with wz-statechart-bridge in the statechart domain). build.rs orchestration (shell-out sce-codegen --emit-ast + OUT_DIR include) and a real example machine deferred to gc-3c; the pure-lib boundary means that wiring -- and any future SCE in-process statechart API -- only changes the thin I/O layer, not the validated logic."
+      ],
+      "publishable_verification_bullets": [
+        "wz-switchboard-codegen: 11 unit+golden tests pass -- parse_machine_facts (v1/kind/empty-ingress), W3C 3.12.1 descriptor matching (exact / token-boundary prefix / trailing .* / non-match / reverse), generate happy-path byte-exact golden, plus UnknownEvent / MachineMismatch / non-canonical-keyexpr rejects, prefix-descriptor accept, empty-switchboard constant-zero emit.",
+        "wz-switchboard-schema: 3 tests pass (serde round-trip, deny_unknown_fields reject of a typo'd key, keyexpr/event field-name contract).",
+        "cargo clippy --all-targets on both crates clean under workspace deny(warnings); cargo build --workspace green -- no regression to the existing 22 crates (purely additive members).",
+        "Empirically confirmed sce-codegen --emit-ast on a real statechart (sources/session/session_fsm_unicast.scxml) emits ast.document.external_ingress_events as an 18-event closed set with error.* filtered -- the generator's input contract is verified against SCE, not assumed.",
+        "validate_workspace: §5.20 caveat added; sections 257 unchanged, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "gc-3b (next): value path -- extend wz-switchboard-schema with an optional payload-decode field + wz-switchboard-codegen to emit a typed EventSchema decode -> _event.data (forge-ast.v1 imported_event_schemas). This is the serialization SSOT deferred from gc-2; deserves its own round of design care.",
+        "gc-3c: wire the generator into a consumer build.rs (mcu-qemu-demo / wz-ap-demo) -- shell-out sce-codegen --emit-ast + OUT_DIR include -- against a real example SCXML application machine; this flips the §5.20 \"MCU static match not yet generated\" caveat.",
+        "A future AP dynamic loader (wz-runtime-tokio, std) deserializes wz-switchboard.yaml via wz-switchboard-schema to populate SwitchboardRegistry -- the schema crate is the shared SSOT, ready for it.",
+        "Long-term-ideal surfaced (non-blocking, SCE-owner decision): SCE exposing the statechart codegen+forge-ast pipeline in-process would remove the build.rs shell-out; the pure-lib boundary is designed so that change would touch only the I/O layer.",
         "Track2 no-alloc (24-module bounded backing flip) remains a separate follow-up."
       ]
     },
