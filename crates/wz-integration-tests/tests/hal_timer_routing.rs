@@ -99,6 +99,7 @@ impl TimerProbePolicy {
 impl StatePolicy for TimerProbePolicy {
     type State = St;
     type Event = Ev;
+    type Payload = ();
     type Hal = TestHal;
 
     fn initial_state() -> Self::State {
