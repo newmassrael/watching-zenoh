@@ -85,26 +85,20 @@
 //! before.
 
 use alloc::string::String;
-#[cfg(any(
-    feature = "pubsub-put",
-    feature = "pubsub-delete",
-    feature = "codec-declare"
-))]
-use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use hashbrown::HashMap;
 
-#[cfg(feature = "codec-declare")]
-use wz_codecs::declare::DeclareOwnedVariant;
-#[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
-use wz_codecs::push::{PushOwned, PushOwnedVariant};
 #[cfg(any(
     feature = "pubsub-put",
     feature = "pubsub-delete",
     feature = "codec-declare"
 ))]
-use wz_codecs::wireexpr::WireexprOwnedVariant;
+use crate::wireexpr_resolve::resolve_wireexpr;
+#[cfg(feature = "codec-declare")]
+use wz_codecs::declare::DeclareOwnedVariant;
+#[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+use wz_codecs::push::{PushOwned, PushOwnedVariant};
 
 #[cfg(all(
     any(feature = "pubsub-put", feature = "pubsub-delete"),
@@ -500,45 +494,19 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// `is_remote = false` semantic).
     #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
     fn dispatch_push(&mut self, push: &PushOwned, reliability: Reliability, is_remote: bool) {
-        // R125c2: keyexpr is now a tagged-union (B5-ν parent-tag
-        // variant dispatch on parent.M); extract id + suffix from
-        // whichever arm the dispatcher selected. Both arms carry the
-        // same id + Option<suffix> fields — the variant is a type-
-        // level mapping-context refinement, not a wire-shape split.
-        let (id, suffix_opt) = match &push.keyexpr.body {
-            WireexprOwnedVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
-            WireexprOwnedVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
-        };
-        // R121d — resolve the Push's keyexpr against the peer
-        // mapping table. The composition rule is:
-        //
-        //   id == 0                       → keyexpr = suffix.unwrap_or("")
-        //   id != 0, suffix is None       → keyexpr = table[id]
-        //   id != 0, suffix is Some(s)    → keyexpr = table[id] + s
-        //
-        // If `id != 0` and the table has no entry, the push is
-        // un-resolvable (the peer never declared this id, OR the
-        // declaration arrived through a path the registry has not
-        // yet absorbed). Drop silently rather than firing on a
-        // partial keyexpr.
-        let resolved: String = if id == 0 {
-            match suffix_opt {
-                Some(s) => s.to_string(),
-                None => return,
-            }
-        } else {
-            let base = match self.peer_keyexpr_table.get(&id) {
-                Some(s) => s.clone(),
-                None => return,
-            };
-            match suffix_opt {
-                Some(s) => {
-                    let mut out = base;
-                    out.push_str(s);
-                    out
-                }
-                None => base,
-            }
+        // R121d / R311gl CLEANUP-2 — resolve the Push's keyexpr against
+        // the peer mapping table via the shared `resolve_wireexpr` SSOT
+        // (the same resolver the four remote-declare registries + the
+        // switchboard consume). Composition rule: id==0 → suffix
+        // verbatim; id!=0 → table[id] + optional suffix. `None` means
+        // either the empty (id=0, suffix=None) form or an id the peer
+        // never declared — drop silently rather than fire on a partial
+        // keyexpr (R125c2: the tagged-union arms are folded inside the
+        // resolver; both carry the same id + Option<suffix> fields).
+        let resolved: String = match resolve_wireexpr(&push.keyexpr.body, &self.peer_keyexpr_table)
+        {
+            Some(r) => r,
+            None => return,
         };
 
         // R222 / R225 — project the decoded Push into a Sample once
@@ -837,7 +805,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                 // table[id] + suffix). If the inner reference is
                 // unresolvable we skip — recording a partial entry
                 // would later mis-fire subscriber matches.
-                if let Some(literal) = self.resolve_wireexpr(&d.keyexpr.body) {
+                if let Some(literal) = resolve_wireexpr(&d.keyexpr.body, &self.peer_keyexpr_table) {
                     self.peer_keyexpr_table.insert(d.id, literal);
                 }
             }
@@ -873,32 +841,6 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             // table is by definition not affected by an unknown
             // Declare sub-type.
             DeclareOwnedVariant::Default { .. } => {}
-        }
-    }
-
-    /// Resolve a `Wireexpr` to its literal keyexpr string using the
-    /// current peer mapping table. Returns `None` when the
-    /// expression references a mapping id that has not been
-    /// declared yet (or when it is the empty `(id=0, suffix=None)`
-    /// form, which carries no resolution).
-    #[cfg(feature = "codec-declare")]
-    fn resolve_wireexpr(&self, body: &WireexprOwnedVariant) -> Option<String> {
-        let (id, suffix_opt) = match body {
-            WireexprOwnedVariant::WireexprLocal(arm) => (arm.id, arm.suffix.as_deref()),
-            WireexprOwnedVariant::WireexprNonlocal(arm) => (arm.id, arm.suffix.as_deref()),
-        };
-        if id == 0 {
-            suffix_opt.map(str::to_string)
-        } else {
-            let base = self.peer_keyexpr_table.get(&id)?.clone();
-            Some(match suffix_opt {
-                Some(s) => {
-                    let mut out = base;
-                    out.push_str(s);
-                    out
-                }
-                None => base,
-            })
         }
     }
 }

@@ -28610,6 +28610,52 @@
         "Track2 no-alloc (24-module bounded backing flip) remains a separate follow-up."
       ]
     },
+    "Round 311gm": {
+      "decision_summary": "R311gm CLEANUP-2: unify pubsub.rs subscriber keyexpr resolution onto resolve_wireexpr free-fn SSOT; drop dispatch_push inline + SubscriberRegistry::resolve_wireexpr method duplicates.",
+      "changes_bullets": [
+        "pubsub.rs dispatch_push: the inline id==0/table[id]+suffix resolution (~35 lines) replaced by a single resolve_wireexpr(&push.keyexpr.body, &self.peer_keyexpr_table) call; behaviour identical (None -> drop covers both the empty (id=0,suffix=None) form and the unknown-id case).",
+        "pubsub.rs SubscriberRegistry::resolve_wireexpr method (codec-declare-gated self-wrapper, a 2nd copy of the free fn) deleted; its sole caller absorb_declare now calls the free fn directly with &self.peer_keyexpr_table.",
+        "pubsub.rs imports: WireexprOwnedVariant + the consumer-gated ToString dropped (only the removed inline used them); resolve_wireexpr imported under the same any(pubsub-put,pubsub-delete,codec-declare) gate.",
+        "reply.rs doc comment retargeted from the deleted pubsub method to the canonical crate::wireexpr_resolve::resolve_wireexpr SSOT; reply.rs's own codec-response-gated resolver is the reply/zget path, out of this cleanup's subscriber scope."
+      ],
+      "verification_bullets": [
+        "5 subset builds clean under deny(warnings): pubsub-only(no declare), declare-only(no pubsub), codec-declare-bare, switchboard-only, queryable-only -- covers dispatch_push present/absent x absorb_declare present/absent x import present/absent.",
+        "C1d pubsub data plane (codec-push,codec-declare,codec-response-final,pubsub-{put,delete,attachment,timestamp,source-info,priority,congestion-control,express}): 256 lib + 2 doctest pass.",
+        "C1g observer full union: 260 lib + 2 doctest pass (counts unchanged from R311gl).",
+        "full scripts/run-ci.sh host lanes 0..E2 green (incl C1d/C1g/C1h + C2 clippy); Layer F/G/Q/M opt-in not run (source change is host-typecheck/behaviour scoped; no_std build surface re-validated by the C1h subset builds)."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "CLEANUP-3b catalog prose: feature-inventory §5 lacks a statechart/switchboard domain; decide a new 5-20 statechart domain section vs existing placement + add prose (inventory entry already registered R311gk).",
+        "THEN gc-3: generator (wz-switchboard.yaml -> MCU closed match + build-time validation) + value path + example app SCXML machine.",
+        "Residual resolve_wireexpr copies remain in reply.rs (codec-response, reply/zget path) + query.rs dispatch_request (inline) -- out of CLEANUP-2's subscriber scope; a future SSOT pass could fold them onto the free fn too if wanted.",
+        "Track2 no-alloc (24-module bounded backing flip) remains a separate follow-up."
+      ],
+      "publishable_decision_summary": "R311gm CLEANUP-2: unify pubsub.rs subscriber keyexpr resolution onto resolve_wireexpr free-fn SSOT; drop dispatch_push inline + SubscriberRegistry::resolve_wireexpr method duplicates.",
+      "publishable_changes_bullets": [
+        "pubsub.rs dispatch_push: the inline id==0/table[id]+suffix resolution (~35 lines) replaced by a single resolve_wireexpr(&push.keyexpr.body, &self.peer_keyexpr_table) call; behaviour identical (None -> drop covers both the empty (id=0,suffix=None) form and the unknown-id case).",
+        "pubsub.rs SubscriberRegistry::resolve_wireexpr method (codec-declare-gated self-wrapper, a 2nd copy of the free fn) deleted; its sole caller absorb_declare now calls the free fn directly with &self.peer_keyexpr_table.",
+        "pubsub.rs imports: WireexprOwnedVariant + the consumer-gated ToString dropped (only the removed inline used them); resolve_wireexpr imported under the same any(pubsub-put,pubsub-delete,codec-declare) gate.",
+        "reply.rs doc comment retargeted from the deleted pubsub method to the canonical crate::wireexpr_resolve::resolve_wireexpr SSOT; reply.rs's own codec-response-gated resolver is the reply/zget path, out of this cleanup's subscriber scope."
+      ],
+      "publishable_verification_bullets": [
+        "5 subset builds clean under deny(warnings): pubsub-only(no declare), declare-only(no pubsub), codec-declare-bare, switchboard-only, queryable-only -- covers dispatch_push present/absent x absorb_declare present/absent x import present/absent.",
+        "C1d pubsub data plane (codec-push,codec-declare,codec-response-final,pubsub-{put,delete,attachment,timestamp,source-info,priority,congestion-control,express}): 256 lib + 2 doctest pass.",
+        "C1g observer full union: 260 lib + 2 doctest pass (counts unchanged from R311gl).",
+        "full scripts/run-ci.sh host lanes 0..E2 green (incl C1d/C1g/C1h + C2 clippy); Layer F/G/Q/M opt-in not run (source change is host-typecheck/behaviour scoped; no_std build surface re-validated by the C1h subset builds)."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "CLEANUP-3b catalog prose: feature-inventory §5 lacks a statechart/switchboard domain; decide a new 5-20 statechart domain section vs existing placement + add prose (inventory entry already registered R311gk).",
+        "THEN gc-3: generator (wz-switchboard.yaml -> MCU closed match + build-time validation) + value path + example app SCXML machine.",
+        "Residual resolve_wireexpr copies remain in reply.rs (codec-response, reply/zget path) + query.rs dispatch_request (inline) -- out of CLEANUP-2's subscriber scope; a future SSOT pass could fold them onto the free fn too if wanted.",
+        "Track2 no-alloc (24-module bounded backing flip) remains a separate follow-up."
+      ]
+    },
     "Round 311h": {
       "decision_summary": "R311h codec-push wire-layer cascade — wz-codecs gate + Cargo edges + session_glue.rs Push surface; pubsub.rs consumer cascade deferred to R311m.",
       "changes_bullets": [

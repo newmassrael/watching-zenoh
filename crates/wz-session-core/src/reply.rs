@@ -820,10 +820,10 @@ impl ReplyRegistry<BoxedReplySink> {
     }
 }
 
-/// Shared keyexpr resolution helper. Mirrors
-/// [`crate::pubsub::SubscriberRegistry::resolve_wireexpr`] /
-/// [`crate::query::QueryableRegistry::dispatch_request`]'s inline
-/// resolution: when `id == 0` the suffix is used verbatim; when
+/// Shared keyexpr resolution helper. Mirrors the canonical
+/// [`crate::wireexpr_resolve::resolve_wireexpr`] SSOT (the same rule
+/// [`crate::query::QueryableRegistry::dispatch_request`] resolves
+/// inline): when `id == 0` the suffix is used verbatim; when
 /// `id != 0` the result is `table[id]` concatenated with the
 /// optional suffix. Returns `None` when the wire-form references a
 /// mapping id the peer never declared (or for the empty
