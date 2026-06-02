@@ -28402,6 +28402,50 @@
         "next: gc-2/gc-3 switchboard impl OR Track2 no-alloc gating (user fork; unchanged by this remediation)."
       ]
     },
+    "Round 311gh": {
+      "decision_summary": "R311gh gc-2 ratify: statechart inject = own inbound adapter threading EventInjector (supersedes gc-1 StatechartSink/SampleSink); EngineInjector in new no_std wz-statechart-bridge; AP==MCU flow.",
+      "changes_bullets": [
+        "wz-session-core: NEW switchboard module -- SwitchboardRegistry reuses keyexpr_match SSOT; dispatch(sample, injector: &mut dyn EventInjector) threads the port. EventInjector port kept (gc-1).",
+        "wz-session-core: REMOVE StatechartSink (gc-1 SampleSink adapter) -- it conflated statechart injection with the data-callback path, forcing an engine handle into the stored-sink model.",
+        "NEW crate wz-statechart-bridge (no_std; wz-session-core + sce-rust-runtime): EngineInjector<'e,P>(&mut Engine<P>) impl EventInjector via raise_external_by_name; orphan-rule-clean local newtype.",
+        "wz-runtime-tokio AP driver: wire-inbound Push -> observer.switchboard.dispatch(sample, &mut EngineInjector(&mut engine)); engine stays driver-owned. MCU (gc-3) generates same-signature closed match."
+      ],
+      "verification_bullets": [
+        "SSOT: keyexpr matching reuses keyexpr_match (no dup); AP and MCU share one control-flow shape (driver owns engine -> thread port -> inject); engine's own external_queue is the only buffer.",
+        "Rejected on smell: deferred-queue (redundant 2nd buffer + foreign actor machinery vs the synchronous engine) and Arc<Mutex<Engine>> (domain-core aliasing + lock-order hazard).",
+        "wz-session-core stays sce-free (dispatch sees &mut dyn EventInjector, not Engine); orphan rule satisfied by the local newtype living in the bridge crate."
+      ],
+      "impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "gc-2 impl order: (1) wz-session-core switchboard module + remove StatechartSink; (2) wz-statechart-bridge crate; (3) wz-runtime-tokio AP wire-in. gc-3 generator follows.",
+        "value vs signal: dispatch consults entry Kind; signal=inject(name,\"\"); value=inject(name, serialize(decode(sample))). value serialization SSOT decided at gc-3.",
+        "switchboard fires on wire-inbound (ACL=wire->domain) path only, NOT local_publish (node's own outbound, not an inbound stimulus) -- keeps engine reachable in driver scope.",
+        "gc-3 build-time validation: signal event subset external_ingress_events (forge-ast.v1); value event subset EventSchema fields (pin f82cf4b16); sidecar = wz-switchboard.yaml per machine."
+      ],
+      "publishable_decision_summary": "R311gh gc-2 ratify: statechart inject = own inbound adapter threading EventInjector (supersedes gc-1 StatechartSink/SampleSink); EngineInjector in new no_std wz-statechart-bridge; AP==MCU flow.",
+      "publishable_changes_bullets": [
+        "wz-session-core: NEW switchboard module -- SwitchboardRegistry reuses keyexpr_match SSOT; dispatch(sample, injector: &mut dyn EventInjector) threads the port. EventInjector port kept (gc-1).",
+        "wz-session-core: REMOVE StatechartSink (gc-1 SampleSink adapter) -- it conflated statechart injection with the data-callback path, forcing an engine handle into the stored-sink model.",
+        "NEW crate wz-statechart-bridge (no_std; wz-session-core + sce-rust-runtime): EngineInjector<'e,P>(&mut Engine<P>) impl EventInjector via raise_external_by_name; orphan-rule-clean local newtype.",
+        "wz-runtime-tokio AP driver: wire-inbound Push -> observer.switchboard.dispatch(sample, &mut EngineInjector(&mut engine)); engine stays driver-owned. MCU (gc-3) generates same-signature closed match."
+      ],
+      "publishable_verification_bullets": [
+        "SSOT: keyexpr matching reuses keyexpr_match (no dup); AP and MCU share one control-flow shape (driver owns engine -> thread port -> inject); engine's own external_queue is the only buffer.",
+        "Rejected on smell: deferred-queue (redundant 2nd buffer + foreign actor machinery vs the synchronous engine) and Arc<Mutex<Engine>> (domain-core aliasing + lock-order hazard).",
+        "wz-session-core stays sce-free (dispatch sees &mut dyn EventInjector, not Engine); orphan rule satisfied by the local newtype living in the bridge crate."
+      ],
+      "publishable_impact_refs": [
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "gc-2 impl order: (1) wz-session-core switchboard module + remove StatechartSink; (2) wz-statechart-bridge crate; (3) wz-runtime-tokio AP wire-in. gc-3 generator follows.",
+        "value vs signal: dispatch consults entry Kind; signal=inject(name,\"\"); value=inject(name, serialize(decode(sample))). value serialization SSOT decided at gc-3.",
+        "switchboard fires on wire-inbound (ACL=wire->domain) path only, NOT local_publish (node's own outbound, not an inbound stimulus) -- keeps engine reachable in driver scope.",
+        "gc-3 build-time validation: signal event subset external_ingress_events (forge-ast.v1); value event subset EventSchema fields (pin f82cf4b16); sidecar = wz-switchboard.yaml per machine."
+      ]
+    },
     "Round 311h": {
       "decision_summary": "R311h codec-push wire-layer cascade — wz-codecs gate + Cargo edges + session_glue.rs Push surface; pubsub.rs consumer cascade deferred to R311m.",
       "changes_bullets": [
