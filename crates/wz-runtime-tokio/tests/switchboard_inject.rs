@@ -1,0 +1,102 @@
+// SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+#![cfg(feature = "switchboard")]
+
+//! R311gi gc-2c — switchboard inject integration.
+//!
+//! A wire-inbound `Push` drives a domain-event injection into a REAL SCE
+//! `Engine` through the `wz-statechart-bridge` `EngineInjector` + the
+//! `ApplicationLayerObserver` switchboard fan-out. This exercises the full
+//! AP path with the production types end to end —
+//!   wire Push -> resolve_wireexpr -> EngineInjector -> Engine::raise_external_by_name
+//! — rather than the `RecordingInjector` the wz-session-core unit tests use.
+//!
+//! The session FSM policy stands in for an application statechart here:
+//! gc-2c proves the bridge + fan-out mechanics; the purpose-built app
+//! SCXML machine (and the live wz-ap-demo wiring, where the app's own
+//! on_event closure constructs the `EngineInjector` over its app engine,
+//! R311gj) arrives with the gc-3 generator.
+
+use std::sync::Arc;
+
+use sce_rust_lua::LuaEngine;
+use sce_rust_runtime::scripting::IScriptEngine;
+use sce_rust_runtime::Engine;
+use wz_codecs::push::{Push, PushOwned, PushOwnedVariant};
+use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+use wz_codecs::wireexpr_local::WireexprLocal;
+use wz_runtime_tokio::observer::ApplicationLayerObserver;
+use wz_runtime_tokio::session_fsm_unicast::SessionFsmUnicastPolicy;
+use wz_runtime_tokio::session_glue::{DriverLoopOutcome, IterationEvent, NetworkMessage};
+use wz_statechart_bridge::EngineInjector;
+
+/// Build a wire-inbound Put Push carrying a literal keyexpr (id=0 ⇒
+/// resolve_wireexpr returns the suffix verbatim, no peer-table lookup).
+fn put_push(keyexpr: &str, payload: &[u8]) -> PushOwned {
+    let mut push = Push {
+        keyexpr: Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len: Some(keyexpr.len() as u64),
+                suffix: Some(keyexpr),
+            }),
+        },
+        ..Push::default()
+    }
+    .into_owned();
+    if let PushOwnedVariant::CodecZenohMsgPut(ref mut put) = push.body {
+        put.payload_len = payload.len() as u64;
+        put.payload = payload.to_vec();
+    }
+    push
+}
+
+fn frame_event(push: PushOwned) -> DriverLoopOutcome {
+    DriverLoopOutcome::FramePayload {
+        reliable: true,
+        sn: 0,
+        messages: vec![NetworkMessage::Push(Box::new(push))],
+        has_ext: false,
+        extensions: Vec::new(),
+    }
+}
+
+fn fresh_engine() -> Engine<SessionFsmUnicastPolicy> {
+    let script_engine: Arc<dyn IScriptEngine> = Arc::new(LuaEngine::new());
+    let mut engine = Engine::new(SessionFsmUnicastPolicy::new(script_engine));
+    engine.initialize();
+    engine
+}
+
+#[test]
+fn wire_push_injects_domain_event_into_real_engine() {
+    let mut engine = fresh_engine();
+    let mut observer = ApplicationLayerObserver::new();
+    observer
+        .switchboard
+        .register("home/livingroom/temp", "temp_update");
+
+    let outcome = frame_event(put_push("home/livingroom/temp", b"22.0"));
+    let mut injector = EngineInjector::new(&mut engine);
+    let fired = observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector);
+
+    // One mapped keyexpr matched -> exactly one inject() -> one
+    // Engine::raise_external_by_name call on the real engine.
+    assert_eq!(fired, 1);
+}
+
+#[test]
+fn wire_push_on_unmapped_keyexpr_injects_nothing() {
+    let mut engine = fresh_engine();
+    let mut observer = ApplicationLayerObserver::new();
+    observer
+        .switchboard
+        .register("home/livingroom/temp", "temp_update");
+
+    let outcome = frame_event(put_push("home/kitchen/humidity", b"55"));
+    let mut injector = EngineInjector::new(&mut engine);
+    let fired = observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector);
+
+    assert_eq!(fired, 0);
+}

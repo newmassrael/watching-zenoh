@@ -381,6 +381,16 @@ pubsub-source-info = ["wz-session-core/pubsub-source-info"]
 pubsub-priority = ["wz-session-core/pubsub-priority"]
 pubsub-congestion-control = ["wz-session-core/pubsub-congestion-control"]
 pubsub-express = ["wz-session-core/pubsub-express"]
+# R311gi gc-2c — statechart switchboard (the AP dynamic keyexpr -> SCXML
+# domain-event inbound adapter). Forwards to wz-session-core/switchboard
+# (the `ApplicationLayerObserver::switchboard` field + `dispatch_switchboard`
+# fan-out) and pulls this crate's `codec-push` so the inbound Push wire
+# surface is present (switchboard reacts to received Push samples). The
+# `EngineInjector` adapter (wz-statechart-bridge) is the application's to
+# construct over its own statechart engine (R311gj); this crate only
+# composes the observer-side fan-out, so the bridge is a dev-dependency
+# (the integration test) rather than a normal one.
+switchboard = ["codec-push", "wz-session-core/switchboard"]
 # R311cd — session domain wire-up. 2 atomic features that have real
 # source behavior (Cargo.toml authoring intent: "9 atomic, 2 active /
 # 7 reserved"):
@@ -539,6 +549,12 @@ socket2 = "0.6"
 # contract because a downstream consumer cannot enable the feature
 # transitively to import the fixtures.
 wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
+# R311gi gc-2c — the EngineInjector bridge, used by the switchboard
+# integration test (tests/switchboard_inject.rs) to wrap a real
+# Engine<SessionFsmUnicastPolicy> as the EventInjector port. Dev-only: the
+# production app (wz-ap-demo) constructs the injector over its own app
+# statechart engine (R311gj), so the bridge is not a normal dep here.
+wz-statechart-bridge = { path = "../wz-statechart-bridge" }
 # R311ds — the wz-session-core-test-support dev-dep moved to
 # wz-session-core: the declare/* shells no longer host the behavioural
 # tests (they migrated to wz-session-core next to the registry code),
