@@ -977,6 +977,7 @@ dependencies = [
 name = "sce-rust-runtime"
 version = "0.1.0"
 dependencies = [
+ "heapless",
  "log",
  "portable-atomic",
  "thiserror",
@@ -1612,6 +1613,14 @@ name = "wz-session-core-test-support"
 version = "0.1.0"
 dependencies = [
  "wz-codecs",
+]
+
+[[package]]
+name = "wz-statechart-bridge"
+version = "0.1.0"
+dependencies = [
+ "sce-rust-runtime",
+ "wz-session-core",
 ]
 
 [[package]]

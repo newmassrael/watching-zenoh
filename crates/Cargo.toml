@@ -36,6 +36,7 @@ members = [
     "wz-runtime-core",
     "wz-session-core",
     "wz-session-core-test-support",
+    "wz-statechart-bridge",
     "zenoh-pico-sys",
     "wz-integration-tests",
     "wz-runtime-tokio",
