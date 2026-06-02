@@ -880,7 +880,8 @@
         "gc-3b: generator value path landed (typed_inject_events gate + EventSchema/codec join).",
         "gc-3b emits typed raise_<event> via generated <Machine>Inject over Engine<P>; consumer wiring gc-3c.",
         "gc-3c: wired into wz-switchboard-example build.rs; value path verified e2e (decode->raise->guard).",
-        "R311gs: AP dynamic value path via generated injector->raise_external_typed; cross-profile SSOT."
+        "R311gs: AP dynamic value path via generated injector->raise_external_typed; cross-profile SSOT.",
+        "R311gt: string/bytes payload fields decode borrowed; dispatch .into()s to owned; alloc-tier only."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -28983,6 +28984,56 @@
         "String/Bytes payload fields: the example still uses a primitive uint16; native-eligible EventSchemas also allow String/Bytes, whose codec decode yields borrowed views (lifetimes on the decoded struct) -- the field-move emission + a borrowed-codec example remain a follow-up.",
         "Live wz-ap-demo wiring: a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the registry (the smoke here still hand-lays wire bytes + drives the Engine directly). The AP dynamic injector now exists; the demo confirms it composes with the gc-2c observer fan-out end to end.",
         "Multi-codec switchboards: generate() handles N value bindings over N codecs; both the static and the new injector emission dedup per event, but the example exercises one value + one signal row -- a multi-event example would exercise the join over several EventSchema + codec docs."
+      ]
+    },
+    "Round 311gt": {
+      "decision_summary": "R311gt: switchboard value path handles scalar string/bytes payload fields -- the generated dispatch deep-copies the codec's borrowed &str/&[u8] view into the owned String/Vec<u8> payload struct via .into().",
+      "changes_bullets": [
+        "wz-switchboard-codegen: new `owned_field_move(sce_type, expr)` threads `.into()` for a scalar string/bytes schema field. SCE decodes a scalar string/bytes codec field as a borrowed view (`&'a str` / `&'a [u8]`, lifetime tied to the wire buffer) but the native-lowered `<Machine><Variant>Payload` struct holds it owned (`String` / `Vec<u8>`, no lifetime -- it derives Clone+Default and outlives the buffer once queued). `.into()` bridges the two with the target inferred from the struct field's known type, so no alloc/std path is named and the one shared helper compiles on both the AP (std) and MCU (no_std+alloc) tiers. A primitive (Copy) field moves verbatim, keeping the primitive-only golden byte-identical.",
+        "wz-switchboard-codegen: the typed_inject_events MachineFacts doc corrected -- the native-lowerable schema rule is \"non-enum\" (primitive plus scalar string/bytes fields), not \"primitive-only\" (verified against SCE schema_is_native_payload_eligible, which rejects only SceType::Enum).",
+        "wz-switchboard-example: the temp_update EventSchema + temp_payload codec gain a scalar string field (sensor_id: length-prefixed UTF-8 = sensor_id_len VLE u64 + sensor_id string length-ref, the zenoh-pico _z_string_encode wire shape); the codec is now a borrowed view (TempPayload<'a> { sensor_id: &'a str }).",
+        "wz-switchboard-example: sensor_monitor adds a native string guard (hot --temp_update[_event.data.sensor_id === 'kitchen']--> alarm) + an alarm state, so the decoded value is observed semantically -- proving the borrowed-view -> owned field-move delivered the right value, not just that it compiled.",
+        "wz-switchboard-example tests: temp_bytes -> temp_wire (encodes via the codec's own encode_to_vec, a real publisher encode -> wire -> decode round-trip); new alarm test (static dispatch + AP registry) asserts only the kitchen sensor escalates hot -> alarm, livingroom stays hot."
+      ],
+      "verification_bullets": [
+        "wz-switchboard-codegen: 21 tests incl new value_string_and_bytes_fields_convert_to_owned (a mixed primitive+string+bytes schema -> celsius_centi verbatim, sensor_id.into(), raw.into(), and no .into() sprayed on the primitive); the existing primitive-only golden_mixed_value_and_signal_switchboard golden is unchanged; cargo clippy clean.",
+        "wz-switchboard-example: 10 tests (5 static dispatch + 5 AP registry) incl alarm_sample_branches_on_decoded_string{,_via_registry} -- the first real compile + run of a borrowed string codec field (&'a str) deep-copied into the owned payload (String) and observed by a native string guard (kitchen -> alarm); cargo clippy + fmt --check clean.",
+        "Generated dispatch confirmed against real SCE codegen: codec TempPayload<'a> { sensor_id: &'a str } (borrowed) -> SensorMonitorTempUpdatePayload { celsius_centi: decoded.celsius_centi, sensor_id: decoded.sensor_id.into() } (owned); the string === guard lowered natively (temp_update stays in typed_inject_events).",
+        "No ripple: wz-session-core switchboard 121 tests + wz-statechart-bridge build unchanged (no .into() on signal/primitive paths); cargo build --workspace clean.",
+        "Full host run-ci (WZ_RUN_LAYER_G=1) all required layers green incl Layer G MCU no_std cross-compile (string/bytes value path is alloc-tier; the no-alloc MCU targets carry no string payload, so the existing signal/primitive paths are byte-unaffected) + Layer M; cargo fmt --check clean.",
+        "validate_workspace: §5.20 caveat appended; sections 257 unchanged, entries 553->554, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "Bytes payload in the live example: the codegen golden covers the bytes .into() (&[u8] -> Vec<u8>) emission, but the live wz-switchboard-example exercises only a string field; a bytes-bearing example would add a second length-prefixed codec field over the same mechanism.",
+        "Multi-codec / multi-event switchboards: the example exercises one value event (temp_update) over one codec; a multi-event example would exercise the EventSchema + codec multi-doc join across several events (carried from R311gs).",
+        "Live wz-ap-demo wiring: a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the registry -- the smoke here still encodes wire bytes locally (via the codec's own encode_to_vec) and drives the Engine directly (carried from R311gs)."
+      ],
+      "publishable_decision_summary": "R311gt: switchboard value path handles scalar string/bytes payload fields -- the generated dispatch deep-copies the codec's borrowed &str/&[u8] view into the owned String/Vec<u8> payload struct via .into().",
+      "publishable_changes_bullets": [
+        "wz-switchboard-codegen: new `owned_field_move(sce_type, expr)` threads `.into()` for a scalar string/bytes schema field. SCE decodes a scalar string/bytes codec field as a borrowed view (`&'a str` / `&'a [u8]`, lifetime tied to the wire buffer) but the native-lowered `<Machine><Variant>Payload` struct holds it owned (`String` / `Vec<u8>`, no lifetime -- it derives Clone+Default and outlives the buffer once queued). `.into()` bridges the two with the target inferred from the struct field's known type, so no alloc/std path is named and the one shared helper compiles on both the AP (std) and MCU (no_std+alloc) tiers. A primitive (Copy) field moves verbatim, keeping the primitive-only golden byte-identical.",
+        "wz-switchboard-codegen: the typed_inject_events MachineFacts doc corrected -- the native-lowerable schema rule is \"non-enum\" (primitive plus scalar string/bytes fields), not \"primitive-only\" (verified against SCE schema_is_native_payload_eligible, which rejects only SceType::Enum).",
+        "wz-switchboard-example: the temp_update EventSchema + temp_payload codec gain a scalar string field (sensor_id: length-prefixed UTF-8 = sensor_id_len VLE u64 + sensor_id string length-ref, the zenoh-pico _z_string_encode wire shape); the codec is now a borrowed view (TempPayload<'a> { sensor_id: &'a str }).",
+        "wz-switchboard-example: sensor_monitor adds a native string guard (hot --temp_update[_event.data.sensor_id === 'kitchen']--> alarm) + an alarm state, so the decoded value is observed semantically -- proving the borrowed-view -> owned field-move delivered the right value, not just that it compiled.",
+        "wz-switchboard-example tests: temp_bytes -> temp_wire (encodes via the codec's own encode_to_vec, a real publisher encode -> wire -> decode round-trip); new alarm test (static dispatch + AP registry) asserts only the kitchen sensor escalates hot -> alarm, livingroom stays hot."
+      ],
+      "publishable_verification_bullets": [
+        "wz-switchboard-codegen: 21 tests incl new value_string_and_bytes_fields_convert_to_owned (a mixed primitive+string+bytes schema -> celsius_centi verbatim, sensor_id.into(), raw.into(), and no .into() sprayed on the primitive); the existing primitive-only golden_mixed_value_and_signal_switchboard golden is unchanged; cargo clippy clean.",
+        "wz-switchboard-example: 10 tests (5 static dispatch + 5 AP registry) incl alarm_sample_branches_on_decoded_string{,_via_registry} -- the first real compile + run of a borrowed string codec field (&'a str) deep-copied into the owned payload (String) and observed by a native string guard (kitchen -> alarm); cargo clippy + fmt --check clean.",
+        "Generated dispatch confirmed against real SCE codegen: codec TempPayload<'a> { sensor_id: &'a str } (borrowed) -> SensorMonitorTempUpdatePayload { celsius_centi: decoded.celsius_centi, sensor_id: decoded.sensor_id.into() } (owned); the string === guard lowered natively (temp_update stays in typed_inject_events).",
+        "No ripple: wz-session-core switchboard 121 tests + wz-statechart-bridge build unchanged (no .into() on signal/primitive paths); cargo build --workspace clean.",
+        "Full host run-ci (WZ_RUN_LAYER_G=1) all required layers green incl Layer G MCU no_std cross-compile (string/bytes value path is alloc-tier; the no-alloc MCU targets carry no string payload, so the existing signal/primitive paths are byte-unaffected) + Layer M; cargo fmt --check clean.",
+        "validate_workspace: §5.20 caveat appended; sections 257 unchanged, entries 553->554, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Bytes payload in the live example: the codegen golden covers the bytes .into() (&[u8] -> Vec<u8>) emission, but the live wz-switchboard-example exercises only a string field; a bytes-bearing example would add a second length-prefixed codec field over the same mechanism.",
+        "Multi-codec / multi-event switchboards: the example exercises one value event (temp_update) over one codec; a multi-event example would exercise the EventSchema + codec multi-doc join across several events (carried from R311gs).",
+        "Live wz-ap-demo wiring: a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the registry -- the smoke here still encodes wire bytes locally (via the codec's own encode_to_vec) and drives the Engine directly (carried from R311gs)."
       ]
     },
     "Round 311h": {

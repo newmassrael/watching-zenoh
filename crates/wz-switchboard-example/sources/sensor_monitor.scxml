@@ -3,16 +3,18 @@
   SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
   SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
-<!-- gc-3c example application machine for the switchboard value path.
+<!-- gc-3c/R311gt example application machine for the switchboard value path.
 
-     Imports the temp_update EventSchema and reads
-     `_event.data.celsius_centi` in a transition guard, so SCE lowers
-     `temp_update` to a native typed `_event.data` comparison (no script
-     engine) and emits the `SensorMonitorInject::raise_temp_update` seam +
-     lists `temp_update` in `typed_inject_events`. The switchboard binds the
-     keyexpr `home/*/temp` to this event (value binding, codec=temp_payload),
-     so an inbound zenoh sample drives the statechart with a typed payload —
-     the MCU-clean value path end to end. -->
+     Imports the temp_update EventSchema and reads `_event.data.celsius_centi`
+     (uint16) AND `_event.data.sensor_id` (string) in native typed transition
+     guards, so SCE lowers `temp_update` to native `_event.data` comparisons
+     (no script engine) and emits the `SensorMonitorInject::raise_temp_update`
+     seam + lists `temp_update` in `typed_inject_events`. The string guard
+     observes the decoded `sensor_id` semantically, proving the switchboard's
+     borrowed-view (`&str`) -> owned (`String`) field-move delivered the right
+     value. The switchboard binds the keyexpr `home/*/temp` to this event
+     (value binding, codec=temp_payload), so an inbound zenoh sample drives the
+     statechart with a typed payload — the MCU-clean value path end to end. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        name="sensor_monitor"
@@ -25,8 +27,16 @@
     <transition event="temp_update" cond="_event.data.celsius_centi &gt; 3000" target="hot"/>
   </state>
   <state id="hot">
+    <!-- native string guard: only the kitchen sensor escalates to alarm.
+         Reads `_event.data.sensor_id` (a non-enum string field is payload-
+         eligible), so this lowers natively too — `temp_update` keeps its
+         typed-inject seam. -->
+    <transition event="temp_update" cond="_event.data.sensor_id === 'kitchen'" target="alarm"/>
     <!-- signal event: no _event.data guard, so `reset` is NOT a typed-inject
          seam — the switchboard binds it as a signal row. -->
+    <transition event="reset" target="idle"/>
+  </state>
+  <state id="alarm">
     <transition event="reset" target="idle"/>
   </state>
 </scxml>

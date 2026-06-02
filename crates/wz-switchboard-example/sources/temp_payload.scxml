@@ -3,13 +3,19 @@
   SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
   SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
-<!-- gc-3c example wire codec: decodes a published temperature sample's
-     payload bytes into `{ celsius_centi: u16 }`. The single big-endian
-     uint16 field matches the temp_update EventSchema field by id + type, so
-     the switchboard generator's codec-fields-superset-of-schema cross-check
-     passes and emits `SensorMonitorTempUpdatePayload { celsius_centi:
-     decoded.celsius_centi }`. This is the wire-format SSOT (a publisher
-     encodes the same codec); the EventSchema is the datamodel-view SSOT. -->
+<!-- gc-3c/R311gt example wire codec: decodes a published temperature
+     sample's payload bytes into `{ celsius_centi: u16, sensor_id: &str }`.
+     The big-endian uint16 + a length-prefixed UTF-8 string (`sensor_id_len`
+     VLE u64 + `sensor_id` length-ref, the same wire shape as zenoh-pico's
+     `_z_string_encode`). `celsius_centi` + `sensor_id` match the temp_update
+     EventSchema fields by id + type (the wire-only `sensor_id_len` is an
+     extra codec field — the cross-check is codec-superset-of-schema), so the
+     switchboard generator emits `SensorMonitorTempUpdatePayload {
+     celsius_centi: decoded.celsius_centi, sensor_id: decoded.sensor_id.into()
+     }`. The string field decodes as a borrowed `&str` view but the payload
+     struct holds it owned (`String`), so `.into()` deep-copies it past the
+     wire buffer's lifetime. This is the wire-format SSOT (a publisher encodes
+     the same codec); the EventSchema is the datamodel-view SSOT. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        sce:kind="codec"
@@ -17,5 +23,8 @@
        name="temp_payload">
   <datamodel>
     <sce:field id="celsius_centi" sce:type="uint16" sce:byte="0" sce:bit-size="16"/>
+    <sce:field id="sensor_id_len" sce:type="uint64" sce:byte="2" sce:bit-size="vle"/>
+    <sce:field id="sensor_id" sce:type="string" sce:byte="3" sce:bit-size="length-ref"
+               sce:length-field="sensor_id_len" sce:max-size="64"/>
   </datamodel>
 </scxml>

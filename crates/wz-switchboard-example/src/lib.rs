@@ -11,14 +11,19 @@
 //!    `SensorMonitorInject::raise_temp_update` typed seam SCE generated from
 //!    the imported EventSchema);
 //!  - [`temp_payload`] — the wire codec that decodes a sample's bytes into
-//!    `{ celsius_centi: u16 }`;
+//!    `{ celsius_centi: u16, sensor_id: &str }` (a borrowed string view);
 //!  - the crate-root `dispatch_switchboard` — the generated closed dispatch
 //!    that matches an inbound keyexpr and injects the typed `_event.data`.
 //!
 //! The tests are the first REAL compile + run of a value-path dispatch: the
 //! gc-3b golden only asserted the emitted *string*; here it type-checks
 //! against SCE's actual generated `Engine<SensorMonitorPolicy>` +
-//! `SensorMonitorTempUpdatePayload` and drives a live engine.
+//! `SensorMonitorTempUpdatePayload` and drives a live engine. The schema mixes
+//! a primitive (`celsius_centi`) and a scalar string (`sensor_id`) field: the
+//! codec decodes `sensor_id` as a borrowed `&str` but the payload struct holds
+//! it owned (`String`), so the generated dispatch threads a `.into()` deep-copy
+//! — and a native string guard (`sensor_id === 'kitchen'`) observes the value,
+//! proving the borrowed-view -> owned field-move delivered it correctly.
 
 // The generated state machine carries a budget of `#![allow(...)]` inner
 // attributes the `include!` mid-module strips (build.rs); restore them here as
@@ -59,13 +64,21 @@ include!(concat!(env!("OUT_DIR"), "/dispatch_switchboard.rs"));
 mod tests {
     use super::dispatch_switchboard;
     use super::sensor_monitor::{SensorMonitorPolicy, SensorMonitorState};
+    use super::temp_payload::TempPayload;
     use sce_rust_runtime::Engine;
 
-    // The temp_payload codec's wire form: one big-endian u16 (centidegrees).
-    // A real publisher encodes via the same codec; here we lay the 2 bytes out
-    // directly so the test exercises the generated *decode* the dispatch runs.
-    fn temp_bytes(centi: u16) -> [u8; 2] {
-        [(centi >> 8) as u8, (centi & 0xff) as u8]
+    // The temp_payload codec's wire form: a big-endian u16 (centidegrees) +
+    // a length-prefixed UTF-8 `sensor_id`. A real publisher encodes via this
+    // same codec, so the test runs a true encode -> wire -> decode round-trip
+    // (the generated `encode_to_vec` produces exactly the bytes the dispatch's
+    // `decode` reads back) rather than hand-laying the VLE length prefix.
+    fn temp_wire(centi: u16, sensor_id: &str) -> Vec<u8> {
+        TempPayload {
+            celsius_centi: centi,
+            sensor_id_len: sensor_id.len() as u64,
+            sensor_id,
+        }
+        .encode_to_vec()
     }
 
     #[test]
@@ -74,9 +87,10 @@ mod tests {
         engine.initialize();
         assert_eq!(engine.get_current_state(), SensorMonitorState::Idle);
 
-        // 35.00 C > the 30.00 C native guard threshold.
-        let bytes = temp_bytes(3500);
-        let injected = dispatch_switchboard("home/livingroom/temp", &bytes, &mut engine);
+        // 35.00 C > the 30.00 C native guard threshold. The borrowed `sensor_id`
+        // view is deep-copied into the owned payload field on the way in.
+        let wire = temp_wire(3500, "livingroom");
+        let injected = dispatch_switchboard("home/livingroom/temp", &wire, &mut engine);
         engine.step();
 
         assert_eq!(injected, 1, "the temp value row fired");
@@ -93,8 +107,8 @@ mod tests {
         engine.initialize();
 
         // 20.00 C < threshold — the typed guard misses.
-        let bytes = temp_bytes(2000);
-        let injected = dispatch_switchboard("home/livingroom/temp", &bytes, &mut engine);
+        let wire = temp_wire(2000, "livingroom");
+        let injected = dispatch_switchboard("home/livingroom/temp", &wire, &mut engine);
         engine.step();
 
         assert_eq!(injected, 1, "the row still fired (event injected)");
@@ -110,7 +124,11 @@ mod tests {
         let mut engine = Engine::new(SensorMonitorPolicy::new());
         engine.initialize();
         // Drive to hot first.
-        dispatch_switchboard("home/livingroom/temp", &temp_bytes(3500), &mut engine);
+        dispatch_switchboard(
+            "home/livingroom/temp",
+            &temp_wire(3500, "livingroom"),
+            &mut engine,
+        );
         engine.step();
         assert_eq!(engine.get_current_state(), SensorMonitorState::Hot);
 
@@ -131,10 +149,45 @@ mod tests {
     fn unmatched_keyexpr_injects_nothing() {
         let mut engine = Engine::new(SensorMonitorPolicy::new());
         engine.initialize();
-        let injected = dispatch_switchboard("office/temp", &temp_bytes(3500), &mut engine);
+        let injected =
+            dispatch_switchboard("office/temp", &temp_wire(3500, "livingroom"), &mut engine);
         engine.step();
         assert_eq!(injected, 0);
         assert_eq!(engine.get_current_state(), SensorMonitorState::Idle);
+    }
+
+    #[test]
+    fn alarm_sample_branches_on_decoded_string() {
+        // The machine has a second native guard reading `_event.data.sensor_id`
+        // (a string-equality `===`), so the borrowed-then-owned `sensor_id`
+        // value is observed semantically: only the `kitchen` sensor escalates a
+        // hot reading to `alarm`; any other hot reading stays `hot`. This proves
+        // the `&str -> String` field-move delivered the correct value, not just
+        // that the payload compiled.
+        let mut engine = Engine::new(SensorMonitorPolicy::new());
+        engine.initialize();
+
+        // A hot livingroom sample reaches `hot` (sensor_id guard misses).
+        dispatch_switchboard(
+            "home/livingroom/temp",
+            &temp_wire(3500, "livingroom"),
+            &mut engine,
+        );
+        engine.step();
+        assert_eq!(engine.get_current_state(), SensorMonitorState::Hot);
+
+        // A hot kitchen sample escalates `hot -> alarm` on the string guard.
+        dispatch_switchboard(
+            "home/kitchen/temp",
+            &temp_wire(3600, "kitchen"),
+            &mut engine,
+        );
+        engine.step();
+        assert_eq!(
+            engine.get_current_state(),
+            SensorMonitorState::Alarm,
+            "decoded sensor_id=\"kitchen\" satisfies the native string guard"
+        );
     }
 }
 
@@ -146,6 +199,7 @@ mod tests {
 #[cfg(test)]
 mod ap_dynamic_tests {
     use super::sensor_monitor::{SensorMonitorPolicy, SensorMonitorState};
+    use super::temp_payload::TempPayload;
     use super::SensorMonitorInjector;
     use sce_rust_runtime::Engine;
     use wz_session_core::reliability::Reliability;
@@ -153,8 +207,16 @@ mod ap_dynamic_tests {
     use wz_session_core::sink::BorrowedSample;
     use wz_session_core::switchboard::SwitchboardRegistry;
 
-    fn temp_bytes(centi: u16) -> [u8; 2] {
-        [(centi >> 8) as u8, (centi & 0xff) as u8]
+    // Encode a temp_payload frame the way a real publisher would (celsius u16 +
+    // length-prefixed `sensor_id`), so the registry-driven decode reads back the
+    // borrowed string the generated injector then owns into the typed payload.
+    fn temp_wire(centi: u16, sensor_id: &str) -> Vec<u8> {
+        TempPayload {
+            celsius_centi: centi,
+            sensor_id_len: sensor_id.len() as u64,
+            sensor_id,
+        }
+        .encode_to_vec()
     }
 
     // Populate a registry from the SAME routing as wz-switchboard.yaml: the temp
@@ -184,7 +246,7 @@ mod ap_dynamic_tests {
         engine.initialize();
         assert_eq!(engine.get_current_state(), SensorMonitorState::Idle);
 
-        let bytes = temp_bytes(3500);
+        let bytes = temp_wire(3500, "livingroom");
         let sample = put_sample("home/livingroom/temp", &bytes);
         // Construct the value injector at the dispatch site (borrows the engine
         // for the duration of one dispatch — the same shape the bridge
@@ -207,7 +269,7 @@ mod ap_dynamic_tests {
         let mut engine = Engine::new(SensorMonitorPolicy::new());
         engine.initialize();
 
-        let bytes = temp_bytes(2000);
+        let bytes = temp_wire(2000, "livingroom");
         let sample = put_sample("home/livingroom/temp", &bytes);
         let mut injector = SensorMonitorInjector::new(&mut engine);
         let injected = board.dispatch(&sample, &mut injector);
@@ -227,7 +289,7 @@ mod ap_dynamic_tests {
         let mut engine = Engine::new(SensorMonitorPolicy::new());
         engine.initialize();
         {
-            let hot = temp_bytes(3500);
+            let hot = temp_wire(3500, "livingroom");
             let sample = put_sample("home/livingroom/temp", &hot);
             let mut injector = SensorMonitorInjector::new(&mut engine);
             board.dispatch(&sample, &mut injector);
@@ -252,7 +314,7 @@ mod ap_dynamic_tests {
         let mut engine = Engine::new(SensorMonitorPolicy::new());
         engine.initialize();
 
-        let bytes = temp_bytes(3500);
+        let bytes = temp_wire(3500, "livingroom");
         let sample = put_sample("office/temp", &bytes);
         let mut injector = SensorMonitorInjector::new(&mut engine);
         let injected = board.dispatch(&sample, &mut injector);
@@ -260,5 +322,40 @@ mod ap_dynamic_tests {
 
         assert_eq!(injected, 0);
         assert_eq!(engine.get_current_state(), SensorMonitorState::Idle);
+    }
+
+    #[test]
+    fn alarm_sample_branches_on_decoded_string_via_registry() {
+        // Cross-profile parity for the static `alarm_sample_branches_on_decoded_string`:
+        // the AP dynamic registry + generated injector deliver the same owned
+        // `sensor_id` to the native string guard, so a hot kitchen sample
+        // escalates `hot -> alarm` identically.
+        let board = registry();
+        let mut engine = Engine::new(SensorMonitorPolicy::new());
+        engine.initialize();
+        {
+            let hot = temp_wire(3500, "livingroom");
+            let sample = put_sample("home/livingroom/temp", &hot);
+            let mut injector = SensorMonitorInjector::new(&mut engine);
+            board.dispatch(&sample, &mut injector);
+        }
+        engine.step();
+        assert_eq!(engine.get_current_state(), SensorMonitorState::Hot);
+
+        let kitchen = temp_wire(3600, "kitchen");
+        let sample = put_sample("home/kitchen/temp", &kitchen);
+        let mut injector = SensorMonitorInjector::new(&mut engine);
+        let injected = board.dispatch(&sample, &mut injector);
+        engine.step();
+
+        assert_eq!(
+            injected, 1,
+            "the kitchen temp value row fired via the registry"
+        );
+        assert_eq!(
+            engine.get_current_state(),
+            SensorMonitorState::Alarm,
+            "dynamic decode of sensor_id=\"kitchen\" satisfies the native string guard"
+        );
     }
 }

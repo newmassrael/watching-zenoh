@@ -71,7 +71,8 @@ pub struct MachineFacts {
     /// [`Self::external_ingress_events`] whose events carry a generated
     /// `<Machine>Inject::raise_<event>(payload)` typed value-inject seam
     /// (their transition guard lowered to a native typed `_event.data`
-    /// comparison; primitive-only schema, no script engine). A switchboard
+    /// comparison; a non-enum schema — primitive plus scalar string/bytes
+    /// fields, no script engine). A switchboard
     /// **value** binding's event MUST be a member — an event absent here has
     /// no typed value path (only the signal path), so the generator gates on
     /// this set rather than re-deriving SCE's native-lowering eligibility.
@@ -348,6 +349,29 @@ pub enum SceType {
     Primitive(String),
     /// Any non-primitive (e.g. `enum:<alias>`) — opaque to the value path.
     NonPrimitive,
+}
+
+/// The expression that moves a codec-decoded field into the typed
+/// `<Machine><Variant>Payload` struct's owned field. `expr` is the decoded
+/// access (e.g. `"decoded.sensor_id"`).
+///
+/// SCE decodes a scalar `string` / `bytes` codec field as a **borrowed** view
+/// — `&'a str` / `&'a [u8]`, the lifetime tied to the wire buffer
+/// (`sce-build` generator: `(Rust, String) => "&'a str"`,
+/// `(Rust, Bytes) => "&'a [u8]"`). The native-lowered payload struct, by
+/// contrast, holds the field **owned** — `String` / `Vec<u8>`, no lifetime: it
+/// derives `Clone + Default` and the engine queues it past the buffer's life.
+/// `.into()` bridges the two (`<&str as Into<String>>` /
+/// `<&[u8] as Into<Vec<u8>>>`), the target inferred from the struct field's
+/// known type — so no `alloc` / `std` path is named and the one shared helper
+/// compiles on both the AP (std) and the MCU (`no_std` + `alloc`) tiers. A
+/// primitive (`Copy`) field needs no conversion and moves verbatim, keeping the
+/// primitive-only golden byte-identical.
+fn owned_field_move(sce_type: &SceType, expr: &str) -> String {
+    match sce_type {
+        SceType::Primitive(p) if p == "string" || p == "bytes" => format!("{expr}.into()"),
+        _ => expr.to_string(),
+    }
 }
 
 /// One field of an EventSchema or a codec document: its id and SCE type.
@@ -726,11 +750,18 @@ pub fn generate(input: &GenInput) -> Result<String, CodegenError> {
                 // Emit the helper + injector value arm once per unique event.
                 if seen_value_events.insert(binding.event.clone()) {
                     // Field moves in schema declaration order (each on its own
-                    // line at 12-space indent inside the struct literal).
+                    // line at 12-space indent inside the struct literal). A
+                    // scalar string/bytes field decodes borrowed (`&str` /
+                    // `&[u8]`) but the payload struct holds it owned (`String` /
+                    // `Vec<u8>`), so `owned_field_move` threads the `.into()`;
+                    // primitive fields move verbatim.
                     let field_moves = schema
                         .fields
                         .iter()
-                        .map(|f| format!("\n            {id}: decoded.{id},", id = f.id))
+                        .map(|f| {
+                            let mv = owned_field_move(&f.sce_type, &format!("decoded.{}", f.id));
+                            format!("\n            {id}: {mv},", id = f.id, mv = mv)
+                        })
                         .collect::<String>();
                     value_helpers.push_str(&format!(
                         "\n/// Decode the wire payload for `{event}` with the `{codec}` forge codec\n\
@@ -1439,6 +1470,42 @@ pub fn dispatch_switchboard(
             2,
             "two static dispatch arms (one per keyexpr)"
         );
+    }
+
+    // ---- generate: borrowed string/bytes field owned-conversion ----
+
+    #[test]
+    fn value_string_and_bytes_fields_convert_to_owned() {
+        // A schema mixing a primitive (`celsius_centi`), a borrowed-decoded
+        // string (`sensor_id`), and a borrowed-decoded bytes (`raw`) field.
+        // The primitive guard keeps the event in typed_inject_events; the
+        // string/bytes fields ride along in the payload struct and must be
+        // moved owned (`.into()`), while the primitive moves verbatim.
+        let facts = parse_machine_facts(&facts_json_typed("m", &["temp_update"], &["temp_update"]))
+            .unwrap();
+        let s = spec(
+            "m",
+            vec![value_binding("home/temp", "temp_update", "temp_payload")],
+        );
+        let fields = &[
+            ("celsius_centi", "uint16"),
+            ("sensor_id", "string"),
+            ("raw", "bytes"),
+        ];
+        let schemas = [parse_event_schema_facts(&schema_json("temp_update", fields)).unwrap()];
+        let codecs =
+            [parse_codec_facts(&codec_json("temp_payload", fields), "temp_payload").unwrap()];
+        let out = generate(&value_input(&s, &facts, &schemas, &codecs)).expect("generate");
+
+        // Primitive moves verbatim (Copy out of the borrowed struct).
+        assert!(out.contains("celsius_centi: decoded.celsius_centi,"));
+        // Borrowed string/bytes views are deep-copied into the owned payload
+        // fields via `.into()` (`&str -> String`, `&[u8] -> Vec<u8>`).
+        assert!(out.contains("sensor_id: decoded.sensor_id.into(),"));
+        assert!(out.contains("raw: decoded.raw.into(),"));
+        // No `.into()` is sprayed onto the primitive (would trip
+        // clippy::useless_conversion and drift the primitive golden).
+        assert!(!out.contains("celsius_centi: decoded.celsius_centi.into(),"));
     }
 
     // ---- generate: value-path validation rejections ----
