@@ -11,7 +11,7 @@
 //!    `SensorMonitorInject::raise_temp_update` typed seam SCE generated from
 //!    the imported EventSchema);
 //!  - [`temp_payload`] — the wire codec that decodes a sample's bytes into
-//!    `{ celsius_centi: u16, sensor_id: &str }` (a borrowed string view);
+//!    `{ celsius_centi: u16, sensor_id: &str, raw: &[u8] }` (borrowed views);
 //!  - the crate-root `dispatch_switchboard` — the generated closed dispatch
 //!    that matches an inbound keyexpr and injects the typed `_event.data`.
 //!
@@ -19,11 +19,15 @@
 //! gc-3b golden only asserted the emitted *string*; here it type-checks
 //! against SCE's actual generated `Engine<SensorMonitorPolicy>` +
 //! `SensorMonitorTempUpdatePayload` and drives a live engine. The schema mixes
-//! a primitive (`celsius_centi`) and a scalar string (`sensor_id`) field: the
-//! codec decodes `sensor_id` as a borrowed `&str` but the payload struct holds
-//! it owned (`String`), so the generated dispatch threads a `.into()` deep-copy
-//! — and a native string guard (`sensor_id === 'kitchen'`) observes the value,
-//! proving the borrowed-view -> owned field-move delivered it correctly.
+//! a primitive (`celsius_centi`), a scalar string (`sensor_id`), and a scalar
+//! bytes (`raw`) field: the codec decodes `sensor_id` / `raw` as borrowed
+//! `&str` / `&[u8]` but the payload struct holds them owned (`String` /
+//! `Vec<u8>`), so the generated dispatch threads a `.into()` deep-copy for
+//! each. A native string guard (`sensor_id === 'kitchen'`) observes the string
+//! value semantically; the `raw` bytes field rides through the same `.into()`
+//! field-move (proven by compile + the encode->decode round-trip) but is
+//! unguarded — SCE's Rust emitter does not yet coerce a `bytes === '<lit>'`
+//! cond to a byte-string literal, so a native bytes guard would not compile.
 
 // The generated state machine carries a budget of `#![allow(...)]` inner
 // attributes the `include!` mid-module strips (build.rs); restore them here as
@@ -68,17 +72,25 @@ mod tests {
     use sce_rust_runtime::Engine;
 
     // The temp_payload codec's wire form: a big-endian u16 (centidegrees) +
-    // a length-prefixed UTF-8 `sensor_id`. A real publisher encodes via this
-    // same codec, so the test runs a true encode -> wire -> decode round-trip
-    // (the generated `encode_to_vec` produces exactly the bytes the dispatch's
-    // `decode` reads back) rather than hand-laying the VLE length prefix.
-    fn temp_wire(centi: u16, sensor_id: &str) -> Vec<u8> {
+    // a length-prefixed UTF-8 `sensor_id` + a length-prefixed `raw` blob. A
+    // real publisher encodes via this same codec, so the test runs a true
+    // encode -> wire -> decode round-trip (the generated `encode_to_vec`
+    // produces exactly the bytes the dispatch's `decode` reads back) rather
+    // than hand-laying the VLE length prefixes.
+    fn temp_wire_full(centi: u16, sensor_id: &str, raw: &[u8]) -> Vec<u8> {
         TempPayload {
             celsius_centi: centi,
             sensor_id_len: sensor_id.len() as u64,
             sensor_id,
+            raw_len: raw.len() as u64,
+            raw,
         }
         .encode_to_vec()
+    }
+
+    // Common case: no `raw` blob (the celsius / sensor_id guards ignore it).
+    fn temp_wire(centi: u16, sensor_id: &str) -> Vec<u8> {
+        temp_wire_full(centi, sensor_id, b"")
     }
 
     #[test]
@@ -189,6 +201,79 @@ mod tests {
             "decoded sensor_id=\"kitchen\" satisfies the native string guard"
         );
     }
+
+    #[test]
+    fn non_kitchen_hot_sample_stays_hot() {
+        // Discriminating / regression test: the hot->alarm guard reads
+        // `_event.data.sensor_id`, NOT celsius. A hot reading from a non-kitchen
+        // sensor (celsius well over the 3000 threshold) must therefore stay
+        // `hot`, not escalate. Under the SCE per-state guard-index collision
+        // (pre-pin-1474bd0a9) the hot guard was mis-rendered as `celsius > 3000`,
+        // so this very sample wrongly went to `alarm`; the assertion below is
+        // the guard that would have caught that bug.
+        let mut engine = Engine::new(SensorMonitorPolicy::new());
+        engine.initialize();
+        dispatch_switchboard(
+            "home/livingroom/temp",
+            &temp_wire(3500, "livingroom"),
+            &mut engine,
+        );
+        engine.step();
+        assert_eq!(engine.get_current_state(), SensorMonitorState::Hot);
+
+        // Hotter still (3600 > 3000), but a bedroom sensor — sensor_id misses.
+        let injected = dispatch_switchboard(
+            "home/bedroom/temp",
+            &temp_wire(3600, "bedroom"),
+            &mut engine,
+        );
+        engine.step();
+        assert_eq!(injected, 1, "the temp value row still fired");
+        assert_eq!(
+            engine.get_current_state(),
+            SensorMonitorState::Hot,
+            "non-kitchen hot sample must stay hot (sensor_id guard misses, \
+             not the celsius guard)"
+        );
+    }
+
+    #[test]
+    fn bytes_payload_field_rides_through_value_path() {
+        // The `raw` bytes field is unguarded but still decoded (borrowed
+        // `&[u8]`), deep-copied to the owned `Vec<u8>` payload field via the
+        // generated `.into()`, and injected — exercising the bytes field-move
+        // end to end against the real SCE codec. A non-empty `raw` blob (here
+        // 4 bytes incl. a non-UTF-8 0xFF, which a bytes field carries verbatim
+        // where a string field could not) must not disturb the celsius/sensor_id
+        // guards: the sample still drives idle -> hot -> alarm exactly as the
+        // empty-raw samples do, proving the extra field decodes + converts +
+        // injects cleanly.
+        let mut engine = Engine::new(SensorMonitorPolicy::new());
+        engine.initialize();
+        let blob: &[u8] = &[0x01, 0xff, 0x02, 0x03];
+
+        let injected = dispatch_switchboard(
+            "home/livingroom/temp",
+            &temp_wire_full(3500, "livingroom", blob),
+            &mut engine,
+        );
+        engine.step();
+        assert_eq!(injected, 1, "the temp value row fired");
+        assert_eq!(engine.get_current_state(), SensorMonitorState::Hot);
+
+        let injected = dispatch_switchboard(
+            "home/kitchen/temp",
+            &temp_wire_full(3600, "kitchen", blob),
+            &mut engine,
+        );
+        engine.step();
+        assert_eq!(injected, 1, "the temp value row fired");
+        assert_eq!(
+            engine.get_current_state(),
+            SensorMonitorState::Alarm,
+            "a non-empty raw blob rides through without disturbing the guards"
+        );
+    }
 }
 
 // The AP dynamic half of the value path: the same machine driven through the
@@ -208,15 +293,22 @@ mod ap_dynamic_tests {
     use wz_session_core::switchboard::SwitchboardRegistry;
 
     // Encode a temp_payload frame the way a real publisher would (celsius u16 +
-    // length-prefixed `sensor_id`), so the registry-driven decode reads back the
-    // borrowed string the generated injector then owns into the typed payload.
-    fn temp_wire(centi: u16, sensor_id: &str) -> Vec<u8> {
+    // length-prefixed `sensor_id` + length-prefixed `raw`), so the registry-
+    // driven decode reads back the borrowed string/bytes the generated injector
+    // then owns into the typed payload.
+    fn temp_wire_full(centi: u16, sensor_id: &str, raw: &[u8]) -> Vec<u8> {
         TempPayload {
             celsius_centi: centi,
             sensor_id_len: sensor_id.len() as u64,
             sensor_id,
+            raw_len: raw.len() as u64,
+            raw,
         }
         .encode_to_vec()
+    }
+
+    fn temp_wire(centi: u16, sensor_id: &str) -> Vec<u8> {
+        temp_wire_full(centi, sensor_id, b"")
     }
 
     // Populate a registry from the SAME routing as wz-switchboard.yaml: the temp
@@ -356,6 +448,22 @@ mod ap_dynamic_tests {
             engine.get_current_state(),
             SensorMonitorState::Alarm,
             "dynamic decode of sensor_id=\"kitchen\" satisfies the native string guard"
+        );
+
+        // The owned `raw` bytes field rides through the registry-driven decode
+        // too (a non-empty blob with a non-UTF-8 byte), without disturbing the
+        // outcome — the bytes field-move works on the AP dynamic profile as on
+        // the static one.
+        let blob: &[u8] = &[0x01, 0xff, 0x02, 0x03];
+        let again = temp_wire_full(3600, "kitchen", blob);
+        let sample = put_sample("home/kitchen/temp", &again);
+        let mut injector = SensorMonitorInjector::new(&mut engine);
+        board.dispatch(&sample, &mut injector);
+        engine.step();
+        assert_eq!(
+            engine.get_current_state(),
+            SensorMonitorState::Alarm,
+            "a non-empty raw blob rides through the registry path cleanly"
         );
     }
 }

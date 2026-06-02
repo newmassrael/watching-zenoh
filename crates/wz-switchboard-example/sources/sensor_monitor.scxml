@@ -3,16 +3,23 @@
   SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
   SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
-<!-- gc-3c/R311gt example application machine for the switchboard value path.
+<!-- gc-3c/R311gv example application machine for the switchboard value path.
 
-     Imports the temp_update EventSchema and reads `_event.data.celsius_centi`
-     (uint16) AND `_event.data.sensor_id` (string) in native typed transition
-     guards, so SCE lowers `temp_update` to native `_event.data` comparisons
-     (no script engine) and emits the `SensorMonitorInject::raise_temp_update`
-     seam + lists `temp_update` in `typed_inject_events`. The string guard
-     observes the decoded `sensor_id` semantically, proving the switchboard's
-     borrowed-view (`&str`) -> owned (`String`) field-move delivered the right
-     value. The switchboard binds the keyexpr `home/*/temp` to this event
+     Imports the temp_update EventSchema and reads a DIFFERENT typed field in
+     each guarded state: `_event.data.celsius_centi` (uint16) in idle and
+     `_event.data.sensor_id` (string) in hot. Two guards in two states, so the
+     machine exercises SCE's per-source-state guard keying fixed in pin
+     1474bd0a9 (R311gu) — before that fix both rendered idle's celsius guard.
+     SCE lowers `temp_update` to native `_event.data` comparisons (no script
+     engine) and emits the `SensorMonitorInject::raise_temp_update` seam +
+     lists `temp_update` in `typed_inject_events`. The string guard observes
+     the decoded `sensor_id` semantically. The third payload field `raw`
+     (bytes) rides in the typed payload too — exercising the borrowed `&[u8]`
+     -> owned `Vec<u8>` field-move via `.into()` — but is NOT guarded: SCE's
+     Rust emitter lowers a `bytes === '<lit>'` cond to `ev.raw == "<lit>"`
+     (a `&str` literal, no `Vec<u8>: PartialEq<&str>`), so a native bytes
+     guard does not compile today (it would need to emit `b"<lit>"`). The
+     switchboard binds the keyexpr `home/*/temp` to this event
      (value binding, codec=temp_payload), so an inbound zenoh sample drives the
      statechart with a typed payload — the MCU-clean value path end to end. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"

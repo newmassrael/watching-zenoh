@@ -881,7 +881,8 @@
         "gc-3b emits typed raise_<event> via generated <Machine>Inject over Engine<P>; consumer wiring gc-3c.",
         "gc-3c: wired into wz-switchboard-example build.rs; value path verified e2e (decode->raise->guard).",
         "R311gs: AP dynamic value path via generated injector->raise_external_typed; cross-profile SSOT.",
-        "R311gt: string/bytes payload fields decode borrowed; dispatch .into()s to owned; alloc-tier only."
+        "R311gt: string/bytes payload fields decode borrowed; dispatch .into()s to owned; alloc-tier only.",
+        "R311gv: bytes payload field live via .into(); native bytes guard awaits SCE byte-literal lowering."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -29080,6 +29081,52 @@
         "Bytes payload field in the live example (carry from R311gt): now unblocked by the guard fix. An observable bytes guard (e.g. `alarm --temp_update[_event.data.raw === 'ack']--> idle`) plus discriminating negative tests (a non-kitchen hot sample must stay hot, not escalate) would harden the multi-state native-guard coverage and exercise the `&[u8] -> Vec<u8>` field-move end to end against a live engine.",
         "Multi-codec / multi-event switchboards (carry from R311gs/gt): the example exercises one value event over one codec; a multi-event example would exercise the EventSchema + codec multi-doc join across several events.",
         "Live wz-ap-demo wiring (carry from R311gs): a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the registry."
+      ]
+    },
+    "Round 311gv": {
+      "decision_summary": "R311gv: discharge gc-3 carry #1 -- add a scalar bytes field (raw) to the wz-switchboard-example payload, exercising the &[u8]->Vec<u8> .into() field-move live end to end; + a discriminating string-guard regression test for the R311gu fix.",
+      "changes_bullets": [
+        "wz-switchboard-example: temp_update_schema + temp_payload gain a scalar bytes field `raw` (length-prefixed on the wire: raw_len VLE u64 + raw bytes length-ref, mirroring sensor_id). The generated SensorMonitorTempUpdatePayload now holds `raw: Vec<u8>` (owned) and the generated dispatch threads `raw: decoded.raw.into()` -- the borrowed `&[u8]` -> owned `Vec<u8>` deep-copy. This is the first LIVE exercise of the bytes branch of the codegen owned_field_move (R311gt covered bytes .into() in a codegen golden only).",
+        "wz-switchboard-example tests: temp_wire -> temp_wire_full(centi, sensor_id, raw) with a 2-arg temp_wire defaulting raw to empty; new bytes_payload_field_rides_through_value_path drives a non-empty, non-UTF-8 (0xFF) blob through the static + AP-registry paths, asserting the raw field decodes + converts + injects without disturbing the celsius/sensor_id-driven outcome.",
+        "wz-switchboard-example: new non_kitchen_hot_sample_stays_hot discriminating/regression test -- a hot non-kitchen sample (celsius 3600 > 3000) must STAY hot because the hot->alarm guard reads sensor_id, not celsius. This is the assertion that would have caught the SCE per-state guard-index collision fixed in R311gu (pin 1474bd0a9): pre-fix the hot guard was mis-rendered as celsius>3000 and this sample wrongly escalated to alarm.",
+        "The `raw` field is intentionally NOT guarded: SCE's Rust emitter lowers a `bytes === '<lit>'` cond to `ev.raw == \"<lit>\"` (a &str literal), and `Vec<u8>: PartialEq<&str>` does not exist, so a native bytes guard does not compile today (it would need to emit `b\"<lit>\"`). Documented in sensor_monitor.scxml + temp_update_schema.scxml; an observable bytes guard awaits an SCE bytes-literal-coercion fix."
+      ],
+      "verification_bullets": [
+        "wz-switchboard-example 12 tests (7 static + 5 AP) green; the generated dispatch (build dir bf462e5b) confirmed `raw: decoded.raw.into()` + payload struct `pub raw: Vec<u8>` + EventSchema AST fields [celsius_centi:uint16, sensor_id:string, raw:bytes].",
+        "non_kitchen_hot_sample_stays_hot exercises the R311gu guard fix (hot guard genuinely reads sensor_id); bytes_payload_field_rides_through_value_path + the AP mirror exercise the bytes field-move end to end against the real SCE codec.",
+        "cargo clippy -p wz-switchboard-example --all-targets clean; cargo fmt --check clean.",
+        "Full host run-ci all required layers green (example is a std-only leaf crate; no codegen/session-core/MCU surface changed).",
+        "validate_workspace: §5.20 caveat appended; sections 257 unchanged, entries 555->556, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "Observable bytes guard: needs an SCE-side fix so a bytes-vs-string-literal native guard emits a byte-string literal (`ev.raw == b\"ack\"`) on the Rust backend instead of `ev.raw == \"ack\"` (which fails `Vec<u8>: PartialEq<&str>`). Then `alarm --temp_update[_event.data.raw === 'ack']--> idle` would observe the decoded bytes value semantically, the way the sensor_id string guard already does. AI must not fix SCE directly (R311gu lesson); report it for the SCE side.",
+        "Multi-codec / multi-event switchboards (carry from R311gs/gt): the example exercises one value event over one codec; a multi-event example would exercise the EventSchema + codec multi-doc join across several events.",
+        "Live wz-ap-demo wiring (carry from R311gs): a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the registry (the smoke still encodes wire bytes locally via the codec's encode_to_vec + drives the Engine directly)."
+      ],
+      "publishable_decision_summary": "R311gv: discharge gc-3 carry #1 -- add a scalar bytes field (raw) to the wz-switchboard-example payload, exercising the &[u8]->Vec<u8> .into() field-move live end to end; + a discriminating string-guard regression test for the R311gu fix.",
+      "publishable_changes_bullets": [
+        "wz-switchboard-example: temp_update_schema + temp_payload gain a scalar bytes field `raw` (length-prefixed on the wire: raw_len VLE u64 + raw bytes length-ref, mirroring sensor_id). The generated SensorMonitorTempUpdatePayload now holds `raw: Vec<u8>` (owned) and the generated dispatch threads `raw: decoded.raw.into()` -- the borrowed `&[u8]` -> owned `Vec<u8>` deep-copy. This is the first LIVE exercise of the bytes branch of the codegen owned_field_move (R311gt covered bytes .into() in a codegen golden only).",
+        "wz-switchboard-example tests: temp_wire -> temp_wire_full(centi, sensor_id, raw) with a 2-arg temp_wire defaulting raw to empty; new bytes_payload_field_rides_through_value_path drives a non-empty, non-UTF-8 (0xFF) blob through the static + AP-registry paths, asserting the raw field decodes + converts + injects without disturbing the celsius/sensor_id-driven outcome.",
+        "wz-switchboard-example: new non_kitchen_hot_sample_stays_hot discriminating/regression test -- a hot non-kitchen sample (celsius 3600 > 3000) must STAY hot because the hot->alarm guard reads sensor_id, not celsius. This is the assertion that would have caught the SCE per-state guard-index collision fixed in R311gu (pin 1474bd0a9): pre-fix the hot guard was mis-rendered as celsius>3000 and this sample wrongly escalated to alarm.",
+        "The `raw` field is intentionally NOT guarded: SCE's Rust emitter lowers a `bytes === '<lit>'` cond to `ev.raw == \"<lit>\"` (a &str literal), and `Vec<u8>: PartialEq<&str>` does not exist, so a native bytes guard does not compile today (it would need to emit `b\"<lit>\"`). Documented in sensor_monitor.scxml + temp_update_schema.scxml; an observable bytes guard awaits an SCE bytes-literal-coercion fix."
+      ],
+      "publishable_verification_bullets": [
+        "wz-switchboard-example 12 tests (7 static + 5 AP) green; the generated dispatch (build dir bf462e5b) confirmed `raw: decoded.raw.into()` + payload struct `pub raw: Vec<u8>` + EventSchema AST fields [celsius_centi:uint16, sensor_id:string, raw:bytes].",
+        "non_kitchen_hot_sample_stays_hot exercises the R311gu guard fix (hot guard genuinely reads sensor_id); bytes_payload_field_rides_through_value_path + the AP mirror exercise the bytes field-move end to end against the real SCE codec.",
+        "cargo clippy -p wz-switchboard-example --all-targets clean; cargo fmt --check clean.",
+        "Full host run-ci all required layers green (example is a std-only leaf crate; no codegen/session-core/MCU surface changed).",
+        "validate_workspace: §5.20 caveat appended; sections 257 unchanged, entries 555->556, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Observable bytes guard: needs an SCE-side fix so a bytes-vs-string-literal native guard emits a byte-string literal (`ev.raw == b\"ack\"`) on the Rust backend instead of `ev.raw == \"ack\"` (which fails `Vec<u8>: PartialEq<&str>`). Then `alarm --temp_update[_event.data.raw === 'ack']--> idle` would observe the decoded bytes value semantically, the way the sensor_id string guard already does. AI must not fix SCE directly (R311gu lesson); report it for the SCE side.",
+        "Multi-codec / multi-event switchboards (carry from R311gs/gt): the example exercises one value event over one codec; a multi-event example would exercise the EventSchema + codec multi-doc join across several events.",
+        "Live wz-ap-demo wiring (carry from R311gs): a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the registry (the smoke still encodes wire bytes locally via the codec's encode_to_vec + drives the Engine directly)."
       ]
     },
     "Round 311h": {

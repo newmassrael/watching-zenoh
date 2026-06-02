@@ -5,15 +5,17 @@
 -->
 <!-- gc-3c/R311gt example EventSchema: the typed `_event.data` contract for
      the `temp_update` event. A primitive field (`celsius_centi`, uint16
-     centidegrees) PLUS a scalar `string` field (`sensor_id`). Imported by
-     sensor_monitor.scxml; the statechart's native typed guard reads
-     `_event.data.celsius_centi`, so the event is native-lowered and SCE emits
-     the `SensorMonitorTempUpdatePayload { celsius_centi: u16, sensor_id: String
-     }` struct (a non-enum schema is payload-eligible — string/bytes included)
-     and the `raise_temp_update` inject seam. `sensor_id` rides in the payload
-     even though the *first* guard only reads `celsius_centi`: it exercises the
-     borrowed-view (`&str`) -> owned (`String`) field-move the switchboard
-     generator emits. The wire decode of those bytes is a separate concern
+     centidegrees) PLUS a scalar `string` field (`sensor_id`) PLUS a scalar
+     `bytes` field (`raw`). Imported by sensor_monitor.scxml, whose native
+     typed guards read `celsius_centi` (idle) and `sensor_id` (hot), so the
+     event is native-lowered and SCE emits the `SensorMonitorTempUpdatePayload
+     { celsius_centi: u16, sensor_id: String, raw: Vec<u8> }` struct (a
+     non-enum schema is payload-eligible — string/bytes included) and the
+     `raise_temp_update` inject seam. `sensor_id` / `raw` exercise the
+     borrowed-view (`&str` / `&[u8]`) -> owned (`String` / `Vec<u8>`)
+     field-moves the switchboard generator emits via `.into()` (the `raw`
+     field rides in the payload but is unguarded — see sensor_monitor.scxml
+     for the SCE bytes-literal-guard gap). The wire decode of those bytes is a separate concern
      (temp_payload.scxml, a forge codec) — wz owns the codec<->schema field
      pairing. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
@@ -24,5 +26,6 @@
   <datamodel>
     <data id="celsius_centi" sce:type="uint16" sce:direction="in"/>
     <data id="sensor_id" sce:type="string" sce:direction="in"/>
+    <data id="raw" sce:type="bytes" sce:direction="in"/>
   </datamodel>
 </scxml>
