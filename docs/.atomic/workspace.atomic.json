@@ -848,6 +848,40 @@
         "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
       ]
     },
+    "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart": {
+      "title": "§5.20 Statechart",
+      "parent_doc": "docs/feature_inventory.md",
+      "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+      "decision_status": "active",
+      "intent": "Statechart domain catalog: 1 atomic feature (switchboard, active) — the keyexpr->SCXML event-injection seam; gc-3 adds the static generator + value-path features.",
+      "rationale_bullets": [
+        "Composable framework lens: statechart ingress is its own domain, not a pubsub/declare sub-aspect.",
+        "switchboard implies codec-push (reacts to inbound Push), independent of pubsub-put.",
+        "No zenoh-cpp/pico equivalent: wz-specific SCE statechart ACL ingress (Ports-and-Adapters).",
+        "EventInjector port is unconditional + alloc-free so the no-heap MCU profile can name it.",
+        "AP dynamic registry + MCU gc-3 generated match call the same port = one ingress shape."
+      ],
+      "outputs_bullets": [
+        "Active set (1): switchboard (R311gh-gi wire-up).",
+        "switchboard gates SwitchboardRegistry + SwitchboardEntry (switchboard.rs alloc_impl).",
+        "switchboard gates Observer.switchboard field + dispatch_switchboard fan-out (R311gi).",
+        "EventInjector trait + &mut blanket impl stay unconditional (AP+MCU ingress contract).",
+        "Reuses resolve_wireexpr + keyexpr_match SSOT (no duplicated matching/resolution).",
+        "gc-3 (forward): static generator (wz-switchboard.yaml -> MCU match + build-time validate).",
+        "gc-3 (forward): value-path feature (typed EventSchema decode -> _event.data)."
+      ],
+      "caveats_bullets": [
+        "switchboard cfg-off: no injection seam; registry + dispatch_switchboard elide.",
+        "Inbound Push still flows to the data-callback path (switchboard is independent).",
+        "Only the signal path (empty _event.data) is wired; value path is gc-3-deferred.",
+        "MCU static match (gc-3) not yet generated; AP dynamic registry is today's only impl.",
+        "EngineInjector concrete impl lives in the sibling no_std wz-statechart-bridge crate."
+      ],
+      "impact_scope": [
+        "runtime-crate--sce_link_runtime_tokio",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog"
+      ]
+    },
     "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting": {
       "title": "§5.3 Scouting",
       "parent_doc": "docs/feature_inventory.md",
@@ -28656,6 +28690,50 @@
         "Track2 no-alloc (24-module bounded backing flip) remains a separate follow-up."
       ]
     },
+    "Round 311gn": {
+      "decision_summary": "R311gn CLEANUP-3b: add §5.20 Statechart domain to the feature-inventory catalog (switchboard feature + gc-3 forward notes); link the switchboard inventory entry section_ref to it. Doc-only.",
+      "changes_bullets": [
+        "Added §5.20 Statechart subsection under §5 atomic-feature-catalog (the 20th domain): intent + 5 rationale + 7 outputs + 5 caveats + impact_scope, mirroring the §5.8/§5.9 domain template.",
+        "Documents the switchboard atomic feature: EventInjector port (unconditional, alloc-free) + SwitchboardRegistry (AP/alloc) + Observer.dispatch_switchboard fan-out; codec-push-implied, pubsub-put-independent; resolve_wireexpr + keyexpr_match SSOT reuse.",
+        "Forward notes mark gc-3 reserved: the static generator (wz-switchboard.yaml -> MCU closed match + build-time external_ingress_events validation) + the value-path feature (typed EventSchema decode -> _event.data).",
+        "Linked the switchboard inventory entry's section_ref to the new §5.20 (was null), closing the inventory<->catalog cross-link."
+      ],
+      "verification_bullets": [
+        "validate_workspace green: sections 256->257, T1 orphan total=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged (no new style violation), GENERATED.md=sync.",
+        "§5.20 renders with the canonical domain template (Intent / Rationale / Outputs / Caveats / Impact scope), BTreeMap-ordered alongside §5.1-§5.19.",
+        "Doc-only catalog prose change; no code or CI compile surface touched (run-ci not required for a Mnemosyne prose mutation)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "CLEANUP-1 / CLEANUP-2 / CLEANUP-3b all DONE — the gc-2 session-review cleanup carry is fully cleared.",
+        "THEN gc-3: generator (wz-switchboard.yaml -> MCU closed match + build-time validation) + value path (typed EventSchema decode -> _event.data) + example app SCXML machine in wz-ap-demo.",
+        "§5.20 active set stays at 1 (switchboard); it grows as gc-3 wires the generator + value-path features (reserved-now, wire-up later).",
+        "Track2 no-alloc (24-module bounded backing flip) remains a separate follow-up."
+      ],
+      "publishable_decision_summary": "R311gn CLEANUP-3b: add §5.20 Statechart domain to the feature-inventory catalog (switchboard feature + gc-3 forward notes); link the switchboard inventory entry section_ref to it. Doc-only.",
+      "publishable_changes_bullets": [
+        "Added §5.20 Statechart subsection under §5 atomic-feature-catalog (the 20th domain): intent + 5 rationale + 7 outputs + 5 caveats + impact_scope, mirroring the §5.8/§5.9 domain template.",
+        "Documents the switchboard atomic feature: EventInjector port (unconditional, alloc-free) + SwitchboardRegistry (AP/alloc) + Observer.dispatch_switchboard fan-out; codec-push-implied, pubsub-put-independent; resolve_wireexpr + keyexpr_match SSOT reuse.",
+        "Forward notes mark gc-3 reserved: the static generator (wz-switchboard.yaml -> MCU closed match + build-time external_ingress_events validation) + the value-path feature (typed EventSchema decode -> _event.data).",
+        "Linked the switchboard inventory entry's section_ref to the new §5.20 (was null), closing the inventory<->catalog cross-link."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace green: sections 256->257, T1 orphan total=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged (no new style violation), GENERATED.md=sync.",
+        "§5.20 renders with the canonical domain template (Intent / Rationale / Outputs / Caveats / Impact scope), BTreeMap-ordered alongside §5.1-§5.19.",
+        "Doc-only catalog prose change; no code or CI compile surface touched (run-ci not required for a Mnemosyne prose mutation)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "CLEANUP-1 / CLEANUP-2 / CLEANUP-3b all DONE — the gc-2 session-review cleanup carry is fully cleared.",
+        "THEN gc-3: generator (wz-switchboard.yaml -> MCU closed match + build-time validation) + value path (typed EventSchema decode -> _event.data) + example app SCXML machine in wz-ap-demo.",
+        "§5.20 active set stays at 1 (switchboard); it grows as gc-3 wires the generator + value-path features (reserved-now, wire-up later).",
+        "Track2 no-alloc (24-module bounded backing flip) remains a separate follow-up."
+      ]
+    },
     "Round 311h": {
       "decision_summary": "R311h codec-push wire-layer cascade — wz-codecs gate + Cargo edges + session_glue.rs Push surface; pubsub.rs consumer cascade deferred to R311m.",
       "changes_bullets": [
@@ -35007,6 +35085,7 @@
     },
     "switchboard": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart",
       "source": "crates/wz-session-core/src/switchboard.rs",
       "reason": "F=keyexpr->SCXML event injection (SwitchboardRegistry + EventInjector port); P=no zenoh equiv, wz SCE statechart ACL ingress; C=implies codec-push, indep of pubsub-put, MCU=generated match"
     },
