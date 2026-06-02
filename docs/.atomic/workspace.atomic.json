@@ -29036,6 +29036,52 @@
         "Live wz-ap-demo wiring: a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the registry -- the smoke here still encodes wire bytes locally (via the codec's own encode_to_vec) and drives the Engine directly (carried from R311gs)."
       ]
     },
+    "Round 311gu": {
+      "decision_summary": "R311gu: bump vendor/sce pin c16811a9b -> 1474bd0a9, landing the SCE all-6-backend fix for the per-state native-guard-index collision (multi-state typed _event.data guards) + clippy 1.96 clears.",
+      "changes_bullets": [
+        "vendor/sce pin c16811a9b -> 1474bd0a9 (+13 commits). Lands SCE 87ab3ccac \"Co-locate native _event.data guard on its owning transition\": all 6 codegen backends keyed the native typed-guard map by a per-state transition_index, so two states each carrying a native `_event.data` guard at the same local index collided in the machine-global map (the later-inserted guard won, mis-rendering the other transitions' guard). SCE now carries the rendered guard on Transition::native_payload_guard (no index lookup) + a cross-state regression fixture asserted across all 6 backends.",
+        "The fix corrects the wz-switchboard-example sensor_monitor: its `hot --temp_update[_event.data.sensor_id === 'kitchen']--> alarm` guard was mis-rendered as `ev.celsius_centi > 3000` (idle's guard won the shared index-0 key) under the prior pin; it now renders `ev.sensor_id == \"kitchen\"` correctly. This retroactively makes the R311gt alarm_sample_branches_on_decoded_string test valid (it now genuinely depends on the decoded string, not a coincidental celsius>3000).",
+        "Also lands clippy 1.96 lint clears (relevant to this rustc 1.96 host) + pre-push embed/MANIFEST drift hooks (SCE-internal chores).",
+        "wz call-site impact 0: wz parse_machine_facts ignores the additive forge-ast `native_payload_guard` field; sce-rust-runtime (1-line clippy fix in helpers/parallel_state.rs) + sce-build public surface stable. build-sce.sh rebuild required (6 templates changed)."
+      ],
+      "verification_bullets": [
+        "build-sce.sh rebuild green (1m28s); wz-switchboard-example regenerated: sensor_monitor hot guard now `ev.sensor_id == \"kitchen\"`, idle `ev.celsius_centi > 3000` — distinct per state, the collision is gone.",
+        "wz-switchboard-example 10 tests pass, now for the right reason (the hot->alarm transition genuinely depends on the decoded sensor_id).",
+        "Bump blast radius on wz direct deps minimal: sce-rust-runtime = 1-line clippy fix (parallel_state.rs); sce-forge-runtime unchanged; forge-ast.v1 schema change additive (native_payload_guard field + transition_index doc note).",
+        "Full host run-ci (WZ_RUN_LAYER_G=1) all required layers green incl Layer G MCU no_std cross-compile + Layer M.",
+        "validate_workspace: sections 257 unchanged, entries 554->555, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "Bytes payload field in the live example (carry from R311gt): now unblocked by the guard fix. An observable bytes guard (e.g. `alarm --temp_update[_event.data.raw === 'ack']--> idle`) plus discriminating negative tests (a non-kitchen hot sample must stay hot, not escalate) would harden the multi-state native-guard coverage and exercise the `&[u8] -> Vec<u8>` field-move end to end against a live engine.",
+        "Multi-codec / multi-event switchboards (carry from R311gs/gt): the example exercises one value event over one codec; a multi-event example would exercise the EventSchema + codec multi-doc join across several events.",
+        "Live wz-ap-demo wiring (carry from R311gs): a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the registry."
+      ],
+      "publishable_decision_summary": "R311gu: bump vendor/sce pin c16811a9b -> 1474bd0a9, landing the SCE all-6-backend fix for the per-state native-guard-index collision (multi-state typed _event.data guards) + clippy 1.96 clears.",
+      "publishable_changes_bullets": [
+        "vendor/sce pin c16811a9b -> 1474bd0a9 (+13 commits). Lands SCE 87ab3ccac \"Co-locate native _event.data guard on its owning transition\": all 6 codegen backends keyed the native typed-guard map by a per-state transition_index, so two states each carrying a native `_event.data` guard at the same local index collided in the machine-global map (the later-inserted guard won, mis-rendering the other transitions' guard). SCE now carries the rendered guard on Transition::native_payload_guard (no index lookup) + a cross-state regression fixture asserted across all 6 backends.",
+        "The fix corrects the wz-switchboard-example sensor_monitor: its `hot --temp_update[_event.data.sensor_id === 'kitchen']--> alarm` guard was mis-rendered as `ev.celsius_centi > 3000` (idle's guard won the shared index-0 key) under the prior pin; it now renders `ev.sensor_id == \"kitchen\"` correctly. This retroactively makes the R311gt alarm_sample_branches_on_decoded_string test valid (it now genuinely depends on the decoded string, not a coincidental celsius>3000).",
+        "Also lands clippy 1.96 lint clears (relevant to this rustc 1.96 host) + pre-push embed/MANIFEST drift hooks (SCE-internal chores).",
+        "wz call-site impact 0: wz parse_machine_facts ignores the additive forge-ast `native_payload_guard` field; sce-rust-runtime (1-line clippy fix in helpers/parallel_state.rs) + sce-build public surface stable. build-sce.sh rebuild required (6 templates changed)."
+      ],
+      "publishable_verification_bullets": [
+        "build-sce.sh rebuild green (1m28s); wz-switchboard-example regenerated: sensor_monitor hot guard now `ev.sensor_id == \"kitchen\"`, idle `ev.celsius_centi > 3000` — distinct per state, the collision is gone.",
+        "wz-switchboard-example 10 tests pass, now for the right reason (the hot->alarm transition genuinely depends on the decoded sensor_id).",
+        "Bump blast radius on wz direct deps minimal: sce-rust-runtime = 1-line clippy fix (parallel_state.rs); sce-forge-runtime unchanged; forge-ast.v1 schema change additive (native_payload_guard field + transition_index doc note).",
+        "Full host run-ci (WZ_RUN_LAYER_G=1) all required layers green incl Layer G MCU no_std cross-compile + Layer M.",
+        "validate_workspace: sections 257 unchanged, entries 554->555, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Bytes payload field in the live example (carry from R311gt): now unblocked by the guard fix. An observable bytes guard (e.g. `alarm --temp_update[_event.data.raw === 'ack']--> idle`) plus discriminating negative tests (a non-kitchen hot sample must stay hot, not escalate) would harden the multi-state native-guard coverage and exercise the `&[u8] -> Vec<u8>` field-move end to end against a live engine.",
+        "Multi-codec / multi-event switchboards (carry from R311gs/gt): the example exercises one value event over one codec; a multi-event example would exercise the EventSchema + codec multi-doc join across several events.",
+        "Live wz-ap-demo wiring (carry from R311gs): a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the registry."
+      ]
+    },
     "Round 311h": {
       "decision_summary": "R311h codec-push wire-layer cascade — wz-codecs gate + Cargo edges + session_glue.rs Push surface; pubsub.rs consumer cascade deferred to R311m.",
       "changes_bullets": [
