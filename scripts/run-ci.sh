@@ -354,7 +354,13 @@ layer_0_preflight_lints() {
         echo "  fmt --check FAIL deploy/mcu-qemu-demo — run \`(cd deploy/mcu-qemu-demo && cargo fmt --all)\`" >&2
         return 1
     fi
-    echo "  fmt --check OK (crates + deploy/mcu-qemu-demo)"
+    # R311hl — deploy/mcu-noheap-probe is a third standalone workspace
+    # (no-heap registry runtime proof; Layer Q.0). Mirror the fmt gate.
+    if ! (cd deploy/mcu-noheap-probe && cargo fmt --all -- --check); then
+        echo "  fmt --check FAIL deploy/mcu-noheap-probe — run \`(cd deploy/mcu-noheap-probe && cargo fmt --all)\`" >&2
+        return 1
+    fi
+    echo "  fmt --check OK (crates + deploy/mcu-qemu-demo + deploy/mcu-noheap-probe)"
 
     # 0.2 actionlint (optional)
     if ! command -v actionlint >/dev/null 2>&1; then
@@ -1519,17 +1525,72 @@ layer_q_qemu_mcu_e2e() {
         return 0
     fi
 
-    if ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
-        echo "  Q SKIP (arm-none-eabi-gcc not on PATH;" \
-             "install gcc-arm-none-eabi)"
-        return 0
-    fi
-
     local installed
     installed="$(rustup target list --installed 2>/dev/null)"
     local has_qemu=0
     if command -v qemu-system-arm >/dev/null 2>&1; then
         has_qemu=1
+    fi
+    local fail=0
+
+    # ── Q.0 — R311hl no-heap registry runtime probe ──
+    #
+    # deploy/mcu-noheap-probe declares NO `#[global_allocator]` and has NO
+    # C deps (no lwip-sys), so it needs only the rustup target + qemu —
+    # not arm-none-eabi-gcc. A clean LINK is a whole-program proof that the
+    # wz-session-core registry control plane + no-heap fire paths are
+    # allocation-free (any `alloc` reference fails with "no global memory
+    # allocator found"); the semihost SYS_EXIT=0 proves they EXECUTE on the
+    # emulated core. Runs BEFORE the arm-none-eabi-gcc gate below so the
+    # no-heap proof is available even on a host lacking the C toolchain.
+    # Mechanically distinct from Layer G (rlib cross-compile — an rlib
+    # never needs an allocator, so it cannot surface a transitive
+    # alloc-forcing dependency; this binary link does, and did: R311hl
+    # found `wz-codecs/alloc` was hardcoded into wz-session-core).
+    local probe_lanes=(
+        "microbit:cortex-m0:thumbv6m-none-eabi"
+        "mps2-an385:cortex-m3:thumbv7m-none-eabi"
+        "mps2-an386:cortex-m4:thumbv7em-none-eabihf"
+        "mps2-an500:cortex-m7:thumbv7em-none-eabihf"
+    )
+    local probe_built=0
+    local plane pmachine pcpu ptarget pbin
+    for plane in "${probe_lanes[@]}"; do
+        IFS=':' read -r pmachine pcpu ptarget <<< "$plane"
+        if ! grep -q "^${ptarget}$" <<< "$installed"; then
+            echo "  Q.0.${pmachine} SKIP (rustup target ${ptarget} absent)"
+            continue
+        fi
+        if cargo build --release \
+            --manifest-path deploy/mcu-noheap-probe/Cargo.toml \
+            --target "$ptarget" --bin mcu-noheap-probe --quiet; then
+            echo "  Q.0.${pmachine} build mcu-noheap-probe ${ptarget} OK (no global allocator)"
+            probe_built=1
+        else
+            echo "  Q.0.${pmachine} build mcu-noheap-probe ${ptarget} FAIL" >&2
+            fail=1
+            continue
+        fi
+        if [[ "$has_qemu" -ne 1 ]]; then
+            echo "  Q.0.${pmachine} run SKIP (qemu-system-arm not on PATH)"
+            continue
+        fi
+        pbin="deploy/mcu-noheap-probe/target/${ptarget}/release/mcu-noheap-probe"
+        if timeout 10 qemu-system-arm \
+            -cpu "$pcpu" -machine "$pmachine" \
+            -nographic -semihosting-config enable=on,target=native \
+            -kernel "$pbin" >/dev/null 2>&1; then
+            echo "  Q.0.${pmachine} run mcu-noheap-probe via qemu-system-arm ${pmachine} PASS"
+        else
+            echo "  Q.0.${pmachine} run mcu-noheap-probe via qemu-system-arm ${pmachine} FAIL" >&2
+            fail=1
+        fi
+    done
+
+    if ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
+        echo "  Q.1-3 SKIP (arm-none-eabi-gcc not on PATH;" \
+             "install gcc-arm-none-eabi — mcu-qemu-demo lwip-sys needs it)"
+        return $fail
     fi
 
     local lwip_port
@@ -1568,7 +1629,9 @@ layer_q_qemu_mcu_e2e() {
     )
 
     local any_built=0
-    local fail=0
+    # `fail` already declared at the top of the function (shared with the
+    # Q.0 probe lanes so a probe FAIL gates the layer even when the demo
+    # portion SKIPs for a missing toolchain).
     # Q.3 dedup — record which target-triples have already been
     # footprint-checked so two machines that share a triple
     # (mps2-an386 + mps2-an500 both thumbv7em-none-eabihf) do not
@@ -1646,7 +1709,7 @@ layer_q_qemu_mcu_e2e() {
         fi
     done
 
-    if [[ $any_built -eq 0 ]]; then
+    if [[ $any_built -eq 0 && $probe_built -eq 0 ]]; then
         echo "Layer Q SKIP (no Layer Q rustup targets installed)"
         return 0
     fi

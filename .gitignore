@@ -12,6 +12,9 @@ vendor/sce/target/
 # (cross-compile to thumbv7m-none-eabi); its target/ is build
 # output identical in policy to crates/target/.
 deploy/mcu-qemu-demo/target/
+# R311hl — deploy/mcu-noheap-probe is a third standalone workspace
+# (no-heap registry runtime proof; Layer Q.0). Same target/ policy.
+deploy/mcu-noheap-probe/target/
 **/*.rs.bk
 
 # Cargo.lock policy: COMMITTED for the wz Rust workspace

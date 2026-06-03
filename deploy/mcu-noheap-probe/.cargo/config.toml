@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# mcu-noheap-probe .cargo/config.toml — R311hl.
+#
+# Pins this standalone crate to a Cortex-M3 target + makes `cargo run`
+# boot the binary in QEMU with semihosting enabled.
+#
+# NB: unlike mcu-qemu-demo, the `-Tlink.x` link-arg is NOT repeated here —
+# build.rs emits it via `cargo:rustc-link-arg` (cwd-invariant), so adding
+# it again in `rustflags` would pass `-Tlink.x` twice and the linker would
+# process cortex-m-rt's `link.x` (and its `INCLUDE memory.x`) twice,
+# failing with "region 'FLASH' already defined". build.rs alone covers
+# both the crate-dir `cargo run` and the Layer-Q `--manifest-path` build.
+
+[build]
+target = "thumbv7m-none-eabi"
+
+# `cargo run` boots the binary in QEMU for developer ergonomics. The
+# Layer Q lane invokes QEMU directly so it can capture the semihost exit
+# code for the PASS/FAIL assertion.
+[target.thumbv7m-none-eabi]
+runner = "qemu-system-arm -cpu cortex-m3 -machine mps2-an385 -nographic -semihosting-config enable=on,target=native -kernel"

@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# mcu-noheap-probe — R311hl Track 2 no-alloc gating: runtime proof.
+#
+# The Track 2 fan-out (R311hb..hk) made every wz-session-core
+# application-layer registry's control plane + no-heap fire path
+# (`dispatch_borrowed` / `dispatch_declared_borrowed` /
+# `dispatch_sample_borrowed`) compile with `--no-default-features`
+# (heapless backing), and Layer G proves that *cross-compiles* to the
+# M-class catalog. What was missing was a RUNTIME proof on a real
+# (QEMU-emulated) MCU that those paths actually execute, and a
+# mechanical guarantee that they touch NO heap.
+#
+# This crate is that proof. It is a Cortex-M binary that:
+#
+#   - declares NO `#[global_allocator]` (unlike the sibling
+#     `mcu-qemu-demo`, which links `embedded-alloc`). On a `#![no_std]`
+#     binary without a global allocator, ANY reference to the `alloc`
+#     crate from any reachable code path is a hard LINK error
+#     ("no global memory allocator found"). So a clean link is a
+#     mechanical, whole-program proof that the exercised registry paths
+#     are allocation-free — strictly stronger than the per-crate
+#     `--no-default-features` lib compile (which only proves the lib
+#     does not *name* `alloc`, not that the composed binary links
+#     without an allocator).
+#   - depends on `wz-session-core` with `default-features = false`
+#     (no `alloc` feature => `bounded::BoundedVec` / `BoundedString`
+#     use the `heapless` backing), zero codec features (the control
+#     plane + no-heap fire need none).
+#   - in `main`, instantiates all seven registries with consumer-
+#     supplied concrete (non-`Box`) sinks, fires each registry's
+#     no-heap entry, and asserts each sink observed its delivery, then
+#     exits via semihosting `SYS_EXIT` (PASS=0 / FAIL=1) so the Layer Q
+#     lane gates on it exactly like `mcu-qemu-demo`.
+#
+# Standalone `[workspace]` (same rationale as `mcu-qemu-demo`): keeps
+# cargo from pulling a thumbv7m crate into the host `crates/` build.
+
+[workspace]
+
+[package]
+name = "mcu-noheap-probe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+license = "LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial"
+authors = ["newmassrael"]
+description = "R311hl no-heap runtime proof: wz-session-core registries run on QEMU MCU with zero global allocator."
+
+[[bin]]
+name = "mcu-noheap-probe"
+path = "src/main.rs"
+
+[dependencies]
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+cortex-m-semihosting = "0.5"
+panic-semihosting = { version = "0.6", features = ["exit"] }
+
+# portable-atomic: the concrete counting sinks tally deliveries into
+# static `AtomicU32`s; ARMv6-M (Cortex-M0/M0+) has no native CAS, so
+# the `fallback` + `critical-section` combo selects the
+# critical-section-single-core impl there (mirrors the mcu-qemu-demo
+# pattern) and native LDREX/STREX on ARMv7-M+.
+portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
+
+# The unit under test. `default-features = false` => no `alloc` =>
+# heapless bounded backing; NO codec features (the registry control
+# plane + no-heap fire surface needs none). Cross-workspace path dep;
+# cargo resolves its workspace inheritance against `crates/Cargo.toml`.
+wz-session-core = { path = "../../crates/wz-session-core", default-features = false }
+
+[profile.release]
+codegen-units = 1
+opt-level = "s"
+lto = true
+panic = "abort"
+
+[profile.dev]
+panic = "abort"
