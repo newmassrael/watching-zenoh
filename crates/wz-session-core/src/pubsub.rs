@@ -103,13 +103,21 @@ use crate::bounded::{BoundedString, BoundedVec};
 use crate::caps;
 use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
 
-#[cfg(any(
-    feature = "pubsub-put",
-    feature = "pubsub-delete",
-    feature = "codec-declare"
+// R311gb (Track 2) — `resolve_wireexpr` lives in the `alloc`-gated
+// `wireexpr_resolve` module and is reached only from the `alloc`
+// wire-dispatch paths (`dispatch_push` / `absorb_declare`), so the import
+// carries `alloc` in addition to the codec markers (else `codec-declare`
+// without `alloc` pulls an absent module).
+#[cfg(all(
+    feature = "alloc",
+    any(
+        feature = "pubsub-put",
+        feature = "pubsub-delete",
+        feature = "codec-declare"
+    )
 ))]
 use crate::wireexpr_resolve::resolve_wireexpr;
-#[cfg(feature = "codec-declare")]
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
 #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
 use wz_codecs::push::{PushOwned, PushOwnedVariant};
@@ -903,7 +911,12 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// surfaces as a compile error here rather than a silent
     /// miss. The intentional no-op arms cite the dedicated
     /// registry that owns each Declare sub-type.
-    #[cfg(feature = "codec-declare")]
+    ///
+    /// R311gb (Track 2) — `all(codec-declare, alloc)`-gated: it mutates
+    /// the `alloc`-gated `peer_keyexpr_table` via the `alloc`
+    /// `resolve_wireexpr`, so a `codec-declare`-without-`alloc` profile
+    /// elides it (its sole caller `dispatch` is already `alloc`-gated).
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     fn absorb_declare(&mut self, body: &DeclareOwnedVariant) {
         match body {
             DeclareOwnedVariant::CodecZenohDeclKexpr(d) => {
