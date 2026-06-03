@@ -82,15 +82,28 @@
 // `Pending<C: ReplySink>` sink seam, so production code no longer
 // heap-boxes a callback here (`BoxedReplySink` owns that, in
 // `reply_sink`). The test module imports `Box` itself.
+// R311gb (Track 2) — `String` / `Vec` / `ToString` back the `alloc`-gated
+// owned retention form (`InboundReply` / `InboundReplyBody` +
+// `from_view`); the no-alloc control plane stores only `Pending` rows in a
+// `BoundedVec` and fires through the borrowed `ReplyView` seam, so the
+// owned-collection imports are `alloc`-gated.
+#[cfg(feature = "alloc")]
 use alloc::string::String;
-// R311gb-3c — `ToString` is now unconditional: the always-compiled
-// `InboundReply::from_view` constructor (the reply-plane `Sample::from_view`
-// analogue) copies the view's keyexpr via `str::to_string`. The
-// `codec-response` keyexpr-resolution path also uses it.
+#[cfg(feature = "alloc")]
 use alloc::string::ToString;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+// HashMap (peer-keyexpr table) is a param of the `alloc` wire-dispatch
+// methods (`dispatch_response` / `dispatch_messages`), so its import is
+// `alloc`-gated.
+#[cfg(feature = "alloc")]
 use hashbrown::HashMap;
+
+// R311gb (Track 2) — bounded backing + the capacity SSOT for the no-alloc
+// pending table.
+use crate::bounded::BoundedVec;
+use crate::caps;
 
 // R311dy — `wz_codecs::{reply, response}` live in the `codec-response`
 // codec_group, so the wire-dispatch imports + the local
@@ -110,10 +123,11 @@ use hashbrown::HashMap;
 // Put / Del body into `InboundReplyBody`, independent of the pub/sub
 // publisher markers. `query-reply` implies `codec-response`, so the
 // outer `codec-response` requirement holds in every arm of the `any`.
-#[cfg(feature = "codec-response")]
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
 use crate::wireexpr_resolve::resolve_wireexpr;
 #[cfg(all(
     feature = "codec-response",
+    feature = "alloc",
     any(
         feature = "pubsub-put",
         feature = "pubsub-delete",
@@ -121,9 +135,9 @@ use crate::wireexpr_resolve::resolve_wireexpr;
     )
 ))]
 use wz_codecs::reply::ReplyOwnedVariant;
-#[cfg(feature = "codec-response")]
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
 use wz_codecs::response::{ResponseOwned, ResponseOwnedVariant};
-#[cfg(feature = "codec-response-final")]
+#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 use wz_codecs::response_final::ResponseFinalOwned;
 
 // R307 — `query-queryable` gates the producer-side `QueryReply` enum
@@ -134,20 +148,22 @@ use wz_codecs::response_final::ResponseFinalOwned;
 // `query-reply` consumer that wires no in-process queryable still
 // gets the wire-side `Response` dispatch path with the loopback
 // bridge elided.
+#[cfg(feature = "alloc")]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+#[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
-#[cfg(feature = "query-queryable")]
+#[cfg(all(feature = "query-queryable", feature = "alloc"))]
 use crate::query::{QueryReply, ReplyBody};
-// R311gb-3c — the model-B reply seam: `ReplySink` is the bound on the
-// generic `ReplyRegistry<C>` pending store; `ReplyView` is the accessor
-// contract `InboundReply` impls so the dispatch hands the sink a
-// `&dyn ReplyView`; `BoxedReplySink` is the default sink type (AP closure
-// adapter) named by the registry's default type parameter + the
-// convenience `register` wrapper; `ReplyKind` is the Put/Del/Err
-// discriminant the `ReplyView::kind` accessor returns. The whole `reply`
-// module is `alloc`-gated, so `BoxedReplySink` (itself `alloc`-gated) is
-// always in scope here.
-use crate::reply_sink::{BoxedReplySink, ReplyKind, ReplySink, ReplyView};
+// R311gb (Track 2) — the model-B reply seam. `ReplySink` (the bound on
+// the generic `ReplyRegistry<C>` pending store) + `ReplyView` (the
+// accessor contract the no-heap `dispatch_borrowed` / `fire_replies_for`
+// pass as `&dyn ReplyView`) are unconditional (no_std-safe in
+// `reply_sink`). `ReplyKind` is read only by the `alloc` owned-retention
+// `InboundReply` impl, and `BoxedReplySink` is the AP closure adapter, so
+// those two carry the `alloc` gate.
+#[cfg(feature = "alloc")]
+use crate::reply_sink::{BoxedReplySink, ReplyKind};
+use crate::reply_sink::{ReplySink, ReplyView};
 
 /// Body arm of an inbound reply record. Mirrors the producer-side
 /// [`QueryReply`](crate::query::QueryReply) enum but inverted for
@@ -160,6 +176,9 @@ use crate::reply_sink::{BoxedReplySink, ReplyKind, ReplySink, ReplyView};
 /// rounds may add a zero-copy `Borrowed` variant when the runtime
 /// guarantees a per-iteration arena lifetime; for the AP MVP the
 /// owned form keeps the call-site straightforward.
+// R311gb (Track 2) — owned reply body (`Vec<u8>` / `String`), the AP
+// retention form; `alloc`-gated.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InboundReplyBody {
     /// Successful data reply — `MsgPut` inner body. Payload bytes
@@ -189,6 +208,9 @@ pub enum InboundReplyBody {
 /// string (mapping-id resolved against the peer table the same way
 /// [`SubscriberRegistry`](crate::pubsub::SubscriberRegistry) does
 /// for Push, or peer-aliased prefix + suffix concatenation).
+// R311gb (Track 2) — owned reply record (the AP retention form);
+// `alloc`-gated. The no-alloc fire path delivers `&dyn ReplyView`.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundReply {
     /// Echo of the inbound `Response.request_id` — matches the rid
@@ -210,6 +232,7 @@ pub struct InboundReply {
 /// `kind` reads the discriminant, `payload` borrows the body bytes (empty
 /// for Del), `err_encoding` borrows the Err encoding hint (None for
 /// Put / Del).
+#[cfg(feature = "alloc")]
 impl ReplyView for InboundReply {
     fn rid(&self) -> u64 {
         self.rid
@@ -241,6 +264,7 @@ impl ReplyView for InboundReply {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl InboundReply {
     /// R311gb-3c — materialise an owned `InboundReply` from any
     /// [`ReplyView`] (the retention form of the borrowed delivery
@@ -291,7 +315,7 @@ impl InboundReply {
 /// the wire-emit side — every `QueryReply` carries enough state to
 /// be projected to *either* a wire `Response` (outbound) *or* an
 /// in-process `InboundReply` (loopback).
-#[cfg(feature = "query-queryable")]
+#[cfg(all(feature = "query-queryable", feature = "alloc"))]
 impl From<QueryReply> for InboundReply {
     fn from(reply: QueryReply) -> Self {
         match reply {
@@ -379,12 +403,44 @@ struct Pending<C: ReplySink> {
     sink: C,
 }
 
+/// R311gb (Track 2) — failure mode of
+/// [`ReplyRegistry::register_sink`] on the no-alloc (MCU) backing: the
+/// pending table is at its declared capacity ([`caps::MAX_PENDING_QUERIES`]),
+/// surfaced fail-fast per the [`crate::bounded`] contract (no silent
+/// drop). On the `alloc` (AP) backing it is never returned — the table
+/// grows, so the convenience [`ReplyRegistry::register`] wrapper stays
+/// infallible there. Single-variant (unlike `SubscribeError` /
+/// `QueryableRegisterError`, the reply registry stores no keyexpr pattern,
+/// so there is no `KeyexprTooLong` mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyRegisterError {
+    /// The pending table is at its declared capacity
+    /// ([`caps::MAX_PENDING_QUERIES`]).
+    TableFull,
+}
+
+impl core::fmt::Display for ReplyRegisterError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::TableFull => f.write_str("pending reply table at declared capacity"),
+        }
+    }
+}
+
+impl core::error::Error for ReplyRegisterError {}
+
 /// Reply table backing the inbound `Response(Reply|Err)` and
 /// `ResponseFinal` → callback dispatch. `!Sync` by construction;
 /// cross-task sharing goes through `Arc<Mutex<…>>`. See module-level
 /// docs for scope.
-pub struct ReplyRegistry<C: ReplySink = BoxedReplySink> {
-    pending: Vec<Pending<C>>,
+///
+/// R311gb (Track 2) — the pending table + register + rid correlation +
+/// the no-heap fire (`dispatch_borrowed` / `deliver_local_final` /
+/// `fire_final_for` / `sweep_timed_out`) form the no-alloc control plane.
+/// The owned-retention `deliver_local_reply` + the wire-dispatch methods
+/// carry `alloc` / `codec-*` gates per-method below.
+pub struct ReplyRegistry<C: ReplySink> {
+    pending: BoundedVec<Pending<C>, { caps::MAX_PENDING_QUERIES }>,
 }
 
 impl<C: ReplySink> Default for ReplyRegistry<C> {
@@ -407,7 +463,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// [`crate::pubsub::SubscriberRegistry::with_sink_backing`].
     pub fn with_sink_backing() -> Self {
         Self {
-            pending: Vec::new(),
+            pending: BoundedVec::new(),
         }
     }
 
@@ -433,20 +489,28 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// callers that allocate rids opaquely (e.g. a future
     /// `z_get_builder` adapter) can carry the rid without leaking
     /// the integer all the way back to user code.
+    ///
+    /// R311gb (Track 2) — fallible on the no-alloc backing: a pending
+    /// registration past [`caps::MAX_PENDING_QUERIES`] is rejected with
+    /// [`ReplyRegisterError::TableFull`] (fail-fast, no silent drop). On
+    /// the `alloc` backing it never fails, so the convenience
+    /// [`register`](Self::register) wrapper `.expect()`s the result.
     pub fn register_sink(
         &mut self,
         rid: u64,
         expected_finals: u32,
         deadline_ms: Option<u64>,
         sink: C,
-    ) -> ReplyHandle {
-        self.pending.push(Pending {
-            rid,
-            remaining_finals: expected_finals,
-            deadline_ms,
-            sink,
-        });
-        ReplyHandle(rid)
+    ) -> Result<ReplyHandle, ReplyRegisterError> {
+        self.pending
+            .push(Pending {
+                rid,
+                remaining_finals: expected_finals,
+                deadline_ms,
+                sink,
+            })
+            .map_err(|_| ReplyRegisterError::TableFull)?;
+        Ok(ReplyHandle(rid))
     }
 
     /// Remove a previously-registered pending entry by rid. Returns
@@ -499,7 +563,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// type lives in the `codec-response` codec_group, so the wire
     /// dispatch entry point elides in a `codec-response`-OFF subset
     /// (the loopback `deliver_local_reply` keeps the registry useful).
-    #[cfg(feature = "codec-response")]
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
     pub fn dispatch_response(
         &mut self,
         response: &ResponseOwned,
@@ -563,7 +627,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// from the table. Duplicate-rid registrations all fire (in
     /// registration order) and all are removed in the same dispatch.
     /// Unknown rids drop silently.
-    #[cfg(feature = "codec-response-final")]
+    #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
     pub fn dispatch_response_final(&mut self, response_final: &ResponseFinalOwned) {
         self.fire_final_for(response_final.request_id);
     }
@@ -580,8 +644,24 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// [`Self::fire_replies_for`] helper so the per-entry behaviour
     /// (multiple registrations on the same rid, entry retained until
     /// Final) is identical across origins.
+    #[cfg(feature = "alloc")]
     pub fn deliver_local_reply(&mut self, inbound: &InboundReply) {
         self.fire_replies_for(inbound);
+    }
+
+    /// R311gb (Track 2) — no-heap fire entry for the reply plane: deliver
+    /// a borrowed [`ReplyView`] to every pending entry whose `rid`
+    /// matches, firing each sink's `on_reply` once. Borrow-driven (no
+    /// owned `InboundReply` materialization), so it is the MCU no-heap
+    /// reply path; the `alloc` loopback ([`deliver_local_reply`](Self::deliver_local_reply))
+    /// and the wire path ([`dispatch_response`](Self::dispatch_response))
+    /// funnel their owned `InboundReply` (which impls `ReplyView`) through
+    /// the same [`fire_replies_for`](Self::fire_replies_for) matcher (one
+    /// SSOT). The terminal `on_final` no-heap entry is
+    /// [`deliver_local_final`](Self::deliver_local_final) (a `Copy` rid
+    /// scalar). Returns the count of sinks fired.
+    pub fn dispatch_borrowed(&mut self, reply: &dyn ReplyView) -> usize {
+        self.fire_replies_for(reply)
     }
 
     /// R239 — loopback delivery of an in-process `ResponseFinal`-
@@ -632,14 +712,19 @@ impl<C: ReplySink> ReplyRegistry<C> {
         // ensures a panicking on_final does NOT leave half-swept entries
         // in the registry — every fired entry has already been removed
         // from self.pending by the time its callback runs.
-        let mut fired: Vec<Pending<C>> = Vec::new();
-        let mut keep: Vec<Pending<C>> = Vec::with_capacity(self.pending.len());
-        for entry in self.pending.drain(..) {
+        // R311gb (Track 2) — no-alloc partition: take the table out, drain
+        // it by value into two bounded stack partitions (`keep` / `fired`),
+        // reassign `keep`, then fire. Each partition is capacity
+        // MAX_PENDING_QUERIES and the two together hold exactly the taken
+        // entries, so neither push can exceed `N`.
+        let mut fired: BoundedVec<Pending<C>, { caps::MAX_PENDING_QUERIES }> = BoundedVec::new();
+        let mut keep: BoundedVec<Pending<C>, { caps::MAX_PENDING_QUERIES }> = BoundedVec::new();
+        for entry in core::mem::take(&mut self.pending) {
             let expired = matches!(entry.deadline_ms, Some(d) if d <= now_ms);
             if expired {
-                fired.push(entry);
+                let _ = fired.push(entry);
             } else {
-                keep.push(entry);
+                let _ = keep.push(entry);
             }
         }
         self.pending = keep;
@@ -657,12 +742,21 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// callback once; the entry stays in the table (only `Final`
     /// removes it). Mirrors the R238 `fire_matching_queryables` split
     /// on the queryable side.
-    fn fire_replies_for(&mut self, inbound: &InboundReply) {
-        for pending in &mut self.pending {
-            if pending.rid == inbound.rid {
-                pending.sink.on_reply(inbound);
+    /// R311gb (Track 2) — takes the borrowed [`ReplyView`] (the no-heap
+    /// delivery currency) so both the owned-`InboundReply` callers (wire +
+    /// `alloc` loopback, which coerce `&InboundReply` to `&dyn ReplyView`)
+    /// and the no-heap [`dispatch_borrowed`](Self::dispatch_borrowed)
+    /// share one matcher. Returns the count of sinks fired.
+    fn fire_replies_for(&mut self, reply: &dyn ReplyView) -> usize {
+        let rid = reply.rid();
+        let mut fired: usize = 0;
+        for pending in self.pending.iter_mut() {
+            if pending.rid == rid {
+                pending.sink.on_reply(reply);
+                fired = fired.saturating_add(1);
             }
         }
+        fired
     }
 
     /// R239 — shared final fan body for wire
@@ -691,17 +785,22 @@ impl<C: ReplySink> ReplyRegistry<C> {
         // need to call `(on_final)(rid)` which requires `&mut Pending`);
         // we instead drain the matches into a stash and fire after the
         // retain-pass releases the &mut self.pending borrow.
-        let mut fired: Vec<Pending<C>> = Vec::new();
-        let mut keep: Vec<Pending<C>> = Vec::with_capacity(self.pending.len());
-        for mut entry in self.pending.drain(..) {
+        // R311gb (Track 2) — no-alloc partition (see `sweep_timed_out`):
+        // take the table out, drain by value into bounded `keep` / `fired`
+        // partitions preserving registration order, reassign `keep`, then
+        // fire the terminal entries. Order-preserving (matters for the
+        // documented duplicate-rid registration-order final firing).
+        let mut fired: BoundedVec<Pending<C>, { caps::MAX_PENDING_QUERIES }> = BoundedVec::new();
+        let mut keep: BoundedVec<Pending<C>, { caps::MAX_PENDING_QUERIES }> = BoundedVec::new();
+        for mut entry in core::mem::take(&mut self.pending) {
             if entry.rid == rid && entry.remaining_finals > 0 {
                 entry.remaining_finals -= 1;
                 if entry.remaining_finals == 0 {
-                    fired.push(entry);
+                    let _ = fired.push(entry);
                     continue;
                 }
             }
-            keep.push(entry);
+            let _ = keep.push(entry);
         }
         self.pending = keep;
         for mut entry in fired {
@@ -717,6 +816,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// routes via [`Self::dispatch_response_final`]. Other variants
     /// (Push / Request / Declare / Interest / Oam / Unknown) are
     /// no-ops here.
+    #[cfg(feature = "alloc")]
     pub fn dispatch_messages(
         &mut self,
         messages: &[NetworkMessage],
@@ -756,6 +856,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// of [`crate::query::QueryableRegistry::dispatch_iteration_event`]
     /// for the z_get-side. Other `IterationEvent` variants
     /// (`Lease`, non-FramePayload Poll outcomes) are no-ops.
+    #[cfg(feature = "alloc")]
     pub fn dispatch_iteration_event(
         &mut self,
         event: IterationEvent<'_>,
@@ -774,8 +875,11 @@ impl<C: ReplySink> ReplyRegistry<C> {
 /// consumer-supplied sink through the generic
 /// [`register_sink`](ReplyRegistry::register_sink) instead. Mirror of
 /// [`crate::pubsub::SubscriberRegistry`]'s `BoxedSink` convenience block.
-/// The `alloc` gate is module-redundant (the whole `reply` module is
-/// `alloc`-gated) but kept explicit for symmetry with the `pubsub` side.
+///
+/// R311gb (Track 2) — gated on `alloc` only: the convenience wrapper
+/// funnels through the un-gated `register_sink`, so the AP register
+/// surface composes in any `alloc` subset (`BoxedReplySink` is itself
+/// `alloc`-gated).
 #[cfg(feature = "alloc")]
 impl ReplyRegistry<BoxedReplySink> {
     /// New empty AP registry backed by heap-boxed closures
@@ -811,12 +915,16 @@ impl ReplyRegistry<BoxedReplySink> {
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> ReplyHandle {
+        // AP backing: `register_sink` is infallible here (the BoundedVec
+        // pending table grows past the advisory `N`), so the convenience
+        // wrapper keeps its `ReplyHandle` signature.
         self.register_sink(
             rid,
             expected_finals,
             deadline_ms,
             BoxedReplySink::new(on_reply, on_final),
         )
+        .expect("register on the alloc backing never exceeds declared capacity")
     }
 }
 

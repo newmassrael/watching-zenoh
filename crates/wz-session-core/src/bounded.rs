@@ -137,6 +137,32 @@ impl<T, const N: usize> Default for BoundedVec<T, N> {
     }
 }
 
+// By-value `IntoIterator` consumes the backing into an owning iterator on
+// both profiles. Registries that must remove-then-fire under a no-alloc
+// backing (the reply registry's `fire_final_for` / `sweep_timed_out`
+// drain-partition-fire pattern) take the table with `core::mem::take` and
+// iterate it by value into bounded `keep` / `fired` partitions — no heap
+// temporary on the MCU profile.
+#[cfg(feature = "alloc")]
+impl<T, const N: usize> IntoIterator for BoundedVec<T, N> {
+    type Item = T;
+    type IntoIter = alloc::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.into_iter()
+    }
+}
+
+#[cfg(not(feature = "alloc"))]
+impl<T, const N: usize> IntoIterator for BoundedVec<T, N> {
+    type Item = T;
+    type IntoIter = <heapless::Vec<T, N> as IntoIterator>::IntoIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.into_iter()
+    }
+}
+
 // Deref to the element slice gives `len` / `is_empty` / `iter` / `get`
 // / indexing / `as_slice` for free on both backings, so the registry
 // read paths are backing-agnostic without a hand-forwarded method per

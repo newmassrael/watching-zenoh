@@ -67,3 +67,11 @@ pub const MAX_SUBSCRIPTIONS: usize = 16;
 /// table on the no-alloc backing; a `register` past this is rejected
 /// (`QueryableRegisterError::TableFull`) rather than growing the table.
 pub const MAX_QUERYABLES: usize = 16;
+
+/// Maximum number of concurrently-outstanding pending z_get queries in a
+/// [`crate::reply::ReplyRegistry`]. Bounds the registry's pending table
+/// on the no-alloc backing; a `register` past this is rejected
+/// (`ReplyRegisterError::TableFull`) rather than growing the table. Also
+/// bounds the `keep` / `fired` partitions the no-alloc `fire_final_for` /
+/// `sweep_timed_out` build on the stack.
+pub const MAX_PENDING_QUERIES: usize = 16;

@@ -265,7 +265,7 @@ pub struct ApplicationLayerObserver {
     /// pending entries regardless of `query-reply` feature state; the
     /// feature-OFF build never enters the registration path (Session::query's
     /// body is gated on `query-get` which implies `query-reply`).
-    pub replies: ReplyRegistry,
+    pub replies: ReplyRegistry<crate::reply_sink::BoxedReplySink>,
     /// R311r — staging buffers are unconditional so the observer
     /// struct shape is stable across consumer-feature subsets. The
     /// drain side in [`Self::flush_pending`] stays cfg-gated on

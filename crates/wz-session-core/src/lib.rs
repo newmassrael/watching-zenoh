@@ -406,18 +406,23 @@ pub mod request_build;
 pub mod query;
 
 /// R311dy — application-layer reply registry (`ReplyRegistry` +
-/// `InboundReply` / `InboundReplyBody` / `ReplyHandle` / `ReplyCallback`
-/// / `FinalCallback`): the z_get-side mirror of `query`, routing inbound
-/// `Response(Reply|Err)` + `ResponseFinal` records to per-rid callbacks.
-/// Lifted from `wz-runtime-tokio::reply`. Unlike the queryable registry,
-/// `ReplyRegistry` stays always-compiled (alloc-gated): its loopback
-/// delivery (`deliver_local_reply` / `deliver_local_final`) + timeout
-/// sweep (`sweep_timed_out`) are codec-agnostic, so only the wire
-/// dispatch (`dispatch_response` / `resolve_wireexpr`) gates on
-/// `codec-response` (and `dispatch_response_final` on
-/// `codec-response-final`); the `From<QueryReply>` loopback bridge gates
-/// on `query-queryable`. Mirrors the `SubscriberRegistry` shape.
-#[cfg(feature = "alloc")]
+/// `InboundReply` / `InboundReplyBody` / `ReplyHandle`): the z_get-side
+/// mirror of `query`, routing inbound `Response(Reply|Err)` +
+/// `ResponseFinal` records to per-rid sinks (R311gb-3c: the `ReplySink`
+/// seam). Lifted from `wz-runtime-tokio::reply`.
+///
+/// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: the control
+/// plane (the `BoundedVec` pending table + `register_sink` / `unregister`
+/// + rid correlation + the no-heap fire entries `dispatch_borrowed`
+/// (on_reply via `ReplyView`) / `deliver_local_final` + the
+/// `fire_final_for` / `sweep_timed_out` remove-then-fire) compiles on the
+/// MCU no-heap profile. The owned retention form (`InboundReply` /
+/// `InboundReplyBody`, holding `String` / `Vec<u8>`) + the `From<QueryReply>`
+/// loopback bridge + `deliver_local_reply` are `alloc`-gated, and the wire
+/// dispatch (`dispatch_response` / `dispatch_messages`) gates on
+/// `all(codec-response, alloc)` (`dispatch_response_final` on
+/// `all(codec-response-final, alloc)`). Mirrors the `SubscriberRegistry`
+/// shape.
 pub mod reply;
 
 /// R311dz-pre — `ResponseSink` IoC trait: the outbound-reply drain
