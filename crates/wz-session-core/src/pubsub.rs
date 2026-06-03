@@ -102,6 +102,7 @@ use hashbrown::HashMap;
 use crate::bounded::{BoundedString, BoundedVec};
 use crate::caps;
 use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
+use crate::registry_error::RegisterError;
 
 // R311gb (Track 2) — `resolve_wireexpr` lives in the `alloc`-gated
 // `wireexpr_resolve` module and is reached only from the `alloc`
@@ -198,33 +199,6 @@ struct Subscriber<C: SampleSink> {
     /// (heap closure), a consumer-supplied closed `enum` on MCU.
     sink: C,
 }
-
-/// R311gb (Track 2) — failure modes of
-/// [`SubscriberRegistry::register_sink`] on the no-alloc (MCU) backing.
-/// Both are deploy-capacity exhaustion, surfaced fail-fast per the
-/// [`crate::bounded`] contract (no silent drop). On the `alloc` (AP)
-/// backing neither is ever returned — the table and pattern buffer
-/// grow, so the convenience [`SubscriberRegistry::register`] wrappers
-/// stay infallible there.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubscribeError {
-    /// The subscriber table is at its declared capacity
-    /// ([`caps::MAX_SUBSCRIPTIONS`]).
-    TableFull,
-    /// The canonical keyexpr exceeds [`caps::MAX_KEYEXPR_BYTES`].
-    KeyexprTooLong,
-}
-
-impl core::fmt::Display for SubscribeError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::TableFull => f.write_str("subscriber table at declared capacity"),
-            Self::KeyexprTooLong => f.write_str("keyexpr exceeds declared capacity"),
-        }
-    }
-}
-
-impl core::error::Error for SubscribeError {}
 
 /// R311dn / di-15-pre — keyexpr glob + intersection matchers moved
 /// to [`crate::keyexpr_match`]; re-exported here so prior
@@ -391,7 +365,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         keyexpr_pattern: &str,
         allowed_origin: crate::locality::Locality,
         sink: C,
-    ) -> Result<SubscriptionId, SubscribeError> {
+    ) -> Result<SubscriptionId, RegisterError> {
         // R221/R311gb — canonicalize into the bounded pattern buffer. A
         // grammar-invalid pattern falls back to the raw form (non-
         // breaking; the matcher still operates). An over-capacity
@@ -402,7 +376,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             match crate::keyexpr_canon::canonize_keyexpr(keyexpr_pattern) {
                 Ok(canon) => canon,
                 Err(crate::keyexpr_canon::KeyexprCanonError::ExceedsCapacity) => {
-                    return Err(SubscribeError::KeyexprTooLong);
+                    return Err(RegisterError::KeyexprTooLong);
                 }
                 Err(err) => {
                     log::warn!(
@@ -412,7 +386,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                     );
                     let mut raw = BoundedString::new();
                     raw.push_str(keyexpr_pattern)
-                        .map_err(|_| SubscribeError::KeyexprTooLong)?;
+                        .map_err(|_| RegisterError::KeyexprTooLong)?;
                     raw
                 }
             };
@@ -426,7 +400,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                 allowed_origin,
                 sink,
             })
-            .map_err(|_| SubscribeError::TableFull)?;
+            .map_err(|_| RegisterError::TableFull)?;
         self.next_id = self.next_id.saturating_add(1);
         Ok(id)
     }

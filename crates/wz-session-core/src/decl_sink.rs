@@ -106,34 +106,6 @@ pub trait UndeclSink {
     fn on_undeclared(&mut self, id: u64);
 }
 
-/// R311gb (Track 2) — failure mode of installing a declaration observer
-/// (`on_*_declared_sink` / `on_*_undeclared_sink`) on the no-alloc (MCU)
-/// backing: the observer list is at its declared capacity
-/// ([`crate::caps::MAX_DECL_OBSERVERS`]), surfaced fail-fast per the
-/// [`crate::bounded`] contract (no silent drop). On the `alloc` (AP)
-/// backing it is never returned — the list grows, so the convenience
-/// closure-installer wrappers stay infallible there. Shared by the three
-/// `DeclSink` / `UndeclSink` registries (subscriber / queryable /
-/// liveliness).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeclRegisterError {
-    /// The observer list is at its declared capacity
-    /// ([`crate::caps::MAX_DECL_OBSERVERS`]).
-    ObserverTableFull,
-}
-
-impl core::fmt::Display for DeclRegisterError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::ObserverTableFull => {
-                f.write_str("declaration observer list at declared capacity")
-            }
-        }
-    }
-}
-
-impl core::error::Error for DeclRegisterError {}
-
 /// Heap declaration-closure type backing [`BoxedDeclSink`]. Factored to a
 /// `type` per `clippy::type_complexity` — the nested `&dyn DeclView`
 /// trait object pushes the inline `Box<dyn FnMut(...)>` over the

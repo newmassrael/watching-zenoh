@@ -103,6 +103,7 @@ use alloc::vec::Vec;
 use crate::bounded::{BoundedString, BoundedVec};
 use crate::caps;
 use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
+use crate::registry_error::RegisterError;
 
 // R311gb (Track 2) — HashMap (peer-keyexpr table) + the driver-loop /
 // network-message envelope types + the owned codec mirrors are consumed
@@ -596,33 +597,6 @@ impl ReplyOut for QueryResponder<'_> {
     }
 }
 
-/// R311gb (Track 2) — failure modes of
-/// [`QueryableRegistry::register_sink`] on the no-alloc (MCU) backing.
-/// Both are deploy-capacity exhaustion, surfaced fail-fast per the
-/// [`crate::bounded`] contract (no silent drop). On the `alloc` (AP)
-/// backing neither is ever returned — the table and pattern buffer
-/// grow, so the convenience [`QueryableRegistry::register`] wrappers
-/// stay infallible there. Mirror of [`crate::pubsub::SubscribeError`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QueryableRegisterError {
-    /// The queryable table is at its declared capacity
-    /// ([`caps::MAX_QUERYABLES`]).
-    TableFull,
-    /// The canonical keyexpr exceeds [`caps::MAX_KEYEXPR_BYTES`].
-    KeyexprTooLong,
-}
-
-impl core::fmt::Display for QueryableRegisterError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::TableFull => f.write_str("queryable table at declared capacity"),
-            Self::KeyexprTooLong => f.write_str("keyexpr exceeds declared capacity"),
-        }
-    }
-}
-
-impl core::error::Error for QueryableRegisterError {}
-
 /// Queryable table backing the inbound `Request(Query)` → callback
 /// dispatch. `!Sync` by construction; cross-task sharing goes
 /// through `Arc<Mutex<…>>`. See module-level docs for scope.
@@ -690,8 +664,8 @@ impl<C: QuerySink> QueryableRegistry<C> {
     ///
     /// R311gb (Track 2) — fallible on the no-alloc backing: an over-
     /// capacity canonical form is rejected with
-    /// [`QueryableRegisterError::KeyexprTooLong`] and a full table with
-    /// [`QueryableRegisterError::TableFull`] (fail-fast, no silent
+    /// [`RegisterError::KeyexprTooLong`] and a full table with
+    /// [`RegisterError::TableFull`] (fail-fast, no silent
     /// truncation). On the `alloc` backing neither branch is ever taken,
     /// so the convenience wrappers `.expect()` the result.
     pub fn register_sink(
@@ -699,7 +673,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
         keyexpr_pattern: &str,
         allowed_origin: crate::locality::Locality,
         sink: C,
-    ) -> Result<QueryableId, QueryableRegisterError> {
+    ) -> Result<QueryableId, RegisterError> {
         // R221/R311gb — canonicalize into the bounded pattern buffer. A
         // grammar-invalid pattern falls back to the raw form (non-
         // breaking; the matcher still operates). An over-capacity
@@ -709,7 +683,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
             match crate::keyexpr_canon::canonize_keyexpr(keyexpr_pattern) {
                 Ok(canon) => canon,
                 Err(crate::keyexpr_canon::KeyexprCanonError::ExceedsCapacity) => {
-                    return Err(QueryableRegisterError::KeyexprTooLong);
+                    return Err(RegisterError::KeyexprTooLong);
                 }
                 Err(err) => {
                     log::warn!(
@@ -719,7 +693,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     );
                     let mut raw = BoundedString::new();
                     raw.push_str(keyexpr_pattern)
-                        .map_err(|_| QueryableRegisterError::KeyexprTooLong)?;
+                        .map_err(|_| RegisterError::KeyexprTooLong)?;
                     raw
                 }
             };
@@ -733,7 +707,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
                 allowed_origin,
                 sink,
             })
-            .map_err(|_| QueryableRegisterError::TableFull)?;
+            .map_err(|_| RegisterError::TableFull)?;
         self.next_id = self.next_id.saturating_add(1);
         Ok(id)
     }

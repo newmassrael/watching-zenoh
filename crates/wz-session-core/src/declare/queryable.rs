@@ -32,13 +32,14 @@ use crate::caps;
 use crate::decl_sink::BorrowedDecl;
 #[cfg(feature = "alloc")]
 use crate::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
-use crate::decl_sink::{DeclRegisterError, DeclSink, DeclView, UndeclSink};
+use crate::decl_sink::{DeclSink, DeclView, UndeclSink};
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 #[cfg(feature = "alloc")]
 use crate::keyexpr_match::keyexpr_intersect_patterns;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
+use crate::registry_error::RegisterError;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::wireexpr_resolve::resolve_wireexpr;
 
@@ -115,20 +116,20 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// [`on_queryable_declared`](RemoteQueryableRegistry::on_queryable_declared)
     /// convenience wrapper funnels through here. Duplicate sinks allowed;
     /// dispatch fires them in registration order.
-    pub fn on_queryable_declared_sink(&mut self, sink: D) -> Result<(), DeclRegisterError> {
+    pub fn on_queryable_declared_sink(&mut self, sink: D) -> Result<(), RegisterError> {
         self.on_decl
             .push(sink)
-            .map_err(|_| DeclRegisterError::ObserverTableFull)
+            .map_err(|_| RegisterError::TableFull)
     }
 
     /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
     /// `alloc`-only
     /// [`on_queryable_undeclared`](RemoteQueryableRegistry::on_queryable_undeclared)
     /// convenience wrapper funnels through here.
-    pub fn on_queryable_undeclared_sink(&mut self, sink: U) -> Result<(), DeclRegisterError> {
+    pub fn on_queryable_undeclared_sink(&mut self, sink: U) -> Result<(), RegisterError> {
         self.on_undecl
             .push(sink)
-            .map_err(|_| DeclRegisterError::ObserverTableFull)
+            .map_err(|_| RegisterError::TableFull)
     }
 
     /// Number of installed `on_queryable_declared` callbacks.

@@ -77,6 +77,12 @@ pub mod bounded;
 /// const-vs-type-parameter rationale.
 pub mod caps;
 
+/// R311gb (Track 2) — shared `RegisterError` taxonomy for the bounded
+/// application-layer registries (the SSOT for "a registration was
+/// rejected at declared capacity"); replaces the per-registry error
+/// enums the R311hd..hg fan-out minted.
+pub mod registry_error;
+
 /// R311gb — sample-delivery seam (`SampleView` accessor contract +
 /// `SampleSink` DIP trait + the `alloc`-only `BoxedSink` closure
 /// adapter). Unconditional — the traits exist in every profile so

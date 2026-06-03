@@ -104,6 +104,7 @@ use hashbrown::HashMap;
 // pending table.
 use crate::bounded::BoundedVec;
 use crate::caps;
+use crate::registry_error::RegisterError;
 
 // R311dy — `wz_codecs::{reply, response}` live in the `codec-response`
 // codec_group, so the wire-dispatch imports + the local
@@ -403,32 +404,6 @@ struct Pending<C: ReplySink> {
     sink: C,
 }
 
-/// R311gb (Track 2) — failure mode of
-/// [`ReplyRegistry::register_sink`] on the no-alloc (MCU) backing: the
-/// pending table is at its declared capacity ([`caps::MAX_PENDING_QUERIES`]),
-/// surfaced fail-fast per the [`crate::bounded`] contract (no silent
-/// drop). On the `alloc` (AP) backing it is never returned — the table
-/// grows, so the convenience [`ReplyRegistry::register`] wrapper stays
-/// infallible there. Single-variant (unlike `SubscribeError` /
-/// `QueryableRegisterError`, the reply registry stores no keyexpr pattern,
-/// so there is no `KeyexprTooLong` mode).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReplyRegisterError {
-    /// The pending table is at its declared capacity
-    /// ([`caps::MAX_PENDING_QUERIES`]).
-    TableFull,
-}
-
-impl core::fmt::Display for ReplyRegisterError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::TableFull => f.write_str("pending reply table at declared capacity"),
-        }
-    }
-}
-
-impl core::error::Error for ReplyRegisterError {}
-
 /// Reply table backing the inbound `Response(Reply|Err)` and
 /// `ResponseFinal` → callback dispatch. `!Sync` by construction;
 /// cross-task sharing goes through `Arc<Mutex<…>>`. See module-level
@@ -492,7 +467,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
     ///
     /// R311gb (Track 2) — fallible on the no-alloc backing: a pending
     /// registration past [`caps::MAX_PENDING_QUERIES`] is rejected with
-    /// [`ReplyRegisterError::TableFull`] (fail-fast, no silent drop). On
+    /// [`RegisterError::TableFull`] (fail-fast, no silent drop). On
     /// the `alloc` backing it never fails, so the convenience
     /// [`register`](Self::register) wrapper `.expect()`s the result.
     pub fn register_sink(
@@ -501,7 +476,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
         expected_finals: u32,
         deadline_ms: Option<u64>,
         sink: C,
-    ) -> Result<ReplyHandle, ReplyRegisterError> {
+    ) -> Result<ReplyHandle, RegisterError> {
         self.pending
             .push(Pending {
                 rid,
@@ -509,7 +484,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
                 deadline_ms,
                 sink,
             })
-            .map_err(|_| ReplyRegisterError::TableFull)?;
+            .map_err(|_| RegisterError::TableFull)?;
         Ok(ReplyHandle(rid))
     }
 

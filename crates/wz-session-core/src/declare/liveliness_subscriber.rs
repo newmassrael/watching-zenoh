@@ -92,6 +92,7 @@ use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 use crate::keyexpr_match::{keyexpr_pattern_matches, MAX_KEYEXPR_CHUNKS};
 #[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
+use crate::registry_error::RegisterError;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::wireexpr_resolve::resolve_wireexpr;
 
@@ -167,33 +168,6 @@ pub struct LivelinessSubscriberRegistry<C: LivelinessSampleSink> {
     peer_token_table: HashMap<u64, String>,
 }
 
-/// R311gb (Track 2) — failure mode of
-/// [`LivelinessSubscriberRegistry::register`] on the no-alloc (MCU)
-/// backing: the slot table is at its declared capacity
-/// ([`caps::MAX_LIVELINESS_SUBSCRIPTIONS`]), surfaced fail-fast per the
-/// [`crate::bounded`] contract. On the `alloc` (AP) backing it is never
-/// returned. Distinct from the `register` return's `Ok(false)`
-/// duplicate-`interest_id` signal (a no-op, not a capacity failure).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LivelinessRegisterError {
-    /// The slot table is at its declared capacity
-    /// ([`caps::MAX_LIVELINESS_SUBSCRIPTIONS`]).
-    TableFull,
-    /// The subscriber keyexpr exceeds [`caps::MAX_KEYEXPR_BYTES`].
-    KeyexprTooLong,
-}
-
-impl core::fmt::Display for LivelinessRegisterError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::TableFull => f.write_str("liveliness subscriber slot table at declared capacity"),
-            Self::KeyexprTooLong => f.write_str("liveliness subscriber keyexpr exceeds capacity"),
-        }
-    }
-}
-
-impl core::error::Error for LivelinessRegisterError {}
-
 impl<C: LivelinessSampleSink> Default for LivelinessSubscriberRegistry<C> {
     fn default() -> Self {
         Self::with_sink_backing()
@@ -249,7 +223,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         keyexpr: &str,
         history: bool,
         sink: C,
-    ) -> Result<bool, LivelinessRegisterError> {
+    ) -> Result<bool, RegisterError> {
         // Duplicate check by linear scan (the slot table is a `BoundedVec`
         // now, not a keyed map). Fresh ids come from
         // `alloc_next_interest_id`, so a collision is a programming error.
@@ -259,7 +233,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         let mut pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }> = BoundedString::new();
         pattern
             .push_str(keyexpr)
-            .map_err(|_| LivelinessRegisterError::KeyexprTooLong)?;
+            .map_err(|_| RegisterError::KeyexprTooLong)?;
         self.slots
             .push(LivelinessSubscriberSlot {
                 interest_id,
@@ -268,7 +242,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                 history,
                 history_complete: false,
             })
-            .map_err(|_| LivelinessRegisterError::TableFull)?;
+            .map_err(|_| RegisterError::TableFull)?;
         Ok(true)
     }
 

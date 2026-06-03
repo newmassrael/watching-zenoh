@@ -31,20 +31,22 @@ use wz_codecs::declare::DeclareOwnedVariant;
 use crate::bounded::BoundedVec;
 use crate::caps;
 // `DeclSink` / `UndeclSink` (the observer-list bounds) + `DeclView` (the
-// no-heap fire currency) + `DeclRegisterError` are unconditional; the
-// `BorrowedDecl` builder + `Boxed*` adapters + the wire-codec / envelope
-// imports carry the narrower gates.
+// no-heap fire currency) are unconditional; the shared
+// [`crate::registry_error::RegisterError`] carries the install failure;
+// the `BorrowedDecl` builder + `Boxed*` adapters + the wire-codec /
+// envelope imports carry the narrower gates.
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::decl_sink::BorrowedDecl;
 #[cfg(feature = "alloc")]
 use crate::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
-use crate::decl_sink::{DeclRegisterError, DeclSink, DeclView, UndeclSink};
+use crate::decl_sink::{DeclSink, DeclView, UndeclSink};
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 #[cfg(feature = "alloc")]
 use crate::keyexpr_match::keyexpr_intersect_patterns;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
+use crate::registry_error::RegisterError;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::wireexpr_resolve::resolve_wireexpr;
 
@@ -120,20 +122,20 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// convenience wrapper funnels through here after wrapping a closure
     /// in a [`BoxedDeclSink`]. Duplicate sinks are explicitly allowed;
     /// dispatch fires them in registration order.
-    pub fn on_subscriber_declared_sink(&mut self, sink: D) -> Result<(), DeclRegisterError> {
+    pub fn on_subscriber_declared_sink(&mut self, sink: D) -> Result<(), RegisterError> {
         self.on_decl
             .push(sink)
-            .map_err(|_| DeclRegisterError::ObserverTableFull)
+            .map_err(|_| RegisterError::TableFull)
     }
 
     /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
     /// `alloc`-only
     /// [`on_subscriber_undeclared`](RemoteSubscriberRegistry::on_subscriber_undeclared)
     /// convenience wrapper funnels through here.
-    pub fn on_subscriber_undeclared_sink(&mut self, sink: U) -> Result<(), DeclRegisterError> {
+    pub fn on_subscriber_undeclared_sink(&mut self, sink: U) -> Result<(), RegisterError> {
         self.on_undecl
             .push(sink)
-            .map_err(|_| DeclRegisterError::ObserverTableFull)
+            .map_err(|_| RegisterError::TableFull)
     }
 
     /// Number of installed `on_subscriber_declared` callbacks.

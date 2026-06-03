@@ -59,19 +59,19 @@ pub const MAX_KEYEXPR_BYTES: usize = 256;
 /// Maximum number of concurrently-registered local subscriptions in a
 /// [`crate::pubsub::SubscriberRegistry`]. Bounds the registry's
 /// subscriber table on the no-alloc backing; a `register` past this is
-/// rejected (`SubscribeError::TableFull`) rather than growing the table.
+/// rejected (`RegisterError::TableFull`) rather than growing the table.
 pub const MAX_SUBSCRIPTIONS: usize = 16;
 
 /// Maximum number of concurrently-registered local queryables in a
 /// [`crate::query::QueryableRegistry`]. Bounds the registry's queryable
 /// table on the no-alloc backing; a `register` past this is rejected
-/// (`QueryableRegisterError::TableFull`) rather than growing the table.
+/// (`RegisterError::TableFull`) rather than growing the table.
 pub const MAX_QUERYABLES: usize = 16;
 
 /// Maximum number of concurrently-outstanding pending z_get queries in a
 /// [`crate::reply::ReplyRegistry`]. Bounds the registry's pending table
 /// on the no-alloc backing; a `register` past this is rejected
-/// (`ReplyRegisterError::TableFull`) rather than growing the table. Also
+/// (`RegisterError::TableFull`) rather than growing the table. Also
 /// bounds the `keep` / `fired` partitions the no-alloc `fire_final_for` /
 /// `sweep_timed_out` build on the stack.
 pub const MAX_PENDING_QUERIES: usize = 16;
@@ -82,7 +82,7 @@ pub const MAX_PENDING_QUERIES: usize = 16;
 /// [`crate::declare::queryable::RemoteQueryableRegistry`],
 /// [`crate::declare::liveliness::LivelinessRegistry`]). Bounds each
 /// observer list on the no-alloc backing; an `on_*_declared_sink` past
-/// this is rejected (`DeclRegisterError::ObserverTableFull`) rather than
+/// this is rejected (`RegisterError::TableFull`) rather than
 /// growing the list. Observers are installed once at startup, so the
 /// default is small.
 pub const MAX_DECL_OBSERVERS: usize = 8;
