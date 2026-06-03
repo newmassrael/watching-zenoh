@@ -81,6 +81,13 @@ path = "src/main.rs"
 # `cargo run -p wz-ap-demo` still gets the full preset because this
 # crate's own `default = ["preset-ap-client"]` below re-enables it.
 wz = { path = "../wz", default-features = false }
+# gc-3 carry #2 — the LIVE application machine (sensor_monitor statechart +
+# temp/reset switchboard + generated value injector). Optional + pulled only by
+# the `switchboard` feature so the footprint measurement
+# (`--no-default-features --features wz/<subset>`) elides it together with the
+# wz facade's switchboard feature — keeping wz-session-core's `switchboard`
+# (and its sce deps) out of a switchboard-less measurement build.
+wz-ap-demo-app = { path = "../wz-ap-demo-app", optional = true }
 # Tokio multi-thread runtime — required by TokioLinkDriverAdapter's
 # block_on contract per session_glue.rs:445; the #[tokio::main] entry
 # attribute and `tokio::signal::ctrl_c` are binary-shaped uses outside
@@ -115,7 +122,17 @@ env_logger = "0.11"
 # never need their own mirror.
 [features]
 default = ["preset-ap-client"]
-preset-ap-client = ["wz/preset-ap-client"]
+# Production preset forwards the wz facade's preset-ap-client contract + the
+# live application switchboard wiring (gc-3 carry #2). switchboard stays a
+# demo-local opt-in on top of the framework preset (preset-ap-client in the wz
+# facade does NOT enable switchboard), so the framework footprint for other
+# preset-ap-client consumers is unchanged.
+preset-ap-client = ["wz/preset-ap-client", "switchboard"]
+# gc-3 carry #2 — the live application machine + observer switchboard fan-out.
+# Pulls the wz-ap-demo-app crate (the app statechart + generated injector) and
+# the wz facade's switchboard feature (ApplicationLayerObserver.switchboard +
+# dispatch_switchboard). Elidable for the footprint measurement.
+switchboard = ["dep:wz-ap-demo-app", "wz/switchboard"]
 
 [lints]
 workspace = true

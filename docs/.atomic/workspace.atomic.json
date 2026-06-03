@@ -885,7 +885,8 @@
         "R311gv: bytes payload field live via .into(); native bytes guard awaits SCE byte-literal lowering.",
         "R311gw: native bytes guard now lowers via SCE BytesLit (pin d665780d9); R311gv caveat closed.",
         "R311gx: multi-event example -- 2nd value event humidity_update (uint8 guard); 2 helpers/2 arms.",
-        "R311gy: carry #2 foundation -- wz-ap-demo-app crate (live app machine + injector); wiring R311gz."
+        "R311gy: carry #2 foundation -- wz-ap-demo-app crate (live app machine + injector); wiring R311gz.",
+        "R311gz: carry #2 -- wz-ap-demo Push->switchboard->app engine wired + fan-out test; ext peer R311h."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -29270,6 +29271,50 @@
         "R311gz (next): wire wz-ap-demo-app into the wz-ap-demo binary -- register_bindings on the observer's switchboard before drive_session, construct SensorMonitorInjector in the inbound loop, drive the app engine on a matched Push, and log app-state transitions. Production-type observer fan-out integration test (in-process Push, like switchboard_inject.rs but the generated value injector).",
         "R311h* (after gz): external zenoh-pico peer Layer E inbound value-path harness -- a real peer publishes temp_payload wire bytes to demo/sensor/temp over TCP, the demo's switchboard decodes + drives the app engine, asserted via a demo stderr transition marker. zenoh-pico CLI (z_put) + wz-e2e publisher binaries are available at target/zenoh-pico-cli.",
         "Live wz-ap-demo wiring (carry from R311gs) stays open until R311gz + the Layer E harness land; this round only adds the isolated app crate."
+      ]
+    },
+    "Round 311gz": {
+      "decision_summary": "R311gz: gc-3 carry #2 -- wire wz-ap-demo-app into the wz-ap-demo binary: inbound Push -> observer.dispatch_switchboard -> app engine (switchboard feature); + value-path fan-out integration test.",
+      "changes_bullets": [
+        "wz-ap-demo/Cargo.toml: add wz-ap-demo-app as an OPTIONAL dep pulled only by a new demo-local `switchboard` feature; `preset-ap-client = [\"wz/preset-ap-client\", \"switchboard\"]` so production `cargo run -p wz-ap-demo` wires the app machine, while the footprint measurement (`--no-default-features --features wz/<subset>`) elides wz-ap-demo-app + wz-session-core's switchboard together. The wz facade's preset-ap-client is unchanged (switchboard stays a demo-local opt-in).",
+        "wz-ap-demo/src/runner.rs (run_demo): before the drive loop, register the demo's switchboard rows (wz_ap_demo_app::register_bindings on observer.switchboard) + construct the app statechart engine (new_engine). All gated on `feature = \"switchboard\"`.",
+        "wz-ap-demo/src/runner.rs (on_event closure): bind the observer lock guard, keep the existing `obs.dispatch(event, &actions)` per-domain fan, then (gated) build a SensorMonitorInjector over the app engine and call `obs.dispatch_switchboard(event, &mut injector)` — IterationEvent is Copy, so one event drives both. On a matched row, step the app engine + log `APP SWITCHBOARD FIRED fired=N app_state=...`.",
+        "wz-ap-demo-app: add a value-path observer fan-out integration test (tests/fan_out_value_path.rs, 4 tests) exercising the EXACT demo path with production types -- an inbound wire Push through ApplicationLayerObserver.dispatch_switchboard + the generated SensorMonitorInjector decodes the temp_payload bytes and drives the app engine (hot / cold-miss / reset-signal / unmapped). dev-deps: wz-runtime-tokio (switchboard) + wz-codecs."
+      ],
+      "verification_bullets": [
+        "wz-ap-demo-app 8 tests green (4 unit static-dispatch + 4 fan_out_value_path integration); the integration test drives the real ApplicationLayerObserver switchboard fan-out + generated injector into the app Engine (inbound Push -> decode -> typed _event.data -> native guard).",
+        "wz-ap-demo builds both WITH switchboard (default preset-ap-client: wz-ap-demo-app compiled + wired) and WITHOUT (`--no-default-features --features wz/preset-ap-client`: wz-ap-demo-app absent, cfg gates elide) -- gating + measurement cleanliness verified.",
+        "cargo fmt --check + cargo clippy --all-targets clean on wz-ap-demo + wz-ap-demo-app; clippy also clean on the switchboard-less demo build.",
+        "No SCE pin change (d665780d9). Generated app code + injector unchanged from R311gy.",
+        "In-process Push only (deterministic); the external zenoh peer Layer E lane is the R311h follow-on."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "R311h (next, carry #2 full closure): external-peer Layer E inbound value-path harness. A real peer publishes temp_payload wire bytes (2-byte big-endian uint16) to demo/sensor/temp over TCP; the demo's switchboard decodes + drives the app engine; assert the demo stderr shows `APP SWITCHBOARD FIRED ... app_state=Hot`. Design note: zenoh-pico z_put -v takes a string value, so exact 2-byte codec bytes are awkward via the CLI -- a wz publisher binary (encoding temp_payload) is the robust \"real peer\" for the value path; the reset SIGNAL row is drivable by any z_put payload (foreign-impl friendly) as a complementary zenoh-pico check.",
+        "After R311h lands, the gc-3 carry #2 (live wz-ap-demo wiring, from R311gs) is fully closed: a real published sample drives a real SCE application machine end to end through the production session + observer + switchboard."
+      ],
+      "publishable_decision_summary": "R311gz: gc-3 carry #2 -- wire wz-ap-demo-app into the wz-ap-demo binary: inbound Push -> observer.dispatch_switchboard -> app engine (switchboard feature); + value-path fan-out integration test.",
+      "publishable_changes_bullets": [
+        "wz-ap-demo/Cargo.toml: add wz-ap-demo-app as an OPTIONAL dep pulled only by a new demo-local `switchboard` feature; `preset-ap-client = [\"wz/preset-ap-client\", \"switchboard\"]` so production `cargo run -p wz-ap-demo` wires the app machine, while the footprint measurement (`--no-default-features --features wz/<subset>`) elides wz-ap-demo-app + wz-session-core's switchboard together. The wz facade's preset-ap-client is unchanged (switchboard stays a demo-local opt-in).",
+        "wz-ap-demo/src/runner.rs (run_demo): before the drive loop, register the demo's switchboard rows (wz_ap_demo_app::register_bindings on observer.switchboard) + construct the app statechart engine (new_engine). All gated on `feature = \"switchboard\"`.",
+        "wz-ap-demo/src/runner.rs (on_event closure): bind the observer lock guard, keep the existing `obs.dispatch(event, &actions)` per-domain fan, then (gated) build a SensorMonitorInjector over the app engine and call `obs.dispatch_switchboard(event, &mut injector)` — IterationEvent is Copy, so one event drives both. On a matched row, step the app engine + log `APP SWITCHBOARD FIRED fired=N app_state=...`.",
+        "wz-ap-demo-app: add a value-path observer fan-out integration test (tests/fan_out_value_path.rs, 4 tests) exercising the EXACT demo path with production types -- an inbound wire Push through ApplicationLayerObserver.dispatch_switchboard + the generated SensorMonitorInjector decodes the temp_payload bytes and drives the app engine (hot / cold-miss / reset-signal / unmapped). dev-deps: wz-runtime-tokio (switchboard) + wz-codecs."
+      ],
+      "publishable_verification_bullets": [
+        "wz-ap-demo-app 8 tests green (4 unit static-dispatch + 4 fan_out_value_path integration); the integration test drives the real ApplicationLayerObserver switchboard fan-out + generated injector into the app Engine (inbound Push -> decode -> typed _event.data -> native guard).",
+        "wz-ap-demo builds both WITH switchboard (default preset-ap-client: wz-ap-demo-app compiled + wired) and WITHOUT (`--no-default-features --features wz/preset-ap-client`: wz-ap-demo-app absent, cfg gates elide) -- gating + measurement cleanliness verified.",
+        "cargo fmt --check + cargo clippy --all-targets clean on wz-ap-demo + wz-ap-demo-app; clippy also clean on the switchboard-less demo build.",
+        "No SCE pin change (d665780d9). Generated app code + injector unchanged from R311gy.",
+        "In-process Push only (deterministic); the external zenoh peer Layer E lane is the R311h follow-on."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311h (next, carry #2 full closure): external-peer Layer E inbound value-path harness. A real peer publishes temp_payload wire bytes (2-byte big-endian uint16) to demo/sensor/temp over TCP; the demo's switchboard decodes + drives the app engine; assert the demo stderr shows `APP SWITCHBOARD FIRED ... app_state=Hot`. Design note: zenoh-pico z_put -v takes a string value, so exact 2-byte codec bytes are awkward via the CLI -- a wz publisher binary (encoding temp_payload) is the robust \"real peer\" for the value path; the reset SIGNAL row is drivable by any z_put payload (foreign-impl friendly) as a complementary zenoh-pico check.",
+        "After R311h lands, the gc-3 carry #2 (live wz-ap-demo wiring, from R311gs) is fully closed: a real published sample drives a real SCE application machine end to end through the production session + observer + switchboard."
       ]
     },
     "Round 311h": {

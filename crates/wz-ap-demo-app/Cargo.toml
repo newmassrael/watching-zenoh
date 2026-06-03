@@ -57,5 +57,15 @@ wz-switchboard-codegen = { path = "../wz-switchboard-codegen" }
 # pins none). serde_yaml_ng is the maintained serde_yaml successor.
 serde_yaml_ng = "0.9"
 
+[dev-dependencies]
+# The value-path observer fan-out integration test (tests/fan_out_value_path.rs)
+# drives an inbound wire Push through the PRODUCTION ApplicationLayerObserver
+# switchboard fan-out into the app engine via the generated SensorMonitorInjector
+# — the exact path the wz-ap-demo binary wires. `switchboard` brings the
+# observer.switchboard field + dispatch_switchboard (and implies codec-push for
+# the Push type); wz-codecs supplies the wire Push / Wireexpr builders.
+wz-runtime-tokio = { path = "../wz-runtime-tokio", features = ["switchboard"] }
+wz-codecs = { path = "../wz-codecs" }
+
 [lints]
 workspace = true

@@ -1441,6 +1441,7 @@ dependencies = [
  "log",
  "tokio",
  "wz",
+ "wz-ap-demo-app",
 ]
 
 [[package]]
@@ -1450,6 +1451,8 @@ dependencies = [
  "sce-forge-runtime",
  "sce-rust-runtime",
  "serde_yaml_ng",
+ "wz-codecs",
+ "wz-runtime-tokio",
  "wz-session-core",
  "wz-switchboard-codegen",
  "wz-switchboard-schema",

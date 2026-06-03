@@ -623,6 +623,25 @@ pub(crate) async fn run_demo(
     let mut driver = inbound;
     let observer_for_dispatch = observer.clone();
 
+    // gc-3 carry #2 — wire the LIVE application switchboard. Register the
+    // demo's keyexpr -> domain-event rows (from wz-ap-demo-app's sidecar) onto
+    // the observer's switchboard registry, and construct the application
+    // statechart engine. An inbound Push on a mapped keyexpr fans out to this
+    // engine via `observer.dispatch_switchboard` in the drive loop below — the
+    // first time an external peer's published sample drives a real SCE
+    // application machine end to end (vs the session FSM the demo always ran).
+    #[cfg(feature = "switchboard")]
+    {
+        let mut obs = observer.lock().expect("observer mutex poisoned");
+        wz_ap_demo_app::register_bindings(&mut obs.switchboard);
+        log::info!(
+            "wz-ap-demo: switchboard registered (demo/sensor/temp value, \
+             demo/sensor/reset signal); app machine = sensor_monitor"
+        );
+    }
+    #[cfg(feature = "switchboard")]
+    let mut app_engine = wz_ap_demo_app::new_engine();
+
     // R264 — sweep_task is a dedicated `TimeSource::sleep`-driven
     // ticker that fires `ReplyRegistry::sweep_timed_out` at the
     // `--sweep-cadence-ms` interval (R270; default 100 ms preserves
@@ -673,10 +692,36 @@ pub(crate) async fn run_demo(
             &session_clock,
             |event: IterationEvent<'_>| {
                 log::debug!("wz-ap-demo: iteration event = {event:?}");
-                observer_for_dispatch
+                let mut obs = observer_for_dispatch
                     .lock()
-                    .expect("observer mutex poisoned by panic in subscriber callback")
-                    .dispatch(event, &actions);
+                    .expect("observer mutex poisoned by panic in subscriber callback");
+                // Fan the iteration event into the per-domain registries
+                // (subscribers / replies / liveliness / …) + drain staged
+                // outbound records, exactly as before.
+                obs.dispatch(event, &actions);
+                // gc-3 carry #2 — also fan an inbound Push through the
+                // switchboard into the application engine. IterationEvent is
+                // Copy, so the same event drives both the registry dispatch and
+                // the switchboard. The value injector decodes the wire payload
+                // (temp_payload codec) into the typed _event.data; a signal row
+                // (reset) injects an empty _event.data. A matched row advances
+                // the app machine, which we then step + log.
+                #[cfg(feature = "switchboard")]
+                {
+                    let fired = {
+                        let mut injector =
+                            wz_ap_demo_app::SensorMonitorInjector::new(&mut app_engine);
+                        obs.dispatch_switchboard(event, &mut injector)
+                    };
+                    if fired > 0 {
+                        app_engine.step();
+                        log::info!(
+                            "wz-ap-demo: APP SWITCHBOARD FIRED fired={fired} \
+                             app_state={:?}",
+                            app_engine.get_current_state()
+                        );
+                    }
+                }
             },
         ) => Some(o),
         _ = shutdown_signal() => {
