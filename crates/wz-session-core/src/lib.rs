@@ -29,7 +29,18 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-#[cfg(feature = "alloc")]
+/// R221 — zenoh keyexpr structural canonicalization mirror.
+///
+/// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: the
+/// canon core ([`canonize_keyexpr`](keyexpr_canon::canonize_keyexpr) +
+/// the per-chunk state machine) now backs its two output buffers onto
+/// [`bounded::BoundedString`] / [`bounded::BoundedVec`], so registry
+/// pattern canonicalization exists on the MCU no-heap profile. The
+/// outbound zenoh-pico-safety gate
+/// ([`check_outbound_keyexpr_pico_safe`](keyexpr_canon::check_outbound_keyexpr_pico_safe)
+/// + [`OutboundKeyexprError`](keyexpr_canon::OutboundKeyexprError))
+/// stays `alloc`-gated: it guards the outbound DECLARE *wire emit*
+/// path, which is AP-retention per the Track 2 borrow boundary.
 pub mod keyexpr_canon;
 
 /// R311dn / di-15-pre — keyexpr glob + intersection matchers
@@ -55,6 +66,16 @@ pub mod keyexpr_match;
 /// feature. First step of the session-core no-alloc gating: provides
 /// the seam the 25 currently alloc-gated modules migrate onto.
 pub mod bounded;
+
+/// R311gb (Track 2 no-alloc gating) — deploy-declared capacity
+/// constants: the SSOT for the bounded backing sizes (`N`) the
+/// registries pin onto [`bounded::BoundedVec`] / [`bounded::BoundedString`].
+/// Unconditional (plain `usize` consts). A registry field binds a
+/// const directly (`BoundedVec<_, { caps::MAX_X }>`) — no `const N`
+/// type parameter, since one machine per sidecar (§2.1) means no
+/// per-instance capacity divergence. See the module docs for the
+/// const-vs-type-parameter rationale.
+pub mod caps;
 
 /// R311gb — sample-delivery seam (`SampleView` accessor contract +
 /// `SampleSink` DIP trait + the `alloc`-only `BoxedSink` closure

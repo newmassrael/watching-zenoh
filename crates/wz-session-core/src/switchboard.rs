@@ -216,18 +216,21 @@ mod alloc_impl {
             is_value: bool,
         ) {
             let raw = keyexpr_pattern.into();
-            let canonical = match crate::keyexpr_canon::canonize_keyexpr(&raw) {
-                Ok(canon) => canon,
+            // R311gb — `canonize_keyexpr` now returns a `BoundedString`;
+            // bind both arms to `&str` for the backing-agnostic split.
+            let canonical = crate::keyexpr_canon::canonize_keyexpr(&raw);
+            let canonical_str: &str = match &canonical {
+                Ok(canon) => canon.as_str(),
                 Err(err) => {
                     log::warn!(
                         "SwitchboardRegistry::register: keyexpr `{raw}` is not canonical \
                          ({err}); storing raw form. The matcher still operates but the \
                          stored chunks may drift from the canonical form a peer emits."
                     );
-                    raw
+                    raw.as_str()
                 }
             };
-            let pattern_chunks: Vec<String> = canonical.split('/').map(String::from).collect();
+            let pattern_chunks: Vec<String> = canonical_str.split('/').map(String::from).collect();
             self.entries.push(SwitchboardEntry {
                 pattern_chunks,
                 event_name: event_name.into(),

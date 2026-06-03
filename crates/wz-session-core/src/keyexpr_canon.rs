@@ -54,9 +54,11 @@
 //! to `Result`-returning `register` is a future round (R222 cluster
 //! API rewrite).
 
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use core::fmt;
+
+use crate::bounded::{BoundedString, BoundedVec};
+use crate::caps::MAX_KEYEXPR_BYTES;
+use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
 
 /// Errors produced by [`canonize_keyexpr`] when the input violates
 /// the structural keyexpr grammar that zenoh-pico's
@@ -87,6 +89,15 @@ pub enum KeyexprCanonError {
     /// `foo$bar`). zenoh-pico:
     /// `Z_KEYEXPR_CANON_CONTAINS_UNBOUND_DOLLAR`.
     ContainsUnboundDollar,
+    /// R311gb (Track 2) — the canonical form would exceed the
+    /// no-alloc output buffer: more than [`MAX_KEYEXPR_BYTES`] bytes
+    /// or more than [`MAX_KEYEXPR_CHUNKS`] `/`-separated chunks. This
+    /// variant has **no zenoh-pico mirror** (it is a wz-side bounded-
+    /// backing concern, not a grammar status); it is only ever
+    /// returned on the no-alloc (MCU) backing — the `alloc` (AP)
+    /// backing grows its buffer and never produces it. Fail-fast per
+    /// the [`crate::bounded`] contract: no silent truncation.
+    ExceedsCapacity,
 }
 
 impl fmt::Display for KeyexprCanonError {
@@ -103,6 +114,10 @@ impl fmt::Display for KeyexprCanonError {
                 f.write_str("keyexpr canon: bare `*` mid-chunk (must be `$*`, `*`, or `**`)")
             }
             Self::ContainsUnboundDollar => f.write_str("keyexpr canon: `$` not followed by `*`"),
+            Self::ExceedsCapacity => f.write_str(
+                "keyexpr canon: canonical form exceeds the deploy-declared capacity \
+                 (MAX_KEYEXPR_BYTES / MAX_KEYEXPR_CHUNKS)",
+            ),
         }
     }
 }
@@ -132,13 +147,17 @@ enum ChunkShape {
 /// [`KeyexprCanonError`] if the input violates the structural
 /// grammar.
 ///
-/// The output is a fresh `String` even when the input was already
-/// canonical — callers that want zero-allocation on the
+/// The output is a fresh [`BoundedString`] even when the input was
+/// already canonical — callers that want to skip re-storing on the
 /// already-canonical hot path can wrap with an equality check
-/// (`canonize_keyexpr(s)? == s`). The two-pass implementation
-/// allocates one intermediate `String` for the `$*` run-collapse
-/// step and one `Vec<String>` for the chunk walk, both bounded
-/// by the input size.
+/// (`canonize_keyexpr(s)? == s`). The two-pass implementation uses one
+/// intermediate [`BoundedString`] for the `$*` run-collapse step and
+/// one [`BoundedVec`] of chunk slices for the chunk walk; since canon
+/// only ever shrinks or preserves length (collapsing runs, dropping
+/// redundant `*`/`**` chunks), the output is bounded by the input
+/// size. On the no-alloc backing an input longer than
+/// [`MAX_KEYEXPR_BYTES`] (or deeper than [`MAX_KEYEXPR_CHUNKS`])
+/// surfaces as [`KeyexprCanonError::ExceedsCapacity`].
 ///
 /// # Examples
 ///
@@ -160,8 +179,10 @@ enum ChunkShape {
 /// // Invalid grammar returns a typed error.
 /// assert!(canonize_keyexpr("home/foo?bar").is_err());
 /// ```
-pub fn canonize_keyexpr(input: &str) -> Result<String, KeyexprCanonError> {
-    let collapsed = collapse_dsl_runs(input);
+pub fn canonize_keyexpr(
+    input: &str,
+) -> Result<BoundedString<MAX_KEYEXPR_BYTES>, KeyexprCanonError> {
+    let collapsed = collapse_dsl_runs(input)?;
     canonize_chunks(&collapsed)
 }
 
@@ -174,64 +195,77 @@ pub fn canonize_keyexpr(input: &str) -> Result<String, KeyexprCanonError> {
 /// `$*foo` and `pre$*$*post` collapses to `pre$*post`. The
 /// transform is idempotent; running it twice yields the same
 /// result as once.
-fn collapse_dsl_runs(input: &str) -> String {
+fn collapse_dsl_runs(input: &str) -> Result<BoundedString<MAX_KEYEXPR_BYTES>, KeyexprCanonError> {
     const DSL: &str = "$*";
-    let mut out = String::with_capacity(input.len());
+    let mut out = BoundedString::new();
     let mut cursor = 0;
     while cursor < input.len() {
         let rest = &input[cursor..];
         if rest.starts_with(DSL) {
-            out.push_str(DSL);
+            out.push_str(DSL)
+                .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
             cursor += DSL.len();
             while input[cursor..].starts_with(DSL) {
                 cursor += DSL.len();
             }
         } else {
             let next_char = rest.chars().next().expect("non-empty remainder");
-            out.push(next_char);
+            out.push(next_char)
+                .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
             cursor += next_char.len_utf8();
         }
     }
-    out
+    Ok(out)
 }
 
 /// Walk `/`-separated chunks, validating each via
 /// [`analyze_chunk`] and applying the chunk-level canon rules
 /// (`$*` → `*`, drop `*` / `**` after `**`).
-fn canonize_chunks(input: &str) -> Result<String, KeyexprCanonError> {
-    let chunks: Vec<&str> = input.split('/').collect();
-    let mut out_chunks: Vec<&str> = Vec::with_capacity(chunks.len());
+fn canonize_chunks(input: &str) -> Result<BoundedString<MAX_KEYEXPR_BYTES>, KeyexprCanonError> {
+    let mut out_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
     let mut prev_was_double_star = false;
 
-    for chunk in chunks {
+    for chunk in input.split('/') {
         let shape = analyze_chunk(chunk)?;
-        match shape {
+        let keep: Option<&str> = match shape {
             ChunkShape::SingleStar => {
-                if !prev_was_double_star {
-                    out_chunks.push("*");
-                }
+                let k = (!prev_was_double_star).then_some("*");
                 prev_was_double_star = false;
+                k
             }
             ChunkShape::DoubleStar => {
-                if !prev_was_double_star {
-                    out_chunks.push("**");
-                    prev_was_double_star = true;
-                }
+                let k = (!prev_was_double_star).then_some("**");
+                prev_was_double_star = true;
+                k
             }
             ChunkShape::LoneDollarStar => {
-                if !prev_was_double_star {
-                    out_chunks.push("*");
-                }
+                let k = (!prev_was_double_star).then_some("*");
                 prev_was_double_star = false;
+                k
             }
             ChunkShape::Mixed => {
-                out_chunks.push(chunk);
                 prev_was_double_star = false;
+                Some(chunk)
             }
+        };
+        if let Some(c) = keep {
+            out_chunks
+                .push(c)
+                .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
         }
     }
 
-    Ok(out_chunks.join("/"))
+    // Join by '/' into a fresh bounded buffer (replaces `Vec::join`).
+    let mut out = BoundedString::new();
+    for (i, c) in out_chunks.iter().enumerate() {
+        if i > 0 {
+            out.push('/')
+                .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
+        }
+        out.push_str(c)
+            .map_err(|_| KeyexprCanonError::ExceedsCapacity)?;
+    }
+    Ok(out)
 }
 
 /// Per-chunk validation + shape classification.
@@ -284,7 +318,16 @@ fn analyze_chunk(chunk: &str) -> Result<ChunkShape, KeyexprCanonError> {
 
 // ──────────────────────────────────────────────────────────────────
 // R300 — outbound-side gate guarding zenoh-pico bug #3 (SIGABRT)
+//
+// R311gb (Track 2) — this whole section stays `alloc`-gated: it guards
+// the outbound DECLARE *wire emit* path (consumed by the AP-only
+// `session_glue` send-declare builders), which is AP-retention per the
+// Track 2 borrow boundary. Only the inbound canon core above is
+// no-alloc.
 // ──────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "alloc")]
+use alloc::string::{String, ToString};
 
 /// Errors returned by [`check_outbound_keyexpr_pico_safe`] when an
 /// outbound DECLARE-side keyexpr (after mapping-table reconstruction)
@@ -329,6 +372,7 @@ fn analyze_chunk(chunk: &str) -> Result<ChunkShape, KeyexprCanonError> {
 /// `**/abc/*/def`), not only the documented single-char case. The
 /// gate consequently treats ANY non-`*`-shape chunk after `**` as a
 /// bug-window opener.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboundKeyexprError {
     /// Input failed the structural keyexpr grammar (empty chunk,
@@ -350,6 +394,7 @@ pub enum OutboundKeyexprError {
     },
 }
 
+#[cfg(feature = "alloc")]
 impl fmt::Display for OutboundKeyexprError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -369,6 +414,7 @@ impl fmt::Display for OutboundKeyexprError {
     }
 }
 
+#[cfg(feature = "alloc")]
 impl core::error::Error for OutboundKeyexprError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
@@ -416,6 +462,7 @@ impl core::error::Error for OutboundKeyexprError {
 ///     Err(OutboundKeyexprError::PicoBugThreeFamily { .. }),
 /// ));
 /// ```
+#[cfg(feature = "alloc")]
 pub fn check_outbound_keyexpr_pico_safe(input: &str) -> Result<(), OutboundKeyexprError> {
     // Structural canon (empty chunks, reserved chars, unbound `$`,
     // bare `*` mid-chunk, …). We discard the canonized output and
@@ -465,6 +512,7 @@ pub fn check_outbound_keyexpr_pico_safe(input: &str) -> Result<(), OutboundKeyex
 /// caller of [`check_outbound_keyexpr_pico_safe`] does not run
 /// `collapse_dsl_runs` first; doing so would have to handle chunk
 /// boundary effects (`$*$*` straddling `/` is not a single chunk).
+#[cfg(feature = "alloc")]
 fn chunk_canonizes_to_star_shape(chunk: &str) -> bool {
     if chunk == "*" || chunk == "**" {
         return true;
@@ -638,13 +686,15 @@ mod tests {
     #[test]
     fn collapse_dsl_runs_idempotent_on_canonical_input() {
         let canonical = "home/foo$*bar";
-        assert_eq!(collapse_dsl_runs(canonical), canonical);
-        let twice = collapse_dsl_runs(&collapse_dsl_runs(canonical));
+        let once = collapse_dsl_runs(canonical).unwrap();
+        assert_eq!(once, canonical);
+        let twice = collapse_dsl_runs(once.as_str()).unwrap();
         assert_eq!(twice, canonical);
     }
 
     // ── R300 — check_outbound_keyexpr_pico_safe ────────────────
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn outbound_safe_for_canonical_literal_keyexpr() {
         assert!(check_outbound_keyexpr_pico_safe("home/temp").is_ok());
@@ -652,6 +702,7 @@ mod tests {
         assert!(check_outbound_keyexpr_pico_safe("liveliness/devA").is_ok());
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn outbound_safe_for_canonical_wildcard_keyexpr() {
         assert!(check_outbound_keyexpr_pico_safe("home/*/temp").is_ok());
@@ -660,6 +711,7 @@ mod tests {
         assert!(check_outbound_keyexpr_pico_safe("home/**/temp").is_ok());
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn outbound_safe_for_bug_one_family_immediate_star_after_double_star() {
         // R299 bug #1 patterns — pico canon produces wrong output
@@ -673,6 +725,7 @@ mod tests {
         assert!(check_outbound_keyexpr_pico_safe("**/**").is_ok());
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn outbound_rejects_bug_three_family_double_star_literal_star() {
         // R299 bug #3 — `**` + literal chunk + `*`-shape chunk. Pico
@@ -704,6 +757,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn outbound_rejects_bug_three_family_with_dsl_or_double_star_trailing() {
         // Bug #3 also fires when the trailing star-shape chunk is
@@ -723,6 +777,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn outbound_rejects_structurally_invalid_keyexpr() {
         // Grammar violations pass through to NotCanonical. The
@@ -748,6 +803,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn outbound_mixed_chunk_after_double_star_opens_bug_window() {
         // A Mixed chunk (literal + `$*` + literal) is NOT star-shape
@@ -763,6 +819,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn outbound_conservatively_rejects_double_star_after_literal_segment() {
         // R300 NARROW gate is CONSERVATIVE on the trailing star-
@@ -792,6 +849,7 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn chunk_canonizes_to_star_shape_classification() {
         assert!(chunk_canonizes_to_star_shape("*"));

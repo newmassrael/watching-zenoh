@@ -325,18 +325,22 @@ impl<C: SampleSink> SubscriberRegistry<C> {
         let id = SubscriptionId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
         let raw = keyexpr_pattern.into();
-        let canonical = match crate::keyexpr_canon::canonize_keyexpr(&raw) {
-            Ok(canon) => canon,
+        // R311gb — `canonize_keyexpr` now returns a `BoundedString`
+        // (no-alloc canon core); bind both arms to `&str` so the
+        // downstream chunk split is backing-agnostic.
+        let canonical = crate::keyexpr_canon::canonize_keyexpr(&raw);
+        let canonical_str: &str = match &canonical {
+            Ok(canon) => canon.as_str(),
             Err(err) => {
                 log::warn!(
                     "SubscriberRegistry::register: keyexpr `{raw}` is not canonical \
                      ({err}); storing raw form. The matcher still operates but the \
                      stored chunks may drift from the canonical form a peer emits."
                 );
-                raw
+                raw.as_str()
             }
         };
-        let pattern_chunks: Vec<String> = canonical.split('/').map(String::from).collect();
+        let pattern_chunks: Vec<String> = canonical_str.split('/').map(String::from).collect();
         self.subscribers.push(Subscriber {
             id,
             pattern_chunks,

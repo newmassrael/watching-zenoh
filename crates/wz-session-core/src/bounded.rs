@@ -275,6 +275,33 @@ impl<const N: usize> fmt::Debug for BoundedString<N> {
     }
 }
 
+// Compare against `str` / `&str` literals by content. Lets callers and
+// tests write `bounded == "literal"` without reaching for `.as_str()`
+// (the canon owned-output modules return `BoundedString` and are
+// asserted against literal expectations). Backing-agnostic.
+impl<const N: usize> PartialEq<str> for BoundedString<N> {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl<const N: usize> PartialEq<&str> for BoundedString<N> {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+// Content equality between two bounded strings (capacity-independent),
+// so a `BoundedString` is usable inside `Result`/`Option` equality
+// assertions and as a comparand in registry dedup. Backing-agnostic.
+impl<const N: usize, const M: usize> PartialEq<BoundedString<M>> for BoundedString<N> {
+    fn eq(&self, other: &BoundedString<M>) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl<const N: usize> Eq for BoundedString<N> {}
+
 // `fmt::Write` lets the owned-output modules build a BoundedString with
 // `write!` / `core::fmt`; the no-alloc backing surfaces a full buffer
 // as `fmt::Error`, the standard `core::fmt` capacity-failure channel.

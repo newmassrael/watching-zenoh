@@ -105,6 +105,13 @@ fn wz_error_to_pico_status(err: &KeyexprCanonError) -> i32 {
         KeyexprCanonError::DollarAfterDollarOrStar => -6,
         KeyexprCanonError::ContainsSharpOrQmark => -7,
         KeyexprCanonError::ContainsUnboundDollar => -8,
+        // R311gb — `ExceedsCapacity` is a wz-side no-alloc-only variant
+        // (no zenoh-pico mirror) returned only when the bounded canon
+        // buffer overflows on the MCU backing. This cross-validation
+        // runs on the host alloc backing, where it is never produced.
+        KeyexprCanonError::ExceedsCapacity => {
+            unreachable!("ExceedsCapacity is unreachable on the host alloc backing")
+        }
     }
 }
 
@@ -118,10 +125,15 @@ fn assert_agree(input: &str) {
     let pico_result = zenoh_pico_canonize(input);
     match (&wz_result, &pico_result) {
         (Ok(wz_out), Ok(pico_out)) => {
+            // R311gb — wz canon now returns `BoundedString`; compare by
+            // string content against pico's `String`.
             assert_eq!(
-                wz_out, pico_out,
+                wz_out.as_str(),
+                pico_out.as_str(),
                 "canonize output mismatch: `{}` → wz=`{}`, pico=`{}`",
-                input, wz_out, pico_out,
+                input,
+                wz_out,
+                pico_out,
             );
         }
         (Err(wz_err), Err(pico_status)) => {
@@ -151,7 +163,12 @@ fn assert_agree(input: &str) {
 /// mismatch, so the divergence-locking tests can assert against
 /// the SPECIFIC byte-different outputs each side produces.
 fn capture_both(input: &str) -> (Result<String, KeyexprCanonError>, Result<String, i32>) {
-    (canonize_keyexpr(input), zenoh_pico_canonize(input))
+    // R311gb — wz canon now returns a `BoundedString` (no-alloc core);
+    // stringify for byte-parity comparison against pico's `String`.
+    (
+        canonize_keyexpr(input).map(|c| c.as_str().to_string()),
+        zenoh_pico_canonize(input),
+    )
 }
 
 // ── Handcrafted corpus — agreed subspace ───────────────────────
@@ -276,13 +293,12 @@ fn canon_known_pico_anomaly_double_star_literal_star_aborts() {
     // analytically. The proptest strategy filters this pattern out
     // (no `**` followed anywhere later by a `*`-shape chunk) so
     // random fuzz does not trip the assert and abort the binary.
-    assert_eq!(canonize_keyexpr("**/c/*"), Ok("**/c/*".to_string()));
-    assert_eq!(canonize_keyexpr("**/foo/*"), Ok("**/foo/*".to_string()));
-    assert_eq!(
-        canonize_keyexpr("**/abc/*/def"),
-        Ok("**/abc/*/def".to_string()),
-    );
-    assert_eq!(canonize_keyexpr("**/a/b/*"), Ok("**/a/b/*".to_string()));
+    // R311gb — wz canon returns `BoundedString`; assert the unwrapped
+    // value against the expected literal (`BoundedString: PartialEq<&str>`).
+    assert_eq!(canonize_keyexpr("**/c/*").unwrap(), "**/c/*");
+    assert_eq!(canonize_keyexpr("**/foo/*").unwrap(), "**/foo/*");
+    assert_eq!(canonize_keyexpr("**/abc/*/def").unwrap(), "**/abc/*/def");
+    assert_eq!(canonize_keyexpr("**/a/b/*").unwrap(), "**/a/b/*");
 }
 
 #[test]
@@ -429,7 +445,8 @@ proptest! {
         match (&wz_result, &pico_result) {
             (Ok(wz_out), Ok(pico_out)) => {
                 prop_assert_eq!(
-                    wz_out, pico_out,
+                    wz_out.as_str(),
+                    pico_out.as_str(),
                     "canonize output mismatch: `{}` → wz=`{}`, pico=`{}`",
                     &input, wz_out, pico_out,
                 );
