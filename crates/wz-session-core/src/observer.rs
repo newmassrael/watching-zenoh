@@ -110,12 +110,16 @@
 use crate::declare::liveliness::LivelinessRegistry;
 // R283 — declarer-side held-token registry + the inbound-Interest
 // responder. Gated on `liveliness-token` (the declarer feature) alongside
-// the peer-side `LivelinessRegistry`. The `DeclareOwned` it stages into
-// `pending_declares` only exists under `codec-declare` (implied).
+// the peer-side `LivelinessRegistry`. R311hn (Track 2) — the staging
+// buffer is now a no-heap `BoundedVec<DeclResponseItem>` (was
+// `Vec<DeclareOwned>`); the registry + its no-heap response surface
+// compile without `alloc`.
 #[cfg(feature = "liveliness-token")]
-use crate::declare::local_token::LocalTokenRegistry;
+use crate::bounded::BoundedVec;
 #[cfg(feature = "liveliness-token")]
-use wz_codecs::declare::DeclareOwned;
+use crate::caps;
+#[cfg(feature = "liveliness-token")]
+use crate::declare::local_token::{DeclResponseItem, LocalTokenRegistry};
 // R311ek — `LivelinessSubscriberRegistry` consumes `DeclareOwnedVariant`
 // and lives under the `codec-declare`-gated `declare` module, so the
 // `liveliness_subscribers` field + this import gate on
@@ -281,13 +285,16 @@ pub struct ApplicationLayerObserver {
     pending_final_rids: Vec<u64>,
     /// R283 — staging buffer for the declarer-side interest-response
     /// (`Declare(DeclToken)` + `Declare(DeclFinal)`). Populated by
-    /// `local_tokens` during the fan phase, drained through
-    /// `ResponseSink::send_declare` during [`Self::flush_pending`]. Gated
-    /// on `liveliness-token` (unlike the unconditional reply buffers)
-    /// because only the declarer registry — itself feature-gated — ever
-    /// stages into it.
+    /// `local_tokens` during the fan phase (the `alloc` inbound-parse
+    /// path), drained through the borrowed
+    /// `ResponseSink::send_declare_token` / `send_declare_final` seam
+    /// during [`Self::flush_pending`]. Gated on `liveliness-token`
+    /// (unlike the unconditional reply buffers) because only the declarer
+    /// registry — itself feature-gated — ever stages into it. R311hn
+    /// (Track 2) — a no-heap [`BoundedVec`] of [`DeclResponseItem`]
+    /// (was `Vec<DeclareOwned>`), so the drain composes without `alloc`.
     #[cfg(feature = "liveliness-token")]
-    pending_declares: Vec<DeclareOwned>,
+    pending_declares: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }>,
 }
 
 impl Default for ApplicationLayerObserver {
@@ -345,9 +352,10 @@ impl ApplicationLayerObserver {
             pending_replies: Vec::new(),
             pending_final_rids: Vec::new(),
             // R283 — declarer interest-response staging buffer, gated on
-            // `liveliness-token` like its producer registry.
+            // `liveliness-token` like its producer registry. R311hn — a
+            // no-heap `BoundedVec`.
             #[cfg(feature = "liveliness-token")]
-            pending_declares: Vec::new(),
+            pending_declares: BoundedVec::new(),
         }
     }
 
@@ -413,8 +421,13 @@ impl ApplicationLayerObserver {
         // R283 — declarer-side: stage an interest-response for each
         // inbound non-final liveliness Interest. Reads peer_table for the
         // Interest keyexpr resolution; stages into pending_declares (the
-        // drain phase flushes them through the sink).
-        #[cfg(feature = "liveliness-token")]
+        // drain phase flushes them through the sink). R311hn (Track 2) —
+        // `all(.., alloc)`-gated: this owned `InterestOwned`-consuming
+        // inbound parse resolves keyexprs through the peer `HashMap`
+        // (`alloc`). On the MCU no-heap profile the registry's borrowed
+        // `respond_to_interest_borrowed` is driven directly, not through
+        // this aggregate fan.
+        #[cfg(all(feature = "liveliness-token", feature = "alloc"))]
         self.local_tokens
             .dispatch_iteration_event(event, peer_table, &mut self.pending_declares);
         #[cfg(feature = "liveliness-subscriber")]
@@ -470,13 +483,24 @@ impl ApplicationLayerObserver {
             #[cfg(not(feature = "codec-response-final"))]
             self.pending_final_rids.clear();
         }
-        // R283 — drain the declarer-side interest-response staging buffer
-        // through the sink. Every staged `Declare` (DeclToken or
-        // DeclFinal) is emitted in stage order, so each interest-response
-        // batch's DeclTokens precede its terminating DeclFinal.
+        // R283 / R311hn — drain the declarer-side interest-response
+        // staging buffer through the borrowed emit seam. Every staged
+        // `DeclResponseItem` is emitted in stage order, so each
+        // interest-response batch's `Token`s precede its terminating
+        // `Final`. The sink owns the encode (a `VecSink` on AP, a
+        // `SliceSink` on MCU) — no owned `DeclareOwned` crosses the seam.
         #[cfg(feature = "liveliness-token")]
-        for declare in self.pending_declares.drain(..) {
-            actions.send_declare(declare);
+        for item in core::mem::take(&mut self.pending_declares) {
+            match item {
+                DeclResponseItem::Token {
+                    token_id,
+                    keyexpr,
+                    interest_id,
+                } => actions.send_declare_token_reply(token_id, keyexpr.as_str(), interest_id),
+                DeclResponseItem::Final { interest_id } => {
+                    actions.send_declare_final_reply(interest_id)
+                }
+            }
         }
         // R307 — without `query-queryable` (and, R283, without
         // `liveliness-token`) the staging buffers do not exist; `actions`

@@ -68,12 +68,15 @@ pub mod liveliness_subscriber;
 // feature, which implies `codec-declare`) rather than bare
 // `codec-declare`: a build that decodes peer declares but never declares
 // its OWN tokens has no local-token state to reply with.
-// R311gb (Track 2) — the declarer-side responder stays fully alloc-gated
-// (it stages owned `DeclareOwned` Interest replies + holds a `HashMap`
-// token table; not part of the observer-fan-out Track 2 surface). The
-// explicit `alloc` gate is now load-bearing since the parent `declare`
-// module un-gated from `alloc`.
-#[cfg(all(feature = "liveliness-token", feature = "alloc"))]
+// R311hn (Track 2, Decision 2 no-heap emit) — un-gated from `alloc`: the
+// bounded token table + the borrowed no-heap response staging
+// (`respond_to_interest_borrowed` -> `DeclResponseItem`) compile on the
+// MCU no-heap profile; only the owned `InterestOwned`-consuming inbound
+// parse (`respond_to_interest` / `dispatch_*`, which resolve keyexprs
+// through the peer `HashMap`) stays `alloc`-gated per-method. The owned
+// `DeclareOwned` builders moved to the AP sink (wz-runtime-tokio), which
+// implements the borrowed `ResponseSink` emit seam.
+#[cfg(feature = "liveliness-token")]
 pub mod local_token;
 
 // R311ds — cross-registry composability tests (R311dr-wider-tests

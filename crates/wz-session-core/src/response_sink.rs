@@ -25,9 +25,6 @@
 #[cfg(feature = "codec-response")]
 use wz_codecs::response::ResponseOwned;
 
-#[cfg(feature = "liveliness-token")]
-use wz_codecs::declare::DeclareOwned;
-
 /// Outbound sink for queryable replies + reply-chain terminals. The
 /// application-layer observer drains its staged `QueryReply` records
 /// through this trait so it is decoupled from any concrete runtime
@@ -44,17 +41,36 @@ pub trait ResponseSink {
     #[cfg(feature = "codec-response-final")]
     fn send_response_final(&self, request_id: u64);
 
-    /// R283 — encode + enqueue one outbound `Declare(...)` frame. The
-    /// declarer-side liveliness-token registry drains its staged
-    /// interest-response declarations (an interest_id-tagged
-    /// `Declare(DeclToken)` per matching held token, then a
-    /// `Declare(DeclFinal)` terminating the pending query) through this
-    /// method. Gated on `liveliness-token`: it is the only registry that
-    /// stages outbound `Declare` frames, and that feature transitively
-    /// pulls `codec-declare` (the encode path). Mirrors
-    /// `SessionLinkActions::send_declare`.
+    /// R283 / R311hn (Track 2, Decision 2 no-heap emit) — encode + enqueue
+    /// one outbound `Declare(DeclToken)` frame replying to a peer's
+    /// liveliness Interest. The declarer-side liveliness-token registry
+    /// drains its staged interest-response declarations (one
+    /// `interest_id`-tagged `DeclToken` per matching held token, then a
+    /// terminating [`send_declare_final_reply`](Self::send_declare_final_reply))
+    /// through this borrowed-argument seam: the registry passes the held
+    /// token's id + resolved keyexpr literal + the peer's `interest_id`,
+    /// and the sink owns the encode (an AP sink encodes through a
+    /// `VecSink`; an MCU sink encodes through `SliceSink` over a stack
+    /// buffer with zero heap). This keeps the registry decoupled from the
+    /// wire format (mirror of the `QueryResponder` split) and removes the
+    /// owned `DeclareOwned` from the no-heap control plane.
+    ///
+    /// Gated on `liveliness-token` (NOT `all(.., alloc)`): the borrowed
+    /// arguments carry no heap, so the seam composes on the MCU no-alloc
+    /// profile. `liveliness-token` transitively pulls `codec-declare`
+    /// (the encode path).
     #[cfg(feature = "liveliness-token")]
-    fn send_declare(&self, declare: DeclareOwned);
+    fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64);
+
+    /// R283 / R311hn — encode + enqueue the `Declare(DeclFinal)` that
+    /// terminates the liveliness interest-response chain for
+    /// `interest_id`. Emitted once after the matching
+    /// [`send_declare_token_reply`](Self::send_declare_token_reply) calls (and emitted
+    /// even when no token matched, so the peer's pending CURRENT query
+    /// always resolves). Carries only `interest_id` — no heap — so it
+    /// composes on the MCU no-alloc profile.
+    #[cfg(feature = "liveliness-token")]
+    fn send_declare_final_reply(&self, interest_id: u64);
 }
 
 // Smart-pointer / reference transparency: an `Arc`-shared or borrowed
@@ -75,8 +91,12 @@ impl<S: ResponseSink + ?Sized> ResponseSink for &S {
         (**self).send_response_final(request_id)
     }
     #[cfg(feature = "liveliness-token")]
-    fn send_declare(&self, declare: DeclareOwned) {
-        (**self).send_declare(declare)
+    fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
+        (**self).send_declare_token_reply(token_id, keyexpr, interest_id)
+    }
+    #[cfg(feature = "liveliness-token")]
+    fn send_declare_final_reply(&self, interest_id: u64) {
+        (**self).send_declare_final_reply(interest_id)
     }
 }
 
@@ -90,7 +110,11 @@ impl<S: ResponseSink + ?Sized> ResponseSink for alloc::sync::Arc<S> {
         (**self).send_response_final(request_id)
     }
     #[cfg(feature = "liveliness-token")]
-    fn send_declare(&self, declare: DeclareOwned) {
-        (**self).send_declare(declare)
+    fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
+        (**self).send_declare_token_reply(token_id, keyexpr, interest_id)
+    }
+    #[cfg(feature = "liveliness-token")]
+    fn send_declare_final_reply(&self, interest_id: u64) {
+        (**self).send_declare_final_reply(interest_id)
     }
 }

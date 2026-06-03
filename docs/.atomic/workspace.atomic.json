@@ -29858,6 +29858,56 @@
         "Layer Q no-heap probe extended to drive an outbound emit once the seam lands"
       ]
     },
+    "Round 311hn": {
+      "decision_summary": "R311hn no-heaps LocalTokenRegistry (R311hm impl): HashMap->BoundedVec storage + DeclResponseItem staging + borrowed ResponseSink seam, un-gated from alloc; SCE already ships SliceSink so no wz sink needed.",
+      "changes_bullets": [
+        "local_token: tokens HashMap<u64,String> -> BoundedVec<{token_id,BoundedString}>; register fallible(&str)",
+        "respond_to_interest_borrowed stages no-heap DeclResponseItem; alloc inbound parse per-method gated",
+        "ResponseSink: send_declare(DeclareOwned) -> borrowed send_declare_token_reply / send_declare_final_reply",
+        "observer pending Vec<DeclareOwned> -> BoundedVec<DeclResponseItem>; drain via seam; module stays cfg(alloc)",
+        "owned DeclareOwned builders moved to AP sink (wz-runtime-tokio); declare gate all(.,alloc)->liveliness-token",
+        "refinement of R311hm: SliceSink already ships in sce-forge-runtime/codec.rs:291 (no wz-local sink built)"
+      ],
+      "verification_bullets": [
+        "run-ci all layers pass incl Layer G cross-compile + Layer Q.0 MCU no-heap probe (no global allocator)",
+        "no-alloc compile: --no-default-features --features liveliness-token now composes (observer is cfg(alloc))",
+        "local_token 10 + tokio 265 + maximal subset 266 tests green; C1h 781/785 now guard the no-heap surface"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-2-permanent-on-mcu",
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "R311ho: extend Layer Q probe to drive respond_to_interest_borrowed + SliceSink emit = runtime no-heap emit proof",
+        "no-heap emit at runtime not yet proven (only compile); probe currently drives the 7 fire paths only",
+        "Decision 2 owned-retention (AP) path unchanged; the no-heap emit route is additive"
+      ],
+      "publishable_decision_summary": "R311hn no-heaps LocalTokenRegistry (R311hm impl): HashMap->BoundedVec storage + DeclResponseItem staging + borrowed ResponseSink seam, un-gated from alloc; SCE already ships SliceSink so no wz sink needed.",
+      "publishable_changes_bullets": [
+        "local_token: tokens HashMap<u64,String> -> BoundedVec<{token_id,BoundedString}>; register fallible(&str)",
+        "respond_to_interest_borrowed stages no-heap DeclResponseItem; alloc inbound parse per-method gated",
+        "ResponseSink: send_declare(DeclareOwned) -> borrowed send_declare_token_reply / send_declare_final_reply",
+        "observer pending Vec<DeclareOwned> -> BoundedVec<DeclResponseItem>; drain via seam; module stays cfg(alloc)",
+        "owned DeclareOwned builders moved to AP sink (wz-runtime-tokio); declare gate all(.,alloc)->liveliness-token",
+        "refinement of R311hm: SliceSink already ships in sce-forge-runtime/codec.rs:291 (no wz-local sink built)"
+      ],
+      "publishable_verification_bullets": [
+        "run-ci all layers pass incl Layer G cross-compile + Layer Q.0 MCU no-heap probe (no global allocator)",
+        "no-alloc compile: --no-default-features --features liveliness-token now composes (observer is cfg(alloc))",
+        "local_token 10 + tokio 265 + maximal subset 266 tests green; C1h 781/785 now guard the no-heap surface"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-2-permanent-on-mcu",
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311ho: extend Layer Q probe to drive respond_to_interest_borrowed + SliceSink emit = runtime no-heap emit proof",
+        "no-heap emit at runtime not yet proven (only compile); probe currently drives the 7 fire paths only",
+        "Decision 2 owned-retention (AP) path unchanged; the no-heap emit route is additive"
+      ]
+    },
     "Round 311i": {
       "decision_summary": "R311i codec-declare wire-layer cascade — 9 declare-family wz-codecs modules gated + Cargo edges + session_glue.rs Declare wire surface body-cfg.",
       "changes_bullets": [

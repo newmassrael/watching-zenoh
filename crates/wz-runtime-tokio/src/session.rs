@@ -1911,7 +1911,8 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
             R::with_mutex_mut(&self.observer, |observer| {
                 observer
                     .local_tokens
-                    .register(token_id, keyexpr_string.clone());
+                    .register(token_id, &keyexpr_string)
+                    .expect("register on the alloc backing never exceeds declared capacity");
             });
             Ok(LivelinessToken {
                 session: self.clone(),

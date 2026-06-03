@@ -93,3 +93,21 @@ pub const MAX_DECL_OBSERVERS: usize = 8;
 /// Bounds the registry's slot table on the no-alloc backing; a `register`
 /// past this is rejected rather than growing the table.
 pub const MAX_LIVELINESS_SUBSCRIPTIONS: usize = 8;
+
+/// Maximum number of liveliness tokens wz itself can declare and hold
+/// concurrently in a [`crate::declare::local_token::LocalTokenRegistry`]
+/// (the declarer-side mirror of [`MAX_LIVELINESS_SUBSCRIPTIONS`]). Bounds
+/// the registry's token table on the no-alloc backing; a `register` past
+/// this is rejected (`RegisterError::TableFull`) rather than growing the
+/// table. R311hn (Track 2, Decision 2 no-heap emit) — was an unbounded
+/// `HashMap` on the prior alloc-only backing.
+pub const MAX_LOCAL_TOKENS: usize = 8;
+
+/// Maximum number of [`crate::declare::local_token::DeclResponseItem`]
+/// records the application-layer observer stages for one drain cycle
+/// (the declarer-side liveliness interest-response buffer). One inbound
+/// CURRENT Interest stages up to [`MAX_LOCAL_TOKENS`] `DeclToken` items
+/// plus one `DeclFinal`; the buffer accumulates across the Interests in a
+/// single poll batch, so the bound is sized generously. R311hn (Track 2)
+/// — replaces the prior unbounded `Vec<DeclareOwned>` staging.
+pub const MAX_PENDING_DECLARES: usize = 32;
