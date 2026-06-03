@@ -43,8 +43,9 @@
 //!    [`crate::declare::liveliness_subscriber`]'s slot table.
 //! 2. **Borrowed no-heap response** —
 //!    [`LocalTokenRegistry::respond_to_interest_borrowed`] stages
-//!    [`DeclResponseItem`] records (a `Token` per match carrying the
-//!    held keyexpr in a `BoundedString`, then one `Final`) into a
+//!    [`DeclResponseItem`] records (a `Token` per match, id-only — the
+//!    keyexpr stays in the table and is resolved at drain via
+//!    [`LocalTokenRegistry::keyexpr_for`] — then one `Final`) into a
 //!    bounded buffer. No codec, no heap; the caller supplies the
 //!    already-resolved Interest pattern.
 //! 3. **Owned inbound parse (alloc)** —
@@ -102,28 +103,27 @@ const INTEREST_NOT_FINAL_MASK: u8 = 0x60;
 
 /// One staged declarer-side interest-response record. The no-heap
 /// replacement for the prior owned `DeclareOwned` staging: it carries
-/// exactly the data the [`crate::response_sink::ResponseSink`] borrowed
-/// emit seam needs, so no codec type is constructed during the fan
-/// phase. The observer drains a `BoundedVec<DeclResponseItem>` through
+/// exactly the *identity* the [`crate::response_sink::ResponseSink`]
+/// borrowed emit seam needs, so no codec type is constructed during the
+/// fan phase. The observer drains a `BoundedVec<DeclResponseItem>` through
 /// `send_declare_token_reply` / `send_declare_final_reply`.
 ///
-/// `clippy::large_enum_variant` is allowed deliberately: the `Token`
-/// variant carries a [`BoundedString`] and dwarfs `Final`, but the
-/// staging buffer is a `BoundedVec<DeclResponseItem, _>` — an inline
-/// array already sized to the largest variant per slot — so the size
-/// disparity is already paid by the backing. The lint's suggested fix
-/// (box the large variant) would put the keyexpr on the heap, defeating
-/// the whole no-heap purpose of this type.
-#[allow(clippy::large_enum_variant)]
+/// SSOT note: the matched token's keyexpr is **not** copied into the
+/// staged item — it lives once in the registry's token table and is
+/// resolved by `token_id` at drain via [`LocalTokenRegistry::keyexpr_for`].
+/// Keeping the item id-only (two `u64`s) avoids duplicating the keyexpr
+/// and keeps the staging buffer small: a `BoundedVec<DeclResponseItem, N>`
+/// is an inline array sized to the largest variant, so a `BoundedString`
+/// per slot would have ballooned the buffer past a small MCU's stack
+/// (the microbit/M0 overflow that surfaced this).
 pub enum DeclResponseItem {
     /// One matching held token: emit an `interest_id`-tagged
-    /// `Declare(DeclToken)` carrying `token_id` + `keyexpr`.
+    /// `Declare(DeclToken)` for the held token `token_id` (the keyexpr is
+    /// resolved from the registry at drain).
     Token {
-        /// The held token's unique id (the `DeclToken.id` wire field).
+        /// The held token's unique id (the `DeclToken.id` wire field, and
+        /// the registry lookup key for the keyexpr).
         token_id: u64,
-        /// The held token's resolved literal keyexpr (copied into a
-        /// `BoundedString` — no heap).
-        keyexpr: BoundedString<{ caps::MAX_KEYEXPR_BYTES }>,
         /// The peer's `interest_id`, echoed so zenoh-pico routes the
         /// reply to the matching pending query.
         interest_id: u64,
@@ -255,17 +255,11 @@ impl LocalTokenRegistry {
             if !token_matches(token.keyexpr.as_str(), pattern) {
                 continue;
             }
-            let mut keyexpr: BoundedString<{ caps::MAX_KEYEXPR_BYTES }> = BoundedString::new();
-            // The source is already a `BoundedString<MAX_KEYEXPR_BYTES>`,
-            // so this copy cannot overflow; a defensive `continue` keeps
-            // the loop total rather than panicking on the impossible arm.
-            if keyexpr.push_str(token.keyexpr.as_str()).is_err() {
-                continue;
-            }
+            // Stage the token by id only — the keyexpr stays in the table
+            // (SSOT) and is resolved at drain via `keyexpr_for`.
             if pending
                 .push(DeclResponseItem::Token {
                     token_id: token.token_id,
-                    keyexpr,
                     interest_id,
                 })
                 .is_err()
@@ -278,6 +272,19 @@ impl LocalTokenRegistry {
         // Terminate the chain (best-effort under the buffer bound).
         let _ = pending.push(DeclResponseItem::Final { interest_id });
         staged
+    }
+
+    /// Resolve a staged [`DeclResponseItem::Token`]'s `token_id` back to
+    /// the held token's literal keyexpr, for the drain phase's borrowed
+    /// emit (`ResponseSink::send_declare_token_reply`). Returns `None` if
+    /// the token was unregistered between staging and drain (a `DeclToken`
+    /// for a vanished token is silently skipped — the chain's `DeclFinal`
+    /// still resolves the peer's query).
+    pub fn keyexpr_for(&self, token_id: u64) -> Option<&str> {
+        self.tokens
+            .iter()
+            .find(|t| t.token_id == token_id)
+            .map(|t| t.keyexpr.as_str())
     }
 
     /// R311hn (Track 2) — `alloc`-gated inbound-parse path: consume an
@@ -435,12 +442,12 @@ mod tests {
         match pending.iter().next() {
             Some(DeclResponseItem::Token {
                 token_id,
-                keyexpr,
                 interest_id,
             }) => {
                 assert_eq!(*token_id, 1);
-                assert_eq!(keyexpr.as_str(), "group1/zenoh-pico");
                 assert_eq!(*interest_id, 42);
+                // keyexpr is resolved from the registry (SSOT), not staged.
+                assert_eq!(reg.keyexpr_for(*token_id), Some("group1/zenoh-pico"));
             }
             other => panic!("expected Token first, got {:?}", other.is_some()),
         }

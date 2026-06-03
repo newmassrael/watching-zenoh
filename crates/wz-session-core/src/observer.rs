@@ -494,9 +494,15 @@ impl ApplicationLayerObserver {
             match item {
                 DeclResponseItem::Token {
                     token_id,
-                    keyexpr,
                     interest_id,
-                } => actions.send_declare_token_reply(token_id, keyexpr.as_str(), interest_id),
+                } => {
+                    // Resolve the keyexpr from the registry (SSOT) at
+                    // drain; a token unregistered between stage and drain
+                    // is skipped (its chain's Final still terminates).
+                    if let Some(keyexpr) = self.local_tokens.keyexpr_for(token_id) {
+                        actions.send_declare_token_reply(token_id, keyexpr, interest_id);
+                    }
+                }
                 DeclResponseItem::Final { interest_id } => {
                     actions.send_declare_final_reply(interest_id)
                 }

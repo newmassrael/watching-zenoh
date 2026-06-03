@@ -22,6 +22,15 @@
 //!   5. `declare::liveliness_subscriber::LivelinessSubscriberRegistry`
 //!        `::dispatch_sample_borrowed`                            (LivelinessSampleSink)
 //!
+//! R311ho adds a sixth stage that proves the no-heap *emit* (not just the
+//! inbound fire): `declare::local_token::LocalTokenRegistry`
+//! `::respond_to_interest_borrowed` stages borrowed `DeclResponseItem`s,
+//! and this probe — playing the MCU `ResponseSink` — encodes each into a
+//! stack buffer through SCE's `SliceSink` (`encode<S: SceSink>`). A clean
+//! no-allocator link + a non-zero encode position is the whole-program
+//! proof that outbound wire construction is heap-free, closing the
+//! Decision 2 no-heap-emit extension (R311hm/hn).
+//!
 //! Each registry is instantiated over a consumer-supplied concrete
 //! (non-`Box`) sink — the closed-type shape an MCU consumer (a generated
 //! switchboard `enum` or a hand-written app) supplies — and each sink
@@ -56,12 +65,28 @@ use wz_session_core::reply_sink::{BorrowedReply, ReplyKind, ReplySink, ReplyView
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::sink::{BorrowedSample, SampleSink, SampleView};
 
+// R311ho — declarer-side liveliness-token no-heap EMIT proof. The
+// registry stages borrowed `DeclResponseItem`s; this probe encodes each
+// into a stack buffer via SCE's `SliceSink` (no allocator).
+use wz_session_core::bounded::BoundedVec;
+use wz_session_core::caps;
+use wz_session_core::declare::local_token::{DeclResponseItem, LocalTokenRegistry};
+
+use wz_codecs::decl_final::DeclFinal;
+use wz_codecs::decl_token::DeclToken;
+use wz_codecs::wire_const;
+use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+use wz_codecs::wireexpr_local::WireexprLocal;
+
+use sce_forge_runtime::codec::SliceSink;
+
 static SAMPLE_HITS: AtomicU32 = AtomicU32::new(0);
 static QUERY_HITS: AtomicU32 = AtomicU32::new(0);
 static REPLY_HITS: AtomicU32 = AtomicU32::new(0);
 static DECL_HITS: AtomicU32 = AtomicU32::new(0);
 static UNDECL_HITS: AtomicU32 = AtomicU32::new(0);
 static LIVE_HITS: AtomicU32 = AtomicU32::new(0);
+static EMIT_HITS: AtomicU32 = AtomicU32::new(0);
 
 // ── Concrete (non-`Box`) consumer sinks — the closed-type MCU shape. ──
 
@@ -131,116 +156,199 @@ impl LivelinessSampleSink for LiveCounter {
 /// sequence of checks.
 fn require(stage: &str, ok: bool) {
     if !ok {
-        hprintln!("R311hl FAIL: {} no-heap dispatch did not deliver", stage);
+        hprintln!("R311ho FAIL: {} no-heap path did not succeed", stage);
         debug::exit(debug::EXIT_FAILURE);
     }
 }
 
 #[entry]
 fn main() -> ! {
-    // 1. pub/sub — SubscriberRegistry no-heap fire.
-    let mut subs: SubscriberRegistry<SampleCounter> = SubscriberRegistry::with_sink_backing();
-    require(
-        "pubsub register",
-        subs.register_sink("home/temp", Locality::Any, SampleCounter(&SAMPLE_HITS))
-            .is_ok(),
-    );
-    let sample_fired = subs.dispatch_borrowed(
-        &BorrowedSample {
-            keyexpr: "home/temp",
-            payload: b"21.5",
-            kind: SampleKind::Put,
-            reliability: Reliability::BestEffort,
-        },
-        /* is_remote = */ true,
-    );
-    require(
-        "pubsub",
-        sample_fired == 1 && SAMPLE_HITS.load(Ordering::SeqCst) == 1,
-    );
-
-    // 2. query — QueryableRegistry no-heap fire (shared `&mut dyn ReplyOut`).
-    let mut qs: QueryableRegistry<QueryCounter> = QueryableRegistry::with_sink_backing();
-    require(
-        "query register",
-        qs.register_sink("svc/**", Locality::Any, QueryCounter(&QUERY_HITS))
-            .is_ok(),
-    );
-    let mut out = NoopReplyOut;
-    let query_fired = qs.dispatch_borrowed(
-        &BorrowedQuery {
-            keyexpr: "svc/a",
-            parameters: None,
-            attachment: None,
-            rid: 1,
-        },
-        &mut out,
-        /* is_remote = */ true,
-    );
-    require(
-        "query",
-        query_fired == 1 && QUERY_HITS.load(Ordering::SeqCst) == 1,
-    );
-
-    // 3. reply — ReplyRegistry no-heap fire (rid correlation).
-    let mut rr: ReplyRegistry<ReplyCounter> = ReplyRegistry::with_sink_backing();
-    require(
-        "reply register",
-        rr.register_sink(7, 1, None, ReplyCounter(&REPLY_HITS))
-            .is_ok(),
-    );
-    let reply_fired = rr.dispatch_borrowed(&BorrowedReply {
-        rid: 7,
-        keyexpr: "svc/a",
-        kind: ReplyKind::Put,
-        payload: b"v",
-        err_encoding: None,
-    });
-    require(
-        "reply",
-        reply_fired == 1 && REPLY_HITS.load(Ordering::SeqCst) == 1,
-    );
-
-    // 4. declare observers — RemoteSubscriberRegistry decl + undecl fire.
-    let mut rsub: RemoteSubscriberRegistry<DeclCounter, UndeclCounter> =
-        RemoteSubscriberRegistry::with_sink_backing();
-    require(
-        "declare register",
-        rsub.on_subscriber_declared_sink(DeclCounter(&DECL_HITS))
-            .is_ok()
-            && rsub
-                .on_subscriber_undeclared_sink(UndeclCounter(&UNDECL_HITS))
+    // Each stage is scoped in its own block so its registry (a
+    // `BoundedVec` over `BoundedString<MAX_KEYEXPR_BYTES>` backings — a
+    // few KB each) is dropped before the next stage allocates, bounding
+    // peak stack to the largest single stage. Without this the six
+    // registries coexist and overflow a small MCU's RAM (the microbit /
+    // Cortex-M0 16 KB had hardfaulted).
+    {
+        // 1. pub/sub — SubscriberRegistry no-heap fire.
+        let mut subs: SubscriberRegistry<SampleCounter> = SubscriberRegistry::with_sink_backing();
+        require(
+            "pubsub register",
+            subs.register_sink("home/temp", Locality::Any, SampleCounter(&SAMPLE_HITS))
                 .is_ok(),
-    );
-    let decl_fired = rsub.dispatch_declared_borrowed(&BorrowedDecl {
-        id: 3,
-        keyexpr: "peer/sub",
-    });
-    let undecl_fired = rsub.dispatch_undeclared(3);
-    require(
-        "declare",
-        decl_fired == 1
-            && undecl_fired == 1
-            && DECL_HITS.load(Ordering::SeqCst) == 1
-            && UNDECL_HITS.load(Ordering::SeqCst) == 1,
-    );
+        );
+        let sample_fired = subs.dispatch_borrowed(
+            &BorrowedSample {
+                keyexpr: "home/temp",
+                payload: b"21.5",
+                kind: SampleKind::Put,
+                reliability: Reliability::BestEffort,
+            },
+            /* is_remote = */ true,
+        );
+        require(
+            "pubsub",
+            sample_fired == 1 && SAMPLE_HITS.load(Ordering::SeqCst) == 1,
+        );
+    }
 
-    // 5. liveliness subscriber — slot-table no-heap fire.
-    let mut ls: LivelinessSubscriberRegistry<LiveCounter> =
-        LivelinessSubscriberRegistry::with_sink_backing();
-    require(
-        "liveliness register",
-        ls.register(1, "live/**", false, LiveCounter(&LIVE_HITS))
-            .map(|registered| registered)
-            .unwrap_or(false),
-    );
-    let live_fired = ls.dispatch_sample_borrowed(LivelinessSampleKind::Put, "live/dev/3", 9);
-    require(
-        "liveliness",
-        live_fired == 1 && LIVE_HITS.load(Ordering::SeqCst) == 1,
-    );
+    {
+        // 2. query — QueryableRegistry no-heap fire (shared `&mut dyn ReplyOut`).
+        let mut qs: QueryableRegistry<QueryCounter> = QueryableRegistry::with_sink_backing();
+        require(
+            "query register",
+            qs.register_sink("svc/**", Locality::Any, QueryCounter(&QUERY_HITS))
+                .is_ok(),
+        );
+        let mut out = NoopReplyOut;
+        let query_fired = qs.dispatch_borrowed(
+            &BorrowedQuery {
+                keyexpr: "svc/a",
+                parameters: None,
+                attachment: None,
+                rid: 1,
+            },
+            &mut out,
+            /* is_remote = */ true,
+        );
+        require(
+            "query",
+            query_fired == 1 && QUERY_HITS.load(Ordering::SeqCst) == 1,
+        );
+    }
 
-    hprintln!("R311hl PASS: 7 registry no-heap fire paths executed with zero global allocator");
+    {
+        // 3. reply — ReplyRegistry no-heap fire (rid correlation).
+        let mut rr: ReplyRegistry<ReplyCounter> = ReplyRegistry::with_sink_backing();
+        require(
+            "reply register",
+            rr.register_sink(7, 1, None, ReplyCounter(&REPLY_HITS))
+                .is_ok(),
+        );
+        let reply_fired = rr.dispatch_borrowed(&BorrowedReply {
+            rid: 7,
+            keyexpr: "svc/a",
+            kind: ReplyKind::Put,
+            payload: b"v",
+            err_encoding: None,
+        });
+        require(
+            "reply",
+            reply_fired == 1 && REPLY_HITS.load(Ordering::SeqCst) == 1,
+        );
+    }
+
+    {
+        // 4. declare observers — RemoteSubscriberRegistry decl + undecl fire.
+        let mut rsub: RemoteSubscriberRegistry<DeclCounter, UndeclCounter> =
+            RemoteSubscriberRegistry::with_sink_backing();
+        require(
+            "declare register",
+            rsub.on_subscriber_declared_sink(DeclCounter(&DECL_HITS))
+                .is_ok()
+                && rsub
+                    .on_subscriber_undeclared_sink(UndeclCounter(&UNDECL_HITS))
+                    .is_ok(),
+        );
+        let decl_fired = rsub.dispatch_declared_borrowed(&BorrowedDecl {
+            id: 3,
+            keyexpr: "peer/sub",
+        });
+        let undecl_fired = rsub.dispatch_undeclared(3);
+        require(
+            "declare",
+            decl_fired == 1
+                && undecl_fired == 1
+                && DECL_HITS.load(Ordering::SeqCst) == 1
+                && UNDECL_HITS.load(Ordering::SeqCst) == 1,
+        );
+    }
+
+    {
+        // 5. liveliness subscriber — slot-table no-heap fire.
+        let mut ls: LivelinessSubscriberRegistry<LiveCounter> =
+            LivelinessSubscriberRegistry::with_sink_backing();
+        require(
+            "liveliness register",
+            ls.register(1, "live/**", false, LiveCounter(&LIVE_HITS))
+                .map(|registered| registered)
+                .unwrap_or(false),
+        );
+        let live_fired = ls.dispatch_sample_borrowed(LivelinessSampleKind::Put, "live/dev/3", 9);
+        require(
+            "liveliness",
+            live_fired == 1 && LIVE_HITS.load(Ordering::SeqCst) == 1,
+        );
+    }
+
+    {
+        // 6. local token declarer — R311ho no-heap interest response + EMIT.
+        // The registry stages a borrowed interest-response (one `DeclToken`
+        // per matching held token, then a terminating `DeclFinal`); this probe
+        // plays the MCU `ResponseSink` and encodes each staged item into a
+        // stack buffer through SCE's `SliceSink` — the wire emit with zero
+        // global allocator (B's thesis: outbound emit, not just inbound fire,
+        // is heap-free). A clean link + a non-zero encode position proves it.
+        let mut lt = LocalTokenRegistry::new();
+        require(
+            "local-token register",
+            lt.register(1, "group1/dev").unwrap_or(false),
+        );
+        let mut pending: BoundedVec<DeclResponseItem, { caps::MAX_PENDING_DECLARES }> =
+            BoundedVec::new();
+        let staged = lt.respond_to_interest_borrowed(Some("group1/**"), 42, &mut pending);
+        require("local-token stage", staged == 1);
+        let mut emitted: u32 = 0;
+        for item in pending {
+            match item {
+                DeclResponseItem::Token { token_id, .. } => {
+                    // Resolve the keyexpr from the registry (SSOT) — the staged
+                    // item is id-only, mirroring the observer drain.
+                    let keyexpr = match lt.keyexpr_for(token_id) {
+                        Some(ke) => ke,
+                        None => continue,
+                    };
+                    let dt = DeclToken {
+                        header: wire_const::D_MID_TOKEN | wire_const::FLAG_D_N,
+                        id: token_id,
+                        keyexpr: Wireexpr {
+                            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                                id: 0,
+                                suffix_len: Some(keyexpr.len() as u64),
+                                suffix: Some(keyexpr),
+                            }),
+                        },
+                    };
+                    let mut buf = [0u8; DeclToken::MAX_ENCODED_BYTES];
+                    let mut sink = SliceSink::new(&mut buf);
+                    require(
+                        "local-token emit token",
+                        dt.encode(&mut sink).is_ok() && sink.position() > 0,
+                    );
+                    emitted += 1;
+                }
+                DeclResponseItem::Final { .. } => {
+                    let df = DeclFinal {
+                        header: wire_const::D_MID_FINAL,
+                    };
+                    let mut buf = [0u8; DeclFinal::MAX_ENCODED_BYTES];
+                    let mut sink = SliceSink::new(&mut buf);
+                    require(
+                        "local-token emit final",
+                        df.encode(&mut sink).is_ok() && sink.position() == 1,
+                    );
+                    emitted += 1;
+                }
+            }
+        }
+        EMIT_HITS.store(emitted, Ordering::SeqCst);
+        // 1 matching DeclToken + 1 terminating DeclFinal.
+        require("local-token emit", EMIT_HITS.load(Ordering::SeqCst) == 2);
+    }
+
+    hprintln!(
+        "R311ho PASS: 7 registry no-heap fire paths + declarer-side SliceSink emit executed with zero global allocator"
+    );
     debug::exit(debug::EXIT_SUCCESS);
 
     // `debug::exit` terminates QEMU; this loop only satisfies the `-> !`

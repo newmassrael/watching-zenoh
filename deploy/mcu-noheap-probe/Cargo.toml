@@ -66,10 +66,23 @@ panic-semihosting = { version = "0.6", features = ["exit"] }
 portable-atomic = { version = "1", default-features = false, features = ["fallback", "critical-section"] }
 
 # The unit under test. `default-features = false` => no `alloc` =>
-# heapless bounded backing; NO codec features (the registry control
-# plane + no-heap fire surface needs none). Cross-workspace path dep;
-# cargo resolves its workspace inheritance against `crates/Cargo.toml`.
-wz-session-core = { path = "../../crates/wz-session-core", default-features = false }
+# heapless bounded backing. `liveliness-token` (R311ho) adds the
+# declarer-side `LocalTokenRegistry` no-heap surface; it implies
+# `codec-declare` but NOT `alloc`, so the heapless backing holds.
+# Cross-workspace path dep; cargo resolves its workspace inheritance
+# against `crates/Cargo.toml`.
+wz-session-core = { path = "../../crates/wz-session-core", default-features = false, features = ["liveliness-token"] }
+
+# R311ho — the declarer-side liveliness-token no-heap EMIT proof. The
+# registry stages borrowed `DeclResponseItem`s; this probe (acting as the
+# MCU `ResponseSink`) encodes each into a stack buffer via SCE's
+# `SliceSink`, proving the wire emit links + runs with zero global
+# allocator. Needs the borrowed codec types (`DeclToken` / `DeclFinal` /
+# `Wireexpr`) from wz-codecs and `SliceSink` from sce-forge-runtime, both
+# `default-features = false` (codec-declare's `encode<S: SceSink>` path is
+# allocation-free).
+wz-codecs = { path = "../../crates/wz-codecs", default-features = false, features = ["codec-declare"] }
+sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-features = false }
 
 [profile.release]
 codegen-units = 1

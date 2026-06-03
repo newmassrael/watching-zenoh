@@ -29908,6 +29908,54 @@
         "Decision 2 owned-retention (AP) path unchanged; the no-heap emit route is additive"
       ]
     },
+    "Round 311ho": {
+      "decision_summary": "R311ho proves the no-heap EMIT at runtime: mcu-noheap-probe encodes the LocalTokenRegistry interest-response (borrowed DeclToken/DeclFinal) into a stack SliceSink with zero allocator; Q.0 PASS on M0/M3/M4. Closes B.",
+      "changes_bullets": [
+        "mcu-noheap-probe stage 6: LocalTokenRegistry register + respond_to_interest_borrowed (no heap)",
+        "each DeclResponseItem encoded to a stack buffer via SCE SliceSink (DeclToken/DeclFinal encode<S:SceSink>)",
+        "probe deps += wz-codecs(codec-declare) + sce-forge-runtime + wz-session-core/liveliness-token (all no-alloc)",
+        "DeclResponseItem shrunk to id-only (keyexpr resolved at drain via keyexpr_for); SSOT, no keyexpr copy",
+        "probe main scoped per-stage so registries do not coexist on stack (microbit M0 16KB fit)",
+        "observer drain resolves keyexpr via keyexpr_for; large_enum_variant allow removed (both variants small)"
+      ],
+      "verification_bullets": [
+        "run-ci all layers pass; Q.0 probe RUN PASS on microbit(M0)/mps2-an385(M3)/an386+an500(M4) with no allocator",
+        "no-heap EMIT proven at runtime: borrowed DeclToken encodes to SliceSink stack buffer, position>0, zero heap",
+        "local_token 10 tests green (Token now id-only, keyexpr via keyexpr_for); host + no-alloc subsets clean"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-2-permanent-on-mcu",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal",
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants"
+      ],
+      "carry_forward_bullets": [
+        "B (Decision 2 no-heap emit extension) fully delivered: registry surface + seam + AP path + MCU runtime proof",
+        "remaining Track 2 tail: probe wire-decode -> switchboard inject path; north-star switchboard generator gc-3"
+      ],
+      "publishable_decision_summary": "R311ho proves the no-heap EMIT at runtime: mcu-noheap-probe encodes the LocalTokenRegistry interest-response (borrowed DeclToken/DeclFinal) into a stack SliceSink with zero allocator; Q.0 PASS on M0/M3/M4. Closes B.",
+      "publishable_changes_bullets": [
+        "mcu-noheap-probe stage 6: LocalTokenRegistry register + respond_to_interest_borrowed (no heap)",
+        "each DeclResponseItem encoded to a stack buffer via SCE SliceSink (DeclToken/DeclFinal encode<S:SceSink>)",
+        "probe deps += wz-codecs(codec-declare) + sce-forge-runtime + wz-session-core/liveliness-token (all no-alloc)",
+        "DeclResponseItem shrunk to id-only (keyexpr resolved at drain via keyexpr_for); SSOT, no keyexpr copy",
+        "probe main scoped per-stage so registries do not coexist on stack (microbit M0 16KB fit)",
+        "observer drain resolves keyexpr via keyexpr_for; large_enum_variant allow removed (both variants small)"
+      ],
+      "publishable_verification_bullets": [
+        "run-ci all layers pass; Q.0 probe RUN PASS on microbit(M0)/mps2-an385(M3)/an386+an500(M4) with no allocator",
+        "no-heap EMIT proven at runtime: borrowed DeclToken encodes to SliceSink stack buffer, position>0, zero heap",
+        "local_token 10 tests green (Token now id-only, keyexpr via keyexpr_for); host + no-alloc subsets clean"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-2-permanent-on-mcu",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal",
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "B (Decision 2 no-heap emit extension) fully delivered: registry surface + seam + AP path + MCU runtime proof",
+        "remaining Track 2 tail: probe wire-decode -> switchboard inject path; north-star switchboard generator gc-3"
+      ]
+    },
     "Round 311i": {
       "decision_summary": "R311i codec-declare wire-layer cascade — 9 declare-family wz-codecs modules gated + Cargo edges + session_glue.rs Declare wire surface body-cfg.",
       "changes_bullets": [
