@@ -746,6 +746,22 @@ layer_c1g_cargo_test_observer() {
 #   7. transport-batching +transport-batching        (R311eg: PeerInitCaps::from_init_syn honors the
 #                                                      peer-advertised batch_size; guards the gate-ON arm
 #                                                      that the alloc-only subset #1 leaves OFF)
+#
+# R311gb (Track 2) — no-alloc (MCU no-heap) subsets 8-13. Every subset
+# above pins `alloc`; these drop it, so they exercise the bounded
+# control-plane backing + the `all(codec-*, alloc)` wire-dispatch gating
+# that an `alloc`-on build can never reach. This is the guard that caught
+# the R311hf-pre / R311hk-pre gaps (codec features whose alloc-gated
+# imports were left un-gated): a `<codec> && !alloc` profile that pulls an
+# absent `alloc` module or leaves an unused import is a hard error here.
+# Subset 13 is the full registry surface with no heap — the strongest
+# statement of the north-star "single source → MCU no-heap" property.
+#   8.  no-alloc bare        (control/value surface only, no codec)
+#   9.  no-alloc declare     +codec-declare +declare/liveliness observers
+#   10. no-alloc pubsub      +codec-push +pubsub-*
+#   11. no-alloc query       +codec-request +query-queryable +query-*
+#   12. no-alloc reply       +codec-response(+final) +query-reply
+#   13. no-alloc FULL surface (every codec + consumer feature, zero heap)
 layer_c1h_arbitrary_subset_matrix() {
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features alloc --quiet \
@@ -754,7 +770,13 @@ layer_c1h_arbitrary_subset_matrix() {
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-response,codec-response-final,pubsub-put,pubsub-delete --quiet \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber --quiet \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-declare --quiet \
-        && cargo build -p wz-session-core --no-default-features --features alloc,transport-batching --quiet)
+        && cargo build -p wz-session-core --no-default-features --features alloc,transport-batching --quiet \
+        && cargo build -p wz-session-core --no-default-features --quiet \
+        && cargo build -p wz-session-core --no-default-features --features codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber --quiet \
+        && cargo build -p wz-session-core --no-default-features --features codec-push,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --quiet \
+        && cargo build -p wz-session-core --no-default-features --features codec-request,query-queryable,query-attachment,query-selector-parameters,query-reply-err --quiet \
+        && cargo build -p wz-session-core --no-default-features --features codec-response,codec-response-final,query-reply --quiet \
+        && cargo build -p wz-session-core --no-default-features --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,query-reply,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,pubsub-source-info,query-attachment,query-selector-parameters,query-reply-err --quiet)
 }
 
 # ─── Layer C1i — cargo test -p wz-runtime-tokio --features scouting-active ─
