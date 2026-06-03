@@ -29808,6 +29808,56 @@
         "remaining: north-star switchboard generator gc-3"
       ]
     },
+    "Round 311hm": {
+      "decision_summary": "R311hm: Decision 2 extended -- outbound wire-emit gains a no-heap route via SCE's existing encode<S:SceSink> + a wz-local BoundedSink (zero SCE change); declarer reply, queryable reply, proactive declare unify on it.",
+      "changes_bullets": [
+        "finding: SCE already emits encode<S: SceSink>(w) + MAX_ENCODED_BYTES; VecSink is only the alloc wrapper",
+        "no-heap sink = wz-local BoundedSink impl SceSink (orphan rule: local type + foreign trait); SCE change 0",
+        "seam: borrowed codec views encode into BoundedSink; ResponseSink gains a no-heap emit variant",
+        "scope: unify declarer reply + queryable reply + proactive declare on one no-heap emit seam",
+        "supersedes the R311gb naive plan (mirror liveliness_subscriber) as an asymmetric-emit smell"
+      ],
+      "verification_bullets": [
+        "alloc-off compile is the gate: proves no encode-internal hidden alloc across the emit paths",
+        "if a codec encode<S> internally allocs -> SCE codegen report (stop-first), not a wz workaround",
+        "SceSink trait + VecSink live in sce-forge-runtime/rust/src/codec.rs:234/349 (foreign, unchanged)"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-2-permanent-on-mcu",
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "impl order: BoundedSink -> local_token reactive responder (first consumer) -> unify reply/proactive",
+        "LocalTokenRegistry L1 storage (HashMap->BoundedVec) folds into the first-consumer step",
+        "Decision 2 owned-retention (AP) path unchanged; the no-heap emit route is additive, not a replacement",
+        "Layer Q no-heap probe extended to drive an outbound emit once the seam lands"
+      ],
+      "publishable_decision_summary": "R311hm: Decision 2 extended -- outbound wire-emit gains a no-heap route via SCE's existing encode<S:SceSink> + a wz-local BoundedSink (zero SCE change); declarer reply, queryable reply, proactive declare unify on it.",
+      "publishable_changes_bullets": [
+        "finding: SCE already emits encode<S: SceSink>(w) + MAX_ENCODED_BYTES; VecSink is only the alloc wrapper",
+        "no-heap sink = wz-local BoundedSink impl SceSink (orphan rule: local type + foreign trait); SCE change 0",
+        "seam: borrowed codec views encode into BoundedSink; ResponseSink gains a no-heap emit variant",
+        "scope: unify declarer reply + queryable reply + proactive declare on one no-heap emit seam",
+        "supersedes the R311gb naive plan (mirror liveliness_subscriber) as an asymmetric-emit smell"
+      ],
+      "publishable_verification_bullets": [
+        "alloc-off compile is the gate: proves no encode-internal hidden alloc across the emit paths",
+        "if a codec encode<S> internally allocs -> SCE codegen report (stop-first), not a wz workaround",
+        "SceSink trait + VecSink live in sce-forge-runtime/rust/src/codec.rs:234/349 (foreign, unchanged)"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-2-permanent-on-mcu",
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "impl order: BoundedSink -> local_token reactive responder (first consumer) -> unify reply/proactive",
+        "LocalTokenRegistry L1 storage (HashMap->BoundedVec) folds into the first-consumer step",
+        "Decision 2 owned-retention (AP) path unchanged; the no-heap emit route is additive, not a replacement",
+        "Layer Q no-heap probe extended to drive an outbound emit once the seam lands"
+      ]
+    },
     "Round 311i": {
       "decision_summary": "R311i codec-declare wire-layer cascade — 9 declare-family wz-codecs modules gated + Cargo edges + session_glue.rs Declare wire surface body-cfg.",
       "changes_bullets": [
