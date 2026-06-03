@@ -29956,6 +29956,48 @@
         "remaining Track 2 tail: probe wire-decode -> switchboard inject path; north-star switchboard generator gc-3"
       ]
     },
+    "Round 311hp": {
+      "decision_summary": "R311hp session-review fixes: single-source borrowed reply builders (build_token_reply/build_final_reply) end reply-shape duplication (AP into_owned, MCU SliceSink); probe encodes the full Declare envelope; probe clippy clean.",
+      "changes_bullets": [
+        "session-review fix: single-source reply builders build_token_reply/build_final_reply (borrowed) in local_token",
+        "AP sink derives owned via Declare::into_owned (tokio local build_decl_*_reply deleted); MCU encodes borrowed",
+        "probe now encodes the full Declare envelope (outer header + interest_id), not just the inner DeclToken leaf",
+        "probe pre-existing clippy cleanup: drop identity .map, loop{} -> wfi park, doc list indent"
+      ],
+      "verification_bullets": [
+        "run-ci all layers pass; Q.0 probe RUN PASS microbit(M0)/mps2 M3/M4 encoding full Declare envelope no-alloc",
+        "probe clippy -D warnings clean (was 4 pre-existing findings); local_token 10 + tokio clippy green",
+        "reply wire shape now defined once; AP and MCU emit paths funnel through it (no duplication)"
+      ],
+      "impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-2-permanent-on-mcu",
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants"
+      ],
+      "carry_forward_bullets": [
+        "B fully delivered + session-reviewed: SSOT single-source reply shape, full-envelope MCU emit proof",
+        "remaining Track 2 tail: ⓓ probe wire-decode->switchboard inject; ⓔ north-star switchboard generator gc-3"
+      ],
+      "publishable_decision_summary": "R311hp session-review fixes: single-source borrowed reply builders (build_token_reply/build_final_reply) end reply-shape duplication (AP into_owned, MCU SliceSink); probe encodes the full Declare envelope; probe clippy clean.",
+      "publishable_changes_bullets": [
+        "session-review fix: single-source reply builders build_token_reply/build_final_reply (borrowed) in local_token",
+        "AP sink derives owned via Declare::into_owned (tokio local build_decl_*_reply deleted); MCU encodes borrowed",
+        "probe now encodes the full Declare envelope (outer header + interest_id), not just the inner DeclToken leaf",
+        "probe pre-existing clippy cleanup: drop identity .map, loop{} -> wfi park, doc list indent"
+      ],
+      "publishable_verification_bullets": [
+        "run-ci all layers pass; Q.0 probe RUN PASS microbit(M0)/mps2 M3/M4 encoding full Declare envelope no-alloc",
+        "probe clippy -D warnings clean (was 4 pre-existing findings); local_token 10 + tokio clippy green",
+        "reply wire shape now defined once; AP and MCU emit paths funnel through it (no duplication)"
+      ],
+      "publishable_impact_refs": [
+        "wire-spec-subset--watching-zenoh-mvp/5-2-permanent-on-mcu",
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants"
+      ],
+      "publishable_carry_forward_bullets": [
+        "B fully delivered + session-reviewed: SSOT single-source reply shape, full-envelope MCU emit proof",
+        "remaining Track 2 tail: ⓓ probe wire-decode->switchboard inject; ⓔ north-star switchboard generator gc-3"
+      ]
+    },
     "Round 311i": {
       "decision_summary": "R311i codec-declare wire-layer cascade — 9 declare-family wz-codecs modules gated + Cargo edges + session_glue.rs Declare wire surface body-cfg.",
       "changes_bullets": [

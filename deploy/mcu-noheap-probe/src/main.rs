@@ -18,9 +18,9 @@
 //!   2. `query::QueryableRegistry::dispatch_borrowed`             (QuerySink + ReplyOut)
 //!   3. `reply::ReplyRegistry::dispatch_borrowed`                 (ReplySink)
 //!   4. `declare::subscriber::RemoteSubscriberRegistry`
-//!        `::dispatch_declared_borrowed` + `::dispatch_undeclared` (DeclSink / UndeclSink)
+//!      `::dispatch_declared_borrowed` + `::dispatch_undeclared` (DeclSink / UndeclSink)
 //!   5. `declare::liveliness_subscriber::LivelinessSubscriberRegistry`
-//!        `::dispatch_sample_borrowed`                            (LivelinessSampleSink)
+//!      `::dispatch_sample_borrowed`                            (LivelinessSampleSink)
 //!
 //! R311ho adds a sixth stage that proves the no-heap *emit* (not just the
 //! inbound fire): `declare::local_token::LocalTokenRegistry`
@@ -70,13 +70,14 @@ use wz_session_core::sink::{BorrowedSample, SampleSink, SampleView};
 // into a stack buffer via SCE's `SliceSink` (no allocator).
 use wz_session_core::bounded::BoundedVec;
 use wz_session_core::caps;
-use wz_session_core::declare::local_token::{DeclResponseItem, LocalTokenRegistry};
+use wz_session_core::declare::local_token::{
+    build_final_reply, build_token_reply, DeclResponseItem, LocalTokenRegistry,
+};
 
-use wz_codecs::decl_final::DeclFinal;
-use wz_codecs::decl_token::DeclToken;
-use wz_codecs::wire_const;
-use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-use wz_codecs::wireexpr_local::WireexprLocal;
+// The full `Declare` envelope is the real emitted unit; the probe encodes
+// it (not just the inner leaf) so the no-heap proof covers the outer
+// header + interest_id routing exactly as the AP sink emits.
+use wz_codecs::declare::Declare;
 
 use sce_forge_runtime::codec::SliceSink;
 
@@ -271,7 +272,6 @@ fn main() -> ! {
         require(
             "liveliness register",
             ls.register(1, "live/**", false, LiveCounter(&LIVE_HITS))
-                .map(|registered| registered)
                 .unwrap_or(false),
         );
         let live_fired = ls.dispatch_sample_borrowed(LivelinessSampleKind::Put, "live/dev/3", 9);
@@ -300,42 +300,37 @@ fn main() -> ! {
         require("local-token stage", staged == 1);
         let mut emitted: u32 = 0;
         for item in pending {
+            // Build the full borrowed `Declare` envelope through the
+            // single-source reply builders and encode it into a stack
+            // `SliceSink` — the exact wire the MCU `ResponseSink` emits,
+            // with zero global allocator.
             match item {
-                DeclResponseItem::Token { token_id, .. } => {
-                    // Resolve the keyexpr from the registry (SSOT) — the staged
-                    // item is id-only, mirroring the observer drain.
+                DeclResponseItem::Token {
+                    token_id,
+                    interest_id,
+                } => {
+                    // Resolve the keyexpr from the registry (SSOT) — the
+                    // staged item is id-only, mirroring the observer drain.
                     let keyexpr = match lt.keyexpr_for(token_id) {
                         Some(ke) => ke,
                         None => continue,
                     };
-                    let dt = DeclToken {
-                        header: wire_const::D_MID_TOKEN | wire_const::FLAG_D_N,
-                        id: token_id,
-                        keyexpr: Wireexpr {
-                            body: WireexprVariant::WireexprLocal(WireexprLocal {
-                                id: 0,
-                                suffix_len: Some(keyexpr.len() as u64),
-                                suffix: Some(keyexpr),
-                            }),
-                        },
-                    };
-                    let mut buf = [0u8; DeclToken::MAX_ENCODED_BYTES];
+                    let decl = build_token_reply(token_id, keyexpr, interest_id);
+                    let mut buf = [0u8; Declare::MAX_ENCODED_BYTES];
                     let mut sink = SliceSink::new(&mut buf);
                     require(
                         "local-token emit token",
-                        dt.encode(&mut sink).is_ok() && sink.position() > 0,
+                        decl.encode(&mut sink).is_ok() && sink.position() > 0,
                     );
                     emitted += 1;
                 }
-                DeclResponseItem::Final { .. } => {
-                    let df = DeclFinal {
-                        header: wire_const::D_MID_FINAL,
-                    };
-                    let mut buf = [0u8; DeclFinal::MAX_ENCODED_BYTES];
+                DeclResponseItem::Final { interest_id } => {
+                    let decl = build_final_reply(interest_id);
+                    let mut buf = [0u8; Declare::MAX_ENCODED_BYTES];
                     let mut sink = SliceSink::new(&mut buf);
                     require(
                         "local-token emit final",
-                        df.encode(&mut sink).is_ok() && sink.position() == 1,
+                        decl.encode(&mut sink).is_ok() && sink.position() > 0,
                     );
                     emitted += 1;
                 }
@@ -353,6 +348,8 @@ fn main() -> ! {
 
     // `debug::exit` terminates QEMU; this loop only satisfies the `-> !`
     // signature for the (unreached) case where the semihost host does not
-    // honour SYS_EXIT.
-    loop {}
+    // honour SYS_EXIT. `wfi` parks the core instead of spinning.
+    loop {
+        cortex_m::asm::wfi();
+    }
 }

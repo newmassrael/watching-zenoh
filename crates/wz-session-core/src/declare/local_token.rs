@@ -75,6 +75,18 @@ use crate::caps;
 use crate::keyexpr_match::{keyexpr_intersect_patterns, MAX_KEYEXPR_CHUNKS};
 use crate::registry_error::RegisterError;
 
+// R311ho — borrowed codec types for the single-source reply builders
+// ([`build_token_reply`] / [`build_final_reply`]). These are the no-heap
+// (`encode<S: SceSink>`) borrowed projections; `liveliness-token` (this
+// module's gate) implies `codec-declare`, so they are always available
+// here without `alloc`.
+use wz_codecs::decl_final::DeclFinal;
+use wz_codecs::decl_token::DeclToken;
+use wz_codecs::declare::{Declare, DeclareVariant};
+use wz_codecs::wire_const;
+use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+use wz_codecs::wireexpr_local::WireexprLocal;
+
 #[cfg(feature = "alloc")]
 use alloc::string::String;
 #[cfg(feature = "alloc")]
@@ -387,6 +399,51 @@ fn token_matches(token_keyexpr: &str, pattern: Option<&str>) -> bool {
         }
     }
     keyexpr_intersect_patterns(&token_chunks, &pattern_chunks)
+}
+
+/// R311ho — build the borrowed `Declare(DeclToken)` interest-response for
+/// one matching held token: the `I`-flagged outer `Declare` carrying the
+/// peer's `interest_id`, wrapping a `DeclToken` whose keyexpr is inline
+/// (mapping_id 0 / `WireexprLocal`).
+///
+/// This is the **single source** of the interest-response wire shape (the
+/// MID/flag bits + the inline-keyexpr `WireexprLocal` form). Both emit
+/// profiles funnel through it: the AP sink derives its owned form via
+/// [`Declare::into_owned`]; an MCU sink encodes this borrowed value
+/// directly through a `SliceSink` (`encode<S: SceSink>`, no heap). The
+/// returned `Declare` borrows `keyexpr` for its lifetime.
+pub fn build_token_reply(token_id: u64, keyexpr: &str, interest_id: u64) -> Declare<'_> {
+    Declare {
+        header: wire_const::N_MID_DECLARE | wire_const::FLAG_N_DECLARE_I,
+        interest_id: Some(interest_id),
+        extensions: None,
+        body: DeclareVariant::CodecZenohDeclToken(DeclToken {
+            header: wire_const::D_MID_TOKEN | wire_const::FLAG_D_N,
+            id: token_id,
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(keyexpr.len() as u64),
+                    suffix: Some(keyexpr),
+                }),
+            },
+        }),
+    }
+}
+
+/// R311ho — build the borrowed `Declare(DeclFinal)` that terminates the
+/// interest-response chain for `interest_id`. Single source shared by the
+/// AP (`into_owned`) and MCU (`SliceSink` encode) emit paths. `DeclFinal`
+/// borrows nothing, so the result is `'static`.
+pub fn build_final_reply(interest_id: u64) -> Declare<'static> {
+    Declare {
+        header: wire_const::N_MID_DECLARE | wire_const::FLAG_N_DECLARE_I,
+        interest_id: Some(interest_id),
+        extensions: None,
+        body: DeclareVariant::CodecZenohDeclFinal(DeclFinal {
+            header: wire_const::D_MID_FINAL,
+        }),
+    }
 }
 
 #[cfg(test)]

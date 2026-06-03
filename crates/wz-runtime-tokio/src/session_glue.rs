@@ -203,6 +203,10 @@ use wz_runtime_core::{Runtime, TimeSource};
 // application-layer observer can drain replies through the IoC trait
 // rather than this concrete type.
 use wz_session_core::response_sink::ResponseSink;
+// R311ho — single-source borrowed reply builders; the AP sink derives the
+// owned form via `Declare::into_owned`.
+#[cfg(feature = "liveliness-token")]
+use wz_session_core::declare::local_token::{build_final_reply, build_token_reply};
 
 use crate::runtime_impl::{TokioRuntime, TokioTime};
 
@@ -671,58 +675,20 @@ impl<R: Runtime, T: TimeSource> ResponseSink for SessionLinkActions<R, T> {
     // enqueue). An MCU sink would instead encode through `SliceSink` over
     // a stack buffer. Inherent-method resolution shadows nothing here
     // (these are distinct names from the inherent `send_declare`).
+    // R311ho — the reply wire shape has a single source in
+    // `wz-session-core::declare::local_token` (`build_token_reply` /
+    // `build_final_reply`, borrowed). The AP sink derives the owned form
+    // via `Declare::into_owned` and routes it through the inherent
+    // `Self::send_declare` (encode via `VecSink` + enqueue); an MCU sink
+    // encodes the same borrowed value through `SliceSink`. No reply-shape
+    // duplication across profiles.
     #[cfg(feature = "liveliness-token")]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
-        self.send_declare(build_decl_token_reply(token_id, keyexpr, interest_id));
+        self.send_declare(build_token_reply(token_id, keyexpr, interest_id).into_owned());
     }
     #[cfg(feature = "liveliness-token")]
     fn send_declare_final_reply(&self, interest_id: u64) {
-        self.send_declare(build_decl_final_reply(interest_id));
-    }
-}
-
-/// R283 / R311hn — build the `interest_id`-tagged `Declare(DeclToken)`
-/// the declarer-side liveliness responder emits for one matching held
-/// token. The `I` flag on the outer header + the `Some(interest_id)`
-/// field route it to the peer's pending liveliness query; the keyexpr is
-/// carried inline (mapping_id 0 / `WireexprLocal`). AP-side helper (owned
-/// `DeclareOwned` construction) for the `ResponseSink::send_declare_token`
-/// seam impl; moved here from `wz-session-core::declare::local_token` in
-/// R311hn so the registry stays no-heap. Mirror of
-/// [`build_declare_token`] with the `interest_id` set.
-#[cfg(feature = "liveliness-token")]
-fn build_decl_token_reply(token_id: u64, keyexpr: &str, interest_id: u64) -> DeclareOwned {
-    DeclareOwned {
-        header: wire_const::N_MID_DECLARE | wire_const::FLAG_N_DECLARE_I,
-        interest_id: Some(interest_id),
-        extensions: None,
-        body: DeclareOwnedVariant::CodecZenohDeclToken(DeclTokenOwned {
-            header: wire_const::D_MID_TOKEN | wire_const::FLAG_D_N,
-            id: token_id,
-            keyexpr: WireexprOwned {
-                body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
-                    id: 0,
-                    suffix_len: Some(keyexpr.len() as u64),
-                    suffix: Some(keyexpr.to_string()),
-                }),
-            },
-        }),
-    }
-}
-
-/// R283 / R311hn — build the `interest_id`-tagged `Declare(DeclFinal)`
-/// terminating the peer's pending liveliness query. AP-side helper for
-/// the `ResponseSink::send_declare_final` seam impl. Mirror of
-/// [`build_declare_final`] with the `interest_id` set.
-#[cfg(feature = "liveliness-token")]
-fn build_decl_final_reply(interest_id: u64) -> DeclareOwned {
-    DeclareOwned {
-        header: wire_const::N_MID_DECLARE | wire_const::FLAG_N_DECLARE_I,
-        interest_id: Some(interest_id),
-        extensions: None,
-        body: DeclareOwnedVariant::CodecZenohDeclFinal(DeclFinal {
-            header: wire_const::D_MID_FINAL,
-        }),
+        self.send_declare(build_final_reply(interest_id).into_owned());
     }
 }
 
