@@ -317,10 +317,19 @@ pub mod wireexpr_resolve;
 
 /// R311di-14+ — application-layer remote-declaration registries
 /// (liveliness / subscriber / queryable / liveliness_subscriber).
-/// Each sub-module gates on `codec-declare` because the inbound
-/// dispatch consumes wz-codecs Declare variants. Alloc-gated for
-/// the callback Box + Vec storage.
-#[cfg(feature = "alloc")]
+///
+/// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: each
+/// registry's control plane (the `BoundedVec` observer lists +
+/// `on_*_declared_sink` installers + the no-heap fire entries
+/// `dispatch_declared_borrowed` / `dispatch_undeclared`) compiles on the
+/// MCU no-heap profile. The wire-dispatch entry points
+/// (`dispatch_declare` / `dispatch_messages` consuming owned
+/// `DeclareOwnedVariant` / `NetworkMessage`) and the peer-`declared`
+/// membership table (`HashMap` + `has_matching`) stay
+/// `all(codec-declare, alloc)` / `alloc`-gated per sub-module. The
+/// `local_token` declarer-side responder + `liveliness_sample` /
+/// `liveliness_subscriber` keep their `alloc` gates pending their own
+/// Track 2 sub-round.
 pub mod declare;
 
 /// R311du — application-layer local subscriber registry

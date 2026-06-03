@@ -12,17 +12,34 @@
 //! [`crate::keyexpr_match::keyexpr_intersect_patterns`] directly —
 //! no extension-trait split (R311dn-pre lift made this possible).
 
+// R311gb (Track 2) — String / Vec / HashMap back the `alloc` wire side
+// (the peer `declared` membership table + `has_matching` chunking + the
+// dispatch params); the no-alloc control plane stores observers in a
+// `BoundedVec` and fires through the borrowed `DeclView` seam.
+#[cfg(feature = "alloc")]
 use alloc::string::String;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
-
+#[cfg(feature = "alloc")]
 use hashbrown::HashMap;
 
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
 
-use crate::decl_sink::{BorrowedDecl, BoxedDeclSink, BoxedUndeclSink, DeclSink, UndeclSink};
+use crate::bounded::BoundedVec;
+use crate::caps;
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+use crate::decl_sink::BorrowedDecl;
+#[cfg(feature = "alloc")]
+use crate::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
+use crate::decl_sink::{DeclRegisterError, DeclSink, DeclView, UndeclSink};
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+#[cfg(feature = "alloc")]
 use crate::keyexpr_match::keyexpr_intersect_patterns;
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::wireexpr_resolve::resolve_wireexpr;
 
 /// Application-layer registry tracking the peer's outbound
@@ -41,12 +58,13 @@ use crate::wireexpr_resolve::resolve_wireexpr;
 /// boundary that matches zenoh-pico's
 /// `Z_FEATURE_SUBSCRIPTION` vs `Z_FEATURE_QUERYABLE` compile-time
 /// feature split.
-pub struct RemoteQueryableRegistry<D: DeclSink = BoxedDeclSink, U: UndeclSink = BoxedUndeclSink> {
+pub struct RemoteQueryableRegistry<D: DeclSink, U: UndeclSink> {
     /// R311gb-3d — declaration observers (DIP seam); `D = BoxedDeclSink`
     /// on AP, a consumer-supplied closed `enum` on MCU.
-    on_decl: Vec<D>,
+    /// R311gb (Track 2) — bounded backing (`caps::MAX_DECL_OBSERVERS`).
+    on_decl: BoundedVec<D, { caps::MAX_DECL_OBSERVERS }>,
     /// R311gb-3d — undeclaration observers; `U = BoxedUndeclSink` on AP.
-    on_undecl: Vec<U>,
+    on_undecl: BoundedVec<U, { caps::MAX_DECL_OBSERVERS }>,
     /// R288 — peer-declared queryables tracked by `{id -> resolved
     /// keyexpr}`. Populated on every inbound `DeclQueryable` whose
     /// keyexpr resolves through `peer_keyexpr_table`, and entries
@@ -60,6 +78,11 @@ pub struct RemoteQueryableRegistry<D: DeclSink = BoxedDeclSink, U: UndeclSink = 
     /// only iteration consumer ([`Self::has_matching`]) does not
     /// depend on ordering. HashMap gives O(1) insert + remove + the
     /// rare full-iteration on get_matching_status calls.
+    ///
+    /// R311gb (Track 2) — wire-side membership state (populated by
+    /// `dispatch_declare` consuming owned `Declare` records, read by
+    /// `has_matching`); `alloc`-gated per the borrow boundary.
+    #[cfg(feature = "alloc")]
     declared: HashMap<u64, String>,
 }
 
@@ -80,8 +103,9 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// `D = BoxedDeclSink` / `U = BoxedUndeclSink`.
     pub fn with_sink_backing() -> Self {
         Self {
-            on_decl: Vec::new(),
-            on_undecl: Vec::new(),
+            on_decl: BoundedVec::new(),
+            on_undecl: BoundedVec::new(),
+            #[cfg(feature = "alloc")]
             declared: HashMap::new(),
         }
     }
@@ -91,16 +115,20 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// [`on_queryable_declared`](RemoteQueryableRegistry::on_queryable_declared)
     /// convenience wrapper funnels through here. Duplicate sinks allowed;
     /// dispatch fires them in registration order.
-    pub fn on_queryable_declared_sink(&mut self, sink: D) {
-        self.on_decl.push(sink);
+    pub fn on_queryable_declared_sink(&mut self, sink: D) -> Result<(), DeclRegisterError> {
+        self.on_decl
+            .push(sink)
+            .map_err(|_| DeclRegisterError::ObserverTableFull)
     }
 
     /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
     /// `alloc`-only
     /// [`on_queryable_undeclared`](RemoteQueryableRegistry::on_queryable_undeclared)
     /// convenience wrapper funnels through here.
-    pub fn on_queryable_undeclared_sink(&mut self, sink: U) {
-        self.on_undecl.push(sink);
+    pub fn on_queryable_undeclared_sink(&mut self, sink: U) -> Result<(), DeclRegisterError> {
+        self.on_undecl
+            .push(sink)
+            .map_err(|_| DeclRegisterError::ObserverTableFull)
     }
 
     /// Number of installed `on_queryable_declared` callbacks.
@@ -119,6 +147,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// (test fixtures, metrics) and for the `get_matching_status`
     /// implementation that wants to short-circuit when no peer is
     /// declared at all.
+    #[cfg(feature = "alloc")]
     pub fn declared_count(&self) -> usize {
         self.declared.len()
     }
@@ -129,6 +158,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// that want to enumerate every peer-side declaration; the
     /// `has_matching` accessor below is the production consult
     /// path.
+    #[cfg(feature = "alloc")]
     pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
         self.declared.iter().map(|(id, ke)| (*id, ke.as_str()))
     }
@@ -162,6 +192,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// SCE-forge RFC) governs wz's *own* declared keyexprs, not the
     /// peer-side. The matcher here is therefore the production
     /// answer for the peer-declared domain.
+    #[cfg(feature = "alloc")]
     pub fn has_matching(&self, query_keyexpr: &str) -> bool {
         let query_chunks: Vec<&str> = query_keyexpr.split('/').collect();
         self.declared.values().any(|peer_keyexpr| {
@@ -176,6 +207,35 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// only `DeclQueryable` / `UndeclQueryable` arms route here,
     /// others (Subscriber, Token, Kexpr, Final) are no-ops at this
     /// layer.
+    /// R311gb (Track 2) — no-heap declaration fire: hand each installed
+    /// `on_decl` observer the borrowed [`DeclView`]. The MCU no-heap
+    /// fan-out SSOT; the wire path
+    /// ([`dispatch_declare`](Self::dispatch_declare)) funnels through here
+    /// after updating the `declared` table. Returns the count fired.
+    pub fn dispatch_declared_borrowed(&mut self, view: &dyn DeclView) -> usize {
+        let mut fired: usize = 0;
+        for sink in self.on_decl.iter_mut() {
+            sink.on_declared(view);
+            fired = fired.saturating_add(1);
+        }
+        fired
+    }
+
+    /// R311gb (Track 2) — no-heap undeclaration fire: hand each installed
+    /// `on_undecl` observer the bare `id`. Returns the count fired.
+    pub fn dispatch_undeclared(&mut self, id: u64) -> usize {
+        let mut fired: usize = 0;
+        for sink in self.on_undecl.iter_mut() {
+            sink.on_undeclared(id);
+            fired = fired.saturating_add(1);
+        }
+        fired
+    }
+
+    /// R311gb (Track 2) — `all(codec-declare, alloc)`-gated wire dispatch;
+    /// updates the `alloc` `declared` table then funnels through the
+    /// no-heap fire SSOT.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare(
         &mut self,
         body: &DeclareOwnedVariant,
@@ -194,28 +254,19 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
                 // the prior entry (peer renamed the keyexpr), which
                 // matches zenoh-pico's same-id-replaces behaviour.
                 self.declared.insert(decl.id, resolved.clone());
-                // R311gb-3d — fan through the DeclSink seam.
                 let view = BorrowedDecl {
                     id: decl.id,
                     keyexpr: &resolved,
                 };
-                for sink in &mut self.on_decl {
-                    sink.on_declared(&view);
-                }
+                self.dispatch_declared_borrowed(&view);
             }
             DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl) => {
                 // R288 — drop the membership entry first so a
                 // get_matching_status fired from inside the
                 // on_undecl callback chain observes the post-
-                // undeclare state. Missing-id remove is silent
-                // (peer sent UndeclQueryable for an id we never
-                // saw a DeclQueryable for; this is a peer-side
-                // contract violation we do not surface here).
+                // undeclare state. Missing-id remove is silent.
                 self.declared.remove(&undecl.id);
-                // R311gb-3d — the undeclaration carries only the id.
-                for sink in &mut self.on_undecl {
-                    sink.on_undeclared(undecl.id);
-                }
+                self.dispatch_undeclared(undecl.id);
             }
             // Other sub-variants do not reach this registry.
             _ => {}
@@ -224,6 +275,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
 
     /// Drain a `Vec<NetworkMessage>` through [`Self::dispatch_declare`].
     /// Mirror of the sibling registries.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_messages(
         &mut self,
         messages: &[NetworkMessage],
@@ -237,6 +289,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     }
 
     /// `IterationEvent` adapter; mirror of the sibling registries.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_iteration_event(
         &mut self,
         event: IterationEvent<'_>,
@@ -271,18 +324,25 @@ impl RemoteQueryableRegistry<BoxedDeclSink, BoxedUndeclSink> {
         &mut self,
         callback: impl FnMut(&dyn crate::decl_sink::DeclView) + Send + 'static,
     ) {
-        self.on_queryable_declared_sink(BoxedDeclSink::new(callback));
+        // AP backing: the observer `BoundedVec` grows past the advisory
+        // `N`, so installing never fails here.
+        self.on_queryable_declared_sink(BoxedDeclSink::new(callback))
+            .expect("observer install on the alloc backing never exceeds declared capacity");
     }
 
     /// Install a closure fired on every inbound `Declare(UndeclQueryable)`.
     /// The closure receives the bare `id` (`u64`). Heap-boxed via
     /// [`BoxedUndeclSink`].
     pub fn on_queryable_undeclared(&mut self, callback: impl FnMut(u64) + Send + 'static) {
-        self.on_queryable_undeclared_sink(BoxedUndeclSink::new(callback));
+        self.on_queryable_undeclared_sink(BoxedUndeclSink::new(callback))
+            .expect("observer install on the alloc backing never exceeds declared capacity");
     }
 }
 
-#[cfg(test)]
+// R311gb (Track 2) — test gate now explicit (was inherited from the
+// module's `codec-declare` gate); exercises `dispatch_declare` +
+// `has_matching`, now `all(codec-declare, alloc)`-gated.
+#[cfg(all(test, feature = "codec-declare"))]
 mod tests {
     //! R311ds — wider behavioural tests migrated here from the
     //! wz-runtime-tokio `declare/queryable.rs` shell (R311dr-wider-tests

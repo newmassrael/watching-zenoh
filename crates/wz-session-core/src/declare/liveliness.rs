@@ -7,16 +7,33 @@
 //! (`_z_liveliness_process_token_declare` /
 //! `_z_liveliness_process_token_undeclare` upstream).
 
+// R311gb (Track 2) — String / HashMap back the `alloc` wire-dispatch
+// params; the no-alloc control plane stores observers in a `BoundedVec`
+// and fires through the borrowed `DeclView` seam. (No `declared` table /
+// `has_matching` here — liveliness is a pure observer fan-out.)
+// String / HashMap appear only in the `all(codec-declare, alloc)` wire-
+// dispatch params (no `declared` membership table here), so they carry
+// that gate rather than bare `alloc`.
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use alloc::string::String;
-use alloc::vec::Vec;
-
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use hashbrown::HashMap;
 
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
 
-use crate::decl_sink::{BorrowedDecl, BoxedDeclSink, BoxedUndeclSink, DeclSink, UndeclSink};
+use crate::bounded::BoundedVec;
+use crate::caps;
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+use crate::decl_sink::BorrowedDecl;
+#[cfg(feature = "alloc")]
+use crate::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
+use crate::decl_sink::{DeclRegisterError, DeclSink, DeclView, UndeclSink};
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::wireexpr_resolve::resolve_wireexpr;
 
 /// Application-layer registry tracking the peer's outbound
@@ -31,13 +48,14 @@ use crate::wireexpr_resolve::resolve_wireexpr;
 /// "process X just subscribed to Y". Keeping the registries split
 /// matches zenoh-pico's structural separation and lets consumers
 /// reason about each surface independently.
-pub struct LivelinessRegistry<D: DeclSink = BoxedDeclSink, U: UndeclSink = BoxedUndeclSink> {
+pub struct LivelinessRegistry<D: DeclSink, U: UndeclSink> {
     /// R311gb-3d — token-declaration observers (DIP seam); `D =
     /// BoxedDeclSink` on AP, a consumer-supplied closed `enum` on MCU.
-    on_decl: Vec<D>,
+    /// R311gb (Track 2) — bounded backing (`caps::MAX_DECL_OBSERVERS`).
+    on_decl: BoundedVec<D, { caps::MAX_DECL_OBSERVERS }>,
     /// R311gb-3d — token-undeclaration observers; `U = BoxedUndeclSink`
     /// on AP.
-    on_undecl: Vec<U>,
+    on_undecl: BoundedVec<U, { caps::MAX_DECL_OBSERVERS }>,
 }
 
 impl<D: DeclSink, U: UndeclSink> Default for LivelinessRegistry<D, U> {
@@ -56,8 +74,8 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     /// [`new`](LivelinessRegistry::new) shorthand.
     pub fn with_sink_backing() -> Self {
         Self {
-            on_decl: Vec::new(),
-            on_undecl: Vec::new(),
+            on_decl: BoundedVec::new(),
+            on_undecl: BoundedVec::new(),
         }
     }
 
@@ -65,16 +83,20 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     /// seam-native entry point). The `alloc`-only
     /// [`on_token_declared`](LivelinessRegistry::on_token_declared)
     /// convenience wrapper funnels through here.
-    pub fn on_token_declared_sink(&mut self, sink: D) {
-        self.on_decl.push(sink);
+    pub fn on_token_declared_sink(&mut self, sink: D) -> Result<(), DeclRegisterError> {
+        self.on_decl
+            .push(sink)
+            .map_err(|_| DeclRegisterError::ObserverTableFull)
     }
 
     /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
     /// `alloc`-only
     /// [`on_token_undeclared`](LivelinessRegistry::on_token_undeclared)
     /// convenience wrapper funnels through here.
-    pub fn on_token_undeclared_sink(&mut self, sink: U) {
-        self.on_undecl.push(sink);
+    pub fn on_token_undeclared_sink(&mut self, sink: U) -> Result<(), DeclRegisterError> {
+        self.on_undecl
+            .push(sink)
+            .map_err(|_| DeclRegisterError::ObserverTableFull)
     }
 
     /// Number of installed `on_token_declared` callbacks.
@@ -91,6 +113,35 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     /// liveliness callbacks. Only `DeclToken` / `UndeclToken` arms
     /// route here; Subscriber, Queryable, Kexpr, and Final arms are
     /// handled by their own dedicated registries.
+    /// R311gb (Track 2) — no-heap token-declaration fire: hand each
+    /// installed `on_decl` observer the borrowed [`DeclView`]. The MCU
+    /// no-heap fan-out SSOT; the wire path
+    /// ([`dispatch_declare`](Self::dispatch_declare)) funnels through here.
+    /// Returns the count fired.
+    pub fn dispatch_declared_borrowed(&mut self, view: &dyn DeclView) -> usize {
+        let mut fired: usize = 0;
+        for sink in self.on_decl.iter_mut() {
+            sink.on_declared(view);
+            fired = fired.saturating_add(1);
+        }
+        fired
+    }
+
+    /// R311gb (Track 2) — no-heap token-undeclaration fire: hand each
+    /// installed `on_undecl` observer the bare `id`. Returns the count
+    /// fired.
+    pub fn dispatch_undeclared(&mut self, id: u64) -> usize {
+        let mut fired: usize = 0;
+        for sink in self.on_undecl.iter_mut() {
+            sink.on_undeclared(id);
+            fired = fired.saturating_add(1);
+        }
+        fired
+    }
+
+    /// R311gb (Track 2) — `all(codec-declare, alloc)`-gated wire dispatch;
+    /// funnels through the no-heap fire SSOT.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare(
         &mut self,
         body: &DeclareOwnedVariant,
@@ -102,20 +153,14 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
                     Some(s) => s,
                     None => return,
                 };
-                // R311gb-3d — fan through the DeclSink seam.
                 let view = BorrowedDecl {
                     id: decl.id,
                     keyexpr: &resolved,
                 };
-                for sink in &mut self.on_decl {
-                    sink.on_declared(&view);
-                }
+                self.dispatch_declared_borrowed(&view);
             }
             DeclareOwnedVariant::CodecZenohUndeclToken(undecl) => {
-                // R311gb-3d — the undeclaration carries only the id.
-                for sink in &mut self.on_undecl {
-                    sink.on_undeclared(undecl.id);
-                }
+                self.dispatch_undeclared(undecl.id);
             }
             // Other sub-variants do not reach this registry.
             _ => {}
@@ -123,6 +168,7 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     }
 
     /// Drain a `Vec<NetworkMessage>` through [`Self::dispatch_declare`].
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_messages(
         &mut self,
         messages: &[NetworkMessage],
@@ -136,6 +182,7 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     }
 
     /// `IterationEvent` adapter; mirror of the other Remote* registries.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_iteration_event(
         &mut self,
         event: IterationEvent<'_>,
@@ -170,18 +217,23 @@ impl LivelinessRegistry<BoxedDeclSink, BoxedUndeclSink> {
         &mut self,
         callback: impl FnMut(&dyn crate::decl_sink::DeclView) + Send + 'static,
     ) {
-        self.on_token_declared_sink(BoxedDeclSink::new(callback));
+        self.on_token_declared_sink(BoxedDeclSink::new(callback))
+            .expect("observer install on the alloc backing never exceeds declared capacity");
     }
 
     /// Install a closure fired on every inbound `Declare(UndeclToken)`.
     /// The closure receives the bare `id` (`u64`). Heap-boxed via
     /// [`BoxedUndeclSink`].
     pub fn on_token_undeclared(&mut self, callback: impl FnMut(u64) + Send + 'static) {
-        self.on_token_undeclared_sink(BoxedUndeclSink::new(callback));
+        self.on_token_undeclared_sink(BoxedUndeclSink::new(callback))
+            .expect("observer install on the alloc backing never exceeds declared capacity");
     }
 }
 
-#[cfg(test)]
+// R311gb (Track 2) — test gate now explicit (was inherited from the
+// module's `codec-declare` gate); exercises `dispatch_declare` (owned
+// `DeclareOwnedVariant`), now `all(codec-declare, alloc)`-gated.
+#[cfg(all(test, feature = "codec-declare"))]
 mod tests {
     //! R311dm self-tests + R311ds wider behavioural tests for
     //! `LivelinessRegistry`.

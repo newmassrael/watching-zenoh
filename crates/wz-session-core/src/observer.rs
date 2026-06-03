@@ -214,16 +214,21 @@ pub struct ApplicationLayerObserver {
     ///
     /// R310 — gated on `feature = "declare-subscriber"`.
     #[cfg(feature = "declare-subscriber")]
-    pub remote_subscribers: RemoteSubscriberRegistry,
+    pub remote_subscribers: RemoteSubscriberRegistry<
+        crate::decl_sink::BoxedDeclSink,
+        crate::decl_sink::BoxedUndeclSink,
+    >,
     /// Peer's outbound `DeclQueryable` / `UndeclQueryable` records.
     ///
     /// R310 — gated on `feature = "declare-queryable"`.
     #[cfg(feature = "declare-queryable")]
-    pub remote_queryables: RemoteQueryableRegistry,
+    pub remote_queryables:
+        RemoteQueryableRegistry<crate::decl_sink::BoxedDeclSink, crate::decl_sink::BoxedUndeclSink>,
     /// Peer's outbound `DeclToken` / `UndeclToken` records — the
     /// liveliness signal layer.
     #[cfg(feature = "liveliness-token")]
-    pub liveliness: LivelinessRegistry,
+    pub liveliness:
+        LivelinessRegistry<crate::decl_sink::BoxedDeclSink, crate::decl_sink::BoxedUndeclSink>,
     /// R283 — DECLARER-side registry of wz's own held
     /// `LivelinessToken`s. Populated by `Session::declare_token` and
     /// emptied by `LivelinessToken::Drop`. Consulted only when an inbound

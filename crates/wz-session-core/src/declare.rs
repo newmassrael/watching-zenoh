@@ -39,13 +39,15 @@
 //! closes the R311dm carry that had stranded these tests in the AP
 //! shell on a since-revised "no std even in cfg(test)" rationale.
 
-#[cfg(feature = "codec-declare")]
+// R311gb (Track 2) — un-gated from `codec-declare`: each registry's
+// observer-list control plane + no-heap fire (`dispatch_declared_borrowed`
+// / `dispatch_undeclared`) compiles on the MCU no-heap profile; the owned
+// `Declare`-consuming wire dispatch + peer-`declared` membership table
+// inside gate on `all(codec-declare, alloc)` / `alloc` per-method.
 pub mod liveliness;
 
-#[cfg(feature = "codec-declare")]
 pub mod subscriber;
 
-#[cfg(feature = "codec-declare")]
 pub mod queryable;
 
 // R311ek — the pure-data liveliness sample types (`LivelinessSample` /
@@ -57,7 +59,11 @@ pub mod queryable;
 #[cfg(feature = "alloc")]
 pub mod liveliness_sample;
 
-#[cfg(feature = "codec-declare")]
+// R311gb (Track 2) — pending its own sub-round (R311hg): kept fully
+// `alloc`-gated (explicit `all(codec-declare, alloc)`, was `codec-declare`
+// under the module-`alloc` gate) until its slot table migrates to the
+// no-alloc backing.
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 pub mod liveliness_subscriber;
 
 // R283 — DECLARER-side registry of wz's own held LivelinessTokens + the
@@ -65,7 +71,12 @@ pub mod liveliness_subscriber;
 // feature, which implies `codec-declare`) rather than bare
 // `codec-declare`: a build that decodes peer declares but never declares
 // its OWN tokens has no local-token state to reply with.
-#[cfg(feature = "liveliness-token")]
+// R311gb (Track 2) — the declarer-side responder stays fully alloc-gated
+// (it stages owned `DeclareOwned` Interest replies + holds a `HashMap`
+// token table; not part of the observer-fan-out Track 2 surface). The
+// explicit `alloc` gate is now load-bearing since the parent `declare`
+// module un-gated from `alloc`.
+#[cfg(all(feature = "liveliness-token", feature = "alloc"))]
 pub mod local_token;
 
 // R311ds — cross-registry composability tests (R311dr-wider-tests

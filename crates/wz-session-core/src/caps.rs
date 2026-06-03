@@ -75,3 +75,21 @@ pub const MAX_QUERYABLES: usize = 16;
 /// bounds the `keep` / `fired` partitions the no-alloc `fire_final_for` /
 /// `sweep_timed_out` build on the stack.
 pub const MAX_PENDING_QUERIES: usize = 16;
+
+/// Maximum number of installed declaration observers per list
+/// (`on_decl` / `on_undecl`) in each of the remote-declaration
+/// registries ([`crate::declare::subscriber::RemoteSubscriberRegistry`],
+/// [`crate::declare::queryable::RemoteQueryableRegistry`],
+/// [`crate::declare::liveliness::LivelinessRegistry`]). Bounds each
+/// observer list on the no-alloc backing; an `on_*_declared_sink` past
+/// this is rejected (`DeclRegisterError::ObserverTableFull`) rather than
+/// growing the list. Observers are installed once at startup, so the
+/// default is small.
+pub const MAX_DECL_OBSERVERS: usize = 8;
+
+/// Maximum number of concurrently-registered liveliness-subscriber
+/// interest slots in a
+/// [`crate::declare::liveliness_subscriber::LivelinessSubscriberRegistry`].
+/// Bounds the registry's slot table on the no-alloc backing; a `register`
+/// past this is rejected rather than growing the table.
+pub const MAX_LIVELINESS_SUBSCRIPTIONS: usize = 8;

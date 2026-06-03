@@ -14,17 +14,38 @@
 //! directly — no extension-trait split (R311dn-pre lift made this
 //! possible).
 
+// R311gb (Track 2) — String / Vec / HashMap back the `alloc` wire side
+// (the peer `declared` membership table + `has_matching` chunking + the
+// dispatch params); the no-alloc control plane stores observers in a
+// `BoundedVec` and fires through the borrowed `DeclView` seam.
+#[cfg(feature = "alloc")]
 use alloc::string::String;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
-
+#[cfg(feature = "alloc")]
 use hashbrown::HashMap;
 
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
 
-use crate::decl_sink::{BorrowedDecl, BoxedDeclSink, BoxedUndeclSink, DeclSink, UndeclSink};
+use crate::bounded::BoundedVec;
+use crate::caps;
+// `DeclSink` / `UndeclSink` (the observer-list bounds) + `DeclView` (the
+// no-heap fire currency) + `DeclRegisterError` are unconditional; the
+// `BorrowedDecl` builder + `Boxed*` adapters + the wire-codec / envelope
+// imports carry the narrower gates.
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+use crate::decl_sink::BorrowedDecl;
+#[cfg(feature = "alloc")]
+use crate::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
+use crate::decl_sink::{DeclRegisterError, DeclSink, DeclView, UndeclSink};
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+#[cfg(feature = "alloc")]
 use crate::keyexpr_match::keyexpr_intersect_patterns;
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::wireexpr_resolve::resolve_wireexpr;
 
 /// Application-layer registry tracking the peer's outbound
@@ -37,13 +58,14 @@ use crate::wireexpr_resolve::resolve_wireexpr;
 /// `on_subscriber_declared` and / or `on_subscriber_undeclared`
 /// callback once at startup; every matching inbound declare fires
 /// every installed callback in registration order.
-pub struct RemoteSubscriberRegistry<D: DeclSink = BoxedDeclSink, U: UndeclSink = BoxedUndeclSink> {
+pub struct RemoteSubscriberRegistry<D: DeclSink, U: UndeclSink> {
     /// R311gb-3d — declaration observers (DIP seam). `D = BoxedDeclSink`
     /// on AP (heap closures), a consumer-supplied closed `enum` on MCU.
-    on_decl: Vec<D>,
+    /// R311gb (Track 2) — bounded backing (`caps::MAX_DECL_OBSERVERS`).
+    on_decl: BoundedVec<D, { caps::MAX_DECL_OBSERVERS }>,
     /// R311gb-3d — undeclaration observers. `U = BoxedUndeclSink` on AP,
     /// a consumer-supplied closed `enum` on MCU.
-    on_undecl: Vec<U>,
+    on_undecl: BoundedVec<U, { caps::MAX_DECL_OBSERVERS }>,
     /// R290 — peer-declared subscribers tracked by `{id -> resolved
     /// keyexpr}`. Pub-side analogue of the `declared` map landed on
     /// [`crate::declare::queryable::RemoteQueryableRegistry`] in R288.
@@ -57,6 +79,13 @@ pub struct RemoteSubscriberRegistry<D: DeclSink = BoxedDeclSink, U: UndeclSink =
     /// Same HashMap rationale as the Q-side: by-id membership
     /// invariant, by-id Undecl removal, no ordering dependency on
     /// the rare full-iteration consult path.
+    ///
+    /// R311gb (Track 2) — wire-side membership state (populated by
+    /// `dispatch_declare` consuming owned `Declare` records, read by
+    /// `has_matching`); `alloc`-gated per the borrow boundary. The
+    /// no-alloc control plane (observer lists + fan-out) does not depend
+    /// on it.
+    #[cfg(feature = "alloc")]
     declared: HashMap<u64, String>,
 }
 
@@ -78,8 +107,9 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// shorthand, which fixes `D = BoxedDeclSink` / `U = BoxedUndeclSink`.
     pub fn with_sink_backing() -> Self {
         Self {
-            on_decl: Vec::new(),
-            on_undecl: Vec::new(),
+            on_decl: BoundedVec::new(),
+            on_undecl: BoundedVec::new(),
+            #[cfg(feature = "alloc")]
             declared: HashMap::new(),
         }
     }
@@ -90,16 +120,20 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// convenience wrapper funnels through here after wrapping a closure
     /// in a [`BoxedDeclSink`]. Duplicate sinks are explicitly allowed;
     /// dispatch fires them in registration order.
-    pub fn on_subscriber_declared_sink(&mut self, sink: D) {
-        self.on_decl.push(sink);
+    pub fn on_subscriber_declared_sink(&mut self, sink: D) -> Result<(), DeclRegisterError> {
+        self.on_decl
+            .push(sink)
+            .map_err(|_| DeclRegisterError::ObserverTableFull)
     }
 
     /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
     /// `alloc`-only
     /// [`on_subscriber_undeclared`](RemoteSubscriberRegistry::on_subscriber_undeclared)
     /// convenience wrapper funnels through here.
-    pub fn on_subscriber_undeclared_sink(&mut self, sink: U) {
-        self.on_undecl.push(sink);
+    pub fn on_subscriber_undeclared_sink(&mut self, sink: U) -> Result<(), DeclRegisterError> {
+        self.on_undecl
+            .push(sink)
+            .map_err(|_| DeclRegisterError::ObserverTableFull)
     }
 
     /// Number of installed `on_subscriber_declared` callbacks.
@@ -116,6 +150,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// whose inbound `DeclSubscriber` has been dispatched and whose
     /// `UndeclSubscriber` has not). Pub-side mirror of the Q-side
     /// `declared_count`.
+    #[cfg(feature = "alloc")]
     pub fn declared_count(&self) -> usize {
         self.declared.len()
     }
@@ -123,6 +158,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// R290 — iterate over currently-declared peer subscribers as
     /// `(id, resolved_keyexpr)` pairs. Pub-side mirror of the Q-side
     /// `iter_declared`. Ordering is unspecified (HashMap iteration).
+    #[cfg(feature = "alloc")]
     pub fn iter_declared(&self) -> impl Iterator<Item = (u64, &str)> + '_ {
         self.declared.iter().map(|(id, ke)| (*id, ke.as_str()))
     }
@@ -140,12 +176,41 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// one-side wildcard, two-side wildcard overlap); the semantic
     /// is symmetric across Pub-side and Q-side because the matcher
     /// itself is symmetric.
+    #[cfg(feature = "alloc")]
     pub fn has_matching(&self, publish_keyexpr: &str) -> bool {
         let publish_chunks: Vec<&str> = publish_keyexpr.split('/').collect();
         self.declared.values().any(|peer_keyexpr| {
             let peer_chunks: Vec<&str> = peer_keyexpr.split('/').collect();
             keyexpr_intersect_patterns(&peer_chunks, &publish_chunks)
         })
+    }
+
+    /// R311gb (Track 2) — no-heap declaration fire: hand each installed
+    /// `on_decl` observer the borrowed [`DeclView`]. Borrow-driven (the
+    /// caller owns the view), so it is the MCU no-heap fan-out; the wire
+    /// path ([`dispatch_declare`](Self::dispatch_declare)) builds a
+    /// [`BorrowedDecl`] from the resolved keyexpr and funnels through here
+    /// after updating the `declared` membership table. Returns the count
+    /// of observers fired.
+    pub fn dispatch_declared_borrowed(&mut self, view: &dyn DeclView) -> usize {
+        let mut fired: usize = 0;
+        for sink in self.on_decl.iter_mut() {
+            sink.on_declared(view);
+            fired = fired.saturating_add(1);
+        }
+        fired
+    }
+
+    /// R311gb (Track 2) — no-heap undeclaration fire: hand each installed
+    /// `on_undecl` observer the bare `id` (the undeclaration carries no
+    /// keyexpr). Returns the count of observers fired.
+    pub fn dispatch_undeclared(&mut self, id: u64) -> usize {
+        let mut fired: usize = 0;
+        for sink in self.on_undecl.iter_mut() {
+            sink.on_undeclared(id);
+            fired = fired.saturating_add(1);
+        }
+        fired
     }
 
     /// Route an inbound `Declare` envelope's inner body through the
@@ -159,6 +224,13 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// `Declare(DeclKexpr)` records. Unresolvable keyexprs (mapping
     /// id not yet declared) drop the dispatch silently rather than
     /// firing on a partial keyexpr.
+    ///
+    /// R311gb (Track 2) — `all(codec-declare, alloc)`-gated: it consumes
+    /// the owned `DeclareOwnedVariant` (codec) and updates the `alloc`
+    /// `declared` table, then funnels the fan-out through the no-heap
+    /// [`dispatch_declared_borrowed`](Self::dispatch_declared_borrowed) /
+    /// [`dispatch_undeclared`](Self::dispatch_undeclared) SSOT.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare(
         &mut self,
         body: &DeclareOwnedVariant,
@@ -174,16 +246,14 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
                 // Q-side registry: same-id-replaces semantic, no
                 // explicit conflict surfacing.
                 self.declared.insert(decl.id, resolved.clone());
-                // R311gb-3d — fan through the DeclSink seam: build the
-                // `(id, resolved-keyexpr)` view once and hand each
-                // observer `&dyn DeclView`.
+                // R311gb-3d / Track 2 — fan through the DeclSink seam via
+                // the no-heap SSOT: build the `(id, resolved-keyexpr)`
+                // view once and hand each observer `&dyn DeclView`.
                 let view = BorrowedDecl {
                     id: decl.id,
                     keyexpr: &resolved,
                 };
-                for sink in &mut self.on_decl {
-                    sink.on_declared(&view);
-                }
+                self.dispatch_declared_borrowed(&view);
             }
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl) => {
                 // R290 — drop the membership entry first so a
@@ -191,10 +261,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
                 // on_undecl callback chain observes the post-
                 // undeclare state.
                 self.declared.remove(&undecl.id);
-                // R311gb-3d — the undeclaration carries only the id.
-                for sink in &mut self.on_undecl {
-                    sink.on_undeclared(undecl.id);
-                }
+                self.dispatch_undeclared(undecl.id);
             }
             // Other sub-variants do not reach this registry.
             _ => {}
@@ -206,6 +273,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// driver loop) through [`Self::dispatch_declare`]. Mirrors the
     /// sibling registries so the observer in production code can fan
     /// one event into every registry uniformly.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_messages(
         &mut self,
         messages: &[NetworkMessage],
@@ -223,6 +291,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
     /// and forwards to [`Self::dispatch_messages`]. Mirror of the
     /// sibling registries. Other `IterationEvent` variants (`Lease`,
     /// non-FramePayload `Poll` outcomes) are no-ops.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_iteration_event(
         &mut self,
         event: IterationEvent<'_>,
@@ -241,9 +310,12 @@ impl<D: DeclSink, U: UndeclSink> RemoteSubscriberRegistry<D, U> {
 /// profile installs consumer-supplied sinks through the generic
 /// [`on_subscriber_declared_sink`](RemoteSubscriberRegistry::on_subscriber_declared_sink)
 /// / [`on_subscriber_undeclared_sink`](RemoteSubscriberRegistry::on_subscriber_undeclared_sink)
-/// instead. The whole `declare` module is `codec-declare`-gated; the
-/// `alloc` gate is module-redundant but kept explicit for symmetry with
-/// the sibling seam adapters.
+/// instead.
+///
+/// R311gb (Track 2) — gated on `alloc` only (not `codec-declare`): the
+/// closure installers funnel through the un-gated `on_*_declared_sink`, so
+/// the AP observer-install surface composes in any `alloc` subset
+/// (`BoxedDeclSink` / `BoxedUndeclSink` are themselves `alloc`-gated).
 #[cfg(feature = "alloc")]
 impl RemoteSubscriberRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// New empty AP registry backed by heap-boxed closures. The inferring
@@ -268,7 +340,10 @@ impl RemoteSubscriberRegistry<BoxedDeclSink, BoxedUndeclSink> {
         &mut self,
         callback: impl FnMut(&dyn crate::decl_sink::DeclView) + Send + 'static,
     ) {
-        self.on_subscriber_declared_sink(BoxedDeclSink::new(callback));
+        // AP backing: the observer `BoundedVec` grows past the advisory
+        // `N`, so installing never fails here.
+        self.on_subscriber_declared_sink(BoxedDeclSink::new(callback))
+            .expect("observer install on the alloc backing never exceeds declared capacity");
     }
 
     /// Install a closure fired on every inbound
@@ -278,11 +353,16 @@ impl RemoteSubscriberRegistry<BoxedDeclSink, BoxedUndeclSink> {
     /// [`Self::on_subscriber_declared`]. The closure is heap-boxed via
     /// [`BoxedUndeclSink`].
     pub fn on_subscriber_undeclared(&mut self, callback: impl FnMut(u64) + Send + 'static) {
-        self.on_subscriber_undeclared_sink(BoxedUndeclSink::new(callback));
+        self.on_subscriber_undeclared_sink(BoxedUndeclSink::new(callback))
+            .expect("observer install on the alloc backing never exceeds declared capacity");
     }
 }
 
-#[cfg(test)]
+// R311gb (Track 2) — the behavioural tests exercise `dispatch_declare`
+// (owned `DeclareOwnedVariant`) + `has_matching`, now
+// `all(codec-declare, alloc)`-gated; the module un-gated from
+// `codec-declare`, so the test gate is now explicit (was inherited).
+#[cfg(all(test, feature = "codec-declare"))]
 mod tests {
     //! R311ds — wider behavioural tests migrated here from the
     //! wz-runtime-tokio `declare/subscriber.rs` shell (R311dr-wider-tests
