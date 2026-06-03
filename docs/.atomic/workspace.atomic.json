@@ -886,7 +886,8 @@
         "R311gw: native bytes guard now lowers via SCE BytesLit (pin d665780d9); R311gv caveat closed.",
         "R311gx: multi-event example -- 2nd value event humidity_update (uint8 guard); 2 helpers/2 arms.",
         "R311gy: carry #2 foundation -- wz-ap-demo-app crate (live app machine + injector); wiring R311gz.",
-        "R311gz: carry #2 -- wz-ap-demo Push->switchboard->app engine wired + fan-out test; ext peer R311h."
+        "R311gz: carry #2 -- wz-ap-demo Push->switchboard->app engine wired + fan-out test; ext peer R311h.",
+        "R311ha: carry #2 CLOSED -- live e2e: zenoh-pico z_put -> demo switchboard -> app engine idle->hot."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -29389,6 +29390,48 @@
         "Tier 3 measurement automation carry forward — extend scripts/measure-codec-footprint.sh + CI Layer F to auto-verify each codec-* feature has a non-trivial mechanical delta (threshold-based catalog truthfulness regression gate). Mechanical prereq for the 50+ remaining catalog features. Should land after R311k closes the body-codec catalog.",
         "Architectural carries unchanged: R267 Session<R,T> reparam (MCU prerequisite + type-ungating carrier for declare-*/query-* signatures), R284 uniform Established gate, R283 peer-side Interest inbound bilateral, R301 §8 SCE cross-repo, Q_B / Q_E codec slots, Phase W full lwIP (north star MCU half), R299 carry #2 / #3, R300 narrow, R301 §7 cargo wz-config tool, R304 stderr non-UTF-8 source, keyexpr_canon proptest filter.",
         "Signature-stability principle preserved — R311h send_push_* methods all signature-stable + body-cfg (silent no-op when off). encode_frame_with_push + 8 build_push_* documented as principled exemption per `feedback_signature_stability` MEMORY note (type-gated return type — the Push type itself disappears under cfg). R311i..R311k apply the same pattern."
+      ]
+    },
+    "Round 311ha": {
+      "decision_summary": "R311ha: gc-3 carry #2 CLOSED -- live switchboard value-path e2e: a real zenoh-pico z_put to demo/sensor/temp drives the demo's app machine idle->hot through the production session + observer + switchboard.",
+      "changes_bullets": [
+        "New Layer E e2e test wz-integration-tests/tests/ap_demo_switchboard_inbound.rs: a REAL foreign peer (zenoh-pico z_put CLI) publishes a temperature sample to the demo's switchboard value keyexpr (demo/sensor/temp), and the demo's session inbound -> ApplicationLayerObserver switchboard fan-out -> generated SensorMonitorInjector decodes the wire payload into the typed _event.data and drives the application machine idle -> hot. Asserts the demo stderr line `APP SWITCHBOARD FIRED ... app_state=Hot`. Mirrors the ap_demo_round_trip harness (spawn demo --listen, wait \"listening on\", z_put -e tcp client, wait the marker, SIGTERM).",
+        "Test data note: zenoh-pico z_put -v takes a STRING value, so the wire payload is the literal ASCII bytes; temp_payload decodes a big-endian uint16 from the first two bytes, and every printable ASCII byte is >= 0x20, so any two-character value decodes to celsius_centi >= 8224 -- over the 3000 guard. The value \"OK\" (0x4F4B = 20299) therefore reaches Hot. SUB-threshold discrimination (a cold sample that must STAY idle) needs arbitrary wire bytes the CLI cannot express, so it stays covered by the in-process fan-out test (R311gz); this e2e owns the live-wire plumbing proof.",
+        "Layer-classification: named ap_demo_* (full preset-ap-client wz-ap-demo, Layer E) rather than wz_e2e_* (the facade-subset family Layer E2 drives against wz-e2e-* binaries). The #[ignore] + the non-wz_e2e_ test-fn name make run-ci Layer E (`--ignored --skip wz_e2e_`) pick it up automatically with no script edit."
+      ],
+      "verification_bullets": [
+        "ap_demo_switchboard_inbound::switchboard_value_path_against_zenoh_pico_z_put passes: captured demo stderr shows the full live path -- \"listening on\" -> \"accepted peer\" -> \"session Established\" -> \"switchboard registered\" -> \"APP SWITCHBOARD FIRED fired=1 app_state=Hot\" -> \"session ended: Terminated\".",
+        "Full host run-ci (WZ_RUN_LAYER_G=1) all required layers pass incl Layer G MCU no_std cross-compile (thumbv7m + riscv32imac) and Layer E, which now runs BOTH binary-dep e2e tests (ap_demo_round_trip + the new switchboard inbound) against the live wz-ap-demo + zenoh-pico CLI.",
+        "cargo fmt --check + cargo clippy --tests clean on wz-integration-tests.",
+        "No SCE pin change (d665780d9). No production-code change in this round (test-only); the demo wiring it exercises landed in R311gz."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "gc-3 carry #2 (live wz-ap-demo wiring, open since R311gs) is now CLOSED: a real published sample drives a real SCE application machine end to end through the production session + observer + switchboard, proven by a foreign-implementation (zenoh-pico) e2e in Layer E.",
+        "Both gc-3 carries are now discharged: #1 multi-codec/multi-event example (R311gx) and #2 live wz-ap-demo wiring (R311gy foundation crate -> R311gz demo wiring -> R311ha e2e).",
+        "Possible future hardening (not a carry): an arbitrary-byte wz publisher binary would let an e2e assert SUB-threshold value discrimination over the wire (a cold sample staying idle), complementing the zenoh-pico ASCII-payload Hot e2e. Multi-MACHINE switchboards remain out of scope (one machine per sidecar)."
+      ],
+      "publishable_decision_summary": "R311ha: gc-3 carry #2 CLOSED -- live switchboard value-path e2e: a real zenoh-pico z_put to demo/sensor/temp drives the demo's app machine idle->hot through the production session + observer + switchboard.",
+      "publishable_changes_bullets": [
+        "New Layer E e2e test wz-integration-tests/tests/ap_demo_switchboard_inbound.rs: a REAL foreign peer (zenoh-pico z_put CLI) publishes a temperature sample to the demo's switchboard value keyexpr (demo/sensor/temp), and the demo's session inbound -> ApplicationLayerObserver switchboard fan-out -> generated SensorMonitorInjector decodes the wire payload into the typed _event.data and drives the application machine idle -> hot. Asserts the demo stderr line `APP SWITCHBOARD FIRED ... app_state=Hot`. Mirrors the ap_demo_round_trip harness (spawn demo --listen, wait \"listening on\", z_put -e tcp client, wait the marker, SIGTERM).",
+        "Test data note: zenoh-pico z_put -v takes a STRING value, so the wire payload is the literal ASCII bytes; temp_payload decodes a big-endian uint16 from the first two bytes, and every printable ASCII byte is >= 0x20, so any two-character value decodes to celsius_centi >= 8224 -- over the 3000 guard. The value \"OK\" (0x4F4B = 20299) therefore reaches Hot. SUB-threshold discrimination (a cold sample that must STAY idle) needs arbitrary wire bytes the CLI cannot express, so it stays covered by the in-process fan-out test (R311gz); this e2e owns the live-wire plumbing proof.",
+        "Layer-classification: named ap_demo_* (full preset-ap-client wz-ap-demo, Layer E) rather than wz_e2e_* (the facade-subset family Layer E2 drives against wz-e2e-* binaries). The #[ignore] + the non-wz_e2e_ test-fn name make run-ci Layer E (`--ignored --skip wz_e2e_`) pick it up automatically with no script edit."
+      ],
+      "publishable_verification_bullets": [
+        "ap_demo_switchboard_inbound::switchboard_value_path_against_zenoh_pico_z_put passes: captured demo stderr shows the full live path -- \"listening on\" -> \"accepted peer\" -> \"session Established\" -> \"switchboard registered\" -> \"APP SWITCHBOARD FIRED fired=1 app_state=Hot\" -> \"session ended: Terminated\".",
+        "Full host run-ci (WZ_RUN_LAYER_G=1) all required layers pass incl Layer G MCU no_std cross-compile (thumbv7m + riscv32imac) and Layer E, which now runs BOTH binary-dep e2e tests (ap_demo_round_trip + the new switchboard inbound) against the live wz-ap-demo + zenoh-pico CLI.",
+        "cargo fmt --check + cargo clippy --tests clean on wz-integration-tests.",
+        "No SCE pin change (d665780d9). No production-code change in this round (test-only); the demo wiring it exercises landed in R311gz."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "gc-3 carry #2 (live wz-ap-demo wiring, open since R311gs) is now CLOSED: a real published sample drives a real SCE application machine end to end through the production session + observer + switchboard, proven by a foreign-implementation (zenoh-pico) e2e in Layer E.",
+        "Both gc-3 carries are now discharged: #1 multi-codec/multi-event example (R311gx) and #2 live wz-ap-demo wiring (R311gy foundation crate -> R311gz demo wiring -> R311ha e2e).",
+        "Possible future hardening (not a carry): an arbitrary-byte wz publisher binary would let an e2e assert SUB-threshold value discrimination over the wire (a cold sample staying idle), complementing the zenoh-pico ASCII-payload Hot e2e. Multi-MACHINE switchboards remain out of scope (one machine per sidecar)."
       ]
     },
     "Round 311i": {
