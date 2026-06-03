@@ -23,11 +23,11 @@
 //! bytes (`raw`) field: the codec decodes `sensor_id` / `raw` as borrowed
 //! `&str` / `&[u8]` but the payload struct holds them owned (`String` /
 //! `Vec<u8>`), so the generated dispatch threads a `.into()` deep-copy for
-//! each. A native string guard (`sensor_id === 'kitchen'`) observes the string
-//! value semantically; the `raw` bytes field rides through the same `.into()`
-//! field-move (proven by compile + the encode->decode round-trip) but is
-//! unguarded — SCE's Rust emitter does not yet coerce a `bytes === '<lit>'`
-//! cond to a byte-string literal, so a native bytes guard would not compile.
+//! each. Native string (`sensor_id === 'kitchen'`) and bytes
+//! (`raw === 'ack'`) guards observe the decoded values semantically — the
+//! bytes guard lowers to a byte-string-literal comparison (`ev.raw == b"ack"`)
+//! since SCE pin d665780d9 — proving the borrowed-view -> owned field-moves
+//! delivered both correctly.
 
 // The generated state machine carries a budget of `#![allow(...)]` inner
 // attributes the `include!` mid-module strips (build.rs); restore them here as
@@ -238,40 +238,55 @@ mod tests {
     }
 
     #[test]
-    fn bytes_payload_field_rides_through_value_path() {
-        // The `raw` bytes field is unguarded but still decoded (borrowed
-        // `&[u8]`), deep-copied to the owned `Vec<u8>` payload field via the
-        // generated `.into()`, and injected — exercising the bytes field-move
-        // end to end against the real SCE codec. A non-empty `raw` blob (here
-        // 4 bytes incl. a non-UTF-8 0xFF, which a bytes field carries verbatim
-        // where a string field could not) must not disturb the celsius/sensor_id
-        // guards: the sample still drives idle -> hot -> alarm exactly as the
-        // empty-raw samples do, proving the extra field decodes + converts +
-        // injects cleanly.
+    fn alarm_acknowledged_by_decoded_bytes() {
+        // The alarm->idle guard reads `_event.data.raw` (a bytes field) and
+        // compares it to the literal "ack" (lowered to `ev.raw == b"ack"` since
+        // SCE pin d665780d9). This observes the borrowed-then-owned
+        // `&[u8] -> Vec<u8>` field-move semantically: only a payload carrying
+        // the exact `ack` bytes acknowledges the alarm; other bytes leave the
+        // machine in alarm.
         let mut engine = Engine::new(SensorMonitorPolicy::new());
         engine.initialize();
-        let blob: &[u8] = &[0x01, 0xff, 0x02, 0x03];
-
-        let injected = dispatch_switchboard(
+        // idle -> hot (celsius) -> alarm (kitchen sensor_id).
+        dispatch_switchboard(
             "home/livingroom/temp",
-            &temp_wire_full(3500, "livingroom", blob),
+            &temp_wire(3500, "livingroom"),
             &mut engine,
         );
         engine.step();
-        assert_eq!(injected, 1, "the temp value row fired");
-        assert_eq!(engine.get_current_state(), SensorMonitorState::Hot);
+        dispatch_switchboard(
+            "home/kitchen/temp",
+            &temp_wire(3600, "kitchen"),
+            &mut engine,
+        );
+        engine.step();
+        assert_eq!(engine.get_current_state(), SensorMonitorState::Alarm);
 
+        // Wrong bytes — the raw guard misses, machine stays in alarm.
+        dispatch_switchboard(
+            "home/kitchen/temp",
+            &temp_wire_full(3600, "kitchen", b"nope"),
+            &mut engine,
+        );
+        engine.step();
+        assert_eq!(
+            engine.get_current_state(),
+            SensorMonitorState::Alarm,
+            "raw=b\"nope\" must not acknowledge the alarm"
+        );
+
+        // The exact `ack` bytes acknowledge: alarm -> idle.
         let injected = dispatch_switchboard(
             "home/kitchen/temp",
-            &temp_wire_full(3600, "kitchen", blob),
+            &temp_wire_full(3600, "kitchen", b"ack"),
             &mut engine,
         );
         engine.step();
         assert_eq!(injected, 1, "the temp value row fired");
         assert_eq!(
             engine.get_current_state(),
-            SensorMonitorState::Alarm,
-            "a non-empty raw blob rides through without disturbing the guards"
+            SensorMonitorState::Idle,
+            "decoded raw=b\"ack\" satisfies the native bytes guard"
         );
     }
 }
@@ -450,20 +465,19 @@ mod ap_dynamic_tests {
             "dynamic decode of sensor_id=\"kitchen\" satisfies the native string guard"
         );
 
-        // The owned `raw` bytes field rides through the registry-driven decode
-        // too (a non-empty blob with a non-UTF-8 byte), without disturbing the
-        // outcome — the bytes field-move works on the AP dynamic profile as on
-        // the static one.
-        let blob: &[u8] = &[0x01, 0xff, 0x02, 0x03];
-        let again = temp_wire_full(3600, "kitchen", blob);
-        let sample = put_sample("home/kitchen/temp", &again);
+        // Cross-profile parity for `alarm_acknowledged_by_decoded_bytes`: the
+        // owned `raw` bytes field reaches the native bytes guard via the
+        // registry path too — the exact `ack` blob acknowledges `alarm -> idle`.
+        let ack = temp_wire_full(3600, "kitchen", b"ack");
+        let sample = put_sample("home/kitchen/temp", &ack);
         let mut injector = SensorMonitorInjector::new(&mut engine);
-        board.dispatch(&sample, &mut injector);
+        let injected = board.dispatch(&sample, &mut injector);
         engine.step();
+        assert_eq!(injected, 1, "the ack temp value row fired via the registry");
         assert_eq!(
             engine.get_current_state(),
-            SensorMonitorState::Alarm,
-            "a non-empty raw blob rides through the registry path cleanly"
+            SensorMonitorState::Idle,
+            "dynamic decode of raw=b\"ack\" satisfies the native bytes guard"
         );
     }
 }

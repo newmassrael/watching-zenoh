@@ -7,15 +7,14 @@
      the `temp_update` event. A primitive field (`celsius_centi`, uint16
      centidegrees) PLUS a scalar `string` field (`sensor_id`) PLUS a scalar
      `bytes` field (`raw`). Imported by sensor_monitor.scxml, whose native
-     typed guards read `celsius_centi` (idle) and `sensor_id` (hot), so the
-     event is native-lowered and SCE emits the `SensorMonitorTempUpdatePayload
-     { celsius_centi: u16, sensor_id: String, raw: Vec<u8> }` struct (a
-     non-enum schema is payload-eligible — string/bytes included) and the
-     `raise_temp_update` inject seam. `sensor_id` / `raw` exercise the
-     borrowed-view (`&str` / `&[u8]`) -> owned (`String` / `Vec<u8>`)
-     field-moves the switchboard generator emits via `.into()` (the `raw`
-     field rides in the payload but is unguarded — see sensor_monitor.scxml
-     for the SCE bytes-literal-guard gap). The wire decode of those bytes is a separate concern
+     typed guards read `celsius_centi` (idle), `sensor_id` (hot), and `raw`
+     (alarm), so the event is native-lowered and SCE emits the
+     `SensorMonitorTempUpdatePayload { celsius_centi: u16, sensor_id: String,
+     raw: Vec<u8> }` struct (a non-enum schema is payload-eligible —
+     string/bytes included) and the `raise_temp_update` inject seam. `sensor_id`
+     / `raw` exercise the borrowed-view (`&str` / `&[u8]`) -> owned (`String` /
+     `Vec<u8>`) field-moves the switchboard generator emits via `.into()`, and
+     each is observed by its native guard. The wire decode of those bytes is a separate concern
      (temp_payload.scxml, a forge codec) — wz owns the codec<->schema field
      pairing. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"

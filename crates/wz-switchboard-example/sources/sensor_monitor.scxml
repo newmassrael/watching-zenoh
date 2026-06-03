@@ -3,22 +3,22 @@
   SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
   SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
-<!-- gc-3c/R311gv example application machine for the switchboard value path.
+<!-- gc-3c/R311gw example application machine for the switchboard value path.
 
      Imports the temp_update EventSchema and reads a DIFFERENT typed field in
-     each guarded state: `_event.data.celsius_centi` (uint16) in idle and
-     `_event.data.sensor_id` (string) in hot. Two guards in two states, so the
-     machine exercises SCE's per-source-state guard keying fixed in pin
-     1474bd0a9 (R311gu) — before that fix both rendered idle's celsius guard.
-     SCE lowers `temp_update` to native `_event.data` comparisons (no script
-     engine) and emits the `SensorMonitorInject::raise_temp_update` seam +
-     lists `temp_update` in `typed_inject_events`. The string guard observes
-     the decoded `sensor_id` semantically. The third payload field `raw`
-     (bytes) rides in the typed payload too — exercising the borrowed `&[u8]`
-     -> owned `Vec<u8>` field-move via `.into()` — but is NOT guarded: SCE's
-     Rust emitter lowers a `bytes === '<lit>'` cond to `ev.raw == "<lit>"`
-     (a `&str` literal, no `Vec<u8>: PartialEq<&str>`), so a native bytes
-     guard does not compile today (it would need to emit `b"<lit>"`). The
+     each guarded state: `_event.data.celsius_centi` (uint16) in idle,
+     `_event.data.sensor_id` (string) in hot, and `_event.data.raw` (bytes) in
+     alarm. Three guards in three states, so the machine exercises SCE's
+     per-source-state guard keying fixed in pin 1474bd0a9 (R311gu) — before
+     that fix all three rendered idle's celsius guard. SCE lowers `temp_update`
+     to native `_event.data` comparisons (no script engine) and emits the
+     `SensorMonitorInject::raise_temp_update` seam + lists `temp_update` in
+     `typed_inject_events`. All three guards observe their decoded field
+     semantically; the bytes guard (`raw === 'ack'`) lowers to a BytesLit
+     comparison (`ev.raw == b"ack"`) since pin d665780d9 (R311gw) — earlier
+     pins mis-emitted a `&str` literal that did not compile against `Vec<u8>`.
+     The string + bytes guards prove the borrowed-view (`&str` / `&[u8]`) ->
+     owned (`String` / `Vec<u8>`) field-moves delivered the right values. The
      switchboard binds the keyexpr `home/*/temp` to this event
      (value binding, codec=temp_payload), so an inbound zenoh sample drives the
      statechart with a typed payload — the MCU-clean value path end to end. -->
@@ -44,6 +44,12 @@
     <transition event="reset" target="idle"/>
   </state>
   <state id="alarm">
+    <!-- native bytes guard: only a payload whose `raw` blob equals the ASCII
+         literal "ack" acknowledges the alarm back to idle; any other
+         temp_update stays in alarm. Reads `_event.data.raw` (a non-enum bytes
+         field is payload-eligible) and lowers to a BytesLit comparison
+         (`ev.raw == b"ack"`) on pin d665780d9+. -->
+    <transition event="temp_update" cond="_event.data.raw === 'ack'" target="idle"/>
     <transition event="reset" target="idle"/>
   </state>
 </scxml>

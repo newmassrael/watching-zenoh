@@ -882,7 +882,8 @@
         "gc-3c: wired into wz-switchboard-example build.rs; value path verified e2e (decode->raise->guard).",
         "R311gs: AP dynamic value path via generated injector->raise_external_typed; cross-profile SSOT.",
         "R311gt: string/bytes payload fields decode borrowed; dispatch .into()s to owned; alloc-tier only.",
-        "R311gv: bytes payload field live via .into(); native bytes guard awaits SCE byte-literal lowering."
+        "R311gv: bytes payload field live via .into(); native bytes guard awaits SCE byte-literal lowering.",
+        "R311gw: native bytes guard now lowers via SCE BytesLit (pin d665780d9); R311gv caveat closed."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -29125,6 +29126,52 @@
       ],
       "publishable_carry_forward_bullets": [
         "Observable bytes guard: needs an SCE-side fix so a bytes-vs-string-literal native guard emits a byte-string literal (`ev.raw == b\"ack\"`) on the Rust backend instead of `ev.raw == \"ack\"` (which fails `Vec<u8>: PartialEq<&str>`). Then `alarm --temp_update[_event.data.raw === 'ack']--> idle` would observe the decoded bytes value semantically, the way the sensor_id string guard already does. AI must not fix SCE directly (R311gu lesson); report it for the SCE side.",
+        "Multi-codec / multi-event switchboards (carry from R311gs/gt): the example exercises one value event over one codec; a multi-event example would exercise the EventSchema + codec multi-doc join across several events.",
+        "Live wz-ap-demo wiring (carry from R311gs): a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the registry (the smoke still encodes wire bytes locally via the codec's encode_to_vec + drives the Engine directly)."
+      ]
+    },
+    "Round 311gw": {
+      "decision_summary": "R311gw: bump vendor/sce pin 1474bd0a9 -> d665780d9, landing the SCE bytes-equality native lowering (BytesLit IR + 6-backend) that closes the R311gv bytes-guard carry; re-enable the observable bytes guard in the example (alarm acknowledged by raw === 'ack' -> ev.raw == b\"ack\").",
+      "changes_bullets": [
+        "vendor/sce pin 1474bd0a9 -> d665780d9 (+15 commits). Lands the SCE bytes-equality native-lowering series that fixes the bug reported in the R311gv carry: 9e9c837d2 (BytesLit IR node + 6-backend bytes-equality lowering), fe1511757 (flip the gate so bytes EventSchema guards lower natively), 2e2fca515 (reject ordering ops + non-ASCII literals on bytes guards), a2a3dd05c (C11 bytes payload as a bounded buffer), 9d1321f91 (6-backend lowerability verdict), c4ca695f6 (representability SSOT), e847de5eb (6-backend runtime parity test). SCE's Rust emitter now lowers a `bytes === '<ascii-lit>'` cond to a BytesLit comparison (`ev.raw == b\"ack\"`) instead of the invalid `ev.raw == \"ack\"` (a &str literal that fails `Vec<u8>: PartialEq<&str>`). Reported from wz; fixed SCE-side (AI did not modify SCE, per the R311gu lesson).",
+        "wz call-site impact 0: templates unchanged (the fix is sce-build Rust source -> sce-codegen binary rebuild required via build-sce.sh); wz direct deps stable (only sce-rust-runtime/tests/hal_clock_routing.rs touched, a test file); forge-ast.v1 schema unchanged.",
+        "wz-switchboard-example: re-enable the observable bytes guard that R311gv had to drop. sensor_monitor `alarm` gains `temp_update[_event.data.raw === 'ack'] -> idle`; the generated guard is now `ev.raw == b\"ack\"` (verified). Three native typed guards in three states -- celsius_centi (idle), sensor_id (hot), raw (alarm) -- each observing its decoded field.",
+        "wz-switchboard-example tests: bytes_payload_field_rides_through_value_path -> alarm_acknowledged_by_decoded_bytes (raw=b\"nope\" leaves the machine in alarm; raw=b\"ack\" acknowledges alarm -> idle); the AP-registry mirror asserts the same. The bytes value is now observed semantically (not just compiled), exactly like the sensor_id string guard."
+      ],
+      "verification_bullets": [
+        "Generated machine confirmed (sensor_monitor_sm.rs): alarm `ev.raw == b\"ack\"` (BytesLit), hot `ev.sensor_id == \"kitchen\"`, idle `ev.celsius_centi > 3000` -- three distinct, observable native guards.",
+        "wz-switchboard-example 12 tests (7 static + 5 AP) green, incl alarm_acknowledged_by_decoded_bytes (static) + the bytes acknowledgment in the AP parity test; non_kitchen_hot_sample_stays_hot (string regression) retained; cargo clippy --all-targets + fmt --check clean.",
+        "Bump blast radius on wz minimal: templates unchanged; sce-rust-runtime only a test-file change; sce-forge-runtime + forge-ast.v1 schema unchanged. build-sce.sh rebuild done.",
+        "Full host run-ci (WZ_RUN_LAYER_G=1) all required layers green incl Layer G MCU no_std cross-compile + Layer M.",
+        "validate_workspace: §5.20 caveat appended; sections 257 unchanged, entries 556->557, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "The R311gv observable-bytes-guard carry is now CLOSED: the bytes guard lowers natively (`ev.raw == b\"ack\"`) and is observed semantically in both the static and AP profiles. Constraint to remember: SCE accepts only ASCII string literals + equality (`===`/`!==`) on bytes guards (2e2fca515 rejects ordering ops + non-ASCII); the example's `ack` is ASCII equality.",
+        "Multi-codec / multi-event switchboards (carry from R311gs/gt): the example exercises one value event over one codec; a multi-event example would exercise the EventSchema + codec multi-doc join across several events.",
+        "Live wz-ap-demo wiring (carry from R311gs): a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the registry (the smoke still encodes wire bytes locally via the codec's encode_to_vec + drives the Engine directly)."
+      ],
+      "publishable_decision_summary": "R311gw: bump vendor/sce pin 1474bd0a9 -> d665780d9, landing the SCE bytes-equality native lowering (BytesLit IR + 6-backend) that closes the R311gv bytes-guard carry; re-enable the observable bytes guard in the example (alarm acknowledged by raw === 'ack' -> ev.raw == b\"ack\").",
+      "publishable_changes_bullets": [
+        "vendor/sce pin 1474bd0a9 -> d665780d9 (+15 commits). Lands the SCE bytes-equality native-lowering series that fixes the bug reported in the R311gv carry: 9e9c837d2 (BytesLit IR node + 6-backend bytes-equality lowering), fe1511757 (flip the gate so bytes EventSchema guards lower natively), 2e2fca515 (reject ordering ops + non-ASCII literals on bytes guards), a2a3dd05c (C11 bytes payload as a bounded buffer), 9d1321f91 (6-backend lowerability verdict), c4ca695f6 (representability SSOT), e847de5eb (6-backend runtime parity test). SCE's Rust emitter now lowers a `bytes === '<ascii-lit>'` cond to a BytesLit comparison (`ev.raw == b\"ack\"`) instead of the invalid `ev.raw == \"ack\"` (a &str literal that fails `Vec<u8>: PartialEq<&str>`). Reported from wz; fixed SCE-side (AI did not modify SCE, per the R311gu lesson).",
+        "wz call-site impact 0: templates unchanged (the fix is sce-build Rust source -> sce-codegen binary rebuild required via build-sce.sh); wz direct deps stable (only sce-rust-runtime/tests/hal_clock_routing.rs touched, a test file); forge-ast.v1 schema unchanged.",
+        "wz-switchboard-example: re-enable the observable bytes guard that R311gv had to drop. sensor_monitor `alarm` gains `temp_update[_event.data.raw === 'ack'] -> idle`; the generated guard is now `ev.raw == b\"ack\"` (verified). Three native typed guards in three states -- celsius_centi (idle), sensor_id (hot), raw (alarm) -- each observing its decoded field.",
+        "wz-switchboard-example tests: bytes_payload_field_rides_through_value_path -> alarm_acknowledged_by_decoded_bytes (raw=b\"nope\" leaves the machine in alarm; raw=b\"ack\" acknowledges alarm -> idle); the AP-registry mirror asserts the same. The bytes value is now observed semantically (not just compiled), exactly like the sensor_id string guard."
+      ],
+      "publishable_verification_bullets": [
+        "Generated machine confirmed (sensor_monitor_sm.rs): alarm `ev.raw == b\"ack\"` (BytesLit), hot `ev.sensor_id == \"kitchen\"`, idle `ev.celsius_centi > 3000` -- three distinct, observable native guards.",
+        "wz-switchboard-example 12 tests (7 static + 5 AP) green, incl alarm_acknowledged_by_decoded_bytes (static) + the bytes acknowledgment in the AP parity test; non_kitchen_hot_sample_stays_hot (string regression) retained; cargo clippy --all-targets + fmt --check clean.",
+        "Bump blast radius on wz minimal: templates unchanged; sce-rust-runtime only a test-file change; sce-forge-runtime + forge-ast.v1 schema unchanged. build-sce.sh rebuild done.",
+        "Full host run-ci (WZ_RUN_LAYER_G=1) all required layers green incl Layer G MCU no_std cross-compile + Layer M.",
+        "validate_workspace: §5.20 caveat appended; sections 257 unchanged, entries 556->557, T1 orphan=0 (new=+0), round-trip 13/13, T3 warn 862 unchanged, GENERATED.md=sync."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The R311gv observable-bytes-guard carry is now CLOSED: the bytes guard lowers natively (`ev.raw == b\"ack\"`) and is observed semantically in both the static and AP profiles. Constraint to remember: SCE accepts only ASCII string literals + equality (`===`/`!==`) on bytes guards (2e2fca515 rejects ordering ops + non-ASCII); the example's `ack` is ASCII equality.",
         "Multi-codec / multi-event switchboards (carry from R311gs/gt): the example exercises one value event over one codec; a multi-event example would exercise the EventSchema + codec multi-doc join across several events.",
         "Live wz-ap-demo wiring (carry from R311gs): a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the registry (the smoke still encodes wire bytes locally via the codec's encode_to_vec + drives the Engine directly)."
       ]
