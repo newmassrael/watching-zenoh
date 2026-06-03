@@ -29434,6 +29434,380 @@
         "Possible future hardening (not a carry): an arbitrary-byte wz publisher binary would let an e2e assert SUB-threshold value discrimination over the wire (a cold sample staying idle), complementing the zenoh-pico ASCII-payload Hot e2e. Multi-MACHINE switchboards remain out of scope (one machine per sidecar)."
       ]
     },
+    "Round 311hb": {
+      "decision_summary": "R311hb gates keyexpr canonicalization no-alloc: canonize_keyexpr returns BoundedString, collapse+chunk-canon heap-free; outbound pico-safe gate stays alloc (wire-emit=AP, Decision 2).",
+      "changes_bullets": [
+        "canonize_keyexpr -> BoundedString; collapse + chunk-canon paths allocation-free",
+        "caps::MAX_KEYEXPR_BYTES SSOT; ExceedsCapacity fail-fast variant on overflow",
+        "outbound pico-safe gate kept alloc-gated (wire-emit = AP retention, Decision 2)"
+      ],
+      "verification_bullets": [
+        "run-ci full + no-alloc subset compile clean; keyexpr_match already un-gated R311fz"
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "carry_forward_bullets": [
+        "registry rounds R311hc-hg build on this BoundedString + caps SSOT foundation"
+      ],
+      "publishable_decision_summary": "R311hb gates keyexpr canonicalization no-alloc: canonize_keyexpr returns BoundedString, collapse+chunk-canon heap-free; outbound pico-safe gate stays alloc (wire-emit=AP, Decision 2).",
+      "publishable_changes_bullets": [
+        "canonize_keyexpr -> BoundedString; collapse + chunk-canon paths allocation-free",
+        "caps::MAX_KEYEXPR_BYTES SSOT; ExceedsCapacity fail-fast variant on overflow",
+        "outbound pico-safe gate kept alloc-gated (wire-emit = AP retention, Decision 2)"
+      ],
+      "publishable_verification_bullets": [
+        "run-ci full + no-alloc subset compile clean; keyexpr_match already un-gated R311fz"
+      ],
+      "publishable_impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "publishable_carry_forward_bullets": [
+        "registry rounds R311hc-hg build on this BoundedString + caps SSOT foundation"
+      ]
+    },
+    "Round 311hc": {
+      "decision_summary": "R311hc makes SubscriberRegistry bounded: subscribers BoundedVec + pattern BoundedString, dispatch_borrowed no-heap fire via SampleView, register fallible; peer table + wire dispatch stay alloc.",
+      "changes_bullets": [
+        "subscribers BoundedVec + Subscriber.pattern BoundedString; caps SSOT",
+        "dispatch_borrowed no-heap fire via SampleView; register now fallible",
+        "peer_keyexpr_table/own_zid + wire dispatch stay alloc-gated; default BoxedSink param removed"
+      ],
+      "verification_bullets": [
+        "run-ci + no-alloc subset clean; clippy --all-targets multi-subset green"
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "carry_forward_bullets": [
+        "R311hk-pre later fixes the codec-push-without-alloc subset miss left here"
+      ],
+      "publishable_decision_summary": "R311hc makes SubscriberRegistry bounded: subscribers BoundedVec + pattern BoundedString, dispatch_borrowed no-heap fire via SampleView, register fallible; peer table + wire dispatch stay alloc.",
+      "publishable_changes_bullets": [
+        "subscribers BoundedVec + Subscriber.pattern BoundedString; caps SSOT",
+        "dispatch_borrowed no-heap fire via SampleView; register now fallible",
+        "peer_keyexpr_table/own_zid + wire dispatch stay alloc-gated; default BoxedSink param removed"
+      ],
+      "publishable_verification_bullets": [
+        "run-ci + no-alloc subset clean; clippy --all-targets multi-subset green"
+      ],
+      "publishable_impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311hk-pre later fixes the codec-push-without-alloc subset miss left here"
+      ]
+    },
+    "Round 311hd": {
+      "decision_summary": "R311hd makes QueryableRegistry bounded: queryables BoundedVec + pattern BoundedString, dispatch_borrowed no-heap fire via QueryView, register fallible; wire dispatch + reply accumulator stay codec+alloc.",
+      "changes_bullets": [
+        "queryables BoundedVec + Queryable.pattern BoundedString; caps SSOT",
+        "dispatch_borrowed no-heap fire via QueryView; register fallible (QueryableRegisterError)",
+        "wire dispatch + reply accumulator stay all(codec-request,alloc); Queryable::matches SSOT"
+      ],
+      "verification_bullets": [
+        "query module un-gated; codec-* imports re-gated all(codec-*,alloc) since codec != alloc imply"
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "carry_forward_bullets": [
+        "per-match QueryResponder wire fire preserved through the bounded path"
+      ],
+      "publishable_decision_summary": "R311hd makes QueryableRegistry bounded: queryables BoundedVec + pattern BoundedString, dispatch_borrowed no-heap fire via QueryView, register fallible; wire dispatch + reply accumulator stay codec+alloc.",
+      "publishable_changes_bullets": [
+        "queryables BoundedVec + Queryable.pattern BoundedString; caps SSOT",
+        "dispatch_borrowed no-heap fire via QueryView; register fallible (QueryableRegisterError)",
+        "wire dispatch + reply accumulator stay all(codec-request,alloc); Queryable::matches SSOT"
+      ],
+      "publishable_verification_bullets": [
+        "query module un-gated; codec-* imports re-gated all(codec-*,alloc) since codec != alloc imply"
+      ],
+      "publishable_impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "publishable_carry_forward_bullets": [
+        "per-match QueryResponder wire fire preserved through the bounded path"
+      ]
+    },
+    "Round 311he": {
+      "decision_summary": "R311he makes ReplyRegistry bounded: pending BoundedVec, dispatch_borrowed no-heap fire via ReplyView, register fallible; new BoundedVec IntoIterator lets fire_final/sweep partition stack-only.",
+      "changes_bullets": [
+        "pending BoundedVec; register fallible (ReplyRegisterError::TableFull)",
+        "new bounded.rs IntoIterator for BoundedVec; fire_final/sweep partition no-heap via mem::take",
+        "wire dispatch + InboundReply retention stay alloc/codec-gated"
+      ],
+      "verification_bullets": [
+        "rid-correlated fire_replies_for SSOT; remove-before-fire + registration order preserved"
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "carry_forward_bullets": [
+        "BoundedVec IntoIterator now reusable by later drain/partition needs"
+      ],
+      "publishable_decision_summary": "R311he makes ReplyRegistry bounded: pending BoundedVec, dispatch_borrowed no-heap fire via ReplyView, register fallible; new BoundedVec IntoIterator lets fire_final/sweep partition stack-only.",
+      "publishable_changes_bullets": [
+        "pending BoundedVec; register fallible (ReplyRegisterError::TableFull)",
+        "new bounded.rs IntoIterator for BoundedVec; fire_final/sweep partition no-heap via mem::take",
+        "wire dispatch + InboundReply retention stay alloc/codec-gated"
+      ],
+      "publishable_verification_bullets": [
+        "rid-correlated fire_replies_for SSOT; remove-before-fire + registration order preserved"
+      ],
+      "publishable_impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "publishable_carry_forward_bullets": [
+        "BoundedVec IntoIterator now reusable by later drain/partition needs"
+      ]
+    },
+    "Round 311hf": {
+      "decision_summary": "R311hf makes declare registries (subscriber/queryable/liveliness) bounded: on_decl/on_undecl BoundedVec, dispatch_declared_borrowed/undeclared no-heap fire, register fallible; declared HashMap stays alloc.",
+      "changes_bullets": [
+        "on_decl/on_undecl BoundedVec across 3 declare registries; DeclRegisterError shared",
+        "dispatch_declared_borrowed/undeclared no-heap fire; declared HashMap + has_matching stay alloc",
+        "R311hf-pre: absorb_declare + resolve_wireexpr/Declare imports gain alloc gate (hc subset miss)"
+      ],
+      "verification_bullets": [
+        "codec-declare-without-alloc subset now compiles; run-ci + subsets clean"
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "carry_forward_bullets": [
+        "liveliness-subscriber registry handled separately in R311hg"
+      ],
+      "publishable_decision_summary": "R311hf makes declare registries (subscriber/queryable/liveliness) bounded: on_decl/on_undecl BoundedVec, dispatch_declared_borrowed/undeclared no-heap fire, register fallible; declared HashMap stays alloc.",
+      "publishable_changes_bullets": [
+        "on_decl/on_undecl BoundedVec across 3 declare registries; DeclRegisterError shared",
+        "dispatch_declared_borrowed/undeclared no-heap fire; declared HashMap + has_matching stay alloc",
+        "R311hf-pre: absorb_declare + resolve_wireexpr/Declare imports gain alloc gate (hc subset miss)"
+      ],
+      "publishable_verification_bullets": [
+        "codec-declare-without-alloc subset now compiles; run-ci + subsets clean"
+      ],
+      "publishable_impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "publishable_carry_forward_bullets": [
+        "liveliness-subscriber registry handled separately in R311hg"
+      ]
+    },
+    "Round 311hg": {
+      "decision_summary": "R311hg makes LivelinessSubscriberRegistry bounded: slots HashMap->BoundedVec linear-scan with interest_id in-row, pattern BoundedString, dispatch_sample_borrowed no-heap fire, register fallible.",
+      "changes_bullets": [
+        "slots BoundedVec linear-scan + interest_id in-row; pattern BoundedString",
+        "dispatch_sample_borrowed no-heap fire; register -> Result<bool, _>",
+        "peer_token_table + wire dispatch stay alloc/codec-gated; liveliness_sample un-gated"
+      ],
+      "verification_bullets": [
+        "completes 7-registry no-alloc fan-out: pubsub/query/reply/declare3/liveliness-sub"
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "carry_forward_bullets": [
+        "session-review quality fixes follow in R311hh-hk"
+      ],
+      "publishable_decision_summary": "R311hg makes LivelinessSubscriberRegistry bounded: slots HashMap->BoundedVec linear-scan with interest_id in-row, pattern BoundedString, dispatch_sample_borrowed no-heap fire, register fallible.",
+      "publishable_changes_bullets": [
+        "slots BoundedVec linear-scan + interest_id in-row; pattern BoundedString",
+        "dispatch_sample_borrowed no-heap fire; register -> Result<bool, _>",
+        "peer_token_table + wire dispatch stay alloc/codec-gated; liveliness_sample un-gated"
+      ],
+      "publishable_verification_bullets": [
+        "completes 7-registry no-alloc fan-out: pubsub/query/reply/declare3/liveliness-sub"
+      ],
+      "publishable_impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "publishable_carry_forward_bullets": [
+        "session-review quality fixes follow in R311hh-hk"
+      ]
+    },
+    "Round 311hh": {
+      "decision_summary": "R311hh consolidates 5 per-registry register-error enums into one registry_error::RegisterError taxonomy shared by pubsub/query/reply/declare/liveliness-sub (session-review quality fix 1).",
+      "changes_bullets": [
+        "new registry_error::RegisterError replaces 5 per-registry enums",
+        "one shared taxonomy; not every registry produces every variant (idiomatic shared error)"
+      ],
+      "verification_bullets": [
+        "behaviour-preserving refactor; run-ci clean across subsets"
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "carry_forward_bullets": [
+        "DRY observer extraction follows in R311hi"
+      ],
+      "publishable_decision_summary": "R311hh consolidates 5 per-registry register-error enums into one registry_error::RegisterError taxonomy shared by pubsub/query/reply/declare/liveliness-sub (session-review quality fix 1).",
+      "publishable_changes_bullets": [
+        "new registry_error::RegisterError replaces 5 per-registry enums",
+        "one shared taxonomy; not every registry produces every variant (idiomatic shared error)"
+      ],
+      "publishable_verification_bullets": [
+        "behaviour-preserving refactor; run-ci clean across subsets"
+      ],
+      "publishable_impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "publishable_carry_forward_bullets": [
+        "DRY observer extraction follows in R311hi"
+      ]
+    },
+    "Round 311hi": {
+      "decision_summary": "R311hi extracts decl_sink::DeclObserverPair holding the 2-list observer install+fire SSOT; subscriber/queryable/liveliness compose it, collapsing triplicated observer fan-out to one component.",
+      "changes_bullets": [
+        "decl_sink::DeclObserverPair = 2-list observer install+fire SSOT",
+        "3 declare registries compose it; named delegators kept for call sites"
+      ],
+      "verification_bullets": [
+        "triplicated observer fan-out collapsed to one component; run-ci clean"
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "carry_forward_bullets": [
+        "no-heap dispatch tests added in R311hj"
+      ],
+      "publishable_decision_summary": "R311hi extracts decl_sink::DeclObserverPair holding the 2-list observer install+fire SSOT; subscriber/queryable/liveliness compose it, collapsing triplicated observer fan-out to one component.",
+      "publishable_changes_bullets": [
+        "decl_sink::DeclObserverPair = 2-list observer install+fire SSOT",
+        "3 declare registries compose it; named delegators kept for call sites"
+      ],
+      "publishable_verification_bullets": [
+        "triplicated observer fan-out collapsed to one component; run-ci clean"
+      ],
+      "publishable_impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "publishable_carry_forward_bullets": [
+        "no-heap dispatch tests added in R311hj"
+      ]
+    },
+    "Round 311hj": {
+      "decision_summary": "R311hj adds direct dispatch_borrowed tests across all 5 registries + DeclObserverPair, and hardens reply fire_final/sweep partition with .expect invariant (was let _=push); query test locks reply_out.",
+      "changes_bullets": [
+        "reply fire_final/sweep let _=push -> .expect(partition invariant)",
+        "direct dispatch_borrowed tests across 5 registries + DeclObserverPair",
+        "query test locks shared reply_out behaviour distinct from wire path"
+      ],
+      "verification_bullets": [
+        "all new no-heap dispatch tests green in run-ci"
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "carry_forward_bullets": [
+        "codec-without-alloc subset guard added in R311hk"
+      ],
+      "publishable_decision_summary": "R311hj adds direct dispatch_borrowed tests across all 5 registries + DeclObserverPair, and hardens reply fire_final/sweep partition with .expect invariant (was let _=push); query test locks reply_out.",
+      "publishable_changes_bullets": [
+        "reply fire_final/sweep let _=push -> .expect(partition invariant)",
+        "direct dispatch_borrowed tests across 5 registries + DeclObserverPair",
+        "query test locks shared reply_out behaviour distinct from wire path"
+      ],
+      "publishable_verification_bullets": [
+        "all new no-heap dispatch tests green in run-ci"
+      ],
+      "publishable_impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "intrinsics-runtime--symbol-surface/5-no-std-hal-trait"
+      ],
+      "publishable_carry_forward_bullets": [
+        "codec-without-alloc subset guard added in R311hk"
+      ]
+    },
+    "Round 311hk": {
+      "decision_summary": "R311hk adds 6 no-alloc MCU no-heap subsets (8-13) to the C1h matrix; full registry surface composes with zero heap (subset 13). R311hk-pre fixed pubsub codec-push alloc gates first.",
+      "changes_bullets": [
+        "C1h matrix gains 6 no-alloc MCU no-heap subsets (8-13); subset 13 = full surface zero-heap",
+        "R311hk-pre: pubsub-put/delete sample/push/attachment imports gain alloc gate",
+        "codec-push-without-alloc now composes (control plane only); matches sibling codecs"
+      ],
+      "verification_bullets": [
+        "C1h 13 subsets green; guards the codec-without-alloc corner hf-pre/hk-pre fixed"
+      ],
+      "impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal"
+      ],
+      "carry_forward_bullets": [
+        "MCU runtime proof (not just compile) follows in R311hl"
+      ],
+      "publishable_decision_summary": "R311hk adds 6 no-alloc MCU no-heap subsets (8-13) to the C1h matrix; full registry surface composes with zero heap (subset 13). R311hk-pre fixed pubsub codec-push alloc gates first.",
+      "publishable_changes_bullets": [
+        "C1h matrix gains 6 no-alloc MCU no-heap subsets (8-13); subset 13 = full surface zero-heap",
+        "R311hk-pre: pubsub-put/delete sample/push/attachment imports gain alloc gate",
+        "codec-push-without-alloc now composes (control plane only); matches sibling codecs"
+      ],
+      "publishable_verification_bullets": [
+        "C1h 13 subsets green; guards the codec-without-alloc corner hf-pre/hk-pre fixed"
+      ],
+      "publishable_impact_refs": [
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal"
+      ],
+      "publishable_carry_forward_bullets": [
+        "MCU runtime proof (not just compile) follows in R311hl"
+      ]
+    },
+    "Round 311hl": {
+      "decision_summary": "R311hl proves MCU no-heap runtime: mcu-noheap-probe (no global_allocator Cortex-M binary) drives all 7 registries; Layer Q.0 boots M0/M3/M4/M7 QEMU. Track 2 goal met.",
+      "changes_bullets": [
+        "mcu-noheap-probe: no-allocator Cortex-M binary drives all 7 registry no-heap fire paths",
+        "Layer Q.0 builds + boots M0/M3/M4/M7 QEMU (semihost SYS_EXIT gate)",
+        "R311hl-pre: alloc feature forwards wz-codecs/alloc (was hardcoded on); no-default links allocator-free"
+      ],
+      "verification_bullets": [
+        "found by probe (rlib lanes G/C1h could not surface it); ALL PASS = zero-allocator link + run proven"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal",
+        "wire-spec-subset--watching-zenoh-mvp/5-2-permanent-on-mcu"
+      ],
+      "carry_forward_bullets": [
+        "remaining: LocalTokenRegistry no-alloc (declarer Interest responder, AP-natured)",
+        "remaining: probe wire-decode -> switchboard inject path (separate design)",
+        "remaining: north-star switchboard generator gc-3"
+      ],
+      "publishable_decision_summary": "R311hl proves MCU no-heap runtime: mcu-noheap-probe (no global_allocator Cortex-M binary) drives all 7 registries; Layer Q.0 boots M0/M3/M4/M7 QEMU. Track 2 goal met.",
+      "publishable_changes_bullets": [
+        "mcu-noheap-probe: no-allocator Cortex-M binary drives all 7 registry no-heap fire paths",
+        "Layer Q.0 builds + boots M0/M3/M4/M7 QEMU (semihost SYS_EXIT gate)",
+        "R311hl-pre: alloc feature forwards wz-codecs/alloc (was hardcoded on); no-default links allocator-free"
+      ],
+      "publishable_verification_bullets": [
+        "found by probe (rlib lanes G/C1h could not surface it); ALL PASS = zero-allocator link + run proven"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-1-preset-mcu-minimal",
+        "wire-spec-subset--watching-zenoh-mvp/5-2-permanent-on-mcu"
+      ],
+      "publishable_carry_forward_bullets": [
+        "remaining: LocalTokenRegistry no-alloc (declarer Interest responder, AP-natured)",
+        "remaining: probe wire-decode -> switchboard inject path (separate design)",
+        "remaining: north-star switchboard generator gc-3"
+      ]
+    },
     "Round 311i": {
       "decision_summary": "R311i codec-declare wire-layer cascade — 9 declare-family wz-codecs modules gated + Cargo edges + session_glue.rs Declare wire surface body-cfg.",
       "changes_bullets": [
@@ -35816,5 +36190,5 @@
       "reason": "F=~3KLOC wz session module; P=zenoh transport/unicast module; C=standalone session shape, multicast independent"
     }
   },
-  "schema_version": 6
+  "schema_version": 7
 }
