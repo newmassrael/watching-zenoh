@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- gc-3 carry #2 — the wz-ap-demo LIVE application machine.
+
+     A deliberately focused two-state machine for the live deploy path: a
+     value event (temp_update) escalates idle -> hot when the decoded
+     temperature crosses 30.00 C, and a signal event (reset) returns hot ->
+     idle. Kept simpler than the wz-switchboard-example's multi-event machine
+     on purpose: the demo's job is to prove the LIVE wire path (an external
+     zenoh peer -> session inbound -> switchboard fan-out -> this engine), not
+     to re-demonstrate the generator's multi-codec join (the example owns
+     that). The single uint16 temp_payload codec keeps the wire bytes small
+     enough for an external peer to publish, and the reset signal row is
+     drivable by any z_put payload (foreign-impl friendly).
+
+     temp_update imports the temp_update EventSchema; its native guard reads
+     `_event.data.celsius_centi` (uint16), so SCE native-lowers it (no script
+     engine) and emits the SensorMonitorInject::raise_temp_update seam +
+     SensorMonitorTempUpdatePayload struct, listing temp_update in
+     typed_inject_events. reset carries no _event.data guard, so it is a
+     signal row (empty _event.data via raise_external_by_name). -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       name="sensor_monitor"
+       version="1.0"
+       initial="idle"
+       datamodel="ecmascript">
+  <sce:import src="temp_update_schema.scxml" kind="event-schema" as="TempUpdateSchema"/>
+  <state id="idle">
+    <!-- value event: 3000 centidegrees = 30.00 C native typed guard. -->
+    <transition event="temp_update" cond="_event.data.celsius_centi &gt; 3000" target="hot"/>
+  </state>
+  <state id="hot">
+    <!-- signal event: any reset sample returns the machine to idle. -->
+    <transition event="reset" target="idle"/>
+  </state>
+</scxml>

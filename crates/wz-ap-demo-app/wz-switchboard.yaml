@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# gc-3 carry #2 — the wz-ap-demo LIVE switchboard sidecar: maps the demo's
+# zenoh keyexprs to sensor_monitor SCXML domain events. The temp row is a
+# VALUE binding (codec temp_payload), so an inbound sample's payload is decoded
+# into the typed _event.data; the reset row is a SIGNAL binding (no codec),
+# injected with an empty _event.data. These keyexprs are what an external peer
+# publishes to drive the live application machine.
+machine: sensor_monitor
+bindings:
+  - keyexpr: demo/sensor/temp
+    event: temp_update
+    codec: temp_payload
+  - keyexpr: demo/sensor/reset
+    event: reset

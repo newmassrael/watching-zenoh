@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-ap-demo-app — gc-3 carry #2.
+#
+# The LIVE application machine for the wz-ap-demo binary: a self-contained
+# crate that owns the demo's SCXML statechart + wire codec + the generated
+# switchboard dispatch/injector. build.rs runs sce-codegen over the three
+# source documents (sensor_monitor statechart + temp_update EventSchema +
+# temp_payload codec), then wz-switchboard-codegen over wz-switchboard.yaml +
+# the emitted forge-asts, and the generated dispatch is `include!`d here.
+#
+# Why a separate crate (vs folding into wz-ap-demo): the generated app machine
+# code references sce-rust-runtime / sce-forge-runtime / wz-session-core
+# directly, while wz-ap-demo collapses to a single `wz` facade dep (R311a4).
+# Isolating the sce deps here keeps the demo's facade boundary clean — the demo
+# adds exactly one path dep (this crate) and never names an sce type directly.
+#
+# Internal deploy-support library: host std only, not published.
+
+[package]
+name = "wz-ap-demo-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+publish = false
+description = "gc-3 carry #2 — the wz-ap-demo live application machine (statechart + EventSchema + codec wired by build.rs into a switchboard value-path dispatch/injector)."
+
+[features]
+# The generated temp_payload codec gates its heap-backed encode facade
+# (VecSink / encode_to_vec) on `feature = "alloc"`; this host crate is always
+# std, so alloc is on by default and forwards to sce-forge-runtime (mirrors
+# wz-codecs / wz-switchboard-example). The codec's primary sink-based decode
+# path the dispatch uses needs no allocator.
+default = ["alloc"]
+alloc = ["sce-forge-runtime/alloc"]
+
+[dependencies]
+# keyexpr_pattern_matches (un-gated) — the generated dispatch's matcher.
+# `switchboard` brings the AP dynamic SwitchboardRegistry + the EventInjector
+# port the generated SensorMonitorInjector impls (alloc is on by default).
+wz-session-core = { path = "../wz-session-core", features = ["switchboard"] }
+# Engine<SensorMonitorPolicy> + the generated SensorMonitorInject seam.
+sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime" }
+# SceCursor / codec runtime for the generated temp_payload decoder + encoder.
+sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
+
+[build-dependencies]
+# The wz-switchboard.yaml model SSOT + the pure generator.
+wz-switchboard-schema = { path = "../wz-switchboard-schema" }
+wz-switchboard-codegen = { path = "../wz-switchboard-codegen" }
+# YAML backend chosen at this consumer's I/O boundary (the schema crate
+# pins none). serde_yaml_ng is the maintained serde_yaml successor.
+serde_yaml_ng = "0.9"
+
+[lints]
+workspace = true

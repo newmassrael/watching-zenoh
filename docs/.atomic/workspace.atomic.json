@@ -884,7 +884,8 @@
         "R311gt: string/bytes payload fields decode borrowed; dispatch .into()s to owned; alloc-tier only.",
         "R311gv: bytes payload field live via .into(); native bytes guard awaits SCE byte-literal lowering.",
         "R311gw: native bytes guard now lowers via SCE BytesLit (pin d665780d9); R311gv caveat closed.",
-        "R311gx: multi-event example -- 2nd value event humidity_update (uint8 guard); 2 helpers/2 arms."
+        "R311gx: multi-event example -- 2nd value event humidity_update (uint8 guard); 2 helpers/2 arms.",
+        "R311gy: carry #2 foundation -- wz-ap-demo-app crate (live app machine + injector); wiring R311gz."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -29223,6 +29224,52 @@
         "The gc-3s/gt multi-codec / multi-event carry is now CLOSED: the example wires two distinct value events (temp_update via temp_payload, humidity_update via humidity_payload), each with its own EventSchema, and the generator's per-event schema<->codec join + two-helper / two-arm emission is verified end to end against a live Engine in both the static (MCU) and AP-dynamic profiles.",
         "Live wz-ap-demo wiring (carry from R311gs) remains open: a real zenoh peer publishing samples through the ApplicationLayerObserver fan-out into the registry (the smoke still encodes wire bytes locally via the codec's encode_to_vec + drives the Engine directly).",
         "Multi-MACHINE switchboards stay out of scope: a sidecar targets exactly one `machine`. Multiple machines would need a registry keyed by machine + a generator that emits one dispatch per machine -- a larger design question, not part of this carry."
+      ]
+    },
+    "Round 311gy": {
+      "decision_summary": "R311gy: gc-3 carry #2 -- new wz-ap-demo-app crate: the live demo's app machine (sensor_monitor idle/hot, temp_update value + reset signal) + generated switchboard dispatch/injector; sce deps isolated from the wz facade.",
+      "changes_bullets": [
+        "New crate wz-ap-demo-app (library, publish=false, host std): the wz-ap-demo LIVE application machine. Owns sources/{sensor_monitor,temp_update_schema,temp_payload}.scxml + wz-switchboard.yaml + build.rs (same sce-codegen -> wz-switchboard-codegen pipeline as wz-switchboard-example). sensor_monitor is a focused idle/hot machine: temp_update value event (uint16 celsius_centi native guard > 3000) drives idle -> hot; reset signal returns hot -> idle.",
+        "Separate crate (not folded into wz-ap-demo) by design: the generated app code references sce-rust-runtime / sce-forge-runtime / wz-session-core directly, whereas wz-ap-demo collapses to a single `wz` facade dep (R311a4). Isolating the sce deps here keeps the demo's facade boundary clean -- the demo will add exactly one path dep (this crate) and never name an sce type directly.",
+        "lib.rs re-exports a small sce-free public API: new_engine() (fresh initialized Engine), register_bindings(&mut SwitchboardRegistry) (installs demo/sensor/temp value + demo/sensor/reset signal rows mirroring the sidecar), plus Engine / SensorMonitorPolicy / SensorMonitorState / SensorMonitorInjector re-exports.",
+        "The demo machine is deliberately single-event (the wz-switchboard-example owns the multi-codec / multi-event demonstration from R311gx); the single uint16 temp_payload codec keeps the live wire bytes small enough for an external peer to publish.",
+        "crates/Cargo.toml: add wz-ap-demo-app to workspace members."
+      ],
+      "verification_bullets": [
+        "wz-ap-demo-app 4 unit tests green (hot_sample_drives_machine_to_hot, cold_sample_leaves_machine_idle, reset_signal_row_returns_to_idle, unmatched_keyexpr_injects_nothing) -- static dispatch_switchboard drives the real Engine through a true encode -> wire -> decode round-trip.",
+        "cargo fmt -p wz-ap-demo-app --check clean; cargo clippy -p wz-ap-demo-app --all-targets clean.",
+        "No SCE pin change (templates + binary unchanged from R311gw d665780d9); the new crate reuses the existing wz-switchboard-codegen generator unchanged.",
+        "Foundation only: no wz-ap-demo binary change yet (the inbound observer fan-out wiring is R311gz; the external-peer Layer E lane is the follow-on round)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "R311gz (next): wire wz-ap-demo-app into the wz-ap-demo binary -- register_bindings on the observer's switchboard before drive_session, construct SensorMonitorInjector in the inbound loop, drive the app engine on a matched Push, and log app-state transitions. Production-type observer fan-out integration test (in-process Push, like switchboard_inject.rs but the generated value injector).",
+        "R311h* (after gz): external zenoh-pico peer Layer E inbound value-path harness -- a real peer publishes temp_payload wire bytes to demo/sensor/temp over TCP, the demo's switchboard decodes + drives the app engine, asserted via a demo stderr transition marker. zenoh-pico CLI (z_put) + wz-e2e publisher binaries are available at target/zenoh-pico-cli.",
+        "Live wz-ap-demo wiring (carry from R311gs) stays open until R311gz + the Layer E harness land; this round only adds the isolated app crate."
+      ],
+      "publishable_decision_summary": "R311gy: gc-3 carry #2 -- new wz-ap-demo-app crate: the live demo's app machine (sensor_monitor idle/hot, temp_update value + reset signal) + generated switchboard dispatch/injector; sce deps isolated from the wz facade.",
+      "publishable_changes_bullets": [
+        "New crate wz-ap-demo-app (library, publish=false, host std): the wz-ap-demo LIVE application machine. Owns sources/{sensor_monitor,temp_update_schema,temp_payload}.scxml + wz-switchboard.yaml + build.rs (same sce-codegen -> wz-switchboard-codegen pipeline as wz-switchboard-example). sensor_monitor is a focused idle/hot machine: temp_update value event (uint16 celsius_centi native guard > 3000) drives idle -> hot; reset signal returns hot -> idle.",
+        "Separate crate (not folded into wz-ap-demo) by design: the generated app code references sce-rust-runtime / sce-forge-runtime / wz-session-core directly, whereas wz-ap-demo collapses to a single `wz` facade dep (R311a4). Isolating the sce deps here keeps the demo's facade boundary clean -- the demo will add exactly one path dep (this crate) and never name an sce type directly.",
+        "lib.rs re-exports a small sce-free public API: new_engine() (fresh initialized Engine), register_bindings(&mut SwitchboardRegistry) (installs demo/sensor/temp value + demo/sensor/reset signal rows mirroring the sidecar), plus Engine / SensorMonitorPolicy / SensorMonitorState / SensorMonitorInjector re-exports.",
+        "The demo machine is deliberately single-event (the wz-switchboard-example owns the multi-codec / multi-event demonstration from R311gx); the single uint16 temp_payload codec keeps the live wire bytes small enough for an external peer to publish.",
+        "crates/Cargo.toml: add wz-ap-demo-app to workspace members."
+      ],
+      "publishable_verification_bullets": [
+        "wz-ap-demo-app 4 unit tests green (hot_sample_drives_machine_to_hot, cold_sample_leaves_machine_idle, reset_signal_row_returns_to_idle, unmatched_keyexpr_injects_nothing) -- static dispatch_switchboard drives the real Engine through a true encode -> wire -> decode round-trip.",
+        "cargo fmt -p wz-ap-demo-app --check clean; cargo clippy -p wz-ap-demo-app --all-targets clean.",
+        "No SCE pin change (templates + binary unchanged from R311gw d665780d9); the new crate reuses the existing wz-switchboard-codegen generator unchanged.",
+        "Foundation only: no wz-ap-demo binary change yet (the inbound observer fan-out wiring is R311gz; the external-peer Layer E lane is the follow-on round)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "R311gz (next): wire wz-ap-demo-app into the wz-ap-demo binary -- register_bindings on the observer's switchboard before drive_session, construct SensorMonitorInjector in the inbound loop, drive the app engine on a matched Push, and log app-state transitions. Production-type observer fan-out integration test (in-process Push, like switchboard_inject.rs but the generated value injector).",
+        "R311h* (after gz): external zenoh-pico peer Layer E inbound value-path harness -- a real peer publishes temp_payload wire bytes to demo/sensor/temp over TCP, the demo's switchboard decodes + drives the app engine, asserted via a demo stderr transition marker. zenoh-pico CLI (z_put) + wz-e2e publisher binaries are available at target/zenoh-pico-cli.",
+        "Live wz-ap-demo wiring (carry from R311gs) stays open until R311gz + the Layer E harness land; this round only adds the isolated app crate."
       ]
     },
     "Round 311h": {

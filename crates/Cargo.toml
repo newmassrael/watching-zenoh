@@ -40,6 +40,7 @@ members = [
     "wz-switchboard-schema",
     "wz-switchboard-codegen",
     "wz-switchboard-example",
+    "wz-ap-demo-app",
     "zenoh-pico-sys",
     "wz-integration-tests",
     "wz-runtime-tokio",

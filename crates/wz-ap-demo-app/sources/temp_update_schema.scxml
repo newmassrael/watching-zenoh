@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- gc-3 carry #2 — the typed `_event.data` contract for the demo's
+     temp_update event. A single primitive field (`celsius_centi`, uint16
+     centidegrees). Imported by sensor_monitor.scxml, whose idle-state native
+     guard reads `celsius_centi`, so the event is native-lowered and SCE emits
+     the `SensorMonitorTempUpdatePayload { celsius_centi: u16 }` struct + the
+     `raise_temp_update` inject seam. A single primitive field keeps the live
+     wire bytes minimal; the wire decode is a separate concern
+     (temp_payload.scxml). -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       name="temp_update_schema"
+       sce:kind="event-schema"
+       sce:event-name="temp_update">
+  <datamodel>
+    <data id="celsius_centi" sce:type="uint16" sce:direction="in"/>
+  </datamodel>
+</scxml>
