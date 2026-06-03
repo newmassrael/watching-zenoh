@@ -2119,12 +2119,15 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
             //
             // R311dh — observer access via R::with_mutex_mut closure form.
             R::with_mutex_mut(&self.observer, |observer| {
-                observer.liveliness_subscribers.register(
-                    interest_id,
-                    keyexpr_string.clone(),
-                    options.history,
-                    BoxedLivelinessSampleSink::new(callback),
-                );
+                observer
+                    .liveliness_subscribers
+                    .register(
+                        interest_id,
+                        &keyexpr_string,
+                        options.history,
+                        BoxedLivelinessSampleSink::new(callback),
+                    )
+                    .expect("register on the alloc backing never exceeds declared capacity");
             });
             self.actions.send_interest_liveliness_subscriber(
                 interest_id,
@@ -2254,12 +2257,15 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
             //
             // R311dh — observer access via R::with_mutex_mut closure form.
             R::with_mutex_mut(&self.observer, |observer| {
-                observer.liveliness_subscribers.register(
-                    interest_id,
-                    resolved.clone(),
-                    options.history,
-                    BoxedLivelinessSampleSink::new(callback),
-                );
+                observer
+                    .liveliness_subscribers
+                    .register(
+                        interest_id,
+                        &resolved,
+                        options.history,
+                        BoxedLivelinessSampleSink::new(callback),
+                    )
+                    .expect("register on the alloc backing never exceeds declared capacity");
             });
             // Wire emit carries the alias form so the peer pays the
             // mapping_id + optional inline_suffix cost rather than the

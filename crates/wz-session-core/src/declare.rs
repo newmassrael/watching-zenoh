@@ -51,19 +51,16 @@ pub mod subscriber;
 pub mod queryable;
 
 // R311ek — the pure-data liveliness sample types (`LivelinessSample` /
-// `LivelinessSampleKind` / `LivelinessSampleSink`) split out of the
-// `codec-declare`-gated `liveliness_subscriber` module so the
-// codec-agnostic callback surface composes in any subset; only the
-// `DeclareOwnedVariant`-consuming `LivelinessSubscriberRegistry` stays
-// `codec-declare`-gated below. Alloc-only (the callback is a `Box`).
-#[cfg(feature = "alloc")]
+// `LivelinessSampleKind` / `LivelinessSampleSink`) are codec-agnostic.
+// R311gb (Track 2) — un-gated from `alloc`: the sample view + sink trait
+// compile on the MCU no-heap profile; only `BoxedLivelinessSampleSink`
+// (the heap closure adapter) stays `alloc`-gated inside the module.
 pub mod liveliness_sample;
 
-// R311gb (Track 2) — pending its own sub-round (R311hg): kept fully
-// `alloc`-gated (explicit `all(codec-declare, alloc)`, was `codec-declare`
-// under the module-`alloc` gate) until its slot table migrates to the
-// no-alloc backing.
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+// R311gb (Track 2) — un-gated from `codec-declare` / `alloc`: the slot
+// table control plane + no-heap fire compile on the MCU no-heap profile;
+// the owned `Declare`-consuming wire dispatch + the `peer_token_table`
+// stay `all(codec-declare, alloc)` / `alloc`-gated per-method.
 pub mod liveliness_subscriber;
 
 // R283 — DECLARER-side registry of wz's own held LivelinessTokens + the

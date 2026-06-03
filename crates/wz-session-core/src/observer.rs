@@ -260,7 +260,8 @@ pub struct ApplicationLayerObserver {
     /// without touching this field. The dispatch fan-out in
     /// [`Self::dispatch_event`] is gated on the same feature.
     #[cfg(feature = "liveliness-subscriber")]
-    pub liveliness_subscribers: LivelinessSubscriberRegistry,
+    pub liveliness_subscribers:
+        LivelinessSubscriberRegistry<crate::declare::liveliness_sample::BoxedLivelinessSampleSink>,
     /// Initiator-side `Response(Reply|Err)` + `ResponseFinal`
     /// callbacks (`z_get` consumer). Pending entries auto-unregister
     /// when their matching `ResponseFinal` arrives.

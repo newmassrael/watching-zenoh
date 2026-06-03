@@ -37,10 +37,10 @@
 //! [`crate::session_glue::SessionLinkActions::alloc_next_interest_id`].
 //! The slot carries:
 //!
-//! * pre-split `pattern_chunks` for the subscriber's keyexpr (so
-//!   `keyexpr_pattern_matches` runs at dispatch with zero per-event
-//!   allocation beyond the `Vec<&str>` borrow conversion);
-//! * the original keyexpr string (for introspection / debug logging);
+//! * the subscriber's keyexpr `pattern` (R311gb Track 2 — one
+//!   [`crate::bounded::BoundedString`]; matching splits it into a stack
+//!   chunk view at dispatch with no heap, and the same buffer serves the
+//!   introspection / debug `keyexpr` accessor);
 //! * the user-supplied [`LivelinessSampleSink`];
 //! * `history` flag — `true` when the subscriber requested current +
 //!   future replay (CURRENT bit on the outbound Interest); the
@@ -73,25 +73,34 @@
 //! it here keeps the cross-registry coupling at zero and matches
 //! zenoh-pico's `_z_session_t._remote_tokens` table sized per session.
 
-use alloc::string::{String, ToString};
-use alloc::vec::Vec;
-
+// R311gb (Track 2) — String / HashMap back the `alloc` wire side (the
+// `peer_token_table` token→keyexpr table + dispatch params); the no-alloc
+// control plane stores slots in a `BoundedVec` (each slot's pattern in a
+// `BoundedString`) and fires the borrowed `LivelinessSample` view.
+#[cfg(feature = "alloc")]
+use alloc::string::String;
+#[cfg(feature = "alloc")]
 use hashbrown::HashMap;
 
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
 
+use crate::bounded::{BoundedString, BoundedVec};
+use crate::caps;
+#[cfg(feature = "alloc")]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
-use crate::keyexpr_match::keyexpr_pattern_matches;
+use crate::keyexpr_match::{keyexpr_pattern_matches, MAX_KEYEXPR_CHUNKS};
+#[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
+#[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::wireexpr_resolve::resolve_wireexpr;
 
-// R311ek — the pure-data sample types moved to the codec-agnostic
-// sibling module `liveliness_sample` so they compose in a
-// `codec-declare`-off subset; this registry (which consumes
-// `DeclareOwnedVariant`) stays `codec-declare`-gated and re-imports
-// them.
+// R311ek / R311gb — the pure-data sample types are codec-agnostic +
+// no_std; `BoxedLivelinessSampleSink` (the heap adapter) is `alloc`-gated.
+#[cfg(feature = "alloc")]
+pub use crate::declare::liveliness_sample::BoxedLivelinessSampleSink;
 pub use crate::declare::liveliness_sample::{
-    BoxedLivelinessSampleSink, LivelinessSample, LivelinessSampleKind, LivelinessSampleSink,
+    LivelinessSample, LivelinessSampleKind, LivelinessSampleSink,
 };
 
 /// Per-subscriber slot. Private to this module; consumers interact
@@ -99,15 +108,17 @@ pub use crate::declare::liveliness_sample::{
 /// [`LivelinessSubscriberRegistry::unregister`] and the RAII handle
 /// at the [`crate::session::LivelinessSubscriber`] layer.
 struct LivelinessSubscriberSlot<C: LivelinessSampleSink> {
-    /// Pre-split keyexpr chunks for [`keyexpr_pattern_matches`]. Same
-    /// chunk-preserving split as [`crate::pubsub::SubscriberRegistry`]:
-    /// empty literal chunks are kept so `a//b` is distinguishable
-    /// from `a/b`.
-    pattern_chunks: Vec<String>,
-    /// Original keyexpr string. Carried for introspection
-    /// (`debug` logs, status surfaces) — the matching engine uses
-    /// `pattern_chunks` directly.
-    keyexpr: String,
+    /// R311gb (Track 2) — the slot's interest id (was the `HashMap` key;
+    /// now carried in-row since the slot table is a linear `BoundedVec`).
+    interest_id: u64,
+    /// R311gb (Track 2) — the subscriber's keyexpr pattern, stored as one
+    /// [`BoundedString`] (no-alloc backing on MCU). Matching splits it on
+    /// `/` at dispatch time into a stack chunk view (the pre-split owned
+    /// `Vec<String>` + duplicate `keyexpr` `String` are folded into this
+    /// single buffer). Empty literal chunks are preserved so `a//b` is
+    /// distinguishable from `a/b`; the registry's `keyexpr` accessor
+    /// returns this verbatim.
+    pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }>,
     /// R311gb-3d — the delivery sink (DIP seam). Fired in registration
     /// order if multiple subscribers are declared on overlapping
     /// patterns. `C = BoxedLivelinessSampleSink` on AP, a consumer-
@@ -132,8 +143,13 @@ struct LivelinessSubscriberSlot<C: LivelinessSampleSink> {
 /// `Decl*Token` records to their keyexpr-matched callbacks. See
 /// module-level docs for the dispatch contract and the
 /// `peer_token_table` keyexpr-resolution mechanism.
-pub struct LivelinessSubscriberRegistry<C: LivelinessSampleSink = BoxedLivelinessSampleSink> {
-    slots: HashMap<u64, LivelinessSubscriberSlot<C>>,
+pub struct LivelinessSubscriberRegistry<C: LivelinessSampleSink> {
+    /// R311gb (Track 2) — bounded slot table (was a `HashMap` keyed by
+    /// `interest_id`; now a linear `BoundedVec` with the id carried
+    /// in-row, scanned on register / unregister / accessor lookup —
+    /// `caps::MAX_LIVELINESS_SUBSCRIPTIONS` is small so the linear scan is
+    /// cheaper than a no-alloc map).
+    slots: BoundedVec<LivelinessSubscriberSlot<C>, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }>,
     /// Peer-side token table: maps a `DeclToken.id` to the keyexpr it
     /// resolved to at `DeclToken` arrival time. Populated by
     /// [`Self::dispatch_declare`] on `DeclToken` reception and
@@ -141,8 +157,42 @@ pub struct LivelinessSubscriberRegistry<C: LivelinessSampleSink = BoxedLivelines
     /// `Delete` sample can carry the same keyexpr as the prior `Put`.
     /// Cleared on `UndeclToken` reception (R280); a `DeclToken` whose
     /// id was never seen is treated as a no-op.
+    ///
+    /// R311gb (Track 2) — wire-side resolution state (populated by
+    /// `dispatch_declare` consuming owned `Declare` records);
+    /// `alloc`-gated per the borrow boundary. The no-alloc control plane
+    /// (slot table + matching + fan) does not depend on it; an MCU caller
+    /// supplies the keyexpr to [`Self::dispatch_sample_borrowed`] directly.
+    #[cfg(feature = "alloc")]
     peer_token_table: HashMap<u64, String>,
 }
+
+/// R311gb (Track 2) — failure mode of
+/// [`LivelinessSubscriberRegistry::register`] on the no-alloc (MCU)
+/// backing: the slot table is at its declared capacity
+/// ([`caps::MAX_LIVELINESS_SUBSCRIPTIONS`]), surfaced fail-fast per the
+/// [`crate::bounded`] contract. On the `alloc` (AP) backing it is never
+/// returned. Distinct from the `register` return's `Ok(false)`
+/// duplicate-`interest_id` signal (a no-op, not a capacity failure).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LivelinessRegisterError {
+    /// The slot table is at its declared capacity
+    /// ([`caps::MAX_LIVELINESS_SUBSCRIPTIONS`]).
+    TableFull,
+    /// The subscriber keyexpr exceeds [`caps::MAX_KEYEXPR_BYTES`].
+    KeyexprTooLong,
+}
+
+impl core::fmt::Display for LivelinessRegisterError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::TableFull => f.write_str("liveliness subscriber slot table at declared capacity"),
+            Self::KeyexprTooLong => f.write_str("liveliness subscriber keyexpr exceeds capacity"),
+        }
+    }
+}
+
+impl core::error::Error for LivelinessRegisterError {}
 
 impl<C: LivelinessSampleSink> Default for LivelinessSubscriberRegistry<C> {
     fn default() -> Self {
@@ -160,7 +210,8 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// shorthand, which fixes `C = BoxedLivelinessSampleSink`.
     pub fn with_sink_backing() -> Self {
         Self {
-            slots: HashMap::new(),
+            slots: BoundedVec::new(),
+            #[cfg(feature = "alloc")]
             peer_token_table: HashMap::new(),
         }
     }
@@ -185,27 +236,40 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// closed `enum` on MCU). The `Session::declare_liveliness_subscriber`
     /// surface keeps its `impl FnMut(LivelinessSample)` closure shape and
     /// wraps it in a [`BoxedLivelinessSampleSink`] before calling here.
+    ///
+    /// R311gb (Track 2) — takes the keyexpr by `&str` (stored in the slot's
+    /// [`BoundedString`]) and is fallible on the no-alloc backing:
+    /// `Ok(true)` = newly registered, `Ok(false)` = duplicate
+    /// `interest_id` (no-op), `Err(TableFull)` = slot table at capacity,
+    /// `Err(KeyexprTooLong)` = keyexpr exceeds [`caps::MAX_KEYEXPR_BYTES`].
+    /// On the `alloc` backing the two `Err` arms are never returned.
     pub fn register(
         &mut self,
         interest_id: u64,
-        keyexpr: impl Into<String>,
+        keyexpr: &str,
         history: bool,
         sink: C,
-    ) -> bool {
-        let keyexpr_string = keyexpr.into();
-        let pattern_chunks: Vec<String> = keyexpr_string.split('/').map(str::to_string).collect();
-        let slot = LivelinessSubscriberSlot {
-            pattern_chunks,
-            keyexpr: keyexpr_string,
-            sink,
-            history,
-            history_complete: false,
-        };
-        if self.slots.contains_key(&interest_id) {
-            return false;
+    ) -> Result<bool, LivelinessRegisterError> {
+        // Duplicate check by linear scan (the slot table is a `BoundedVec`
+        // now, not a keyed map). Fresh ids come from
+        // `alloc_next_interest_id`, so a collision is a programming error.
+        if self.slots.iter().any(|s| s.interest_id == interest_id) {
+            return Ok(false);
         }
-        self.slots.insert(interest_id, slot);
-        true
+        let mut pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }> = BoundedString::new();
+        pattern
+            .push_str(keyexpr)
+            .map_err(|_| LivelinessRegisterError::KeyexprTooLong)?;
+        self.slots
+            .push(LivelinessSubscriberSlot {
+                interest_id,
+                pattern,
+                sink,
+                history,
+                history_complete: false,
+            })
+            .map_err(|_| LivelinessRegisterError::TableFull)?;
+        Ok(true)
     }
 
     /// Remove a subscriber slot. Returns `true` when a slot was
@@ -214,7 +278,9 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// explicit `LivelinessSubscriber::undeclare` ahead of the drop
     /// covers the same call site.
     pub fn unregister(&mut self, interest_id: u64) -> bool {
-        self.slots.remove(&interest_id).is_some()
+        let before = self.slots.len();
+        self.slots.retain(|s| s.interest_id != interest_id);
+        before != self.slots.len()
     }
 
     /// Mark the subscriber with `interest_id` as history-complete.
@@ -223,7 +289,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// an id whose subscriber was already unregistered locally;
     /// dropping the signal silently is the correct response).
     pub fn mark_history_complete(&mut self, interest_id: u64) {
-        if let Some(slot) = self.slots.get_mut(&interest_id) {
+        if let Some(slot) = self.slots.iter_mut().find(|s| s.interest_id == interest_id) {
             slot.history_complete = true;
         }
     }
@@ -240,8 +306,9 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// not this view.
     pub fn keyexpr(&self, interest_id: u64) -> Option<&str> {
         self.slots
-            .get(&interest_id)
-            .map(|slot| slot.keyexpr.as_str())
+            .iter()
+            .find(|s| s.interest_id == interest_id)
+            .map(|slot| slot.pattern.as_str())
     }
 
     /// `true` when the subscriber requested CURRENT replay AND the
@@ -251,7 +318,8 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// before the peer's `InterestFinal` arrives.
     pub fn history_complete(&self, interest_id: u64) -> bool {
         self.slots
-            .get(&interest_id)
+            .iter()
+            .find(|s| s.interest_id == interest_id)
             .map(|slot| slot.history && slot.history_complete)
             .unwrap_or(false)
     }
@@ -260,6 +328,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// currently tracked. Equal to the number of `DeclToken` arrivals
     /// minus matching `UndeclToken` arrivals; bounded by the peer's
     /// declared token set. Test / diagnostic surface only.
+    #[cfg(feature = "alloc")]
     pub fn peer_token_count(&self) -> usize {
         self.peer_token_table.len()
     }
@@ -278,6 +347,43 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// "no resolved keyexpr → no fire" contract — recording the slot
     /// match without the resolved keyexpr would surface a half-truth
     /// to the callback).
+    /// R311gb (Track 2) — no-heap fire entry: fan a borrowed liveliness
+    /// sample `(kind, keyexpr, token_id)` to every slot whose pattern
+    /// matches `keyexpr`, delivering the `LivelinessSample` view to each
+    /// matching sink. Borrow-driven (the caller supplies the resolved
+    /// keyexpr), so it is the MCU no-heap fan-out; the `alloc` wire path
+    /// ([`dispatch_declare`](Self::dispatch_declare)) resolves the keyexpr
+    /// through the peer table + `peer_token_table` and funnels through
+    /// here. Returns the count of slots fired.
+    pub fn dispatch_sample_borrowed(
+        &mut self,
+        kind: LivelinessSampleKind,
+        keyexpr: &str,
+        token_id: u64,
+    ) -> usize {
+        self.fan_to_matching_slots(kind, keyexpr, token_id)
+    }
+
+    /// Route an inbound `Declare` envelope's inner body through the
+    /// matching subscriber slots. Updates `peer_token_table` on
+    /// `DeclToken` arrival (so a later `UndeclToken` can resolve back
+    /// to the same keyexpr) and removes the entry on `UndeclToken`
+    /// arrival.
+    ///
+    /// `peer_keyexpr_table` is the shared mapping table populated by
+    /// [`crate::pubsub::SubscriberRegistry`] from inbound
+    /// `Declare(DeclKexpr)` records. A `DeclToken` whose keyexpr
+    /// references an undeclared peer mapping silently drops (mirror
+    /// of [`crate::declare::LivelinessRegistry::dispatch_declare`]'s
+    /// "no resolved keyexpr → no fire" contract — recording the slot
+    /// match without the resolved keyexpr would surface a half-truth
+    /// to the callback).
+    ///
+    /// R311gb (Track 2) — `all(codec-declare, alloc)`-gated: consumes the
+    /// owned `DeclareOwnedVariant` (codec) + the `alloc` `peer_token_table`
+    /// resolution, then funnels through the no-heap
+    /// [`dispatch_sample_borrowed`](Self::dispatch_sample_borrowed) SSOT.
+    #[cfg(all(feature = "codec-declare", feature = "alloc"))]
     pub fn dispatch_declare(
         &mut self,
         body: &DeclareOwnedVariant,
@@ -305,15 +411,32 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
         }
     }
 
-    /// Internal fan-out helper. Walks every slot and invokes its
-    /// callback when the slot's pattern chunks match the resolved
-    /// keyexpr. Borrows the chunks via a per-slot `Vec<&str>` view
-    /// — the per-slot allocation is the same shape
-    /// [`crate::pubsub::SubscriberRegistry::dispatch_push`] uses; it
-    /// stays out of the inner loop on the matching engine itself.
-    fn fan_to_matching_slots(&mut self, kind: LivelinessSampleKind, resolved: &str, token_id: u64) {
-        for slot in self.slots.values_mut() {
-            let chunks: Vec<&str> = slot.pattern_chunks.iter().map(String::as_str).collect();
+    /// Internal fan-out helper (the no-heap match SSOT). Walks every slot
+    /// and invokes its sink when the slot's pattern matches the resolved
+    /// keyexpr. R311gb (Track 2) — splits the slot's [`BoundedString`]
+    /// pattern into a stack chunk view (no heap); a pattern exceeding
+    /// [`MAX_KEYEXPR_CHUNKS`] chunks (cannot happen for a registered
+    /// pattern) is skipped rather than matched truncated. Returns the
+    /// count of slots fired.
+    fn fan_to_matching_slots(
+        &mut self,
+        kind: LivelinessSampleKind,
+        resolved: &str,
+        token_id: u64,
+    ) -> usize {
+        let mut fired: usize = 0;
+        for slot in self.slots.iter_mut() {
+            let mut chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+            let mut overflow = false;
+            for c in slot.pattern.split('/') {
+                if chunks.push(c).is_err() {
+                    overflow = true;
+                    break;
+                }
+            }
+            if overflow {
+                continue;
+            }
             if keyexpr_pattern_matches(&chunks, resolved) {
                 // R311gb-3d — deliver through the LivelinessSampleSink seam.
                 slot.sink.on_sample(LivelinessSample {
@@ -321,8 +444,10 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
                     keyexpr: resolved,
                     token_id,
                 });
+                fired = fired.saturating_add(1);
             }
         }
+        fired
     }
 
     /// Drain a `Vec<NetworkMessage>` through [`Self::dispatch_declare`]
@@ -332,6 +457,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// `_Z_INTEREST_NOT_FINAL_MASK` at
     /// `vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/
     /// interest.h:35`).
+    #[cfg(feature = "alloc")]
     pub fn dispatch_messages(
         &mut self,
         messages: &[NetworkMessage],
@@ -384,6 +510,7 @@ impl<C: LivelinessSampleSink> LivelinessSubscriberRegistry<C> {
     /// through [`Self::dispatch_messages`]; other variants are
     /// no-ops here (the liveliness signal path lives entirely in the
     /// `Declare` / `Interest` MIDs).
+    #[cfg(feature = "alloc")]
     pub fn dispatch_iteration_event(
         &mut self,
         event: IterationEvent<'_>,
@@ -411,7 +538,10 @@ impl LivelinessSubscriberRegistry<BoxedLivelinessSampleSink> {
     }
 }
 
-#[cfg(test)]
+// R311gb (Track 2) — test gate now explicit (was inherited from the
+// module's `codec-declare` gate); exercises `dispatch_declare` (owned
+// `DeclareOwnedVariant`), now `all(codec-declare, alloc)`-gated.
+#[cfg(all(test, feature = "codec-declare"))]
 mod tests {
     //! R311ds — behavioural tests migrated here from the
     //! wz-runtime-tokio `declare/liveliness_subscriber.rs` shell
@@ -465,7 +595,9 @@ mod tests {
     fn register_then_unregister_clears_slot() {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        assert!(reg.register(7, "liveliness/dev", false, make_subscriber(sink.clone())));
+        assert!(reg
+            .register(7, "liveliness/dev", false, make_subscriber(sink.clone()))
+            .unwrap());
         assert_eq!(reg.slot_count(), 1);
         assert_eq!(reg.keyexpr(7), Some("liveliness/dev"));
         assert!(reg.unregister(7));
@@ -477,9 +609,12 @@ mod tests {
     fn duplicate_register_rejected() {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        assert!(reg.register(7, "a", false, make_subscriber(sink.clone())));
+        assert!(reg
+            .register(7, "a", false, make_subscriber(sink.clone()))
+            .unwrap());
         assert!(
-            !reg.register(7, "b", false, make_subscriber(sink.clone())),
+            !reg.register(7, "b", false, make_subscriber(sink.clone()))
+                .unwrap(),
             "second register on same interest_id must reject"
         );
         assert_eq!(reg.keyexpr(7), Some("a"), "first registration retained");
@@ -489,7 +624,8 @@ mod tests {
     fn decl_token_dispatches_put_sample_on_pattern_match() {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "liveliness/*", false, make_subscriber(sink.clone()));
+        reg.register(1, "liveliness/*", false, make_subscriber(sink.clone()))
+            .unwrap();
 
         let body =
             DeclareOwnedVariant::CodecZenohDeclToken(decl_token(42, 0, Some("liveliness/dev42")));
@@ -507,7 +643,8 @@ mod tests {
     fn undecl_token_dispatches_delete_sample_using_remembered_keyexpr() {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()));
+        reg.register(1, "liveliness/**", false, make_subscriber(sink.clone()))
+            .unwrap();
 
         let decl =
             DeclareOwnedVariant::CodecZenohDeclToken(decl_token(7, 0, Some("liveliness/svc/api")));
@@ -535,7 +672,8 @@ mod tests {
     fn non_matching_keyexpr_does_not_fire_callback() {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "alpha/*", false, make_subscriber(sink.clone()));
+        reg.register(1, "alpha/*", false, make_subscriber(sink.clone()))
+            .unwrap();
 
         let body =
             DeclareOwnedVariant::CodecZenohDeclToken(decl_token(5, 0, Some("beta/instance")));
@@ -564,7 +702,8 @@ mod tests {
             BoxedLivelinessSampleSink::new(move |_| {
                 fired_for_cb.fetch_add(1, Ordering::SeqCst);
             }),
-        );
+        )
+        .unwrap();
         // mapping_id=55 with no peer-keyexpr table entry → resolve_wireexpr returns None.
         let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token(1, 55, None));
         reg.dispatch_declare(&body, &HashMap::new());
@@ -580,7 +719,8 @@ mod tests {
     fn aliased_keyexpr_resolves_through_peer_table() {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "liveliness/*", false, make_subscriber(sink.clone()));
+        reg.register(1, "liveliness/*", false, make_subscriber(sink.clone()))
+            .unwrap();
 
         // Peer declared mapping_id=10 → "liveliness".
         let mut table = HashMap::new();
@@ -602,8 +742,10 @@ mod tests {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink1: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
         let sink2: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "**", false, make_subscriber(sink1.clone()));
-        reg.register(2, "alpha/*", false, make_subscriber(sink2.clone()));
+        reg.register(1, "**", false, make_subscriber(sink1.clone()))
+            .unwrap();
+        reg.register(2, "alpha/*", false, make_subscriber(sink2.clone()))
+            .unwrap();
 
         let body = DeclareOwnedVariant::CodecZenohDeclToken(decl_token(3, 0, Some("alpha/one")));
         reg.dispatch_declare(&body, &HashMap::new());
@@ -616,8 +758,10 @@ mod tests {
     fn interest_final_marks_history_complete_only_for_history_subscribers() {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "a", true, make_subscriber(sink.clone()));
-        reg.register(2, "b", false, make_subscriber(sink.clone()));
+        reg.register(1, "a", true, make_subscriber(sink.clone()))
+            .unwrap();
+        reg.register(2, "b", false, make_subscriber(sink.clone()))
+            .unwrap();
 
         // InterestFinal for interest_id=1.
         let interest_final = Interest {
@@ -644,7 +788,8 @@ mod tests {
     fn non_final_interest_does_not_mark_history_complete() {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "x", true, make_subscriber(sink.clone()));
+        reg.register(1, "x", true, make_subscriber(sink.clone()))
+            .unwrap();
 
         // Non-final Interest (FUTURE bit set) carrying a body. This is the
         // shape the peer would emit if it ever asked us about tokens
@@ -678,7 +823,8 @@ mod tests {
     fn other_declare_arms_are_noops() {
         let mut reg = LivelinessSubscriberRegistry::new();
         let sink: Arc<Mutex<Vec<_>>> = Arc::new(Mutex::new(Vec::new()));
-        reg.register(1, "**", false, make_subscriber(sink.clone()));
+        reg.register(1, "**", false, make_subscriber(sink.clone()))
+            .unwrap();
 
         // DeclSubscriber + DeclQueryable arms must not route into the
         // liveliness-subscriber registry.
