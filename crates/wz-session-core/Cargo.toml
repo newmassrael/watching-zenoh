@@ -44,7 +44,15 @@ default = ["alloc"]
 # byte buffers) can compose. R311di-2+ will gate the alloc-bound surface
 # on this feature; the trait-only sub-surface stays available with
 # default-off `alloc` for MCU profiles that prefer stack/static-only.
-alloc = []
+# R311hl (Track 2) — `alloc` now PROPAGATES to `wz-codecs/alloc`. The
+# prior `alloc = []` + a hardcoded `wz-codecs/alloc` dep (below) meant a
+# `--no-default-features` session-core still dragged in the allocator
+# transitively, so a no-`alloc` *binary* link failed ("no global memory
+# allocator") even though the rlib compiled. rlib-only lanes (Layer G
+# cross-compile, C1h subset matrix) never surfaced it; the mcu-noheap-probe
+# binary did. Propagating the feature makes the no-alloc profile genuinely
+# allocator-free and keeps the alloc profile unchanged.
+alloc = ["wz-codecs/alloc"]
 
 # R311di-11 — body-codec feature forwarders for the NetworkMessage
 # dispatch cluster. Each forwards to wz-codecs/codec-* so the 3-stage
@@ -166,9 +174,14 @@ transport-batching = []
 wz-runtime-core = { path = "../wz-runtime-core" }
 # R311di-4 — wz-codecs needed by sample.rs for `wz_codecs::ext_entry`
 # projection helpers (extract_qos / extract_attachment / extract_source_info).
-# default-features = false + features = ["alloc"] mirrors wz-runtime-tokio's
-# baseline so MCU profiles stay heap-aware but std-free.
-wz-codecs = { path = "../wz-codecs", default-features = false, features = ["alloc"] }
+# R311hl (Track 2) — `default-features = false` with NO hardcoded `alloc`;
+# session-core's own `alloc` feature forwards to `wz-codecs/alloc` (see the
+# `[features] alloc` entry above). This lets a no-`alloc` session-core link
+# wz-codecs allocator-free; the codec-* feature forwarders below pull the
+# wz-codecs codec features (which are themselves alloc-independent), and the
+# owned codec types they expose are only ever named by session-core under
+# `all(codec-*, alloc)`, where the `alloc` forward re-enables wz-codecs/alloc.
+wz-codecs = { path = "../wz-codecs", default-features = false }
 # R311di-6 — sce-forge-runtime supplies `CodecError` needed by
 # InboundParseError variants. default-features = false stays MCU-aware;
 # `alloc` is implied via wz-codecs's transitive enable but the dep is
