@@ -820,4 +820,25 @@ mod tests {
             "non-token Declare arms must not fan into LivelinessSubscriberRegistry",
         );
     }
+
+    /// R311gb (Track 2) — direct exercise of the no-heap fire entry
+    /// `dispatch_sample_borrowed`: the MCU path delivers a borrowed
+    /// `LivelinessSample` to matching slots with no codec / no
+    /// `peer_token_table` (the caller supplies the resolved keyexpr).
+    #[test]
+    fn dispatch_sample_borrowed_fans_to_matching_slot_no_codec() {
+        let mut reg = LivelinessSubscriberRegistry::new();
+        let cap: Arc<Mutex<Vec<(LivelinessSampleKind, String, u64)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        reg.register(1, "live/**", false, make_subscriber(cap.clone()))
+            .unwrap();
+
+        let fired = reg.dispatch_sample_borrowed(LivelinessSampleKind::Put, "live/dev/3", 77);
+        assert_eq!(fired, 1);
+        let got = cap.lock().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, LivelinessSampleKind::Put);
+        assert_eq!(got[0].1, "live/dev/3");
+        assert_eq!(got[0].2, 77);
+    }
 }

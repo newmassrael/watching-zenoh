@@ -697,9 +697,12 @@ impl<C: ReplySink> ReplyRegistry<C> {
         for entry in core::mem::take(&mut self.pending) {
             let expired = matches!(entry.deadline_ms, Some(d) if d <= now_ms);
             if expired {
-                let _ = fired.push(entry);
+                fired
+                    .push(entry)
+                    .expect("partition fits: keep + fired == taken <= MAX_PENDING_QUERIES");
             } else {
-                let _ = keep.push(entry);
+                keep.push(entry)
+                    .expect("partition fits: keep + fired == taken <= MAX_PENDING_QUERIES");
             }
         }
         self.pending = keep;
@@ -771,11 +774,14 @@ impl<C: ReplySink> ReplyRegistry<C> {
             if entry.rid == rid && entry.remaining_finals > 0 {
                 entry.remaining_finals -= 1;
                 if entry.remaining_finals == 0 {
-                    let _ = fired.push(entry);
+                    fired
+                        .push(entry)
+                        .expect("partition fits: keep + fired == taken <= MAX_PENDING_QUERIES");
                     continue;
                 }
             }
-            let _ = keep.push(entry);
+            keep.push(entry)
+                .expect("partition fits: keep + fired == taken <= MAX_PENDING_QUERIES");
         }
         self.pending = keep;
         for mut entry in fired {
@@ -1886,5 +1892,46 @@ mod tests {
             "on_final fires once per entry (registration order preserved)",
         );
         assert!(reg.is_empty());
+    }
+
+    /// R311gb (Track 2) — direct exercise of the no-heap fire entry
+    /// `dispatch_borrowed`: delivers a borrowed `ReplyView` to the
+    /// pending entry whose rid matches (and filters non-matching rids),
+    /// the MCU on_reply path that does not materialize an owned
+    /// `InboundReply`.
+    #[test]
+    fn dispatch_borrowed_delivers_borrowed_reply_to_matching_pending() {
+        use crate::reply_sink::BorrowedReply;
+        let mut reg = ReplyRegistry::new();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        reg.register(
+            42,
+            1,
+            None,
+            move |v: &dyn ReplyView| {
+                assert_eq!(v.rid(), 42);
+                assert_eq!(v.payload(), b"v");
+                h.fetch_add(1, Ordering::SeqCst);
+            },
+            |_rid| {},
+        );
+        let fired = reg.dispatch_borrowed(&BorrowedReply {
+            rid: 42,
+            keyexpr: "q/k",
+            kind: ReplyKind::Put,
+            payload: b"v",
+            err_encoding: None,
+        });
+        assert_eq!(fired, 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let none = reg.dispatch_borrowed(&BorrowedReply {
+            rid: 99,
+            keyexpr: "q/k",
+            kind: ReplyKind::Put,
+            payload: b"",
+            err_encoding: None,
+        });
+        assert_eq!(none, 0, "non-matching rid does not fire");
     }
 }

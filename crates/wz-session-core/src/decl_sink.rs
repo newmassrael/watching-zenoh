@@ -323,6 +323,51 @@ mod tests {
         assert_eq!(sink.last_id, 42);
     }
 
+    /// R311gb (Track 2) — direct exercise of the extracted
+    /// [`DeclObserverPair`] SSOT with concrete (no-`Box`) sinks: install
+    /// two declaration observers + one undeclaration observer, then fire
+    /// both no-heap fan-outs and confirm registration-order delivery +
+    /// the returned fired-counts. This is the component the three
+    /// `DeclSink` registries now compose, so one test covers all three.
+    #[test]
+    fn observer_pair_installs_and_fires_concrete_sinks() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct CountDecl(Arc<AtomicUsize>);
+        impl DeclSink for CountDecl {
+            fn on_declared(&mut self, _d: &dyn DeclView) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct CountUndecl(Arc<AtomicUsize>);
+        impl UndeclSink for CountUndecl {
+            fn on_undeclared(&mut self, _id: u64) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let dcount = Arc::new(AtomicUsize::new(0));
+        let ucount = Arc::new(AtomicUsize::new(0));
+        let mut pair: DeclObserverPair<CountDecl, CountUndecl> = DeclObserverPair::new();
+        pair.install_decl(CountDecl(dcount.clone())).unwrap();
+        pair.install_decl(CountDecl(dcount.clone())).unwrap();
+        pair.install_undecl(CountUndecl(ucount.clone())).unwrap();
+        assert_eq!(pair.decl_len(), 2);
+        assert_eq!(pair.undecl_len(), 1);
+
+        let fired = pair.fire_declared(&BorrowedDecl {
+            id: 9,
+            keyexpr: "k",
+        });
+        assert_eq!(fired, 2, "both declaration observers fire");
+        assert_eq!(dcount.load(Ordering::SeqCst), 2);
+
+        let ufired = pair.fire_undeclared(9);
+        assert_eq!(ufired, 1);
+        assert_eq!(ucount.load(Ordering::SeqCst), 1);
+    }
+
     #[cfg(feature = "alloc")]
     #[test]
     fn boxed_decl_sink_dispatches_to_captured_closure() {

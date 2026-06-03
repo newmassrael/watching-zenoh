@@ -3004,4 +3004,42 @@ mod tests {
             "clear_own_zid must re-enable normal fire on wire-arrived samples"
         );
     }
+
+    /// R311gb (Track 2) — direct exercise of the no-heap fire entry
+    /// `dispatch_borrowed`: the wire path reaches `fire_to_subscribers`
+    /// via `dispatch_push`, but this proves the public no-heap entry
+    /// itself delivers a borrowed `SampleView` to a matching sink (and
+    /// filters non-matches) without an owned `Sample`.
+    #[test]
+    fn dispatch_borrowed_delivers_borrowed_sample_to_matching_sink() {
+        use crate::sink::BorrowedSample;
+        let mut reg = SubscriberRegistry::new();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        reg.register("home/temp", move |v: &dyn SampleView| {
+            assert_eq!(v.keyexpr(), "home/temp");
+            h.fetch_add(1, Ordering::SeqCst);
+        });
+        let fired = reg.dispatch_borrowed(
+            &BorrowedSample {
+                keyexpr: "home/temp",
+                payload: b"21.5",
+                kind: SampleKind::Put,
+                reliability: Reliability::BestEffort,
+            },
+            /* is_remote = */ true,
+        );
+        assert_eq!(fired, 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        let none = reg.dispatch_borrowed(
+            &BorrowedSample {
+                keyexpr: "other/x",
+                payload: b"",
+                kind: SampleKind::Put,
+                reliability: Reliability::BestEffort,
+            },
+            true,
+        );
+        assert_eq!(none, 0, "non-matching keyexpr does not fire");
+    }
 }

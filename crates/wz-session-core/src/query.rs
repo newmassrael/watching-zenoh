@@ -2118,4 +2118,45 @@ mod tests {
              (Locality::SessionLocal stays suppressed on wire arrival)"
         );
     }
+
+    /// R311gb (Track 2) — the no-heap fire entry `dispatch_borrowed` has
+    /// behaviour the wire path does NOT exercise: the wire
+    /// `fire_matching_queryables` builds a fresh `QueryResponder` per
+    /// matched queryable, whereas `dispatch_borrowed` shares ONE
+    /// caller-supplied `&mut dyn ReplyOut` across every match (the MCU
+    /// consumer owns its reply sink's lifecycle). This proves both
+    /// matched queryables fire through the single shared reply_out.
+    #[test]
+    fn dispatch_borrowed_shares_one_reply_out_across_matched_queryables() {
+        let mut reg = QueryableRegistry::new();
+        reg.register("a/**", |_q, r: &mut dyn ReplyOut| r.reply(b"from-wild"));
+        reg.register("a/b", |_q, r: &mut dyn ReplyOut| r.reply(b"from-exact"));
+
+        let mut replies: Vec<QueryReply> = Vec::new();
+        let mut responder = QueryResponder {
+            rid: 7,
+            keyexpr_literal: "a/b".to_string(),
+            replies: &mut replies,
+            responder: None,
+        };
+        let fired = reg.dispatch_borrowed(
+            &BorrowedQuery {
+                keyexpr: "a/b",
+                parameters: None,
+                attachment: None,
+                rid: 7,
+            },
+            &mut responder,
+            /* is_remote = */ true,
+        );
+        assert_eq!(
+            fired, 2,
+            "both matching queryables fire via the no-heap entry"
+        );
+        assert_eq!(
+            replies.len(),
+            2,
+            "the single shared reply_out accumulates both replies"
+        );
+    }
 }
