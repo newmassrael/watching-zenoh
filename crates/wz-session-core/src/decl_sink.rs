@@ -49,6 +49,10 @@
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
 
+use crate::bounded::BoundedVec;
+use crate::caps;
+use crate::registry_error::RegisterError;
+
 /// Read-only accessor contract for an inbound peer declaration handed to
 /// a [`DeclSink`]. The delivery currency (passed as `&dyn DeclView`); a
 /// contract rather than a new data representation, so the dispatch's
@@ -104,6 +108,101 @@ pub trait DeclSink {
 pub trait UndeclSink {
     /// Observe one inbound peer undeclaration, identified by its `id`.
     fn on_undeclared(&mut self, id: u64);
+}
+
+/// R311gb (Track 2) — the shared declaration-observer mechanism for the
+/// three `DeclSink` / `UndeclSink` registries
+/// ([`crate::declare::subscriber::RemoteSubscriberRegistry`],
+/// [`crate::declare::queryable::RemoteQueryableRegistry`],
+/// [`crate::declare::liveliness::LivelinessRegistry`]).
+///
+/// Each of those registries observes a distinct `Declare` sub-type (and
+/// the subscriber / queryable ones additionally track a peer-`declared`
+/// membership table), but their **observer-list machinery is identical**:
+/// a bounded `on_decl` list of [`DeclSink`]s + a bounded `on_undecl` list
+/// of [`UndeclSink`]s, installed at startup and fanned in registration
+/// order on every matching inbound declare. Rather than copy that
+/// machinery into each registry (the R311hf state triplicated it), they
+/// **compose** this one component — the SSOT for the 2-list observer
+/// fan-out — and keep only their own dispatch + membership state. The
+/// registries' public named methods (`on_subscriber_declared_sink`, …)
+/// stay as thin delegators so consumer ergonomics are unchanged; the
+/// separation into distinct registry *types* (the deliberate
+/// scope-boundary decision) is preserved.
+///
+/// No-alloc: both lists are [`BoundedVec`] capped at
+/// [`caps::MAX_DECL_OBSERVERS`]; `fire_*` split nothing and allocate
+/// nothing, so the whole component is the MCU no-heap control plane.
+pub struct DeclObserverPair<D: DeclSink, U: UndeclSink> {
+    on_decl: BoundedVec<D, { caps::MAX_DECL_OBSERVERS }>,
+    on_undecl: BoundedVec<U, { caps::MAX_DECL_OBSERVERS }>,
+}
+
+impl<D: DeclSink, U: UndeclSink> Default for DeclObserverPair<D, U> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U> {
+    /// Empty observer pair. `const` so a registry may hold it in a
+    /// `const` / `static` slot.
+    pub const fn new() -> Self {
+        Self {
+            on_decl: BoundedVec::new(),
+            on_undecl: BoundedVec::new(),
+        }
+    }
+
+    /// Install a declaration observer. Fallible on the no-alloc backing
+    /// ([`RegisterError::TableFull`] past [`caps::MAX_DECL_OBSERVERS`]);
+    /// infallible on `alloc`. Duplicate sinks are allowed; fired in
+    /// registration order.
+    pub fn install_decl(&mut self, sink: D) -> Result<(), RegisterError> {
+        self.on_decl
+            .push(sink)
+            .map_err(|_| RegisterError::TableFull)
+    }
+
+    /// Install an undeclaration observer. Same contract as
+    /// [`install_decl`](Self::install_decl).
+    pub fn install_undecl(&mut self, sink: U) -> Result<(), RegisterError> {
+        self.on_undecl
+            .push(sink)
+            .map_err(|_| RegisterError::TableFull)
+    }
+
+    /// Number of installed declaration observers.
+    pub fn decl_len(&self) -> usize {
+        self.on_decl.len()
+    }
+
+    /// Number of installed undeclaration observers.
+    pub fn undecl_len(&self) -> usize {
+        self.on_undecl.len()
+    }
+
+    /// No-heap declaration fire: hand each declaration observer the
+    /// borrowed [`DeclView`]. Returns the count fired.
+    pub fn fire_declared(&mut self, view: &dyn DeclView) -> usize {
+        let mut fired: usize = 0;
+        for sink in self.on_decl.iter_mut() {
+            sink.on_declared(view);
+            fired = fired.saturating_add(1);
+        }
+        fired
+    }
+
+    /// No-heap undeclaration fire: hand each undeclaration observer the
+    /// bare `id`. Returns the count fired.
+    pub fn fire_undeclared(&mut self, id: u64) -> usize {
+        let mut fired: usize = 0;
+        for sink in self.on_undecl.iter_mut() {
+            sink.on_undeclared(id);
+            fired = fired.saturating_add(1);
+        }
+        fired
+    }
 }
 
 /// Heap declaration-closure type backing [`BoxedDeclSink`]. Factored to a

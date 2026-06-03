@@ -26,13 +26,11 @@ use hashbrown::HashMap;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
 
-use crate::bounded::BoundedVec;
-use crate::caps;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::decl_sink::BorrowedDecl;
 #[cfg(feature = "alloc")]
 use crate::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
-use crate::decl_sink::{DeclSink, DeclView, UndeclSink};
+use crate::decl_sink::{DeclObserverPair, DeclSink, DeclView, UndeclSink};
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 #[cfg(feature = "alloc")]
@@ -60,12 +58,11 @@ use crate::wireexpr_resolve::resolve_wireexpr;
 /// `Z_FEATURE_SUBSCRIPTION` vs `Z_FEATURE_QUERYABLE` compile-time
 /// feature split.
 pub struct RemoteQueryableRegistry<D: DeclSink, U: UndeclSink> {
-    /// R311gb-3d — declaration observers (DIP seam); `D = BoxedDeclSink`
-    /// on AP, a consumer-supplied closed `enum` on MCU.
-    /// R311gb (Track 2) — bounded backing (`caps::MAX_DECL_OBSERVERS`).
-    on_decl: BoundedVec<D, { caps::MAX_DECL_OBSERVERS }>,
-    /// R311gb-3d — undeclaration observers; `U = BoxedUndeclSink` on AP.
-    on_undecl: BoundedVec<U, { caps::MAX_DECL_OBSERVERS }>,
+    /// R311gb (Track 2) — shared 2-list observer machinery composed from
+    /// [`crate::decl_sink::DeclObserverPair`] (SSOT across the three
+    /// `DeclSink` registries). `D = BoxedDeclSink` / `U = BoxedUndeclSink`
+    /// on AP, consumer-supplied closed `enum`s on MCU.
+    observers: DeclObserverPair<D, U>,
     /// R288 — peer-declared queryables tracked by `{id -> resolved
     /// keyexpr}`. Populated on every inbound `DeclQueryable` whose
     /// keyexpr resolves through `peer_keyexpr_table`, and entries
@@ -104,8 +101,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// `D = BoxedDeclSink` / `U = BoxedUndeclSink`.
     pub fn with_sink_backing() -> Self {
         Self {
-            on_decl: BoundedVec::new(),
-            on_undecl: BoundedVec::new(),
+            observers: DeclObserverPair::new(),
             #[cfg(feature = "alloc")]
             declared: HashMap::new(),
         }
@@ -117,9 +113,7 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// convenience wrapper funnels through here. Duplicate sinks allowed;
     /// dispatch fires them in registration order.
     pub fn on_queryable_declared_sink(&mut self, sink: D) -> Result<(), RegisterError> {
-        self.on_decl
-            .push(sink)
-            .map_err(|_| RegisterError::TableFull)
+        self.observers.install_decl(sink)
     }
 
     /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
@@ -127,19 +121,17 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// [`on_queryable_undeclared`](RemoteQueryableRegistry::on_queryable_undeclared)
     /// convenience wrapper funnels through here.
     pub fn on_queryable_undeclared_sink(&mut self, sink: U) -> Result<(), RegisterError> {
-        self.on_undecl
-            .push(sink)
-            .map_err(|_| RegisterError::TableFull)
+        self.observers.install_undecl(sink)
     }
 
     /// Number of installed `on_queryable_declared` callbacks.
     pub fn on_decl_len(&self) -> usize {
-        self.on_decl.len()
+        self.observers.decl_len()
     }
 
     /// Number of installed `on_queryable_undeclared` callbacks.
     pub fn on_undecl_len(&self) -> usize {
-        self.on_undecl.len()
+        self.observers.undecl_len()
     }
 
     /// R288 — count of currently-declared peer queryables (those whose
@@ -214,23 +206,13 @@ impl<D: DeclSink, U: UndeclSink> RemoteQueryableRegistry<D, U> {
     /// ([`dispatch_declare`](Self::dispatch_declare)) funnels through here
     /// after updating the `declared` table. Returns the count fired.
     pub fn dispatch_declared_borrowed(&mut self, view: &dyn DeclView) -> usize {
-        let mut fired: usize = 0;
-        for sink in self.on_decl.iter_mut() {
-            sink.on_declared(view);
-            fired = fired.saturating_add(1);
-        }
-        fired
+        self.observers.fire_declared(view)
     }
 
     /// R311gb (Track 2) — no-heap undeclaration fire: hand each installed
     /// `on_undecl` observer the bare `id`. Returns the count fired.
     pub fn dispatch_undeclared(&mut self, id: u64) -> usize {
-        let mut fired: usize = 0;
-        for sink in self.on_undecl.iter_mut() {
-            sink.on_undeclared(id);
-            fired = fired.saturating_add(1);
-        }
-        fired
+        self.observers.fire_undeclared(id)
     }
 
     /// R311gb (Track 2) — `all(codec-declare, alloc)`-gated wire dispatch;

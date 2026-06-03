@@ -22,13 +22,11 @@ use hashbrown::HashMap;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
 
-use crate::bounded::BoundedVec;
-use crate::caps;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::decl_sink::BorrowedDecl;
 #[cfg(feature = "alloc")]
 use crate::decl_sink::{BoxedDeclSink, BoxedUndeclSink};
-use crate::decl_sink::{DeclSink, DeclView, UndeclSink};
+use crate::decl_sink::{DeclObserverPair, DeclSink, DeclView, UndeclSink};
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
@@ -50,13 +48,11 @@ use crate::wireexpr_resolve::resolve_wireexpr;
 /// matches zenoh-pico's structural separation and lets consumers
 /// reason about each surface independently.
 pub struct LivelinessRegistry<D: DeclSink, U: UndeclSink> {
-    /// R311gb-3d — token-declaration observers (DIP seam); `D =
-    /// BoxedDeclSink` on AP, a consumer-supplied closed `enum` on MCU.
-    /// R311gb (Track 2) — bounded backing (`caps::MAX_DECL_OBSERVERS`).
-    on_decl: BoundedVec<D, { caps::MAX_DECL_OBSERVERS }>,
-    /// R311gb-3d — token-undeclaration observers; `U = BoxedUndeclSink`
-    /// on AP.
-    on_undecl: BoundedVec<U, { caps::MAX_DECL_OBSERVERS }>,
+    /// R311gb (Track 2) — shared 2-list observer machinery composed from
+    /// [`crate::decl_sink::DeclObserverPair`] (SSOT across the three
+    /// `DeclSink` registries). `D = BoxedDeclSink` / `U = BoxedUndeclSink`
+    /// on AP, consumer-supplied closed `enum`s on MCU.
+    observers: DeclObserverPair<D, U>,
 }
 
 impl<D: DeclSink, U: UndeclSink> Default for LivelinessRegistry<D, U> {
@@ -75,8 +71,7 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     /// [`new`](LivelinessRegistry::new) shorthand.
     pub fn with_sink_backing() -> Self {
         Self {
-            on_decl: BoundedVec::new(),
-            on_undecl: BoundedVec::new(),
+            observers: DeclObserverPair::new(),
         }
     }
 
@@ -85,9 +80,7 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     /// [`on_token_declared`](LivelinessRegistry::on_token_declared)
     /// convenience wrapper funnels through here.
     pub fn on_token_declared_sink(&mut self, sink: D) -> Result<(), RegisterError> {
-        self.on_decl
-            .push(sink)
-            .map_err(|_| RegisterError::TableFull)
+        self.observers.install_decl(sink)
     }
 
     /// R311gb-3d — install an explicit [`UndeclSink`] observer. The
@@ -95,19 +88,17 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     /// [`on_token_undeclared`](LivelinessRegistry::on_token_undeclared)
     /// convenience wrapper funnels through here.
     pub fn on_token_undeclared_sink(&mut self, sink: U) -> Result<(), RegisterError> {
-        self.on_undecl
-            .push(sink)
-            .map_err(|_| RegisterError::TableFull)
+        self.observers.install_undecl(sink)
     }
 
     /// Number of installed `on_token_declared` callbacks.
     pub fn on_decl_len(&self) -> usize {
-        self.on_decl.len()
+        self.observers.decl_len()
     }
 
     /// Number of installed `on_token_undeclared` callbacks.
     pub fn on_undecl_len(&self) -> usize {
-        self.on_undecl.len()
+        self.observers.undecl_len()
     }
 
     /// Route an inbound `Declare` envelope's inner body through the
@@ -120,24 +111,14 @@ impl<D: DeclSink, U: UndeclSink> LivelinessRegistry<D, U> {
     /// ([`dispatch_declare`](Self::dispatch_declare)) funnels through here.
     /// Returns the count fired.
     pub fn dispatch_declared_borrowed(&mut self, view: &dyn DeclView) -> usize {
-        let mut fired: usize = 0;
-        for sink in self.on_decl.iter_mut() {
-            sink.on_declared(view);
-            fired = fired.saturating_add(1);
-        }
-        fired
+        self.observers.fire_declared(view)
     }
 
     /// R311gb (Track 2) — no-heap token-undeclaration fire: hand each
     /// installed `on_undecl` observer the bare `id`. Returns the count
     /// fired.
     pub fn dispatch_undeclared(&mut self, id: u64) -> usize {
-        let mut fired: usize = 0;
-        for sink in self.on_undecl.iter_mut() {
-            sink.on_undeclared(id);
-            fired = fired.saturating_add(1);
-        }
-        fired
+        self.observers.fire_undeclared(id)
     }
 
     /// R311gb (Track 2) — `all(codec-declare, alloc)`-gated wire dispatch;
