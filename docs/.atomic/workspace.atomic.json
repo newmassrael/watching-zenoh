@@ -883,7 +883,8 @@
         "R311gs: AP dynamic value path via generated injector->raise_external_typed; cross-profile SSOT.",
         "R311gt: string/bytes payload fields decode borrowed; dispatch .into()s to owned; alloc-tier only.",
         "R311gv: bytes payload field live via .into(); native bytes guard awaits SCE byte-literal lowering.",
-        "R311gw: native bytes guard now lowers via SCE BytesLit (pin d665780d9); R311gv caveat closed."
+        "R311gw: native bytes guard now lowers via SCE BytesLit (pin d665780d9); R311gv caveat closed.",
+        "R311gx: multi-event example -- 2nd value event humidity_update (uint8 guard); 2 helpers/2 arms."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -29174,6 +29175,54 @@
         "The R311gv observable-bytes-guard carry is now CLOSED: the bytes guard lowers natively (`ev.raw == b\"ack\"`) and is observed semantically in both the static and AP profiles. Constraint to remember: SCE accepts only ASCII string literals + equality (`===`/`!==`) on bytes guards (2e2fca515 rejects ordering ops + non-ASCII); the example's `ack` is ASCII equality.",
         "Multi-codec / multi-event switchboards (carry from R311gs/gt): the example exercises one value event over one codec; a multi-event example would exercise the EventSchema + codec multi-doc join across several events.",
         "Live wz-ap-demo wiring (carry from R311gs): a real zenoh peer publishing temp samples through the ApplicationLayerObserver fan-out into the registry (the smoke still encodes wire bytes locally via the codec's encode_to_vec + drives the Engine directly)."
+      ]
+    },
+    "Round 311gx": {
+      "decision_summary": "R311gx: gc-3 carry #1 -- multi-codec/multi-event switchboard example: add 2nd value event humidity_update (humidity_payload codec, uint8 percent>=90 guard) alongside temp_update.",
+      "changes_bullets": [
+        "wz-switchboard-example: add a SECOND value event `humidity_update` to the gc-3c example, making it a multi-codec / multi-event switchboard. New sources: humidity_update_schema.scxml (EventSchema, single `percent: uint8`) + humidity_payload.scxml (codec, single big-endian uint8 at byte 0 -- a structurally different wire shape from temp_payload's uint16 + two length-prefixed blobs). sensor_monitor.scxml imports the second schema and gains an idle native guard `humidity_update[_event.data.percent >= 90] -> hot`.",
+        "wz-switchboard.yaml: add the value binding `home/*/humidity -> humidity_update (codec humidity_payload)` alongside the existing temp value row + reset signal row.",
+        "build.rs: emit + parse the humidity schema/codec forge-asts (strip_inner_attrs on humidity_payload.rs) and pass both events' schemas/codecs to generate() as `&[schema, humidity_schema]` / `&[codec, humidity_codec]`. The generator resolves a separate schema<->codec join per binding.",
+        "src/lib.rs: add the `humidity_payload` sibling module include; the generated dispatch now emits two decode helpers (inject_temp_update / inject_humidity_update), two injector match arms, and the machine carries a distinct SensorMonitorHumidityUpdatePayload + raise_humidity_update seam. Four native guards across three states (celsius_centi u16, sensor_id string, raw bytes, percent u8).",
+        "wz-switchboard-codegen: add unit golden `two_distinct_value_events_emit_two_helpers_and_arms` -- pins that two distinct value events emit two helpers / two injector arms / two payload-struct refs / two per-event codec decodes (no dedup collapse across distinct events; complements the existing same-event dedup golden)."
+      ],
+      "verification_bullets": [
+        "Generated dispatch_switchboard.rs confirmed: two decode helpers (inject_temp_update + inject_humidity_update) and two injector match arms (\"temp_update\" => ... / \"humidity_update\" => ...), each routing to its own per-event codec decode (temp_payload::TempPayload::decode / humidity_payload::HumidityPayload::decode).",
+        "Generated sensor_monitor_sm.rs confirmed: SensorMonitorHumidityUpdatePayload struct + HumidityUpdate payload-enum variant + raise_humidity_update seam; four distinct native guards -- ev.celsius_centi > 3000 (idle), ev.percent >= 90 (idle, HumidityUpdate variant), ev.sensor_id == \"kitchen\" (hot), ev.raw == b\"ack\" (alarm).",
+        "wz-switchboard-example 15 tests (9 static + 6 AP) green, incl saturated_humidity_drives_machine_to_hot + comfortable_humidity_leaves_machine_idle (static) and saturated_humidity_drives_machine_to_hot_via_registry (AP parity).",
+        "wz-switchboard-codegen 22 tests green, incl the new two_distinct_value_events_emit_two_helpers_and_arms golden; cargo clippy --all-targets + fmt --check clean on both changed crates.",
+        "Full host run-ci (WZ_RUN_LAYER_G=1) all required layers pass incl Layer G MCU no_std cross-compile (thumbv7m-none-eabi + riscv32imac-unknown-none-elf) and Layer M. No SCE pin change (templates + binary unchanged from R311gw d665780d9)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "carry_forward_bullets": [
+        "The gc-3s/gt multi-codec / multi-event carry is now CLOSED: the example wires two distinct value events (temp_update via temp_payload, humidity_update via humidity_payload), each with its own EventSchema, and the generator's per-event schema<->codec join + two-helper / two-arm emission is verified end to end against a live Engine in both the static (MCU) and AP-dynamic profiles.",
+        "Live wz-ap-demo wiring (carry from R311gs) remains open: a real zenoh peer publishing samples through the ApplicationLayerObserver fan-out into the registry (the smoke still encodes wire bytes locally via the codec's encode_to_vec + drives the Engine directly).",
+        "Multi-MACHINE switchboards stay out of scope: a sidecar targets exactly one `machine`. Multiple machines would need a registry keyed by machine + a generator that emits one dispatch per machine -- a larger design question, not part of this carry."
+      ],
+      "publishable_decision_summary": "R311gx: gc-3 carry #1 -- multi-codec/multi-event switchboard example: add 2nd value event humidity_update (humidity_payload codec, uint8 percent>=90 guard) alongside temp_update.",
+      "publishable_changes_bullets": [
+        "wz-switchboard-example: add a SECOND value event `humidity_update` to the gc-3c example, making it a multi-codec / multi-event switchboard. New sources: humidity_update_schema.scxml (EventSchema, single `percent: uint8`) + humidity_payload.scxml (codec, single big-endian uint8 at byte 0 -- a structurally different wire shape from temp_payload's uint16 + two length-prefixed blobs). sensor_monitor.scxml imports the second schema and gains an idle native guard `humidity_update[_event.data.percent >= 90] -> hot`.",
+        "wz-switchboard.yaml: add the value binding `home/*/humidity -> humidity_update (codec humidity_payload)` alongside the existing temp value row + reset signal row.",
+        "build.rs: emit + parse the humidity schema/codec forge-asts (strip_inner_attrs on humidity_payload.rs) and pass both events' schemas/codecs to generate() as `&[schema, humidity_schema]` / `&[codec, humidity_codec]`. The generator resolves a separate schema<->codec join per binding.",
+        "src/lib.rs: add the `humidity_payload` sibling module include; the generated dispatch now emits two decode helpers (inject_temp_update / inject_humidity_update), two injector match arms, and the machine carries a distinct SensorMonitorHumidityUpdatePayload + raise_humidity_update seam. Four native guards across three states (celsius_centi u16, sensor_id string, raw bytes, percent u8).",
+        "wz-switchboard-codegen: add unit golden `two_distinct_value_events_emit_two_helpers_and_arms` -- pins that two distinct value events emit two helpers / two injector arms / two payload-struct refs / two per-event codec decodes (no dedup collapse across distinct events; complements the existing same-event dedup golden)."
+      ],
+      "publishable_verification_bullets": [
+        "Generated dispatch_switchboard.rs confirmed: two decode helpers (inject_temp_update + inject_humidity_update) and two injector match arms (\"temp_update\" => ... / \"humidity_update\" => ...), each routing to its own per-event codec decode (temp_payload::TempPayload::decode / humidity_payload::HumidityPayload::decode).",
+        "Generated sensor_monitor_sm.rs confirmed: SensorMonitorHumidityUpdatePayload struct + HumidityUpdate payload-enum variant + raise_humidity_update seam; four distinct native guards -- ev.celsius_centi > 3000 (idle), ev.percent >= 90 (idle, HumidityUpdate variant), ev.sensor_id == \"kitchen\" (hot), ev.raw == b\"ack\" (alarm).",
+        "wz-switchboard-example 15 tests (9 static + 6 AP) green, incl saturated_humidity_drives_machine_to_hot + comfortable_humidity_leaves_machine_idle (static) and saturated_humidity_drives_machine_to_hot_via_registry (AP parity).",
+        "wz-switchboard-codegen 22 tests green, incl the new two_distinct_value_events_emit_two_helpers_and_arms golden; cargo clippy --all-targets + fmt --check clean on both changed crates.",
+        "Full host run-ci (WZ_RUN_LAYER_G=1) all required layers pass incl Layer G MCU no_std cross-compile (thumbv7m-none-eabi + riscv32imac-unknown-none-elf) and Layer M. No SCE pin change (templates + binary unchanged from R311gw d665780d9)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-20-statechart"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The gc-3s/gt multi-codec / multi-event carry is now CLOSED: the example wires two distinct value events (temp_update via temp_payload, humidity_update via humidity_payload), each with its own EventSchema, and the generator's per-event schema<->codec join + two-helper / two-arm emission is verified end to end against a live Engine in both the static (MCU) and AP-dynamic profiles.",
+        "Live wz-ap-demo wiring (carry from R311gs) remains open: a real zenoh peer publishing samples through the ApplicationLayerObserver fan-out into the registry (the smoke still encodes wire bytes locally via the codec's encode_to_vec + drives the Engine directly).",
+        "Multi-MACHINE switchboards stay out of scope: a sidecar targets exactly one `machine`. Multiple machines would need a registry keyed by machine + a generator that emits one dispatch per machine -- a larger design question, not part of this carry."
       ]
     },
     "Round 311h": {

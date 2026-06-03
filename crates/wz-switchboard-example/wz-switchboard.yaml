@@ -2,13 +2,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
 # gc-3c example switchboard sidecar: maps zenoh keyexprs to sensor_monitor
-# SCXML domain events. The temp row is a VALUE binding (it names a codec),
-# so an inbound sample's payload is decoded into the typed _event.data; the
-# door row is a SIGNAL binding (no codec), injected with an empty _event.data.
+# SCXML domain events. The temp + humidity rows are VALUE bindings (each names
+# a codec), so an inbound sample's payload is decoded into the typed
+# _event.data; the reset row is a SIGNAL binding (no codec), injected with an
+# empty _event.data. Two value rows naming two different codecs (temp_payload /
+# humidity_payload) for two different events make this a multi-codec /
+# multi-event switchboard.
 machine: sensor_monitor
 bindings:
   - keyexpr: home/*/temp
     event: temp_update
     codec: temp_payload
+  - keyexpr: home/*/humidity
+    event: humidity_update
+    codec: humidity_payload
   - keyexpr: home/*/reset
     event: reset

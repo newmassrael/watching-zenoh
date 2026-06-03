@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- gc-3c multi-event carry: the wire codec for the SECOND value event. A
+     published humidity sample's payload is a single big-endian uint8 percent
+     at byte 0 — deliberately the SIMPLEST possible wire shape, in contrast to
+     temp_payload's uint16 + two length-prefixed blobs. Two structurally
+     different codecs feeding two different events is what proves the
+     switchboard generator's multi-codec join is real, not a coincidence of one
+     shared shape. `percent` matches the humidity_update EventSchema field by
+     id + type, so the generator emits `SensorMonitorHumidityUpdatePayload {
+     percent: decoded.percent }` (a primitive Copy move, no `.into()`). This is
+     the wire-format SSOT (a publisher encodes the same codec); the EventSchema
+     is the datamodel-view SSOT. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec"
+       sce:default-endian="big"
+       name="humidity_payload">
+  <datamodel>
+    <sce:field id="percent" sce:type="uint8" sce:byte="0" sce:bit-size="8"/>
+  </datamodel>
+</scxml>

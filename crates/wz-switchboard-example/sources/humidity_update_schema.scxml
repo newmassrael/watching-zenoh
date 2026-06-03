@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- gc-3c multi-event carry: the typed `_event.data` contract for a SECOND
+     value event, `humidity_update`. A single primitive field (`percent`,
+     uint8 relative-humidity percent). Imported by sensor_monitor.scxml, whose
+     idle-state native guard reads `_event.data.percent` (`>= 90`), so the
+     event is native-lowered and SCE emits a distinct
+     `SensorMonitorHumidityUpdatePayload { percent: u8 }` struct + a
+     `raise_humidity_update` inject seam — separate from the temp_update event's
+     struct/seam. Pairing this schema with the humidity_payload codec (a
+     structurally different wire shape from temp_payload) is what exercises the
+     switchboard generator's multi-codec / multi-event join: two value events,
+     each with its OWN EventSchema + codec, both resolved against the one
+     machine. The wire decode is a separate concern (humidity_payload.scxml);
+     wz owns the codec<->schema field pairing. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       name="humidity_update_schema"
+       sce:kind="event-schema"
+       sce:event-name="humidity_update">
+  <datamodel>
+    <data id="percent" sce:type="uint8" sce:direction="in"/>
+  </datamodel>
+</scxml>

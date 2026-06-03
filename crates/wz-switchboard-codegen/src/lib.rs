@@ -1472,6 +1472,72 @@ pub fn dispatch_switchboard(
         );
     }
 
+    #[test]
+    fn two_distinct_value_events_emit_two_helpers_and_arms() {
+        // Multi-codec / multi-event: two DIFFERENT value events, each with its
+        // own EventSchema + codec, resolved per binding. The generator must emit
+        // a distinct decode helper, injector match arm, and payload-struct
+        // reference for EACH event (no dedup collapse across distinct events).
+        let facts = parse_machine_facts(&facts_json_typed(
+            "m",
+            &["temp_update", "humidity_update"],
+            &["temp_update", "humidity_update"],
+        ))
+        .unwrap();
+        let s = spec(
+            "m",
+            vec![
+                value_binding("home/*/temp", "temp_update", "temp_payload"),
+                value_binding("home/*/humidity", "humidity_update", "humidity_payload"),
+            ],
+        );
+        let schemas = [
+            parse_event_schema_facts(&schema_json("temp_update", &[("celsius_centi", "uint16")]))
+                .unwrap(),
+            parse_event_schema_facts(&schema_json("humidity_update", &[("percent", "uint8")]))
+                .unwrap(),
+        ];
+        let codecs = [
+            parse_codec_facts(
+                &codec_json("temp_payload", &[("celsius_centi", "uint16")]),
+                "temp_payload",
+            )
+            .unwrap(),
+            parse_codec_facts(
+                &codec_json("humidity_payload", &[("percent", "uint8")]),
+                "humidity_payload",
+            )
+            .unwrap(),
+        ];
+        let out = generate(&value_input(&s, &facts, &schemas, &codecs)).expect("generate");
+
+        // One decode helper per distinct event.
+        assert_eq!(out.matches("fn inject_temp_update(\n").count(), 1);
+        assert_eq!(out.matches("fn inject_humidity_update(\n").count(), 1);
+        // One injector match arm per distinct event, each routing to its helper.
+        assert!(out.contains("\"temp_update\" => inject_temp_update(payload, self.engine),"));
+        assert!(
+            out.contains("\"humidity_update\" => inject_humidity_update(payload, self.engine),")
+        );
+        // Each helper decodes via its OWN codec and builds its OWN payload struct
+        // (the per-event schema<->codec join, no cross-wiring).
+        assert!(out.contains("temp_payload::TempPayload::decode"));
+        assert!(out.contains("humidity_payload::HumidityPayload::decode"));
+        assert!(out.contains("MTempUpdatePayload {"));
+        assert!(out.contains("MHumidityUpdatePayload {"));
+        // Each keyexpr keeps its own static dispatch arm.
+        assert_eq!(
+            out.matches("&& inject_temp_update(payload, engine)\n")
+                .count(),
+            1
+        );
+        assert_eq!(
+            out.matches("&& inject_humidity_update(payload, engine)\n")
+                .count(),
+            1
+        );
+    }
+
     // ---- generate: borrowed string/bytes field owned-conversion ----
 
     #[test]

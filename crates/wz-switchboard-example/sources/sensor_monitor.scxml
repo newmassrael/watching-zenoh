@@ -3,25 +3,35 @@
   SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
   SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 -->
-<!-- gc-3c/R311gw example application machine for the switchboard value path.
+<!-- gc-3c example application machine for the switchboard value path.
 
-     Imports the temp_update EventSchema and reads a DIFFERENT typed field in
-     each guarded state: `_event.data.celsius_centi` (uint16) in idle,
-     `_event.data.sensor_id` (string) in hot, and `_event.data.raw` (bytes) in
-     alarm. Three guards in three states, so the machine exercises SCE's
-     per-source-state guard keying fixed in pin 1474bd0a9 (R311gu) — before
-     that fix all three rendered idle's celsius guard. SCE lowers `temp_update`
-     to native `_event.data` comparisons (no script engine) and emits the
-     `SensorMonitorInject::raise_temp_update` seam + lists `temp_update` in
-     `typed_inject_events`. All three guards observe their decoded field
-     semantically; the bytes guard (`raw === 'ack'`) lowers to a BytesLit
-     comparison (`ev.raw == b"ack"`) since pin d665780d9 (R311gw) — earlier
-     pins mis-emitted a `&str` literal that did not compile against `Vec<u8>`.
-     The string + bytes guards prove the borrowed-view (`&str` / `&[u8]`) ->
-     owned (`String` / `Vec<u8>`) field-moves delivered the right values. The
-     switchboard binds the keyexpr `home/*/temp` to this event
-     (value binding, codec=temp_payload), so an inbound zenoh sample drives the
-     statechart with a typed payload — the MCU-clean value path end to end. -->
+     Imports TWO EventSchemas (multi-event carry): `temp_update` (the original
+     value event) and `humidity_update` (a second, independent value event).
+     The machine reads a native typed guard from each decoded payload:
+       - idle:  `_event.data.celsius_centi` (uint16, temp_update)  -> hot
+       - idle:  `_event.data.percent`       (uint8,  humidity_update) -> hot
+       - hot:   `_event.data.sensor_id`     (string, temp_update)  -> alarm
+       - alarm: `_event.data.raw`           (bytes,  temp_update)  -> idle
+     Two value EVENTS, each with its OWN EventSchema and its OWN wire codec
+     (temp_payload vs humidity_payload), is what makes this a multi-codec /
+     multi-event switchboard: the generator resolves a separate
+     schema<->codec join per event and emits a distinct
+     `raise_<event>` seam + `SensorMonitor<Variant>Payload` struct for each.
+
+     Four guards across three states also exercise SCE's per-source-state guard
+     keying fixed in pin 1474bd0a9 (R311gu) — before that fix they collapsed to
+     idle's celsius guard. SCE lowers each event to native `_event.data`
+     comparisons (no script engine) and lists both `temp_update` and
+     `humidity_update` in `typed_inject_events`. The bytes guard
+     (`raw === 'ack'`) lowers to a BytesLit comparison (`ev.raw == b"ack"`)
+     since pin d665780d9 (R311gw); the string/bytes guards prove the
+     borrowed-view (`&str` / `&[u8]`) -> owned (`String` / `Vec<u8>`)
+     field-moves delivered the right values, and the uint8 humidity guard
+     proves a second codec's primitive field reaches a guard verbatim. The
+     switchboard binds `home/*/temp` (codec=temp_payload) and `home/*/humidity`
+     (codec=humidity_payload) as value rows, so an inbound zenoh sample on
+     either key drives the statechart with the matching typed payload — the
+     MCU-clean value path end to end. -->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        name="sensor_monitor"
@@ -29,9 +39,19 @@
        initial="idle"
        datamodel="ecmascript">
   <sce:import src="temp_update_schema.scxml" kind="event-schema" as="TempUpdateSchema"/>
+  <sce:import src="humidity_update_schema.scxml" kind="event-schema" as="HumidityUpdateSchema"/>
   <state id="idle">
     <!-- value event: 3000 centidegrees = 30.00 C native typed guard. -->
     <transition event="temp_update" cond="_event.data.celsius_centi &gt; 3000" target="hot"/>
+    <!-- SECOND value event (multi-event carry): a saturated-humidity reading
+         (>= 90%) is also an alert condition, so it drives idle -> hot too.
+         Reads `_event.data.percent` from a DIFFERENT EventSchema
+         (humidity_update) decoded by a DIFFERENT codec (humidity_payload), so
+         this transition is what makes the switchboard a multi-codec /
+         multi-event one. The uint8 `>=` guard lowers natively (ev.percent >=
+         90), keeping humidity_update in typed_inject_events with its own
+         raise_humidity_update seam. -->
+    <transition event="humidity_update" cond="_event.data.percent &gt;= 90" target="hot"/>
   </state>
   <state id="hot">
     <!-- native string guard: only the kitchen sensor escalates to alarm.

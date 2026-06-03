@@ -1,33 +1,41 @@
 // SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! gc-3c — the switchboard value path, wired end to end.
+//! gc-3c — the switchboard value path, wired end to end (multi-event).
 //!
 //! `build.rs` runs sce-codegen over `sources/{sensor_monitor,
-//! temp_update_schema, temp_payload}.scxml` and then wz-switchboard-codegen
-//! over `wz-switchboard.yaml` + the emitted forge-asts. This crate `include!`s
-//! the three generated artifacts:
+//! temp_update_schema, temp_payload, humidity_update_schema,
+//! humidity_payload}.scxml` and then wz-switchboard-codegen over
+//! `wz-switchboard.yaml` + the emitted forge-asts. This crate `include!`s the
+//! generated artifacts:
 //!  - [`sensor_monitor`] — the SCXML state machine (with the
-//!    `SensorMonitorInject::raise_temp_update` typed seam SCE generated from
-//!    the imported EventSchema);
+//!    `SensorMonitorInject::{raise_temp_update, raise_humidity_update}` typed
+//!    seams SCE generated from the two imported EventSchemas);
 //!  - [`temp_payload`] — the wire codec that decodes a sample's bytes into
 //!    `{ celsius_centi: u16, sensor_id: &str, raw: &[u8] }` (borrowed views);
+//!  - [`humidity_payload`] — the SECOND wire codec, a single `{ percent: u8 }`;
 //!  - the crate-root `dispatch_switchboard` — the generated closed dispatch
 //!    that matches an inbound keyexpr and injects the typed `_event.data`.
 //!
-//! The tests are the first REAL compile + run of a value-path dispatch: the
-//! gc-3b golden only asserted the emitted *string*; here it type-checks
-//! against SCE's actual generated `Engine<SensorMonitorPolicy>` +
-//! `SensorMonitorTempUpdatePayload` and drives a live engine. The schema mixes
-//! a primitive (`celsius_centi`), a scalar string (`sensor_id`), and a scalar
-//! bytes (`raw`) field: the codec decodes `sensor_id` / `raw` as borrowed
-//! `&str` / `&[u8]` but the payload struct holds them owned (`String` /
-//! `Vec<u8>`), so the generated dispatch threads a `.into()` deep-copy for
-//! each. Native string (`sensor_id === 'kitchen'`) and bytes
-//! (`raw === 'ack'`) guards observe the decoded values semantically — the
-//! bytes guard lowers to a byte-string-literal comparison (`ev.raw == b"ack"`)
-//! since SCE pin d665780d9 — proving the borrowed-view -> owned field-moves
-//! delivered both correctly.
+//! The tests are the REAL compile + run of a value-path dispatch: the gc-3b
+//! golden only asserted the emitted *string*; here it type-checks against
+//! SCE's actual generated `Engine<SensorMonitorPolicy>` +
+//! `SensorMonitor{TempUpdate,HumidityUpdate}Payload` and drives a live engine.
+//!
+//! Two value EVENTS exercise the generator's multi-codec / multi-event join:
+//! `temp_update` (codec `temp_payload`) and `humidity_update` (codec
+//! `humidity_payload`). The generator resolves a separate schema<->codec
+//! pairing per event and emits a distinct decode helper + injector arm for
+//! each. The temp schema mixes a primitive (`celsius_centi`), a scalar string
+//! (`sensor_id`), and a scalar bytes (`raw`) field — the codec decodes
+//! `sensor_id` / `raw` as borrowed `&str` / `&[u8]` but the payload struct
+//! holds them owned (`String` / `Vec<u8>`), so the dispatch threads a
+//! `.into()` deep-copy for each; native string (`sensor_id === 'kitchen'`) and
+//! bytes (`raw === 'ack'`) guards observe them semantically (the bytes guard
+//! lowers to `ev.raw == b"ack"` since SCE pin d665780d9). The humidity schema
+//! is a single primitive (`percent: u8`) over a structurally different wire
+//! shape, and its native `percent >= 90` guard proves the second codec's
+//! decoded field reaches a guard verbatim.
 
 // The generated state machine carries a budget of `#![allow(...)]` inner
 // attributes the `include!` mid-module strips (build.rs); restore them here as
@@ -58,6 +66,20 @@ pub mod temp_payload {
     include!(concat!(env!("OUT_DIR"), "/temp_payload.rs"));
 }
 
+// The SECOND value event's wire codec (multi-event carry): decodes a single
+// big-endian uint8 percent. Included as its own sibling module so the
+// generated dispatch's `humidity_payload::HumidityPayload` reference resolves.
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(clippy::style)]
+#[allow(clippy::complexity)]
+pub mod humidity_payload {
+    include!(concat!(env!("OUT_DIR"), "/humidity_payload.rs"));
+}
+
 // The generated dispatch: `use sensor_monitor::SensorMonitorInject;` + a
 // crate-root `pub fn dispatch_switchboard(target, payload, engine)`. Included
 // at crate root so its `sensor_monitor::` / `temp_payload::` references
@@ -67,6 +89,7 @@ include!(concat!(env!("OUT_DIR"), "/dispatch_switchboard.rs"));
 #[cfg(test)]
 mod tests {
     use super::dispatch_switchboard;
+    use super::humidity_payload::HumidityPayload;
     use super::sensor_monitor::{SensorMonitorPolicy, SensorMonitorState};
     use super::temp_payload::TempPayload;
     use sce_rust_runtime::Engine;
@@ -91,6 +114,14 @@ mod tests {
     // Common case: no `raw` blob (the celsius / sensor_id guards ignore it).
     fn temp_wire(centi: u16, sensor_id: &str) -> Vec<u8> {
         temp_wire_full(centi, sensor_id, b"")
+    }
+
+    // The SECOND value event's codec: a single big-endian uint8 percent. A real
+    // humidity publisher encodes via this same codec, so the dispatch decodes
+    // back exactly these bytes — a structurally different wire shape from
+    // temp_payload, proving the multi-codec join.
+    fn humidity_wire(percent: u8) -> Vec<u8> {
+        HumidityPayload { percent }.encode_to_vec()
     }
 
     #[test]
@@ -289,6 +320,51 @@ mod tests {
             "decoded raw=b\"ack\" satisfies the native bytes guard"
         );
     }
+
+    #[test]
+    fn saturated_humidity_drives_machine_to_hot() {
+        // The SECOND value event: a `home/*/humidity` sample is decoded by the
+        // DIFFERENT codec (humidity_payload) into the DIFFERENT EventSchema
+        // (humidity_update), and its native uint8 guard (`percent >= 90`) drives
+        // idle -> hot. This is the multi-codec / multi-event path: the same
+        // dispatch resolves a separate schema<->codec join for humidity_update,
+        // distinct from temp_update's.
+        let mut engine = Engine::new(SensorMonitorPolicy::new());
+        engine.initialize();
+        assert_eq!(engine.get_current_state(), SensorMonitorState::Idle);
+
+        let injected =
+            dispatch_switchboard("home/bathroom/humidity", &humidity_wire(95), &mut engine);
+        engine.step();
+
+        assert_eq!(injected, 1, "the humidity value row fired");
+        assert_eq!(
+            engine.get_current_state(),
+            SensorMonitorState::Hot,
+            "decoded percent=95 satisfies the native uint8 guard"
+        );
+    }
+
+    #[test]
+    fn comfortable_humidity_leaves_machine_idle() {
+        // Discriminating: a below-threshold humidity (45% < 90%) must miss the
+        // guard, proving the decoded uint8 value reaches the guard (not a
+        // coincidental match). The row still fires (event injected) but the
+        // machine stays idle.
+        let mut engine = Engine::new(SensorMonitorPolicy::new());
+        engine.initialize();
+
+        let injected =
+            dispatch_switchboard("home/bathroom/humidity", &humidity_wire(45), &mut engine);
+        engine.step();
+
+        assert_eq!(injected, 1, "the humidity row fired (event injected)");
+        assert_eq!(
+            engine.get_current_state(),
+            SensorMonitorState::Idle,
+            "decoded percent=45 must not satisfy the >= 90 guard"
+        );
+    }
 }
 
 // The AP dynamic half of the value path: the same machine driven through the
@@ -298,6 +374,7 @@ mod tests {
 // (dynamic) and MCU (static) profiles, the gc-3 cross-profile SSOT.
 #[cfg(test)]
 mod ap_dynamic_tests {
+    use super::humidity_payload::HumidityPayload;
     use super::sensor_monitor::{SensorMonitorPolicy, SensorMonitorState};
     use super::temp_payload::TempPayload;
     use super::SensorMonitorInjector;
@@ -326,13 +403,21 @@ mod ap_dynamic_tests {
         temp_wire_full(centi, sensor_id, b"")
     }
 
+    // The second value event's wire form (single big-endian uint8 percent).
+    fn humidity_wire(percent: u8) -> Vec<u8> {
+        HumidityPayload { percent }.encode_to_vec()
+    }
+
     // Populate a registry from the SAME routing as wz-switchboard.yaml: the temp
-    // row is a value binding, the reset row a signal binding. In production the
-    // AP loader fills this by parsing the runtime sidecar; here we register the
-    // two rows directly (the routing data is what is dynamic, not the codecs).
+    // + humidity rows are value bindings, the reset row a signal binding. In
+    // production the AP loader fills this by parsing the runtime sidecar; here we
+    // register the rows directly (the routing data is what is dynamic, not the
+    // codecs). Two value rows for two events make this the AP-side multi-event
+    // mirror of the static dispatch.
     fn registry() -> SwitchboardRegistry {
         let mut board = SwitchboardRegistry::new();
         board.register_value("home/*/temp", "temp_update");
+        board.register_value("home/*/humidity", "humidity_update");
         board.register("home/*/reset", "reset");
         board
     }
@@ -478,6 +563,33 @@ mod ap_dynamic_tests {
             engine.get_current_state(),
             SensorMonitorState::Idle,
             "dynamic decode of raw=b\"ack\" satisfies the native bytes guard"
+        );
+    }
+
+    #[test]
+    fn saturated_humidity_drives_machine_to_hot_via_registry() {
+        // Cross-profile parity for the static `saturated_humidity_drives_machine_to_hot`:
+        // the AP dynamic registry + generated injector resolve the SECOND value
+        // event's codec (humidity_payload) by the same name-keyed `inject_value`
+        // arm the static dispatch uses, decode the uint8 percent, and drive
+        // idle -> hot identically. This proves the multi-event injector match
+        // (two value arms) works on the dynamic path, not just the static one.
+        let board = registry();
+        let mut engine = Engine::new(SensorMonitorPolicy::new());
+        engine.initialize();
+        assert_eq!(engine.get_current_state(), SensorMonitorState::Idle);
+
+        let bytes = humidity_wire(95);
+        let sample = put_sample("home/bathroom/humidity", &bytes);
+        let mut injector = SensorMonitorInjector::new(&mut engine);
+        let injected = board.dispatch(&sample, &mut injector);
+        engine.step();
+
+        assert_eq!(injected, 1, "the humidity value row fired via the registry");
+        assert_eq!(
+            engine.get_current_state(),
+            SensorMonitorState::Hot,
+            "dynamic decode of percent=95 satisfies the native uint8 guard"
         );
     }
 }

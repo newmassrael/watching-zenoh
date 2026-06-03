@@ -6,13 +6,16 @@
 // Orchestrates the switchboard value path end to end:
 //   1. sce-codegen over each source doc (-l rust + --emit-ast):
 //      - sensor_monitor.scxml  -> sensor_monitor_sm.rs  + AST (the machine,
-//        with the EventSchema import resolved -> SensorMonitorInject seam,
-//        SensorMonitorTempUpdatePayload, typed_inject_events)
-//      - temp_update_schema.scxml -> AST (the EventSchema field list)
-//      - temp_payload.scxml    -> temp_payload.rs       + AST (the codec)
-//   2. wz-switchboard-codegen over wz-switchboard.yaml + the three ASTs ->
-//      dispatch_switchboard.rs (the closed typed dispatch).
-// lib.rs `include!`s the machine + codec + dispatch. The shell-out to the
+//        with BOTH EventSchema imports resolved -> SensorMonitorInject seam,
+//        SensorMonitor{TempUpdate,HumidityUpdate}Payload, typed_inject_events)
+//      - temp_update_schema.scxml     -> AST (the temp_update field list)
+//      - temp_payload.scxml    -> temp_payload.rs       + AST (the temp codec)
+//      - humidity_update_schema.scxml -> AST (the humidity_update field list)
+//      - humidity_payload.scxml -> humidity_payload.rs  + AST (the humidity codec)
+//   2. wz-switchboard-codegen over wz-switchboard.yaml + the five ASTs ->
+//      dispatch_switchboard.rs (the closed typed dispatch, one schema<->codec
+//      join per value event).
+// lib.rs `include!`s the machine + both codecs + dispatch. The shell-out to the
 // sce-codegen BINARY mirrors wz-runtime-tokio/build.rs (the documented public
 // codegen path); the pin lives in the vendor/sce submodule.
 
@@ -71,17 +74,40 @@ fn main() {
         &sce_codegen,
         &sce_workspace,
     );
+    // Multi-event carry: a SECOND value event's EventSchema + wire codec. The
+    // generator resolves a separate schema<->codec join for `humidity_update`.
+    let humidity_schema_ast = emit(
+        "humidity_update_schema",
+        &sources,
+        &out_dir,
+        &sce_codegen,
+        &sce_workspace,
+    );
+    let humidity_codec_ast = emit(
+        "humidity_payload",
+        &sources,
+        &out_dir,
+        &sce_codegen,
+        &sce_workspace,
+    );
 
-    // The machine + codec Rust is `include!`d into a `mod`, so strip the
+    // The machine + codecs' Rust is `include!`d into a `mod`, so strip the
     // file-head inner attributes (`#![allow(...)]` / `//!`) that are illegal
     // at item position (same transform as wz-runtime-tokio/build.rs).
     strip_inner_attrs(&out_dir.join("sensor_monitor_sm.rs"));
     strip_inner_attrs(&out_dir.join("temp_payload.rs"));
+    strip_inner_attrs(&out_dir.join("humidity_payload.rs"));
 
-    // 2. Parse the facts and the sidecar, then run the pure generator.
+    // 2. Parse the facts and the sidecar, then run the pure generator. Both
+    // value events' schemas + codecs are supplied; the generator looks each up
+    // by event_name / codec name per binding.
     let facts = parse_machine_facts(&read(&machine_ast)).expect("parse machine facts");
     let schema = parse_event_schema_facts(&read(&schema_ast)).expect("parse event-schema facts");
     let codec = parse_codec_facts(&read(&codec_ast), "temp_payload").expect("parse codec facts");
+    let humidity_schema = parse_event_schema_facts(&read(&humidity_schema_ast))
+        .expect("parse humidity event-schema facts");
+    let humidity_codec = parse_codec_facts(&read(&humidity_codec_ast), "humidity_payload")
+        .expect("parse humidity codec facts");
 
     let spec: SwitchboardSpec =
         serde_yaml_ng::from_str(&read(&sidecar)).expect("parse wz-switchboard.yaml");
@@ -89,8 +115,8 @@ fn main() {
     let dispatch = generate(&GenInput {
         spec: &spec,
         facts: &facts,
-        schemas: &[schema],
-        codecs: &[codec],
+        schemas: &[schema, humidity_schema],
+        codecs: &[codec, humidity_codec],
         machine_module: "sensor_monitor",
     })
     .expect("generate switchboard dispatch");
