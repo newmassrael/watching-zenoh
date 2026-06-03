@@ -85,19 +85,32 @@
 // uses are the test module's `NetworkMessage::Request` fixtures, so the
 // import lives inside `mod tests` (under that module's full-query-feature
 // gate) rather than here.
+// R311gb (Track 2) — `String` / `Vec` back the `alloc`-gated reply
+// accumulator (`QueryReply` / `QueryResponder`); the no-alloc control
+// plane stores each pattern in a `BoundedString` and the table in a
+// `BoundedVec`, so the owned-collection imports are `alloc`-gated.
+// `ToString` (`.to_string()`) is reached only from the
+// `codec-request` + `alloc` dispatch / responder path.
+#[cfg(feature = "alloc")]
 use alloc::string::String;
-// `ToString` (`.to_string()`) is only reached from the `codec-request`
-// dispatch / responder path; `String` / `Vec` back the always-compiled
-// `QueryReply` accumulator.
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 use alloc::string::ToString;
+#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-// HashMap (peer-keyexpr table) + the driver-loop / network-message
-// envelope types are consumed only by the `codec-request`-gated registry
-// impl, so their imports carry the same gate (deny-warnings clean in a
-// `codec-request`-OFF subset).
-#[cfg(feature = "codec-request")]
+// R311gb (Track 2) — bounded backing + the capacity SSOT for the
+// no-alloc control plane (queryable table + per-row keyexpr pattern).
+use crate::bounded::{BoundedString, BoundedVec};
+use crate::caps;
+use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
+
+// R311gb (Track 2) — HashMap (peer-keyexpr table) + the driver-loop /
+// network-message envelope types + the owned codec mirrors are consumed
+// only by the `all(codec-request, alloc)` wire-dispatch impl (owned
+// records staged into the `alloc` reply accumulator), so their imports
+// carry that exact gate (deny-warnings clean in a `codec-request`-OFF or
+// no-`alloc` subset).
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 use hashbrown::HashMap;
 
 // R311dx — SCE owned-view absorb: decoded inbound Query / Request bodies
@@ -106,56 +119,50 @@ use hashbrown::HashMap;
 // test-locally for fixture construction (`..Foo::default().into_owned()`).
 //
 // `wz_codecs::{query, request}` live in the `codec-request` codec_group
-// (wz-codecs/src/lib.rs), so every import + method that consumes a
-// `QueryOwned` / `RequestOwned` is `codec-request`-gated. This is the
-// textbook data/handle ↔ codec-coupled split the migration realises: the
-// codec-agnostic accumulator types (`QueryReply` / `QueryResponder` /
-// `QueryableId` / `QueryableRegistry` register surface) stay always-
-// compiled (alloc-gated), while the wire-dispatch entry points
-// (`dispatch_request` / `local_query` / `fire_matching_queryables` /
-// `extract_query_attachment`) gate out cleanly in a `codec-request`-OFF
-// subset — the same wire-data-helper exemption as
-// `SubscriberRegistry::dispatch_push` (R311g1 signature stability).
-#[cfg(feature = "codec-request")]
+// (wz-codecs/src/lib.rs); R311gb (Track 2) un-gated the control plane, so
+// every import + method that consumes a `QueryOwned` / `RequestOwned`
+// into the `alloc` accumulator gates on `all(codec-request, alloc)`. The
+// no-alloc control plane (table + register + matching +
+// `dispatch_borrowed`) carries none of these — the same wire-data-helper
+// split as `SubscriberRegistry::dispatch_push` (R311g1 signature
+// stability), now also alloc-aware.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 use wz_codecs::query::QueryOwned;
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 use wz_codecs::request::{RequestOwned, RequestOwnedVariant};
 // R311r — `Response` + the `ResponseReplyBuilder` / `ResponseErrBuilder`
-// pair (now in wz-session-core::response_build) gate on `codec-response`.
-// `QueryReply::into_response` is the only use site for these symbols
-// inside this module, so the imports follow that method's gate (see the
-// method's `#[cfg]` below). The dispatch / loopback / registration paths
-// only stage entries into `Vec<QueryReply>` and do not need
-// codec-response.
-#[cfg(feature = "codec-request")]
+// pair (now in wz-session-core::response_build) back `into_response`,
+// gated on `all(codec-response, alloc)` (the `QueryReply` owned record is
+// `alloc`-gated). The dispatch / loopback / registration paths only stage
+// entries into `Vec<QueryReply>` and do not need codec-response.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::wireexpr_resolve::resolve_wireexpr;
-#[cfg(feature = "codec-response")]
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
 use wz_codecs::response::ResponseOwned;
 
-#[cfg(feature = "codec-response-final")]
+#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 use wz_codecs::response_final::{ResponseFinal, ResponseFinalOwned};
 
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 use crate::network_message::NetworkMessage;
-#[cfg(feature = "codec-request")]
+// R311gb (Track 2) — the keyexpr matcher backs the un-gated
+// control-plane `Queryable::matches`, so its import is unconditional
+// (the matcher lives in `keyexpr_match`, no-alloc since R311fz).
 use crate::pubsub::keyexpr_pattern_matches;
-// R311gb-3b-cleanup — the query seam contracts are now the sole query
-// callback surface (`QueryEvent` / `ReplyEmitter` retired with their
-// `query_event` module): `QuerySink` is the bound on the `Queryable<C>` /
-// `QueryableRegistry<C>` store; `ReplyOut` is implemented directly by
-// `QueryResponder` (the reply accumulator), so `fire_matching_queryables`
-// hands the handler `&mut responder`; `BorrowedQuery` is the loose
-// `QueryView` the dispatch builds for the inbound side; `BoxedQuerySink`
-// is the default sink type (AP closure adapter) named by the registry's
-// default type parameter + the convenience `register` wrappers. All are
-// consumed only by the `codec-request`-gated registry/dispatch, so they
-// share that gate (the `query` module is `alloc`-gated, so `codec-request`
-// here implies `alloc` and `BoxedQuerySink` is always in scope).
-#[cfg(feature = "codec-request")]
-use crate::query_sink::{BorrowedQuery, BoxedQuerySink, QuerySink, ReplyOut};
-#[cfg(feature = "codec-response")]
+// R311gb (Track 2) — the seam traits (`QuerySink` bounds the table,
+// `QueryView` / `ReplyOut` are the no-heap `dispatch_borrowed` fire
+// contracts) are unconditional (no_std-safe in `query_sink`).
+// `BorrowedQuery` is built only by the `alloc` wire fire path, and
+// `BoxedQuerySink` is the AP closure adapter, so those two carry the
+// narrower gates.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+use crate::query_sink::BorrowedQuery;
+#[cfg(feature = "alloc")]
+use crate::query_sink::BoxedQuerySink;
+use crate::query_sink::{QuerySink, QueryView, ReplyOut};
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
 use crate::response_build::{ResponseErrBuilder, ResponseReplyBuilder};
 
 /// R311v — extract the attachment payload view from an inbound
@@ -177,7 +184,7 @@ use crate::response_build::{ResponseErrBuilder, ResponseReplyBuilder};
 // extraction. cfg-off: callback always observes attachment=None.
 // Signature stable (returns Option), behavior change is the early
 // short-circuit at the function entry.
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 fn extract_query_attachment(query: &QueryOwned) -> Option<&[u8]> {
     #[cfg(not(feature = "query-attachment"))]
     {
@@ -209,28 +216,26 @@ impl QueryableId {
     }
 }
 
-// R311dx — the queryable table + its responder are gated on
-// `codec-request`: both the wire-dispatch (`dispatch_request`) and the
-// in-process loopback (`local_query`) fan-out fundamentally consume a
-// `wz_codecs::query::Query` (the `codec-request` codec_group), so a
-// registry that can be populated but never fired has no reason to exist
-// in a `codec-request`-OFF subset. This differs from
-// `SubscriberRegistry`, whose loopback (`local_publish`) takes a
-// codec-agnostic `Sample` and so stays always-compiled. The
-// codec-agnostic accumulator + handle types (`QueryReply` / `ReplyBody`
-// / `QueryableId`) stay always-compiled above so the type-ungated
-// `Session::declare_queryable` surface and the
-// `Vec<QueryReply>` staging path compile in every subset.
-#[cfg(feature = "codec-request")]
+// R311gb (Track 2) — the queryable table is the no-alloc control plane
+// (un-gated from `codec-request` / `alloc`): the table + per-row
+// pattern + matching + the borrowed no-heap fire (`dispatch_borrowed`)
+// compile on the MCU profile. Only the wire-dispatch entry points that
+// consume an owned `wz_codecs::query::Query` (`dispatch_request` /
+// `local_query`) and the owned reply accumulator (`QueryReply` /
+// `QueryResponder`) stay `all(codec-request, alloc)` / `alloc`-gated.
+// This brings the queryable side in line with `SubscriberRegistry`,
+// whose control plane is likewise always-compiled.
 struct Queryable<C: QuerySink> {
     id: QueryableId,
-    /// Pre-split pattern chunks. Same shape as
-    /// [`crate::pubsub::SubscriberRegistry`]: literal chunks (incl.
-    /// empty for `a//b`), `*` (single-chunk wildcard), `**` (zero-or-
-    /// more-chunk wildcard), or a chunk containing `$*` (intra-chunk
-    /// substring wildcard, R220). Matching is performed by the
-    /// shared [`keyexpr_pattern_matches`] helper.
-    pattern_chunks: Vec<String>,
+    /// R311gb (Track 2) — the canonical keyexpr pattern, stored as one
+    /// [`BoundedString`] (no-alloc backing on MCU). Matching splits it
+    /// on `/` at dispatch time into a stack chunk view rather than
+    /// keeping a pre-split owned `Vec<String>`. Empty literal chunks
+    /// are preserved (`a//b` keeps its empty chunk); `*` (single-chunk
+    /// wildcard), `**` (zero-or-more-chunk wildcard), and `$*` intra-
+    /// chunk substring wildcards (R220) match via the shared
+    /// [`keyexpr_pattern_matches`] helper.
+    pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }>,
     /// R223 — locality filter applied before the callback fires.
     /// Identical semantics to
     /// [`crate::pubsub::SubscriberRegistry`] —
@@ -242,9 +247,40 @@ struct Queryable<C: QuerySink> {
     sink: C,
 }
 
+impl<C: QuerySink> Queryable<C> {
+    /// R311gb (Track 2) — the shared match SSOT for both the wire fire
+    /// path ([`QueryableRegistry::fire_matching_queryables`]) and the
+    /// no-heap borrowed fire ([`QueryableRegistry::dispatch_borrowed`]):
+    /// does this queryable's pattern match `keyexpr` under the
+    /// `is_remote` locality predicate? Splits the bounded pattern into a
+    /// stack chunk view (no heap); a pattern whose canonical form
+    /// exceeds [`MAX_KEYEXPR_CHUNKS`] chunks (cannot happen for a
+    /// pattern admitted at register time) is treated as a non-match
+    /// rather than a truncated match.
+    fn matches(&self, keyexpr: &str, is_remote: bool) -> bool {
+        let allowed = if is_remote {
+            self.allowed_origin.allows_remote()
+        } else {
+            self.allowed_origin.allows_local()
+        };
+        if !allowed {
+            return false;
+        }
+        let mut chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+        for c in self.pattern.split('/') {
+            if chunks.push(c).is_err() {
+                return false;
+            }
+        }
+        keyexpr_pattern_matches(&chunks, keyexpr)
+    }
+}
+
 /// Body arm for a `QueryReply::Reply` — mirrors zenoh-pico's
 /// `_z_reply` inner `_z_push_body_t` dispatch on `_z_is_put` (Put
 /// path = data Reply; Del path = delete-keyexpr Reply).
+// R311gb (Track 2) — owned reply body (`Vec<u8>` payload), `alloc`-gated.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplyBody {
     /// Standard data reply. Payload bytes are the application
@@ -271,6 +307,10 @@ pub enum ReplyBody {
 /// [`crate::session_glue::ResponseReplyBuilder::responder`]). Same shape
 /// for Reply and Err paths since the ext lives on the outer Response,
 /// not the inner Reply / Err body.
+// R311gb (Track 2) — owned reply accumulator record (`String` keyexpr +
+// `Vec<u8>` payload + `responder` bytes), `alloc`-gated; one specific
+// `ReplyOut` sink (`QueryResponder`) stages these for the AP wire path.
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryReply {
     /// Successful reply — typed as Put or Del per [`ReplyBody`].
@@ -307,6 +347,7 @@ pub enum QueryReply {
     },
 }
 
+#[cfg(feature = "alloc")]
 impl QueryReply {
     /// Compose the wire-form [`Response`] for this Reply / Err using
     /// the existing layered builders. Consumes `self` so the
@@ -383,7 +424,7 @@ impl QueryReply {
 ///
 /// R311dx — `codec-request`-gated: only [`QueryableRegistry::fire_matching_queryables`]
 /// constructs a `QueryResponder`, so it shares the registry's gate.
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 pub struct QueryResponder<'a> {
     rid: u64,
     keyexpr_literal: String,
@@ -398,7 +439,7 @@ pub struct QueryResponder<'a> {
     responder: Option<(Vec<u8>, u32)>,
 }
 
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 impl<'a> QueryResponder<'a> {
     /// Emit a Put-form data reply with the given payload bytes.
     /// Multiple calls accumulate; the registry passes the
@@ -528,7 +569,7 @@ impl<'a> QueryResponder<'a> {
 /// PhantomData scaffolding, not a semantic gate, mirroring how
 /// `SubscriberRegistry` leaves `SampleSink::deliver` ungated and gates
 /// only the `codec-push` wire arms).
-#[cfg(feature = "codec-request")]
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
 impl ReplyOut for QueryResponder<'_> {
     fn reply(&mut self, payload: &[u8]) {
         self.send_reply(payload);
@@ -555,28 +596,53 @@ impl ReplyOut for QueryResponder<'_> {
     }
 }
 
+/// R311gb (Track 2) — failure modes of
+/// [`QueryableRegistry::register_sink`] on the no-alloc (MCU) backing.
+/// Both are deploy-capacity exhaustion, surfaced fail-fast per the
+/// [`crate::bounded`] contract (no silent drop). On the `alloc` (AP)
+/// backing neither is ever returned — the table and pattern buffer
+/// grow, so the convenience [`QueryableRegistry::register`] wrappers
+/// stay infallible there. Mirror of [`crate::pubsub::SubscribeError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryableRegisterError {
+    /// The queryable table is at its declared capacity
+    /// ([`caps::MAX_QUERYABLES`]).
+    TableFull,
+    /// The canonical keyexpr exceeds [`caps::MAX_KEYEXPR_BYTES`].
+    KeyexprTooLong,
+}
+
+impl core::fmt::Display for QueryableRegisterError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::TableFull => f.write_str("queryable table at declared capacity"),
+            Self::KeyexprTooLong => f.write_str("keyexpr exceeds declared capacity"),
+        }
+    }
+}
+
+impl core::error::Error for QueryableRegisterError {}
+
 /// Queryable table backing the inbound `Request(Query)` → callback
 /// dispatch. `!Sync` by construction; cross-task sharing goes
 /// through `Arc<Mutex<…>>`. See module-level docs for scope.
 ///
-/// R311dx — `codec-request`-gated (see the `struct Queryable` note): the
-/// registry stores `Queryable` records that are only ever consumed by
-/// the `Query`-codec dispatch / loopback paths, so the whole table gates
-/// with `codec-request`.
-#[cfg(feature = "codec-request")]
-pub struct QueryableRegistry<C: QuerySink = BoxedQuerySink> {
-    queryables: Vec<Queryable<C>>,
+/// R311gb (Track 2) — the table + register + matching + the borrowed
+/// no-heap fire ([`Self::dispatch_borrowed`]) form the no-alloc control
+/// plane (un-gated). The owned-reply wire-dispatch methods
+/// (`dispatch_request` / `local_query` / `dispatch_messages`) live in a
+/// separate `all(codec-request, alloc)` impl block below.
+pub struct QueryableRegistry<C: QuerySink> {
+    queryables: BoundedVec<Queryable<C>, { caps::MAX_QUERYABLES }>,
     next_id: u64,
 }
 
-#[cfg(feature = "codec-request")]
 impl<C: QuerySink> Default for QueryableRegistry<C> {
     fn default() -> Self {
         Self::with_sink_backing()
     }
 }
 
-#[cfg(feature = "codec-request")]
 impl<C: QuerySink> QueryableRegistry<C> {
     /// New empty registry over an explicit sink backing `C`. Queryable
     /// ids start at 1 so 0 stays available as a sentinel "no queryable"
@@ -592,7 +658,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// without a turbofish.
     pub fn with_sink_backing() -> Self {
         Self {
-            queryables: Vec::new(),
+            queryables: BoundedVec::new(),
             next_id: 1,
         }
     }
@@ -617,40 +683,59 @@ impl<C: QuerySink> QueryableRegistry<C> {
     ///
     /// R221 — the pattern is canonicalized via
     /// [`canonize_keyexpr`](crate::keyexpr_canon::canonize_keyexpr)
-    /// before being split into chunks, so the stored form agrees
+    /// into the bounded pattern buffer, so the stored form agrees
     /// byte-for-byte with the canonical wire form. Structurally
     /// invalid patterns fall back to the raw form (non-breaking)
     /// with a `log::warn!` notice.
+    ///
+    /// R311gb (Track 2) — fallible on the no-alloc backing: an over-
+    /// capacity canonical form is rejected with
+    /// [`QueryableRegisterError::KeyexprTooLong`] and a full table with
+    /// [`QueryableRegisterError::TableFull`] (fail-fast, no silent
+    /// truncation). On the `alloc` backing neither branch is ever taken,
+    /// so the convenience wrappers `.expect()` the result.
     pub fn register_sink(
         &mut self,
-        keyexpr_pattern: impl Into<String>,
+        keyexpr_pattern: &str,
         allowed_origin: crate::locality::Locality,
         sink: C,
-    ) -> QueryableId {
+    ) -> Result<QueryableId, QueryableRegisterError> {
+        // R221/R311gb — canonicalize into the bounded pattern buffer. A
+        // grammar-invalid pattern falls back to the raw form (non-
+        // breaking; the matcher still operates). An over-capacity
+        // canonical form is a hard no-alloc failure. On the `alloc`
+        // backing neither capacity branch is ever taken.
+        let pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }> =
+            match crate::keyexpr_canon::canonize_keyexpr(keyexpr_pattern) {
+                Ok(canon) => canon,
+                Err(crate::keyexpr_canon::KeyexprCanonError::ExceedsCapacity) => {
+                    return Err(QueryableRegisterError::KeyexprTooLong);
+                }
+                Err(err) => {
+                    log::warn!(
+                        "QueryableRegistry::register: keyexpr `{keyexpr_pattern}` is not \
+                         canonical ({err}); storing raw form. The matcher still operates \
+                         but the stored chunks may drift from the canonical form a peer emits."
+                    );
+                    let mut raw = BoundedString::new();
+                    raw.push_str(keyexpr_pattern)
+                        .map_err(|_| QueryableRegisterError::KeyexprTooLong)?;
+                    raw
+                }
+            };
         let id = QueryableId(self.next_id);
+        // Push first; only consume the id counter on success so a
+        // rejected (table-full) registration leaves no id gap.
+        self.queryables
+            .push(Queryable {
+                id,
+                pattern,
+                allowed_origin,
+                sink,
+            })
+            .map_err(|_| QueryableRegisterError::TableFull)?;
         self.next_id = self.next_id.saturating_add(1);
-        let raw = keyexpr_pattern.into();
-        // R311gb — `canonize_keyexpr` now returns a `BoundedString`;
-        // bind both arms to `&str` for the backing-agnostic split.
-        let canonical = crate::keyexpr_canon::canonize_keyexpr(&raw);
-        let canonical_str: &str = match &canonical {
-            Ok(canon) => canon.as_str(),
-            Err(err) => {
-                log::warn!(
-                    "QueryableRegistry::register: keyexpr `{raw}` is not canonical \
-                     ({err}); storing raw form."
-                );
-                raw.as_str()
-            }
-        };
-        let pattern_chunks: Vec<String> = canonical_str.split('/').map(String::from).collect();
-        self.queryables.push(Queryable {
-            id,
-            pattern_chunks,
-            allowed_origin,
-            sink,
-        });
-        id
+        Ok(id)
     }
 
     /// Remove a previously-registered queryable. Returns `true` if
@@ -673,6 +758,49 @@ impl<C: QuerySink> QueryableRegistry<C> {
         self.queryables.is_empty()
     }
 
+    /// R311gb (Track 2) — no-heap fire entry: match `view`'s keyexpr
+    /// against every queryable and hand each matching sink the borrowed
+    /// [`QueryView`] + the caller-supplied [`ReplyOut`], applying the
+    /// locality filter. Borrow-driven (no owned `Query` materialization,
+    /// no per-match `QueryResponder` accumulator), so it is the MCU
+    /// no-heap dispatch path; the AP wire path
+    /// ([`fire_matching_queryables`](Self::fire_matching_queryables))
+    /// shares the same per-queryable match SSOT
+    /// ([`Queryable::matches`]) but builds a fresh `QueryResponder`
+    /// per match to stage owned `QueryReply` records for the wire.
+    /// Returns the count of sinks fired.
+    ///
+    /// Unlike the wire path, the single `reply_out` is shared across all
+    /// matched queryables — the consumer owns its lifecycle (an MCU
+    /// `ReplyOut` typically injects into a statechart rather than
+    /// accumulating), so any per-queryable reset is the consumer's
+    /// responsibility.
+    pub fn dispatch_borrowed(
+        &mut self,
+        view: &dyn QueryView,
+        reply_out: &mut dyn ReplyOut,
+        is_remote: bool,
+    ) -> usize {
+        let mut fired: usize = 0;
+        let keyexpr = view.keyexpr();
+        for queryable in self.queryables.iter_mut() {
+            if queryable.matches(keyexpr, is_remote) {
+                queryable.sink.handle(view, reply_out);
+                fired = fired.saturating_add(1);
+            }
+        }
+        fired
+    }
+}
+
+// R311gb (Track 2) — owned wire-dispatch surface: these entry points
+// consume an owned `wz_codecs::query::Query` / `Request` / a
+// `Vec<QueryReply>` accumulator, so they gate on `all(codec-request,
+// alloc)` (the `codec-request` codec_group + the `alloc` reply
+// accumulator). The control plane above (table + register + matching +
+// `dispatch_borrowed`) stays un-gated.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+impl<C: QuerySink> QueryableRegistry<C> {
     /// Route an inbound [`Request`] through the queryable table.
     ///
     /// - Requests whose body is not `RequestVariant::CodecZenohQuery`
@@ -704,7 +832,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// `codec-request`-OFF subset elides this entry point entirely
     /// (wire-data-helper exemption to R311g1 signature stability,
     /// mirror of `SubscriberRegistry::dispatch_push`). Gate carried by
-    /// the enclosing `#[cfg(feature = "codec-request")] impl`.
+    /// the enclosing `#[cfg(all(codec-request, alloc))] impl`.
     pub fn dispatch_request(
         &mut self,
         request: &RequestOwned,
@@ -777,7 +905,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// equivalent here.
     ///
     /// R311dx — gate carried by the enclosing
-    /// `#[cfg(feature = "codec-request")] impl` (the `&QueryOwned` param).
+    /// `#[cfg(all(codec-request, alloc))] impl` (the `&QueryOwned` param).
     pub fn local_query(
         &mut self,
         rid: u64,
@@ -804,7 +932,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
     ///
     /// R311dx — the shared fan-out body for the two public entry
     /// points; gate carried by the enclosing
-    /// `#[cfg(feature = "codec-request")] impl` (the `&QueryOwned` param).
+    /// `#[cfg(all(codec-request, alloc))] impl` (the `&QueryOwned` param).
     fn fire_matching_queryables(
         &mut self,
         rid: u64,
@@ -829,21 +957,11 @@ impl<C: QuerySink> QueryableRegistry<C> {
         #[cfg(not(feature = "query-selector-parameters"))]
         let parameters_view: Option<&[u8]> = None;
         let attachment_view = extract_query_attachment(query);
-        for queryable in &mut self.queryables {
-            let allowed = if is_remote {
-                queryable.allowed_origin.allows_remote()
-            } else {
-                queryable.allowed_origin.allows_local()
-            };
-            if !allowed {
-                continue;
-            }
-            let chunks: Vec<&str> = queryable
-                .pattern_chunks
-                .iter()
-                .map(String::as_str)
-                .collect();
-            if keyexpr_pattern_matches(&chunks, keyexpr) {
+        for queryable in self.queryables.iter_mut() {
+            // R311gb (Track 2) — shared match SSOT with the no-heap
+            // `dispatch_borrowed` path: locality predicate + bounded
+            // pattern split happen in `Queryable::matches`.
+            if queryable.matches(keyexpr, is_remote) {
                 let mut responder = QueryResponder {
                     rid,
                     keyexpr_literal: keyexpr.to_string(),
@@ -962,9 +1080,11 @@ impl<C: QuerySink> QueryableRegistry<C> {
 /// registers a consumer-supplied sink through the generic
 /// [`register_sink`](QueryableRegistry::register_sink) instead. Mirror of
 /// [`crate::pubsub::SubscriberRegistry`]'s `BoxedSink` convenience block.
-/// The `alloc` gate is module-redundant (the whole `query` module is
-/// `alloc`-gated) but kept explicit for symmetry with the `pubsub` side.
-#[cfg(all(feature = "codec-request", feature = "alloc"))]
+///
+/// R311gb (Track 2) — gated on `alloc` only (not `codec-request`): the
+/// convenience wrappers funnel through the un-gated `register_sink`, so
+/// the AP register surface composes in any `alloc` subset.
+#[cfg(feature = "alloc")]
 impl QueryableRegistry<BoxedQuerySink> {
     /// New empty AP registry backed by heap-boxed closures
     /// ([`BoxedQuerySink`]). The inferring shorthand for
@@ -1012,11 +1132,12 @@ impl QueryableRegistry<BoxedQuerySink> {
             + Send
             + 'static,
     ) -> QueryableId {
-        self.register_sink(
-            keyexpr_pattern,
-            allowed_origin,
-            BoxedQuerySink::new(handler),
-        )
+        let pattern = keyexpr_pattern.into();
+        // AP backing: `register_sink` is infallible here (the BoundedVec
+        // table + BoundedString pattern grow past the advisory `N`), so
+        // the convenience wrapper keeps its `QueryableId` signature.
+        self.register_sink(&pattern, allowed_origin, BoxedQuerySink::new(handler))
+            .expect("register on the alloc backing never exceeds declared capacity")
     }
 }
 
@@ -1032,7 +1153,7 @@ impl QueryableRegistry<BoxedQuerySink> {
 /// per-rid VLE. Future qos / responder envelope exts on ResponseFinal
 /// will land via a separate setter (none exist on the wire today —
 /// zenoh-pico's `_z_response_final_encode` emits only header + rid).
-#[cfg(feature = "codec-response-final")]
+#[cfg(all(feature = "codec-response-final", feature = "alloc"))]
 pub fn response_final_for(rid: u64) -> ResponseFinalOwned {
     ResponseFinal {
         request_id: rid,

@@ -209,7 +209,7 @@ pub struct ApplicationLayerObserver {
     /// wire-emit drain in [`Self::flush_pending`] stay cfg-gated so a
     /// feature-OFF build elides the dispatch + drain paths entirely.
     #[cfg(feature = "query-queryable")]
-    pub queryables: QueryableRegistry,
+    pub queryables: QueryableRegistry<crate::query_sink::BoxedQuerySink>,
     /// Peer's outbound `DeclSubscriber` / `UndeclSubscriber` records.
     ///
     /// R310 — gated on `feature = "declare-subscriber"`.

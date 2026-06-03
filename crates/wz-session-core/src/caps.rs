@@ -61,3 +61,9 @@ pub const MAX_KEYEXPR_BYTES: usize = 256;
 /// subscriber table on the no-alloc backing; a `register` past this is
 /// rejected (`SubscribeError::TableFull`) rather than growing the table.
 pub const MAX_SUBSCRIPTIONS: usize = 16;
+
+/// Maximum number of concurrently-registered local queryables in a
+/// [`crate::query::QueryableRegistry`]. Bounds the registry's queryable
+/// table on the no-alloc backing; a `register` past this is rejected
+/// (`QueryableRegisterError::TableFull`) rather than growing the table.
+pub const MAX_QUERYABLES: usize = 16;

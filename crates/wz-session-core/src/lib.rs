@@ -387,14 +387,22 @@ pub mod request_build;
 /// routes inbound `Request(Query)` records to user-registered on_query
 /// sinks (R311gb-3b: the `QuerySink` seam), accumulating Reply / Err
 /// records into a caller-owned `Vec<QueryReply>`. Lifted from
-/// `wz-runtime-tokio::query`. The codec-agnostic accumulator + handle
-/// types are always-compiled (alloc-gated); the wire-dispatch entry
-/// points (`dispatch_request` / `local_query` / `fire_matching_queryables`
-/// / `extract_query_attachment`) gate on `codec-request` (the
-/// `Request` / `Query` codec_group), and `QueryReply::into_response` /
-/// `response_final_for` gate on `codec-response` / `codec-response-final`.
-/// Runtime-agnostic (`FnMut + Send`, no async).
-#[cfg(feature = "alloc")]
+/// `wz-runtime-tokio::query`.
+///
+/// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: the
+/// control plane (the `BoundedVec` queryable table + `BoundedString`
+/// patterns + `register_sink` / `unregister` / matching) compiles on
+/// the MCU no-heap profile, with the borrowed no-heap fire entry
+/// (`dispatch_borrowed` via the `QueryView` / `ReplyOut` seam). The
+/// reply-accumulator surface (`QueryReply` / `ReplyBody` /
+/// `QueryResponder`, all holding owned `String` / `Vec<u8>`) is
+/// `alloc`-gated, and the wire-dispatch entry points (`dispatch_request`
+/// / `local_query` / `fire_matching_queryables` / `dispatch_messages` /
+/// `extract_query_attachment`) gate on `all(codec-request, alloc)` (the
+/// `Request` / `Query` codec_group consumes owned records into the
+/// `alloc` accumulator), with `QueryReply::into_response` /
+/// `response_final_for` further behind `codec-response` /
+/// `codec-response-final`. Runtime-agnostic (`FnMut + Send`, no async).
 pub mod query;
 
 /// R311dy — application-layer reply registry (`ReplyRegistry` +
