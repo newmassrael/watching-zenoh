@@ -326,11 +326,19 @@ pub mod declare;
 /// R311du — application-layer local subscriber registry
 /// (`SubscriberRegistry` + `SubscriptionId`): the keyexpr callbacks the
 /// application registers so an inbound `Push` fires them. The dispatch
-/// arms gate on `codec-push` (they consume wz-codecs `Push` records);
-/// the struct itself is alloc-gated for the callback `Box` + `Vec`
-/// storage. Runtime-agnostic (`FnMut + Send`, no async), so the same
-/// registry serves the tokio (AP) and lwIP (MCU) runtimes.
-#[cfg(feature = "alloc")]
+/// arms gate on `codec-push` (they consume wz-codecs `Push` records).
+/// Runtime-agnostic (`FnMut + Send`, no async), so the same registry
+/// serves the tokio (AP) and lwIP (MCU) runtimes.
+///
+/// R311gb (Track 2 no-alloc gating) — un-gated from `alloc`: the
+/// control plane (the `BoundedVec` subscriber table + `BoundedString`
+/// patterns + `register` / `unregister` / matching) compiles on the
+/// MCU no-heap profile. The wire-dispatch surface (`dispatch_push` /
+/// `dispatch` / `local_publish` / `absorb_declare` consuming owned
+/// `PushOwned` / `NetworkMessage` / `Sample`, plus the
+/// `peer_keyexpr_table` / `own_zid` wire-state fields) stays
+/// `alloc`-gated per the Track 2 borrow boundary — the no-heap fire
+/// path (borrowed `SampleView` dispatch) lands in a later sub-round.
 pub mod pubsub;
 
 /// R311ek — shared `source_info` extension-body encoder

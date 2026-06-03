@@ -55,3 +55,9 @@
 /// rejected with [`crate::keyexpr_canon::KeyexprCanonError::ExceedsCapacity`]
 /// rather than silently truncated.
 pub const MAX_KEYEXPR_BYTES: usize = 256;
+
+/// Maximum number of concurrently-registered local subscriptions in a
+/// [`crate::pubsub::SubscriberRegistry`]. Bounds the registry's
+/// subscriber table on the no-alloc backing; a `register` past this is
+/// rejected (`SubscribeError::TableFull`) rather than growing the table.
+pub const MAX_SUBSCRIPTIONS: usize = 16;

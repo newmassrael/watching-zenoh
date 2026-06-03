@@ -84,10 +84,24 @@
 //! need cross-task sharing wrap the registry in `Arc<Mutex<…>>` as
 //! before.
 
+#[cfg(feature = "alloc")]
 use alloc::string::String;
+// `Vec` is used only by the owned-attachment arms of `dispatch_push`
+// (`pubsub-put` / `pubsub-delete`); gate the import to that exact
+// condition so alloc-but-no-pubsub-put/delete subsets don't see an
+// unused import.
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
 use alloc::vec::Vec;
 
+#[cfg(feature = "alloc")]
 use hashbrown::HashMap;
+
+use crate::bounded::{BoundedString, BoundedVec};
+use crate::caps;
+use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
 
 #[cfg(any(
     feature = "pubsub-put",
@@ -105,7 +119,9 @@ use wz_codecs::push::{PushOwned, PushOwnedVariant};
     feature = "pubsub-attachment"
 ))]
 use crate::attachment::{decode_attachment_ext, ATTACHMENT_EXT_ID_PUSH};
+#[cfg(feature = "alloc")]
 use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
+#[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
 #[cfg(all(
     any(feature = "pubsub-put", feature = "pubsub-delete"),
@@ -123,6 +139,7 @@ use crate::sample::extract_qos;
 use crate::sample::extract_source_info;
 #[cfg(feature = "pubsub-put")]
 use crate::sample::EncodingHint;
+#[cfg(feature = "alloc")]
 use crate::sample::{Reliability, Sample};
 #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
 use crate::sample::{SampleKind, TimestampHint};
@@ -155,12 +172,15 @@ impl SubscriptionId {
 
 struct Subscriber<C: SampleSink> {
     id: SubscriptionId,
-    /// Pre-split pattern chunks. Empty literal chunks are preserved
-    /// so a pattern like `a//b` (which canonical zenoh treats as a
-    /// chunk-with-empty-string) distinguishes from `a/b`. Wildcards
-    /// `*` and `**` appear as single-char chunk entries; matching is
-    /// performed by [`keyexpr_pattern_matches`].
-    pattern_chunks: Vec<String>,
+    /// R311gb (Track 2) — the canonical keyexpr pattern, stored as one
+    /// [`BoundedString`] (no-alloc backing on MCU). Matching splits it
+    /// on `/` at dispatch time into a stack chunk view rather than
+    /// keeping a pre-split owned `Vec<String>`, so the subscriber row
+    /// carries a single bounded buffer. Empty literal chunks are
+    /// preserved (a pattern like `a//b` keeps its empty chunk); `*` /
+    /// `**` are single-char chunks; matching is performed by
+    /// [`keyexpr_pattern_matches`].
+    pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }>,
     /// R223 — locality filter applied before the sink fires.
     /// See [`crate::locality`] for the semantics and the wz
     /// dispatch invariant (every inbound Push is treated as remote
@@ -170,6 +190,33 @@ struct Subscriber<C: SampleSink> {
     /// (heap closure), a consumer-supplied closed `enum` on MCU.
     sink: C,
 }
+
+/// R311gb (Track 2) — failure modes of
+/// [`SubscriberRegistry::register_sink`] on the no-alloc (MCU) backing.
+/// Both are deploy-capacity exhaustion, surfaced fail-fast per the
+/// [`crate::bounded`] contract (no silent drop). On the `alloc` (AP)
+/// backing neither is ever returned — the table and pattern buffer
+/// grow, so the convenience [`SubscriberRegistry::register`] wrappers
+/// stay infallible there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscribeError {
+    /// The subscriber table is at its declared capacity
+    /// ([`caps::MAX_SUBSCRIPTIONS`]).
+    TableFull,
+    /// The canonical keyexpr exceeds [`caps::MAX_KEYEXPR_BYTES`].
+    KeyexprTooLong,
+}
+
+impl core::fmt::Display for SubscribeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::TableFull => f.write_str("subscriber table at declared capacity"),
+            Self::KeyexprTooLong => f.write_str("keyexpr exceeds declared capacity"),
+        }
+    }
+}
+
+impl core::error::Error for SubscribeError {}
 
 /// R311dn / di-15-pre — keyexpr glob + intersection matchers moved
 /// to [`crate::keyexpr_match`]; re-exported here so prior
@@ -184,8 +231,8 @@ pub use crate::keyexpr_match::{keyexpr_intersect_patterns, keyexpr_pattern_match
 /// See module-level docs for scope (Push + DECLARE resolver, R121d).
 /// `!Sync` by construction (no shared mutable state); callers that
 /// need cross-task sharing wrap in `Arc<Mutex<…>>`.
-pub struct SubscriberRegistry<C: SampleSink = BoxedSink> {
-    subscribers: Vec<Subscriber<C>>,
+pub struct SubscriberRegistry<C: SampleSink> {
+    subscribers: BoundedVec<Subscriber<C>, { caps::MAX_SUBSCRIPTIONS }>,
     next_id: u64,
     /// R121d — peer-side keyexpr alias table. Populated from
     /// inbound `Declare(DeclKexpr)` records; cleared per-id by
@@ -201,6 +248,12 @@ pub struct SubscriberRegistry<C: SampleSink = BoxedSink> {
     /// unresolved composites stay out of the table so a
     /// downstream Push referencing them is filtered as "no
     /// resolution" rather than firing on a partial keyexpr.
+    ///
+    /// R311gb (Track 2) — wire-side state (populated by `absorb_declare`
+    /// consuming owned `Declare` records, consumed by `dispatch_push`);
+    /// `alloc`-gated per the borrow boundary. The no-alloc control plane
+    /// (subscription table + matching) does not depend on it.
+    #[cfg(feature = "alloc")]
     peer_keyexpr_table: HashMap<u64, String>,
     /// R231 — this session's own zid prefix (1..=16 bytes),
     /// negotiated during the session-FSM open handshake. When set,
@@ -219,7 +272,11 @@ pub struct SubscriberRegistry<C: SampleSink = BoxedSink> {
     /// that could echo a publish back). When wz operates in
     /// single-peer unicast mode the dedup is a no-op; the
     /// production correctness payoff is the mesh / router topology.
-    own_zid: Option<Vec<u8>>,
+    ///
+    /// R311gb (Track 2) — wire-side self-echo dedup state, consumed by
+    /// `dispatch_push`; `alloc`-gated per the borrow boundary.
+    #[cfg(feature = "alloc")]
+    own_zid: Option<alloc::vec::Vec<u8>>,
 }
 
 impl<C: SampleSink> Default for SubscriberRegistry<C> {
@@ -242,9 +299,11 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// turbofish.
     pub fn with_sink_backing() -> Self {
         Self {
-            subscribers: Vec::new(),
+            subscribers: BoundedVec::new(),
             next_id: 1,
+            #[cfg(feature = "alloc")]
             peer_keyexpr_table: HashMap::new(),
+            #[cfg(feature = "alloc")]
             own_zid: None,
         }
     }
@@ -265,7 +324,8 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// integration is currently caller-driven (see the wz-runtime-tokio
     /// `Session::set_own_zid`); an auto-wire from
     /// the session-FSM completion event is an R232+ carry.
-    pub fn set_own_zid(&mut self, zid: Vec<u8>) -> bool {
+    #[cfg(feature = "alloc")]
+    pub fn set_own_zid(&mut self, zid: alloc::vec::Vec<u8>) -> bool {
         if !(1..=16).contains(&zid.len()) {
             return false;
         }
@@ -277,6 +337,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// session close or re-init). Subsequent dispatches behave as
     /// if `set_own_zid` had never been called: no self-echo dedup,
     /// every wire-arrived Push fires its matching subscribers.
+    #[cfg(feature = "alloc")]
     pub fn clear_own_zid(&mut self) {
         self.own_zid = None;
     }
@@ -285,6 +346,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// and test purposes. Returns the same slice that
     /// [`dispatch_push`](Self::dispatch_push) compares against
     /// `source_info.zid_prefix()`.
+    #[cfg(feature = "alloc")]
     pub fn own_zid(&self) -> Option<&[u8]> {
         self.own_zid.as_deref()
     }
@@ -318,36 +380,47 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// returning signature is deferred to the cluster API rewrite.
     pub fn register_sink(
         &mut self,
-        keyexpr_pattern: impl Into<String>,
+        keyexpr_pattern: &str,
         allowed_origin: crate::locality::Locality,
         sink: C,
-    ) -> SubscriptionId {
+    ) -> Result<SubscriptionId, SubscribeError> {
+        // R221/R311gb — canonicalize into the bounded pattern buffer. A
+        // grammar-invalid pattern falls back to the raw form (non-
+        // breaking; the matcher still operates). An over-capacity
+        // canonical form is a hard no-alloc failure (fail-fast, no
+        // silent truncation). On the `alloc` backing neither capacity
+        // branch is ever taken.
+        let pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }> =
+            match crate::keyexpr_canon::canonize_keyexpr(keyexpr_pattern) {
+                Ok(canon) => canon,
+                Err(crate::keyexpr_canon::KeyexprCanonError::ExceedsCapacity) => {
+                    return Err(SubscribeError::KeyexprTooLong);
+                }
+                Err(err) => {
+                    log::warn!(
+                        "SubscriberRegistry::register: keyexpr `{keyexpr_pattern}` is not \
+                         canonical ({err}); storing raw form. The matcher still operates but \
+                         the stored chunks may drift from the canonical form a peer emits."
+                    );
+                    let mut raw = BoundedString::new();
+                    raw.push_str(keyexpr_pattern)
+                        .map_err(|_| SubscribeError::KeyexprTooLong)?;
+                    raw
+                }
+            };
         let id = SubscriptionId(self.next_id);
+        // Push first; only consume the id counter on success so a
+        // rejected (table-full) registration leaves no id gap.
+        self.subscribers
+            .push(Subscriber {
+                id,
+                pattern,
+                allowed_origin,
+                sink,
+            })
+            .map_err(|_| SubscribeError::TableFull)?;
         self.next_id = self.next_id.saturating_add(1);
-        let raw = keyexpr_pattern.into();
-        // R311gb — `canonize_keyexpr` now returns a `BoundedString`
-        // (no-alloc canon core); bind both arms to `&str` so the
-        // downstream chunk split is backing-agnostic.
-        let canonical = crate::keyexpr_canon::canonize_keyexpr(&raw);
-        let canonical_str: &str = match &canonical {
-            Ok(canon) => canon.as_str(),
-            Err(err) => {
-                log::warn!(
-                    "SubscriberRegistry::register: keyexpr `{raw}` is not canonical \
-                     ({err}); storing raw form. The matcher still operates but the \
-                     stored chunks may drift from the canonical form a peer emits."
-                );
-                raw.as_str()
-            }
-        };
-        let pattern_chunks: Vec<String> = canonical_str.split('/').map(String::from).collect();
-        self.subscribers.push(Subscriber {
-            id,
-            pattern_chunks,
-            allowed_origin,
-            sink,
-        });
-        id
+        Ok(id)
     }
 
     /// Remove a previously-registered subscriber. Returns `true` if
@@ -380,6 +453,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// reference avoids dual-write bookkeeping (one DECLARE absorbed
     /// once, observed by both registries) without requiring
     /// `Arc<Mutex<…>>` shared state.
+    #[cfg(feature = "alloc")]
     pub fn peer_keyexpr_table(&self) -> &HashMap<u64, String> {
         &self.peer_keyexpr_table
     }
@@ -406,6 +480,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// (or the registry borrow lifetime) to every downstream
     /// operation, which is the same trade-off the outbound mirror
     /// makes intentionally.
+    #[cfg(feature = "alloc")]
     pub fn resolve_inbound_mapping(&self, id: u64) -> Option<String> {
         self.peer_keyexpr_table.get(&id).cloned()
     }
@@ -422,6 +497,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// no-ops. Callers use this as the registry's observer callback so
     /// they need not hand-write the `if let Poll(FramePayload { ... })`
     /// matcher at the integration site.
+    #[cfg(feature = "alloc")]
     pub fn dispatch_iteration_event(&mut self, event: IterationEvent<'_>) {
         if let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
             messages, reliable, ..
@@ -451,6 +527,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// `FramePayload.reliable`). Declare-arm dispatch ignores
     /// `reliability` because the peer-mapping absorb is reliability-
     /// agnostic (declarations always travel on the reliable channel).
+    #[cfg(feature = "alloc")]
     pub fn dispatch(&mut self, message: &NetworkMessage, _reliability: Reliability) {
         #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
         let reliability = _reliability;
@@ -497,6 +574,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// `_z_handle_network_message` with a wz-equivalent
     /// `is_remote = false` semantic).
     #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+    #[cfg(feature = "alloc")]
     fn dispatch_push(&mut self, push: &PushOwned, reliability: Reliability, is_remote: bool) {
         // R121d / R311gl CLEANUP-2 — resolve the Push's keyexpr against
         // the peer mapping table via the shared `resolve_wireexpr` SSOT
@@ -724,9 +802,22 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// [`Locality::Any`](crate::locality::Locality) (the
     /// [`register`](Self::register) default) pass either predicate
     /// and so fire on both origins.
-    fn fire_to_subscribers(&mut self, sample: &Sample, is_remote: bool) -> usize {
+    /// R311gb (Track 2) — no-heap fire entry: match `view`'s keyexpr
+    /// against every subscription and deliver the borrowed
+    /// [`SampleView`] to each matching sink, applying the locality
+    /// filter. Borrow-driven (no owned `Sample` materialization), so it
+    /// is the MCU no-heap delivery path; the AP wire path
+    /// ([`dispatch_push`](Self::dispatch_push)) funnels its owned
+    /// `Sample` through the same matcher via the `Sample: SampleView`
+    /// coercion (one matching SSOT). Returns the count of sinks fired.
+    pub fn dispatch_borrowed(&mut self, view: &dyn SampleView, is_remote: bool) -> usize {
+        self.fire_to_subscribers(view, is_remote)
+    }
+
+    fn fire_to_subscribers(&mut self, view: &dyn SampleView, is_remote: bool) -> usize {
         let mut fired: usize = 0;
-        for subscriber in &mut self.subscribers {
+        let keyexpr = view.keyexpr();
+        for subscriber in self.subscribers.iter_mut() {
             let pass = if is_remote {
                 subscriber.allowed_origin.allows_remote()
             } else {
@@ -735,16 +826,28 @@ impl<C: SampleSink> SubscriberRegistry<C> {
             if !pass {
                 continue;
             }
-            let chunks: Vec<&str> = subscriber
-                .pattern_chunks
-                .iter()
-                .map(String::as_str)
-                .collect();
-            if keyexpr_pattern_matches(&chunks, &sample.keyexpr) {
-                // R311gb-2b — deliver via the DIP seam. The owned
-                // `Sample` impls `SampleView`, so `&Sample` coerces to
-                // `&dyn SampleView` with no projection step.
-                subscriber.sink.deliver(sample);
+            // Split the bounded pattern into a stack chunk view. On the
+            // no-alloc backing `BoundedVec` is heapless-backed (no heap);
+            // the canon stored at register time already bounds the chunk
+            // count to `MAX_KEYEXPR_CHUNKS`, so the push is infallible in
+            // practice — skip defensively on overflow rather than match a
+            // truncated pattern.
+            let mut chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+            let mut overflow = false;
+            for c in subscriber.pattern.split('/') {
+                if chunks.push(c).is_err() {
+                    overflow = true;
+                    break;
+                }
+            }
+            if overflow {
+                continue;
+            }
+            if keyexpr_pattern_matches(&chunks, keyexpr) {
+                // R311gb-2b — deliver via the DIP seam (borrowed view,
+                // no projection step). On MCU `C` is a closed `enum`
+                // whose `deliver` injects; on AP a `BoxedSink` closure.
+                subscriber.sink.deliver(view);
                 fired = fired.saturating_add(1);
             }
         }
@@ -783,6 +886,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
     /// `is_remote = false` branch then filters on the subscriber-side
     /// locality so the Any/Remote/SessionLocal contract holds for
     /// every receiver.
+    #[cfg(feature = "alloc")]
     pub fn local_publish(&mut self, sample: &Sample) -> usize {
         self.fire_to_subscribers(sample, false)
     }
@@ -905,7 +1009,12 @@ impl SubscriberRegistry<BoxedSink> {
         allowed_origin: crate::locality::Locality,
         callback: impl FnMut(&dyn SampleView) + Send + 'static,
     ) -> SubscriptionId {
-        self.register_sink(keyexpr_pattern, allowed_origin, BoxedSink::new(callback))
+        let pattern = keyexpr_pattern.into();
+        // AP backing: `register_sink` is infallible here (the BoundedVec
+        // table + BoundedString pattern grow past the advisory `N`), so
+        // the convenience wrapper keeps its `SubscriptionId` signature.
+        self.register_sink(&pattern, allowed_origin, BoxedSink::new(callback))
+            .expect("register on the alloc backing never exceeds declared capacity")
     }
 }
 

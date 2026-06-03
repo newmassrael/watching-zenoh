@@ -180,7 +180,7 @@ pub struct ApplicationLayerObserver {
     /// Local pub/sub callbacks + peer keyexpr table (the table is
     /// populated by inbound `Declare(DeclKexpr|UndeclKexpr)` records
     /// and shared by every consumer registry for keyexpr resolution).
-    pub subscribers: SubscriberRegistry,
+    pub subscribers: SubscriberRegistry<crate::sink::BoxedSink>,
     /// R311gi gc-2c — the statechart switchboard: the keyexpr -> SCXML
     /// domain-event injection table. A SEPARATE inbound adapter from the
     /// data-callback `subscribers` (gc-2a): its
