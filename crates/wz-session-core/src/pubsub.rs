@@ -120,10 +120,20 @@ use crate::registry_error::RegisterError;
 use crate::wireexpr_resolve::resolve_wireexpr;
 #[cfg(all(feature = "codec-declare", feature = "alloc"))]
 use wz_codecs::declare::DeclareOwnedVariant;
-#[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+// R311gb (Track 2) — these wire-dispatch-supporting imports feed the
+// `alloc`-gated `dispatch_push` (owned `PushOwned` / `Sample` building),
+// and `crate::sample` / the owned codec types are `alloc`-gated, so each
+// carries `alloc` in addition to its pub/sub feature gate. Without it a
+// `codec-push`-without-`alloc` profile pulls an absent module / leaves an
+// unused import (mirror of the sibling codecs, which compose no-alloc).
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
 use wz_codecs::push::{PushOwned, PushOwnedVariant};
 
 #[cfg(all(
+    feature = "alloc",
     any(feature = "pubsub-put", feature = "pubsub-delete"),
     feature = "pubsub-attachment"
 ))]
@@ -133,6 +143,7 @@ use crate::driver_loop::{DriverLoopOutcome, IterationEvent};
 #[cfg(feature = "alloc")]
 use crate::network_message::NetworkMessage;
 #[cfg(all(
+    feature = "alloc",
     any(feature = "pubsub-put", feature = "pubsub-delete"),
     any(
         feature = "pubsub-priority",
@@ -142,15 +153,19 @@ use crate::network_message::NetworkMessage;
 ))]
 use crate::sample::extract_qos;
 #[cfg(all(
+    feature = "alloc",
     any(feature = "pubsub-put", feature = "pubsub-delete"),
     feature = "pubsub-source-info"
 ))]
 use crate::sample::extract_source_info;
-#[cfg(feature = "pubsub-put")]
+#[cfg(all(feature = "pubsub-put", feature = "alloc"))]
 use crate::sample::EncodingHint;
 #[cfg(feature = "alloc")]
 use crate::sample::{Reliability, Sample};
-#[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+#[cfg(all(
+    feature = "alloc",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
 use crate::sample::{SampleKind, TimestampHint};
 use crate::sink::{SampleSink, SampleView};
 // R311gb-2b — `BoxedSink` is the default sink type (the AP closure
