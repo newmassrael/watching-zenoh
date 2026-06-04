@@ -217,16 +217,6 @@
         "Generated code exports as library, not monolith: out/ap and out/mcu are library targets.",
         "Platform gating only when physically necessary; keep pool/link/worker kinds platform-neutral.",
         "out/ is SSoT-downstream: manual edits forbidden; new features land via SCE extensions."
-      ],
-      "impact_scope": [
-        "2/2.4/2.4.1",
-        "2/2.4/2.4.2",
-        "2/2.4/2.4.3",
-        "2/2.4/2.4.4",
-        "2/2.4/2.4.5",
-        "2/2.4/2.4.6",
-        "2/2.4/2.4.7",
-        "2/2.4/2.4.8"
       ]
     },
     "2/2.5": {
@@ -308,21 +298,13 @@
       ]
     },
     "5": {
-      "intent": "Cargo workspace structure: out/ap library, crates/watching_zenoh_{api,bin}, plugin extension path.",
-      "impact_scope": [
-        "5/5.1",
-        "5/5.2",
-        "5/5.3",
-        "5/5.4"
-      ]
+      "intent": "Cargo workspace structure: out/ap library, crates/watching_zenoh_{api,bin}, plugin extension path."
     },
     "6": {
       "intent": "Build stages from SCXML+SCE through codegen, out/, cargo, to AP/MCU artifacts; per-target artifact list.",
       "impact_scope": [
         "6/6.1",
-        "6/6.2",
-        "6/6.3",
-        "6/6.4"
+        "6/6.2"
       ]
     },
     "6/6.1": {
@@ -421,9 +403,7 @@
         "9/9.2",
         "9/9.3",
         "9/9.4",
-        "9/9.5",
-        "9/9.6",
-        "9/9.7"
+        "9/9.5"
       ]
     },
     "9/9.1": {
@@ -1830,8 +1810,7 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
         "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail",
         "reassembly-fsm--prose-sketch/6-buffer-pool-interaction",
-        "9/9.5",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+        "9/9.5"
       ]
     },
     "intrinsics-runtime--symbol-surface/2-1-atomics": {
@@ -1874,9 +1853,7 @@
       ],
       "impact_scope": [
         "intrinsics-runtime--symbol-surface/2-symbol-categories",
-        "intrinsics-runtime--symbol-surface/2-6-hmac",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation"
+        "intrinsics-runtime--symbol-surface/2-6-hmac"
       ]
     },
     "intrinsics-runtime--symbol-surface/2-6-hmac": {
@@ -1892,9 +1869,7 @@
       ],
       "impact_scope": [
         "intrinsics-runtime--symbol-surface/2-symbol-categories",
-        "intrinsics-runtime--symbol-surface/2-5-rng",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation"
+        "intrinsics-runtime--symbol-surface/2-5-rng"
       ]
     },
     "intrinsics-runtime--symbol-surface/2-7-hw-semaphores": {
@@ -1986,8 +1961,7 @@
       ],
       "impact_scope": [
         "intrinsics-runtime--symbol-surface",
-        "session-fsm--prose-level-sketch",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+        "session-fsm--prose-level-sketch"
       ]
     },
     "oq-w15-a--ratification-summary-for-sce-maintainer-sync/2-why-this-decision-is-needed-now": {
@@ -2007,8 +1981,7 @@
       ],
       "impact_scope": [
         "intrinsics-runtime--symbol-surface",
-        "session-fsm--prose-level-sketch",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+        "session-fsm--prose-level-sketch"
       ]
     },
     "oq-w15-a--ratification-summary-for-sce-maintainer-sync/3-initial-proposal-watching-zenoh": {
@@ -2044,8 +2017,7 @@
       ],
       "impact_scope": [
         "intrinsics-runtime--symbol-surface",
-        "session-fsm--prose-level-sketch",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+        "session-fsm--prose-level-sketch"
       ]
     },
     "oq-w15-a--ratification-summary-for-sce-maintainer-sync/4-counter-options-presented-for-context": {
@@ -2070,8 +2042,7 @@
       ],
       "impact_scope": [
         "intrinsics-runtime--symbol-surface",
-        "session-fsm--prose-level-sketch",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+        "session-fsm--prose-level-sketch"
       ]
     },
     "oq-w15-a--ratification-summary-for-sce-maintainer-sync/5-blast-radius-forward-compatibility-implications": {
@@ -2090,8 +2061,7 @@
       "impact_scope": [
         "intrinsics-runtime--symbol-surface",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
-        "session-fsm--prose-level-sketch",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+        "session-fsm--prose-level-sketch"
       ]
     },
     "oq-w15-a--ratification-summary-for-sce-maintainer-sync/6-action-requested": {
@@ -2114,9 +2084,7 @@
         "Fallback path validated (SCE C13-β tests, 4570a389); deploys unblock via 4-line plugin row."
       ],
       "impact_scope": [
-        "intrinsics-runtime--symbol-surface",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation"
+        "intrinsics-runtime--symbol-surface"
       ]
     },
     "oq-w15-a--ratification-summary-for-sce-maintainer-sync/7-references-for-the-maintainer": {
@@ -2124,8 +2092,7 @@
       "impact_scope": [
         "intrinsics-runtime--symbol-surface",
         "session-fsm--prose-level-sketch",
-        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis"
       ]
     },
     "reassembly-fsm--prose-sketch/1-framing-overview": {
@@ -2213,8 +2180,7 @@
       "intent": "Strict in-order policy (OQ-W21 closed): non-consecutive Continue aborts the chain (option 2 ratified); upstream consecutive-SN parity preserved.",
       "impact_scope": [
         "reassembly-fsm--prose-sketch",
-        "reassembly-fsm--prose-sketch/2-4-transitions-in-detail",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w21--out-of-order-continue-policy-under-best_effort"
+        "reassembly-fsm--prose-sketch/2-4-transitions-in-detail"
       ]
     },
     "reassembly-fsm--prose-sketch/2-6-mapping-to-rfc-5m-three-state-sketch": {
@@ -2246,8 +2212,7 @@
         "reassembly-fsm--prose-sketch",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
-        "session-fsm--prose-level-sketch/2-6-trust-class-interaction",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w22--listener-link-trust-class-lifecycle"
+        "session-fsm--prose-level-sketch/2-6-trust-class-interaction"
       ]
     },
     "reassembly-fsm--prose-sketch/6-buffer-pool-interaction": {
@@ -2293,17 +2258,13 @@
     "reassembly-fsm--prose-sketch/8-1-authoring-contract-gaps": {
       "intent": "Reassembly authoring-contract gaps (G-RFM-1..N) — most resolved via OQ-W21/W22 closure; residuals tracked for Phase D+ TX fragmentation work.",
       "impact_scope": [
-        "reassembly-fsm--prose-sketch",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w21--out-of-order-continue-policy-under-best_effort",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w22--listener-link-trust-class-lifecycle"
+        "reassembly-fsm--prose-sketch"
       ]
     },
     "reassembly-fsm--prose-sketch/8-2-new-open-questions": {
       "intent": "OQ-W21 (out-of-order continue policy) closed via strict in-order; OQ-W22 (listener-link trust-class lifecycle) closed via codegen sibling split.",
       "impact_scope": [
-        "reassembly-fsm--prose-sketch",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w21--out-of-order-continue-policy-under-best_effort",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w22--listener-link-trust-class-lifecycle"
+        "reassembly-fsm--prose-sketch"
       ]
     },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm": {
@@ -2348,10 +2309,7 @@
       ],
       "impact_scope": [
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
-        "architecture--watching-zenoh",
-        "rfc-open-questions-log/sce-side-questions-q1q14/q3--algorithm-calling-algorithm",
-        "rfc-open-questions-log/sce-side-questions-q1q14/q4--compute-atbuild-on-transform",
-        "rfc-open-questions-log/sce-side-questions-q1q14/q14--algorithm-calling-bounded-collection-ops"
+        "architecture--watching-zenoh"
       ]
     },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions": {
@@ -2405,8 +2363,7 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
         "architecture--watching-zenoh",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
-        "wire-spec-subset--watching-zenoh-mvp",
-        "rfc-open-questions-log/sce-side-questions-q1q14/q5--5b-codec-dsl-pr-granularity"
+        "wire-spec-subset--watching-zenoh-mvp"
       ]
     },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link": {
@@ -2461,8 +2418,7 @@
         "session-fsm--prose-level-sketch",
         "reassembly-fsm--prose-sketch",
         "runtime-crate--sce_link_runtime_lwip-c11-header-shape",
-        "runtime-crate--sce_link_runtime_tokio",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w22--listener-link-trust-class-lifecycle"
+        "runtime-crate--sce_link_runtime_tokio"
       ]
     },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.d-timer-and-worker-primitives": {
@@ -2506,8 +2462,7 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
         "architecture--watching-zenoh",
-        "session-fsm--prose-level-sketch",
-        "rfc-open-questions-log/sce-side-questions-q1q14/q2--existing-timer-kind-vs-rfc-5d"
+        "session-fsm--prose-level-sketch"
       ]
     },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement": {
@@ -2609,8 +2564,7 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
-        "architecture--watching-zenoh",
-        "rfc-open-questions-log/sce-side-questions-q1q14/q4--compute-atbuild-on-transform"
+        "architecture--watching-zenoh"
       ]
     },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern": {
@@ -2669,11 +2623,7 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.d-timer-and-worker-primitives",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
         "architecture--watching-zenoh",
-        "intrinsics-runtime--symbol-surface",
-        "rfc-open-questions-log/sce-side-questions-q1q14/q7--sceextern-whitelist-location",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w14--hardware-sync-primitive-standardization-in-target_plugin",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w17--f4-fuzz-coverage-transport-engine-choice-and-per-target-default"
+        "intrinsics-runtime--symbol-surface"
       ]
     },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i.0-tier-definitions": {
@@ -2720,9 +2670,7 @@
         }
       ],
       "impact_scope": [
-        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern"
       ]
     },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage": {
@@ -2778,9 +2726,7 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.d-timer-and-worker-primitives",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
         "architecture--watching-zenoh",
-        "intrinsics-runtime--symbol-surface",
-        "rfc-open-questions-log/sce-side-questions-q1q14/q6--c11-vs-c99-for-the-c-backend",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w20--sce_link_runtime_qnx-reactor-mio-qnx-backend-vs-custom-qnx-native-runtime"
+        "intrinsics-runtime--symbol-surface"
       ]
     },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions": {
@@ -2837,10 +2783,7 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.e-buffer-pool-and-memory-placement",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
-        "architecture--watching-zenoh",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w13--worker_slot_budget_us-default-and-keyexpr-wcet-source",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w18--vle_decode_cycles_per_byte-and-tlv_chain_per_entry_overhead_us-defaults-per-platform-class"
+        "architecture--watching-zenoh"
       ]
     },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.l-new-kind-bounded-collection": {
@@ -2893,10 +2836,7 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
-        "architecture--watching-zenoh",
-        "rfc-open-questions-log/sce-side-questions-q1q14/q11--bounded-collection-capacity-source",
-        "rfc-open-questions-log/sce-side-questions-q1q14/q14--algorithm-calling-bounded-collection-ops",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w8--bounded-collection-default-capacities"
+        "architecture--watching-zenoh"
       ]
     },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds": {
@@ -2953,10 +2893,7 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
         "architecture--watching-zenoh",
         "reassembly-fsm--prose-sketch",
-        "session-fsm--prose-level-sketch",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w22--listener-link-trust-class-lifecycle",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults",
-        "rfc-open-questions-log/sce-side-questions-q1q14/q12--fragment--reassembly-author-level-vs-shipped-template"
+        "session-fsm--prose-level-sketch"
       ]
     },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.n-multi-link-concurrency": {
@@ -2995,8 +2932,7 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.d-timer-and-worker-primitives",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
-        "architecture--watching-zenoh",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w11--multi-link-tx-dispatch-policy"
+        "architecture--watching-zenoh"
       ]
     },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.o-generated-source-traceability": {
@@ -3048,8 +2984,7 @@
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.a-new-kind-algorithm",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage",
-        "architecture--watching-zenoh",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w16--generated-source-traceability-state-path-delimiter-and-rust-sce-map-preservation"
+        "architecture--watching-zenoh"
       ]
     },
     "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.p-runtime-services-tier": {
@@ -3445,8 +3380,7 @@
       ],
       "impact_scope": [
         "scouting-fsm--prose-sketch",
-        "architecture--watching-zenoh",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w23--passive-scouting-mode-justification--deploy-schema"
+        "architecture--watching-zenoh"
       ]
     },
     "scouting-fsm--prose-sketch/10-next-step-scaffolding": {
@@ -3529,8 +3463,7 @@
       "intent": "Passive deferred Phase D+ (OQ-W23 closed 2026-05-01); MVP enum={active,static}; deploy/scouting-mode-unknown rejects passive value pre-Phase-D.",
       "impact_scope": [
         "scouting-fsm--prose-sketch",
-        "scouting-fsm--prose-sketch/1-4-three-modes-and-zenoh-pico-mapping",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w23--passive-scouting-mode-justification--deploy-schema"
+        "scouting-fsm--prose-sketch/1-4-three-modes-and-zenoh-pico-mapping"
       ]
     },
     "scouting-fsm--prose-sketch/2-4-3-static": {
@@ -3582,8 +3515,7 @@
       ],
       "impact_scope": [
         "scouting-fsm--prose-sketch",
-        "wire-spec-subset--watching-zenoh-mvp",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present"
+        "wire-spec-subset--watching-zenoh-mvp"
       ]
     },
     "scouting-fsm--prose-sketch/3-3-implication-for-the-scouting-fsm": {
@@ -3629,8 +3561,7 @@
       ],
       "impact_scope": [
         "scouting-fsm--prose-sketch",
-        "session-fsm--prose-level-sketch/3-4-client-mode-and-multicast",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w9--client-mode-and-multicast-session"
+        "session-fsm--prose-level-sketch/3-4-client-mode-and-multicast"
       ]
     },
     "scouting-fsm--prose-sketch/8-1-authoring-contract-gaps": {
@@ -3643,8 +3574,7 @@
       ],
       "impact_scope": [
         "scouting-fsm--prose-sketch",
-        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w23--passive-scouting-mode-justification--deploy-schema"
+        "scouting-fsm--prose-sketch/2-6-bounded-collection-invariants"
       ]
     },
     "scouting-fsm--prose-sketch/8-2-new-open-questions": {
@@ -3655,10 +3585,7 @@
         "OQ-W9 closed in §6.4: client refuses multicast session, participates in scouting"
       ],
       "impact_scope": [
-        "scouting-fsm--prose-sketch",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w23--passive-scouting-mode-justification--deploy-schema",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w9--client-mode-and-multicast-session"
+        "scouting-fsm--prose-sketch"
       ]
     },
     "session-fsm--prose-level-sketch/10-next-step-scaffolding": {
@@ -3776,8 +3703,7 @@
       "impact_scope": [
         "session-fsm--prose-level-sketch",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.m-fragment-and-reassembly-kinds",
-        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w22--listener-link-trust-class-lifecycle"
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.c-link"
       ]
     },
     "session-fsm--prose-level-sketch/2-7-accept-side-hardening-detail": {
@@ -3796,8 +3722,7 @@
         "session-fsm--prose-level-sketch",
         "session-fsm--prose-level-sketch/2-6-trust-class-interaction",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.k-deploy-model-extensions",
-        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern"
       ]
     },
     "session-fsm--prose-level-sketch/3-1-multicast-session-level-states": {
@@ -3841,8 +3766,7 @@
       "intent": "Client whatami refuses multicast session (zenoh-pico parity); participates in scouting only. OQ-W9 closed via deploy/client-multicast-session-unsupported.",
       "impact_scope": [
         "session-fsm--prose-level-sketch",
-        "scouting-fsm--prose-sketch",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w9--client-mode-and-multicast-session"
+        "scouting-fsm--prose-sketch"
       ]
     },
     "session-fsm--prose-level-sketch/4-scouting-pre-session": {
@@ -3874,8 +3798,7 @@
       "impact_scope": [
         "session-fsm--prose-level-sketch",
         "architecture--watching-zenoh",
-        "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
-        "rfc-open-questions-log/sce-side-questions-q1q14/q13--client-vs-peer-session-fsm-variants"
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis"
       ]
     },
     "session-fsm--prose-level-sketch/6-link-layer-interaction": {
@@ -3934,11 +3857,7 @@
       "impact_scope": [
         "session-fsm--prose-level-sketch",
         "session-fsm--prose-level-sketch/2-2-unicast-transitions",
-        "wire-spec-subset--watching-zenoh-mvp",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w2--auth-baseline-methods",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w4--extcompression-critical-bit-safety",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w7--extpatchtype-mismatch-policy",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w10--extauth-multi-step-handshake-shape"
+        "wire-spec-subset--watching-zenoh-mvp"
       ]
     },
     "session-fsm--prose-level-sketch/8-1-authoring-contract-gaps": {
@@ -3954,8 +3873,7 @@
         "session-fsm--prose-level-sketch",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.b-codec-dsl-extensions",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.i-sce-extern",
-        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.n-multi-link-concurrency",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+        "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.n-multi-link-concurrency"
       ]
     },
     "session-fsm--prose-level-sketch/8-2-new-open-questions": {
@@ -3967,11 +3885,7 @@
         "OQ-W12: closing timeout default for slow links (Serial 115200); deploy.yaml default"
       ],
       "impact_scope": [
-        "session-fsm--prose-level-sketch",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w9--client-mode-and-multicast-session",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w10--extauth-multi-step-handshake-shape",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w11--multi-link-tx-dispatch-policy",
-        "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w12--closing-timeout-default"
+        "session-fsm--prose-level-sketch"
       ]
     },
     "watching-zenoh": {
@@ -3996,7 +3910,6 @@
       ],
       "impact_scope": [
         "1",
-        "rfc-open-questions-log",
         "rfc--sce-forge-extensions-for-wire-protocol-synthesis",
         "session-fsm--prose-level-sketch",
         "scouting-fsm--prose-sketch",
@@ -29998,6 +29911,48 @@
         "remaining Track 2 tail: ⓓ probe wire-decode->switchboard inject; ⓔ north-star switchboard generator gc-3"
       ]
     },
+    "Round 311hq": {
+      "decision_summary": "R408 markdown-doc retirement: atomic store is sole SSOT. Removed GENERATED.md and workspace.docs; data-fixed 45 sections stale impact_scope; ledgered 13 prose and 18 frozen-entry orphans",
+      "changes_bullets": [
+        "Removed docs/GENERATED.md plus mnemosyne.toml workspace.docs and default_doc keys",
+        "Data-fixed 45 sections by dropping 83 unresolvable impact_scope refs via set-section-impact-scope",
+        "Ledgered 13 markdown_ref prose orphans and 18 atomic_entry_ref frozen-entry orphans",
+        "Updated CLAUDE.md, README.md, README.ko.md, COMMIT_FORMAT.md, pre-commit to store-direct model"
+      ],
+      "verification_bullets": [
+        "mnemosyne-cli validate-workspace exits 0; T1 orphans 13 all ledgered, zero new",
+        "atomic section orphans 83 to 0 via data-fix; schema v7 to v8; sections 257 entries 576",
+        "scripts/run-ci.sh layer A pass (all required layers pass)"
+      ],
+      "impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog"
+      ],
+      "carry_forward_bullets": [
+        "Layer E ap-demo wire round-trip and vendor/sce GENERATED.md intentionally untouched",
+        "The 13 design docs are now unvalidated human notes; read SSOT via mnemosyne-cli query"
+      ],
+      "publishable_decision_summary": "R408 markdown-doc retirement: atomic store is sole SSOT. Removed GENERATED.md and workspace.docs; data-fixed 45 sections stale impact_scope; ledgered 13 prose and 18 frozen-entry orphans",
+      "publishable_changes_bullets": [
+        "Removed docs/GENERATED.md plus mnemosyne.toml workspace.docs and default_doc keys",
+        "Data-fixed 45 sections by dropping 83 unresolvable impact_scope refs via set-section-impact-scope",
+        "Ledgered 13 markdown_ref prose orphans and 18 atomic_entry_ref frozen-entry orphans",
+        "Updated CLAUDE.md, README.md, README.ko.md, COMMIT_FORMAT.md, pre-commit to store-direct model"
+      ],
+      "publishable_verification_bullets": [
+        "mnemosyne-cli validate-workspace exits 0; T1 orphans 13 all ledgered, zero new",
+        "atomic section orphans 83 to 0 via data-fix; schema v7 to v8; sections 257 entries 576",
+        "scripts/run-ci.sh layer A pass (all required layers pass)"
+      ],
+      "publishable_impact_refs": [
+        "architecture--watching-zenoh",
+        "feature-inventory--composable-framework-atomic--preset-catalog"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Layer E ap-demo wire round-trip and vendor/sce GENERATED.md intentionally untouched",
+        "The 13 design docs are now unvalidated human notes; read SSOT via mnemosyne-cli query"
+      ]
+    },
     "Round 311i": {
       "decision_summary": "R311i codec-declare wire-layer cascade — 9 declare-family wz-codecs modules gated + Cargo edges + session_glue.rs Declare wire surface body-cfg.",
       "changes_bullets": [
@@ -36380,5 +36335,5 @@
       "reason": "F=~3KLOC wz session module; P=zenoh transport/unicast module; C=standalone session shape, multicast independent"
     }
   },
-  "schema_version": 7
+  "schema_version": 8
 }

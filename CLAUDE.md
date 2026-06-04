@@ -12,13 +12,23 @@ are the audit-traced replacement.
 
 ## SSOT contract
 
-The 12 docs in `mnemosyne.toml::workspace.docs` are governed by Mnemosyne.
-For these docs, mutations route through the Mnemosyne MCP server, not
-through `Edit` / `Write` on the raw markdown. The justification is the
-same as for any audit-traced spec system: a typed primitive validates
-each change against tier rules (T1 cross-ref orphan, T2 frozen ledger,
-round-trip preservation) before persisting, while a regex-based `Edit`
-silently drifts structure.
+The atomic store (`docs/.atomic/workspace.atomic.json`) is the single,
+directly-validated SSOT. Its Section / ChangelogEntry bodies are
+governed by Mnemosyne: mutations route through the typed `set_section_*`
+/ `append-changelog-entry` primitives, not through `Edit` / `Write` on
+the sidecar JSON. The justification is the same as for any audit-traced
+spec system: a typed primitive validates each change against tier rules
+(T1 cross-ref orphan, frozen ledger) before persisting, while a regex
+`Edit` silently drifts structure.
+
+R408 markdown-doc retirement (2026-06-04): Mnemosyne upstream
+(R395-R400) retired the ParsedDoc validator, the `GENERATED.md` render,
+and the `generate-docs` cascade. The former `mnemosyne.toml::workspace.docs`
+member files (ARCHITECTURE.md, README.md, docs/*.md) are now ordinary
+human-readable design notes that Mnemosyne no longer parses or
+§N-orphan-validates. Edit them directly; they are not the validated
+surface and may drift from the store. To read the SSOT, use
+`mnemosyne-cli query` / `query_section`, not a rendered doc.
 
 ## Before any action on a registered doc
 
@@ -32,25 +42,25 @@ silently drifts structure.
    - `mnemosyne://concepts/frozen-ledger`
    - `mnemosyne://concepts/tier-rules`
    - `mnemosyne://concepts/workflow`
-2. Run `validate_workspace` to surface the current baseline (orphan
-   count, round-trip status, style violations). Snapshot the numbers —
-   you will compare against this after your mutation.
+2. Run `validate_workspace` to surface the current baseline (T1 orphan
+   count, atomic ledger entries/sections, style violations). Snapshot
+   the numbers — you will compare against this after your mutation.
+   (R408: the round-trip and GENERATED.md-sync dimensions are gone; the
+   scan is store-direct.)
 3. For section-targeted changes: `query_section(section_id,
    include_related=true, include_changelog=true)` first.
 
 ## Mutation rules
 
-- **Markdown body edits** to a registered doc → reach for the
-  `set_section_*` / `add_section_*` primitives via the Mnemosyne MCP.
-  Do not `Edit` / `Write` the markdown directly.
+- **Store Section body edits** → reach for the `set_section_*` /
+  `add_section_*` primitives (MCP or `mnemosyne-cli`). Do not `Edit` /
+  `Write` the sidecar JSON directly.
 - **Sidecar direct `Write` / `Edit`** on
   `docs/.atomic/workspace.atomic.json` is forbidden by default
-  (`anti-patterns` #8). MCP mutate primitives cascade-update
-  `docs/GENERATED.md` automatically; direct sidecar edits do not —
-  they leave `GENERATED.md=stale` and the next `validate_workspace`
-  exits 1. If an explicit user override is granted (e.g. revert after
-  a demo), follow the direct edit with `mnemosyne-cli generate-docs`
-  to restore `GENERATED.md=sync`.
+  (`anti-patterns` #8) — it bypasses tier-rule validation. Route every
+  Section / ChangelogEntry body change through a typed primitive.
+  (R408 retired `GENERATED.md` and `generate-docs`; there is no longer a
+  render cascade to keep in sync — the store IS the artifact.)
 - **Changelog entries** (atomic-store audit ledger + the
   `rfc-open-questions-log.md::Change log`) → append via the CLI:
   `mnemosyne-cli append-changelog-entry --entry-id "Round N"
@@ -68,25 +78,25 @@ silently drifts structure.
   `Round N` form — frozen-ledger spirit applies even though they predate
   the atomic store).
 - **After every mutation** → `validate_workspace`. Confirm orphan delta
-  = 0 (no new orphans), round-trip mandatory still N/N, T3 warn count
-  not increased, atomic ledger drift consistent with the mutation
-  (entries / sections delta matches what the call should have produced).
+  = 0 (no new orphans), T3 warn count not increased, atomic ledger drift
+  consistent with the mutation (entries / sections delta matches what the
+  call should have produced).
 - If a mutation needs to reference a section that does not exist yet,
   add the target section first (avoid creating new orphans).
 
 ## Atomic store baseline
 
-`docs/.atomic/workspace.atomic.json` holds the workspace as 215
-atomic Sections + 274 ChangelogEntries across the 12 registered docs
-(R275 baseline). The full atomic mutate API surface (14 primitives)
-is the only path for mutating Section / ChangelogEntry bodies.
+`docs/.atomic/workspace.atomic.json` holds the workspace as 257
+atomic Sections + 576 ChangelogEntries (R408-migration baseline,
+schema v8). The typed mutate API surface is the only path for
+mutating Section / ChangelogEntry bodies.
 
-`docs/GENERATED.md` is the cascade output of every MCP mutate
-primitive (the MCP tool schema has no `--no-regenerate`; only
-`mnemosyne-cli` does). For watching-zenoh it is **not the
-human-readable surface** — the 12 prose docs in
-`mnemosyne.toml::workspace.docs` remain the human-readable surface;
-`docs/GENERATED.md` is gitignored and treated as a byproduct.
+There is no `GENERATED.md` render any more (R408 retired it). The
+atomic store IS the artifact and the SSOT; read it via
+`mnemosyne-cli query` / `query_section`. The former prose docs
+(ARCHITECTURE.md, README.md, docs/*.md) survive as un-validated
+human design notes — useful narrative, but not authoritative and not
+kept in sync with the store.
 
 No NarrativeSection / `prose_blocks` escape-hatch — that route is
 `mnemosyne://concepts/anti-patterns` #9 violation (schema extensions
@@ -116,9 +126,8 @@ git config core.hooksPath .githooks
 ```
 
 - **pre-commit** — fast `mnemosyne-cli validate-workspace` gate;
-  blocks any commit that introduces a new T1 orphan, a
-  resolved-but-still-ledgered entry (drift catch), or a
-  round-trip mandatory break.
+  blocks any commit that introduces a new T1 orphan or a
+  resolved-but-still-ledgered entry (drift catch).
 - **commit-msg** — enforces `COMMIT_FORMAT.md` (subject and body
   ≤72 bytes per line, no multi-line bullet wraps, no
   Co-Authored-By / "Generated with Claude Code" / emoji).
@@ -201,11 +210,12 @@ genre가 atomic ledger의 carry_forward와 중복이라 제거됨 — 시작 프
 1. Mnemosyne concept 6종 적재 (overview → anti-patterns →
    atomic-store → frozen-ledger → tier-rules → workflow) — 이번 세션에
    아직 안 읽은 것만
-2. `validate_workspace` 로 베이스라인 (T1 orphan / round-trip /
-   entries / sections / GENERATED.md sync) 캡처
+2. `validate_workspace` 로 베이스라인 (T1 orphan / atomic ledger
+   entries·sections / style) 캡처 (R408: round-trip·GENERATED.md sync
+   차원은 제거됨 — store-direct 스캔)
 3. 가장 최근 atomic changelog entry 조회 후 `carry_forward` 복원 —
-   `docs/GENERATED.md` 의 마지막 `### Round N` 블록 읽거나
-   `query_section` 으로 latest impact_refs 추적
+   `mnemosyne-cli query` / `query_section` 으로 latest impact_refs 추적
+   (R408: `docs/GENERATED.md` 렌더는 폐기됨; store 가 단일 소스)
 4. `git status` + `git log --oneline -5` 로 미푸시 commit + 최근 활동 확인
 5. SCE 상태가 작업에 필요하면 `/home/coin/scxml-core-engine/` 직접 read
 

@@ -295,11 +295,9 @@ feat(scxml): Phase B9 — generated source drift detection wiring
 Always quantify mutations with validate output deltas:
 
 - **Entries**: `entries 9 → 11` (atomic ledger growth)
-- **Sections**: `sections 102 → 205` (atomic typed-populate) or
-  `parser sections 297 → 298` (raw-markdown auto-detect)
-- **Validate**: `T1=0` (orphan), `RT 11/11` (round-trip mandatory),
-  `T3 warn 843 → 851` (style advisory delta)
-- **GENERATED.md**: `sync` (cascade verified) or `stale` (needs regen)
+- **Sections**: `sections 102 → 205` (atomic typed-populate)
+- **Validate**: `T1=0` (orphan), `T3 warn 843 → 851` (style advisory
+  delta) — R408: round-trip / GENERATED.md-sync dimensions retired
 - **Orphan delta**: `T1 orphan total=0 (ledger=N, new=+0, resolved=-0)`
 
 **Key Points**:

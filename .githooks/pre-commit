@@ -24,7 +24,7 @@
 #      `mnemosyne-cli validate-workspace` finds:
 #        - new T1 cross-ref orphans (not registered in [[orphan_ledger]])
 #        - resolved ledger entries (entry stale, drift catch)
-#        - round-trip mandatory dimension break
+#      (R408: round-trip dimension retired; scan is store-direct)
 #
 # Install via:
 #   git config core.hooksPath .githooks

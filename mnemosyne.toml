@@ -1,40 +1,13 @@
 [workspace]
-# README.md and docs/SESSION_KICKOFF.md removed per Round 7 scope correction
-# (2026-05-08). README is a 0-byte stub (Phase E prose authoring deferred).
-# SESSION_KICKOFF.md moved to notes/SESSION_KICKOFF.md as activity-log genre
-# is a fit for ChangelogEntry, not Section. Round 1/5/6 atomic_impact_refs
-# pointing at the two doc roots are absorbed by the workspace.docs
-# membership change itself — removing the two paths from this list drops
-# their cross-refs out of the orphan-eligible set, so no [[orphan_ledger]]
-# entry is required. (Earlier draft of this comment referenced a Round 254
-# atomic_entry_ref ledger entry "below"; that entry was never authored
-# because the membership-level fix made it unnecessary.)
-#
-# Round 25 Phase E amendment (2026-05-15): README.md re-registered after
-# R24 prose authoring + R25 English rewrite (parser-friendly form, no
-# markdown URL links, no plain §N inline refs). Korean translation lives
-# as README.ko.md satellite file outside workspace.docs governance per
-# README language convention. The pre-existing atomic-store section
-# `watching-zenoh` (R5 lean/stub form, Round 1/5/6/7 cited) remains as
-# the doc-root anchor; atomic decompose of README H2 headings into typed
-# Section fields deferred to a later round to keep R25 = register-only
-# per CLAUDE.md "one phase per session, do not bundle".
-docs = [
-    "ARCHITECTURE.md",
-    "README.md",
-    "docs/feature_inventory.md",
-    "docs/intrinsics-runtime-symbols.md",
-    "docs/oq-w15-ratification-summary.md",
-    "docs/reassembly-fsm.md",
-    "docs/rfc-open-questions-log.md",
-    "docs/rfc-sce-protocol-synthesis.md",
-    "docs/runtime-crate-lwip.md",
-    "docs/runtime-crate-tokio.md",
-    "docs/scouting-fsm.md",
-    "docs/session-fsm.md",
-    "docs/wire-spec-subset.md",
-]
-default_doc = "ARCHITECTURE.md"
+# R408 markdown-doc model retirement (2026-06-04): Mnemosyne retired the
+# ParsedDoc validator + GENERATED.md render + generate-docs cascade
+# (upstream R395-R400). The `docs = [...]` array and `default_doc` keys
+# were removed here because the R408 config parser no longer carries those
+# fields — it ignored them silently, and the atomic store is now the sole
+# directly-validated SSOT. The 13 former member docs (ARCHITECTURE.md,
+# README.md, docs/*.md) remain as human-readable design notes that
+# Mnemosyne no longer parses or §N-orphan-validates. The `[workspace]`
+# table header is still required by the config schema, so it stays.
 
 [schema]
 # rfc-open-questions-log.md uses `## Change log` (with space) for the
@@ -266,3 +239,262 @@ from = "Round 193"
 to = "66"
 reason = "R121j-5c-e2e-action — Round 193 impact_refs §66 typo. Intended atomic section: runtime-crate--sce_link_runtime_tokio. RFC sec numbering tops out at §16; §66 is not a workspace section. R254 absorb."
 since = "Round 193"
+
+# ── R408 markdown-doc model retirement (2026-06-04) ──
+# R400 retired the ParsedDoc validator; store-prose §N citations that
+# previously resolved against parsed markdown headings now surface as
+# T1 orphans. These 13 cite real, existing headings in the (now
+# Mnemosyne-unvalidated) design docs; removing them would degrade the
+# human prose, so they are carried as known-stale markdown_ref.
+[[orphan_ledger]]
+kind = "markdown_ref"
+doc = "atomic-store"
+from = "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-7-preset-cortex-m4-default"
+to = "5.12"
+reason = "R408 store-prose §N cite to a real design-doc heading not registered as a standalone store section; carried as known-stale (prose integrity)."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "markdown_ref"
+doc = "atomic-store"
+from = "reassembly-fsm--prose-sketch/2-4-transitions-in-detail"
+to = "2.4.1"
+reason = "R408 store-prose §N cite to a real design-doc heading not registered as a standalone store section; carried as known-stale (prose integrity)."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "markdown_ref"
+doc = "atomic-store"
+from = "reassembly-fsm--prose-sketch/2-4-transitions-in-detail"
+to = "2.4.2"
+reason = "R408 store-prose §N cite to a real design-doc heading not registered as a standalone store section; carried as known-stale (prose integrity)."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "markdown_ref"
+doc = "atomic-store"
+from = "reassembly-fsm--prose-sketch/2-4-transitions-in-detail"
+to = "2.4.3"
+reason = "R408 store-prose §N cite to a real design-doc heading not registered as a standalone store section; carried as known-stale (prose integrity)."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "markdown_ref"
+doc = "atomic-store"
+from = "reassembly-fsm--prose-sketch/2-4-transitions-in-detail"
+to = "2.4.4"
+reason = "R408 store-prose §N cite to a real design-doc heading not registered as a standalone store section; carried as known-stale (prose integrity)."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "markdown_ref"
+doc = "atomic-store"
+from = "reassembly-fsm--prose-sketch/2-4-transitions-in-detail"
+to = "2.4.5"
+reason = "R408 store-prose §N cite to a real design-doc heading not registered as a standalone store section; carried as known-stale (prose integrity)."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "markdown_ref"
+doc = "atomic-store"
+from = "reassembly-fsm--prose-sketch/2-4-transitions-in-detail"
+to = "2.4.6"
+reason = "R408 store-prose §N cite to a real design-doc heading not registered as a standalone store section; carried as known-stale (prose integrity)."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "markdown_ref"
+doc = "atomic-store"
+from = "reassembly-fsm--prose-sketch/2-4-transitions-in-detail"
+to = "2.4.7"
+reason = "R408 store-prose §N cite to a real design-doc heading not registered as a standalone store section; carried as known-stale (prose integrity)."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "markdown_ref"
+doc = "atomic-store"
+from = "reassembly-fsm--prose-sketch/2-4-transitions-in-detail"
+to = "2.4.8"
+reason = "R408 store-prose §N cite to a real design-doc heading not registered as a standalone store section; carried as known-stale (prose integrity)."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "markdown_ref"
+doc = "atomic-store"
+from = "scouting-fsm--prose-sketch/6-1-per-link-trust-class-table"
+to = "2.6"
+reason = "R408 store-prose §N cite to a real design-doc heading not registered as a standalone store section; carried as known-stale (prose integrity)."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "markdown_ref"
+doc = "atomic-store"
+from = "scouting-fsm--prose-sketch/6-4-oq-w9-closure"
+to = "6.4"
+reason = "R408 store-prose §N cite to a real design-doc heading not registered as a standalone store section; carried as known-stale (prose integrity)."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "markdown_ref"
+doc = "atomic-store"
+from = "scouting-fsm--prose-sketch/8-2-new-open-questions"
+to = "6.4"
+reason = "R408 store-prose §N cite to a real design-doc heading not registered as a standalone store section; carried as known-stale (prose integrity)."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "markdown_ref"
+doc = "atomic-store"
+from = "wire-spec-subset--watching-zenoh-mvp/6-zenoh-payload-layer"
+to = "6.3"
+reason = "R408 store-prose §N cite to a real design-doc heading not registered as a standalone store section; carried as known-stale (prose integrity)."
+since = "R408-migration 2026-06-04"
+
+# 18 changelog impact_refs to targets absent from the store (rfc-open-
+# questions-log was never decomposed into sections; appendix-a/b/c +
+# oq-w paths reorganized away). Audit half is frozen (frozen-ledger),
+# so the dangling refs are absorbed here rather than rewritten.
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 1"
+to = "0"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 1"
+to = "rfc-open-questions-log"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 10"
+to = "6/6.2/6.2.6"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 104"
+to = "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 107"
+to = "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 11"
+to = "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 11"
+to = "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 13"
+to = "rfc--sce-forge-extensions-for-wire-protocol-synthesis/appendix-a--worked-example-crc16-ccitt"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 14"
+to = "rfc--sce-forge-extensions-for-wire-protocol-synthesis/appendix-a--worked-example-crc16-ccitt"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 15"
+to = "rfc--sce-forge-extensions-for-wire-protocol-synthesis/appendix-a--worked-example-crc16-ccitt"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 15"
+to = "rfc--sce-forge-extensions-for-wire-protocol-synthesis/appendix-b--worked-example-vle-zint-u64"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 16"
+to = "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w15--stateless-accept-primitive-ownership-and-defaults"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 16"
+to = "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 17"
+to = "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w24--rfc-5i-architectural-tier-vs-peripheral-tier-explicit-separation"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 295"
+to = "rfc--sce-forge-extensions-for-wire-protocol-synthesis/appendix-c--honest-scope-of-the-end-state/what-watching-zenoh-will-deliver-when-all-phases-land"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 295"
+to = "rfc--sce-forge-extensions-for-wire-protocol-synthesis/appendix-c--honest-scope-of-the-end-state/what-watching-zenoh-will-not-deliver"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 93"
+to = "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+
+[[orphan_ledger]]
+kind = "atomic_entry_ref"
+doc = "<atomic-changelog>"
+from = "Round 94"
+to = "rfc-open-questions-log/wire-subset-questions-oq-w1oq-w8/oq-w3--interest-semantics-with-no-router-present"
+reason = "R408: frozen changelog impact_ref to a target absent from the atomic store (rfc-open-questions-log undecomposed / path reorganized); audit half immutable, absorbed as known-stale."
+since = "R408-migration 2026-06-04"
+

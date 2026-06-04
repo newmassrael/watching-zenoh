@@ -31,9 +31,10 @@ This repo builds two things at once.
    harnesses exercise all six languages from the same vectors.
    Design RFC lives in docs/rfc-sce-protocol-synthesis.md.
 
-Design SSoT entry is ARCHITECTURE.md. The 12 spec docs under
-docs/ are governed by Mnemosyne (atomic-store + GENERATED.md
-lifecycle); the operating rules are in CLAUDE.md.
+Design SSoT is the Mnemosyne atomic store (docs/.atomic/). The spec
+docs under docs/ are human-readable design notes (since R408 Mnemosyne
+no longer parses or validates them); the operating rules are in
+CLAUDE.md.
 
 ## Current status
 
@@ -88,9 +89,8 @@ mirrored by the GitHub Actions workflow.
 | Path | Role |
 |---|---|
 | ARCHITECTURE.md | Design entry point |
-| docs/ | 12 Mnemosyne-managed spec docs |
-| docs/.atomic/ | Atomic-store sidecar (mutate only via typed primitives) |
-| docs/GENERATED.md | Cascade-rendered output (gitignored, never edit) |
+| docs/ | Design notes (R408: no longer Mnemosyne-validated) |
+| docs/.atomic/ | Atomic store — the SSOT (mutate only via typed primitives) |
 | sources/ | SCE Forge input SCXML (codecs + algorithms + session FSM) |
 | crates/wz-codecs | Generated codec types from sources/codecs/*.scxml |
 | crates/wz-runtime-tokio | Tokio-based AP runtime + session glue + builders |
@@ -181,7 +181,7 @@ first vendored snippet lands).
 
 - SCE (build infrastructure): scxml-core-engine
   - https://github.com/newmassrael/scxml-core-engine
-- Mnemosyne (atomic-store + GENERATED.md lifecycle): mnemosyne
+- Mnemosyne (atomic-store SSOT lifecycle): mnemosyne
   - https://github.com/newmassrael/mnemosyne
 - zenoh upstream
   - https://github.com/eclipse-zenoh/zenoh

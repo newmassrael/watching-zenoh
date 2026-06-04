@@ -28,9 +28,9 @@ Kotlin / Go / Python 6 언어가 동일 author-side 파일에서 생성된다.
    SCE Forge 가 생성한다. Conformance harness 가 6 언어를 동일
    vector 로 검증한다. 설계 RFC 는 docs/rfc-sce-protocol-synthesis.md.
 
-설계 SSoT 진입점은 ARCHITECTURE.md. docs/ 하위 12 spec doc 은
-Mnemosyne 가 관리 (atomic-store + GENERATED.md lifecycle); 운영
-규칙은 CLAUDE.md.
+설계 SSoT 는 Mnemosyne atomic store (docs/.atomic/). docs/ 하위
+spec doc 은 사람용 설계 노트 (R408 이후 Mnemosyne 가 더는 파싱·검증
+안 함); 운영 규칙은 CLAUDE.md.
 
 ## 현재 상태
 
@@ -83,9 +83,8 @@ E binary-dep e2e fixture 가 로컬 10-lane CI (scripts/run-ci.sh
 | 경로 | 역할 |
 |---|---|
 | ARCHITECTURE.md | 설계 진입점 |
-| docs/ | Mnemosyne 가 관리하는 12 spec doc |
-| docs/.atomic/ | Atomic-store sidecar (typed primitive 만 mutate) |
-| docs/GENERATED.md | Cascade-render 결과 (gitignored, 직접 편집 금지) |
+| docs/ | 설계 노트 (R408: 더는 Mnemosyne 검증 대상 아님) |
+| docs/.atomic/ | Atomic store — SSOT (typed primitive 만 mutate) |
 | sources/ | SCE Forge 입력 SCXML (codec + algorithm + session FSM) |
 | crates/wz-codecs | sources/codecs/*.scxml 에서 생성된 codec 타입 |
 | crates/wz-runtime-tokio | Tokio 기반 AP 런타임 + session glue + builder |
@@ -176,7 +175,7 @@ snippet land 시 생성).
 
 - SCE (build infrastructure): scxml-core-engine
   - https://github.com/newmassrael/scxml-core-engine
-- Mnemosyne (atomic-store + GENERATED.md lifecycle): mnemosyne
+- Mnemosyne (atomic-store SSOT lifecycle): mnemosyne
   - https://github.com/newmassrael/mnemosyne
 - zenoh upstream
   - https://github.com/eclipse-zenoh/zenoh
