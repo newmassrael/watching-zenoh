@@ -3099,6 +3099,103 @@ mod tests {
         );
     }
 
+    /// A literal-keyexpr Put carrying an OUTER QoS ext (ext_id 0x01,
+    /// ENC_ZINT, packed byte = `raw`). The outer ext lives on
+    /// `Push.extensions`; the codec carries it ungated, so this is
+    /// constructible regardless of the QoS-byte consumer features — they
+    /// gate only the subscriber-side projection (`extract_qos`).
+    fn push_put_with_qos(keyexpr: &str, raw: u8) -> PushOwned {
+        let mut ext = wz_codecs::ext_entry::ExtEntry::new();
+        ext.set_ext_id(0x01); // QOS_EXT_ID
+        ext.set_enc(0x01); // ENC_ZINT
+        ext.body = wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZint(
+            wz_codecs::ext_zint::ExtZint {
+                value: u64::from(raw),
+            },
+        );
+        let mut push = Push {
+            keyexpr: wz_codecs::wireexpr::Wireexpr {
+                body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(keyexpr.len() as u64),
+                    suffix: Some(keyexpr),
+                }),
+            },
+            body: wz_codecs::push::PushVariant::CodecZenohMsgPut(
+                wz_codecs::msg_put::MsgPut::default(),
+            ),
+            ..Push::default()
+        }
+        .try_into_owned()
+        .unwrap();
+        push.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        push
+    }
+
+    #[cfg(any(
+        feature = "pubsub-priority",
+        feature = "pubsub-congestion-control",
+        feature = "pubsub-express"
+    ))]
+    #[test]
+    fn inbound_put_qos_is_projected_when_a_qos_consumer_on() {
+        let mut registry = SubscriberRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let present = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        let p = present.clone();
+        registry.register("home/temp", move |sample| {
+            f.fetch_add(1, Ordering::SeqCst);
+            if sample.qos().is_some() {
+                p.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_put_with_qos("home/temp", 0xBE))),
+            Reliability::Reliable,
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 1, "subscriber fires");
+        assert_eq!(
+            present.load(Ordering::SeqCst),
+            1,
+            "wire QoS projects to Sample.qos when a QoS-byte consumer is on"
+        );
+    }
+
+    #[cfg(not(any(
+        feature = "pubsub-priority",
+        feature = "pubsub-congestion-control",
+        feature = "pubsub-express"
+    )))]
+    #[test]
+    fn inbound_put_qos_is_dropped_when_all_qos_consumers_off() {
+        let mut registry = SubscriberRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let present = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        let p = present.clone();
+        registry.register("home/temp", move |sample| {
+            f.fetch_add(1, Ordering::SeqCst);
+            if sample.qos().is_some() {
+                p.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_put_with_qos("home/temp", 0xBE))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "subscriber still fires — only the metadata field is dropped"
+        );
+        assert_eq!(
+            present.load(Ordering::SeqCst),
+            0,
+            "wire QoS must NOT project to Sample.qos when all QoS-byte consumers are off"
+        );
+    }
+
     #[test]
     fn dispatch_push_fires_when_own_zid_not_set() {
         // Without an installed own_zid the registry cannot recognise
