@@ -64,6 +64,16 @@ pub trait QueryView {
     /// Attachment payload extracted from the Query ext-chain. `None` when
     /// no attachment ext is present.
     fn attachment(&self) -> Option<&[u8]>;
+    /// Source-info record extracted from the Query ext-chain (querier
+    /// identity: zid / eid / sn). `None` when no source-info ext is
+    /// present or `query-source-info` is off. Default impl returns `None`
+    /// so `QueryView` impls that predate this accessor stay valid.
+    /// `alloc`-only (the `SourceInfo` type lives in the `alloc`-gated
+    /// `sample` module); mirrors `SampleView`'s metadata accessors.
+    #[cfg(feature = "alloc")]
+    fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
+        None
+    }
     /// Request id from the outer `Request.rid` envelope (correlation key
     /// for the matching reply chain).
     fn rid(&self) -> u64;
@@ -125,6 +135,12 @@ pub struct BorrowedQuery<'a> {
     pub parameters: Option<&'a [u8]>,
     /// Attachment payload, if any.
     pub attachment: Option<&'a [u8]>,
+    /// Source-info record (querier identity), if any. Owned (the decoded
+    /// `SourceInfo` is a small POD copied out of the ext-chain once at
+    /// dispatch); the accessor lends it. `alloc`-only — the `SourceInfo`
+    /// type lives in the `alloc`-gated `sample` module.
+    #[cfg(feature = "alloc")]
+    pub source_info: Option<crate::sample::SourceInfo>,
     /// Request id (correlation key).
     pub rid: u64,
 }
@@ -138,6 +154,10 @@ impl QueryView for BorrowedQuery<'_> {
     }
     fn attachment(&self) -> Option<&[u8]> {
         self.attachment
+    }
+    #[cfg(feature = "alloc")]
+    fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
+        self.source_info.as_ref()
     }
     fn rid(&self) -> u64 {
         self.rid
@@ -259,6 +279,7 @@ mod tests {
                 keyexpr: "robot/**",
                 parameters: Some(b"p=1"),
                 attachment: None,
+                source_info: None,
                 rid: 42,
             },
             &mut out,
@@ -309,6 +330,7 @@ mod tests {
                 keyexpr: "a/b",
                 parameters: None,
                 attachment: None,
+                source_info: None,
                 rid: 1,
             },
             &mut out,
@@ -318,6 +340,7 @@ mod tests {
                 keyexpr: "c/d",
                 parameters: Some(b"x=2"),
                 attachment: Some(b"att"),
+                source_info: None,
                 rid: 2,
             },
             &mut out,

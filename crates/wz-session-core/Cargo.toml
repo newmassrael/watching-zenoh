@@ -123,6 +123,11 @@ query-queryable = ["codec-request", "codec-response"]
 query-attachment = ["attachment-bytes"]
 query-selector-parameters = []
 query-reply-err = []
+# query-source-info gates the queryable-side projection of the inbound
+# Query body source-info ext (id 0x01 ENC_ZBUF, shared with the Push
+# decoder). Receive-side only at this round; send-side stamping is a
+# follow-up.
+query-source-info = []
 # R311fm — the z_get consumer's reply-body decode plane. Gates the
 # inbound `Response(Reply)` Put / Del body arms in `reply.rs`
 # `dispatch_response` (the projection to `InboundReplyBody::Put` /

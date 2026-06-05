@@ -311,19 +311,19 @@ pubsub-timestamp = ["wz-runtime-tokio?/pubsub-timestamp"]
 # keyexpr -> SCXML domain-event inbound adapter; ⇒ codec-push).
 switchboard = ["wz-runtime-tokio?/switchboard"]
 
-# ----- domain: query (10 atomic, 9 active / 1 reserved) -----
-# R311cj — query-attachment + -selector-parameters + -reply-err wire-up;
-# query-source-info stays reserved (build_request_query_with_source_info
-# is doc-referenced but not yet implemented).
-# R307 — six atomic features in the query domain forward into
+# ----- domain: query (10 atomic, 10 active / 0 reserved) -----
+# R311cj — query-attachment + -selector-parameters + -reply-err wire-up.
+# query-source-info wired receive-side this round (the queryable-side
+# projection of the inbound Query body source-info ext, id 0x01 ENC_ZBUF,
+# shared decoder with the Push path); send-side stamping
+# (`build_request_query_with_source_info`) remains a follow-up.
+# R307 — the query-domain atomic features forward into
 # `wz-runtime-tokio` (cargo `?` syntax: only when runtime-tokio is
 # also active). Internal implication edges live in
 # `wz-runtime-tokio/Cargo.toml::[features]` (e.g. `query-get =
 # ["query-reply"]`); the facade does not re-declare them so a future
 # alternative runtime can implement its own dependency shape without
-# the facade pre-committing to tokio-side semantics. Only
-# `query-source-info` stays reserved (no source-level gate yet — its
-# `build_request_query_with_source_info` impl has not landed). The R307
+# the facade pre-committing to tokio-side semantics. The R307
 # comment that listed query-reply-err / query-selector-parameters /
 # query-attachment as "reserved" was superseded by R311cj (which wired
 # all three); the attachment composability round additionally selects
@@ -336,7 +336,7 @@ query-queryable = ["wz-runtime-tokio?/query-queryable"]
 query-reply = ["wz-runtime-tokio?/query-reply"]
 query-reply-err = ["wz-runtime-tokio?/query-reply-err"]
 query-selector-parameters = ["wz-runtime-tokio?/query-selector-parameters"]
-query-source-info = []
+query-source-info = ["wz-runtime-tokio?/query-source-info"]
 query-target = ["wz-runtime-tokio?/query-target"]
 query-timeout = ["wz-runtime-tokio?/query-timeout"]
 

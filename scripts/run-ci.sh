@@ -712,7 +712,7 @@ layer_c1d_cargo_test_pubsub() {
 # it. (It also re-runs reply::decode_isolation_tests — harmless.)
 layer_c1e_cargo_test_query() {
     (cd crates \
-        && cargo test -p wz-session-core --features query-queryable,query-attachment,query-selector-parameters,query-reply-err,codec-response-final --quiet \
+        && cargo test -p wz-session-core --features query-queryable,query-attachment,query-selector-parameters,query-reply-err,query-source-info,codec-response-final --quiet \
         && cargo test -p wz-session-core --features query-queryable --quiet)
 }
 
@@ -824,7 +824,7 @@ layer_c1h_arbitrary_subset_matrix() {
     (cd crates \
         && cargo build -p wz-session-core --no-default-features --features alloc --quiet \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --quiet \
-        && cargo build -p wz-session-core --no-default-features --features alloc,query-queryable,query-attachment,query-selector-parameters,query-reply-err --quiet \
+        && cargo build -p wz-session-core --no-default-features --features alloc,query-queryable,query-attachment,query-selector-parameters,query-reply-err,query-source-info --quiet \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-push,codec-response,codec-response-final,pubsub-put,pubsub-delete --quiet \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber --quiet \
         && cargo build -p wz-session-core --no-default-features --features alloc,codec-declare --quiet \
@@ -832,9 +832,9 @@ layer_c1h_arbitrary_subset_matrix() {
         && cargo build -p wz-session-core --no-default-features --quiet \
         && cargo build -p wz-session-core --no-default-features --features codec-declare,declare-subscriber,declare-queryable,liveliness-token,liveliness-subscriber --quiet \
         && cargo build -p wz-session-core --no-default-features --features codec-push,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp --quiet \
-        && cargo build -p wz-session-core --no-default-features --features codec-request,query-queryable,query-attachment,query-selector-parameters,query-reply-err --quiet \
+        && cargo build -p wz-session-core --no-default-features --features codec-request,query-queryable,query-attachment,query-selector-parameters,query-reply-err,query-source-info --quiet \
         && cargo build -p wz-session-core --no-default-features --features codec-response,codec-response-final,query-reply --quiet \
-        && cargo build -p wz-session-core --no-default-features --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,query-reply,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,pubsub-source-info,query-attachment,query-selector-parameters,query-reply-err --quiet)
+        && cargo build -p wz-session-core --no-default-features --features codec-push,codec-declare,codec-request,codec-response,codec-response-final,query-queryable,query-reply,liveliness-token,liveliness-subscriber,declare-subscriber,declare-queryable,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,pubsub-source-info,query-attachment,query-selector-parameters,query-reply-err,query-source-info --quiet)
 }
 
 # ─── Layer C1i — cargo test -p wz-runtime-tokio --features scouting-active ─

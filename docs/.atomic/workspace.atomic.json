@@ -30193,6 +30193,38 @@
         "Signature-stability principle preserved — all 12 declare-family builders + encode_frame_with_declare carry the principled exemption tag per `feedback_signature_stability` MEMORY note (Declare return type is feature-gated). send_declare_* methods on SessionLinkActions remain signature-stable from R311g1; the new Cargo implication chain (declare-* implies codec-declare) mechanically guarantees the body-cfg branch is well-formed."
       ]
     },
+    "Round 311ia": {
+      "decision_summary": "query-source-info receive-side: inbound Query source-info ext (id 0x01 ZBUF) projected to QueryView::source_info via shared Push decoder; status reserved->active; send-side stamping follow-up",
+      "changes_bullets": [
+        "extract_query_source_info + QueryView::source_info accessor + BorrowedQuery field; fire_matching_queryables projects it",
+        "query-source-info forwarded wz-session-core -> wz-runtime-tokio -> wz facade",
+        "inventory query-source-info reserved->active (Layer A3 active<=>gated invariant)",
+        "POS (source-info on) + NEG (off, isolated -p lane) receive-side tests"
+      ],
+      "verification_bullets": [
+        "POS + NEG cargo test pass; clippy -D warnings clean on source-info on/off sets",
+        "Layer A3 catalog-status gate OK (atoms=143 active=55)",
+        "full host run-ci WZ_RUN_LAYER_G=1 EXIT 0"
+      ],
+      "carry_forward_bullets": [
+        "query-source-info send-side stamping (RequestQueryBuilder query body ext-chain source_info+attachment ordering with Z bits + QueryOptions::with_source_info + querier identity source) remains a follow-up; receive-side projection landed this round"
+      ],
+      "publishable_decision_summary": "query-source-info receive-side: inbound Query source-info ext (id 0x01 ZBUF) projected to QueryView::source_info via shared Push decoder; status reserved->active; send-side stamping follow-up",
+      "publishable_changes_bullets": [
+        "extract_query_source_info + QueryView::source_info accessor + BorrowedQuery field; fire_matching_queryables projects it",
+        "query-source-info forwarded wz-session-core -> wz-runtime-tokio -> wz facade",
+        "inventory query-source-info reserved->active (Layer A3 active<=>gated invariant)",
+        "POS (source-info on) + NEG (off, isolated -p lane) receive-side tests"
+      ],
+      "publishable_verification_bullets": [
+        "POS + NEG cargo test pass; clippy -D warnings clean on source-info on/off sets",
+        "Layer A3 catalog-status gate OK (atoms=143 active=55)",
+        "full host run-ci WZ_RUN_LAYER_G=1 EXIT 0"
+      ],
+      "publishable_carry_forward_bullets": [
+        "query-source-info send-side stamping (RequestQueryBuilder query body ext-chain source_info+attachment ordering with Z bits + QueryOptions::with_source_info + querier identity source) remains a follow-up; receive-side projection landed this round"
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
@@ -36313,10 +36345,10 @@
       "reason": "F=selector param parse; P=zenoh; C=opt-in query refinement"
     },
     "query-source-info": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "zenoh query SourceInfo",
-      "reason": "F=source-info on query; P=zenoh; C=symmetric to pubsub-source-info"
+      "reason": "F=querier source-info ext (id 0x01 ZBUF) projected to QueryView::source_info, gated query-source-info (receive-side; send-side stamping follow-up); P=zenoh query SourceInfo; C=symmetric to pubsub-source-info, shared sample decoder"
     },
     "query-target": {
       "status": "active",

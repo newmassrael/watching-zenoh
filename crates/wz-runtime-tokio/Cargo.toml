@@ -457,6 +457,7 @@ keyexpr-canon = []
 # reference); wire-up cascade lands when the impl arrives.
 query-attachment = ["wz-session-core/query-attachment"]
 query-selector-parameters = ["wz-session-core/query-selector-parameters"]
+query-source-info = ["wz-session-core/query-source-info"]
 query-reply-err = ["wz-session-core/query-reply-err"]
 # R311en — scouting domain wire-up (active mode). First of the
 # scouting 0/6 -> active transition (north-star missing-subsystem

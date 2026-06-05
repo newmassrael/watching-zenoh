@@ -206,6 +206,28 @@ fn extract_query_attachment(query: &QueryOwned) -> Option<&[u8]> {
     }
 }
 
+// R311 — project the querier's source-info ext into a typed
+// `SourceInfo`. The Query body source-info ext is `ENC_ZBUF | 0x01`
+// (zenoh-pico message.c:438-444 `_z_query_encode`) — the SAME ext id +
+// encoding as the Push body source-info, so the wz `crate::sample`
+// SSOT decoder is reused verbatim rather than re-deriving the layout.
+// Signature stable (returns Option); `query-source-info` off
+// short-circuits to None so a `codec-request` subset that does not
+// compose querier provenance carries no source-info decode path.
+#[cfg(all(feature = "codec-request", feature = "alloc"))]
+fn extract_query_source_info(query: &QueryOwned) -> Option<crate::sample::SourceInfo> {
+    #[cfg(not(feature = "query-source-info"))]
+    {
+        let _ = query;
+        None
+    }
+    #[cfg(feature = "query-source-info")]
+    {
+        let exts = query.extensions.as_deref()?;
+        crate::sample::extract_source_info(exts)
+    }
+}
+
 /// Stable handle returned by [`QueryableRegistry::register`] so the
 /// caller can later unregister the queryable without re-keying on
 /// the keyexpr pattern (duplicate-pattern queryables are explicitly
@@ -938,6 +960,9 @@ impl<C: QuerySink> QueryableRegistry<C> {
         #[cfg(not(feature = "query-selector-parameters"))]
         let parameters_view: Option<&[u8]> = None;
         let attachment_view = extract_query_attachment(query);
+        // R311 — querier source-info, decoded once per inbound query
+        // (owned POD; cloned into each matched queryable's view below).
+        let source_info_view = extract_query_source_info(query);
         for queryable in self.queryables.iter_mut() {
             // R311gb (Track 2) — shared match SSOT with the no-heap
             // `dispatch_borrowed` path: locality predicate + bounded
@@ -962,6 +987,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     keyexpr,
                     parameters: parameters_view,
                     attachment: attachment_view,
+                    source_info: source_info_view.clone(),
                     rid,
                 };
                 queryable.sink.handle(&query_view, &mut responder);
@@ -1529,6 +1555,70 @@ mod tests {
             Some(&b"key=value"[..]),
             "wire parameters slice must reach QueryView when query-selector-parameters is on"
         );
+    }
+
+    /// A `Request(Query)` carrying a source-info ext (id 0x01 ENC_ZBUF,
+    /// the same wire shape as the Push body source-info). Built by hand
+    /// so the fixture composes regardless of `query-source-info` — that
+    /// feature gates only the queryable-side projection.
+    #[cfg(feature = "query-source-info")]
+    fn request_query_with_source_info(rid: u64, suffix: &str, zid: &[u8]) -> RequestOwned {
+        let payload = crate::source_info_ext::encode_source_info_ext_body(zid, 7, 42);
+        let mut ext = ExtEntry::default();
+        ext.set_ext_id(0x01); // SOURCE_INFO_EXT_ID
+        ext.set_enc(2); // ENC_ZBUF
+        ext.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+            value_len: payload.len() as u64,
+            value: &payload,
+        });
+        let mut query = Query::default().try_into_owned().unwrap();
+        query.header |= 0x80;
+        query.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        let keyexpr = Wireexpr {
+            body: wz_codecs::wireexpr::WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len: Some(suffix.len() as u64),
+                suffix: Some(suffix),
+            }),
+        };
+        let mut request = Request {
+            header: 0x1c,
+            rid,
+            keyexpr,
+            extensions: None,
+            body: RequestVariant::CodecZenohQuery(Query::default()),
+        }
+        .try_into_owned()
+        .unwrap();
+        request.body = RequestOwnedVariant::CodecZenohQuery(query);
+        request
+    }
+
+    #[cfg(feature = "query-source-info")]
+    #[test]
+    fn dispatch_threads_source_info_into_query_event_callback() {
+        // query-source-info ON → the wire querier source-info reaches the
+        // handler's QueryView::source_info() (id 0x01 ENC_ZBUF, shared
+        // decoder with the Push path).
+        let mut reg = QueryableRegistry::new();
+        let captured: Arc<Mutex<Option<crate::sample::SourceInfo>>> = Arc::new(Mutex::new(None));
+        let cap_cb = captured.clone();
+        reg.register("home/temp", move |event, _responder| {
+            *cap_cb.lock().unwrap() = event.source_info().cloned();
+        });
+
+        let req = request_query_with_source_info(21, "home/temp", &[0xAA, 0xBB, 0xCC, 0xDD]);
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+
+        let si = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("wire source-info must reach QueryView when query-source-info is on");
+        assert_eq!(si.zid_prefix(), &[0xAA, 0xBB, 0xCC, 0xDD]);
+        assert_eq!(si.eid, 7);
+        assert_eq!(si.sn, 42);
     }
 
     #[test]
@@ -2215,6 +2305,7 @@ mod tests {
                 keyexpr: "a/b",
                 parameters: None,
                 attachment: None,
+                source_info: None,
                 rid: 7,
             },
             &mut responder,
@@ -2389,6 +2480,66 @@ mod request_decode_isolation_tests {
             *parameters.lock().unwrap(),
             None,
             "wire parameters must NOT reach QueryView when query-selector-parameters is off"
+        );
+    }
+
+    /// A `Request(Query)` carrying a source-info ext (id 0x01 ENC_ZBUF).
+    /// Constructible with `query-source-info` off — the feature gates
+    /// only `extract_query_source_info`'s projection.
+    #[cfg(not(feature = "query-source-info"))]
+    fn request_query_with_source_info(rid: u64, suffix: &str, zid: &[u8]) -> RequestOwned {
+        let payload = crate::source_info_ext::encode_source_info_ext_body(zid, 7, 42);
+        let mut ext = ExtEntry::default();
+        ext.set_ext_id(0x01); // SOURCE_INFO_EXT_ID
+        ext.set_enc(2); // ENC_ZBUF
+        ext.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+            value_len: payload.len() as u64,
+            value: &payload,
+        });
+        let mut query = Query::default().try_into_owned().unwrap();
+        query.header |= 0x80;
+        query.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        let mut request = Request {
+            header: 0x1c,
+            rid,
+            keyexpr: literal_keyexpr(suffix),
+            extensions: None,
+            body: RequestVariant::CodecZenohQuery(Query::default()),
+        }
+        .try_into_owned()
+        .unwrap();
+        request.body = RequestOwnedVariant::CodecZenohQuery(query);
+        request
+    }
+
+    #[cfg(not(feature = "query-source-info"))]
+    #[test]
+    fn inbound_query_source_info_is_dropped_when_query_source_info_off() {
+        let mut reg = QueryableRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let present = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        let p = present.clone();
+        reg.register("home/temp", move |event, _responder| {
+            f.fetch_add(1, Ordering::SeqCst);
+            if event.source_info().is_some() {
+                p.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        let req = request_query_with_source_info(14, "home/temp", &[0xAA, 0xBB, 0xCC, 0xDD]);
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "queryable still fires — only the metadata field is dropped"
+        );
+        assert_eq!(
+            present.load(Ordering::SeqCst),
+            0,
+            "wire source-info must NOT reach QueryView when query-source-info is off"
         );
     }
 }
