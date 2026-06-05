@@ -2927,6 +2927,178 @@ mod tests {
         );
     }
 
+    // ─── receive-side metadata field-projection isolation ────────────
+    //
+    // dispatch_push's Put arm projects the wire-carried `encoding` /
+    // `source_info` into the `Sample` only when the consumer feature is
+    // ON; with it OFF the per-arm populator yields `None` (the
+    // `#[cfg(not(feature = "pubsub-encoding"))]` / `..-source-info`
+    // branches above). The wire bytes still carry the field — the codec
+    // `MsgPut.encoding` field and the source_info ext are ungated
+    // (struct stability) — so an un-gating regression (projecting
+    // unconditionally) would leak the field into the Sample on a build
+    // that never opted in, and no behavioural test would catch it (Layer
+    // F only proves the OFF feature shrinks the binary). These symmetric
+    // POS/NEG pairs pin both directions: with the feature ON the wire
+    // field projects (Some); with it OFF the SAME wire projects None
+    // while the subscriber still fires — only the metadata field is
+    // dropped, not the whole dispatch (distinguishing a gated field from
+    // a dropped message). The C1d pubsub lane runs both arms: its first
+    // invocation omits pubsub-encoding / pubsub-source-info (NEG arm),
+    // its second enables them (POS arm).
+
+    /// A literal-keyexpr Put (id=0, suffix=keyexpr) carrying a wire
+    /// `encoding` (packed_id, no schema). The codec `MsgPut.encoding`
+    /// field is ungated, so this is constructible regardless of
+    /// `pubsub-encoding` — that feature gates only the subscriber-side
+    /// projection.
+    fn push_put_with_encoding(keyexpr: &str, packed_id: u32) -> PushOwned {
+        let put = wz_codecs::msg_put::MsgPut {
+            encoding: Some(wz_codecs::encoding::Encoding {
+                packed_id,
+                schema_len: None,
+                schema: None,
+            }),
+            ..wz_codecs::msg_put::MsgPut::default()
+        }
+        .try_into_owned()
+        .unwrap();
+        let mut push = Push {
+            keyexpr: wz_codecs::wireexpr::Wireexpr {
+                body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(keyexpr.len() as u64),
+                    suffix: Some(keyexpr),
+                }),
+            },
+            ..Push::default()
+        }
+        .try_into_owned()
+        .unwrap();
+        push.body = PushOwnedVariant::CodecZenohMsgPut(put);
+        push
+    }
+
+    #[cfg(feature = "pubsub-encoding")]
+    #[test]
+    fn inbound_put_encoding_is_projected_when_pubsub_encoding_on() {
+        let mut registry = SubscriberRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let present = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        let p = present.clone();
+        registry.register("home/temp", move |sample| {
+            f.fetch_add(1, Ordering::SeqCst);
+            if sample.encoding().is_some() {
+                p.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_put_with_encoding("home/temp", 4))),
+            Reliability::Reliable,
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 1, "subscriber fires");
+        assert_eq!(
+            present.load(Ordering::SeqCst),
+            1,
+            "wire encoding projects to Sample.encoding when pubsub-encoding is on"
+        );
+    }
+
+    #[cfg(not(feature = "pubsub-encoding"))]
+    #[test]
+    fn inbound_put_encoding_is_dropped_when_pubsub_encoding_off() {
+        let mut registry = SubscriberRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let present = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        let p = present.clone();
+        registry.register("home/temp", move |sample| {
+            f.fetch_add(1, Ordering::SeqCst);
+            if sample.encoding().is_some() {
+                p.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_put_with_encoding("home/temp", 4))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "subscriber still fires — only the metadata field is dropped"
+        );
+        assert_eq!(
+            present.load(Ordering::SeqCst),
+            0,
+            "wire encoding must NOT project to Sample.encoding when pubsub-encoding is off"
+        );
+    }
+
+    #[cfg(feature = "pubsub-source-info")]
+    #[test]
+    fn inbound_put_source_info_is_projected_when_pubsub_source_info_on() {
+        // No own_zid installed → dedup cannot engage → the sample fires
+        // and carries the projected source_info.
+        let mut registry = SubscriberRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let present = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        let p = present.clone();
+        registry.register("demo/temp", move |sample| {
+            f.fetch_add(1, Ordering::SeqCst);
+            if sample.source_info().is_some() {
+                p.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_put_literal_with_source_info(
+                "demo/temp",
+                &[0xAA, 0xBB, 0xCC, 0xDD],
+            ))),
+            Reliability::Reliable,
+        );
+        assert_eq!(fired.load(Ordering::SeqCst), 1, "subscriber fires");
+        assert_eq!(
+            present.load(Ordering::SeqCst),
+            1,
+            "wire source_info projects to Sample.source_info when pubsub-source-info is on"
+        );
+    }
+
+    #[cfg(not(feature = "pubsub-source-info"))]
+    #[test]
+    fn inbound_put_source_info_is_dropped_when_pubsub_source_info_off() {
+        let mut registry = SubscriberRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let present = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        let p = present.clone();
+        registry.register("demo/temp", move |sample| {
+            f.fetch_add(1, Ordering::SeqCst);
+            if sample.source_info().is_some() {
+                p.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(push_put_literal_with_source_info(
+                "demo/temp",
+                &[0xAA, 0xBB, 0xCC, 0xDD],
+            ))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "subscriber still fires — only the metadata field is dropped"
+        );
+        assert_eq!(
+            present.load(Ordering::SeqCst),
+            0,
+            "wire source_info must NOT project to Sample.source_info when pubsub-source-info is off"
+        );
+    }
+
     #[test]
     fn dispatch_push_fires_when_own_zid_not_set() {
         // Without an installed own_zid the registry cannot recognise
