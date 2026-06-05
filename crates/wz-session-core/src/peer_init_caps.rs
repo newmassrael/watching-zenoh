@@ -78,3 +78,40 @@ impl PeerInitCaps {
         }
     }
 }
+
+// ── transport-batching receive-side field-drop NEG ──
+//
+// `from_init_syn` honors the peer-advertised InitSyn `batch_size` only
+// when `transport-batching` is ON; with it OFF the peer value is
+// discarded and the field is forced to 65535 (full MTU). The ON arm is
+// behaviourally covered by wz-runtime-tokio's
+// `r121d_peer_init_caps_decodes_packed_sn_res_byte` (which asserts the
+// honored 1024 under `cfg(feature = "transport-batching")`, and runs in
+// Layer C1's workspace test because the runtime crate's defaults enable
+// the feature). The OFF arm had no behavioural test — Layer C1h subset
+// #1/#7 only `cargo build`s the gate, proving it compiles, not that the
+// peer value is dropped. This NEG pins it: with the feature off, the
+// same `Some(1024)` peer advertisement must NOT survive into
+// `batch_size`, while the packed `sn_res` byte (feature-independent)
+// still decodes. The gate selects the OFF arm; it runs in the isolated
+// `cargo test -p wz-session-core` lanes (C1c/d/e), whose feature set
+// leaves transport-batching off (the workspace build unifies it ON from
+// the runtime crate, where the POS arm above runs instead).
+#[cfg(test)]
+#[cfg(not(feature = "transport-batching"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_batch_size_discarded_when_transport_batching_off() {
+        // sn_res 0x09 = seq 1 | (req 2 << 2); peer advertises batch 1024.
+        let caps = PeerInitCaps::from_init_syn(Some(0x09), Some(1024));
+        assert_eq!(caps.seq_num_res, 1, "packed sn_res still decodes");
+        assert_eq!(caps.req_id_res, 2, "packed sn_res still decodes");
+        assert_eq!(
+            caps.batch_size, 65535,
+            "peer-advertised batch_size must be discarded (clamped to full \
+             MTU) when transport-batching is off"
+        );
+    }
+}
