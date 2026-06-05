@@ -30334,6 +30334,42 @@
         "liveliness-get now in both AP (preset-ap-client) and MCU (preset-mcu-extended) presets — parity with liveliness-token / -subscriber. Layer G G.2 facade cross-compile uses --no-default-features so no per-feature MCU lane gates it; preset membership (C4 host build) + this round's manual thumbv7m cross-compile are the coverage. Same coverage shape as the sibling liveliness features."
       ]
     },
+    "Round 311ie": {
+      "decision_summary": "Carry consolidation for next-session /load handoff: liveliness-get closed (pushed c9c468b); records 2 open debts (loopback Locality::Any, partition-drain dedup) + next MS1 Tier B frontier (scouting-static / transport-fragmentation)",
+      "changes_bullets": [
+        "Atomic ledger entry only — carry consolidation round for /load handoff (R311z-style), no code change. liveliness-get landed at R311ic/id (commit c9c468b, pushed origin/main)."
+      ],
+      "verification_bullets": [
+        "validate_workspace T1=13 unchanged (no new orphan); liveliness-get round c9c468b already full run-ci EXIT 0 (29 layers incl Layer G 7 MCU + Layer Q) and pushed f4a8f2e..c9c468b."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "carry_forward_bullets": [
+        "liveliness-get CLOSED + PUSHED (origin/main=c9c468b): full send+receive vertical, status active, AP (preset-ap-client) + MCU (preset-mcu-extended) parity, wire = declaration plane (CURRENT Interest, NOT query plane). LivelinessGetRegistry + Session::liveliness_get + Layer E e2e.",
+        "OPEN DEBT 1 (loopback, functional limit): Locality::Any NOT wired for liveliness-get — wire-only client snapshot, so a session cannot get its OWN held tokens (only peer tokens). zenoh full API supports it. Future round if a self-query use case arises.",
+        "OPEN DEBT 2 (dedup, smell): partition-drain-then-fire no-alloc idiom (core::mem::take + keep/fired BoundedVec) duplicated across reply.rs + declare/liveliness_get.rs (8 sites). Cross-cutting refactor candidate (a bounded::partition_drain_fire helper with predicate + mut-sink-borrow fire closure); touches reply.rs too, so NOT liveliness-get-specific debt. Consistent with pre-existing reply.rs duplication.",
+        "NEXT MS1 FRONTIER (Tier B per claudedocs/composability-audit-2026-06-05.md): scouting-static (config-driven peer list, non-multicast discovery) OR transport-fragmentation (reassembly FSM, larger multi-round). query + liveliness domains now fully active; locator-tcp/udp gating tidy is a cheap cleanup option.",
+        "CAUTION: Layer G G.2 facade cross-compile is --no-default-features, so NO per-feature MCU cross-compile is CI-gated for any atomic feature (project-wide coverage shape). MCU no_std proof = preset membership (C4 host) + manual thumbv7m cross-compile."
+      ],
+      "publishable_decision_summary": "Carry consolidation for next-session /load handoff: liveliness-get closed (pushed c9c468b); records 2 open debts (loopback Locality::Any, partition-drain dedup) + next MS1 Tier B frontier (scouting-static / transport-fragmentation)",
+      "publishable_changes_bullets": [
+        "Atomic ledger entry only — carry consolidation round for /load handoff (R311z-style), no code change. liveliness-get landed at R311ic/id (commit c9c468b, pushed origin/main)."
+      ],
+      "publishable_verification_bullets": [
+        "validate_workspace T1=13 unchanged (no new orphan); liveliness-get round c9c468b already full run-ci EXIT 0 (29 layers incl Layer G 7 MCU + Layer Q) and pushed f4a8f2e..c9c468b."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "publishable_carry_forward_bullets": [
+        "liveliness-get CLOSED + PUSHED (origin/main=c9c468b): full send+receive vertical, status active, AP (preset-ap-client) + MCU (preset-mcu-extended) parity, wire = declaration plane (CURRENT Interest, NOT query plane). LivelinessGetRegistry + Session::liveliness_get + Layer E e2e.",
+        "OPEN DEBT 1 (loopback, functional limit): Locality::Any NOT wired for liveliness-get — wire-only client snapshot, so a session cannot get its OWN held tokens (only peer tokens). zenoh full API supports it. Future round if a self-query use case arises.",
+        "OPEN DEBT 2 (dedup, smell): partition-drain-then-fire no-alloc idiom (core::mem::take + keep/fired BoundedVec) duplicated across reply.rs + declare/liveliness_get.rs (8 sites). Cross-cutting refactor candidate (a bounded::partition_drain_fire helper with predicate + mut-sink-borrow fire closure); touches reply.rs too, so NOT liveliness-get-specific debt. Consistent with pre-existing reply.rs duplication.",
+        "NEXT MS1 FRONTIER (Tier B per claudedocs/composability-audit-2026-06-05.md): scouting-static (config-driven peer list, non-multicast discovery) OR transport-fragmentation (reassembly FSM, larger multi-round). query + liveliness domains now fully active; locator-tcp/udp gating tidy is a cheap cleanup option.",
+        "CAUTION: Layer G G.2 facade cross-compile is --no-default-features, so NO per-feature MCU cross-compile is CI-gated for any atomic feature (project-wide coverage shape). MCU no_std proof = preset membership (C4 host) + manual thumbv7m cross-compile."
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
