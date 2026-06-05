@@ -76,14 +76,28 @@ use wz_runtime_tokio::keyexpr_canon::{canonize_keyexpr, KeyexprCanonError};
 /// of `input`. Returns the canonical rewritten string on SUCCESS, or
 /// the negative status code on a grammar violation.
 ///
-/// The buffer is sized to `input.len()` because canon never grows the
-/// output past the input length (singleify shrinks; lone-`$*` → `*`
-/// shrinks by 1; drop-after-`**` shrinks by 3; verbatim passthrough
-/// is same-length). The truncate-on-success step scopes the returned
-/// string to the post-canonize byte range.
+/// `*len` carries the canonical-input byte length and never grows
+/// (singleify shrinks; lone-`$*` → `*` shrinks by 1; drop-after-`**`
+/// shrinks by 3; verbatim passthrough is same-length), so the result
+/// always fits the input range and the truncate-on-success step scopes
+/// the returned string to it.
+///
+/// The buffer MUST be NUL-terminated even though `*len` is supplied:
+/// `_z_keyexpr_canonize` scans chunk boundaries with `strchr`
+/// (`keyexpr.c:326`) and `_z_str_startswith` (`string.c`), both of
+/// which read to a NUL terminator irrespective of `*len`. A buffer of
+/// exactly `input.len()` bytes makes those reads run past its end (UB —
+/// a rare SIGSEGV when the allocation abuts an unmapped page, which
+/// surfaced as a flaky Layer C1 segfault under the parallel `cargo
+/// test`; valgrind flags it deterministically as "Invalid read of size
+/// 1" at `keyexpr.c:326` / `string.c:145`). The trailing NUL bounds
+/// every internal scan; `len` excludes it, and canon's shrink-only
+/// contract means the NUL slot is never written.
 fn zenoh_pico_canonize(input: &str) -> Result<String, i32> {
-    let mut buf: Vec<u8> = input.as_bytes().to_vec();
-    let mut len: usize = buf.len();
+    let mut buf: Vec<u8> = Vec::with_capacity(input.len() + 1);
+    buf.extend_from_slice(input.as_bytes());
+    buf.push(0);
+    let mut len: usize = input.len();
     let status = unsafe {
         zenoh_pico_sys::_z_keyexpr_canonize(buf.as_mut_ptr() as *mut c_char, &mut len as *mut usize)
     };
