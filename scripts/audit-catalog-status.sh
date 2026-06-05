@@ -32,62 +32,41 @@
 #   2. reserved => NOT gated:  status(A)=="reserved" must have ZERO
 #                 `cfg(feature="A")` sites in crates/**/*.rs (a reserved
 #                 atom that actually gates code is the drift class above).
-#   3. active   => gated OR foundational:  status(A)=="active" must
-#                 either have >=1 `cfg(feature="A")` gate site, OR appear
-#                 in the FOUNDATIONAL allowlist below (capabilities that
-#                 ship unconditionally and so carry no toggle by design).
+#   3. active <=> gated:  status(A)=="active" iff A has >=1
+#                 `cfg(feature="A")` gate site in crates/**/*.rs. `active`
+#                 means EXACTLY "a real composition toggle the user can
+#                 flip" — nothing else. A capability that is implemented
+#                 but always compiled with no cfg toggle (foundational,
+#                 e.g. keyexpr matchers / the Sample type / platform-linux
+#                 routed by target_os) is status=reserved with a
+#                 FOUNDATIONAL marker in its reason, NOT active — it is not
+#                 a knob, so it does not belong in the active (toggle) set.
+#                 (Invariant #2 already covers it: reserved => not gated.)
 #   4. linked:  A carries a section_ref to its feature_inventory §5
 #                 domain section, so the inventory entry is not an island
 #                 disconnected from the design doc that describes it (and
 #                 so the catalog cross-ref graph stays whole).
 #
-# FOUNDATIONAL allowlist — atoms that are genuinely implemented and
-# always compiled (no cfg gate by design), so `status=active` is honest
-# even though no `cfg(feature=...)` site exists. Each entry is a curated
-# judgment, not a mechanical fact, and must cite why:
+# Foundational atoms (implemented but always-on, no cfg toggle) are
+# status=reserved, distinguished from inert-unimplemented reserved atoms
+# by a "FOUNDATIONAL" prefix in their inventory reason. The gate does not
+# need to special-case them: invariant #2 (reserved => not gated) already
+# holds for them since they carry no cfg(feature=...) site. The
+# FOUNDATIONAL/inert distinction is documentation (reason + feature_inventory
+# §5), not a gate input. Examples of foundational reserved atoms:
 #   keyexpr-canon / -literal / -mapping / -intersect / -includes /
-#   -wildcard-single / -wildcard-double / -dollar-star
-#       — the canon + glob/intersection matchers live in
-#         wz-session-core/src/keyexpr_match.rs (R293 / R311dn) and are
-#         used unconditionally on every subscriber/queryable match path.
-#         lib.rs:70 documents keyexpr-canon as FOUNDATIONAL.
-#   pubsub-sample
-#       — the Sample receive surface (sample.rs) is always-on; cfg-off
-#         would API-break the subscriber callback (feature_inventory
-#         §5.8).
-#   time-system-clock
-#       — the wall-clock time source (wz-runtime-core/src/time.rs) is
-#         the always-on default; HLC / source selection is the future
-#         toggle (feature_inventory §5.18).
-#   routing-client
-#       — wz-runtime-tokio is unicast client-only today; the client
-#         path is the always-on default, peer/router are the future
-#         toggles (feature_inventory §5.15).
-#   platform-linux
-#       — platform identity is routed by Rust `target_os` cfg, not by a
-#         cargo feature; the feature is a preset-composition label
-#         (feature_inventory §5.14).
+#   -wildcard-single / -wildcard-double / -dollar-star  (matchers in
+#       wz-session-core/src/keyexpr_match.rs, always-on on every match path)
+#   pubsub-sample        (Sample receive surface; cfg-off would API-break)
+#   time-system-clock    (wall-clock source; HLC is the future toggle)
+#   routing-client       (unicast client-only; peer/router are future)
+#   platform-linux       (routed by Rust target_os cfg, not a cargo feature)
 #
-# Adding a new always-on capability => add it here WITH a rationale.
-# Adding a new toggleable feature => it must carry a cfg(feature=...)
-# gate; do NOT add it here to silence the gate.
+# Adding a new toggleable feature => it MUST carry a cfg(feature=...) gate
+# and be status=active. A new always-on capability => status=reserved with
+# a FOUNDATIONAL reason; do NOT mark it active (it is not a toggle).
 
 set -euo pipefail
-
-FOUNDATIONAL=(
-    keyexpr-canon
-    keyexpr-literal
-    keyexpr-mapping
-    keyexpr-intersect
-    keyexpr-includes
-    keyexpr-wildcard-single
-    keyexpr-wildcard-double
-    keyexpr-dollar-star
-    pubsub-sample
-    time-system-clock
-    routing-client
-    platform-linux
-)
 
 # ─── cwd discovery (repo root) ──────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -107,14 +86,11 @@ INV_FILE="$(mktemp)"
 trap 'rm -f "$INV_FILE"' EXIT
 mnemosyne-cli query --list-inventory --json 2>/dev/null >"$INV_FILE"
 
-FOUNDATIONAL_CSV="$(IFS=,; echo "${FOUNDATIONAL[*]}")"
-
-FOUNDATIONAL_CSV="$FOUNDATIONAL_CSV" INV_FILE="$INV_FILE" python3 - <<'PY'
+INV_FILE="$INV_FILE" python3 - <<'PY'
 import json, os, re, subprocess, sys
 
 inv = json.load(open(os.environ["INV_FILE"]))
 entries = inv if isinstance(inv, list) else inv.get("entries", inv.get("inventory", []))
-foundational = set(filter(None, os.environ["FOUNDATIONAL_CSV"].split(",")))
 
 # atom -> (status, section_ref), excluding presets (bundles, not atoms)
 atoms = {}
@@ -152,7 +128,6 @@ def has_gate(atom):
 
 fail_undeclared, fail_reserved_gated, fail_active_nogate = [], [], []
 fail_unlinked = []
-info_foundational = []
 
 for atom in sorted(atoms):
     status = atoms[atom]
@@ -162,21 +137,14 @@ for atom in sorted(atoms):
     if status == "reserved" and gated:
         fail_reserved_gated.append(atom)
     if status == "active" and not gated:
-        if atom in foundational:
-            info_foundational.append(atom)
-        else:
-            fail_active_nogate.append(atom)
+        fail_active_nogate.append(atom)
     if not section_ref.get(atom):
         fail_unlinked.append(atom)
 
 ok = True
+active_n = sum(1 for a in atoms if atoms[a] == "active")
 print("=== catalog status truthfulness audit ===")
-print("  atoms=%d declared-cargo-features=%d" % (len(atoms), len(declared)))
-
-if info_foundational:
-    print("  foundational (active, always-on, no gate by design): %d" % len(info_foundational))
-    for a in info_foundational:
-        print("    - %s" % a)
+print("  atoms=%d active=%d declared-cargo-features=%d" % (len(atoms), active_n, len(declared)))
 
 if fail_undeclared:
     ok = False
@@ -192,9 +160,9 @@ if fail_reserved_gated:
 
 if fail_active_nogate:
     ok = False
-    print("FAIL: status=active but NO cfg gate and NOT foundational: %d" % len(fail_active_nogate))
+    print("FAIL: status=active but NO cfg gate: %d" % len(fail_active_nogate))
     for a in fail_active_nogate:
-        print("    - %s  (set status=reserved if unimplemented/folded, or add to FOUNDATIONAL with rationale)" % a)
+        print("    - %s  (active means a real cfg toggle; set status=reserved + FOUNDATIONAL reason if always-on, or add the cfg gate)" % a)
 
 if fail_unlinked:
     ok = False

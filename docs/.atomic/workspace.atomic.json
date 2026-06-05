@@ -940,21 +940,21 @@
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
       "decision_status": "active",
-      "intent": "Keyexpr domain catalog: 8 atomic features (1 active wired keyexpr-canon module gate, 7 cluster-deferred for per-site wire-up).",
+      "intent": "Keyexpr domain catalog: 8 atomic features (0 active toggles; all 8 foundational-reserved — matchers ship always-on, no per-feature cfg gate).",
       "rationale_bullets": [
         "Keyexpr is a cluster-wide concern: matchers + canonicalize + mapping table all touch many files.",
-        "keyexpr-canon has a single anchor (pub mod keyexpr_canon) so cfg-gate is mechanical.",
-        "Other 7 features are spread across pubsub.rs / session_glue.rs / declare/ — no single anchor.",
-        "Cargo 'all active' comment corrected to '1 active / 7 cluster-deferred' per R311cf audit.",
-        "Follow-up cascade lands per-site wire-up once anchor functions stabilize."
+        "keyexpr-canon is FOUNDATIONAL (lib.rs:70): pub mod always compiled, no cfg gate despite the feature.",
+        "Other features are spread across pubsub.rs / session_glue.rs / declare/ — no single anchor.",
+        "R311ht: all 8 reclassified foundational-reserved; active = real cfg toggles only (none here).",
+        "Follow-up cascade could land per-site cfg gates, turning some into real toggles (then active)."
       ],
       "outputs_bullets": [
-        "Active set (1): keyexpr-canon (R311cf wire-up).",
-        "keyexpr-canon gates `pub mod keyexpr_canon` declaration in lib.rs.",
-        "Cluster-deferred (7): -literal, -mapping, -intersect, -includes, -dollar-star.",
-        "Cluster-deferred (cont): -wildcard-single, -wildcard-double.",
-        "Each deferred feature has source behavior across 4+ files; per-site wire-up pending.",
-        "Cargo comment updated 'all active' -> '1 active / 7 cluster-deferred'."
+        "Active set (0): no keyexpr atom has its own cfg toggle today.",
+        "keyexpr-canon: pub mod keyexpr_canon always compiled (FOUNDATIONAL, lib.rs:70), not cfg-gated.",
+        "Foundational-reserved (8): -canon, -literal, -mapping, -intersect, -includes,",
+        "Foundational-reserved cont: -dollar-star, -wildcard-single, -wildcard-double.",
+        "Each has source behavior across 4+ files (keyexpr_match.rs etc.); per-site cfg wire-up pending.",
+        "R311ht: reclassified 1-active/7-deferred -> 0 active / 8 foundational-reserved (matchers always-on)."
       ],
       "caveats_bullets": [
         "keyexpr-canon cfg-off: callers must pre-canonicalize keyexpr strings (no module access).",
@@ -1000,29 +1000,35 @@
       "parent_doc": "docs/feature_inventory.md",
       "parent_section": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
       "decision_status": "active",
-      "intent": "Pubsub domain catalog: 11 atomic features (5 active wired in wz-runtime-tokio msg body + Sample projection + loopback, 6 reserved declaration-only).",
+      "intent": "Pubsub domain catalog: 11 atomic features (10 active toggles + 1 foundational-reserved Sample anchor; 0 inert-reserved) after Phase 2 + R311hr/ht.",
       "rationale_bullets": [
         "Composable framework lens: each pubsub capability is one atomic feature toggle (R267-R299).",
-        "Cargo.toml authoring intent: 11 features split 5 active / 6 reserved per the source comment.",
+        "Cargo.toml: 11 = 10 active toggles + 1 foundational-reserved (Sample); 0 inert (Phase 2 + R311ht).",
         "Active set follows real wz-runtime-tokio source behavior, not catalog wish list.",
-        "Sample API anchor: pubsub-sample reserved (API surface always-on; cfg-off would API-break).",
+        "pubsub-sample foundational-reserved: Sample anchor always-on, cfg-off API-breaks, not a toggle.",
         "R311g1 signature stability: cfg-off populator returns None; Sample optional fields stay declared."
       ],
       "outputs_bullets": [
-        "Active set (5): -put, -delete, -allow-loop, -attachment, -timestamp (R311cc wire-up).",
+        "Active set (10): -put, -delete, -allow-loop, -attachment, -timestamp (R311cc wire-up).",
+        "Active set cont: -encoding, -source-info, -priority, -congestion-control, -express (Phase 2 R311fx).",
         "pubsub-put gates Push + Reply MsgPut match arms in pubsub.rs + reply.rs.",
         "pubsub-delete gates Push + Reply MsgDel match arms in pubsub.rs + reply.rs.",
         "pubsub-allow-loop gates Session::publish + publish_aliased loopback fan-out.",
         "pubsub-attachment gates extract_attachment in pubsub Push consumer arms.",
         "pubsub-timestamp gates TimestampHint::from_codec in pubsub Push consumer arms.",
-        "Reserved (6): -sample API anchor, -encoding, -source-info, -priority, -congestion-control, -express.",
-        "Reserved features stay declaration-only in wz facade Cargo.toml; populator always-on."
+        "pubsub-encoding gates the encoding ext field on Push send + decode (gated_encoding_field).",
+        "pubsub-source-info gates source_info ext in build_body_extensions + Sample provenance.",
+        "pubsub-priority / -congestion-control / -express gate the QoS byte (any-of) on Push send.",
+        "Foundational-reserved (1): -sample, always-on Sample anchor, no toggle (not active).",
+        "0 inert-reserved: every pubsub atom is an active toggle or the foundational Sample anchor."
       ],
       "caveats_bullets": [
         "pubsub-put + pubsub-delete cfg-off: inbound Push / Reply silently drops; subscriber not fired.",
         "pubsub-allow-loop cfg-off: Locality::Any default effectively becomes Locality::Remote only.",
         "pubsub-attachment + pubsub-timestamp cfg-off: Sample optional fields always None (field declared).",
-        "pubsub-sample reserved: Sample type is API anchor (cfg-off would be wholesale API break)."
+        "pubsub-sample reserved: Sample type is API anchor (cfg-off would be wholesale API break).",
+        "pubsub-sample is foundational-active (R311hr), not reserved; anchor caveat above predates A3 model.",
+        "R311ht: pubsub-sample is foundational-RESERVED, not active; supersedes R311hr note above."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -30059,6 +30065,60 @@
         "future A3 hardening once §5 bodies are machine-reconciled: cross-check inventory status against the §5 active-set so the third catalog surface is gated too, not just linked"
       ]
     },
+    "Round 311ht": {
+      "decision_summary": "R311ht: status active now means EXACTLY a cfg toggle; 12 foundational always-on atoms reclassified active->reserved+FOUNDATIONAL marker; Layer A3 simplified to active<=>gated; §5.6/§5.8 reconciled",
+      "changes_bullets": [
+        "Convention correction superseding R311hr's foundational=active: status active now means EXACTLY a real cfg(feature) toggle the user can flip; foundational always-on capabilities are status=reserved + a FOUNDATIONAL reason marker, not active",
+        "12 foundational atoms reclassified active->reserved with FOUNDATIONAL reason (F/P/C text preserved): keyexpr-canon/literal/mapping/intersect/includes/wildcard-single/wildcard-double/dollar-star, pubsub-sample, time-system-clock, routing-client, platform-linux",
+        "the 8 genuinely-gated reserved->active flips from R311hr stay active (pubsub-source-info etc. gate real code); only the 12 foundational reverse",
+        "Layer A3 simplified: invariant #3 is now active<=>gated (FOUNDATIONAL allowlist removed from the active branch); active=54, all with a cfg gate",
+        "§5.6 keyexpr fixed (false \"1 active, canon gates pub mod\" -> \"0 active / 8 foundational-reserved\"; canon is ungated per lib.rs:70) + §5.8 pubsub (sample -> foundational-reserved; 10 active toggles)",
+        "rationale: foundational atoms are not user-flippable knobs, so the active (composition-toggle) set must exclude them; aligns with already-ratified §5.14/5.15/5.18 + the north-star composability purpose"
+      ],
+      "verification_bullets": [
+        "Layer A3 green post-correction (run-ci.sh --layer A3): active=54 all have cfg gates; 12 foundational now reserved+ungated so reserved=>not-gated holds",
+        "validate-workspace T1 orphan new=+0 (13 ledger unchanged), entries=579 sections=257 unchanged, T3 warn=4 T4 info=3 unchanged",
+        "§5.6 / §5.8 bodies re-queried: active counts now match inventory (0 active keyexpr, 10 active pubsub)",
+        "frozen-ledger preserved: R311hr / R311hs entry bodies untouched; this is a superseding new entry"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time"
+      ],
+      "carry_forward_bullets": [
+        "§5.14/5.15/5.18 active counts are already Option-A-correct (their foundational atoms platform-linux/routing-client/time-system-clock are reserved); the foundational-vs-inert nuance within those reserved sets lives in the inventory reason marker, §5 prose refinement optional (R408 unvalidated notes)",
+        "§5.8 caveat trail now reads reserved->active(R311hr)->reserved(R311ht) via append-only corrections (caveats have no set/remove primitive); honest audit trail but verbose",
+        "lesson: append-only caveats mean a mid-flight status-wording change leaves a correction trail; decide the status framing once before writing caveat prose"
+      ],
+      "publishable_decision_summary": "R311ht: status active now means EXACTLY a cfg toggle; 12 foundational always-on atoms reclassified active->reserved+FOUNDATIONAL marker; Layer A3 simplified to active<=>gated; §5.6/§5.8 reconciled",
+      "publishable_changes_bullets": [
+        "Convention correction superseding R311hr's foundational=active: status active now means EXACTLY a real cfg(feature) toggle the user can flip; foundational always-on capabilities are status=reserved + a FOUNDATIONAL reason marker, not active",
+        "12 foundational atoms reclassified active->reserved with FOUNDATIONAL reason (F/P/C text preserved): keyexpr-canon/literal/mapping/intersect/includes/wildcard-single/wildcard-double/dollar-star, pubsub-sample, time-system-clock, routing-client, platform-linux",
+        "the 8 genuinely-gated reserved->active flips from R311hr stay active (pubsub-source-info etc. gate real code); only the 12 foundational reverse",
+        "Layer A3 simplified: invariant #3 is now active<=>gated (FOUNDATIONAL allowlist removed from the active branch); active=54, all with a cfg gate",
+        "§5.6 keyexpr fixed (false \"1 active, canon gates pub mod\" -> \"0 active / 8 foundational-reserved\"; canon is ungated per lib.rs:70) + §5.8 pubsub (sample -> foundational-reserved; 10 active toggles)",
+        "rationale: foundational atoms are not user-flippable knobs, so the active (composition-toggle) set must exclude them; aligns with already-ratified §5.14/5.15/5.18 + the north-star composability purpose"
+      ],
+      "publishable_verification_bullets": [
+        "Layer A3 green post-correction (run-ci.sh --layer A3): active=54 all have cfg gates; 12 foundational now reserved+ungated so reserved=>not-gated holds",
+        "validate-workspace T1 orphan new=+0 (13 ledger unchanged), entries=579 sections=257 unchanged, T3 warn=4 T4 info=3 unchanged",
+        "§5.6 / §5.8 bodies re-queried: active counts now match inventory (0 active keyexpr, 10 active pubsub)",
+        "frozen-ledger preserved: R311hr / R311hs entry bodies untouched; this is a superseding new entry"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time"
+      ],
+      "publishable_carry_forward_bullets": [
+        "§5.14/5.15/5.18 active counts are already Option-A-correct (their foundational atoms platform-linux/routing-client/time-system-clock are reserved); the foundational-vs-inert nuance within those reserved sets lives in the inventory reason marker, §5 prose refinement optional (R408 unvalidated notes)",
+        "§5.8 caveat trail now reads reserved->active(R311hr)->reserved(R311ht) via append-only corrections (caveats have no set/remove primitive); honest audit trail but verbose",
+        "lesson: append-only caveats mean a mid-flight status-wording change leaves a correction trail; decide the status framing once before writing caveat prose"
+      ]
+    },
     "Round 311i": {
       "decision_summary": "R311i codec-declare wire-layer cascade — 9 declare-family wz-codecs modules gated + Cargo edges + session_glue.rs Declare wire surface body-cfg.",
       "changes_bullets": [
@@ -35911,52 +35971,52 @@
       "reason": "F=text/plain UTF-8 tag; P=zenoh; C=indep encoding tag"
     },
     "keyexpr-canon": {
-      "status": "active",
+      "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs at R221",
-      "reason": "F=canonize fn; P=zenoh-pico _z_keyexpr_canonize; C=mandatory for outbound wire safety"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=canonize fn; P=zenoh-pico _z_keyexpr_canonize; C=mandatory for outbound wire safety"
     },
     "keyexpr-dollar-star": {
-      "status": "active",
+      "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs $*",
-      "reason": "F=non-greedy single-seg wildcard; P=zenoh $*; C=opt-in extension over wildcard-single"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=non-greedy single-seg wildcard; P=zenoh $*; C=opt-in extension over wildcard-single"
     },
     "keyexpr-includes": {
-      "status": "active",
+      "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "sources/algorithms/keyexpr_includes.scxml at R299",
-      "reason": "F=includes algorithm; P=zenoh _z_keyexpr_includes; C=required for declare-keyexpr alias check"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=includes algorithm; P=zenoh _z_keyexpr_includes; C=required for declare-keyexpr alias check"
     },
     "keyexpr-intersect": {
-      "status": "active",
+      "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "sources/algorithms/keyexpr_intersect.scxml at R297",
-      "reason": "F=intersect algorithm; P=zenoh _z_keyexpr_intersect; C=required for subscriber matching"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=intersect algorithm; P=zenoh _z_keyexpr_intersect; C=required for subscriber matching"
     },
     "keyexpr-literal": {
-      "status": "active",
+      "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs",
-      "reason": "F=baseline parse; P=zenoh keyexpr literal; C=indep, foundation for all wildcard variants"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=baseline parse; P=zenoh keyexpr literal; C=indep, foundation for all wildcard variants"
     },
     "keyexpr-mapping": {
-      "status": "active",
+      "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/session_glue.rs KexprMappingTable",
-      "reason": "F=alias table; P=zenoh kexpr resolver; C=required when declare-keyexpr enabled"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=alias table; P=zenoh kexpr resolver; C=required when declare-keyexpr enabled"
     },
     "keyexpr-wildcard-double": {
-      "status": "active",
+      "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs",
-      "reason": "F=double-star chunk + canon rules; P=zenoh keyexpr **; C=R299 documented divergence pins"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=double-star chunk + canon rules; P=zenoh keyexpr **; C=R299 documented divergence pins"
     },
     "keyexpr-wildcard-single": {
-      "status": "active",
+      "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs",
-      "reason": "F=star chunk handling; P=zenoh keyexpr *; C=opt-in pattern, indep of double-wildcard"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=star chunk handling; P=zenoh keyexpr *; C=opt-in pattern, indep of double-wildcard"
     },
     "link-batching": {
       "status": "reserved",
@@ -36085,10 +36145,10 @@
       "reason": "F=FreeRTOS task primitives; P=zenoh-pico; C=alternative MCU OS"
     },
     "platform-linux": {
-      "status": "active",
+      "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "crates/wz-runtime-tokio/src target",
-      "reason": "F=Linux syscalls; P=zenoh tokio default; C=baseline platform"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=Linux syscalls; P=zenoh tokio default; C=baseline platform"
     },
     "platform-macos": {
       "status": "reserved",
@@ -36193,10 +36253,10 @@
       "reason": "F=Put emit path; P=zenoh put; C=indep operation"
     },
     "pubsub-sample": {
-      "status": "active",
+      "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
       "source": "crates/wz-runtime-tokio/src/sample.rs",
-      "reason": "F=Sample receive surface; P=zenoh Sample; C=indep receive-side"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=Sample receive surface; P=zenoh Sample; C=indep receive-side"
     },
     "pubsub-source-info": {
       "status": "active",
@@ -36271,10 +36331,10 @@
       "reason": "F=per-query deadline; P=zenoh GetOptions::timeout; C=indep client-side"
     },
     "routing-client": {
-      "status": "active",
+      "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
       "source": "crates/wz-ap-demo/src/main.rs client mode",
-      "reason": "F=client-only routing; P=zenoh client; C=indep mode, smallest topology footprint"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=client-only routing; P=zenoh client; C=indep mode, smallest topology footprint"
     },
     "routing-failover": {
       "status": "reserved",
@@ -36475,10 +36535,10 @@
       "reason": "F=NTP64 timestamp codec; P=zenoh NTP64 timestamp; C=baseline timestamp shape"
     },
     "time-system-clock": {
-      "status": "active",
+      "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time",
       "source": "crates/wz-runtime-core/src/time.rs",
-      "reason": "F=wall-clock source; P=zenoh SystemTime; C=baseline time source, mutually exclusive with HLC"
+      "reason": "FOUNDATIONAL always-on, no cfg toggle; F=wall-clock source; P=zenoh SystemTime; C=baseline time source, mutually exclusive with HLC"
     },
     "time-timestamp-source": {
       "status": "reserved",
