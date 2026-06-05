@@ -692,6 +692,15 @@ layer_c1d_cargo_test_pubsub() {
 # implicit cross-crate coincidence. This lane enumerates the union
 # explicitly so the query tests cannot silently drop out of CI if
 # wz-runtime-tokio's defaults change.
+#
+# This feature set is ALSO the `reply::decode_isolation_tests` build:
+# `query-queryable` pulls in `codec-response` (so `dispatch_response`
+# compiles) while the reply-body consumer markers (query-reply /
+# pubsub-put / pubsub-delete) stay OFF, so the inbound Reply Put/Del
+# body arms are cfg'd out and fall through to `_ => return`. The
+# maximal reply lane C1f keeps those markers ON (cfg'ing the module
+# out), so this is the only lane that RUNS the reply decode-isolation
+# NEG — the query-side mirror of pubsub's `decode_isolation_tests`.
 layer_c1e_cargo_test_query() {
     (cd crates && cargo test -p wz-session-core --features query-queryable,query-attachment,query-selector-parameters,query-reply-err,codec-response-final --quiet)
 }

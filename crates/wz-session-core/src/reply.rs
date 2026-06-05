@@ -1941,3 +1941,207 @@ mod tests {
         assert_eq!(none, 0, "non-matching rid does not fire");
     }
 }
+
+// ── decode-side feature-isolation NEG (reply-body consumer OFF) ──
+//
+// The main `mod tests` above gates on
+// `any(pubsub-put, query-reply)` AND `any(pubsub-delete, query-reply)`
+// (R311fn — the reply-DECODE-capability predicate), so it is entirely
+// cfg'd out under a subset that turns `codec-response` ON but leaves
+// every reply-body consumer marker OFF — the `queryable-only` plane
+// (`query-queryable` pulls in `codec-response` for the reply *emit*
+// side, while the getter consumer features `query-reply` / `pubsub-put`
+// / `pubsub-delete` stay OFF). There the inbound reply-body arms of
+// `dispatch_response` (Put = `cfg(any(pubsub-put, query-reply))`,
+// Del = `cfg(any(pubsub-delete, query-reply))`) are both cfg'd out, so
+// an inbound `Response(Reply)` of either body falls through to the
+// `_ => return` silent drop (the query-side mirror of the pubsub
+// `dispatch` Push arms guarded by `mod decode_isolation_tests` in
+// `pubsub.rs`). Layer C1h proves this subset BUILDS; Layer F proves the
+// off consumer SHRINKS the binary — only these pin the receive
+// BEHAVIOUR: an inbound `Response(Reply)` Put / Del fires NO pending
+// `on_reply`, while a `Response(Err)` (whose arm is unconditional)
+// still fires through the same entry, proving the drop is body-variant-
+// selective and the pending table itself is live (not a dead registry).
+// The module gate selects exactly the codec-response-on / reply-
+// consumer-off builds; the run-ci C1h queryable-only profile is
+// promoted to a `cargo test` so these RUN, which no other lane does
+// (C1c-g each pin a reply-consumer marker ON, cfg'ing the module out).
+#[cfg(test)]
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-response",
+    not(feature = "pubsub-put"),
+    not(feature = "pubsub-delete"),
+    not(feature = "query-reply"),
+))]
+mod decode_isolation_tests {
+    use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use wz_codecs::encoding::Encoding;
+    use wz_codecs::err::Err as ErrBody;
+    use wz_codecs::msg_del::MsgDel;
+    use wz_codecs::msg_put::MsgPut;
+    use wz_codecs::reply::{Reply, ReplyVariant};
+    use wz_codecs::response::{Response, ResponseVariant};
+    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+    use wz_codecs::wireexpr_local::WireexprLocal;
+
+    /// A Put-bodied `Response(Reply)` for `suffix` (literal local
+    /// wireexpr, id=0 → suffix resolves verbatim, no peer table).
+    /// Constructible regardless of `pubsub-put` / `query-reply` — those
+    /// features gate the dispatch consumer arm, not the `codec-response`
+    /// wire variant.
+    fn response_reply_put(rid: u64, suffix: &str, payload: &[u8]) -> ResponseOwned {
+        let keyexpr = Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len: Some(suffix.len() as u64),
+                suffix: Some(suffix),
+            }),
+        };
+        let reply = Reply {
+            body: ReplyVariant::CodecZenohMsgPut(MsgPut {
+                payload_len: payload.len() as u64,
+                payload,
+                ..MsgPut::default()
+            }),
+            ..Reply::default()
+        };
+        Response {
+            request_id: rid,
+            keyexpr,
+            body: ResponseVariant::CodecZenohReply(reply),
+            ..Response::default()
+        }
+        .try_into_owned()
+        .unwrap()
+    }
+
+    /// A Del-bodied `Response(Reply)` for `suffix`. Constructible
+    /// regardless of `pubsub-delete` / `query-reply` (same reason as
+    /// [`response_reply_put`]).
+    fn response_reply_del(rid: u64, suffix: &str) -> ResponseOwned {
+        let keyexpr = Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len: Some(suffix.len() as u64),
+                suffix: Some(suffix),
+            }),
+        };
+        let reply = Reply {
+            body: ReplyVariant::CodecZenohMsgDel(MsgDel::default()),
+            ..Reply::default()
+        };
+        Response {
+            request_id: rid,
+            keyexpr,
+            body: ResponseVariant::CodecZenohReply(reply),
+            ..Response::default()
+        }
+        .try_into_owned()
+        .unwrap()
+    }
+
+    /// An Err-bodied `Response` for `suffix`. The Err arm of
+    /// `dispatch_response` is unconditional, so this is the live
+    /// contrast that proves the pending entry is not dead.
+    fn response_err(rid: u64, suffix: &str, payload: &[u8]) -> ResponseOwned {
+        let keyexpr = Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len: Some(suffix.len() as u64),
+                suffix: Some(suffix),
+            }),
+        };
+        let err_body = ErrBody {
+            encoding: Some(Encoding {
+                packed_id: 0,
+                schema_len: None,
+                schema: None,
+            }),
+            payload_len: payload.len() as u64,
+            payload,
+            ..ErrBody::default()
+        };
+        Response {
+            request_id: rid,
+            keyexpr,
+            body: ResponseVariant::CodecZenohErr(err_body),
+            ..Response::default()
+        }
+        .try_into_owned()
+        .unwrap()
+    }
+
+    #[test]
+    fn inbound_reply_put_body_is_dropped_when_reply_consumer_off() {
+        let mut reg = ReplyRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        reg.register(
+            42,
+            1,
+            None,
+            move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
+            |_| {},
+        );
+
+        // Put body → `pubsub-put` / `query-reply` arm cfg'd out →
+        // `_ => return` silent drop.
+        reg.dispatch_response(
+            &response_reply_put(42, "home/temp", b"21.0"),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "inbound Reply(Put) must not fire on_reply when the reply consumer is off"
+        );
+
+        // Err body still fires through the same pending entry — proves
+        // the drop is body-variant-selective, not a dead registry.
+        reg.dispatch_response(&response_err(42, "home/temp", b"oops"), &HashMap::new());
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "inbound Reply(Err) still fires (Err arm is unconditional)"
+        );
+    }
+
+    #[test]
+    fn inbound_reply_del_body_is_dropped_when_reply_consumer_off() {
+        let mut reg = ReplyRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        reg.register(
+            9,
+            1,
+            None,
+            move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
+            |_| {},
+        );
+
+        // Del body → `pubsub-delete` / `query-reply` arm cfg'd out →
+        // `_ => return` silent drop.
+        reg.dispatch_response(&response_reply_del(9, "clear/me"), &HashMap::new());
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "inbound Reply(Del) must not fire on_reply when the reply consumer is off"
+        );
+
+        // Err body still fires — variant-selective drop, live entry.
+        reg.dispatch_response(&response_err(9, "clear/me", b"oops"), &HashMap::new());
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "inbound Reply(Err) still fires (Err arm is unconditional)"
+        );
+    }
+}
