@@ -23,16 +23,18 @@
 //! the R71b carry pointed at is gone by design.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use sce_rust_lua::LuaEngine;
 use sce_rust_runtime::scripting::{IScriptEngine, ScriptResult, ScriptValue};
 use sce_rust_runtime::Hal;
 
+use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
-    install_session_actions, SessionInitParams, SessionLinkActions, SigningKey,
+    install_session_actions, BoxedLinkDriver, SessionInitParams, SessionLinkActions, SigningKey,
     REGISTERED_SCRIPT_NAMES, SESSION_ID,
 };
+use wz_runtime_tokio::Reliability;
 
 /// Deterministic `SessionInitParams` matching the Layer 3 wire-interop
 /// fixture inputs, so wire-byte assertions cross-reference cleanly
@@ -61,6 +63,60 @@ pub fn fixture_session_init_params() -> SessionInitParams {
         cookie_signing_key: SigningKey::new(vec![0xAB; 32])
             .expect("32-byte test key satisfies >= 32 invariant"),
     }
+}
+
+/// Test [`BoxedLinkDriver`] that records every outbound frame so a
+/// behavioural NEG guard can assert the *no-emit* half of a typed-reject
+/// contract — `SendWireError` / `SendDeclareError` doc: "no wire bytes
+/// leave on Err" — i.e. `frame_count() == 0`, in addition to the
+/// `Err(..::FeatureDisabled)` return value.
+///
+/// R311hz home for the FeatureDisabled-NEG fixture. It was an inline
+/// `SessionInitParams` + `DiscardDriver` duplicate inside `session_glue.rs`
+/// tests (bypassing the [`fixture_session_init_params`] SSOT and forcing a
+/// hand-synced `any(not, ..)` cfg gate); consolidating it here removes the
+/// duplication and the gate.
+pub struct RecordingLinkDriver {
+    frames: Mutex<Vec<(Vec<u8>, Reliability)>>,
+}
+
+impl RecordingLinkDriver {
+    /// Number of frames observed via `send_blocking` so far.
+    pub fn frame_count(&self) -> usize {
+        self.frames
+            .lock()
+            .expect("recording driver mutex poisoned")
+            .len()
+    }
+}
+
+impl BoxedLinkDriver for RecordingLinkDriver {
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) {
+        self.frames
+            .lock()
+            .expect("recording driver mutex poisoned")
+            .push((bytes.to_vec(), reliability));
+    }
+    fn open_blocking(&self) {}
+    fn close_blocking(&self) {}
+}
+
+/// Build a [`SessionLinkActions`] backed by a fresh [`RecordingLinkDriver`]
+/// and the deterministic [`fixture_session_init_params`]. Returns both
+/// handles so a caller can drive a signature-stable emit method and then
+/// assert on the emitted-frame count — e.g. a `*-FeatureDisabled` NEG guard
+/// asserts the `Err(..)` return AND `driver.frame_count() == 0` (the
+/// no-emit half of the reject contract).
+pub fn recording_actions() -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
+    let driver = Arc::new(RecordingLinkDriver {
+        frames: Mutex::new(Vec::new()),
+    });
+    let actions = SessionLinkActions::new(
+        driver.clone(),
+        fixture_session_init_params(),
+        TokioTime::new(),
+    );
+    (actions, driver)
 }
 
 /// Build a fresh `LuaEngine`, wire `actions`'s 17 closures onto it

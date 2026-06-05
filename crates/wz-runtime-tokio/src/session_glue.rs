@@ -7120,61 +7120,30 @@ mod tests {
         assert_eq!(actions.next_outbound_frame_sn(), 44);
     }
 
-    // ── R311hw / R311hx — codec & declare behavioural NEG / isolation ──
+    // ── R311hw / R311hx (R311hz refactor) — codec & declare behavioural
+    // NEG / isolation ──
     //
-    // Layer F (codec-footprint) proves a `codec-*` atomic feature's
-    // minus-<codec> lane SHRINKS the binary — the bytes are elided when
-    // the feature is off. It does NOT prove the consumer-side
+    // Layer F (codec-footprint) proves a `codec-*` feature's minus-<codec>
+    // lane SHRINKS the binary; it does NOT prove the consumer-side
     // signature-stable emit path BEHAVES correctly when off. The
-    // `feedback_signature_stability` contract (R311j / R311g1) requires
-    // the `SessionLinkActions` send method to keep its signature and
-    // return `Err(..::FeatureDisabled)` — an honest typed reject, never a
-    // falsely-`Ok` no-op and never a panic (see the `FeatureDisabled`
-    // variant docs in wz-session-core). R311hw pins the two `codec-*`
-    // send gates (codec-push / codec-request → SendWireError); R311hx
-    // extends the same shape to the five declare gates (declare-keyexpr /
-    // -subscriber / -queryable / -token → SendDeclareError, declare-
-    // interest → SendWireError). These guards pin the behavioural half
-    // Layer F's size proof leaves open. They are cfg'd to the feature-OFF
-    // builds and ride the existing C1j subset lanes (handshake-only /
-    // pubsub-only / queryable-only / zget-reply-only / liveliness-* /
-    // declare-observer each compose the consumer plane with some of these
-    // gates OFF); no new lane is needed. The shared probe helper's gate is
-    // the exact union of the per-test gates below, so it is compiled iff
-    // at least one of those tests is active — the all-on default build
-    // cfg's every one out, so no dead code lands there.
-    #[cfg(any(
-        not(feature = "codec-push"),
-        not(feature = "codec-request"),
-        not(feature = "declare-keyexpr"),
-        not(feature = "declare-subscriber"),
-        not(feature = "declare-queryable"),
-        not(feature = "declare-token"),
-        not(feature = "declare-interest"),
-    ))]
-    fn feature_disabled_probe_actions() -> Arc<SessionLinkActions> {
-        struct DiscardDriver;
-        impl BoxedLinkDriver for DiscardDriver {
-            fn send_blocking(&self, _bytes: &[u8], _r: Reliability) {}
-            fn open_blocking(&self) {}
-            fn close_blocking(&self) {}
-        }
-        let params = SessionInitParams {
-            version: 0x09,
-            whatami: 0x02,
-            zid: vec![0x01, 0x02, 0x03, 0x04],
-            seq_num_res: 2,
-            req_id_res: 2,
-            batch_size: 65535,
-            lease: 10_000,
-            lease_in_seconds: false,
-            initial_sn: 1,
-            cookie: Vec::new(),
-            cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-                .expect("32-byte demo key satisfies the >=32 invariant"),
-        };
-        SessionLinkActions::new(Arc::new(DiscardDriver), params, TokioTime::new())
-    }
+    // `feedback_signature_stability` contract (R311j / R311g1) requires the
+    // `SessionLinkActions` send method to keep its signature and return
+    // `Err(..::FeatureDisabled)` — an honest typed reject that emits NO
+    // wire bytes (see the `FeatureDisabled` variant docs in
+    // wz-session-core). Each guard below pins BOTH halves: the typed `Err`
+    // AND `driver.frame_count() == 0`. R311hw covers the two `codec-*`
+    // send gates (codec-push / codec-request → SendWireError); R311hx the
+    // five declare gates (declare-keyexpr / -subscriber / -queryable /
+    // -token → SendDeclareError, declare-interest → SendWireError).
+    //
+    // R311hz moved the fixture onto the `recording_actions()` SSOT in
+    // `wz-runtime-tokio-test-support` (was an inline `SessionInitParams` +
+    // `DiscardDriver` duplicate that bypassed `fixture_session_init_params`
+    // and forced a hand-synced `any(not, ..)` cfg gate; both removed). The
+    // per-test `#[cfg(not(feature = ..))]` gates stay — they select which
+    // off-build runs each guard — and ride the existing C1j subset lanes
+    // (handshake-only / pubsub-only / queryable-only / zget-reply-only /
+    // liveliness-* / declare-observer), so no new lane is needed.
 
     /// R311hw — with `codec-push` OFF, the signature-stable
     /// `send_push_literal` must fail-fast with the typed
@@ -7185,12 +7154,17 @@ mod tests {
     #[cfg(not(feature = "codec-push"))]
     #[test]
     fn send_push_literal_rejects_with_feature_disabled_when_codec_push_off() {
-        let actions = feature_disabled_probe_actions();
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         assert_eq!(
             actions.send_push_literal("home/temp", b"data", true),
             Err(SendWireError::FeatureDisabled),
             "codec-push OFF: send_push_literal must return the typed \
              FeatureDisabled reject, not a falsely-Ok no-op or a panic"
+        );
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "codec-push OFF: the typed reject must leave no wire bytes"
         );
     }
 
@@ -7201,12 +7175,17 @@ mod tests {
     #[cfg(not(feature = "codec-request"))]
     #[test]
     fn send_request_query_rejects_with_feature_disabled_when_codec_request_off() {
-        let actions = feature_disabled_probe_actions();
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         assert_eq!(
             actions.send_request_query(7, 0, Some("home/temp")),
             Err(SendWireError::FeatureDisabled),
             "codec-request OFF: send_request_query must return the typed \
              FeatureDisabled reject, not a falsely-Ok no-op or a panic"
+        );
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "codec-request OFF: the typed reject must leave no wire bytes"
         );
     }
 
@@ -7216,12 +7195,17 @@ mod tests {
     #[cfg(not(feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_keyexpr_rejects_with_feature_disabled_when_declare_keyexpr_off() {
-        let actions = feature_disabled_probe_actions();
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         assert_eq!(
             actions.send_declare_keyexpr(1, "home/temp"),
             Err(SendDeclareError::FeatureDisabled),
             "declare-keyexpr OFF: send_declare_keyexpr must return the typed \
              FeatureDisabled reject, not a falsely-Ok no-op or a panic"
+        );
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "declare-keyexpr OFF: the typed reject must leave no wire bytes"
         );
     }
 
@@ -7231,12 +7215,17 @@ mod tests {
     #[cfg(not(feature = "declare-subscriber"))]
     #[test]
     fn send_declare_subscriber_rejects_with_feature_disabled_when_declare_subscriber_off() {
-        let actions = feature_disabled_probe_actions();
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         assert_eq!(
             actions.send_declare_subscriber(1, 0, Some("home/temp")),
             Err(SendDeclareError::FeatureDisabled),
             "declare-subscriber OFF: send_declare_subscriber must return the \
              typed FeatureDisabled reject, not a falsely-Ok no-op or a panic"
+        );
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "declare-subscriber OFF: the typed reject must leave no wire bytes"
         );
     }
 
@@ -7245,12 +7234,17 @@ mod tests {
     #[cfg(not(feature = "declare-queryable"))]
     #[test]
     fn send_declare_queryable_rejects_with_feature_disabled_when_declare_queryable_off() {
-        let actions = feature_disabled_probe_actions();
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         assert_eq!(
             actions.send_declare_queryable(1, 0, Some("home/temp")),
             Err(SendDeclareError::FeatureDisabled),
             "declare-queryable OFF: send_declare_queryable must return the \
              typed FeatureDisabled reject, not a falsely-Ok no-op or a panic"
+        );
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "declare-queryable OFF: the typed reject must leave no wire bytes"
         );
     }
 
@@ -7259,12 +7253,17 @@ mod tests {
     #[cfg(not(feature = "declare-token"))]
     #[test]
     fn send_declare_token_rejects_with_feature_disabled_when_declare_token_off() {
-        let actions = feature_disabled_probe_actions();
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         assert_eq!(
             actions.send_declare_token(1, 0, Some("home/temp")),
             Err(SendDeclareError::FeatureDisabled),
             "declare-token OFF: send_declare_token must return the typed \
              FeatureDisabled reject, not a falsely-Ok no-op or a panic"
+        );
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "declare-token OFF: the typed reject must leave no wire bytes"
         );
     }
 
@@ -7278,13 +7277,18 @@ mod tests {
     #[test]
     fn send_interest_liveliness_subscriber_rejects_with_feature_disabled_when_declare_interest_off()
     {
-        let actions = feature_disabled_probe_actions();
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         assert_eq!(
             actions.send_interest_liveliness_subscriber(1, false, 0, Some("home/temp")),
             Err(SendWireError::FeatureDisabled),
             "declare-interest OFF: send_interest_liveliness_subscriber must \
              return the typed FeatureDisabled reject, not a falsely-Ok no-op \
              or a panic"
+        );
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "declare-interest OFF: the typed reject must leave no wire bytes"
         );
     }
 
