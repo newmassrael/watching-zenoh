@@ -53,3 +53,9 @@ docs/GENERATED.md
 # Cross-session handoff lives in the atomic changelog (audit-traced);
 # notes/ is a local working cache only.
 notes/
+
+# Claude-facing analysis / scratch docs (audits, codegen-surface notes).
+# Local working artifacts, not part of the tracked design surface (the
+# atomic store is the SSOT). Previously-tracked files are untracked via
+# `git rm --cached`; they stay on disk as local references.
+claudedocs/
