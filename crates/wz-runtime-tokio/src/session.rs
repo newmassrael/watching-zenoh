@@ -6179,6 +6179,88 @@ mod tests {
         );
     }
 
+    /// R311hu — NEG / isolation coverage for the query send-side
+    /// metadata gate, the symmetric analog of the pubsub C1d
+    /// metadata-OFF lane. A subset that composes `query-get` WITHOUT
+    /// `query-target` (the C1j `zget-reply-only` subset) cfg's out the
+    /// POS `..._threads_target_through_with_meta` test above, so nothing
+    /// otherwise proves `QueryOptions::with_target` actually elides. This
+    /// guard pins the signature-stable no-op (R311o): with the feature
+    /// off, calling `with_target` must leave the outbound frame
+    /// byte-identical to the bare no-metadata baseline (no Q_T flag /
+    /// target ext on the wire). A regression that silently un-gated the
+    /// setter — making the field always-on — would break this parity.
+    #[cfg(all(feature = "query-get", not(feature = "query-target")))]
+    #[test]
+    fn query_with_target_is_silent_noop_when_query_target_feature_disabled() {
+        let (session, driver) = build_session();
+        session
+            .query(
+                "home/temp",
+                QueryOptions::get()
+                    .with_allowed_destination(Locality::Remote)
+                    .with_target(QueryTarget::AllComplete),
+                |_| {},
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
+        let session_frame = driver.frames.lock().unwrap()[0].0.clone();
+
+        // Baseline: the bare no-metadata send_request_query path, the
+        // same construction the empty-meta fast-path test pins.
+        let driver2 = Arc::new(RecordingDriver::new());
+        let actions2 = SessionLinkActions::new(driver2.clone(), fixture_params(), TokioTime::new());
+        let rid = actions2.alloc_next_request_id();
+        actions2
+            .send_request_query(rid, 0, Some("home/temp"))
+            .unwrap();
+        let baseline = driver2.frames.lock().unwrap()[0].0.clone();
+
+        assert_eq!(
+            session_frame, baseline,
+            "with query-target OFF, with_target() must be a no-op: the wire \
+             frame must equal the bare no-metadata baseline (no Q_T on the wire)"
+        );
+    }
+
+    /// R311hu — NEG / isolation counterpart for `query-consolidation`
+    /// (see the `query-target` guard above for the rationale). With the
+    /// feature off, `QueryOptions::with_consolidation` is a
+    /// signature-stable no-op: the Q_C flag and its consolidation byte
+    /// must be absent, so the outbound frame must equal the bare
+    /// no-metadata baseline.
+    #[cfg(all(feature = "query-get", not(feature = "query-consolidation")))]
+    #[test]
+    fn query_with_consolidation_is_silent_noop_when_query_consolidation_feature_disabled() {
+        let (session, driver) = build_session();
+        session
+            .query(
+                "home/temp",
+                QueryOptions::get()
+                    .with_allowed_destination(Locality::Remote)
+                    .with_consolidation(ConsolidationMode::Latest),
+                |_| {},
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
+        let session_frame = driver.frames.lock().unwrap()[0].0.clone();
+
+        let driver2 = Arc::new(RecordingDriver::new());
+        let actions2 = SessionLinkActions::new(driver2.clone(), fixture_params(), TokioTime::new());
+        let rid = actions2.alloc_next_request_id();
+        actions2
+            .send_request_query(rid, 0, Some("home/temp"))
+            .unwrap();
+        let baseline = driver2.frames.lock().unwrap()[0].0.clone();
+
+        assert_eq!(
+            session_frame, baseline,
+            "with query-consolidation OFF, with_consolidation() must be a \
+             no-op: the wire frame must equal the bare no-metadata baseline \
+             (no Q_C on the wire)"
+        );
+    }
+
     #[cfg(all(feature = "query-get", feature = "query-attachment"))]
     #[test]
     fn query_session_local_with_any_metadata_skips_wire_branch_entirely() {
