@@ -701,8 +701,19 @@ layer_c1d_cargo_test_pubsub() {
 # maximal reply lane C1f keeps those markers ON (cfg'ing the module
 # out), so this is the only lane that RUNS the reply decode-isolation
 # NEG — the query-side mirror of pubsub's `decode_isolation_tests`.
+#
+# Second invocation: the metadata-OFF receive subset (query-queryable
+# ON, query-attachment / query-selector-parameters OFF). It runs
+# `query::request_decode_isolation_tests` — the receive-side NEG that an
+# inbound Query's attachment ext / parameters slice does NOT reach the
+# QueryView when those consumer features are off (extract_query_attachment
+# short-circuits; parameters_view = None). The first (maximal) invocation
+# keeps both markers ON, cfg'ing that module out, so only this lane RUNS
+# it. (It also re-runs reply::decode_isolation_tests — harmless.)
 layer_c1e_cargo_test_query() {
-    (cd crates && cargo test -p wz-session-core --features query-queryable,query-attachment,query-selector-parameters,query-reply-err,codec-response-final --quiet)
+    (cd crates \
+        && cargo test -p wz-session-core --features query-queryable,query-attachment,query-selector-parameters,query-reply-err,codec-response-final --quiet \
+        && cargo test -p wz-session-core --features query-queryable --quiet)
 }
 
 # ─── Layer C1f — cargo test -p wz-session-core (reply dispatch plane) ──

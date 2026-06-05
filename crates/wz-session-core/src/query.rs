@@ -2176,3 +2176,164 @@ mod tests {
         );
     }
 }
+
+// ── receive-side query metadata field-drop NEG ──
+//
+// The main `mod tests` gate requires query-attachment + query-selector-
+// parameters ON, so it can only host the POS arm of those two receive-
+// side projection gates (`dispatch_request` → `extract_query_attachment`
+// for the attachment ext, and the `parameters_view` cfg-pair for the
+// selector parameters). This module pins the OFF arm: in a build with
+// `query-queryable` ON (so the registry + `dispatch_request` compile,
+// codec-request implied) but query-attachment / query-selector-
+// parameters OFF, an inbound `Request(Query)` that carries the
+// attachment ext / a parameters slice must surface `None` through the
+// `QueryView` accessors — the codec `Query.extensions` / `Query.parameters`
+// fields are ungated (struct stability), so an un-gating regression
+// would leak them into the handler on a build that never opted in.
+// Companion of the reply (`reply::decode_isolation_tests`) and pubsub
+// (`pubsub::*decode_isolation_tests`) receive-side guards. The run-ci
+// C1e lane gains a second invocation (`--features query-queryable`,
+// metadata OFF) that builds exactly this profile, so these RUN there;
+// the maximal C1e/C1h queryable lanes keep the markers ON (cfg'ing the
+// module out).
+#[cfg(test)]
+#[cfg(all(
+    feature = "alloc",
+    feature = "query-queryable",
+    not(feature = "query-attachment"),
+    not(feature = "query-selector-parameters"),
+))]
+mod request_decode_isolation_tests {
+    use super::*;
+    use alloc::vec;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use wz_codecs::ext_entry::{ExtEntry, ExtEntryVariant};
+    use wz_codecs::ext_zbuf::ExtZbuf;
+    use wz_codecs::query::Query;
+    use wz_codecs::request::{Request, RequestVariant};
+    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+    use wz_codecs::wireexpr_local::WireexprLocal;
+
+    fn literal_keyexpr(suffix: &str) -> Wireexpr<'_> {
+        Wireexpr {
+            body: WireexprVariant::WireexprLocal(WireexprLocal {
+                id: 0,
+                suffix_len: Some(suffix.len() as u64),
+                suffix: Some(suffix),
+            }),
+        }
+    }
+
+    /// A `Request(Query)` carrying an attachment ext (ext_id 0x05,
+    /// ENC_ZBUF). The codec `Query.extensions` field is ungated, so this
+    /// is constructible with `query-attachment` off — that feature gates
+    /// only `extract_query_attachment`'s projection.
+    fn request_query_with_attachment(rid: u64, suffix: &str, attachment: &[u8]) -> RequestOwned {
+        let mut ext = ExtEntry::default();
+        ext.set_ext_id(0x05); // ATTACHMENT_EXT_ID_QUERY
+        ext.set_enc(2); // ENC_ZBUF
+        ext.body = ExtEntryVariant::CodecZenohExtZbuf(ExtZbuf {
+            value_len: attachment.len() as u64,
+            value: attachment,
+        });
+        let mut query = Query::default().try_into_owned().unwrap();
+        query.header |= 0x80;
+        query.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        let mut request = Request {
+            header: 0x1c,
+            rid,
+            keyexpr: literal_keyexpr(suffix),
+            extensions: None,
+            body: RequestVariant::CodecZenohQuery(Query::default()),
+        }
+        .try_into_owned()
+        .unwrap();
+        request.body = RequestOwnedVariant::CodecZenohQuery(query);
+        request
+    }
+
+    /// A `Request(Query)` carrying a selector `parameters` slice
+    /// (header flag 0x40 + parameters_len + parameters). Ungated codec
+    /// field; `query-selector-parameters` gates only the `parameters_view`
+    /// projection in `fire_matching_queryables`.
+    fn request_query_with_parameters(rid: u64, suffix: &str, params: &[u8]) -> RequestOwned {
+        let query = Query {
+            header: 0x40,
+            parameters_len: Some(params.len() as u64),
+            parameters: Some(params),
+            ..Query::default()
+        }
+        .try_into_owned()
+        .unwrap();
+        let mut request = Request {
+            header: 0x1c,
+            rid,
+            keyexpr: literal_keyexpr(suffix),
+            extensions: None,
+            body: RequestVariant::CodecZenohQuery(Query::default()),
+        }
+        .try_into_owned()
+        .unwrap();
+        request.body = RequestOwnedVariant::CodecZenohQuery(query);
+        request
+    }
+
+    #[test]
+    fn inbound_query_attachment_is_dropped_when_query_attachment_off() {
+        let mut reg = QueryableRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let attachment = Arc::new(Mutex::new(Some(b"dirty".to_vec())));
+        let f = fired.clone();
+        let a = attachment.clone();
+        reg.register("home/temp", move |event, _responder| {
+            f.fetch_add(1, Ordering::SeqCst);
+            *a.lock().unwrap() = event.attachment().map(<[u8]>::to_vec);
+        });
+
+        let req = request_query_with_attachment(11, "home/temp", b"hello-att");
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "queryable still fires — only the metadata field is dropped"
+        );
+        assert_eq!(
+            *attachment.lock().unwrap(),
+            None,
+            "wire attachment must NOT reach QueryView when query-attachment is off"
+        );
+    }
+
+    #[test]
+    fn inbound_query_parameters_are_dropped_when_query_selector_parameters_off() {
+        let mut reg = QueryableRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let parameters = Arc::new(Mutex::new(Some(b"dirty".to_vec())));
+        let f = fired.clone();
+        let p = parameters.clone();
+        reg.register("home/temp", move |event, _responder| {
+            f.fetch_add(1, Ordering::SeqCst);
+            *p.lock().unwrap() = event.parameters().map(<[u8]>::to_vec);
+        });
+
+        let req = request_query_with_parameters(12, "home/temp", b"key=value");
+        let mut replies = Vec::new();
+        reg.dispatch_request(&req, &HashMap::new(), &mut replies);
+
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "queryable still fires — only the metadata field is dropped"
+        );
+        assert_eq!(
+            *parameters.lock().unwrap(),
+            None,
+            "wire parameters must NOT reach QueryView when query-selector-parameters is off"
+        );
+    }
+}
