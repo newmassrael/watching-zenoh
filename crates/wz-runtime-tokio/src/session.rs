@@ -313,6 +313,15 @@ impl PublishOptions {
 
     /// R232 — attach a body-level encoding (Put kind only; Del kind
     /// ignores the field per zenoh-pico `_z_msg_del_t` layout).
+    ///
+    /// Gated on `pubsub-encoding` (wire-data helper, mirrors
+    /// `with_timestamp` / `with_attachment`): the send-side encode
+    /// (`gated_encoding_field` in build_msg_put_with_meta) omits the
+    /// inline encoding field + `_Z_FLAG_Z_P_E` header bit when the
+    /// feature is off, so offering the setter would silently drop it.
+    /// The `encoding` field stays (struct stability); only the
+    /// populator gates.
+    #[cfg(feature = "pubsub-encoding")]
     pub fn with_encoding(mut self, encoding: EncodingHint) -> Self {
         self.encoding = Some(encoding);
         self
@@ -323,6 +332,14 @@ impl PublishOptions {
     /// whose `source_info.zid` matches the session's own zid, the
     /// dispatch suppresses to avoid double-firing local subscribers
     /// in mesh / router-echo topologies.
+    ///
+    /// Gated on `pubsub-source-info` (wire-data helper, mirrors
+    /// `with_attachment` / `with_timestamp`): the send-side encode
+    /// (`build_body_extensions`) omits the source_info ext when the
+    /// feature is off, so offering the setter would silently drop it.
+    /// The `source_info` field stays (struct stability); only the
+    /// populator gates.
+    #[cfg(feature = "pubsub-source-info")]
     pub fn with_source_info(mut self, source_info: SourceInfo) -> Self {
         self.source_info = Some(source_info);
         self
@@ -342,6 +359,20 @@ impl PublishOptions {
     /// R232 — attach outer-level QoS metadata (priority / congestion
     /// control / express byte). Mirrors zenoh-pico's
     /// `_Z_MSG_EXT_ENC_ZINT | 0x01` Push outer extension.
+    ///
+    /// Gated on any of the three QoS-byte features (`pubsub-priority` /
+    /// `pubsub-congestion-control` / `pubsub-express`) — the single
+    /// outer-ext byte packs all three, so any one of them composes the
+    /// `build_push_outer_extensions` encode path. With none of them on,
+    /// the send-side emits no QoS ext (and the subscriber-side decode is
+    /// gated on the same `any(...)`), so offering the setter would
+    /// silently drop the byte. The `qos` field stays (struct stability);
+    /// only the populator gates.
+    #[cfg(any(
+        feature = "pubsub-priority",
+        feature = "pubsub-congestion-control",
+        feature = "pubsub-express"
+    ))]
     pub fn with_qos(mut self, qos: QosLevel) -> Self {
         self.qos = Some(qos);
         self
@@ -4959,7 +4990,17 @@ mod tests {
         captured
     }
 
-    #[cfg(all(feature = "pubsub-attachment", feature = "pubsub-timestamp"))]
+    #[cfg(all(
+        feature = "pubsub-attachment",
+        feature = "pubsub-timestamp",
+        feature = "pubsub-encoding",
+        feature = "pubsub-source-info",
+        any(
+            feature = "pubsub-priority",
+            feature = "pubsub-congestion-control",
+            feature = "pubsub-express"
+        )
+    ))]
     #[test]
     fn publish_options_with_metadata_setters_chain() {
         // Builder ergonomics: every R232 with_* setter is chainable
@@ -5012,7 +5053,7 @@ mod tests {
         assert_eq!(ts.zid, vec![1, 2, 3]);
     }
 
-    #[cfg(feature = "pubsub-allow-loop")]
+    #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-encoding"))]
     #[test]
     fn publish_loopback_propagates_encoding_to_put_sample() {
         let (session, _driver) = build_session();
@@ -5032,7 +5073,7 @@ mod tests {
         assert_eq!(enc.schema.as_deref(), Some("text/plain"));
     }
 
-    #[cfg(feature = "pubsub-allow-loop")]
+    #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-encoding"))]
     #[test]
     fn publish_loopback_omits_encoding_for_del_kind_even_when_opts_supplied() {
         // Mirror zenoh-pico's wire constraint: _z_msg_del_t has no
@@ -5059,7 +5100,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "pubsub-allow-loop")]
+    #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-source-info"))]
     #[test]
     fn publish_loopback_propagates_source_info_to_sample() {
         let (session, _driver) = build_session();
@@ -5094,7 +5135,14 @@ mod tests {
         assert_eq!(s[0].attachment.as_deref(), Some(&b"attach-payload"[..]));
     }
 
-    #[cfg(feature = "pubsub-allow-loop")]
+    #[cfg(all(
+        feature = "pubsub-allow-loop",
+        any(
+            feature = "pubsub-priority",
+            feature = "pubsub-congestion-control",
+            feature = "pubsub-express"
+        )
+    ))]
     #[test]
     fn publish_loopback_propagates_qos_to_sample() {
         let (session, _driver) = build_session();
@@ -5116,7 +5164,14 @@ mod tests {
     #[cfg(all(
         feature = "pubsub-allow-loop",
         feature = "pubsub-attachment",
-        feature = "pubsub-timestamp"
+        feature = "pubsub-timestamp",
+        feature = "pubsub-encoding",
+        feature = "pubsub-source-info",
+        any(
+            feature = "pubsub-priority",
+            feature = "pubsub-congestion-control",
+            feature = "pubsub-express"
+        )
     ))]
     #[test]
     fn publish_loopback_propagates_all_metadata_in_one_chain() {

@@ -289,17 +289,17 @@ platform-qnx = []
 platform-windows = []
 platform-zephyr = []
 
-# ----- domain: pubsub (11 atomic, 9 active / 2 reserved) -----
+# ----- domain: pubsub (11 atomic, 10 active / 1 reserved) -----
 # R311cc — active features forward to wz-runtime-tokio (-put/-delete
 # msg body variants, -allow-loop loopback, -attachment / -timestamp /
-# -source-info Sample optional field populators, -priority /
-# -congestion-control / -express QoS-byte projection). 2 reserved
-# (-encoding / -sample) stay declaration-only.
+# -encoding / -source-info Sample optional field populators, -priority /
+# -congestion-control / -express QoS-byte projection). 1 reserved
+# (-sample) stays declaration-only.
 pubsub-allow-loop = ["wz-runtime-tokio?/pubsub-allow-loop"]
 pubsub-attachment = ["attachment-bytes", "wz-runtime-tokio?/pubsub-attachment"]
 pubsub-congestion-control = ["wz-runtime-tokio?/pubsub-congestion-control"]
 pubsub-delete = ["wz-runtime-tokio?/pubsub-delete"]
-pubsub-encoding = []
+pubsub-encoding = ["wz-runtime-tokio?/pubsub-encoding"]
 pubsub-express = ["wz-runtime-tokio?/pubsub-express"]
 pubsub-priority = ["session-extqos", "wz-runtime-tokio?/pubsub-priority"]
 pubsub-put = ["wz-runtime-tokio?/pubsub-put"]

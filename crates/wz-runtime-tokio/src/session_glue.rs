@@ -174,7 +174,10 @@ use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 // in session_glue these owned codec types are now consumed solely by the
 // `codec-push` body-extension + MsgPut/MsgDel builders, so the wider
 // `any(...)` gate left them unused (deny) in a `codec-push`-off subset.
-#[cfg(feature = "codec-push")]
+// `ExtZbufOwned` is the source_info ext body type, used only by the
+// `pubsub-source-info`-gated branch of `build_body_extensions`, so it
+// narrows to that feature too.
+#[cfg(all(feature = "codec-push", feature = "pubsub-source-info"))]
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 #[cfg(feature = "codec-init-body")]
 use wz_codecs::init_body::InitBodyOwned;
@@ -2920,6 +2923,13 @@ fn build_body_extensions(
     attachment: Option<&[u8]>,
 ) -> Result<Option<Vec<ExtEntryOwned>>, CodecError> {
     let mut exts: Vec<ExtEntryOwned> = Vec::new();
+    // Push source_info ext (id 0x01) — gated on `pubsub-source-info` so a
+    // codec-push subset that does not compose source identification carries
+    // no source_info encode path. The subscriber-side decode is gated on
+    // the same feature (pubsub.rs), so off-subset both ends agree the wire
+    // carries no source_info. M flag stays clear (informational); Z chain
+    // bit applied below.
+    #[cfg(feature = "pubsub-source-info")]
     if let Some(si) = source_info {
         let prefix = si.zid_prefix();
         if !prefix.is_empty() {
@@ -2938,6 +2948,8 @@ fn build_body_extensions(
             });
         }
     }
+    #[cfg(not(feature = "pubsub-source-info"))]
+    let _ = source_info;
     // Push attachment ext (id 0x03) — gated on `pubsub-attachment` so a
     // codec-push subset that does not compose attachments carries no
     // attachment encode path. The ext wire shape lives in the
@@ -2992,6 +3004,15 @@ fn apply_chain_z_bits(entries: &mut [ExtEntryOwned]) {
 #[cfg(feature = "codec-push")]
 fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<Vec<ExtEntryOwned>> {
     let mut exts: Vec<ExtEntryOwned> = Vec::new();
+    // Push outer QoS ext (id 0x01) — gated on any of the three QoS-byte
+    // features (the single ext byte packs priority / congestion-control /
+    // express). The subscriber-side decode is gated on the same `any(...)`
+    // (pubsub.rs), so off-subset both ends agree the wire carries no QoS.
+    #[cfg(any(
+        feature = "pubsub-priority",
+        feature = "pubsub-congestion-control",
+        feature = "pubsub-express"
+    ))]
     if let Some(q) = qos {
         exts.push(ExtEntryOwned {
             // ENC_ZINT(0x20) | id_qos(0x01). No M flag — qos is
@@ -3003,6 +3024,12 @@ fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<V
             }),
         });
     }
+    #[cfg(not(any(
+        feature = "pubsub-priority",
+        feature = "pubsub-congestion-control",
+        feature = "pubsub-express"
+    )))]
+    let _ = qos;
     if exts.is_empty() {
         return None;
     }
@@ -3034,6 +3061,30 @@ fn gated_timestamp_field(
     }
 }
 
+/// SSOT for the `pubsub-encoding` send-side gate. The inline `MsgPut`
+/// encoding field is the single place a caller-set encoding reaches the
+/// wire (Put only; `MsgDel` has no encoding slot per zenoh-pico
+/// `_z_msg_del_t`), so the "is an encoding emitted" policy lives here
+/// once — sibling of [`gated_timestamp_field`]. When `pubsub-encoding`
+/// is off the result is forced `None` so the `_Z_FLAG_Z_P_E` (0x40)
+/// header bit the builder ORs in stays clear and no encoding is
+/// serialised. The param keeps the builder's signature stable across
+/// the toggle.
+#[cfg(feature = "codec-push")]
+fn gated_encoding_field(
+    encoding: Option<&crate::sample::EncodingHint>,
+) -> Result<Option<wz_codecs::encoding::EncodingOwned>, CodecError> {
+    #[cfg(feature = "pubsub-encoding")]
+    {
+        encoding.map(|e| e.to_codec().try_into_owned()).transpose()
+    }
+    #[cfg(not(feature = "pubsub-encoding"))]
+    {
+        let _ = encoding;
+        Ok(None)
+    }
+}
+
 /// R233 — build a `MsgPut` body carrying caller-set metadata
 /// (timestamp, encoding, source_info, attachment). Sets the
 /// `_Z_FLAG_Z_P_T` (0x20) and `_Z_FLAG_Z_P_E` (0x40) header bits to
@@ -3055,9 +3106,7 @@ fn build_msg_put_with_meta(
     let mut put = MsgPutOwned {
         header: 0x01,
         timestamp: gated_timestamp_field(timestamp)?,
-        encoding: encoding
-            .map(|e| e.to_codec().try_into_owned())
-            .transpose()?,
+        encoding: gated_encoding_field(encoding)?,
         extensions,
         payload_len,
         payload: wz_session_core::codec_bound::bounded_bytes(payload)?,
@@ -7073,7 +7122,12 @@ mod tests {
 
     // ── R233 wire encoder for PublishOptions metadata ──
     #[cfg(feature = "codec-push")]
-    use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
+    use crate::sample::{QosLevel, SourceInfo, TimestampHint};
+    // `EncodingHint` is used only by the `pubsub-encoding`-gated encoding
+    // builder tests, so it narrows to that feature to stay used in a
+    // codec-push subset that does not compose encoding.
+    #[cfg(all(feature = "codec-push", feature = "pubsub-encoding"))]
+    use crate::sample::EncodingHint;
 
     #[cfg(feature = "codec-push")]
     #[test]
@@ -7113,7 +7167,7 @@ mod tests {
         assert!(!put.z(), "Z flag must remain clear without body extensions");
     }
 
-    #[cfg(feature = "codec-push")]
+    #[cfg(all(feature = "codec-push", feature = "pubsub-encoding"))]
     #[test]
     fn build_msg_put_with_meta_sets_encoding_field_and_e_flag() {
         let enc = EncodingHint {
@@ -7139,7 +7193,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "codec-push")]
+    #[cfg(all(feature = "codec-push", feature = "pubsub-source-info"))]
     #[test]
     fn build_msg_put_with_meta_attaches_source_info_ext_and_sets_z_flag() {
         let si = SourceInfo::new(&[0x11, 0x22, 0x33, 0x44], 7, 42);
@@ -7162,7 +7216,11 @@ mod tests {
         }
     }
 
-    #[cfg(all(feature = "codec-push", feature = "pubsub-attachment"))]
+    #[cfg(all(
+        feature = "codec-push",
+        feature = "pubsub-attachment",
+        feature = "pubsub-source-info"
+    ))]
     #[test]
     fn build_msg_put_with_meta_attaches_attachment_ext_after_source_info() {
         // Both source_info + attachment together — order matters: pico's
@@ -7210,7 +7268,14 @@ mod tests {
         assert!(!del.z(), "Z flag clear with no extensions");
     }
 
-    #[cfg(feature = "codec-push")]
+    #[cfg(all(
+        feature = "codec-push",
+        any(
+            feature = "pubsub-priority",
+            feature = "pubsub-congestion-control",
+            feature = "pubsub-express"
+        )
+    ))]
     #[test]
     fn build_push_outer_extensions_emits_qos_with_zint_body() {
         let exts = build_push_outer_extensions(Some(QosLevel::from_raw(0b0001_1010)))
@@ -7231,7 +7296,14 @@ mod tests {
         assert!(build_push_outer_extensions(None).is_none());
     }
 
-    #[cfg(feature = "codec-push")]
+    #[cfg(all(
+        feature = "codec-push",
+        any(
+            feature = "pubsub-priority",
+            feature = "pubsub-congestion-control",
+            feature = "pubsub-express"
+        )
+    ))]
     #[test]
     fn build_push_literal_with_meta_sets_push_header_z_bit_when_qos_attached() {
         let meta = PushMetadata {
@@ -7255,7 +7327,14 @@ mod tests {
     #[cfg(all(
         feature = "codec-push",
         feature = "pubsub-attachment",
-        feature = "pubsub-timestamp"
+        feature = "pubsub-timestamp",
+        feature = "pubsub-encoding",
+        feature = "pubsub-source-info",
+        any(
+            feature = "pubsub-priority",
+            feature = "pubsub-congestion-control",
+            feature = "pubsub-express"
+        )
     ))]
     #[test]
     fn build_push_literal_with_meta_round_trips_through_codec_encode_decode() {

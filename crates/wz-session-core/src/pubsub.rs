@@ -652,11 +652,19 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                         let _ = body_exts;
                         None
                     };
+                    // pubsub-encoding gate: with the feature off the subscriber
+                    // never projects the inline encoding field, so Sample.encoding
+                    // stays None — mirroring a wire Put that simply carries no
+                    // encoding. Symmetric to the send-side `gated_encoding_field`.
+                    #[cfg(feature = "pubsub-encoding")]
+                    let body_encoding = put.encoding.as_ref().map(EncodingHint::from_codec);
+                    #[cfg(not(feature = "pubsub-encoding"))]
+                    let body_encoding: Option<EncodingHint> = None;
                     (
                         SampleKind::Put,
                         put.payload.as_slice().to_vec(),
                         body_timestamp,
-                        put.encoding.as_ref().map(EncodingHint::from_codec),
+                        body_encoding,
                         body_attachment,
                         body_source_info,
                     )
