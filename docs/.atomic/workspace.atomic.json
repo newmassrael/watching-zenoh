@@ -30225,6 +30225,38 @@
         "query-source-info send-side stamping (RequestQueryBuilder query body ext-chain source_info+attachment ordering with Z bits + QueryOptions::with_source_info + querier identity source) remains a follow-up; receive-side projection landed this round"
       ]
     },
+    "Round 311ib": {
+      "decision_summary": "query-source-info send-side: querier stamps source-info on outbound Query body ext 0x01 (RequestQueryBuilder ext-chain + QueryOptions::with_source_info); completes the send+receive vertical begun in R311ia; BorrowedQuery source_info owned->borrow cleanup",
+      "changes_bullets": [
+        "RequestQueryBuilder::query_source_info setter + build() Query body ext-chain reworked to source_info(0x01)+attachment(0x05) ordered with Z-continuation bits",
+        "QueryMetadata.source_info + QueryOptions::with_source_info + query_metadata threading + send_request_query_with_meta source_info branch",
+        "query-source-info added to wz-runtime-tokio default (sibling of query-attachment/selector/reply-err)",
+        "send-side wire POS test; receive-side BorrowedQuery.source_info changed owned->borrow (uniform with attachment, no per-match clone)"
+      ],
+      "verification_bullets": [
+        "send POS (frame contains standalone query_source_info bytes) + receive POS/NEG pass",
+        "clippy -D warnings clean on send + receive feature sets",
+        "full host run-ci EXIT 0"
+      ],
+      "carry_forward_bullets": [
+        "query-source-info now full send+receive vertical; status active is honest (R311ia receive-side + R311ib send-side complete the atom). No remaining query-domain unimplemented atoms."
+      ],
+      "publishable_decision_summary": "query-source-info send-side: querier stamps source-info on outbound Query body ext 0x01 (RequestQueryBuilder ext-chain + QueryOptions::with_source_info); completes the send+receive vertical begun in R311ia; BorrowedQuery source_info owned->borrow cleanup",
+      "publishable_changes_bullets": [
+        "RequestQueryBuilder::query_source_info setter + build() Query body ext-chain reworked to source_info(0x01)+attachment(0x05) ordered with Z-continuation bits",
+        "QueryMetadata.source_info + QueryOptions::with_source_info + query_metadata threading + send_request_query_with_meta source_info branch",
+        "query-source-info added to wz-runtime-tokio default (sibling of query-attachment/selector/reply-err)",
+        "send-side wire POS test; receive-side BorrowedQuery.source_info changed owned->borrow (uniform with attachment, no per-match clone)"
+      ],
+      "publishable_verification_bullets": [
+        "send POS (frame contains standalone query_source_info bytes) + receive POS/NEG pass",
+        "clippy -D warnings clean on send + receive feature sets",
+        "full host run-ci EXIT 0"
+      ],
+      "publishable_carry_forward_bullets": [
+        "query-source-info now full send+receive vertical; status active is honest (R311ia receive-side + R311ib send-side complete the atom). No remaining query-domain unimplemented atoms."
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
@@ -36348,7 +36380,7 @@
       "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "zenoh query SourceInfo",
-      "reason": "F=querier source-info ext (id 0x01 ZBUF) projected to QueryView::source_info, gated query-source-info (receive-side; send-side stamping follow-up); P=zenoh query SourceInfo; C=symmetric to pubsub-source-info, shared sample decoder"
+      "reason": "F=querier source-info ext (id 0x01 ZBUF) full vertical: send-side stamp (QueryOptions::with_source_info -> RequestQueryBuilder query body ext-chain) + receive-side QueryView::source_info projection, gated query-source-info; P=zenoh query SourceInfo; C=symmetric to pubsub-source-info, shared sample encode/decode SSOT"
     },
     "query-target": {
       "status": "active",

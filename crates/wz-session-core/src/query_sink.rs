@@ -135,12 +135,13 @@ pub struct BorrowedQuery<'a> {
     pub parameters: Option<&'a [u8]>,
     /// Attachment payload, if any.
     pub attachment: Option<&'a [u8]>,
-    /// Source-info record (querier identity), if any. Owned (the decoded
-    /// `SourceInfo` is a small POD copied out of the ext-chain once at
-    /// dispatch); the accessor lends it. `alloc`-only — the `SourceInfo`
-    /// type lives in the `alloc`-gated `sample` module.
+    /// Source-info record (querier identity), if any. Borrowed — the
+    /// dispatcher decodes the ext once into a local that outlives the
+    /// per-queryable fan and lends it, matching the other fields' borrow
+    /// shape (no per-match clone). `alloc`-only — the `SourceInfo` type
+    /// lives in the `alloc`-gated `sample` module.
     #[cfg(feature = "alloc")]
-    pub source_info: Option<crate::sample::SourceInfo>,
+    pub source_info: Option<&'a crate::sample::SourceInfo>,
     /// Request id (correlation key).
     pub rid: u64,
 }
@@ -157,7 +158,7 @@ impl QueryView for BorrowedQuery<'_> {
     }
     #[cfg(feature = "alloc")]
     fn source_info(&self) -> Option<&crate::sample::SourceInfo> {
-        self.source_info.as_ref()
+        self.source_info
     }
     fn rid(&self) -> u64 {
         self.rid

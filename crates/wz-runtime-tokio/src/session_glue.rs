@@ -2003,6 +2003,16 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             if let Some(consolidation) = meta.consolidation {
                 builder = builder.consolidation(consolidation);
             }
+            // Query source-info ext threading — gated on
+            // `query-source-info` (the builder's `query_source_info`
+            // setter gates with it). Ordered before attachment in the
+            // builder; `build()` emits them in zenoh-pico Query body
+            // order (source_info 0x01 → attachment 0x05) regardless of
+            // setter call order.
+            #[cfg(feature = "query-source-info")]
+            if let Some(ref source_info) = meta.source_info {
+                builder = builder.query_source_info(source_info.clone());
+            }
             // Query attachment ext threading — gated on `query-attachment`
             // (the builder's `query_attachment` setter gates with it).
             #[cfg(feature = "query-attachment")]
@@ -8007,6 +8017,37 @@ mod tests {
                 .windows(standalone_bytes.len())
                 .any(|w| w == standalone_bytes),
             "frame must contain the with-attachment Request bytes verbatim"
+        );
+    }
+
+    #[cfg(all(feature = "codec-request", feature = "query-source-info"))]
+    #[test]
+    fn send_request_query_with_meta_source_info_emits_query_with_source_info_ext() {
+        // The querier stamps its source-info on the outbound Query body
+        // (ext 0x01 ZBUF). The meta-threading path and a standalone
+        // RequestQueryBuilder::query_source_info build the same wire, so
+        // the emitted frame must contain the standalone bytes verbatim.
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        let si = wz_session_core::sample::SourceInfo::new(&[0xAA, 0xBB, 0xCC, 0xDD], 7, 42);
+        let meta = QueryMetadata {
+            source_info: Some(si.clone()),
+            ..Default::default()
+        };
+        actions
+            .send_request_query_with_meta(42, 0, Some("home/temp"), &meta)
+            .unwrap();
+
+        let standalone = RequestQueryBuilder::new(42, 0, Some("home/temp"))
+            .query_source_info(si)
+            .build()
+            .unwrap();
+        let standalone_bytes = standalone.wire();
+        let frame = driver.frame_bytes(0);
+        assert!(
+            frame
+                .windows(standalone_bytes.len())
+                .any(|w| w == standalone_bytes),
+            "frame must contain the with-source-info Request bytes verbatim"
         );
     }
 

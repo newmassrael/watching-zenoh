@@ -135,6 +135,7 @@ default = [
     "query-attachment",
     "query-selector-parameters",
     "query-reply-err",
+    "query-source-info",
 ]
 # R311dz — liveliness-* / declare-{subscriber,queryable} additionally
 # forward to the wz-session-core same-named gate-only feature so the

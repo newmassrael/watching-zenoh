@@ -313,10 +313,11 @@ switchboard = ["wz-runtime-tokio?/switchboard"]
 
 # ----- domain: query (10 atomic, 10 active / 0 reserved) -----
 # R311cj — query-attachment + -selector-parameters + -reply-err wire-up.
-# query-source-info wired receive-side this round (the queryable-side
-# projection of the inbound Query body source-info ext, id 0x01 ENC_ZBUF,
-# shared decoder with the Push path); send-side stamping
-# (`build_request_query_with_source_info`) remains a follow-up.
+# query-source-info is a full send+receive vertical (R311ia receive: the
+# queryable-side QueryView::source_info projection of the inbound Query
+# body source-info ext, id 0x01 ENC_ZBUF, shared codec with the Push
+# path; R311ib send: QueryOptions::with_source_info stamps it on the
+# outbound Query body ext-chain).
 # R307 — the query-domain atomic features forward into
 # `wz-runtime-tokio` (cargo `?` syntax: only when runtime-tokio is
 # also active). Internal implication edges live in

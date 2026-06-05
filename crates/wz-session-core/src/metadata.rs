@@ -86,9 +86,12 @@ pub struct QueryMetadata {
     /// Reply consolidation hint (`Q_C` flag + consolidation byte).
     /// `None` elides → peer decodes `Z_CONSOLIDATION_MODE_AUTO`.
     pub consolidation: Option<ConsolidationMode>,
-    /// Query-level attachment blob (ext_id=0x03 ZBUF on the Query
+    /// Query-level attachment blob (ext_id=0x05 ZBUF on the Query
     /// ext chain). `None` elides the ext.
     pub attachment: Option<Vec<u8>>,
+    /// Query-level source-info (querier identity: zid / eid / sn;
+    /// ext_id=0x01 ZBUF on the Query ext chain). `None` elides the ext.
+    pub source_info: Option<SourceInfo>,
     /// Request-level timeout in milliseconds. `0` elides the ext
     /// per zenoh-pico's `_z_n_msg_request_needed_exts` predicate
     /// (`msg->_ext_timeout_ms != 0`).
@@ -104,6 +107,7 @@ impl QueryMetadata {
         self.target.is_none()
             && self.consolidation.is_none()
             && self.attachment.is_none()
+            && self.source_info.is_none()
             && self.timeout_ms == 0
     }
 }

@@ -24,14 +24,9 @@
 //! wire frame to build, and the builders allocate owned codec buffers.
 
 use alloc::string::{String, ToString};
-// `alloc::vec` backs the one `vec![..]` expression in this module: the
-// query-attachment encode branch in `build`. The test module's many
-// `vec![..]` uses are macro invocations that need no `use` under edition
-// 2021, so the import is gated to exactly `query-attachment` — every other
-// subset (codec-request without query-attachment, and the codec-request-OFF
-// reply / observer lanes) would otherwise flag it unused under `-D warnings`.
-#[cfg(feature = "query-attachment")]
-use alloc::vec;
+// The production query-body / request-level ext chains build with
+// `Vec::new()` + `push` (the `vec![..]` macro is used only in the test
+// module, which carries its own `use alloc::vec`).
 use alloc::vec::Vec;
 
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
@@ -176,6 +171,8 @@ pub struct RequestQueryBuilder {
     // Query-layer settings.
     consolidation: Option<ConsolidationMode>,
     parameters: Option<Vec<u8>>,
+    #[cfg(feature = "query-source-info")]
+    query_source_info: Option<crate::sample::SourceInfo>,
     #[cfg(feature = "query-attachment")]
     query_attachment: Option<Vec<u8>>,
     // Request-layer ext settings.
@@ -199,6 +196,8 @@ impl RequestQueryBuilder {
             keyexpr_suffix: keyexpr_suffix.map(str::to_string),
             consolidation: None,
             parameters: None,
+            #[cfg(feature = "query-source-info")]
+            query_source_info: None,
             #[cfg(feature = "query-attachment")]
             query_attachment: None,
             request_qos: None,
@@ -338,6 +337,20 @@ impl RequestQueryBuilder {
         self
     }
 
+    /// Set the Query-level source-info extension (querier identity:
+    /// zid / eid / sn). Gated on `query-source-info` (wire-data helper)
+    /// so a `codec-request` subset that does not compose querier
+    /// provenance carries no source-info encode path. The ext is emitted
+    /// as `ENC_ZBUF | 0x01` on the Query body chain (zenoh-pico
+    /// `_z_query_encode` message.c:438-444) — the same wire shape as the
+    /// Push body source-info, built through the shared
+    /// [`crate::source_info_ext::encode_source_info_ext_body`] SSOT.
+    #[cfg(feature = "query-source-info")]
+    pub fn query_source_info(mut self, source_info: crate::sample::SourceInfo) -> Self {
+        self.query_source_info = Some(source_info);
+        self
+    }
+
     /// Set the Query-level attachment extension payload. Panics on
     /// empty and on `len > QUERY_EXT_ZBUF_MAX_LEN`. Gated on
     /// `query-attachment` (wire-data helper) so a `codec-request` subset
@@ -421,13 +434,46 @@ impl RequestQueryBuilder {
                 query.parameters_len = Some(params.len() as u64);
                 query.parameters = Some(bounded_bytes(&params)?);
             }
+            // Query body ext chain in zenoh-pico encode order:
+            // source_info (0x01) → attachment (0x05) (message.c:438-448).
+            // Z chain-continuation bit set on every entry except the last
+            // (mirrors the Request-level ext assembly below); the Q_Z
+            // (0x80) header flag marks the chain's presence.
+            let mut query_exts: Vec<ExtEntryOwned> = Vec::new();
+            #[cfg(feature = "query-source-info")]
+            if let Some(si) = self.query_source_info {
+                let body_bytes = crate::source_info_ext::encode_source_info_ext_body(
+                    si.zid_prefix(),
+                    si.eid,
+                    si.sn,
+                );
+                query_exts.push(ExtEntryOwned {
+                    // ENC_ZBUF(0x40) | id_source_info(0x01). No M flag —
+                    // source_info is informational (zenoh-pico
+                    // message.c:439). Z bit applied in the finalize loop.
+                    header: 0x40 | 0x01,
+                    body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                        value_len: body_bytes.len() as u64,
+                        value: bounded_bytes(&body_bytes)?,
+                    }),
+                });
+            }
             #[cfg(feature = "query-attachment")]
             if let Some(attachment) = self.query_attachment {
-                query.header |= 0x80;
-                query.extensions = Some(vec![crate::attachment::encode_attachment_ext(
+                query_exts.push(crate::attachment::encode_attachment_ext(
                     crate::attachment::ATTACHMENT_EXT_ID_QUERY,
                     &attachment,
-                )?]);
+                )?);
+            }
+            if !query_exts.is_empty() {
+                query.header |= 0x80; // Q_Z (Query body exts present)
+                let last_idx = query_exts.len() - 1;
+                for (i, ext) in query_exts.iter_mut().enumerate() {
+                    if i < last_idx {
+                        ext.header |= 0x80;
+                    }
+                }
+                query.extensions = Some(query_exts);
             }
         } else {
             unreachable!(

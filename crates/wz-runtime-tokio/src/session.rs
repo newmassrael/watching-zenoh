@@ -490,6 +490,10 @@ pub struct QueryOptions {
     /// Optional Query-level attachment blob. Mirror of
     /// `z_get_options_t.attachment`. R239 carry.
     pub attachment: Option<Vec<u8>>,
+    /// Optional Query-level source-info (querier identity: zid / eid /
+    /// sn) stamped on the outbound Query body (ext 0x01 ZBUF). `None`
+    /// elides the ext. Symmetric to `PublishOptions::source_info`.
+    pub source_info: Option<SourceInfo>,
     /// Query timeout in milliseconds (`0` = default = use
     /// `Z_GET_TIMEOUT_DEFAULT`). Used by a future R240+
     /// ReplyRegistry-side timeout sweep that cancels the pending
@@ -582,6 +586,18 @@ impl QueryOptions {
         self
     }
 
+    /// Stamp the querier's source-info (zid / eid / sn) on the outbound
+    /// Query body (ext 0x01 ZBUF). Gated on `query-source-info`
+    /// (wire-data helper): the get path threads this into the Query
+    /// source-info ext only when the feature is composed, so the setter
+    /// gates with it. The field stays (struct stability). Symmetric to
+    /// `PublishOptions::with_source_info`.
+    #[cfg(feature = "query-source-info")]
+    pub fn with_source_info(mut self, source_info: SourceInfo) -> Self {
+        self.source_info = Some(source_info);
+        self
+    }
+
     /// Pin a per-query timeout in milliseconds. `0` leaves the
     /// default in place. Wire-side enforcement lands with the R240+
     /// ReplyRegistry timeout sweep; loopback ignores the value
@@ -659,6 +675,7 @@ impl QueryOptions {
             target: self.target,
             consolidation: self.consolidation,
             attachment: self.attachment.clone(),
+            source_info: self.source_info.clone(),
             timeout_ms: self.timeout_ms,
         }
     }

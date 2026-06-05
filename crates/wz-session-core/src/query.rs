@@ -960,8 +960,9 @@ impl<C: QuerySink> QueryableRegistry<C> {
         #[cfg(not(feature = "query-selector-parameters"))]
         let parameters_view: Option<&[u8]> = None;
         let attachment_view = extract_query_attachment(query);
-        // R311 — querier source-info, decoded once per inbound query
-        // (owned POD; cloned into each matched queryable's view below).
+        // R311 — querier source-info, decoded once per inbound query into
+        // this local; each matched queryable's `BorrowedQuery` lends it
+        // (`.as_ref()`), matching the attachment/parameters borrow shape.
         let source_info_view = extract_query_source_info(query);
         for queryable in self.queryables.iter_mut() {
             // R311gb (Track 2) — shared match SSOT with the no-heap
@@ -987,7 +988,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
                     keyexpr,
                     parameters: parameters_view,
                     attachment: attachment_view,
-                    source_info: source_info_view.clone(),
+                    source_info: source_info_view.as_ref(),
                     rid,
                 };
                 queryable.sink.handle(&query_view, &mut responder);
