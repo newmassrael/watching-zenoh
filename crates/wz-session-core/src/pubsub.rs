@@ -3381,3 +3381,161 @@ mod decode_isolation_tests {
         );
     }
 }
+
+// ── receive-side timestamp / attachment field-drop NEG ──
+//
+// The main `mod tests` gates on pubsub-timestamp + pubsub-attachment ON
+// (the data-plane union), so it cannot host the OFF arm of those two
+// projection gates. This module pins it: in a build with `pubsub-put`
+// ON but `pubsub-timestamp` / `pubsub-attachment` OFF, dispatch_push's
+// Put arm yields `None` for those fields (the
+// `#[cfg(not(feature = "pubsub-timestamp"))]` / `..-attachment`
+// branches) even though the wire body carries them — the codec
+// `MsgPut.timestamp` field and the attachment ext (ext_id 0x03 ZBuf)
+// are ungated (struct stability). An un-gating regression would leak
+// the field into the Sample on a build that never opted in, and only
+// this lane would catch it; Layer F proves the OFF feature shrinks the
+// binary, not that the field is dropped. Companion of the encoding /
+// source_info pairs in `mod tests` (whose OFF arm the C1d-first lane
+// covers); these two metadata fields have no put-on / feature-off build
+// there, so they get a dedicated module. The run-ci C1d
+// `--features codec-push,pubsub-put` lane (added with the put/delete
+// `decode_isolation_tests`) builds exactly this profile — pubsub-put ON,
+// every metadata feature OFF — so these RUN there.
+#[cfg(test)]
+#[cfg(all(
+    feature = "alloc",
+    feature = "codec-push",
+    feature = "pubsub-put",
+    not(feature = "pubsub-timestamp"),
+    not(feature = "pubsub-attachment"),
+))]
+mod metadata_decode_isolation_tests {
+    use super::*;
+    use alloc::boxed::Box;
+    use alloc::vec;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use wz_codecs::push::Push;
+    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+    use wz_codecs::wireexpr_local::WireexprLocal;
+
+    /// A literal-keyexpr Put with a `Push::default()` body (no metadata).
+    fn put_push_literal(keyexpr: &str) -> PushOwned {
+        Push {
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(keyexpr.len() as u64),
+                    suffix: Some(keyexpr),
+                }),
+            },
+            ..Push::default()
+        }
+        .try_into_owned()
+        .unwrap()
+    }
+
+    /// A Put carrying a wire `timestamp` (time + 4-byte zid). The codec
+    /// `MsgPut.timestamp` field is ungated, so this is constructible with
+    /// `pubsub-timestamp` off — that feature gates only the projection.
+    fn put_push_with_timestamp(keyexpr: &str) -> PushOwned {
+        let zid = [0x01u8, 0x02, 0x03, 0x04];
+        let put = wz_codecs::msg_put::MsgPut {
+            timestamp: Some(wz_codecs::timestamp::Timestamp {
+                time: 0x0102_0304_0506_0708,
+                zid_len: zid.len() as u64,
+                zid: &zid,
+            }),
+            ..wz_codecs::msg_put::MsgPut::default()
+        }
+        .try_into_owned()
+        .unwrap();
+        let mut push = put_push_literal(keyexpr);
+        push.body = PushOwnedVariant::CodecZenohMsgPut(put);
+        push
+    }
+
+    /// A Put carrying a wire attachment ext (ext_id 0x03 ZBuf). Built by
+    /// hand (the `crate::attachment` helper is `attachment-bytes`-gated
+    /// and absent in this profile); the wire form is the raw ZBuf value.
+    fn put_push_with_attachment(keyexpr: &str, bytes: &[u8]) -> PushOwned {
+        let mut ext = wz_codecs::ext_entry::ExtEntry::new();
+        ext.set_ext_id(0x03); // ATTACHMENT_EXT_ID_PUSH
+        ext.set_enc(0x02); // ENC_ZBUF
+        ext.body = wz_codecs::ext_entry::ExtEntryVariant::CodecZenohExtZbuf(
+            wz_codecs::ext_zbuf::ExtZbuf {
+                value_len: bytes.len() as u64,
+                value: bytes,
+            },
+        );
+        let mut put = wz_codecs::msg_put::MsgPut::default()
+            .try_into_owned()
+            .unwrap();
+        put.extensions = Some(vec![ext.try_into_owned().unwrap()]);
+        let mut push = put_push_literal(keyexpr);
+        push.body = PushOwnedVariant::CodecZenohMsgPut(put);
+        push
+    }
+
+    #[test]
+    fn inbound_put_timestamp_is_dropped_when_pubsub_timestamp_off() {
+        let mut registry = SubscriberRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let present = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        let p = present.clone();
+        registry.register("home/temp", move |sample| {
+            f.fetch_add(1, Ordering::SeqCst);
+            if sample.timestamp().is_some() {
+                p.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(put_push_with_timestamp("home/temp"))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "subscriber still fires — only the metadata field is dropped"
+        );
+        assert_eq!(
+            present.load(Ordering::SeqCst),
+            0,
+            "wire timestamp must NOT project to Sample.timestamp when pubsub-timestamp is off"
+        );
+    }
+
+    #[test]
+    fn inbound_put_attachment_is_dropped_when_pubsub_attachment_off() {
+        let mut registry = SubscriberRegistry::new();
+        let fired = Arc::new(AtomicUsize::new(0));
+        let present = Arc::new(AtomicUsize::new(0));
+        let f = fired.clone();
+        let p = present.clone();
+        registry.register("home/temp", move |sample| {
+            f.fetch_add(1, Ordering::SeqCst);
+            if sample.attachment().is_some() {
+                p.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        registry.dispatch(
+            &NetworkMessage::Push(Box::new(put_push_with_attachment(
+                "home/temp",
+                &[0xDE, 0xAD, 0xBE, 0xEF],
+            ))),
+            Reliability::Reliable,
+        );
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "subscriber still fires — only the metadata field is dropped"
+        );
+        assert_eq!(
+            present.load(Ordering::SeqCst),
+            0,
+            "wire attachment must NOT project to Sample.attachment when pubsub-attachment is off"
+        );
+    }
+}
