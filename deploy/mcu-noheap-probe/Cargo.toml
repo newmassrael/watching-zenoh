@@ -84,6 +84,32 @@ wz-session-core = { path = "../../crates/wz-session-core", default-features = fa
 wz-codecs = { path = "../../crates/wz-codecs", default-features = false, features = ["codec-declare"] }
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust", default-features = false }
 
+# ⓓ — the generated thermostat machine's `Engine<ThermostatPolicy>` + the
+# `ThermostatInject::raise_temp_reading` typed-inject seam. `no_std` selects the
+# heapless-backed runtime variant (zero alloc dependency); `default-features =
+# false` drops the std-coupled `http-send` default so the no_std variant links.
+# The switchboard dispatch the build.rs emits drives this engine with a wire-
+# decoded payload, all with no global allocator.
+sce-rust-runtime = { path = "../../vendor/sce/sce-rust-runtime", default-features = false, features = ["no_std"] }
+
+# ⓓ build-time codegen: the wz-switchboard.yaml model + the pure generator that
+# emits the closed `dispatch_switchboard` over the forge-asts. YAML backend
+# (serde_yaml_ng) chosen at this consumer's I/O boundary, mirroring the example.
+[build-dependencies]
+wz-switchboard-schema = { path = "../../crates/wz-switchboard-schema" }
+wz-switchboard-codegen = { path = "../../crates/wz-switchboard-codegen" }
+serde_yaml_ng = "0.9"
+
+# The generated codec (`temp_reading_codec.rs`) gates its heap-backed
+# `VecSink` / `encode_to_vec` facade on `#[cfg(feature = "alloc")]`. This probe
+# deliberately defines NO `alloc` feature (it must never link an allocator), so
+# that gate is always false and the facade compiles out — but check-cfg would
+# otherwise warn the value is unknown. Declare it as an expected external cfg
+# (NOT a real cargo feature, which would be an enableable footgun on a no-alloc
+# target) so the no-alloc build stays warning-clean.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("alloc"))'] }
+
 [profile.release]
 codegen-units = 1
 opt-level = "s"

@@ -31,6 +31,20 @@
 //! proof that outbound wire construction is heap-free, closing the
 //! Decision 2 no-heap-emit extension (R311hm/hn).
 //!
+//! ⓓ adds a seventh stage that closes the loop with the switchboard
+//! generator: `build.rs` runs `sce-codegen --no-std` + wz-switchboard-codegen
+//! over the `thermostat` triad (a primitive-only statechart + EventSchema +
+//! codec), and `main` feeds a FOREIGN wire sample through the generated
+//! `dispatch_switchboard` — keyexpr match -> `SceCursor` codec decode -> typed
+//! `_event.data` inject via the `ThermostatInject::raise_temp_reading` seam ->
+//! native `celsius_centi > 3000` guard -> `Engine<ThermostatPolicy>`
+//! idle->hot. Every link is heap-free (the `--no-std` engine is heapless-
+//! backed, the payload is a `Copy` u16, the codec's alloc facade compiles
+//! out), so a clean no-allocator link + the observed transitions prove the
+//! single-SCXML-source -> MCU no-heap *value* path end to end. This stage is
+//! gated to the mps2-class cores (M3/M4/M7); the engine's working set exceeds
+//! the microbit / M0's 16 KB RAM (the registry stages 1-6 still run there).
+//!
 //! Each registry is instantiated over a consumer-supplied concrete
 //! (non-`Box`) sink — the closed-type shape an MCU consumer (a generated
 //! switchboard `enum` or a hand-written app) supplies — and each sink
@@ -81,6 +95,63 @@ use wz_codecs::declare::Declare;
 
 use sce_forge_runtime::codec::SliceSink;
 
+// ── (ⓓ) generated switchboard value path ────────────────────────────────
+//
+// build.rs ran `sce-codegen --no-std` over the thermostat triad and
+// wz-switchboard-codegen over wz-switchboard.yaml. The three generated
+// artifacts are `include!`d here:
+//   - `thermostat` — the SCXML state machine (Engine<ThermostatPolicy> + the
+//     ThermostatInject::raise_temp_reading typed seam, allocator-free under
+//     --no-std);
+//   - `temp_reading_codec` — the wire codec whose `SceCursor` decode reads the
+//     big-endian uint16 `celsius_centi` (the alloc-gated VecSink facade is
+//     compiled out — this crate has no `alloc` feature);
+//   - the crate-root `dispatch_switchboard` — the closed keyexpr -> typed
+//     inject dispatch.
+// The machine + codec carry `#![allow(...)]` inner attributes that build.rs
+// strips for the mid-module `include!`; they are restored here as outer
+// attributes on the wrapping module (mirrors wz-switchboard-example).
+//
+// The whole switchboard machinery (both modules + the dispatch + the stage-7
+// driver in `main`) is gated to `target_has_atomic = "32"` — the mps2-class
+// cores (Cortex-M3/M4/M7). The generated `Engine<ThermostatPolicy>` working
+// set exceeds the microbit / Cortex-M0's 16 KB RAM (see the stage-7 comment in
+// `main`); gating the includes out there also keeps the M0 build free of
+// unused-item warnings. The registry stages 1-6 stay unconditional.
+
+#[cfg(target_has_atomic = "32")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(unused_assignments)]
+#[allow(clippy::all)]
+mod thermostat {
+    include!(concat!(env!("OUT_DIR"), "/thermostat_sm.rs"));
+}
+
+#[cfg(target_has_atomic = "32")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(clippy::all)]
+mod temp_reading_codec {
+    include!(concat!(env!("OUT_DIR"), "/temp_reading_codec.rs"));
+}
+
+// `use thermostat::ThermostatInject;` + `pub fn dispatch_switchboard(target,
+// payload, engine)`. Included at CRATE ROOT (not in a module) so its
+// `thermostat::` / `temp_reading_codec::` references resolve to the sibling
+// modules above (mirrors wz-switchboard-example/src/lib.rs).
+#[cfg(target_has_atomic = "32")]
+include!(concat!(env!("OUT_DIR"), "/dispatch_switchboard.rs"));
+
 static SAMPLE_HITS: AtomicU32 = AtomicU32::new(0);
 static QUERY_HITS: AtomicU32 = AtomicU32::new(0);
 static REPLY_HITS: AtomicU32 = AtomicU32::new(0);
@@ -88,6 +159,8 @@ static DECL_HITS: AtomicU32 = AtomicU32::new(0);
 static UNDECL_HITS: AtomicU32 = AtomicU32::new(0);
 static LIVE_HITS: AtomicU32 = AtomicU32::new(0);
 static EMIT_HITS: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_has_atomic = "32")]
+static INJECT_HITS: AtomicU32 = AtomicU32::new(0);
 
 // ── Concrete (non-`Box`) consumer sinks — the closed-type MCU shape. ──
 
@@ -341,8 +414,94 @@ fn main() -> ! {
         require("local-token emit", EMIT_HITS.load(Ordering::SeqCst) == 2);
     }
 
+    // Stage 7 is gated to the mps2-class cores (Cortex-M3/M4/M7). The
+    // generated SCXML `Engine<ThermostatPolicy>` working set + the microstep
+    // step() frames exceed the microbit / Cortex-M0's 16 KB RAM — running it
+    // there underflows the stack ~80 KB past the RAM base (observed
+    // SP=0x1ffce0d0 < 0x20000000 -> HardFault Lockup). The mps2 machines have
+    // megabytes of RAM and host it comfortably. `target_has_atomic = "32"` is
+    // the established repo discriminator for the M0-vs-rest split (mirrors
+    // mcu-qemu-demo's sync-only fork); here it is a proxy for "has enough RAM
+    // for the engine", not an atomics requirement (the registry stages 1-6
+    // below remain unconditional and DO run on M0, proving the no-heap control
+    // plane + emit there). The single-source -> MCU no-heap *value* path is
+    // proven on M3/M4/M7.
+    #[cfg(target_has_atomic = "32")]
+    {
+        // 7. switchboard wire-decode -> typed inject (ⓓ). The convergence of
+        // the two tracks: a FOREIGN wire sample drives a generated SCE
+        // statechart with ZERO global allocator. The build.rs ran
+        // `sce-codegen --no-std` + wz-switchboard-codegen over the thermostat
+        // triad; here a `home/<x>/temp` sample's wire bytes are decoded by the
+        // generated codec (`SceCursor`, no VecSink) into the typed
+        // `ThermostatTempReadingPayload { celsius_centi: u16 }` and injected
+        // into a real `Engine<ThermostatPolicy>` via the generated dispatch's
+        // `raise_temp_reading` seam. The native uint16 guard
+        // (`celsius_centi > 3000`) then fires idle -> hot. Every link is
+        // heap-free: the codec decode, the `Copy` payload, the inject seam, and
+        // the heapless-backed Engine — so a clean no-allocator link + the
+        // observed transitions prove the single-source -> MCU no-heap value
+        // path end to end.
+        use sce_rust_runtime::Engine;
+        use thermostat::{ThermostatPolicy, ThermostatState};
+
+        let mut engine = Engine::new(ThermostatPolicy::new());
+        engine.initialize();
+        require(
+            "switchboard init",
+            engine.get_current_state() == ThermostatState::Idle,
+        );
+
+        // 3500 centidegrees = 35.00 C, big-endian uint16 = [0x0D, 0xAC] —
+        // above the 30.00 C (3000) native guard threshold. Hand-laid on the
+        // stack (no allocator); a real publisher would encode the same bytes.
+        let hot_wire = [0x0Du8, 0xACu8];
+        let injected = dispatch_switchboard("home/livingroom/temp", &hot_wire, &mut engine);
+        engine.step();
+        require(
+            "switchboard inject hot",
+            injected == 1 && engine.get_current_state() == ThermostatState::Hot,
+        );
+
+        // The reset row is a SIGNAL binding (no codec): an empty _event.data
+        // injected via `raise_external_by_name` returns hot -> idle.
+        let reset_fired = dispatch_switchboard("home/livingroom/reset", &[], &mut engine);
+        engine.step();
+        require(
+            "switchboard reset",
+            reset_fired == 1 && engine.get_current_state() == ThermostatState::Idle,
+        );
+
+        // Discriminating check: a 2000-centidegree (20.00 C) reading is decoded
+        // and injected (row fires) but MUST miss the `> 3000` guard, proving the
+        // decoded value actually reaches the guard rather than the transition
+        // firing unconditionally. 2000 = 0x07D0 big-endian = [0x07, 0xD0].
+        let cold_wire = [0x07u8, 0xD0u8];
+        let cold_fired = dispatch_switchboard("home/livingroom/temp", &cold_wire, &mut engine);
+        engine.step();
+        require(
+            "switchboard inject cold",
+            cold_fired == 1 && engine.get_current_state() == ThermostatState::Idle,
+        );
+
+        INJECT_HITS.store(1, Ordering::SeqCst);
+    }
+    #[cfg(target_has_atomic = "32")]
+    require(
+        "switchboard inject tally",
+        INJECT_HITS.load(Ordering::SeqCst) == 1,
+    );
+
+    // The PASS banner reflects what actually ran on this target: the mps2
+    // cores add the stage-7 switchboard inject proof; the M0 keeps the
+    // registry + emit proof (stage 7 gated out for RAM — see above).
+    #[cfg(target_has_atomic = "32")]
     hprintln!(
-        "R311ho PASS: 7 registry no-heap fire paths + declarer-side SliceSink emit executed with zero global allocator"
+        "PASS: 7 registry no-heap fire paths + declarer-side SliceSink emit + generated switchboard wire-decode->typed-inject (Engine<ThermostatPolicy>) executed with zero global allocator"
+    );
+    #[cfg(not(target_has_atomic = "32"))]
+    hprintln!(
+        "PASS: 7 registry no-heap fire paths + declarer-side SliceSink emit executed with zero global allocator (switchboard inject stage gated off: engine working set exceeds this core's 16 KB RAM)"
     );
     debug::exit(debug::EXIT_SUCCESS);
 

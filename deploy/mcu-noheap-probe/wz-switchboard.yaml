@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# ⓓ no-heap switchboard-inject probe sidecar: maps zenoh keyexprs to the
+# thermostat machine's domain events. The temp row is a VALUE binding (names
+# the temp_reading_codec), so an inbound sample's wire payload is decoded into
+# the typed _event.data and injected via the generated
+# ThermostatInject::raise_temp_reading seam. The reset row is a SIGNAL binding
+# (no codec), injected with an empty _event.data via raise_external_by_name.
+# A single primitive value codec keeps the whole inject path allocator-free.
+machine: thermostat
+bindings:
+  - keyexpr: home/*/temp
+    event: temp_reading
+    codec: temp_reading_codec
+  - keyexpr: home/*/reset
+    event: reset

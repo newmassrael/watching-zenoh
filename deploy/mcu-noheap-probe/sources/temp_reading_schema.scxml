@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- EventSchema for the `temp_reading` value event: the typed `_event.data`
+     contract read by thermostat.scxml's native guard. A SINGLE primitive
+     field (`celsius_centi`, uint16 centidegrees) — no string/bytes — so the
+     SCE-emitted `ThermostatTempReadingPayload { celsius_centi: u16 }` is a
+     pure-`Copy` struct and the inject path needs no allocator. The wire
+     decode of those bytes is a separate concern (temp_reading_codec.scxml). -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       name="temp_reading_schema"
+       sce:kind="event-schema"
+       sce:event-name="temp_reading">
+  <datamodel>
+    <data id="celsius_centi" sce:type="uint16" sce:direction="in"/>
+  </datamodel>
+</scxml>

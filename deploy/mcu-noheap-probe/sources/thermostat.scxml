@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- ⓓ no-heap switchboard-inject probe application machine.
+
+     A deliberately PRIMITIVE-ONLY statechart so the whole wire-decode ->
+     typed-inject -> guard path stays allocator-free on a target with no
+     `#[global_allocator]`:
+       - idle: `temp_reading` value event, native typed guard
+         `_event.data.celsius_centi > 3000` (uint16 centidegrees = 30.00 C)
+         -> hot. The single payload field is a `Copy` primitive, so the
+         SCE-emitted `ThermostatTempReadingPayload { celsius_centi: u16 }`
+         struct holds no `String`/`Vec` (no alloc) — unlike the
+         string/bytes-bearing sensor_monitor example.
+       - hot: `reset` signal event (no `_event.data` guard) -> idle. This is
+         a SIGNAL row (no codec), injected via `raise_external_by_name`, so
+         the probe also exercises the no_std signal-inject path.
+
+     No script, assign, send, or invoke actions — the guard lowers to a
+     native uint16 comparison (no script engine), so the sce-codegen no_std
+     mode accepts it and emits an allocator-free Engine ThermostatPolicy. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       name="thermostat"
+       version="1.0"
+       initial="idle"
+       datamodel="ecmascript">
+  <sce:import src="temp_reading_schema.scxml" kind="event-schema" as="TempReadingSchema"/>
+  <state id="idle">
+    <!-- 3000 centidegrees = 30.00 C native typed guard (uint16, Copy). -->
+    <transition event="temp_reading" cond="_event.data.celsius_centi &gt; 3000" target="hot"/>
+  </state>
+  <state id="hot">
+    <!-- signal event: no _event.data guard, so `reset` is NOT a typed-inject
+         seam — the switchboard binds it as a signal row. -->
+    <transition event="reset" target="idle"/>
+  </state>
+</scxml>

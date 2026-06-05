@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-3.0-or-later OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!-- Wire codec for the `temp_reading` value event: decodes a published
+     sample's payload bytes into `{ celsius_centi: u16 }`. A single
+     big-endian uint16 — no length-prefixed blobs, no string/bytes — so the
+     sink-based decode (`SceCursor`) the switchboard dispatch uses is
+     allocator-free (the alloc-gated `encode_to_vec`/`VecSink` facade is not
+     reached). `celsius_centi` matches the temp_reading EventSchema field by
+     id + type, so the switchboard generator emits
+     `ThermostatTempReadingPayload { celsius_centi: decoded.celsius_centi }`
+     (a verbatim primitive move, no `.into()`). This is the wire-format SSOT;
+     the EventSchema is the datamodel-view SSOT. -->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       sce:kind="codec"
+       sce:default-endian="big"
+       name="temp_reading_codec">
+  <datamodel>
+    <sce:field id="celsius_centi" sce:type="uint16" sce:byte="0" sce:bit-size="16"/>
+  </datamodel>
+</scxml>
