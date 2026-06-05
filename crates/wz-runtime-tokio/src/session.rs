@@ -4295,6 +4295,83 @@ mod tests {
         );
     }
 
+    // R311hy — pubsub-allow-loop NEG / isolation. The POS twins
+    // (publish_locality_session_local_fires_loopback_only +
+    // publish_aliased_locality_session_local_fires_loopback_only) are
+    // cfg-gated ON `pubsub-allow-loop`, so they run only in the all-on
+    // default build; with the feature OFF nothing otherwise proves the
+    // loopback branch actually elides. `pubsub-allow-loop` is OFF in every
+    // C1j consumer-plane subset (none compose it), so these guards run
+    // there. Contract (Session::publish / publish_aliased
+    // `#[cfg(not(pubsub-allow-loop))]` arm at session.rs ~1043 / ~1149): a
+    // SessionLocal publish must short-circuit to Ok(0) and NEVER invoke
+    // the registered subscriber callback — a regression that silently
+    // un-gated the loopback would fire it. Two guards because publish and
+    // publish_aliased are distinct cfg sites.
+    #[cfg(not(feature = "pubsub-allow-loop"))]
+    #[test]
+    fn publish_session_local_does_not_fire_loopback_when_allow_loop_off() {
+        let (session, driver) = build_session();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .register("home/temp", move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            });
+
+        let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
+        let fired = session.publish("home/temp", b"22.5", opts).unwrap();
+        assert_eq!(
+            fired, 0,
+            "pubsub-allow-loop OFF: SessionLocal publish must short-circuit to Ok(0)"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "pubsub-allow-loop OFF: the loopback subscriber callback must not fire"
+        );
+        assert_eq!(
+            driver.frame_count(),
+            0,
+            "SessionLocal suppresses the wire branch regardless of allow-loop"
+        );
+    }
+
+    #[cfg(not(feature = "pubsub-allow-loop"))]
+    #[test]
+    fn publish_aliased_session_local_does_not_fire_loopback_when_allow_loop_off() {
+        let (session, driver) = build_session();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = counter.clone();
+        session
+            .observer()
+            .lock()
+            .unwrap()
+            .subscribers
+            .register("home/temp", move |_sample| {
+                counter_clone.fetch_add(1, Ordering::SeqCst);
+            });
+
+        let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
+        let fired = session
+            .publish_aliased(7, None, "home/temp", b"22.5", opts)
+            .unwrap();
+        assert_eq!(
+            fired, 0,
+            "pubsub-allow-loop OFF: aliased SessionLocal publish short-circuits to Ok(0)"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "pubsub-allow-loop OFF: the aliased loopback callback must not fire"
+        );
+        assert_eq!(driver.frame_count(), 0);
+    }
+
     #[cfg(feature = "pubsub-allow-loop")]
     #[test]
     fn publish_loopback_sample_carries_options_reliability_and_kind() {

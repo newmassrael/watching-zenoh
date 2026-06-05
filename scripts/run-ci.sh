@@ -1116,6 +1116,13 @@ layer_c4c_runtime_tokio_subset_matrix() {
 # FeatureDisabled reject (never a falsely-Ok no-op). This is the BEHAVIOUR
 # complement to Layer F, which only proves the codec bytes shrink
 # (footprint), not that the off path rejects correctly.
+#
+# R311hy — the pubsub-allow-loop NEG guards (session.rs
+# publish{,_aliased}_session_local_does_not_fire_loopback_when_allow_loop_
+# off) likewise ride these subsets: pubsub-allow-loop is OFF in every
+# consumer-plane subset, so a SessionLocal publish there must short-circuit
+# to Ok(0) and never fire the registered loopback subscriber. The POS twins
+# are cfg-gated ON the feature and run only in the all-on default build.
 layer_c1j_runtime_tokio_subset_behavior() {
     local name feats
     while IFS=$'\t' read -r name feats; do
