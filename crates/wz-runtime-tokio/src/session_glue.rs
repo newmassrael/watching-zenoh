@@ -7120,6 +7120,83 @@ mod tests {
         assert_eq!(actions.next_outbound_frame_sn(), 44);
     }
 
+    // ── R311hw — codec behavioural NEG / isolation ──
+    //
+    // Layer F (codec-footprint) proves a `codec-*` atomic feature's
+    // minus-<codec> lane SHRINKS the binary — the codec bytes are elided
+    // when the feature is off. It does NOT prove the consumer-side
+    // signature-stable emit path BEHAVES correctly when off. The
+    // `feedback_signature_stability` contract (R311j / R311g1) requires
+    // the `SessionLinkActions` send method to keep its signature and
+    // return `Err(SendWireError::FeatureDisabled)` — an honest typed
+    // reject, never a falsely-`Ok` no-op and never a panic (see the
+    // `FeatureDisabled` variant doc in wz-session-core). These guards pin
+    // that behaviour, the behavioural half Layer F's size proof leaves
+    // open. They are cfg'd to the feature-OFF builds and so ride the
+    // existing C1j subset lanes (handshake-only / queryable-only /
+    // zget-reply-only / liveliness-* / declare-observer compose the
+    // consumer plane with codec-push and/or codec-request OFF); no new
+    // lane is needed. The all-on default build cfg's both out (the
+    // `any(not, not)` gate is false), so no dead code lands there.
+    #[cfg(any(not(feature = "codec-push"), not(feature = "codec-request")))]
+    fn feature_disabled_probe_actions() -> Arc<SessionLinkActions> {
+        struct DiscardDriver;
+        impl BoxedLinkDriver for DiscardDriver {
+            fn send_blocking(&self, _bytes: &[u8], _r: Reliability) {}
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+        }
+        let params = SessionInitParams {
+            version: 0x09,
+            whatami: 0x02,
+            zid: vec![0x01, 0x02, 0x03, 0x04],
+            seq_num_res: 2,
+            req_id_res: 2,
+            batch_size: 65535,
+            lease: 10_000,
+            lease_in_seconds: false,
+            initial_sn: 1,
+            cookie: Vec::new(),
+            cookie_signing_key: SigningKey::new(vec![0xAB; 32])
+                .expect("32-byte demo key satisfies the >=32 invariant"),
+        };
+        SessionLinkActions::new(Arc::new(DiscardDriver), params, TokioTime::new())
+    }
+
+    /// R311hw — with `codec-push` OFF, the signature-stable
+    /// `send_push_literal` must fail-fast with the typed
+    /// `SendWireError::FeatureDisabled` reject and emit no wire bytes.
+    /// Complements Layer F's footprint proof with the behavioural half of
+    /// the signature-stability contract: a regression that silently
+    /// un-gated the emit body would return `Ok(())` (or panic) here.
+    #[cfg(not(feature = "codec-push"))]
+    #[test]
+    fn send_push_literal_rejects_with_feature_disabled_when_codec_push_off() {
+        let actions = feature_disabled_probe_actions();
+        assert_eq!(
+            actions.send_push_literal("home/temp", b"data", true),
+            Err(SendWireError::FeatureDisabled),
+            "codec-push OFF: send_push_literal must return the typed \
+             FeatureDisabled reject, not a falsely-Ok no-op or a panic"
+        );
+    }
+
+    /// R311hw — with `codec-request` OFF, the signature-stable
+    /// `send_request_query` must fail-fast with
+    /// `SendWireError::FeatureDisabled`. The query initiator surface stays
+    /// callable (signature stable) but emits nothing on the wire.
+    #[cfg(not(feature = "codec-request"))]
+    #[test]
+    fn send_request_query_rejects_with_feature_disabled_when_codec_request_off() {
+        let actions = feature_disabled_probe_actions();
+        assert_eq!(
+            actions.send_request_query(7, 0, Some("home/temp")),
+            Err(SendWireError::FeatureDisabled),
+            "codec-request OFF: send_request_query must return the typed \
+             FeatureDisabled reject, not a falsely-Ok no-op or a panic"
+        );
+    }
+
     // ── R233 wire encoder for PublishOptions metadata ──
     #[cfg(feature = "codec-push")]
     use crate::sample::{QosLevel, SourceInfo, TimestampHint};

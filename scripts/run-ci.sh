@@ -1105,6 +1105,16 @@ layer_c4c_runtime_tokio_subset_matrix() {
 # runtime crate's own tests ran solely under default (all-on) features
 # via Layer C1's `cargo test --workspace`, so a subset-specific runtime
 # behaviour regression had no guard.
+#
+# R311hw — the codec behavioural NEG / isolation guards
+# (session_glue.rs send_{push_literal,request_query}_rejects_with_feature_
+# disabled_when_codec_{push,request}_off) ride these same subsets: a
+# subset that composes the consumer plane with codec-push and/or
+# codec-request OFF runs them, asserting the signature-stable emit path
+# returns the typed SendWireError::FeatureDisabled reject (never a
+# falsely-Ok no-op). This is the BEHAVIOUR complement to Layer F, which
+# only proves the codec bytes shrink (footprint), not that the off path
+# rejects correctly.
 layer_c1j_runtime_tokio_subset_behavior() {
     local name feats
     while IFS=$'\t' read -r name feats; do
