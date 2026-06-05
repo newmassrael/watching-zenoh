@@ -960,10 +960,12 @@ _wz_consumer_plane_subsets() {
     # R311hu — zget-reply-only composes query-get WITHOUT query-target /
     # query-consolidation / query-timeout / query-attachment, so it is the
     # subset that carries the query send-side metadata NEG / isolation
-    # guards (session.rs query_with_{target,consolidation}_is_silent_noop_*).
-    # Those tests assert the signature-stable setters elide to the bare
-    # no-metadata wire when their feature is off — the query-side analog of
-    # the pubsub C1d metadata-OFF lane.
+    # guards (session.rs query_with_{target,consolidation,timeout_ms}_is_
+    # silent_noop_*). Those tests assert the signature-stable setters elide
+    # to the bare no-metadata wire when their feature is off — the
+    # query-side analog of the pubsub C1d metadata-OFF lane. The timeout_ms
+    # guard (R311hv) additionally pins that the local ReplyRegistry
+    # deadline stays unarmed, since both effects share the one setter gate.
     printf '%s\t%s\n' "zget-reply-only"       "codec-response,codec-response-final,query-get,query-reply"
     printf '%s\t%s\n' "liveliness-sub-only"   "codec-declare,declare-interest,liveliness-subscriber"
     printf '%s\t%s\n' "liveliness-token-only" "liveliness-token"

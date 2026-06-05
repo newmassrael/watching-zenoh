@@ -6261,6 +6261,58 @@ mod tests {
         );
     }
 
+    /// R311hv — NEG / isolation counterpart for `query-timeout` (see the
+    /// `query-target` guard above for the shared rationale). Unlike
+    /// target / consolidation, `query-timeout` drives TWO observables off
+    /// a single gate: the outbound Request-level timeout ext
+    /// (`send_request_query_with_meta`'s `meta.timeout_ms != 0` branch)
+    /// AND the local `ReplyRegistry` deadline (`Session::query` computes
+    /// `deadline_ms` from the same `opts.timeout_ms` the wire branch
+    /// reads). The single gate is the `with_timeout_ms` setter (R311o,
+    /// signature-stable): with the feature off it leaves `timeout_ms` at
+    /// the `0` "never-expire" sentinel, so the `!= 0` wire branch and the
+    /// `(opts.timeout_ms > 0).then(..)` deadline elide together. Pinning
+    /// the outbound frame to the bare no-metadata baseline therefore
+    /// guards both effects at once — a regression that silently un-gated
+    /// the setter would push the field above zero, emitting the timeout
+    /// ext (this assertion fails) and arming a spurious deadline. No
+    /// separate sweep harness is needed: the sentinel the wire branch
+    /// reads is the same one the deadline reads, so one wire-parity
+    /// assertion is the complete guard.
+    #[cfg(all(feature = "query-get", not(feature = "query-timeout")))]
+    #[test]
+    fn query_with_timeout_ms_is_silent_noop_when_query_timeout_feature_disabled() {
+        let (session, driver) = build_session();
+        session
+            .query(
+                "home/temp",
+                QueryOptions::get()
+                    .with_allowed_destination(Locality::Remote)
+                    .with_timeout_ms(1_000),
+                |_| {},
+                |_| {},
+            )
+            .expect("query-get feature is ON in this test build");
+        let session_frame = driver.frames.lock().unwrap()[0].0.clone();
+
+        // Baseline: the bare no-metadata send_request_query path, the
+        // same construction the target / consolidation guards pin.
+        let driver2 = Arc::new(RecordingDriver::new());
+        let actions2 = SessionLinkActions::new(driver2.clone(), fixture_params(), TokioTime::new());
+        let rid = actions2.alloc_next_request_id();
+        actions2
+            .send_request_query(rid, 0, Some("home/temp"))
+            .unwrap();
+        let baseline = driver2.frames.lock().unwrap()[0].0.clone();
+
+        assert_eq!(
+            session_frame, baseline,
+            "with query-timeout OFF, with_timeout_ms() must be a no-op: the \
+             wire frame must equal the bare no-metadata baseline (no timeout \
+             ext on the wire) and no local deadline is armed"
+        );
+    }
+
     #[cfg(all(feature = "query-get", feature = "query-attachment"))]
     #[test]
     fn query_session_local_with_any_metadata_skips_wire_branch_entirely() {
