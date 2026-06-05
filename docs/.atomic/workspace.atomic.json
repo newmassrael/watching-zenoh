@@ -603,7 +603,8 @@
         "R311cl ratifies 2/3 audit; deferred wire-up pending API impl + cluster cfg pattern."
       ],
       "caveats_bullets": [
-        "R311ci audit confirms 2 wired (token 21 cfg + subscriber 14 cfg = 35 sites); 3 reserved unchanged."
+        "R311ci audit confirms 2 wired (token 21 cfg + subscriber 14 cfg = 35 sites); 3 reserved unchanged.",
+        "R311ic: liveliness-get activated (declaration-plane snapshot); 3 active / 2 reserved."
       ],
       "impact_scope": [
         "runtime-crate--sce_link_runtime_tokio",
@@ -30257,6 +30258,82 @@
         "query-source-info now full send+receive vertical; status active is honest (R311ia receive-side + R311ib send-side complete the atom). No remaining query-domain unimplemented atoms."
       ]
     },
+    "Round 311ic": {
+      "decision_summary": "liveliness-get implemented as a declaration-plane snapshot (CURRENT Interest -> interest_id-tagged Declare(DeclToken) replies -> Declare(DeclFinal)), NOT the query/Request plane; LivelinessGetRegistry + Session::liveliness_get; Cargo dep corrected query-get -> declare-*; status reserved->active",
+      "changes_bullets": [
+        "wz-session-core declare/liveliness_get.rs: LivelinessGetRegistry<C: ReplySink> (interest_id-keyed pending table, dispatch_reply_borrowed/dispatch_final/sweep_timed_out no-heap + dispatch_declare/dispatch_messages alloc); observer.rs liveliness_gets field + dispatch fan; caps MAX_PENDING_LIVELINESS_GETS",
+        "wz-runtime-tokio session_glue.rs: build_interest_liveliness_get (CURRENT-only, F clear) sharing build_liveliness_token_interest SSOT with the subscriber builder + send_interest_liveliness_get; session.rs Session::liveliness_get + LivelinessGetOptions + LivelinessGetError",
+        "Cargo: liveliness-get dependency corrected query-get -> declare-interest/declare-final/declare-token (wz-runtime-tokio) + codec-declare (wz-session-core); facade forwards wz-runtime-tokio?/liveliness-get; preset-ap-client gains liveliness-get",
+        "wz-ap-demo --liveliness-get flag + liveliness_get_task (Established-gated one-shot); inventory liveliness-get status reserved -> active (A3 catalog gate)"
+      ],
+      "verification_bullets": [
+        "unit: 11 LivelinessGetRegistry tests (interest_id reply correlation, DeclFinal removal, timeout sweep, unsolicited interest_id=None ignore, unresolvable keyexpr drop, no-codec borrowed path)",
+        "wire POS: build_interest_liveliness_get_emits_current_only_wire_bytes (outer C set 0x20, F clear; body KE|TO|R|N|M) matches zenoh-pico _z_liveliness_query flags KEYEXPRS|TOKENS|RESTRICTED|CURRENT",
+        "e2e Layer E: wz_liveliness_get_round_trip_against_wz_acceptor (wz get demo/** -> wz acceptor demo/token LocalTokenRegistry responder -> LIVELINESS GET REPLY keyexpr=demo/token + GET FINAL)",
+        "full run-ci EXIT 0 incl Layer G 7 MCU targets + Layer Q no-heap probe; LivelinessGetRegistry no-alloc control plane cross-compiles"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "carry_forward_bullets": [
+        "liveliness-get now full send+receive vertical; status active is honest. Wire = declaration plane (CURRENT Interest -> interest_id-tagged DeclToken replies -> DeclFinal), reply-delivery surface reuses ReplySink (reply-shaped, matches zenoh liveliness().get() API).",
+        "Loopback (Locality::Any: a session answering its own get from its LocalTokenRegistry) NOT wired this round — wire-only client snapshot, matching zenoh-pico client model. Future Locality::Any extension if a co-located-token use case arises.",
+        "Next MS1 Tier B frontier per claudedocs/composability-audit-2026-06-05.md: scouting-static (config peer list) or transport-fragmentation (reassembly FSM); liveliness domain now 3 active / 2 reserved (-history / -historical-samples remain)."
+      ],
+      "publishable_decision_summary": "liveliness-get implemented as a declaration-plane snapshot (CURRENT Interest -> interest_id-tagged Declare(DeclToken) replies -> Declare(DeclFinal)), NOT the query/Request plane; LivelinessGetRegistry + Session::liveliness_get; Cargo dep corrected query-get -> declare-*; status reserved->active",
+      "publishable_changes_bullets": [
+        "wz-session-core declare/liveliness_get.rs: LivelinessGetRegistry<C: ReplySink> (interest_id-keyed pending table, dispatch_reply_borrowed/dispatch_final/sweep_timed_out no-heap + dispatch_declare/dispatch_messages alloc); observer.rs liveliness_gets field + dispatch fan; caps MAX_PENDING_LIVELINESS_GETS",
+        "wz-runtime-tokio session_glue.rs: build_interest_liveliness_get (CURRENT-only, F clear) sharing build_liveliness_token_interest SSOT with the subscriber builder + send_interest_liveliness_get; session.rs Session::liveliness_get + LivelinessGetOptions + LivelinessGetError",
+        "Cargo: liveliness-get dependency corrected query-get -> declare-interest/declare-final/declare-token (wz-runtime-tokio) + codec-declare (wz-session-core); facade forwards wz-runtime-tokio?/liveliness-get; preset-ap-client gains liveliness-get",
+        "wz-ap-demo --liveliness-get flag + liveliness_get_task (Established-gated one-shot); inventory liveliness-get status reserved -> active (A3 catalog gate)"
+      ],
+      "publishable_verification_bullets": [
+        "unit: 11 LivelinessGetRegistry tests (interest_id reply correlation, DeclFinal removal, timeout sweep, unsolicited interest_id=None ignore, unresolvable keyexpr drop, no-codec borrowed path)",
+        "wire POS: build_interest_liveliness_get_emits_current_only_wire_bytes (outer C set 0x20, F clear; body KE|TO|R|N|M) matches zenoh-pico _z_liveliness_query flags KEYEXPRS|TOKENS|RESTRICTED|CURRENT",
+        "e2e Layer E: wz_liveliness_get_round_trip_against_wz_acceptor (wz get demo/** -> wz acceptor demo/token LocalTokenRegistry responder -> LIVELINESS GET REPLY keyexpr=demo/token + GET FINAL)",
+        "full run-ci EXIT 0 incl Layer G 7 MCU targets + Layer Q no-heap probe; LivelinessGetRegistry no-alloc control plane cross-compiles"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
+        "runtime-crate--sce_link_runtime_tokio"
+      ],
+      "publishable_carry_forward_bullets": [
+        "liveliness-get now full send+receive vertical; status active is honest. Wire = declaration plane (CURRENT Interest -> interest_id-tagged DeclToken replies -> DeclFinal), reply-delivery surface reuses ReplySink (reply-shaped, matches zenoh liveliness().get() API).",
+        "Loopback (Locality::Any: a session answering its own get from its LocalTokenRegistry) NOT wired this round — wire-only client snapshot, matching zenoh-pico client model. Future Locality::Any extension if a co-located-token use case arises.",
+        "Next MS1 Tier B frontier per claudedocs/composability-audit-2026-06-05.md: scouting-static (config peer list) or transport-fragmentation (reassembly FSM); liveliness domain now 3 active / 2 reserved (-history / -historical-samples remain)."
+      ]
+    },
+    "Round 311id": {
+      "decision_summary": "Session-review follow-up: liveliness-get added to preset-mcu-extended for MCU parity with sibling liveliness-token/-subscriber (R311ic put it in preset-ap-client only); thumbv7m cross-compile clean",
+      "changes_bullets": [
+        "crates/wz/Cargo.toml: preset-mcu-extended gains liveliness-get (R311ic added it to preset-ap-client only); now parity with sibling liveliness-token / liveliness-subscriber already in that preset"
+      ],
+      "verification_bullets": [
+        "preset-mcu-extended host build + thumbv7m-none-eabi cross-compile OK (LivelinessGetRegistry no-alloc control plane compiles no_std)",
+        "full run-ci EXIT 0 after change (Layer C4 preset matrix + Layer G 7 MCU + Layer Q)"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "carry_forward_bullets": [
+        "liveliness-get now in both AP (preset-ap-client) and MCU (preset-mcu-extended) presets — parity with liveliness-token / -subscriber. Layer G G.2 facade cross-compile uses --no-default-features so no per-feature MCU lane gates it; preset membership (C4 host build) + this round's manual thumbv7m cross-compile are the coverage. Same coverage shape as the sibling liveliness features."
+      ],
+      "publishable_decision_summary": "Session-review follow-up: liveliness-get added to preset-mcu-extended for MCU parity with sibling liveliness-token/-subscriber (R311ic put it in preset-ap-client only); thumbv7m cross-compile clean",
+      "publishable_changes_bullets": [
+        "crates/wz/Cargo.toml: preset-mcu-extended gains liveliness-get (R311ic added it to preset-ap-client only); now parity with sibling liveliness-token / liveliness-subscriber already in that preset"
+      ],
+      "publishable_verification_bullets": [
+        "preset-mcu-extended host build + thumbv7m-none-eabi cross-compile OK (LivelinessGetRegistry no-alloc control plane compiles no_std)",
+        "full run-ci EXIT 0 after change (Layer C4 preset matrix + Layer G 7 MCU + Layer Q)"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness"
+      ],
+      "publishable_carry_forward_bullets": [
+        "liveliness-get now in both AP (preset-ap-client) and MCU (preset-mcu-extended) presets — parity with liveliness-token / -subscriber. Layer G G.2 facade cross-compile uses --no-default-features so no per-feature MCU lane gates it; preset membership (C4 host build) + this round's manual thumbv7m cross-compile are the coverage. Same coverage shape as the sibling liveliness features."
+      ]
+    },
     "Round 311j": {
       "decision_summary": "R311j codec-request wire-layer cascade — request envelope + Query inner body gated; query-* implies codec-request; send_request_query body-cfg.",
       "changes_bullets": [
@@ -36113,7 +36190,7 @@
       "reason": "F=retransmit buffer; P=zenoh; C=opt-in reliability layer"
     },
     "liveliness-get": {
-      "status": "reserved",
+      "status": "active",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
       "source": "zenoh liveliness.get",
       "reason": "F=Querier on liveliness; P=zenoh; C=opt-in snapshot query"

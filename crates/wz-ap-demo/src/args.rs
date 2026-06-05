@@ -203,4 +203,14 @@ pub(crate) struct ReplyConsumerSpec {
 pub(crate) struct QueryRoleSpec {
     pub(crate) queryable: Option<(String, String)>,
     pub(crate) query: Option<String>,
+    /// liveliness-get — optional `--liveliness-get <keyexpr>` payload.
+    /// When `Some`, the demo spawns an Established-gated
+    /// [`crate::tasks::liveliness_get_task`] that issues one
+    /// [`wz::runtime_tokio::session::Session::liveliness_get`] snapshot
+    /// query and logs each `LIVELINESS GET REPLY` + the terminating
+    /// `LIVELINESS GET FINAL`. Grouped with the query role (both are
+    /// reply-consuming "get" surfaces) though the wire is the
+    /// declaration plane (a CURRENT liveliness Interest), not the
+    /// Request/Query plane.
+    pub(crate) liveliness_get: Option<String>,
 }

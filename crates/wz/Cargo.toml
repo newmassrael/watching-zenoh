@@ -244,8 +244,17 @@ link-fragment = ["transport-fragmentation"]
 link-frame = []
 link-tx-cache = []
 
-# ----- domain: liveliness (5 atomic, 2 active / 3 reserved) -----
-liveliness-get = ["query-get"]
+# ----- domain: liveliness (5 atomic, 3 active / 2 reserved) -----
+# liveliness-get — requester-side snapshot get. Source-gated (forwards
+# into wz-runtime-tokio iff runtime-tokio is active, cargo's `?` syntax),
+# mirror of liveliness-subscriber / liveliness-token. NOT `query-get`:
+# the prior `= ["query-get"]` mis-modeled the wire as the Request/Query
+# plane, but zenoh implements `liveliness().get()` on the declaration
+# plane (a CURRENT liveliness Interest -> interest_id-tagged
+# Declare(DeclToken) replies -> Declare(DeclFinal)), so pulling
+# query-get / codec-request was both dead weight and interop-wrong. The
+# reply-delivery surface reuses the un-gated reply_sink::ReplySink seam.
+liveliness-get = ["wz-runtime-tokio?/liveliness-get"]
 liveliness-historical-samples = ["liveliness-history"]
 liveliness-history = []
 # R302b — first source-gated atomic features. Forward into
@@ -772,6 +781,7 @@ preset-mcu-extended = [
     "query-consolidation",
     "liveliness-token",
     "liveliness-subscriber",
+    "liveliness-get",
     "locator-udp",
     "routing-client",
     "scouting-static",
@@ -840,6 +850,7 @@ preset-ap-client = [
     "query-consolidation",
     "liveliness-token",
     "liveliness-subscriber",
+    "liveliness-get",
     "locator-tcp",
     "locator-udp",
     "routing-client",

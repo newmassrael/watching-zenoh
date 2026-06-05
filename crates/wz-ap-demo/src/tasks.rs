@@ -30,9 +30,11 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use wz::runtime_core::TimeSource;
+use wz::runtime_tokio::reply_sink::ReplyView;
 use wz::runtime_tokio::sample::SampleKind;
 use wz::runtime_tokio::session::{
-    LivelinessOptions, LivelinessToken, PublishAliasError, PublishOptions, Session,
+    LivelinessGetOptions, LivelinessOptions, LivelinessToken, PublishAliasError, PublishOptions,
+    Session,
 };
 use wz::runtime_tokio::session_glue::SessionLinkActions;
 use wz::runtime_tokio::Reliability;
@@ -292,6 +294,65 @@ where
         .send_request_query(QUERY_RID, /*mapping_id=*/ 0, Some(&keyexpr))
         .expect("demo query keyexpr is a fixed short literal, within codec bounds");
     log::info!("wz-ap-demo: QUERY EMITTED keyexpr='{keyexpr}' rid={QUERY_RID}");
+}
+
+/// liveliness-get — single-shot snapshot task. Mirrors
+/// [`query_task`]'s Established gate, then issues one
+/// [`Session::liveliness_get`] on `keyexpr`. The peer's
+/// `LocalTokenRegistry` (a wz acceptor with `--declare-token`)
+/// replies with one `Declare(DeclToken)` per matching live token
+/// (logged as `LIVELINESS GET REPLY`) terminated by one
+/// `Declare(DeclFinal)` (logged as `LIVELINESS GET FINAL`). Unlike
+/// [`query_task`] this task DOES consume the inbound reply chain —
+/// `liveliness_get` registers the pending get + its callbacks
+/// internally — so it takes a [`Session`] (not bare
+/// `SessionLinkActions`). The Established gate is mandatory here: the
+/// surface enforces [`crate::Session::is_established`] (a one-shot get
+/// emitted mid-handshake is discarded by the peer), so the task must
+/// not call before the gate fires.
+pub(crate) async fn liveliness_get_task<T>(session: Session, keyexpr: String, clock: T)
+where
+    T: TimeSource + Send + 'static,
+{
+    let actions = session.actions();
+    let deadline_ms = clock.now_monotonic_ms() + QUERY_HANDSHAKE_TIMEOUT_MS;
+    loop {
+        if actions.trace_snapshot().record_established_at > 0 {
+            break;
+        }
+        if clock.now_monotonic_ms() >= deadline_ms {
+            log::warn!(
+                "wz-ap-demo: liveliness_get_task gave up waiting for Established \
+                 after {QUERY_HANDSHAKE_TIMEOUT_MS}ms (record_established_at \
+                 never fired)"
+            );
+            return;
+        }
+        clock.sleep(QUERY_HANDSHAKE_POLL_INTERVAL_MS).await;
+    }
+    log::info!(
+        "wz-ap-demo: liveliness_get_task observed Established; emitting CURRENT \
+         liveliness Interest on keyexpr='{keyexpr}'"
+    );
+    let key_for_reply = keyexpr.clone();
+    let result = session.liveliness_get(
+        keyexpr.clone(),
+        LivelinessGetOptions::default(),
+        move |reply: &dyn ReplyView| {
+            log::info!(
+                "wz-ap-demo: LIVELINESS GET REPLY filter='{}' keyexpr='{}'",
+                key_for_reply,
+                reply.keyexpr(),
+            );
+        },
+        move |interest_id: u64| {
+            log::info!("wz-ap-demo: LIVELINESS GET FINAL interest_id={interest_id}");
+        },
+    );
+    match result {
+        Ok(()) => log::info!("wz-ap-demo: LIVELINESS GET EMITTED keyexpr='{keyexpr}'"),
+        Err(e) => log::warn!("wz-ap-demo: liveliness_get failed: {e}"),
+    }
 }
 
 /// R254 — `clock: T` generic + 3 sleep sites migrated to

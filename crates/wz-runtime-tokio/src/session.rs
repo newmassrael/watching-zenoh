@@ -2393,6 +2393,170 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
             Err(LivelinessSubscriberAliasError::FeatureDisabled)
         }
     }
+
+    /// liveliness-get — one-shot snapshot of the peer's currently-alive
+    /// liveliness tokens matching `keyexpr`. Emits a single CURRENT
+    /// liveliness `Interest` (C=1, F=0); the peer replies with one
+    /// `on_reply` invocation per matching live token (the reply's
+    /// keyexpr is the token's keyexpr; a liveliness reply carries no
+    /// payload), terminated by exactly one `on_final`. Mirrors
+    /// zenoh-pico's `z_liveliness_get`
+    /// (`vendor/zenoh-pico/src/api/liveliness.c:119`).
+    ///
+    /// Wire = the declaration plane, NOT the query (Request/Response)
+    /// plane: the request is an `Interest`, the replies are
+    /// `Declare(DeclToken)` records, the terminator a
+    /// `Declare(DeclFinal)` — all `interest_id`-correlated. The
+    /// application *surface* is reply-shaped (the same `on_reply` +
+    /// `on_final` seam as [`Self::query`]), matching zenoh's reply-stream
+    /// get API, but there is no `Request(Query)` on the wire and no
+    /// dependency on the query plane.
+    ///
+    /// `options.timeout_ms == 0` registers the pending get with no
+    /// deadline (it stays pending until the peer's `DeclFinal` arrives);
+    /// a non-zero value arms a timeout swept by the driver loop, firing
+    /// `on_final` if the peer never terminates the snapshot so the
+    /// pending slot cannot leak. Because a get is one-shot (unlike a
+    /// re-fireable subscription) this surface enforces the
+    /// [`Self::is_established`] gate — an Interest emitted mid-handshake
+    /// is silently discarded by the peer and the snapshot would hang
+    /// until timeout — returning [`LivelinessGetError::NotEstablished`]
+    /// rather than best-effort emitting (the asymmetry with the literal
+    /// `declare_liveliness_subscriber` is deliberate: a lost subscription
+    /// Interest can be re-declared, a lost one-shot get cannot).
+    ///
+    /// R311g1 — signature-stability: body cfg, signature stable. Returns
+    /// [`LivelinessGetError::FeatureDisabled`] when `liveliness-get` is
+    /// off (both the wire-emit and observer-dispatch paths are elided).
+    pub fn liveliness_get(
+        &self,
+        keyexpr: impl Into<String>,
+        options: LivelinessGetOptions,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
+        on_final: impl FnMut(u64) + Send + 'static,
+    ) -> Result<(), LivelinessGetError> {
+        #[cfg(feature = "liveliness-get")]
+        {
+            if !self.is_established() {
+                return Err(LivelinessGetError::NotEstablished);
+            }
+            let keyexpr_string = keyexpr.into();
+            let interest_id = self.actions.alloc_next_interest_id();
+            // R262 — absolute monotonic-ms deadline (same epoch contract
+            // as `Session::query`: the application threads one `Arc<T>`
+            // clock through both `Session::new` and
+            // `drive_session_until_terminal`). timeout_ms == 0 → None
+            // (never expires).
+            let deadline_ms = (options.timeout_ms > 0)
+                .then(|| self.clock.now_monotonic_ms() + options.timeout_ms as u64);
+            // Register the pending get first, emit the Interest second —
+            // the order matters against a peer reply whose Interest
+            // reached it before we recorded the pending entry (same race
+            // reasoning as `declare_liveliness_subscriber`).
+            R::with_mutex_mut(&self.observer, |observer| {
+                observer
+                    .liveliness_gets
+                    .register_get(interest_id, deadline_ms, on_reply, on_final)
+                    .expect("register on the alloc backing never exceeds declared capacity");
+            });
+            self.actions.send_interest_liveliness_get(
+                interest_id,
+                /*keyexpr_mapping_id=*/ 0,
+                Some(&keyexpr_string),
+            )?;
+            Ok(())
+        }
+        #[cfg(not(feature = "liveliness-get"))]
+        {
+            let _ = (keyexpr, options, on_reply, on_final);
+            Err(LivelinessGetError::FeatureDisabled)
+        }
+    }
+}
+
+/// liveliness-get — options for [`Session::liveliness_get`]. Mirrors
+/// zenoh-pico's `z_liveliness_get_options_t` (currently the timeout
+/// only). `timeout_ms == 0` is the "no timeout" sentinel (the pending
+/// get never expires; it is removed only by the peer's `DeclFinal`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LivelinessGetOptions {
+    /// Snapshot timeout in milliseconds. `0` = no timeout. A non-zero
+    /// value arms the driver-loop sweep to fire `on_final` if the peer
+    /// never terminates the snapshot, so the pending slot cannot leak.
+    pub timeout_ms: u32,
+}
+
+impl LivelinessGetOptions {
+    /// Default options — `timeout_ms = 0` (no timeout). Mirrors
+    /// zenoh-pico's `z_liveliness_get_options_default`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Builder — set the snapshot `timeout_ms`.
+    pub fn with_timeout_ms(mut self, timeout_ms: u32) -> Self {
+        self.timeout_ms = timeout_ms;
+        self
+    }
+}
+
+/// liveliness-get — typed error returned by [`Session::liveliness_get`].
+/// Mirror of the [`LivelinessSubscriberAliasError`] family on the
+/// snapshot-get side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LivelinessGetError {
+    /// The session-FSM has not yet entered `Established`. A CURRENT
+    /// liveliness `Interest` emitted mid-handshake is discarded by the
+    /// peer (no `remote-interests` table entry yet), so the one-shot
+    /// snapshot would hang until timeout. Poll [`Session::is_established`]
+    /// before retrying. Enforced here (unlike the literal
+    /// `declare_liveliness_subscriber`) because a one-shot get cannot be
+    /// transparently re-fired.
+    NotEstablished,
+    /// The `liveliness-get` feature is OFF at compile time; the
+    /// wire-emit and observer-dispatch paths are elided, so no snapshot
+    /// can complete on this build. Caller must feature-detect at the
+    /// consumer-crate level before relying on a liveliness get.
+    FeatureDisabled,
+    /// The resolved keyexpr exceeded the declared bounded-codec capacity
+    /// (`MAX_KEYEXPR_BYTES`) while being copied into the no-alloc owned
+    /// `Interest` mirror, so no wire bytes were emitted. Semantic
+    /// projection of the codec-layer reject.
+    ExceedsCapacity,
+}
+
+impl std::fmt::Display for LivelinessGetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LivelinessGetError::NotEstablished => write!(
+                f,
+                "LivelinessGetError: session-FSM not yet Established; wait for \
+                 Session::is_established() to flip to true before retrying the get"
+            ),
+            LivelinessGetError::FeatureDisabled => write!(
+                f,
+                "LivelinessGetError: liveliness-get feature is OFF at compile time; \
+                 the wire-emit and observer-dispatch paths are elided, so no \
+                 snapshot can complete on this build"
+            ),
+            LivelinessGetError::ExceedsCapacity => write!(
+                f,
+                "LivelinessGetError: keyexpr exceeded the declared codec capacity \
+                 (MAX_KEYEXPR_BYTES); the Interest was not emitted"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LivelinessGetError {}
+
+impl From<SendWireError> for LivelinessGetError {
+    fn from(e: SendWireError) -> Self {
+        match e {
+            SendWireError::Codec(_) => LivelinessGetError::ExceedsCapacity,
+            SendWireError::FeatureDisabled => LivelinessGetError::FeatureDisabled,
+        }
+    }
 }
 
 /// R241 — typed error returned by [`Session::query_aliased_auto`]

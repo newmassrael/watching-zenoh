@@ -1881,6 +1881,47 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
+    /// liveliness-get — encode + dispatch a one-shot CURRENT liveliness
+    /// `Interest` (C=1, F=0) requesting the peer's currently-alive token
+    /// snapshot for the keyexpr resolved by `(keyexpr_mapping_id,
+    /// keyexpr_suffix)`. The peer replies with one `interest_id`-tagged
+    /// `Declare(DeclToken)` per matching live token, terminated by an
+    /// `interest_id`-tagged `Declare(DeclFinal)`; because FUTURE is clear
+    /// the peer does not stream subsequent events (the snapshot is
+    /// one-shot). Mirror of [`Self::send_interest_liveliness_subscriber`]
+    /// — the requester-side of the same declaration-plane protocol — but
+    /// CURRENT-only.
+    ///
+    /// Reliable channel — same SN-window ordering reason as the
+    /// subscriber Interest: the peer must observe the Interest before its
+    /// `_z_interest_process_*` resolves the matching token set, otherwise
+    /// the snapshot silently drops.
+    ///
+    /// R311g1 — signature-stability: body cfg, signature stable. Returns
+    /// `Err(FeatureDisabled)` when `declare-interest` is off (the peer
+    /// never observes the Interest, so the get cannot complete).
+    pub fn send_interest_liveliness_get(
+        &self,
+        interest_id: u64,
+        keyexpr_mapping_id: u64,
+        keyexpr_suffix: Option<&str>,
+    ) -> Result<(), SendWireError> {
+        #[cfg(feature = "declare-interest")]
+        {
+            let interest =
+                build_interest_liveliness_get(interest_id, keyexpr_mapping_id, keyexpr_suffix)?;
+            let sn = self.next_outbound_frame_sn();
+            let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
+            self.driver.send_blocking(&wire, Reliability::Reliable);
+            Ok(())
+        }
+        #[cfg(not(feature = "declare-interest"))]
+        {
+            let _ = (interest_id, keyexpr_mapping_id, keyexpr_suffix);
+            Err(SendWireError::FeatureDisabled)
+        }
+    }
+
     /// R279 — encode + dispatch an `Interest(Final)` (no C, no F)
     /// network-message terminating a previously emitted Interest
     /// stream. Mirror of zenoh-pico's
@@ -4020,24 +4061,78 @@ pub fn build_interest_liveliness_subscriber(
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
 ) -> Result<InterestOwned, CodecError> {
+    // A liveliness subscriber always sets FUTURE (the subscription stays
+    // live for subsequent peer declarations); CURRENT mirrors the
+    // `history` replay request.
+    build_liveliness_token_interest(
+        interest_id,
+        /*current=*/ history,
+        /*future=*/ true,
+        keyexpr_mapping_id,
+        keyexpr_suffix,
+    )
+}
+
+/// Build a one-shot liveliness GET (snapshot) `Interest`: CURRENT set,
+/// FUTURE clear, restricted to the attached keyexpr. The peer replies
+/// with the currently-alive matching tokens (`interest_id`-tagged
+/// `Declare(DeclToken)`) terminated by an `interest_id`-tagged
+/// `Declare(DeclFinal)`, then — because FUTURE is clear — drops the
+/// interest without streaming future events. Mirrors zenoh-pico's
+/// `_z_liveliness_query` flags
+/// (`KEYEXPRS | TOKENS | RESTRICTED | CURRENT`,
+/// `vendor/zenoh-pico/src/net/liveliness.c:350-352`). Shares the
+/// body-header flag composition with
+/// [`build_interest_liveliness_subscriber`] via
+/// [`build_liveliness_token_interest`] (one SSOT; the two differ only in
+/// the outer C / F bits).
+pub fn build_interest_liveliness_get(
+    interest_id: u64,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+) -> Result<InterestOwned, CodecError> {
+    build_liveliness_token_interest(
+        interest_id,
+        /*current=*/ true,
+        /*future=*/ false,
+        keyexpr_mapping_id,
+        keyexpr_suffix,
+    )
+}
+
+/// SSOT for the liveliness-token `Interest` body-header flag composition
+/// (`KE | TO | R | N | M`) shared by the subscriber + get paths. The
+/// only difference between the two is the outer `Interest.header` C
+/// (CURRENT) / F (FUTURE) bits, surfaced here as the `current` / `future`
+/// params. Keeping one constructor avoids the body-header bitset drifting
+/// between the two callers.
+///
+/// N/M bit positions on `InterestBody.header` (bits 5 and 6) coincide
+/// with the C/F positions on the outer `Interest.header`; that is
+/// intentional and matches zenoh-pico's `_Z_INTEREST_FLAG_COPY_MASK`
+/// reorder (the two `header` bytes are distinct wire bytes, so no
+/// collision). The inner body sets KE (carries a keyexpr), TO (wants
+/// token records), and R (restricted to the attached keyexpr); SU/QU/AG
+/// stay clear (the liveliness-token path does not interest on peer
+/// subscribers / queryables / aggregated keyexprs).
+fn build_liveliness_token_interest(
+    interest_id: u64,
+    current: bool,
+    future: bool,
+    keyexpr_mapping_id: u64,
+    keyexpr_suffix: Option<&str>,
+) -> Result<InterestOwned, CodecError> {
     let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
     let suffix_string = keyexpr_suffix
         .map(wz_session_core::codec_bound::bounded_string)
         .transpose()?;
 
-    // Outer header: MID 0x19 | F (always) | C (if history). Z stays
+    // Outer header: MID 0x19 | (current ? C) | (future ? F). Z stays
     // clear — wz emits no Interest-level extensions today; the
     // wz-codecs envelope leaves bit 7 free for a future ext-chain.
-    let c_flag = if history { 0x20u8 } else { 0x00u8 };
-    let f_flag = 0x40u8;
+    let c_flag = if current { 0x20u8 } else { 0x00u8 };
+    let f_flag = if future { 0x40u8 } else { 0x00u8 };
 
-    // Inner body header carries the appetite bits (KE/SU/QU/TO/AG),
-    // the restricted gate (R), and the wireexpr codec flags (N/M).
-    // For a liveliness subscriber we set KE (the interest carries a
-    // keyexpr), TO (we want token records), and R (restricted to the
-    // attached keyexpr). SU/QU/AG stay clear because the AP MVP does
-    // not subscribe to peer-declared subscribers / queryables /
-    // aggregated keyexprs through this path.
     let ke_flag = 0x01u8;
     let to_flag = 0x08u8;
     let r_flag = 0x10u8;
@@ -6674,6 +6769,46 @@ mod tests {
                 "future-only/current+future Interest must carry an InterestBody (C||F is set)",
             ),
         }
+    }
+
+    /// liveliness-get — `build_interest_liveliness_get` produces a
+    /// one-shot CURRENT snapshot `Interest`: outer C set, F CLEAR
+    /// (`MID | C = 0x39`), distinguishing it from the subscriber's
+    /// always-FUTURE Interest. The inner body carries the same
+    /// `KE | TO | R | N | M` flags (shared SSOT via
+    /// `build_liveliness_token_interest`). Mirrors zenoh-pico's
+    /// `_z_liveliness_query` flags
+    /// (`KEYEXPRS | TOKENS | RESTRICTED | CURRENT`,
+    /// `vendor/zenoh-pico/src/net/liveliness.c:350-352`).
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn build_interest_liveliness_get_emits_current_only_wire_bytes() {
+        // Literal keyexpr snapshot get.
+        //   outer header = MID(0x19) | C(0x20) = 0x39   (NO FUTURE)
+        //   VLE(interest_id=7) = 0x07
+        //   body header = KE | TO | R | N | M = 0x79
+        //   wireexpr.id VLE(0) | suffix_len VLE(14) | "liveliness/dev"
+        let get =
+            build_interest_liveliness_get(7, /*mapping_id=*/ 0, Some("liveliness/dev")).unwrap();
+        let get_wire = get.wire();
+        let mut expected = vec![
+            0x39u8, // outer: MID | C  (F clear — one-shot snapshot)
+            0x07,   // VLE(interest_id=7)
+            0x79,   // body: KE | TO | R | N | M
+            0x00,   // wireexpr.id VLE(0) literal sentinel
+            0x0E,   // suffix_len VLE(14)
+        ];
+        expected.extend_from_slice(b"liveliness/dev");
+        assert_eq!(
+            get_wire, expected,
+            "liveliness-get Interest must set CURRENT and clear FUTURE",
+        );
+        assert_eq!(
+            get.header & 0x40,
+            0,
+            "FUTURE (F) bit MUST be clear — a get is one-shot, not an ongoing subscription",
+        );
+        assert_eq!(get.header & 0x20, 0x20, "CURRENT (C) bit must be set");
     }
 
     /// R279 — `build_interest_final` produces an `Interest` envelope

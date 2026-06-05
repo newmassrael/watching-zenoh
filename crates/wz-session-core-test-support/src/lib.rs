@@ -37,6 +37,7 @@
 //! inert framing fields (`header`/`interest_id`/`extensions`)
 //! explicitly; the registries dispatch on `body` and never inspect them.
 
+use wz_codecs::decl_final::DeclFinal;
 use wz_codecs::decl_queryable::{DeclQueryable, DeclQueryableOwned};
 use wz_codecs::decl_subscriber::{DeclSubscriber, DeclSubscriberOwned};
 use wz_codecs::decl_token::{DeclToken, DeclTokenOwned};
@@ -196,5 +197,34 @@ pub fn declare_envelope_undecl_token(u: UndeclToken) -> DeclareOwned {
         interest_id: None,
         extensions: None,
         body: DeclareOwnedVariant::CodecZenohUndeclToken(u),
+    }
+}
+
+/// A `Declare(DeclToken)` envelope tagged with an outer `interest_id`
+/// — the shape a peer emits when *replying* to a CURRENT liveliness
+/// Interest (the solicited-reply form consumed by
+/// `LivelinessGetRegistry`). The un-tagged `declare_envelope_decl_token`
+/// is the proactive (unsolicited) form with `interest_id = None`.
+pub fn declare_envelope_decl_token_with_interest(
+    d: DeclTokenOwned,
+    interest_id: u64,
+) -> DeclareOwned {
+    DeclareOwned {
+        header: 0,
+        interest_id: Some(interest_id),
+        extensions: None,
+        body: DeclareOwnedVariant::CodecZenohDeclToken(d),
+    }
+}
+
+/// A `Declare(DeclFinal)` envelope tagged with an outer `interest_id` —
+/// the terminator a peer emits after replying to a CURRENT liveliness
+/// Interest (consumed by `LivelinessGetRegistry` to fire `on_final`).
+pub fn declare_envelope_decl_final_with_interest(interest_id: u64) -> DeclareOwned {
+    DeclareOwned {
+        header: 0,
+        interest_id: Some(interest_id),
+        extensions: None,
+        body: DeclareOwnedVariant::CodecZenohDeclFinal(DeclFinal::default()),
     }
 }

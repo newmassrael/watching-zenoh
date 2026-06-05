@@ -79,6 +79,21 @@ pub mod liveliness_subscriber;
 #[cfg(feature = "liveliness-token")]
 pub mod local_token;
 
+// liveliness-get — REQUESTER-side registry for the liveliness GET
+// (snapshot query). Gated on `liveliness-get` (which implies
+// `codec-declare` for the DeclToken / DeclFinal decode + the CURRENT
+// Interest send path), mirror of `local_token`'s `liveliness-token`
+// gate: a build that never issues a liveliness snapshot get has no
+// pending-get state. The no-heap control plane (register / fire /
+// sweep) compiles on the MCU no-alloc profile; the owned
+// `DeclareOwned`-consuming wire dispatch gates on `alloc` per-method.
+// The reply-delivery surface reuses the un-gated
+// `crate::reply_sink::ReplySink` seam (the get's application surface is
+// reply-shaped, matching zenoh), so there is NO query-plane dependency
+// — the wire is the Interest / declaration plane.
+#[cfg(feature = "liveliness-get")]
+pub mod liveliness_get;
+
 // R311ds — cross-registry composability tests (R311dr-wider-tests
 // carry closure). Gated on `codec-declare` as well as `test` because
 // it references all three registries, which compile only under

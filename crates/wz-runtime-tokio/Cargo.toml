@@ -144,6 +144,13 @@ default = [
 # implications below are unchanged.
 liveliness-token = ["declare-token", "declare-undeclare", "wz-session-core/liveliness-token"]
 liveliness-subscriber = ["declare-interest", "declare-final", "wz-session-core/liveliness-subscriber"]
+# liveliness-get — requester-side snapshot get. Wire = the declaration
+# plane: emit a CURRENT liveliness Interest (`declare-interest`), collect
+# the interest_id-tagged `Declare(DeclToken)` replies (`declare-token`)
+# terminated by a `Declare(DeclFinal)` (`declare-final`). NOT the
+# query / Request plane — so it does NOT imply `query-get` /
+# `codec-request`. Mirror of `liveliness-subscriber`'s declare-* set.
+liveliness-get = ["declare-interest", "declare-final", "declare-token", "wz-session-core/liveliness-get"]
 # R311i — every declare-* feature implies codec-declare so the wire
 # emit path (`send_declare_*` body-cfg branch) is mechanically
 # available whenever the high-level declare surface is on.

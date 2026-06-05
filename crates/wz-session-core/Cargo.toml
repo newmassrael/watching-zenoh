@@ -167,6 +167,12 @@ declare-subscriber = ["codec-declare"]
 declare-queryable = ["codec-declare"]
 liveliness-token = ["codec-declare"]
 liveliness-subscriber = ["codec-declare"]
+# liveliness-get — requester-side snapshot get. The CURRENT Interest +
+# the inbound DeclToken / DeclFinal reply decode are the declaration
+# plane, so the dependency is `codec-declare` (NOT the query / Request
+# plane). The reply-delivery surface reuses the un-gated
+# `reply_sink::ReplySink` seam, so no query-get / codec-response edge.
+liveliness-get = ["codec-declare"]
 
 # R311eg — transport-batching gate for the migrated PeerInitCaps decoder
 # (`wz-session-core::peer_init_caps`). Standalone gate-only (no wz-codecs

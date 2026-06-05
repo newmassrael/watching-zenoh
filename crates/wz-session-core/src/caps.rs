@@ -103,6 +103,18 @@ pub const MAX_LIVELINESS_SUBSCRIPTIONS: usize = 8;
 /// `HashMap` on the prior alloc-only backing.
 pub const MAX_LOCAL_TOKENS: usize = 8;
 
+/// Maximum number of concurrently-outstanding pending liveliness GET
+/// (snapshot) queries in a
+/// [`crate::declare::liveliness_get::LivelinessGetRegistry`]. Bounds the
+/// registry's pending table on the no-alloc backing; a `register` past
+/// this is rejected (`RegisterError::TableFull`) rather than growing the
+/// table. Also bounds the `keep` / `fired` partitions the no-alloc
+/// `dispatch_final` / `sweep_timed_out` build on the stack. A liveliness
+/// snapshot get is short-lived (one CURRENT Interest, drained on the
+/// terminating `Declare(DeclFinal)`), so few are outstanding at once;
+/// the default mirrors [`MAX_LIVELINESS_SUBSCRIPTIONS`].
+pub const MAX_PENDING_LIVELINESS_GETS: usize = 8;
+
 /// Maximum number of [`crate::declare::local_token::DeclResponseItem`]
 /// records the application-layer observer stages for one drain cycle
 /// (the declarer-side liveliness interest-response buffer). One inbound

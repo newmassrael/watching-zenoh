@@ -57,6 +57,7 @@ pub(crate) struct TeardownInitial {
     pub sweep_task: TokioJoinHandle<()>,
     pub publisher_handle: Option<TokioJoinHandle<()>>,
     pub query_handle: Option<TokioJoinHandle<()>>,
+    pub liveliness_get_handle: Option<TokioJoinHandle<()>>,
     pub declare_handle: Option<TokioJoinHandle<()>>,
     pub token_rx: Option<oneshot::Receiver<LivelinessToken>>,
     pub actions: Arc<SessionLinkActions>,
@@ -93,6 +94,9 @@ impl TeardownInitial {
             let _ = self.clock.timeout(200, h).await;
         }
         if let Some(h) = self.query_handle {
+            let _ = self.clock.timeout(200, h).await;
+        }
+        if let Some(h) = self.liveliness_get_handle {
             let _ = self.clock.timeout(200, h).await;
         }
         if let Some(h) = self.declare_handle {

@@ -82,7 +82,7 @@ use crate::args::{
     ReplyConsumerSpec, Role,
 };
 use crate::shutdown::shutdown_signal;
-use crate::tasks::{declare_task, publisher_task, query_task, QUERY_RID};
+use crate::tasks::{declare_task, liveliness_get_task, publisher_task, query_task, QUERY_RID};
 use crate::teardown;
 
 /// RAII keepers for the local Session-level declarations
@@ -108,6 +108,7 @@ struct SessionHandles {
 struct SpawnedTasks {
     publisher_handle: Option<TokioJoinHandle<()>>,
     query_handle: Option<TokioJoinHandle<()>>,
+    liveliness_get_handle: Option<TokioJoinHandle<()>>,
     declare_handle: Option<TokioJoinHandle<()>>,
     token_rx: Option<oneshot::Receiver<LivelinessToken>>,
 }
@@ -415,6 +416,7 @@ fn spawn_background_tasks(
     actions: &Arc<SessionLinkActions>,
     publisher_spec: Option<(String, PushOperation, Option<u64>)>,
     query_spec: Option<String>,
+    liveliness_get_spec: Option<String>,
     declare_spec: DeclareEmitSpec,
     session_clock: TokioTime,
 ) -> SpawnedTasks {
@@ -432,6 +434,11 @@ fn spawn_background_tasks(
     let query_handle = query_spec.map(|keyexpr| {
         let actions_for_query = actions.clone();
         TokioRuntime.spawn(query_task(actions_for_query, keyexpr, session_clock))
+    });
+
+    let liveliness_get_handle = liveliness_get_spec.map(|keyexpr| {
+        let session_for_get = session.clone();
+        TokioRuntime.spawn(liveliness_get_task(session_for_get, keyexpr, session_clock))
     });
 
     let has_declares = declare_spec.subscriber_keyexpr.is_some()
@@ -458,6 +465,7 @@ fn spawn_background_tasks(
     SpawnedTasks {
         publisher_handle,
         query_handle,
+        liveliness_get_handle,
         declare_handle,
         token_rx,
     }
@@ -500,6 +508,7 @@ pub(crate) async fn run_demo(
     let QueryRoleSpec {
         queryable: queryable_spec,
         query: query_spec,
+        liveliness_get: liveliness_get_spec,
     } = query_role_spec;
 
     // ── Step 1: TCP setup (Acceptor binds + accepts, Initiator dials).
@@ -599,6 +608,7 @@ pub(crate) async fn run_demo(
     let SpawnedTasks {
         publisher_handle,
         query_handle,
+        liveliness_get_handle,
         declare_handle,
         token_rx,
     } = spawn_background_tasks(
@@ -606,6 +616,7 @@ pub(crate) async fn run_demo(
         &actions,
         publisher_spec,
         query_spec,
+        liveliness_get_spec,
         declare_spec,
         session_clock,
     );
@@ -755,6 +766,7 @@ pub(crate) async fn run_demo(
         sweep_task,
         publisher_handle,
         query_handle,
+        liveliness_get_handle,
         declare_handle,
         token_rx,
         actions,

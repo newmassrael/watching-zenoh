@@ -176,6 +176,11 @@ fn main() -> ExitCode {
     let queryable_opt = parse_pair(rest, "--queryable");
     let reply_opt = parse_pair(rest, "--reply");
     let query_opt = parse_pair(rest, "--query");
+    // liveliness-get — optional `--liveliness-get <keyexpr>` issues one
+    // CURRENT liveliness snapshot Interest once Established and logs each
+    // reply + the terminating final. Reply-consuming "get" surface on the
+    // declaration plane (sibling of --query on the Request plane).
+    let liveliness_get_opt = parse_pair(rest, "--liveliness-get");
     // R121k-5 — declare emit + remote-declare callback CLI surface.
     let declare_subscriber_opt = parse_pair(rest, "--declare-subscriber");
     let declare_queryable_opt = parse_pair(rest, "--declare-queryable");
@@ -241,13 +246,14 @@ fn main() -> ExitCode {
         && declare_queryable_opt.is_none()
         && declare_token_opt.is_none()
         && liveliness_subscribe_opt.is_none()
+        && liveliness_get_opt.is_none()
         && !on_remote_sub_log
         && !on_remote_q_log
         && !on_remote_l_log
     {
         eprintln!(
             "wz-ap-demo: at least one of --key / --publish / --delete / --queryable / --query / \
-             --declare-* / --liveliness-subscribe / --on-remote-* must be supplied",
+             --declare-* / --liveliness-subscribe / --liveliness-get / --on-remote-* must be supplied",
         );
         eprintln!();
         print_usage();
@@ -480,6 +486,7 @@ fn main() -> ExitCode {
     let query_role_spec = QueryRoleSpec {
         queryable: queryable_spec,
         query: query_spec,
+        liveliness_get: liveliness_get_opt,
     };
     let outcome = runtime.block_on(async move {
         run_demo(

@@ -134,6 +134,15 @@ use crate::declare::local_token::{DeclResponseItem, LocalTokenRegistry};
 // registry slot (and its dispatch / Drop access) follow the feature.
 #[cfg(feature = "liveliness-subscriber")]
 use crate::declare::liveliness_subscriber::LivelinessSubscriberRegistry;
+// liveliness-get — the requester-side pending-get registry. Gated on
+// `liveliness-get` (which implies `codec-declare`); the field + this
+// import + the dispatch fan in `dispatch_event` follow the feature, the
+// `Session::liveliness_get` Result-form surface returns
+// `Err(FeatureDisabled)` in the feature-OFF build without touching the
+// field. Reuses the `crate::reply_sink::BoxedReplySink` delivery seam
+// (the get surface is reply-shaped).
+#[cfg(feature = "liveliness-get")]
+use crate::declare::liveliness_get::LivelinessGetRegistry;
 // R310 — peer-side declare observer registries gate on the matching
 // application-layer declare-* feature. Without the feature the
 // observer slot for that wire arm is elided entirely; inbound
@@ -266,6 +275,18 @@ pub struct ApplicationLayerObserver {
     #[cfg(feature = "liveliness-subscriber")]
     pub liveliness_subscribers:
         LivelinessSubscriberRegistry<crate::declare::liveliness_sample::BoxedLivelinessSampleSink>,
+    /// Requester-side pending liveliness GET (snapshot) queries declared
+    /// by [`crate::session::Session::liveliness_get`]. Each inbound
+    /// solicited `Declare(DeclToken)` (interest_id-tagged) fans to the
+    /// matching pending get's `on_reply`; the terminating
+    /// `Declare(DeclFinal)` fires `on_final` + removes the entry. A
+    /// declaration-plane sibling of [`Self::replies`] (the z_get reply
+    /// registry) — same reply-delivery seam, distinct correlation plane
+    /// (`interest_id` vs `Response.request_id`). Gated on `liveliness-get`
+    /// (implies `codec-declare`); the dispatch fan in
+    /// [`Self::dispatch_event`] gates on the same feature.
+    #[cfg(feature = "liveliness-get")]
+    pub liveliness_gets: LivelinessGetRegistry<crate::reply_sink::BoxedReplySink>,
     /// Initiator-side `Response(Reply|Err)` + `ResponseFinal`
     /// callbacks (`z_get` consumer). Pending entries auto-unregister
     /// when their matching `ResponseFinal` arrives.
@@ -342,6 +363,12 @@ impl ApplicationLayerObserver {
             // absent field.
             #[cfg(feature = "liveliness-subscriber")]
             liveliness_subscribers: LivelinessSubscriberRegistry::new(),
+            // liveliness-get — requester-side pending-get registry,
+            // constructed only under `liveliness-get`. Empty until
+            // `Session::liveliness_get` registers the first snapshot
+            // query.
+            #[cfg(feature = "liveliness-get")]
+            liveliness_gets: LivelinessGetRegistry::new(),
             // R311s — replies field is type-ungated; the registry is
             // always constructed (empty) so the type-ungated query
             // surface can register pending entries even though
@@ -393,6 +420,7 @@ impl ApplicationLayerObserver {
             feature = "declare-queryable",
             feature = "liveliness-token",
             feature = "liveliness-subscriber",
+            feature = "liveliness-get",
             feature = "query-queryable",
             feature = "codec-response",
             feature = "codec-response-final",
@@ -432,6 +460,12 @@ impl ApplicationLayerObserver {
             .dispatch_iteration_event(event, peer_table, &mut self.pending_declares);
         #[cfg(feature = "liveliness-subscriber")]
         self.liveliness_subscribers
+            .dispatch_iteration_event(event, peer_table);
+        // liveliness-get — fan inbound solicited Declare(DeclToken/DeclFinal)
+        // replies into the pending-get registry, correlated by the outer
+        // interest_id. Reads peer_table for the reply keyexpr resolution.
+        #[cfg(feature = "liveliness-get")]
+        self.liveliness_gets
             .dispatch_iteration_event(event, peer_table);
         #[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
         self.replies.dispatch_iteration_event(event, peer_table);
