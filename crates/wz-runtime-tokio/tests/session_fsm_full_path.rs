@@ -47,50 +47,21 @@
 #![cfg(feature = "transport-keepalive")]
 
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use sce_rust_runtime::Engine;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
 };
-use wz_runtime_tokio::session_glue::{BoxedLinkDriver, SessionLinkActions};
+use wz_runtime_tokio::session_glue::SessionLinkActions;
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test,
+    fixture_session_init_params, install_session_actions_for_test, LifecycleRecordingDriver,
 };
-
-#[derive(Default)]
-struct RecordingDriver {
-    inner: Mutex<RecordingState>,
-}
-
-#[derive(Default)]
-struct RecordingState {
-    opens: u32,
-    closes: u32,
-    sends: Vec<(Vec<u8>, Reliability)>,
-}
-
-impl BoxedLinkDriver for RecordingDriver {
-    fn open_blocking(&self) {
-        self.inner.lock().unwrap().opens += 1;
-    }
-    fn close_blocking(&self) {
-        self.inner.lock().unwrap().closes += 1;
-    }
-    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) {
-        self.inner
-            .lock()
-            .unwrap()
-            .sends
-            .push((bytes.to_vec(), reliability));
-    }
-}
 
 #[test]
 fn r59_engine_drives_full_outbound_initiator_happy_path() {
-    let driver = Arc::new(RecordingDriver::default());
+    let driver = Arc::new(LifecycleRecordingDriver::default());
     let actions = SessionLinkActions::new(
         driver.clone(),
         fixture_session_init_params(),
@@ -112,7 +83,7 @@ fn r59_engine_drives_full_outbound_initiator_happy_path() {
     {
         let t = actions.trace_snapshot();
         assert_eq!(t.link_driver_open, 1);
-        let snap = driver.inner.lock().unwrap();
+        let snap = driver.snapshot();
         assert_eq!(snap.opens, 1, "driver.open after LinkOpening onentry");
     }
 
@@ -125,7 +96,7 @@ fn r59_engine_drives_full_outbound_initiator_happy_path() {
     {
         let t = actions.trace_snapshot();
         assert_eq!(t.send_init_syn, 1);
-        let snap = driver.inner.lock().unwrap();
+        let snap = driver.snapshot();
         assert_eq!(
             snap.sends.len(),
             1,
@@ -143,7 +114,7 @@ fn r59_engine_drives_full_outbound_initiator_happy_path() {
     {
         let t = actions.trace_snapshot();
         assert_eq!(t.send_open_syn, 1);
-        let snap = driver.inner.lock().unwrap();
+        let snap = driver.snapshot();
         assert_eq!(
             snap.sends.len(),
             2,
@@ -177,7 +148,7 @@ fn r59_engine_drives_full_outbound_initiator_happy_path() {
         assert_eq!(t.stop_keepalive_worker, 1);
         assert_eq!(t.stop_lease_monitor, 1);
         assert_eq!(t.send_close_frame_with_reason, 1);
-        let snap = driver.inner.lock().unwrap();
+        let snap = driver.snapshot();
         assert_eq!(
             snap.sends.len(),
             3,
@@ -199,7 +170,7 @@ fn r59_engine_drives_full_outbound_initiator_happy_path() {
         let t = actions.trace_snapshot();
         assert_eq!(t.release_link, 1);
         assert_eq!(t.free_pool_slots, 1);
-        let snap = driver.inner.lock().unwrap();
+        let snap = driver.snapshot();
         assert_eq!(snap.closes, 1, "driver.close after release_link");
     }
 }

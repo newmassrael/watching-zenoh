@@ -33,7 +33,6 @@
 // runner can execute them concurrently without collision.
 
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use sce_rust_runtime::Engine;
 use wz_runtime_tokio::runtime_impl::TokioTime;
@@ -41,34 +40,15 @@ use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent as E, SessionFsmUnicastPolicy, SessionFsmUnicastState as S,
 };
 use wz_runtime_tokio::session_glue::{BoxedLinkDriver, CloseReason, SessionLinkActions};
-use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test,
+    fixture_session_init_params, install_session_actions_for_test, LifecycleRecordingDriver,
 };
-
-#[derive(Default)]
-struct RecordingDriver {
-    inner: Mutex<RecordingState>,
-}
-
-#[derive(Default)]
-struct RecordingState {
-    sends: u32,
-}
-
-impl BoxedLinkDriver for RecordingDriver {
-    fn open_blocking(&self) {}
-    fn close_blocking(&self) {}
-    fn send_blocking(&self, _b: &[u8], _r: Reliability) {
-        self.inner.lock().unwrap().sends += 1;
-    }
-}
 
 /// Build a driver + actions + Engine triple for one scenario. Each
 /// call yields an independent `LuaEngine` (R79 per-instance DI), so
 /// concurrent test scenarios cannot contend on shared state.
 fn fresh_engine() -> (Arc<SessionLinkActions>, Engine<SessionFsmUnicastPolicy>) {
-    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(RecordingDriver::default());
+    let driver: Arc<dyn BoxedLinkDriver> = Arc::new(LifecycleRecordingDriver::default());
     let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
     let lua = install_session_actions_for_test(actions.clone());
     let mut engine = Engine::new(SessionFsmUnicastPolicy::new(lua));

@@ -30,7 +30,6 @@
 #![cfg(feature = "transport-keepalive")]
 
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
@@ -39,35 +38,8 @@ use wz_runtime_tokio::session_glue::{
 use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{
     dispatch_script, fixture_session_init_params, install_session_actions_for_test,
+    LifecycleRecordingDriver,
 };
-
-#[derive(Default)]
-struct RecordingDriver {
-    inner: Mutex<RecordingState>,
-}
-
-#[derive(Default)]
-struct RecordingState {
-    opens: u32,
-    closes: u32,
-    sends: Vec<(Vec<u8>, Reliability)>,
-}
-
-impl BoxedLinkDriver for RecordingDriver {
-    fn open_blocking(&self) {
-        self.inner.lock().unwrap().opens += 1;
-    }
-    fn close_blocking(&self) {
-        self.inner.lock().unwrap().closes += 1;
-    }
-    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) {
-        self.inner
-            .lock()
-            .unwrap()
-            .sends
-            .push((bytes.to_vec(), reliability));
-    }
-}
 
 /// Mirror of `layer3_init_body.rs::compute_init_cbyte` so this test's
 /// expected bytes are independent of the production code under
@@ -103,7 +75,7 @@ fn fixture_params() -> SessionInitParams {
 
 #[test]
 fn r57_session_script_actions_produce_real_wire_bytes() {
-    let driver = Arc::new(RecordingDriver::default());
+    let driver = Arc::new(LifecycleRecordingDriver::default());
     let actions = SessionLinkActions::new(driver.clone(), fixture_params(), TokioTime::new());
     let lua = install_session_actions_for_test(actions.clone());
 
@@ -149,7 +121,7 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     assert_eq!(trace.set_close_reason_count, 4);
     assert_eq!(trace.close_reason, CloseReason::Unresponsive);
 
-    let snap = driver.inner.lock().unwrap();
+    let snap = driver.snapshot();
     assert_eq!(snap.opens, 1);
     assert_eq!(snap.closes, 1);
     assert_eq!(snap.sends.len(), 5, "5 outbound sends in step 1-3");
@@ -260,7 +232,7 @@ fn r57_session_script_actions_produce_real_wire_bytes() {
     // `LuaEngine` instances, and a dispatch against the second
     // engine must hit the SECOND `SessionLinkActions` — not the
     // first one (which would be the pre-R79 race symptom).
-    let second_driver = Arc::new(RecordingDriver::default());
+    let second_driver = Arc::new(LifecycleRecordingDriver::default());
     let second_actions = SessionLinkActions::new(
         second_driver.clone() as Arc<dyn BoxedLinkDriver>,
         fixture_session_init_params(),

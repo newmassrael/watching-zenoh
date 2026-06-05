@@ -88,6 +88,22 @@ impl RecordingLinkDriver {
             .expect("recording driver mutex poisoned")
             .len()
     }
+
+    /// Wire bytes of the `idx`-th recorded frame (panics if absent), so
+    /// a wire-byte assertion can compare against an independently encoded
+    /// expectation without reaching into the driver's private storage.
+    pub fn frame_bytes(&self, idx: usize) -> Vec<u8> {
+        self.frames.lock().expect("recording driver mutex poisoned")[idx]
+            .0
+            .clone()
+    }
+
+    /// Reliability channel the `idx`-th recorded frame was emitted on
+    /// (panics if absent) — pins the action layer's reliable/best-effort
+    /// channel pick (e.g. Close + Reply are reliable-only).
+    pub fn frame_reliability(&self, idx: usize) -> Reliability {
+        self.frames.lock().expect("recording driver mutex poisoned")[idx].1
+    }
 }
 
 impl BoxedLinkDriver for RecordingLinkDriver {
@@ -108,15 +124,96 @@ impl BoxedLinkDriver for RecordingLinkDriver {
 /// asserts the `Err(..)` return AND `driver.frame_count() == 0` (the
 /// no-emit half of the reject contract).
 pub fn recording_actions() -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
+    recording_actions_with_params(fixture_session_init_params())
+}
+
+/// [`recording_actions`] variant that accepts caller-supplied
+/// [`SessionInitParams`]. Use when a wire-byte assertion depends on a
+/// specific field — typically `initial_sn`, which seeds
+/// `next_outbound_frame_sn` and therefore the SN byte of every emitted
+/// Frame. Build the params from [`fixture_session_init_params`] and
+/// override only the asserted field so the rest stays on the SSOT:
+///
+/// ```ignore
+/// let mut params = fixture_session_init_params();
+/// params.initial_sn = 100;
+/// let (actions, driver) = recording_actions_with_params(params);
+/// ```
+pub fn recording_actions_with_params(
+    params: SessionInitParams,
+) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
     let driver = Arc::new(RecordingLinkDriver {
         frames: Mutex::new(Vec::new()),
     });
-    let actions = SessionLinkActions::new(
-        driver.clone(),
-        fixture_session_init_params(),
-        TokioTime::new(),
-    );
+    let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
     (actions, driver)
+}
+
+/// Test [`BoxedLinkDriver`] that counts `open_blocking` / `close_blocking`
+/// calls *in addition to* recording every outbound frame. This is the
+/// second driver shape the runtime tests need — handshake / lifecycle
+/// tests assert the FSM drove the link through open → sends → close in
+/// the right order, which the no-op-open/close [`RecordingLinkDriver`]
+/// cannot observe.
+///
+/// SSOT home for the `RecordingDriver { opens, closes, sends }` shape
+/// that was copy-pasted byte-identically across
+/// `tests/session_fsm_engine_drive.rs`, `tests/session_fsm_full_path.rs`,
+/// and `tests/session_glue_dispatch.rs` (plus a send-count-only variant
+/// in `tests/session_fsm_coverage.rs`). Consolidating it here removes
+/// the four duplicates.
+#[derive(Default)]
+pub struct LifecycleRecordingDriver {
+    inner: Mutex<LifecycleState>,
+}
+
+#[derive(Default)]
+struct LifecycleState {
+    opens: u32,
+    closes: u32,
+    sends: Vec<(Vec<u8>, Reliability)>,
+}
+
+/// Immutable snapshot of a [`LifecycleRecordingDriver`]'s observed state.
+/// A test binds this once via [`LifecycleRecordingDriver::snapshot`] and
+/// reads multiple fields without re-locking — the field names/types mirror
+/// the inline `RecordingState` the tests/ files previously defined, so the
+/// assertion bodies (`snap.opens`, `snap.sends[i].0`, …) are unchanged.
+pub struct LifecycleSnapshot {
+    /// `open_blocking` call count.
+    pub opens: u32,
+    /// `close_blocking` call count.
+    pub closes: u32,
+    /// Every `send_blocking` frame in emission order: (bytes, reliability).
+    pub sends: Vec<(Vec<u8>, Reliability)>,
+}
+
+impl LifecycleRecordingDriver {
+    /// Take an immutable snapshot of the observed open/close/send state.
+    pub fn snapshot(&self) -> LifecycleSnapshot {
+        let s = self.inner.lock().expect("lifecycle driver poisoned");
+        LifecycleSnapshot {
+            opens: s.opens,
+            closes: s.closes,
+            sends: s.sends.clone(),
+        }
+    }
+}
+
+impl BoxedLinkDriver for LifecycleRecordingDriver {
+    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) {
+        self.inner
+            .lock()
+            .expect("lifecycle driver poisoned")
+            .sends
+            .push((bytes.to_vec(), reliability));
+    }
+    fn open_blocking(&self) {
+        self.inner.lock().expect("lifecycle driver poisoned").opens += 1;
+    }
+    fn close_blocking(&self) {
+        self.inner.lock().expect("lifecycle driver poisoned").closes += 1;
+    }
 }
 
 /// Build a fresh `LuaEngine`, wire `actions`'s 17 closures onto it

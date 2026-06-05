@@ -6861,37 +6861,13 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn send_response_emits_reliable_frame_with_seeded_sn() {
-        use crate::sync::Mutex;
-
-        struct RecordingDriver {
-            frames: Mutex<Vec<(Vec<u8>, Reliability)>>,
-        }
-        impl BoxedLinkDriver for RecordingDriver {
-            fn send_blocking(&self, bytes: &[u8], r: Reliability) {
-                self.frames.lock().unwrap().push((bytes.to_vec(), r));
-            }
-            fn open_blocking(&self) {}
-            fn close_blocking(&self) {}
-        }
-
-        let driver = Arc::new(RecordingDriver {
-            frames: Mutex::new(Vec::new()),
-        });
-        let params = SessionInitParams {
-            version: 0x09,
-            whatami: 0x02,
-            zid: vec![0x01, 0x02, 0x03, 0x04],
-            seq_num_res: 2,
-            req_id_res: 2,
-            batch_size: 65535,
-            lease: 10_000,
-            lease_in_seconds: false,
-            initial_sn: 100,
-            cookie: Vec::new(),
-            cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-                .expect("32-byte demo key satisfies the >=32 invariant"),
-        };
-        let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
+        // The wire-byte assertion depends on initial_sn (it seeds the
+        // Frame SN), so override only that field on the
+        // `fixture_session_init_params()` SSOT.
+        let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        params.initial_sn = 100;
+        let (actions, driver) =
+            wz_runtime_tokio_test_support::recording_actions_with_params(params);
 
         let response = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"21.0")
             .build()
@@ -6905,18 +6881,18 @@ mod tests {
         );
         actions.send_response(response);
 
-        let frames = driver.frames.lock().unwrap();
         assert_eq!(
-            frames.len(),
+            driver.frame_count(),
             1,
             "exactly one send_blocking call per send_response"
         );
         assert_eq!(
-            frames[0].0, expected_wire,
+            driver.frame_bytes(0),
+            expected_wire,
             "wire bytes must match encode_frame_with_response output byte-for-byte"
         );
         assert_eq!(
-            frames[0].1,
+            driver.frame_reliability(0),
             Reliability::Reliable,
             "Reply data delivery pinned reliable at the action layer"
         );
@@ -6942,43 +6918,15 @@ mod tests {
     #[cfg(feature = "codec-close")]
     #[test]
     fn send_close_with_reason_emits_zenoh_pico_compatible_wire_bytes() {
-        use crate::sync::Mutex;
-
-        struct RecordingDriver {
-            frames: Mutex<Vec<(Vec<u8>, Reliability)>>,
-        }
-        impl BoxedLinkDriver for RecordingDriver {
-            fn send_blocking(&self, bytes: &[u8], r: Reliability) {
-                self.frames.lock().unwrap().push((bytes.to_vec(), r));
-            }
-            fn open_blocking(&self) {}
-            fn close_blocking(&self) {}
-        }
-
         for (variant, reason_byte) in [
             (CloseReason::Generic, 0u8),
             (CloseReason::Invalid, 1u8),
             (CloseReason::Expired, 2u8),
             (CloseReason::Unresponsive, 3u8),
         ] {
-            let driver = Arc::new(RecordingDriver {
-                frames: Mutex::new(Vec::new()),
-            });
-            let params = SessionInitParams {
-                version: 0x09,
-                whatami: 0x02,
-                zid: vec![0x01, 0x02, 0x03, 0x04],
-                seq_num_res: 2,
-                req_id_res: 2,
-                batch_size: 65535,
-                lease: 10_000,
-                lease_in_seconds: false,
-                initial_sn: 1,
-                cookie: Vec::new(),
-                cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-                    .expect("32-byte demo key satisfies the >=32 invariant"),
-            };
-            let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
+            // Close is a fixed 2-byte frame (no SN field), so the
+            // `recording_actions()` SSOT params are used verbatim.
+            let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
             assert_eq!(
                 actions.trace_snapshot().send_close_frame_with_reason,
                 0,
@@ -6987,9 +6935,8 @@ mod tests {
 
             actions.send_close_with_reason(variant);
 
-            let frames = driver.frames.lock().unwrap();
             assert_eq!(
-                frames.len(),
+                driver.frame_count(),
                 1,
                 "exactly one wire emit per send_close_with_reason ({variant:?})",
             );
@@ -7003,11 +6950,12 @@ mod tests {
                 reason_byte,
             ];
             assert_eq!(
-                frames[0].0, expected,
+                driver.frame_bytes(0),
+                expected,
                 "wire bytes must match encode_close output for {variant:?}",
             );
             assert_eq!(
-                frames[0].1,
+                driver.frame_reliability(0),
                 Reliability::Reliable,
                 "Close pinned reliable — zenoh-pico drops Close on best-effort",
             );
@@ -7028,37 +6976,12 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn send_response_and_final_share_sn_counter() {
-        use crate::sync::Mutex;
-
-        struct RecordingDriver {
-            frames: Mutex<Vec<Vec<u8>>>,
-        }
-        impl BoxedLinkDriver for RecordingDriver {
-            fn send_blocking(&self, bytes: &[u8], _r: Reliability) {
-                self.frames.lock().unwrap().push(bytes.to_vec());
-            }
-            fn open_blocking(&self) {}
-            fn close_blocking(&self) {}
-        }
-
-        let driver = Arc::new(RecordingDriver {
-            frames: Mutex::new(Vec::new()),
-        });
-        let params = SessionInitParams {
-            version: 0x09,
-            whatami: 0x02,
-            zid: vec![0x01, 0x02, 0x03, 0x04],
-            seq_num_res: 2,
-            req_id_res: 2,
-            batch_size: 65535,
-            lease: 10_000,
-            lease_in_seconds: false,
-            initial_sn: 7,
-            cookie: Vec::new(),
-            cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-                .expect("32-byte demo key satisfies the >=32 invariant"),
-        };
-        let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
+        // Asserts on the Frame SN byte, so override initial_sn on the
+        // `fixture_session_init_params()` SSOT.
+        let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        params.initial_sn = 7;
+        let (actions, driver) =
+            wz_runtime_tokio_test_support::recording_actions_with_params(params);
 
         actions.send_response(
             ResponseReplyBuilder::new(99, 0, Some("k"), b"v")
@@ -7067,12 +6990,12 @@ mod tests {
         );
         actions.send_response_final(99);
 
-        let frames = driver.frames.lock().unwrap();
-        assert_eq!(frames.len(), 2);
+        assert_eq!(driver.frame_count(), 2);
         // Reply frame SN byte is at offset 1 (Frame header + VLE(sn)).
-        assert_eq!(frames[0][1], 7, "first frame uses initial_sn=7");
+        assert_eq!(driver.frame_bytes(0)[1], 7, "first frame uses initial_sn=7");
         assert_eq!(
-            frames[1][1], 8,
+            driver.frame_bytes(1)[1],
+            8,
             "second frame increments to 8 — Reply + ResponseFinal carry consecutive SNs",
         );
     }
@@ -7084,29 +7007,13 @@ mod tests {
     /// fires loud.
     #[test]
     fn next_outbound_frame_sn_seeds_at_initial_sn_then_increments() {
-        // Driver harness — discard everything (the SN counter is
-        // independent of driver wire-up).
-        struct NullDriver;
-        impl BoxedLinkDriver for NullDriver {
-            fn send_blocking(&self, _bytes: &[u8], _r: Reliability) {}
-            fn open_blocking(&self) {}
-            fn close_blocking(&self) {}
-        }
-        let params = SessionInitParams {
-            version: 0x09,
-            whatami: 0x02,
-            zid: vec![0x01, 0x02, 0x03, 0x04],
-            seq_num_res: 2,
-            req_id_res: 2,
-            batch_size: 65535,
-            lease: 10_000,
-            lease_in_seconds: false,
-            initial_sn: 42,
-            cookie: Vec::new(),
-            cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-                .expect("32-byte demo key satisfies the >=32 invariant"),
-        };
-        let actions = SessionLinkActions::new(Arc::new(NullDriver), params, TokioTime::new());
+        // The SN counter seeds from initial_sn; the driver is unused
+        // (we only read the counter), so the `recording_actions_with_params`
+        // SSOT driver discards the never-emitted frames.
+        let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
+        params.initial_sn = 42;
+        let (actions, _driver) =
+            wz_runtime_tokio_test_support::recording_actions_with_params(params);
         assert_eq!(
             actions.next_outbound_frame_sn(),
             42,
@@ -7640,12 +7547,7 @@ mod tests {
         // caller-set metadata. Pins the integration between
         // PushMetadata, build_push_literal_with_meta, and
         // encode_frame_with_push.
-        let driver = std::sync::Arc::new(crate::session_glue::tests::CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         let meta = PushMetadata {
             source_info: Some(SourceInfo::new(&[0xCA, 0xFE], 5, 7)),
             qos: Some(QosLevel::from_raw(0x10)),
@@ -7655,8 +7557,7 @@ mod tests {
             .send_push_with_meta_literal("home/temp", b"data", true, &meta)
             .unwrap();
 
-        let frames = driver.frames.lock().unwrap();
-        assert_eq!(frames.len(), 1);
+        assert_eq!(driver.frame_count(), 1);
         // The frame is `Frame + Push`. We don't decode the outer Frame
         // here (the layer-3 integration tests cover that path); instead
         // we re-encode an equivalent Push via build_push_literal_with_meta
@@ -7665,83 +7566,27 @@ mod tests {
         let standalone_push = build_push_literal_with_meta("home/temp", b"data", &meta).unwrap();
         let standalone_bytes = standalone_push.wire();
         assert!(
-            frames[0]
-                .0
+            driver
+                .frame_bytes(0)
                 .windows(standalone_bytes.len())
                 .any(|w| w == standalone_bytes),
             "recorded frame must contain the with-meta Push bytes verbatim"
         );
     }
 
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-declare",
-        feature = "codec-request"
-    ))]
-    fn publish_meta_fixture_params() -> SessionInitParams {
-        SessionInitParams {
-            version: 0x09,
-            whatami: 0x02,
-            zid: vec![0x01, 0x02, 0x03, 0x04],
-            seq_num_res: 2,
-            req_id_res: 2,
-            batch_size: 65535,
-            lease: 10_000,
-            lease_in_seconds: false,
-            initial_sn: 1,
-            cookie: Vec::new(),
-            cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-                .expect("32-byte demo key satisfies the >=32 invariant"),
-        }
-    }
-
-    /// Minimal recording driver for R233 wire-side tests. Captures
-    /// every send_blocking frame so the per-test asserts can compare
-    /// against a re-encoded standalone Push.
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-declare",
-        feature = "codec-request"
-    ))]
-    pub(super) struct CaptureDriver {
-        frames: std::sync::Mutex<Vec<(Vec<u8>, Reliability)>>,
-    }
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-declare",
-        feature = "codec-request"
-    ))]
-    impl CaptureDriver {
-        fn new() -> Self {
-            Self {
-                frames: std::sync::Mutex::new(Vec::new()),
-            }
-        }
-    }
-    #[cfg(any(
-        feature = "codec-push",
-        feature = "codec-declare",
-        feature = "codec-request"
-    ))]
-    impl BoxedLinkDriver for CaptureDriver {
-        fn send_blocking(&self, bytes: &[u8], r: Reliability) {
-            self.frames.lock().unwrap().push((bytes.to_vec(), r));
-        }
-        fn open_blocking(&self) {}
-        fn close_blocking(&self) {}
-    }
+    // R233/R234 wire-side tests use the `recording_actions()` SSOT in
+    // `wz-runtime-tokio-test-support` for the (actions, recording driver)
+    // pair. The former local `publish_meta_fixture_params` + `CaptureDriver`
+    // duplicate (a re-spelling of `fixture_session_init_params` +
+    // `RecordingLinkDriver`) was folded into it. None of these tests assert
+    // on the SN / version fields, so the SSOT params are used verbatim.
 
     // ── R234 outbound mapping table ──
 
     #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_populates_outbound_mapping_table() {
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, _driver) = wz_runtime_tokio_test_support::recording_actions();
         assert!(
             actions.resolve_outbound_mapping(7).is_none(),
             "fresh table empty"
@@ -7777,12 +7622,7 @@ mod tests {
         // possibly different suffix). The outbound table must mirror
         // that semantic so a caller re-declaring a mapping doesn't
         // see stale resolution for later publishes.
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, _driver) = wz_runtime_tokio_test_support::recording_actions();
         actions
             .send_declare_keyexpr(7, "home/v1")
             .expect("hardcoded canonical literal keyexpr");
@@ -7799,12 +7639,7 @@ mod tests {
     #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
     #[test]
     fn send_undeclare_kexpr_removes_mapping_from_table() {
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, _driver) = wz_runtime_tokio_test_support::recording_actions();
         actions
             .send_declare_keyexpr(7, "home/temp")
             .expect("hardcoded canonical literal keyexpr");
@@ -7820,12 +7655,7 @@ mod tests {
     #[cfg(feature = "codec-declare")]
     #[test]
     fn send_undeclare_kexpr_idempotent_on_unknown_id() {
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, _driver) = wz_runtime_tokio_test_support::recording_actions();
         // Calling undeclare on an id that was never declared must not
         // panic — the HashMap::remove on absent key is a no-op.
         actions.send_undeclare_kexpr(42);
@@ -7837,18 +7667,14 @@ mod tests {
     #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_rejects_reserved_mapping_id_zero() {
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         let err = actions
             .send_declare_keyexpr(0, "home/temp")
             .expect_err("mapping_id 0 is reserved");
         assert_eq!(err, SendDeclareError::ReservedMappingIdZero);
-        assert!(
-            driver.frames.lock().unwrap().is_empty(),
+        assert_eq!(
+            driver.frame_count(),
+            0,
             "gate must reject pre-emit — no wire frame leaves on Err"
         );
         assert!(
@@ -7860,12 +7686,7 @@ mod tests {
     #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_rejects_pico_bug_three_pattern() {
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         let err = actions
             .send_declare_keyexpr(7, "**/c/*")
             .expect_err("R299 bug #3 pattern must reject");
@@ -7881,19 +7702,14 @@ mod tests {
             }
             other => panic!("expected Keyexpr(PicoBugThreeFamily), got {other:?}"),
         }
-        assert!(driver.frames.lock().unwrap().is_empty());
+        assert_eq!(driver.frame_count(), 0);
         assert!(actions.resolve_outbound_mapping(7).is_none());
     }
 
     #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_rejects_structurally_invalid() {
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, _driver) = wz_runtime_tokio_test_support::recording_actions();
         let err = actions
             .send_declare_keyexpr(7, "home//temp")
             .expect_err("empty chunk must reject");
@@ -7913,35 +7729,25 @@ mod tests {
     #[cfg(all(feature = "declare-subscriber", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_subscriber_rejects_missing_keyexpr() {
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         // mapping_id = 0 + suffix = None → no keyexpr at all.
         let err = actions
             .send_declare_subscriber(1, 0, None)
             .expect_err("MissingKeyexpr");
         assert_eq!(err, SendDeclareError::MissingKeyexpr);
-        assert!(driver.frames.lock().unwrap().is_empty());
+        assert_eq!(driver.frame_count(), 0);
     }
 
     #[cfg(all(feature = "declare-subscriber", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_subscriber_rejects_unknown_mapping_id() {
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         // mapping_id != 0 but no prior send_declare_keyexpr.
         let err = actions
             .send_declare_subscriber(1, 99, Some("/tail"))
             .expect_err("UnknownMappingId(99)");
         assert_eq!(err, SendDeclareError::UnknownMappingId(99));
-        assert!(driver.frames.lock().unwrap().is_empty());
+        assert_eq!(driver.frame_count(), 0);
     }
 
     #[cfg(all(feature = "declare-subscriber", feature = "declare-keyexpr"))]
@@ -7952,17 +7758,12 @@ mod tests {
         // send_declare_subscriber — neither alone triggers bug #3,
         // but the reconstructed full keyexpr `**/c/*` does. A
         // suffix-only check would miss this.
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         actions
             .send_declare_keyexpr(7, "**")
             .expect("prefix `**` is canonical + pico-safe in isolation");
         // 1 frame from the keyexpr declare; clear the count.
-        let frames_before = driver.frames.lock().unwrap().len();
+        let frames_before = driver.frame_count();
         assert_eq!(frames_before, 1);
 
         let err = actions
@@ -7981,18 +7782,13 @@ mod tests {
         }
         // No additional wire frame leaked — only the prior keyexpr
         // declare's frame is present.
-        assert_eq!(driver.frames.lock().unwrap().len(), 1);
+        assert_eq!(driver.frame_count(), 1);
     }
 
     #[cfg(all(feature = "declare-subscriber", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_subscriber_accepts_safe_alias_form() {
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, _driver) = wz_runtime_tokio_test_support::recording_actions();
         actions
             .send_declare_keyexpr(7, "home")
             .expect("safe prefix");
@@ -8013,12 +7809,7 @@ mod tests {
     #[cfg(all(feature = "declare-queryable", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_queryable_inherits_gate() {
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         // Direct literal bug-three pattern.
         let err = actions
             .send_declare_queryable(1, 0, Some("**/foo/*"))
@@ -8029,18 +7820,13 @@ mod tests {
                 crate::keyexpr_canon::OutboundKeyexprError::PicoBugThreeFamily { .. }
             )
         ));
-        assert!(driver.frames.lock().unwrap().is_empty());
+        assert_eq!(driver.frame_count(), 0);
     }
 
     #[cfg(all(feature = "declare-token", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_token_inherits_gate() {
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         let err = actions
             .send_declare_token(1, 0, Some("**/abc/*/def"))
             .expect_err("token inherits the same gate");
@@ -8050,16 +7836,41 @@ mod tests {
                 crate::keyexpr_canon::OutboundKeyexprError::PicoBugThreeFamily { .. }
             )
         ));
-        assert!(driver.frames.lock().unwrap().is_empty());
+        assert_eq!(driver.frame_count(), 0);
     }
 
     #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn reconstruct_outbound_keyexpr_shape_table() {
-        let driver = std::sync::Arc::new(CaptureDriver::new());
+        // `reconstruct_outbound_keyexpr` is a *private* method, so this
+        // test must build `SessionLinkActions` from the local crate
+        // version. The `wz-runtime-tokio-test-support` SSOT yields the
+        // dev-dependency cycle's second `wz-runtime-tokio` copy, whose
+        // private API is out of scope here. Param values are irrelevant
+        // (the test reads the mapping table, never the wire); they mirror
+        // `fixture_session_init_params()` for recognizability.
+        struct DiscardDriver;
+        impl BoxedLinkDriver for DiscardDriver {
+            fn send_blocking(&self, _: &[u8], _: Reliability) {}
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+        }
         let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
+            Arc::new(DiscardDriver),
+            SessionInitParams {
+                version: 0x05,
+                whatami: 0x02,
+                zid: vec![0x01; 4],
+                seq_num_res: 0,
+                req_id_res: 0,
+                batch_size: 0,
+                lease: 10_000,
+                lease_in_seconds: false,
+                initial_sn: 0,
+                cookie: Vec::new(),
+                cookie_signing_key: SigningKey::new(vec![0xAB; 32])
+                    .expect("32-byte test key satisfies the >=32 invariant"),
+            },
             TokioTime::new(),
         );
         actions
@@ -8105,12 +7916,7 @@ mod tests {
         // across a later send_undeclare_kexpr must still see the
         // value they originally fetched. This pins the contract
         // that callers don't accidentally borrow the table slot.
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, _driver) = wz_runtime_tokio_test_support::recording_actions();
         actions
             .send_declare_keyexpr(7, "home/temp")
             .expect("hardcoded canonical literal keyexpr");
@@ -8130,27 +7936,17 @@ mod tests {
         // send_request_query path so byte-stable callers (CI / fuzz
         // baselines) stay unchanged when QueryOptions::default() is
         // threaded through Session::query.
-        let driver_a = std::sync::Arc::new(CaptureDriver::new());
-        let actions_a = SessionLinkActions::new(
-            driver_a.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions_a, driver_a) = wz_runtime_tokio_test_support::recording_actions();
         actions_a
             .send_request_query_with_meta(42, 0, Some("home/temp"), &QueryMetadata::default())
             .unwrap();
-        let with_meta = driver_a.frames.lock().unwrap()[0].0.clone();
+        let with_meta = driver_a.frame_bytes(0);
 
-        let driver_b = std::sync::Arc::new(CaptureDriver::new());
-        let actions_b = SessionLinkActions::new(
-            driver_b.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions_b, driver_b) = wz_runtime_tokio_test_support::recording_actions();
         actions_b
             .send_request_query(42, 0, Some("home/temp"))
             .unwrap();
-        let no_meta = driver_b.frames.lock().unwrap()[0].0.clone();
+        let no_meta = driver_b.frame_bytes(0);
 
         assert_eq!(
             with_meta, no_meta,
@@ -8166,12 +7962,7 @@ mod tests {
         // when meta.target = Some(target). Pins the
         // QueryMetadata::target → RequestQueryBuilder::request_target
         // wiring.
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         let meta = QueryMetadata {
             target: Some(QueryTarget::All),
             ..Default::default()
@@ -8183,7 +7974,7 @@ mod tests {
         let standalone =
             build_request_query_with_target(42, 0, Some("home/temp"), QueryTarget::All).unwrap();
         let standalone_bytes = standalone.wire();
-        let frame = &driver.frames.lock().unwrap()[0].0;
+        let frame = driver.frame_bytes(0);
         assert!(
             frame
                 .windows(standalone_bytes.len())
@@ -8195,12 +7986,7 @@ mod tests {
     #[cfg(feature = "codec-request")]
     #[test]
     fn send_request_query_with_meta_consolidation_emits_query_with_q_c_flag() {
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         let meta = QueryMetadata {
             consolidation: Some(ConsolidationMode::Latest),
             ..Default::default()
@@ -8217,7 +8003,7 @@ mod tests {
         )
         .unwrap();
         let standalone_bytes = standalone.wire();
-        let frame = &driver.frames.lock().unwrap()[0].0;
+        let frame = driver.frame_bytes(0);
         assert!(
             frame
                 .windows(standalone_bytes.len())
@@ -8229,12 +8015,7 @@ mod tests {
     #[cfg(all(feature = "codec-request", feature = "query-attachment"))]
     #[test]
     fn send_request_query_with_meta_attachment_emits_query_with_attachment_ext() {
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         let meta = QueryMetadata {
             attachment: Some(b"q-att".to_vec()),
             ..Default::default()
@@ -8246,7 +8027,7 @@ mod tests {
         let standalone =
             build_request_query_with_attachment(42, 0, Some("home/temp"), b"q-att").unwrap();
         let standalone_bytes = standalone.wire();
-        let frame = &driver.frames.lock().unwrap()[0].0;
+        let frame = driver.frame_bytes(0);
         assert!(
             frame
                 .windows(standalone_bytes.len())
@@ -8264,12 +8045,7 @@ mod tests {
         // against the panic by skipping the attach call on an empty
         // inner slice. Wire frame ends up matching the
         // no-attachment shape.
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         let meta = QueryMetadata {
             attachment: Some(Vec::new()),
             ..Default::default()
@@ -8284,7 +8060,7 @@ mod tests {
         // slice is empty).
         let baseline = build_request_query(42, 0, Some("home/temp")).unwrap();
         let baseline_bytes = baseline.wire();
-        let frame = &driver.frames.lock().unwrap()[0].0;
+        let frame = driver.frame_bytes(0);
         assert!(
             frame
                 .windows(baseline_bytes.len())
@@ -8296,12 +8072,7 @@ mod tests {
     #[cfg(feature = "codec-request")]
     #[test]
     fn send_request_query_with_meta_timeout_ms_emits_request_with_timeout_ext() {
-        let driver = std::sync::Arc::new(CaptureDriver::new());
-        let actions = SessionLinkActions::new(
-            driver.clone(),
-            publish_meta_fixture_params(),
-            TokioTime::new(),
-        );
+        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
         let meta = QueryMetadata {
             timeout_ms: 5_000,
             ..Default::default()
@@ -8313,7 +8084,7 @@ mod tests {
         let standalone =
             build_request_query_with_timeout_ms(42, 0, Some("home/temp"), 5_000).unwrap();
         let standalone_bytes = standalone.wire();
-        let frame = &driver.frames.lock().unwrap()[0].0;
+        let frame = driver.frame_bytes(0);
         assert!(
             frame
                 .windows(standalone_bytes.len())

@@ -21,50 +21,20 @@
 //! round.
 
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use sce_rust_runtime::Engine;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
 };
-use wz_runtime_tokio::session_glue::{BoxedLinkDriver, SessionLinkActions};
-use wz_runtime_tokio::Reliability;
+use wz_runtime_tokio::session_glue::SessionLinkActions;
 use wz_runtime_tokio_test_support::{
-    fixture_session_init_params, install_session_actions_for_test,
+    fixture_session_init_params, install_session_actions_for_test, LifecycleRecordingDriver,
 };
-
-#[derive(Default)]
-struct RecordingDriver {
-    inner: Mutex<RecordingState>,
-}
-
-#[derive(Default)]
-struct RecordingState {
-    opens: u32,
-    closes: u32,
-    sends: Vec<(Vec<u8>, Reliability)>,
-}
-
-impl BoxedLinkDriver for RecordingDriver {
-    fn open_blocking(&self) {
-        self.inner.lock().unwrap().opens += 1;
-    }
-    fn close_blocking(&self) {
-        self.inner.lock().unwrap().closes += 1;
-    }
-    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) {
-        self.inner
-            .lock()
-            .unwrap()
-            .sends
-            .push((bytes.to_vec(), reliability));
-    }
-}
 
 #[test]
 fn r55b_engine_drives_link_opening_onentry_script() {
-    let driver = Arc::new(RecordingDriver::default());
+    let driver = Arc::new(LifecycleRecordingDriver::default());
     let actions = SessionLinkActions::new(
         driver.clone(),
         fixture_session_init_params(),
@@ -102,7 +72,7 @@ fn r55b_engine_drives_link_opening_onentry_script() {
         "LinkOpening.onentry script must dispatch link_driver_open exactly once"
     );
 
-    let snap = driver.inner.lock().unwrap();
+    let snap = driver.snapshot();
     assert_eq!(
         snap.opens, 1,
         "the trace's link_driver_open must propagate through to driver.open()"
