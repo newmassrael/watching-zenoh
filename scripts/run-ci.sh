@@ -1106,15 +1106,16 @@ layer_c4c_runtime_tokio_subset_matrix() {
 # via Layer C1's `cargo test --workspace`, so a subset-specific runtime
 # behaviour regression had no guard.
 #
-# R311hw — the codec behavioural NEG / isolation guards
-# (session_glue.rs send_{push_literal,request_query}_rejects_with_feature_
-# disabled_when_codec_{push,request}_off) ride these same subsets: a
-# subset that composes the consumer plane with codec-push and/or
-# codec-request OFF runs them, asserting the signature-stable emit path
-# returns the typed SendWireError::FeatureDisabled reject (never a
-# falsely-Ok no-op). This is the BEHAVIOUR complement to Layer F, which
-# only proves the codec bytes shrink (footprint), not that the off path
-# rejects correctly.
+# R311hw / R311hx — the codec & declare behavioural NEG / isolation
+# guards (session_glue.rs send_*_rejects_with_feature_disabled_when_*_off:
+# codec-push / codec-request -> SendWireError; declare-keyexpr /
+# -subscriber / -queryable / -token -> SendDeclareError; declare-interest
+# -> SendWireError) ride these same subsets: a subset that composes the
+# consumer plane with one of those gates OFF runs the matching guard,
+# asserting the signature-stable emit path returns the typed
+# FeatureDisabled reject (never a falsely-Ok no-op). This is the BEHAVIOUR
+# complement to Layer F, which only proves the codec bytes shrink
+# (footprint), not that the off path rejects correctly.
 layer_c1j_runtime_tokio_subset_behavior() {
     local name feats
     while IFS=$'\t' read -r name feats; do

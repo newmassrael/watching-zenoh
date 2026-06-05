@@ -7120,25 +7120,38 @@ mod tests {
         assert_eq!(actions.next_outbound_frame_sn(), 44);
     }
 
-    // ── R311hw — codec behavioural NEG / isolation ──
+    // ── R311hw / R311hx — codec & declare behavioural NEG / isolation ──
     //
     // Layer F (codec-footprint) proves a `codec-*` atomic feature's
-    // minus-<codec> lane SHRINKS the binary — the codec bytes are elided
-    // when the feature is off. It does NOT prove the consumer-side
+    // minus-<codec> lane SHRINKS the binary — the bytes are elided when
+    // the feature is off. It does NOT prove the consumer-side
     // signature-stable emit path BEHAVES correctly when off. The
     // `feedback_signature_stability` contract (R311j / R311g1) requires
     // the `SessionLinkActions` send method to keep its signature and
-    // return `Err(SendWireError::FeatureDisabled)` — an honest typed
-    // reject, never a falsely-`Ok` no-op and never a panic (see the
-    // `FeatureDisabled` variant doc in wz-session-core). These guards pin
-    // that behaviour, the behavioural half Layer F's size proof leaves
-    // open. They are cfg'd to the feature-OFF builds and so ride the
-    // existing C1j subset lanes (handshake-only / queryable-only /
-    // zget-reply-only / liveliness-* / declare-observer compose the
-    // consumer plane with codec-push and/or codec-request OFF); no new
-    // lane is needed. The all-on default build cfg's both out (the
-    // `any(not, not)` gate is false), so no dead code lands there.
-    #[cfg(any(not(feature = "codec-push"), not(feature = "codec-request")))]
+    // return `Err(..::FeatureDisabled)` — an honest typed reject, never a
+    // falsely-`Ok` no-op and never a panic (see the `FeatureDisabled`
+    // variant docs in wz-session-core). R311hw pins the two `codec-*`
+    // send gates (codec-push / codec-request → SendWireError); R311hx
+    // extends the same shape to the five declare gates (declare-keyexpr /
+    // -subscriber / -queryable / -token → SendDeclareError, declare-
+    // interest → SendWireError). These guards pin the behavioural half
+    // Layer F's size proof leaves open. They are cfg'd to the feature-OFF
+    // builds and ride the existing C1j subset lanes (handshake-only /
+    // pubsub-only / queryable-only / zget-reply-only / liveliness-* /
+    // declare-observer each compose the consumer plane with some of these
+    // gates OFF); no new lane is needed. The shared probe helper's gate is
+    // the exact union of the per-test gates below, so it is compiled iff
+    // at least one of those tests is active — the all-on default build
+    // cfg's every one out, so no dead code lands there.
+    #[cfg(any(
+        not(feature = "codec-push"),
+        not(feature = "codec-request"),
+        not(feature = "declare-keyexpr"),
+        not(feature = "declare-subscriber"),
+        not(feature = "declare-queryable"),
+        not(feature = "declare-token"),
+        not(feature = "declare-interest"),
+    ))]
     fn feature_disabled_probe_actions() -> Arc<SessionLinkActions> {
         struct DiscardDriver;
         impl BoxedLinkDriver for DiscardDriver {
@@ -7194,6 +7207,84 @@ mod tests {
             Err(SendWireError::FeatureDisabled),
             "codec-request OFF: send_request_query must return the typed \
              FeatureDisabled reject, not a falsely-Ok no-op or a panic"
+        );
+    }
+
+    /// R311hx — with `declare-keyexpr` OFF, `send_declare_keyexpr` must
+    /// reject with `SendDeclareError::FeatureDisabled` and leave the
+    /// outbound mapping table untouched (no wire bytes, no side effect).
+    #[cfg(not(feature = "declare-keyexpr"))]
+    #[test]
+    fn send_declare_keyexpr_rejects_with_feature_disabled_when_declare_keyexpr_off() {
+        let actions = feature_disabled_probe_actions();
+        assert_eq!(
+            actions.send_declare_keyexpr(1, "home/temp"),
+            Err(SendDeclareError::FeatureDisabled),
+            "declare-keyexpr OFF: send_declare_keyexpr must return the typed \
+             FeatureDisabled reject, not a falsely-Ok no-op or a panic"
+        );
+    }
+
+    /// R311hx — with `declare-subscriber` OFF,
+    /// `send_declare_subscriber` must reject with
+    /// `SendDeclareError::FeatureDisabled`.
+    #[cfg(not(feature = "declare-subscriber"))]
+    #[test]
+    fn send_declare_subscriber_rejects_with_feature_disabled_when_declare_subscriber_off() {
+        let actions = feature_disabled_probe_actions();
+        assert_eq!(
+            actions.send_declare_subscriber(1, 0, Some("home/temp")),
+            Err(SendDeclareError::FeatureDisabled),
+            "declare-subscriber OFF: send_declare_subscriber must return the \
+             typed FeatureDisabled reject, not a falsely-Ok no-op or a panic"
+        );
+    }
+
+    /// R311hx — with `declare-queryable` OFF, `send_declare_queryable`
+    /// must reject with `SendDeclareError::FeatureDisabled`.
+    #[cfg(not(feature = "declare-queryable"))]
+    #[test]
+    fn send_declare_queryable_rejects_with_feature_disabled_when_declare_queryable_off() {
+        let actions = feature_disabled_probe_actions();
+        assert_eq!(
+            actions.send_declare_queryable(1, 0, Some("home/temp")),
+            Err(SendDeclareError::FeatureDisabled),
+            "declare-queryable OFF: send_declare_queryable must return the \
+             typed FeatureDisabled reject, not a falsely-Ok no-op or a panic"
+        );
+    }
+
+    /// R311hx — with `declare-token` OFF, `send_declare_token` must
+    /// reject with `SendDeclareError::FeatureDisabled`.
+    #[cfg(not(feature = "declare-token"))]
+    #[test]
+    fn send_declare_token_rejects_with_feature_disabled_when_declare_token_off() {
+        let actions = feature_disabled_probe_actions();
+        assert_eq!(
+            actions.send_declare_token(1, 0, Some("home/temp")),
+            Err(SendDeclareError::FeatureDisabled),
+            "declare-token OFF: send_declare_token must return the typed \
+             FeatureDisabled reject, not a falsely-Ok no-op or a panic"
+        );
+    }
+
+    /// R311hx — with `declare-interest` OFF,
+    /// `send_interest_liveliness_subscriber` must reject with
+    /// `SendWireError::FeatureDisabled` (this surface returns the
+    /// wire-error type, not the declare-error type). The liveliness
+    /// subscription is silently inactive on such a build; the typed
+    /// reject is the caller's feature-detect signal.
+    #[cfg(not(feature = "declare-interest"))]
+    #[test]
+    fn send_interest_liveliness_subscriber_rejects_with_feature_disabled_when_declare_interest_off()
+    {
+        let actions = feature_disabled_probe_actions();
+        assert_eq!(
+            actions.send_interest_liveliness_subscriber(1, false, 0, Some("home/temp")),
+            Err(SendWireError::FeatureDisabled),
+            "declare-interest OFF: send_interest_liveliness_subscriber must \
+             return the typed FeatureDisabled reject, not a falsely-Ok no-op \
+             or a panic"
         );
     }
 
