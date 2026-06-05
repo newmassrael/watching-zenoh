@@ -36,6 +36,10 @@
 #                 either have >=1 `cfg(feature="A")` gate site, OR appear
 #                 in the FOUNDATIONAL allowlist below (capabilities that
 #                 ship unconditionally and so carry no toggle by design).
+#   4. linked:  A carries a section_ref to its feature_inventory §5
+#                 domain section, so the inventory entry is not an island
+#                 disconnected from the design doc that describes it (and
+#                 so the catalog cross-ref graph stays whole).
 #
 # FOUNDATIONAL allowlist — atoms that are genuinely implemented and
 # always compiled (no cfg gate by design), so `status=active` is honest
@@ -112,13 +116,15 @@ inv = json.load(open(os.environ["INV_FILE"]))
 entries = inv if isinstance(inv, list) else inv.get("entries", inv.get("inventory", []))
 foundational = set(filter(None, os.environ["FOUNDATIONAL_CSV"].split(",")))
 
-# atom -> status, excluding presets (presets are bundles, not atoms)
+# atom -> (status, section_ref), excluding presets (bundles, not atoms)
 atoms = {}
+section_ref = {}
 for e in entries:
     aid = e.get("id") or e.get("inventory_id")
     if not aid or aid.startswith("preset-"):
         continue
     atoms[aid] = e.get("status")
+    section_ref[aid] = e.get("section_ref")
 
 # ground truth: declared cargo [features] keys across the workspace
 declared = set()
@@ -145,6 +151,7 @@ def has_gate(atom):
     return bool(r.stdout.strip())
 
 fail_undeclared, fail_reserved_gated, fail_active_nogate = [], [], []
+fail_unlinked = []
 info_foundational = []
 
 for atom in sorted(atoms):
@@ -159,6 +166,8 @@ for atom in sorted(atoms):
             info_foundational.append(atom)
         else:
             fail_active_nogate.append(atom)
+    if not section_ref.get(atom):
+        fail_unlinked.append(atom)
 
 ok = True
 print("=== catalog status truthfulness audit ===")
@@ -186,6 +195,12 @@ if fail_active_nogate:
     print("FAIL: status=active but NO cfg gate and NOT foundational: %d" % len(fail_active_nogate))
     for a in fail_active_nogate:
         print("    - %s  (set status=reserved if unimplemented/folded, or add to FOUNDATIONAL with rationale)" % a)
+
+if fail_unlinked:
+    ok = False
+    print("FAIL: catalog atom with NO section_ref to its feature_inventory section: %d" % len(fail_unlinked))
+    for a in fail_unlinked:
+        print("    - %s  (set-inventory-section-ref --id %s --section <its §5 domain section>)" % (a, a))
 
 if ok:
     print("catalog status truthfulness OK")

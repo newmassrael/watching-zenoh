@@ -30015,6 +30015,50 @@
         "reserved access/storage/SHM domains remain MS3+ long-tail and untouched this round; out-of-phase per project_north_star phasing"
       ]
     },
+    "Round 311hs": {
+      "decision_summary": "R311hs links all 143 catalog atoms to their §5 domain section (section_ref, was all None) and extends Layer A3 with a section_ref-required invariant, building the inventory<->design cross-ref graph that was missing",
+      "changes_bullets": [
+        "set-inventory-section-ref on all 143 non-preset catalog atoms to their §5.N domain section (was section_ref=None for every atom; the inventory entries were islands disconnected from the design doc that describes them)",
+        "domain->section map: transport->5.1, locator->5.2, ... encoding->5.19, switchboard->5.20-statechart; dry-run confirmed 143/143 mapped, 0 unmapped, before any mutation",
+        "Layer A3 gate (scripts/audit-catalog-status.sh) extended with invariant #4: every catalog atom must carry a section_ref, so a future unlinked atom fails the gate"
+      ],
+      "verification_bullets": [
+        "Layer A3 green post-link via run-ci.sh --layer A3 (all 143 atoms linked, status+gate+link invariants all pass)",
+        "validate-workspace after the 143 section_ref mutations: T1 orphan new=+0 (every ref targets an existing §5 section), entries=578 sections=257 unchanged",
+        "the section_ref form (full path, stored without leading §) verified on one atom before batching the rest"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "carry_forward_bullets": [
+        "§5 domain section BODIES (prose) still state pre-Phase-2 counts (e.g. §5.8 \"5 active / 6 reserved\"; now 10 toggleable active + 1 foundational); reconciling needs a field-decomposition probe first (no set_section_body primitive; the body renders from typed fields) and is lower priority since R408 makes §5 unvalidated human notes",
+        "future A3 hardening once §5 bodies are machine-reconciled: cross-check inventory status against the §5 active-set so the third catalog surface is gated too, not just linked"
+      ],
+      "publishable_decision_summary": "R311hs links all 143 catalog atoms to their §5 domain section (section_ref, was all None) and extends Layer A3 with a section_ref-required invariant, building the inventory<->design cross-ref graph that was missing",
+      "publishable_changes_bullets": [
+        "set-inventory-section-ref on all 143 non-preset catalog atoms to their §5.N domain section (was section_ref=None for every atom; the inventory entries were islands disconnected from the design doc that describes them)",
+        "domain->section map: transport->5.1, locator->5.2, ... encoding->5.19, switchboard->5.20-statechart; dry-run confirmed 143/143 mapped, 0 unmapped, before any mutation",
+        "Layer A3 gate (scripts/audit-catalog-status.sh) extended with invariant #4: every catalog atom must carry a section_ref, so a future unlinked atom fails the gate"
+      ],
+      "publishable_verification_bullets": [
+        "Layer A3 green post-link via run-ci.sh --layer A3 (all 143 atoms linked, status+gate+link invariants all pass)",
+        "validate-workspace after the 143 section_ref mutations: T1 orphan new=+0 (every ref targets an existing §5 section), entries=578 sections=257 unchanged",
+        "the section_ref form (full path, stored without leading §) verified on one atom before batching the rest"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query"
+      ],
+      "publishable_carry_forward_bullets": [
+        "§5 domain section BODIES (prose) still state pre-Phase-2 counts (e.g. §5.8 \"5 active / 6 reserved\"; now 10 toggleable active + 1 foundational); reconciling needs a field-decomposition probe first (no set_section_body primitive; the body renders from typed fields) and is lower priority since R408 makes §5 unvalidated human notes",
+        "future A3 hardening once §5 bodies are machine-reconciled: cross-check inventory status against the §5 active-set so the third catalog surface is gated too, not just linked"
+      ]
+    },
     "Round 311i": {
       "decision_summary": "R311i codec-declare wire-layer cascade — 9 declare-family wz-codecs modules gated + Cargo edges + session_glue.rs Declare wire surface body-cfg.",
       "changes_bullets": [
@@ -35652,351 +35696,421 @@
   "inventory_entries": {
     "access-acl": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
       "source": "zenoh-acl plugin",
       "reason": "F=ACL filter pipeline; P=zenoh-acl; C=opt-in policy plugin"
     },
     "access-downsampling": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
       "source": "zenoh downsampling plugin",
       "reason": "F=rate-limit filter; P=zenoh downsampling; C=opt-in QoS policy"
     },
     "access-extauth-jwt": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
       "source": "zenoh JWT auth method",
       "reason": "F=JWT verify; P=zenoh; C=requires session-extauth, alternative method"
     },
     "access-extauth-pubkey": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
       "source": "zenoh pubkey auth method",
       "reason": "F=RSA verify; P=zenoh; C=requires session-extauth, alternative method"
     },
     "access-extauth-usrpwd": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
       "source": "zenoh usrpwd auth method",
       "reason": "F=usrpwd verify; P=zenoh; C=requires session-extauth, alternative method"
     },
     "access-quota": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
       "source": "zenoh per-key quota",
       "reason": "F=quota accounting; P=zenoh; C=opt-in policy"
     },
     "attachment-bytes": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-17-attachment",
       "source": "zenoh sample/query attachment opaque bytes",
       "reason": "F=attachment field codec; P=zenoh attachment; C=opt-in metadata, enables pubsub-attachment + query-attachment"
     },
     "attachment-encoding-aware": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-17-attachment",
       "source": "zenoh encoding-tagged attachment",
       "reason": "F=tag-typed attachment view; P=zenoh; C=builds on attachment-bytes"
     },
     "codec-close": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
       "source": "sources/codecs/close.scxml",
       "reason": "F=CLOSE codec; P=zenoh-pico codec_variant_session_close; C=session lifecycle terminator"
     },
     "codec-declare": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
       "source": "sources/codecs/declare.scxml",
       "reason": "F=DECLARE outer codec; P=zenoh DECLARE; C=carrier for all declare-* kinds"
     },
     "codec-fragment": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
       "source": "sources/codecs/fragment.scxml",
       "reason": "F=Fragment codec; P=zenoh transport Fragment; C=requires transport-fragmentation"
     },
     "codec-frame": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
       "source": "sources/codecs/frame.scxml",
       "reason": "F=Frame codec; P=zenoh transport Frame; C=primary data carrier"
     },
     "codec-hello": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
       "source": "sources/codecs/hello.scxml",
       "reason": "F=HELLO codec; P=zenoh-pico codec_zenoh_hello; C=companion to codec-scout"
     },
     "codec-init-body": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
       "source": "sources/codecs/init_body.scxml",
       "reason": "F=Init body (InitSyn + InitAck via parent.S/A flag dispatch); P=zenoh-pico init_body codec; C=session handshake first + second leg single emit unit"
     },
     "codec-join": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
       "source": "sources/codecs/join.scxml",
       "reason": "F=JOIN codec; P=zenoh-pico Join; C=requires session-multicast"
     },
     "codec-keep-alive": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
       "source": "sources/codecs/keep_alive.scxml",
       "reason": "F=KeepAlive codec; P=zenoh-pico codec_zenoh_keep_alive; C=independent"
     },
     "codec-open-body": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
       "source": "sources/codecs/open_body.scxml",
       "reason": "F=Open body (OpenSyn + OpenAck via parent.A negation); P=zenoh-pico open_body codec; C=session establish third + fourth leg single emit unit"
     },
     "codec-push": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
       "source": "sources/codecs/push.scxml",
       "reason": "F=PUSH codec; P=zenoh PUSH; C=pubsub carrier (put/delete)"
     },
     "codec-request": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
       "source": "sources/codecs/request.scxml",
       "reason": "F=REQUEST codec; P=zenoh REQUEST; C=query carrier"
     },
     "codec-response": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
       "source": "sources/codecs/response.scxml",
       "reason": "F=RESPONSE codec; P=zenoh RESPONSE; C=reply carrier"
     },
     "codec-response-final": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
       "source": "sources/codecs/response_final.scxml",
       "reason": "F=RESPONSE-FINAL codec; P=zenoh RESPONSE_FINAL; C=query completion signal"
     },
     "codec-scout": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
       "source": "sources/codecs/scout.scxml",
       "reason": "F=SCOUT codec; P=zenoh-pico codec_zenoh_scout; C=requires scouting-active or -multicast"
     },
     "declare-final": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow",
       "source": "sources/codecs/decl_final.scxml",
       "reason": "F=DECLARE-FINAL push; P=zenoh DECLARE final; C=opt-in subscription complete signal"
     },
     "declare-interest": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow",
       "source": "sources/codecs/interest.scxml + interest_body.scxml",
       "reason": "F=Z_INTEREST extension; P=zenoh interest; C=opt-in, OQ-W3 carry"
     },
     "declare-keyexpr": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow",
       "source": "sources/codecs/decl_kexpr.scxml",
       "reason": "F=DECLARE-KEXPR codec; P=zenoh DECLARE alias; C=requires keyexpr-mapping"
     },
     "declare-queryable": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow",
       "source": "sources/codecs/decl_queryable.scxml",
       "reason": "F=DECLARE-QUERYABLE codec; P=zenoh DECLARE queryable; C=indep declare kind"
     },
     "declare-subscriber": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow",
       "source": "sources/codecs/decl_subscriber.scxml",
       "reason": "F=DECLARE-SUBSCRIBER codec; P=zenoh DECLARE subscriber; C=indep declare kind"
     },
     "declare-token": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow",
       "source": "sources/codecs/decl_token.scxml",
       "reason": "F=DECLARE-TOKEN codec; P=zenoh DECLARE liveliness token; C=indep declare kind"
     },
     "declare-undeclare": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-7-declare-flow",
       "source": "sources/codecs/undecl_*.scxml (4 files)",
       "reason": "F=UNDECLARE codec pair per declare kind; P=zenoh UNDECLARE; C=lifecycle pair of DECLARE"
     },
     "encoding-bytes": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "sources/codecs/encoding.scxml octet-stream arm",
       "reason": "F=application/octet-stream tag; P=zenoh; C=indep encoding tag"
     },
     "encoding-cbor": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "zenoh application/cbor encoding",
       "reason": "F=CBOR encoding tag; P=zenoh; C=indep encoding tag"
     },
     "encoding-empty": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "sources/codecs/encoding.scxml empty arm",
       "reason": "F=empty encoding tag; P=zenoh encoding empty; C=baseline tag value"
     },
     "encoding-json": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "zenoh application/json encoding",
       "reason": "F=JSON encoding tag; P=zenoh; C=indep, payload still bytes"
     },
     "encoding-mime": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "zenoh RFC 6838 full MIME registry",
       "reason": "F=full MIME tag table; P=zenoh RFC 6838; C=superset of bespoke encoding-* tags"
     },
     "encoding-protobuf": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "zenoh application/protobuf encoding",
       "reason": "F=Protobuf encoding tag; P=zenoh; C=indep encoding tag"
     },
     "encoding-utf8": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding",
       "source": "sources/codecs/encoding.scxml text/plain arm",
       "reason": "F=text/plain UTF-8 tag; P=zenoh; C=indep encoding tag"
     },
     "keyexpr-canon": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs at R221",
       "reason": "F=canonize fn; P=zenoh-pico _z_keyexpr_canonize; C=mandatory for outbound wire safety"
     },
     "keyexpr-dollar-star": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs $*",
       "reason": "F=non-greedy single-seg wildcard; P=zenoh $*; C=opt-in extension over wildcard-single"
     },
     "keyexpr-includes": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "sources/algorithms/keyexpr_includes.scxml at R299",
       "reason": "F=includes algorithm; P=zenoh _z_keyexpr_includes; C=required for declare-keyexpr alias check"
     },
     "keyexpr-intersect": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "sources/algorithms/keyexpr_intersect.scxml at R297",
       "reason": "F=intersect algorithm; P=zenoh _z_keyexpr_intersect; C=required for subscriber matching"
     },
     "keyexpr-literal": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs",
       "reason": "F=baseline parse; P=zenoh keyexpr literal; C=indep, foundation for all wildcard variants"
     },
     "keyexpr-mapping": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/session_glue.rs KexprMappingTable",
       "reason": "F=alias table; P=zenoh kexpr resolver; C=required when declare-keyexpr enabled"
     },
     "keyexpr-wildcard-double": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs",
       "reason": "F=double-star chunk + canon rules; P=zenoh keyexpr **; C=R299 documented divergence pins"
     },
     "keyexpr-wildcard-single": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-6-keyexpr",
       "source": "crates/wz-runtime-tokio/src/keyexpr_canon.rs",
       "reason": "F=star chunk handling; P=zenoh keyexpr *; C=opt-in pattern, indep of double-wildcard"
     },
     "link-batching": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
       "source": "crates/wz-runtime-tokio/src/session_glue.rs tx batch",
       "reason": "F=multi-msg pack; P=zenoh batch; C=opt-in throughput"
     },
     "link-flow-control": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
       "source": "zenoh transport flow control",
       "reason": "F=backpressure signal; P=zenoh; C=indep, can fail-fast without"
     },
     "link-fragment": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
       "source": "sources/codecs/fragment.scxml",
       "reason": "F=Fragment codec; P=zenoh transport Fragment; C=requires transport-fragmentation"
     },
     "link-frame": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
       "source": "sources/codecs/frame.scxml",
       "reason": "F=Frame envelope codec; P=zenoh transport Frame; C=indep of fragment path"
     },
     "link-tx-cache": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
       "source": "zenoh transport tx cache",
       "reason": "F=retransmit buffer; P=zenoh; C=opt-in reliability layer"
     },
     "liveliness-get": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
       "source": "zenoh liveliness.get",
       "reason": "F=Querier on liveliness; P=zenoh; C=opt-in snapshot query"
     },
     "liveliness-historical-samples": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
       "source": "zenoh liveliness historical samples",
       "reason": "F=replay current tokens; P=zenoh; C=requires liveliness-history"
     },
     "liveliness-history": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
       "source": "zenoh Z_EXT_HISTORY on liveliness",
       "reason": "F=history extension; P=zenoh; C=opt-in for liveliness subscribers"
     },
     "liveliness-subscriber": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
       "source": "crates/wz-runtime-tokio/src/session.rs declare_liveliness_subscriber",
       "reason": "F=Subscriber on liveliness; P=zenoh liveliness sub; C=indep receiver side"
     },
     "liveliness-token": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-10-liveliness",
       "source": "crates/wz-runtime-tokio/src/session.rs declare_token",
       "reason": "F=LivelinessToken handle; P=zenoh liveliness token; C=indep presence assertion"
     },
     "locator-iface": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "zenoh locator ?iface= query parameter",
       "reason": "F=qparam parse; P=zenoh locator iface scope; C=multi-NIC qualifier, orthogonal"
     },
     "locator-quic": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "zenoh locator quic prefix",
       "reason": "F=quic prefix dispatch; P=zenoh; C=requires transport-link-quic"
     },
     "locator-serial": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "zenoh-pico locator serial prefix",
       "reason": "F=serial prefix; P=zenoh-pico; C=requires transport-link-serial"
     },
     "locator-tcp": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "crates/wz-ap-demo/src/args.rs",
       "reason": "F=parser branch; P=zenoh-pico locator tcp prefix; C=indep"
     },
     "locator-tls": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "zenoh locator tls prefix",
       "reason": "F=tls prefix dispatch; P=zenoh; C=requires transport-link-tls"
     },
     "locator-udp": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "crates/wz-ap-demo/src/args.rs",
       "reason": "F=parser branch; P=zenoh-pico locator udp prefix; C=indep prefix dispatch"
     },
     "locator-unixsock": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "zenoh locator unixsock-stream prefix",
       "reason": "F=unixsock prefix; P=zenoh; C=requires transport-link-unixsock"
     },
     "locator-vsock": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "zenoh locator vsock prefix",
       "reason": "F=vsock prefix; P=zenoh; C=requires transport-link-vsock"
     },
     "locator-ws": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator",
       "source": "zenoh locator ws prefix",
       "reason": "F=ws prefix; P=zenoh; C=requires transport-link-ws"
     },
     "platform-bare-metal": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "RFC §5.J.4 MCU class",
       "reason": "F=bare-metal C11; P=RFC §5.J.4; C=MCU target, mutually exclusive with OS-bearing platforms"
     },
     "platform-freertos": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "zenoh-pico FreeRTOS port",
       "reason": "F=FreeRTOS task primitives; P=zenoh-pico; C=alternative MCU OS"
     },
     "platform-linux": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "crates/wz-runtime-tokio/src target",
       "reason": "F=Linux syscalls; P=zenoh tokio default; C=baseline platform"
     },
     "platform-macos": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "zenoh macOS backend",
       "reason": "F=Darwin syscalls; P=zenoh; C=alternative to platform-linux"
     },
     "platform-qnx": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "OQ-W20 QNX-native runtime",
       "reason": "F=QNX dispatch primitives; P=OQ-W20; C=alternative to platform-linux"
     },
     "platform-windows": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "zenoh windows backend",
       "reason": "F=Win32 syscalls; P=zenoh; C=alternative to platform-linux"
     },
     "platform-zephyr": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
       "source": "zenoh-pico Zephyr port",
       "reason": "F=Zephyr API; P=zenoh-pico; C=alternative MCU OS"
     },
@@ -36032,261 +36146,313 @@
     },
     "pubsub-allow-loop": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
       "source": "zenoh allowed_destination enum",
       "reason": "F=local-loop dispatch; P=zenoh; C=opt-in same-process delivery"
     },
     "pubsub-attachment": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
       "source": "zenoh sample attachment field",
       "reason": "F=attachment bytes; P=zenoh; C=opt-in metadata, requires attachment-bytes"
     },
     "pubsub-congestion-control": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
       "source": "zenoh CongestionControl enum",
       "reason": "F=Block/Drop policy; P=zenoh; C=opt-in publisher option"
     },
     "pubsub-delete": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
       "source": "sources/codecs/msg_del.scxml",
       "reason": "F=Delete sample; P=zenoh delete; C=opt-in lifecycle op alongside put"
     },
     "pubsub-encoding": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
       "source": "sources/codecs/encoding.scxml",
       "reason": "F=Encoding field codec; P=zenoh Encoding; C=opt-in payload tag"
     },
     "pubsub-express": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
       "source": "zenoh express bit",
       "reason": "F=express bit; P=zenoh; C=opt-in fast-path bypass batching"
     },
     "pubsub-priority": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
       "source": "zenoh Priority 8-level enum",
       "reason": "F=priority field; P=zenoh; C=requires session-extqos"
     },
     "pubsub-put": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
       "source": "crates/wz-runtime-tokio/src/pubsub.rs",
       "reason": "F=Put emit path; P=zenoh put; C=indep operation"
     },
     "pubsub-sample": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
       "source": "crates/wz-runtime-tokio/src/sample.rs",
       "reason": "F=Sample receive surface; P=zenoh Sample; C=indep receive-side"
     },
     "pubsub-source-info": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
       "source": "zenoh SourceInfo extension",
       "reason": "F=source-info ext codec; P=zenoh; C=opt-in sample provenance"
     },
     "pubsub-timestamp": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-8-pubsub",
       "source": "sources/codecs/timestamp.scxml",
       "reason": "F=Timestamp field codec; P=zenoh Timestamp; C=opt-in sample metadata"
     },
     "query-attachment": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "zenoh query attachment field",
       "reason": "F=attachment in query; P=zenoh; C=opt-in metadata, requires attachment-bytes"
     },
     "query-consolidation": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "crates/wz-runtime-tokio/src/query.rs ConsolidationMode",
       "reason": "F=None/Monotonic/Latest/Auto enum; P=zenoh ConsolidationMode; C=indep reply dedup"
     },
     "query-get": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "crates/wz-runtime-tokio/src/query.rs Session::get",
       "reason": "F=get initiator; P=zenoh get; C=indep request-response op"
     },
     "query-queryable": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "crates/wz-runtime-tokio/src/query.rs Queryable",
       "reason": "F=Queryable surface; P=zenoh Queryable; C=indep responder-side"
     },
     "query-reply": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "crates/wz-runtime-tokio/src/reply.rs",
       "reason": "F=Reply emit path; P=zenoh Query::reply; C=companion to query-queryable"
     },
     "query-reply-err": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "sources/codecs/err.scxml",
       "reason": "F=ReplyErr variant; P=zenoh Query::reply_err; C=opt-in error reporting"
     },
     "query-selector-parameters": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "zenoh Selector ?k=v parameters",
       "reason": "F=selector param parse; P=zenoh; C=opt-in query refinement"
     },
     "query-source-info": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "zenoh query SourceInfo",
       "reason": "F=source-info on query; P=zenoh; C=symmetric to pubsub-source-info"
     },
     "query-target": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "crates/wz-runtime-tokio/src/query.rs QueryTarget",
       "reason": "F=Best/All/AllComplete enum; P=zenoh QueryTarget; C=indep query routing knob"
     },
     "query-timeout": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-9-query",
       "source": "crates/wz-runtime-tokio/src/query.rs timeout option",
       "reason": "F=per-query deadline; P=zenoh GetOptions::timeout; C=indep client-side"
     },
     "routing-client": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
       "source": "crates/wz-ap-demo/src/main.rs client mode",
       "reason": "F=client-only routing; P=zenoh client; C=indep mode, smallest topology footprint"
     },
     "routing-failover": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
       "source": "zenoh failover brokering",
       "reason": "F=failover policy; P=zenoh; C=requires routing-router"
     },
     "routing-peer": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
       "source": "zenoh peer mode",
       "reason": "F=peer-to-peer routing; P=zenoh peer; C=alternative to routing-client"
     },
     "routing-router": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
       "source": "zenoh router mode",
       "reason": "F=router topology; P=zenoh router; C=enables routing-routes/failover/static"
     },
     "routing-routes": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
       "source": "zenoh router routing tables",
       "reason": "F=routing tables; P=zenoh; C=requires routing-router"
     },
     "routing-static-routes": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-15-routing",
       "source": "zenoh static route config",
       "reason": "F=config static routes; P=zenoh; C=requires routing-router"
     },
     "runtime-async-std": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
       "source": "zenoh async-std backend",
       "reason": "F=async-std executor; P=zenoh; C=alternative to runtime-tokio"
     },
     "runtime-lwip": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
       "source": "crates/wz-runtime-lwip/ Phase W skeleton",
       "reason": "F=lwIP MCU adapter; P=docs/runtime-crate-lwip.md; C=alternative runtime, mutually exclusive with runtime-tokio"
     },
     "runtime-no-std": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
       "source": "zenoh-pico #![no_std] core",
       "reason": "F=no-std core lib; P=zenoh-pico; C=mutually exclusive with std-bearing runtimes"
     },
     "runtime-tokio": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
       "source": "crates/wz-runtime-tokio/src/runtime_impl.rs",
       "reason": "F=tokio executor binding; P=zenoh tokio backend; C=indep async runtime adapter"
     },
     "runtime-tokio-uring": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
       "source": "docs/runtime-crate-tokio.md §4 io_uring opt-in",
       "reason": "F=io_uring fixed-buf adapter; P=ARCHITECTURE §9.5 row 3; C=alternative reactor under runtime-tokio"
     },
     "runtime-zero-copy": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
       "source": "RFC §5.E buffer pool",
       "reason": "F=pool-slot Sample lifetime; P=RFC §5.E; C=opt-in performance, requires runtime-tokio-uring or runtime-lwip"
     },
     "scouting-active": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
       "source": "sources/codecs/scout.scxml + hello.scxml",
       "reason": "F=SCOUT+HELLO codec pair; P=zenoh-pico scouting active; C=indep of passive/static modes"
     },
     "scouting-autoconnect": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
       "source": "zenoh autoconnect on HELLO",
       "reason": "F=auto-connect logic; P=zenoh; C=opt-in policy on top of discovery"
     },
     "scouting-gossip": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
       "source": "zenoh router gossip protocol",
       "reason": "F=peer-to-peer gossip; P=zenoh router; C=router-side only, requires routing-router"
     },
     "scouting-multicast": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
       "source": "zenoh-pico scouting multicast UDP",
       "reason": "F=multicast group join; P=zenoh-pico; C=requires transport-link-udp + multicast OS support"
     },
     "scouting-passive": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
       "source": "OQ-W23 ratify pending",
       "reason": "F=listen-only path; P=OQ-W23 passive scouting mode; C=alternative to scouting-active"
     },
     "scouting-static": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-3-scouting",
       "source": "zenoh config static peer list",
       "reason": "F=config-file static peer; P=zenoh static endpoints; C=alternative to dynamic discovery"
     },
     "session-extauth": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
       "source": "zenoh Z_EXT_AUTH",
       "reason": "F=auth extension dispatch; P=zenoh; C=opt-in handshake extension, OQ-W2 carry"
     },
     "session-extcompression": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
       "source": "zenoh Z_EXT_COMPRESSION",
       "reason": "F=compression handshake; P=zenoh; C=requires transport-compression"
     },
     "session-extqos": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
       "source": "zenoh Z_EXT_QOS",
       "reason": "F=qos extension; P=zenoh ext qos priority; C=opt-in extension"
     },
     "session-extshm": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
       "source": "zenoh Z_EXT_SHM",
       "reason": "F=shm handshake; P=zenoh; C=requires transport-shm"
     },
     "session-multicast": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
       "source": "zenoh-pico multicast session FSM",
       "reason": "F=multicast FSM; P=zenoh-pico; C=indep of unicast, OQ-W9"
     },
     "session-resumable": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
       "source": "OQ-Q14 resumable session",
       "reason": "F=cookie state; P=OQ-Q14 ratify pending; C=opt-in on top of unicast"
     },
     "session-stateless-accept": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
       "source": "OQ-W15 stateless accept ratify",
       "reason": "F=cookie HMAC SHA256; P=OQ-W15 ratify; C=required on untrusted_source listeners"
     },
     "session-unicast-accept": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
       "source": "sources/session/session_fsm_unicast.scxml",
       "reason": "F=acceptor FSM partial; P=zenoh session accept; C=indep of open role, OQ-W15/W22 carries"
     },
     "session-unicast-open": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
       "source": "sources/session/session_fsm_unicast.scxml",
       "reason": "F=initiator FSM; P=zenoh-pico session open; C=indep of acceptor role"
     },
     "storage-aligner": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage",
       "source": "zenoh storage aligner protocol",
       "reason": "F=aligner protocol; P=zenoh; C=opt-in storage convergence"
     },
     "storage-backend": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage",
       "source": "zenoh-backend-traits crate",
       "reason": "F=plugin trait; P=zenoh-backend-traits; C=opt-in plugin surface"
     },
     "storage-history": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage",
       "source": "zenoh Z_EXT_HISTORY emit",
       "reason": "F=history ext emit; P=zenoh; C=opt-in for storage backends"
     },
     "storage-replication": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-11-storage",
       "source": "zenoh storage replication protocol",
       "reason": "F=replication FSM; P=zenoh storage-replication; C=opt-in on top of storage-backend"
     },
@@ -36298,101 +36464,121 @@
     },
     "time-hlc": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time",
       "source": "zenoh-uhlc crate",
       "reason": "F=HLC clock state; P=zenoh-uhlc; C=opt-in alternative to wall-clock"
     },
     "time-ntp64": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time",
       "source": "sources/codecs/timestamp.scxml",
       "reason": "F=NTP64 timestamp codec; P=zenoh NTP64 timestamp; C=baseline timestamp shape"
     },
     "time-system-clock": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time",
       "source": "crates/wz-runtime-core/src/time.rs",
       "reason": "F=wall-clock source; P=zenoh SystemTime; C=baseline time source, mutually exclusive with HLC"
     },
     "time-timestamp-source": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-18-time",
       "source": "zenoh pluggable timestamp source",
       "reason": "F=pluggable source trait; P=zenoh; C=opt-in abstraction over time-ntp64/hlc/system-clock"
     },
     "transport-batching": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "crates/wz-runtime-tokio/src/session_glue.rs",
       "reason": "F=measured wz tx batch buffer; P=zenoh batching; C=opt-in throughput optimization"
     },
     "transport-compression": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh Z_EXT_COMPRESSION",
       "reason": "F=est lz4/zstd wrap; P=zenoh ext compression; C=opt-in per-message, OQ-W4 carry"
     },
     "transport-fragmentation": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "sources/codecs/frame.scxml + fragment.scxml",
       "reason": "F=measured wz codec pair; P=zenoh fragment/reassembly; C=can disable for transport-lowlatency"
     },
     "transport-keepalive": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "sources/codecs/keep_alive.scxml",
       "reason": "F=tiny empty-body codec; P=zenoh-pico keep_alive; C=independent liveness signal"
     },
     "transport-link-quic": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh-link-quic crate",
       "reason": "F=est quinn crate; P=zenoh-link-quic; C=standalone link kind"
     },
     "transport-link-serial": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh-pico serial link",
       "reason": "F=est UART driver; P=zenoh-pico serial transport; C=independent MCU link kind"
     },
     "transport-link-tcp": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "crates/wz-ap-demo/src/link_driver.rs",
       "reason": "F=measured wz TcpStream adapter; P=zenoh-pico transport_link_tcp.c; C=independent"
     },
     "transport-link-tls": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh-link-tls crate",
       "reason": "F=est rustls wrap over tcp; P=zenoh-link-tls; C=wraps transport-link-tcp, can disable"
     },
     "transport-link-udp": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "crates/wz-ap-demo/src/link_driver.rs",
       "reason": "F=measured wz UdpSocket adapter; P=zenoh-pico transport_link_udp.c; C=independent of TCP/TLS/QUIC link kinds"
     },
     "transport-link-unixsock": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh-link-unixsock crate",
       "reason": "F=est unix domain socket; P=zenoh-link-unixsock; C=independent local link kind"
     },
     "transport-link-vsock": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh-link-vsock crate",
       "reason": "F=est vsock crate; P=zenoh-link-vsock; C=independent VM host link"
     },
     "transport-link-ws": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh-link-ws crate",
       "reason": "F=est tungstenite wrap; P=zenoh-link-ws; C=independent"
     },
     "transport-lowlatency": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh src/net/protocol/lowlatency",
       "reason": "F=small no-fragmentation path; P=zenoh lowlatency mode; C=alternative to transport-fragmentation"
     },
     "transport-multicast": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh-pico src/transport/multicast/",
       "reason": "F=~2KLOC est from zenoh-pico; P=zenoh-pico multicast surface; C=independent of unicast; OQ-W9 carry"
     },
     "transport-shm": {
       "status": "reserved",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "zenoh-shm crate",
       "reason": "F=est shared-memory ring; P=zenoh-shm Z_EXT_SHM; C=zero-copy opt-in, requires runtime-zero-copy"
     },
     "transport-unicast": {
       "status": "active",
+      "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
       "source": "crates/wz-runtime-tokio/src/session.rs",
       "reason": "F=~3KLOC wz session module; P=zenoh transport/unicast module; C=standalone session shape, multicast independent"
     }
