@@ -6866,8 +6866,7 @@ mod tests {
         // `fixture_session_init_params()` SSOT.
         let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
         params.initial_sn = 100;
-        let (actions, driver) =
-            wz_runtime_tokio_test_support::recording_actions_with_params(params);
+        let (actions, driver) = crate::test_fixtures::recording_actions_with_params(params);
 
         let response = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"21.0")
             .build()
@@ -6926,7 +6925,7 @@ mod tests {
         ] {
             // Close is a fixed 2-byte frame (no SN field), so the
             // `recording_actions()` SSOT params are used verbatim.
-            let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+            let (actions, driver) = crate::test_fixtures::recording_actions();
             assert_eq!(
                 actions.trace_snapshot().send_close_frame_with_reason,
                 0,
@@ -6980,8 +6979,7 @@ mod tests {
         // `fixture_session_init_params()` SSOT.
         let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
         params.initial_sn = 7;
-        let (actions, driver) =
-            wz_runtime_tokio_test_support::recording_actions_with_params(params);
+        let (actions, driver) = crate::test_fixtures::recording_actions_with_params(params);
 
         actions.send_response(
             ResponseReplyBuilder::new(99, 0, Some("k"), b"v")
@@ -7012,8 +7010,7 @@ mod tests {
         // SSOT driver discards the never-emitted frames.
         let mut params = wz_runtime_tokio_test_support::fixture_session_init_params();
         params.initial_sn = 42;
-        let (actions, _driver) =
-            wz_runtime_tokio_test_support::recording_actions_with_params(params);
+        let (actions, _driver) = crate::test_fixtures::recording_actions_with_params(params);
         assert_eq!(
             actions.next_outbound_frame_sn(),
             42,
@@ -7061,7 +7058,7 @@ mod tests {
     #[cfg(not(feature = "codec-push"))]
     #[test]
     fn send_push_literal_rejects_with_feature_disabled_when_codec_push_off() {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         assert_eq!(
             actions.send_push_literal("home/temp", b"data", true),
             Err(SendWireError::FeatureDisabled),
@@ -7082,7 +7079,7 @@ mod tests {
     #[cfg(not(feature = "codec-request"))]
     #[test]
     fn send_request_query_rejects_with_feature_disabled_when_codec_request_off() {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         assert_eq!(
             actions.send_request_query(7, 0, Some("home/temp")),
             Err(SendWireError::FeatureDisabled),
@@ -7102,7 +7099,7 @@ mod tests {
     #[cfg(not(feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_keyexpr_rejects_with_feature_disabled_when_declare_keyexpr_off() {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         assert_eq!(
             actions.send_declare_keyexpr(1, "home/temp"),
             Err(SendDeclareError::FeatureDisabled),
@@ -7122,7 +7119,7 @@ mod tests {
     #[cfg(not(feature = "declare-subscriber"))]
     #[test]
     fn send_declare_subscriber_rejects_with_feature_disabled_when_declare_subscriber_off() {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         assert_eq!(
             actions.send_declare_subscriber(1, 0, Some("home/temp")),
             Err(SendDeclareError::FeatureDisabled),
@@ -7141,7 +7138,7 @@ mod tests {
     #[cfg(not(feature = "declare-queryable"))]
     #[test]
     fn send_declare_queryable_rejects_with_feature_disabled_when_declare_queryable_off() {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         assert_eq!(
             actions.send_declare_queryable(1, 0, Some("home/temp")),
             Err(SendDeclareError::FeatureDisabled),
@@ -7160,7 +7157,7 @@ mod tests {
     #[cfg(not(feature = "declare-token"))]
     #[test]
     fn send_declare_token_rejects_with_feature_disabled_when_declare_token_off() {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         assert_eq!(
             actions.send_declare_token(1, 0, Some("home/temp")),
             Err(SendDeclareError::FeatureDisabled),
@@ -7184,7 +7181,7 @@ mod tests {
     #[test]
     fn send_interest_liveliness_subscriber_rejects_with_feature_disabled_when_declare_interest_off()
     {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         assert_eq!(
             actions.send_interest_liveliness_subscriber(1, false, 0, Some("home/temp")),
             Err(SendWireError::FeatureDisabled),
@@ -7547,7 +7544,7 @@ mod tests {
         // caller-set metadata. Pins the integration between
         // PushMetadata, build_push_literal_with_meta, and
         // encode_frame_with_push.
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         let meta = PushMetadata {
             source_info: Some(SourceInfo::new(&[0xCA, 0xFE], 5, 7)),
             qos: Some(QosLevel::from_raw(0x10)),
@@ -7586,7 +7583,7 @@ mod tests {
     #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_populates_outbound_mapping_table() {
-        let (actions, _driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
         assert!(
             actions.resolve_outbound_mapping(7).is_none(),
             "fresh table empty"
@@ -7622,7 +7619,7 @@ mod tests {
         // possibly different suffix). The outbound table must mirror
         // that semantic so a caller re-declaring a mapping doesn't
         // see stale resolution for later publishes.
-        let (actions, _driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
         actions
             .send_declare_keyexpr(7, "home/v1")
             .expect("hardcoded canonical literal keyexpr");
@@ -7639,7 +7636,7 @@ mod tests {
     #[cfg(all(feature = "declare-keyexpr", feature = "declare-undeclare"))]
     #[test]
     fn send_undeclare_kexpr_removes_mapping_from_table() {
-        let (actions, _driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
         actions
             .send_declare_keyexpr(7, "home/temp")
             .expect("hardcoded canonical literal keyexpr");
@@ -7655,7 +7652,7 @@ mod tests {
     #[cfg(feature = "codec-declare")]
     #[test]
     fn send_undeclare_kexpr_idempotent_on_unknown_id() {
-        let (actions, _driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
         // Calling undeclare on an id that was never declared must not
         // panic — the HashMap::remove on absent key is a no-op.
         actions.send_undeclare_kexpr(42);
@@ -7667,7 +7664,7 @@ mod tests {
     #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_rejects_reserved_mapping_id_zero() {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         let err = actions
             .send_declare_keyexpr(0, "home/temp")
             .expect_err("mapping_id 0 is reserved");
@@ -7686,7 +7683,7 @@ mod tests {
     #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_rejects_pico_bug_three_pattern() {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         let err = actions
             .send_declare_keyexpr(7, "**/c/*")
             .expect_err("R299 bug #3 pattern must reject");
@@ -7709,7 +7706,7 @@ mod tests {
     #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn send_declare_keyexpr_rejects_structurally_invalid() {
-        let (actions, _driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
         let err = actions
             .send_declare_keyexpr(7, "home//temp")
             .expect_err("empty chunk must reject");
@@ -7729,7 +7726,7 @@ mod tests {
     #[cfg(all(feature = "declare-subscriber", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_subscriber_rejects_missing_keyexpr() {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         // mapping_id = 0 + suffix = None → no keyexpr at all.
         let err = actions
             .send_declare_subscriber(1, 0, None)
@@ -7741,7 +7738,7 @@ mod tests {
     #[cfg(all(feature = "declare-subscriber", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_subscriber_rejects_unknown_mapping_id() {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         // mapping_id != 0 but no prior send_declare_keyexpr.
         let err = actions
             .send_declare_subscriber(1, 99, Some("/tail"))
@@ -7758,7 +7755,7 @@ mod tests {
         // send_declare_subscriber — neither alone triggers bug #3,
         // but the reconstructed full keyexpr `**/c/*` does. A
         // suffix-only check would miss this.
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         actions
             .send_declare_keyexpr(7, "**")
             .expect("prefix `**` is canonical + pico-safe in isolation");
@@ -7788,7 +7785,7 @@ mod tests {
     #[cfg(all(feature = "declare-subscriber", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_subscriber_accepts_safe_alias_form() {
-        let (actions, _driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
         actions
             .send_declare_keyexpr(7, "home")
             .expect("safe prefix");
@@ -7809,7 +7806,7 @@ mod tests {
     #[cfg(all(feature = "declare-queryable", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_queryable_inherits_gate() {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         // Direct literal bug-three pattern.
         let err = actions
             .send_declare_queryable(1, 0, Some("**/foo/*"))
@@ -7826,7 +7823,7 @@ mod tests {
     #[cfg(all(feature = "declare-token", feature = "declare-keyexpr"))]
     #[test]
     fn send_declare_token_inherits_gate() {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         let err = actions
             .send_declare_token(1, 0, Some("**/abc/*/def"))
             .expect_err("token inherits the same gate");
@@ -7842,37 +7839,14 @@ mod tests {
     #[cfg(feature = "declare-keyexpr")]
     #[test]
     fn reconstruct_outbound_keyexpr_shape_table() {
-        // `reconstruct_outbound_keyexpr` is a *private* method, so this
-        // test must build `SessionLinkActions` from the local crate
-        // version. The `wz-runtime-tokio-test-support` SSOT yields the
-        // dev-dependency cycle's second `wz-runtime-tokio` copy, whose
-        // private API is out of scope here. Param values are irrelevant
-        // (the test reads the mapping table, never the wire); they mirror
-        // `fixture_session_init_params()` for recognizability.
-        struct DiscardDriver;
-        impl BoxedLinkDriver for DiscardDriver {
-            fn send_blocking(&self, _: &[u8], _: Reliability) {}
-            fn open_blocking(&self) {}
-            fn close_blocking(&self) {}
-        }
-        let actions = SessionLinkActions::new(
-            Arc::new(DiscardDriver),
-            SessionInitParams {
-                version: 0x05,
-                whatami: 0x02,
-                zid: vec![0x01; 4],
-                seq_num_res: 0,
-                req_id_res: 0,
-                batch_size: 0,
-                lease: 10_000,
-                lease_in_seconds: false,
-                initial_sn: 0,
-                cookie: Vec::new(),
-                cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-                    .expect("32-byte test key satisfies the >=32 invariant"),
-            },
-            TokioTime::new(),
-        );
+        // `reconstruct_outbound_keyexpr` is a *private* method; the
+        // crate-local `test_fixtures::recording_actions()` SSOT builds a
+        // local-version `SessionLinkActions`, so the private call is in
+        // scope here (the test-support sibling's copy would be the
+        // dev-dependency cycle's second crate, out of scope — see the
+        // `test_fixtures` module docs). The driver is unused (the test
+        // reads the mapping table, never the wire).
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
         actions
             .send_declare_keyexpr(7, "home")
             .expect("safe prefix registration");
@@ -7916,7 +7890,7 @@ mod tests {
         // across a later send_undeclare_kexpr must still see the
         // value they originally fetched. This pins the contract
         // that callers don't accidentally borrow the table slot.
-        let (actions, _driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
         actions
             .send_declare_keyexpr(7, "home/temp")
             .expect("hardcoded canonical literal keyexpr");
@@ -7936,13 +7910,13 @@ mod tests {
         // send_request_query path so byte-stable callers (CI / fuzz
         // baselines) stay unchanged when QueryOptions::default() is
         // threaded through Session::query.
-        let (actions_a, driver_a) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions_a, driver_a) = crate::test_fixtures::recording_actions();
         actions_a
             .send_request_query_with_meta(42, 0, Some("home/temp"), &QueryMetadata::default())
             .unwrap();
         let with_meta = driver_a.frame_bytes(0);
 
-        let (actions_b, driver_b) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions_b, driver_b) = crate::test_fixtures::recording_actions();
         actions_b
             .send_request_query(42, 0, Some("home/temp"))
             .unwrap();
@@ -7962,7 +7936,7 @@ mod tests {
         // when meta.target = Some(target). Pins the
         // QueryMetadata::target → RequestQueryBuilder::request_target
         // wiring.
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         let meta = QueryMetadata {
             target: Some(QueryTarget::All),
             ..Default::default()
@@ -7986,7 +7960,7 @@ mod tests {
     #[cfg(feature = "codec-request")]
     #[test]
     fn send_request_query_with_meta_consolidation_emits_query_with_q_c_flag() {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         let meta = QueryMetadata {
             consolidation: Some(ConsolidationMode::Latest),
             ..Default::default()
@@ -8015,7 +7989,7 @@ mod tests {
     #[cfg(all(feature = "codec-request", feature = "query-attachment"))]
     #[test]
     fn send_request_query_with_meta_attachment_emits_query_with_attachment_ext() {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         let meta = QueryMetadata {
             attachment: Some(b"q-att".to_vec()),
             ..Default::default()
@@ -8045,7 +8019,7 @@ mod tests {
         // against the panic by skipping the attach call on an empty
         // inner slice. Wire frame ends up matching the
         // no-attachment shape.
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         let meta = QueryMetadata {
             attachment: Some(Vec::new()),
             ..Default::default()
@@ -8072,7 +8046,7 @@ mod tests {
     #[cfg(feature = "codec-request")]
     #[test]
     fn send_request_query_with_meta_timeout_ms_emits_request_with_timeout_ext() {
-        let (actions, driver) = wz_runtime_tokio_test_support::recording_actions();
+        let (actions, driver) = crate::test_fixtures::recording_actions();
         let meta = QueryMetadata {
             timeout_ms: 5_000,
             ..Default::default()

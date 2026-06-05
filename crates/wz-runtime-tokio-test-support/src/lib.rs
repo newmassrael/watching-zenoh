@@ -29,7 +29,6 @@ use sce_rust_lua::LuaEngine;
 use sce_rust_runtime::scripting::{IScriptEngine, ScriptResult, ScriptValue};
 use sce_rust_runtime::Hal;
 
-use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::{
     install_session_actions, BoxedLinkDriver, SessionInitParams, SessionLinkActions, SigningKey,
     REGISTERED_SCRIPT_NAMES, SESSION_ID,
@@ -65,89 +64,17 @@ pub fn fixture_session_init_params() -> SessionInitParams {
     }
 }
 
-/// Test [`BoxedLinkDriver`] that records every outbound frame so a
-/// behavioural NEG guard can assert the *no-emit* half of a typed-reject
-/// contract — `SendWireError` / `SendDeclareError` doc: "no wire bytes
-/// leave on Err" — i.e. `frame_count() == 0`, in addition to the
-/// `Err(..::FeatureDisabled)` return value.
-///
-/// R311hz home for the FeatureDisabled-NEG fixture. It was an inline
-/// `SessionInitParams` + `DiscardDriver` duplicate inside `session_glue.rs`
-/// tests (bypassing the [`fixture_session_init_params`] SSOT and forcing a
-/// hand-synced `any(not, ..)` cfg gate); consolidating it here removes the
-/// duplication and the gate.
-pub struct RecordingLinkDriver {
-    frames: Mutex<Vec<(Vec<u8>, Reliability)>>,
-}
-
-impl RecordingLinkDriver {
-    /// Number of frames observed via `send_blocking` so far.
-    pub fn frame_count(&self) -> usize {
-        self.frames
-            .lock()
-            .expect("recording driver mutex poisoned")
-            .len()
-    }
-
-    /// Wire bytes of the `idx`-th recorded frame (panics if absent), so
-    /// a wire-byte assertion can compare against an independently encoded
-    /// expectation without reaching into the driver's private storage.
-    pub fn frame_bytes(&self, idx: usize) -> Vec<u8> {
-        self.frames.lock().expect("recording driver mutex poisoned")[idx]
-            .0
-            .clone()
-    }
-
-    /// Reliability channel the `idx`-th recorded frame was emitted on
-    /// (panics if absent) — pins the action layer's reliable/best-effort
-    /// channel pick (e.g. Close + Reply are reliable-only).
-    pub fn frame_reliability(&self, idx: usize) -> Reliability {
-        self.frames.lock().expect("recording driver mutex poisoned")[idx].1
-    }
-}
-
-impl BoxedLinkDriver for RecordingLinkDriver {
-    fn send_blocking(&self, bytes: &[u8], reliability: Reliability) {
-        self.frames
-            .lock()
-            .expect("recording driver mutex poisoned")
-            .push((bytes.to_vec(), reliability));
-    }
-    fn open_blocking(&self) {}
-    fn close_blocking(&self) {}
-}
-
-/// Build a [`SessionLinkActions`] backed by a fresh [`RecordingLinkDriver`]
-/// and the deterministic [`fixture_session_init_params`]. Returns both
-/// handles so a caller can drive a signature-stable emit method and then
-/// assert on the emitted-frame count — e.g. a `*-FeatureDisabled` NEG guard
-/// asserts the `Err(..)` return AND `driver.frame_count() == 0` (the
-/// no-emit half of the reject contract).
-pub fn recording_actions() -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
-    recording_actions_with_params(fixture_session_init_params())
-}
-
-/// [`recording_actions`] variant that accepts caller-supplied
-/// [`SessionInitParams`]. Use when a wire-byte assertion depends on a
-/// specific field — typically `initial_sn`, which seeds
-/// `next_outbound_frame_sn` and therefore the SN byte of every emitted
-/// Frame. Build the params from [`fixture_session_init_params`] and
-/// override only the asserted field so the rest stays on the SSOT:
-///
-/// ```ignore
-/// let mut params = fixture_session_init_params();
-/// params.initial_sn = 100;
-/// let (actions, driver) = recording_actions_with_params(params);
-/// ```
-pub fn recording_actions_with_params(
-    params: SessionInitParams,
-) -> (Arc<SessionLinkActions>, Arc<RecordingLinkDriver>) {
-    let driver = Arc::new(RecordingLinkDriver {
-        frames: Mutex::new(Vec::new()),
-    });
-    let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
-    (actions, driver)
-}
+// The frame-recording `RecordingLinkDriver` + `recording_actions`
+// builders that used to live here moved to `wz-runtime-tokio`'s
+// crate-local `#[cfg(test)] mod test_fixtures`: they are consumed ONLY
+// by that crate's own unit tests, and sourcing them across the
+// dev-dependency cycle handed those tests a second `wz-runtime-tokio`
+// copy whose `SessionLinkActions` `Session::new` rejects (and whose
+// private methods are out of scope). This sibling now holds only the
+// fixtures the INTEGRATION tests (`tests/*.rs`) consume:
+// `fixture_session_init_params` (a shared `wz-session-core` return type,
+// safe across the cycle), `LifecycleRecordingDriver`,
+// `install_session_actions_for_test`, `dispatch_script`, and `TestHal`.
 
 /// Test [`BoxedLinkDriver`] that counts `open_blocking` / `close_blocking`
 /// calls *in addition to* recording every outbound frame. This is the

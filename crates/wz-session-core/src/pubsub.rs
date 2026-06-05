@@ -1037,6 +1037,67 @@ impl SubscriberRegistry<BoxedSink> {
 // default features enable all of them; the explicit `-p wz-session-core`
 // C1d lane enumerates the same union so the coverage is non-implicit
 // (R311ds-c1c precedent).
+// Shared Push builders for BOTH test modules below. The `mod tests`
+// suite requires put+delete (+ more), while `mod decode_isolation_tests`
+// requires put XOR delete — disjoint gates, so neither can host helpers
+// the other reaches. This module's gate is the EXACT union of the two
+// consumer gates (codec-push factored out) so it compiles iff at least
+// one consumer does — no dead-code arm, no `#[allow]`.
+#[cfg(all(
+    test,
+    feature = "codec-push",
+    any(
+        all(
+            feature = "codec-declare",
+            feature = "codec-response-final",
+            feature = "pubsub-put",
+            feature = "pubsub-delete",
+            feature = "pubsub-attachment",
+            feature = "pubsub-timestamp"
+        ),
+        all(feature = "pubsub-put", not(feature = "pubsub-delete")),
+        all(not(feature = "pubsub-put"), feature = "pubsub-delete"),
+    )
+))]
+mod push_fixtures {
+    use super::*;
+    use wz_codecs::push::Push;
+    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
+    use wz_codecs::wireexpr_local::WireexprLocal;
+
+    /// A Put-bodied Push for `suffix` (literal local wireexpr, id=0).
+    /// `Push::default()` already carries a `CodecZenohMsgPut` body, so the
+    /// keyexpr is the only field overridden. Constructible regardless of
+    /// `pubsub-put` — that feature gates the dispatch consumer, not the
+    /// `codec-push` wire variant.
+    pub(super) fn push_with_keyexpr(suffix: &str) -> PushOwned {
+        Push {
+            keyexpr: Wireexpr {
+                body: WireexprVariant::WireexprLocal(WireexprLocal {
+                    id: 0,
+                    suffix_len: Some(suffix.len() as u64),
+                    suffix: Some(suffix),
+                }),
+            },
+            ..Push::default()
+        }
+        .try_into_owned()
+        .unwrap()
+    }
+
+    /// A Del-bodied Push for `suffix`. Constructible regardless of
+    /// `pubsub-delete` (same reason as [`push_with_keyexpr`]).
+    pub(super) fn push_with_del_body(suffix: &str) -> PushOwned {
+        let mut push = push_with_keyexpr(suffix);
+        push.body = PushOwnedVariant::CodecZenohMsgDel(
+            wz_codecs::msg_del::MsgDel::default()
+                .try_into_owned()
+                .unwrap(),
+        );
+        push
+    }
+}
+
 #[cfg(all(
     test,
     feature = "codec-push",
@@ -1048,6 +1109,7 @@ impl SubscriberRegistry<BoxedSink> {
     feature = "pubsub-timestamp"
 ))]
 mod tests {
+    use super::push_fixtures::{push_with_del_body, push_with_keyexpr};
     use super::*;
     // no_std test prelude: the std prelude (String / Vec / Box / vec!)
     // is absent here, so the alloc-provided forms are imported
@@ -1063,29 +1125,7 @@ mod tests {
     // dispatch boundary (`NetworkMessage::*` carriers store `*Owned`).
     use wz_codecs::push::Push;
     use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
-
-    fn push_with_keyexpr(suffix: &str) -> PushOwned {
-        // R125c2: wireexpr is now a tagged-union (Local default arm at
-        // M=1; mirrors zenoh-pico's `_z_wireexpr_t` zero-init mapping=
-        // LOCAL → is_local=true → encoder OR's M=1). Construct the
-        // Local arm so the test wire shape matches zenoh-pico's
-        // default-state push (header M=1 ORed in by the encoder via
-        // the b5_nu_derivation_block).
-        Push {
-            keyexpr: Wireexpr {
-                body: WireexprVariant::WireexprLocal(WireexprLocal {
-                    id: 0,
-                    suffix_len: Some(suffix.len() as u64),
-                    suffix: Some(suffix),
-                }),
-            },
-            ..Push::default()
-        }
-        .try_into_owned()
-        .unwrap()
-    }
 
     #[test]
     fn dispatch_fires_callback_on_matching_keyexpr() {
@@ -1985,16 +2025,6 @@ mod tests {
             put.payload_len = payload.len() as u64;
             put.payload = crate::codec_bound::bounded_bytes(payload).unwrap();
         }
-        push
-    }
-
-    fn push_with_del_body(keyexpr: &str) -> PushOwned {
-        let mut push = push_with_keyexpr(keyexpr);
-        push.body = PushOwnedVariant::CodecZenohMsgDel(
-            wz_codecs::msg_del::MsgDel::default()
-                .try_into_owned()
-                .unwrap(),
-        );
         push
     }
 
@@ -3106,45 +3136,11 @@ mod tests {
     )
 ))]
 mod decode_isolation_tests {
+    use super::push_fixtures::{push_with_del_body, push_with_keyexpr};
     use super::*;
     use alloc::boxed::Box;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-    use wz_codecs::push::Push;
-    use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
-    use wz_codecs::wireexpr_local::WireexprLocal;
-
-    /// A Put-bodied Push for `suffix` (literal local wireexpr, id=0).
-    /// `Push::default()` already carries a `CodecZenohMsgPut` body, so the
-    /// keyexpr is the only field overridden. Constructible regardless of
-    /// `pubsub-put` — that feature gates the dispatch consumer, not the
-    /// `codec-push` wire variant.
-    fn put_push(suffix: &str) -> PushOwned {
-        Push {
-            keyexpr: Wireexpr {
-                body: WireexprVariant::WireexprLocal(WireexprLocal {
-                    id: 0,
-                    suffix_len: Some(suffix.len() as u64),
-                    suffix: Some(suffix),
-                }),
-            },
-            ..Push::default()
-        }
-        .try_into_owned()
-        .unwrap()
-    }
-
-    /// A Del-bodied Push for `suffix`. Constructible regardless of
-    /// `pubsub-delete` (same reason as [`put_push`]).
-    fn del_push(suffix: &str) -> PushOwned {
-        let mut push = put_push(suffix);
-        push.body = PushOwnedVariant::CodecZenohMsgDel(
-            wz_codecs::msg_del::MsgDel::default()
-                .try_into_owned()
-                .unwrap(),
-        );
-        push
-    }
 
     #[cfg(all(feature = "pubsub-put", not(feature = "pubsub-delete")))]
     #[test]
@@ -3158,7 +3154,7 @@ mod decode_isolation_tests {
 
         // Del variant → `pubsub-delete` arm cfg'd out → `_ => return`.
         registry.dispatch(
-            &NetworkMessage::Push(Box::new(del_push("home/temp"))),
+            &NetworkMessage::Push(Box::new(push_with_del_body("home/temp"))),
             Reliability::Reliable,
         );
         assert_eq!(
@@ -3170,7 +3166,7 @@ mod decode_isolation_tests {
         // Put still dispatches — proves the drop is variant-selective,
         // not a dead/unwired registry.
         registry.dispatch(
-            &NetworkMessage::Push(Box::new(put_push("home/temp"))),
+            &NetworkMessage::Push(Box::new(push_with_keyexpr("home/temp"))),
             Reliability::Reliable,
         );
         assert_eq!(
@@ -3192,7 +3188,7 @@ mod decode_isolation_tests {
 
         // Put variant → `pubsub-put` arm cfg'd out → `_ => return`.
         registry.dispatch(
-            &NetworkMessage::Push(Box::new(put_push("home/temp"))),
+            &NetworkMessage::Push(Box::new(push_with_keyexpr("home/temp"))),
             Reliability::Reliable,
         );
         assert_eq!(
@@ -3203,7 +3199,7 @@ mod decode_isolation_tests {
 
         // Del still dispatches — proves the drop is variant-selective.
         registry.dispatch(
-            &NetworkMessage::Push(Box::new(del_push("home/temp"))),
+            &NetworkMessage::Push(Box::new(push_with_del_body("home/temp"))),
             Reliability::Reliable,
         );
         assert_eq!(

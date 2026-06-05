@@ -4100,9 +4100,12 @@ mod tests {
     #[cfg(all(feature = "query-get", feature = "query-queryable"))]
     use crate::reply_sink::ReplyKind;
     use crate::runtime_impl::TokioTime;
-    use crate::session_glue::{BoxedLinkDriver, SessionInitParams, SigningKey};
+    use crate::test_fixtures::{
+        recording_actions, recording_actions_with_params, RecordingLinkDriver,
+    };
     use portable_atomic::{AtomicUsize, Ordering};
     use wz_runtime_core::TimeSource;
+    use wz_runtime_tokio_test_support::fixture_session_init_params;
 
     /// R283 test helper — force the session-FSM `Established` stamp
     /// without driving the full handshake. The production path
@@ -4122,62 +4125,15 @@ mod tests {
             Some(session.actions().clock.now_monotonic_ms());
     }
 
-    /// Captures every outbound wire send so tests can assert wire
-    /// branch fires only when `allows_remote()` holds. Mirrors the
-    /// `RecordingDriver` shape already used by session_glue tests.
-    struct RecordingDriver {
-        frames: Mutex<Vec<(Vec<u8>, Reliability)>>,
-    }
-
-    impl RecordingDriver {
-        fn new() -> Self {
-            Self {
-                frames: Mutex::new(Vec::new()),
-            }
-        }
-
-        fn frame_count(&self) -> usize {
-            self.frames.lock().unwrap().len()
-        }
-
-        #[cfg(any(feature = "codec-push", feature = "liveliness-token"))]
-        fn frame_reliability(&self, idx: usize) -> Reliability {
-            self.frames.lock().unwrap()[idx].1
-        }
-    }
-
-    impl BoxedLinkDriver for RecordingDriver {
-        fn send_blocking(&self, bytes: &[u8], r: Reliability) {
-            self.frames.lock().unwrap().push((bytes.to_vec(), r));
-        }
-        fn open_blocking(&self) {}
-        fn close_blocking(&self) {}
-    }
-
-    fn fixture_params() -> SessionInitParams {
-        SessionInitParams {
-            version: 0x09,
-            whatami: 0x02,
-            zid: vec![0x01, 0x02, 0x03, 0x04],
-            seq_num_res: 2,
-            req_id_res: 2,
-            batch_size: 65535,
-            lease: 10_000,
-            lease_in_seconds: false,
-            initial_sn: 1,
-            cookie: Vec::new(),
-            cookie_signing_key: SigningKey::new(vec![0xAB; 32])
-                .expect("32-byte demo key satisfies the >=32 invariant"),
-        }
-    }
-
     /// Convenience constructor that returns a (Session,
     /// driver_handle) pair so tests can assert against both the
     /// outbound wire branch (via the driver) and the loopback branch
-    /// (via the observer borrowed off the session).
-    fn build_session() -> (Session, Arc<RecordingDriver>) {
-        let driver = Arc::new(RecordingDriver::new());
-        let actions = SessionLinkActions::new(driver.clone(), fixture_params(), TokioTime::new());
+    /// (via the observer borrowed off the session). The driver +
+    /// `SessionInitParams` come from the crate-local `test_fixtures`
+    /// SSOT (`recording_actions()`); the former local `RecordingDriver`
+    /// + `fixture_params` duplicate was folded into it.
+    fn build_session() -> (Session, Arc<RecordingLinkDriver>) {
+        let (actions, driver) = recording_actions();
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
         // R311cw — Session::new now takes a third `clock: Arc<T>`
         // argument (the T fold-in moved the per-call clock parameter
@@ -4973,7 +4929,10 @@ mod tests {
         // `_z_session_init` which stamps `_local_zid` at session
         // creation (vendor/zenoh-pico/src/session/session.c).
         let (session, _driver) = build_session();
-        let fixture_zid: Vec<u8> = vec![0x01, 0x02, 0x03, 0x04];
+        // The `fixture_session_init_params()` SSOT seeds zid = [0x01; 4];
+        // this test only pins that whatever zid the params carry is the
+        // one auto-wired into the registry, not a specific byte pattern.
+        let fixture_zid: Vec<u8> = vec![0x01; 4];
         assert_eq!(
             session.observer().lock().unwrap().subscribers.own_zid(),
             Some(&fixture_zid[..]),
@@ -4990,10 +4949,9 @@ mod tests {
         // subscribers (the safe default that preserves
         // backwards-compatible behavior for callers who never opt
         // into dedup).
-        let driver = Arc::new(RecordingDriver::new());
-        let mut params = fixture_params();
+        let mut params = fixture_session_init_params();
         params.zid = Vec::new();
-        let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
+        let (actions, _driver) = recording_actions_with_params(params);
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
         // R311cw — Session::new gained third `clock: Arc<T>` argument.
         let clock = Arc::new(TokioTime::new());
@@ -5024,10 +4982,9 @@ mod tests {
         // boundary. The registry stays uninstalled; the application
         // can still call `set_own_zid` later with a valid zid to
         // opt into dedup.
-        let driver = Arc::new(RecordingDriver::new());
-        let mut params = fixture_params();
+        let mut params = fixture_session_init_params();
         params.zid = vec![0u8; 17];
-        let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
+        let (actions, _driver) = recording_actions_with_params(params);
         let observer = Arc::new(Mutex::new(ApplicationLayerObserver::new()));
         // R311cw — Session::new gained third `clock: Arc<T>` argument.
         let clock = Arc::new(TokioTime::new());
@@ -6051,8 +6008,7 @@ mod tests {
 
     #[test]
     fn alloc_next_request_id_increments_and_starts_at_zero() {
-        let driver = Arc::new(RecordingDriver::new());
-        let actions = SessionLinkActions::new(driver, fixture_params(), TokioTime::new());
+        let (actions, _driver) = recording_actions();
         assert_eq!(actions.alloc_next_request_id(), 0);
         assert_eq!(actions.alloc_next_request_id(), 1);
         assert_eq!(actions.alloc_next_request_id(), 2);
@@ -6120,21 +6076,21 @@ mod tests {
                 |_| {},
             )
             .expect("query-get feature is ON in this test build");
-        let session_frame = driver.frames.lock().unwrap()[0].0.clone();
+        let session_frame = driver.frame_bytes(0);
 
         // Mirror the call against an independent recording driver +
         // SessionLinkActions, using the bare no-metadata API, and
-        // assert byte parity. Construct a fresh session so the
-        // outbound Frame SN starts from the same initial_sn=1; the
+        // assert byte parity. The `recording_actions()` SSOT seeds both
+        // sides from the same `fixture_session_init_params()`, so the
+        // outbound Frame SN starts from the same initial_sn; the
         // alloc_next_request_id counter also starts at 0 so the
         // request_id matches.
-        let driver2 = Arc::new(RecordingDriver::new());
-        let actions2 = SessionLinkActions::new(driver2.clone(), fixture_params(), TokioTime::new());
+        let (actions2, driver2) = recording_actions();
         let rid = actions2.alloc_next_request_id();
         actions2
             .send_request_query(rid, 0, Some("home/temp"))
             .unwrap();
-        let baseline = driver2.frames.lock().unwrap()[0].0.clone();
+        let baseline = driver2.frame_bytes(0);
 
         assert_eq!(
             session_frame, baseline,
@@ -6176,7 +6132,7 @@ mod tests {
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
             .encode_to_vec();
-        let frame = &driver.frames.lock().unwrap()[0].0;
+        let frame = driver.frame_bytes(0);
         assert!(
             frame
                 .windows(standalone_bytes.len())
@@ -6207,7 +6163,7 @@ mod tests {
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
             .encode_to_vec();
-        let frame = &driver.frames.lock().unwrap()[0].0;
+        let frame = driver.frame_bytes(0);
         assert!(
             frame
                 .windows(standalone_bytes.len())
@@ -6247,7 +6203,7 @@ mod tests {
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
             .encode_to_vec();
-        let frame = &driver.frames.lock().unwrap()[0].0;
+        let frame = driver.frame_bytes(0);
         assert!(
             frame
                 .windows(standalone_bytes.len())
@@ -6281,17 +6237,16 @@ mod tests {
                 |_| {},
             )
             .expect("query-get feature is ON in this test build");
-        let session_frame = driver.frames.lock().unwrap()[0].0.clone();
+        let session_frame = driver.frame_bytes(0);
 
         // Baseline: the bare no-metadata send_request_query path, the
         // same construction the empty-meta fast-path test pins.
-        let driver2 = Arc::new(RecordingDriver::new());
-        let actions2 = SessionLinkActions::new(driver2.clone(), fixture_params(), TokioTime::new());
+        let (actions2, driver2) = recording_actions();
         let rid = actions2.alloc_next_request_id();
         actions2
             .send_request_query(rid, 0, Some("home/temp"))
             .unwrap();
-        let baseline = driver2.frames.lock().unwrap()[0].0.clone();
+        let baseline = driver2.frame_bytes(0);
 
         assert_eq!(
             session_frame, baseline,
@@ -6320,15 +6275,14 @@ mod tests {
                 |_| {},
             )
             .expect("query-get feature is ON in this test build");
-        let session_frame = driver.frames.lock().unwrap()[0].0.clone();
+        let session_frame = driver.frame_bytes(0);
 
-        let driver2 = Arc::new(RecordingDriver::new());
-        let actions2 = SessionLinkActions::new(driver2.clone(), fixture_params(), TokioTime::new());
+        let (actions2, driver2) = recording_actions();
         let rid = actions2.alloc_next_request_id();
         actions2
             .send_request_query(rid, 0, Some("home/temp"))
             .unwrap();
-        let baseline = driver2.frames.lock().unwrap()[0].0.clone();
+        let baseline = driver2.frame_bytes(0);
 
         assert_eq!(
             session_frame, baseline,
@@ -6370,17 +6324,16 @@ mod tests {
                 |_| {},
             )
             .expect("query-get feature is ON in this test build");
-        let session_frame = driver.frames.lock().unwrap()[0].0.clone();
+        let session_frame = driver.frame_bytes(0);
 
         // Baseline: the bare no-metadata send_request_query path, the
         // same construction the target / consolidation guards pin.
-        let driver2 = Arc::new(RecordingDriver::new());
-        let actions2 = SessionLinkActions::new(driver2.clone(), fixture_params(), TokioTime::new());
+        let (actions2, driver2) = recording_actions();
         let rid = actions2.alloc_next_request_id();
         actions2
             .send_request_query(rid, 0, Some("home/temp"))
             .unwrap();
-        let baseline = driver2.frames.lock().unwrap()[0].0.clone();
+        let baseline = driver2.frame_bytes(0);
 
         assert_eq!(
             session_frame, baseline,
@@ -6481,7 +6434,7 @@ mod tests {
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
             .encode_to_vec();
-        let frame = &driver.frames.lock().unwrap()[0].0;
+        let frame = driver.frame_bytes(0);
         assert!(
             frame
                 .windows(standalone_bytes.len())
@@ -6713,7 +6666,7 @@ mod tests {
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
             .encode_to_vec();
-        let frame = &driver.frames.lock().unwrap()[0].0;
+        let frame = driver.frame_bytes(0);
         assert!(
             frame
                 .windows(standalone_bytes.len())
@@ -6863,7 +6816,7 @@ mod tests {
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
             .encode_to_vec();
-        let frame = &driver.frames.lock().unwrap()[0].0;
+        let frame = driver.frame_bytes(0);
         assert!(
             frame
                 .windows(standalone_bytes.len())
@@ -8429,7 +8382,7 @@ mod tests {
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
             .encode_to_vec();
-        let frame = &driver.frames.lock().unwrap()[0].0;
+        let frame = driver.frame_bytes(0);
         assert!(
             frame.windows(expected.len()).any(|w| w == expected),
             "Session::declare_token wire frame must contain the build_declare_token byte stream"
@@ -8492,7 +8445,7 @@ mod tests {
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
             .encode_to_vec();
-        let frame = &driver.frames.lock().unwrap()[1].0;
+        let frame = driver.frame_bytes(1);
         assert!(
             frame.windows(expected.len()).any(|w| w == expected),
             "Drop must emit a Declare(UndeclToken) carrying the allocated token_id"
@@ -8622,7 +8575,7 @@ mod tests {
         .try_as_borrowed()
         .expect("test: <=N exts by construction")
         .encode_to_vec();
-        let token_frame = &driver.frames.lock().unwrap()[baseline_frames].0;
+        let token_frame = driver.frame_bytes(baseline_frames);
         assert!(
             token_frame.windows(expected.len()).any(|w| w == expected),
             "wire frame must carry alias-form DeclToken bytes (mapping_id=7, suffix=/sensor)",
@@ -8794,7 +8747,7 @@ mod tests {
         .try_as_borrowed()
         .expect("test: <=N exts by construction")
         .encode_to_vec();
-        let interest_frame = &driver.frames.lock().unwrap()[baseline_frames].0;
+        let interest_frame = driver.frame_bytes(baseline_frames);
         assert!(
             interest_frame
                 .windows(expected.len())

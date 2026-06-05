@@ -38,6 +38,14 @@ use wz_codecs::stream_envelope::StreamEnvelope;
 
 pub mod session_glue;
 
+// Crate-local fixtures for this crate's OWN unit tests (recording driver
+// + actions builders). Kept in-crate — NOT in the test-support sibling —
+// so unit tests receive this crate's version of `SessionLinkActions`
+// (the dev-dependency cycle would otherwise hand them a second copy that
+// `Session::new` rejects). See the module docs.
+#[cfg(test)]
+mod test_fixtures;
+
 // R311eo — generic SCXML script-action binders (bind_unit / bind_guard),
 // extracted from session_glue and generalised over the deps type so the
 // scouting FSM glue reuses them. Neutral module: depends on neither glue.
