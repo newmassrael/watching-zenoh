@@ -564,7 +564,7 @@ impl<C: ReplySink> ReplyRegistry<C> {
                 // composes on `query-reply` alone.
                 #[cfg(any(feature = "pubsub-put", feature = "query-reply"))]
                 ReplyOwnedVariant::CodecZenohMsgPut(put) => InboundReplyBody::Put {
-                    payload: put.payload.clone(),
+                    payload: put.payload.as_slice().to_vec(),
                 },
                 #[cfg(any(feature = "pubsub-delete", feature = "query-reply"))]
                 ReplyOwnedVariant::CodecZenohMsgDel(_) => InboundReplyBody::Del,
@@ -576,13 +576,15 @@ impl<C: ReplySink> ReplyRegistry<C> {
                 _ => return,
             },
             ResponseOwnedVariant::CodecZenohErr(err) => {
-                let encoding = err
-                    .encoding
-                    .as_ref()
-                    .map(|e| (e.packed_id, e.schema.clone()));
+                let encoding = err.encoding.as_ref().map(|e| {
+                    (
+                        e.packed_id,
+                        e.schema.as_ref().map(|s| String::from(s.as_str())),
+                    )
+                });
                 InboundReplyBody::Err {
                     encoding,
-                    payload: err.payload.clone(),
+                    payload: err.payload.as_slice().to_vec(),
                 }
             }
             // See ResponseVariant::Default rationale on Reply arm.
@@ -995,7 +997,8 @@ mod tests {
             body: ResponseVariant::CodecZenohReply(reply),
             ..Response::default()
         }
-        .into_owned()
+        .try_into_owned()
+        .unwrap()
     }
 
     fn response_reply_del(rid: u64, suffix: &str) -> ResponseOwned {
@@ -1016,7 +1019,8 @@ mod tests {
             body: ResponseVariant::CodecZenohReply(reply),
             ..Response::default()
         }
-        .into_owned()
+        .try_into_owned()
+        .unwrap()
     }
 
     fn response_err(
@@ -1051,7 +1055,8 @@ mod tests {
             body: ResponseVariant::CodecZenohErr(err_body),
             ..Response::default()
         }
-        .into_owned()
+        .try_into_owned()
+        .unwrap()
     }
 
     fn response_final_for(rid: u64) -> ResponseFinalOwned {
@@ -1059,7 +1064,8 @@ mod tests {
             request_id: rid,
             ..ResponseFinal::default()
         }
-        .into_owned()
+        .try_into_owned()
+        .unwrap()
     }
 
     #[test]

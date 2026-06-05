@@ -47,11 +47,11 @@ fn craft_hello_datagram(locator: &str) -> Vec<u8> {
     let body = HelloOwned {
         version: 0x09,
         cbyte,
-        zid,
+        zid: wz_session_core::codec_bound::bounded_bytes(&zid).unwrap(),
         num_locators: Some(1),
         locators: Some(vec![LocatorOwned {
             locator_len: locator.len() as u64,
-            locator: locator.to_string(),
+            locator: wz_session_core::codec_bound::bounded_string(locator).unwrap(),
         }]),
     }
     .try_as_borrowed()
@@ -274,6 +274,7 @@ mod round2 {
             initiator_params(),
             TokioTime::new(),
             Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
         );
         let ((acc_est, _w), opened) = tokio::join!(acceptor, initiator);
         assert!(

@@ -559,10 +559,11 @@ mod tests {
             },
             ..Push::default()
         }
-        .into_owned();
+        .try_into_owned()
+        .unwrap();
         if let PushOwnedVariant::CodecZenohMsgPut(ref mut put) = push.body {
             put.payload_len = payload.len() as u64;
-            put.payload = payload.to_vec();
+            put.payload = crate::codec_bound::bounded_bytes(payload).unwrap();
         }
         push
     }

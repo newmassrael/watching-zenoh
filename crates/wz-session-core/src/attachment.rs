@@ -22,8 +22,8 @@
 //! the catalog primitive the `pubsub-attachment` / `query-attachment`
 //! consumer features select.
 
-use alloc::vec::Vec;
-
+use crate::codec_bound::bounded_bytes;
+use sce_forge_runtime::codec::CodecError;
 use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
 use wz_codecs::ext_zbuf::ExtZbufOwned;
 
@@ -45,14 +45,16 @@ const ATTACHMENT_EXT_HEADER_ENC_ZBUF: u8 = 0x40;
 /// surrounding codec applies the chain-continuation `Z` bit; this helper
 /// emits the entry with `Z` clear (terminator) so a caller appending it
 /// as the sole / last entry needs no fix-up.
-pub fn encode_attachment_ext(ext_id: u8, payload: Vec<u8>) -> ExtEntryOwned {
-    ExtEntryOwned {
+pub fn encode_attachment_ext(ext_id: u8, payload: &[u8]) -> Result<ExtEntryOwned, CodecError> {
+    // W3: the ext_zbuf value owned mirror is bounded `heapless::Vec<u8, 32>`
+    // (the codec's declared max-size); copy in, fallible past 32 bytes.
+    Ok(ExtEntryOwned {
         header: ATTACHMENT_EXT_HEADER_ENC_ZBUF | ext_id,
         body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
             value_len: payload.len() as u64,
-            value: payload,
+            value: bounded_bytes(payload)?,
         }),
-    }
+    })
 }
 
 /// Project the first attachment payload from an ext chain for the given
@@ -74,13 +76,12 @@ pub fn decode_attachment_ext(extensions: &[ExtEntryOwned], ext_id: u8) -> Option
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
 
     /// Round-trips the encode helper against the decode helper for the
     /// PUSH carrier and locks the on-the-wire header byte (`0x40 | 0x03`).
     #[test]
     fn push_encode_decode_round_trip() {
-        let ext = encode_attachment_ext(ATTACHMENT_EXT_ID_PUSH, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let ext = encode_attachment_ext(ATTACHMENT_EXT_ID_PUSH, &[0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
         assert_eq!(
             ext.header, 0x43,
             "ENC_ZBUF | id_attachment(push) = 0x40 | 0x03"
@@ -95,7 +96,7 @@ mod tests {
     /// Same round-trip for the Query carrier (`0x40 | 0x05`).
     #[test]
     fn query_encode_decode_round_trip() {
-        let ext = encode_attachment_ext(ATTACHMENT_EXT_ID_QUERY, vec![0x01, 0x02]);
+        let ext = encode_attachment_ext(ATTACHMENT_EXT_ID_QUERY, &[0x01, 0x02]).unwrap();
         assert_eq!(
             ext.header, 0x45,
             "ENC_ZBUF | id_attachment(query) = 0x40 | 0x05"
@@ -112,7 +113,7 @@ mod tests {
     /// but the predicate must still discriminate).
     #[test]
     fn decode_discriminates_carrier_ext_id() {
-        let chain = [encode_attachment_ext(ATTACHMENT_EXT_ID_PUSH, vec![0xAA])];
+        let chain = [encode_attachment_ext(ATTACHMENT_EXT_ID_PUSH, &[0xAA]).unwrap()];
         assert_eq!(decode_attachment_ext(&chain, ATTACHMENT_EXT_ID_QUERY), None);
     }
 

@@ -70,7 +70,10 @@ async fn echo_demo_msg_put_round_trip() {
 
         // Decode via wz-codecs.
         let mut cursor = SceCursor::new(&frame_bytes);
-        let received = MsgPut::decode(&mut cursor).expect("decode").into_owned();
+        let received = MsgPut::decode(&mut cursor)
+            .expect("decode")
+            .try_into_owned()
+            .unwrap();
         driver.close().await.expect("subscriber close");
         received
     });

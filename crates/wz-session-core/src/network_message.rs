@@ -184,35 +184,35 @@ pub fn parse_frame_payload(bytes: &[u8]) -> Result<Vec<NetworkMessage>, CodecErr
             #[cfg(feature = "codec-request")]
             wire_const::N_MID_REQUEST => {
                 let req = wz_codecs::request::Request::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Request(Box::new(req.into_owned())));
+                messages.push(NetworkMessage::Request(Box::new(req.try_into_owned()?)));
             }
             #[cfg(feature = "codec-push")]
             wire_const::N_MID_PUSH => {
                 let push = wz_codecs::push::Push::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Push(Box::new(push.into_owned())));
+                messages.push(NetworkMessage::Push(Box::new(push.try_into_owned()?)));
             }
             #[cfg(feature = "codec-response-final")]
             wire_const::N_MID_RESPONSE_FINAL => {
                 let rf = wz_codecs::response_final::ResponseFinal::decode(&mut cursor)?;
-                messages.push(NetworkMessage::ResponseFinal(rf.into_owned()));
+                messages.push(NetworkMessage::ResponseFinal(rf.try_into_owned()?));
             }
             wire_const::N_MID_OAM => {
                 let oam = wz_codecs::oam::Oam::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Oam(oam.into_owned()));
+                messages.push(NetworkMessage::Oam(oam.try_into_owned()?));
             }
             wire_const::N_MID_INTEREST => {
                 let interest = wz_codecs::interest::Interest::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Interest(interest.into_owned()));
+                messages.push(NetworkMessage::Interest(interest.try_into_owned()?));
             }
             #[cfg(feature = "codec-response")]
             wire_const::N_MID_RESPONSE => {
                 let resp = wz_codecs::response::Response::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Response(Box::new(resp.into_owned())));
+                messages.push(NetworkMessage::Response(Box::new(resp.try_into_owned()?)));
             }
             #[cfg(feature = "codec-declare")]
             wire_const::N_MID_DECLARE => {
                 let decl = wz_codecs::declare::Declare::decode(&mut cursor)?;
-                messages.push(NetworkMessage::Declare(Box::new(decl.into_owned())));
+                messages.push(NetworkMessage::Declare(Box::new(decl.try_into_owned()?)));
             }
             _ => {
                 let rem = cursor.remaining();

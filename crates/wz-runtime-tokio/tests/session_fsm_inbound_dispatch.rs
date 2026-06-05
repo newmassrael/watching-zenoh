@@ -150,7 +150,7 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
     let init_syn = InboundFrame::Init {
         is_ack: false,
         has_ext: false,
-        body: InitBody::default().into_owned(),
+        body: InitBody::default().try_into_owned().unwrap(),
         extensions: Vec::new(),
     };
     assert_eq!(
@@ -161,7 +161,7 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
     let init_ack = InboundFrame::Init {
         is_ack: true,
         has_ext: false,
-        body: InitBody::default().into_owned(),
+        body: InitBody::default().try_into_owned().unwrap(),
         extensions: Vec::new(),
     };
     assert_eq!(
@@ -173,7 +173,7 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
         is_ack: false,
         lease_in_seconds: false,
         has_ext: false,
-        body: OpenBody::default().into_owned(),
+        body: OpenBody::default().try_into_owned().unwrap(),
         extensions: Vec::new(),
     };
     assert_eq!(
@@ -185,7 +185,7 @@ fn inbound_to_fsm_event_covers_every_inbound_variant() {
         is_ack: true,
         lease_in_seconds: false,
         has_ext: false,
-        body: OpenBody::default().into_owned(),
+        body: OpenBody::default().try_into_owned().unwrap(),
         extensions: Vec::new(),
     };
     assert_eq!(

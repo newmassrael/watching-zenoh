@@ -62,7 +62,8 @@ pub fn decl_subscriber(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclSu
         keyexpr,
         ..DeclSubscriber::default()
     }
-    .into_owned()
+    .try_into_owned()
+    .unwrap()
 }
 
 pub fn decl_subscriber_nonlocal(
@@ -83,7 +84,8 @@ pub fn decl_subscriber_nonlocal(
         keyexpr,
         ..DeclSubscriber::default()
     }
-    .into_owned()
+    .try_into_owned()
+    .unwrap()
 }
 
 pub fn undecl_subscriber(id: u64) -> UndeclSubscriber {
@@ -107,7 +109,8 @@ pub fn decl_queryable(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclQue
         keyexpr,
         ..DeclQueryable::default()
     }
-    .into_owned()
+    .try_into_owned()
+    .unwrap()
 }
 
 pub fn undecl_queryable(id: u64) -> UndeclQueryable {
@@ -131,7 +134,8 @@ pub fn decl_token(id: u64, mapping_id: u64, suffix: Option<&str>) -> DeclTokenOw
         keyexpr,
         ..DeclToken::default()
     }
-    .into_owned()
+    .try_into_owned()
+    .unwrap()
 }
 
 pub fn undecl_token(id: u64) -> UndeclToken {

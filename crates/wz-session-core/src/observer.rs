@@ -474,7 +474,11 @@ impl ApplicationLayerObserver {
         #[cfg(feature = "query-queryable")]
         {
             for reply in self.pending_replies.drain(..) {
-                actions.send_response(reply.into_response());
+                // W3: a reply whose bounded field overflows cannot be wire-encoded
+                // (the codec would reject it too); skip it and continue the drain.
+                if let Ok(response) = reply.into_response() {
+                    actions.send_response(response);
+                }
             }
             #[cfg(feature = "codec-response-final")]
             for rid in self.pending_final_rids.drain(..) {
@@ -668,7 +672,7 @@ mod tests {
                 put.payload_len = payload.len() as u64;
                 put.payload = payload;
             }
-            push.into_owned()
+            push.try_into_owned().unwrap()
         }
     }
 
@@ -700,7 +704,8 @@ mod tests {
                 body: DeclareVariant::CodecZenohDeclSubscriber(decl),
                 ..Declare::default()
             }
-            .into_owned()
+            .try_into_owned()
+            .unwrap()
         }
     }
 
@@ -853,7 +858,8 @@ mod tests {
                         ),
                         ..Declare::default()
                     }
-                    .into_owned()
+                    .try_into_owned()
+                    .unwrap()
                 })),
                 NetworkMessage::Declare(Box::new({
                     let keyexpr = Wireexpr {
@@ -873,7 +879,8 @@ mod tests {
                         ),
                         ..Declare::default()
                     }
-                    .into_owned()
+                    .try_into_owned()
+                    .unwrap()
                 })),
             ]);
             observer.dispatch_event(IterationEvent::Poll(&outcome));
@@ -929,7 +936,8 @@ mod tests {
                 body: RequestVariant::CodecZenohQuery(Query::default()),
                 ..Request::default()
             }
-            .into_owned();
+            .try_into_owned()
+            .unwrap();
             let outcome = make_outcome(vec![NetworkMessage::Request(Box::new(request))]);
             observer.dispatch_event(IterationEvent::Poll(&outcome));
 

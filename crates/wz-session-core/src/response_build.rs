@@ -34,7 +34,9 @@ use wz_codecs::response::{ResponseOwned, ResponseOwnedVariant};
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 use wz_codecs::wireexpr_local::WireexprLocalOwned;
 
+use crate::codec_bound::{bounded_bytes, bounded_string};
 use crate::query_mode::ConsolidationMode;
+use sce_forge_runtime::codec::CodecError;
 // R311ek — the source_info ext encoder + the shared VLE primitive moved
 // to the codec-feature-agnostic `source_info_ext` module so the
 // `codec-push` body-extension path can reach the encoder too; the
@@ -86,15 +88,18 @@ pub fn build_response_reply_literal(
     request_id: u64,
     keyexpr_suffix: &str,
     payload: &[u8],
-) -> ResponseOwned {
+) -> Result<ResponseOwned, CodecError> {
     assert!(
         !keyexpr_suffix.is_empty(),
         "build_response_reply_literal requires a non-empty keyexpr suffix; \
          the literal shape's purpose is to carry the keyexpr inline",
     );
-    let suffix_string = keyexpr_suffix.to_string();
-    let suffix_len = Some(suffix_string.len() as u64);
-    ResponseOwned {
+    let suffix_len = Some(keyexpr_suffix.len() as u64);
+    // W3 (SCE 7a94d084a): the codec owned mirror's bounded suffix / payload
+    // fields are no-alloc inline (`heapless::String<N>` / `heapless::Vec<u8,
+    // N>`); copy the caller data in, fallible past the declared capacity (the
+    // same bound decode enforces).
+    Ok(ResponseOwned {
         // MID 0x1B | N 0x20 (suffix present) | M codegen-derived
         // (Local arm sets 0x40). Z stays clear (no Response exts).
         header: 0x1B | 0x20,
@@ -103,7 +108,7 @@ pub fn build_response_reply_literal(
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len,
-                suffix: Some(suffix_string),
+                suffix: Some(bounded_string(keyexpr_suffix)?),
             }),
         },
         extensions: None,
@@ -119,10 +124,10 @@ pub fn build_response_reply_literal(
                 encoding: None,
                 extensions: None,
                 payload_len: payload.len() as u64,
-                payload: payload.to_vec(),
+                payload: bounded_bytes(payload)?,
             }),
         }),
-    }
+    })
 }
 
 /// R121j-3 — build a `Response(Reply(MsgPut))` for a peer-declared
@@ -145,23 +150,23 @@ pub fn build_response_reply_aliased(
     mapping_id: u64,
     suffix: Option<&str>,
     payload: &[u8],
-) -> ResponseOwned {
+) -> Result<ResponseOwned, CodecError> {
     assert!(
         mapping_id != 0,
         "build_response_reply_aliased requires a non-zero mapping id; \
          use build_response_reply_literal for the literal keyexpr case",
     );
-    let suffix_string = suffix.map(str::to_string);
-    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let suffix_len = suffix.map(|s| s.len() as u64);
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
-    ResponseOwned {
+    // W3: bounded suffix / payload copy in, fallible past declared capacity.
+    Ok(ResponseOwned {
         header: 0x1B | n_flag,
         request_id,
         keyexpr: WireexprOwned {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: mapping_id,
                 suffix_len,
-                suffix: suffix_string,
+                suffix: suffix.map(bounded_string).transpose()?,
             }),
         },
         extensions: None,
@@ -175,10 +180,10 @@ pub fn build_response_reply_aliased(
                 encoding: None,
                 extensions: None,
                 payload_len: payload.len() as u64,
-                payload: payload.to_vec(),
+                payload: bounded_bytes(payload)?,
             }),
         }),
-    }
+    })
 }
 
 /// R121j-4 — build a `Response(Err)` network-message in the minimal
@@ -219,22 +224,22 @@ pub fn build_response_err_literal(
     request_id: u64,
     keyexpr_suffix: &str,
     payload: &[u8],
-) -> ResponseOwned {
+) -> Result<ResponseOwned, CodecError> {
     assert!(
         !keyexpr_suffix.is_empty(),
         "build_response_err_literal requires a non-empty keyexpr suffix; \
          the literal shape's purpose is to carry the keyexpr inline",
     );
-    let suffix_string = keyexpr_suffix.to_string();
-    let suffix_len = Some(suffix_string.len() as u64);
-    ResponseOwned {
+    let suffix_len = Some(keyexpr_suffix.len() as u64);
+    // W3: bounded suffix / payload copy in, fallible past declared capacity.
+    Ok(ResponseOwned {
         header: 0x1B | 0x20, // MID | N (M codegen-derived from Local)
         request_id,
         keyexpr: WireexprOwned {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len,
-                suffix: Some(suffix_string),
+                suffix: Some(bounded_string(keyexpr_suffix)?),
             }),
         },
         extensions: None,
@@ -244,9 +249,9 @@ pub fn build_response_err_literal(
             encoding: None,
             extensions: None,
             payload_len: payload.len() as u64,
-            payload: payload.to_vec(),
+            payload: bounded_bytes(payload)?,
         }),
-    }
+    })
 }
 
 /// R121j-4 — build a `Response(Err)` for a peer-declared keyexpr
@@ -260,23 +265,23 @@ pub fn build_response_err_aliased(
     mapping_id: u64,
     suffix: Option<&str>,
     payload: &[u8],
-) -> ResponseOwned {
+) -> Result<ResponseOwned, CodecError> {
     assert!(
         mapping_id != 0,
         "build_response_err_aliased requires a non-zero mapping id; \
          use build_response_err_literal for the literal keyexpr case",
     );
-    let suffix_string = suffix.map(str::to_string);
-    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let suffix_len = suffix.map(|s| s.len() as u64);
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
-    ResponseOwned {
+    // W3: bounded suffix / payload copy in, fallible past declared capacity.
+    Ok(ResponseOwned {
         header: 0x1B | n_flag,
         request_id,
         keyexpr: WireexprOwned {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: mapping_id,
                 suffix_len,
-                suffix: suffix_string,
+                suffix: suffix.map(bounded_string).transpose()?,
             }),
         },
         extensions: None,
@@ -285,9 +290,9 @@ pub fn build_response_err_aliased(
             encoding: None,
             extensions: None,
             payload_len: payload.len() as u64,
-            payload: payload.to_vec(),
+            payload: bounded_bytes(payload)?,
         }),
-    }
+    })
 }
 
 /// R121j-2b — fluent builder for `Response(Reply)` that composes the
@@ -415,7 +420,7 @@ impl ResponseReplyBuilder {
     /// the existing literal-or-aliased builder, then applies the
     /// Reply-layer settings. Panics on `(mapping_id=0, suffix=None)`
     /// because the literal path requires an inline keyexpr suffix.
-    pub fn build(self) -> ResponseOwned {
+    pub fn build(self) -> Result<ResponseOwned, CodecError> {
         let mut response = if self.keyexpr_mapping_id == 0 {
             let suffix = self.keyexpr_suffix.as_deref().unwrap_or_else(|| {
                 panic!(
@@ -423,14 +428,14 @@ impl ResponseReplyBuilder {
                      a non-empty keyexpr_suffix; use mapping_id != 0 for aliased",
                 )
             });
-            build_response_reply_literal(self.request_id, suffix, &self.payload)
+            build_response_reply_literal(self.request_id, suffix, &self.payload)?
         } else {
             build_response_reply_aliased(
                 self.request_id,
                 self.keyexpr_mapping_id,
                 self.keyexpr_suffix.as_deref(),
                 &self.payload,
-            )
+            )?
         };
 
         if let ResponseOwnedVariant::CodecZenohReply(ref mut reply) = response.body {
@@ -473,12 +478,12 @@ impl ResponseReplyBuilder {
                 header: 0x40 | 0x03,
                 body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                     value_len: value.len() as u64,
-                    value,
+                    value: bounded_bytes(&value)?,
                 }),
             }]);
         }
 
-        response
+        Ok(response)
     }
 }
 
@@ -605,7 +610,7 @@ impl ResponseErrBuilder {
     /// the existing literal-or-aliased builder, then applies the
     /// Err-layer settings. Panics on `(mapping_id=0, suffix=None)`
     /// because the literal path requires an inline keyexpr suffix.
-    pub fn build(self) -> ResponseOwned {
+    pub fn build(self) -> Result<ResponseOwned, CodecError> {
         let mut response = if self.keyexpr_mapping_id == 0 {
             let suffix = self.keyexpr_suffix.as_deref().unwrap_or_else(|| {
                 panic!(
@@ -613,14 +618,14 @@ impl ResponseErrBuilder {
                      a non-empty keyexpr_suffix; use mapping_id != 0 for aliased",
                 )
             });
-            build_response_err_literal(self.request_id, suffix, &self.payload)
+            build_response_err_literal(self.request_id, suffix, &self.payload)?
         } else {
             build_response_err_aliased(
                 self.request_id,
                 self.keyexpr_mapping_id,
                 self.keyexpr_suffix.as_deref(),
                 &self.payload,
-            )
+            )?
         };
 
         if let ResponseOwnedVariant::CodecZenohErr(ref mut err) = response.body {
@@ -631,7 +636,7 @@ impl ResponseErrBuilder {
                 err.encoding = Some(EncodingOwned {
                     packed_id: packed,
                     schema_len: schema.as_ref().map(|s| s.len() as u64),
-                    schema,
+                    schema: schema.as_deref().map(bounded_string).transpose()?,
                 });
             }
             if let Some((zid, eid, sn)) = self.source_info {
@@ -649,7 +654,7 @@ impl ResponseErrBuilder {
                     header: 0x40 | 0x01,
                     body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                         value_len: value.len() as u64,
-                        value,
+                        value: bounded_bytes(&value)?,
                     }),
                 }]);
             }
@@ -670,12 +675,12 @@ impl ResponseErrBuilder {
                 header: 0x40 | 0x03,
                 body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                     value_len: value.len() as u64,
-                    value,
+                    value: bounded_bytes(&value)?,
                 }),
             }]);
         }
 
-        response
+        Ok(response)
     }
 }
 
@@ -762,7 +767,7 @@ mod tests {
         //   MsgPut.header = 0x01
         //   MsgPut.payload_len(11) → 0x0B
         //   payload "hello-reply"
-        let small = build_response_reply_literal(42, "demo/test", b"hello-reply");
+        let small = build_response_reply_literal(42, "demo/test", b"hello-reply").unwrap();
         let small_wire = small.wire();
         let mut small_expected = vec![
             0x7B, // Response: MID | N | M
@@ -783,7 +788,7 @@ mod tests {
         );
 
         // Case 2 — multi-byte VLE boundary on rid (200 = 0xC8 0x01).
-        let large = build_response_reply_literal(200, "k", b"v");
+        let large = build_response_reply_literal(200, "k", b"v").unwrap();
         let large_wire = large.wire();
         let large_expected = vec![
             0x7B, 0xC8, // VLE(200) low + cont
@@ -842,7 +847,7 @@ mod tests {
         //   MsgPut.header = 0x01
         //   payload_len(1) → 0x01
         //   payload "v"
-        let alias = build_response_reply_aliased(42, 7, None, b"v");
+        let alias = build_response_reply_aliased(42, 7, None, b"v").unwrap();
         let alias_wire = alias.wire();
         assert_eq!(
             alias_wire,
@@ -862,7 +867,7 @@ mod tests {
         // payload "data"). Wire:
         //   Response.header = MID | N | M = 0x7B
         //   wireexpr Local: id=7 + suffix_len(4) + "tail"
-        let composite = build_response_reply_aliased(42, 7, Some("tail"), b"data");
+        let composite = build_response_reply_aliased(42, 7, Some("tail"), b"data").unwrap();
         let composite_wire = composite.wire();
         let mut composite_expected = vec![
             0x7B, 0x2A, 0x07, // wireexpr.id
@@ -880,7 +885,7 @@ mod tests {
         );
 
         // Case 3 — multi-byte VLE alias (mapping_id=200).
-        let large = build_response_reply_aliased(42, 200, None, b"x");
+        let large = build_response_reply_aliased(42, 200, None, b"x").unwrap();
         let large_wire = large.wire();
         assert_eq!(
             large_wire,
@@ -917,7 +922,7 @@ mod tests {
         //   Err.header = 0x05
         //   payload_len(4) = 0x04
         //   "fail"
-        let small = build_response_err_literal(42, "k", b"fail");
+        let small = build_response_err_literal(42, "k", b"fail").unwrap();
         let small_wire = small.wire();
         let mut small_expected = vec![
             0x7B, 0x2A, 0x00, // wireexpr id=0
@@ -933,7 +938,7 @@ mod tests {
         );
 
         // Case 2 — multi-byte VLE rid (200).
-        let large = build_response_err_literal(200, "x", b"e");
+        let large = build_response_err_literal(200, "x", b"e").unwrap();
         let large_wire = large.wire();
         assert_eq!(
             large_wire,
@@ -976,7 +981,7 @@ mod tests {
     #[test]
     fn build_response_err_aliased_emits_zenoh_pico_compatible_wire_bytes() {
         // Pure alias: rid=42, mapping_id=7, no suffix, payload "e".
-        let alias = build_response_err_aliased(42, 7, None, b"e");
+        let alias = build_response_err_aliased(42, 7, None, b"e").unwrap();
         let alias_wire = alias.wire();
         assert_eq!(
             alias_wire,
@@ -993,7 +998,7 @@ mod tests {
         );
 
         // Composite: rid=42, mapping_id=7, suffix "tail", payload "data".
-        let composite = build_response_err_aliased(42, 7, Some("tail"), b"data");
+        let composite = build_response_err_aliased(42, 7, Some("tail"), b"data").unwrap();
         let composite_wire = composite.wire();
         let mut composite_expected = vec![
             0x7B, // Response: MID | N | M
@@ -1024,9 +1029,12 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_reply_builder_no_setters_matches_aliased_baseline() {
-        let direct = build_response_reply_aliased(42, 7, None, b"hello").wire();
+        let direct = build_response_reply_aliased(42, 7, None, b"hello")
+            .unwrap()
+            .wire();
         let built = ResponseReplyBuilder::new(42, 7, None, b"hello")
             .build()
+            .unwrap()
             .wire();
         assert_eq!(
             direct, built,
@@ -1041,10 +1049,13 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_reply_builder_consolidation_sets_r_c_flag_and_byte() {
-        let baseline = build_response_reply_aliased(42, 7, None, b"hello").wire();
+        let baseline = build_response_reply_aliased(42, 7, None, b"hello")
+            .unwrap()
+            .wire();
         let with_c = ResponseReplyBuilder::new(42, 7, None, b"hello")
             .consolidation(ConsolidationMode::Latest)
             .build()
+            .unwrap()
             .wire();
         // The C-bit-set wire differs from baseline only in the Reply.header
         // byte (R_C bit) and a freshly inserted consolidation byte (0x02 =
@@ -1082,8 +1093,13 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_no_setters_matches_aliased_baseline() {
-        let direct = build_response_err_aliased(42, 7, None, b"oops").wire();
-        let built = ResponseErrBuilder::new(42, 7, None, b"oops").build().wire();
+        let direct = build_response_err_aliased(42, 7, None, b"oops")
+            .unwrap()
+            .wire();
+        let built = ResponseErrBuilder::new(42, 7, None, b"oops")
+            .build()
+            .unwrap()
+            .wire();
         assert_eq!(
             direct, built,
             "ErrBuilder.new+build must match build_response_err_aliased byte-for-byte"
@@ -1099,6 +1115,7 @@ mod tests {
         let with_enc = ResponseErrBuilder::new(42, 7, None, b"oops")
             .encoding(4, None) // 4 = application/json prefix
             .build()
+            .unwrap()
             .wire();
         // Layout up through Err.header:
         //   Response.header(1) + VLE(42)(1) + VLE(7)(1) + Err.header(1) at offset 3
@@ -1123,6 +1140,7 @@ mod tests {
         let with_enc = ResponseErrBuilder::new(42, 7, None, b"oops")
             .encoding(4, Some("schema_v1"))
             .build()
+            .unwrap()
             .wire();
         assert_eq!(
             with_enc[3] & 0x40,
@@ -1181,6 +1199,7 @@ mod tests {
         let wire = ResponseErrBuilder::new(42, 7, None, b"oops")
             .source_info(&[0xAA; 4], 11, 17)
             .build()
+            .unwrap()
             .wire();
         // Layout up through Err.header: Response.header(1) + VLE(42)(1)
         // + VLE(7)(1) + Err.header(1) at offset 3. The source_info
@@ -1243,6 +1262,7 @@ mod tests {
             .encoding(4, None)
             .source_info(&[0xBB; 1], 1, 2)
             .build()
+            .unwrap()
             .wire();
         // Err.header at offset 3: E(0x40) | Z(0x80) = 0xC0.
         assert_eq!(
@@ -1306,10 +1326,12 @@ mod tests {
     fn response_reply_builder_responder_emits_envelope_zbuf_ext_entry() {
         let baseline = ResponseReplyBuilder::new(42, 7, None, b"hello")
             .build()
+            .unwrap()
             .wire();
         let wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
             .responder(&[0xAA; 4], 11)
             .build()
+            .unwrap()
             .wire();
         // Envelope: Response.header(1) + VLE(42)(1) + VLE(7)(1) = 3-byte
         // prefix; responder ext lands at offset 3 (no keyexpr suffix in
@@ -1356,6 +1378,7 @@ mod tests {
             .responder(&[0xBB; 1], 1)
             .consolidation(ConsolidationMode::Latest)
             .build()
+            .unwrap()
             .wire();
         // Envelope Z set on Response.header at offset 0.
         assert_eq!(
@@ -1395,10 +1418,14 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn response_err_builder_responder_emits_envelope_zbuf_ext_entry() {
-        let baseline = ResponseErrBuilder::new(42, 7, None, b"oops").build().wire();
+        let baseline = ResponseErrBuilder::new(42, 7, None, b"oops")
+            .build()
+            .unwrap()
+            .wire();
         let wire = ResponseErrBuilder::new(42, 7, None, b"oops")
             .responder(&[0xCC; 2], 5)
             .build()
+            .unwrap()
             .wire();
         assert_eq!(
             wire[0],
@@ -1435,6 +1462,7 @@ mod tests {
             .responder(&[0xDD; 1], 9)
             .source_info(&[0xEE; 1], 3, 4)
             .build()
+            .unwrap()
             .wire();
         // Envelope Z on Response.header.
         assert_eq!(
@@ -1520,10 +1548,12 @@ mod tests {
     fn response_reply_builder_reply_del_swaps_inner_arm_to_msgdel() {
         let put_wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
             .build()
+            .unwrap()
             .wire();
         let del_wire = ResponseReplyBuilder::new(42, 7, None, b"hello")
             .reply_del()
             .build()
+            .unwrap()
             .wire();
         // Layout up through Reply.header: Response.header(1) + VLE(42)(1) +
         // VLE(7)(1) + Reply.header(1) at offset 3. Inner MID at offset 4.
@@ -1557,6 +1587,7 @@ mod tests {
             .reply_del()
             .consolidation(ConsolidationMode::Latest)
             .build()
+            .unwrap()
             .wire();
         // Reply.header at offset 3 must carry R_C(0x20).
         assert_eq!(

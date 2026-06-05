@@ -654,7 +654,7 @@ impl<C: SampleSink> SubscriberRegistry<C> {
                     };
                     (
                         SampleKind::Put,
-                        put.payload.clone(),
+                        put.payload.as_slice().to_vec(),
                         body_timestamp,
                         put.encoding.as_ref().map(EncodingHint::from_codec),
                         body_attachment,
@@ -1075,7 +1075,8 @@ mod tests {
             },
             ..Push::default()
         }
-        .into_owned()
+        .try_into_owned()
+        .unwrap()
     }
 
     #[test]
@@ -1170,7 +1171,8 @@ mod tests {
             },
             ..Push::default()
         }
-        .into_owned();
+        .try_into_owned()
+        .unwrap();
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(
@@ -1259,7 +1261,7 @@ mod tests {
         // subscriber callback.
         use wz_codecs::response_final::ResponseFinal;
         registry.dispatch(
-            &NetworkMessage::ResponseFinal(ResponseFinal::default().into_owned()),
+            &NetworkMessage::ResponseFinal(ResponseFinal::default().try_into_owned().unwrap()),
             Reliability::Reliable,
         );
 
@@ -1973,15 +1975,18 @@ mod tests {
         let mut push = push_with_keyexpr(keyexpr);
         if let PushOwnedVariant::CodecZenohMsgPut(ref mut put) = push.body {
             put.payload_len = payload.len() as u64;
-            put.payload = payload.to_vec();
+            put.payload = crate::codec_bound::bounded_bytes(payload).unwrap();
         }
         push
     }
 
     fn push_with_del_body(keyexpr: &str) -> PushOwned {
         let mut push = push_with_keyexpr(keyexpr);
-        push.body =
-            PushOwnedVariant::CodecZenohMsgDel(wz_codecs::msg_del::MsgDel::default().into_owned());
+        push.body = PushOwnedVariant::CodecZenohMsgDel(
+            wz_codecs::msg_del::MsgDel::default()
+                .try_into_owned()
+                .unwrap(),
+        );
         push
     }
 
@@ -2151,7 +2156,8 @@ mod tests {
             ),
             ..Default::default()
         }
-        .into_owned()
+        .try_into_owned()
+        .unwrap()
     }
 
     fn undeclare_kexpr(mapping_id: u64) -> wz_codecs::declare::DeclareOwned {
@@ -2164,7 +2170,8 @@ mod tests {
             ),
             ..Default::default()
         }
-        .into_owned()
+        .try_into_owned()
+        .unwrap()
     }
 
     fn push_with_mapping_id(mapping_id: u64, inline_suffix: Option<&str>) -> PushOwned {
@@ -2178,7 +2185,8 @@ mod tests {
             },
             ..Push::default()
         }
-        .into_owned()
+        .try_into_owned()
+        .unwrap()
     }
 
     #[test]
@@ -2423,7 +2431,7 @@ mod tests {
             let mut registry = SubscriberRegistry::new();
             // `absorb_declare` takes the owned variant; deep-copy the
             // borrowed test arm at the boundary.
-            let body = body.into_owned();
+            let body = body.try_into_owned().unwrap();
             registry.absorb_declare(&body);
             assert!(
                 registry.peer_keyexpr_table().is_empty(),
@@ -2765,8 +2773,10 @@ mod tests {
         );
         // The owned `MsgPut` carries an alloc `Vec<ExtEntryOwned>` (vs the
         // borrowed heapless `Vec<_, 4>`); deep-copy the borrowed ext in.
-        let mut put = wz_codecs::msg_put::MsgPut::default().into_owned();
-        put.extensions = Some(vec![ext.into_owned()]);
+        let mut put = wz_codecs::msg_put::MsgPut::default()
+            .try_into_owned()
+            .unwrap();
+        put.extensions = Some(vec![ext.try_into_owned().unwrap()]);
         let mut push = Push {
             keyexpr: wz_codecs::wireexpr::Wireexpr {
                 body: WireexprVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
@@ -2777,7 +2787,8 @@ mod tests {
             },
             ..Push::default()
         }
-        .into_owned();
+        .try_into_owned()
+        .unwrap();
         push.body = PushOwnedVariant::CodecZenohMsgPut(put);
         push
     }
@@ -2867,7 +2878,8 @@ mod tests {
             ),
             ..Push::default()
         }
-        .into_owned();
+        .try_into_owned()
+        .unwrap();
         registry.dispatch(&NetworkMessage::Push(Box::new(push)), Reliability::Reliable);
 
         assert_eq!(

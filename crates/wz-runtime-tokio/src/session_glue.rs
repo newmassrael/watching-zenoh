@@ -364,6 +364,10 @@ pub use wz_session_core::ext_chain_role::ExtChainRole;
 // R311di-10 — SendDeclareError moved to wz-session-core::send_declare_error.
 pub use wz_session_core::send_declare_error::SendDeclareError;
 
+// W3 — shared typed reject for the non-DECLARE outbound wire-emit
+// actions (push / request / interest).
+pub use wz_session_core::send_wire_error::SendWireError;
+
 /// Bundle of state shared across the 17 native script functions.
 pub struct SessionLinkActions<R: Runtime = TokioRuntime, T: TimeSource = TokioTime> {
     pub driver: Arc<dyn BoxedLinkDriver>,
@@ -684,11 +688,19 @@ impl<R: Runtime, T: TimeSource> ResponseSink for SessionLinkActions<R, T> {
     // duplication across profiles.
     #[cfg(feature = "liveliness-token")]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
-        self.send_declare(build_token_reply(token_id, keyexpr, interest_id).into_owned());
+        self.send_declare(
+            build_token_reply(token_id, keyexpr, interest_id)
+                .try_into_owned()
+                .expect("local-token reply keyexpr is within MAX_KEYEXPR_BYTES"),
+        );
     }
     #[cfg(feature = "liveliness-token")]
     fn send_declare_final_reply(&self, interest_id: u64) {
-        self.send_declare(build_final_reply(interest_id).into_owned());
+        self.send_declare(
+            build_final_reply(interest_id)
+                .try_into_owned()
+                .expect("DeclFinal reply carries no bounded fields"),
+        );
     }
 }
 
@@ -803,7 +815,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
         is_ack: bool,
         cookie_override: Option<&[u8]>,
         role: ExtChainRole,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>, CodecError> {
         // R121d — capped-to-peer params so the outbound InitAck
         // satisfies the wire-spec `InitAck.size <= InitSyn.size`
         // invariant. The owned clone is cheap (the heavy field is
@@ -833,7 +845,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
         is_ack: bool,
         cookie_override: Option<&[u8]>,
         role: ExtChainRole,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>, CodecError> {
         R::with_mutex_mut(self.ext_chain_slot(role), |chain| {
             encode_open(&self.params, is_ack, cookie_override, chain)
         })
@@ -872,7 +884,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             } => {
                 if let Some(cookie) = &body.cookie {
                     R::with_mutex_mut(&self.inbound_cookie, |slot| {
-                        *slot = Some(cookie.clone());
+                        *slot = Some(cookie.as_slice().to_vec());
                     });
                 }
             }
@@ -886,7 +898,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 // peer's claimed zid so the next send_init_ack_with_cookie
                 // can HMAC-bind the outbound cookie to it per RFC §5.M.
                 R::with_mutex_mut(&self.inbound_peer_zid, |slot| {
-                    *slot = Some(body.zid.clone());
+                    *slot = Some(body.zid.as_slice().to_vec());
                 });
                 // R121d — capture the peer's announced sizing caps
                 // so `init_ack_params` can enforce the wire-spec
@@ -911,7 +923,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 // sides of the handshake.
                 if let Some(cookie) = &body.cookie {
                     R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| {
-                        *slot = Some(cookie.clone());
+                        *slot = Some(cookie.as_slice().to_vec());
                     });
                 }
             }
@@ -1062,10 +1074,15 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
     ///     `block_on`; the wz-ap-demo binary substitutes the
     ///     mpsc-channel `OutboundWriteDriver` precisely to avoid
     ///     this trap (see wz-ap-demo `OutboundWriteDriver` doc).
-    pub fn send_push_literal(&self, keyexpr_suffix: &str, value: &[u8], reliable: bool) {
+    pub fn send_push_literal(
+        &self,
+        keyexpr_suffix: &str,
+        value: &[u8],
+        reliable: bool,
+    ) -> Result<(), SendWireError> {
         #[cfg(feature = "codec-push")]
         {
-            let push = build_push_literal(keyexpr_suffix, value);
+            let push = build_push_literal(keyexpr_suffix, value)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
             let reliability = if reliable {
@@ -1074,9 +1091,13 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 Reliability::BestEffort
             };
             self.driver.send_blocking(&wire, reliability);
+            Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
-        let _ = (keyexpr_suffix, value, reliable);
+        {
+            let _ = (keyexpr_suffix, value, reliable);
+            Err(SendWireError::FeatureDisabled)
+        }
     }
 
     /// R121g — encode + dispatch a `Declare(DeclKexpr)` on the
@@ -1124,7 +1145,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 return Err(SendDeclareError::ReservedMappingIdZero);
             }
             check_outbound_keyexpr_pico_safe(suffix)?;
-            let declare = build_declare_kexpr(mapping_id, suffix);
+            let declare = build_declare_kexpr(mapping_id, suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
             self.driver.send_blocking(&wire, Reliability::Reliable);
@@ -1166,10 +1187,10 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
         suffix: Option<&str>,
         value: &[u8],
         reliable: bool,
-    ) {
+    ) -> Result<(), SendWireError> {
         #[cfg(feature = "codec-push")]
         {
-            let push = build_push_aliased(mapping_id, suffix, value);
+            let push = build_push_aliased(mapping_id, suffix, value)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
             let reliability = if reliable {
@@ -1178,9 +1199,13 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 Reliability::BestEffort
             };
             self.driver.send_blocking(&wire, reliability);
+            Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
-        let _ = (mapping_id, suffix, value, reliable);
+        {
+            let _ = (mapping_id, suffix, value, reliable);
+            Err(SendWireError::FeatureDisabled)
+        }
     }
 
     /// R219 — encode + dispatch a literal-keyexpr `Push(MsgDel)` on
@@ -1191,10 +1216,14 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
     /// `MsgDel` carries no payload so the action accepts only the
     /// keyexpr suffix. Reliability gating + Established-state
     /// preconditions match [`Self::send_push_literal`].
-    pub fn send_push_del_literal(&self, keyexpr_suffix: &str, reliable: bool) {
+    pub fn send_push_del_literal(
+        &self,
+        keyexpr_suffix: &str,
+        reliable: bool,
+    ) -> Result<(), SendWireError> {
         #[cfg(feature = "codec-push")]
         {
-            let push = build_push_del_literal(keyexpr_suffix);
+            let push = build_push_del_literal(keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
             let reliability = if reliable {
@@ -1203,9 +1232,13 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 Reliability::BestEffort
             };
             self.driver.send_blocking(&wire, reliability);
+            Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
-        let _ = (keyexpr_suffix, reliable);
+        {
+            let _ = (keyexpr_suffix, reliable);
+            Err(SendWireError::FeatureDisabled)
+        }
     }
 
     /// R219 — encode + dispatch a DECLARE-aliased `Push(MsgDel)`
@@ -1215,10 +1248,15 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
     /// a Declare for `mapping_id` earlier on the same session so
     /// the receive-side resolver can map it back to a literal
     /// keyexpr before firing the subscriber callback.
-    pub fn send_push_del_aliased(&self, mapping_id: u64, suffix: Option<&str>, reliable: bool) {
+    pub fn send_push_del_aliased(
+        &self,
+        mapping_id: u64,
+        suffix: Option<&str>,
+        reliable: bool,
+    ) -> Result<(), SendWireError> {
         #[cfg(feature = "codec-push")]
         {
-            let push = build_push_del_aliased(mapping_id, suffix);
+            let push = build_push_del_aliased(mapping_id, suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
             let reliability = if reliable {
@@ -1227,9 +1265,13 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 Reliability::BestEffort
             };
             self.driver.send_blocking(&wire, reliability);
+            Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
-        let _ = (mapping_id, suffix, reliable);
+        {
+            let _ = (mapping_id, suffix, reliable);
+            Err(SendWireError::FeatureDisabled)
+        }
     }
 
     /// R233 — metadata-bearing counterpart of [`send_push_literal`].
@@ -1245,10 +1287,10 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
         value: &[u8],
         reliable: bool,
         meta: &PushMetadata,
-    ) {
+    ) -> Result<(), SendWireError> {
         #[cfg(feature = "codec-push")]
         {
-            let push = build_push_literal_with_meta(keyexpr_suffix, value, meta);
+            let push = build_push_literal_with_meta(keyexpr_suffix, value, meta)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
             let reliability = if reliable {
@@ -1257,9 +1299,13 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 Reliability::BestEffort
             };
             self.driver.send_blocking(&wire, reliability);
+            Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
-        let _ = (keyexpr_suffix, value, reliable, meta);
+        {
+            let _ = (keyexpr_suffix, value, reliable, meta);
+            Err(SendWireError::FeatureDisabled)
+        }
     }
 
     /// R233 — metadata-bearing counterpart of [`send_push_aliased`].
@@ -1270,10 +1316,10 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
         value: &[u8],
         reliable: bool,
         meta: &PushMetadata,
-    ) {
+    ) -> Result<(), SendWireError> {
         #[cfg(feature = "codec-push")]
         {
-            let push = build_push_aliased_with_meta(mapping_id, suffix, value, meta);
+            let push = build_push_aliased_with_meta(mapping_id, suffix, value, meta)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
             let reliability = if reliable {
@@ -1282,9 +1328,13 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 Reliability::BestEffort
             };
             self.driver.send_blocking(&wire, reliability);
+            Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
-        let _ = (mapping_id, suffix, value, reliable, meta);
+        {
+            let _ = (mapping_id, suffix, value, reliable, meta);
+            Err(SendWireError::FeatureDisabled)
+        }
     }
 
     /// R233 — metadata-bearing counterpart of
@@ -1297,10 +1347,10 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
         keyexpr_suffix: &str,
         reliable: bool,
         meta: &PushMetadata,
-    ) {
+    ) -> Result<(), SendWireError> {
         #[cfg(feature = "codec-push")]
         {
-            let push = build_push_del_literal_with_meta(keyexpr_suffix, meta);
+            let push = build_push_del_literal_with_meta(keyexpr_suffix, meta)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
             let reliability = if reliable {
@@ -1309,9 +1359,13 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 Reliability::BestEffort
             };
             self.driver.send_blocking(&wire, reliability);
+            Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
-        let _ = (keyexpr_suffix, reliable, meta);
+        {
+            let _ = (keyexpr_suffix, reliable, meta);
+            Err(SendWireError::FeatureDisabled)
+        }
     }
 
     /// R233 — metadata-bearing counterpart of
@@ -1322,10 +1376,10 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
         suffix: Option<&str>,
         reliable: bool,
         meta: &PushMetadata,
-    ) {
+    ) -> Result<(), SendWireError> {
         #[cfg(feature = "codec-push")]
         {
-            let push = build_push_del_aliased_with_meta(mapping_id, suffix, meta);
+            let push = build_push_del_aliased_with_meta(mapping_id, suffix, meta)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_push(sn, push, reliable);
             let reliability = if reliable {
@@ -1334,9 +1388,13 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 Reliability::BestEffort
             };
             self.driver.send_blocking(&wire, reliability);
+            Ok(())
         }
         #[cfg(not(feature = "codec-push"))]
-        let _ = (mapping_id, suffix, reliable, meta);
+        {
+            let _ = (mapping_id, suffix, reliable, meta);
+            Err(SendWireError::FeatureDisabled)
+        }
     }
 
     /// R121i — encode + dispatch a `Declare(DeclSubscriber)` on the
@@ -1379,7 +1437,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
             check_outbound_keyexpr_pico_safe(&reconstructed)?;
             let declare =
-                build_declare_subscriber(subscriber_id, keyexpr_mapping_id, keyexpr_suffix);
+                build_declare_subscriber(subscriber_id, keyexpr_mapping_id, keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
             self.driver.send_blocking(&wire, Reliability::Reliable);
@@ -1426,7 +1484,8 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             let reconstructed =
                 self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
             check_outbound_keyexpr_pico_safe(&reconstructed)?;
-            let declare = build_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix);
+            let declare =
+                build_declare_queryable(queryable_id, keyexpr_mapping_id, keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
             self.driver.send_blocking(&wire, Reliability::Reliable);
@@ -1469,7 +1528,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             let reconstructed =
                 self.reconstruct_outbound_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
             check_outbound_keyexpr_pico_safe(&reconstructed)?;
-            let declare = build_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix);
+            let declare = build_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_declare(sn, declare, /*reliable=*/ true);
             self.driver.send_blocking(&wire, Reliability::Reliable);
@@ -1798,7 +1857,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
         history: bool,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
-    ) {
+    ) -> Result<(), SendWireError> {
         #[cfg(feature = "declare-interest")]
         {
             let interest = build_interest_liveliness_subscriber(
@@ -1806,13 +1865,17 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
                 history,
                 keyexpr_mapping_id,
                 keyexpr_suffix,
-            );
+            )?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_interest(sn, interest, /*reliable=*/ true);
             self.driver.send_blocking(&wire, Reliability::Reliable);
+            Ok(())
         }
         #[cfg(not(feature = "declare-interest"))]
-        let _ = (interest_id, history, keyexpr_mapping_id, keyexpr_suffix);
+        {
+            let _ = (interest_id, history, keyexpr_mapping_id, keyexpr_suffix);
+            Err(SendWireError::FeatureDisabled)
+        }
     }
 
     /// R279 — encode + dispatch an `Interest(Final)` (no C, no F)
@@ -1879,16 +1942,20 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
         rid: u64,
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
-    ) {
+    ) -> Result<(), SendWireError> {
         #[cfg(feature = "codec-request")]
         {
-            let request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix);
+            let request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix)?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_request(sn, request, /*reliable=*/ true);
             self.driver.send_blocking(&wire, Reliability::Reliable);
+            Ok(())
         }
         #[cfg(not(feature = "codec-request"))]
-        let _ = (rid, keyexpr_mapping_id, keyexpr_suffix);
+        {
+            let _ = (rid, keyexpr_mapping_id, keyexpr_suffix);
+            Err(SendWireError::FeatureDisabled)
+        }
     }
 
     /// R240 — metadata-bearing counterpart of [`Self::send_request_query`].
@@ -1923,7 +1990,7 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
         meta: &QueryMetadata,
-    ) {
+    ) -> Result<(), SendWireError> {
         #[cfg(feature = "codec-request")]
         {
             let mut builder = RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix);
@@ -1951,13 +2018,17 @@ impl<R: Runtime, T: TimeSource> SessionLinkActions<R, T> {
             if meta.timeout_ms != 0 {
                 builder = builder.request_timeout_ms(meta.timeout_ms as u64);
             }
-            let request = builder.build();
+            let request = builder.build()?;
             let sn = self.next_outbound_frame_sn();
             let wire = encode_frame_with_request(sn, request, /*reliable=*/ true);
             self.driver.send_blocking(&wire, Reliability::Reliable);
+            Ok(())
         }
         #[cfg(not(feature = "codec-request"))]
-        let _ = (rid, keyexpr_mapping_id, keyexpr_suffix, meta);
+        {
+            let _ = (rid, keyexpr_mapping_id, keyexpr_suffix, meta);
+            Err(SendWireError::FeatureDisabled)
+        }
     }
 
     /// R121j-2 — encode + dispatch a `ResponseFinal(request_id)` on
@@ -2151,11 +2222,13 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
     #[cfg(all(feature = "codec-init-body", feature = "session-unicast-open"))]
     bind_unit(lua, "send_init_syn", actions, |a| {
         a.trace.lock().unwrap().send_init_syn += 1;
-        let bytes = a.encode_init_with_role(
-            /*is_ack=*/ false,
-            /*cookie_override=*/ None,
-            ExtChainRole::InitSyn,
-        );
+        let bytes = a
+            .encode_init_with_role(
+                /*is_ack=*/ false,
+                /*cookie_override=*/ None,
+                ExtChainRole::InitSyn,
+            )
+            .expect("InitSyn zid/cookie are protocol-bounded (zid 1..=16, no cookie on Syn)");
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
@@ -2166,11 +2239,13 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
         // peer InitAck via handle_inbound; fall back to params.cookie
         // for tests that drive OpenSyn without an inbound parse cycle.
         let cookie_override = a.inbound_cookie.lock().unwrap().clone();
-        let bytes = a.encode_open_with_role(
-            /*is_ack=*/ false,
-            cookie_override.as_deref(),
-            ExtChainRole::OpenSyn,
-        );
+        let bytes = a
+            .encode_open_with_role(
+                /*is_ack=*/ false,
+                cookie_override.as_deref(),
+                ExtChainRole::OpenSyn,
+            )
+            .expect("OpenSyn cookie echo is decode-bounded (peer InitAck cookie <= codec cap)");
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
@@ -2199,11 +2274,13 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
             a.inbound_peer_zid.lock().unwrap().as_ref().map(|peer_zid| {
                 generate_cookie_hmac_sha256(&a.params.cookie_signing_key, peer_zid)
             });
-        let bytes = a.encode_init_with_role(
-            /*is_ack=*/ true,
-            cookie_hmac.as_deref(),
-            ExtChainRole::InitAck,
-        );
+        let bytes = a
+            .encode_init_with_role(
+                /*is_ack=*/ true,
+                cookie_hmac.as_deref(),
+                ExtChainRole::InitAck,
+            )
+            .expect("InitAck cookie is HMAC-SHA256[..16] (16 bytes, within codec cap)");
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
@@ -2214,11 +2291,13 @@ pub fn register_outbound_link_fns(lua: &dyn IScriptEngine, actions: &Arc<Session
         // get here (it travelled inbound on OpenSyn and was already
         // MAC-verified); the OpenAck shape omits it (parent.A=1
         // suppresses the cookie field per transport.c:300-302).
-        let bytes = a.encode_open_with_role(
-            /*is_ack=*/ true,
-            /*cookie_override=*/ None,
-            ExtChainRole::OpenAck,
-        );
+        let bytes = a
+            .encode_open_with_role(
+                /*is_ack=*/ true,
+                /*cookie_override=*/ None,
+                ExtChainRole::OpenAck,
+            )
+            .expect("OpenAck omits the cookie field (A=1); only zid 1..=16 is bounded-copied");
         a.driver.send_blocking(&bytes, Reliability::Reliable);
     });
 
@@ -2364,7 +2443,7 @@ fn encode_init(
     is_ack: bool,
     extensions: &[ExtEntryOwned],
     cookie_override: Option<&[u8]>,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, CodecError> {
     let mut parent_flags = wire_const::FLAG_T_INIT_S;
     if is_ack {
         parent_flags |= wire_const::FLAG_T_INIT_A;
@@ -2392,11 +2471,18 @@ fn encode_init(
     let body = InitBodyOwned {
         version: params.version,
         cbyte,
-        zid: params.zid.clone(),
+        // zid is the protocol-bounded peer id (1..=16); init_cbyte
+        // above already encodes its length, so the bounded copy is an
+        // invariant leaf (`.expect`), mirroring request_build.rs.
+        zid: wz_session_core::codec_bound::bounded_bytes(&params.zid)
+            .expect("zid length asserted in 1..=16"),
         sn_res: Some(pack_sn_res(params.seq_num_res, params.req_id_res)),
         batch_size: Some(params.batch_size),
         cookie_len: cookie_bytes.as_ref().map(|c| c.len() as u64),
-        cookie: cookie_bytes,
+        cookie: cookie_bytes
+            .as_deref()
+            .map(wz_session_core::codec_bound::bounded_bytes)
+            .transpose()?,
     };
 
     let ext_bytes = encode_ext_chain(extensions);
@@ -2411,7 +2497,7 @@ fn encode_init(
             .expect("VecSink is infallible");
     }
     wire.extend_from_slice(&ext_bytes);
-    wire
+    Ok(wire)
 }
 
 /// Build the wire bytes for an Open frame (OpenSyn / OpenAck). Body
@@ -2431,7 +2517,7 @@ fn encode_open(
     is_ack: bool,
     cookie_override: Option<&[u8]>,
     extensions: &[ExtEntryOwned],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, CodecError> {
     let mut parent_flags = 0u8;
     if params.lease_in_seconds {
         parent_flags |= wire_const::FLAG_T_OPEN_T;
@@ -2457,7 +2543,7 @@ fn encode_open(
             None
         },
         cookie: if !is_ack {
-            Some(cookie_bytes.to_vec())
+            Some(wz_session_core::codec_bound::bounded_bytes(cookie_bytes)?)
         } else {
             None
         },
@@ -2474,7 +2560,7 @@ fn encode_open(
             .expect("VecSink is infallible");
     }
     wire.extend_from_slice(&ext_bytes);
-    wire
+    Ok(wire)
 }
 
 /// Serialize a transport-message ext chain — concatenated
@@ -2570,12 +2656,10 @@ fn encode_close(reason: u8) -> Vec<u8> {
 /// `wz_codecs::push::Push`; principled exemption from the
 /// signature-stability sweep per `feedback_signature_stability`).
 #[cfg(feature = "codec-push")]
-pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> PushOwned {
-    let suffix_string = keyexpr_suffix.to_string();
-    let suffix_len = suffix_string.len() as u64;
-    let payload_bytes = value.to_vec();
-    let payload_len = payload_bytes.len() as u64;
-    PushOwned {
+pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> Result<PushOwned, CodecError> {
+    let suffix_len = keyexpr_suffix.len() as u64;
+    let payload_len = value.len() as u64;
+    Ok(PushOwned {
         // `N_MID_PUSH | N_flag(0x20)` — M flag derives from the
         // WireexprLocal arm at encode time (push.rs:189).
         header: wire_const::N_MID_PUSH | 0x20,
@@ -2583,7 +2667,9 @@ pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> PushOwned {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(suffix_len),
-                suffix: Some(suffix_string),
+                suffix: Some(wz_session_core::codec_bound::bounded_string(
+                    keyexpr_suffix,
+                )?),
             }),
         },
         extensions: None,
@@ -2593,9 +2679,9 @@ pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> PushOwned {
             encoding: None,
             extensions: None,
             payload_len,
-            payload: payload_bytes,
+            payload: wz_session_core::codec_bound::bounded_bytes(value)?,
         }),
-    }
+    })
 }
 
 /// R121g — build a `Push` network-message that references a peer-
@@ -2627,15 +2713,20 @@ pub fn build_push_literal(keyexpr_suffix: &str, value: &[u8]) -> PushOwned {
 /// shapes apart at the API surface so a caller cannot silently
 /// invert them.
 #[cfg(feature = "codec-push")]
-pub fn build_push_aliased(mapping_id: u64, suffix: Option<&str>, value: &[u8]) -> PushOwned {
+pub fn build_push_aliased(
+    mapping_id: u64,
+    suffix: Option<&str>,
+    value: &[u8],
+) -> Result<PushOwned, CodecError> {
     assert!(
         mapping_id != 0,
         "build_push_aliased requires a non-zero mapping id; use build_push_literal for id=0",
     );
-    let suffix_string = suffix.map(str::to_string);
-    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
-    let payload_bytes = value.to_vec();
-    let payload_len = payload_bytes.len() as u64;
+    let suffix_len = suffix.map(|s| s.len() as u64);
+    let suffix_string = suffix
+        .map(wz_session_core::codec_bound::bounded_string)
+        .transpose()?;
+    let payload_len = value.len() as u64;
     // Push.header.N (bit 5, 0x20) is the "suffix carrier present"
     // flag: set when the WireexprLocal carries a non-None suffix,
     // clear for a pure-aliased Push (`suffix=None`). The peer's
@@ -2646,7 +2737,7 @@ pub fn build_push_aliased(mapping_id: u64, suffix: Option<&str>, value: &[u8]) -
     // `Unknown message type received` (zenoh-pico
     // `_z_network_message_decode` MID switch on a stale byte).
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
-    PushOwned {
+    Ok(PushOwned {
         header: wire_const::N_MID_PUSH | n_flag,
         keyexpr: WireexprOwned {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
@@ -2662,9 +2753,9 @@ pub fn build_push_aliased(mapping_id: u64, suffix: Option<&str>, value: &[u8]) -
             encoding: None,
             extensions: None,
             payload_len,
-            payload: payload_bytes,
+            payload: wz_session_core::codec_bound::bounded_bytes(value)?,
         }),
-    }
+    })
 }
 
 /// R219 — build a literal-keyexpr `Push` whose body is a `MsgDel`
@@ -2692,10 +2783,9 @@ pub fn build_push_aliased(mapping_id: u64, suffix: Option<&str>, value: &[u8]) -
 /// substring — distinguishable from a Put-with-empty-value only by
 /// the wz-side codec round-trip witness.
 #[cfg(feature = "codec-push")]
-pub fn build_push_del_literal(keyexpr_suffix: &str) -> PushOwned {
-    let suffix_string = keyexpr_suffix.to_string();
-    let suffix_len = suffix_string.len() as u64;
-    PushOwned {
+pub fn build_push_del_literal(keyexpr_suffix: &str) -> Result<PushOwned, CodecError> {
+    let suffix_len = keyexpr_suffix.len() as u64;
+    Ok(PushOwned {
         // `N_MID_PUSH | N_flag(0x20)` — M flag derives from the
         // WireexprLocal arm at encode time (push.rs:189). Identical
         // header shape to the Put path; only the inner body MID
@@ -2706,7 +2796,9 @@ pub fn build_push_del_literal(keyexpr_suffix: &str) -> PushOwned {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(suffix_len),
-                suffix: Some(suffix_string),
+                suffix: Some(wz_session_core::codec_bound::bounded_string(
+                    keyexpr_suffix,
+                )?),
             }),
         },
         extensions: None,
@@ -2715,7 +2807,7 @@ pub fn build_push_del_literal(keyexpr_suffix: &str) -> PushOwned {
             timestamp: None,
             extensions: None,
         }),
-    }
+    })
 }
 
 /// R219 — build a DECLARE-aliased `Push` whose body is `MsgDel`.
@@ -2729,19 +2821,24 @@ pub fn build_push_del_literal(keyexpr_suffix: &str) -> PushOwned {
 /// the two shapes apart at the API surface so a caller cannot
 /// silently invert them.
 #[cfg(feature = "codec-push")]
-pub fn build_push_del_aliased(mapping_id: u64, suffix: Option<&str>) -> PushOwned {
+pub fn build_push_del_aliased(
+    mapping_id: u64,
+    suffix: Option<&str>,
+) -> Result<PushOwned, CodecError> {
     assert!(
         mapping_id != 0,
         "build_push_del_aliased requires a non-zero mapping id; use build_push_del_literal for id=0",
     );
-    let suffix_string = suffix.map(str::to_string);
-    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let suffix_len = suffix.map(|s| s.len() as u64);
+    let suffix_string = suffix
+        .map(wz_session_core::codec_bound::bounded_string)
+        .transpose()?;
     // Same N-flag derivation as build_push_aliased: bit 5 set when
     // a per-Push suffix tail is present, cleared for the
     // pure-aliased shape. The flag has identical decoder semantics
     // regardless of the inner body MID (Put vs Del).
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
-    PushOwned {
+    Ok(PushOwned {
         header: wire_const::N_MID_PUSH | n_flag,
         keyexpr: WireexprOwned {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
@@ -2756,7 +2853,7 @@ pub fn build_push_del_aliased(mapping_id: u64, suffix: Option<&str>) -> PushOwne
             timestamp: None,
             extensions: None,
         }),
-    }
+    })
 }
 
 /// R233 — caller-supplied metadata for a publish wire branch. Owns
@@ -2821,7 +2918,7 @@ pub use wz_session_core::metadata::QueryMetadata;
 fn build_body_extensions(
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
-) -> Option<Vec<ExtEntryOwned>> {
+) -> Result<Option<Vec<ExtEntryOwned>>, CodecError> {
     let mut exts: Vec<ExtEntryOwned> = Vec::new();
     if let Some(si) = source_info {
         let prefix = si.zid_prefix();
@@ -2836,7 +2933,7 @@ fn build_body_extensions(
                 header: 0x40 | 0x01,
                 body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                     value_len: body_bytes.len() as u64,
-                    value: body_bytes,
+                    value: wz_session_core::codec_bound::bounded_bytes(&body_bytes)?,
                 }),
             });
         }
@@ -2851,16 +2948,16 @@ fn build_body_extensions(
     if let Some(bytes) = attachment {
         exts.push(wz_session_core::attachment::encode_attachment_ext(
             wz_session_core::attachment::ATTACHMENT_EXT_ID_PUSH,
-            bytes.to_vec(),
-        ));
+            bytes,
+        )?);
     }
     #[cfg(not(feature = "pubsub-attachment"))]
     let _ = attachment;
     if exts.is_empty() {
-        return None;
+        return Ok(None);
     }
     apply_chain_z_bits(&mut exts);
-    Some(exts)
+    Ok(Some(exts))
 }
 
 /// R233 — set the `Z` (chain-continuation, 0x80) bit on every
@@ -2925,15 +3022,15 @@ fn build_push_outer_extensions(qos: Option<crate::sample::QosLevel>) -> Option<V
 #[cfg(feature = "codec-push")]
 fn gated_timestamp_field(
     timestamp: Option<&crate::sample::TimestampHint>,
-) -> Option<wz_codecs::timestamp::TimestampOwned> {
+) -> Result<Option<wz_codecs::timestamp::TimestampOwned>, CodecError> {
     #[cfg(feature = "pubsub-timestamp")]
     {
-        timestamp.map(|t| t.to_codec().into_owned())
+        timestamp.map(|t| t.to_codec().try_into_owned()).transpose()
     }
     #[cfg(not(feature = "pubsub-timestamp"))]
     {
         let _ = timestamp;
-        None
+        Ok(None)
     }
 }
 
@@ -2952,17 +3049,18 @@ fn build_msg_put_with_meta(
     encoding: Option<&crate::sample::EncodingHint>,
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
-) -> MsgPutOwned {
-    let payload_bytes = payload.to_vec();
-    let payload_len = payload_bytes.len() as u64;
-    let extensions = build_body_extensions(source_info, attachment);
+) -> Result<MsgPutOwned, CodecError> {
+    let payload_len = payload.len() as u64;
+    let extensions = build_body_extensions(source_info, attachment)?;
     let mut put = MsgPutOwned {
         header: 0x01,
-        timestamp: gated_timestamp_field(timestamp),
-        encoding: encoding.map(|e| e.to_codec().into_owned()),
+        timestamp: gated_timestamp_field(timestamp)?,
+        encoding: encoding
+            .map(|e| e.to_codec().try_into_owned())
+            .transpose()?,
         extensions,
         payload_len,
-        payload: payload_bytes,
+        payload: wz_session_core::codec_bound::bounded_bytes(payload)?,
     };
     // `MsgPutOwned` is read-only (no `set_*` write accessors —
     // those live on the borrowed view per the owned-encode-omitted
@@ -2977,7 +3075,7 @@ fn build_msg_put_with_meta(
     if put.extensions.is_some() {
         put.header |= 0x80;
     }
-    put
+    Ok(put)
 }
 
 /// R233 — build a `MsgDel` body carrying caller-set metadata
@@ -2993,11 +3091,11 @@ fn build_msg_del_with_meta(
     timestamp: Option<&crate::sample::TimestampHint>,
     source_info: Option<&crate::sample::SourceInfo>,
     attachment: Option<&[u8]>,
-) -> MsgDelOwned {
-    let extensions = build_body_extensions(source_info, attachment);
+) -> Result<MsgDelOwned, CodecError> {
+    let extensions = build_body_extensions(source_info, attachment)?;
     let mut del = MsgDelOwned {
         header: 0x02,
-        timestamp: gated_timestamp_field(timestamp),
+        timestamp: gated_timestamp_field(timestamp)?,
         extensions,
     };
     // `MsgDelOwned` is read-only; OR the header flag bits directly
@@ -3008,7 +3106,7 @@ fn build_msg_del_with_meta(
     if del.extensions.is_some() {
         del.header |= 0x80;
     }
-    del
+    Ok(del)
 }
 
 /// R233 — metadata-bearing counterpart of [`build_push_literal`].
@@ -3021,16 +3119,18 @@ pub fn build_push_literal_with_meta(
     keyexpr_suffix: &str,
     value: &[u8],
     meta: &PushMetadata,
-) -> PushOwned {
+) -> Result<PushOwned, CodecError> {
     let outer_exts = build_push_outer_extensions(meta.qos);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
-    PushOwned {
+    Ok(PushOwned {
         header: wire_const::N_MID_PUSH | 0x20 | z_flag,
         keyexpr: WireexprOwned {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(keyexpr_suffix.len() as u64),
-                suffix: Some(keyexpr_suffix.to_string()),
+                suffix: Some(wz_session_core::codec_bound::bounded_string(
+                    keyexpr_suffix,
+                )?),
             }),
         },
         extensions: outer_exts,
@@ -3040,8 +3140,8 @@ pub fn build_push_literal_with_meta(
             meta.encoding.as_ref(),
             meta.source_info.as_ref(),
             meta.attachment.as_deref(),
-        )),
-    }
+        )?),
+    })
 }
 
 /// R233 — metadata-bearing counterpart of [`build_push_aliased`].
@@ -3051,7 +3151,7 @@ pub fn build_push_aliased_with_meta(
     suffix: Option<&str>,
     value: &[u8],
     meta: &PushMetadata,
-) -> PushOwned {
+) -> Result<PushOwned, CodecError> {
     assert!(
         mapping_id != 0,
         "build_push_aliased_with_meta requires a non-zero mapping id; \
@@ -3059,10 +3159,12 @@ pub fn build_push_aliased_with_meta(
     );
     let outer_exts = build_push_outer_extensions(meta.qos);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
-    let suffix_string = suffix.map(str::to_string);
-    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let suffix_len = suffix.map(|s| s.len() as u64);
+    let suffix_string = suffix
+        .map(wz_session_core::codec_bound::bounded_string)
+        .transpose()?;
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
-    PushOwned {
+    Ok(PushOwned {
         header: wire_const::N_MID_PUSH | n_flag | z_flag,
         keyexpr: WireexprOwned {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
@@ -3078,8 +3180,8 @@ pub fn build_push_aliased_with_meta(
             meta.encoding.as_ref(),
             meta.source_info.as_ref(),
             meta.attachment.as_deref(),
-        )),
-    }
+        )?),
+    })
 }
 
 /// R233 — metadata-bearing counterpart of [`build_push_del_literal`].
@@ -3087,16 +3189,21 @@ pub fn build_push_aliased_with_meta(
 /// encoding slot — the loopback path enforces the same projection
 /// in `crate::session::build_loopback_sample`.
 #[cfg(feature = "codec-push")]
-pub fn build_push_del_literal_with_meta(keyexpr_suffix: &str, meta: &PushMetadata) -> PushOwned {
+pub fn build_push_del_literal_with_meta(
+    keyexpr_suffix: &str,
+    meta: &PushMetadata,
+) -> Result<PushOwned, CodecError> {
     let outer_exts = build_push_outer_extensions(meta.qos);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
-    PushOwned {
+    Ok(PushOwned {
         header: wire_const::N_MID_PUSH | 0x20 | z_flag,
         keyexpr: WireexprOwned {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: 0,
                 suffix_len: Some(keyexpr_suffix.len() as u64),
-                suffix: Some(keyexpr_suffix.to_string()),
+                suffix: Some(wz_session_core::codec_bound::bounded_string(
+                    keyexpr_suffix,
+                )?),
             }),
         },
         extensions: outer_exts,
@@ -3104,8 +3211,8 @@ pub fn build_push_del_literal_with_meta(keyexpr_suffix: &str, meta: &PushMetadat
             meta.timestamp.as_ref(),
             meta.source_info.as_ref(),
             meta.attachment.as_deref(),
-        )),
-    }
+        )?),
+    })
 }
 
 /// R233 — metadata-bearing counterpart of [`build_push_del_aliased`].
@@ -3114,7 +3221,7 @@ pub fn build_push_del_aliased_with_meta(
     mapping_id: u64,
     suffix: Option<&str>,
     meta: &PushMetadata,
-) -> PushOwned {
+) -> Result<PushOwned, CodecError> {
     assert!(
         mapping_id != 0,
         "build_push_del_aliased_with_meta requires a non-zero mapping id; \
@@ -3122,10 +3229,12 @@ pub fn build_push_del_aliased_with_meta(
     );
     let outer_exts = build_push_outer_extensions(meta.qos);
     let z_flag = if outer_exts.is_some() { 0x80u8 } else { 0x00u8 };
-    let suffix_string = suffix.map(str::to_string);
-    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let suffix_len = suffix.map(|s| s.len() as u64);
+    let suffix_string = suffix
+        .map(wz_session_core::codec_bound::bounded_string)
+        .transpose()?;
     let n_flag = if suffix.is_some() { 0x20u8 } else { 0x00u8 };
-    PushOwned {
+    Ok(PushOwned {
         header: wire_const::N_MID_PUSH | n_flag | z_flag,
         keyexpr: WireexprOwned {
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
@@ -3139,8 +3248,8 @@ pub fn build_push_del_aliased_with_meta(
             meta.timestamp.as_ref(),
             meta.source_info.as_ref(),
             meta.attachment.as_deref(),
-        )),
-    }
+        )?),
+    })
 }
 
 /// R121g — build a `Declare` network-message that registers a
@@ -3169,14 +3278,13 @@ pub fn build_push_del_aliased_with_meta(
 /// literal-keyexpr sentinel and a DECLARE with id=0 has no
 /// table-population semantics in zenoh-pico.
 #[cfg(feature = "codec-declare")]
-pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> DeclareOwned {
+pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> Result<DeclareOwned, CodecError> {
     assert!(
         mapping_id != 0,
         "build_declare_kexpr requires a non-zero mapping id; id=0 is the literal-keyexpr sentinel",
     );
-    let suffix_string = suffix.to_string();
-    let suffix_len = Some(suffix_string.len() as u64);
-    DeclareOwned {
+    let suffix_len = Some(suffix.len() as u64);
+    Ok(DeclareOwned {
         // `N_MID_DECLARE (0x1E)` — no I (interest_id), no Z
         // (extensions); the MVP wires only the unsolicited
         // mapping-population shape that zenoh-pico emits on
@@ -3215,11 +3323,11 @@ pub fn build_declare_kexpr(mapping_id: u64, suffix: &str) -> DeclareOwned {
                 body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                     id: 0,
                     suffix_len,
-                    suffix: Some(suffix_string),
+                    suffix: Some(wz_session_core::codec_bound::bounded_string(suffix)?),
                 }),
             },
         }),
-    }
+    })
 }
 
 /// R121i — build a `Declare` network-message that registers a
@@ -3271,15 +3379,17 @@ pub fn build_declare_subscriber(
     subscriber_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> DeclareOwned {
-    let suffix_string = keyexpr_suffix.map(str::to_string);
-    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+) -> Result<DeclareOwned, CodecError> {
+    let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
+    let suffix_string = keyexpr_suffix
+        .map(wz_session_core::codec_bound::bounded_string)
+        .transpose()?;
     let n_flag = if keyexpr_suffix.is_some() {
         0x20u8
     } else {
         0x00u8
     };
-    DeclareOwned {
+    Ok(DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
@@ -3296,7 +3406,7 @@ pub fn build_declare_subscriber(
                 }),
             },
         }),
-    }
+    })
 }
 
 /// R121i-b — build a `Declare` network-message that registers a
@@ -3349,15 +3459,17 @@ pub fn build_declare_queryable(
     queryable_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> DeclareOwned {
-    let suffix_string = keyexpr_suffix.map(str::to_string);
-    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+) -> Result<DeclareOwned, CodecError> {
+    let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
+    let suffix_string = keyexpr_suffix
+        .map(wz_session_core::codec_bound::bounded_string)
+        .transpose()?;
     let n_flag = if keyexpr_suffix.is_some() {
         0x20u8
     } else {
         0x00u8
     };
-    DeclareOwned {
+    Ok(DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
@@ -3375,7 +3487,7 @@ pub fn build_declare_queryable(
                 }),
             },
         }),
-    }
+    })
 }
 
 /// R121i-b — build a `Declare` network-message that registers a
@@ -3415,15 +3527,17 @@ pub fn build_declare_token(
     token_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> DeclareOwned {
-    let suffix_string = keyexpr_suffix.map(str::to_string);
-    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+) -> Result<DeclareOwned, CodecError> {
+    let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
+    let suffix_string = keyexpr_suffix
+        .map(wz_session_core::codec_bound::bounded_string)
+        .transpose()?;
     let n_flag = if keyexpr_suffix.is_some() {
         0x20u8
     } else {
         0x00u8
     };
-    DeclareOwned {
+    Ok(DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
@@ -3441,7 +3555,7 @@ pub fn build_declare_token(
                 }),
             },
         }),
-    }
+    })
 }
 
 // ─── R121i-d: WireexprNonlocal-arm DECLARE builders ──────────────────
@@ -3520,21 +3634,23 @@ pub fn build_declare_subscriber_nonlocal(
     subscriber_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> DeclareOwned {
+) -> Result<DeclareOwned, CodecError> {
     assert!(
         keyexpr_mapping_id != 0,
         "build_declare_subscriber_nonlocal requires a non-zero mapping id; \
          id=0 is the literal-keyexpr sentinel, which is only representable \
          in the Local arm — call build_declare_subscriber instead",
     );
-    let suffix_string = keyexpr_suffix.map(str::to_string);
-    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
+    let suffix_string = keyexpr_suffix
+        .map(wz_session_core::codec_bound::bounded_string)
+        .transpose()?;
     let n_flag = if keyexpr_suffix.is_some() {
         0x20u8
     } else {
         0x00u8
     };
-    DeclareOwned {
+    Ok(DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
@@ -3549,7 +3665,7 @@ pub fn build_declare_subscriber_nonlocal(
                 }),
             },
         }),
-    }
+    })
 }
 
 /// R121i-d — build a `Declare(DeclQueryable)` for a keyexpr rooted in
@@ -3565,20 +3681,22 @@ pub fn build_declare_queryable_nonlocal(
     queryable_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> DeclareOwned {
+) -> Result<DeclareOwned, CodecError> {
     assert!(
         keyexpr_mapping_id != 0,
         "build_declare_queryable_nonlocal requires a non-zero mapping id; \
          id=0 is the literal-keyexpr sentinel — call build_declare_queryable instead",
     );
-    let suffix_string = keyexpr_suffix.map(str::to_string);
-    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
+    let suffix_string = keyexpr_suffix
+        .map(wz_session_core::codec_bound::bounded_string)
+        .transpose()?;
     let n_flag = if keyexpr_suffix.is_some() {
         0x20u8
     } else {
         0x00u8
     };
-    DeclareOwned {
+    Ok(DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
@@ -3593,7 +3711,7 @@ pub fn build_declare_queryable_nonlocal(
                 }),
             },
         }),
-    }
+    })
 }
 
 /// R121i-d — build a `Declare(DeclToken)` for a keyexpr rooted in the
@@ -3606,20 +3724,22 @@ pub fn build_declare_token_nonlocal(
     token_id: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> DeclareOwned {
+) -> Result<DeclareOwned, CodecError> {
     assert!(
         keyexpr_mapping_id != 0,
         "build_declare_token_nonlocal requires a non-zero mapping id; \
          id=0 is the literal-keyexpr sentinel — call build_declare_token instead",
     );
-    let suffix_string = keyexpr_suffix.map(str::to_string);
-    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+    let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
+    let suffix_string = keyexpr_suffix
+        .map(wz_session_core::codec_bound::bounded_string)
+        .transpose()?;
     let n_flag = if keyexpr_suffix.is_some() {
         0x20u8
     } else {
         0x00u8
     };
-    DeclareOwned {
+    Ok(DeclareOwned {
         header: wire_const::N_MID_DECLARE,
         interest_id: None,
         extensions: None,
@@ -3634,7 +3754,7 @@ pub fn build_declare_token_nonlocal(
                 }),
             },
         }),
-    }
+    })
 }
 
 /// R121i-c — build a `Declare(UndeclKexpr)` network-message that
@@ -3840,9 +3960,11 @@ pub fn build_interest_liveliness_subscriber(
     history: bool,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> InterestOwned {
-    let suffix_string = keyexpr_suffix.map(str::to_string);
-    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+) -> Result<InterestOwned, CodecError> {
+    let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
+    let suffix_string = keyexpr_suffix
+        .map(wz_session_core::codec_bound::bounded_string)
+        .transpose()?;
 
     // Outer header: MID 0x19 | F (always) | C (if history). Z stays
     // clear — wz emits no Interest-level extensions today; the
@@ -3868,7 +3990,7 @@ pub fn build_interest_liveliness_subscriber(
     let m_flag = 0x40u8; // Local arm (M=1)
     let body_header = ke_flag | to_flag | r_flag | n_flag | m_flag;
 
-    InterestOwned {
+    Ok(InterestOwned {
         header: wire_const::N_MID_INTEREST | c_flag | f_flag,
         interest_id,
         body: Some(InterestBodyOwned {
@@ -3882,7 +4004,7 @@ pub fn build_interest_liveliness_subscriber(
             }),
         }),
         extensions: None,
-    }
+    })
 }
 
 /// R279 — build an `Interest(Final)` network-message (C=0, F=0) that
@@ -4364,8 +4486,8 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
     match mid {
         #[cfg(feature = "codec-init-body")]
         wire_const::T_MID_INIT => {
-            let body =
-                InitBody::decode(&mut cursor, (flags >> 6) & 1, (flags >> 5) & 1)?.into_owned();
+            let body = InitBody::decode(&mut cursor, (flags >> 6) & 1, (flags >> 5) & 1)?
+                .try_into_owned()?;
             let extensions = if has_ext {
                 decode_ext_chain(&mut cursor)?
             } else {
@@ -4380,7 +4502,7 @@ pub fn parse_inbound(bytes: &[u8]) -> Result<InboundFrame, InboundParseError> {
         }
         #[cfg(feature = "codec-open-body")]
         wire_const::T_MID_OPEN => {
-            let body = OpenBody::decode(&mut cursor, (flags >> 5) & 1)?.into_owned();
+            let body = OpenBody::decode(&mut cursor, (flags >> 5) & 1)?.try_into_owned()?;
             let extensions = if has_ext {
                 decode_ext_chain(&mut cursor)?
             } else {
@@ -4864,7 +4986,7 @@ fn decode_ext_chain(cursor: &mut SceCursor<'_>) -> Result<Vec<ExtEntryOwned>, In
         // Deep-copy the borrowed decode view into the lifetime-free
         // owned mirror so the parsed chain can outlive the input
         // buffer in `InboundFrame::*.extensions`.
-        entries.push(entry.into_owned());
+        entries.push(entry.try_into_owned().map_err(InboundParseError::Codec)?);
         if !z {
             return Ok(entries);
         }
@@ -5052,7 +5174,7 @@ mod tests {
     #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_literal_shapes_struct_for_literal_keyexpr() {
-        let push = build_push_literal("demo/test", b"hello");
+        let push = build_push_literal("demo/test", b"hello").unwrap();
         // header bits: N_MID_PUSH (0x1D) | N flag (0x20) = 0x3D.
         // M flag (0x40) is set at encode time, not on the struct.
         assert_eq!(
@@ -5121,11 +5243,12 @@ mod tests {
         // the transport-envelope header byte and the Frame body
         // shape. Push::default()'s wire bytes are independently
         // pinned by layer3_push.rs's byte-equiv test.
-        let push = Push::default().into_owned();
+        let push = Push::default().try_into_owned().unwrap();
         let push_bytes = push.wire();
 
         // Reliable Frame at sn=0.
-        let wire_reliable = encode_frame_with_push(0, Push::default().into_owned(), true);
+        let wire_reliable =
+            encode_frame_with_push(0, Push::default().try_into_owned().unwrap(), true);
         assert_eq!(
             wire_reliable[0],
             wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME,
@@ -5141,7 +5264,8 @@ mod tests {
         );
 
         // Best-effort Frame: same shape minus FLAG_T_FRAME_R.
-        let wire_best_effort = encode_frame_with_push(0, Push::default().into_owned(), false);
+        let wire_best_effort =
+            encode_frame_with_push(0, Push::default().try_into_owned().unwrap(), false);
         assert_eq!(
             wire_best_effort[0],
             wire_const::T_MID_FRAME,
@@ -5159,7 +5283,7 @@ mod tests {
     #[test]
     fn encode_frame_with_push_carries_vle_sn_across_widths() {
         for sn in [0u64, 1, 127, 128, 16383, 16384, 1_000_000] {
-            let wire = encode_frame_with_push(sn, Push::default().into_owned(), true);
+            let wire = encode_frame_with_push(sn, Push::default().try_into_owned().unwrap(), true);
             // Round-trip through parse_inbound to recover the
             // sn — it carries us through both the transport-header
             // byte decode AND the Frame.sn VLE decode.
@@ -5208,7 +5332,7 @@ mod tests {
     #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_aliased_carries_non_zero_id_with_optional_suffix() {
-        let pure = build_push_aliased(7, None, b"hello");
+        let pure = build_push_aliased(7, None, b"hello").unwrap();
         match &pure.keyexpr.body {
             WireexprOwnedVariant::WireexprLocal(w) => {
                 assert_eq!(w.id, 7, "pure aliased Push id must equal mapping_id");
@@ -5219,13 +5343,13 @@ mod tests {
         }
         match &pure.body {
             PushOwnedVariant::CodecZenohMsgPut(p) => {
-                assert_eq!(p.payload, b"hello".to_vec());
+                assert_eq!(p.payload.as_slice(), b"hello");
                 assert_eq!(p.payload_len, 5);
             }
             _ => panic!("build_push_aliased must wrap a MsgPut body"),
         }
 
-        let composite = build_push_aliased(7, Some("tail"), b"hi");
+        let composite = build_push_aliased(7, Some("tail"), b"hi").unwrap();
         match &composite.keyexpr.body {
             WireexprOwnedVariant::WireexprLocal(w) => {
                 assert_eq!(w.id, 7);
@@ -5253,7 +5377,7 @@ mod tests {
     #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_del_literal_shapes_struct_for_literal_keyexpr() {
-        let push = build_push_del_literal("demo/test");
+        let push = build_push_del_literal("demo/test").unwrap();
         assert_eq!(
             push.header, 0x3D,
             "Push.header must carry N_MID_PUSH (0x1D) | N flag (0x20) — same as the Put literal path"
@@ -5311,7 +5435,7 @@ mod tests {
     #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_del_aliased_carries_non_zero_id_with_optional_suffix() {
-        let pure = build_push_del_aliased(7, None);
+        let pure = build_push_del_aliased(7, None).unwrap();
         assert_eq!(
             pure.header,
             wire_const::N_MID_PUSH,
@@ -5332,7 +5456,7 @@ mod tests {
             _ => panic!("build_push_del_aliased must wrap a MsgDel body"),
         }
 
-        let composite = build_push_del_aliased(7, Some("tail"));
+        let composite = build_push_del_aliased(7, Some("tail")).unwrap();
         assert_eq!(
             composite.header,
             wire_const::N_MID_PUSH | 0x20,
@@ -5375,7 +5499,7 @@ mod tests {
     #[cfg(feature = "codec-push")]
     #[test]
     fn build_push_del_literal_round_trips_through_frame_decode_as_msg_del() {
-        let push = build_push_del_literal("demo/test");
+        let push = build_push_del_literal("demo/test").unwrap();
         let wire = encode_frame_with_push(/*sn=*/ 0, push, /*reliable=*/ true);
         let parsed = parse_inbound(&wire).expect("parse_inbound on Del-bearing Frame");
         let payload = match parsed {
@@ -5422,7 +5546,7 @@ mod tests {
     #[cfg(feature = "codec-declare")]
     #[test]
     fn build_declare_kexpr_wraps_decl_kexpr_with_literal_suffix() {
-        let declare = build_declare_kexpr(7, "demo/test");
+        let declare = build_declare_kexpr(7, "demo/test").unwrap();
         assert_eq!(
             declare.header,
             wire_const::N_MID_DECLARE,
@@ -5480,7 +5604,7 @@ mod tests {
     #[cfg(feature = "codec-declare")]
     #[test]
     fn build_declare_kexpr_emits_zenoh_pico_compatible_wire_bytes() {
-        let declare = build_declare_kexpr(7, "demo/test");
+        let declare = build_declare_kexpr(7, "demo/test").unwrap();
         let outer = declare.wire();
         // Skip the outer Declare envelope header (0x1E) — that
         // single byte is the wz Declare codec's own emit; the rest
@@ -5519,10 +5643,11 @@ mod tests {
     #[cfg(feature = "codec-declare")]
     #[test]
     fn encode_frame_with_declare_wraps_declare_in_frame_envelope() {
-        let declare = build_declare_kexpr(7, "demo/test");
+        let declare = build_declare_kexpr(7, "demo/test").unwrap();
         let declare_bytes = declare.wire();
 
-        let wire_reliable = encode_frame_with_declare(0, build_declare_kexpr(7, "demo/test"), true);
+        let wire_reliable =
+            encode_frame_with_declare(0, build_declare_kexpr(7, "demo/test").unwrap(), true);
         assert_eq!(
             wire_reliable[0],
             wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME,
@@ -5536,7 +5661,7 @@ mod tests {
         );
 
         let wire_best_effort =
-            encode_frame_with_declare(0, build_declare_kexpr(7, "demo/test"), false);
+            encode_frame_with_declare(0, build_declare_kexpr(7, "demo/test").unwrap(), false);
         assert_eq!(
             wire_best_effort[0],
             wire_const::T_MID_FRAME,
@@ -5554,7 +5679,7 @@ mod tests {
     #[test]
     fn build_declare_subscriber_wraps_decl_subscriber_in_declare_envelope() {
         // Case 1 — pure alias to a peer-declared mapping (suffix=None).
-        let alias = build_declare_subscriber(5, 7, None);
+        let alias = build_declare_subscriber(5, 7, None).unwrap();
         assert_eq!(
             alias.header,
             wire_const::N_MID_DECLARE,
@@ -5580,7 +5705,7 @@ mod tests {
         }
 
         // Case 2 — composite: alias N + tail suffix.
-        let composite = build_declare_subscriber(5, 7, Some("tail"));
+        let composite = build_declare_subscriber(5, 7, Some("tail")).unwrap();
         match &composite.body {
             DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
                 assert_eq!(
@@ -5600,7 +5725,7 @@ mod tests {
         }
 
         // Case 3 — literal: id=0 sentinel + suffix carries the keyexpr.
-        let literal = build_declare_subscriber(5, 0, Some("demo/test"));
+        let literal = build_declare_subscriber(5, 0, Some("demo/test")).unwrap();
         match &literal.body {
             DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
                 assert_eq!(d.header, 0x22, "literal case still sets N (suffix present)");
@@ -5642,7 +5767,7 @@ mod tests {
         //                             decl_subscriber.scxml)
         //   VLE(subscriber_id=5)     = 0x05
         //   wireexpr Local id=7 only = 0x07
-        let alias = build_declare_subscriber(5, 7, None);
+        let alias = build_declare_subscriber(5, 7, None).unwrap();
         let alias_wire = alias.wire();
         let alias_expected = vec![
             wire_const::N_MID_DECLARE, // 0x1E
@@ -5661,7 +5786,7 @@ mod tests {
         //   wireexpr.id VLE(7) = 0x07
         //   suffix_len VLE(3) = 0x03
         //   suffix bytes = "abc"
-        let composite = build_declare_subscriber(5, 7, Some("abc"));
+        let composite = build_declare_subscriber(5, 7, Some("abc")).unwrap();
         let composite_wire = composite.wire();
         let mut composite_expected = vec![
             wire_const::N_MID_DECLARE,
@@ -5682,7 +5807,7 @@ mod tests {
         //   wireexpr.id VLE(0) = 0x00
         //   suffix_len VLE(9) = 0x09
         //   suffix bytes = "demo/test"
-        let literal = build_declare_subscriber(5, 0, Some("demo/test"));
+        let literal = build_declare_subscriber(5, 0, Some("demo/test")).unwrap();
         let literal_wire = literal.wire();
         let mut literal_expected = vec![wire_const::N_MID_DECLARE, 0x62, 0x05, 0x00, 0x09];
         literal_expected.extend_from_slice(b"demo/test");
@@ -5701,7 +5826,7 @@ mod tests {
     #[test]
     fn build_declare_queryable_wraps_decl_queryable_in_declare_envelope() {
         // Case 1 — pure alias to a peer-declared mapping (suffix=None).
-        let alias = build_declare_queryable(9, 7, None);
+        let alias = build_declare_queryable(9, 7, None).unwrap();
         assert_eq!(
             alias.header,
             wire_const::N_MID_DECLARE,
@@ -5727,7 +5852,7 @@ mod tests {
         }
 
         // Case 2 — composite: alias N + tail suffix.
-        let composite = build_declare_queryable(9, 7, Some("tail"));
+        let composite = build_declare_queryable(9, 7, Some("tail")).unwrap();
         match &composite.body {
             DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
                 assert_eq!(
@@ -5747,7 +5872,7 @@ mod tests {
         }
 
         // Case 3 — literal: id=0 sentinel + suffix carries the keyexpr.
-        let literal = build_declare_queryable(9, 0, Some("demo/test"));
+        let literal = build_declare_queryable(9, 0, Some("demo/test")).unwrap();
         match &literal.body {
             DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
                 assert_eq!(d.header, 0x24, "literal case still sets N (suffix present)");
@@ -5783,7 +5908,7 @@ mod tests {
         //   DeclQueryable.header = MID(0x04) | M(0x40) = 0x44
         //   VLE(queryable_id=9)  = 0x09
         //   wireexpr Local id=7  = 0x07
-        let alias = build_declare_queryable(9, 7, None);
+        let alias = build_declare_queryable(9, 7, None).unwrap();
         let alias_wire = alias.wire();
         let alias_expected = vec![
             wire_const::N_MID_DECLARE, // 0x1E
@@ -5802,7 +5927,7 @@ mod tests {
         //   wireexpr.id VLE(7) = 0x07
         //   suffix_len VLE(3) = 0x03
         //   suffix bytes = "abc"
-        let composite = build_declare_queryable(9, 7, Some("abc"));
+        let composite = build_declare_queryable(9, 7, Some("abc")).unwrap();
         let composite_wire = composite.wire();
         let mut composite_expected = vec![
             wire_const::N_MID_DECLARE,
@@ -5823,7 +5948,7 @@ mod tests {
         //   wireexpr.id VLE(0) = 0x00
         //   suffix_len VLE(9) = 0x09
         //   suffix bytes = "demo/test"
-        let literal = build_declare_queryable(9, 0, Some("demo/test"));
+        let literal = build_declare_queryable(9, 0, Some("demo/test")).unwrap();
         let literal_wire = literal.wire();
         let mut literal_expected = vec![wire_const::N_MID_DECLARE, 0x64, 0x09, 0x00, 0x09];
         literal_expected.extend_from_slice(b"demo/test");
@@ -5840,7 +5965,7 @@ mod tests {
     #[test]
     fn build_declare_token_wraps_decl_token_in_declare_envelope() {
         // Case 1 — pure alias.
-        let alias = build_declare_token(11, 7, None);
+        let alias = build_declare_token(11, 7, None).unwrap();
         match &alias.body {
             DeclareOwnedVariant::CodecZenohDeclToken(d) => {
                 assert_eq!(d.id, 11, "DeclToken.id must equal token_id");
@@ -5860,7 +5985,7 @@ mod tests {
         }
 
         // Case 2 — composite.
-        let composite = build_declare_token(11, 7, Some("tail"));
+        let composite = build_declare_token(11, 7, Some("tail")).unwrap();
         match &composite.body {
             DeclareOwnedVariant::CodecZenohDeclToken(d) => {
                 assert_eq!(d.header, 0x26, "header MID 0x06 | N(0x20)");
@@ -5876,7 +6001,7 @@ mod tests {
         }
 
         // Case 3 — literal.
-        let literal = build_declare_token(11, 0, Some("demo/test"));
+        let literal = build_declare_token(11, 0, Some("demo/test")).unwrap();
         match &literal.body {
             DeclareOwnedVariant::CodecZenohDeclToken(d) => {
                 assert_eq!(d.header, 0x26);
@@ -5905,7 +6030,7 @@ mod tests {
     #[test]
     fn build_declare_token_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — pure alias (token_id=11, mapping_id=7, no suffix).
-        let alias = build_declare_token(11, 7, None);
+        let alias = build_declare_token(11, 7, None).unwrap();
         let alias_wire = alias.wire();
         let alias_expected = vec![
             wire_const::N_MID_DECLARE, // 0x1E
@@ -5919,7 +6044,7 @@ mod tests {
         );
 
         // Case 2 — composite (id=7 + tail "abc").
-        let composite = build_declare_token(11, 7, Some("abc"));
+        let composite = build_declare_token(11, 7, Some("abc")).unwrap();
         let composite_wire = composite.wire();
         let mut composite_expected = vec![
             wire_const::N_MID_DECLARE,
@@ -5935,7 +6060,7 @@ mod tests {
         );
 
         // Case 3 — literal (id=0 + suffix "demo/test").
-        let literal = build_declare_token(11, 0, Some("demo/test"));
+        let literal = build_declare_token(11, 0, Some("demo/test")).unwrap();
         let literal_wire = literal.wire();
         let mut literal_expected = vec![wire_const::N_MID_DECLARE, 0x66, 0x0B, 0x00, 0x09];
         literal_expected.extend_from_slice(b"demo/test");
@@ -5961,7 +6086,7 @@ mod tests {
     fn build_declare_subscriber_nonlocal_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — pure alias to peer's mapping 7 (no suffix).
         //   DeclSubscriber.header = MID(0x02) | M(0x00) = 0x02
-        let alias = build_declare_subscriber_nonlocal(5, 7, None);
+        let alias = build_declare_subscriber_nonlocal(5, 7, None).unwrap();
         assert_eq!(
             alias.wire(),
             vec![
@@ -5976,7 +6101,7 @@ mod tests {
 
         // Case 2 — composite: peer's mapping 7 + tail "abc".
         //   DeclSubscriber.header = MID | N | M(=0) = 0x22
-        let composite = build_declare_subscriber_nonlocal(5, 7, Some("abc"));
+        let composite = build_declare_subscriber_nonlocal(5, 7, Some("abc")).unwrap();
         let mut composite_expected = vec![
             wire_const::N_MID_DECLARE,
             0x22, // MID | N, no M
@@ -5996,7 +6121,7 @@ mod tests {
         // (id=200 crosses the 7-bit VLE boundary; first byte = 0xC8,
         // second byte = 0x01). Pure alias to lock the VLE writer
         // regression surface on the Nonlocal arm.
-        let large = build_declare_subscriber_nonlocal(5, 200, None);
+        let large = build_declare_subscriber_nonlocal(5, 200, None).unwrap();
         assert_eq!(
             large.wire(),
             vec![
@@ -6044,7 +6169,7 @@ mod tests {
     #[test]
     fn build_declare_queryable_nonlocal_emits_zenoh_pico_compatible_wire_bytes() {
         // Case 1 — pure alias.
-        let alias = build_declare_queryable_nonlocal(9, 7, None);
+        let alias = build_declare_queryable_nonlocal(9, 7, None).unwrap();
         assert_eq!(
             alias.wire(),
             vec![
@@ -6058,7 +6183,7 @@ mod tests {
         );
 
         // Case 2 — composite.
-        let composite = build_declare_queryable_nonlocal(9, 7, Some("abc"));
+        let composite = build_declare_queryable_nonlocal(9, 7, Some("abc")).unwrap();
         let mut composite_expected = vec![
             wire_const::N_MID_DECLARE,
             0x24, // MID | N, no M
@@ -6075,7 +6200,7 @@ mod tests {
         );
 
         // Case 3 — multi-byte VLE boundary on the peer's mapping id.
-        let large = build_declare_queryable_nonlocal(9, 200, None);
+        let large = build_declare_queryable_nonlocal(9, 200, None).unwrap();
         assert_eq!(
             large.wire(),
             vec![wire_const::N_MID_DECLARE, 0x04, 0x09, 0xC8, 0x01,],
@@ -6113,7 +6238,7 @@ mod tests {
     #[cfg(feature = "codec-declare")]
     #[test]
     fn build_declare_token_nonlocal_emits_zenoh_pico_compatible_wire_bytes() {
-        let alias = build_declare_token_nonlocal(11, 7, None);
+        let alias = build_declare_token_nonlocal(11, 7, None).unwrap();
         assert_eq!(
             alias.wire(),
             vec![
@@ -6126,7 +6251,7 @@ mod tests {
              zenoh-pico reference",
         );
 
-        let composite = build_declare_token_nonlocal(11, 7, Some("abc"));
+        let composite = build_declare_token_nonlocal(11, 7, Some("abc")).unwrap();
         let mut composite_expected = vec![
             wire_const::N_MID_DECLARE,
             0x26, // MID | N, no M
@@ -6142,7 +6267,7 @@ mod tests {
              zenoh-pico reference",
         );
 
-        let large = build_declare_token_nonlocal(11, 200, None);
+        let large = build_declare_token_nonlocal(11, 200, None).unwrap();
         assert_eq!(
             large.wire(),
             vec![wire_const::N_MID_DECLARE, 0x06, 0x0B, 0xC8, 0x01,],
@@ -6386,7 +6511,8 @@ mod tests {
             /*history=*/ false,
             /*mapping_id=*/ 0,
             Some("liveliness/dev"),
-        );
+        )
+        .unwrap();
         let future_only_wire = future_only.wire();
         let mut future_only_expected = vec![
             0x59u8, // outer: MID | F
@@ -6411,7 +6537,8 @@ mod tests {
             /*history=*/ true,
             /*mapping_id=*/ 0,
             Some("a"),
-        );
+        )
+        .unwrap();
         let current_future_wire = current_future.wire();
         let mut current_future_expected = vec![
             0x79u8, // outer: MID | C | F
@@ -6433,7 +6560,8 @@ mod tests {
         //   wireexpr.id VLE(11) = 0x0B  (no suffix bytes)
         let alias = build_interest_liveliness_subscriber(
             5, /*history=*/ false, /*mapping_id=*/ 11, None,
-        );
+        )
+        .unwrap();
         let alias_wire = alias.wire();
         assert_eq!(
             alias_wire,
@@ -6449,7 +6577,8 @@ mod tests {
             /*history=*/ false,
             /*mapping_id=*/ 11,
             Some("/tail"),
-        );
+        )
+        .unwrap();
         let composite_wire = composite.wire();
         let mut composite_expected = vec![0x59u8, 0x05, 0x79, 0x0B, 0x05];
         composite_expected.extend_from_slice(b"/tail");
@@ -6614,11 +6743,14 @@ mod tests {
     #[cfg(feature = "codec-response")]
     #[test]
     fn encode_frame_with_response_wraps_response_in_frame_envelope() {
-        let response = build_response_reply_literal(42, "k", b"v");
+        let response = build_response_reply_literal(42, "k", b"v").unwrap();
         let response_bytes = response.wire();
 
-        let wire_reliable =
-            encode_frame_with_response(0, build_response_reply_literal(42, "k", b"v"), true);
+        let wire_reliable = encode_frame_with_response(
+            0,
+            build_response_reply_literal(42, "k", b"v").unwrap(),
+            true,
+        );
         assert_eq!(
             wire_reliable[0],
             wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME,
@@ -6631,8 +6763,11 @@ mod tests {
             "Frame body tail must be Response.wire() bytes verbatim",
         );
 
-        let wire_best_effort =
-            encode_frame_with_response(0, build_response_reply_literal(42, "k", b"v"), false);
+        let wire_best_effort = encode_frame_with_response(
+            0,
+            build_response_reply_literal(42, "k", b"v").unwrap(),
+            false,
+        );
         assert_eq!(
             wire_best_effort[0],
             wire_const::T_MID_FRAME,
@@ -6643,10 +6778,11 @@ mod tests {
     #[cfg(feature = "codec-request")]
     #[test]
     fn encode_frame_with_request_wraps_request_in_frame_envelope() {
-        let request = build_request_query(42, 7, None);
+        let request = build_request_query(42, 7, None).unwrap();
         let request_bytes = request.wire();
 
-        let wire_reliable = encode_frame_with_request(0, build_request_query(42, 7, None), true);
+        let wire_reliable =
+            encode_frame_with_request(0, build_request_query(42, 7, None).unwrap(), true);
         assert_eq!(
             wire_reliable[0],
             wire_const::FLAG_T_FRAME_R | wire_const::T_MID_FRAME,
@@ -6660,7 +6796,7 @@ mod tests {
         );
 
         let wire_best_effort =
-            encode_frame_with_request(0, build_request_query(42, 7, None), false);
+            encode_frame_with_request(0, build_request_query(42, 7, None).unwrap(), false);
         assert_eq!(
             wire_best_effort[0],
             wire_const::T_MID_FRAME,
@@ -6708,10 +6844,14 @@ mod tests {
         };
         let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
 
-        let response = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"21.0").build();
+        let response = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"21.0")
+            .build()
+            .unwrap();
         let expected_wire = encode_frame_with_response(
             100,
-            ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"21.0").build(),
+            ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"21.0")
+                .build()
+                .unwrap(),
             /*reliable=*/ true,
         );
         actions.send_response(response);
@@ -6871,7 +7011,11 @@ mod tests {
         };
         let actions = SessionLinkActions::new(driver.clone(), params, TokioTime::new());
 
-        actions.send_response(ResponseReplyBuilder::new(99, 0, Some("k"), b"v").build());
+        actions.send_response(
+            ResponseReplyBuilder::new(99, 0, Some("k"), b"v")
+                .build()
+                .unwrap(),
+        );
         actions.send_response_final(99);
 
         let frames = driver.frames.lock().unwrap();
@@ -6957,10 +7101,13 @@ mod tests {
             time: 0xDEAD_BEEF_CAFE_BABE,
             zid: vec![0xAA, 0xBB],
         };
-        let put = build_msg_put_with_meta(b"payload", Some(&ts), None, None, None);
+        let put = build_msg_put_with_meta(b"payload", Some(&ts), None, None, None).unwrap();
         assert!(put.timestamp.is_some(), "set_t routes through Option");
         assert_eq!(put.timestamp.as_ref().unwrap().time, 0xDEAD_BEEF_CAFE_BABE);
-        assert_eq!(put.timestamp.as_ref().unwrap().zid, vec![0xAA, 0xBB]);
+        assert_eq!(
+            put.timestamp.as_ref().unwrap().zid.as_slice(),
+            &[0xAA, 0xBB]
+        );
         assert!(put.t(), "T flag must be set when timestamp is attached");
         assert!(!put.e(), "E flag must remain clear when encoding is absent");
         assert!(!put.z(), "Z flag must remain clear without body extensions");
@@ -6973,7 +7120,7 @@ mod tests {
             packed_id: 13,
             schema: Some("application/json".into()),
         };
-        let put = build_msg_put_with_meta(b"payload", None, Some(&enc), None, None);
+        let put = build_msg_put_with_meta(b"payload", None, Some(&enc), None, None).unwrap();
         assert!(put.encoding.is_some());
         assert_eq!(put.encoding.as_ref().unwrap().packed_id, 13);
         assert_eq!(
@@ -6996,7 +7143,7 @@ mod tests {
     #[test]
     fn build_msg_put_with_meta_attaches_source_info_ext_and_sets_z_flag() {
         let si = SourceInfo::new(&[0x11, 0x22, 0x33, 0x44], 7, 42);
-        let put = build_msg_put_with_meta(b"payload", None, None, Some(&si), None);
+        let put = build_msg_put_with_meta(b"payload", None, None, Some(&si), None).unwrap();
         let exts = put.extensions.as_deref().expect("body ext chain populated");
         assert_eq!(exts.len(), 1);
         // source_info ext: ENC_ZBUF(0x40) | ext_id(0x01) — M and Z bits
@@ -7023,7 +7170,8 @@ mod tests {
         // attachment so the chain position must mirror that ordering.
         let si = SourceInfo::new(&[0xDE, 0xAD], 7, 0);
         let put =
-            build_msg_put_with_meta(b"payload", None, None, Some(&si), Some(b"attach-payload"));
+            build_msg_put_with_meta(b"payload", None, None, Some(&si), Some(b"attach-payload"))
+                .unwrap();
         let exts = put.extensions.as_deref().expect("body ext chain populated");
         assert_eq!(exts.len(), 2, "source_info + attachment = 2 entries");
         assert_eq!(exts[0].header & 0x4F, 0x41, "source_info first");
@@ -7038,7 +7186,7 @@ mod tests {
     #[cfg(feature = "codec-push")]
     #[test]
     fn build_msg_put_with_meta_leaves_extensions_none_on_empty_inputs() {
-        let put = build_msg_put_with_meta(b"payload", None, None, None, None);
+        let put = build_msg_put_with_meta(b"payload", None, None, None, None).unwrap();
         assert!(put.extensions.is_none());
         assert!(!put.z(), "Z flag must remain clear with no extensions");
         assert!(!put.t(), "T flag clear with no timestamp");
@@ -7056,7 +7204,7 @@ mod tests {
             time: 0x0102_0304_0506_0708,
             zid: vec![0x99],
         };
-        let del = build_msg_del_with_meta(Some(&ts), None, None);
+        let del = build_msg_del_with_meta(Some(&ts), None, None).unwrap();
         assert!(del.timestamp.is_some());
         assert!(del.t(), "T flag set when Del carries timestamp");
         assert!(!del.z(), "Z flag clear with no extensions");
@@ -7090,7 +7238,7 @@ mod tests {
             qos: Some(QosLevel::from_raw(0x10)),
             ..Default::default()
         };
-        let push = build_push_literal_with_meta("home/temp", b"22.5", &meta);
+        let push = build_push_literal_with_meta("home/temp", b"22.5", &meta).unwrap();
         // Push.header bit 7 (0x80) = Z chain-continuation for outer
         // extensions. Must be set when an outer extension is present.
         assert_eq!(push.header & 0x80, 0x80);
@@ -7128,7 +7276,7 @@ mod tests {
             attachment: Some(b"attach".to_vec()),
             qos: Some(QosLevel::from_raw(0b0001_1010)),
         };
-        let push = build_push_literal_with_meta("home/temp", b"payload", &meta);
+        let push = build_push_literal_with_meta("home/temp", b"payload", &meta).unwrap();
         let encoded = push.wire();
 
         // Decode back via SCE-emitted cursor path. wz-codecs re-exports
@@ -7137,7 +7285,8 @@ mod tests {
         let mut cursor = sce_forge_runtime::codec::SceCursor::new(&encoded);
         let decoded = Push::decode(&mut cursor)
             .expect("Push round-trip decode")
-            .into_owned();
+            .try_into_owned()
+            .unwrap();
 
         // Outer Push extensions: qos must round-trip.
         let outer = decoded
@@ -7155,7 +7304,7 @@ mod tests {
         if let PushOwnedVariant::CodecZenohMsgPut(put) = &decoded.body {
             let ts = put.timestamp.as_ref().expect("timestamp round-trips");
             assert_eq!(ts.time, 0x1122_3344_5566_7788);
-            assert_eq!(ts.zid, vec![0xAA, 0xBB, 0xCC]);
+            assert_eq!(ts.zid.as_slice(), &[0xAA, 0xBB, 0xCC]);
             let enc = put.encoding.as_ref().expect("encoding round-trips");
             assert_eq!(enc.packed_id, 5);
             assert_eq!(enc.schema.as_deref(), Some("text/plain"));
@@ -7204,12 +7353,13 @@ mod tests {
             attachment: Some(b"del-att".to_vec()),
             qos: Some(QosLevel::from_raw(0x10)),
         };
-        let push = build_push_del_literal_with_meta("home/temp", &meta);
+        let push = build_push_del_literal_with_meta("home/temp", &meta).unwrap();
         let encoded = push.wire();
         let mut cursor = sce_forge_runtime::codec::SceCursor::new(&encoded);
         let decoded = Push::decode(&mut cursor)
             .expect("Push(MsgDel) round-trip")
-            .into_owned();
+            .try_into_owned()
+            .unwrap();
 
         if let PushOwnedVariant::CodecZenohMsgDel(del) = &decoded.body {
             assert_eq!(del.timestamp.as_ref().unwrap().time, 0xAABB_CCDD);
@@ -7250,7 +7400,9 @@ mod tests {
             qos: Some(QosLevel::from_raw(0x10)),
             ..Default::default()
         };
-        actions.send_push_with_meta_literal("home/temp", b"data", true, &meta);
+        actions
+            .send_push_with_meta_literal("home/temp", b"data", true, &meta)
+            .unwrap();
 
         let frames = driver.frames.lock().unwrap();
         assert_eq!(frames.len(), 1);
@@ -7259,7 +7411,7 @@ mod tests {
         // we re-encode an equivalent Push via build_push_literal_with_meta
         // and assert the trailing Push bytes are byte-identical to the
         // bytes that follow the Frame envelope in the recorded buffer.
-        let standalone_push = build_push_literal_with_meta("home/temp", b"data", &meta);
+        let standalone_push = build_push_literal_with_meta("home/temp", b"data", &meta).unwrap();
         let standalone_bytes = standalone_push.wire();
         assert!(
             frames[0]
@@ -7733,7 +7885,9 @@ mod tests {
             publish_meta_fixture_params(),
             TokioTime::new(),
         );
-        actions_a.send_request_query_with_meta(42, 0, Some("home/temp"), &QueryMetadata::default());
+        actions_a
+            .send_request_query_with_meta(42, 0, Some("home/temp"), &QueryMetadata::default())
+            .unwrap();
         let with_meta = driver_a.frames.lock().unwrap()[0].0.clone();
 
         let driver_b = std::sync::Arc::new(CaptureDriver::new());
@@ -7742,7 +7896,9 @@ mod tests {
             publish_meta_fixture_params(),
             TokioTime::new(),
         );
-        actions_b.send_request_query(42, 0, Some("home/temp"));
+        actions_b
+            .send_request_query(42, 0, Some("home/temp"))
+            .unwrap();
         let no_meta = driver_b.frames.lock().unwrap()[0].0.clone();
 
         assert_eq!(
@@ -7769,10 +7925,12 @@ mod tests {
             target: Some(QueryTarget::All),
             ..Default::default()
         };
-        actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
+        actions
+            .send_request_query_with_meta(42, 0, Some("home/temp"), &meta)
+            .unwrap();
 
         let standalone =
-            build_request_query_with_target(42, 0, Some("home/temp"), QueryTarget::All);
+            build_request_query_with_target(42, 0, Some("home/temp"), QueryTarget::All).unwrap();
         let standalone_bytes = standalone.wire();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
@@ -7796,14 +7954,17 @@ mod tests {
             consolidation: Some(ConsolidationMode::Latest),
             ..Default::default()
         };
-        actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
+        actions
+            .send_request_query_with_meta(42, 0, Some("home/temp"), &meta)
+            .unwrap();
 
         let standalone = build_request_query_with_consolidation(
             42,
             0,
             Some("home/temp"),
             ConsolidationMode::Latest,
-        );
+        )
+        .unwrap();
         let standalone_bytes = standalone.wire();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
@@ -7827,9 +7988,12 @@ mod tests {
             attachment: Some(b"q-att".to_vec()),
             ..Default::default()
         };
-        actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
+        actions
+            .send_request_query_with_meta(42, 0, Some("home/temp"), &meta)
+            .unwrap();
 
-        let standalone = build_request_query_with_attachment(42, 0, Some("home/temp"), b"q-att");
+        let standalone =
+            build_request_query_with_attachment(42, 0, Some("home/temp"), b"q-att").unwrap();
         let standalone_bytes = standalone.wire();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
@@ -7859,13 +8023,15 @@ mod tests {
             attachment: Some(Vec::new()),
             ..Default::default()
         };
-        actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
+        actions
+            .send_request_query_with_meta(42, 0, Some("home/temp"), &meta)
+            .unwrap();
 
         // No panic; frame ends up matching the no-meta baseline (meta
         // is not empty for is_empty() because attachment.is_some(),
         // but the wire emission elides the ext because the inner
         // slice is empty).
-        let baseline = build_request_query(42, 0, Some("home/temp"));
+        let baseline = build_request_query(42, 0, Some("home/temp")).unwrap();
         let baseline_bytes = baseline.wire();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(
@@ -7889,9 +8055,12 @@ mod tests {
             timeout_ms: 5_000,
             ..Default::default()
         };
-        actions.send_request_query_with_meta(42, 0, Some("home/temp"), &meta);
+        actions
+            .send_request_query_with_meta(42, 0, Some("home/temp"), &meta)
+            .unwrap();
 
-        let standalone = build_request_query_with_timeout_ms(42, 0, Some("home/temp"), 5_000);
+        let standalone =
+            build_request_query_with_timeout_ms(42, 0, Some("home/temp"), 5_000).unwrap();
         let standalone_bytes = standalone.wire();
         let frame = &driver.frames.lock().unwrap()[0].0;
         assert!(

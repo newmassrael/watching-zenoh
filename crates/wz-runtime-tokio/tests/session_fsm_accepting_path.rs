@@ -428,7 +428,8 @@ async fn r86_send_init_ack_with_cookie_binds_to_inbound_peer_zid() {
         &[0xB0, 0xB1, 0xB2, 0xB3],
     );
     assert_eq!(
-        cookie, expected_cookie,
+        cookie.as_slice(),
+        expected_cookie.as_slice(),
         "R86: outbound InitAck cookie MUST be HMAC(cookie_signing_key, \
          inbound_peer_zid)[..16] — pre-R86 this was params.cookie verbatim \
          which violated RFC §5.M anti-amplification (deploy-static cookie \

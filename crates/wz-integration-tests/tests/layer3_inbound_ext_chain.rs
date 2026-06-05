@@ -157,7 +157,7 @@ fn parse_inbound_decodes_ext_chain_from_pico_wire() {
             assert!(!extensions[2].z(), "terminal entry must clear Z");
             match &extensions[2].body {
                 ExtEntryOwnedVariant::CodecZenohExtZbuf(b) => {
-                    assert_eq!(b.value, ENTRY2_ZBUF_VAL.to_vec())
+                    assert_eq!(b.value.as_slice(), ENTRY2_ZBUF_VAL.as_slice())
                 }
                 _ => panic!("entry 2 must decode to ZBuf"),
             }

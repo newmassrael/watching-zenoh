@@ -288,7 +288,9 @@ where
         "wz-ap-demo: query_task observed Established; emitting Query \
          on keyexpr='{keyexpr}' rid={QUERY_RID}"
     );
-    actions.send_request_query(QUERY_RID, /*mapping_id=*/ 0, Some(&keyexpr));
+    actions
+        .send_request_query(QUERY_RID, /*mapping_id=*/ 0, Some(&keyexpr))
+        .expect("demo query keyexpr is a fixed short literal, within codec bounds");
     log::info!("wz-ap-demo: QUERY EMITTED keyexpr='{keyexpr}' rid={QUERY_RID}");
 }
 
@@ -438,7 +440,10 @@ pub(crate) async fn publisher_task<T>(
             Some(mapping_id) => session
                 .publish_aliased_auto(mapping_id, None, payload, opts)
                 .map(|fired| (fired, "aliased")),
-            None => Ok((session.publish(&keyexpr, payload, opts), "literal")),
+            None => session
+                .publish(&keyexpr, payload, opts)
+                .map(|fired| (fired, "literal"))
+                .map_err(PublishAliasError::from),
         };
         match dispatch_outcome {
             Ok((loopback_fired, mode)) => {
@@ -463,6 +468,16 @@ pub(crate) async fn publisher_task<T>(
                 log::error!(
                     "wz-ap-demo: publisher_task UnknownMapping id={id} on idx={i} — \
                      declare-before-publish contract violated; skipping this iteration"
+                );
+            }
+            // W3 — the publish build can now also reject when caller
+            // data overflows the declared codec capacity (a no-emit
+            // reject); log and skip the iteration so the burst still
+            // terminates.
+            Err(e @ PublishAliasError::ExceedsCapacity) => {
+                log::error!(
+                    "wz-ap-demo: publisher_task publish rejected on idx={i}: {e}; \
+                     skipping this iteration"
                 );
             }
         }

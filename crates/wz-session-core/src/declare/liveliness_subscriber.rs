@@ -744,7 +744,8 @@ mod tests {
             body: None,
             extensions: None,
         }
-        .into_owned();
+        .try_into_owned()
+        .unwrap();
         let messages = vec![NetworkMessage::Interest(interest_final)];
         reg.dispatch_messages(&messages, &HashMap::new());
 
@@ -783,7 +784,8 @@ mod tests {
             }),
             extensions: None,
         }
-        .into_owned();
+        .try_into_owned()
+        .unwrap();
         let messages = vec![NetworkMessage::Interest(non_final)];
         reg.dispatch_messages(&messages, &HashMap::new());
 

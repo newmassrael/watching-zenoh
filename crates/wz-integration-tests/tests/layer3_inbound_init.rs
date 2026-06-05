@@ -152,7 +152,7 @@ fn parse_inbound_decodes_pico_initack_frame() {
                 "no-Z-flag frame must yield empty extensions"
             );
             assert_eq!(body.version, 0x05);
-            assert_eq!(body.zid, vec![0x01, 0x02, 0x03, 0x04]);
+            assert_eq!(body.zid.as_slice(), [0x01, 0x02, 0x03, 0x04].as_slice());
             assert_eq!(body.sn_res, Some(0x06)); // (seq=2 & 0x03) | ((req=1 & 0x03) << 2)
             assert_eq!(body.batch_size, Some(0xCAFE));
             assert_eq!(body.cookie.as_deref(), Some(cookie.as_slice()));

@@ -181,7 +181,12 @@ use crate::sample::{EncodingHint, QosLevel, Reliability, SampleKind, SourceInfo,
 use crate::sample::Sample;
 #[cfg(feature = "liveliness-token")]
 use crate::session_glue::SendDeclareError;
-use crate::session_glue::{PushMetadata, SessionLinkActions};
+use crate::session_glue::SendWireError;
+use crate::session_glue::SessionLinkActions;
+// W3 — PushMetadata is consumed only by the `codec-push`-gated
+// `PublishOptions::push_metadata`, so the import carries the same gate.
+#[cfg(feature = "codec-push")]
+use crate::session_glue::PushMetadata;
 // R311o — `QueryTarget` / `ConsolidationMode` are referenced from
 // the now-unconditional `QueryOptions` struct fields + builder
 // bodies, so they import unconditionally. `QueryMetadata` is only
@@ -346,6 +351,12 @@ impl PublishOptions {
     /// `send_push_*` outbound API expects (it predates the typed
     /// enum). Exposed inside the crate so [`Session::publish`] does
     /// the conversion in exactly one place.
+    ///
+    /// W3 — `codec-push`-gated: the sole callers are the
+    /// `codec-push`-gated remote legs of [`Session::publish`] /
+    /// [`Session::publish_aliased`], so the helper is dead weight on a
+    /// build without the Push codec.
+    #[cfg(feature = "codec-push")]
     fn reliable_bool(&self) -> bool {
         matches!(self.reliability, Reliability::Reliable)
     }
@@ -359,6 +370,10 @@ impl PublishOptions {
     /// expected publish path performs one extraction per publish
     /// call so the allocation cost is amortised against the wire
     /// frame's existing copies.
+    ///
+    /// W3 — `codec-push`-gated for the same reason as
+    /// [`Self::reliable_bool`]: only the gated remote legs consume it.
+    #[cfg(feature = "codec-push")]
     fn push_metadata(&self) -> PushMetadata {
         PushMetadata {
             timestamp: self.timestamp.clone(),
@@ -943,18 +958,33 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
     /// under `allows_local()`. Both branches run when
     /// `Locality::Any` (the default) and the publisher's intent is
     /// "fan to every receiver, in-process and remote".
-    pub fn publish(&self, keyexpr: &str, payload: &[u8], opts: PublishOptions) -> usize {
-        let reliable = opts.reliable_bool();
+    pub fn publish(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        opts: PublishOptions,
+    ) -> Result<usize, PublishError> {
+        // W3 — the remote wire leg is `codec-push`-gated (symmetric with
+        // the `pubsub-allow-loop` loopback gate below). On a build
+        // without `codec-push` the Push codec is statically absent, so
+        // the remote leg is elided entirely and the loopback leg still
+        // runs — rather than `?`-aborting on a `FeatureDisabled` reject,
+        // which would break in-process pub/sub for codec-push-less
+        // deploys. With `codec-push` on, the only runtime reject is a
+        // payload/keyexpr that overflows the declared codec capacity
+        // (`PublishError::ExceedsCapacity`).
+        #[cfg(feature = "codec-push")]
         if opts.allowed_destination.allows_remote() {
+            let reliable = opts.reliable_bool();
             let meta = opts.push_metadata();
             match opts.kind {
                 SampleKind::Put => {
                     self.actions
-                        .send_push_with_meta_literal(keyexpr, payload, reliable, &meta);
+                        .send_push_with_meta_literal(keyexpr, payload, reliable, &meta)?;
                 }
                 SampleKind::Del => {
                     self.actions
-                        .send_push_del_with_meta_literal(keyexpr, reliable, &meta);
+                        .send_push_del_with_meta_literal(keyexpr, reliable, &meta)?;
                 }
             }
         }
@@ -968,18 +998,21 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
         // to the R::with_mutex_mut closure form (R311ct API) so this
         // method composes generically across the runtime profile.
         #[cfg(feature = "pubsub-allow-loop")]
-        if opts.allowed_destination.allows_local() {
-            let sample = build_loopback_sample(keyexpr, payload, &opts);
-            R::with_mutex_mut(&self.observer, |observer| {
-                observer.subscribers.local_publish(&sample)
-            })
-        } else {
-            0
+        {
+            let delivered = if opts.allowed_destination.allows_local() {
+                let sample = build_loopback_sample(keyexpr, payload, &opts);
+                R::with_mutex_mut(&self.observer, |observer| {
+                    observer.subscribers.local_publish(&sample)
+                })
+            } else {
+                0
+            };
+            Ok(delivered)
         }
         #[cfg(not(feature = "pubsub-allow-loop"))]
         {
             let _ = (keyexpr, payload, opts);
-            0
+            Ok(0)
         }
     }
 
@@ -1038,9 +1071,12 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
         loopback_keyexpr: &str,
         payload: &[u8],
         opts: PublishOptions,
-    ) -> usize {
-        let reliable = opts.reliable_bool();
+    ) -> Result<usize, PublishError> {
+        // W3 — remote wire leg `codec-push`-gated (see Session::publish);
+        // a codec-push-less build elides it and runs loopback only.
+        #[cfg(feature = "codec-push")]
         if opts.allowed_destination.allows_remote() {
+            let reliable = opts.reliable_bool();
             let meta = opts.push_metadata();
             match opts.kind {
                 SampleKind::Put => {
@@ -1050,7 +1086,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                         payload,
                         reliable,
                         &meta,
-                    );
+                    )?;
                 }
                 SampleKind::Del => {
                     self.actions.send_push_del_with_meta_aliased(
@@ -1058,26 +1094,31 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                         inline_suffix,
                         reliable,
                         &meta,
-                    );
+                    )?;
                 }
             }
         }
+        #[cfg(not(feature = "codec-push"))]
+        let _ = (mapping_id, inline_suffix);
         // R311cc — pubsub-allow-loop gates the aliased-publish
         // loopback fan-out (mirror of Session::publish gate).
         // R311db — observer access via R::with_mutex_mut (closure form).
         #[cfg(feature = "pubsub-allow-loop")]
-        if opts.allowed_destination.allows_local() {
-            let sample = build_loopback_sample(loopback_keyexpr, payload, &opts);
-            R::with_mutex_mut(&self.observer, |observer| {
-                observer.subscribers.local_publish(&sample)
-            })
-        } else {
-            0
+        {
+            let delivered = if opts.allowed_destination.allows_local() {
+                let sample = build_loopback_sample(loopback_keyexpr, payload, &opts);
+                R::with_mutex_mut(&self.observer, |observer| {
+                    observer.subscribers.local_publish(&sample)
+                })
+            } else {
+                0
+            };
+            Ok(delivered)
         }
         #[cfg(not(feature = "pubsub-allow-loop"))]
         {
             let _ = (loopback_keyexpr, payload, opts);
-            0
+            Ok(0)
         }
     }
 
@@ -1123,7 +1164,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                 composed
             }
         };
-        Ok(self.publish_aliased(mapping_id, inline_suffix, &loopback_keyexpr, payload, opts))
+        Ok(self.publish_aliased(mapping_id, inline_suffix, &loopback_keyexpr, payload, opts)?)
     }
 
     /// R239 — issue a query on `keyexpr` and route replies to
@@ -1260,7 +1301,9 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                         // `QueryOwned` has no `Default`; build the borrowed
                         // default and deep-copy into the owned form the
                         // loopback dispatch path (`local_query`) now takes.
-                        let query = Query::default().into_owned();
+                        let query = Query::default().try_into_owned().expect(
+                            "Query::default has empty fields, trivially within codec bounds",
+                        );
                         observer
                             .queryables
                             .local_query(rid, keyexpr, &query, &mut replies);
@@ -1294,10 +1337,10 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                 // callers that pass `QueryOptions::default()`.
                 let meta = opts.query_metadata();
                 if meta.is_empty() {
-                    self.actions.send_request_query(rid, 0, Some(keyexpr));
+                    self.actions.send_request_query(rid, 0, Some(keyexpr))?;
                 } else {
                     self.actions
-                        .send_request_query_with_meta(rid, 0, Some(keyexpr), &meta);
+                        .send_request_query_with_meta(rid, 0, Some(keyexpr), &meta)?;
                 }
             }
 
@@ -1416,7 +1459,9 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                         // `QueryOwned` has no `Default`; build the borrowed
                         // default and deep-copy into the owned form the
                         // loopback dispatch path (`local_query`) now takes.
-                        let query = Query::default().into_owned();
+                        let query = Query::default().try_into_owned().expect(
+                            "Query::default has empty fields, trivially within codec bounds",
+                        );
                         observer.queryables.local_query(
                             rid,
                             loopback_keyexpr,
@@ -1437,14 +1482,14 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                 let meta = opts.query_metadata();
                 if meta.is_empty() {
                     self.actions
-                        .send_request_query(rid, mapping_id, inline_suffix);
+                        .send_request_query(rid, mapping_id, inline_suffix)?;
                 } else {
                     self.actions.send_request_query_with_meta(
                         rid,
                         mapping_id,
                         inline_suffix,
                         &meta,
-                    );
+                    )?;
                 }
             }
 
@@ -1892,6 +1937,11 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                 .send_declare_token(token_id, /*mapping_id=*/ 0, Some(&keyexpr_string))
                 .map_err(|e| match e {
                     SendDeclareError::Keyexpr(inner) => LivelinessAliasError::InvalidKeyexpr(inner),
+                    // W3 — a literal keyexpr longer than MAX_KEYEXPR_BYTES
+                    // is a reachable caller-data condition (not a
+                    // protocol invariant), so it projects to the typed
+                    // public reject rather than the unreachable guard.
+                    SendDeclareError::Codec(_) => LivelinessAliasError::ExceedsCapacity,
                     // declare_token always calls send_declare_token in
                     // literal mode (mapping_id = 0, suffix = Some(_)),
                     // so the protocol-invariant variants cannot fire.
@@ -1979,6 +2029,10 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                 .send_declare_token(token_id, mapping_id, inline_suffix)
                 .map_err(|e| match e {
                     SendDeclareError::Keyexpr(inner) => LivelinessAliasError::InvalidKeyexpr(inner),
+                    // W3 — reconstructed keyexpr over MAX_KEYEXPR_BYTES is a
+                    // reachable caller-data condition projecting to the
+                    // typed public reject.
+                    SendDeclareError::Codec(_) => LivelinessAliasError::ExceedsCapacity,
                     SendDeclareError::UnknownMappingId(id) => {
                         // Race against a concurrent send_undeclare_kexpr
                         // between the pre-check resolve_outbound_mapping
@@ -2135,7 +2189,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                 options.history,
                 /*keyexpr_mapping_id=*/ 0,
                 Some(&keyexpr_string),
-            );
+            )?;
             Ok(LivelinessSubscriber {
                 session: self.clone(),
                 interest_id,
@@ -2277,7 +2331,7 @@ impl<R: Runtime, T: TimeSource> Session<R, T> {
                 options.history,
                 mapping_id,
                 inline_suffix,
-            );
+            )?;
             Ok(LivelinessSubscriber {
                 session: self.clone(),
                 interest_id,
@@ -2329,6 +2383,14 @@ pub enum QueryAliasError {
     /// for callsite stability; this variant lets callers branch on
     /// FeatureDisabled uniformly once the transition lands).
     FeatureDisabled,
+    /// W3 (SCE pin 7a94d084a) — a query field (keyexpr suffix, selector
+    /// parameters, or attachment) exceeded its declared bounded-codec
+    /// capacity while being copied into the no-alloc owned
+    /// `Request(Query)` mirror, so no wire bytes were emitted. Semantic
+    /// projection of the codec-layer reject (keeps the SCE codec type
+    /// off the public surface); the generic name avoids over-claiming
+    /// which field overflowed, matching [`PublishError::ExceedsCapacity`].
+    ExceedsCapacity,
 }
 
 impl std::fmt::Display for QueryAliasError {
@@ -2344,11 +2406,25 @@ impl std::fmt::Display for QueryAliasError {
                 "QueryAliasError: query-get feature is OFF at compile time; the \
                  outbound query / reply-registry paths are elided on this build"
             ),
+            QueryAliasError::ExceedsCapacity => write!(
+                f,
+                "QueryAliasError: a query field (keyexpr / parameters / attachment) \
+                 exceeded the declared codec capacity; the Request(Query) was not emitted"
+            ),
         }
     }
 }
 
 impl std::error::Error for QueryAliasError {}
+
+impl From<SendWireError> for QueryAliasError {
+    fn from(e: SendWireError) -> Self {
+        match e {
+            SendWireError::Codec(_) => QueryAliasError::ExceedsCapacity,
+            SendWireError::FeatureDisabled => QueryAliasError::FeatureDisabled,
+        }
+    }
+}
 
 /// R242 — reusable query target with pre-set keyexpr + options.
 /// Mirror of zenoh-pico's `z_querier_t`
@@ -2719,7 +2795,7 @@ impl<R: Runtime, T: TimeSource> Publisher<R, T> {
     /// the declared options retain the caller's reliability /
     /// locality / metadata choices; only the discriminator that
     /// selects put vs delete is overridden by the call shape.
-    pub fn put(&self, payload: &[u8]) -> usize {
+    pub fn put(&self, payload: &[u8]) -> Result<usize, PublishError> {
         let mut opts = self.options.clone();
         opts.kind = SampleKind::Put;
         self.session.publish(&self.keyexpr, payload, opts)
@@ -2731,7 +2807,7 @@ impl<R: Runtime, T: TimeSource> Publisher<R, T> {
     /// slot per zenoh-pico `_z_msg_del_t`).
     ///
     /// Per-call `opts.kind` is overridden to [`SampleKind::Del`].
-    pub fn delete(&self) -> usize {
+    pub fn delete(&self) -> Result<usize, PublishError> {
         let mut opts = self.options.clone();
         opts.kind = SampleKind::Del;
         self.session.publish(&self.keyexpr, &[], opts)
@@ -3464,6 +3540,13 @@ pub enum LivelinessAliasError {
     /// build whose declare-token / declare-undeclare runtime path is
     /// absent.
     FeatureDisabled,
+    /// W3 (SCE pin 7a94d084a) — the resolved keyexpr exceeded the
+    /// declared bounded-codec capacity (`MAX_KEYEXPR_BYTES`) while
+    /// being copied into the no-alloc owned DECLARE mirror, so no wire
+    /// bytes were emitted. Semantic projection of the codec-layer
+    /// `CodecError` (the public surface stays free of the SCE codec
+    /// type, mirroring how the other variants expose wz-level causes).
+    ExceedsCapacity,
 }
 
 impl std::fmt::Display for LivelinessAliasError {
@@ -3484,6 +3567,11 @@ impl std::fmt::Display for LivelinessAliasError {
                  on this wz-runtime-tokio build; rebuild with the feature \
                  enabled (or its preset) to obtain a LivelinessToken handle"
             ),
+            LivelinessAliasError::ExceedsCapacity => write!(
+                f,
+                "LivelinessAliasError: keyexpr exceeded the declared codec \
+                 capacity (MAX_KEYEXPR_BYTES); the DECLARE was not emitted"
+            ),
         }
     }
 }
@@ -3492,7 +3580,9 @@ impl std::error::Error for LivelinessAliasError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             LivelinessAliasError::InvalidKeyexpr(inner) => Some(inner),
-            LivelinessAliasError::UnknownMapping(_) | LivelinessAliasError::FeatureDisabled => None,
+            LivelinessAliasError::UnknownMapping(_)
+            | LivelinessAliasError::FeatureDisabled
+            | LivelinessAliasError::ExceedsCapacity => None,
         }
     }
 }
@@ -3783,6 +3873,12 @@ pub enum LivelinessSubscriberAliasError {
     /// disabled so no callback would ever fire even if a stub handle
     /// were constructed.
     FeatureDisabled,
+    /// W3 (SCE pin 7a94d084a) — the resolved keyexpr exceeded the
+    /// declared bounded-codec capacity (`MAX_KEYEXPR_BYTES`) while
+    /// being copied into the no-alloc owned `Interest` mirror, so no
+    /// wire bytes were emitted. Semantic projection of the codec-layer
+    /// reject.
+    ExceedsCapacity,
 }
 
 impl std::fmt::Display for LivelinessSubscriberAliasError {
@@ -3805,11 +3901,25 @@ impl std::fmt::Display for LivelinessSubscriberAliasError {
                  compile time; the wire-emit and observer-dispatch paths are elided, \
                  so no subscription can be established on this build"
             ),
+            LivelinessSubscriberAliasError::ExceedsCapacity => write!(
+                f,
+                "LivelinessSubscriberAliasError: keyexpr exceeded the declared codec \
+                 capacity (MAX_KEYEXPR_BYTES); the Interest was not emitted"
+            ),
         }
     }
 }
 
 impl std::error::Error for LivelinessSubscriberAliasError {}
+
+impl From<SendWireError> for LivelinessSubscriberAliasError {
+    fn from(e: SendWireError) -> Self {
+        match e {
+            SendWireError::Codec(_) => LivelinessSubscriberAliasError::ExceedsCapacity,
+            SendWireError::FeatureDisabled => LivelinessSubscriberAliasError::FeatureDisabled,
+        }
+    }
+}
 
 /// R234 — typed error returned by
 /// [`Session::publish_aliased_auto`] when the requested mapping id
@@ -3825,6 +3935,11 @@ pub enum PublishAliasError {
     /// outbound mapping table (or a later `send_undeclare_kexpr`
     /// retracted it). The wrapped value is the offending mapping id.
     UnknownMapping(u64),
+    /// W3 (SCE pin 7a94d084a) — the payload or resolved keyexpr
+    /// exceeded the declared bounded-codec capacity while being copied
+    /// into the no-alloc owned Push mirror, so no wire bytes were
+    /// emitted (projected from the underlying [`PublishError`]).
+    ExceedsCapacity,
 }
 
 impl std::fmt::Display for PublishAliasError {
@@ -3835,11 +3950,75 @@ impl std::fmt::Display for PublishAliasError {
                 "PublishAliasError: mapping id {id} not present in outbound table; \
                  call SessionLinkActions::send_declare_keyexpr({id}, …) first"
             ),
+            PublishAliasError::ExceedsCapacity => write!(
+                f,
+                "PublishAliasError: payload or keyexpr exceeded the declared codec \
+                 capacity; the Push was not emitted"
+            ),
         }
     }
 }
 
 impl std::error::Error for PublishAliasError {}
+
+impl From<PublishError> for PublishAliasError {
+    fn from(e: PublishError) -> Self {
+        match e {
+            PublishError::ExceedsCapacity => PublishAliasError::ExceedsCapacity,
+        }
+    }
+}
+
+/// W3 (SCE pin 7a94d084a) — typed reject from the literal /
+/// direct-aliased publish path ([`Session::publish`] /
+/// [`Session::publish_aliased`] and the [`Publisher`] handles). These
+/// paths do not resolve the outbound mapping table (so they cannot
+/// produce `UnknownMapping`), and their remote leg is
+/// `codec-push`-gated (a build without the Push codec elides the leg
+/// and runs loopback only — never an error), so the single failure
+/// mode is a caller-data overflow of the declared bounded-codec
+/// capacity. Distinct from [`PublishAliasError`] (ISP): the
+/// auto-resolving [`Session::publish_aliased_auto`] keeps the richer
+/// `UnknownMapping` surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublishError {
+    /// The payload or keyexpr exceeded the declared bounded-codec
+    /// capacity while being copied into the no-alloc owned Push
+    /// mirror — the same bound the decode path enforces. No wire bytes
+    /// were emitted.
+    ExceedsCapacity,
+}
+
+impl std::fmt::Display for PublishError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PublishError::ExceedsCapacity => write!(
+                f,
+                "PublishError: payload or keyexpr exceeded the declared codec \
+                 capacity; the Push was not emitted"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PublishError {}
+
+impl From<SendWireError> for PublishError {
+    fn from(e: SendWireError) -> Self {
+        match e {
+            SendWireError::Codec(_) => PublishError::ExceedsCapacity,
+            // `Session::publish` / `publish_aliased` only invoke the
+            // send_push_* path inside a `#[cfg(feature = "codec-push")]`
+            // block, where the Push codec is present; the send therefore
+            // never reports `FeatureDisabled` to this conversion. The
+            // guard documents that compile-time invariant (and trips a
+            // future regression that ungates the leg).
+            SendWireError::FeatureDisabled => {
+                unreachable!("publish remote leg is codec-push-gated")
+            }
+        }
+    }
+}
 
 /// R232 — shared loopback Sample assembly for [`Session::publish`] and
 /// [`Session::publish_aliased`]. Constructs a Put or Del Sample on the
@@ -4018,7 +4197,9 @@ mod tests {
                 counter_clone.fetch_add(1, Ordering::SeqCst);
             });
 
-        let fired = session.publish("home/temp", b"22.5", PublishOptions::put());
+        let fired = session
+            .publish("home/temp", b"22.5", PublishOptions::put())
+            .unwrap();
         assert_eq!(fired, 1, "Locality::Any fires loopback subscriber");
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -4044,7 +4225,7 @@ mod tests {
             });
 
         let opts = PublishOptions::put().with_locality(Locality::Remote);
-        let fired = session.publish("home/temp", b"22.5", opts);
+        let fired = session.publish("home/temp", b"22.5", opts).unwrap();
         assert_eq!(
             fired, 0,
             "Locality::Remote suppresses loopback branch entirely"
@@ -4073,7 +4254,7 @@ mod tests {
             });
 
         let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
-        let fired = session.publish("home/temp", b"22.5", opts);
+        let fired = session.publish("home/temp", b"22.5", opts).unwrap();
         assert_eq!(fired, 1, "loopback branch fires the Any-default subscriber");
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -4101,7 +4282,7 @@ mod tests {
         let opts = PublishOptions::put()
             .with_locality(Locality::SessionLocal)
             .with_reliability(Reliability::BestEffort);
-        let fired = session.publish("home/temp", b"22.5", opts);
+        let fired = session.publish("home/temp", b"22.5", opts).unwrap();
         assert_eq!(fired, 1);
         let observed = captured.lock().unwrap().clone().expect("callback fired");
         assert_eq!(observed.keyexpr, "home/temp");
@@ -4132,7 +4313,7 @@ mod tests {
         let opts = PublishOptions::del().with_locality(Locality::SessionLocal);
         // Payload argument is ignored for Del kind — the Sample observed
         // by the subscriber carries an empty payload regardless.
-        let fired = session.publish("home/temp", b"ignored", opts);
+        let fired = session.publish("home/temp", b"ignored", opts).unwrap();
         assert_eq!(fired, 1);
         let (kind, payload) = captured.lock().unwrap().clone().expect("fired");
         assert_eq!(kind, SampleKind::Del);
@@ -4146,7 +4327,7 @@ mod tests {
         let opts = PublishOptions::put()
             .with_locality(Locality::Remote)
             .with_reliability(Reliability::BestEffort);
-        session.publish("home/temp", b"x", opts);
+        session.publish("home/temp", b"x", opts).unwrap();
         assert_eq!(driver.frame_count(), 1);
         assert_eq!(
             driver.frame_reliability(0),
@@ -4157,7 +4338,7 @@ mod tests {
         let opts = PublishOptions::put()
             .with_locality(Locality::Remote)
             .with_reliability(Reliability::Reliable);
-        session.publish("home/temp", b"x", opts);
+        session.publish("home/temp", b"x", opts).unwrap();
         assert_eq!(driver.frame_count(), 2);
         assert_eq!(driver.frame_reliability(1), Reliability::Reliable);
     }
@@ -4166,7 +4347,7 @@ mod tests {
     fn publish_with_no_subscribers_returns_zero_on_loopback() {
         let (session, _driver) = build_session();
         let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
-        let fired = session.publish("home/temp", b"x", opts);
+        let fired = session.publish("home/temp", b"x", opts).unwrap();
         assert_eq!(
             fired, 0,
             "empty registry yields zero fired subscribers without panic"
@@ -4188,7 +4369,7 @@ mod tests {
             });
 
         let opts = PublishOptions::put().with_locality(Locality::Remote);
-        let fired = session.publish("home/temp", b"x", opts);
+        let fired = session.publish("home/temp", b"x", opts).unwrap();
         assert_eq!(
             fired, 0,
             "Locality::Remote never enters the loopback branch, so fired count is always 0"
@@ -4226,7 +4407,7 @@ mod tests {
         }
 
         let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
-        let fired = session.publish("home/temp", b"22.5", opts);
+        let fired = session.publish("home/temp", b"22.5", opts).unwrap();
         assert_eq!(fired, 2, "both matching subscribers fire on loopback");
         assert_eq!(hits_a.load(Ordering::SeqCst), 1);
         assert_eq!(hits_b.load(Ordering::SeqCst), 1);
@@ -4279,7 +4460,7 @@ mod tests {
         }
 
         let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
-        let fired = session.publish("home/temp", b"22.5", opts);
+        let fired = session.publish("home/temp", b"22.5", opts).unwrap();
         assert_eq!(
             fired, 2,
             "Session::publish(SessionLocal) fires Any + SessionLocal, suppresses Remote"
@@ -4315,7 +4496,9 @@ mod tests {
         // "home/temp"); the loopback_keyexpr argument restates that
         // resolved form so loopback fires on "home/temp" even though
         // the wire side carries only mapping_id = 7.
-        let fired = session.publish_aliased(7, None, "home/temp", b"22.5", PublishOptions::put());
+        let fired = session
+            .publish_aliased(7, None, "home/temp", b"22.5", PublishOptions::put())
+            .unwrap();
         assert_eq!(fired, 1, "loopback fires on resolved literal");
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -4341,7 +4524,9 @@ mod tests {
             });
 
         let opts = PublishOptions::put().with_locality(Locality::Remote);
-        let fired = session.publish_aliased(7, None, "home/temp", b"22.5", opts);
+        let fired = session
+            .publish_aliased(7, None, "home/temp", b"22.5", opts)
+            .unwrap();
         assert_eq!(fired, 0);
         assert_eq!(counter.load(Ordering::SeqCst), 0);
         assert_eq!(driver.frame_count(), 1);
@@ -4363,7 +4548,9 @@ mod tests {
             });
 
         let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
-        let fired = session.publish_aliased(7, None, "home/temp", b"22.5", opts);
+        let fired = session
+            .publish_aliased(7, None, "home/temp", b"22.5", opts)
+            .unwrap();
         assert_eq!(fired, 1);
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -4393,7 +4580,9 @@ mod tests {
             });
 
         let opts = PublishOptions::del();
-        let fired = session.publish_aliased(7, None, "home/temp", b"ignored", opts);
+        let fired = session
+            .publish_aliased(7, None, "home/temp", b"ignored", opts)
+            .unwrap();
         assert_eq!(fired, 1);
         let (kind, payload, keyexpr) = captured.lock().unwrap().clone().expect("fired");
         assert_eq!(kind, SampleKind::Del);
@@ -4418,7 +4607,9 @@ mod tests {
             });
 
         let opts = PublishOptions::put().with_reliability(Reliability::BestEffort);
-        let fired = session.publish_aliased(7, None, "home/temp", b"x", opts);
+        let fired = session
+            .publish_aliased(7, None, "home/temp", b"x", opts)
+            .unwrap();
         assert_eq!(fired, 1);
         assert_eq!(
             *captured.lock().unwrap(),
@@ -4451,13 +4642,15 @@ mod tests {
             },
         );
 
-        let fired = session.publish_aliased(
-            7,
-            Some("/kitchen"),
-            "home/temp/kitchen",
-            b"x",
-            PublishOptions::put(),
-        );
+        let fired = session
+            .publish_aliased(
+                7,
+                Some("/kitchen"),
+                "home/temp/kitchen",
+                b"x",
+                PublishOptions::put(),
+            )
+            .unwrap();
         assert_eq!(fired, 1);
         assert_eq!(
             *captured.lock().unwrap(),
@@ -4471,7 +4664,9 @@ mod tests {
     fn publish_aliased_returns_zero_with_no_loopback_subscriber() {
         let (session, driver) = build_session();
         let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
-        let fired = session.publish_aliased(7, None, "home/temp", b"x", opts);
+        let fired = session
+            .publish_aliased(7, None, "home/temp", b"x", opts)
+            .unwrap();
         assert_eq!(fired, 0, "empty registry yields zero fired callbacks");
         assert_eq!(
             driver.frame_count(),
@@ -4499,13 +4694,15 @@ mod tests {
             },
         );
 
-        let fired = session.publish_aliased(
-            42,
-            Some("/whatever"),
-            "intentionally_decoupled",
-            b"x",
-            PublishOptions::put().with_locality(Locality::SessionLocal),
-        );
+        let fired = session
+            .publish_aliased(
+                42,
+                Some("/whatever"),
+                "intentionally_decoupled",
+                b"x",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .unwrap();
         assert_eq!(
             fired, 1,
             "loopback fires on the caller-asserted literal regardless of the wire pair"
@@ -4559,7 +4756,9 @@ mod tests {
         }
 
         let opts = PublishOptions::put().with_locality(Locality::SessionLocal);
-        let fired = session.publish_aliased(7, None, "home/temp", b"x", opts);
+        let fired = session
+            .publish_aliased(7, None, "home/temp", b"x", opts)
+            .unwrap();
         assert_eq!(fired, 2);
         assert_eq!(any_hits.load(Ordering::SeqCst), 1);
         assert_eq!(local_hits.load(Ordering::SeqCst), 1);
@@ -4804,7 +5003,7 @@ mod tests {
                 time: 0xDEAD_BEEF,
                 zid: vec![1, 2, 3],
             });
-        let fired = session.publish("home/temp", b"22.5", opts);
+        let fired = session.publish("home/temp", b"22.5", opts).unwrap();
         assert_eq!(fired, 1);
 
         let s = captured.lock().unwrap();
@@ -4825,7 +5024,7 @@ mod tests {
                 packed_id: 5,
                 schema: Some("text/plain".into()),
             });
-        session.publish("home/temp", b"22.5", opts);
+        session.publish("home/temp", b"22.5", opts).unwrap();
 
         let s = captured.lock().unwrap();
         let enc = s[0].encoding.as_ref().unwrap();
@@ -4850,7 +5049,7 @@ mod tests {
                 packed_id: 5,
                 schema: None,
             });
-        session.publish("home/temp", b"", opts);
+        session.publish("home/temp", b"", opts).unwrap();
 
         let s = captured.lock().unwrap();
         assert_eq!(s[0].kind, SampleKind::Del);
@@ -4870,7 +5069,7 @@ mod tests {
         let opts = PublishOptions::put()
             .with_locality(Locality::SessionLocal)
             .with_source_info(si.clone());
-        session.publish("home/temp", b"22.5", opts);
+        session.publish("home/temp", b"22.5", opts).unwrap();
 
         let s = captured.lock().unwrap();
         let got = s[0].source_info.as_ref().unwrap();
@@ -4889,7 +5088,7 @@ mod tests {
         let opts = PublishOptions::put()
             .with_locality(Locality::SessionLocal)
             .with_attachment(b"attach-payload".to_vec());
-        session.publish("home/temp", b"22.5", opts);
+        session.publish("home/temp", b"22.5", opts).unwrap();
 
         let s = captured.lock().unwrap();
         assert_eq!(s[0].attachment.as_deref(), Some(&b"attach-payload"[..]));
@@ -4904,7 +5103,7 @@ mod tests {
         let opts = PublishOptions::put()
             .with_locality(Locality::SessionLocal)
             .with_qos(QosLevel::from_raw(0b0001_1010));
-        session.publish("home/temp", b"22.5", opts);
+        session.publish("home/temp", b"22.5", opts).unwrap();
 
         let s = captured.lock().unwrap();
         assert_eq!(s[0].qos.unwrap().raw, 0b0001_1010);
@@ -4942,7 +5141,7 @@ mod tests {
             .with_source_info(SourceInfo::new(&[0xAA, 0xBB], 1, 2))
             .with_attachment(vec![0xCC, 0xDD])
             .with_qos(QosLevel::from_raw(0x10));
-        session.publish("home/temp", b"payload", opts);
+        session.publish("home/temp", b"payload", opts).unwrap();
 
         let s = captured.lock().unwrap();
         let got = &s[0];
@@ -5113,7 +5312,9 @@ mod tests {
                 zid: vec![0x42],
             })
             .with_attachment(b"aliased-meta".to_vec());
-        let fired = session.publish_aliased(7, None, "home/temp", b"x", opts);
+        let fired = session
+            .publish_aliased(7, None, "home/temp", b"x", opts)
+            .unwrap();
         assert_eq!(fired, 1);
 
         let s = captured.lock().unwrap();
@@ -5420,7 +5621,8 @@ mod tests {
             request_id: 0,
             ..ResponseFinal::default()
         }
-        .into_owned();
+        .try_into_owned()
+        .unwrap();
         observer.replies.dispatch_response_final(&response_final);
         drop(observer);
 
@@ -5797,7 +5999,9 @@ mod tests {
         let driver2 = Arc::new(RecordingDriver::new());
         let actions2 = SessionLinkActions::new(driver2.clone(), fixture_params(), TokioTime::new());
         let rid = actions2.alloc_next_request_id();
-        actions2.send_request_query(rid, 0, Some("home/temp"));
+        actions2
+            .send_request_query(rid, 0, Some("home/temp"))
+            .unwrap();
         let baseline = driver2.frames.lock().unwrap()[0].0.clone();
 
         assert_eq!(
@@ -5834,7 +6038,8 @@ mod tests {
         // frame.
         use crate::session_glue::build_request_query_with_target;
         let standalone =
-            build_request_query_with_target(0, 0, Some("home/temp"), QueryTarget::AllComplete);
+            build_request_query_with_target(0, 0, Some("home/temp"), QueryTarget::AllComplete)
+                .unwrap();
         let standalone_bytes = standalone
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
@@ -5864,7 +6069,8 @@ mod tests {
             .expect("query-get feature is ON in this test build");
 
         use crate::session_glue::build_request_query_with_attachment;
-        let standalone = build_request_query_with_attachment(0, 0, Some("home/temp"), b"q-att");
+        let standalone =
+            build_request_query_with_attachment(0, 0, Some("home/temp"), b"q-att").unwrap();
         let standalone_bytes = standalone
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
@@ -5903,7 +6109,8 @@ mod tests {
             0,
             Some("home/temp"),
             ConsolidationMode::Latest,
-        );
+        )
+        .unwrap();
         let standalone_bytes = standalone
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
@@ -6003,7 +6210,7 @@ mod tests {
         // Verify the recorded frame is byte-equivalent to a standalone
         // build_request_query with mapping_id=7.
         use crate::session_glue::build_request_query;
-        let standalone = build_request_query(0, 7, None);
+        let standalone = build_request_query(0, 7, None).unwrap();
         let standalone_bytes = standalone
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
@@ -6235,7 +6442,7 @@ mod tests {
             .expect("query-get feature is ON in this test build");
 
         use crate::session_glue::build_request_query_with_attachment;
-        let standalone = build_request_query_with_attachment(0, 7, None, b"q-att");
+        let standalone = build_request_query_with_attachment(0, 7, None, b"q-att").unwrap();
         let standalone_bytes = standalone
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
@@ -6384,7 +6591,8 @@ mod tests {
             .expect("query-get feature is ON in this test build");
 
         use crate::session_glue::build_request_query_with_target;
-        let standalone = build_request_query_with_target(0, 0, Some("home/temp"), QueryTarget::All);
+        let standalone =
+            build_request_query_with_target(0, 0, Some("home/temp"), QueryTarget::All).unwrap();
         let standalone_bytes = standalone
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
@@ -6455,7 +6663,8 @@ mod tests {
             keyexpr,
             ..DeclQueryable::default()
         })
-        .into_owned()
+        .try_into_owned()
+        .unwrap()
     }
 
     #[cfg(feature = "declare-queryable")]
@@ -6465,7 +6674,8 @@ mod tests {
             id,
             ..UndeclQueryable::default()
         })
-        .into_owned()
+        .try_into_owned()
+        .unwrap()
     }
 
     #[test]
@@ -7025,7 +7235,7 @@ mod tests {
             "home/temp",
             PublishOptions::put().with_locality(Locality::SessionLocal),
         );
-        let count = pubr.put(b"22.5");
+        let count = pubr.put(b"22.5").unwrap();
         assert_eq!(count, 1);
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
@@ -7049,7 +7259,7 @@ mod tests {
             "clear/me",
             PublishOptions::put().with_locality(Locality::SessionLocal),
         );
-        pubr.delete();
+        pubr.delete().unwrap();
         assert_eq!(*kind_seen.lock().unwrap(), Some(SampleKind::Del));
     }
 
@@ -7063,8 +7273,8 @@ mod tests {
         );
         let clone = pubr.clone();
         assert_eq!(clone.keyexpr(), pubr.keyexpr());
-        pubr.put(b"a");
-        clone.put(b"b");
+        pubr.put(b"a").unwrap();
+        clone.put(b"b").unwrap();
         assert_eq!(driver.frame_count(), 2, "both clones share the wire driver");
     }
 
@@ -7207,7 +7417,8 @@ mod tests {
             keyexpr,
             ..DeclSubscriber::default()
         })
-        .into_owned()
+        .try_into_owned()
+        .unwrap()
     }
 
     #[cfg(feature = "declare-subscriber")]
@@ -7217,7 +7428,8 @@ mod tests {
             id,
             ..UndeclSubscriber::default()
         })
-        .into_owned()
+        .try_into_owned()
+        .unwrap()
     }
 
     #[test]
@@ -7435,11 +7647,13 @@ mod tests {
                 fired_cb.fetch_add(1, Ordering::SeqCst);
             });
 
-        session.publish(
-            "home/temp",
-            b"22.5",
-            PublishOptions::put().with_locality(Locality::SessionLocal),
-        );
+        session
+            .publish(
+                "home/temp",
+                b"22.5",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .unwrap();
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 
@@ -7455,19 +7669,23 @@ mod tests {
                     fired_cb.fetch_add(1, Ordering::SeqCst);
                 });
             // First publish fires.
-            session.publish(
-                "home/temp",
-                b"21.0",
-                PublishOptions::put().with_locality(Locality::SessionLocal),
-            );
+            session
+                .publish(
+                    "home/temp",
+                    b"21.0",
+                    PublishOptions::put().with_locality(Locality::SessionLocal),
+                )
+                .unwrap();
             assert_eq!(fired.load(Ordering::SeqCst), 1);
         } // Subscriber drops here -> auto-unregister
           // Second publish must NOT fire — the callback is gone.
-        session.publish(
-            "home/temp",
-            b"22.0",
-            PublishOptions::put().with_locality(Locality::SessionLocal),
-        );
+        session
+            .publish(
+                "home/temp",
+                b"22.0",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .unwrap();
         assert_eq!(
             fired.load(Ordering::SeqCst),
             1,
@@ -7482,11 +7700,13 @@ mod tests {
         let removed = sub.undeclare();
         assert!(removed, "first undeclare returns true");
         // Empty registry: subsequent publish fires no callback (no panic).
-        session.publish(
-            "home/temp",
-            b"22.0",
-            PublishOptions::put().with_locality(Locality::SessionLocal),
-        );
+        session
+            .publish(
+                "home/temp",
+                b"22.0",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .unwrap();
     }
 
     #[test]
@@ -7502,11 +7722,13 @@ mod tests {
             },
         );
 
-        session.publish(
-            "home/temp",
-            b"22.5",
-            PublishOptions::put().with_locality(Locality::SessionLocal),
-        );
+        session
+            .publish(
+                "home/temp",
+                b"22.5",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .unwrap();
         assert_eq!(
             fired.load(Ordering::SeqCst),
             0,
@@ -7542,11 +7764,13 @@ mod tests {
             "resolved literal stored on handle"
         );
 
-        session.publish(
-            "home/temp",
-            b"22.5",
-            PublishOptions::put().with_locality(Locality::SessionLocal),
-        );
+        session
+            .publish(
+                "home/temp",
+                b"22.5",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .unwrap();
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 
@@ -7615,11 +7839,13 @@ mod tests {
 
         // Publish on the literal — subscriber still fires (already
         // registered against the resolved literal).
-        session.publish(
-            "home/temp",
-            b"22.5",
-            PublishOptions::put().with_locality(Locality::SessionLocal),
-        );
+        session
+            .publish(
+                "home/temp",
+                b"22.5",
+                PublishOptions::put().with_locality(Locality::SessionLocal),
+            )
+            .unwrap();
         assert_eq!(fired.load(Ordering::SeqCst), 1);
     }
 
@@ -7933,6 +8159,7 @@ mod tests {
             .expect("hardcoded canonical literal keyexpr");
 
         let expected = build_declare_token(0, /*mapping_id=*/ 0, Some("liveliness/devA"))
+            .unwrap()
             .try_as_borrowed()
             .expect("test: <=N exts by construction")
             .encode_to_vec();
@@ -8125,6 +8352,7 @@ mod tests {
             /*mapping_id=*/ 7,
             Some("/sensor"),
         )
+        .unwrap()
         .try_as_borrowed()
         .expect("test: <=N exts by construction")
         .encode_to_vec();
@@ -8296,6 +8524,7 @@ mod tests {
             /*mapping_id=*/ 7,
             Some("/sensor"),
         )
+        .unwrap()
         .try_as_borrowed()
         .expect("test: <=N exts by construction")
         .encode_to_vec();

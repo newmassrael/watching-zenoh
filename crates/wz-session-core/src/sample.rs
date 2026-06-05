@@ -88,7 +88,11 @@ impl TimestampHint {
     pub fn from_codec(ts: &wz_codecs::timestamp::TimestampOwned) -> Self {
         Self {
             time: ts.time,
-            zid: ts.zid.clone(),
+            // SCE pin 7a94d084a (W3) stores the codec owned mirror as a
+            // no-alloc bounded `heapless::Vec<u8, 16>`; this AP-side hint
+            // retains an alloc `Vec<u8>` (Decision 2: AP retention is
+            // alloc), so copy out of the bounded buffer at the boundary.
+            zid: ts.zid.as_slice().to_vec(),
         }
     }
 
@@ -131,7 +135,10 @@ impl EncodingHint {
     pub fn from_codec(encoding: &wz_codecs::encoding::EncodingOwned) -> Self {
         Self {
             packed_id: encoding.packed_id,
-            schema: encoding.schema.clone(),
+            // W3 (SCE 7a94d084a): the codec owned mirror's schema is a
+            // bounded `heapless::String<128>`; copy it into this AP hint's
+            // alloc `Option<String>` at the projection boundary.
+            schema: encoding.schema.as_ref().map(|s| String::from(s.as_str())),
         }
     }
 
@@ -740,7 +747,7 @@ mod tests {
         let codec = wz_codecs::timestamp::TimestampOwned {
             time: 0xDEAD_BEEF,
             zid_len: 4,
-            zid: vec![1, 2, 3, 4],
+            zid: crate::codec_bound::bounded_bytes(&[1, 2, 3, 4]).unwrap(),
         };
         let hint = TimestampHint::from_codec(&codec);
         assert_eq!(hint.time, 0xDEAD_BEEF);
@@ -752,7 +759,7 @@ mod tests {
         let codec = wz_codecs::encoding::EncodingOwned {
             packed_id: 0x1234,
             schema_len: Some(4),
-            schema: Some("text".into()),
+            schema: Some(crate::codec_bound::bounded_string("text").unwrap()),
         };
         let hint = EncodingHint::from_codec(&codec);
         assert_eq!(hint.packed_id, 0x1234);
@@ -810,7 +817,7 @@ mod tests {
         if let ExtEntryVariant::CodecZenohExtZint(z) = &mut ext.body {
             z.value = 0xCC;
         }
-        assert!(extract_qos(&[ext.into_owned()]).is_none());
+        assert!(extract_qos(&[ext.try_into_owned().unwrap()]).is_none());
     }
 
     #[test]
@@ -819,7 +826,7 @@ mod tests {
         ext.set_ext_id(0x01);
         ext.set_enc(0x01);
         ext.body = ExtEntryVariant::CodecZenohExtZint(wz_codecs::ext_zint::ExtZint { value: 0xBE });
-        let qos = extract_qos(&[ext.into_owned()]).unwrap();
+        let qos = extract_qos(&[ext.try_into_owned().unwrap()]).unwrap();
         assert_eq!(qos.raw, 0xBE);
     }
 
@@ -844,7 +851,7 @@ mod tests {
             value_len: payload.len() as u64,
             value: &payload,
         });
-        let si = extract_source_info(&[ext.into_owned()]).unwrap();
+        let si = extract_source_info(&[ext.try_into_owned().unwrap()]).unwrap();
         let mut expected_zid = [0u8; 16];
         expected_zid[..5].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
         assert_eq!(si.zid, expected_zid);
@@ -865,7 +872,7 @@ mod tests {
             value_len: 1,
             value: &[0xF0u8],
         });
-        assert!(extract_source_info(&[ext.into_owned()]).is_none());
+        assert!(extract_source_info(&[ext.try_into_owned().unwrap()]).is_none());
     }
 
     #[test]
@@ -877,7 +884,7 @@ mod tests {
             value_len: 0,
             value: &[],
         });
-        assert!(extract_source_info(&[ext.into_owned()]).is_none());
+        assert!(extract_source_info(&[ext.try_into_owned().unwrap()]).is_none());
     }
 
     #[test]
@@ -897,7 +904,7 @@ mod tests {
             value_len: payload.len() as u64,
             value: &payload,
         });
-        let si = extract_source_info(&[ext.into_owned()]).unwrap();
+        let si = extract_source_info(&[ext.try_into_owned().unwrap()]).unwrap();
         let mut expected_zid = [0u8; 16];
         expected_zid[0] = 0x99;
         assert_eq!(si.zid, expected_zid);

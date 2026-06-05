@@ -77,6 +77,14 @@ pub mod bounded;
 /// const-vs-type-parameter rationale.
 pub mod caps;
 
+/// W3 bounded owned-mirror adapters (`bounded_bytes` / `bounded_string`) for
+/// the builders that copy caller data into SCE's no-alloc bounded codec
+/// owned fields (SCE pin 7a94d084a). Public so the AP runtime
+/// (`wz-runtime-tokio` `session_glue`) hand-assembling the same `*Owned`
+/// wire mirrors reuses the single SSOT adapter rather than duplicating the
+/// bound/error mapping.
+pub mod codec_bound;
+
 /// R311gb (Track 2) — shared `RegisterError` taxonomy for the bounded
 /// application-layer registries (the SSOT for "a registration was
 /// rejected at declared capacity"); replaces the per-registry error
@@ -285,6 +293,11 @@ pub mod metadata;
 /// OutboundKeyexprError (alloc-bound) so the module is alloc-gated.
 #[cfg(feature = "alloc")]
 pub mod send_declare_error;
+
+/// W3 — typed reject for the non-DECLARE outbound wire-emit actions
+/// (push / request / interest). Alloc-free (only wraps `CodecError`),
+/// so ungated — usable from the no-alloc MCU surface too.
+pub mod send_wire_error;
 
 /// R222 / R225 — application-layer `Sample` type for subscriber callbacks.
 /// Mirrors zenoh-pico's `_z_sample_t` projection. Carries alloc-bound

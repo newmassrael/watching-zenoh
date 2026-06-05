@@ -18,6 +18,8 @@
 
 use core::fmt;
 
+use sce_forge_runtime::codec::CodecError;
+
 use crate::keyexpr_canon::OutboundKeyexprError;
 
 /// R300 — typed reject from the outbound DECLARE-side gate that
@@ -42,6 +44,12 @@ pub enum SendDeclareError {
     /// called with `mapping_id == 0` AND `keyexpr_suffix == None`
     /// — no keyexpr at all.
     MissingKeyexpr,
+    /// W3 (SCE pin 7a94d084a) — the keyexpr suffix exceeded the
+    /// declared bounded-codec capacity (`MAX_KEYEXPR_BYTES`) while
+    /// copying the caller string into the no-alloc owned mirror, so
+    /// the DECLARE could not be assembled. Same bound the decode
+    /// path enforces; a no-emit reject (no wire bytes left).
+    Codec(CodecError),
     /// R311g1 — the matching `declare-*` Cargo feature is OFF in
     /// this build, so the wire emit path is elided. The
     /// `SessionLinkActions` method signature stays stable
@@ -74,6 +82,11 @@ impl fmt::Display for SendDeclareError {
                 "send_declare: mapping_id 0 requires a literal keyexpr \
                  suffix (received None)",
             ),
+            Self::Codec(e) => write!(
+                f,
+                "send_declare: keyexpr suffix exceeded bounded-codec \
+                 capacity while building owned mirror: {e:?}"
+            ),
             Self::FeatureDisabled => f.write_str(
                 "send_declare: matching declare-* Cargo feature is OFF \
                  in this build; wire emit elided (signature-stability \
@@ -96,5 +109,11 @@ impl core::error::Error for SendDeclareError {
 impl From<OutboundKeyexprError> for SendDeclareError {
     fn from(e: OutboundKeyexprError) -> Self {
         Self::Keyexpr(e)
+    }
+}
+
+impl From<CodecError> for SendDeclareError {
+    fn from(e: CodecError) -> Self {
+        Self::Codec(e)
     }
 }

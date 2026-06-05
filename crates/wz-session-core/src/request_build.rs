@@ -43,8 +43,10 @@ use wz_codecs::timestamp::TimestampOwned;
 use wz_codecs::wireexpr::{WireexprOwned, WireexprOwnedVariant};
 use wz_codecs::wireexpr_local::WireexprLocalOwned;
 
+use crate::codec_bound::{bounded_bytes, bounded_string};
 use crate::qos::{CongestionControl, Priority};
 use crate::query_mode::{ConsolidationMode, QueryTarget};
+use sce_forge_runtime::codec::CodecError;
 
 /// R121j-1 — build a `Request` network-message that carries a
 /// `Query` body, addressed to the keyexpr resolved by
@@ -102,15 +104,15 @@ pub fn build_request_query(
     rid: u64,
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
-) -> RequestOwned {
-    let suffix_string = keyexpr_suffix.map(str::to_string);
-    let suffix_len = suffix_string.as_ref().map(|s| s.len() as u64);
+) -> Result<RequestOwned, CodecError> {
+    let suffix_len = keyexpr_suffix.map(|s| s.len() as u64);
     let n_flag = if keyexpr_suffix.is_some() {
         0x20u8
     } else {
         0x00u8
     };
-    RequestOwned {
+    // W3: bounded suffix copy in, fallible past the declared capacity.
+    Ok(RequestOwned {
         // MID 0x1C (_Z_MID_N_REQUEST) + N gate; M is codegen-derived
         // from the wireexpr Local arm. Z (outer ext) stays clear:
         // this minimal builder emits no Request-level extensions.
@@ -120,7 +122,7 @@ pub fn build_request_query(
             body: WireexprOwnedVariant::WireexprLocal(WireexprLocalOwned {
                 id: keyexpr_mapping_id,
                 suffix_len,
-                suffix: suffix_string,
+                suffix: keyexpr_suffix.map(bounded_string).transpose()?,
             }),
         },
         extensions: None,
@@ -134,7 +136,7 @@ pub fn build_request_query(
             parameters: None,
             extensions: None,
         }),
-    }
+    })
 }
 
 /// R121j-2a — fluent builder for `Request(Query)` that composes the
@@ -303,7 +305,9 @@ impl RequestQueryBuilder {
         self.request_tstamp = Some(TimestampOwned {
             time,
             zid_len: zid.len() as u64,
-            zid: zid.to_vec(),
+            // W3: zid owned mirror is bounded Vec<u8, 16>; the asserts above
+            // guarantee 1..=16, so the bounded copy cannot overflow.
+            zid: bounded_bytes(zid).expect("zid length asserted in 1..=16"),
         });
         self
     }
@@ -397,12 +401,12 @@ impl RequestQueryBuilder {
     /// the inner Query body, then assembles Request-level extensions
     /// in zenoh-pico's emit order with proper Z chain-continuation
     /// bits on intermediate entries.
-    pub fn build(self) -> RequestOwned {
+    pub fn build(self) -> Result<RequestOwned, CodecError> {
         let mut request = build_request_query(
             self.rid,
             self.keyexpr_mapping_id,
             self.keyexpr_suffix.as_deref(),
-        );
+        )?;
 
         // Query-layer settings (consolidation / parameters /
         // Q-attachment). The codec gates these on Query.header
@@ -415,15 +419,15 @@ impl RequestQueryBuilder {
             if let Some(params) = self.parameters {
                 query.header |= 0x40;
                 query.parameters_len = Some(params.len() as u64);
-                query.parameters = Some(params);
+                query.parameters = Some(bounded_bytes(&params)?);
             }
             #[cfg(feature = "query-attachment")]
             if let Some(attachment) = self.query_attachment {
                 query.header |= 0x80;
                 query.extensions = Some(vec![crate::attachment::encode_attachment_ext(
                     crate::attachment::ATTACHMENT_EXT_ID_QUERY,
-                    attachment,
-                )]);
+                    &attachment,
+                )?]);
             }
         } else {
             unreachable!(
@@ -467,7 +471,8 @@ impl RequestQueryBuilder {
                 header: 0x40 | 0x02,
                 body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
                     value_len: body_bytes.len() as u64,
-                    value: body_bytes,
+                    // W3: ext_zbuf value owned mirror is bounded Vec<u8, 32>.
+                    value: bounded_bytes(&body_bytes)?,
                 }),
             });
         }
@@ -515,7 +520,7 @@ impl RequestQueryBuilder {
             request.extensions = Some(request_exts);
         }
 
-        request
+        Ok(request)
     }
 }
 /// R121j-1a — build a `Request(Query)` with an explicit
@@ -546,7 +551,7 @@ pub fn build_request_query_with_consolidation(
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
     consolidation: ConsolidationMode,
-) -> RequestOwned {
+) -> Result<RequestOwned, CodecError> {
     RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
         .consolidation(consolidation)
         .build()
@@ -600,7 +605,7 @@ pub fn build_request_query_with_parameters(
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
     params: &[u8],
-) -> RequestOwned {
+) -> Result<RequestOwned, CodecError> {
     RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
         .parameters(params)
         .build()
@@ -678,7 +683,7 @@ pub fn build_request_query_with_attachment(
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
     attachment: &[u8],
-) -> RequestOwned {
+) -> Result<RequestOwned, CodecError> {
     RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
         .query_attachment(attachment)
         .build()
@@ -736,7 +741,7 @@ pub fn build_request_query_with_timeout_ms(
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
     timeout_ms: u64,
-) -> RequestOwned {
+) -> Result<RequestOwned, CodecError> {
     RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
         .request_timeout_ms(timeout_ms)
         .build()
@@ -784,7 +789,7 @@ pub fn build_request_query_with_target(
     keyexpr_mapping_id: u64,
     keyexpr_suffix: Option<&str>,
     target: QueryTarget,
-) -> RequestOwned {
+) -> Result<RequestOwned, CodecError> {
     RequestQueryBuilder::new(rid, keyexpr_mapping_id, keyexpr_suffix)
         .request_target(target)
         .build()
@@ -821,7 +826,7 @@ mod tests {
     #[test]
     fn build_request_query_wraps_query_in_request_envelope() {
         // Case 1 — pure alias.
-        let alias = build_request_query(42, 7, None);
+        let alias = build_request_query(42, 7, None).unwrap();
         assert_eq!(
             alias.header, 0x1C,
             "Request header carries MID 0x1C only (no N since no suffix); \
@@ -854,7 +859,7 @@ mod tests {
         }
 
         // Case 2 — composite (id=7 + tail "tail").
-        let composite = build_request_query(42, 7, Some("tail"));
+        let composite = build_request_query(42, 7, Some("tail")).unwrap();
         assert_eq!(
             composite.header, 0x3C,
             "Request header carries MID 0x1C | N(0x20) = 0x3C when suffix present",
@@ -869,7 +874,7 @@ mod tests {
         }
 
         // Case 3 — literal (id=0 sentinel + suffix carries the keyexpr).
-        let literal = build_request_query(42, 0, Some("demo/test"));
+        let literal = build_request_query(42, 0, Some("demo/test")).unwrap();
         assert_eq!(
             literal.header, 0x3C,
             "literal case still sets N (suffix present)"
@@ -907,7 +912,7 @@ mod tests {
         //   VLE(rid=42)     = 0x2A
         //   wireexpr.id VLE(7) = 0x07
         //   Query.header   = MID(0x03)
-        let alias = build_request_query(42, 7, None);
+        let alias = build_request_query(42, 7, None).unwrap();
         let alias_wire = alias.wire();
         let alias_expected = vec![
             0x5C, // Request: MID 0x1C | M 0x40
@@ -927,7 +932,7 @@ mod tests {
         //   wireexpr.suffix_len VLE(3) = 0x03
         //   wireexpr.suffix bytes = "abc"
         //   Query.header = 0x03
-        let composite = build_request_query(42, 7, Some("abc"));
+        let composite = build_request_query(42, 7, Some("abc")).unwrap();
         let composite_wire = composite.wire();
         let mut composite_expected = vec![
             0x7C, // MID | N | M
@@ -947,7 +952,7 @@ mod tests {
         //   wireexpr.suffix_len VLE(9) = 0x09
         //   wireexpr.suffix bytes = "demo/test"
         //   Query.header = 0x03
-        let literal = build_request_query(42, 0, Some("demo/test"));
+        let literal = build_request_query(42, 0, Some("demo/test")).unwrap();
         let literal_wire = literal.wire();
         let mut literal_expected = vec![0x7C, 0x2A, 0x00, 0x09];
         literal_expected.extend_from_slice(b"demo/test");
@@ -979,7 +984,7 @@ mod tests {
             (ConsolidationMode::Latest, 0x02),
         ];
         for (mode, expected_byte) in cases {
-            let request = build_request_query_with_consolidation(42, 7, None, mode);
+            let request = build_request_query_with_consolidation(42, 7, None, mode).unwrap();
             let wire = request.wire();
             let expected = vec![
                 0x5C,          // Request: MID 0x1C | M 0x40
@@ -998,7 +1003,8 @@ mod tests {
         // Inner-arm sanity: Query.header carries Q_C set + consolidation
         // is Some(wire_byte) — matches the Optional-field shape that
         // the codegen produces from query.scxml's `sce:present-if`.
-        let r = build_request_query_with_consolidation(42, 7, None, ConsolidationMode::Monotonic);
+        let r = build_request_query_with_consolidation(42, 7, None, ConsolidationMode::Monotonic)
+            .unwrap();
         match &r.body {
             RequestOwnedVariant::CodecZenohQuery(q) => {
                 assert_eq!(
@@ -1031,7 +1037,7 @@ mod tests {
         //   Request: [0x5C, 0x2A, 0x07]      (MID|M, VLE(42), VLE(7))
         //   Query:   [0x43, 0x03, b'k', b'=', b'v']
         //              (MID(0x03) | Q_P(0x40), VLE(len=3), 3 bytes)
-        let small = build_request_query_with_parameters(42, 7, None, b"k=v");
+        let small = build_request_query_with_parameters(42, 7, None, b"k=v").unwrap();
         let small_wire = small.wire();
         let mut small_expected = vec![
             0x5C, // Request: MID 0x1C | M 0x40
@@ -1052,7 +1058,7 @@ mod tests {
         // 0x80, second byte = 0x01). Lock the VLE writer regression
         // on the parameters_len field specifically.
         let mid_params: Vec<u8> = (0u8..128).collect();
-        let mid = build_request_query_with_parameters(42, 7, None, &mid_params);
+        let mid = build_request_query_with_parameters(42, 7, None, &mid_params).unwrap();
         let mid_wire = mid.wire();
         let mut mid_expected = vec![
             0x5C, 0x2A, 0x07, 0x43, 0x80, // VLE(128) low 7 + cont bit
@@ -1067,7 +1073,7 @@ mod tests {
 
         // Case 3 — at max-size (256 bytes). VLE(256) = 0x80 0x02.
         let max_params: Vec<u8> = (0..256).map(|i| (i % 251) as u8).collect();
-        let max = build_request_query_with_parameters(42, 7, None, &max_params);
+        let max = build_request_query_with_parameters(42, 7, None, &max_params).unwrap();
         let max_wire = max.wire();
         let mut max_expected = vec![0x5C, 0x2A, 0x07, 0x43, 0x80, 0x02];
         max_expected.extend_from_slice(&max_params);
@@ -1125,7 +1131,7 @@ mod tests {
         //   Query:   [0x83]                  (MID(0x03) | Q_Z(0x80))
         //   ExtEntry header: [0x45]          (ENC_ZBUF(0x40) | id(0x05))
         //   ExtZbuf: [0x02, b'h', b'i']      (VLE(2), bytes)
-        let small = build_request_query_with_attachment(42, 7, None, b"hi");
+        let small = build_request_query_with_attachment(42, 7, None, b"hi").unwrap();
         let small_wire = small.wire();
         let mut small_expected = vec![
             0x5C, // Request: MID 0x1C | M 0x40
@@ -1145,7 +1151,7 @@ mod tests {
         // Case 2 — at-max attachment (32 bytes, all-distinct sequence
         // 0..32). VLE(32) = 0x20 (single byte, fits in 7 bits).
         let max_attach: Vec<u8> = (0u8..32).collect();
-        let max = build_request_query_with_attachment(42, 7, None, &max_attach);
+        let max = build_request_query_with_attachment(42, 7, None, &max_attach).unwrap();
         let max_wire = max.wire();
         let mut max_expected = vec![
             0x5C, 0x2A, 0x07, 0x83, // Query header with Q_Z
@@ -1228,7 +1234,7 @@ mod tests {
         //   ExtEntry.header = ENC_ZINT(0x20) | id_timeout(0x06) = 0x26
         //   ExtZint.value VLE(50) = 0x32
         //   Query.header = 0x03
-        let small = build_request_query_with_timeout_ms(42, 7, None, 50);
+        let small = build_request_query_with_timeout_ms(42, 7, None, 50).unwrap();
         let small_wire = small.wire();
         assert_eq!(
             small_wire,
@@ -1245,7 +1251,7 @@ mod tests {
         );
 
         // Case 2 — multi-byte VLE boundary (1000ms = 0xE8 0x07).
-        let mid = build_request_query_with_timeout_ms(42, 7, None, 1000);
+        let mid = build_request_query_with_timeout_ms(42, 7, None, 1000).unwrap();
         let mid_wire = mid.wire();
         assert_eq!(
             mid_wire,
@@ -1260,7 +1266,7 @@ mod tests {
 
         // Case 3 — large VLE (2^32 = 0x1_0000_0000 = 5-byte VLE in
         // base-128: 0x80 0x80 0x80 0x80 0x10).
-        let large = build_request_query_with_timeout_ms(42, 7, None, 1u64 << 32);
+        let large = build_request_query_with_timeout_ms(42, 7, None, 1u64 << 32).unwrap();
         let large_wire = large.wire();
         assert_eq!(
             large_wire,
@@ -1328,7 +1334,7 @@ mod tests {
         let cases: [(QueryTarget, u8); 2] =
             [(QueryTarget::All, 0x01), (QueryTarget::AllComplete, 0x02)];
         for (target, target_byte) in cases {
-            let request = build_request_query_with_target(42, 7, None, target);
+            let request = build_request_query_with_target(42, 7, None, target).unwrap();
             let wire = request.wire();
             assert_eq!(
                 wire,
@@ -1346,7 +1352,7 @@ mod tests {
         }
 
         // Inner-arm sanity check on the All case.
-        let r = build_request_query_with_target(42, 7, None, QueryTarget::All);
+        let r = build_request_query_with_target(42, 7, None, QueryTarget::All).unwrap();
         let req_exts = r
             .extensions
             .as_ref()
@@ -1389,7 +1395,8 @@ mod tests {
         let request = RequestQueryBuilder::new(42, 7, None)
             .consolidation(ConsolidationMode::Monotonic)
             .parameters(b"k=v")
-            .build();
+            .build()
+            .unwrap();
         let wire = request.wire();
         let mut expected = vec![
             0x5C, // Request: MID | M
@@ -1442,7 +1449,8 @@ mod tests {
             .query_attachment(b"at")
             .request_target(QueryTarget::All)
             .request_timeout_ms(1000)
-            .build();
+            .build()
+            .unwrap();
         let wire = request.wire();
         let mut expected = vec![
             0xDC, // Request: MID | M | N_Z
@@ -1499,7 +1507,8 @@ mod tests {
     fn request_query_builder_request_qos_emits_first_ext_with_no_m_flag() {
         let request = RequestQueryBuilder::new(42, 7, None)
             .request_qos(0x05) // priority=5, no nodrop, no express
-            .build();
+            .build()
+            .unwrap();
         let req_exts = request
             .extensions
             .as_ref()
@@ -1537,7 +1546,8 @@ mod tests {
             .request_qos(0x05)
             .request_target(QueryTarget::All)
             .request_timeout_ms(1000)
-            .build();
+            .build()
+            .unwrap();
         let req_exts = request
             .extensions
             .as_ref()
@@ -1574,7 +1584,8 @@ mod tests {
         // Z (it is the only ext, hence the last).
         let request = RequestQueryBuilder::new(42, 7, None)
             .request_budget(0x1234_5678)
-            .build();
+            .build()
+            .unwrap();
         let req_exts = request
             .extensions
             .as_ref()
@@ -1604,7 +1615,8 @@ mod tests {
             .request_target(QueryTarget::All)
             .request_budget(100)
             .request_timeout_ms(1000)
-            .build();
+            .build()
+            .unwrap();
         let req_exts = request.extensions.as_ref().expect("4 exts set");
         assert_eq!(req_exts.len(), 4, "qos + target + budget + timeout");
         assert_eq!(req_exts[0].header & 0x07, 0x01, "index 0: qos id");
@@ -1640,7 +1652,8 @@ mod tests {
     fn request_query_builder_budget_rejects_zero() {
         let _ = RequestQueryBuilder::new(42, 7, None)
             .request_budget(0)
-            .build();
+            .build()
+            .unwrap();
     }
 
     /// R121j-tstamp — request_tstamp emits one Request-level ext at
@@ -1657,7 +1670,8 @@ mod tests {
         // = [0x2a, 0x02, 0xab, 0xcd], len=4.
         let request = RequestQueryBuilder::new(42, 7, None)
             .request_tstamp(42, &[0xab, 0xcd])
-            .build();
+            .build()
+            .unwrap();
         let req_exts = request
             .extensions
             .as_ref()
@@ -1675,8 +1689,8 @@ mod tests {
                     "Timestamp encode = VLE(42)+VLE(2)+zid[2] = 4 bytes"
                 );
                 assert_eq!(
-                    zbuf.value,
-                    vec![0x2a, 0x02, 0xab, 0xcd],
+                    zbuf.value.as_slice(),
+                    [0x2a, 0x02, 0xab, 0xcd].as_slice(),
                     "Timestamp body: VLE(time=42)=0x2a, VLE(zid_len=2)=0x02, zid=[0xab,0xcd]",
                 );
             }
@@ -1703,7 +1717,8 @@ mod tests {
             .request_target(QueryTarget::All)
             .request_budget(100)
             .request_timeout_ms(1000)
-            .build();
+            .build()
+            .unwrap();
         let req_exts = request.extensions.as_ref().expect("5 exts set");
         assert_eq!(
             req_exts.len(),
@@ -1749,7 +1764,8 @@ mod tests {
     fn request_query_builder_tstamp_rejects_empty_zid() {
         let _ = RequestQueryBuilder::new(42, 7, None)
             .request_tstamp(0, &[])
-            .build();
+            .build()
+            .unwrap();
     }
 
     /// R121j-tstamp — request_tstamp rejects zid longer than the
@@ -1761,7 +1777,8 @@ mod tests {
     fn request_query_builder_tstamp_rejects_zid_over_16_bytes() {
         let _ = RequestQueryBuilder::new(42, 7, None)
             .request_tstamp(0, &[0u8; 17])
-            .build();
+            .build()
+            .unwrap();
     }
 
     /// R121j-1h — request_qos_typed packs `(Priority, CongestionControl,
@@ -1779,7 +1796,8 @@ mod tests {
         // bit4=0. Expected packed byte = 0x07.
         let request = RequestQueryBuilder::new(42, 7, None)
             .request_qos_typed(Priority::Background, CongestionControl::Drop, false)
-            .build();
+            .build()
+            .unwrap();
         let req_exts = request.extensions.as_ref().expect("qos ext present");
         match &req_exts[0].body {
             ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
@@ -1793,7 +1811,8 @@ mod tests {
         // Expected packed byte = 0x10 | 0x08 | 0x01 = 0x19.
         let request = RequestQueryBuilder::new(42, 7, None)
             .request_qos_typed(Priority::RealTime, CongestionControl::Block, true)
-            .build();
+            .build()
+            .unwrap();
         let req_exts = request.extensions.as_ref().expect("qos ext present");
         match &req_exts[0].body {
             ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
@@ -1810,7 +1829,8 @@ mod tests {
         // default-aligned values produce a clean low-bits byte.
         let request = RequestQueryBuilder::new(42, 7, None)
             .request_qos_typed(Priority::Data, CongestionControl::Drop, false)
-            .build();
+            .build()
+            .unwrap();
         let req_exts = request.extensions.as_ref().expect("qos ext present");
         match &req_exts[0].body {
             ExtEntryOwnedVariant::CodecZenohExtZint(zint) => {
@@ -1837,12 +1857,14 @@ mod tests {
             .request_qos_typed(Priority::RealTime, CongestionControl::Block, true)
             .request_target(QueryTarget::All)
             .request_timeout_ms(1000)
-            .build();
+            .build()
+            .unwrap();
         let raw = RequestQueryBuilder::new(42, 7, None)
             .request_qos(0x19) // same packed byte as the typed call
             .request_target(QueryTarget::All)
             .request_timeout_ms(1000)
-            .build();
+            .build()
+            .unwrap();
         assert_eq!(
             typed.wire(),
             raw.wire(),
@@ -1859,7 +1881,8 @@ mod tests {
     fn request_query_builder_parameters_rejects_empty() {
         let _ = RequestQueryBuilder::new(42, 7, None)
             .parameters(b"")
-            .build();
+            .build()
+            .unwrap();
     }
 
     #[cfg(feature = "codec-request")]
@@ -1868,6 +1891,7 @@ mod tests {
     fn request_query_builder_timeout_rejects_zero() {
         let _ = RequestQueryBuilder::new(42, 7, None)
             .request_timeout_ms(0)
-            .build();
+            .build()
+            .unwrap();
     }
 }

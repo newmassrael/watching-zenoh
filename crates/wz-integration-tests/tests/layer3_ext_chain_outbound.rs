@@ -171,7 +171,7 @@ fn wz_oracle_chain() -> Vec<ExtEntryOwned> {
     // deep-copy the borrowed builder views at the boundary.
     vec![unit, zint, zbuf]
         .into_iter()
-        .map(|e| e.into_owned())
+        .map(|e| e.try_into_owned().unwrap())
         .collect()
 }
 
@@ -187,11 +187,13 @@ fn encode_init_with_ext_chain_byte_equiv_to_pico() {
     let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
     actions.set_ext_chain(ExtChainRole::InitAck, wz_oracle_chain());
 
-    let actual = actions.encode_init_with_role(
-        /*is_ack=*/ true,
-        /*cookie_override=*/ None,
-        ExtChainRole::InitAck,
-    );
+    let actual = actions
+        .encode_init_with_role(
+            /*is_ack=*/ true,
+            /*cookie_override=*/ None,
+            ExtChainRole::InitAck,
+        )
+        .unwrap();
     assert_eq!(
         actual, expected,
         "wz InitAck encode with ext chain must byte-match pico reference"
@@ -213,11 +215,13 @@ fn encode_init_with_explicit_empty_chain_omits_z_flag_and_trailing_bytes() {
     // contract by explicitly clearing the slot first.
     actions.set_ext_chain(ExtChainRole::InitAck, Vec::new());
 
-    let actual = actions.encode_init_with_role(
-        /*is_ack=*/ true,
-        /*cookie_override=*/ None,
-        ExtChainRole::InitAck,
-    );
+    let actual = actions
+        .encode_init_with_role(
+            /*is_ack=*/ true,
+            /*cookie_override=*/ None,
+            ExtChainRole::InitAck,
+        )
+        .unwrap();
     assert_eq!(
         actual, expected,
         "explicitly-empty chain wire must omit Z flag + trailing bytes"
@@ -236,22 +240,26 @@ fn ext_chain_role_isolation() {
     actions.set_ext_chain(ExtChainRole::InitAck, Vec::new());
     actions.set_ext_chain(ExtChainRole::InitSyn, wz_oracle_chain());
 
-    let init_ack_wire = actions.encode_init_with_role(
-        /*is_ack=*/ true,
-        /*cookie_override=*/ None,
-        ExtChainRole::InitAck,
-    );
+    let init_ack_wire = actions
+        .encode_init_with_role(
+            /*is_ack=*/ true,
+            /*cookie_override=*/ None,
+            ExtChainRole::InitAck,
+        )
+        .unwrap();
     assert_eq!(
         init_ack_wire[0] & FLAG_T_Z,
         0,
         "InitAck unaffected by InitSyn chain"
     );
 
-    let init_syn_wire = actions.encode_init_with_role(
-        /*is_ack=*/ false,
-        /*cookie_override=*/ None,
-        ExtChainRole::InitSyn,
-    );
+    let init_syn_wire = actions
+        .encode_init_with_role(
+            /*is_ack=*/ false,
+            /*cookie_override=*/ None,
+            ExtChainRole::InitSyn,
+        )
+        .unwrap();
     assert_ne!(
         init_syn_wire[0] & FLAG_T_Z,
         0,
@@ -274,16 +282,20 @@ fn default_session_actions_seed_init_chains_with_patch_extension() {
     let driver: Arc<dyn BoxedLinkDriver> = Arc::new(NoopDriver);
     let actions = SessionLinkActions::new(driver, fixture_session_init_params(), TokioTime::new());
 
-    let init_syn = actions.encode_init_with_role(
-        /*is_ack=*/ false,
-        /*cookie_override=*/ None,
-        ExtChainRole::InitSyn,
-    );
-    let init_ack = actions.encode_init_with_role(
-        /*is_ack=*/ true,
-        /*cookie_override=*/ None,
-        ExtChainRole::InitAck,
-    );
+    let init_syn = actions
+        .encode_init_with_role(
+            /*is_ack=*/ false,
+            /*cookie_override=*/ None,
+            ExtChainRole::InitSyn,
+        )
+        .unwrap();
+    let init_ack = actions
+        .encode_init_with_role(
+            /*is_ack=*/ true,
+            /*cookie_override=*/ None,
+            ExtChainRole::InitAck,
+        )
+        .unwrap();
 
     assert_ne!(init_syn[0] & FLAG_T_Z, 0, "default InitSyn wire must set Z");
     assert_ne!(init_ack[0] & FLAG_T_Z, 0, "default InitAck wire must set Z");

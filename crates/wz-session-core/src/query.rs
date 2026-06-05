@@ -104,6 +104,13 @@ use crate::bounded::{BoundedString, BoundedVec};
 use crate::caps;
 use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
 use crate::registry_error::RegisterError;
+// `CodecError` is referenced only by `into_response`, which lives in the
+// `all(codec-response, alloc)` impl block (ResponseOwned is alloc-backed),
+// so the import must carry the same gate — otherwise a
+// `codec-response`-without-`alloc` subset compiles the import but not its
+// sole user (Layer C1h regression).
+#[cfg(all(feature = "codec-response", feature = "alloc"))]
+use sce_forge_runtime::codec::CodecError;
 
 // R311gb (Track 2) — HashMap (peer-keyexpr table) + the driver-loop /
 // network-message envelope types + the owned codec mirrors are consumed
@@ -370,7 +377,7 @@ impl QueryReply {
     /// `Response`, which is the textbook honest shape: no codec ⇒ no
     /// wire frame to compose.
     #[cfg(feature = "codec-response")]
-    pub fn into_response(self) -> ResponseOwned {
+    pub fn into_response(self) -> Result<ResponseOwned, CodecError> {
         match self {
             QueryReply::Reply {
                 rid,
@@ -1141,7 +1148,9 @@ pub fn response_final_for(rid: u64) -> ResponseFinalOwned {
     // `ResponseFinalOwned` has no `Default` (the owned mirrors derive
     // only Debug/Clone/PartialEq), so build the borrowed view via the
     // spread default and deep-copy into the owned form at the boundary.
-    .into_owned()
+    // ResponseFinal carries no bounded fields, so the owned copy is infallible.
+    .try_into_owned()
+    .expect("ResponseFinal carries no bounded fields")
 }
 
 // R311dx — the behavioural query tests exercise the full
@@ -1220,7 +1229,8 @@ mod tests {
             extensions: None,
             body: RequestVariant::CodecZenohQuery(Query::default()),
         }
-        .into_owned()
+        .try_into_owned()
+        .unwrap()
     }
 
     /// R311v test helper — construct an inbound Query whose
@@ -1255,9 +1265,9 @@ mod tests {
             value_len: attachment.len() as u64,
             value: attachment,
         });
-        let mut query = Query::default().into_owned();
+        let mut query = Query::default().try_into_owned().unwrap();
         query.header |= 0x80;
-        query.extensions = Some(vec![ext.into_owned()]);
+        query.extensions = Some(vec![ext.try_into_owned().unwrap()]);
         let mut request = Request {
             header: 0x1c,
             rid,
@@ -1265,7 +1275,8 @@ mod tests {
             extensions: None,
             body: RequestVariant::CodecZenohQuery(Query::default()),
         }
-        .into_owned();
+        .try_into_owned()
+        .unwrap();
         request.body = RequestOwnedVariant::CodecZenohQuery(query);
         request
     }
@@ -1285,7 +1296,8 @@ mod tests {
             extensions: None,
             body: RequestVariant::CodecZenohMsgPut(MsgPut::default()),
         }
-        .into_owned()
+        .try_into_owned()
+        .unwrap()
     }
 
     #[test]
@@ -1762,10 +1774,11 @@ mod tests {
         );
 
         assert_eq!(replies.len(), 1);
-        let via_chain = replies.pop().unwrap().into_response().wire();
+        let via_chain = replies.pop().unwrap().into_response().unwrap().wire();
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"hello")
             .responder(&[0xBB; 1], 1)
             .build()
+            .unwrap()
             .wire();
         assert_eq!(
             via_chain, via_builder,
@@ -1782,11 +1795,12 @@ mod tests {
             body: ReplyBody::Put(b"hello".to_vec()),
             responder: None,
         };
-        let response = reply.into_response();
+        let response = reply.into_response().unwrap();
         // The Response should encode to the same bytes as the
         // ResponseReplyBuilder direct path with the same args.
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("home/temp"), b"hello")
             .build()
+            .unwrap()
             .wire();
         assert_eq!(
             response.wire(),
@@ -1803,10 +1817,11 @@ mod tests {
             body: ReplyBody::Del,
             responder: None,
         };
-        let response = reply.into_response();
+        let response = reply.into_response().unwrap();
         let via_builder = ResponseReplyBuilder::new(42, 0, Some("clear/me"), &[])
             .reply_del()
             .build()
+            .unwrap()
             .wire();
         assert_eq!(
             response.wire(),
@@ -1824,10 +1839,11 @@ mod tests {
             payload: b"oops".to_vec(),
             responder: None,
         };
-        let response = reply.into_response();
+        let response = reply.into_response().unwrap();
         let via_builder = ResponseErrBuilder::new(42, 0, Some("error/path"), b"oops")
             .encoding(4, Some("schema_v1"))
             .build()
+            .unwrap()
             .wire();
         assert_eq!(
             response
@@ -1986,7 +2002,7 @@ mod tests {
         });
 
         let mut replies = Vec::new();
-        let query = Query::default().into_owned();
+        let query = Query::default().try_into_owned().unwrap();
         reg.local_query(/*rid=*/ 7, "home/temp", &query, &mut replies);
 
         assert_eq!(invocations.load(Ordering::SeqCst), 1);
@@ -2026,7 +2042,7 @@ mod tests {
         });
 
         let mut replies = Vec::new();
-        let query = Query::default().into_owned();
+        let query = Query::default().try_into_owned().unwrap();
         reg.local_query(1, "home/temp", &query, &mut replies);
 
         assert_eq!(
@@ -2054,7 +2070,7 @@ mod tests {
         });
 
         let mut replies = Vec::new();
-        let query = Query::default().into_owned();
+        let query = Query::default().try_into_owned().unwrap();
         reg.local_query(1, "home/temp", &query, &mut replies);
 
         assert_eq!(
@@ -2079,7 +2095,7 @@ mod tests {
         });
 
         let mut replies = Vec::new();
-        let query = Query::default().into_owned();
+        let query = Query::default().try_into_owned().unwrap();
         reg.local_query(1, "home/humid", &query, &mut replies);
 
         assert_eq!(invocations.load(Ordering::SeqCst), 0);

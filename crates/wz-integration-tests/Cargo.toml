@@ -39,6 +39,10 @@ path = "src/lib.rs"
 
 [dev-dependencies]
 wz-codecs = { path = "../wz-codecs" }
+# W3 no-alloc bounded mirror migration — tests build owned-mirror
+# heapless fields via the `codec_bound::bounded_{bytes,string}` helpers
+# (the same idiom production code uses at decode boundaries).
+wz-session-core = { path = "../wz-session-core" }
 zenoh-pico-sys = { path = "../zenoh-pico-sys" }
 sce-forge-runtime = { path = "../../vendor/sce/sce-forge-runtime/rust" }
 # R116b — `hal_timer_routing.rs` declares an in-test TimerProbePolicy

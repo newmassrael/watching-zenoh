@@ -62,7 +62,9 @@ fn main() -> ExitCode {
                     let mut opts =
                         PublishOptions::default().with_reliability(Reliability::Reliable);
                     opts.kind = SampleKind::Put;
-                    let fired = session.publish(&publish_key, value.as_bytes(), opts);
+                    let fired = session
+                        .publish(&publish_key, value.as_bytes(), opts)
+                        .unwrap();
                     log::info!(
                         "{BINARY}: PUBLISHER EMITTED idx={idx} keyexpr='{publish_key}' \
                          payload_len={} loopback_fired={fired}",
